@@ -903,9 +903,9 @@ legacy_effect = """
 LEGACY-EFFECT: the schema-1..3 engine's Git operations — branch, checkout, \
 stage, commit, rollback — each a `std::process::Command` on the system git, plus \
 the working-tree writes around them. `invariants_preserved[1]` requires this \
-module's behaviour untouched, AMENDED ONCE: to close \
+module's behaviour untouched, AMENDED TWICE. First, to close \
 `LEGACY-WORKSPACE-READS-REPLACEMENT-OBJECTS`, by the route that finding's guard \
-names ("an owner decision to unfreeze the module for this one change"). The \
+names ("an owner decision to unfreeze the module for this one change"). That \
 amendment is three things and no more. Every Git child is built by \
 `git_command`, which sets `crate::workspace_manager::NO_REPLACEMENT_OBJECTS` \
 and passes `-c core.useReplaceRefs=false` ahead of the child's own arguments, \
@@ -918,7 +918,27 @@ configuration, the include file through which the v0.1 runner keeps its role \
 processes on that graph. `ensure_execution_prerequisites` refuses a Git older \
 than 2.41 by name, the floor the owner raised on 2026-09-28 because Git 2.40's \
 `merge-tree` ignores the setting, and the `check-attr --source` refusal states \
-the same floor. Every other behaviour of the module stays frozen. The schema-4 \
+the same floor. Second, by the owner's ruling B-W924-R1, adopted 2026-10-08: \
+the gate and review snapshots' `git worktree add` (`add_gate_worktree`), the \
+snapshot cleanup's `git worktree remove --force` (`cleanup_gate_workspace`) and \
+its `git worktree list` (`worktree_is_registered`) each run their built command \
+again, after a sleep of one millisecond doubling to fifty, while it exits 128 \
+with exactly one standard-error line `fatal: failed to read \
+<…>/worktrees/<id>/commondir: Success`, `<id>` neither the caller's own \
+registration nor that name with anything after it, and, for the add, while its \
+destination is still an empty directory; against a deadline ten seconds after \
+its first attempt began, checked after each attempt: the first attempt to end \
+at or past it is the last, a sleep before it is asked to end no later than it, \
+and the attempt after that sleep is admitted however late it starts, so neither \
+that attempt's start nor any Git child's completion has a hard wall-clock bound \
+(`output_past_anothers_empty_commondir`, \
+`output_past_anothers_empty_commondir_until`, `read_anothers_empty_commondir`, \
+`is_an_empty_directory`, `REGISTRY_TEAR_DEADLINE`, \
+`REGISTRY_TEAR_BACKOFF_CEILING`); and the module's regression tests of that \
+rule. Every other outcome is returned as before; past the deadline the last \
+attempt's failure, in the module's form. No argv, environment, error type or \
+message changes, and nothing else in the module. Every other behaviour of the \
+module stays frozen. The schema-4 \
 equivalents live behind funnels in `crate::workspace_manager` and nothing here \
 calls them: the constant is read, and no funnel is called."""
 shrinks_when = "the schema-4 engine replaces the legacy paths that call this module (PR7-PR11); the module goes with them."

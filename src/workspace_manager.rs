@@ -121,7 +121,7 @@ pub const RUN_REF_ROOT: &str = "refs/upstroke/runs";
 
 mod hooks;
 pub use self::hooks::{EffectHooks, HarnessEffects, NoHooks};
-use self::hooks::{consult, funnel, point};
+use self::hooks::{consult, funnel, funnel_lending, point};
 
 // ---------------------------------------------------------------------------
 // Refusals
@@ -787,8 +787,11 @@ pub(crate) enum Primitive {
 )]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum GitWorkingDirectory {
-    /// The managed base: where `worktree add`, `worktree prune`, `commit-tree`
-    /// and `update-ref` run, and where the manager's reads run.
+    /// The managed base: where `worktree add`, `commit-tree` and `update-ref`
+    /// run, and where the manager's reads run. A removal runs no Git child
+    /// since #329 removed its `git worktree prune`, and is named here because
+    /// it acts through what `<base>/.git` resolves to: the common git dir, from
+    /// which it removes its registration and the store it emptied.
     ManagedBase,
     /// The slot's checkout: where `add`, `write-tree`, `cherry-pick` and the
     /// per-worktree reads run.
@@ -867,6 +870,9 @@ impl Primitive {
             | Self::RemoveExecutionRoot
             | Self::WriteIntent
             | Self::RemoveIntent => &[],
+            // `RemoveWorktree` runs no Git child since #329; it keeps the base
+            // for the common git dir its registration is removed from (see
+            // `GitWorkingDirectory::ManagedBase`).
             Self::AddWorktree
             | Self::RemoveWorktree
             | Self::SnapshotCommitTree
@@ -1551,53 +1557,560 @@ fn remove_tree_once_handles_close(path: &Path) -> std::io::Result<()> {
 fn note_removal_attempt(_attempt: u32) {}
 
 /// One lock per repository's worktree registry (`<common git dir>/worktrees`),
-/// shared by every [`WorkspaceManager`] of that repository in this process.
+/// shared by every [`WorkspaceManager`] of that repository in this process:
+/// the working record's R-X (`reviews/2026-10-01-pr11-follow-up-b-record.md`).
 ///
-/// **Why a lock, and why here.** From PR11 several pipelines of one run add and
-/// remove snapshots while the coordinator adds and removes task and staging
-/// worktrees, all through clones of one manager, and Git 2.43's registry is not
-/// safe against itself: `git worktree add` makes the administrative directory
-/// before it writes `locked`, `gitdir` and `commondir`, a plain `git worktree
-/// prune` removes a directory with no `gitdir`, and every enumeration — `git
-/// worktree list`, the one `add` makes of its siblings, and this module's own
-/// scan in [`WorkspaceManager::remove_worktree_proving`] — reads each entry's
-/// files and dies (or, here, refuses) on one half written. Measured with four
-/// concurrent loops: an add raced by a prune failed 2–3 times in 600
+/// **Why a lock, and why it is no longer what keeps the registry whole.** From
+/// PR11 several pipelines of one run add and remove snapshots while the
+/// coordinator adds and removes task and staging worktrees, all through clones
+/// of one manager, and Git's registry is not safe against itself: `git worktree
+/// add` makes the administrative directory before it writes `locked`, `gitdir`
+/// and `commondir`, and every enumeration — `git worktree list`, the one `add`
+/// makes of its siblings, and this module's own scan in
+/// [`WorkspaceManager::remove_worktree_proving`] — reads each entry's files and
+/// dies (or, here, refuses) on one half written. Measured with four concurrent
+/// loops: an add raced by a prune failed 2–3 times in 600
 /// (`~/orch-pr11/logs/pr11_research_c/git-worktree-add-prune-race-*.log`), and a
 /// `git worktree list` raced by adds and prunes failed 7–10 times in about 7,500,
 /// and once in about 2,000 against adds alone
 /// (`~/orch-pr11/logs/pr11_impl_c/git-worktree-list-race.log`); serially, never.
+/// PR11 serialised every registry access of one process behind this lock, and
+/// that could not reach a writer in another process: two coordinators of one
+/// repository in two checkouts each held their own
+/// (`PR11-LINKED-CHECKOUTS-RACE-THE-SHARED-WORKTREE-REGISTRY`). Since #329 every
+/// access survives another's half-done work through
+/// [`tolerant_registry_access`], whoever the writer is, so the lock no longer
+/// serialises anything that tolerance covers.
 ///
-/// **What it guards.** No data: it orders every registry access this process
-/// makes — the `git worktree add` child, a removal from its registration scan to
-/// its prune, `git worktree list`, and the torn-registration plan's scan — so
-/// none of them sees another half done. **Protocol.** Keyed by the canonical
-/// common git directory, so two managers of one repository share it. Its four
-/// holders take it around one Git child (the add, the list), one scan (a
-/// removal's, the torn plan's), or a removal's mutation inside its funnel, and
-/// each releases it before its funnel's `After` hook. No holder
-/// calls a hook, a registry reader or anything else that could take it again,
-/// so it is never taken twice on one thread, and a holder waits only for its
-/// own Git child and filesystem calls, so it adds no wait cycle. (Phase 3 held
-/// it across a removal's hooks, and an observer that listed the worktrees from
-/// one waited on its own caller for ever: the PR11 record, §13, round R1,
-/// `R1-REG-1`.) A poisoned lock is taken anyway: it protects an ordering, not a
-/// value. **What it cannot guard:** another process — or an agent running Git in
-/// its own worktree — that edits the registry is outside it (the PR11 record,
-/// §11).
+/// **What it still guards.** One exclusion tolerance cannot replace: the
+/// torn-registration plan ([`WorkspaceManager::repair_torn_registrations`])
+/// reads an empty `commondir` as a dead add's residue and removes that slot,
+/// and an add of this same process in flight passes through that state for the
+/// writes between `commondir`'s open and its write. The run lock keeps other
+/// processes of the run out; nothing else keeps this process's own adds out. So
+/// it is a read-write lock: **adds hold it shared**, so two adds of one process
+/// never wait for each other; **the plan holds it alone**; the list, a removal's
+/// scan and a removal's mutation take nothing. (A mutex taken by every access
+/// under a bounded wait refused 3 of 120 cycles of
+/// `concurrent_snapshot_adds_and_removals_on_one_repository_never_fail`: bounding
+/// a wait for a lock that serialises everything turns queueing into refusals —
+/// the record's §3.4.)
+///
+/// **Protocol.** Keyed by the canonical common git directory, so two managers
+/// of one repository share it. Every acquisition is a `try_read` or `try_write`
+/// loop that sleeps outside the lock and gives up at the access's deadline
+/// ([`with_registry`]), so no wait for it is unbounded. A holder holds it around
+/// one attempt — one `git worktree add` child, or the plan's scan — and calls no
+/// hook and no registry reader under it, so it is never taken twice on one
+/// thread and adds no wait cycle. (Phase 3 held it across a removal's hooks, and
+/// an observer that listed the worktrees from one waited on its own caller for
+/// ever: the PR11 record, §13, round R1, `R1-REG-1`.) A poisoned lock is taken
+/// anyway: it protects an ordering, not a value. **What it cannot guard:**
+/// another process; that is what tolerance is for.
 ///
 /// The table holds one entry per repository this process has managed and is
-/// never pruned; shared ownership is the lifecycle — each manager of the
-/// repository holds the `Arc` only while it holds the lock.
+/// never pruned; shared ownership is the lifecycle — each access of the
+/// repository holds the `Arc` only while it holds or waits for the lock.
 static REGISTRY_LOCKS: std::sync::Mutex<
-    std::collections::BTreeMap<PathBuf, std::sync::Arc<std::sync::Mutex<()>>>,
+    std::collections::BTreeMap<PathBuf, std::sync::Arc<std::sync::RwLock<()>>>,
 > = std::sync::Mutex::new(std::collections::BTreeMap::new());
 
-fn registry_lock_of(common_git_dir: &Path) -> std::sync::Arc<std::sync::Mutex<()>> {
+fn registry_lock_of(common_git_dir: &Path) -> std::sync::Arc<std::sync::RwLock<()>> {
     let mut table = REGISTRY_LOCKS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     std::sync::Arc::clone(table.entry(common_git_dir.to_path_buf()).or_default())
+}
+
+/// How a registry access takes this process's registry lock (R-X) around each
+/// attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RegistryHold {
+    /// Not at all: a list, a scan, a removal.
+    Unheld,
+    /// Shared: an add. Adds of one process do not wait for each other.
+    Shared,
+    /// Alone: the torn-registration plan, which must not read this process's
+    /// add in flight as a dead add's residue.
+    Exclusive,
+}
+
+/// What a registry access does after a failed attempt, as the caller's veto
+/// answers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Again {
+    /// Attempt again, while the deadline allows.
+    Attempt,
+    /// Return this attempt's error, unchanged: the failure is the operation's
+    /// own.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the contract's third answer, published for follow-up D's legacy add (the \
+                      record's §5.5 and §7.6); the topology's own accesses never return Git state \
+                      and answer only `Attempt` or `Undecidable`, and the contract's witnesses \
+                      give it"
+        )
+    )]
+    Return,
+    /// The caller could not decide: refuse now, as
+    /// [`UpstrokeError::RegistryRefused`], naming why.
+    Undecidable { why: String },
+}
+
+/// How long one registry access may wait for R-X, attempt again and sleep:
+/// ten seconds in production. A writer's registration is torn only for the few
+/// file writes between its `mkdir` and its `commondir`, microseconds, and a
+/// removal's for the deletion of one directory; ten seconds is four orders of
+/// magnitude over both, and a registration still in the way then is static, so
+/// the access refuses resumably. The `#[cfg(test)]` twin, at the bottom of this
+/// file for the reason [`note_removal_attempt`] gives, is 500 ms, so that a test
+/// meeting a tear it planted does not wait out this one.
+#[cfg(not(test))]
+const REGISTRY_ACCESS_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The deadline of a registry access over `common_git_dir`: always
+/// [`REGISTRY_ACCESS_DEADLINE`] in a production build. The `#[cfg(test)]`
+/// twin, at the bottom of this file for the reason [`note_removal_attempt`]
+/// gives, lets a test give its own repository's accesses another deadline.
+#[cfg(not(test))]
+const fn registry_access_deadline(_common_git_dir: &Path) -> std::time::Duration {
+    REGISTRY_ACCESS_DEADLINE
+}
+
+/// The time as a registry access over `common_git_dir` reads it: always the
+/// monotonic clock in a production build. The `#[cfg(test)]` twin, at the
+/// bottom of this file for the reason [`note_removal_attempt`] gives, lets a
+/// test give its own repository's accesses a clock it moves itself.
+#[cfg(not(test))]
+#[inline]
+fn registry_now(_common_git_dir: &Path) -> std::time::Instant {
+    std::time::Instant::now()
+}
+
+/// The longest backoff sleep between two attempts of one registry access; the
+/// first is one millisecond, and each doubles up to this.
+const REGISTRY_BACKOFF_CEILING: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Record that a registry access decided to attempt again, so that a test can
+/// finish the tear it planted only after the access has failed once on it
+/// (the helper contract's `CONTENDED_ATTEMPTS`, the record's §6.4). A no-op in a
+/// production build; the `#[cfg(test)]` twin sits beside
+/// [`note_removal_attempt`]'s, for the same reason.
+#[cfg(not(test))]
+#[inline]
+fn note_contended(_common_git_dir: &Path) {}
+
+/// Record that a registry access over `common_git_dir` is about to make its
+/// first attempt on this thread, so that a test can change the store just
+/// before one particular access of its own thread. A no-op in a production
+/// build; the `#[cfg(test)]` twin sits beside [`note_contended`]'s.
+#[cfg(not(test))]
+#[inline]
+fn note_access_start(_common_git_dir: &Path) {}
+
+/// Run `attempt` under R-X as `hold` says, waiting for R-X by a `try_read` or
+/// `try_write` loop that waits outside it through `pause_for` and gives up at
+/// `deadline`. `Ok(None)` when R-X stayed held elsewhere in this process until
+/// then, and then no attempt ran; the error of a wait that `pause_for` ended
+/// (the topology coordinator's, once its command is ending), and then no
+/// attempt ran either. R-X is released when the attempt returns.
+fn with_registry<T>(
+    common_git_dir: &Path,
+    hold: RegistryHold,
+    deadline: std::time::Instant,
+    pause_for: &mut dyn FnMut(std::time::Duration) -> Result<(), UpstrokeError>,
+    attempt: &mut dyn FnMut() -> Result<T, UpstrokeError>,
+) -> Result<Option<Result<T, UpstrokeError>>, UpstrokeError> {
+    if hold == RegistryHold::Unheld {
+        return Ok(Some(attempt()));
+    }
+    let registry = registry_lock_of(common_git_dir);
+    let mut pause = std::time::Duration::from_millis(1);
+    loop {
+        match hold {
+            RegistryHold::Unheld => return Ok(Some(attempt())),
+            RegistryHold::Shared => match registry.try_read() {
+                Ok(_held) => return Ok(Some(attempt())),
+                Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+                    let _held = poisoned.into_inner();
+                    return Ok(Some(attempt()));
+                }
+                Err(std::sync::TryLockError::WouldBlock) => {}
+            },
+            RegistryHold::Exclusive => match registry.try_write() {
+                Ok(_held) => return Ok(Some(attempt())),
+                Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+                    let _held = poisoned.into_inner();
+                    return Ok(Some(attempt()));
+                }
+                Err(std::sync::TryLockError::WouldBlock) => {}
+            },
+        }
+        let now = registry_now(common_git_dir);
+        if now >= deadline {
+            return Ok(None);
+        }
+        pause_for(pause.min(deadline.saturating_duration_since(now)))?;
+        pause = pause.saturating_mul(2).min(REGISTRY_BACKOFF_CEILING);
+    }
+}
+
+/// One wait of a registry access, slept on the calling thread: what
+/// [`EffectHooks::registry_pause`] does by default, and what an access made
+/// with no hooks waits by. A `pause_for`'s `Result` carries a wait that a
+/// caller's own pause ends early (the topology coordinator's, once its command
+/// is ending); a sleep never ends early, so this is always `Ok`.
+///
+/// # Errors
+///
+/// None.
+fn sleep_for(pause: std::time::Duration) -> Result<(), UpstrokeError> {
+    note_slept_pause();
+    std::thread::sleep(pause);
+    Ok(())
+}
+
+/// Record that a wait of a registry access slept on this thread, so that a
+/// test can tell a topology coordinator whose waits answered its messages from
+/// one that slept on its own thread (the record's §9.16, I2-2). A no-op in a
+/// production build; the `#[cfg(test)]` twin sits beside [`note_contended`]'s.
+#[cfg(not(test))]
+#[inline]
+fn note_slept_pause() {}
+
+/// Run one registry access as a series of attempts: the tolerant registry
+/// access (the working record `reviews/2026-10-01-pr11-follow-up-b-record.md`,
+/// §5.3 to §5.5 with §6.4 and §7.6 as the contract's current text).
+///
+/// **Nothing is classified.** It reads no store state, no error text and no
+/// timestamp: whether another process's registry write caused a failure cannot
+/// be told from outside Git (rounds 3 to 5 of the record tried, and every round's
+/// reviewers built a state the reads did not see). It reads the monotonic clock
+/// for its deadline and takes R-X as `hold` says; the only things that decide
+/// another attempt are `again` and the deadline.
+///
+/// **When it attempts again.**
+/// 1. It runs `attempt`, under R-X as `hold` says, released when the attempt
+///    returns. A wait for R-X that reaches the deadline refuses, and no attempt
+///    runs.
+/// 2. On `Ok`, it returns at once. `again` is never called before the first
+///    attempt or after a success.
+/// 3. On `Err`, it calls `again()` once, outside R-X.
+/// 4. On [`Again::Return`], it returns that `Err` exactly as the attempt
+///    returned it. This is the only way it returns `UpstrokeError::Git`.
+/// 5. On [`Again::Undecidable`], it refuses at once, naming why; no further
+///    attempt runs. A veto that cannot be evaluated is never returned as Git
+///    state and never attempted past.
+/// 6. On [`Again::Attempt`], it counts the answer for the test handshake
+///    (`note_contended`). If the attempt that failed began at or after the
+///    deadline, it refuses: that attempt was the final one. Otherwise, if the
+///    deadline has not passed, it waits out the backoff through `pause_for` —
+///    one millisecond, doubling, at most [`REGISTRY_BACKOFF_CEILING`], each
+///    wait asked for no longer than the time left before the deadline — and
+///    goes back to 1; if the deadline has passed, it asks for no wait and goes
+///    back to 1.
+/// 7. So the first attempt that begins at or after the deadline is made, and
+///    it is the last: the attempt after a wait the deadline cut short or, when
+///    the deadline passed during an attempt, its veto or the count, the next
+///    attempt, with no wait asked for before it. A store a writer leaves whole
+///    by the deadline is passed.
+///
+/// **Where it waits.** Every wait — each backoff, and each turn of the wait
+/// for R-X — is one call of `pause_for`. A caller passes the call's
+/// [`EffectHooks::registry_pause`], whose default sleeps on the caller's
+/// thread; the topology coordinator answers its messages for the length of
+/// the wait instead, so no wait of an access it makes keeps a pipeline from
+/// its grants (the record's §9.13, R1). A wait may therefore end after its
+/// length, by the time the coordinator takes to answer a message; the
+/// deadline and every check against it are unchanged.
+///
+/// **A wait that ends the access.** A `pause_for` that returns an error ends
+/// the access at once with that error: no attempt follows it. A sleep never
+/// does. The topology coordinator's does once a message it answered during the
+/// wait has ended its command — a shutdown, or an error that ends it — so the
+/// transition waiting on the access stops there (the record's §9.16, I2-1).
+///
+/// **The bound, end to end.** One nominal deadline,
+/// [`REGISTRY_ACCESS_DEADLINE`] after the call begins, and one admission rule:
+/// no attempt is admitted after the first that begins at or after the
+/// deadline. Each wait, for R-X or a backoff, is asked for no longer than the
+/// time left before the deadline, and none is asked for once it has passed.
+/// Nothing else is bounded here: when a wait wakes, how the thread is
+/// scheduled, the bookkeeping between an attempt and its check (the count — in
+/// a test build `note_contended` and its locks — and the clock read), and the
+/// runtime of each attempt and of each veto. Nothing interrupts an attempt or a
+/// veto that has started — killing a Git writer mid-write is exactly what
+/// leaves a torn registration — so the access ends after the last attempt it
+/// admits and the veto after it, at a time this function does not bound.
+///
+/// **What it returns:** `Ok` from the first successful attempt; the failed
+/// attempt's own error, unchanged, when `again` answers `Return`; the error of
+/// a wait `pause_for` ended; otherwise [`UpstrokeError::RegistryRefused`],
+/// whose message names the store, the deadline, the attempt count, the last
+/// failure's text and, for a veto that could not decide, why — resumable, and
+/// never `UpstrokeError::Git`.
+///
+/// `common_git_dir` is the canonical common git directory, as
+/// [`WorkspaceManager::common_git_dir`] holds it: R-X's key, and the store a
+/// refusal names is `<common_git_dir>/worktrees`. A caller that passes another
+/// spelling shares no R-X with this process's manager of the repository.
+///
+/// # Errors
+///
+/// The attempt's own error when `again` answers `Return`, the error of a wait
+/// `pause_for` ended, and [`UpstrokeError::RegistryRefused`] as above.
+pub(crate) fn tolerant_registry_access<T>(
+    common_git_dir: &Path,
+    hold: RegistryHold,
+    pause_for: &mut dyn FnMut(std::time::Duration) -> Result<(), UpstrokeError>,
+    again: &mut dyn FnMut() -> Again,
+    attempt: &mut dyn FnMut() -> Result<T, UpstrokeError>,
+) -> Result<T, UpstrokeError> {
+    note_access_start(common_git_dir);
+    let limit = registry_access_deadline(common_git_dir);
+    let deadline = registry_now(common_git_dir) + limit;
+    let store = common_git_dir.join("worktrees");
+    let mut pause = std::time::Duration::from_millis(1);
+    let mut attempts: u32 = 0;
+    let mut last: Option<UpstrokeError> = None;
+    loop {
+        let mut began = None;
+        let Some(outcome) =
+            with_registry(common_git_dir, hold, deadline, &mut *pause_for, &mut || {
+                began = Some(registry_now(common_git_dir));
+                attempt()
+            })?
+        else {
+            return Err(registry_lock_refusal(
+                &store,
+                hold,
+                limit,
+                attempts,
+                last.as_ref(),
+            ));
+        };
+        attempts = attempts.saturating_add(1);
+        let failure = match outcome {
+            Ok(value) => return Ok(value),
+            Err(failure) => failure,
+        };
+        match again() {
+            Again::Return => return Err(failure),
+            Again::Undecidable { why } => {
+                return Err(UpstrokeError::RegistryRefused {
+                    message: format!(
+                        "a worktree registry access of {} stopped after {attempts} attempt(s): \
+                         whether another attempt is safe could not be decided ({why}); the last \
+                         attempt failed with: {failure}",
+                        store.display()
+                    ),
+                });
+            }
+            Again::Attempt => {}
+        }
+        note_contended(common_git_dir);
+        if began.is_none_or(|began| began >= deadline) {
+            return Err(UpstrokeError::RegistryRefused {
+                message: format!(
+                    "the worktree registry {} kept this access from completing until its \
+                     deadline ({limit:?}): {attempts} attempt(s), the last \
+                     failed with: {failure}",
+                    store.display()
+                ),
+            });
+        }
+        let now = registry_now(common_git_dir);
+        if now < deadline {
+            pause_for(pause.min(deadline.saturating_duration_since(now)))?;
+            pause = pause.saturating_mul(2).min(REGISTRY_BACKOFF_CEILING);
+        }
+        last = Some(failure);
+    }
+}
+
+/// The refusal of an access whose wait for R-X reached its deadline: what held
+/// it, and what the attempts before the wait met, if any ran.
+fn registry_lock_refusal(
+    store: &Path,
+    hold: RegistryHold,
+    limit: std::time::Duration,
+    attempts: u32,
+    last: Option<&UpstrokeError>,
+) -> UpstrokeError {
+    let holder = match hold {
+        RegistryHold::Exclusive => "its adds or another torn-registration plan",
+        RegistryHold::Unheld | RegistryHold::Shared => "its torn-registration plan",
+    };
+    let before = match last {
+        Some(failure) => format!("{attempts} attempt(s) ran, the last failed with: {failure}"),
+        None => "no attempt ran".to_owned(),
+    };
+    UpstrokeError::RegistryRefused {
+        message: format!(
+            "this process's registry lock for the worktree registry {} stayed held by {holder} \
+             until the access's deadline ({limit:?}); {before}",
+            store.display()
+        ),
+    }
+}
+
+/// What is at an add's destination, read without following a link.
+enum AtDestination {
+    /// Nothing.
+    Absent,
+    /// A directory, not a link or reparse point, holding no entry.
+    EmptyDirectory,
+    /// Anything else: a directory holding entries, a file, a link or reparse
+    /// point; named for the message.
+    Other(&'static str),
+    /// Its metadata, or its listing, could not be read.
+    Unreadable(std::io::Error),
+}
+
+impl AtDestination {
+    fn read(path: &Path) -> Self {
+        let metadata = match fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Self::Absent,
+            Err(error) => return Self::Unreadable(error),
+        };
+        if containment::is_reparse_point(&metadata) {
+            return Self::Other("a link or reparse point");
+        }
+        if !metadata.is_dir() {
+            return Self::Other("a file");
+        }
+        match fs::read_dir(path).map(|mut entries| entries.next()) {
+            Ok(None) => Self::EmptyDirectory,
+            Ok(Some(Ok(_))) => Self::Other("a directory holding entries"),
+            Ok(Some(Err(error))) | Err(error) => Self::Unreadable(error),
+        }
+    }
+}
+
+/// An add's destination, which the access makes before Git's add runs and
+/// reads after each failed attempt (the record's §5.3, §7.2 and §8.2).
+///
+/// **Why it is made first.** Git's add scans its siblings, makes its entry and
+/// that entry's `locked`, and only then takes the destination over
+/// (`junk_work_tree`; 2.43.0 `builtin/worktree.c:489`, 2.50.1 `:504`, 2.55.0
+/// `:538`). On every failure after that it runs `remove_junk`, which removes the
+/// entry and then the destination with `remove_dir_recursively`, ending, for an
+/// empty destination, in the `rmdir` this access performs. So a destination
+/// still there and empty after a failure, which this access can remove, holds
+/// nothing to lose, and the add is attempted again. It does not prove Git never
+/// took it over: a Git killed after the takeover, before it wrote anything
+/// there, leaves it empty too (FUB-D9-TAKEOVERWORD), and that is a failure
+/// another attempt meets as residue, never Git state. A destination that is
+/// gone, or that this access cannot remove, may have been taken over — by a
+/// checkout that cannot be made, or by another process's prune deleting the
+/// entry after the takeover, which leave the same end state (§6.2) — and
+/// refuses resumably, never as Git state (§7.3).
+///
+/// **Why a destination that is not an empty directory is Git state at once.**
+/// Git's add runs its sibling scan before it checks its destination
+/// (`get_worktrees`, then `check_candidate_path`), so attempting such an add
+/// returned a torn sibling's registry error as Git state; and its check follows
+/// a link to an empty directory and checks out through it (§8.2). It is
+/// answered before `git worktree add` runs, and only after the add's gate
+/// passed: the gate's list ([`WorkspaceManager::revalidate`]) is an access of
+/// its own, so a store that list fails on refuses as the registry's first,
+/// whatever is at the destination (the record's §9.13, R4).
+struct Destination<'p> {
+    path: &'p Path,
+    /// Whether this access made the directory at `path`, rather than finding
+    /// it there empty.
+    made: bool,
+}
+
+impl<'p> Destination<'p> {
+    /// Before the first attempt: make the destination as an empty directory,
+    /// or take the empty directory already there. Anything else at the path,
+    /// and a destination that cannot be made or read, is Git state, before
+    /// `git worktree add` runs.
+    ///
+    /// # Errors
+    ///
+    /// [`UpstrokeError::Git`] naming the path and what is there or the OS
+    /// error.
+    fn prepare(path: &'p Path) -> Result<Self, UpstrokeError> {
+        let refused = |what: String| UpstrokeError::Git {
+            message: format!(
+                "the worktree destination {} {what}; `git worktree add` did not run",
+                path.display()
+            ),
+        };
+        match AtDestination::read(path) {
+            AtDestination::EmptyDirectory => Ok(Self { path, made: false }),
+            AtDestination::Absent => match fs::create_dir(path) {
+                Ok(()) => Ok(Self { path, made: true }),
+                Err(error) => Err(refused(format!("could not be made: {error}"))),
+            },
+            AtDestination::Other(what) => Err(refused(format!("already exists as {what}"))),
+            AtDestination::Unreadable(error) => Err(refused(format!("could not be read: {error}"))),
+        }
+    }
+
+    /// After a failed attempt: the removal proof. An empty directory this
+    /// access can remove is untouched, so it is removed and made again and the
+    /// answer is [`Again::Attempt`]; anything else, and a directory that cannot
+    /// be made again, is [`Again::Undecidable`]. It runs no Git command and
+    /// reads and writes nothing but the destination.
+    fn untouched(&mut self) -> Again {
+        let undecidable = |path: &Path, what: String| Again::Undecidable {
+            why: format!("the worktree destination {} {what}", path.display()),
+        };
+        match AtDestination::read(self.path) {
+            AtDestination::EmptyDirectory => {
+                if let Err(error) = fs::remove_dir(self.path) {
+                    return undecidable(
+                        self.path,
+                        format!(
+                            "is an empty directory this access cannot remove ({error}), so Git \
+                             may have taken it over"
+                        ),
+                    );
+                }
+                match fs::create_dir(self.path) {
+                    Ok(()) => {
+                        self.made = true;
+                        Again::Attempt
+                    }
+                    Err(error) => undecidable(
+                        self.path,
+                        format!("was removed untouched and could not be made again: {error}"),
+                    ),
+                }
+            }
+            AtDestination::Absent => undecidable(
+                self.path,
+                "is gone: Git took it over, or may have".to_owned(),
+            ),
+            AtDestination::Other(what) => undecidable(self.path, format!("now holds {what}")),
+            AtDestination::Unreadable(error) => {
+                undecidable(self.path, format!("could not be read: {error}"))
+            }
+        }
+    }
+
+    /// After a refused access: remove the destination this access made, when
+    /// it is still an empty directory.
+    fn settle(&self) {
+        if self.made
+            && matches!(
+                AtDestination::read(self.path),
+                AtDestination::EmptyDirectory
+            )
+        {
+            // Best effort, as Git's own junk removal is: a directory this
+            // access cannot remove stays empty, and the slot's forced removal
+            // binds nothing for an empty directory and takes it, store or no
+            // store (`revalidate_removal_proving`).
+            let _ = fs::remove_dir(self.path);
+        }
+    }
 }
 
 impl WorkspaceManager {
@@ -1610,9 +2123,12 @@ impl WorkspaceManager {
     /// [`Refusal::RunId`], [`Refusal::BaseIsNotADirectory`],
     /// [`Refusal::RootOutsidePrivateRoot`], [`Refusal::ReparsePointOnChain`],
     /// [`Refusal::RootInsideRepositoryWorktree`] and
-    /// [`Refusal::WorktreeInsideRoot`]; [`UpstrokeError::Io`] when the base,
-    /// the private root or a registered worktree cannot be read or resolved;
-    /// and a Git error when the base is not a repository.
+    /// [`Refusal::WorktreeInsideRoot`]; [`UpstrokeError::Io`] when the base or
+    /// the private root cannot be read or resolved;
+    /// [`UpstrokeError::RegistryRefused`] when the worktree list, or a
+    /// registered worktree's path, cannot be read by the registry access's
+    /// deadline ([`Self::revalidate`]); and a Git error when the base is not a
+    /// repository.
     pub fn derive(
         base: &Path,
         private_root: &Path,
@@ -1703,30 +2219,58 @@ impl WorkspaceManager {
     /// `<root>/{tasks,merge,snapshots}/<component>`; anything else inside the
     /// root is foreign and refuses.
     ///
+    /// The worktree list and the resolution of each path it names are one
+    /// registry access ([`Self::visit_resolved_records`]), so a sibling whose
+    /// checkout another removal is deleting while this reads it does not fail
+    /// the gate (the record's §9.14, R7).
+    ///
     /// # Errors
     ///
-    /// The containment refusals, or a Git error reading the worktree list.
+    /// The containment refusals, a refusal of a link on a listed path, an I/O
+    /// error resolving the execution root, or
+    /// [`UpstrokeError::RegistryRefused`] when the list, or a path it names,
+    /// could not be read by the access's deadline.
     pub fn revalidate(&self) -> Result<(), UpstrokeError> {
+        self.revalidate_with(&mut sleep_for)
+    }
+
+    /// [`Self::revalidate`], its registry list waiting out its pauses through
+    /// `hooks` ([`EffectHooks::registry_pause`]): the form the topology
+    /// coordinator's own calls take, so that a list another process's write
+    /// fails does not keep a pipeline from its grants (the record's §9.13).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::revalidate`].
+    pub fn revalidate_pausing(&self, hooks: &mut dyn EffectHooks) -> Result<(), UpstrokeError> {
+        self.revalidate_with(&mut |pause| hooks.registry_pause(pause))
+    }
+
+    fn revalidate_with(
+        &self,
+        pause_for: &mut dyn FnMut(std::time::Duration) -> Result<(), UpstrokeError>,
+    ) -> Result<(), UpstrokeError> {
         self.revalidate_chain(&self.execution_root)?;
         let root = canonical_prefix(&self.execution_root)?;
-        for record in self.worktree_records()? {
-            let worktree = canonical_prefix(record.path())?;
-            if is_at_or_inside(&worktree, &root) {
-                return Err(Refusal::RootInsideRepositoryWorktree {
-                    root,
+        // The visit runs again on every attempt, so a refusal it answers holds
+        // a copy of the root rather than the root itself; the one copy is made
+        // on the refusal (§6).
+        let refused = self.visit_resolved_records(pause_for, &|record, worktree| {
+            if is_at_or_inside(worktree, &root) {
+                return Some(Refusal::RootInsideRepositoryWorktree {
+                    root: root.clone(),
                     worktree: record.into_path(),
-                }
-                .into());
+                });
             }
-            if is_at_or_inside(&root, &worktree) && !self.is_manager_slot_path(&root, &worktree) {
-                return Err(Refusal::WorktreeInsideRoot {
-                    root,
+            if is_at_or_inside(&root, worktree) && !self.is_manager_slot_path(&root, worktree) {
+                return Some(Refusal::WorktreeInsideRoot {
+                    root: root.clone(),
                     worktree: record.into_path(),
-                }
-                .into());
+                });
             }
-        }
-        Ok(())
+            None
+        })?;
+        refused.map_or(Ok(()), |refusal| Err(refusal.into()))
     }
 
     /// The chain half of [`Self::revalidate`], re-run inside every funnel
@@ -2070,7 +2614,7 @@ impl WorkspaceManager {
     ///
     /// The containment refusals, or an I/O error creating the directories.
     pub fn create_execution_root(&self, hooks: &mut dyn EffectHooks) -> Result<(), UpstrokeError> {
-        self.revalidate()?;
+        self.revalidate_pausing(hooks)?;
         let ledger = hooks.durability_ledger();
         funnel(
             hooks,
@@ -2115,7 +2659,7 @@ impl WorkspaceManager {
         &self,
         hooks: &mut dyn EffectHooks,
     ) -> Result<bool, UpstrokeError> {
-        self.revalidate()?;
+        self.revalidate_pausing(hooks)?;
         funnel(
             hooks,
             EffectSiteId::Worktree(WorktreeSite::RemoveExecutionRoot),
@@ -2217,7 +2761,7 @@ impl WorkspaceManager {
         slot: &Slot,
     ) -> Result<(), UpstrokeError> {
         slot.validate()?;
-        self.revalidate()?;
+        self.revalidate_pausing(hooks)?;
         let path = self.intent_path(slot);
         // Owned snapshots: the record is persisted, and serde owns its
         // fields.
@@ -2265,11 +2809,11 @@ impl WorkspaceManager {
         slot: &Slot,
     ) -> Result<(), UpstrokeError> {
         slot.validate()?;
-        if let Err(refused) = self.revalidate() {
+        if let Err(refused) = self.revalidate_pausing(hooks) {
             if !self.repair_torn_registrations(hooks, Some(slot))? {
                 return Err(refused);
             }
-            self.revalidate()?;
+            self.revalidate_pausing(hooks)?;
         }
         let directory = self.execution_root.join("intents");
         let path = directory.join(slot.intent_name());
@@ -2384,7 +2928,7 @@ impl WorkspaceManager {
         // is an ordinary empty state. Every non-empty case is revalidated by
         // `remove_worktree`, where a missing store must refuse before deletion.
         if slots.is_empty() {
-            self.revalidate()?;
+            self.revalidate_pausing(hooks)?;
         }
         // Two passes, not one: an intent's removal enumerates, so every slot's
         // worktree, a torn registration included, goes through its own removal
@@ -2419,7 +2963,7 @@ impl WorkspaceManager {
         &self,
         hooks: &mut dyn EffectHooks,
     ) -> Result<Vec<PathBuf>, UpstrokeError> {
-        self.revalidate()?;
+        self.revalidate_pausing(hooks)?;
         let directory = self.execution_root.join("intents");
         let leftovers = self.staging_leftovers()?;
         for path in &leftovers {
@@ -2642,10 +3186,30 @@ impl WorkspaceManager {
     /// Separate sites make the *ordering* a caller's obligation, so the
     /// obligation is checked here — see [`Refusal::AddWithoutIntent`].
     ///
+    /// **The add is a tolerant registry access** ([`tolerant_registry_access`],
+    /// R-X shared). After the add's gate has listed the registry, its
+    /// destination is made as an empty directory before Git's add runs
+    /// ([`Destination::prepare`]), and a destination that is anything but an
+    /// empty directory is Git state at once, before `git worktree add` runs. A
+    /// store the gate's list fails on refuses as the registry's first,
+    /// whatever is at the destination. After a failed `git worktree add`, the
+    /// destination answers whether another attempt is safe
+    /// ([`Destination::untouched`]): an empty directory the access can remove
+    /// holds nothing to lose — Git's junk removal would have removed it after a
+    /// failure of Git's own past its takeover — so it is made again and the add
+    /// attempted again; anything else refuses at once, resumably, as
+    /// [`UpstrokeError::RegistryRefused`]. So this funnel returns Git state only
+    /// for a destination that could not be made or was not an empty directory
+    /// when it began, and neither depends on the registry
+    /// (`reviews/2026-10-01-pr11-follow-up-b-record.md`, §7.2, §7.3, §8.2). A
+    /// refused add removes the destination it made, when that is still an
+    /// empty directory.
+    ///
     /// # Errors
     ///
     /// A slot refusal, [`Refusal::AddWithoutIntent`], the containment refusals,
-    /// or a Git error.
+    /// a Git error for a destination that could not be made or was not an empty
+    /// directory, or [`UpstrokeError::RegistryRefused`].
     pub fn add_worktree(
         &self,
         hooks: &mut dyn EffectHooks,
@@ -2653,9 +3217,9 @@ impl WorkspaceManager {
         commit: &str,
     ) -> Result<PathBuf, UpstrokeError> {
         let path = self.slot_target(slot)?;
-        self.revalidate()?;
+        self.revalidate_pausing(hooks)?;
         let intent = self.intent_path(slot);
-        funnel(hooks, slot.add_site(), move || {
+        funnel_lending(hooks, slot.add_site(), move |hooks| {
             self.revalidate_acted_through(Primitive::AddWorktree, Some(slot), None)?;
             // Inside the funnel, after the `Before` hook: an intent removed
             // between a check outside and the add would leave a worktree that
@@ -2701,11 +3265,18 @@ impl WorkspaceManager {
                 Self::WORKTREE_ADD_ARGV.iter().map(OsString::from).collect();
             argv.push(path.as_os_str().to_os_string());
             argv.push(OsString::from(commit));
-            let registry = registry_lock_of(&self.common_git_dir);
-            let _serialized = registry
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            self.git_ok(&self.base, &argv)?;
+            let mut destination = Destination::prepare(&path)?;
+            let added = tolerant_registry_access(
+                &self.common_git_dir,
+                RegistryHold::Shared,
+                &mut |pause| hooks.registry_pause(pause),
+                &mut || destination.untouched(),
+                &mut || self.git_ok(&self.base, &argv).map(|_quiet| ()),
+            );
+            if added.is_err() {
+                destination.settle();
+            }
+            added?;
             Ok(path)
         })
     }
@@ -2741,17 +3312,21 @@ impl WorkspaceManager {
         slot: &Slot,
         expected: &Quiescence,
     ) -> Result<Result<(), VerifyFailure>, UpstrokeError> {
-        if let Err(refused) = self.revalidate() {
+        if let Err(refused) = self.revalidate_pausing(hooks) {
             if !self.repair_torn_registrations(hooks, None)? {
                 return Err(refused);
             }
-            self.revalidate()?;
+            self.revalidate_pausing(hooks)?;
         }
         let path = self.slot_target(slot)?;
-        funnel(hooks, EffectSiteId::Worktree(WorktreeSite::Verify), || {
-            self.revalidate_acted_through(Primitive::VerifyWorktree, Some(slot), None)?;
-            self.quiescence(&path, expected)
-        })
+        funnel_lending(
+            hooks,
+            EffectSiteId::Worktree(WorktreeSite::Verify),
+            |hooks| {
+                self.revalidate_acted_through(Primitive::VerifyWorktree, Some(slot), None)?;
+                self.quiescence_with(&path, expected, &mut |pause| hooks.registry_pause(pause))
+            },
+        )
     }
 
     /// The body of [`Self::verify_worktree`], so the sampling harness can ask
@@ -2759,13 +3334,24 @@ impl WorkspaceManager {
     ///
     /// # Errors
     ///
-    /// A Git error.
+    /// A Git error, or [`UpstrokeError::RegistryRefused`] when the worktree
+    /// list, or a path it names, cannot be read by the registry access's
+    /// deadline ([`Self::visit_resolved_records`]).
     pub fn quiescence(
         &self,
         path: &Path,
         expected: &Quiescence,
     ) -> Result<Result<(), VerifyFailure>, UpstrokeError> {
-        let Some(record) = self.worktree_record(path)? else {
+        self.quiescence_with(path, expected, &mut sleep_for)
+    }
+
+    fn quiescence_with(
+        &self,
+        path: &Path,
+        expected: &Quiescence,
+        pause_for: &mut dyn FnMut(std::time::Duration) -> Result<(), UpstrokeError>,
+    ) -> Result<Result<(), VerifyFailure>, UpstrokeError> {
+        let Some(record) = self.worktree_record(path, pause_for)? else {
             return Ok(Err(VerifyFailure::NotRegistered));
         };
         if record.is_initializing() {
@@ -2906,12 +3492,20 @@ impl WorkspaceManager {
     ///
     /// The contained-deletion form is the one implemented, because it is the
     /// only one that works when the checkout is already gone — and because it
-    /// is the form whose containment is checkable. The `locked` marker
-    /// `git worktree add` leaves behind is cleared as part of the removal:
-    /// measured, `git worktree prune` skips a locked entry and
-    /// `git worktree remove --force` refuses one, so a removal that did not
-    /// clear it would leave exactly the residue this sentence promises never
-    /// blocks reclaim.
+    /// is the form whose containment is checkable. **Its registration is
+    /// removed directly, and no `git worktree prune` runs** (#329, the record's
+    /// §2.5 and §3.5): the registration the removal's scan bound to this slot's
+    /// checkout is removed, `locked` first and then its directory, and then the
+    /// store itself when that left it empty, as Git's prune removed an emptied
+    /// store. Git's prune deletes *every* entry with neither `locked` nor
+    /// `gitdir`, and `git worktree add` makes its entry before it writes
+    /// `locked`, so an engine prune could delete another process's add in
+    /// flight; removal bound to the instance's own registration deletes no
+    /// other process's entry. The `locked` marker `git worktree add` leaves
+    /// behind is cleared as part of the removal: measured, `git worktree prune`
+    /// skips a locked entry and `git worktree remove --force` refuses one, so
+    /// a removal that did not clear it would leave exactly the residue this
+    /// sentence promises never blocks reclaim.
     ///
     /// A registration the store holds that names no checkout — `locked`
     /// beside an empty `gitdir`, or `locked` with no `gitdir` at all, the two
@@ -2920,11 +3514,15 @@ impl WorkspaceManager {
     /// whichever slot is being removed: the plain funnel proves nothing about
     /// writers of the root, and on disk that state is an add in flight. See
     /// [`WriterProof`]; [`Self::remove_worktree_proving`] is the form a caller
-    /// with the proof uses.
+    /// with the proof uses. The scan is a tolerant registry access, so that
+    /// refusal is attempted past until its deadline, and a registration still
+    /// in that state then refuses as [`UpstrokeError::RegistryRefused`],
+    /// carrying the scan's own text.
     ///
     /// # Errors
     ///
-    /// The containment refusals, or a Git or I/O error.
+    /// The containment refusals, [`UpstrokeError::RegistryRefused`], or a Git
+    /// or I/O error.
     pub fn remove_worktree(
         &self,
         hooks: &mut dyn EffectHooks,
@@ -2969,22 +3567,28 @@ impl WorkspaceManager {
     /// finalization's scrub and the live loop's; its error is the funnel's,
     /// never absorbed.
     ///
-    /// The repository's registry lock (`REGISTRY_LOCKS`) is held twice, and
-    /// never across a hook. First around the registration scan, before any
-    /// hook: it binds the registration the removal will act through, so a
-    /// scan refusal comes first and a registration exchanged at the `Before`
-    /// hook is refused by the acted-through check inside the funnel. Then,
-    /// inside the funnel after the `Before` hook has returned, around the
-    /// removal of the checkout, the administrative directory and the prune,
-    /// which act on that binding; it is released before the `After` hook. So
-    /// the scan never reads an add this process has in flight and the prune
-    /// never removes one, and an observer may list the worktrees, or wait on
-    /// another thread's registry access, from either hook (the PR11 record,
-    /// §13, round R1, `R1-REG-1`).
+    /// **The scan is a tolerant registry access, and nothing holds R-X.** The
+    /// registration scan runs before any hook, through
+    /// [`tolerant_registry_access`] with no hold: it binds the registration the
+    /// removal will act through, so a scan refusal comes first and a
+    /// registration exchanged at the `Before` hook is refused by the
+    /// acted-through check inside the funnel; a scan that meets another
+    /// process's registration half written is attempted again until its
+    /// deadline, and refuses resumably after it. The mutation, inside the
+    /// funnel, removes the checkout and then exactly the registration the scan
+    /// bound, and the store only when that left it empty; it enumerates nothing
+    /// and takes no lock, because removals of one process act on different
+    /// slots and the store's removal is an `rmdir`, which fails on a store that
+    /// is not empty. An add of this process that has not yet made its entry
+    /// and meets a store removed under it fails before Git takes its
+    /// destination over, and is attempted again. An observer may list the
+    /// worktrees, or wait on another thread's registry access, from either hook
+    /// (the PR11 record, §13, round R1, `R1-REG-1`).
     ///
     /// # Errors
     ///
-    /// The containment refusals, or a Git or I/O error.
+    /// The containment refusals, [`UpstrokeError::RegistryRefused`], or a Git
+    /// or I/O error.
     pub fn remove_worktree_proving(
         &self,
         hooks: &mut dyn EffectHooks,
@@ -2995,28 +3599,25 @@ impl WorkspaceManager {
         let RemovalBinding {
             admin: registration,
             passed_over,
-        } = {
-            let registry = registry_lock_of(&self.common_git_dir);
-            let _serialized = registry
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            self.revalidate_removal_proving(&path, proof)?
-        };
+        } = tolerant_registry_access(
+            &self.common_git_dir,
+            RegistryHold::Unheld,
+            &mut |pause| hooks.registry_pause(pause),
+            &mut || Again::Attempt,
+            &mut || self.revalidate_removal_proving(&path, proof),
+        )?;
         let ledger = hooks.durability_ledger();
         funnel(hooks, slot.remove_site(), || {
-            let registry = registry_lock_of(&self.common_git_dir);
-            let _serialized = registry
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
             self.remove_bound(slot, &path, registration.as_deref(), &ledger)
         })?;
         Ok(passed_over)
     }
 
-    /// [`Self::remove_worktree_proving`]'s second critical section, entered
-    /// holding the registry lock with `registration` bound by its scan: the
-    /// checkout removed and its deletion made durable, then the registration
-    /// cleared and pruned.
+    /// [`Self::remove_worktree_proving`]'s mutation, with `registration` bound
+    /// by its scan: the checkout removed and its deletion made durable, then
+    /// that registration removed directly — `locked`, then its directory — and
+    /// then the store, when that left it empty. No `git worktree prune` runs,
+    /// and no entry the scan did not bind to this slot is touched.
     fn remove_bound(
         &self,
         slot: &Slot,
@@ -3052,76 +3653,46 @@ impl WorkspaceManager {
             message: format!("{} has no parent directory", checkout.display()),
         })?;
         sync_checkout_removed(&checkout, parent, ledger)?;
-        if let Some(admin) = registration {
-            if !self.registration_still_names(admin, path)? {
-                // Its identity metadata is already absent: forced cleanup
-                // converges without inferring or deleting an admin path.
-                self.git_ok(
-                    &self.base,
-                    &[OsString::from("worktree"), OsString::from("prune")],
-                )?;
-                return Ok(());
-            }
-            let locked = admin.join("locked");
-            match fs::remove_file(&locked) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(source) => {
-                    return Err(UpstrokeError::Filesystem {
-                        operation: "remove",
-                        path: locked,
-                        source,
-                    });
-                }
-            }
-            // A killed `git worktree add` can leave an empty `commondir`.
-            // Git then cannot enumerate *any* worktree, so `prune` cannot
-            // remove this one. `revalidate_removal` bound this admin
-            // directory to the exact, contained slot from its byte-safe
-            // `gitdir` before the checkout was deleted. Only that proved
-            // registration may be removed directly.
-            let commondir = admin.join("commondir");
-            let commondir_empty = match fs::metadata(&commondir) {
-                Ok(metadata) => metadata.len() == 0,
-                // No `commondir` at all is Git's to prune; only a read
-                // failure is ours to report.
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-                Err(source) => {
-                    return Err(UpstrokeError::Io {
-                        path: commondir,
-                        source,
-                    });
-                }
-            };
-            if commondir_empty {
-                if !self.registration_still_names(admin, path)? {
-                    self.git_ok(
-                        &self.base,
-                        &[OsString::from("worktree"), OsString::from("prune")],
-                    )?;
-                    return Ok(());
-                }
-                remove_tree_once_handles_close(admin).map_err(|source| {
-                    UpstrokeError::Filesystem {
-                        operation: "remove",
-                        path: admin.to_path_buf(),
-                        source,
-                    }
-                })?;
-                // No prune: nothing of this slot's is left for one, and
-                // what it would remove is other slots' — among it a
-                // registration whose `gitdir` is gone and, once that
-                // empties the store, `<common git dir>/worktrees` itself,
-                // without which the gate above refuses that slot's
-                // checkout on every attempt. That slot's own removal
-                // prunes, after its checkout has gone.
-                return Ok(());
+        let Some(admin) = registration else {
+            // No registration names this slot: nothing of the store is this
+            // removal's to touch.
+            return Ok(());
+        };
+        if !self.registration_still_names(admin, path)? {
+            // Its identity metadata is already absent: forced cleanup
+            // converges without inferring or deleting an admin path.
+            return Ok(());
+        }
+        let locked = admin.join("locked");
+        match fs::remove_file(&locked) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(UpstrokeError::Filesystem {
+                    operation: "remove",
+                    path: locked,
+                    source,
+                });
             }
         }
-        self.git_ok(
-            &self.base,
-            &[OsString::from("worktree"), OsString::from("prune")],
-        )?;
+        // `revalidate_removal_proving` bound this admin directory to the
+        // exact, contained slot from its byte-safe `gitdir` before the
+        // checkout was deleted, and `registration_still_names` re-read that
+        // identity just now: only that proved registration is removed, and
+        // the same way whether its `commondir` was written or a killed add
+        // left it empty, which Git can enumerate nothing past.
+        remove_tree_once_handles_close(admin).map_err(|source| UpstrokeError::Filesystem {
+            operation: "remove",
+            path: admin.to_path_buf(),
+            source,
+        })?;
+        // The store itself, when this removal left it empty, as `git worktree
+        // prune` removed an emptied store; an `rmdir`, so it fails on a store
+        // another registration still holds, and best effort, as Git's is. The
+        // frozen `finalize.rs` test
+        // `scrub_slots_converges_when_git_has_pruned_the_emptied_registration_store`
+        // pins the store's absence after its slots' removals.
+        let _ = fs::remove_dir(self.common_git_dir.join("worktrees"));
         Ok(())
     }
 
@@ -3163,7 +3734,7 @@ impl WorkspaceManager {
         name: &SnapshotName,
         input: &SnapshotInput,
     ) -> Result<Snapshot, UpstrokeError> {
-        self.revalidate()?;
+        self.revalidate_pausing(hooks)?;
         match input {
             SnapshotInput::Commit(commit) => {
                 self.refuse_unless_resolves_to_itself(SnapshotObject::Commit, commit)?;
@@ -3360,6 +3931,13 @@ impl WorkspaceManager {
     /// A swap that reclaimed nothing held Git's lock throughout and needs no
     /// such check.
     ///
+    /// The publishability re-check before the funnel waits out its registry
+    /// list's pauses through `hooks` ([`Self::assert_publishable_pausing`]), as
+    /// every other access of a call that takes hooks does: the topology
+    /// coordinator's publication hands the swap its own hooks, so that wait
+    /// answers the coordinator's messages and never sleeps on its thread (the
+    /// record's §9.21, CAS-1).
+    ///
     /// # Errors
     ///
     /// [`Refusal::SymbolicRef`] or [`Refusal::CheckedOutRef`];
@@ -3367,7 +3945,9 @@ impl WorkspaceManager {
     /// [`Refusal::MalformedObjectId`] or [`Refusal::NullExpectedOld`] for
     /// `old`; [`Refusal::RefLockNamesAnotherWrite`],
     /// [`Refusal::RefLockOnPackedRef`] or [`Refusal::RefRepackedDuringReclaim`]
-    /// around a lock file; or a Git error when the old value does not match.
+    /// around a lock file; [`UpstrokeError::RegistryRefused`], or the error of
+    /// a wait `hooks` ended, from the re-check's list; or a Git error when the
+    /// old value does not match.
     pub fn compare_and_swap_ref(
         &self,
         hooks: &mut dyn EffectHooks,
@@ -3376,7 +3956,7 @@ impl WorkspaceManager {
         old: &str,
         new: &str,
     ) -> Result<(), UpstrokeError> {
-        self.assert_publishable(refname)?;
+        self.assert_publishable_pausing(hooks, refname)?;
         refuse_new(refname, new)?;
         refuse_expected_old(refname, old)?;
         funnel(hooks, EffectSiteId::Ref(site), || {
@@ -3419,6 +3999,21 @@ impl WorkspaceManager {
     ///
     /// [`Refusal::SymbolicRef`] or [`Refusal::CheckedOutRef`].
     pub fn assert_publishable(&self, refname: &str) -> Result<(), UpstrokeError> {
+        self.assert_publishable_pausing(&mut NoHooks, refname)
+    }
+
+    /// [`Self::assert_publishable`], its registry list waiting out its pauses through `hooks`
+    /// ([`EffectHooks::registry_pause`]): the form the topology coordinator's
+    /// own calls take (the record's §9.13).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::assert_publishable`].
+    pub fn assert_publishable_pausing(
+        &self,
+        hooks: &mut dyn EffectHooks,
+        refname: &str,
+    ) -> Result<(), UpstrokeError> {
         // **Two limits of this check, neither of them closed here.** The
         // comparison is exact bytes, so on a case-insensitive filesystem with
         // the files ref backend a worktree holding another spelling of the
@@ -3431,7 +4026,7 @@ impl WorkspaceManager {
         // inside the funnel after the Before hook and a statement of what the
         // funnel then guarantees.
         self.refuse_symbolic(refname)?;
-        for record in self.worktree_records()? {
+        for record in self.worktree_records_with(&mut |pause| hooks.registry_pause(pause))? {
             if record.has_checked_out(refname) {
                 return Err(Refusal::CheckedOutRef {
                     refname: refname.to_owned(),
@@ -3808,7 +4403,7 @@ impl WorkspaceManager {
         slot: &Slot,
         resolutions: &[DeclaredResolution],
     ) -> Result<(), UpstrokeError> {
-        self.revalidate()?;
+        self.revalidate_pausing(hooks)?;
         let path = self.slot_target(slot)?;
         funnel(
             hooks,
@@ -3873,7 +4468,7 @@ impl WorkspaceManager {
         hooks: &mut dyn EffectHooks,
         slot: &Slot,
     ) -> Result<String, UpstrokeError> {
-        self.revalidate()?;
+        self.revalidate_pausing(hooks)?;
         let path = self.slot_target(slot)?;
         funnel(
             hooks,
@@ -4016,7 +4611,7 @@ impl WorkspaceManager {
         slot: &Slot,
         commit: &str,
     ) -> Result<String, UpstrokeError> {
-        self.revalidate()?;
+        self.revalidate_pausing(hooks)?;
         let path = self.slot_target(slot)?;
         funnel(
             hooks,
@@ -4082,7 +4677,23 @@ impl WorkspaceManager {
     ///
     /// The containment refusals or a Git error from the inspections.
     pub fn proposal_state(&self, slot: &Slot, head: &str) -> Result<ProposalState, UpstrokeError> {
-        self.revalidate()?;
+        self.proposal_state_pausing(&mut NoHooks, slot, head)
+    }
+
+    /// [`Self::proposal_state`], its revalidation's registry list waiting out its pauses through `hooks`
+    /// ([`EffectHooks::registry_pause`]): the form the topology coordinator's
+    /// own calls take (the record's §9.13).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::proposal_state`].
+    pub fn proposal_state_pausing(
+        &self,
+        hooks: &mut dyn EffectHooks,
+        slot: &Slot,
+        head: &str,
+    ) -> Result<ProposalState, UpstrokeError> {
+        self.revalidate_pausing(hooks)?;
         let path = self.slot_target(slot)?;
         let unmerged = self.git_ok(
             &path,
@@ -4231,7 +4842,7 @@ impl WorkspaceManager {
         slot: &Slot,
         commit: &str,
     ) -> Result<Materialized, UpstrokeError> {
-        self.revalidate()?;
+        self.revalidate_pausing(hooks)?;
         let path = self.slot_target(slot)?;
         funnel(
             hooks,
@@ -4752,7 +5363,23 @@ impl WorkspaceManager {
     ///
     /// The containment refusals or a Git error.
     pub fn changed_paths(&self, slot: &Slot, base: &str) -> Result<PathSet, UpstrokeError> {
-        self.revalidate()?;
+        self.changed_paths_pausing(&mut NoHooks, slot, base)
+    }
+
+    /// [`Self::changed_paths`], its revalidation's registry list waiting out its pauses through `hooks`
+    /// ([`EffectHooks::registry_pause`]): the form the topology coordinator's
+    /// own calls take (the record's §9.13).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::changed_paths`].
+    pub fn changed_paths_pausing(
+        &self,
+        hooks: &mut dyn EffectHooks,
+        slot: &Slot,
+        base: &str,
+    ) -> Result<PathSet, UpstrokeError> {
+        self.revalidate_pausing(hooks)?;
         let path = self.slot_target(slot)?;
         let output = self.git_ok(
             &path,
@@ -4828,7 +5455,22 @@ impl WorkspaceManager {
     /// The containment refusals, the hooks path's among them, a Git failure
     /// other than "no such object", or non-UTF-8 output.
     pub fn commit_parent(&self, commit: &str) -> Result<Option<String>, UpstrokeError> {
-        self.revalidate()?;
+        self.commit_parent_pausing(&mut NoHooks, commit)
+    }
+
+    /// [`Self::commit_parent`], its revalidation's registry list waiting out its pauses through `hooks`
+    /// ([`EffectHooks::registry_pause`]): the form the topology coordinator's
+    /// own calls take (the record's §9.13).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::commit_parent`].
+    pub fn commit_parent_pausing(
+        &self,
+        hooks: &mut dyn EffectHooks,
+        commit: &str,
+    ) -> Result<Option<String>, UpstrokeError> {
+        self.revalidate_pausing(hooks)?;
         let argv = [
             OsString::from("rev-parse"),
             OsString::from("--verify"),
@@ -4855,7 +5497,22 @@ impl WorkspaceManager {
     /// The containment refusals, the hooks path's among them, a Git failure
     /// other than "no such object", or non-UTF-8 output.
     pub fn commit_tree_sha(&self, commit: &str) -> Result<Option<String>, UpstrokeError> {
-        self.revalidate()?;
+        self.commit_tree_sha_pausing(&mut NoHooks, commit)
+    }
+
+    /// [`Self::commit_tree_sha`], its revalidation's registry list waiting out its pauses through `hooks`
+    /// ([`EffectHooks::registry_pause`]): the form the topology coordinator's
+    /// own calls take (the record's §9.13).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::commit_tree_sha`].
+    pub fn commit_tree_sha_pausing(
+        &self,
+        hooks: &mut dyn EffectHooks,
+        commit: &str,
+    ) -> Result<Option<String>, UpstrokeError> {
+        self.revalidate_pausing(hooks)?;
         let argv = [
             OsString::from("rev-parse"),
             OsString::from("--verify"),
@@ -4907,8 +5564,8 @@ impl WorkspaceManager {
     /// The hooks path, walked immediately before every command the manager
     /// runs through [`Self::git`] and [`Self::git_with_identity`].
     ///
-    /// That set is the funnel primitives' commands (`worktree add`, `worktree
-    /// prune`, `add`, `write-tree`, `cherry-pick`, `commit-tree`, `update-ref`)
+    /// That set is the funnel primitives' commands (`worktree add`, `add`,
+    /// `write-tree`, `cherry-pick`, `commit-tree`, `update-ref`)
     /// and the manager's reads through the same runner (`worktree list`,
     /// `for-each-ref`, `show-ref`, `rev-parse`, `diff`). The two free
     /// functions `read_only_git` and `read_only_git_ok` are not in it: they
@@ -4968,9 +5625,9 @@ impl WorkspaceManager {
     /// ignores every replacement, and the same command materialises `A`
     /// (measured, both ways). It is set here rather than in the snapshot
     /// funnel because this is where the commands are built, and the reason
-    /// holds for all of them: every funnel primitive (`worktree add`, `worktree
-    /// prune`, `add`, `write-tree`, `cherry-pick`, `commit-tree`,
-    /// `update-ref`) and every read the manager makes through
+    /// holds for all of them: every funnel primitive (`worktree add`, `add`,
+    /// `write-tree`, `cherry-pick`, `commit-tree`, `update-ref`) and every
+    /// read the manager makes through
     /// [`Self::git`] and [`Self::git_with_identity`] (`rev-parse`, `worktree
     /// list`, `for-each-ref`, `show-ref`, `diff`) is about the objects the
     /// repository actually holds.
@@ -5045,36 +5702,116 @@ impl WorkspaceManager {
 
     /// Every registered worktree of the managed repository.
     ///
+    /// A tolerant registry access ([`tolerant_registry_access`], no hold): one
+    /// attempt is `git worktree list --porcelain -z` **and** the parse of its
+    /// output, so output the parser refuses — Git 2.43 exits 0 over a
+    /// registration half written, printing a record the parser rejects — is a
+    /// failed attempt like Git's own failure, and is attempted again. Output
+    /// the parser accepts is a success, even when an entry in it is still
+    /// being written: no consumer reads a foreign record's `HEAD`.
+    ///
     /// # Errors
     ///
-    /// A Git error.
+    /// [`UpstrokeError::RegistryRefused`] when no attempt succeeded by the
+    /// access's deadline.
     pub fn worktree_records(&self) -> Result<Vec<WorktreeRecord>, UpstrokeError> {
-        let registry = registry_lock_of(&self.common_git_dir);
-        let output = {
-            let _serialized = registry
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            self.git_ok(
-                &self.base,
-                &[
-                    OsString::from("worktree"),
-                    OsString::from("list"),
-                    OsString::from("--porcelain"),
-                    OsString::from("-z"),
-                ],
-            )?
-        };
+        self.worktree_records_with(&mut sleep_for)
+    }
+
+    fn worktree_records_with(
+        &self,
+        pause_for: &mut dyn FnMut(std::time::Duration) -> Result<(), UpstrokeError>,
+    ) -> Result<Vec<WorktreeRecord>, UpstrokeError> {
+        tolerant_registry_access(
+            &self.common_git_dir,
+            RegistryHold::Unheld,
+            pause_for,
+            &mut || Again::Attempt,
+            &mut || self.list_worktree_records(),
+        )
+    }
+
+    /// One reading of the registry: `git worktree list --porcelain -z` and the
+    /// parse of its output. The whole attempt of [`Self::worktree_records`]'s
+    /// access, and the first step of [`Self::visit_resolved_records`]'s.
+    fn list_worktree_records(&self) -> Result<Vec<WorktreeRecord>, UpstrokeError> {
+        let output = self.git_ok(
+            &self.base,
+            &[
+                OsString::from("worktree"),
+                OsString::from("list"),
+                OsString::from("--porcelain"),
+                OsString::from("-z"),
+            ],
+        )?;
         parse_worktree_records(&output)
     }
 
-    fn worktree_record(&self, path: &Path) -> Result<Option<WorktreeRecord>, UpstrokeError> {
+    /// Visit the registered worktrees in the list's order, each with its path
+    /// resolved ([`canonical_prefix`]), until `visit` answers; `None` when it
+    /// answers for none.
+    ///
+    /// One tolerant registry access ([`tolerant_registry_access`], no hold),
+    /// and its attempt is the list, its parse **and the resolution of each
+    /// path the visit reaches** (the record's §9.14, R7). A path that cannot
+    /// be read fails the attempt, as a list Git could not finish does, and the
+    /// access attempts again until its deadline: nothing in the error tells a
+    /// read that met another removal's deletion in progress from any other.
+    /// On Windows a directory whose deletion is pending — a sibling's checkout
+    /// that a removal of this process, or of another, has deleted while a
+    /// handle on it is still open — answers `ERROR_ACCESS_DENIED` to the open
+    /// that resolving it makes, as a directory its access list denies does.
+    /// When the last handle closes the name is gone, and the next attempt
+    /// reads it as absent, or lists no record for it once the removal has
+    /// taken its registration. A path still unreadable at the deadline refuses
+    /// as [`UpstrokeError::RegistryRefused`], which carries the read's own
+    /// error, and never as that I/O error.
+    ///
+    /// A path the resolution read and refused — a link on it whose target is
+    /// absent — is not a failure to read: that refusal is the access's answer
+    /// at once, as it was before the resolution joined the attempt. Each
+    /// attempt visits from the list's start again, so `visit` answers from its
+    /// arguments alone.
+    ///
+    /// # Errors
+    ///
+    /// The refusal a resolution made, or [`UpstrokeError::RegistryRefused`]
+    /// when no attempt completed by the access's deadline.
+    fn visit_resolved_records<T>(
+        &self,
+        pause_for: &mut dyn FnMut(std::time::Duration) -> Result<(), UpstrokeError>,
+        visit: &dyn Fn(WorktreeRecord, &Path) -> Option<T>,
+    ) -> Result<Option<T>, UpstrokeError> {
+        tolerant_registry_access(
+            &self.common_git_dir,
+            RegistryHold::Unheld,
+            pause_for,
+            &mut || Again::Attempt,
+            &mut || {
+                for record in self.list_worktree_records()? {
+                    let resolved = match canonical_prefix(record.path()) {
+                        Ok(resolved) => resolved,
+                        Err(unread @ UpstrokeError::Io { .. }) => return Err(unread),
+                        Err(refused) => return Ok(Err(refused)),
+                    };
+                    if let Some(answer) = visit(record, &resolved) {
+                        return Ok(Ok(Some(answer)));
+                    }
+                }
+                Ok(Ok(None))
+            },
+        )?
+    }
+
+    fn worktree_record(
+        &self,
+        path: &Path,
+        pause_for: &mut dyn FnMut(std::time::Duration) -> Result<(), UpstrokeError>,
+    ) -> Result<Option<WorktreeRecord>, UpstrokeError> {
         let wanted = canonical_prefix(path)?;
-        for record in self.worktree_records()? {
-            if canonical_prefix(record.path())? == wanted {
-                return Ok(Some(record));
-            }
-        }
-        Ok(None)
+        self.visit_resolved_records(pause_for, &|record, resolved| {
+            (resolved == wanted.as_path()).then_some(record)
+        })
     }
 
     /// The per-worktree administrative directory of a linked worktree.
@@ -5145,11 +5882,23 @@ impl WorkspaceManager {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 // No registrations at all. Nothing to remove only if the
-                // target is absent too; a target that is there with no
-                // registration directory is the I/O failure it looks like,
-                // and a target that cannot be read is its own.
+                // target is absent too, or is an empty directory — the
+                // destination an add makes before Git runs, left by a
+                // coordinator killed before Git's first write, which no
+                // registration can name and which holds nothing to lose. A
+                // target that is anything else there with no registration
+                // directory is the I/O failure it looks like, and a target
+                // that cannot be read is its own.
                 return match fs::symlink_metadata(&target) {
                     Err(absent) if absent.kind() == std::io::ErrorKind::NotFound => {
+                        Ok(RemovalBinding::unbound())
+                    }
+                    Ok(_)
+                        if matches!(
+                            AtDestination::read(&target),
+                            AtDestination::EmptyDirectory
+                        ) =>
+                    {
                         Ok(RemovalBinding::unbound())
                     }
                     Ok(_) => Err(UpstrokeError::Io {
@@ -5283,16 +6032,16 @@ impl WorkspaceManager {
     /// Each is [`Self::remove_worktree_proving`] itself, under the torn
     /// slot's own removal site: its gate binds the registration from the
     /// byte-safe `gitdir`, the checkout goes with its durability barrier, and
-    /// the empty-`commondir` branch removes the registration on the proof it
-    /// has always used and stops there, without the `git worktree prune` that
-    /// could take the store from a checkout the plan passed over. Only the
-    /// intent is left, for the step that owns the slot, whose own forced
-    /// removal then finds nothing to remove and converges. The checkout goes
-    /// with the registration because a checkout left behind without one
-    /// converges only while `<common git dir>/worktrees` survives: once
-    /// nothing else is registered, the next `git worktree prune` deletes the
-    /// empty directory, and the forced removal refuses a checkout that is
-    /// present with no registration directory at all, on every attempt.
+    /// the registration is removed directly on the proof it has always used,
+    /// with no `git worktree prune` (which could take the store from a checkout
+    /// the plan passed over). Only the intent is left, for the step that owns
+    /// the slot, whose own forced removal then finds nothing to remove and
+    /// converges. The checkout goes with the registration because a checkout
+    /// left behind without one converges only while `<common git
+    /// dir>/worktrees` survives: once nothing else is registered, the store is
+    /// removed with its last registration, and the forced removal refuses a
+    /// checkout that is present with no registration directory at all, on
+    /// every attempt.
     /// Traced on Git 2.43, `git worktree add` writes `commondir` before it
     /// populates the checkout, so a torn registration is an add that never
     /// populated its checkout, and no step has a checkout to keep.
@@ -5330,7 +6079,9 @@ impl WorkspaceManager {
         hooks: &mut dyn EffectHooks,
         excluding: Option<&Slot>,
     ) -> Result<bool, UpstrokeError> {
-        let Ok(torn) = self.slots_with_torn_registrations(excluding) else {
+        let Ok(torn) =
+            self.slots_with_torn_registrations(excluding, &mut |pause| hooks.registry_pause(pause))
+        else {
             return Ok(false);
         };
         for slot in &torn {
@@ -5342,14 +6093,29 @@ impl WorkspaceManager {
     /// The plan of [`Self::repair_torn_registrations`]: every slot an intent
     /// names, but `excluding`, whose registration the forced removal's gate
     /// binds and whose `commondir` holds no bytes. Reads only.
+    ///
+    /// A tolerant registry access holding R-X **alone** (`REGISTRY_LOCKS`):
+    /// the plan reads an empty `commondir` as a dead add's residue, and an add
+    /// of this process in flight passes through that state, so no add of this
+    /// process runs while it reads. A plan that cannot take R-X, or meets a
+    /// store it cannot read, by its deadline refuses, and
+    /// [`Self::repair_torn_registrations`] answers `false`.
     fn slots_with_torn_registrations(
         &self,
         excluding: Option<&Slot>,
+        pause_for: &mut dyn FnMut(std::time::Duration) -> Result<(), UpstrokeError>,
     ) -> Result<Vec<Slot>, UpstrokeError> {
-        let registry = registry_lock_of(&self.common_git_dir);
-        let _serialized = registry
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        tolerant_registry_access(
+            &self.common_git_dir,
+            RegistryHold::Exclusive,
+            pause_for,
+            &mut || Again::Attempt,
+            &mut || self.torn_plan(excluding),
+        )
+    }
+
+    /// One attempt of [`Self::slots_with_torn_registrations`].
+    fn torn_plan(&self, excluding: Option<&Slot>) -> Result<Vec<Slot>, UpstrokeError> {
         let mut torn = Vec::new();
         for slot in self.intents()? {
             if excluding == Some(&slot) {
@@ -6384,6 +7150,259 @@ fn note_removal_attempt(attempt: u32) {
 #[inline]
 fn note_marker_read_attempt(attempt: u32) {
     fixture::note_marker_read_attempt(attempt);
+}
+
+/// How many times a registry access has decided to attempt again, per common
+/// git dir exactly as the caller passed it: the test handshake of
+/// [`tolerant_registry_access`]'s contract (`CONTENDED_ATTEMPTS`, the record's
+/// §6.4). A test that must finish a tear only after an access has failed once
+/// on it waits, with a watchdog, for [`contended_attempts`] to exceed its value
+/// before the access began. Never reset or decremented, and keyed per
+/// repository, so two such tests in one suite do not overwrite each other.
+#[cfg(test)]
+pub(crate) static CONTENDED_ATTEMPTS: std::sync::Mutex<std::collections::BTreeMap<PathBuf, usize>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// The count of [`CONTENDED_ATTEMPTS`] for one common git dir; 0 before any.
+#[cfg(test)]
+pub(crate) fn contended_attempts(common_git_dir: &Path) -> usize {
+    CONTENDED_ATTEMPTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(common_git_dir)
+        .copied()
+        .unwrap_or(0)
+}
+
+/// The `#[cfg(test)]` half of the contended-attempt seam: one more `Attempt`
+/// answer for `common_git_dir`, counted before the deadline check and the
+/// sleep. See the `#[cfg(not(test))]` twin beside `REGISTRY_ACCESS_DEADLINE`.
+///
+/// When a test holds the next such answer for `common_git_dir`
+/// ([`hold_next_contended`]), the access waits here, after counting it and
+/// before its deadline check and its sleep, until the holder releases it: so a
+/// test that samples what the failed attempt and its veto left reads it
+/// before the next attempt and the next veto can change it. The hold is taken
+/// by the first answer and serves only it.
+#[cfg(test)]
+fn note_contended(common_git_dir: &Path) {
+    {
+        let mut table = CONTENDED_ATTEMPTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let count = table.entry(common_git_dir.to_path_buf()).or_default();
+        *count = count.saturating_add(1);
+    }
+    let held = CONTENDED_HOLDS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(common_git_dir);
+    if let Some(released) = held {
+        // Bounded: a holder that never releases is a wedged test, and the
+        // access then goes on to its deadline as if nothing held it. A sender
+        // dropped unsent releases the access at once, as a send does, so the
+        // code under test never waits on a holder that is gone. Whether the
+        // holder let go or failed is not this access's to judge: it may run on
+        // a pipeline, whose panic becomes a judgement, so the test that owns
+        // the holder joins it and fails on its failure (standards §10).
+        let _ = released.recv_timeout(std::time::Duration::from_secs(60));
+    }
+}
+
+/// The holds tests have placed on the next `Attempt` answer of an access, per
+/// common git dir exactly as the caller passed it ([`note_contended`]).
+#[cfg(test)]
+static CONTENDED_HOLDS: std::sync::Mutex<
+    std::collections::BTreeMap<PathBuf, std::sync::mpsc::Receiver<()>>,
+> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// Hold the next `Attempt` answer of an access over `common_git_dir` until the
+/// returned sender sends or is dropped ([`note_contended`]). A drop releases
+/// the access as a send does, so the release alone cannot tell a holder that
+/// let go from one that failed: a test that hands the sender to a thread joins
+/// that thread and fails on its failure (standards §10).
+#[cfg(test)]
+pub(crate) fn hold_next_contended(common_git_dir: &Path) -> std::sync::mpsc::Sender<()> {
+    let (release, released) = std::sync::mpsc::channel();
+    CONTENDED_HOLDS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(common_git_dir.to_path_buf(), released);
+    release
+}
+
+/// The `#[cfg(test)]` half of the access-start seam; see the
+/// `#[cfg(not(test))]` twin beside `REGISTRY_ACCESS_DEADLINE`.
+#[cfg(test)]
+#[inline]
+fn note_access_start(common_git_dir: &Path) {
+    fixture::note_access_start(common_git_dir);
+}
+
+/// The `#[cfg(test)]` half of the slept-pause seam; see the
+/// `#[cfg(not(test))]` twin beside [`sleep_for`].
+#[cfg(test)]
+#[inline]
+fn note_slept_pause() {
+    fixture::note_slept_pause();
+}
+
+/// The registry access deadline under test: short, so that a test meeting a
+/// tear it planted does not wait out the production one. See the
+/// `#[cfg(not(test))]` twin.
+#[cfg(test)]
+const REGISTRY_ACCESS_DEADLINE: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// The deadlines tests have given the registry accesses over one common git
+/// dir, exactly as the caller passes it, each with the number of live guards
+/// that hold it ([`RegistryDeadline`]). Keyed per repository, as
+/// [`CONTENDED_ATTEMPTS`] is, so a deadline one test sets reaches no other
+/// test's accesses, on whichever thread they run.
+#[cfg(test)]
+static REGISTRY_DEADLINES: std::sync::Mutex<
+    std::collections::BTreeMap<PathBuf, (std::time::Duration, usize)>,
+> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// The `#[cfg(test)]` half of the deadline seam: [`REGISTRY_ACCESS_DEADLINE`],
+/// unless a live [`RegistryDeadline`] gives `common_git_dir` another. See the
+/// `#[cfg(not(test))]` twin beside `REGISTRY_ACCESS_DEADLINE`.
+#[cfg(test)]
+fn registry_access_deadline(common_git_dir: &Path) -> std::time::Duration {
+    REGISTRY_DEADLINES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(common_git_dir)
+        .map_or(REGISTRY_ACCESS_DEADLINE, |(deadline, _)| *deadline)
+}
+
+/// While this guard lives, every registry access over its common git dir that
+/// begins waits to the guard's deadline rather than to
+/// [`REGISTRY_ACCESS_DEADLINE`]. For a test whose own act ends the access's
+/// wait once the code under test reaches the point the test is about -- a
+/// prober that finishes its tear, a scheduler that injects a shutdown -- so
+/// that how long the platform takes to get there does not make the access
+/// refuse first, as long as time remains when it reads its clock after a
+/// failed attempt's veto and count: with the guard's deadline passed by then,
+/// it asks for no wait (the record's §9.34). Guards over one directory nest;
+/// its entry goes when the last drops.
+#[cfg(test)]
+pub(crate) struct RegistryDeadline {
+    common_git_dir: PathBuf,
+}
+
+#[cfg(test)]
+impl RegistryDeadline {
+    pub(crate) fn hold(common_git_dir: &Path, deadline: std::time::Duration) -> Self {
+        let mut table = REGISTRY_DEADLINES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let held = table
+            .entry(common_git_dir.to_path_buf())
+            .or_insert((deadline, 0));
+        *held = (deadline, held.1.saturating_add(1));
+        Self {
+            common_git_dir: common_git_dir.to_path_buf(),
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for RegistryDeadline {
+    fn drop(&mut self) {
+        let mut table = REGISTRY_DEADLINES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(held) = table.get_mut(&self.common_git_dir) {
+            held.1 = held.1.saturating_sub(1);
+            if held.1 == 0 {
+                table.remove(&self.common_git_dir);
+            }
+        }
+    }
+}
+
+/// The clocks tests have given the registry accesses over one common git dir,
+/// exactly as the caller passes it, each with its reading and the number of
+/// live guards that hold it ([`RegistryClock`]). Keyed per repository, as
+/// [`REGISTRY_DEADLINES`] is, so a clock one test holds reaches no other
+/// test's accesses, on whichever thread they run.
+#[cfg(test)]
+static REGISTRY_CLOCKS: std::sync::Mutex<
+    std::collections::BTreeMap<PathBuf, (std::time::Instant, usize)>,
+> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// The `#[cfg(test)]` half of the clock seam: the monotonic clock, unless a
+/// live [`RegistryClock`] gives `common_git_dir` its own. See the
+/// `#[cfg(not(test))]` twin beside `REGISTRY_ACCESS_DEADLINE`.
+#[cfg(test)]
+fn registry_now(common_git_dir: &Path) -> std::time::Instant {
+    REGISTRY_CLOCKS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(common_git_dir)
+        .map_or_else(std::time::Instant::now, |(reading, _)| *reading)
+}
+
+/// While this guard lives, every registry access over its common git dir
+/// reads its time from a logical clock instead of the monotonic one. The clock
+/// reads the monotonic clock once, when the first guard is taken, and from
+/// then on moves only by [`RegistryClock::advance`]: by what the test moves it
+/// by, and by the waits the access asks its `pause_for` for, when the test's
+/// `pause_for` advances it by them. How the host schedules the test's threads
+/// therefore neither moves the clock nor reorders what the test did by it (the
+/// record's §9.33). Guards over one directory nest and share one clock; its
+/// entry goes when the last drops, on an unwinding as on a return. The clock
+/// takes only its table's lock, and waits for nothing else.
+#[cfg(test)]
+pub(crate) struct RegistryClock {
+    common_git_dir: PathBuf,
+}
+
+#[cfg(test)]
+impl RegistryClock {
+    pub(crate) fn hold(common_git_dir: &Path) -> Self {
+        let mut table = REGISTRY_CLOCKS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let held = table
+            .entry(common_git_dir.to_path_buf())
+            .or_insert((std::time::Instant::now(), 0));
+        held.1 = held.1.saturating_add(1);
+        Self {
+            common_git_dir: common_git_dir.to_path_buf(),
+        }
+    }
+
+    /// The clock's reading: what the accesses over its directory read.
+    pub(crate) fn now(&self) -> std::time::Instant {
+        registry_now(&self.common_git_dir)
+    }
+
+    /// Move the clock on by `by`.
+    pub(crate) fn advance(&self, by: std::time::Duration) {
+        if let Some(held) = REGISTRY_CLOCKS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_mut(&self.common_git_dir)
+        {
+            held.0 += by;
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for RegistryClock {
+    fn drop(&mut self) {
+        let mut table = REGISTRY_CLOCKS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(held) = table.get_mut(&self.common_git_dir) {
+            held.1 = held.1.saturating_sub(1);
+            if held.1 == 0 {
+                table.remove(&self.common_git_dir);
+            }
+        }
+    }
 }
 
 #[cfg(test)]

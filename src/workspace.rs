@@ -876,7 +876,8 @@ impl Workspace {
     ) -> Result<(), UpstrokeError> {
         let mut hooks_config = OsString::from("core.hooksPath=");
         hooks_config.push(hooks_path);
-        let output = git_command(&self.root)
+        let mut command = git_command(&self.root);
+        command
             .arg("-c")
             .arg(hooks_config)
             .args([
@@ -889,11 +890,15 @@ impl Workspace {
                 "--force",
             ])
             .arg(path)
-            .arg(commit)
-            .output()
-            .map_err(|e| UpstrokeError::Git {
-                message: format!("failed to run git worktree add: {e}"),
-            })?;
+            .arg(commit);
+        let output = output_past_anothers_empty_commondir(
+            path.file_name().unwrap_or_default(),
+            &mut || is_an_empty_directory(path),
+            &mut || command.output(),
+        )
+        .map_err(|e| UpstrokeError::Git {
+            message: format!("failed to run git worktree add: {e}"),
+        })?;
         if !output.status.success() {
             return Err(UpstrokeError::Git {
                 message: format!(
@@ -1554,7 +1559,8 @@ fn cleanup_gate_workspace(
 ) -> Result<(), UpstrokeError> {
     let mut hooks_config = OsString::from("core.hooksPath=");
     hooks_config.push(hooks_path);
-    let removal = git_command(source_root)
+    let mut command = git_command(source_root);
+    command
         .arg("-c")
         .arg(&hooks_config)
         .args([
@@ -1564,11 +1570,15 @@ fn cleanup_gate_workspace(
             "remove",
             "--force",
         ])
-        .arg(path)
-        .output()
-        .map_err(|error| UpstrokeError::Git {
-            message: format!("failed to remove gate worktree {}: {error}", path.display()),
-        })?;
+        .arg(path);
+    let removal = output_past_anothers_empty_commondir(
+        path.file_name().unwrap_or_default(),
+        &mut || true,
+        &mut || command.output(),
+    )
+    .map_err(|error| UpstrokeError::Git {
+        message: format!("failed to remove gate worktree {}: {error}", path.display()),
+    })?;
     if worktree_is_registered(source_root, path, &hooks_config)? {
         return Err(UpstrokeError::Git {
             message: format!(
@@ -1604,21 +1614,23 @@ fn worktree_is_registered(
     path: &Path,
     hooks_config: &std::ffi::OsStr,
 ) -> Result<bool, UpstrokeError> {
-    let output = git_command(source_root)
-        .arg("-c")
-        .arg(hooks_config)
-        .args([
-            "-c",
-            "core.fsmonitor=false",
-            "worktree",
-            "list",
-            "--porcelain",
-            "-z",
-        ])
-        .output()
-        .map_err(|error| UpstrokeError::Git {
-            message: format!("failed to verify gate-worktree reclamation: {error}"),
-        })?;
+    let mut command = git_command(source_root);
+    command.arg("-c").arg(hooks_config).args([
+        "-c",
+        "core.fsmonitor=false",
+        "worktree",
+        "list",
+        "--porcelain",
+        "-z",
+    ]);
+    let output = output_past_anothers_empty_commondir(
+        path.file_name().unwrap_or_default(),
+        &mut || true,
+        &mut || command.output(),
+    )
+    .map_err(|error| UpstrokeError::Git {
+        message: format!("failed to verify gate-worktree reclamation: {error}"),
+    })?;
     if !output.status.success() {
         return Err(UpstrokeError::Git {
             message: format!(
@@ -1632,6 +1644,70 @@ fn worktree_is_registered(
         .split(|byte| *byte == 0)
         .filter_map(|field| field.strip_prefix(b"worktree "))
         .any(|field| git_path_field_matches(field, path)))
+}
+
+const REGISTRY_TEAR_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+
+const REGISTRY_TEAR_BACKOFF_CEILING: std::time::Duration = std::time::Duration::from_millis(50);
+
+fn output_past_anothers_empty_commondir(
+    own: &std::ffi::OsStr,
+    may_repeat: &mut dyn FnMut() -> bool,
+    run: &mut dyn FnMut() -> std::io::Result<Output>,
+) -> std::io::Result<Output> {
+    output_past_anothers_empty_commondir_until(
+        std::time::Instant::now() + REGISTRY_TEAR_DEADLINE,
+        own,
+        may_repeat,
+        run,
+    )
+}
+
+fn output_past_anothers_empty_commondir_until(
+    deadline: std::time::Instant,
+    own: &std::ffi::OsStr,
+    may_repeat: &mut dyn FnMut() -> bool,
+    run: &mut dyn FnMut() -> std::io::Result<Output>,
+) -> std::io::Result<Output> {
+    let mut pause = std::time::Duration::from_millis(1);
+    loop {
+        let output = run()?;
+        if !read_anothers_empty_commondir(&output, own) || !may_repeat() {
+            return Ok(output);
+        }
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            return Ok(output);
+        }
+        std::thread::sleep(pause.min(deadline.saturating_duration_since(now)));
+        pause = pause.saturating_mul(2).min(REGISTRY_TEAR_BACKOFF_CEILING);
+    }
+}
+
+fn read_anothers_empty_commondir(output: &Output, own: &std::ffi::OsStr) -> bool {
+    if output.status.code() != Some(128) {
+        return false;
+    }
+    let Some(line) = output.stderr.strip_suffix(b"\n") else {
+        return false;
+    };
+    let Some(registration) = line
+        .strip_prefix(b"fatal: failed to read ")
+        .and_then(|rest| rest.strip_suffix(b"/commondir: Success"))
+    else {
+        return false;
+    };
+    let mut components = registration.rsplit(|byte| *byte == b'/');
+    let id = components.next().unwrap_or_default();
+    !line.contains(&b'\n')
+        && components.next() == Some(b"worktrees".as_slice())
+        && !id.is_empty()
+        && !id.starts_with(own.as_encoded_bytes())
+}
+
+fn is_an_empty_directory(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir())
+        && fs::read_dir(path).is_ok_and(|mut entries| entries.next().is_none())
 }
 
 #[cfg(unix)]
@@ -3877,5 +3953,750 @@ mod tests {
                 "`{undo}` can take the pair back off a child `git_command` built"
             );
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Served {
+        Torn,
+        Whole,
+    }
+
+    #[cfg(target_os = "linux")]
+    struct SnapshotRepo {
+        _tree: crate::rundir::scratch_tree::ScratchTree,
+        repo: PathBuf,
+        ws: Workspace,
+        parent: String,
+        tree_oid: String,
+        store: PathBuf,
+    }
+
+    #[cfg(target_os = "linux")]
+    impl SnapshotRepo {
+        fn new(tag: &str) -> Self {
+            let (tree, repo) = temp_repo(tag);
+            let ws = Workspace::open(&repo).expect("open");
+            let parent = ws.head_sha_full().expect("parent");
+            let tree_oid = ws.staged_tree_oid().expect("tree");
+            let store = tree.path().join("store");
+            Self {
+                _tree: tree,
+                repo,
+                ws,
+                parent,
+                tree_oid,
+                store,
+            }
+        }
+
+        fn snapshot(&self) -> Result<GateWorkspace, UpstrokeError> {
+            self.ws
+                .gate_snapshot_for_candidate_in_store(&self.parent, &self.tree_oid, &self.store)
+        }
+
+        fn registered(&self, path: &Path) -> bool {
+            run_git(&self.repo, &["worktree", "list", "--porcelain", "-z"])
+                .split(|byte| *byte == 0)
+                .filter_map(|field| field.strip_prefix(b"worktree "))
+                .any(|field| git_path_field_matches(field, path))
+        }
+
+        fn commondir_as_git_names_it(id: &std::ffi::OsStr) -> PathBuf {
+            Path::new(".git")
+                .join("worktrees")
+                .join(id)
+                .join("commondir")
+        }
+
+        fn plant_another_registration(&self, id: &str) -> PathBuf {
+            let entry = self.repo.join(".git").join("worktrees").join(id);
+            fs::create_dir_all(&entry).expect("another checkout's registration");
+            let checkout = self.repo.with_file_name(id).join(".git");
+            fs::write(
+                entry.join("gitdir"),
+                [checkout.as_os_str().as_encoded_bytes(), b"\n"].concat(),
+            )
+            .expect("its gitdir");
+            fs::write(
+                entry.join("HEAD"),
+                run_git(&self.repo, &["rev-parse", "HEAD"]),
+            )
+            .expect("its HEAD");
+            entry
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn make_fifo(path: &Path) -> std::io::Result<()> {
+        let made = Command::new("mkfifo").arg(path).status()?;
+        if made.success() {
+            Ok(())
+        } else {
+            Err(std::io::Error::other(format!(
+                "mkfifo {}: {made:?}",
+                path.display()
+            )))
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn serving_commondir<T>(
+        entry: &Path,
+        script: &[Served],
+        on_serve: &(dyn Fn(usize) + Sync),
+        act: impl FnOnce() -> T,
+    ) -> (T, Vec<Served>) {
+        use std::os::unix::fs::OpenOptionsExt;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let commondir = entry.join("commondir");
+        let whole = entry.join("commondir.whole");
+        let next = entry.join("commondir.next");
+        fs::write(&whole, "../..\n").expect("the whole commondir, made ready");
+        make_fifo(&commondir).expect("the first FIFO");
+        let stopped = AtomicBool::new(false);
+        let serve = || -> std::io::Result<Vec<Served>> {
+            let mut served = Vec::new();
+            for (at, reading) in script.iter().enumerate() {
+                let mut writer = OpenOptions::new().write(true).open(&commondir)?;
+                if stopped.load(Ordering::SeqCst) {
+                    fs::rename(&whole, &commondir)?;
+                    return Ok(served);
+                }
+                on_serve(at);
+                if at + 1 == script.len() {
+                    fs::rename(&whole, &commondir)?;
+                } else {
+                    make_fifo(&next)?;
+                    fs::rename(&next, &commondir)?;
+                }
+                if *reading == Served::Whole {
+                    writer.write_all(b"../..\n")?;
+                }
+                drop(writer);
+                served.push(*reading);
+            }
+            Ok(served)
+        };
+        let (acted, served) = std::thread::scope(|scope| {
+            let server = scope.spawn(|| {
+                let served = std::panic::catch_unwind(std::panic::AssertUnwindSafe(&serve));
+                if !matches!(served, Ok(Ok(_))) {
+                    release_commondir_readers(&commondir, &whole);
+                }
+                served.unwrap_or_else(|panicked| std::panic::resume_unwind(panicked))
+            });
+            let acted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(act));
+            stopped.store(true, Ordering::SeqCst);
+            let release = (!server.is_finished()).then(|| {
+                OpenOptions::new()
+                    .read(true)
+                    .custom_flags(libc::O_NONBLOCK)
+                    .open(&commondir)
+            });
+            let served = server.join();
+            drop(release);
+            (acted, served)
+        });
+        let acted = acted.unwrap_or_else(|panicked| std::panic::resume_unwind(panicked));
+        let served = served
+            .unwrap_or_else(|panicked| std::panic::resume_unwind(panicked))
+            .expect("the commondir's server");
+        (acted, served)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn release_commondir_readers(commondir: &Path, whole: &Path) {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let reader = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(commondir);
+        let writer = OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(commondir);
+        let _ = fs::rename(whole, commondir);
+        drop((writer, reader));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_snapshot_add_is_attempted_again_past_another_registrations_empty_commondir() {
+        let fixture = SnapshotRepo::new("w924-add-past-a-tear");
+        let entry = fixture.plant_another_registration("w924-other");
+        let (added, served) =
+            serving_commondir(&entry, &[Served::Torn], &|_| {}, || fixture.snapshot());
+        assert_eq!(
+            served,
+            [Served::Torn],
+            "the add's first attempt read the other registration's commondir empty"
+        );
+        let snapshot =
+            added.unwrap_or_else(|error| panic!("the add met the tear and stopped: {error}"));
+        let path = snapshot.path.clone();
+        assert!(fixture.registered(&path), "the snapshot is registered");
+        drop(snapshot);
+        assert!(!fixture.registered(&path), "and its cleanup removed it");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_snapshots_removal_and_its_list_are_attempted_again_past_another_registrations_empty_commondir()
+     {
+        let fixture = SnapshotRepo::new("w924-cleanup-past-a-tear");
+        let snapshot = fixture.snapshot().expect("a snapshot");
+        let (path, hooks, intent) = (
+            snapshot.path.clone(),
+            snapshot.hooks_path.clone(),
+            snapshot.intent_path.clone(),
+        );
+        let entry = fixture.plant_another_registration("w924-other");
+        let ((), served) = serving_commondir(
+            &entry,
+            &[Served::Torn, Served::Whole, Served::Torn],
+            &|_| {},
+            || drop(snapshot),
+        );
+        assert_eq!(
+            served,
+            [Served::Torn, Served::Whole, Served::Torn],
+            "the removal read the other registration's commondir empty, then whole, and the \
+             list after it empty"
+        );
+        assert!(
+            !fixture.registered(&path),
+            "the removal was attempted again past the tear"
+        );
+        assert!(
+            !path.exists() && !hooks.exists() && !intent.exists(),
+            "and so was the list, so the cleanup ran to its end"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_empty_commondir_of_the_snapshots_own_registration_is_returned_at_once() {
+        let fixture = SnapshotRepo::new("w924-own-tear");
+        let snapshot = fixture.snapshot().expect("a snapshot");
+        let own = fixture
+            .repo
+            .join(".git")
+            .join("worktrees")
+            .join(snapshot.path.file_name().expect("a snapshot's name"));
+        let commondir = own.join("commondir");
+        let whole = fs::read(&commondir).expect("its own commondir");
+        fs::write(&commondir, "").expect("its own commondir, emptied");
+        let started = std::time::Instant::now();
+        let cleaned = cleanup_gate_workspace(
+            &snapshot.source_root,
+            &snapshot.path,
+            &snapshot.hooks_path,
+            &snapshot.intent_path,
+        );
+        let elapsed = started.elapsed();
+        fs::write(&commondir, whole).expect("its own commondir, restored");
+        let error = match cleaned {
+            Ok(()) => panic!("a cleanup over its own empty commondir passed"),
+            Err(error) => error.to_string(),
+        };
+        let named = format!(
+            "fatal: failed to read {}: Success",
+            SnapshotRepo::commondir_as_git_names_it(
+                snapshot.path.file_name().expect("a snapshot's name")
+            )
+            .display()
+        );
+        assert!(
+            error.contains("verifying gate-worktree reclamation failed: ")
+                && error.ends_with(&named),
+            "{error}"
+        );
+        assert!(
+            elapsed < REGISTRY_TEAR_DEADLINE / 2,
+            "its own registration is never waited on: {elapsed:?}"
+        );
+        let path = snapshot.path.clone();
+        drop(snapshot);
+        assert!(!fixture.registered(&path), "restored, it is reclaimed");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn another_registrations_commondir_git_cannot_read_is_returned_at_once() {
+        let fixture = SnapshotRepo::new("w924-unreadable");
+        let entry = fixture.plant_another_registration("w924-other");
+        fs::create_dir(entry.join("commondir")).expect("a commondir Git cannot read");
+        let started = std::time::Instant::now();
+        let added = fixture.snapshot();
+        let elapsed = started.elapsed();
+        let error = match added {
+            Ok(_) => panic!("an add over an unreadable commondir passed"),
+            Err(error) => error.to_string(),
+        };
+        let named = format!(
+            "git worktree add failed: fatal: failed to read {}: Is a directory",
+            SnapshotRepo::commondir_as_git_names_it(std::ffi::OsStr::new("w924-other")).display()
+        );
+        assert!(error.ends_with(&named), "{error}");
+        assert!(
+            elapsed < REGISTRY_TEAR_DEADLINE / 2,
+            "a failure that is not an empty read is never waited on: {elapsed:?}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn another_registrations_empty_commondir_that_outlasts_the_deadline_returns_the_adds_error() {
+        let fixture = SnapshotRepo::new("w924-outlasting-tear");
+        let entry = fixture.plant_another_registration("w924-other");
+        let commondir = entry.join("commondir");
+        fs::write(&commondir, "").expect("an empty commondir nobody writes");
+        let commit = fixture
+            .ws
+            .git(&[
+                "commit-tree",
+                &fixture.tree_oid,
+                "-p",
+                &fixture.parent,
+                "-m",
+                "w924",
+            ])
+            .expect("a commit to add");
+        let destination = fixture.store.join("w924-destination");
+        let hooks = fixture.store.join("w924-hooks");
+        fs::create_dir_all(&destination).expect("an empty destination");
+        fs::create_dir_all(&hooks).expect("an empty hooks directory");
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let ended = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let started = std::time::Instant::now();
+                let added = fixture
+                    .ws
+                    .add_gate_worktree(&destination, &hooks, commit.trim());
+                let _ = sender.send((added, started.elapsed()));
+            });
+            let ended = receiver.recv_timeout(REGISTRY_TEAR_DEADLINE * 3);
+            if ended.is_err() {
+                fs::write(&commondir, "../..\n").expect("the tear ended, so the add can stop");
+            }
+            ended
+        });
+        let (added, elapsed) = ended.unwrap_or_else(|_| {
+            panic!(
+                "the add was still attempting {:?} after it began",
+                REGISTRY_TEAR_DEADLINE * 3
+            )
+        });
+        let error = match added {
+            Ok(()) => panic!("an add over a tear nobody ends passed"),
+            Err(error) => error.to_string(),
+        };
+        let named = format!(
+            "git worktree add failed: fatal: failed to read {}: Success",
+            SnapshotRepo::commondir_as_git_names_it(std::ffi::OsStr::new("w924-other")).display()
+        );
+        assert!(error.ends_with(&named), "the add's own error: {error}");
+        assert!(
+            elapsed >= REGISTRY_TEAR_DEADLINE,
+            "it was attempted again until its deadline: {elapsed:?}"
+        );
+        assert!(
+            elapsed < REGISTRY_TEAR_DEADLINE + Duration::from_secs(5),
+            "and no longer: {elapsed:?}"
+        );
+        assert!(
+            is_an_empty_directory(&destination),
+            "and the destination was never taken"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_destination_no_longer_empty_returns_the_adds_first_error() {
+        let fixture = SnapshotRepo::new("w924-touched-destination");
+        let entry = fixture.plant_another_registration("w924-other");
+        let worktrees = fixture.store.join("worktrees");
+        let touch = |_: usize| {
+            for destination in fs::read_dir(&worktrees).expect("the store's worktrees") {
+                let destination = destination.expect("a destination").path();
+                fs::write(destination.join("w924-planted"), "not the add's\n")
+                    .expect("a file in the add's destination");
+            }
+        };
+        let (added, served) = serving_commondir(&entry, &[Served::Torn], &touch, || {
+            fixture.snapshot().map(drop)
+        });
+        assert_eq!(served, [Served::Torn], "the add read the tear once");
+        let error = match added {
+            Ok(()) => panic!("an add whose destination was touched passed"),
+            Err(error) => error.to_string(),
+        };
+        let named = format!(
+            "git worktree add failed: fatal: failed to read {}: Success",
+            SnapshotRepo::commondir_as_git_names_it(std::ffi::OsStr::new("w924-other")).display()
+        );
+        assert!(
+            error.ends_with(&named),
+            "a destination Git may have taken returns the first error, unchanged: {error}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    fn serving_commondir_under_containment(
+        fixture: &SnapshotRepo,
+        entry: &Path,
+        script: &[Served],
+        on_serve: &(dyn Fn(usize) + Sync),
+    ) -> (
+        std::thread::Result<Vec<Served>>,
+        Option<Result<(), String>>,
+        bool,
+    ) {
+        let (ended, wait) = std::sync::mpsc::channel();
+        let mut added = None;
+        std::thread::scope(|scope| {
+            let containment = scope.spawn(move || {
+                let wedged = wait.recv_timeout(REGISTRY_TEAR_DEADLINE * 3)
+                    == Err(std::sync::mpsc::RecvTimeoutError::Timeout);
+                if wedged {
+                    use std::os::unix::fs::OpenOptionsExt;
+
+                    let commondir = entry.join("commondir");
+                    let reader = OpenOptions::new()
+                        .read(true)
+                        .custom_flags(libc::O_NONBLOCK)
+                        .open(&commondir);
+                    let writer = OpenOptions::new()
+                        .write(true)
+                        .custom_flags(libc::O_NONBLOCK)
+                        .open(&commondir);
+                    let _ = fs::rename(entry.join("commondir.whole"), &commondir);
+                    drop((writer, reader));
+                }
+                wedged
+            });
+            let served = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                serving_commondir(entry, script, on_serve, || {
+                    added = Some(
+                        fixture
+                            .snapshot()
+                            .map(drop)
+                            .map_err(|error| error.to_string()),
+                    );
+                })
+                .1
+            }));
+            let _ = ended.send(());
+            let contained = containment
+                .join()
+                .unwrap_or_else(|panicked| std::panic::resume_unwind(panicked));
+            (served, added, contained)
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_commondir_server_that_panics_releases_its_reader_and_its_panic_reaches_the_caller() {
+        let fixture = SnapshotRepo::new("w924-server-panics");
+        let entry = fixture.plant_another_registration("w924-other");
+        let (served, added, contained) =
+            serving_commondir_under_containment(&fixture, &entry, &[Served::Torn], &|_| {
+                panic!("w924: the commondir's server failed")
+            });
+        assert!(
+            !contained,
+            "the server's unwinding left the add's next Git waiting on its FIFO, until the \
+             witness's containment released it"
+        );
+        let panicked = match served {
+            Ok(served) => panic!("a server that panicked returned {served:?}"),
+            Err(panicked) => panicked,
+        };
+        assert_eq!(
+            panicked.downcast_ref::<&str>(),
+            Some(&"w924: the commondir's server failed"),
+            "the server's own panic reached the caller"
+        );
+        assert_eq!(
+            added,
+            Some(Ok(())),
+            "the add read the tear, and then the whole commondir the release put in place"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_commondir_server_that_fails_releases_its_reader_and_its_error_reaches_the_caller() {
+        let fixture = SnapshotRepo::new("w924-server-fails");
+        let entry = fixture.plant_another_registration("w924-other");
+        let (served, added, contained) = serving_commondir_under_containment(
+            &fixture,
+            &entry,
+            &[Served::Torn, Served::Whole],
+            &|_| {
+                fs::write(entry.join("commondir.next"), "")
+                    .expect("a file where the next FIFO would go");
+            },
+        );
+        assert!(
+            !contained,
+            "the server's failure left the add's next Git waiting on its FIFO, until the \
+             witness's containment released it"
+        );
+        let panicked = match served {
+            Ok(served) => panic!("a server that failed returned {served:?}"),
+            Err(panicked) => panicked,
+        };
+        let message = panicked
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .unwrap_or_default();
+        assert!(
+            message.starts_with("the commondir's server: ") && message.contains("mkfifo"),
+            "the server's own error reached the caller: {message:?}"
+        );
+        assert_eq!(
+            added,
+            Some(Ok(())),
+            "the add read the tear, and then the whole commondir the release put in place"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_commondir_server_that_serves_its_script_ends_without_the_containment() {
+        let fixture = SnapshotRepo::new("w924-server-serves");
+        let entry = fixture.plant_another_registration("w924-other");
+        let (served, added, contained) =
+            serving_commondir_under_containment(&fixture, &entry, &[Served::Torn], &|_| {});
+        assert!(
+            !contained,
+            "a server that serves its script needs no release"
+        );
+        assert_eq!(served.ok(), Some(vec![Served::Torn]), "it served the tear");
+        assert_eq!(added, Some(Ok(())), "and the add went on past it");
+    }
+
+    #[test]
+    fn only_another_registrations_empty_commondir_reads_as_attempted_again() {
+        let status = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .output()
+                .expect("run git")
+                .status
+        };
+        let died = status(&["-C", "w924-no-such-directory", "status"]);
+        assert_eq!(died.code(), Some(128), "Git's death");
+        let refused = status(&["--w924-no-such-option"]);
+        assert_eq!(refused.code(), Some(129), "Git's usage refusal");
+        let succeeded = status(&["--version"]);
+        let output = |status, stderr: &str| Output {
+            status,
+            stdout: Vec::new(),
+            stderr: stderr.as_bytes().to_vec(),
+        };
+        let own = std::ffi::OsStr::new("upstroke-gates-1-01AAAAAAAAAAAAAAAAAAAAAAAA");
+        let other = "fatal: failed to read /r/.git/worktrees/upstroke-gates-2-01BBBBBBBBBBBBBBBBBBBBBBBB\
+                     /commondir: Success\n";
+        assert!(read_anothers_empty_commondir(&output(died, other), own));
+        assert!(read_anothers_empty_commondir(
+            &output(
+                died,
+                "fatal: failed to read .git/worktrees/w/commondir: Success\n"
+            ),
+            own
+        ));
+        for (stderr, why) in [
+            (
+                "fatal: failed to read /r/.git/worktrees/upstroke-gates-1-01AAAAAAAAAAAAAAAAAAAAAAAA\
+                 /commondir: Success\n",
+                "its own registration",
+            ),
+            (
+                "fatal: failed to read /r/.git/worktrees/upstroke-gates-1-01AAAAAAAAAAAAAAAAAAAAAAAA1\
+                 /commondir: Success\n",
+                "its own, under the suffix Git gives a taken name",
+            ),
+            (
+                "fatal: failed to read /r/.git/worktrees/w/commondir: No such file or directory\n",
+                "a removal's",
+            ),
+            (
+                "fatal: failed to read /r/.git/worktrees/w/commondir: Is a directory\n",
+                "a file Git cannot read",
+            ),
+            (
+                "fatal: failed to read '/r/.git/worktrees/w/locked'\n",
+                "a lock's",
+            ),
+            (
+                "fatal: failed to read /r/.git/worktrees/w/gitdir: Success\n",
+                "a gitdir's",
+            ),
+            (
+                "fatal: failed to read /r/.git/w/commondir: Success\n",
+                "a path outside the registry",
+            ),
+            (
+                "fatal: failed to read /r/.git/worktrees//commondir: Success\n",
+                "no registration's name",
+            ),
+            (
+                "warning: w924\nfatal: failed to read /r/.git/worktrees/w/commondir: Success\n",
+                "a second line",
+            ),
+            (
+                "fatal: failed to read /r/one\nfatal: failed to read /r/.git/worktrees/w/commondir: Success\n",
+                "two lines, each Git's death",
+            ),
+            (
+                "fatal: failed to read /r/.git/worktrees/w/commondir: Success",
+                "an unfinished line",
+            ),
+            (
+                "error: failed to read /r/.git/worktrees/w/commondir: Success\n",
+                "not Git's death",
+            ),
+        ] {
+            assert!(
+                !read_anothers_empty_commondir(&output(died, stderr), own),
+                "{why}: {stderr:?}"
+            );
+        }
+        assert!(
+            !read_anothers_empty_commondir(&output(refused, other), own),
+            "an exit that is not Git's death"
+        );
+        assert!(
+            !read_anothers_empty_commondir(&output(succeeded, other), own),
+            "a success"
+        );
+        assert!(
+            !read_anothers_empty_commondir(&output(died, other), std::ffi::OsStr::new("")),
+            "a command whose own registration is unknown"
+        );
+    }
+
+    #[test]
+    fn a_registry_command_is_attempted_again_only_while_its_answer_allows() {
+        let status = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .output()
+                .expect("run git")
+                .status
+        };
+        let output = |status, stderr: &str| Output {
+            status,
+            stdout: Vec::new(),
+            stderr: stderr.as_bytes().to_vec(),
+        };
+        let torn = output(
+            status(&["-C", "w924-no-such-directory", "status"]),
+            "fatal: failed to read /r/.git/worktrees/other/commondir: Success\n",
+        );
+        let unrelated = output(torn.status, "fatal: w924 something else\n");
+        let passed = output(status(&["--version"]), "");
+        let own = std::ffi::OsStr::new("mine");
+        let far = || std::time::Instant::now() + Duration::from_secs(60);
+        let attempt = |deadline: std::time::Instant,
+                       repeat: bool,
+                       script: Vec<Output>|
+         -> (std::io::Result<Output>, usize, usize) {
+            let mut script = script.into_iter();
+            let (mut runs, mut asked) = (0, 0);
+            let got = output_past_anothers_empty_commondir_until(
+                deadline,
+                own,
+                &mut || {
+                    asked += 1;
+                    repeat
+                },
+                &mut || {
+                    runs += 1;
+                    script
+                        .next()
+                        .ok_or_else(|| std::io::Error::other("ran past the script"))
+                },
+            );
+            (got, runs, asked)
+        };
+
+        let (got, runs, asked) = attempt(
+            far(),
+            true,
+            vec![torn.clone(), torn.clone(), passed.clone()],
+        );
+        assert_eq!(got.expect("the third attempt"), passed, "past two tears");
+        assert_eq!(
+            (runs, asked),
+            (3, 2),
+            "each tear asked once, the success not at all"
+        );
+
+        let (got, runs, asked) = attempt(far(), true, vec![unrelated.clone(), passed.clone()]);
+        assert_eq!(
+            got.expect("the first attempt"),
+            unrelated,
+            "any other failure, at once"
+        );
+        assert_eq!((runs, asked), (1, 0));
+
+        let (got, runs, asked) = attempt(far(), false, vec![torn.clone(), passed.clone()]);
+        assert_eq!(
+            got.expect("the first attempt"),
+            torn,
+            "a caller that answers no"
+        );
+        assert_eq!((runs, asked), (1, 1));
+
+        let (got, runs, asked) = attempt(
+            std::time::Instant::now(),
+            true,
+            vec![torn.clone(), passed.clone()],
+        );
+        assert_eq!(
+            got.expect("the first attempt"),
+            torn,
+            "a deadline already past"
+        );
+        assert_eq!((runs, asked), (1, 1));
+
+        let deadline = std::time::Instant::now() + Duration::from_millis(30);
+        let mut ended: Vec<std::time::Instant> = Vec::new();
+        let got =
+            output_past_anothers_empty_commondir_until(deadline, own, &mut || true, &mut || {
+                if ended.last().is_some_and(|end| *end >= deadline) {
+                    return Err(std::io::Error::other(
+                        "attempted after an attempt that ended at or past the deadline",
+                    ));
+                }
+                ended.push(std::time::Instant::now());
+                Ok(torn.clone())
+            });
+        let returned = std::time::Instant::now();
+        assert_eq!(
+            got.expect("the last attempt"),
+            torn,
+            "the tear at the deadline, as it read"
+        );
+        assert!(
+            returned >= deadline,
+            "the last attempt is the one at the deadline"
+        );
+        let (_, before_the_last) = ended.split_last().expect("one attempt at least");
+        assert!(
+            before_the_last.iter().all(|end| *end < deadline),
+            "attempted again only after an attempt that ended before the deadline: {ended:?}, \
+             the deadline {deadline:?}"
+        );
+
+        let (got, runs, asked) = attempt(far(), true, Vec::new());
+        assert!(got.is_err(), "a command that cannot start, at once");
+        assert_eq!((runs, asked), (1, 0));
     }
 }

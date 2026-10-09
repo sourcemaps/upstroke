@@ -3,9 +3,11 @@
 Extended notes for [`src/engine/topology/coordinator.rs`](../../../../src/engine/topology/coordinator.rs).
 
 The code is the authority for what it does; this file is the whole of its prose but for the
-concurrency protocol standards §10 places at its site, which the source keeps in four comments:
+concurrency protocol standards §10 places at its site, which the source keeps in seven comments:
 above `PipelineSeams` (what the shared handles are shared for), `SnapshotGate` (the snapshot gate),
-`Coordinator` (the coordinator's protocol) and `Client` (a pipeline's side of it). Each section
+`Coordinator` (the coordinator's protocol), `Client` (a pipeline's side of it) and `Timer` (the
+wait timer), and in `mod tests` above `TearsAForeignRegistration` and `DelayedRelease` (the two
+test workers an owner joins). Each section
 here is headed by the line of code it describes, spelled as it is in the source, so the heading is
 the grep string that finds the code.
 
@@ -212,6 +214,16 @@ carries how the invocation's Runner call ended (`InvocationEnd`): completed, or 
 process fate the Runner established and its account of why — which is what tells a process that is
 gone from one that may still run (round R1, `R1-CONC-1`).
 
+`Wake` is the coordinator's own: its [`Timer`] sends it, at the end of one wait of a registry access
+the coordinator makes and with that wait's token, into the coordinator's inbox (`registry_pause`;
+the follow-up B record's §9.13, R1, and §9.16 for the one timer). It names no pipeline. A wake that
+arrives outside its wait is stale and is dropped.
+
+## `impl ToCoordinator` › `const fn completes(&self) -> bool {`
+
+A completion — `Judged` or `Verified` — which a registry access's wait defers until the transition
+it waits in returns, because applying one appends.
+
 ## `pub trait Quiescence {`
 
 A test's hook into the deterministic intake (R-AD), called at two points. `granted` is handed every
@@ -256,13 +268,17 @@ anything it would settle or release is refused.
 Run the schema-4 loop at the run's width until it finishes, or until the command ends.
 
 It enters the run's cleanup scope on the caller's thread, reads the scope's lease paths once (Unix;
-elsewhere there are none) for every pipeline to carry, installs the command's slot limits, builds
-the runtime and drives. It joins every pipeline's handle before it returns, whatever the outcome.
+elsewhere there are none) for every pipeline to carry, installs the command's slot limits, starts
+the wait timer ([`Timer`]) and then builds the runtime, and drives. It joins every pipeline's handle
+and the timer before it returns, whatever the outcome, and then reopens the run if a wait stopped it
+(`TopologyRun::stop`; the follow-up B record's §9.16).
 
 ### Errors
 
 A refusal before anything is spawned: slot limits that cannot replace the broker's (something is
-outstanding in it), or a runtime that could not be built. After that, whatever ends the command: a
+outstanding in it), a wait timer that could not be started (its thread refused — new at follow-up
+B's repair round 6, I2-3: no wait would then be answerable without sleeping on the coordinator), or
+a runtime that could not be built. After that, whatever ends the command: a
 pipeline's error or panic, a coordinator-side error (a settlement's Git failure, a refused
 dispatch, a poisoned fold), an append error (its protocol's report), a shutdown, a halt whose
 cancelled process the Runner could not establish as ended, or a closure step's own error. Every one
@@ -318,7 +334,32 @@ Grant every waiting pipeline when the gate grants, in the order they asked.
 
 The source keeps the coordinator's protocol beside the struct (§10): the owner of every shared
 state, the linearization point, a pipeline's transitions, which completion wins, the cleanup after
-an interrupt, and why the unbounded channels are bounded.
+an interrupt, why the unbounded channels are bounded, and how a registry access the coordinator
+makes waits only for messages.
+
+## `struct Coordinator<'s>` › `deferred: VecDeque<(Origin, ToCoordinator)>,`
+
+Completions a registry access's wait received and deferred, applied first by [`Self::next_message`]
+once the transition returns.
+
+## `struct Coordinator<'s>` › `wakes: u64,`
+
+The last wait's token; each wait takes the next, so a stale wake never ends a later wait.
+
+## `struct Coordinator<'s>` › `timer: Timer,`
+
+The one thread every wait is timed by, started before the coordinator acts ([`Timer`]).
+
+## `struct Coordinator<'s>` › `ledger: crate::util::DurabilityLedger,`
+
+The run's hooks' durability ledger, taken once when the coordinator is built, for the manager's
+funnels that take the coordinator as their hooks: `durability_ledger` reads through `&self`, and the
+run's hooks are reachable only mutably.
+
+## `struct Coordinator<'s>` › `refusal: Option<String>,`
+
+Why the run's hooks answered the last phase they refused, read right after the answer, for the same
+reason.
 
 ## `impl Coordinator<'_>` › `fn drive(&mut self) -> Result<Progress, UpstrokeError> {`
 
@@ -379,7 +420,9 @@ stale integration's reclaim takes them too.
 ## `impl Coordinator<'_>` › `fn idle(&mut self) -> Result<Progress, UpstrokeError> {`
 
 The idle-only arms, by the functions `step` runs: the backoff, the hard block, the closure. Any
-other arm here is a refusal, because the admission pass takes it first.
+other arm here is a refusal, because the admission pass takes it first. The hard block and the
+closure run with the coordinator as their operator (`run::hard_block`, `run::close_run`), so their
+registry waits, finalization's included, answer its messages (the follow-up B record's §9.16, I2-2).
 
 ## `impl Coordinator<'_>` › `fn spawn_attempt(&mut self, job: AttemptJob) {`
 
@@ -434,6 +477,35 @@ chooses what happens next.
 
 Ask the observer. A released invocation's pipeline is `Running` again; an injection must have put
 something in the injector; nothing released is `stuck`, which ends the command resumably.
+
+## `impl Coordinator<'_>` › `fn answer_until_woken(&mut self, token: u64) -> Result<(), UpstrokeError> {`
+
+One wait of a registry access the coordinator makes (R1): answer messages until the wake with
+`token` arrives. Without an observer, each message in arrival order. With one, the deterministic
+intake's own steps — an injected message, everything arrived buffered, a wait while a pipeline is
+`Running`, the buffered message that sorts first — over the messages the wait may apply, and the
+observer at quiescence; when the observer releases nothing, the wait waits for its next message,
+since the wake is on its way. It returns at the wake, leaving later messages where they are.
+
+## `impl Coordinator<'_>` › `fn answer_paused(&mut self, origin: Origin, message: ToCoordinator) -> Result<(), UpstrokeError> {`
+
+What a wait does with a message: a grant request, an end, a snapshot request or end, and a shutdown
+are applied as [`Self::handle`] applies them — none appends — and a completion is deferred; a stale
+wake is dropped.
+
+## `impl Coordinator<'_>` › `fn buffer_paused(&mut self, message: ToCoordinator) {`
+
+Buffer a message for the observer's intake, dropping a stale wake.
+
+## `impl Coordinator<'_>` › `fn take_canonical_answerable(&mut self) -> Option<ToCoordinator> {`
+
+The buffered message that sorts first by pipeline and arrival among those a wait may apply.
+
+## `impl Coordinator<'_>` › `fn observe_paused(&mut self) -> Result<bool, UpstrokeError> {`
+
+The observer at a wait's quiescence: a released invocation's pipeline is `Running` again, and
+nothing released only means the wait goes on. An append asked for inside a wait is refused: nothing
+is appended inside another transition.
 
 ## `impl Coordinator<'_>` › `fn admit_invocation(`
 
@@ -595,7 +667,8 @@ itself waiting on the intake (round R1's class search found the phase-3 shape do
 ## `impl Coordinator<'_>` › `fn finish(&mut self) -> Result<Progress, UpstrokeError> {`
 
 End the command: cancel, apply messages until no pipeline is live, then act on the interrupt.
-After a halt the closure runs with the identities this coordinator cancelled — unless a cancelled
+After a halt the closure runs, with the coordinator as its operator (`run::close_run`; I2-2), with
+the identities this coordinator cancelled — unless a cancelled
 pipeline ended with its process unresolved, in which case nothing is appended and the command ends
 resumably naming it. A shutdown cancels any provisional reservation still held (none is expected)
 and ends resumably, appending nothing. An error is returned as it is: after an append error it is
@@ -628,6 +701,75 @@ leaves no pipeline waiting on it.
 ## `impl Driver for Coordinator<'_>` › `fn verify(&mut self, request: &VerifyRequest<'_>) -> Result<Verified, UpstrokeError> {`
 
 The frozen `integrate()`'s verification, run concurrently.
+
+## `impl Operator for Coordinator<'_> {`
+
+The coordinator runs its transitions with itself as the operator: the run, its seams and its own
+hooks for the transition's steps, and itself as the registry hooks
+(`run::begin_dispatch`, `run::begin_retry`, `run::settle_judged`, `run::hard_block`,
+`run::close_run`, and through `DrivenJournal` the frozen `integrate()`).
+
+## `impl TopologyHooks for Coordinator<'_> {`
+
+The hooks the coordinator lends a registry access: its own effect hooks (`effects` is the
+coordinator, below), and the run's for the rest. `spawn` is called by path because the process-start
+census (`runner::contract`) counts the text `.spawn()`, and this accessor starts nothing. No
+`folded`: no append runs through these hooks — every append goes through the run with the run's own
+hooks — and a frozen census (`events::log::tests`) lists the production modules that name the
+fold's type, which this one does not.
+
+## `impl crate::workspace_manager::EffectHooks for Coordinator<'_> {`
+
+The run's effect hooks, with the wait of a registry access answered here. `phase` forwards and keeps
+the refusal's cause for `refusal_cause`; `durability_ledger` is the run's, taken at construction.
+
+**A stopped run's effects are refused** (the follow-up B record's §9.16, I2-1). Once the run is
+stopped (`TopologyRun::stop`, below), `phase` answers `Error` at `Before`, at `After` and at an
+error-return point, with the cause "nothing further is done in this process: <why>", so every
+effect a transition makes through these hooks — a worktree, an intent, a ref, the integration ref's
+compare-and-swap — is refused before its primitive runs; at a point whose only other answer is
+`Kill` it proceeds, since an `Error` there would invent an error-return contract the point does not
+declare. With the run's emitter refusing every append, a transition that carried on past a stopped
+wait publishes and appends nothing.
+
+**`registry_pause`** is one wait of an access a transition makes. It asks the [`Timer`] for a wake
+after the wait's length — no thread per wait, so a wait needs no thread it might not get (I2-3) —
+and answers messages until that wake ([`Self::answer_until_woken`]); a timer that cannot be asked
+is a typed refusal recorded as the command's error, never a sleep. A wait that ends with an
+interrupt recorded — a shutdown it answered, an error a message it answered raised, or that refusal
+— stops the run and returns an error ("a registry access's wait inside a transition met <the
+interrupt>…"), so the access stops before another attempt (`tolerant_registry_access`) and the
+transition propagates it (I2-1). A wait that begins with an interrupt already recorded does not
+wait. Halt and budget judgements stay deferred until the transition returns, as completions are.
+
+## `struct Timer {`
+
+The coordinator's wait timer: one thread for the coordinator's life, which the source's comment
+beside the struct gives the protocol of (§10). The coordinator starts it before it builds its
+runtime, so a thread it cannot have refuses the command before anything is spawned or appended, and
+stops and joins it when it ends.
+
+## `impl Timer` › `fn start(outbox: mpsc::UnboundedSender<ToCoordinator>) -> Result<Self, UpstrokeError> {`
+
+The timer, sleeping with `std::thread::sleep`.
+
+## `impl Timer` › `fn starting(`
+
+The timer with the sleep given: production's is `std::thread::sleep`, and a test's can unwind, to
+show that a sleep that unwinds is still answered and that the thread goes on serving. Each request's
+sleep runs under `catch_unwind`, and the wake is sent after it either way, so a wake the coordinator
+waits for cannot be lost while the thread lives; the thread ends only when the coordinator drops its
+sender (the follow-up B record's §9.16, I2-5).
+
+## `impl Timer` › `fn wake(&self, token: u64, pause: std::time::Duration) -> Result<(), UpstrokeError> {`
+
+Ask for `Wake { token }` after `pause`. A timer that has stopped cannot be asked: that is a typed
+refusal, and the wait it would have timed is not slept.
+
+## `impl Timer` › `fn stop(&mut self) -> Option<String> {`
+
+Drop the sender, join the thread, and say what to warn of: sleeps that unwound, or a thread that
+did. Idempotent; the drop calls it.
 
 ## `struct Client {`
 
@@ -958,11 +1100,14 @@ worker is held when the decline closes beta's in-flight generation. The phase-3 
 beta's pipeline run on — its gate was registered and run for a generation the fold had closed — and
 only discarded its completion. Now beta's worker is cancelled and nothing more of beta starts.
 
-## `mod tests` › `fn bounded(what: &'static str, body: impl FnOnce() + Send + 'static) {`
+## `mod tests` › `fn bounded(what: &str, body: impl FnOnce() + Send + 'static) {`
 
 Run a scenario on a thread named after the test's, and wait for it a bounded time: the regression the
 two tests below guard against is a coordinator that waits for ever, and it must fail the test, not
-hang the suite. A scenario that never ends leaves only its own fixture's thread blocked.
+hang the suite. A scenario that never ends leaves only its own fixture's thread blocked. Since
+follow-up B's repair round 6 (I2-5) every R1 witness and each witness of that round runs its
+coordinator call through it, so a mutation that loses a wake fails its witness within `BOUND`
+rather than wait for an external timeout.
 
 ## `mod tests` › `fn a_halt_answers_a_request_its_intake_still_buffers() {`
 
@@ -1505,3 +1650,828 @@ The design property, in-process, through a resume's pre-flight (`resume_over` wi
 `step`: every container start was covered by an armed reaper whose scope selects its labels, and
 every container created was observed starting.
 
+
+## `mod tests` › `struct TearsAForeignRegistration {`
+
+PR11 review round 8's witness (`R8-CONC-1`), the verification face of
+`PR11-LINKED-CHECKOUTS-RACE-THE-SHARED-WORKTREE-REGISTRY`: a review-input policy that, at the
+verification of a candidate (the staging worktree under `merge/`), plants another process's
+registration half written in the shared store — `HEAD` and `gitdir` written, `commondir` opened
+and empty, the state `git worktree add` passes through and leaves when it is killed there. Once:
+the first verification only. With `finishes`, a thread plays the other process finishing its
+write, but only after a registry access of this run has failed on it at least once — the
+`CONTENDED_ATTEMPTS` handshake of `workspace_manager::tolerant_registry_access`'s contract
+(`reviews/2026-10-01-pr11-follow-up-b-record.md` §6.4) — so the witness measures a retry and
+never a store that happened to be whole. Through the fixture's primitives: a topology module
+may name no `std::fs` write.
+
+The planted `gitdir` spells its path as Git writes it (`workspace_manager::fixture::as_git_writes_it`,
+the host runner's Git-for-Windows form with `/` separators, and the path's own bytes elsewhere), as
+every registration #329's tests plant does (repair round 3, the record's §9.13, R6).
+
+The policy owns its writer (repair round 3, R3). The verification that plants the tear stores a
+`ForeignWriter` once. `finish` cancels it and joins it, and
+hands back what it returned: `Ok` only when it finished the registration after an access failed on
+it. `settle(false)` joins it without a cancel, so the join waits for the handshake or the writer's
+watchdog. The writer looks for the handshake every millisecond until its `watchdog` (`BOUND`, as
+`tearing` makes the policy); when the handshake never arrives it writes nothing and returns why.
+The drop cancels and joins a writer no test finished, and fails with what that writer returned,
+saying it on stderr instead when the thread already unwinds, so nothing the writer does lands
+after the fixture is reclaimed. Before, the writer's handle was discarded: it wrote `commondir`
+when its watchdog expired whatever had happened, and a writer that outlived its test recreated a
+directory its fixture had already reclaimed.
+
+## `mod tests` › `struct ForeignWriter {`
+
+`TearsAForeignRegistration`'s writer: the sender that cancels it, and the handle `finish`, or the
+policy's drop, joins.
+
+## `mod tests` › `fn registry_drive(`
+
+`run_concurrently` with the review-input policy replaced, and the first-released scheduler.
+
+## `mod tests` › `fn tearing(`
+
+The policy and the administrative directory it plants, named `name` in the run's own store.
+
+## `mod tests` › `fn a_verification_beside_another_processs_registration_write_in_flight_spends_no_deferral() {`
+
+The record's T2: a registration another process finishes writing never reaches the verification
+as Git state. The verification's registry access fails on the write in flight, is attempted
+again, and passes once the writer finishes; nothing is deferred and both candidates merge. The
+policy's `finish` returns `Ok`: an access failed on the tear, and only then did the writer finish
+it.
+Before #329 the same interleaving was durable: one `merge_verification_unavailable` (Deferred),
+or a park at `max_defers` (round 3's measurement of the round 8 witness). Its repository's accesses
+wait to `WITNESS_REGISTRY_DEADLINE` (§9.31).
+
+## `mod tests` › `fn a_verification_beside_a_registration_that_stays_torn_ends_resumably_and_its_resume_reverifies()`
+
+The record's T2′: a registration that stays torn — nobody finishes it — ends the command at the
+access's deadline as `UpstrokeError::RegistryRefused`, naming the entry's `commondir`, with
+nothing durable after `merge_verification_started`: no `merge_verification_unavailable`, no
+question, no `run_finished`. The operator's remedy (remove the registration) and a resume settle
+the open verification interrupted and verify the candidate again under a new sequence, and the
+run completes with nothing deferred. Mutation m2 (the deadline's refusal typed `Git`) makes the
+verification defer here.
+
+## `mod tests` › `fn planted_alone(`
+
+The tear as `TearsAForeignRegistration` plants it, with no run: a scratch tree of its own, the
+registration's directory at `<root>/common/worktrees/foreign`, planted through `problem` at a
+worktree path whose parent is `merge`, as a verification's snapshot is.
+
+## `mod tests` › `fn a_foreign_writer_whose_handshake_never_arrives_writes_nothing_and_says_so() {`
+
+Repair round 3's R3, the shape of the regular lens's watchdog witness: no access meets the tear,
+so the writer's 20 ms watchdog expires. Joined without a cancel, it reports the watchdog, and
+`commondir` is still the empty file planted. Before the repair the writer wrote `commondir` at
+its watchdog anyway.
+
+## `mod tests` › `fn a_foreign_writer_is_cancelled_and_joined_before_its_fixture_is_reclaimed() {`
+
+R3, the shape of the regression lens's witness: `finish` cancels and joins the writer before the
+fixture goes, and says it was cancelled, and the cancelled writer wrote nothing. The fixture is
+then reclaimed, and the wake the writer waited for arrives late (`CONTENDED_ATTEMPTS` moved by
+hand, as a late access would move it): nothing recreates the root. Before the repair the writer's
+handle was discarded, and that late wake recreated the reclaimed directory.
+
+## `mod tests` › `enum TearAt {`
+
+Where the R1 witnesses tear a foreign registration (the follow-up B record's §9.13): when an event
+is folded, or just before the n-th registry access the coordinator's thread starts after an event
+is folded (`workspace_manager::fixture::before_registry_access`), which names an access no fold
+precedes directly.
+
+## `mod tests` › `struct Prober {`
+
+The writer that finishes the tear, owned by `TearHeld`: the sender that cancels it and the handle
+its `finish` or its drop joins (standards §10). What it reports, and after which sample, is under
+`fn tear_sampling_every`.
+
+## `mod tests` › `enum Wakes {`
+
+What lets the prober finish the tear: an invocation entering the runner (a pipeline was granted),
+one leaving it (the observer released a held invocation inside the wait, and its end was applied),
+or a registry access answering `Attempt` (the width-1 control, where no pipeline is there to serve).
+`Never`: nothing does; the prober only waits to be cancelled, and the witness finishes the tear
+itself or leaves it (round 6's shutdown witnesses).
+
+## `mod tests` › `enum Torn {`
+
+The two torn shapes a witness plants: an empty `commondir`, on which Git's enumeration dies, and a
+registration that is `locked` and has no `gitdir`, which the removal scan cannot bind under
+`WriterProof::Unknown` and the enumeration passes over. Each is a shape a killed `git worktree add`
+leaves.
+
+## `mod tests` › `struct Plant {`
+
+The tear `TearHeld` plants in the run's own store — `HEAD`, a `gitdir` spelt as Git writes it and an
+empty `commondir`, or `locked` alone — and the prober it starts, which completes the registration
+once what it waits for happened after the tear and otherwise writes nothing.
+
+## `mod tests` › `impl Plant` › `fn finish_tear(&self) {`
+
+Complete the registration the tear left, as its writer would: the whole registration for the
+`locked` shape, then `commondir`, then the lock removed. The prober calls it, and a shutdown witness
+calls it from inside the wait, right after it injects the shutdown.
+
+## `mod tests` › `impl Plant` › `fn tear_sampling_every(&self, every: Duration) -> Prober {`
+
+Plant the tear and start its prober. The prober waits at most `every` at a time, a cancel ending the
+wait early, and after each wait it samples what it waits for (`Wakes`). Every report follows such a
+sample: `Ok`, the tear finished, when the sample shows that what it waits for happened after the
+plant; otherwise the cancel, or its deadline once `BOUND` has passed. A witness cancels it only after
+the call it watches has returned, so anything that call counted happened before the cancel was sent,
+and the sample after the cancel sees it however long the wait was. `tear` samples every millisecond.
+
+Before repair round 7 (the follow-up B record's §9.17) the prober sampled before each wait and
+reported a cancel without sampling again, so what happened during its last wait was reported as
+nothing. The integration witness below counts its attempt about 1.2 ms before its cancel on Linux
+(the coordinator's first backoff, then the return), longer than one millisecond-sampler period, so
+it passed there. A wait that ends only at Windows' clock tick, commonly 15.625 ms, mostly misses
+such a window: that is the reasoned cause of `test (winguest)`'s failure of the witness at
+`a337efa7`, and a 15.625 ms sampler reproduces it on Linux. The witnesses whose access cannot pass
+until the prober has finished the tear (the R1 witnesses, the width-1 control, and the closure and
+finalization waits) were never exposed: their prober has reported before the run they drive ends.
+
+## `mod tests` › `impl Wakes` › `fn not_seen(self) -> &'static str {`
+
+What a prober's report says it did not see, by what it waits for. Before repair round 7 every
+report said that no invocation reached or left the runner, whatever the prober waited for.
+
+## `mod tests` › `fn lone_plant(tag: &str) -> (crate::rundir::scratch_tree::ScratchTree, Plant) {`
+
+A tear with an empty `commondir` in a store of its own, in a scratch tree, its prober waiting for a
+contended attempt on that store: the two tests below.
+
+## `mod tests` › `fn cancelled_and_joined(prober: Prober) -> Result<(), String> {`
+
+Cancel a prober, join it, and return its report.
+
+## `mod tests` › `fn a_prober_cancelled_after_the_attempt_it_waits_for_reports_it_and_finishes_the_tear() {`
+
+Repair round 7's order, forced: the prober's wait is as long as the test, so the attempt is counted
+and the cancel sent while it waits, with no sample between them. It reports the attempt and
+finishes the tear. A prober that reports a cancel before it samples, as it did before round 7,
+reports the tear standing here, every time.
+
+## `mod tests` › `fn a_prober_cancelled_before_anything_it_waits_for_leaves_the_tear_and_says_so() {`
+
+The other side of that order: cancelled with nothing counted, the prober leaves the tear as planted
+and says what it did not see. A prober that took a cancel for progress fails here.
+
+## `mod tests` › `type FoldAct = (fn(&TopologyEventBody) -> bool, Box<dyn FnMut()>);`
+
+An act `TearHeld` runs once when an event is folded, besides the tear: a broken worktree before a
+retry, a file at a destination before an add.
+
+## `mod tests` › `const WITNESS_REGISTRY_DEADLINE: Duration = Duration::from_secs(10);`
+
+The registry access deadline a tear witness gives its own repository
+(`crate::workspace_manager::RegistryDeadline`): the production deadline's ten seconds rather than
+the suite's 500 ms. Every such witness ends its access's wait itself -- its prober finishes the
+tear, or its scheduler injects a shutdown -- once the coordinator reaches the point the witness is
+about, and how many Git processes run before that point is the platform's to say: on the Windows
+leg under the suite's load the three before a dispatch's intent witness could inject its shutdown
+took longer than 500 ms, and the access refused first. Fix P (P-all), follow-up C's round 5, in this
+change's B4 round (the follow-up B record's §9.22); the Windows reading is a Linux stand-in's. The
+four witnesses that plant their tear without `TearHeld` hold it themselves (the B14 round, §9.31).
+
+## `mod tests` › `struct TearHeld {`
+
+The run's hooks with one tear planted on the coordinator's thread at a `TearAt`, its prober owned
+and joined, and an optional `FoldAct`. `finish` cancels and joins the prober and hands back what it
+returned: `Ok` only when it finished the tear after what it waited for. The drop does the same for a
+prober nobody finished. At `54a1ff14` the coordinator slept through every such access, so the prober
+never saw anything and the access refused at its deadline. While it lives it holds a
+`RegistryDeadline` giving its repository's accesses `WITNESS_REGISTRY_DEADLINE`, so every tear
+witness's access waits to the production length, not the suite's 500 ms, before the witness's own
+act ends the wait (fix P). Everything before the wait still counts against that deadline: an access
+asks for the wait after a failed attempt only if time remains when it reads its clock after that
+attempt's veto and count. If the deadline has passed by then, wherever the time went (the
+platform's Git, the veto, the count, or a descheduled thread), it asks for none: it makes its final
+attempt, or refuses if the failed attempt was already its final one (§9.32, §9.34).
+
+
+## `mod tests` › `impl TearHeld` › `fn tearing(&mut self, torn: Torn) {`
+
+The shape the tear takes.
+
+## `mod tests` › `impl TearHeld` › `fn planted(&self) -> impl Fn() -> bool + 'static {`
+
+Whether the tear has been planted, for a release order that waits for it.
+## `mod tests` › `fn two_independent() -> [WideTask; 2] {`
+
+Beta, key 0, then alpha, key 1: in the order the admission dispatches them.
+
+## `mod tests` › `fn served_through(tag: &str, tasks: &[WideTask], at: TearAt) {`
+
+The dispatch witness of R1, without an observer: the first task's pipeline is spawned and asks for
+its worker while the coordinator dispatches the second, whose access meets the tear. The access is
+passed only because the coordinator granted the worker while it waited. Since round 6 the
+coordinator call runs [`bounded`], and no wait of the coordinator's slept on its thread
+(`fixture::slept_pauses`, unchanged across the call), as in every R1 witness.
+
+## `mod tests` › `fn attempt_started_of(key: u32) -> fn(&TopologyEventBody) -> bool {`
+
+The predicate of a task's `attempt_started`.
+
+## `mod tests` › `fn task_dispatched_of(key: u32) -> fn(&TopologyEventBody) -> bool {`
+
+The predicate of a task's `task_dispatched`.
+
+## `mod tests` › `fn a_pipeline_is_granted_while_a_dispatchs_head_check_waits_on_a_torn_registration() {`
+
+Census A1: the dispatch's head check, the first access of every dispatch: the frozen
+`integrate::dispatch_head` over `run::PausingRefs` since follow-up B's repair round 6 (I2-7), which
+withdrew round 3's split `dispatch_head_at` (H2).
+
+## `mod tests` › `fn a_pipeline_is_granted_while_a_dispatchs_revalidation_waits_on_a_torn_registration() {`
+
+Census A2: the dispatch's own revalidation before `task_dispatched`.
+
+## `mod tests` › `fn a_pipeline_is_granted_while_a_dispatchs_intent_waits_on_a_torn_registration() {`
+
+Census A3, the implementation review's witness: the intent's revalidation after `task_dispatched`.
+
+## `mod tests` › `fn a_pipeline_is_granted_while_a_dispatchs_add_gate_waits_on_a_torn_registration() {`
+
+Census A4: the add's gate.
+
+## `mod tests` › `fn a_pipeline_is_granted_while_a_dispatchs_add_waits_on_a_torn_registration() {`
+
+Census A4: the add itself, whose waits run inside its funnel (`funnel_lending`).
+
+## `mod tests` › `fn beta_settles_while_alpha_holds_its_first_gate(view: &Quiescent<'_>) -> Option<Release> {`
+
+The release order of the observed witnesses: alpha's worker first, then beta's invocations while
+beta is live, and alpha's held first gate only once beta is not — inside the wait of an access made
+for beta, where alpha's second gate is then asked for and granted, and enters the runner.
+
+## `mod tests` › `fn served_while_alpha_waits(tag: &str, failing: &'static [(u32, u32)], at: TearAt) {`
+
+`served_while_alpha_waits_with`, expecting the run to complete.
+
+## `mod tests` › `fn served_while_alpha_waits_with(`
+
+The observed witness for a settlement, an integration or a retry of beta while alpha holds its first
+gate: two gates, so that alpha's next grant asks for no registry access first. The scenario is built
+and run inside [`bounded`], so `prepare` is `Send`.
+
+## `mod tests` › `fn candidate_prepared_of_beta(body: &TopologyEventBody) -> bool {`
+
+Beta's `candidate_prepared`.
+
+## `mod tests` › `fn candidate_created_of_beta(body: &TopologyEventBody) -> bool {`
+
+Beta's `task_candidate_created`.
+
+## `mod tests` › `fn merge_prepared_of_beta(body: &TopologyEventBody) -> bool {`
+
+Beta's `merge_prepared`.
+
+## `mod tests` › `fn retained_attempt_finished_of_beta(body: &TopologyEventBody) -> bool {`
+
+Beta's `attempt_finished`.
+
+## `mod tests` › `fn generation_closed_of_beta(body: &TopologyEventBody) -> bool {`
+
+Beta's `generation_closed`.
+
+## `mod tests` › `fn a_pipeline_is_served_while_a_settlements_path_read_waits_on_a_torn_registration() {`
+
+Census D1: the promotion's changed paths.
+
+## `mod tests` › `fn a_pipeline_is_served_while_a_settlements_parent_check_waits_on_a_torn_registration() {`
+
+Census D2: the candidate's parent check.
+
+## `mod tests` › `fn a_pipeline_is_served_while_a_settlements_tree_check_waits_on_a_torn_registration() {`
+
+Census D2: the candidate's tree check.
+
+## `mod tests` › `fn a_pipeline_is_served_while_a_settlements_worktree_removal_waits_on_a_torn_registration() {`
+
+Census D3: the reclaim's worktree removal — its scan, met by a registration that is `locked` and has
+no `gitdir`.
+## `mod tests` › `fn a_pipeline_is_served_while_a_settlements_intent_removal_waits_on_a_torn_registration() {`
+
+Census D3: the reclaim's intent removal.
+
+## `mod tests` › `fn a_pipeline_is_served_while_an_integrations_decision_waits_on_a_torn_registration() {`
+
+Census C1: `integrate::decide`'s publishability check (H1).
+
+## `mod tests` › `fn a_pipeline_is_served_while_an_integrations_publication_waits_on_a_torn_registration() {`
+
+Census C2: `integrate::publish`'s publishability check (H1).
+
+## `mod tests` › `fn a_pipeline_is_served_while_a_publications_swap_recheck_waits_on_a_torn_registration() {`
+
+Census C6: the publishability re-check that `WorkspaceManager::compare_and_swap_ref` makes before its
+funnel, through the hooks `integrate::publish` hands it (CAS-1, the record's §9.21). The tear is
+planted before the second registry access after beta's `merge_prepared`, so `publish`'s own check
+(C2) passes and the swap's re-check meets it.
+
+## `mod tests` › `fn a_pipeline_is_served_while_a_retrys_worktree_check_waits_on_a_torn_registration() {`
+
+Census B1: the retained retry's worktree verification.
+
+## `mod tests` › `fn alpha_waits_for_the_tear(planted: impl Fn() -> bool + 'static) -> Script<'static> {`
+
+The release order of the repair witnesses: as `beta_settles_while_alpha_holds_its_first_gate` once
+the tear is planted, and before that alpha's worker and beta's invocations only, releasing nothing
+otherwise, so a first revalidation that waits out its deadline does not spend alpha's held gate.
+
+## `mod tests` › `fn served_while_a_repair_waits(`
+
+The witness of a revalidation's repair arm (census A6, B1 and B2: the torn plan and its scans) and
+of the verification's own read. With `residue`, a dead add's residue of a slot an intent names — its
+intent written before the run, its registration with an empty `commondir` planted at the fold — makes
+the first revalidation refuse at its deadline, the repair's plan find it, and its forced removal
+remove it; the tear is planted at the access the test names. The residue is gone afterwards.
+
+## `mod tests` › `fn a_pipeline_is_served_while_an_intent_removals_repair_plan_waits_on_a_torn_registration() {`
+
+The reclaim's intent removal: its repair's plan (the torn plan, R-X alone) meets the tear.
+
+## `mod tests` › `fn a_pipeline_is_served_while_an_intent_removals_repair_removal_waits_on_a_torn_registration() {`
+
+The reclaim's intent removal: its repair's forced removal of the residue (the scan) meets the tear.
+
+## `mod tests` › `fn a_pipeline_is_served_while_an_intent_removals_second_revalidation_waits_on_a_torn_registration()`
+
+The reclaim's intent removal: the revalidation after its repair meets the tear.
+
+## `mod tests` › `fn a_pipeline_is_served_while_a_verifications_repair_plan_waits_on_a_torn_registration() {`
+
+The retained retry's verification: its repair's plan meets the tear.
+
+## `mod tests` › `fn a_pipeline_is_served_while_a_verifications_second_revalidation_waits_on_a_torn_registration()`
+
+The retained retry's verification: the revalidation after its repair meets the tear.
+
+## `mod tests` › `fn a_pipeline_is_served_while_a_verifications_worktree_read_waits_on_a_torn_registration() {`
+
+The retained retry's verification: its read of the worktree's record, inside its funnel, meets the
+tear.
+
+## `mod tests` › `fn closing_attempt_finished_of_beta(body: &TopologyEventBody) -> bool {`
+
+Beta's `attempt_finished` that closes its generation.
+
+## `mod tests` › `fn a_pipeline_is_served_while_a_closed_retrys_worktree_scrub_waits_on_a_torn_registration() {`
+
+Census B2: a retry whose retained worktree was changed by hand closes, and its scrub's worktree
+removal (the scan) meets the tear.
+
+## `mod tests` › `fn a_pipeline_is_served_while_a_closed_retrys_intent_scrub_waits_on_a_torn_registration() {`
+
+Census B2: the same scrub's intent removal meets the tear; the scan passes over an empty `commondir`.
+
+## `mod tests` › `fn served_while_a_closed_retry_scrubs(tag: &str, torn: Torn) {`
+
+The B2 witnesses: beta's first attempt fails and retains its worktree, a file is staged in it by
+hand, the retry's verification fails, and the generation closes.
+## `mod tests` › `fn a_pipeline_is_served_while_a_failed_settlements_worktree_scrub_waits_on_a_torn_registration()`
+
+Census D4: beta's second failed attempt escalates and closes the generation, and its scrub's
+worktree removal (the scan) meets the tear; the task then parks, as the scaffold's failing gates
+leave it.
+
+## `mod tests` › `fn a_pipeline_is_served_while_a_failed_settlements_intent_scrub_waits_on_a_torn_registration() {`
+
+Census D4: the same scrub's intent removal meets the tear.
+
+## `mod tests` › `fn served_while_a_failed_settlement_scrubs(tag: &str, torn: Torn) {`
+
+The D4 witnesses: both of beta's attempts fail their first gate.
+## `mod tests` › `fn alpha_waits_for_gammas_integration(view: &Quiescent<'_>) -> Option<Release> {`
+
+The release order of the stale witnesses: everything but alpha's held worker while gamma is live,
+and alpha's worker once gamma is not — inside the wait of an access of gamma's integration, where
+alpha holds no snapshot, so the stale arm is not deferred (R-W).
+
+## `mod tests` › `fn alpha_waits_for_gammas_merge(view: &Quiescent<'_>) -> Option<Release> {`
+
+The same, holding alpha's worker until gamma's `task_merged`.
+
+## `mod tests` › `fn served_while_a_stale_integration_waits(tag: &str, conflicting: bool, at: TearAt) {`
+
+`served_while_a_stale_integration_waits_under` with `alpha_waits_for_gammas_integration`.
+
+## `mod tests` › `fn served_while_a_stale_integration_waits_under(`
+
+The stale witness: beta merges first, so gamma's integration is stale; with `conflicting`, gamma
+writes beta's file, its pick conflicts, and the rejection's repair is dispatched. The tear takes the
+shape `torn`. The prober wakes on an ending: alpha's released worker ends, and the coordinator
+applies that end, inside the wait.
+## `mod tests` › `fn candidate_created_of_gamma(body: &TopologyEventBody) -> bool {`
+
+Gamma's `task_candidate_created`.
+
+## `mod tests` › `fn task_merged_of_gamma(body: &TopologyEventBody) -> bool {`
+
+Gamma's `task_merged`.
+
+## `mod tests` › `fn merge_rejected_of_gamma(body: &TopologyEventBody) -> bool {`
+
+Gamma's `merge_rejected`.
+
+## `mod tests` › `fn repair_dispatched(body: &TopologyEventBody) -> bool {`
+
+A repair's `task_dispatched`.
+
+## `mod tests` › `fn a_pipeline_is_served_while_a_stale_integrations_intent_waits_on_a_torn_registration() {`
+
+Census C4: the stale arm's staging intent.
+
+## `mod tests` › `fn a_pipeline_is_served_while_a_stale_integrations_add_gate_waits_on_a_torn_registration() {`
+
+Census C4: the staging add's gate.
+
+## `mod tests` › `fn a_pipeline_is_served_while_a_stale_integrations_add_waits_on_a_torn_registration() {`
+
+Census C4: the staging add.
+
+## `mod tests` › `fn a_pipeline_is_served_while_a_stale_integrations_pick_waits_on_a_torn_registration() {`
+
+Census C4: the cherry-pick's revalidation.
+
+## `mod tests` › `fn a_pipeline_is_served_while_a_publications_staging_removal_waits_on_a_torn_registration() {`
+
+Census C5: the publication's staging removal — its scan.
+
+## `mod tests` › `fn a_pipeline_is_served_while_a_publications_staging_intent_removal_waits_on_a_torn_registration()`
+
+Census C5: the publication's staging intent removal.
+## `mod tests` › `fn a_pipeline_is_served_while_a_conflicts_classification_waits_on_a_torn_registration() {`
+
+Census C3: `integrate_stale`'s `proposal_state` after the conflicting pick (H1).
+
+## `mod tests` › `fn a_pipeline_is_served_while_a_rejections_staging_reclaim_waits_on_a_torn_registration() {`
+
+Census C5: the rejection's staging reclaim — its scan.
+
+## `mod tests` › `fn a_pipeline_is_served_while_a_rejections_staging_intent_reclaim_waits_on_a_torn_registration()`
+
+Census C5: the rejection's staging intent removal.
+## `mod tests` › `fn a_pipeline_is_served_while_a_repairs_materialization_waits_on_a_torn_registration() {`
+
+Census A5: the repair dispatch's materialization.
+
+## `mod tests` › `fn a_pipeline_is_granted_while_a_continued_dispatchs_worktree_check_waits_on_a_torn_registration()`
+
+Census A6: the first process stops after beta's `task_dispatched`, at a file planted at beta's
+destination; the next process resumes, starts alpha's attempt, and continues beta's open generation,
+whose worktree check meets the tear.
+
+## `mod tests` › `fn the_width_one_step_runs_the_same_transitions_and_its_access_waits_by_sleeping() {`
+
+R-T's control: the width-1 `step` runs the same dispatch with its own hooks, whose waits sleep; the
+tear is finished once the access has answered `Attempt`, and the run completes. The sleep is seen:
+`fixture::slept_pauses` moves on the stepping thread.
+
+## `mod tests` › `struct FoldsSeen {`
+
+Hooks that record the kind of every event folded through them, forwarding the rest to the harness.
+
+## `mod tests` › `fn every_append_of_the_width_one_step_a_retrys_settlement_included_folds_through_the_callers_hooks()`
+
+R-T in behaviour (the follow-up B record's §9.16, I2-4). Beta's first attempt fails its gate and is
+retained, so the width-1 `step` takes the retry arm: begin the retry, judge it inline, settle it. Every
+event `step` appended — the retry's `attempt_started` and its settlement's `candidate_prepared`
+included — must have been folded through the hooks `step` was handed. A transition run with any
+other hooks (the review's single-call mutation hands the retry's settlement fresh `NoTopologyHooks`)
+leaves events folded through hooks the caller never sees, and the lists differ.
+
+## `mod tests` › `fn a_shutdown_injected_once_the_tear_stands(`
+
+The scheduler of a shutdown witness (I2-1): at its first quiescent point after the tear is planted —
+which is inside the wait of the access that met the tear, since nothing else asks the observer
+before that access returns — it records the log's length, injects `Shutdown` and, when the witness
+asks, finishes the tear, so that a transition that ignored the shutdown would find its access passed
+and carry on. Before that point, and after, it orders as the witness's own script does.
+
+## `mod tests` › `fn published_as_the_log_authorizes(wide: &Wide) {`
+
+The integration ref is where the log's last `task_merged` (or the run's base) puts it: nothing was
+published that the log does not record.
+
+## `mod tests` › `struct StoppedInItsWait {`
+
+Where a shutdown witness plants its tear, in which shape, and whether the shutdown finishes it.
+
+## `mod tests` › `fn stopped_in_its_wait(`
+
+The shutdown witness of one transition (I2-1), bounded. The run meets a tear in the transition's
+access; the scheduler injects `Shutdown` inside the access's wait and finishes the tear. The command
+must end on the shutdown, the access must have failed on the tear first (so the shutdown came inside
+its wait), no wait may have slept on the coordinator's thread, **nothing may be appended after the
+shutdown**, the integration ref must be where the log authorizes it, the invocations must balance,
+and the run must be reopened once the coordinator is gone; `check` adds what the transition must not
+have done. At `a58c2ce3`, and with the stop undone, the access passes once the tear is finished and
+the transition appends on. When no shutdown was injected, its panic keeps the message
+"the shutdown was injected while the tear stood" and adds what the command ended on, so a
+recurrence says which path it took (fix P).
+
+## `mod tests` › `fn two_held(tag: &str) -> Wide {`
+
+Two independent tasks at width 2 behind a holding runner.
+
+## `mod tests` › `fn two_held_gated(failing: &'static [(u32, u32)]) -> impl FnOnce(&str) -> Wide + Send {`
+
+The same with two gates, failing as `failing` says: `served_while_alpha_waits`'s scenario.
+
+## `mod tests` › `fn first_invoking(view: &Quiescent<'_>) -> Option<Release> {`
+
+Release the first invocation in id order.
+
+## `mod tests` › `fn first_released(_: &TearHeld) -> Script<'static> {`
+
+[`first_invoking`], as a shutdown witness's order.
+
+## `mod tests` › `fn beta_settles_first(_: &TearHeld) -> Script<'static> {`
+
+`beta_settles_while_alpha_holds_its_first_gate`, as a shutdown witness's order.
+
+## `mod tests` › `fn workers_of(wide: &Wide, key: u32) -> usize {`
+
+How many of a task's workers reached the runner.
+
+## `mod tests` › `fn of_key(events: &[TopologyEvent], kind: &str, key: u32) -> usize {`
+
+How many events of `kind` name task `key`.
+
+## `mod tests` › `fn a_shutdown_answered_inside_a_dispatchs_head_check_dispatches_and_spawns_nothing() {`
+
+Dispatch: the second task's head check meets the tear; after the shutdown no `task_dispatched` for
+it, and no worker of it reached the runner, so its pipeline was never spawned.
+
+## `mod tests` › `fn a_shutdown_answered_inside_a_dispatchs_intent_starts_no_attempt_and_spawns_nothing() {`
+
+Dispatch after its `task_dispatched`: the intent's access meets the tear; no `attempt_started` for
+the task, and no pipeline.
+
+## `mod tests` › `struct DelayedRelease {`
+
+The worker that holds the slow dispatch witness's first contended answer, and its owner: the sender
+that cancels the worker's wait for that answer, and the handle `finish`, or the drop, joins
+(standards §10; the protocol stays in the source, above the type). Repair round 11 (B6; I6-1, the
+follow-up B record's §9.23): fix P spawned the worker and discarded its handle, so a worker that
+panicked before its delay dropped its release unsent, the held access went on at once, and the
+witness passed without the delay it is about. Both i6 review lenses showed it passing in 0.04 s
+with the deadline seam undone and a panic injected into the worker.
+
+## `mod tests` › `impl DelayedRelease` › `fn finish(&mut self) -> Result<(), String> {`
+
+Cancel what is left of the worker's wait for an attempt, join the worker, and turn a panic into the
+witness's failure: a worker that panicked dropped its release unsent, and the access went on
+without the delay. A second call finds nothing to join.
+
+## `mod tests` › `impl Drop for DelayedRelease` › `fn drop(&mut self) {`
+
+Finish a worker no step finished: when the scenario already unwinds, say what the join found on
+stderr; otherwise fail with it.
+
+## `mod tests` › `fn a_delayed_release_whose_worker_panicked_fails_its_witness() {`
+
+`finish` over a worker that panicked returns the failure, never `Ok`: an owner that drops the
+worker's verdict, as the witness's discarded handle did before repair round 11, fails here.
+
+## `mod tests` › `fn a_shutdown_answered_inside_a_slow_dispatchs_intent_starts_no_attempt_and_spawns_nothing() {`
+
+The dispatch's intent witness above, with its access slow to come back to its wait: the access's
+first failed attempt is held (`workspace_manager::hold_next_contended`) for 700 ms, longer than the
+suite's 500 ms registry deadline, before its deadline check, as three slow Git processes held it on
+the Windows leg (the coordinator's grant to the waiting pipeline runs the scaffold runner's
+`git rev-parse`, and the access's second attempt is another `git worktree list`). Its repository
+waits to `WITNESS_REGISTRY_DEADLINE`, so, while time remains when the access reads its clock after
+the 700 ms, the access still reaches its wait, the shutdown is still injected there, and the
+dispatch still starts no attempt; a deadline passed by then, wherever the time went, leaves no wait
+asked for (§9.32, §9.34). With the deadline seam undone it fails with the Windows leg's message.
+Fix P; the Windows reading is a Linux stand-in's, not a measured cause of the guest's failure.
+
+The worker that holds the answer and releases it after the 700 ms is owned (`DelayedRelease`, repair
+round 11, I6-1): the build step spawns it and hands it over a channel to the check step, which joins
+it before its own assertions and fails when it panicked, since its release then dropped unsent and
+the access went on without the delay. Its wait for the first attempt also ends at a cancel, so a
+scenario that unwinds first joins it within the delay. The hold, its 700 ms and the witness's cost
+are unchanged.
+
+## `mod tests` › `fn a_shutdown_answered_inside_a_continued_dispatchs_wait_starts_no_attempt() {`
+
+Continuation: beta's add is broken after its `task_dispatched` (the R1 witness's set-up), a fresh
+process resumes with beta's generation open and no attempt, and the continuation's worktree check
+meets the tear; beta never starts an attempt.
+
+## `mod tests` › `fn a_shutdown_answered_inside_a_retrys_wait_starts_no_retry() {`
+
+Retry: beta's retained retry's worktree verification meets the tear; the retry's `attempt_started`
+is never appended.
+
+## `mod tests` › `fn a_shutdown_answered_inside_a_settlements_wait_promotes_nothing() {`
+
+Settlement: beta's settlement's path read meets the tear; no `candidate_prepared` and no
+`attempt_finished` for beta.
+
+## `mod tests` › `fn a_shutdown_answered_inside_a_verifications_wait_starts_no_retry() {`
+
+Verification: the worktree record a retry's verification reads inside its funnel meets the tear; no
+retry starts.
+
+## `mod tests` › `fn a_shutdown_answered_inside_a_repairs_wait_starts_no_repair_attempt() {`
+
+Repair: a conflict's repair is dispatched and its materialization meets the tear; the repair task
+starts no attempt and no worker of it runs.
+
+## `mod tests` › `fn a_shutdown_answered_inside_an_integrations_decision_prepares_and_publishes_nothing() {`
+
+Integration: the frozen `decide`'s publishability check (H1) meets the tear; no `merge_prepared`, no
+`task_merged`, and the ref is unmoved.
+
+## `mod tests` › `fn a_shutdown_answered_inside_a_publications_wait_publishes_nothing() {`
+
+Publication: after `merge_prepared`, the frozen `publish`'s check (H1) meets the tear; no
+`task_merged`, and no compare-and-swap moved the ref.
+
+## `mod tests` › `fn a_shutdown_answered_inside_a_publications_swap_recheck_publishes_nothing() {`
+
+Publication, CAS-1: after `merge_prepared` and `publish`'s own check, the compare-and-swap's
+publishability re-check meets the tear; no `task_merged`, and the ref is where the log authorizes it.
+
+## `mod tests` › `fn a_shutdown_answered_inside_a_stale_picks_wait_classifies_nothing_into_the_log() {`
+
+The one place the frozen integration discards an error: a stale integration's cherry-pick, whose
+gate meets the tear. The pick's error is set aside and the proposal's state is read, with the tear
+finished, so a transition that went on would classify and append; nothing is appended after the
+shutdown.
+
+## `mod tests` › `fn run_finished(body: &TopologyEventBody) -> bool {`
+
+Any `run_finished`.
+
+## `mod tests` › `fn attempt_interrupted(body: &TopologyEventBody) -> bool {`
+
+Any `attempt_interrupted`.
+
+## `mod tests` › `fn gamma_halts_while_alpha_gates(view: &Quiescent<'_>) -> Option<Release> {`
+
+`halt_cancels_in_flight_attempt_at_width_three`'s order: alpha's worker first, then, while alpha is
+at its gate, gamma's worker, whose declined question halts the run.
+
+## `mod tests` › `fn a_shutdown_answered_inside_a_closures_wait_closes_nothing_further() {`
+
+Closure: the halt's closure appends alpha's `attempt_interrupted` and its reclaim meets the tear; no
+second `attempt_interrupted` and no `run_finished` follow.
+
+## `mod tests` › `fn a_shutdown_answered_inside_a_finalizations_wait_finalizes_nothing_further() {`
+
+Finalization: after `run_finished`, the frozen `finalize` meets the tear; it stops, and the execution
+root it would have removed is still there.
+
+## `mod tests` › `fn coordinator_of<'s>(`
+
+A coordinator over a run, with its own channels, runtime and timer, for the witnesses that drive one
+transition directly, as the reviews' witnesses did.
+
+## `mod tests` › `fn plant_commondir_empty(wide: &Wide, name: &str) -> PathBuf {`
+
+A registration with an empty `commondir`, spelt as Git writes it, in the run's own store.
+
+## `mod tests` › `fn a_shutdown_answered_during_a_registry_pause_dispatches_nothing_and_appends_nothing() {`
+
+The regular review's dispatch witness at `a58c2ce3`, kept: alpha is live, a shutdown is queued and
+beta's dispatch meets a tear; an owned thread finishes the tear once alpha is cancelled. The
+shutdown is handled inside the wait, and beta's dispatch now fails and appends nothing. Its
+repository's accesses wait to `WITNESS_REGISTRY_DEADLINE` (§9.31), so the access reaches its wait
+only if time remains when it reads its clock after its first failed attempt's veto and count. If the
+deadline has passed by then, wherever the time went (the attempt, its veto, the count, or a
+descheduled thread), no wait is asked for: the final attempt is made, or was the failed one (§9.32),
+and if it fails the access refuses without servicing the queued shutdown (§9.34).
+
+## `mod tests` › `fn a_shutdown_answered_during_an_admitted_dispatchs_pause_spawns_no_pipeline() {`
+
+The same through the admission pass, the real call site of the spawn: `admit` ends with the stop's
+error, and no pipeline, no handle and no worker exist. It waits to `WITNESS_REGISTRY_DEADLINE` as the
+dispatch witness above does.
+
+## `mod tests` › `fn a_shutdown_consumed_during_a_registry_wait_publishes_no_candidate() {`
+
+The regression review's integration witness at `a58c2ce3`, kept: a prepared candidate's integration
+meets a tear with a shutdown queued, and a prober finishes the tear. Nothing is appended, the ref is
+unmoved, and the interrupted integration ends the admission pass. Its access ends at the shutdown,
+not at the tear, so nothing waits for the prober: that the access failed on the tear first rests on
+the sample the prober takes after the cancel (`fn tear_sampling_every`, repair round 7). Should the
+wait not stop the integration, the prober still finishes the tear in time for the access's next
+attempt, and the integration then appends and publishes, which the witness refuses. Its
+repository's accesses wait to `WITNESS_REGISTRY_DEADLINE` (§9.31), so the access reaches its wait
+only if time remains when it reads its clock after its first failed attempt's veto and count. If the
+deadline has passed by then, wherever the time went (the attempt, its veto, the count, or a
+descheduled thread), no wait is asked for: the final attempt is made, or was the failed one (§9.32),
+and if it fails the access refuses without servicing the queued shutdown (§9.34).
+
+## `mod tests` › `fn a_dispatch_begun_after_a_wait_answered_a_shutdown_appends_nothing() {`
+
+The append half of the stop, on its own: a wait answers a queued shutdown and stops the run, and a
+dispatch begun after it, with no tear to meet, is refused at its first append by the run's emitter.
+This is what holds for a transition that carries on past the wait's error, whatever it does with it.
+
+## `mod tests` › `fn a_publication_begun_after_a_wait_answered_a_shutdown_moves_no_ref() {`
+
+The effect half: after a stopped wait, the frozen `publish` over the coordinator reaches its
+compare-and-swap, which the coordinator's effect hooks refuse at `before`; the ref is unmoved.
+
+## `mod tests` › `struct CountsRawPauses {`
+
+The caller's effect hooks, counting their own `registry_pause`: a call is a wait the coordinator did
+not answer itself.
+
+## `mod tests` › `struct RawPausesUnder {`
+
+Those hooks under a `TearHeld`'s plant and prober.
+
+## `mod tests` › `fn waits_through_the_coordinator(`
+
+The routing witness of closure and finalization (I2-2), bounded: the tear is finished once the
+access has failed on it, the run ends as expected, and the caller's raw pause was never called and no
+wait slept on the coordinator's thread. At `a58c2ce3` closure and finalization were handed the
+caller's hooks, and the raw pause was the wait.
+
+## `mod tests` › `fn a_finalizations_registry_wait_answers_on_the_coordinator() {`
+
+The regular review's finalization witness, made strict: a tear at `run_finished`, met by the frozen
+`finalize`.
+
+## `mod tests` › `fn a_closures_registry_wait_answers_on_the_coordinator() {`
+
+The same for the halt's closure: a tear at its first `attempt_interrupted`, met by the reclaim.
+
+## `mod tests` › `fn a_wait_answers_a_queued_shutdown_when_no_thread_can_be_started() {`
+
+The regular review's thread-exhaustion witness (I2-3), Linux: with `clone3` answering `EAGAIN` on the
+coordinator's thread — checked by a spawn that fails so — a wait still answers the queued shutdown,
+leaves nothing in the inbox and sleeps nothing, because no wait starts a thread. At `a58c2ce3` the
+wait slept 30 ms and answered nothing.
+
+## `mod tests` › `fn a_coordinator_whose_timer_cannot_start_refuses_before_it_appends_anything() {`
+
+The one place a thread is still needed, at the coordinator's start: with `clone3` refused, the run
+refuses as typed, before the runtime is built, appending, spawning and sleeping nothing.
+
+## `mod tests` › `fn unwinding_sleep(_: Duration) {`
+
+A timer's sleep that unwinds.
+
+## `mod tests` › `fn a_wait_whose_timer_unwinds_is_still_woken_and_the_timer_serves_the_next() {`
+
+I2-5's lost producer, injected: the timer's sleep unwinds, and two waits in a row are each woken, the
+second by the same thread; the join reports both unwinds. No natural timer panic is known (the
+thread's calls are a channel receive, a sleep and a send); this is the injected one.
+
+## `mod tests` › `fn a_wait_that_begins_after_a_shutdown_does_not_wait() {`
+
+A wait asked for once a shutdown is recorded stops at once with the stop's error, asking the timer
+for nothing: a minute's wait is not waited out.
+
+## `mod tests` › `fn a_wait_after_its_timer_has_stopped_refuses_at_once_and_never_sleeps() {`
+
+A wait whose timer cannot be asked refuses as typed, at once, and records the command's error; a
+minute's wait is not slept.
+
+## `mod tests` › `struct RequiresAFailingFilter {`
+
+A review-input policy that, at the first verification, makes every checkout of the repository
+run a required smudge filter that fails (`info/attributes` and the repository's configuration,
+through the fixture's `git`): a snapshot's checkout then fails after Git took its destination
+over, as a checkout that cannot be made does.
+
+## `mod tests` › `fn a_verification_whose_snapshot_checkout_fails_after_the_takeover_ends_resumably_and_its_resume_reverifies()`
+
+The record's T15, verification face, and R14
+(`PR329-A-GENUINE-CHECKOUT-FAILURE-AFTER-THE-TAKEOVER-REFUSES`): the judge's snapshot add fails
+after the takeover, which nothing outside Git tells from a prune deleting the snapshot's
+registration, so it refuses at once, resumably, and nothing durable is appended. With the
+environment repaired, a resume settles the verification interrupted and verifies again; the run
+completes. Before #329 the same failure was Git state, and the verification deferred and then
+parked at `max_defers`; R14 is that narrowing, which needs the owner's disposition before G6.
+Two tasks, because a single candidate already on the integration head merges with no
+verification.
+
+## `mod tests` › `struct DeniesTheSnapshots {`
+
+Round 5's construction: at the first verification, the execution root's `snapshots/` is made
+unwritable, so the judge's snapshot destination cannot be made.
+
+## `mod tests` › `struct RestoresTheSnapshots {`
+
+Restores `snapshots/` once the verification's terminal is durable, so the next verification
+proceeds.
+
+## `mod tests` › `fn a_verification_whose_snapshot_destination_cannot_be_made_defers_as_before() {`
+
+The control beside T15: a destination that cannot be made is Git state at once, before `git worktree add`
+runs (`workspace_manager`'s destination step, after the add's gate), so `decisions.repairs.not_repairs` applies as it did:
+one `merge_verification_unavailable` (Deferred), and the run completes with both candidates
+merged. Green before #329 too, where Git's own add failed to make the destination.

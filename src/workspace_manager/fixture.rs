@@ -38,8 +38,8 @@ use crate::rundir::scratch_tree::ScratchTree;
 /// because the two `thread_local!` slots below read better for having it.
 type AttemptObserver = Box<dyn FnMut(u32)>;
 
-// Attempts `remove_tree_once_handles_close` has made **on this thread**, and
-// the observer to run after each.
+// The most attempts one call of `remove_tree_once_handles_close` has made **on
+// this thread**, and the observer to run after each attempt.
 //
 // Thread-local rather than global, and that is the whole reason it is sound:
 // the suite runs tests in parallel and several of them remove worktrees, so a
@@ -60,8 +60,10 @@ thread_local! {
     static REMOVAL_ATTEMPT_OBSERVER: RefCell<Option<AttemptObserver>> =
         const { RefCell::new(None) };
     static MARKER_READ_ATTEMPTS: Cell<u32> = const { Cell::new(0) };
+    static SLEPT_PAUSES: Cell<u64> = const { Cell::new(0) };
     static MARKER_READ_ATTEMPT_OBSERVER: RefCell<Option<AttemptObserver>> =
         const { RefCell::new(None) };
+    static ACCESS_PLANT: RefCell<Option<AccessPlant>> = const { RefCell::new(None) };
 }
 
 /// A live observation of this thread's removal attempts, ended by dropping it.
@@ -75,7 +77,11 @@ pub(crate) struct AttemptObservation {
 }
 
 impl AttemptObservation {
-    /// Attempts made since the observation began.
+    /// The most attempts one removal made since the observation began. Each
+    /// call of the primitive numbers its attempts from one, and a forced
+    /// removal makes two calls — the checkout's and, since #329's targeted
+    /// removal, its registration's — so this is the larger count, never their
+    /// sum and never the later call's alone.
     pub(crate) fn count(&self) -> u32 {
         REMOVAL_ATTEMPTS.with(Cell::get)
     }
@@ -117,7 +123,7 @@ pub(crate) fn observe_removal_attempts(observer: AttemptObserver) -> AttemptObse
 /// observer which somehow removes a tree of its own is a no-op here instead of
 /// a panic inside production code.
 pub(crate) fn note_removal_attempt(attempt: u32) {
-    REMOVAL_ATTEMPTS.with(|count| count.set(attempt));
+    REMOVAL_ATTEMPTS.with(|count| count.set(count.get().max(attempt)));
     REMOVAL_ATTEMPT_OBSERVER.with(|slot| {
         if let Ok(mut slot) = slot.try_borrow_mut() {
             if let Some(observer) = slot.as_mut() {
@@ -179,6 +185,172 @@ pub(crate) fn note_marker_read_attempt(attempt: u32) {
             }
         }
     });
+}
+
+// -----------------------------------------------------------------------
+// Acting just before one registry access
+// -----------------------------------------------------------------------
+
+/// What a test does just before one registry access of its own thread, given
+/// the access's common git dir: plant a registration the access will meet.
+pub(crate) type AccessAct = Box<dyn FnOnce(&Path)>;
+
+/// The armed act and how many accesses on this thread are still to start
+/// before it runs (1: the next).
+struct AccessPlant {
+    skip: usize,
+    act: AccessAct,
+}
+
+/// An act armed before one registry access of this thread, disarmed by
+/// dropping it, so a test that unwinds leaves nothing for whatever runs next
+/// on this thread.
+pub(crate) struct AccessPlanting {
+    /// Not `Send`: the armed act is this thread's.
+    _not_send: PhantomData<*const ()>,
+}
+
+impl Drop for AccessPlanting {
+    fn drop(&mut self) {
+        ACCESS_PLANT.with(|slot| {
+            if let Ok(mut slot) = slot.try_borrow_mut() {
+                *slot = None;
+            }
+        });
+    }
+}
+
+/// Run `act` on this thread just before the `nth` registry access that starts
+/// on it from now (1: the next one), before that access's first attempt.
+///
+/// Thread-local for the reason the removal observer is: the suite runs tests
+/// in parallel, and a pipeline's accesses run on its own thread, so only the
+/// accesses of the thread that armed it are counted — the coordinator's, when
+/// a test arms it from a hook the coordinator calls.
+pub(crate) fn before_registry_access(nth: usize, act: AccessAct) -> AccessPlanting {
+    ACCESS_PLANT.with(|slot| {
+        if let Ok(mut slot) = slot.try_borrow_mut() {
+            *slot = Some(AccessPlant {
+                skip: nth.max(1),
+                act,
+            });
+        }
+    });
+    AccessPlanting {
+        _not_send: PhantomData,
+    }
+}
+
+/// Refuse the syscall `number` for this thread and every process it forks,
+/// answering `errno` instead: four seccomp instructions, installed the way
+/// `rundir`'s tests install theirs (`PR_SET_NO_NEW_PRIVS`, then
+/// `PR_SET_SECCOMP` in filter mode). A policy cannot be removed, so it is for
+/// an isolated child's thread, or a thread a test starts for it, alone.
+#[cfg(target_os = "linux")]
+pub(crate) fn refuse_syscall_on_this_thread(number: libc::c_long, errno: libc::c_int) {
+    let instruction = |code: u32, jt: u8, jf: u8, k: u32| libc::sock_filter {
+        code: u16::try_from(code).expect("a BPF instruction class fits the kernel's field"),
+        jt,
+        jf,
+        k,
+    };
+    let word = |value: libc::c_long| {
+        u32::try_from(value).expect("a syscall number or errno fits the kernel's field")
+    };
+    let mut program = [
+        instruction(libc::BPF_LD | libc::BPF_W | libc::BPF_ABS, 0, 0, 0),
+        instruction(
+            libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K,
+            0,
+            1,
+            word(number),
+        ),
+        instruction(
+            libc::BPF_RET | libc::BPF_K,
+            0,
+            0,
+            libc::SECCOMP_RET_ERRNO | word(libc::c_long::from(errno)),
+        ),
+        instruction(libc::BPF_RET | libc::BPF_K, 0, 0, libc::SECCOMP_RET_ALLOW),
+    ];
+    let filter = libc::sock_fprog {
+        len: u16::try_from(program.len()).expect("the program fits the count"),
+        filter: program.as_mut_ptr(),
+    };
+    // SAFETY: `prctl` takes its five arguments by value and reads through no
+    // pointer for `PR_SET_NO_NEW_PRIVS`, which the kernel refuses unless the
+    // remaining four are 1, 0, 0 and 0.
+    let allowed = unsafe {
+        libc::syscall(
+            libc::SYS_prctl,
+            libc::c_long::from(libc::PR_SET_NO_NEW_PRIVS),
+            1_i64,
+            0_i64,
+            0_i64,
+            0_i64,
+        )
+    };
+    assert_eq!(
+        allowed,
+        0,
+        "PR_SET_NO_NEW_PRIVS: {}",
+        std::io::Error::last_os_error()
+    );
+    // SAFETY: `PR_SET_SECCOMP` reads the `sock_fprog` behind the third
+    // argument and the instructions behind that program's own pointer; both
+    // live for the call and the kernel copies them.
+    let installed = unsafe {
+        libc::syscall(
+            libc::SYS_prctl,
+            libc::c_long::from(libc::PR_SET_SECCOMP),
+            libc::c_long::from(libc::SECCOMP_MODE_FILTER),
+            std::ptr::from_ref(&filter),
+            0_i64,
+            0_i64,
+        )
+    };
+    assert_eq!(
+        installed,
+        0,
+        "PR_SET_SECCOMP: {}",
+        std::io::Error::last_os_error()
+    );
+}
+
+/// One more wait of a registry access slept on this thread (`super::sleep_for`).
+/// Called from `super::note_slept_pause`.
+pub(crate) fn note_slept_pause() {
+    SLEPT_PAUSES.with(|slept| slept.set(slept.get().saturating_add(1)));
+}
+
+/// How many waits of a registry access have slept on this thread. A test reads
+/// it before and after a topology coordinator's call, on the coordinator's own
+/// thread: no difference means that no wait of an access the coordinator made
+/// slept there (the record's §9.16, I2-2).
+pub(crate) fn slept_pauses() -> u64 {
+    SLEPT_PAUSES.with(Cell::get)
+}
+
+/// A registry access over `common_git_dir` is about to make its first attempt
+/// on this thread: run the armed act when it is this access's turn. Called
+/// from `super::note_access_start`; the act runs with nothing borrowed.
+pub(crate) fn note_access_start(common_git_dir: &Path) {
+    let due = ACCESS_PLANT.with(|slot| {
+        let Ok(mut slot) = slot.try_borrow_mut() else {
+            return None;
+        };
+        match slot.as_mut() {
+            Some(plant) if plant.skip > 1 => {
+                plant.skip -= 1;
+                None
+            }
+            Some(_) => slot.take().map(|plant| plant.act),
+            None => None,
+        }
+    });
+    if let Some(act) = due {
+        act(common_git_dir);
+    }
 }
 
 /// A scratch tree for one fixture, guarded by the token that authorises its
@@ -275,6 +447,16 @@ pub(crate) fn tear_registration(manager: &WorkspaceManager, worktree: &Path) -> 
         .expect("the lock the add holds until it finishes");
     fs::write(admin.join("commondir"), []).expect("the file the add opened and never wrote");
     admin
+}
+
+/// `path` as Git writes it into a registration's `gitdir` and a checkout's
+/// `.git`: a plant on Windows must use Git for Windows' `/`, or Git lists it
+/// with `.git` still on (the path's own bytes elsewhere).
+pub(crate) fn as_git_writes_it(path: &Path) -> String {
+    String::from_utf8(
+        crate::runner::host::GitdirRule::native().spelling(path.as_os_str().as_encoded_bytes()),
+    )
+    .expect("a fixture's path is UTF-8")
 }
 
 /// A real repository, a real private root, and a manager over both.
@@ -507,6 +689,42 @@ pub(crate) fn create_dir(path: &Path) {
     fs::create_dir_all(path).expect("create a fixture directory");
 }
 
+/// Set the Unix mode of `path`: how a test in a topology module, which cannot
+/// name `set_permissions`, makes a directory one the engine cannot write.
+#[cfg(unix)]
+pub(crate) fn set_mode(path: &Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt as _;
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))
+        .unwrap_or_else(|error| panic!("set the mode of {}: {error}", path.display()));
+}
+
+/// Restores a directory's mode to `0755` when dropped, so a fixture a test
+/// made unwritable is reclaimable again whatever the test did.
+#[cfg(unix)]
+pub(crate) struct ModeRestored {
+    path: PathBuf,
+}
+
+#[cfg(unix)]
+impl ModeRestored {
+    pub(crate) fn of(path: &Path) -> Self {
+        Self {
+            path: path.to_path_buf(),
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ModeRestored {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt as _;
+        if fs::set_permissions(&self.path, fs::Permissions::from_mode(0o755)).is_err() {
+            // Gone already, or not ours to restore: the scratch tree's own
+            // reclaim reports what it cannot remove.
+        }
+    }
+}
+
 /// A fan-out directory the object store already holds, to construct Git's
 /// temporary object file in.
 ///
@@ -650,6 +868,175 @@ pub(crate) fn spawn_ready_helper(
     crate::agent::proc::test_support::readiness::Producer::adopt(
         command.spawn().expect("spawn the ready helper"),
     )
+}
+
+// -----------------------------------------------------------------------
+// A run's cleanup lease, observed told apart, and made unobservable
+// -----------------------------------------------------------------------
+
+/// One observation of the cleanup lease of the run whose public directory is
+/// `public`, made as `rundir`'s own probe makes it and answered told apart:
+/// `Ok(true)` held, `Ok(false)` free, or the error that answered neither.
+///
+/// The production observation (`rundir::observe_cleanup_hold`, through
+/// `cleanup::is_held`) is fail-closed: a lease file that will not open, or a
+/// `flock` that fails other than `EWOULDBLOCK`, reads held, because an
+/// inspection that failed is no evidence that cleanup finished. That answer
+/// is right for a resume deciding whether to take a run, and wrong for a test
+/// deciding whether to wait: a wait that reads an inspection error as a holder
+/// retries the error until it passes. So the probe is the same -- the lease
+/// file opened for reading and writing and never created, an exclusive
+/// `flock` asked for without blocking and given straight back -- and only the
+/// answer differs: what the production observation reads held because it
+/// failed is the error here. A lease file that does not exist is free, as
+/// there. A release that fails is an error too, because the exclusive hold
+/// would then outlive the observation in any fork made meanwhile.
+///
+/// # Errors
+///
+/// The open's error other than `NotFound`, the take's other than
+/// `EWOULDBLOCK`, or the release's.
+#[cfg(unix)]
+pub(crate) fn observe_cleanup_lease(public: &Path) -> std::io::Result<bool> {
+    use std::os::fd::AsRawFd as _;
+
+    let lease = match fs::File::options()
+        .read(true)
+        .write(true)
+        .open(public.join("cleanup.lock"))
+    {
+        Ok(lease) => lease,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    // SAFETY: `lease` owns a live descriptor, and `flock` takes an integer
+    // and a flag and reads nothing through a pointer.
+    if unsafe { libc::flock(lease.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        let error = std::io::Error::last_os_error();
+        return match error.raw_os_error() {
+            Some(code) if code == libc::EWOULDBLOCK || code == libc::EAGAIN => Ok(true),
+            _ => Err(error),
+        };
+    }
+    // SAFETY: as above.
+    if unsafe { libc::flock(lease.as_raw_fd(), libc::LOCK_UN) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(false)
+}
+
+/// [`observe_cleanup_lease`] where there is no lease: the cleanup lease is
+/// Unix's (`rundir::hold_cleanup_lease_for_child`), and the production
+/// observation answers free elsewhere without opening anything, so there is
+/// nothing to tell apart and nothing that can fail.
+#[cfg(not(unix))]
+pub(crate) fn observe_cleanup_lease(public: &Path) -> std::io::Result<bool> {
+    Ok(crate::rundir::observe_cleanup_hold(
+        public,
+        &mut crate::rundir::NoHooks,
+    ))
+}
+
+// The file a test on this thread made unreadable, and the mode to put back,
+// until a lease wait's observation reads the lease held
+// (`a_wait_read_the_lease_held`). Thread-local for the removal observer's
+// reason above: a test's lease waits run on the thread of the test that armed
+// it, and a process-wide slot would be another test's as often as this one's.
+#[cfg(unix)]
+thread_local! {
+    static UNREADABLE_UNTIL_READ_HELD: RefCell<Option<(PathBuf, u32)>> =
+        const { RefCell::new(None) };
+}
+
+/// Make the file at `path` unreadable to this process, mode `000`, until a
+/// lease wait on this thread reads the run's cleanup lease held: that wait's
+/// acknowledgement puts the mode back ([`a_wait_read_the_lease_held`]), and
+/// dropping the answer puts it back otherwise. The inspection error a wait
+/// meets is then real, `EACCES`, and lasts exactly until a wait has read it as
+/// a holder: a wait that tells an inspection error from a holder fails on it,
+/// and one that reads the error as a holder clears it by reading it so, and
+/// passes.
+///
+/// # Panics
+///
+/// When a file is already armed on this thread; when the mode cannot be read
+/// or set; and when `path` still opens for reading at mode `000`: root, or a
+/// process holding `CAP_DAC_OVERRIDE`, opens through it, and a test built on
+/// the error would then measure nothing. The mode has been put back before
+/// that panic.
+#[cfg(unix)]
+pub(crate) fn unreadable_until_read_held(path: &Path) -> UnreadableUntilReadHeld {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let mode = fs::metadata(path)
+        .unwrap_or_else(|error| panic!("the mode of {}: {error}", path.display()))
+        .permissions()
+        .mode();
+    UNREADABLE_UNTIL_READ_HELD.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        assert!(
+            slot.is_none(),
+            "one file is made unreadable at a time on this thread"
+        );
+        *slot = Some((path.to_path_buf(), mode));
+    });
+    let armed = UnreadableUntilReadHeld {
+        _not_send: PhantomData,
+    };
+    set_mode(path, 0o000);
+    match fs::File::open(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => armed,
+        opened => panic!(
+            "prerequisite not met: {} answered {opened:?} at mode 000, so the mode bit did not \
+             bind (running as root or with CAP_DAC_OVERRIDE); this needs an unprivileged user",
+            path.display()
+        ),
+    }
+}
+
+/// [`unreadable_until_read_held`]'s file, armed on this thread: whether it is
+/// unreadable still, and its mode put back when this drops, if no lease wait
+/// put it back first.
+#[cfg(unix)]
+pub(crate) struct UnreadableUntilReadHeld {
+    /// Not `Send`: the slot it ends is this thread's.
+    _not_send: PhantomData<*const ()>,
+}
+
+#[cfg(unix)]
+impl UnreadableUntilReadHeld {
+    /// Whether no lease wait on this thread has read the lease held since the
+    /// file was made unreadable: it is unreadable still.
+    pub(crate) fn never_read_held(&self) -> bool {
+        UNREADABLE_UNTIL_READ_HELD.with(|slot| slot.borrow().is_some())
+    }
+}
+
+#[cfg(unix)]
+impl Drop for UnreadableUntilReadHeld {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let Some((path, mode)) = UNREADABLE_UNTIL_READ_HELD.with(|slot| slot.borrow_mut().take())
+        else {
+            return;
+        };
+        if fs::set_permissions(&path, fs::Permissions::from_mode(mode)).is_err() {
+            // Gone already, with the scratch tree it was in: nothing to put
+            // back, and the tree's own reclaim reports what it cannot remove.
+        }
+    }
+}
+
+/// A lease wait's acknowledgement of an observation that read the run's
+/// cleanup lease held, on this thread: put back the mode of the file
+/// [`unreadable_until_read_held`] armed, if one is armed, and nothing
+/// otherwise.
+#[cfg(unix)]
+pub(crate) fn a_wait_read_the_lease_held() {
+    if let Some((path, mode)) = UNREADABLE_UNTIL_READ_HELD.with(|slot| slot.borrow_mut().take()) {
+        set_mode(&path, mode);
+    }
 }
 
 // -----------------------------------------------------------------------
@@ -2977,6 +3364,15 @@ pub(crate) fn median(durations: &[std::time::Duration]) -> Option<std::time::Dur
 /// bound that decides nothing but a failure, never an order.
 pub(crate) const LINK_BOUND: std::time::Duration = std::time::Duration::from_secs(120);
 
+/// How long [`LinkedChild::kill`] and the link's drop wait for a child they
+/// killed to become collectable, and the drop for the reader of its stdout to
+/// end: a bound that decides nothing but a failure. A child the kernel will not
+/// hand back after `SIGKILL` -- held at its exit stop by a tracer, or in
+/// uninterruptible sleep with the signal pending -- fails the test that killed
+/// it, rather than holding that test, and the suite with it, until the child
+/// ends by itself (`PR328-LINKED-CHILD-KILL-WAITS-WITHOUT-A-DEADLINE`).
+pub(crate) const COLLECT_BOUND: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// A second process of this test binary, run `--exact <test> --ignored`, whose
 /// stdin and stdout are pipes to this process: the parent's end of a link that
 /// carries one line per message in each direction.
@@ -3005,10 +3401,19 @@ pub(crate) const LINK_BOUND: std::time::Duration = std::time::Duration::from_sec
 /// `Child::kill` -- `SIGKILL` on Unix, `TerminateProcess` on Windows -- so a
 /// killed child is a coordinator that died without running a line of its
 /// own cleanup, which is the death the resume tests are about.
+///
+/// **Every wait after a kill is bounded** ([`COLLECT_BOUND`]). A child still
+/// not collectable at the bound fails the test, naming what the kill answered
+/// and carrying the child's stderr, and is left to this process's exit; the
+/// drop does the same without panicking while the thread is already
+/// unwinding, and says so on stderr instead. A reader still reading at the
+/// bound -- the child gone, and something it started still holding its end of
+/// the pipe -- is left running, and the drop says so.
 pub(crate) struct LinkedChild {
     child: std::sync::Mutex<std::process::Child>,
     stdin: std::sync::Mutex<Option<std::process::ChildStdin>>,
     reader: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
+    stderr: PathBuf,
 }
 
 impl LinkedChild {
@@ -3059,6 +3464,7 @@ impl LinkedChild {
             child: std::sync::Mutex::new(child),
             stdin: std::sync::Mutex::new(stdin),
             reader: std::sync::Mutex::new(None),
+            stderr: stderr.to_path_buf(),
         };
         let stdout = stdout.expect("the linked child's stdout");
         let (lines, received) = std::sync::mpsc::channel();
@@ -3103,17 +3509,66 @@ impl LinkedChild {
         pipe.write_all(framed.as_bytes()).is_ok() && pipe.flush().is_ok()
     }
 
-    /// Kill the child (`Child::kill`) and reap it, returning how it ended.
+    /// Kill the child (`Child::kill`) and reap it within [`COLLECT_BOUND`],
+    /// returning how it ended.
+    ///
+    /// # Panics
+    ///
+    /// When the child is still not collectable at the bound: the test fails,
+    /// naming what the kill answered and carrying the child's stderr, and the
+    /// child is left to this process's exit.
     pub(crate) fn kill(&self) -> std::process::ExitStatus {
+        self.kill_within(COLLECT_BOUND)
+            .unwrap_or_else(|still| panic!("{still}"))
+    }
+
+    /// [`Self::kill`]'s kill and collection, the collection polled with
+    /// `try_wait` and a 10 ms rest for at most `bound`: `Err` saying so when
+    /// the child is still not collectable then. The rest paces the question
+    /// and orders nothing.
+    pub(crate) fn kill_within(
+        &self,
+        bound: std::time::Duration,
+    ) -> Result<std::process::ExitStatus, String> {
         let mut child = self
             .child
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Ok(Some(status)) = child.try_wait() {
-            return status;
+            return Ok(status);
         }
-        let _ = child.kill();
-        child.wait().expect("reap the linked child after its kill")
+        let killed = child.kill();
+        let deadline = std::time::Instant::now() + bound;
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => return Ok(status),
+                Ok(None) => {}
+                Err(error) => {
+                    return Err(format!(
+                        "the linked child {} could not be polled after its kill: {error}",
+                        child.id()
+                    ));
+                }
+            }
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                let killed = match &killed {
+                    Ok(()) => "delivered".to_owned(),
+                    Err(error) => error.to_string(),
+                };
+                return Err(format!(
+                    "the linked child {} was still not collectable {bound:?} after its kill \
+                     ({killed}): this test fails rather than wait for it, and leaves it to this \
+                     process's exit; its stderr:\n{}",
+                    child.id(),
+                    fs::read_to_string(&self.stderr).unwrap_or_default()
+                ));
+            }
+            rest_within(
+                std::time::Duration::from_millis(10),
+                deadline.saturating_duration_since(now),
+            );
+        }
     }
 
     /// The child's exit status once it ends within `bound`; `None` when it has
@@ -3151,14 +3606,64 @@ impl Drop for LinkedChild {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .take(),
         );
-        let _ = self.kill();
-        if let Some(reader) = self
+        let collected = self.kill_within(COLLECT_BOUND);
+        let reader = self
             .reader
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()
+            .take();
+        match collected {
+            Ok(_) => {
+                let Some(reader) = reader else {
+                    return;
+                };
+                let deadline = std::time::Instant::now() + COLLECT_BOUND;
+                while !reader.is_finished() {
+                    let now = std::time::Instant::now();
+                    if now >= deadline {
+                        say(&format!(
+                            "the reader of a linked child's stdout was still reading \
+                             {COLLECT_BOUND:?} after the child was collected -- something the \
+                             child started holds its end of the pipe -- and is left running"
+                        ));
+                        return;
+                    }
+                    rest_within(
+                        std::time::Duration::from_millis(10),
+                        deadline.saturating_duration_since(now),
+                    );
+                }
+                if reader.join().is_err() {
+                    say("the reader of a linked child's stdout panicked");
+                }
+            }
+            // The reader cannot reach the end of a pipe a live child holds:
+            // it is left with the child.
+            Err(still) => {
+                drop(reader);
+                if std::thread::panicking() {
+                    say(&still);
+                } else {
+                    panic!("{still}");
+                }
+            }
+        }
+    }
+}
+
+/// Say `line` on this process's stderr: through [`say_on_stderr`] on Unix,
+/// and one unretried write on Windows, where this file names no print macro.
+pub(crate) fn say(line: &str) {
+    #[cfg(unix)]
+    say_on_stderr(&format!("{line}\n"));
+    #[cfg(windows)]
+    {
+        use std::io::Write as _;
+        if std::io::stderr()
+            .write_all(format!("{line}\n").as_bytes())
+            .is_err()
         {
-            let _ = reader.join();
+            // No other channel to say so on.
         }
     }
 }
