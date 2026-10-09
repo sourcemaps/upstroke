@@ -15768,9 +15768,10 @@ fn a_registry_access_returns_a_vetoed_failure_unchanged_after_one_attempt() {
 /// T4: an access whose every attempt fails refuses at its deadline as a
 /// registry refusal, never as Git state, naming the store, the deadline, the
 /// attempt count and the last failure; every failure answered `Attempt` and was
-/// counted, the last one included. The final attempt is the one that follows
-/// the sleep the deadline cut short (§6.4, step 7): with attempts that take no
-/// time the backoff fits sixteen in 500 ms.
+/// counted, the last one included. The final attempt is the first that begins
+/// at or after the deadline (§6.4, step 7): with attempts that take no time it
+/// follows the sleep the deadline cut short, and the backoff fits sixteen in
+/// 500 ms.
 #[test]
 fn a_registry_access_that_always_fails_refuses_at_its_deadline_naming_the_count_and_the_last_failure()
  {
@@ -15883,10 +15884,12 @@ fn an_undecidable_veto_refuses_at_once_naming_why() {
 }
 
 /// T4 (the final attempt, FUD-D1-PROGRESS): a failure repaired by the
-/// deadline is passed by the attempt the deadline's cut-short sleep leads to.
-/// Every attempt fails until the access's deadline, which is no earlier than
-/// `REGISTRY_ACCESS_DEADLINE` after this test's clock was read; only an attempt
-/// made at the deadline can succeed, and the contract makes exactly one.
+/// deadline is passed by the final attempt, the first made at or after the
+/// deadline: after the deadline's cut-short sleep, or at once after an attempt
+/// the deadline passed during (the test below). Every attempt fails until the
+/// access's deadline, which is no earlier than `REGISTRY_ACCESS_DEADLINE` after
+/// this test's clock was read; only an attempt made at or after the deadline
+/// can succeed, and the contract makes exactly one.
 #[test]
 fn the_final_attempt_passes_a_failure_repaired_by_the_deadline() {
     let (_tree, key) = contract_key("registry-access-final");
@@ -15918,6 +15921,48 @@ fn the_final_attempt_passes_a_failure_repaired_by_the_deadline() {
     );
 }
 
+/// T4 (the final attempt, FUD-D1-PROGRESS): an attempt that began before the
+/// deadline and failed after it is followed by the final attempt, at once, and
+/// a store repaired by the deadline is passed. The first attempt reads the
+/// store before its repair and the deadline passes while it runs, as a slow Git
+/// command or a descheduled thread makes it pass.
+#[test]
+fn the_final_attempt_follows_an_attempt_the_deadline_passed_during() {
+    let (_tree, key) = contract_key("registry-access-straddle");
+    let mut made = 0_u32;
+    let repaired = std::time::Instant::now() + REGISTRY_ACCESS_DEADLINE;
+    let result = tolerant_registry_access(
+        &key,
+        RegistryHold::Unheld,
+        &mut crate::workspace_manager::sleep_for,
+        &mut || Again::Attempt,
+        &mut || {
+            made += 1;
+            let whole = std::time::Instant::now() >= repaired;
+            if made == 1 {
+                std::thread::sleep(
+                    REGISTRY_ACCESS_DEADLINE + std::time::Duration::from_millis(100),
+                );
+            }
+            if whole {
+                Ok(made)
+            } else {
+                Err(attempt_failed(made))
+            }
+        },
+    );
+    assert_eq!(
+        result.expect("the final attempt, after the deadline, meets the repaired store"),
+        2,
+        "the first attempt read the store before its repair; the second is the final one"
+    );
+    assert_eq!(
+        contended_attempts(&key),
+        1,
+        "one failure, answered `Attempt`"
+    );
+}
+
 /// T4: `contended_attempts` counts exactly the `Attempt` answers: two of them,
 /// then a `Return`, count two; an `Undecidable` and a `Return` count nothing
 /// (the two tests above).
@@ -15943,15 +15988,17 @@ fn contended_attempts_counts_exactly_the_attempt_answers() {
     assert_eq!((made, contended_attempts(&key)), (3, 2));
 }
 
-/// T4 (FUB-D6-BOUND): a veto that blocks past the deadline is followed by no
-/// attempt; the access returns after it, refusing. The bound is the deadline
-/// plus the last attempt's runtime plus the veto's, and the helper bounds
-/// neither.
+/// T4 (FUB-D6-BOUND): a veto that blocks past the deadline, after an attempt
+/// that began before it, is followed by the final attempt alone, at once; the
+/// access returns after that attempt's veto, refusing. The bound is the
+/// deadline plus the runtimes of the last two attempts and of the vetoes after
+/// them, and the helper bounds none of them.
 #[test]
-fn a_veto_that_blocks_past_the_deadline_is_followed_by_no_attempt() {
+fn a_veto_that_blocks_past_the_deadline_is_followed_by_the_final_attempt_alone() {
     let (_tree, key) = contract_key("registry-access-slow-veto");
     let blocked = REGISTRY_ACCESS_DEADLINE + std::time::Duration::from_millis(100);
     let mut made = 0_u32;
+    let mut began: Vec<std::time::Instant> = Vec::new();
     let started = std::time::Instant::now();
     let result: Result<(), _> = tolerant_registry_access(
         &key,
@@ -15963,17 +16010,27 @@ fn a_veto_that_blocks_past_the_deadline_is_followed_by_no_attempt() {
         },
         &mut || {
             made += 1;
+            began.push(std::time::Instant::now());
             Err(attempt_failed(made))
         },
     );
     let took = started.elapsed();
     let message = registry_refusal(result, "an access whose veto blocked past its deadline");
     assert_eq!(
-        made, 1,
-        "no attempt after a veto that ended past the deadline"
+        made, 2,
+        "the final attempt after the veto, and none after it"
     );
-    assert!(took >= blocked, "it returned after the veto: {took:?}");
-    assert!(message.contains("1 attempt(s)"), "{message}");
+    assert!(
+        began
+            .get(1)
+            .is_some_and(|second| *second >= started + REGISTRY_ACCESS_DEADLINE),
+        "the final attempt began after the deadline: {began:?}"
+    );
+    assert!(
+        took >= blocked + blocked,
+        "it returned after the final attempt's veto: {took:?}"
+    );
+    assert!(message.contains("2 attempt(s)"), "{message}");
 }
 
 /// T4 and T9: with R-X held alone by another thread, as the torn-registration

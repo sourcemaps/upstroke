@@ -113,10 +113,12 @@ scans.
   left torn, and any other fault of the store, such as a store nothing can write, a registration
   Git cannot list, or a listed path that stays unreadable. A failure the access cannot decide, such
   as a destination holding something the add did not leave, refuses at once.
-- The deadline covers the access's waits, its retries and the start of every attempt; the attempt
-  after a backoff the deadline cut short is made, at the deadline, and is the last. It does not bound
-  the last Git command already running, which a filter, a large checkout or a slow filesystem can
-  extend, nor the short decision after it.
+- The deadline covers the access's waits, its retries and the start of every attempt but the last:
+  the first attempt that begins at or after the deadline is made and is the last, after a backoff the
+  deadline cut short or, if the deadline passed while an attempt or the short decision after it ran,
+  at once after them. So a store a writer leaves whole by the deadline is passed. It does not bound
+  that last Git command, or the one running when the deadline passed, which a filter, a large
+  checkout or a slow filesystem can extend, nor the short decision after each.
 - On the topology coordinator a wait answers the coordinator's messages instead of sleeping. A wait
   that answers one that ends the command, such as a shutdown, ends the access there, with no further
   attempt, and the transition it waited in: nothing further is appended, published or spawned for

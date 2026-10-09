@@ -1794,12 +1794,17 @@ fn note_slept_pause() {}
 ///    attempt runs. A veto that cannot be evaluated is never returned as Git
 ///    state and never attempted past.
 /// 6. On [`Again::Attempt`], it counts the answer for the test handshake
-///    (`note_contended`). If the deadline has passed, it refuses. Otherwise it
-///    waits out the backoff through `pause_for` — one millisecond, doubling, at
-///    most [`REGISTRY_BACKOFF_CEILING`], never past the deadline — and goes
-///    back to 1.
-/// 7. So the attempt that follows a wait the deadline cut short is made, and
-///    it is the last: a store a writer leaves whole by the deadline is passed.
+///    (`note_contended`). If the attempt that failed began at or after the
+///    deadline, it refuses: that attempt was the final one. Otherwise, while
+///    the deadline has not passed, it waits out the backoff through
+///    `pause_for` — one millisecond, doubling, at most
+///    [`REGISTRY_BACKOFF_CEILING`], never past the deadline — and goes back to
+///    1; once the deadline has passed, it goes back to 1 at once.
+/// 7. So the first attempt that begins at or after the deadline is made, and
+///    it is the last: the attempt after a wait the deadline cut short or, when
+///    the deadline passed during an attempt, its veto or the count, the attempt
+///    made at once after them. A store a writer leaves whole by the deadline is
+///    passed.
 ///
 /// **Where it waits.** Every wait — each backoff, and each turn of the wait
 /// for R-X — is one call of `pause_for`. A caller passes the call's
@@ -1818,11 +1823,12 @@ fn note_slept_pause() {}
 ///
 /// **The bound, end to end.** One deadline, [`REGISTRY_ACCESS_DEADLINE`] after
 /// the call begins. Every wait for R-X and every backoff sleep ends by it, and
-/// no attempt starts after it but the final one, which starts at it. Nothing
-/// interrupts an attempt or a veto that has started — killing a Git writer
-/// mid-write is exactly what leaves a torn registration — so an access returns
-/// by the deadline plus the runtime of its last attempt plus the runtime of the
-/// veto after it, and bounds neither.
+/// no attempt starts after it but the final one, which starts at it or, when
+/// the deadline passed during the attempt before it or that attempt's veto, as
+/// soon as that veto has returned. Nothing interrupts an attempt or a veto that
+/// has started — killing a Git writer mid-write is exactly what leaves a torn
+/// registration — so an access returns by the deadline plus the runtimes of its
+/// last two attempts and of the vetoes after them, and bounds none of them.
 ///
 /// **What it returns:** `Ok` from the first successful attempt; the failed
 /// attempt's own error, unchanged, when `again` answers `Return`; the error of
@@ -1855,13 +1861,12 @@ pub(crate) fn tolerant_registry_access<T>(
     let mut attempts: u32 = 0;
     let mut last: Option<UpstrokeError> = None;
     loop {
-        let Some(outcome) = with_registry(
-            common_git_dir,
-            hold,
-            deadline,
-            &mut *pause_for,
-            &mut *attempt,
-        )?
+        let mut began = None;
+        let Some(outcome) =
+            with_registry(common_git_dir, hold, deadline, &mut *pause_for, &mut || {
+                began = Some(std::time::Instant::now());
+                attempt()
+            })?
         else {
             return Err(registry_lock_refusal(
                 &store,
@@ -1891,8 +1896,7 @@ pub(crate) fn tolerant_registry_access<T>(
             Again::Attempt => {}
         }
         note_contended(common_git_dir);
-        let now = std::time::Instant::now();
-        if now >= deadline {
+        if began.is_none_or(|began| began >= deadline) {
             return Err(UpstrokeError::RegistryRefused {
                 message: format!(
                     "the worktree registry {} kept this access from completing until its \
@@ -1902,8 +1906,11 @@ pub(crate) fn tolerant_registry_access<T>(
                 ),
             });
         }
-        pause_for(pause.min(deadline.saturating_duration_since(now)))?;
-        pause = pause.saturating_mul(2).min(REGISTRY_BACKOFF_CEILING);
+        let now = std::time::Instant::now();
+        if now < deadline {
+            pause_for(pause.min(deadline.saturating_duration_since(now)))?;
+            pause = pause.saturating_mul(2).min(REGISTRY_BACKOFF_CEILING);
+        }
         last = Some(failure);
     }
 }
