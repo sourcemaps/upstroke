@@ -54,6 +54,9 @@ routes a defect of #329's test to #329 and merges #329's head `83006dc4`, provis
 `~/orch-pr11/logs/pr11_fuc_impl5/`, cited as `c6r5/…`. Repair round 6 (§6.13), after the i3 review of `6066758b`,
 which also merges #329's head `17bd5652`, provisionally again, is `pr11_fuc_impl6`'s (the same model and effort, a fresh
 session on this branch at `6066758b`); its figures are under `~/orch-pr11/logs/pr11_fuc_impl6/`, cited as `c6r6/…`.
+Repair round 7 (§6.14), after #329 merged, which merges master `c0ed07a5` (#329's merge, carrying #329's final head
+`53d972e9`) and repairs the i4 review's C-I4-1, is `pr11_fuc_impl7`'s (the same model and effort, a fresh session on
+this branch at `66e8a393`); its figures are under `~/orch-pr11/logs/pr11_fuc_impl7/`, cited as `c6r7/…`.
 
 **The evidence plan was conservative, by direction.** Read our code, read Git's source at the three versions that
 matter, cite the corruption witnesses #329 already executed at base rather than rebuild them, and run one new witness
@@ -76,7 +79,7 @@ signal no process (§5, opening).
 
 | Phase | State |
 |---|---|
-| Implementation (§6) | **IMPLEMENTED; REVIEWED AT `83516466` (CHANGES_REQUIRED, ONE P1); REPAIRED IN ROUND 3 (§6.10), WHOSE DELTA REVIEW AT `778abee6` PASSED WITH ONE P3; INTEGRATED PROVISIONALLY WITH #329'S HEAD `ce55ca91` IN ROUND 4 (§6.11) AND WITH #329'S HEAD `83006dc4` IN ROUND 5 (§6.12); THAT PROVISIONAL HEAD `6066758b` REVIEWED (i3: THE REGRESSION LENS PASSED, THE REGULAR LENS CHANGES_REQUIRED WITH TWO P3S) AND REPAIRED IN ROUND 6 (§6.13), WHICH ALSO INTEGRATED #329'S HEAD `17bd5652` PROVISIONALLY; NOT YET RE-REVIEWED, AND NOT YET INTEGRATED WITH #329'S FINAL HEAD — U as §4 and §5 specify, with the PR11 decision appendix's §11 rows for this change.** It is built on #329's head `17bd5652`, merged in at `6b3fe4a0` as a provisional integration (repair round 6; `83006dc4`, merged at `2f2468c3` in round 5, was provisional too; corrected at repair round 5: `ce55ca91`, merged at `905ed0c8`, was provisional too and is not #329's final head; first merged at `e46b71d3`), and uses #329's targeted removal, tolerant registry access and coordinator pause as they are. **#329 is not final: this change must integrate #329's actual final code and text, and then be revalidated — the gates, native CI and the reviews.** **Three frozen changes are on the branch, each proposed, conditional on the owner's freeze ruling and not adopted: #329's H1 and H3 (H3 as #329's round B4 revised it) and this change's C-R1 (§6.11, §6.12)**; D4 did not trigger, as this change changes no frozen test (§6.3): H3, in the frozen `recover/tests.rs`, is #329's and among the rulings #329's merge waits on. Accounting, the packet and every Git child's inherited environment are unchanged. Its merge is the orchestrator's once the owner's decisions it waits on are made: #329 merged, E-FUC-3's adoption, O4, O7 (or R-REF's disposition), O3's or O3-R's route for FUC-D5-GITINDEXFILE (§6.9), and the freeze ruling for C-R1 (§6.11). Repair round 2 (§6.9) fixed CI's one red leg on `1fc0c911`, a pre-existing Windows-only test whose fixture planted its file under the slot's untagged name, and audited every platform-gated test for the same derivation: there is no other. Repair round 3 (§6.10) fixed the implementation review's five items: the torn-registration repair removes the proven torn instance alone, a resume's recreate reclaims every earlier incarnation's intent before its replacement, Q's three open findings are filed, and two test-only items. Repair round 4 (§6.11) merged #329's head `ce55ca91` provisionally (not its final head; corrected at repair round 5), routed every registry wait of C's cleanup through the coordinator (the repair's and the final sweep's instance removal, the sweep's and the walks' discovery read), proposed C-R1 for the two frozen walks that make the discovery read, and corrected the body's validation paragraph (C-I2-1). Repair round 5 (§6.12) found CI's one red leg on `7904ca71` to be #329's dispatch-intent shutdown witness, a test of #329's (shown on a Linux stand-in, whose thresholds are not a measured causal proof of the guest's failure), routed its fix to #329, merged #329's resulting head `83006dc4` provisionally at `2f2468c3`, and corrected "final head" to provisional throughout. Repair round 6 (§6.13) fixed the i3 review's two P3s: the one routing point round 4's matrix covered only in combination, an attempt's residue discard, now has a witness of its own, through its call site, and a row of its own, and every routing point's row was run again alone; and a current source comment that still called the provisional merge `905ed0c8` #329's final head now says provisional. It then merged #329's head `17bd5652` provisionally at `6b3fe4a0`, as the orchestrator's answer directed: that brings #329's repair of I6-1, whose review is pending, and #329's record of a red at `9bcfb3f3`, carried as the fingerprint match that record calls it. |
+| Implementation (§6) | **IMPLEMENTED; REVIEWED AT `83516466` (CHANGES_REQUIRED, ONE P1); REPAIRED IN ROUND 3 (§6.10), WHOSE DELTA REVIEW AT `778abee6` PASSED WITH ONE P3; INTEGRATED PROVISIONALLY WITH #329'S HEAD `ce55ca91` IN ROUND 4 (§6.11) AND WITH #329'S HEAD `83006dc4` IN ROUND 5 (§6.12); THAT PROVISIONAL HEAD `6066758b` REVIEWED (i3: THE REGRESSION LENS PASSED, THE REGULAR LENS CHANGES_REQUIRED WITH TWO P3S) AND REPAIRED IN ROUND 6 (§6.13), WHICH ALSO INTEGRATED #329'S HEAD `17bd5652` PROVISIONALLY; ROUND 6 REVIEWED AT `66e8a393` (i4: THE REGRESSION LENS PASSED, THE REGULAR LENS CHANGES_REQUIRED WITH ONE P3); #329 MERGED (`c0ed07a5`) AND ITS FINAL HEAD `53d972e9` INTEGRATED AT `89a65ccd` IN ROUND 7 (§6.14), WHICH ALSO REPAIRS THE i4 P3; ROUND 7 NOT YET REVIEWED — U as §4 and §5 specify, with the PR11 decision appendix's §11 rows for this change.** It is built on master `c0ed07a5`, #329's merge, which carries #329's final head `53d972e9`, merged in at `89a65ccd` (repair round 7: the final integration; the earlier ones were provisional: #329's `17bd5652` at `6b3fe4a0` in round 6, `83006dc4` at `2f2468c3` in round 5 and `ce55ca91` at `905ed0c8` in round 4; first merged at `e46b71d3`), and uses #329's targeted removal, tolerant registry access and coordinator pause as they are. **#329's final code and text are integrated; of the revalidation, native CI and the review of round 7's delta remain (§6.14).** **This change's own frozen change, C-R1 (§6.11), is proposed, conditional on the owner's freeze ruling and not adopted; #329's H1 and revised H3, which the owner adopted on 2026-10-08, are master's (§6.14)**; D4 did not trigger, as this change changes no frozen test (§6.3). Accounting, the packet and every Git child's inherited environment are unchanged. Its merge, under the standing delegation, needs exactly: the owner's choices (E-FUC-3's adoption, O4(a), O7 or R-REF's disposition with O7(a)'s method stopped, O3's or O3-R's route for FUC-D5-GITINDEXFILE (§6.9), the freeze ruling for C-R1 (§6.11), O6 if it is triggered, and O11's item (iv), whose basis is U); the review of round 7's delta; and CI (§6.14). It has no relation to O14(b) (§6.14). Repair round 2 (§6.9) fixed CI's one red leg on `1fc0c911`, a pre-existing Windows-only test whose fixture planted its file under the slot's untagged name, and audited every platform-gated test for the same derivation: there is no other. Repair round 3 (§6.10) fixed the implementation review's five items: the torn-registration repair removes the proven torn instance alone, a resume's recreate reclaims every earlier incarnation's intent before its replacement, Q's three open findings are filed, and two test-only items. Repair round 4 (§6.11) merged #329's head `ce55ca91` provisionally (not its final head; corrected at repair round 5), routed every registry wait of C's cleanup through the coordinator (the repair's and the final sweep's instance removal, the sweep's and the walks' discovery read), proposed C-R1 for the two frozen walks that make the discovery read, and corrected the body's validation paragraph (C-I2-1). Repair round 5 (§6.12) found CI's one red leg on `7904ca71` to be #329's dispatch-intent shutdown witness, a test of #329's (shown on a Linux stand-in, whose thresholds are not a measured causal proof of the guest's failure), routed its fix to #329, merged #329's resulting head `83006dc4` provisionally at `2f2468c3`, and corrected "final head" to provisional throughout. Repair round 6 (§6.13) fixed the i3 review's two P3s: the one routing point round 4's matrix covered only in combination, an attempt's residue discard, now has a witness of its own, through its call site, and a row of its own, and every routing point's row was run again alone; and a current source comment that still called the provisional merge `905ed0c8` #329's final head now says provisional. It then merged #329's head `17bd5652` provisionally at `6b3fe4a0`, as the orchestrator's answer directed: that brings #329's repair of I6-1, which #329's B7 review had already passed when round 6 published (corrected at round 7, C-I4-1), and #329's record of a red at `9bcfb3f3`, carried as the fingerprint match that record calls it. Repair round 7 (§6.14) merged master `c0ed07a5` once #329 merged, #329's final code and text, with no conflict; ran this change's own tests, the routing rows, the platforms and the frozen proof again there; corrected the record's and the body's statements of #329's state (C-I4-1); and read #329's T11 class over this change's witnesses, whose five unheld members are a question to the orchestrator. |
 | Design, round 5 (§5) | Reviewed by design review round 5 on `30026823` (`~/orch-pr11/reviews/review-330-d5-triage.md`), whose items against U §6 takes. Round 5 read: **PROPOSED — the last design round before the owner's consolidated question; the owner's decisions D1 to D5 (§5.9).** It answers design review round 4, whose three lenses returned CHANGES_REQUIRED on `12375c7e` with one P1: Git's shared rerere state crosses U's instance boundary. Every engine Git command now runs with rerere disabled, executed on 2.43.0 and 2.55.0 for its effect: no engine pick reads or writes `rr-cache` (§5.2). The common git dir is censused path by path, by plain listings and trace2 on both versions, and the census adds `worktree.useRelativePaths=false` (§5.3). Terminal finalization's last step sweeps every earlier incarnation's instance in non-frozen manager code, and the window after it is R-UR, P3, with E-FUC-3's stated exception (§5.4). R-REF is the owner's decision D5 and blocks G6 until it is made (§5.5). This head changes no production code. |
 | Design, round 4 (§4) | Superseded in part by §5; §5.11 lists what it replaces. Round 4 read: **PROPOSED — U repaired, retention withdrawn, Q frozen; the owner's decisions D1 to D4 (§4.15).** It answers design review round 3, whose three lenses returned CHANGES_REQUIRED on `a0464f43` with one P1, in U's tag, and the looping signal raised the third time (§4.1). The production incarnation id now carries host randomness through the standard library's `RandomState`, and the tag is 60 bits of a hash of it (§4.2). Every walk discovers other incarnations' instances no intent names, executed again with saved evidence on 2.43.0 and 2.55.0 (§4.3). A dead instance that cannot be removed refuses the command, so Q1's order and the outcome equations stand (§4.5). The frozen oracles' replacements are specified fixture by fixture (§4.6). R-REF is regraded and filed (§4.8), Q's open items are restated (§4.9), and R-GU is analysed from DESC's side and filed by #329 (§4.11). This head changes no production code. |
 | Design, round 3 (§3) | Superseded in part by §4; §4.17 lists what it replaces. Round 3 read: **PROPOSED — the closure choice, framed for the owner's decisions D1 to D4 (§3.8).** It answers design review round 2, whose three lenses returned CHANGES_REQUIRED on `a9be94bc`, and the looping signal (§3.1): it proposes the smaller change. Recovery recomputes every slot from non-frozen code and never reads the recorded `worktree_path`, so slot paths and registration names can be unique per coordinator incarnation with no frozen code changed; the packet's T-DISPATCH, R9 and naming texts change instead (erratum E-FUC-3, revised, §3.3.7). Executed with git commands only on 2.43.0 and 2.55.0: a dead incarnation's late add, its `remove_junk` and a `setsid` helper damage a same-path replacement and leave a uniquely named one intact (§3.3.3). R-G is P1, and its in-window variant needs follow-up D's legacy change (§3.4). Q is repaired where no new layer is needed, with PGIDREUSE left open (§3.5). This head changes no production code. |
@@ -3657,7 +3660,9 @@ sides; #329's text, which carries its dated note, is taken (blob `81ec6201`). U 
 access, its targeted removal and its deletion of every engine prune. (Corrected at repair rounds 4 to 6: #329's head
 `ce55ca91`, a provisional integration and not #329's final head, is merged at `905ed0c8`, and U's cleanup now waits
 through #329's coordinator pause, §6.11; #329's head `83006dc4`, provisional again, is merged at `2f2468c3`, §6.12; and
-#329's head `17bd5652`, provisional again, at `6b3fe4a0`, §6.13.)
+#329's head `17bd5652`, provisional again, at `6b3fe4a0`, §6.13. Each of those was provisional when it was made, and
+§6.11 to §6.13 state #329's state as of their rounds. Corrected at repair round 7: #329 merged, and master `c0ed07a5`,
+its merge, which carries #329's final head `53d972e9`, is merged at `89a65ccd`, the final integration, §6.14.)
 
 ### 6.1 Per file: what changed
 
@@ -3895,6 +3900,9 @@ condition does not hold.
   (`recover/tests.rs`, blob `407b27cb`), a third proposed frozen change, #329's; H1 is unchanged (`bf62256e`). This
   change's own frozen delta against #329's head is still C-R1 alone, and it changes no frozen test, so D4 still did not
   trigger.
+- **Corrected at repair round 7** (§6.14): the owner adopted H1 and the revised H3 on 2026-10-08, in the B-first set,
+  and they are master's since #329 merged (`c0ed07a5`). This change's one frozen change over master is C-R1, still
+  proposed; it changes no frozen test, so D4 still did not trigger.
 
 ### 6.4 The whole suite, and residue base against head
 
@@ -5009,15 +5017,19 @@ re-stamped (`c6r6/merge/MERGE.txt`).
 - **#329's change came in byte for byte.** Its diff `83006dc4..17bd5652` and the merge's `413101f2..6b3fe4a0` have one
   patch-id, and its record and `coordinator.md` are #329's blobs.
 - **It is provisional.** #329 is not final: its B7 review of `83006dc4..17bd5652` began at 18:40Z, and #329 is final
-  only after its required review and closure.
+  only after its required review and closure. *Corrected at repair round 7 (C-I4-1):* B7 had ended before this round
+  published, PASS on both lenses at `17bd5652` at 18:57:57Z (`~/orch-pr11/reviews/review-330-i4-triage.md`). #329
+  became final with its merge, `c0ed07a5`, whose code round 7 integrates (§6.14).
 - **What comes in:**
   - `2386f2c4`, I6-1's repair, test-only. The slow dispatch witness owns, joins and cancels its delay worker, and fails
     when the worker panicked. It adds a self-test, `a_delayed_release_whose_worker_panicked_fails_its_witness`, doc
     comments on two `cfg(test)` helpers of the manager, and `coordinator.md`'s notes;
   - `9bcfb3f3`, #329's record §9.23, with I6-2;
   - `17bd5652`, #329's record §9.24.
-- **I6-1's repair came in with this merge, and its review (B7) is pending.** Before the merge this change inherited I6-1
-  through `83006dc4` (above); it now carries #329's repair of it, unreviewed.
+- **I6-1's repair came in with this merge.** Before the merge this change inherited I6-1 through `83006dc4` (above); it
+  now carries #329's repair of it. *Corrected at repair round 7 (C-I4-1):* as first published, this bullet called that
+  repair's review outstanding. B7, which reviewed it, had ended PASS on both lenses at `17bd5652` at 18:57:57Z, before
+  this round's push. #329's record carries I6-1 as `FUB-I6-DELAYWORKER`, P3, fixed by `2386f2c4` (its §9.23).
 - **The red at `9bcfb3f3`, as #329's §9.24 records it.** CI at `9bcfb3f3` was red on its ubuntu leg in master's
   `sibling_v1_runs_in_one_repository_share_one_include_and_keep_their_roles_recorded`. The child's message matches the
   filed legacy-race P1's recorded signature. That is a fingerprint match only; its cause and attribution are not
@@ -5043,9 +5055,10 @@ re-stamped (`c6r6/merge/MERGE.txt`).
 #### Preserved
 
 - **#329's integration is PROVISIONAL**, now at `17bd5652`, merged at `6b3fe4a0` (above), as it was at `83006dc4`,
-  merged at `2f2468c3`. #329 is final only after its required review and closure, and its B7 review is pending. This
-  change must integrate #329's actual final code and text, and then be revalidated: the gates, native CI and the
-  reviews.
+  merged at `2f2468c3`. #329 is final only after its required review and closure. This change must integrate #329's
+  actual final code and text, and then be revalidated: the gates, native CI and the reviews. *Corrected at repair round
+  7 (C-I4-1):* as first published, this bullet called B7 pending; it had ended PASS on both lenses before this round's
+  push. #329 is final and merged since `c0ed07a5`, which round 7 integrates (§6.14).
 - **The three proposed frozen changes**, each conditional on the owner's freeze ruling and not adopted: #329's H1 and
   H3, H3 as #329's round B4 revised it, and this change's C-R1. This round changes no frozen file.
 - **The three Docker sightings of round 5** (§6.12) keep their trees, failing logs, dispositions, guards and owed G6
@@ -5087,3 +5100,268 @@ re-stamped (`c6r6/merge/MERGE.txt`).
   The new witness is not platform-gated, so it runs on every CI leg, with a registration whose `gitdir` is a directory,
   which Windows refuses to read as a file too. CI is the truth for Windows and macOS.
 - **The ten gates** run at the head that carries this record; the pull request's body gives them.
+
+### 6.14 Repair round 7: #329 merged, its final head integrated at `89a65ccd`, and C-I4-1
+
+**What this subsection is.** The work of `pr11_fuc_impl7` (`claude-opus-5-5`, `max`), a fresh repairer the PR11
+orchestrator (`orch_pr11b`) spawned on this branch at `66e8a393` under `~/orch-pr11/briefs/pr11_fuc_impl7.md` and its
+dated restatement of 2026-10-09T07:43:10Z. Its authority is the owner's B-first execution direction
+(`~/babysit-pr11/evidence/b-first-owner-approval-and-execution-20261008.md`, sha256 `77d4340c…`, item 5): once #329's
+requirements are met and it merges, C's already authorized final integration and repair advance. Its scope:
+- merge master, which carries #329's final code, as one merge commit: #329's final code wins where it and this branch's
+  provisional copy of #329 differ, and this change's own changes are kept;
+- re-validate, bounded, what #329's later rounds could affect: this change's own tests and witnesses, the routing rows
+  whose paths those rounds touched, and the frozen proof on the integrated tree;
+- C-I4-1, the i4 review's one finding (P3), with a sweep of this change's current text for any other stale statement
+  of #329's state;
+- this record and the body, and the ten gates at the final head; then a stop before any push, with a question to the
+  orchestrator (`~/orch-pr11/questions/pr11_fuc_impl7-1.md`).
+
+Its evidence is under `~/orch-pr11/logs/pr11_fuc_impl7/`, cited as `c6r7/…`. **It adopts no owner decision.** E-FUC-3,
+O4(a), O7 or R-REF's disposition (O7(a)'s method stays stopped), the O3 or O3-R route, C-R1's freeze ruling, O6 if it is
+triggered, and O11's item (iv), whose basis is U, stay the owner's.
+
+**The commits:** `89a65ccd`, the merge of master `c0ed07a5`, and this record's commit. This round changes no product
+code of this change's and no test.
+
+#### #329 merged: the landing, verified
+
+- **#329 is merged** (`c6r7/inputs/pr329-state.json`): MERGED at 2026-10-09T07:42:11Z, merge commit `c0ed07a5`, head
+  `53d972e9`.
+- **Master is that merge** (`c6r7/setup/03-ls-remote.txt` and `05-landing-verify.txt`, 07:45Z). `git ls-remote` gives
+  `refs/heads/master` at `c0ed07a5`. Its parents are `5c222ff2`, the previous master, and `53d972e9`, #329's final head
+  (its B17 round), and its tree is `53d972e9`'s. `120c8c8c` (B12) and `17bd5652`, the head this branch last merged, are
+  ancestors of `53d972e9`.
+- **This branch's remote head** was `66e8a393`, the pull request a draft (`c6r7/setup/03-ls-remote.txt`,
+  `c6r7/inputs/pr330-state-at-start.json`).
+- **The worktree was clean, and this session its sole writer,** by Git state alone (`c6r7/setup/01-worktree-state.txt`,
+  `02-worktree-reflog.txt`, `02b-reflog-rewrite.txt`): no change and no lock, HEAD at `66e8a393`, and the last HEAD
+  reflog entry round 6's commit at 2026-10-04T19:00:39Z. The reflog file's later mtime, 2026-10-09T02:26:59Z, is the
+  shared repository's reflog rewrite in that second, not a write to this worktree.
+
+#### The merge `89a65ccd`
+
+`89a65ccd` merges master `c0ed07a5` into `66e8a393` on the local branch `pr11-fuc-impl7`, with no rebase, so no
+`reviewed_sha` is re-stamped (`c6r7/merge/MERGE-MSG.txt`, `10-merge.log`, `11-merge-result.txt`).
+- **No conflict.** Git 2.43.0's `merge-tree --write-tree` gave tree `502300dc`, the tree the merge commit has
+  (`c6r7/merge/01-preview.txt`, `11-merge-result.txt`). Five paths both sides changed since the merge base `17bd5652`
+  auto-merged: `design/15`, `docs/internals/engine/topology/integrate.md`, `src/engine/topology/coordinator.rs`,
+  `src/workspace_manager.rs` and `src/workspace_manager/tests.rs`.
+- **#329's final code wins, and this change's own change is kept** (`c6r7/merge/14-merge-verify-89a65ccd.txt` and
+  `15-merge-verify-89a65ccd-U0.txt`, by `c6r7/tools/merge-verify.sh`):
+  - each of the 16 paths only #329 changed after `17bd5652` is master's blob at the merge (two of them findings #329
+    deleted, absent at both);
+  - each of the 28 paths only this change changed is its blob at `66e8a393` (one, the finding round 1 deleted as
+    fixed, absent at both);
+  - in each of the five auto-merged paths the merge adds and removes exactly #329's lines and exactly this change's:
+    their zero-context patch-ids are equal both ways. With default context three of the five are equal too.
+    `design/15` and `workspace_manager/tests.rs` differ only in context lines. In `design/15`, #329's one-line change
+    at the base's line 160 and this change's paragraph inserted after its line 161 are adjacent
+    (`c6r7/merge/06-adjacent-hunks.txt`), and the merged text is #329's sentence, a blank line, then this change's
+    paragraph (`08-design15-seam-merged.txt`).
+- **No conflict needed resolving,** so no resolution is recorded beyond that check, and nothing of #329's was edited on
+  this branch.
+- **What comes in,** `17bd5652..53d972e9`, 55 commits (`c6r7/setup/05-landing-verify.txt`,
+  `c6r7/merge/02-b-later-diffstat.txt`): #329's rounds B8 to B17, its record's §9.25 to §9.34. Among them:
+  - B-W924-R1 (`src/workspace.rs`) and B-W924-R2 (`src/engine/tests.rs`) and their repairs, adopted on 2026-10-08;
+  - the owner's B-first set recorded, with `design/26`'s texts and the findings filed (§9.28), and H1 and the revised
+    H3 adopted;
+  - the closure of W1 and W2, `PR329-A-DROPPED-RESUMES-RUN-STILL-READ-AS-RUNNING` and
+    `PR329-A-CREATION-PREFIX-RESUME-REFUSED-ON-A-HELD-CLEANUP-LEASE`, their repair H3 adopted (`f261459b`);
+  - T1, T3, T10 and T11 and their class waiting to the production registry deadline (§9.30, §9.31);
+  - the registry access's final-attempt rule (`bdf7f6ac`, §9.32);
+  - its clock read through `registry_now`, and its contract witnesses on a per-repository test clock (`e3cda508`,
+    §9.33);
+  - §9.34's corrections.
+- **Unchanged by the merge:** C-R1's two lines, and every file of the R-D set as it was at `66e8a393`: #329's later
+  rounds touched none of them (`c6r7/frozen/frozen-proof-89a65ccd.txt`, Part C).
+
+#### Re-validation: what #329's later rounds touch, and what ran again
+
+Besides #329's own record, findings and notes, #329's later rounds change:
+- `src/workspace.rs` and `src/engine/tests.rs` (R1 and R2), frozen legacy modules this change does not touch;
+- `src/workspace_manager.rs`'s registry access: its final attempt, its clock and the test build's deadline and clock
+  seams;
+- `src/workspace_manager/tests.rs`, #329's own tests;
+- `src/engine/topology/coordinator.rs`'s tests, where four of #329's witnesses now hold `WITNESS_REGISTRY_DEADLINE`
+  (`c6r7/merge/12-b-later-coordinator.diff`, `13-b-later-workspace_manager.diff`).
+
+Every registry wait this change routes goes through that access. So round 7 ran again, at the merge `89a65ccd`:
+- **The build** of every target with its tests: rc 0 (`c6r7/build/01-no-run.log`).
+- **This change's own tests:** the 69 library tests in whose function a line of this change's diff against master lies
+  (`c6r7/build/c-own-tests.txt`, by `c6r7/tools/c-own-tests.py`; the attribution is
+  `c6r7/build/c-own-tests-attribution.txt`). In each of three runs, 65 passed, 0 failed and 4 were ignored, the four
+  subprocess children their parents spawn (`c6r7/tests/c-own-x3-at-89a65ccd/`). Among them are the DESC witnesses,
+  U's tests, C-I1's and C-I2's, the twelve round-4 and C-R1 witnesses, and round 6's attempt witness. The three
+  Windows-only tests do not run here.
+- **The routing matrix's eleven code-head rows** (`c6r7/matrix/VERDICTS.txt`, by `c6r7/tools/r7-rows.py`, C6's
+  `r6-rows.py` with this round's base, tree and evidence directory; C5's 70-test list hashed in
+  `c6r7/inputs/matrix-tests-70.sha256`, with the attempt witness). 11 of 11 give exactly their expected red sets over
+  71 tests, as at `6b3fe4a0`.
+  - All eleven ran again, not only the rows whose mutated lines #329's later rounds moved, because each row's
+    witnesses wait through the access #329 changed.
+  - The attempt row's witness again slept 15 waits.
+  - The three historical rows, at `6066758b` and `905ed0c8`, are at commits the merge does not change, and stand as
+    §6.13 records them.
+- **The platforms, compiled and linted, never run** (`c6r7/platform/code-89a65ccd/`): `cargo clippy` for
+  `x86_64-pc-windows-msvc` and `aarch64-apple-darwin`, `cargo check` for `x86_64-pc-windows-msvc` on stable and on
+  1.85.0, and the host's 1.85.0 check, each with `-D warnings`: rc 0 each.
+- **The frozen proof and the legacy check,** below.
+
+**What stands without running again, and why.** Rounds 1 to 6's other witnesses and mutations ran on trees in which this
+change's own lines are byte for byte the merge's (the patch-ids above), and the whole suite runs in the ten gates at
+the final head. #329's witnesses are #329's final evidence; the slow-Git stand-in runs of rounds 5 and 6 over #329's
+fix-P and tear witnesses are not repeated, since those tests are #329's, final and merged.
+
+#### #329's T11 class, read over this change's witnesses: an observation, with its disposition the orchestrator's
+
+#329's B14 round (its record's §9.31) found a class among #329's tests: success after a contention the test's own act
+ends, under the test build's 500 ms registry deadline. One first attempt the platform makes slow can spend that whole
+deadline, and the access then asks for no wait, so a contention only a wait would end is never ended. T11 went red on
+the persistent Windows guest with that refusal's signature; that its first attempt there ran past 500 ms is #329's
+reasoning, executed on #329's stand-ins (§9.31.2). #329 repaired its seventeen by holding the production deadline
+(`e7ef8afe`), and
+the documentation of `PRODUCTION_REGISTRY_DEADLINE` in `src/workspace_manager/tests.rs` names "a wait made through its
+hooks" among the acts that call for the hold. #329's census covered #329's tests only.
+- **This change's witnesses, read for it.** The eleven coordinator witnesses this change added for its routing go
+  through #329's `TearHeld`, whose guard holds `WITNESS_REGISTRY_DEADLINE` while it lives. Five hold no deadline, and
+  end their contention by a wait through their hooks (`c6r7/class/tests-unheld-5.txt`): round 4's
+  `intents_pausing_reads_the_registry_through_the_hooks_it_is_handed`,
+  `a_reclaims_walk_reads_the_registry_through_the_hooks_it_is_handed`,
+  `the_final_sweeps_registry_read_waits_through_the_hooks_it_is_handed` and
+  `the_final_sweeps_removal_waits_through_the_hooks_it_is_handed`, and round 6's
+  `an_interrupted_attempts_residue_discard_reads_the_registry_through_the_hooks_it_is_handed`.
+- **Executed on a stand-in on this box, S2′** (`c6r7/class/s2prime.diff`, never committed; written from #329's
+  record's description of its S2, not from #329's tool). In a scratch copy of `89a65ccd`, the first `Attempt` answer
+  of each access ends 600 ms later, before it is counted (`c6r7/scratch/s2prime-at-89a65ccd/`):
+  - the five are red: four refused with "deadline (500ms): 2 attempt(s)", and the attempt witness with its hooks never
+    asked to wait;
+  - the twelve held controls are green: this change's eleven `TearHeld` witnesses and #329's held T11;
+  - over all 69 of this change's own tests, the same stand-in turns exactly the five red, and 60 pass, the four
+    subprocess children ignored (`c6r7/scratch/s2prime-c-own-69/`, `c6r7/class/s2prime-c-own-69-red.txt`).
+- **A repair is prepared, and not committed** (`c6r7/class/candidate-hold.diff`): each of the five holds its
+  repository's deadline at the production length, as #329's seventeen do. With it:
+  - under S2′, the seventeen are green (`c6r7/scratch/s2prime-candidate/`);
+  - with the five holds set back to 500 ms, exactly the five are red again (`s2prime-candidate-reversed/`,
+    `c6r7/class/reversed-red.txt`);
+  - without S2′, the seventeen pass in each of three runs (`candidate-plain/`);
+  - the routing rows whose witnesses include the five, and the control, give exactly their expected red sets with it
+    laid over, 6 of 6 (`c6r7/matrix-candidate/VERDICTS.txt`).
+- **Not established:** that any native run of this change meets it. At `66e8a393` the five passed on all three CI test
+  legs (`c6r7/class/unheld-5-at-66e8a393-ci.txt`). The results above are this box's and a stand-in's.
+- **Disposition.** A repair here is beyond this round's brief, so it goes to the orchestrator, with the options and a
+  default, in this round's question.
+
+#### C-I4-1 (P3): the current text misstated #329's review status
+
+**The defect** (the i4 review's regular lens, reasoned; `~/orch-pr11/reviews/review-330-i4-triage.md`, sha256
+`9f813146…`). The body as reviewed (`pr.md:524`) said #329's B7 review was pending, and §6.13 (`:5019`) that I6-1's
+repair came in unreviewed. B7, the review of `83006dc4..17bd5652`, had ended PASS on both lenses at `17bd5652` at
+18:57:57Z on 2026-10-04, before round 6's push at about 19:07Z: round 6 wrote from the orchestrator's answer, which gave
+B7's start at 18:40Z. The triage disposes it as FIX in this change's next necessary round.
+
+**#329's state, as the facts now give it:**
+- **#329 is FINAL and merged:** master `c0ed07a5` is its merge, and its final head is `53d972e9` (above).
+- **B7 PASSED,** both lenses, at `17bd5652` (the i4 triage).
+- **I6-1, as #329's record states it** (its §9.23): the slow dispatch witness's delay worker was detached, so a worker
+  that panicked could let the witness pass. `2386f2c4` owns, joins and cancels the worker and fails on its panic, with
+  a test of its owner, and #329's ledger carries it as `FUB-I6-DELAYWORKER`, P3, `correctness`, `fixed` (§9.23.6). That
+  repair is in `17bd5652`, which B7 reviewed.
+- **B-W924 is FIXED for its demonstrated mechanism,** by #329's merge determination
+  (`~/orch-pr11/determinations/B-MERGE-DETERMINATION-20261008.md`, sha256 `5dc88520…`, 2026-10-08T19:07:14Z): R1 and
+  R2, which the owner adopted on 2026-10-08, with their witnesses and each half's reversal red. The historical CI
+  instance is explained by that mechanism and not uniquely attributed; its provenance stays undetermined.
+
+**The fix.** Every current statement of #329's state in this record and the body now says the above:
+- here: the header's chronology and status row, §6's merge note, §6.3's frozen note, and §6.13's three statements
+  (the provisional merge's bullet, the I6-1 bullet the triage cites, and "Preserved"), each corrected in place and
+  dated;
+- in the body: the summary's round-6 paragraph and the merge requirements, Scope's `6b3fe4a0` line, the frozen set,
+  the findings, and the review evidence.
+
+The ledger's `FUC-I4-BSTATUS` is the row, `fixed`.
+
+**The sweep for any other stale statement of #329's state** (`c6r7/sweep/`). Searched by pattern: "#329", "provisional",
+"final", H1, H3, E-G6-1, O12, B7, I6-1, "pending", "not adopted", "proposed", W1's ID, O11, O14 and B-W924.
+- **This change's lines in source, notes, `design/15` and `effects/`** (`c6r7/sweep/02-c-added-lines-hits.txt`: only the
+  lines this change's diff against master adds): 17 hits. None states #329's state now. They are C-R1, still
+  proposed; round 4's comment on the provisional merge `905ed0c8`, accurate as dated; finding IDs; and citations of
+  #329's record and evidence.
+- **This change's lines in `findings/`** (`c6r7/sweep/03-c-findings-added-hits.txt`): 5 hits, none about #329.
+- **The record:**
+  - every hit in §6.11 to §6.13 that calls #329 not final, or an integration provisional, is a statement of its round
+    and true then;
+  - §6's merge note now says so;
+  - the three §6.13 statements above were not true when published, and are corrected in place.
+- **The body** (`c6r7/sweep/04-body-c6-hits.txt`, 114 hits in its prose): corrected where it states #329's state now,
+  besides C-I4-1's lines:
+  - H1 and H3 described as proposed;
+  - E-G6-1 described as not adopted;
+  - #329's merge listed as a requirement;
+  - W1's finding as open and routed;
+  - "the integration is provisional" in the risk section.
+
+  Statements of earlier rounds' provisional integrations stay, as history.
+
+Commit messages, test inputs and the dated round sections stay as they are.
+
+**What else this corrects, beside B's review state.** The owner adopted on 2026-10-08, in the B-first set:
+- H1 and the revised H3, which #329 carried in, are master's;
+- O12(a), with E-G6-1. The body's "E-G6-1 not adopted" was stale. The cumulative comparison against G5's range below is
+  still executed by round 3's tool, which enumerates #322's and #327's merges only, so it reports H1's and H3's files,
+  merged by `c0ed07a5`, as not enumerated.
+- W1 (`PR329-A-DROPPED-RESUMES-RUN-STILL-READ-AS-RUNNING`), whose fingerprint round 4 read in round 2's two failed
+  first attempts, was closed by #329 when H3 merged (`f261459b`), not routed onward.
+
+#### The frozen set, the platforms and the legacy check
+
+- **The frozen proof at the merge** (`c6r7/frozen/frozen-proof-89a65ccd.txt`, by `c6r7/tools/frozen-proof-r7.sh`, C6's
+  re-based on the new master). Against master `c0ed07a5`, and against #329's final head `53d972e9`, whose tree is
+  master's:
+  - **the frozen delta is C-R1 alone**: `finalize.rs` and `integrate.rs`, +1/−1 each, 32 of 34 files byte-identical
+    (Part A);
+  - each of those two files, with C-R1's line reversed, hashes to master's blob (Part B);
+  - H1 (`integrate.rs`, blob `bf62256e`) and H3 (`recover/tests.rs`, blob `407b27cb`) are master's blobs;
+  - the merge touches no file of the set against `66e8a393`; against master, only C-R1's two (Part C).
+- **Against the previous master `5c222ff2`,** 31 of 34 are byte-identical, as round 6 recorded: H1 and C-R1 in
+  `integrate.rs` (+17/−5), C-R1 in `finalize.rs` (+1/−1), H3 in `recover/tests.rs` (+353/−3).
+- **Against G5's range `d724fb16`,** six files differ, +612 −83, at the merge; five at master, +610 −81. Round 3's
+  tool reports `integrate.rs`, `finalize.rs` and `recover/tests.rs` as not enumerated at the merge, and
+  `integrate.rs` and `recover/tests.rs` at master (Part E).
+- **D4 still did not trigger:** this change changes no frozen test.
+- **Schema 4 stays unreachable, and the legacy path is unchanged** (`c6r7/frozen/legacy-activation-89a65ccd.txt`):
+  - against master, the paths this change touches under `src/` and `effects/` are round 6's;
+  - no legacy module changes;
+  - `TOPOLOGY_ACTIVATION` is `Inactive` and `MAX_READABLE_SCHEMA` 3;
+  - the production half of `coordinator.rs` is master's, byte for byte.
+- **The platforms:** above.
+
+#### No relation to O14(b)
+
+The O14(b) proposal (`~/orch-pr11/owner-package/O14B-MECHANISM-PROPOSAL.md`, sha256 `ebeefaf4…`) gives this change, in
+its §7, no relation: "None. C's U changes which instances recovery removes; a recorded verification's residue goes
+through the frozen `reclaim_stale_residue` and `reclaim_snapshot_residue` as any open verification's, and E-FUC-3
+touches no spend text" (`c6r7/inputs/o14b-proposal-s7-c-row.txt`, its line 1595). This change neither waits for O14(b)
+nor carries any of it.
+
+#### What this change's merge still needs, exactly
+
+- **The owner's choices:**
+  - E-FUC-3's adoption;
+  - O4(a);
+  - O7, or R-REF's disposition (O7(a)'s method is stopped);
+  - the O3 or O3-R route for FUC-D5-GITINDEXFILE;
+  - the freeze ruling for C-R1;
+  - O6, only if it is triggered (it is not: this change changes no frozen test);
+  - O11's item (iv), whose basis is U. The owner's adoption of 2026-10-08 took O11's items (i) to (iii), #329's, and
+    not (iv).
+- **The review of round 7's delta,** once CI is green on every leg.
+- **CI** on the pushed head: both required contexts.
+- **Then the merge under the standing delegation.**
+
+#329's merge and this change's integration of #329's final code are done. This change has no relation to O14(b).
+
+#### The ten gates
+
+They run once, at the head that carries this record; the body gives them, and this round's question carries them to
+the orchestrator before any push.
