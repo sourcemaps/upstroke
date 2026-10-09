@@ -19621,13 +19621,13 @@ mod tests {
         );
     }
 
-    struct TearingTheSnapshot {
+    struct PlantingAtTheSnapshot {
         effects: crate::workspace_manager::HarnessEffects,
-        tear: Arc<TearsAForeignRegistration>,
+        planter: Arc<dyn ReviewInputPolicy + Send + Sync>,
         passing: Option<u32>,
     }
 
-    impl crate::workspace_manager::EffectHooks for TearingTheSnapshot {
+    impl crate::workspace_manager::EffectHooks for PlantingAtTheSnapshot {
         fn phase(
             &mut self,
             site: crate::topology::effects::EffectSiteId,
@@ -19637,9 +19637,9 @@ mod tests {
                 match self.passing {
                     Some(0) => {
                         self.passing = None;
-                        self.tear
+                        self.planter
                             .problem(&PathBuf::from("merge").join("third-review"), "")
-                            .expect("the tear is planted before the third reviewer's snapshot");
+                            .expect("the fault is planted before the third reviewer's snapshot");
                     }
                     Some(left) => self.passing = Some(left - 1),
                     None => {}
@@ -19657,31 +19657,31 @@ mod tests {
         }
     }
 
-    struct TearingHooks {
+    struct PlantingHooks {
         inner: crate::engine::topology::seams::HarnessTopologyHooks,
-        effects: TearingTheSnapshot,
+        effects: PlantingAtTheSnapshot,
     }
 
-    impl TearingHooks {
+    impl PlantingHooks {
         fn new(
             harness: &Arc<std::sync::Mutex<crate::topology::effects::HookHarness>>,
-            tear: &Arc<TearsAForeignRegistration>,
+            planter: &Arc<dyn ReviewInputPolicy + Send + Sync>,
             passing: u32,
         ) -> Self {
             Self {
                 inner: crate::engine::topology::seams::HarnessTopologyHooks::new(Arc::clone(
                     harness,
                 )),
-                effects: TearingTheSnapshot {
+                effects: PlantingAtTheSnapshot {
                     effects: crate::workspace_manager::HarnessEffects::new(Arc::clone(harness)),
-                    tear: Arc::clone(tear),
+                    planter: Arc::clone(planter),
                     passing: Some(passing),
                 },
             }
         }
     }
 
-    impl TopologyHooks for TearingHooks {
+    impl TopologyHooks for PlantingHooks {
         fn effects(&mut self) -> &mut dyn crate::workspace_manager::EffectHooks {
             &mut self.effects
         }
@@ -19712,6 +19712,65 @@ mod tests {
             matches!(error, UpstrokeError::RegistryRefused { message } if message.contains("commondir")),
             "the third reviewer's registry access refuses on the torn registration: {error:?}"
         );
+    }
+
+    fn refused_at_the_third_review(
+        wide: &mut Wide,
+        planter: &Arc<dyn ReviewInputPolicy + Send + Sync>,
+    ) -> UpstrokeError {
+        let mut pipelines = wide.env.pipelines();
+        let (harness, planter) = (Arc::clone(&wide.env.harness), Arc::clone(planter));
+        pipelines.hooks = Arc::new(move || {
+            Box::new(PlantingHooks::new(&harness, &planter, 3)) as Box<dyn TopologyHooks + Send>
+        });
+        let runner = Arc::clone(&wide.env.runner);
+        let mut scheduler = alpha_then_beta(&runner);
+        let mut hooks = wide.env.hooks();
+        wide.run
+            .run_concurrently(
+                &wide.env.seams(),
+                &pipelines,
+                &mut hooks,
+                Some(&mut scheduler),
+            )
+            .expect_err("the third reviewer's snapshot refuses")
+    }
+
+    fn recorded_and_still_open(wide: &Wide, sequence: SequenceId) {
+        let events = wide.env.durable_events();
+        assert_eq!(
+            kinds_of(&events).last(),
+            Some(&"merge_verification_charged"),
+            "the record is the command's last append: {:?}",
+            kinds_of(&events)
+        );
+        assert!(
+            terminals_of(&events, sequence).is_empty(),
+            "the record is no terminal: {:?}",
+            kinds_of(&events)
+        );
+        assert!(
+            verifying(wide.run.fold(), sequence),
+            "the fold still holds the refused verification open: {:?}",
+            wide.run.fold().transaction()
+        );
+        records_both_passes(wide, sequence);
+        replay_equals_live(wide);
+    }
+
+    fn resumed_to_completion(wide: Wide, tasks: &[WideTask], key: TaskKey, sequence: SequenceId) {
+        let live = wide.run.spend().clone();
+        let (_, mut resumed) = wide
+            .resume("inc-2", holding(tasks, &[]), unlimited())
+            .expect("the next process resumes once the fault is repaired");
+        resumed_spend_is_the_live_one(&resumed, key, &live, sequence);
+        let runner = Arc::clone(&resumed.env.runner);
+        let mut scheduler = Scheduler::first(&runner);
+        let progress =
+            drive(&mut resumed, Some(&mut scheduler)).expect("the resumed run completes");
+        drop(scheduler);
+        assert_eq!(outcome_of(&progress), RunOutcome::Complete);
+        records_both_passes(&resumed, sequence);
     }
 
     fn untear(admin: &std::path::Path) {
@@ -19774,60 +19833,51 @@ mod tests {
         let _deadline =
             crate::workspace_manager::RegistryDeadline::hold(&common, WITNESS_REGISTRY_DEADLINE);
         let (tear, admin) = tearing(&wide, "foreign-at-the-third-review", false);
-        let mut pipelines = wide.env.pipelines();
-        let harness = Arc::clone(&wide.env.harness);
-        pipelines.hooks = Arc::new(move || {
-            Box::new(TearingHooks::new(&harness, &tear, 3)) as Box<dyn TopologyHooks + Send>
-        });
-        let runner = Arc::clone(&wide.env.runner);
-        let mut scheduler = alpha_then_beta(&runner);
-        let mut hooks = wide.env.hooks();
-        let error = wide
-            .run
-            .run_concurrently(
-                &wide.env.seams(),
-                &pipelines,
-                &mut hooks,
-                Some(&mut scheduler),
-            )
-            .expect_err("the third reviewer's snapshot refuses");
-        drop(scheduler);
-        drop(hooks);
+        let tear: Arc<dyn ReviewInputPolicy + Send + Sync> = tear;
+        let error = refused_at_the_third_review(&mut wide, &tear);
         refused_by_the_tear(&error);
         let sequence = SequenceId(1);
-        let events = wide.env.durable_events();
-        assert_eq!(
-            kinds_of(&events).last(),
-            Some(&"merge_verification_charged"),
-            "the record is the command's last append: {:?}",
-            kinds_of(&events)
-        );
-        assert!(
-            terminals_of(&events, sequence).is_empty(),
-            "the record is no terminal: {:?}",
-            kinds_of(&events)
-        );
-        assert!(
-            verifying(wide.run.fold(), sequence),
-            "the fold still holds the refused verification open: {:?}",
-            wide.run.fold().transaction()
-        );
-        records_both_passes(&wide, sequence);
-        replay_equals_live(&wide);
-        let key = started_key(&events, sequence);
-        let live = wide.run.spend().clone();
+        recorded_and_still_open(&wide, sequence);
+        let key = started_key(&wide.env.durable_events(), sequence);
         untear(&admin);
-        let (_, mut resumed) = wide
-            .resume("inc-2", holding(&tasks, &[]), unlimited())
-            .expect("the next process resumes once the tear is removed");
-        resumed_spend_is_the_live_one(&resumed, key, &live, sequence);
-        let runner = Arc::clone(&resumed.env.runner);
-        let mut scheduler = Scheduler::first(&runner);
-        let progress =
-            drive(&mut resumed, Some(&mut scheduler)).expect("the resumed run completes");
-        drop(scheduler);
-        assert_eq!(outcome_of(&progress), RunOutcome::Complete);
-        records_both_passes(&resumed, sequence);
+        resumed_to_completion(wide, &tasks, key, sequence);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_registry_refusal_after_the_takeover_at_the_third_review_is_recorded_with_both_passes() {
+        let tasks = two();
+        let mut wide = Wide::durable(
+            "coordinator-o14-takeover-refusal",
+            &tasks,
+            3,
+            reviewing(3),
+            holding(&tasks, &[]),
+        );
+        let common = wide.env.fixture.manager.common_git_dir().to_path_buf();
+        let _deadline =
+            crate::workspace_manager::RegistryDeadline::hold(&common, WITNESS_REGISTRY_DEADLINE);
+        let base = wide.env.fixture.base.clone();
+        let info = common.join("info");
+        let filter: Arc<dyn ReviewInputPolicy + Send + Sync> = Arc::new(RequiresAFailingFilter {
+            base: base.clone(),
+            info: info.clone(),
+            remaining: std::sync::atomic::AtomicUsize::new(1),
+        });
+        let error = refused_at_the_third_review(&mut wide, &filter);
+        assert!(
+            matches!(&error, UpstrokeError::RegistryRefused { message } if message.contains("b329fails") || message.contains("is gone")),
+            "the third reviewer's checkout fails after the takeover and refuses at once: {error:?}"
+        );
+        let sequence = SequenceId(1);
+        recorded_and_still_open(&wide, sequence);
+        let key = started_key(&wide.env.durable_events(), sequence);
+        crate::workspace_manager::fixture::remove_file(&info.join("attributes"));
+        crate::workspace_manager::fixture::git(
+            &base,
+            &["config", "--remove-section", "filter.b329fails"],
+        );
+        resumed_to_completion(wide, &tasks, key, sequence);
     }
 
     #[test]
@@ -19837,7 +19887,8 @@ mod tests {
         let _deadline =
             crate::workspace_manager::RegistryDeadline::hold(&common, WITNESS_REGISTRY_DEADLINE);
         let (tear, admin) = tearing(&wide, "foreign-at-the-third-review", false);
-        let mut hooks = TearingHooks::new(&wide.env.harness, &tear, 3);
+        let tear: Arc<dyn ReviewInputPolicy + Send + Sync> = tear;
+        let mut hooks = PlantingHooks::new(&wide.env.harness, &tear, 3);
         let seams = wide.env.seams();
         let error = wide
             .run
