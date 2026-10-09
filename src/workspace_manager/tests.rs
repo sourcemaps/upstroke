@@ -15736,6 +15736,99 @@ fn registry_refusal<T: std::fmt::Debug>(result: Result<T, UpstrokeError>, what: 
     }
 }
 
+/// The real-time containment of a contract witness whose access runs on its
+/// repository's [`super::RegistryClock`] (the record's §9.33, B16): a stated,
+/// generous bound on wall time, checked at each step the witness sees and at
+/// its end, and never its oracle. That clock moves only when the witness, or a
+/// wait its access asks for, moves it, so an access that went round with
+/// neither would never reach its deadline on it; this turns that into a
+/// failure. It is wall time, so a stall of the host longer than it fails the
+/// witness too.
+const CLOCK_CONTAINMENT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Fail a witness on a [`super::RegistryClock`] once [`CLOCK_CONTAINMENT`] of
+/// wall time has passed since `since`, naming the `step` it had reached.
+fn contained(since: std::time::Instant, step: &str) {
+    let ran = since.elapsed();
+    assert!(
+        ran < CLOCK_CONTAINMENT,
+        "{step}: {ran:?} of wall time, past the containment of {CLOCK_CONTAINMENT:?}, which \
+         is not this witness's oracle"
+    );
+}
+
+/// The `pause_for` of a witness on `clock`: each wait its access asks for
+/// moves the clock by the wait's length and sleeps nothing, inside the
+/// witness's containment.
+fn clock_pause(
+    clock: &super::RegistryClock,
+    since: std::time::Instant,
+) -> impl FnMut(std::time::Duration) -> Result<(), UpstrokeError> + '_ {
+    move |pause| {
+        contained(since, "a wait");
+        clock.advance(pause);
+        Ok(())
+    }
+}
+
+/// B16 (the record's §9.33): a [`super::RegistryClock`] reaches only the
+/// accesses of its own repository; it stands still while the host's time
+/// passes and moves by exactly what it is moved by; nested guards share it,
+/// and it goes with its last guard, on an unwinding as on a return. It takes
+/// only its table's lock: nothing of it waits.
+#[test]
+fn a_registry_clock_reaches_only_its_own_repository_and_goes_with_its_last_guard() {
+    let (_tree, held) = contract_key("registry-clock-held");
+    let (_other_tree, other) = contract_key("registry-clock-other");
+    let before = std::time::Instant::now();
+    let clock = super::RegistryClock::hold(&held);
+    let reading = clock.now();
+    assert!(
+        reading >= before,
+        "it starts at the monotonic clock's reading"
+    );
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    assert_eq!(
+        super::registry_now(&held),
+        reading,
+        "it stands still while the host's time passes"
+    );
+    assert!(
+        super::registry_now(&other) >= reading + std::time::Duration::from_millis(2),
+        "another repository's accesses read the monotonic clock"
+    );
+    clock.advance(REGISTRY_ACCESS_DEADLINE);
+    assert_eq!(
+        super::registry_now(&held),
+        reading + REGISTRY_ACCESS_DEADLINE,
+        "it moves by exactly what it is moved by"
+    );
+    let nested = super::RegistryClock::hold(&held);
+    assert_eq!(nested.now(), clock.now(), "a nested guard shares the clock");
+    drop(clock);
+    assert_eq!(
+        nested.now(),
+        reading + REGISTRY_ACCESS_DEADLINE,
+        "the clock stays while a guard lives"
+    );
+    drop(nested);
+    let after = std::time::Instant::now();
+    assert!(
+        super::registry_now(&held) >= after,
+        "with its last guard gone, its repository's accesses read the monotonic clock again"
+    );
+    let unwound = std::panic::catch_unwind(|| {
+        let _clock = super::RegistryClock::hold(&held);
+        panic!("a test that holds a clock fails");
+    });
+    assert!(unwound.is_err(), "the holder unwound");
+    let later = std::time::Instant::now();
+    assert!(
+        super::registry_now(&held) >= later,
+        "a guard dropped by an unwinding takes its clock with it"
+    );
+}
+
 /// T4 (record §5.5, §6.4): a veto that answers `Return` after the first
 /// failure returns that failure exactly as the attempt returned it, after one
 /// attempt, the veto asked once and nothing counted as contended.
@@ -15772,24 +15865,41 @@ fn a_registry_access_returns_a_vetoed_failure_unchanged_after_one_attempt() {
 /// at or after the deadline (§6.4, step 7): with attempts that take no time it
 /// follows the sleep the deadline cut short, and the backoff fits sixteen in
 /// 500 ms.
+///
+/// **On its repository's test clock** (the record's §9.33, B16): the deadline
+/// and `took` are that [`super::RegistryClock`]'s readings, which only the
+/// waits the access asks for move, so a stall of the host before the first
+/// attempt makes that attempt no later on it. Wall time is held twice: to the
+/// containment, and, as before, to the deadline and 5 s. A refusal no earlier
+/// than the deadline in wall time stays a real repository's
+/// (`a_list_over_a_registration_half_written_refuses_at_its_deadline_and_is_never_git_state`).
 #[test]
 fn a_registry_access_that_always_fails_refuses_at_its_deadline_naming_the_count_and_the_last_failure()
  {
     let (_tree, key) = contract_key("registry-access-deadline");
+    let clock = super::RegistryClock::hold(&key);
+    let wall = std::time::Instant::now();
     let mut made = 0_u32;
-    let started = std::time::Instant::now();
+    let started = clock.now();
     let result: Result<(), _> = tolerant_registry_access(
         &key,
         RegistryHold::Unheld,
-        &mut crate::workspace_manager::sleep_for,
+        &mut clock_pause(&clock, wall),
         &mut || Again::Attempt,
         &mut || {
+            contained(wall, "an attempt");
             made += 1;
             Err(attempt_failed(made))
         },
     );
-    let took = started.elapsed();
+    let took = clock.now().saturating_duration_since(started);
+    let ran = wall.elapsed();
+    contained(wall, "the refusal");
     let message = registry_refusal(result, "an access that always fails");
+    assert!(
+        ran < REGISTRY_ACCESS_DEADLINE + std::time::Duration::from_secs(5),
+        "and within the deadline and 5 s of wall time: {ran:?}"
+    );
     assert!(
         took >= REGISTRY_ACCESS_DEADLINE,
         "it refused only at its deadline, {REGISTRY_ACCESS_DEADLINE:?}: it took {took:?}"
@@ -15819,17 +15929,23 @@ fn a_registry_access_that_always_fails_refuses_at_its_deadline_naming_the_count_
 }
 
 /// T4: two failures and then a success return the success, after three
-/// attempts, with the two failures counted.
+/// attempts, with the two failures counted. On its repository's test clock
+/// (the record's §9.33, B16), which only the waits the access asks for move,
+/// so its attempts begin before the deadline however the host schedules them;
+/// wall time is its containment.
 #[test]
 fn a_registry_access_passes_two_failures_and_returns_the_success_after_them() {
     let (_tree, key) = contract_key("registry-access-success");
+    let clock = super::RegistryClock::hold(&key);
+    let wall = std::time::Instant::now();
     let mut made = 0_u32;
     let result = tolerant_registry_access(
         &key,
         RegistryHold::Unheld,
-        &mut crate::workspace_manager::sleep_for,
+        &mut clock_pause(&clock, wall),
         &mut || Again::Attempt,
         &mut || {
+            contained(wall, "an attempt");
             made += 1;
             if made < 3 {
                 Err(attempt_failed(made))
@@ -15838,6 +15954,7 @@ fn a_registry_access_passes_two_failures_and_returns_the_success_after_them() {
             }
         },
     );
+    contained(wall, "the success");
     assert_eq!(
         result.expect("the third attempt succeeds"),
         30,
@@ -15850,24 +15967,35 @@ fn a_registry_access_passes_two_failures_and_returns_the_success_after_them() {
 /// T4 (FUB-D6-DABSENCE): a veto that answers `Undecidable` refuses at once,
 /// after one attempt, as a registry refusal naming why and carrying the
 /// failure; never Git state, never attempted past, and not counted.
+///
+/// **"At once" is on its repository's test clock** (the record's §9.33, B16):
+/// `took` is that [`super::RegistryClock`]'s, which only the waits the access
+/// asks for move, so a refusal that asks for none takes none of it, however
+/// the host schedules the test; wall time is its containment. An undecidable
+/// refusal at once in wall time stays a real repository's
+/// (`an_add_whose_checkout_cannot_be_made_refuses_after_one_attempt_and_leaves_nothing`).
 #[test]
 fn an_undecidable_veto_refuses_at_once_naming_why() {
     let (_tree, key) = contract_key("registry-access-undecidable");
+    let clock = super::RegistryClock::hold(&key);
+    let wall = std::time::Instant::now();
     let mut made = 0_u32;
-    let started = std::time::Instant::now();
+    let started = clock.now();
     let result: Result<(), _> = tolerant_registry_access(
         &key,
         RegistryHold::Unheld,
-        &mut crate::workspace_manager::sleep_for,
+        &mut clock_pause(&clock, wall),
         &mut || Again::Undecidable {
             why: "the destination now holds a file".to_owned(),
         },
         &mut || {
+            contained(wall, "an attempt");
             made += 1;
             Err(attempt_failed(made))
         },
     );
-    let took = started.elapsed();
+    let took = clock.now().saturating_duration_since(started);
+    contained(wall, "the refusal");
     let message = registry_refusal(result, "an undecidable veto");
     assert_eq!(made, 1, "no attempt after an undecidable veto");
     assert!(
@@ -15891,25 +16019,36 @@ fn an_undecidable_veto_refuses_at_once_naming_why() {
 /// earlier than `REGISTRY_ACCESS_DEADLINE` after this test's clock was read;
 /// only an attempt made at or after the deadline can succeed, and the contract
 /// makes exactly one.
+///
+/// **On its repository's test clock** (the record's §9.33, B16, O-1): the
+/// deadline, the repair and each attempt's reading are that
+/// [`super::RegistryClock`]'s, which only the waits the access asks for move,
+/// so a stall of the host before the first attempt makes that attempt no later
+/// on it; the test build's 500 ms is the deadline on it. Wall time is its
+/// containment.
 #[test]
 fn the_final_attempt_passes_a_failure_repaired_by_the_deadline() {
     let (_tree, key) = contract_key("registry-access-final");
+    let clock = super::RegistryClock::hold(&key);
+    let wall = std::time::Instant::now();
     let mut made = 0_u32;
-    let repaired = std::time::Instant::now() + REGISTRY_ACCESS_DEADLINE;
+    let repaired = clock.now() + REGISTRY_ACCESS_DEADLINE;
     let result = tolerant_registry_access(
         &key,
         RegistryHold::Unheld,
-        &mut crate::workspace_manager::sleep_for,
+        &mut clock_pause(&clock, wall),
         &mut || Again::Attempt,
         &mut || {
+            contained(wall, "an attempt");
             made += 1;
-            if std::time::Instant::now() >= repaired {
+            if clock.now() >= repaired {
                 Ok(made)
             } else {
                 Err(attempt_failed(made))
             }
         },
     );
+    contained(wall, "the final attempt");
     let last = result.expect("the final attempt, at the deadline, meets the repaired store");
     assert!(
         last >= 2,
@@ -15925,26 +16064,34 @@ fn the_final_attempt_passes_a_failure_repaired_by_the_deadline() {
 /// T4 (the final attempt, FUD-D1-PROGRESS): an attempt that began before the
 /// deadline and failed after it is followed by the final attempt, with no wait
 /// asked for before it, and a store repaired by the deadline is passed. The
-/// first attempt reads the store before its repair and then sleeps the
+/// first attempt reads the store before its repair and then lasts the
 /// deadline's length and 100 ms more, so the nominal deadline passes while it
 /// runs, as a slow Git command or a descheduled thread makes it pass.
+///
+/// **On its repository's test clock** (the record's §9.33, B16): the deadline,
+/// the repair and each attempt's reading are that [`super::RegistryClock`]'s,
+/// which only the first attempt's length and the waits the access asks for
+/// move, so the first attempt begins before the deadline and reads the store
+/// before its repair however the host schedules the test, and the deadline
+/// passes during it. Wall time is its containment.
 #[test]
 fn the_final_attempt_follows_an_attempt_the_deadline_passed_during() {
     let (_tree, key) = contract_key("registry-access-straddle");
+    let clock = super::RegistryClock::hold(&key);
+    let wall = std::time::Instant::now();
     let mut made = 0_u32;
-    let repaired = std::time::Instant::now() + REGISTRY_ACCESS_DEADLINE;
+    let repaired = clock.now() + REGISTRY_ACCESS_DEADLINE;
     let result = tolerant_registry_access(
         &key,
         RegistryHold::Unheld,
-        &mut crate::workspace_manager::sleep_for,
+        &mut clock_pause(&clock, wall),
         &mut || Again::Attempt,
         &mut || {
+            contained(wall, "an attempt");
             made += 1;
-            let whole = std::time::Instant::now() >= repaired;
+            let whole = clock.now() >= repaired;
             if made == 1 {
-                std::thread::sleep(
-                    REGISTRY_ACCESS_DEADLINE + std::time::Duration::from_millis(100),
-                );
+                clock.advance(REGISTRY_ACCESS_DEADLINE + std::time::Duration::from_millis(100));
             }
             if whole {
                 Ok(made)
@@ -15953,6 +16100,7 @@ fn the_final_attempt_follows_an_attempt_the_deadline_passed_during() {
             }
         },
     );
+    contained(wall, "the final attempt");
     assert_eq!(
         result.expect("the final attempt, after the deadline, meets the repaired store"),
         2,
@@ -15967,22 +16115,28 @@ fn the_final_attempt_follows_an_attempt_the_deadline_passed_during() {
 
 /// T4: `contended_attempts` counts exactly the `Attempt` answers: two of them,
 /// then a `Return`, count two; an `Undecidable` and a `Return` count nothing
-/// (the two tests above).
+/// (the two tests above). On its repository's test clock (the record's §9.33,
+/// B16), so its attempts begin before the deadline however the host schedules
+/// them; wall time is its containment.
 #[test]
 fn contended_attempts_counts_exactly_the_attempt_answers() {
     let (_tree, key) = contract_key("registry-access-counted");
+    let clock = super::RegistryClock::hold(&key);
+    let wall = std::time::Instant::now();
     let mut answers = [Again::Attempt, Again::Attempt, Again::Return].into_iter();
     let mut made = 0_u32;
     let result: Result<(), _> = tolerant_registry_access(
         &key,
         RegistryHold::Unheld,
-        &mut crate::workspace_manager::sleep_for,
+        &mut clock_pause(&clock, wall),
         &mut || answers.next().unwrap_or(Again::Return),
         &mut || {
+            contained(wall, "an attempt");
             made += 1;
             Err(attempt_failed(made))
         },
     );
+    contained(wall, "the third failure");
     match result {
         Err(UpstrokeError::Git { message }) => assert_eq!(message, "attempt 3 failed"),
         other => panic!("the third failure is returned as it was: {other:?}"),
@@ -15990,34 +16144,46 @@ fn contended_attempts_counts_exactly_the_attempt_answers() {
     assert_eq!((made, contended_attempts(&key)), (3, 2));
 }
 
-/// T4 (FUB-D6-BOUND): a veto that blocks for the deadline's length and 100 ms
-/// more, after an attempt that began before the deadline, so that the nominal
+/// T4 (FUB-D6-BOUND): a veto that lasts the deadline's length and 100 ms more,
+/// after an attempt that began before the deadline, so that the nominal
 /// deadline passes while it runs, is followed by the final attempt alone, with
 /// no wait asked for before it; the access refuses after that attempt's veto.
 /// Nothing bounds the attempts' or the vetoes' runtimes, or the scheduling
 /// between them.
+///
+/// **On its repository's test clock** (the record's §9.33, B16): the deadline,
+/// each attempt's start and `took` are that [`super::RegistryClock`]'s, which
+/// only the vetoes' length and the waits the access asks for move, so the
+/// first attempt begins before the deadline however the host schedules the
+/// test, and the deadline passes during the first veto. Wall time is its
+/// containment.
 #[test]
 fn a_veto_that_blocks_past_the_deadline_is_followed_by_the_final_attempt_alone() {
     let (_tree, key) = contract_key("registry-access-slow-veto");
+    let clock = super::RegistryClock::hold(&key);
+    let wall = std::time::Instant::now();
     let blocked = REGISTRY_ACCESS_DEADLINE + std::time::Duration::from_millis(100);
     let mut made = 0_u32;
     let mut began: Vec<std::time::Instant> = Vec::new();
-    let started = std::time::Instant::now();
+    let started = clock.now();
     let result: Result<(), _> = tolerant_registry_access(
         &key,
         RegistryHold::Unheld,
-        &mut crate::workspace_manager::sleep_for,
+        &mut clock_pause(&clock, wall),
         &mut || {
-            std::thread::sleep(blocked);
+            contained(wall, "a veto");
+            clock.advance(blocked);
             Again::Attempt
         },
         &mut || {
+            contained(wall, "an attempt");
             made += 1;
-            began.push(std::time::Instant::now());
+            began.push(clock.now());
             Err(attempt_failed(made))
         },
     );
-    let took = started.elapsed();
+    let took = clock.now().saturating_duration_since(started);
+    contained(wall, "the refusal");
     let message = registry_refusal(result, "an access whose veto blocked past its deadline");
     assert_eq!(
         made, 2,
@@ -16041,9 +16207,20 @@ fn a_veto_that_blocks_past_the_deadline_is_followed_by_the_final_attempt_alone()
 /// attempt run, and an unheld one (a list, a scan) runs at once. A shared
 /// access beside another shared holder runs at once too, and an exclusive one
 /// waits for the shared holder and refuses at its deadline.
+///
+/// **On its repository's test clock** (the record's §9.33, B16): each case's
+/// `took` is that [`super::RegistryClock`]'s, which only the waits the access
+/// asks for move. A case that waits for R-X reaches its deadline by those waits
+/// alone, with no attempt run; a case that does not wait asks for none. Wall
+/// time is its containment. R-X's wait refusing no earlier than its deadline in
+/// wall time, and an unheld list beside R-X held alone not waiting in it, stay
+/// a real repository's
+/// (`an_add_refuses_within_its_deadline_while_r_x_is_held_alone_and_a_list_does_not_wait`).
 #[test]
 fn r_x_held_alone_refuses_a_shared_access_with_no_attempt_and_passes_an_unheld_one() {
     let (_tree, key) = contract_key("registry-access-rx");
+    let clock = super::RegistryClock::hold(&key);
+    let wall = std::time::Instant::now();
     let bound = std::time::Duration::from_secs(60);
     for (holder_alone, hold) in [
         (true, RegistryHold::Shared),
@@ -16073,20 +16250,22 @@ fn r_x_held_alone_refuses_a_shared_access_with_no_attempt_and_passes_an_unheld_o
             .recv_timeout(bound)
             .expect("the other thread holds R-X");
         let mut made = 0_u32;
-        let started = std::time::Instant::now();
+        let started = clock.now();
         let result = tolerant_registry_access(
             &key,
             hold,
-            &mut crate::workspace_manager::sleep_for,
+            &mut clock_pause(&clock, wall),
             &mut || Again::Attempt,
             &mut || {
+                contained(wall, "an attempt");
                 made += 1;
                 Ok(made)
             },
         );
-        let took = started.elapsed();
+        let took = clock.now().saturating_duration_since(started);
         let _ = release.send(());
         holder.join().expect("the holder thread");
+        contained(wall, "a case");
         let waits = match hold {
             RegistryHold::Unheld => false,
             RegistryHold::Shared => holder_alone,

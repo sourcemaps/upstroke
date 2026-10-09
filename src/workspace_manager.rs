@@ -1679,6 +1679,16 @@ const fn registry_access_deadline(_common_git_dir: &Path) -> std::time::Duration
     REGISTRY_ACCESS_DEADLINE
 }
 
+/// The time as a registry access over `common_git_dir` reads it: always the
+/// monotonic clock in a production build. The `#[cfg(test)]` twin, at the
+/// bottom of this file for the reason [`note_removal_attempt`] gives, lets a
+/// test give its own repository's accesses a clock it moves itself.
+#[cfg(not(test))]
+#[inline]
+fn registry_now(_common_git_dir: &Path) -> std::time::Instant {
+    std::time::Instant::now()
+}
+
 /// The longest backoff sleep between two attempts of one registry access; the
 /// first is one millisecond, and each doubles up to this.
 const REGISTRY_BACKOFF_CEILING: std::time::Duration = std::time::Duration::from_millis(50);
@@ -1738,7 +1748,7 @@ fn with_registry<T>(
                 Err(std::sync::TryLockError::WouldBlock) => {}
             },
         }
-        let now = std::time::Instant::now();
+        let now = registry_now(common_git_dir);
         if now >= deadline {
             return Ok(None);
         }
@@ -1860,7 +1870,7 @@ pub(crate) fn tolerant_registry_access<T>(
 ) -> Result<T, UpstrokeError> {
     note_access_start(common_git_dir);
     let limit = registry_access_deadline(common_git_dir);
-    let deadline = std::time::Instant::now() + limit;
+    let deadline = registry_now(common_git_dir) + limit;
     let store = common_git_dir.join("worktrees");
     let mut pause = std::time::Duration::from_millis(1);
     let mut attempts: u32 = 0;
@@ -1869,7 +1879,7 @@ pub(crate) fn tolerant_registry_access<T>(
         let mut began = None;
         let Some(outcome) =
             with_registry(common_git_dir, hold, deadline, &mut *pause_for, &mut || {
-                began = Some(std::time::Instant::now());
+                began = Some(registry_now(common_git_dir));
                 attempt()
             })?
         else {
@@ -1911,7 +1921,7 @@ pub(crate) fn tolerant_registry_access<T>(
                 ),
             });
         }
-        let now = std::time::Instant::now();
+        let now = registry_now(common_git_dir);
         if now < deadline {
             pause_for(pause.min(deadline.saturating_duration_since(now)))?;
             pause = pause.saturating_mul(2).min(REGISTRY_BACKOFF_CEILING);
@@ -7298,6 +7308,90 @@ impl RegistryDeadline {
 impl Drop for RegistryDeadline {
     fn drop(&mut self) {
         let mut table = REGISTRY_DEADLINES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(held) = table.get_mut(&self.common_git_dir) {
+            held.1 = held.1.saturating_sub(1);
+            if held.1 == 0 {
+                table.remove(&self.common_git_dir);
+            }
+        }
+    }
+}
+
+/// The clocks tests have given the registry accesses over one common git dir,
+/// exactly as the caller passes it, each with its reading and the number of
+/// live guards that hold it ([`RegistryClock`]). Keyed per repository, as
+/// [`REGISTRY_DEADLINES`] is, so a clock one test holds reaches no other
+/// test's accesses, on whichever thread they run.
+#[cfg(test)]
+static REGISTRY_CLOCKS: std::sync::Mutex<
+    std::collections::BTreeMap<PathBuf, (std::time::Instant, usize)>,
+> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// The `#[cfg(test)]` half of the clock seam: the monotonic clock, unless a
+/// live [`RegistryClock`] gives `common_git_dir` its own. See the
+/// `#[cfg(not(test))]` twin beside `REGISTRY_ACCESS_DEADLINE`.
+#[cfg(test)]
+fn registry_now(common_git_dir: &Path) -> std::time::Instant {
+    REGISTRY_CLOCKS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(common_git_dir)
+        .map_or_else(std::time::Instant::now, |(reading, _)| *reading)
+}
+
+/// While this guard lives, every registry access over its common git dir
+/// reads its time from a logical clock instead of the monotonic one. The clock
+/// reads the monotonic clock once, when the first guard is taken, and from
+/// then on moves only by [`RegistryClock::advance`]: by what the test moves it
+/// by, and by the waits the access asks its `pause_for` for, when the test's
+/// `pause_for` advances it by them. How the host schedules the test's threads
+/// therefore neither moves the clock nor reorders what the test did by it (the
+/// record's §9.33). Guards over one directory nest and share one clock; its
+/// entry goes when the last drops, on an unwinding as on a return. The clock
+/// takes only its table's lock, and waits for nothing else.
+#[cfg(test)]
+pub(crate) struct RegistryClock {
+    common_git_dir: PathBuf,
+}
+
+#[cfg(test)]
+impl RegistryClock {
+    pub(crate) fn hold(common_git_dir: &Path) -> Self {
+        let mut table = REGISTRY_CLOCKS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let held = table
+            .entry(common_git_dir.to_path_buf())
+            .or_insert((std::time::Instant::now(), 0));
+        held.1 = held.1.saturating_add(1);
+        Self {
+            common_git_dir: common_git_dir.to_path_buf(),
+        }
+    }
+
+    /// The clock's reading: what the accesses over its directory read.
+    pub(crate) fn now(&self) -> std::time::Instant {
+        registry_now(&self.common_git_dir)
+    }
+
+    /// Move the clock on by `by`.
+    pub(crate) fn advance(&self, by: std::time::Duration) {
+        if let Some(held) = REGISTRY_CLOCKS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_mut(&self.common_git_dir)
+        {
+            held.0 += by;
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for RegistryClock {
+    fn drop(&mut self) {
+        let mut table = REGISTRY_CLOCKS
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(held) = table.get_mut(&self.common_git_dir) {
