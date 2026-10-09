@@ -66,7 +66,10 @@ impl EventEmitter for RunEmitter<'_> {
     ) -> Result<(), EmitFailure> {
         if let Some(why) = self.stopped {
             return Err(EmitFailure::Clean(UpstrokeError::Refused {
-                message: format!("nothing further is appended in this process: {why}"),
+                message: format!(
+                    "nothing further is appended in this process but the record of the review \
+                     passes a verification had charged: {why}"
+                ),
             }));
         }
         emit(self.identity, &mut self.state, self.clock, body, hooks)?;
@@ -1724,6 +1727,18 @@ impl TopologyRun {
         }
         self.emit(body, seams, hooks)?;
         Ok(())
+    }
+
+    pub(super) fn record_charged_past_the_stop(
+        &mut self,
+        charged: Charged,
+        seams: &RunSeams<'_>,
+        hooks: &mut dyn TopologyHooks,
+    ) -> Result<(), UpstrokeError> {
+        let stopped = self.stopped.take();
+        let recorded = self.record_charged(charged, seams, hooks);
+        self.stopped = stopped;
+        recorded
     }
 
     pub(super) fn broker_mut(&mut self) -> &mut PermitBroker {

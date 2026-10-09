@@ -464,8 +464,12 @@ impl SnapshotGate {
 // run's emitter refuses every further append, and every further effect made
 // through the coordinator's hooks is refused at its `Before`, so the transition
 // publishes, appends and spawns nothing further whatever it does with the error.
-// A wait that begins with an interrupt recorded does not wait. The run reopens
-// when the coordinator is gone.
+// The one append made past the stop is O14(b)'s record of the review passes a
+// verification charged: an integration's recording point leaves them to
+// `finish`, which records them after its last receive, every transition having
+// returned, with the stop lifted for that append alone. A wait that begins with
+// an interrupt recorded does not wait. The run reopens when the coordinator is
+// gone.
 struct Coordinator<'s> {
     run: &'s mut TopologyRun,
     seams: &'s RunSeams<'s>,
@@ -646,9 +650,11 @@ impl Coordinator<'_> {
         self.run.reserve_integration(key)?;
         let manager = self.seams.manager;
         let terminal = integrate::integrate(&mut DrivenJournal(self), manager, &request);
-        if let (Some(charged), Err(ended)) = (self.charged.take(), &terminal) {
-            if let Err(append) = self.run.record_charged(charged, self.seams, self.hooks) {
-                self.supersede(append, Some(ended));
+        if self.run.stopped().is_none() {
+            if let (Some(charged), Err(ended)) = (self.charged.take(), &terminal) {
+                if let Err(append) = self.run.record_charged(charged, self.seams, self.hooks) {
+                    self.supersede(append, Some(ended));
+                }
             }
         }
         let settled = self.run.integration_settled(key, terminal);
@@ -1767,7 +1773,10 @@ impl Coordinator<'_> {
             self.receive_one();
         }
         if let Some(charged) = self.charged.take() {
-            if let Err(append) = self.run.record_charged(charged, self.seams, self.hooks) {
+            if let Err(append) = self
+                .run
+                .record_charged_past_the_stop(charged, self.seams, self.hooks)
+            {
                 self.supersede(append, None);
             }
         }
@@ -20181,5 +20190,78 @@ mod tests {
         stopped_and_recorded(&wide, &error, at_shutdown, sequence, TaskKey(3));
         let key = started_key(&wide.env.durable_events(), sequence);
         resumed_to_completion(wide, &tasks, key, sequence);
+    }
+
+    #[test]
+    fn the_record_past_a_stop_leaves_the_run_stopped_for_what_follows() {
+        let tasks = two_independent();
+        let mut wide = Wide::started_with(
+            "stopped-record-then-dispatch",
+            &tasks,
+            2,
+            WidePlans::default(),
+            holding(&tasks, &[]),
+        );
+        let mut hooks = wide.env.hooks();
+        let seams = wide.env.seams();
+        let pipelines = wide.env.pipelines();
+        let before = wide.run.events().len();
+        let (stopped, recorded, still, dispatched) = {
+            let mut coordinator = coordinator_of(
+                &mut wide.run,
+                &seams,
+                &mut hooks,
+                &pipelines,
+                BTreeMap::new(),
+            );
+            coordinator
+                .outbox
+                .send(ToCoordinator::Shutdown)
+                .expect("shutdown reaches inbox");
+            let stopped = crate::workspace_manager::EffectHooks::registry_pause(
+                &mut coordinator,
+                Duration::from_millis(5),
+            );
+            let recorded = coordinator.run.record_charged_past_the_stop(
+                super::super::run::Charged {
+                    sequence: SequenceId(1),
+                    reviews: Vec::new(),
+                },
+                coordinator.seams,
+                coordinator.hooks,
+            );
+            let still = coordinator.run.stopped().map(str::to_owned);
+            let dispatched = crate::engine::topology::run::begin_dispatch(
+                &mut coordinator,
+                seams.manager,
+                TaskKey(0),
+                GenerationId(0),
+                false,
+            );
+            (stopped, recorded, still, dispatched)
+        };
+        let stopped = stopped.expect_err("a wait that answered a shutdown ends in an error");
+        assert!(stopped.to_string().contains("met a shutdown"), "{stopped}");
+        recorded.expect("a record of no pass offers nothing and fails nothing");
+        assert!(
+            still
+                .as_deref()
+                .is_some_and(|why| why.contains("met a shutdown")),
+            "the stop is lifted for the record's offer alone and holds after it: {still:?}"
+        );
+        let refused = dispatched.expect_err("the run is still stopped for what follows the record");
+        assert!(
+            refused
+                .to_string()
+                .contains("nothing further is appended in this process"),
+            "the run's emitter refused the dispatch's first append: {refused}"
+        );
+        assert!(
+            wide.run.events()[before..].is_empty(),
+            "{:?}",
+            kinds_of(&wide.run.events()[before..])
+        );
+        assert!(wide.run.stopped().is_some());
+        wide.run.reopen();
     }
 }
