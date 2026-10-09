@@ -19620,4 +19620,263 @@ mod tests {
             "the ceiling stops the run: {progress:?}"
         );
     }
+
+    struct TearingTheSnapshot {
+        effects: crate::workspace_manager::HarnessEffects,
+        tear: Arc<TearsAForeignRegistration>,
+        passing: Option<u32>,
+    }
+
+    impl crate::workspace_manager::EffectHooks for TearingTheSnapshot {
+        fn phase(
+            &mut self,
+            site: crate::topology::effects::EffectSiteId,
+            phase: crate::topology::effects::HookPhase,
+        ) -> crate::topology::effects::Injection {
+            if site == snapshot_add() && phase == crate::topology::effects::HookPhase::Before {
+                match self.passing {
+                    Some(0) => {
+                        self.passing = None;
+                        self.tear
+                            .problem(&PathBuf::from("merge").join("third-review"), "")
+                            .expect("the tear is planted before the third reviewer's snapshot");
+                    }
+                    Some(left) => self.passing = Some(left - 1),
+                    None => {}
+                }
+            }
+            self.effects.phase(site, phase)
+        }
+
+        fn durability_ledger(&self) -> crate::util::DurabilityLedger {
+            self.effects.durability_ledger()
+        }
+
+        fn refusal_cause(&self) -> Option<String> {
+            self.effects.refusal_cause()
+        }
+    }
+
+    struct TearingHooks {
+        inner: crate::engine::topology::seams::HarnessTopologyHooks,
+        effects: TearingTheSnapshot,
+    }
+
+    impl TearingHooks {
+        fn new(
+            harness: &Arc<std::sync::Mutex<crate::topology::effects::HookHarness>>,
+            tear: &Arc<TearsAForeignRegistration>,
+            passing: u32,
+        ) -> Self {
+            Self {
+                inner: crate::engine::topology::seams::HarnessTopologyHooks::new(Arc::clone(
+                    harness,
+                )),
+                effects: TearingTheSnapshot {
+                    effects: crate::workspace_manager::HarnessEffects::new(Arc::clone(harness)),
+                    tear: Arc::clone(tear),
+                    passing: Some(passing),
+                },
+            }
+        }
+    }
+
+    impl TopologyHooks for TearingHooks {
+        fn effects(&mut self) -> &mut dyn crate::workspace_manager::EffectHooks {
+            &mut self.effects
+        }
+
+        fn rundir(&mut self) -> &mut dyn crate::rundir::RunDirHooks {
+            self.inner.rundir()
+        }
+
+        fn events(&mut self) -> &mut dyn crate::events::log::EventHooks {
+            self.inner.events()
+        }
+
+        fn container(&mut self) -> &mut dyn crate::runner::container::ContainerHooks {
+            self.inner.container()
+        }
+
+        fn spawn(&mut self) -> &mut dyn crate::agent::proc::SpawnHooks {
+            self.inner.spawn()
+        }
+
+        fn folded(&mut self, fold: &TopologyFold, events: &[TopologyEvent]) {
+            self.inner.folded(fold, events);
+        }
+    }
+
+    fn refused_by_the_tear(error: &UpstrokeError) {
+        assert!(
+            matches!(error, UpstrokeError::RegistryRefused { message } if message.contains("commondir")),
+            "the third reviewer's registry access refuses on the torn registration: {error:?}"
+        );
+    }
+
+    fn untear(admin: &std::path::Path) {
+        for file in ["HEAD", "gitdir", "commondir"] {
+            crate::workspace_manager::fixture::remove_file(&admin.join(file));
+        }
+        crate::workspace_manager::fixture::remove_dir(admin);
+    }
+
+    fn resumed_spend_is_the_live_one(
+        resumed: &Wide,
+        key: TaskKey,
+        live: &crate::engine::topology::select::Spend,
+        sequence: SequenceId,
+    ) {
+        let events = resumed.env.durable_events();
+        let kinds = kinds_of(&events);
+        assert_eq!(
+            terminals_of(&events, sequence),
+            vec!["merge_verification_interrupted"],
+            "recovery settles the refused sequence interrupted: {kinds:?}"
+        );
+        let of_sequence = |kind: &str| {
+            events
+                .iter()
+                .position(|event| {
+                    event.body.kind() == kind && event.body.sequence() == Some(sequence)
+                })
+                .unwrap_or_else(|| panic!("no {kind} for sequence {}: {kinds:?}", sequence.0))
+        };
+        assert!(
+            of_sequence("merge_verification_charged")
+                < of_sequence("merge_verification_interrupted"),
+            "recovery's interrupted terminal follows the record: {kinds:?}"
+        );
+        let replayed = resumed.run.spend();
+        for (what, replayed, live) in [
+            ("run", replayed.run_usd(), live.run_usd()),
+            ("task", replayed.task_usd(key), live.task_usd(key)),
+        ] {
+            assert!(
+                (replayed - live).abs() < 1e-9,
+                "the next process replays the {what}'s total its predecessor charged live, both \
+                 passes included: {live} -> {replayed}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_registry_refusal_after_two_paid_passes_is_recorded_with_both_at_width_three() {
+        let tasks = two();
+        let mut wide = Wide::durable(
+            "coordinator-o14-registry-refusal",
+            &tasks,
+            3,
+            reviewing(3),
+            holding(&tasks, &[]),
+        );
+        let common = wide.env.fixture.manager.common_git_dir().to_path_buf();
+        let _deadline =
+            crate::workspace_manager::RegistryDeadline::hold(&common, WITNESS_REGISTRY_DEADLINE);
+        let (tear, admin) = tearing(&wide, "foreign-at-the-third-review", false);
+        let mut pipelines = wide.env.pipelines();
+        let harness = Arc::clone(&wide.env.harness);
+        pipelines.hooks = Arc::new(move || {
+            Box::new(TearingHooks::new(&harness, &tear, 3)) as Box<dyn TopologyHooks + Send>
+        });
+        let runner = Arc::clone(&wide.env.runner);
+        let mut scheduler = alpha_then_beta(&runner);
+        let mut hooks = wide.env.hooks();
+        let error = wide
+            .run
+            .run_concurrently(
+                &wide.env.seams(),
+                &pipelines,
+                &mut hooks,
+                Some(&mut scheduler),
+            )
+            .expect_err("the third reviewer's snapshot refuses");
+        drop(scheduler);
+        drop(hooks);
+        refused_by_the_tear(&error);
+        let sequence = SequenceId(1);
+        let events = wide.env.durable_events();
+        assert_eq!(
+            kinds_of(&events).last(),
+            Some(&"merge_verification_charged"),
+            "the record is the command's last append: {:?}",
+            kinds_of(&events)
+        );
+        assert!(
+            terminals_of(&events, sequence).is_empty(),
+            "the record is no terminal: {:?}",
+            kinds_of(&events)
+        );
+        assert!(
+            verifying(wide.run.fold(), sequence),
+            "the fold still holds the refused verification open: {:?}",
+            wide.run.fold().transaction()
+        );
+        records_both_passes(&wide, sequence);
+        replay_equals_live(&wide);
+        let key = started_key(&events, sequence);
+        let live = wide.run.spend().clone();
+        untear(&admin);
+        let (_, mut resumed) = wide
+            .resume("inc-2", holding(&tasks, &[]), unlimited())
+            .expect("the next process resumes once the tear is removed");
+        resumed_spend_is_the_live_one(&resumed, key, &live, sequence);
+        let runner = Arc::clone(&resumed.env.runner);
+        let mut scheduler = Scheduler::first(&runner);
+        let progress =
+            drive(&mut resumed, Some(&mut scheduler)).expect("the resumed run completes");
+        drop(scheduler);
+        assert_eq!(outcome_of(&progress), RunOutcome::Complete);
+        records_both_passes(&resumed, sequence);
+    }
+
+    #[test]
+    fn a_registry_refusal_after_two_paid_passes_is_recorded_with_both_at_width_one() {
+        let mut wide = stale_at_width_one("coordinator-o14-registry-refusal-w1", 3, unlimited());
+        let common = wide.env.fixture.manager.common_git_dir().to_path_buf();
+        let _deadline =
+            crate::workspace_manager::RegistryDeadline::hold(&common, WITNESS_REGISTRY_DEADLINE);
+        let (tear, admin) = tearing(&wide, "foreign-at-the-third-review", false);
+        let mut hooks = TearingHooks::new(&wide.env.harness, &tear, 3);
+        let seams = wide.env.seams();
+        let error = wide
+            .run
+            .step(&seams, &mut hooks)
+            .expect_err("the third reviewer's snapshot refuses");
+        drop(hooks);
+        refused_by_the_tear(&error);
+        let sequence = SequenceId(2);
+        let events = wide.env.durable_events();
+        assert_eq!(
+            kinds_of(&events).last(),
+            Some(&"merge_verification_charged"),
+            "the record is the step's last append: {:?}",
+            kinds_of(&events)
+        );
+        assert!(
+            verifying(wide.run.fold(), sequence),
+            "the fold still holds the refused verification open: {:?}",
+            wide.run.fold().transaction()
+        );
+        records_both_passes(&wide, sequence);
+        let key = started_key(&events, sequence);
+        let live = wide.run.spend().clone();
+        untear(&admin);
+        let (_, mut resumed) = wide
+            .resume("inc-3", answering_two(), unlimited())
+            .expect("the next process resumes once the tear is removed");
+        resumed_spend_is_the_live_one(&resumed, key, &live, sequence);
+        let mut hooks = resumed.env.hooks();
+        let seams = resumed.env.seams();
+        let progress = resumed
+            .run
+            .step(&seams, &mut hooks)
+            .expect("the candidate verifies again");
+        drop(hooks);
+        assert!(
+            matches!(progress, Progress::Integrated { sequence: again, .. } if again == SequenceId(3)),
+            "the candidate verifies again under the next sequence: {progress:?}"
+        );
+        records_both_passes(&resumed, sequence);
+    }
 }
