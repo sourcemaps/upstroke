@@ -331,3 +331,63 @@ The source is the round's triage, `~/orch-pr11/reviews/review-329-d9-triage.md`,
 
 The triage reads them together: closures 1 to 3 are partial even combined, and a complete technical closure of face 2
 needs a change to G6-frozen recovery, or the owner's ruling on scope.
+
+## The false-success face (FUF-R1-1), the misread faces (F round 2's E5 and E8), and a qualification (FUF-R1-6) (2026-10-05)
+
+Recorded at PR #329's next necessary touch, its B9 round (its record's §9.26.7), as the PR11 orchestrator's triage of
+F's design review round 1 directs (`~/orch-pr11/reviews/review-fuf-r1-triage.md`, with its dated correction of
+2026-10-04T23:08:15Z). This section adds faces of the class and one qualification. It changes no field above: the
+severity, the provenance, the reviewed SHA and the guard stand, no face here is graded apart from the file, and no
+closure is implemented. Git-level execution and reasoned engine consequences are kept apart below.
+
+**The false-success face: a deleted staging `index` turns a conflict into a published success (FUF-R1-1).**
+- **Executed at the Git level** by both lenses of F's design review round 1, 3 of 3 on Git 2.43.0 and 2.55.0 in each
+  (`~/orch-pr11/reviews/review-fuf-r1-regular-05306b18.review.md` F1, `review-fuf-r1-regression-05306b18.review.md` 1):
+  the base holds one tracked file, the candidate modifies it, and the integration head deletes it, leaving an empty
+  tree; cherry-picking the candidate conflicts (modify/delete); with the staging registration's `index` deleted before
+  classification, the classification answers `Empty` where the control answers `Conflict`, and the review-input policy
+  returns `Ok(None)`, the index still absent.
+- **Reasoned from the code at follow-up C's `66e8a393`, not executed:** `integrate_stale`
+  (`src/engine/topology/integrate.rs:605` there) classifies every pick error, so a refusal there is swallowed, and the
+  `Empty` answer starts `AlreadyPresent` verification against the unchanged head (`:638`); with passing gates and
+  reviews, the integration publishes a success without the candidate applied.
+- **At B, by exact source comparison** (the orchestrator's `~/orch-pr11/logs/orch-verify/fuf-r1-1-source/comparison.txt`,
+  read-only `git show`, brace-matched extraction): `proposal_state_pausing` is byte-identical at B `17bd5652`
+  (`src/workspace_manager.rs:4668-4732`) and C (`:5280-5344`), and absent at master `5c222ff2`; `integrate_stale` is
+  byte-identical at B and C (`src/engine/topology/integrate.rs:584-681`) and differs at master (`:576-669`; B's H1
+  changes this file). The path the reviewers cited at C is present, unchanged, at B. The comparison makes no claim that
+  B introduced it, and does not establish whether master's own path has the same consequence.
+
+**The misread faces: a deleted `index` answered without a failure (F round 2's E5 and E8).**
+- **Executed at the Git level** by F's design round 2, 3 of 3 on Git 2.43.0 and 2.55.0 each, in scratch repositories
+  that model the manager's reads (`~/orch-pr11/logs/pr11_fuf_design2/experiments/e5_summary.txt`, `e8_summary.txt`,
+  hashes in that directory's parent's `SHA256SUMS`). With the slot's `index` deleted (E5): `write-tree` writes the empty
+  tree; the promotion's path read reports the base's paths deleted and loses the additions (`M a.txt, A c.txt` becomes
+  `D a.txt, D dir/b.txt`); the unresolved-conflict read reports none where the control reports `U a.txt`; the
+  resolved-conflict read reports none; a tracked `.upstroke-resolved` reads as the worker's manifest; and a repair's
+  materialization observation swaps `Empty` and `Clean` and reads a conflict as no unmerged entry. The review-input
+  policy (E8) answers `Ok(None)` where the control answers `Ok(Some(unstaged))`; with only `gitdir` deleted it answers
+  as the control does.
+- **Reasoned from the code at C, not executed** (F's design, `~/orch-pr11/owner-package/F-DESIGN-PROPOSAL-c0b83c13.md`
+  §3.8, its audit of every read an outcome rests on): an attempt judged on a capture whose tree is empty, and, with
+  gates and reviews passing, a promotion of a candidate that deletes every file the base holds; an unresolved conflict
+  staged as content; a declared deletion not applied; a repository's tracked file read as the worker's manifest and
+  deleted by the candidate; a lease region recorded wrong; a judgement where a `review_input_failure` was due; a
+  repair's materialization recorded as the wrong kind.
+- **At master and B:** that audit's own byte comparison finds `unresolved_conflicts`, `resolved_conflicts`,
+  `manifest_name`, `staged_against_head` and `unmerged_records` identical at master, B and C, `repair_materialize`
+  identical at B and C, and `proposal_state_pausing` and `changed_paths_pausing` absent at master; it draws no claim
+  about master's behaviour, and neither does this section.
+
+**What the faces mean for this file.** Each starts from a deletion of a checkout's `index` alone, a slot's or the
+integration's staging checkout's: the partial state this file's evidence already names (with `index` gone, commands
+succeed and misread the checkout). Closure 1, as written above, reads after a failure, and these reads do not fail,
+so it does not catch them (reasoned). F's design proposes, for them, a refusal on the classification path, an answer
+arm on these reads, checks at the two review-input policy reads and a check before `write-tree` (its §3.2, §3.3, §3.6
+and §3.8), conditional and not adopted. The guard above stands, and these faces are part of the class it blocks G6
+for.
+
+**A qualification of closure 2's text (FUF-R1-6, executed).** "Git cannot re-register the checkout: `git worktree
+repair` refuses" holds for the deletion of the whole entry that `d8/witness/r13-summary.txt` executed. After a deletion
+of `gitdir` alone, `git worktree repair <checkout>` exits 0 and restores `gitdir` on Git 2.43.0 and 2.55.0 (F's
+design review round 1, the regular lens's F5). PR #329's record carries the same correction, dated, at its §8.5.

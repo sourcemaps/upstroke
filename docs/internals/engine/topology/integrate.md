@@ -293,8 +293,8 @@ reading the ref.
 
 [`decide`], with the hooks its `assert_publishable` waits through; [`integrate`] passes its journal's, so
 a coordinator that lends itself as those hooks answers its messages while the check waits. Proposed
-at follow-up B's repair round 3 as part of hunk H1, conditional on the owner's freeze ruling and not
-adopted (`reviews/2026-10-01-pr11-follow-up-b-record.md` §9.13). [`decide`] keeps its signature and
+at follow-up B's repair round 3 as part of hunk H1, and adopted by the owner's ruling B-H on 2026-10-08
+(`reviews/2026-10-01-pr11-follow-up-b-record.md` §9.13 and §9.28). [`decide`] keeps its signature and
 waits by sleeping.
 
 ## `pub fn dispatch_head(`

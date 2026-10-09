@@ -1702,7 +1702,8 @@ again, and passes once the writer finishes; nothing is deferred and both candida
 policy's `finish` returns `Ok`: an access failed on the tear, and only then did the writer finish
 it.
 Before #329 the same interleaving was durable: one `merge_verification_unavailable` (Deferred),
-or a park at `max_defers` (round 3's measurement of the round 8 witness).
+or a park at `max_defers` (round 3's measurement of the round 8 witness). Its repository's accesses
+wait to `WITNESS_REGISTRY_DEADLINE` (§9.31).
 
 ## `mod tests` › `fn a_verification_beside_a_registration_that_stays_torn_ends_resumably_and_its_resume_reverifies()`
 
@@ -1834,7 +1835,8 @@ tear, or its scheduler injects a shutdown -- once the coordinator reaches the po
 about, and how many Git processes run before that point is the platform's to say: on the Windows
 leg under the suite's load the three before a dispatch's intent witness could inject its shutdown
 took longer than 500 ms, and the access refused first. Fix P (P-all), follow-up C's round 5, in this
-change's B4 round (the follow-up B record's §9.22); the Windows reading is a Linux stand-in's.
+change's B4 round (the follow-up B record's §9.22); the Windows reading is a Linux stand-in's. The
+four witnesses that plant their tear without `TearHeld` hold it themselves (the B14 round, §9.31).
 
 ## `mod tests` › `struct TearHeld {`
 
@@ -1844,8 +1846,12 @@ returned: `Ok` only when it finished the tear after what it waited for. The drop
 prober nobody finished. At `54a1ff14` the coordinator slept through every such access, so the prober
 never saw anything and the access refused at its deadline. While it lives it holds a
 `RegistryDeadline` giving its repository's accesses `WITNESS_REGISTRY_DEADLINE`, so every tear
-witness's access waits to the production length, whatever the platform's Git costs before the
-witness's own act ends the wait (fix P).
+witness's access waits to the production length, not the suite's 500 ms, before the witness's own
+act ends the wait (fix P). Everything before the wait still counts against that deadline: an access
+asks for the wait after a failed attempt only if time remains when it reads its clock after that
+attempt's veto and count. If the deadline has passed by then, wherever the time went (the
+platform's Git, the veto, the count, or a descheduled thread), it asks for none: it makes its final
+attempt, or refuses if the failed attempt was already its final one (§9.32, §9.34).
 
 
 ## `mod tests` › `impl TearHeld` › `fn tearing(&mut self, torn: Torn) {`
@@ -2241,10 +2247,11 @@ first failed attempt is held (`workspace_manager::hold_next_contended`) for 700 
 suite's 500 ms registry deadline, before its deadline check, as three slow Git processes held it on
 the Windows leg (the coordinator's grant to the waiting pipeline runs the scaffold runner's
 `git rev-parse`, and the access's second attempt is another `git worktree list`). Its repository
-waits to `WITNESS_REGISTRY_DEADLINE`, so the access still reaches its wait, the shutdown is still
-injected there, and the dispatch still starts no attempt. With the deadline seam undone it fails
-with the Windows leg's message. Fix P; the Windows reading is a Linux stand-in's, not a measured
-cause of the guest's failure.
+waits to `WITNESS_REGISTRY_DEADLINE`, so, while time remains when the access reads its clock after
+the 700 ms, the access still reaches its wait, the shutdown is still injected there, and the
+dispatch still starts no attempt; a deadline passed by then, wherever the time went, leaves no wait
+asked for (§9.32, §9.34). With the deadline seam undone it fails with the Windows leg's message.
+Fix P; the Windows reading is a Linux stand-in's, not a measured cause of the guest's failure.
 
 The worker that holds the answer and releases it after the 700 ms is owned (`DelayedRelease`, repair
 round 11, I6-1): the build step spawns it and hands it over a channel to the check step, which joins
@@ -2337,12 +2344,18 @@ A registration with an empty `commondir`, spelt as Git writes it, in the run's o
 
 The regular review's dispatch witness at `a58c2ce3`, kept: alpha is live, a shutdown is queued and
 beta's dispatch meets a tear; an owned thread finishes the tear once alpha is cancelled. The
-shutdown is handled inside the wait, and beta's dispatch now fails and appends nothing.
+shutdown is handled inside the wait, and beta's dispatch now fails and appends nothing. Its
+repository's accesses wait to `WITNESS_REGISTRY_DEADLINE` (§9.31), so the access reaches its wait
+only if time remains when it reads its clock after its first failed attempt's veto and count. If the
+deadline has passed by then, wherever the time went (the attempt, its veto, the count, or a
+descheduled thread), no wait is asked for: the final attempt is made, or was the failed one (§9.32),
+and if it fails the access refuses without servicing the queued shutdown (§9.34).
 
 ## `mod tests` › `fn a_shutdown_answered_during_an_admitted_dispatchs_pause_spawns_no_pipeline() {`
 
 The same through the admission pass, the real call site of the spawn: `admit` ends with the stop's
-error, and no pipeline, no handle and no worker exist.
+error, and no pipeline, no handle and no worker exist. It waits to `WITNESS_REGISTRY_DEADLINE` as the
+dispatch witness above does.
 
 ## `mod tests` › `fn a_shutdown_consumed_during_a_registry_wait_publishes_no_candidate() {`
 
@@ -2352,7 +2365,12 @@ unmoved, and the interrupted integration ends the admission pass. Its access end
 not at the tear, so nothing waits for the prober: that the access failed on the tear first rests on
 the sample the prober takes after the cancel (`fn tear_sampling_every`, repair round 7). Should the
 wait not stop the integration, the prober still finishes the tear in time for the access's next
-attempt, and the integration then appends and publishes, which the witness refuses.
+attempt, and the integration then appends and publishes, which the witness refuses. Its
+repository's accesses wait to `WITNESS_REGISTRY_DEADLINE` (§9.31), so the access reaches its wait
+only if time remains when it reads its clock after its first failed attempt's veto and count. If the
+deadline has passed by then, wherever the time went (the attempt, its veto, the count, or a
+descheduled thread), no wait is asked for: the final attempt is made, or was the failed one (§9.32),
+and if it fails the access refuses without servicing the queued shutdown (§9.34).
 
 ## `mod tests` › `fn a_dispatch_begun_after_a_wait_answered_a_shutdown_appends_nothing() {`
 

@@ -4835,10 +4835,20 @@ fn an_integration_ref_beside_a_torn_registration(fixture: &Fixture) -> (&'static
 /// (§9.13, R1). At `4253b2ca` the re-check asked the hook-less
 /// `assert_publishable`, so its waits slept on the calling thread, and the
 /// tear, which only a wait made through the hooks mends here, held the swap to
-/// its deadline.
+/// its deadline. The re-check waits to the production deadline (the record's
+/// §9.31, B14), so it asks for the wait after its first failed attempt only
+/// if time remains when it reads its clock after that attempt's veto and
+/// count. If the deadline has passed by then, wherever the time went (the
+/// attempt, its veto, the count, or its thread descheduled), it asks for no
+/// wait: it makes its final attempt, or refuses if the failed attempt was
+/// already its final one (the record's §9.32 and §9.34).
 #[test]
 fn a_swaps_publishability_recheck_waits_through_the_calls_hooks() {
     let fixture = Fixture::created("cas1-recheck-waits");
+    let _deadline = super::RegistryDeadline::hold(
+        fixture.manager.common_git_dir(),
+        PRODUCTION_REGISTRY_DEADLINE,
+    );
     let (name, admin) = an_integration_ref_beside_a_torn_registration(&fixture);
     let mut hooks = WaitsOutATear::mending(admin);
     let slept = super::fixture::slept_pauses();
@@ -4875,11 +4885,21 @@ fn a_swaps_publishability_recheck_waits_through_the_calls_hooks() {
 /// ref is not moved. The topology coordinator's wait ends so once a shutdown
 /// it answered has ended its command (§9.16, I2-1). At `4253b2ca` the
 /// re-check never reached the hooks, and the swap refused at the access's
-/// deadline with the registry's error instead.
+/// deadline with the registry's error instead. The re-check waits to the
+/// production deadline (the record's §9.31, B14), so it reaches the wait that
+/// ends it only if time remains when it reads its clock after its first failed
+/// attempt's veto and count. If the deadline has passed by then, wherever the
+/// time went (the attempt, its veto, the count, or its thread descheduled), no
+/// wait is asked for: the final attempt is made, or was the failed one, and if
+/// it fails the access refuses without the wait (the record's §9.32 and §9.34).
 #[test]
 fn a_wait_that_ends_a_swaps_publishability_recheck_moves_no_ref() {
     const ENDS: &str = "the command ended while the re-check waited";
     let fixture = Fixture::created("cas1-recheck-ends");
+    let _deadline = super::RegistryDeadline::hold(
+        fixture.manager.common_git_dir(),
+        PRODUCTION_REGISTRY_DEADLINE,
+    );
     let (name, admin) = an_integration_ref_beside_a_torn_registration(&fixture);
     let mut hooks = WaitsOutATear {
         ends: Some(ENDS),
@@ -7781,12 +7801,21 @@ fn an_ephemeral_snapshot_commit_created_before_the_intent_is_left_to_git() {
 /// is not safe against itself (`git worktree add` raced by `prune` or `list`
 /// fails, measured in the record's §8), so the lock is what keeps every cycle
 /// here from failing.
+///
+/// **Since #329 its accesses wait to the production deadline** (#329's record,
+/// §9.31, B14). Under the tolerant registry access they race each other's
+/// registry writes and are attempted again, and one attempt the platform
+/// makes slow must not spend the test build's 500 ms first.
 #[test]
 fn concurrent_snapshot_adds_and_removals_on_one_repository_never_fail() {
     const THREADS: u32 = 4;
     const ROUNDS: u32 = 30;
 
     let fixture = Fixture::created("registry-lock");
+    let _deadline = super::RegistryDeadline::hold(
+        fixture.manager.common_git_dir(),
+        PRODUCTION_REGISTRY_DEADLINE,
+    );
     let failures: Vec<String> = std::thread::scope(|scope| {
         let workers: Vec<_> = (0..THREADS)
             .map(|thread| {
@@ -7950,10 +7979,21 @@ impl EffectHooks for EndsTheSiblingsRemovalAtAPause {
 /// the coordinator answers its messages for the length of every wait — and the
 /// attempt after it reads the sibling as absent. At `f9c88fdb` the gate
 /// returned the failed read at once, as `UpstrokeError::Io`, and no wait ran.
+/// The gate's access waits to the production deadline (the record's §9.31,
+/// B14), so it asks for the wait after its first failed attempt only if time
+/// remains when it reads its clock after that attempt's veto and count. If
+/// the deadline has passed by then, wherever the time went (the attempt, its
+/// veto, the count, or its thread descheduled), it asks for no wait: it makes
+/// its final attempt, or refuses if the failed attempt was already its final
+/// one (the record's §9.32 and §9.34).
 #[cfg(unix)]
 #[test]
 fn a_sibling_whose_checkout_cannot_be_read_while_its_removal_is_in_flight_does_not_fail_an_add() {
     let fixture = Fixture::created("r7-sibling-read-add");
+    let _deadline = super::RegistryDeadline::hold(
+        fixture.manager.common_git_dir(),
+        PRODUCTION_REGISTRY_DEADLINE,
+    );
     let sibling = plant_a_sibling_whose_checkout_cannot_be_read(&fixture, 1);
     let attempted_again = contended_attempts(fixture.manager.common_git_dir());
     let mut hooks = EndsTheSiblingsRemovalAtAPause {
@@ -8034,12 +8074,17 @@ fn a_sibling_whose_checkout_stays_unreadable_refuses_the_add_resumably_and_never
 /// gate has passed, and its removal ends at the lookup's first wait: the lookup
 /// attempts again and answers for the slot, which is not registered. At
 /// `f9c88fdb` the lookup returned the failed read at once, as
-/// `UpstrokeError::Io`.
+/// `UpstrokeError::Io`. The lookup waits to the production deadline (the
+/// record's §9.31, B14).
 #[cfg(unix)]
 #[test]
 fn a_sibling_whose_checkout_cannot_be_read_while_its_removal_is_in_flight_does_not_fail_a_verification()
  {
     let fixture = Fixture::created("r7-sibling-read-verify");
+    let _deadline = super::RegistryDeadline::hold(
+        fixture.manager.common_git_dir(),
+        PRODUCTION_REGISTRY_DEADLINE,
+    );
     let sibling = a_sibling_snapshot(&fixture, 1);
     let slot = fixture.task("alpha", 1);
     let mut hooks = EndsTheSiblingsRemovalAtAPause {
@@ -15706,6 +15751,119 @@ fn registry_refusal<T: std::fmt::Debug>(result: Result<T, UpstrokeError>, what: 
     }
 }
 
+/// The real-time containment of a contract witness whose access runs on its
+/// repository's [`super::RegistryClock`] (the record's §9.33, B16): a stated,
+/// generous bound on wall time, checked at each step the witness sees and at
+/// its end, and never its oracle. That clock moves only when the witness, or a
+/// wait its access asks for, moves it, so an access that went round with
+/// neither would never reach its deadline on it; this turns that into a
+/// failure. It is wall time, so a stall of the host longer than it fails the
+/// witness too.
+const CLOCK_CONTAINMENT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Fail a witness on a [`super::RegistryClock`] once [`CLOCK_CONTAINMENT`] of
+/// wall time has passed since `since`, naming the `step` it had reached.
+fn contained(since: std::time::Instant, step: &str) {
+    let ran = since.elapsed();
+    assert!(
+        ran < CLOCK_CONTAINMENT,
+        "{step}: {ran:?} of wall time, past the containment of {CLOCK_CONTAINMENT:?}, which \
+         is not this witness's oracle"
+    );
+}
+
+/// The `pause_for` of a witness on `clock`: each wait its access asks for
+/// moves the clock by the wait's length and sleeps nothing, inside the
+/// witness's containment.
+fn clock_pause(
+    clock: &super::RegistryClock,
+    since: std::time::Instant,
+) -> impl FnMut(std::time::Duration) -> Result<(), UpstrokeError> + '_ {
+    move |pause| {
+        contained(since, "a wait");
+        clock.advance(pause);
+        Ok(())
+    }
+}
+
+/// Whether the clock table holds an entry for `common_git_dir`, read from the
+/// table itself. A reading through `registry_now` cannot tell: an entry left
+/// behind still reads ahead of the monotonic clock once the test has moved it
+/// on (B17-1, the record's §9.34).
+fn clock_entry_stands(common_git_dir: &Path) -> bool {
+    super::REGISTRY_CLOCKS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains_key(common_git_dir)
+}
+
+/// B16 (the record's §9.33): a [`super::RegistryClock`] reaches only the
+/// accesses of its own repository; it stands still while the host's time
+/// passes and moves by exactly what it is moved by; nested guards share it,
+/// and it goes with its last guard, on an unwinding as on a return. It takes
+/// only its table's lock: nothing of it waits. That it goes is read from its
+/// table, its entry absent after each last guard (B17-1, the record's §9.34).
+#[test]
+fn a_registry_clock_reaches_only_its_own_repository_and_goes_with_its_last_guard() {
+    let (_tree, held) = contract_key("registry-clock-held");
+    let (_other_tree, other) = contract_key("registry-clock-other");
+    let before = std::time::Instant::now();
+    let clock = super::RegistryClock::hold(&held);
+    let reading = clock.now();
+    assert!(
+        reading >= before,
+        "it starts at the monotonic clock's reading"
+    );
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    assert_eq!(
+        super::registry_now(&held),
+        reading,
+        "it stands still while the host's time passes"
+    );
+    assert!(
+        super::registry_now(&other) >= reading + std::time::Duration::from_millis(2),
+        "another repository's accesses read the monotonic clock"
+    );
+    clock.advance(REGISTRY_ACCESS_DEADLINE);
+    assert_eq!(
+        super::registry_now(&held),
+        reading + REGISTRY_ACCESS_DEADLINE,
+        "it moves by exactly what it is moved by"
+    );
+    let nested = super::RegistryClock::hold(&held);
+    assert_eq!(nested.now(), clock.now(), "a nested guard shares the clock");
+    drop(clock);
+    assert_eq!(
+        nested.now(),
+        reading + REGISTRY_ACCESS_DEADLINE,
+        "the clock stays while a guard lives"
+    );
+    drop(nested);
+    assert!(
+        !clock_entry_stands(&held),
+        "with its last guard gone, its repository's clock entry is gone"
+    );
+    let after = std::time::Instant::now();
+    assert!(
+        super::registry_now(&held) >= after,
+        "with its last guard gone, its repository's accesses read the monotonic clock again"
+    );
+    let unwound = std::panic::catch_unwind(|| {
+        let _clock = super::RegistryClock::hold(&held);
+        panic!("a test that holds a clock fails");
+    });
+    assert!(unwound.is_err(), "the holder unwound");
+    assert!(
+        !clock_entry_stands(&held),
+        "a guard dropped by an unwinding takes its clock's entry with it"
+    );
+    let later = std::time::Instant::now();
+    assert!(
+        super::registry_now(&held) >= later,
+        "a guard dropped by an unwinding takes its clock with it"
+    );
+}
+
 /// T4 (record §5.5, §6.4): a veto that answers `Return` after the first
 /// failure returns that failure exactly as the attempt returned it, after one
 /// attempt, the veto asked once and nothing counted as contended.
@@ -15738,27 +15896,46 @@ fn a_registry_access_returns_a_vetoed_failure_unchanged_after_one_attempt() {
 /// T4: an access whose every attempt fails refuses at its deadline as a
 /// registry refusal, never as Git state, naming the store, the deadline, the
 /// attempt count and the last failure; every failure answered `Attempt` and was
-/// counted, the last one included. The final attempt is the one that follows
-/// the sleep the deadline cut short (§6.4, step 7): with attempts that take no
-/// time the backoff fits sixteen in 500 ms.
+/// counted, the last one included. The final attempt is the first that begins
+/// at or after the deadline (§6.4, step 7): with attempts that take no time it
+/// follows the sleep the deadline cut short, and the backoff fits sixteen in
+/// 500 ms.
+///
+/// **On its repository's test clock** (the record's §9.33, B16): the deadline
+/// and `took` are that [`super::RegistryClock`]'s readings, which only the
+/// waits the access asks for move, so a stall of the host before the first
+/// attempt makes that attempt no later on it. Wall time is held twice: to the
+/// containment, and, as before, to the deadline and 5 s; a long enough stall of
+/// the host can trip either. A refusal no earlier than the deadline in wall
+/// time stays a real repository's
+/// (`a_list_over_a_registration_half_written_refuses_at_its_deadline_and_is_never_git_state`).
 #[test]
 fn a_registry_access_that_always_fails_refuses_at_its_deadline_naming_the_count_and_the_last_failure()
  {
     let (_tree, key) = contract_key("registry-access-deadline");
+    let clock = super::RegistryClock::hold(&key);
+    let wall = std::time::Instant::now();
     let mut made = 0_u32;
-    let started = std::time::Instant::now();
+    let started = clock.now();
     let result: Result<(), _> = tolerant_registry_access(
         &key,
         RegistryHold::Unheld,
-        &mut crate::workspace_manager::sleep_for,
+        &mut clock_pause(&clock, wall),
         &mut || Again::Attempt,
         &mut || {
+            contained(wall, "an attempt");
             made += 1;
             Err(attempt_failed(made))
         },
     );
-    let took = started.elapsed();
+    let took = clock.now().saturating_duration_since(started);
+    let ran = wall.elapsed();
+    contained(wall, "the refusal");
     let message = registry_refusal(result, "an access that always fails");
+    assert!(
+        ran < REGISTRY_ACCESS_DEADLINE + std::time::Duration::from_secs(5),
+        "and within the deadline and 5 s of wall time: {ran:?}"
+    );
     assert!(
         took >= REGISTRY_ACCESS_DEADLINE,
         "it refused only at its deadline, {REGISTRY_ACCESS_DEADLINE:?}: it took {took:?}"
@@ -15788,17 +15965,23 @@ fn a_registry_access_that_always_fails_refuses_at_its_deadline_naming_the_count_
 }
 
 /// T4: two failures and then a success return the success, after three
-/// attempts, with the two failures counted.
+/// attempts, with the two failures counted. On its repository's test clock
+/// (the record's §9.33, B16), which only the waits the access asks for move,
+/// so its attempts begin before the deadline however the host schedules them;
+/// wall time is its containment.
 #[test]
 fn a_registry_access_passes_two_failures_and_returns_the_success_after_them() {
     let (_tree, key) = contract_key("registry-access-success");
+    let clock = super::RegistryClock::hold(&key);
+    let wall = std::time::Instant::now();
     let mut made = 0_u32;
     let result = tolerant_registry_access(
         &key,
         RegistryHold::Unheld,
-        &mut crate::workspace_manager::sleep_for,
+        &mut clock_pause(&clock, wall),
         &mut || Again::Attempt,
         &mut || {
+            contained(wall, "an attempt");
             made += 1;
             if made < 3 {
                 Err(attempt_failed(made))
@@ -15807,6 +15990,7 @@ fn a_registry_access_passes_two_failures_and_returns_the_success_after_them() {
             }
         },
     );
+    contained(wall, "the success");
     assert_eq!(
         result.expect("the third attempt succeeds"),
         30,
@@ -15819,29 +16003,47 @@ fn a_registry_access_passes_two_failures_and_returns_the_success_after_them() {
 /// T4 (FUB-D6-DABSENCE): a veto that answers `Undecidable` refuses at once,
 /// after one attempt, as a registry refusal naming why and carrying the
 /// failure; never Git state, never attempted past, and not counted.
+///
+/// **"At once" is on its repository's test clock** (the record's §9.33, B16):
+/// `took` is that [`super::RegistryClock`]'s, which only the waits the access
+/// asks for move; the refusal asks for none, so its `took` on the clock is
+/// zero, however the host schedules the test. Wall time is its containment. An
+/// undecidable refusal at once in wall time is still asserted by a real
+/// repository's test
+/// (`an_add_whose_checkout_cannot_be_made_refuses_after_one_attempt_and_leaves_nothing`),
+/// whose wall-time bound a long enough stall of the host can trip.
 #[test]
 fn an_undecidable_veto_refuses_at_once_naming_why() {
     let (_tree, key) = contract_key("registry-access-undecidable");
+    let clock = super::RegistryClock::hold(&key);
+    let wall = std::time::Instant::now();
     let mut made = 0_u32;
-    let started = std::time::Instant::now();
+    let started = clock.now();
     let result: Result<(), _> = tolerant_registry_access(
         &key,
         RegistryHold::Unheld,
-        &mut crate::workspace_manager::sleep_for,
+        &mut clock_pause(&clock, wall),
         &mut || Again::Undecidable {
             why: "the destination now holds a file".to_owned(),
         },
         &mut || {
+            contained(wall, "an attempt");
             made += 1;
             Err(attempt_failed(made))
         },
     );
-    let took = started.elapsed();
+    let took = clock.now().saturating_duration_since(started);
+    contained(wall, "the refusal");
     let message = registry_refusal(result, "an undecidable veto");
     assert_eq!(made, 1, "no attempt after an undecidable veto");
     assert!(
         took < REGISTRY_ACCESS_DEADLINE,
         "it refused at once, not at the deadline: {took:?}"
+    );
+    assert_eq!(
+        took,
+        std::time::Duration::ZERO,
+        "it asked for no wait on its clock: {took:?}"
     );
     assert!(
         message.contains("the destination now holds a file")
@@ -15853,29 +16055,43 @@ fn an_undecidable_veto_refuses_at_once_naming_why() {
 }
 
 /// T4 (the final attempt, FUD-D1-PROGRESS): a failure repaired by the
-/// deadline is passed by the attempt the deadline's cut-short sleep leads to.
-/// Every attempt fails until the access's deadline, which is no earlier than
-/// `REGISTRY_ACCESS_DEADLINE` after this test's clock was read; only an attempt
-/// made at the deadline can succeed, and the contract makes exactly one.
+/// deadline is passed by the final attempt, the first made at or after the
+/// deadline: after the deadline's cut-short sleep or, when the deadline passed
+/// during the attempt before it, next, with no wait asked for before it (the
+/// test below). Every attempt fails until the access's deadline, which is no
+/// earlier than `REGISTRY_ACCESS_DEADLINE` after this test's clock was read;
+/// only an attempt made at or after the deadline can succeed, and the contract
+/// makes exactly one.
+///
+/// **On its repository's test clock** (the record's §9.33, B16, O-1): the
+/// deadline, the repair and each attempt's reading are that
+/// [`super::RegistryClock`]'s, which only the waits the access asks for move,
+/// so a stall of the host before the first attempt makes that attempt no later
+/// on it; the test build's 500 ms is the deadline on it. Wall time is its
+/// containment.
 #[test]
 fn the_final_attempt_passes_a_failure_repaired_by_the_deadline() {
     let (_tree, key) = contract_key("registry-access-final");
+    let clock = super::RegistryClock::hold(&key);
+    let wall = std::time::Instant::now();
     let mut made = 0_u32;
-    let repaired = std::time::Instant::now() + REGISTRY_ACCESS_DEADLINE;
+    let repaired = clock.now() + REGISTRY_ACCESS_DEADLINE;
     let result = tolerant_registry_access(
         &key,
         RegistryHold::Unheld,
-        &mut crate::workspace_manager::sleep_for,
+        &mut clock_pause(&clock, wall),
         &mut || Again::Attempt,
         &mut || {
+            contained(wall, "an attempt");
             made += 1;
-            if std::time::Instant::now() >= repaired {
+            if clock.now() >= repaired {
                 Ok(made)
             } else {
                 Err(attempt_failed(made))
             }
         },
     );
+    contained(wall, "the final attempt");
     let last = result.expect("the final attempt, at the deadline, meets the repaired store");
     assert!(
         last >= 2,
@@ -15888,24 +16104,82 @@ fn the_final_attempt_passes_a_failure_repaired_by_the_deadline() {
     );
 }
 
+/// T4 (the final attempt, FUD-D1-PROGRESS): an attempt that began before the
+/// deadline and failed after it is followed by the final attempt, with no wait
+/// asked for before it, and a store repaired by the deadline is passed. The
+/// first attempt reads the store before its repair and then lasts the
+/// deadline's length and 100 ms more, so the nominal deadline passes while it
+/// runs, as a slow Git command or a descheduled thread makes it pass.
+///
+/// **On its repository's test clock** (the record's §9.33, B16): the deadline,
+/// the repair and each attempt's reading are that [`super::RegistryClock`]'s,
+/// which only the first attempt's length and the waits the access asks for
+/// move, so the first attempt begins before the deadline and reads the store
+/// before its repair however the host schedules the test, and the deadline
+/// passes during it. Wall time is its containment.
+#[test]
+fn the_final_attempt_follows_an_attempt_the_deadline_passed_during() {
+    let (_tree, key) = contract_key("registry-access-straddle");
+    let clock = super::RegistryClock::hold(&key);
+    let wall = std::time::Instant::now();
+    let mut made = 0_u32;
+    let repaired = clock.now() + REGISTRY_ACCESS_DEADLINE;
+    let result = tolerant_registry_access(
+        &key,
+        RegistryHold::Unheld,
+        &mut clock_pause(&clock, wall),
+        &mut || Again::Attempt,
+        &mut || {
+            contained(wall, "an attempt");
+            made += 1;
+            let whole = clock.now() >= repaired;
+            if made == 1 {
+                clock.advance(REGISTRY_ACCESS_DEADLINE + std::time::Duration::from_millis(100));
+            }
+            if whole {
+                Ok(made)
+            } else {
+                Err(attempt_failed(made))
+            }
+        },
+    );
+    contained(wall, "the final attempt");
+    assert_eq!(
+        result.expect("the final attempt, after the deadline, meets the repaired store"),
+        2,
+        "the first attempt read the store before its repair; the second is the final one"
+    );
+    assert_eq!(
+        contended_attempts(&key),
+        1,
+        "one failure, answered `Attempt`"
+    );
+}
+
 /// T4: `contended_attempts` counts exactly the `Attempt` answers: two of them,
 /// then a `Return`, count two; an `Undecidable` and a `Return` count nothing
-/// (the two tests above).
+/// (the two tests above). On its repository's test clock (the record's §9.33,
+/// B16), so its attempts begin before the deadline however the host schedules
+/// them; wall time is its containment.
 #[test]
 fn contended_attempts_counts_exactly_the_attempt_answers() {
     let (_tree, key) = contract_key("registry-access-counted");
+    let clock = super::RegistryClock::hold(&key);
+    let wall = std::time::Instant::now();
     let mut answers = [Again::Attempt, Again::Attempt, Again::Return].into_iter();
     let mut made = 0_u32;
     let result: Result<(), _> = tolerant_registry_access(
         &key,
         RegistryHold::Unheld,
-        &mut crate::workspace_manager::sleep_for,
+        &mut clock_pause(&clock, wall),
         &mut || answers.next().unwrap_or(Again::Return),
         &mut || {
+            contained(wall, "an attempt");
             made += 1;
             Err(attempt_failed(made))
         },
     );
+    contained(wall, "the third failure");
     match result {
         Err(UpstrokeError::Git { message }) => assert_eq!(message, "attempt 3 failed"),
         other => panic!("the third failure is returned as it was: {other:?}"),
@@ -15913,37 +16187,62 @@ fn contended_attempts_counts_exactly_the_attempt_answers() {
     assert_eq!((made, contended_attempts(&key)), (3, 2));
 }
 
-/// T4 (FUB-D6-BOUND): a veto that blocks past the deadline is followed by no
-/// attempt; the access returns after it, refusing. The bound is the deadline
-/// plus the last attempt's runtime plus the veto's, and the helper bounds
-/// neither.
+/// T4 (FUB-D6-BOUND): a veto that lasts the deadline's length and 100 ms more,
+/// after an attempt that began before the deadline, so that the nominal
+/// deadline passes while it runs, is followed by the final attempt alone, with
+/// no wait asked for before it; the access refuses after that attempt's veto.
+/// Nothing bounds the attempts' or the vetoes' runtimes, or the scheduling
+/// between them.
+///
+/// **On its repository's test clock** (the record's §9.33, B16): the deadline,
+/// each attempt's start and `took` are that [`super::RegistryClock`]'s, which
+/// only the vetoes' length and the waits the access asks for move, so the
+/// first attempt begins before the deadline however the host schedules the
+/// test, and the deadline passes during the first veto. Wall time is its
+/// containment.
 #[test]
-fn a_veto_that_blocks_past_the_deadline_is_followed_by_no_attempt() {
+fn a_veto_that_blocks_past_the_deadline_is_followed_by_the_final_attempt_alone() {
     let (_tree, key) = contract_key("registry-access-slow-veto");
+    let clock = super::RegistryClock::hold(&key);
+    let wall = std::time::Instant::now();
     let blocked = REGISTRY_ACCESS_DEADLINE + std::time::Duration::from_millis(100);
     let mut made = 0_u32;
-    let started = std::time::Instant::now();
+    let mut began: Vec<std::time::Instant> = Vec::new();
+    let started = clock.now();
     let result: Result<(), _> = tolerant_registry_access(
         &key,
         RegistryHold::Unheld,
-        &mut crate::workspace_manager::sleep_for,
+        &mut clock_pause(&clock, wall),
         &mut || {
-            std::thread::sleep(blocked);
+            contained(wall, "a veto");
+            clock.advance(blocked);
             Again::Attempt
         },
         &mut || {
+            contained(wall, "an attempt");
             made += 1;
+            began.push(clock.now());
             Err(attempt_failed(made))
         },
     );
-    let took = started.elapsed();
+    let took = clock.now().saturating_duration_since(started);
+    contained(wall, "the refusal");
     let message = registry_refusal(result, "an access whose veto blocked past its deadline");
     assert_eq!(
-        made, 1,
-        "no attempt after a veto that ended past the deadline"
+        made, 2,
+        "the final attempt after the veto, and none after it"
     );
-    assert!(took >= blocked, "it returned after the veto: {took:?}");
-    assert!(message.contains("1 attempt(s)"), "{message}");
+    assert!(
+        began
+            .get(1)
+            .is_some_and(|second| *second >= started + REGISTRY_ACCESS_DEADLINE),
+        "the final attempt began after the deadline: {began:?}"
+    );
+    assert!(
+        took >= blocked + blocked,
+        "it returned after the final attempt's veto: {took:?}"
+    );
+    assert!(message.contains("2 attempt(s)"), "{message}");
 }
 
 /// T4 and T9: with R-X held alone by another thread, as the torn-registration
@@ -15951,9 +16250,30 @@ fn a_veto_that_blocks_past_the_deadline_is_followed_by_no_attempt() {
 /// attempt run, and an unheld one (a list, a scan) runs at once. A shared
 /// access beside another shared holder runs at once too, and an exclusive one
 /// waits for the shared holder and refuses at its deadline.
+///
+/// **On its repository's test clock** (the record's §9.33, B16): each case's
+/// `took` is that [`super::RegistryClock`]'s, which only the waits the access
+/// asks for move. A case that waits for R-X reaches its deadline by those waits
+/// alone, with no attempt run; a case that does not wait asks for none, and
+/// its `took` on the clock is zero. A shared access beside a shared holder
+/// returns `Ok(1)` while the holder's read guard is still held, which no access
+/// that waited for or excluded that holder could. Wall time is its containment.
+///
+/// **A guarantee this test no longer makes** (the orchestrator's R-X
+/// determination, B16): before B16 its cases that do not wait returned within
+/// 500 ms of wall time (`took < REGISTRY_ACCESS_DEADLINE`, on the monotonic
+/// clock). A real-time delay in the shared path that is not an R-X wait turn,
+/// and still lets the access succeed while the holder is held, is not caught
+/// here. R-X's wait refusing no earlier than its deadline, and an unheld list
+/// beside R-X held alone not waiting, are still asserted in wall time by a real
+/// repository's test
+/// (`an_add_refuses_within_its_deadline_while_r_x_is_held_alone_and_a_list_does_not_wait`),
+/// whose wall-time bounds a long enough stall of the host can trip.
 #[test]
 fn r_x_held_alone_refuses_a_shared_access_with_no_attempt_and_passes_an_unheld_one() {
     let (_tree, key) = contract_key("registry-access-rx");
+    let clock = super::RegistryClock::hold(&key);
+    let wall = std::time::Instant::now();
     let bound = std::time::Duration::from_secs(60);
     for (holder_alone, hold) in [
         (true, RegistryHold::Shared),
@@ -15983,20 +16303,22 @@ fn r_x_held_alone_refuses_a_shared_access_with_no_attempt_and_passes_an_unheld_o
             .recv_timeout(bound)
             .expect("the other thread holds R-X");
         let mut made = 0_u32;
-        let started = std::time::Instant::now();
+        let started = clock.now();
         let result = tolerant_registry_access(
             &key,
             hold,
-            &mut crate::workspace_manager::sleep_for,
+            &mut clock_pause(&clock, wall),
             &mut || Again::Attempt,
             &mut || {
+                contained(wall, "an attempt");
                 made += 1;
                 Ok(made)
             },
         );
-        let took = started.elapsed();
+        let took = clock.now().saturating_duration_since(started);
         let _ = release.send(());
         holder.join().expect("the holder thread");
+        contained(wall, "a case");
         let waits = match hold {
             RegistryHold::Unheld => false,
             RegistryHold::Shared => holder_alone,
@@ -16015,6 +16337,12 @@ fn r_x_held_alone_refuses_a_shared_access_with_no_attempt_and_passes_an_unheld_o
             );
             assert!(took >= REGISTRY_ACCESS_DEADLINE, "{hold:?}: {took:?}");
         } else {
+            assert_eq!(
+                took,
+                std::time::Duration::ZERO,
+                "{hold:?} (holder alone: {holder_alone}) asked for no wait on its clock; the \
+                 access returned {result:?}"
+            );
             assert_eq!(
                 result.expect("the access runs beside the holder"),
                 1,
@@ -16145,9 +16473,18 @@ fn a_list_over_a_registration_half_written_refuses_at_its_deadline_and_is_never_
 /// T11, transient (and T18's second shape, FUB-D5-OPTFILE's effect): the same
 /// registration, finished by its writer only after the list has failed on it
 /// once (the `CONTENDED_ATTEMPTS` handshake), is passed by a later attempt.
+///
+/// **Its list waits to the production deadline** (the record's §9.31, B14).
+/// On the persistent Windows guest, under the suite's load, the list's first
+/// attempt ended past the test build's 500 ms, and the access refused with no
+/// attempt left for the registration its writer then finished.
 #[test]
 fn a_list_over_a_registration_half_written_passes_once_its_writer_finishes() {
     let fixture = Fixture::created("registry-tornok-transient");
+    let _deadline = super::RegistryDeadline::hold(
+        fixture.manager.common_git_dir(),
+        PRODUCTION_REGISTRY_DEADLINE,
+    );
     let _alpha = fixture.add_task(&mut NoHooks, "alpha", 1);
     let admin = plant_half_written_registration(&fixture, "foreign-transient");
     let common = fixture.manager.common_git_dir().to_path_buf();
@@ -16292,11 +16629,16 @@ fn an_add_into_a_store_nothing_can_write_refuses_at_its_deadline_and_leaves_noth
 /// the add's entry once ("could not create directory of
 /// '.git/worktrees/<name>'"). The destination is untouched, so the add is
 /// attempted again, and the store is made writable again only after the add
-/// has failed once (the handshake).
+/// has failed once (the handshake). The add waits to the production deadline
+/// (the record's §9.31, B14).
 #[cfg(unix)]
 #[test]
 fn an_add_whose_own_entry_cannot_be_made_once_succeeds_on_a_later_attempt() {
     let fixture = Fixture::created("registry-own-entry-once");
+    let _deadline = super::RegistryDeadline::hold(
+        fixture.manager.common_git_dir(),
+        PRODUCTION_REGISTRY_DEADLINE,
+    );
     let _alpha = fixture.add_task(&mut NoHooks, "alpha", 1);
     let beta = fixture.task("beta", 1);
     fixture
@@ -16330,11 +16672,19 @@ fn an_add_whose_own_entry_cannot_be_made_once_succeeds_on_a_later_attempt() {
 /// scan dies. Removed once the add has failed on it twice, the add passes on a
 /// later attempt; kept, the add refuses at its deadline and leaves nothing at
 /// the slot. Nothing tells this from the add's own failure but another
-/// attempt, which the untouched destination licenses.
+/// attempt, which the untouched destination licenses. The add whose entry is
+/// removed waits to the production deadline (the record's §9.31, B14); the one
+/// whose entry is kept refuses at the test build's.
 #[test]
 fn an_add_whose_sibling_scan_meets_a_torn_entry_of_its_own_name_is_attempted_past_it() {
     for (windows, label) in [(Some(2_usize), "two"), (None, "every")] {
         let fixture = Fixture::created(&format!("registry-own-entry-{label}"));
+        let _deadline = windows.map(|_| {
+            super::RegistryDeadline::hold(
+                fixture.manager.common_git_dir(),
+                PRODUCTION_REGISTRY_DEADLINE,
+            )
+        });
         let _alpha = fixture.add_task(&mut NoHooks, "alpha", 1);
         let beta = fixture.task("beta", 1);
         fixture
@@ -16825,12 +17175,17 @@ fn an_add_whose_destination_cannot_be_made_is_git_state_at_once() {
 /// and making again explain. The access is held at that answer until the
 /// destination has been read ([`hold_next_contended`]), so no second attempt
 /// and veto can remove it under the read. Then the sibling is repaired, the
-/// access released, and the add passes.
+/// access released, and the add passes. The add waits to the production
+/// deadline (the record's §9.31, B14).
 #[cfg(unix)]
 #[test]
 fn after_an_untouched_failure_the_destination_is_removed_and_made_again() {
     use std::os::unix::fs::PermissionsExt as _;
     let fixture = Fixture::created("registry-destination-again");
+    let _deadline = super::RegistryDeadline::hold(
+        fixture.manager.common_git_dir(),
+        PRODUCTION_REGISTRY_DEADLINE,
+    );
     let foreign = fixture.add_task(&mut NoHooks, "foreign", 1);
     let foreign_path = fixture.manager.slot_path(&foreign);
     let foreign_admin = super::fixture::registration_of(&fixture.manager, &foreign_path);
@@ -17223,8 +17578,11 @@ fn no_production_argv_of_the_manager_names_prune() {
 /// work in one checkout of the parent's repository. It takes that checkout's
 /// worktree lock and its own run's lock, derives a manager over its own run,
 /// says it is ready, waits for `GO`, runs `B329_CYCLES` snapshot add-and-remove
-/// cycles through the production funnels, and reports how many failed and
-/// each failure, on one line each.
+/// cycles through the production funnels, saying `B329_CYCLE` and the round
+/// after each one ([`result_through_cycles`]), and reports how many failed and
+/// each failure, on one line each. Its manager's accesses wait to the
+/// production deadline (the record's §9.31, B14): they race the other
+/// processes' registry writes.
 #[test]
 #[ignore = "linked child of the two-process registry tests"]
 fn registry_cycles_child() {
@@ -17248,6 +17606,8 @@ fn registry_cycles_child() {
     let _run = crate::rundir::RunLock::acquire(&public).expect("the run's lock");
     let manager = WorkspaceManager::derive(&base, &private, &run_id, &format!("inc-{number}"))
         .expect("a manager over this run, in the shared repository");
+    let _deadline =
+        super::RegistryDeadline::hold(manager.common_git_dir(), PRODUCTION_REGISTRY_DEADLINE);
     manager
         .create_execution_root(&mut NoHooks)
         .expect("the execution root");
@@ -17270,6 +17630,7 @@ fn registry_cycles_child() {
             }
             Err(error) => failures.push(format!("adding {name}: {error}")),
         }
+        link.send(&format!("B329_CYCLE {number} {round}"));
     }
     link.send(&format!(
         "B329_RESULT {number} cycles={cycles} failures={}",
@@ -17304,11 +17665,68 @@ fn line_from(lines: &std::sync::mpsc::Receiver<String>, prefix: &str, stderr: &P
     }
 }
 
+/// The `B329_RESULT` line of linked child `number`, read through the
+/// `B329_CYCLE` line it says after each of its `cycles` cycles, each within
+/// `bound` of the cycle line before it ([`super::fixture::LINK_BOUND`] in T1
+/// and T3); a panic carrying the child's stderr otherwise, or when a round
+/// arrives out of order or the result before the last round.
+///
+/// **Why the bound restarts at each cycle** (the record's §9.30, B13). The
+/// link's bound only turns a silent peer into a failure, and a child that is
+/// still cycling is not silent. Read with [`line_from`], the result's one
+/// deadline timed the whole run instead, which is the runner's speed and not
+/// the registry's: merge-queue run 37834058719 failed T1 on hosted
+/// `windows-latest` at that deadline, with no result line and an empty
+/// stderr, and on the persistent Windows guest under load every child was
+/// still cycling when the same deadline ended T1 and T3. A child that stops is
+/// still caught, `bound` after the last cycle it reported, and the message
+/// says how many that was.
+fn result_through_cycles(
+    lines: &std::sync::mpsc::Receiver<String>,
+    number: u32,
+    cycles: u32,
+    stderr: &Path,
+    bound: std::time::Duration,
+) -> String {
+    let mut reported = 0_u32;
+    let mut deadline = std::time::Instant::now() + bound;
+    loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        let line = match lines.recv_timeout(left) {
+            Ok(line) => line,
+            Err(error) => panic!(
+                "no `B329_RESULT` line from the linked child ({error}): process {number} \
+                 reported {reported} of its {cycles} cycles and then nothing for {bound:?}; \
+                 its stderr:\n{}",
+                fs::read_to_string(stderr).unwrap_or_default()
+            ),
+        };
+        if let Some(result) = line.find("B329_RESULT").and_then(|at| line.get(at..)) {
+            assert_eq!(
+                reported, cycles,
+                "process {number} reported its result after {reported} of {cycles} cycles: {result}"
+            );
+            return result.to_owned();
+        }
+        if let Some(cycle) = line.find("B329_CYCLE ").and_then(|at| line.get(at..)) {
+            reported += 1;
+            assert!(
+                reported <= cycles && cycle == format!("B329_CYCLE {number} {reported}"),
+                "process {number} said `{cycle}` where cycle {reported} of {cycles} was due"
+            );
+            deadline = std::time::Instant::now() + bound;
+        }
+    }
+}
+
 /// T1 and T3: `processes` coordinators of one repository, each in its own
 /// checkout — the first in the main checkout, the others in linked checkouts
 /// added with plain Git — each holding its own worktree lock and run lock,
 /// run their registry work at once. Each one's R-X is its own; tolerance is
-/// what keeps every cycle from failing on another's write in flight.
+/// what keeps every cycle from failing on another's write in flight. Each
+/// child's result is read through its cycle lines
+/// ([`result_through_cycles`]), so the link's bound ends a child that stops
+/// and never one still cycling, however long its cycles take on the runner.
 fn registry_cycles_across(tag: &str, processes: u32, cycles: u32) {
     let fixture = Fixture::created(tag);
     let mut children = Vec::new();
@@ -17351,7 +17769,8 @@ fn registry_cycles_across(tag: &str, processes: u32, cycles: u32) {
     }
     let mut failed = Vec::new();
     for (number, child, lines, stderr) in &children {
-        let result = line_from(lines, "B329_RESULT", stderr);
+        let result =
+            result_through_cycles(lines, *number, cycles, stderr, super::fixture::LINK_BOUND);
         loop {
             let line = line_from(lines, "B329_", stderr);
             if line.starts_with("B329_DONE") {
@@ -17402,6 +17821,118 @@ fn three_coordinators_in_three_checkouts_of_one_repository_never_fail_on_each_ot
         "registry-three-processes",
         3,
         if cfg!(windows) { 100 } else { 340 },
+    );
+}
+
+/// B13 (the record's §9.30): T1's and T3's wait restarts its bound at each
+/// cycle line, so a child whose cycles together outlast the bound, none of
+/// them near it, is read to its result. Eight cycle lines 400 ms apart, then
+/// the result, take at least 3.2 s against a 2 s bound: the one deadline
+/// [`line_from`] keeps from its call refuses that whatever the scheduling,
+/// and this refuses it only if a line comes 2 s after the one before it, five
+/// times its interval.
+///
+/// **The speaker starts only once the test's clock is read** (the record's
+/// §9.33, B16-2): it waits for a start signal the test sends after `started`,
+/// so none of its eight intervals falls before the measurement begins, however
+/// long the test is descheduled after spawning it. That wait is bounded by
+/// [`super::fixture::LINK_BOUND`], a containment and not the oracle.
+#[test]
+fn a_childs_result_is_read_through_cycles_whose_sum_outlasts_the_bound() {
+    let (say, lines) = std::sync::mpsc::channel::<String>();
+    let (go, told) = std::sync::mpsc::channel::<()>();
+    let speaker = std::thread::spawn(move || {
+        if told.recv_timeout(super::fixture::LINK_BOUND).is_err() {
+            return;
+        }
+        for round in 1..=8 {
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            if say.send(format!("B329_CYCLE 0 {round}")).is_err() {
+                return;
+            }
+        }
+        let _ = say.send("B329_RESULT 0 cycles=8 failures=0".to_owned());
+    });
+    let started = std::time::Instant::now();
+    go.send(())
+        .expect("the speaker is told to start once the clock is read");
+    let result = result_through_cycles(
+        &lines,
+        0,
+        8,
+        Path::new(""),
+        std::time::Duration::from_secs(2),
+    );
+    let took = started.elapsed();
+    speaker.join().expect("the speaker");
+    assert_eq!(result, "B329_RESULT 0 cycles=8 failures=0");
+    assert!(
+        took >= std::time::Duration::from_millis(3_200),
+        "the cycles together outlasted the bound: {took:?}"
+    );
+}
+
+/// B13 (the record's §9.30): a child that stops cycling is still caught, the
+/// bound after the last cycle it reported, and its failure says how many that
+/// was. Three cycle lines wait in the channel and its sender stays open, so
+/// only the bound ends the wait, as it does for a child that hangs.
+#[test]
+#[should_panic(
+    expected = "(timed out waiting on channel): process 0 reported 3 of its 10 cycles and then nothing for 100ms"
+)]
+fn a_child_that_stops_cycling_fails_naming_the_cycles_it_reported() {
+    let (say, lines) = std::sync::mpsc::channel::<String>();
+    for round in 1..=3 {
+        say.send(format!("B329_CYCLE 0 {round}"))
+            .expect("a cycle line");
+    }
+    let _result = result_through_cycles(
+        &lines,
+        0,
+        10,
+        Path::new(""),
+        std::time::Duration::from_millis(100),
+    );
+    drop(say);
+}
+
+/// B13 (the record's §9.30): a result before the last cycle fails at once, so
+/// a child is held to the cycles its test claims.
+#[test]
+#[should_panic(expected = "process 1 reported its result after 2 of 3 cycles")]
+fn a_result_before_the_last_cycle_fails() {
+    let (say, lines) = std::sync::mpsc::channel::<String>();
+    for line in [
+        "B329_CYCLE 1 1",
+        "B329_CYCLE 1 2",
+        "B329_RESULT 1 cycles=3 failures=0",
+    ] {
+        say.send(line.to_owned()).expect("a line");
+    }
+    let _result = result_through_cycles(
+        &lines,
+        1,
+        3,
+        Path::new(""),
+        std::time::Duration::from_secs(2),
+    );
+}
+
+/// B13 (the record's §9.30): a cycle line out of order fails at once, so the
+/// wait reads at most one line per cycle.
+#[test]
+#[should_panic(expected = "process 1 said `B329_CYCLE 1 3` where cycle 2 of 10 was due")]
+fn a_cycle_line_out_of_order_fails() {
+    let (say, lines) = std::sync::mpsc::channel::<String>();
+    for line in ["B329_CYCLE 1 1", "B329_CYCLE 1 3"] {
+        say.send(line.to_owned()).expect("a line");
+    }
+    let _result = result_through_cycles(
+        &lines,
+        1,
+        10,
+        Path::new(""),
+        std::time::Duration::from_secs(2),
     );
 }
 
@@ -17488,10 +18019,15 @@ fn torn_by_another_process(
 /// Claim 1, another process's write in flight, across two processes: a list
 /// meets a registration another process is half way through writing, fails on
 /// it, and — the writer told to finish only once the list has failed on it
-/// (the `CONTENDED_ATTEMPTS` handshake) — passes on a later attempt.
+/// (the `CONTENDED_ATTEMPTS` handshake) — passes on a later attempt. The list
+/// waits to the production deadline (the record's §9.31, B14).
 #[test]
 fn a_list_passes_a_registration_another_process_finishes_writing() {
     let fixture = Fixture::created("registry-writer-in-flight");
+    let _deadline = super::RegistryDeadline::hold(
+        fixture.manager.common_git_dir(),
+        PRODUCTION_REGISTRY_DEADLINE,
+    );
     let _alpha = fixture.add_task(&mut NoHooks, "alpha", 1);
     let (child, lines, _admin, stderr) = torn_by_another_process(&fixture, "other-process");
     let common = fixture.manager.common_git_dir().to_path_buf();
@@ -17589,16 +18125,41 @@ fn a_list_over_a_registration_another_process_left_whole_and_unlistable_refuses(
     assert!(message.contains("the last failed with"), "{message}");
 }
 
+/// The production registry deadline: `REGISTRY_ACCESS_DEADLINE`'s
+/// `#[cfg(not(test))]` value, which a test build cannot name. A test holds it
+/// for its repository ([`super::RegistryDeadline`]), as the coordinator's tear
+/// witnesses hold `WITNESS_REGISTRY_DEADLINE`, when an access of its must be
+/// attempted again before what the test is about can happen: its accesses race
+/// real writers, or its own act ends the contention an access meets -- a
+/// writer finishing the registration it tore, a remover, a restorer, a wait
+/// made through its hooks. Under the test build's 500 ms one attempt the
+/// platform makes slow can spend the whole deadline first, and the access
+/// refuses with no second attempt (the record's §9.30.10 and §9.31). A test
+/// whose tear stays, and whose oracle is the refusal at the deadline, keeps
+/// the test build's.
+const PRODUCTION_REGISTRY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// T10 (the legacy writer beside the manager): the legacy engine's gate
 /// snapshots, added and dropped in a linked checkout by four threads, beside
 /// the manager's snapshot cycles in the main checkout on four threads. The
 /// legacy accesses are follow-up D's and are counted, not asserted; the
 /// manager has no failure.
+///
+/// **Its accesses wait to the production deadline** (the record's §9.30.10,
+/// B13). Under the test build's 500 ms, one attempt the platform makes slow
+/// can spend the whole deadline: on the persistent Windows guest, under the
+/// suite's load, an add's one attempt failed on another add's registration in
+/// flight after the deadline had passed, and the access refused with no second
+/// attempt, which is the retry this test exists to exercise.
 #[test]
 fn the_manager_never_fails_beside_the_legacy_engines_gate_snapshots() {
     const THREADS: u32 = 4;
     const ROUNDS: u32 = 40;
     let fixture = Fixture::created("registry-legacy-beside");
+    let _deadline = super::RegistryDeadline::hold(
+        fixture.manager.common_git_dir(),
+        PRODUCTION_REGISTRY_DEADLINE,
+    );
     let linked = fixture.root.join("legacy-checkout");
     git_os(
         &fixture.base,
@@ -17672,7 +18233,8 @@ fn the_manager_never_fails_beside_the_legacy_engines_gate_snapshots() {
 /// T18 (FUB-D5-SPELLING): T14's interleaving on a repository whose `.git` is a
 /// link to a directory of another name. Nothing reads Git's text, so no
 /// spelling of the store can be missed: the add is attempted past its own
-/// name's torn entry.
+/// name's torn entry. It waits to the production deadline (the record's
+/// §9.31, B14).
 #[cfg(unix)]
 #[test]
 fn an_add_in_a_repository_whose_git_dir_is_a_link_is_attempted_past_a_torn_entry_of_its_name() {
@@ -17697,6 +18259,8 @@ fn an_add_in_a_repository_whose_git_dir_is_a_link_is_attempted_past_a_torn_entry
         .expect("public dir");
     let manager = WorkspaceManager::derive(&base, &private, super::fixture::RUN_ID, "inc-1")
         .expect("a manager over it");
+    let _deadline =
+        super::RegistryDeadline::hold(manager.common_git_dir(), PRODUCTION_REGISTRY_DEADLINE);
     manager
         .create_execution_root(&mut NoHooks)
         .expect("the execution root");

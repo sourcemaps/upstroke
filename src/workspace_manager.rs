@@ -1768,6 +1768,16 @@ const fn registry_access_deadline(_common_git_dir: &Path) -> std::time::Duration
     REGISTRY_ACCESS_DEADLINE
 }
 
+/// The time as a registry access over `common_git_dir` reads it: always the
+/// monotonic clock in a production build. The `#[cfg(test)]` twin, at the
+/// bottom of this file for the reason [`note_removal_attempt`] gives, lets a
+/// test give its own repository's accesses a clock it moves itself.
+#[cfg(not(test))]
+#[inline]
+fn registry_now(_common_git_dir: &Path) -> std::time::Instant {
+    std::time::Instant::now()
+}
+
 /// The longest backoff sleep between two attempts of one registry access; the
 /// first is one millisecond, and each doubles up to this.
 const REGISTRY_BACKOFF_CEILING: std::time::Duration = std::time::Duration::from_millis(50);
@@ -1827,7 +1837,7 @@ fn with_registry<T>(
                 Err(std::sync::TryLockError::WouldBlock) => {}
             },
         }
-        let now = std::time::Instant::now();
+        let now = registry_now(common_git_dir);
         if now >= deadline {
             return Ok(None);
         }
@@ -1883,12 +1893,18 @@ fn note_slept_pause() {}
 ///    attempt runs. A veto that cannot be evaluated is never returned as Git
 ///    state and never attempted past.
 /// 6. On [`Again::Attempt`], it counts the answer for the test handshake
-///    (`note_contended`). If the deadline has passed, it refuses. Otherwise it
-///    waits out the backoff through `pause_for` — one millisecond, doubling, at
-///    most [`REGISTRY_BACKOFF_CEILING`], never past the deadline — and goes
+///    (`note_contended`). If the attempt that failed began at or after the
+///    deadline, it refuses: that attempt was the final one. Otherwise, if the
+///    deadline has not passed, it waits out the backoff through `pause_for` —
+///    one millisecond, doubling, at most [`REGISTRY_BACKOFF_CEILING`], each
+///    wait asked for no longer than the time left before the deadline — and
+///    goes back to 1; if the deadline has passed, it asks for no wait and goes
 ///    back to 1.
-/// 7. So the attempt that follows a wait the deadline cut short is made, and
-///    it is the last: a store a writer leaves whole by the deadline is passed.
+/// 7. So the first attempt that begins at or after the deadline is made, and
+///    it is the last: the attempt after a wait the deadline cut short or, when
+///    the deadline passed during an attempt, its veto or the count, the next
+///    attempt, with no wait asked for before it. A store a writer leaves whole
+///    by the deadline is passed.
 ///
 /// **Where it waits.** Every wait — each backoff, and each turn of the wait
 /// for R-X — is one call of `pause_for`. A caller passes the call's
@@ -1905,13 +1921,18 @@ fn note_slept_pause() {}
 /// wait has ended its command — a shutdown, or an error that ends it — so the
 /// transition waiting on the access stops there (the record's §9.16, I2-1).
 ///
-/// **The bound, end to end.** One deadline, [`REGISTRY_ACCESS_DEADLINE`] after
-/// the call begins. Every wait for R-X and every backoff sleep ends by it, and
-/// no attempt starts after it but the final one, which starts at it. Nothing
-/// interrupts an attempt or a veto that has started — killing a Git writer
-/// mid-write is exactly what leaves a torn registration — so an access returns
-/// by the deadline plus the runtime of its last attempt plus the runtime of the
-/// veto after it, and bounds neither.
+/// **The bound, end to end.** One nominal deadline,
+/// [`REGISTRY_ACCESS_DEADLINE`] after the call begins, and one admission rule:
+/// no attempt is admitted after the first that begins at or after the
+/// deadline. Each wait, for R-X or a backoff, is asked for no longer than the
+/// time left before the deadline, and none is asked for once it has passed.
+/// Nothing else is bounded here: when a wait wakes, how the thread is
+/// scheduled, the bookkeeping between an attempt and its check (the count — in
+/// a test build `note_contended` and its locks — and the clock read), and the
+/// runtime of each attempt and of each veto. Nothing interrupts an attempt or a
+/// veto that has started — killing a Git writer mid-write is exactly what
+/// leaves a torn registration — so the access ends after the last attempt it
+/// admits and the veto after it, at a time this function does not bound.
 ///
 /// **What it returns:** `Ok` from the first successful attempt; the failed
 /// attempt's own error, unchanged, when `again` answers `Return`; the error of
@@ -1938,19 +1959,18 @@ pub(crate) fn tolerant_registry_access<T>(
 ) -> Result<T, UpstrokeError> {
     note_access_start(common_git_dir);
     let limit = registry_access_deadline(common_git_dir);
-    let deadline = std::time::Instant::now() + limit;
+    let deadline = registry_now(common_git_dir) + limit;
     let store = common_git_dir.join("worktrees");
     let mut pause = std::time::Duration::from_millis(1);
     let mut attempts: u32 = 0;
     let mut last: Option<UpstrokeError> = None;
     loop {
-        let Some(outcome) = with_registry(
-            common_git_dir,
-            hold,
-            deadline,
-            &mut *pause_for,
-            &mut *attempt,
-        )?
+        let mut began = None;
+        let Some(outcome) =
+            with_registry(common_git_dir, hold, deadline, &mut *pause_for, &mut || {
+                began = Some(registry_now(common_git_dir));
+                attempt()
+            })?
         else {
             return Err(registry_lock_refusal(
                 &store,
@@ -1980,8 +2000,7 @@ pub(crate) fn tolerant_registry_access<T>(
             Again::Attempt => {}
         }
         note_contended(common_git_dir);
-        let now = std::time::Instant::now();
-        if now >= deadline {
+        if began.is_none_or(|began| began >= deadline) {
             return Err(UpstrokeError::RegistryRefused {
                 message: format!(
                     "the worktree registry {} kept this access from completing until its \
@@ -1991,8 +2010,11 @@ pub(crate) fn tolerant_registry_access<T>(
                 ),
             });
         }
-        pause_for(pause.min(deadline.saturating_duration_since(now)))?;
-        pause = pause.saturating_mul(2).min(REGISTRY_BACKOFF_CEILING);
+        let now = registry_now(common_git_dir);
+        if now < deadline {
+            pause_for(pause.min(deadline.saturating_duration_since(now)))?;
+            pause = pause.saturating_mul(2).min(REGISTRY_BACKOFF_CEILING);
+        }
         last = Some(failure);
     }
 }
@@ -7995,9 +8017,11 @@ fn registry_access_deadline(common_git_dir: &Path) -> std::time::Duration {
 /// [`REGISTRY_ACCESS_DEADLINE`]. For a test whose own act ends the access's
 /// wait once the code under test reaches the point the test is about -- a
 /// prober that finishes its tear, a scheduler that injects a shutdown -- so
-/// that the access does not refuse first on how long the platform takes to
-/// get there. Guards over one directory nest; its entry goes when the last
-/// drops.
+/// that how long the platform takes to get there does not make the access
+/// refuse first, as long as time remains when it reads its clock after a
+/// failed attempt's veto and count: with the guard's deadline passed by then,
+/// it asks for no wait (the record's §9.34). Guards over one directory nest;
+/// its entry goes when the last drops.
 #[cfg(test)]
 pub(crate) struct RegistryDeadline {
     common_git_dir: PathBuf,
@@ -8023,6 +8047,90 @@ impl RegistryDeadline {
 impl Drop for RegistryDeadline {
     fn drop(&mut self) {
         let mut table = REGISTRY_DEADLINES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(held) = table.get_mut(&self.common_git_dir) {
+            held.1 = held.1.saturating_sub(1);
+            if held.1 == 0 {
+                table.remove(&self.common_git_dir);
+            }
+        }
+    }
+}
+
+/// The clocks tests have given the registry accesses over one common git dir,
+/// exactly as the caller passes it, each with its reading and the number of
+/// live guards that hold it ([`RegistryClock`]). Keyed per repository, as
+/// [`REGISTRY_DEADLINES`] is, so a clock one test holds reaches no other
+/// test's accesses, on whichever thread they run.
+#[cfg(test)]
+static REGISTRY_CLOCKS: std::sync::Mutex<
+    std::collections::BTreeMap<PathBuf, (std::time::Instant, usize)>,
+> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// The `#[cfg(test)]` half of the clock seam: the monotonic clock, unless a
+/// live [`RegistryClock`] gives `common_git_dir` its own. See the
+/// `#[cfg(not(test))]` twin beside `REGISTRY_ACCESS_DEADLINE`.
+#[cfg(test)]
+fn registry_now(common_git_dir: &Path) -> std::time::Instant {
+    REGISTRY_CLOCKS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(common_git_dir)
+        .map_or_else(std::time::Instant::now, |(reading, _)| *reading)
+}
+
+/// While this guard lives, every registry access over its common git dir
+/// reads its time from a logical clock instead of the monotonic one. The clock
+/// reads the monotonic clock once, when the first guard is taken, and from
+/// then on moves only by [`RegistryClock::advance`]: by what the test moves it
+/// by, and by the waits the access asks its `pause_for` for, when the test's
+/// `pause_for` advances it by them. How the host schedules the test's threads
+/// therefore neither moves the clock nor reorders what the test did by it (the
+/// record's §9.33). Guards over one directory nest and share one clock; its
+/// entry goes when the last drops, on an unwinding as on a return. The clock
+/// takes only its table's lock, and waits for nothing else.
+#[cfg(test)]
+pub(crate) struct RegistryClock {
+    common_git_dir: PathBuf,
+}
+
+#[cfg(test)]
+impl RegistryClock {
+    pub(crate) fn hold(common_git_dir: &Path) -> Self {
+        let mut table = REGISTRY_CLOCKS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let held = table
+            .entry(common_git_dir.to_path_buf())
+            .or_insert((std::time::Instant::now(), 0));
+        held.1 = held.1.saturating_add(1);
+        Self {
+            common_git_dir: common_git_dir.to_path_buf(),
+        }
+    }
+
+    /// The clock's reading: what the accesses over its directory read.
+    pub(crate) fn now(&self) -> std::time::Instant {
+        registry_now(&self.common_git_dir)
+    }
+
+    /// Move the clock on by `by`.
+    pub(crate) fn advance(&self, by: std::time::Duration) {
+        if let Some(held) = REGISTRY_CLOCKS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_mut(&self.common_git_dir)
+        {
+            held.0 += by;
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for RegistryClock {
+    fn drop(&mut self) {
+        let mut table = REGISTRY_CLOCKS
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(held) = table.get_mut(&self.common_git_dir) {

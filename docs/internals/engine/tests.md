@@ -2735,7 +2735,11 @@ and none panics: the witness wants the whole record, not the first failure.
   presence is the regression this policy replaced.
 - `worktree-true` (gates, when the spec says `worktree true`): the role sets
   `core.useReplaceRefs = true` in its own snapshot's worktree configuration
-  first, so every read below it has to beat that scope too.
+  first, so every read below it has to beat that scope too. It sets it through
+  `probe_git_past_another_registrations_write` (proposed and conditional,
+  B-W924-R2, its section below): the setting reads every registration of the
+  repository first, so beside a sibling run's add in flight it can die on that
+  sibling's empty `commondir`.
 - `include`: `git config -z --show-origin --get core.useReplaceRefs` answers
   `false` from the include file, in the directory the role was started in. The
   include is present and in force while the role runs, not only when the run
@@ -2854,6 +2858,106 @@ was still running in. The sibling
 checkouts are created with `--no-replace-objects -c core.useReplaceRefs=false`,
 because a checkout written through the commit replacement differs from what its
 HEAD records and the run refuses it as dirty, correctly.
+
+## `fn probe_git_past_another_registrations_write(dir: &Path, args: &[&str]) -> Result<String, String> {`
+
+*Proposed and conditional: B-W924-R2, not adopted (the follow-up B record's
+§9.25).* The gate probe's `git config --worktree core.useReplaceRefs true`
+enumerates the repository's registrations before it writes anything
+(`location_options_init` calls `get_worktrees()` first), so in the siblings
+witness it can die reading the other sibling's add in flight, at its empty
+`commondir`. The B-W924 diagnosis's half-forced runs saw it do so: that probe was
+the first reader to meet the held write and exited 128, and a later attempt of
+the same run met the add itself (what ended the first attempt was not observed
+directly). The product's snapshot commands now run again past
+such a read (B-W924-R1, `src/workspace.rs`), and this probe runs again on the
+same terms: another registration's `commondir` read at zero bytes, the gate's own
+snapshot never, one millisecond's sleep doubling to fifty, and a ten-second
+deadline from the first probe, checked after each probe, the probe after a
+sleep admitted however late it starts (no hard wall-clock bound). Every
+other answer is the probe's own, and the check and its record are unchanged: a
+setting that never lands still records `worktree-true FAIL` with Git's message.
+It sits after the siblings' helpers so that the witness's own lines keep their
+numbers. It reads its own copy of the rule, so that either change can be taken
+without the other.
+
+It builds the probe's command itself, `git -C <dir> <args>` with the test
+process's environment, as `probe_git` builds it, runs it once per attempt, and
+decides each attempt on the attempt's raw output: its exit status and its
+standard error as Git wrote them. Only the attempt it returns is converted, by
+`probe_answer`, into the probe's answer. (Until the B9 round it ran `probe_git`
+itself and decided on that answer, which has lost the exit status and trimmed
+the standard error, so a matching line with any failing exit, a signal, no
+newline or a blank line after it was attempted again: B-I8-1, the follow-up B
+record's §9.26.)
+
+## `fn past_another_registrations_write(`
+
+The loop, against an injected command and deadline, so that its decision runs
+without Git (the test below). It decides on each attempt's raw output, before
+any conversion, and returns that output; a command that cannot start is
+returned at once.
+
+## `fn anothers_empty_commondir_in(output: &std::process::Output, dir: &Path) -> bool {`
+
+The rule, B-W924-R1's (`read_anothers_empty_commondir` in `src/workspace.rs`) in
+a copy of its own: exit 128, Git's death; standard error exactly one line, ended
+by its newline; that line Git's `fatal: failed to read `, a path whose last
+components are `worktrees` and a registration's name, then `/commondir:
+Success`; and the name not the gate's own snapshot directory's, nor that with
+anything after it. A directory with no name of its own matches every name, so
+nothing is attempted again for it.
+
+## `fn probe_answer(output: std::io::Result<std::process::Output>) -> Result<String, String> {`
+
+The probe's answer, as `probe_git` converts it: a command that cannot start
+answers its error's text, a success its standard output, and any other exit its
+standard error, trimmed. `probe_git` stays as it was; this is the same
+conversion, applied after the decision rather than before it, and
+`a_gates_worktree_setting_answers_what_the_probe_answers_when_nothing_tears`
+compares the two on Git's own answers.
+
+## `fn a_gates_worktree_setting_is_attempted_again_only_past_another_registrations_empty_commondir() {`
+
+The loop against scripted raw outputs: past two tears of another registration
+to the setting. Returned at once, each after one attempt: the same line with
+exit 1; the same line unfinished; the same line with an empty line after it; a
+second line before it; two lines, each Git's death; the gate's own
+registration, and Git's numbered spelling of it; a removal's; a lock's; an
+unrelated refusal; and, on Unix, the same line from a Git a signal ended (a
+synthetic status, signal 15). A deadline already past returns the first tear; a
+success, and a command that cannot start, at once.
+
+## `fn a_gates_worktree_setting_answers_what_the_probe_answers_when_nothing_tears() {`
+
+Against Git itself, in a scratch repository and a directory that does not
+exist: a success with output, an unknown revision, an unknown option (Git's
+usage text, several lines, trimmed) and a `-C` that cannot be entered each get
+the answer `probe_git` gives the same command, to the byte.
+
+## `fn the_gate_role_sets_its_worktree_value_again_only_past_another_registrations_empty_commondir() {`
+
+Unix only. The call site itself: the gate role (`v1_role_probe_gate`, this test
+binary run as a child) in a directory named as a gate snapshot, with a spec
+asking for `worktree true` and `PATH` leading to a stand-in `git` script, which
+answers the setting once as the case says and then succeeds, records each
+setting call, and fails every other command (so the role's other checks fail
+and it exits 1, which the test does not read). The script reads where it records
+its calls, and the marker of its one answer, from two environment values it
+quotes (`UPSTROKE_W924_CALLS`, `UPSTROKE_W924_ANSWERED`), and `PATH` is joined
+from the paths themselves, so a temporary directory whose path holds a quote, or
+a byte that is not UTF-8, reaches the script as it is; one holding `:`, which no
+`PATH` can name, fails on `join_paths`. (Until the B10 round those paths went
+into the script as display strings inside single quotes, and `PATH` from the
+stand-in directory's display string, so a quote in the temporary path broke the
+script and failed the first case: B-I9-1, the follow-up B record's §9.27.) The
+record's `worktree-true`
+line: `ok` after two calls for another registration's tear; `FAIL` with the
+first answer's standard error after one call for the same line with exit 1,
+from a Git `SIGKILL` ended (no inherited disposition can ignore it), unfinished,
+or with an empty line after it, and for the gate's own registration and an
+unrelated failure. With the call site put back to `probe_git`, the first case
+records `FAIL`.
 
 ## `fn the_v1_include_names_the_managed_repository_however_its_path_is_spelled() {`
 

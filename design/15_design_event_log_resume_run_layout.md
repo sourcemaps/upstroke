@@ -114,10 +114,14 @@ scans.
   left torn, and any other fault of the store, such as a store nothing can write, a registration
   Git cannot list, or a listed path that stays unreadable. A failure the access cannot decide, such
   as a destination holding something the add did not leave, refuses at once.
-- The deadline covers the access's waits, its retries and the start of every attempt; the attempt
-  after a backoff the deadline cut short is made, at the deadline, and is the last. It does not bound
-  the last Git command already running, which a filter, a large checkout or a slow filesystem can
-  extend, nor the short decision after it.
+- The deadline is nominal. The access admits no attempt after the first that begins at or after
+  it, asks for no wait longer than the time left before it, and asks for none once it has passed.
+  So the final attempt is the first that begins at or after the deadline: after a backoff the
+  deadline cut short or, if the deadline passed while an attempt or the short decision after it
+  ran, next, with no backoff before it. A store a writer leaves whole by the deadline is passed.
+  Nothing here bounds the scheduling, the bookkeeping between an attempt and its check, a wait's
+  wake-up, or the runtime of a Git command or of the short decision after it, which a filter, a
+  large checkout or a slow filesystem can extend.
 - On the topology coordinator a wait answers the coordinator's messages instead of sleeping. A wait
   that answers one that ends the command, such as a shutdown, ends the access there, with no further
   attempt, and the transition it waited in: nothing further is appended, published or spawned for
@@ -157,7 +161,12 @@ what a coordinator killed after making an add's destination leaves.
 - The frozen legacy engine's registry accesses do not take this access, and its coordinator discards
   an attempt's output on any error. Both are follow-up D's
   (`PR329-LEGACY-RUNS-IN-LINKED-CHECKOUTS-RACE-THE-SHARED-WORKTREE-REGISTRY`), a separate change
-  under the owner's decision that calls this access.
+  under the owner's decision that calls this access. *By the owner's ruling B-W924-R1, adopted
+  2026-10-08 (the follow-up B record's §9.25 and §9.28):* the legacy gate and review snapshots'
+  add, removal and list each run their Git command again while it dies reading another
+  registration's `commondir` at zero bytes, against a nominal ten-second deadline checked after each
+  attempt (the attempt after a sleep is admitted however late it starts, and no attempt's start or
+  completion has a hard wall-clock bound); nothing else of the legacy engine's accesses changes.
 
 **A dead coordinator's Git writers and the slot its resume uses.** *In force for the topology's
 slots, as `reviews/2026-10-02-pr11-follow-up-c-record.md` designs them (§4, completed in §5) and its

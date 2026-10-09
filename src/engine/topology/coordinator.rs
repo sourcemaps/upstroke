@@ -4201,6 +4201,10 @@ mod tests {
             WidePlans::default(),
             holding(&tasks, &[]),
         );
+        let _deadline = crate::workspace_manager::RegistryDeadline::hold(
+            wide.env.fixture.manager.common_git_dir(),
+            WITNESS_REGISTRY_DEADLINE,
+        );
         let common = wide.env.fixture.manager.common_git_dir().to_path_buf();
         let before = crate::workspace_manager::contended_attempts(&common);
         let (policy, _admin) = tearing(&wide, "foreign-in-flight", true);
@@ -6723,6 +6727,10 @@ mod tests {
                 WidePlans::default(),
                 holding(&tasks, &[]),
             );
+            let _deadline = crate::workspace_manager::RegistryDeadline::hold(
+                wide.env.fixture.manager.common_git_dir(),
+                WITNESS_REGISTRY_DEADLINE,
+            );
             let mut hooks = wide.env.hooks();
             let seams = wide.env.seams();
             let alpha = crate::engine::topology::run::begin_dispatch(
@@ -6808,6 +6816,10 @@ mod tests {
                 WidePlans::default(),
                 holding(&tasks, &[]),
             );
+            let _deadline = crate::workspace_manager::RegistryDeadline::hold(
+                wide.env.fixture.manager.common_git_dir(),
+                WITNESS_REGISTRY_DEADLINE,
+            );
             let mut hooks = wide.env.hooks();
             let seams = wide.env.seams();
             let pipelines = wide.env.pipelines();
@@ -6862,6 +6874,10 @@ mod tests {
                 2,
                 WidePlans::default(),
                 RecordingRunner::new().answering(wide_responder(&tasks, &[])),
+            );
+            let _deadline = crate::workspace_manager::RegistryDeadline::hold(
+                wide.env.fixture.manager.common_git_dir(),
+                WITNESS_REGISTRY_DEADLINE,
             );
             let mut hooks = wide.env.hooks();
             let seams = wide.env.seams();
