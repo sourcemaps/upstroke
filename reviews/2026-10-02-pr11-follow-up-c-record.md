@@ -5121,8 +5121,10 @@ Its evidence is under `~/orch-pr11/logs/pr11_fuc_impl7/`, cited as `c6r7/…`. *
 O4(a), O7 or R-REF's disposition (O7(a)'s method stays stopped), the O3 or O3-R route, C-R1's freeze ruling, O6 if it is
 triggered, and O11's item (iv), whose basis is U, stay the owner's.
 
-**The commits:** `89a65ccd`, the merge of master `c0ed07a5`, and this record's commit. This round changes no product
-code of this change's and no test.
+**The commits:** `89a65ccd`, the merge of master `c0ed07a5`, and this record's two commits: the first adds this
+subsection and the in-place corrections; the second corrects this subsection's count of the coordinator witnesses
+among this change's tests, its account of what stands without running again, and one quotation in its sweep, and adds
+the stand-in's run at `66e8a393`. This round changes no product code of this change's and no test.
 
 #### #329 merged: the landing, verified
 
@@ -5208,10 +5210,11 @@ Every registry wait this change routes goes through that access. So round 7 ran 
   1.85.0, and the host's 1.85.0 check, each with `-D warnings`: rc 0 each.
 - **The frozen proof and the legacy check,** below.
 
-**What stands without running again, and why.** Rounds 1 to 6's other witnesses and mutations ran on trees in which this
-change's own lines are byte for byte the merge's (the patch-ids above), and the whole suite runs in the ten gates at
-the final head. #329's witnesses are #329's final evidence; the slow-Git stand-in runs of rounds 5 and 6 over #329's
-fix-P and tear witnesses are not repeated, since those tests are #329's, final and merged.
+**What stands without running again, and why.** The merge changes none of this change's own lines (the patch-ids
+above), so rounds 1 to 6's other witnesses and mutations stand for them as they stood at `66e8a393`, and the whole
+suite runs in the ten gates at the final head. #329's witnesses are #329's final evidence; the slow-Git stand-in runs
+of rounds 5 and 6 over #329's fix-P and tear witnesses are not repeated, since those tests are #329's, final and
+merged.
 
 #### #329's T11 class, read over this change's witnesses: an observation, with its disposition the orchestrator's
 
@@ -5220,12 +5223,12 @@ ends, under the test build's 500 ms registry deadline. One first attempt the pla
 deadline, and the access then asks for no wait, so a contention only a wait would end is never ended. T11 went red on
 the persistent Windows guest with that refusal's signature; that its first attempt there ran past 500 ms is #329's
 reasoning, executed on #329's stand-ins (§9.31.2). #329 repaired its seventeen by holding the production deadline
-(`e7ef8afe`), and
-the documentation of `PRODUCTION_REGISTRY_DEADLINE` in `src/workspace_manager/tests.rs` names "a wait made through its
-hooks" among the acts that call for the hold. #329's census covered #329's tests only.
-- **This change's witnesses, read for it.** The eleven coordinator witnesses this change added for its routing go
-  through #329's `TearHeld`, whose guard holds `WITNESS_REGISTRY_DEADLINE` while it lives. Five hold no deadline, and
-  end their contention by a wait through their hooks (`c6r7/class/tests-unheld-5.txt`): round 4's
+(`e7ef8afe`), and the documentation of `PRODUCTION_REGISTRY_DEADLINE` in `src/workspace_manager/tests.rs` names "a wait
+made through its hooks" among the acts that call for the hold. #329's census covered #329's tests only.
+- **This change's witnesses, read for it.** The eleven coordinator witnesses among this change's own tests (eight it
+  added, and three of #329's in which it edits lines) go through #329's `TearHeld`, whose guard holds
+  `WITNESS_REGISTRY_DEADLINE` while it lives (`c6r7/class/tests-held-controls-12.txt`, with #329's T11). Five hold no
+  deadline, and end their contention by a wait through their hooks (`c6r7/class/tests-unheld-5.txt`): round 4's
   `intents_pausing_reads_the_registry_through_the_hooks_it_is_handed`,
   `a_reclaims_walk_reads_the_registry_through_the_hooks_it_is_handed`,
   `the_final_sweeps_registry_read_waits_through_the_hooks_it_is_handed` and
@@ -5236,9 +5239,15 @@ hooks" among the acts that call for the hold. #329's census covered #329's tests
   of each access ends 600 ms later, before it is counted (`c6r7/scratch/s2prime-at-89a65ccd/`):
   - the five are red: four refused with "deadline (500ms): 2 attempt(s)", and the attempt witness with its hooks never
     asked to wait;
-  - the twelve held controls are green: this change's eleven `TearHeld` witnesses and #329's held T11;
+  - the twelve held controls are green: those eleven `TearHeld` witnesses and #329's held T11;
   - over all 69 of this change's own tests, the same stand-in turns exactly the five red, and 60 pass, the four
-    subprocess children ignored (`c6r7/scratch/s2prime-c-own-69/`, `c6r7/class/s2prime-c-own-69-red.txt`).
+    subprocess children ignored (`c6r7/scratch/s2prime-c-own-69/`, `c6r7/class/s2prime-c-own-69-red.txt`);
+  - at `66e8a393`, before the merge, the same seventeen under the same stand-in: the five are red, refused after
+    "1 attempt(s)" under the access as it was then, and so is #329's T11, which held no deadline there
+    (`c6r7/scratch/s2prime-at-66e8a393/`). So the exposure predates #329's later rounds: at `17bd5652` an access whose
+    first failed attempt ended past its deadline refused at once, and since `bdf7f6ac` it makes one more attempt
+    first, with no wait either way (`c6r7/class/access-check-17bd5652-vs-89a65ccd.txt`). And the stand-in reproduces
+    #329's own finding on #329's own test.
 - **A repair is prepared, and not committed** (`c6r7/class/candidate-hold.diff`): each of the five holds its
   repository's deadline at the production length, as #329's seventeen do. With it:
   - under S2′, the seventeen are green (`c6r7/scratch/s2prime-candidate/`);
@@ -5299,7 +5308,7 @@ The ledger's `FUC-I4-BSTATUS` is the row, `fixed`.
   - E-G6-1 described as not adopted;
   - #329's merge listed as a requirement;
   - W1's finding as open and routed;
-  - "the integration is provisional" in the risk section.
+  - the risk section's present-tense provisional integrations.
 
   Statements of earlier rounds' provisional integrations stay, as history.
 
