@@ -43,7 +43,9 @@ cited as `fudi3/…`. Its repair round 4 (§5.18) is `pr11_fud_impl4`'s; its fig
 are under `~/orch-pr11/logs/pr11_fud_impl5/`, cited as `fudi5/…`. Round D6 (`pr11_fud_impl6`) stopped before
 publication with a returned dependency and wrote no section; its evidence under `~/orch-pr11/logs/pr11_fud_impl6/` is
 cited as `fudi6/…`. Round D7 (§5.20), follow-up B's final integration with option S, is `pr11_fud_impl7`'s; its
-figures are under `~/orch-pr11/logs/pr11_fud_impl7/`, cited as `fudi7/…`.
+figures are under `~/orch-pr11/logs/pr11_fud_impl7/`, cited as `fudi7/…`. Round D8 (§5.21), S's retry fixtures under
+a slow-attempt stand-in and the one reproduced exposure held, is `pr11_fud_impl8`'s; its figures are under
+`~/orch-pr11/logs/pr11_fud_impl8/`, cited as `fudi8/…`.
 
 ## 0. Status
 
@@ -59,6 +61,7 @@ figures are under `~/orch-pr11/logs/pr11_fud_impl7/`, cited as `fudi7/…`.
 | Implementation, repair round 4 (§5.18) | **The hosted-Linux failure of T-R10 at `202c0805` repaired, on the same terms: draft, PROPOSED, conditional on O8, and not merge-ready.** CI run 37202558686 failed one test on the runner's Git 2.55.0. T-R10's operator `fetch --prune` ran Git's automatic maintenance, whose `geometric` default (from Git 2.54) can prune the planted torn registration before the operator's repair, in a race. It is a test defect: F2's fetch now runs with automatic maintenance off, and nothing it asserts changes. The cause is executed on a Git 2.55.0 stand-in, red before, green after, and red again under a mutation; round 3's other 69 tests do not depend on it. No production code, finding, instrument, cost or limit changes; #329's `55029628` stays merged provisionally. Unreviewed. |
 | Implementation, repair round 5 (§5.19) | **D2's D-I2-1 repaired, on the same terms: draft, PROPOSED, conditional on O8, and not merge-ready.** D2, one regression lens at `fb1717b1`, executed that the orphan shared index files an inherited `GIT_TEST_SPLIT_INDEX` leaves outlast the checkout's next split write. The record, the notes, the R-D7 finding and the body now state the true reach: Git's expiry removes an orphan only at a later split write of the checkout's own index that creates a shared index file, once the orphan is older than the checkout's `splitIndex.sharedIndexExpire`; with the default it stays at least two weeks, with `never` for good, and captures can accumulate them. An `include_str!` test pins the notes, red at `fb1717b1` and green after. No behaviour, production code, instrument or other cost changes; #329's `55029628` stays merged provisionally; R-D1's regular review stays unmet. Unreviewed. |
 | Implementation, round D7 (§5.20) | **Follow-up B integrated FINAL (`c0ed07a5`, B's final head `53d972e9`), with option S PROPOSED — conditional on O8 and on the owner's ruling B-W924-R1-S, and not adopted; B-W924-R1 stays operative on master.** At the snapshot path's three registry commands, D's access supersedes B-W924-R1's retry, whose call-site wrapping, helper and constants are withdrawn by its documented ordered rollback; `src/workspace.rs`'s production region is D's `1be2e2ad`'s. Each of R1's six superseded tests is mapped to a witness, green at the head and red under its own reversal, and O8's semantic changes are asserted and disclosed, not claimed as equivalences. Not merge-ready and not reviewed: R-D1's regular review stays HELD and UNMET, and D's requested regular review stays OUTSTANDING after integration. Stopped before publication. |
+| Implementation, round D8 (§5.21) | **S's five retry fixtures characterised under a predeclared slow-attempt stand-in, and the one reproduced exposure held — on §5.20's terms: draft, PROPOSED, conditional on O8 and on B-W924-R1-S, not adopted, and not merge-ready; B-W924-R1 stays operative on master.** Under a stand-in that ends each registry access's first `Attempt` answer 600 ms later, in two matched pairs per fixture against a native control, only the rescripted removal-and-list witness was EXPOSED; the kept add witness and the FIFO fixture's three tests were NOT EXPOSED. That witness alone now holds its repository's registry deadline at the production NOMINAL ten seconds, an admission rule with no hard elapsed bound: green under the stand-in, and red again with the hold removed. The exposure is the stand-in's; no natural failure is claimed. §5.20's boundary count is corrected to two. Not reviewed: R-D1's regular review stays HELD and UNMET, and D's requested regular review stays OUTSTANDING. Stopped before push. |
 
 ## 1. Design
 
@@ -4261,7 +4264,8 @@ Round D6 (`pr11_fud_impl6`) prepared the merge's independent resolutions and cha
 then stopped with the returned dependency and wrote no section; its package is `~/orch-pr11/questions/pr11_fud_impl6-1.md`
 (`d305f765…`). Its evidence, opened only where its manifest (`69ce3cb5…`) lists a file, is cited as `fudi6/…`. This
 round's figures are under `~/orch-pr11/logs/pr11_fud_impl7/`, cited as `fudi7/…`. No stopped-review artifact was read,
-and no broad search was run. One boundary event is disclosed in §5.20.8.
+and no broad search was run. Two boundary events are disclosed in §5.20.8 (corrected in round D8, §5.21.6: this
+sentence said one).
 
 #### 5.20.1 The landing, and the start
 
@@ -4460,11 +4464,18 @@ changes no code, and the body cites the proof at the final head.
 - **Not executed:** Windows and macOS (§5.20.5); and the production deadline of ten seconds, since every time here is
   a test build's.
 
-#### 5.20.8 Operations, and one boundary event
+#### 5.20.8 Operations, and two boundary events
 
-- **One boundary event, disclosed.** This round's first command listed `~/orch-pr11/briefs/` (`ls -la`, the last thirty
-  names) before the brief had been read; the brief forbids listing a shared directory. Only file names were listed. No
-  file of that listing was opened beyond D's six briefs, named by exact path, and the listing was not repeated.
+- **Two boundary events, disclosed.** *(Round D8, §5.21.6: this bullet named one; the second is added below as round
+  D7's package, §9, states it.)*
+  - **The first.** This round's first command listed `~/orch-pr11/briefs/` (`ls -la`, the last thirty names) before
+    the brief had been read; the brief forbids listing a shared directory. Only file names were listed. No file of
+    that listing was opened beyond D's six briefs, named by exact path, and the listing was not repeated.
+  - **The second, as round D7's package states it:** "The brief says to read B's record only at §9.25.3, §9.25.4
+    and §9.28.1. Looking for the name of B-W924's original witness test, I also printed lines 9287–9330 of
+    master's copy: §9.25's opening, §9.25.1 (the diagnosis summary) and the first lines of §9.25.2. It is B's own
+    record on master, not stopped-review material. Nothing from it is used in the merge, the record, the body or
+    this package, and it was not repeated."
 - **Other workers' evidence** was opened only by exact path, after `lstat` as a regular file and with a non-blocking
   open. D6's was opened only where its manifest lists the file, after `sha256sum -c` of that line (`fudi7/start/`,
   `d6-reused/`, `d6-cited/`).
@@ -4472,3 +4483,168 @@ changes no code, and the body cites the proof at the final head.
   private base. No background process of this round's is left running.
 
 The draft body records the head the ten gates passed at, with the logs under `fudi7/gates/`.
+
+### 5.21 Round D8: S's five retry fixtures under a slow-attempt stand-in, and the one reproduced exposure held
+
+> **On §5.20's terms:** a draft, PROPOSED, conditional on the owner's decision O8 and on the owner's ruling
+> B-W924-R1-S, and not merge-ready. B-W924-R1 stays operative on master; O8 and B-W924-R1-S are not adopted. The
+> specification's §3.4 rule that no test deadline is lengthened is lifted, by the supervisor's direction, ONLY for this
+> evidence-supported fixture repair in S's conditional draft; that is not an owner adoption. This round is not a
+> review: R-D1's regular review stays HELD and UNMET, and D's full requested regular review stays OUTSTANDING. The
+> round adds two commits on `21519f5d`, the hold `122485db` and this record's commit, with no rebase, and no
+> `reviewed_sha` is re-stamped. Nothing is pushed: the round stops before push.
+
+**Who and on what.** `pr11_fud_impl8` (`claude-opus-5-5`, `max`), a fresh repairer `orch_pr11b` spawned on 2026-10-09
+on `21519f5d`. Its brief is `~/orch-pr11/briefs/pr11_fud_impl8.md`; it carries the supervisor's direction (babysit_pr11,
+2026-10-09), and round D7's brief binds where it does not change it. Its question is round D7's returned observation
+8(e) (`~/orch-pr11/questions/pr11_fud_impl7-1.md`, `5ee2a55b…`), as the orchestrator's disposition records it, with its
+dated erratum (`~/orch-pr11/logs/orch-d7/SECTION8-DISPOSITION-AND-SCOPE-MAP-20261009.md`, `09c6cfda…`). This round's
+figures are under `~/orch-pr11/logs/pr11_fud_impl8/`, cited as `fudi8/…`. #329's B14 repair and D's FUD-D2-TL2 stay
+analogies: this round classifies nothing beyond what its own runs show.
+
+#### 5.21.1 The question, and the plan
+
+- **The question.** Under S, B-W924-R1's retry witnesses run against the access's 500 ms test deadline, where R1's
+  versions ran against R1's ten-second one. Five are in scope, the joint exhibit's rows 2, 3, 7, 8 and 9:
+  - row 2, `a_snapshot_add_is_attempted_again_past_another_registrations_empty_commondir`;
+  - row 3, `a_snapshots_removal_and_its_list_are_attempted_again_past_another_registrations_empty_commondir`;
+  - rows 7 to 9, the FIFO fixture's `a_commondir_server_that_panics_releases_its_reader_and_its_panic_reaches_the_caller`,
+    `a_commondir_server_that_fails_releases_its_reader_and_its_error_reaches_the_caller` and
+    `a_commondir_server_that_serves_its_script_ends_without_the_containment`.
+- **The plan** (`fudi8/PLAN.md`) was sealed at 09:59:46Z, before any build or run (`fudi8/plan-seal.txt`).
+  - **The intervention, stand-in D8-S:** the first `Attempt` answer of each registry access on a thread ends 600 ms
+    later, before it is counted. It is C7's S2′ (`~/orch-pr11/logs/orch-c7/retained/L7/class/s2prime.diff`),
+    re-anchored on this tree, its code unchanged: three hunks in `src/workspace_manager.rs`'s `#[cfg(test)]` seams
+    (`note_contended`, `note_access_start`, and the flag's `thread_local!`). It delays an operation the fixtures already
+    perform, the access's handling of a failed attempt's `Attempt` answer, past the 500 ms test deadline. It adds no
+    Git command, no access, no file operation and no output. It was applied only to `git archive` copies under a
+    private scratch root and never committed (`fudi8/standin/`); each copy was checked blob by blob against its commit
+    (`fudi8/trees/`).
+  - **The control:** the same fixture on the same tree, without the delay.
+  - **The limits:** two matched pairs per fixture, each a native control then a slow attempt, each one test in one
+    process. No run is repeated, no third pair is run, and an undetermined fixture is returned.
+  - **The decision rule:** a pair reads EXPOSED when the control passes and the slow attempt fails, NOT EXPOSED when
+    both pass, and UNDETERMINED otherwise. A run counts only if it is valid: one test run, its own per-test line, no
+    rebuild, and the recorded binary, unchanged. A slow run counts only if it is engaged: libtest's own `finished in`
+    is at least 0.60 s. A fixture is EXPOSED (reproduced) when both its pairs are EXPOSED at the same assertion, NOT
+    EXPOSED when both are NOT EXPOSED, and UNDETERMINED otherwise.
+  - **One amendment, A1,** made at 10:03:18Z after the runs, adds no run and changes no rule: it fixes the judge's
+    parser. The first version required libtest's per-test line and its `ok` on one line. In all four runs of row 8
+    the fixture's `mkfifo` child, which inherits the test's stderr, prints "File exists" onto that line, and the `ok`
+    follows on the next. So the first version read row 8 UNDETERMINED, for the parser's reason, not the run's. Both
+    judgements are kept (`fudi8/runs/exposure/judged/`, `judged-v2/`).
+- **What the stand-in models, and its limit:** a first failed attempt, or its answer, that a slow platform makes last
+  past 500 ms. **Every exposure here is shown under the stand-in only. No natural failure is claimed, and none was
+  observed.**
+
+#### 5.21.2 Every attempt
+
+- **The builds** (`fudi8/builds/`): each through `upstroke-build` on its own sub-base of this round's private base,
+  each Compiling line naming its copy. The native copy of `21519f5d` gave binary `f3527665…`, and the slow copy
+  `56536e62…`. One build attempt did not start: its log directory was missing, and no cargo process ran
+  (`fudi8/ATTEMPTS-LOG.txt`).
+- **The twenty runs,** 10:02:03Z to 10:02:12Z, in the plan's order, one log each
+  (`fudi8/runs/exposure/results.tsv`). Each cell gives libtest's own `finished in` for the control, then for the slow
+  attempt, with each run's verdict:
+
+| Row | Pair 1: control / slow | Pair 2: control / slow |
+|---|---|---|
+| 2 | 0.02 s pass / 0.62 s pass | 0.60 s pass / 0.62 s pass |
+| 3 | 0.03 s pass / 0.62 s **fail** | 0.03 s pass / 0.63 s **fail** |
+| 7 | 0.03 s pass / 0.62 s pass | 0.02 s pass / 0.62 s pass |
+| 8 | 0.02 s pass / 0.62 s pass | 0.02 s pass / 0.62 s pass |
+| 9 | 0.03 s pass / 0.68 s pass | 0.02 s pass / 0.62 s pass |
+
+- **Row 2's second native control took 0.60 s,** where its first took 0.02 s. Its log names the native binary, and it
+  passed. What took the time was not measured. It is kept as it ran, and nothing was repeated.
+- Under the amended judge every run is valid and every slow run engaged.
+
+#### 5.21.3 Each fixture's reading
+
+From `fudi8/runs/exposure/judged-v2/READINGS.md`:
+
+| Row | Reading | From |
+|---|---|---|
+| 3 | **EXPOSED (reproduced)** | red in both pairs, each control green, at the same assertion (`src/workspace.rs:5047` at `21519f5d`): "and so was the list, so the cleanup ran to its end" |
+| 2, 7, 8, 9 | **NOT EXPOSED** | green in both pairs under the engaged stand-in, each control green |
+
+- **Why row 3, reasoned from the code, not traced.** The access admits the first attempt that begins at or after its
+  deadline, as its last (`src/workspace_manager.rs:1806-1818`). Row 3's script needs two failed attempts of the
+  cleanup's one access: the removal's tear, then, once that removal has passed, the list's. With the first `Attempt`
+  answer ending 600 ms later, the second attempt begins past the 500 ms nominal deadline and is the last; its list
+  reads the scripted tear, and the access refuses. The snapshot's drop ignores the refusal, so the witness fails on
+  the hooks and the intent the cleanup never reached. The refusal's own text is not printed; that the deadline decides
+  the outcome is what §5.21.4's proof shows.
+- **Rows 2, 7, 8 and 9 need one failed attempt,** after which the whole file is in place. The attempt after the slow
+  one is admitted, and passes.
+- **Not exercised by the stand-in** (reasoned only; no reading is claimed either way). In rows 7 and 8 the server's
+  release puts the whole file in place, on its own thread, after the add's first attempt has failed; under the stand-in
+  it does so during the 600 ms. A schedule in which a first attempt slow past the deadline is followed by a second one
+  that reaches the FIFO before the release is not exercised. Each NOT EXPOSED reading holds under this stand-in only.
+- **Where it began, from Git** (`fudi8/firstbad/derivation.txt`). At `1be2e2ad`, D's side of the merge, the witness
+  does not exist. At master `c0ed07a5` it is B-W924-R1's: its script is empty, whole, empty, and its cleanup runs
+  through R1's wrapping and R1's ten-second `REGISTRY_TEAR_DEADLINE`. At `b9559a4e`, round D7's merge, it is S's: its
+  script is empty, whole, whole, empty, and its cleanup's removal and list run as one attempt of the access, against
+  the test build's 500 ms.
+  So `b9559a4e` is the first commit at which the witness runs as it was exposed here. The exposure itself is claimed
+  only under the stand-in, and only at the heads this round ran: `21519f5d` and `122485db`.
+
+#### 5.21.4 The hold, and its proof
+
+- **The hold** (`122485db`, test code and its notes only), in B's `e7ef8afe` pattern. Row 3's witness alone holds its
+  repository's registry deadline at the production NOMINAL length, right after its fixture is made:
+  `crate::workspace_manager::RegistryDeadline::hold(&common_git_dir_of(&fixture.repo), PRODUCTION_REGISTRY_DEADLINE)`.
+  `PRODUCTION_REGISTRY_DEADLINE` is a new `#[cfg(target_os = "linux")]` constant of the test module, ten seconds:
+  `REGISTRY_ACCESS_DEADLINE`'s `#[cfg(not(test))]` value, which a test build cannot name. The notes give it a section,
+  and the witness's section a sentence (§13).
+- **B's limits stand:** the held deadline is NOMINAL, an admission rule checked after each attempt, with no hard
+  elapsed bound and no bound on a running Git child's completion. A hold is never a guarantee that a hung child fails
+  within its value.
+- **The proof** (`fudi8/runs/proof/PROOF.md`): one run each, each valid, in three copies built for it
+  (`fudi8/builds/p-*`, binaries `967554a1…`, `170efa58…` and `582639df…`).
+
+| Proof | Copy | Result |
+|---|---|---|
+| red: the reproduced exposure | `21519f5d` with the stand-in | the exposure runs 04 and 14: fail, 0.62 s and 0.63 s, at the assertion above |
+| control: native green | `122485db` | pass, 0.03 s |
+| green: held, under the slow attempt | `122485db` with the stand-in | pass, 0.63 s, engaged |
+| the catching reversal: the hold removed, under the slow attempt | `122485db` with the stand-in and without the hold's statement | **fail**, 0.62 s, at the same assertion (`src/workspace.rs:5050` in that copy, which keeps the constant) |
+
+- The reversal's copy warns only that the constant is unused: the hold is its only use.
+- **Native against stand-in:** the red and the reversal are the stand-in's. In each of this round's native runs the
+  witness was green, held or not.
+
+#### 5.21.5 What is unchanged
+
+- Every assertion.
+- The deliberate deadline tests, the exhibit's rows 1, 4, 5 and 6 and every test that means to reach the short
+  deadline, keep the test build's 500 ms.
+- Rows 2, 7, 8 and 9 are not held.
+- Production constants and code; R2, H1 and H3; every instrument, `effects/` included; `design/` and every contract
+  text; O8's and S's proposed texts, the notes' amendment paragraph included.
+
+#### 5.21.6 §5.20's boundary count, corrected
+
+§5.20 stated one boundary event. Round D7's package (§9) discloses two. Its opening sentence and §5.20.8 are
+corrected in place, each change marked as this round's, and the second event is quoted as the package states it.
+
+#### 5.21.7 Validation at the final head
+
+- **The proofs ran at `122485db`.** This record's commit changes this file only, and no compiled input reads it: no
+  `include_str!` names it, and `Cargo.toml` excludes `reviews/` from the package.
+- **At the final head, once:** the ten gates, through `upstroke-build` on this round's private base, each in the
+  foreground (`fudi8/gates/`); the four platform lints round D7 ran (`fudi8/platform/`); the frozen and instrument
+  proofs against master `c0ed07a5` and against `21519f5d` (`fudi8/frozen/`); and the branch check (`fudi8/body/`). A
+  red is kept and returned, never re-run to green.
+
+#### 5.21.8 Operations
+
+- **Inputs** were read by exact path. Other workers' evidence was `lstat`'d as a regular file and opened non-blocking,
+  and round D7's only where its manifest lists the file, after checking its hash (`fudi8/inputs/READ-LOG.txt`).
+- **The worktree never held the stand-in.** After the proofs it was clean at `122485db`, and its
+  `src/workspace_manager.rs` was `21519f5d`'s blob (`fudi8/runs/worktree-after-proof.txt`).
+- **No boundary event.**
+- **Left in place, since cleanup is out of scope:** the scratch root `/tmp/pr11-fud-impl8.N11fbD`, and this round's
+  private base. No background process of this round's is left running.
+
+The draft body records the head the ten gates passed at, with the logs under `fudi8/gates/`.
