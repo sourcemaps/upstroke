@@ -15775,11 +15775,23 @@ fn clock_pause(
     }
 }
 
+/// Whether the clock table holds an entry for `common_git_dir`, read from the
+/// table itself. A reading through `registry_now` cannot tell: an entry left
+/// behind still reads ahead of the monotonic clock once the test has moved it
+/// on (B17-1, the record's §9.34).
+fn clock_entry_stands(common_git_dir: &Path) -> bool {
+    super::REGISTRY_CLOCKS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains_key(common_git_dir)
+}
+
 /// B16 (the record's §9.33): a [`super::RegistryClock`] reaches only the
 /// accesses of its own repository; it stands still while the host's time
 /// passes and moves by exactly what it is moved by; nested guards share it,
 /// and it goes with its last guard, on an unwinding as on a return. It takes
-/// only its table's lock: nothing of it waits.
+/// only its table's lock: nothing of it waits. That it goes is read from its
+/// table, its entry absent after each last guard (B17-1, the record's §9.34).
 #[test]
 fn a_registry_clock_reaches_only_its_own_repository_and_goes_with_its_last_guard() {
     let (_tree, held) = contract_key("registry-clock-held");
@@ -15816,6 +15828,10 @@ fn a_registry_clock_reaches_only_its_own_repository_and_goes_with_its_last_guard
         "the clock stays while a guard lives"
     );
     drop(nested);
+    assert!(
+        !clock_entry_stands(&held),
+        "with its last guard gone, its repository's clock entry is gone"
+    );
     let after = std::time::Instant::now();
     assert!(
         super::registry_now(&held) >= after,
@@ -15826,6 +15842,10 @@ fn a_registry_clock_reaches_only_its_own_repository_and_goes_with_its_last_guard
         panic!("a test that holds a clock fails");
     });
     assert!(unwound.is_err(), "the holder unwound");
+    assert!(
+        !clock_entry_stands(&held),
+        "a guard dropped by an unwinding takes its clock's entry with it"
+    );
     let later = std::time::Instant::now();
     assert!(
         super::registry_now(&held) >= later,
