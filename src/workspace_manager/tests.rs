@@ -15874,8 +15874,9 @@ fn a_registry_access_returns_a_vetoed_failure_unchanged_after_one_attempt() {
 /// and `took` are that [`super::RegistryClock`]'s readings, which only the
 /// waits the access asks for move, so a stall of the host before the first
 /// attempt makes that attempt no later on it. Wall time is held twice: to the
-/// containment, and, as before, to the deadline and 5 s. A refusal no earlier
-/// than the deadline in wall time stays a real repository's
+/// containment, and, as before, to the deadline and 5 s; a long enough stall of
+/// the host can trip either. A refusal no earlier than the deadline in wall
+/// time stays a real repository's
 /// (`a_list_over_a_registration_half_written_refuses_at_its_deadline_and_is_never_git_state`).
 #[test]
 fn a_registry_access_that_always_fails_refuses_at_its_deadline_naming_the_count_and_the_last_failure()
@@ -15974,10 +15975,12 @@ fn a_registry_access_passes_two_failures_and_returns_the_success_after_them() {
 ///
 /// **"At once" is on its repository's test clock** (the record's §9.33, B16):
 /// `took` is that [`super::RegistryClock`]'s, which only the waits the access
-/// asks for move, so a refusal that asks for none takes none of it, however
-/// the host schedules the test; wall time is its containment. An undecidable
-/// refusal at once in wall time stays a real repository's
-/// (`an_add_whose_checkout_cannot_be_made_refuses_after_one_attempt_and_leaves_nothing`).
+/// asks for move; the refusal asks for none, so its `took` on the clock is
+/// zero, however the host schedules the test. Wall time is its containment. An
+/// undecidable refusal at once in wall time is still asserted by a real
+/// repository's test
+/// (`an_add_whose_checkout_cannot_be_made_refuses_after_one_attempt_and_leaves_nothing`),
+/// whose wall-time bound a long enough stall of the host can trip.
 #[test]
 fn an_undecidable_veto_refuses_at_once_naming_why() {
     let (_tree, key) = contract_key("registry-access-undecidable");
@@ -16005,6 +16008,11 @@ fn an_undecidable_veto_refuses_at_once_naming_why() {
     assert!(
         took < REGISTRY_ACCESS_DEADLINE,
         "it refused at once, not at the deadline: {took:?}"
+    );
+    assert_eq!(
+        took,
+        std::time::Duration::ZERO,
+        "it asked for no wait on its clock: {took:?}"
     );
     assert!(
         message.contains("the destination now holds a file")
@@ -16215,11 +16223,21 @@ fn a_veto_that_blocks_past_the_deadline_is_followed_by_the_final_attempt_alone()
 /// **On its repository's test clock** (the record's §9.33, B16): each case's
 /// `took` is that [`super::RegistryClock`]'s, which only the waits the access
 /// asks for move. A case that waits for R-X reaches its deadline by those waits
-/// alone, with no attempt run; a case that does not wait asks for none. Wall
-/// time is its containment. R-X's wait refusing no earlier than its deadline in
-/// wall time, and an unheld list beside R-X held alone not waiting in it, stay
-/// a real repository's
-/// (`an_add_refuses_within_its_deadline_while_r_x_is_held_alone_and_a_list_does_not_wait`).
+/// alone, with no attempt run; a case that does not wait asks for none, and
+/// its `took` on the clock is zero. A shared access beside a shared holder
+/// returns `Ok(1)` while the holder's read guard is still held, which no access
+/// that waited for or excluded that holder could. Wall time is its containment.
+///
+/// **A guarantee this test no longer makes** (the orchestrator's R-X
+/// determination, B16): before B16 its cases that do not wait returned within
+/// 500 ms of wall time (`took < REGISTRY_ACCESS_DEADLINE`, on the monotonic
+/// clock). A real-time delay in the shared path that is not an R-X wait turn,
+/// and still lets the access succeed while the holder is held, is not caught
+/// here. R-X's wait refusing no earlier than its deadline, and an unheld list
+/// beside R-X held alone not waiting, are still asserted in wall time by a real
+/// repository's test
+/// (`an_add_refuses_within_its_deadline_while_r_x_is_held_alone_and_a_list_does_not_wait`),
+/// whose wall-time bounds a long enough stall of the host can trip.
 #[test]
 fn r_x_held_alone_refuses_a_shared_access_with_no_attempt_and_passes_an_unheld_one() {
     let (_tree, key) = contract_key("registry-access-rx");
@@ -16288,6 +16306,12 @@ fn r_x_held_alone_refuses_a_shared_access_with_no_attempt_and_passes_an_unheld_o
             );
             assert!(took >= REGISTRY_ACCESS_DEADLINE, "{hold:?}: {took:?}");
         } else {
+            assert_eq!(
+                took,
+                std::time::Duration::ZERO,
+                "{hold:?} (holder alone: {holder_alone}) asked for no wait on its clock; the \
+                 access returned {result:?}"
+            );
             assert_eq!(
                 result.expect("the access runs beside the holder"),
                 1,
