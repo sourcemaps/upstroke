@@ -2605,4 +2605,6 @@ integration's own offer was refused.
 
 `record_charged_past_the_stop` lifts the stop for its one offer only. On a run a wait has stopped, the
 helper is called, and the stop still holds after it: a dispatch begun next is refused by the run's
-emitter, in #329's words, and nothing is appended.
+emitter and nothing is appended. The refusal keeps #329's words, "nothing further is appended in this
+process", then names the one append made past the stop, the record of the review passes a
+verification had charged, and then the stop.

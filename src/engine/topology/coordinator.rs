@@ -20257,6 +20257,13 @@ mod tests {
             "the run's emitter refused the dispatch's first append: {refused}"
         );
         assert!(
+            refused.to_string().contains(
+                "but the record of the review passes a verification had charged: a registry \
+                 access's wait inside a transition met a shutdown"
+            ),
+            "the refusal names the one append made past the stop, then the stop: {refused}"
+        );
+        assert!(
             wide.run.events()[before..].is_empty(),
             "{:?}",
             kinds_of(&wide.run.events()[before..])
