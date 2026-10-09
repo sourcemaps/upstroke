@@ -17764,10 +17764,20 @@ fn three_coordinators_in_three_checkouts_of_one_repository_never_fail_on_each_ot
 /// [`line_from`] keeps from its call refuses that whatever the scheduling,
 /// and this refuses it only if a line comes 2 s after the one before it, five
 /// times its interval.
+///
+/// **The speaker starts only once the test's clock is read** (the record's
+/// §9.33, B16-2): it waits for a start signal the test sends after `started`,
+/// so none of its eight intervals falls before the measurement begins, however
+/// long the test is descheduled after spawning it. That wait is bounded by
+/// [`super::fixture::LINK_BOUND`], a containment and not the oracle.
 #[test]
 fn a_childs_result_is_read_through_cycles_whose_sum_outlasts_the_bound() {
     let (say, lines) = std::sync::mpsc::channel::<String>();
+    let (go, told) = std::sync::mpsc::channel::<()>();
     let speaker = std::thread::spawn(move || {
+        if told.recv_timeout(super::fixture::LINK_BOUND).is_err() {
+            return;
+        }
         for round in 1..=8 {
             std::thread::sleep(std::time::Duration::from_millis(400));
             if say.send(format!("B329_CYCLE 0 {round}")).is_err() {
@@ -17777,6 +17787,8 @@ fn a_childs_result_is_read_through_cycles_whose_sum_outlasts_the_bound() {
         let _ = say.send("B329_RESULT 0 cycles=8 failures=0".to_owned());
     });
     let started = std::time::Instant::now();
+    go.send(())
+        .expect("the speaker is told to start once the clock is read");
     let result = result_through_cycles(
         &lines,
         0,
