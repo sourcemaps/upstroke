@@ -39,6 +39,9 @@ impl RunState {
             TopologyEventBody::MergeVerificationInterrupted { .. } => {
                 self.release_transaction();
             }
+            TopologyEventBody::MergeVerificationCharged { data } => {
+                self.charged = Some(data.sequence);
+            }
             TopologyEventBody::MergePrepared { data } => self.apply_merge_prepared(data),
             TopologyEventBody::MergeRejected { data } => self.apply_merge_rejected(data),
             TopologyEventBody::TaskMerged { data } => self.apply_task_merged(data),
@@ -71,6 +74,7 @@ impl RunState {
         self.incarnation = resumed.incarnation.clone();
         self.budget_stop = None;
         self.finished = None;
+        self.abandoned = None;
         self.wake_backoff();
     }
 
@@ -435,6 +439,10 @@ impl RunState {
                 }
         });
         if cancels_verification {
+            self.abandoned = self
+                .transaction
+                .as_ref()
+                .map(|transaction| transaction.sequence);
             self.release_transaction();
         }
         let members: Vec<TaskKey> = self

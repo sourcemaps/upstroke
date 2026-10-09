@@ -342,6 +342,28 @@ Every question id this log has used, open or not: an id is never reused.
 Execution backoff still owed, including tasks parked on questions.
 Accepted settlements add keys; elapsed waits and resume clear them.
 
+## `pub struct RunState` › `abandoned: Option<SequenceId>,`
+
+The sequence whose verification a lineage failure released: `fail_lineage` sets it just before it
+releases the transaction, and `run_resumed` clears it. Only `check_verification_charged` reads it.
+The coordinator holds a released verification's passes only after the fold has released its
+transaction (a decline, or a lineage member's failed settlement, while the pipeline still runs or its
+result waits for snapshots to drain), so a `merge_verification_charged` for this sequence is admitted
+while it is still the latest one the incarnation started. A later start moves `next_sequence` and a
+resume clears the field, so a record cannot reach a sequence a terminal settled or one an earlier
+incarnation abandoned (proposal ebeefaf4 §3.2, RULING Q-2).
+
+## `pub struct RunState` › `charged: Option<SequenceId>,`
+
+The latest sequence a `merge_verification_charged` recorded: set by the record's apply and never
+cleared, `run_resumed` included. Only `check_spend_unrecorded` reads it, to refuse a second record
+for the sequence and the three terminals that carry a verification's review passes, so no admitted
+log counts a charged pass twice, live or on replay. The latest is enough: a record is admitted only
+for the open verification or the abandoned latest, and sequences are dense and never reused, so a
+record or a carrying terminal for an earlier sequence is refused by `open_transaction` whether or not
+this still names it. On a log with no record it is never set, and every existing kind's checks are
+exactly what they were.
+
 ## `pub struct RunState` › `halted_epoch: Option<Epoch>,`
 
 The epoch the halting settlement was recorded in. `halted_at` is never

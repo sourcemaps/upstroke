@@ -598,7 +598,9 @@ reader through that one variant, quoted, never interpreted.
 
 Added 2026-09-12 under §13's same-change rule; not part of the verbatim record above. It records
 which of the two readings of "the four terminal shapes carry the complete gate/review records,
-usage/cost" the unavailable terminal implements, now that it can implement either.
+usage/cost" the unavailable terminal implements, now that it can implement either. Amended under the
+same rule when the known-spend record `merge_verification_charged` was added for verifications that
+reach no terminal carrying what they charged.
 
 `merge_verification_unavailable` carries the review passes its verification charged, in the
 `Vec<ReviewRecord>` shape the prepared and rejected terminals carry inside their verification
@@ -606,59 +608,79 @@ record, and replay charges them by the same addition. This is the requirement ab
 literally, and the alternative — amending the record to say the unavailable terminal carries no
 spend — was rejected: the failure it would make permanent is that a restart forgets what the
 parked and deferred verifications of the incarnation it replaces cost, so every incarnation admits
-integration a ceiling had already refused and the overspend compounds once per restart. One case is
-excepted, for an interim only, by the owner's temporary ruling O14-BF of 2026-10-08: a verification
-whose command ends on an error after some of its review passes were charged — a registry refusal
-(`UpstrokeError::RegistryRefused`) of a later pass's snapshot, or of a pass whose checkout's
-registration is no longer whole, or any other error `run::verified` passes on — reaches no
-unavailable terminal. Its passes were charged in the ended process's memory only, so the resume
-that settles it interrupted forgets them, the resume that verifies again under a new sequence pays
-for its passes again (a cause that persists can end resumes before one does, below), and each such
-refusal and resume lets the passes it had charged escape the run's and the task's ceilings. This is
-a known loss accepted for that interim, not a repair and not a permanent
-O14(a). It expires when the change implementing the owner's O14(b) lands, and that change replaces
-this exception; O14(b) is required before F's final merge, G6, PR12 and any change that activates
-the topology, and no such activation lands while the exception stands.
+integration a ceiling had already refused and the overspend compounds once per restart.
 
 The terminal carries review records and no gate verdicts. A gate is a local process with no
 reported cost, so the sentence's "usage/cost" half is satisfied by the reviews alone; the
 gate-record half of it remains unimplemented for this one terminal and is a reporting gap, not a
 budget one. `merge_verification_interrupted` is unchanged and stays the unknown-spend terminal the
 crash table above makes it: a coordinator that died holding a verification recorded no cost for
-anything it was running, and a verification whose command ended on an error records none for the
-passes it had charged (the exception above).
+anything it was running.
 
 The spend a terminal records is what its verification *charged*, which is not always what a
 judgement reports. Review passes are charged as each returns; a later pass's snapshot or ledger
-step can fail and take the whole judgement with it. On an integration that failure settles the
-sequence unavailable rather than ending the command, except a snapshot whose registry access
-refuses (`UpstrokeError::RegistryRefused`, the tolerant registry access of `design/15`) because a
-fault outlasted its deadline — contention, a registration a dead writer left torn, any other fault
-of the worktree registry, such as a store nothing can write, a registration Git cannot list or an
-unreadable registry file, or a fault of the whole repository that an add meets before Git takes its
-destination over — or because its add failed after Git may have taken the destination over, or at
-once, because a fault of those kinds fails its add before Git takes the destination over and the
-access cannot prove the destination untouched, as when it is an empty directory the access cannot
-remove. The refusal ends the command resumably. A resume's recovery settles the verification
-interrupted, and once that recovery completes and the next integration can make a new staging
-worktree and cherry-pick the candidate there, the resume verifies again under a new sequence. A
-cause that persists can end each resume earlier, before another verification starts, with no
-unavailable settlement and no question: where the resume first lists the registry, before its
-recovery settles the verification, for a fault such as a registration Git cannot list; at
-recovery's removal, for a destination or a registration it cannot remove; or at the new staging
-worktree or its cherry-pick, for a fault such as a failing filter. Such a fault that persists
-therefore stops the run at each resume until it is repaired, where an unavailable settlement would
-defer and then park.
+step can fail and take the whole judgement with it. On an integration, foreign Git state
+(`UpstrokeError::Git`) settles the sequence unavailable rather than ending the command, and so does
+a Runner failure whose process never started or is established gone, unless the verification was
+cancelled. A cancellation settles nothing unavailable, and what follows it is its cause's. Only a
+concurrent driver cancels a verification. A halt then closes the run `Halted`, its closure settling
+the verification interrupted, and no resume continues the run; if the Runner did not establish that
+every process of the run ended, the closure appends nothing and the command ends resumably instead,
+the halt still recorded. A lineage failure cancels the verification's transaction, and the same
+command goes on. A shutdown, another pipeline's error or an invocation left unresolved ends the
+command resumably, as any other error that takes the judgement does, and the next resume settles the
+verification interrupted and verifies the candidate again under a new sequence, unless a cause that
+persists ends that resume earlier, as below. Any other error that takes the judgement ends the
+command, among them a snapshot whose registry access refuses (`UpstrokeError::RegistryRefused`, the
+tolerant registry access of `design/15`) because a fault outlasted its deadline — contention, a
+registration a dead writer left torn, any other fault of the worktree registry, such as a store
+nothing can write, a registration Git cannot list or an unreadable registry file, or a fault of the
+whole repository that an add meets before Git takes its destination over — or because its add failed
+after Git may have taken the destination over, or at once, because a fault of those kinds fails its
+add before Git takes the destination over and the access cannot prove the destination untouched, as
+when it is an empty directory the access cannot remove. The refusal ends the command resumably. A
+resume's recovery settles the verification interrupted, and once that recovery completes and the
+next integration can make a new staging worktree and cherry-pick the candidate there, the resume
+verifies again under a new sequence. A cause that persists can end each resume earlier, before
+another verification starts, with no unavailable settlement and no question: where the resume first
+lists the registry, before its recovery settles the verification, for a fault such as a registration
+Git cannot list; at recovery's removal, for a destination or a registration it cannot remove; or at
+the new staging worktree or its cherry-pick, for a fault such as a failing filter. Such a fault that
+persists therefore stops the run at each resume until it is repaired, where an unavailable
+settlement would defer and then park.
 A cause that persists — a tree the snapshot's path cannot hold, a failing filter, a destination the
 filesystem will not write, a missing object — therefore stops the run at each resume until the
 content or the environment changes, where an unavailable settlement would defer and then park. So
 the records come from the account that charged them rather than from a judgement that may not
-survive, and the unavailable terminal of a verification whose judgement never returned still
-carries the passes that did.
+survive: the unavailable terminal of a verification whose judgement never returned still carries the
+passes that did, and a verification that reaches no terminal carrying them has them recorded as the
+next paragraph says.
 
-The field is required, as every schema-4 payload field is. Schema 4 has never shipped in a
-release and a run reaches this vocabulary only by choosing it, so no schema-4 log is under a
-compatibility promise that a defaulted field would be protecting; one written before the field is
-refused at parse rather than folded to a total it cannot account for, which is the safe direction
-for a ceiling. This remains a Class C wire change under the `src/topology/**` freeze and it is the
-whole subject of the pull request that makes it, which is what the classification asks for.
+`merge_verification_charged` is that record. A process that charged review passes for a verification
+and leaves it without a terminal carrying them — the verification's own error or the refusal of the
+step after it, an invocation whose end the Runner did not establish, a cancellation, a halt, a
+shutdown, another pipeline's error, or a lineage failure that cancels its transaction — appends one,
+with every pass it charged for the sequence in the same `Vec<ReviewRecord>` shape, before the
+command or the integration ends, and replay charges its passes by the same addition. It is not a
+terminal and not a finish event: it records no outcome and settles, releases and authorizes nothing,
+so the transaction stays open, cleanup and readmission keep their conditions — a process the Runner
+did not establish as ended still blocks them — and which terminal settles the verification is not
+changed by it. The fold admits the record only for the open verification of its sequence, or for the
+one a lineage failure cancelled while it is still the latest sequence of the incarnation; never with
+no pass; and at most once for a sequence. Once a sequence has its record, no terminal that carries a
+verification's passes is admitted for it — `merge_verification_interrupted`, which carries none,
+still is — so its spend is counted once, whatever is appended after it. If the record's own append
+fails, that error ends the command, and what had ended the verification is kept as a warning. What
+no record carries stays unknown spend: a pass whose process ran but which no account charged, and
+whatever a coordinator that died, or a log that failed an append, could not record. A ledger row
+whose spend includes a record therefore states a lower bound.
+
+Each field is required, as every schema-4 payload field is: the unavailable terminal's `reviews` and
+the record's alike. Schema 4 has never shipped in a release and a run reaches this vocabulary only
+by choosing it, so no schema-4 log is under a compatibility promise that a defaulted field would be
+protecting; one written before a field is refused at parse rather than folded to a total it cannot
+account for, which is the safe direction for a ceiling, and a binary that predates the record
+refuses a log holding one for the same reason. Each is a Class C wire change under the
+`src/topology/**` freeze and the whole subject of the pull request that makes it, which is what the
+classification asks for; the record's also moves files G6 compares with its G5 range, which the
+owner's rulings on G6's diff proof name by path and merge.

@@ -475,7 +475,8 @@ still running in Docker beside a `Deferred` terminal that had released
 both entitlements and removed the snapshot the container had mounted, then
 a second sequence started beside it. A terminal authorizes cleanup and
 readmission, so an error that leaves the process's liveness unknown ends
-the command with the transaction open and nothing appended; the next
+the command with the transaction open and no terminal appended, only the
+record of what was charged (`merge_verification_charged`); the next
 resume's census reclaims the container before recovery step (f) settles
 the verification interrupted. A reviewer's Runner error reaches the
 judgement through `run_review`, which reports it unavailable on the same
@@ -510,9 +511,11 @@ it is attempted again until its deadline, and a registration still in the
 way then — another process's write that has not finished, a write a dead
 process left torn, a registration nobody is writing — refuses as
 `UpstrokeError::RegistryRefused`, which the last arm passes on, so the
-command ends resumably, with the transaction open and nothing appended, and
-a resume settles the verification interrupted and verifies the candidate
-again under a new sequence. A coordinator in a linked checkout of the same
+command ends resumably, with the transaction open and nothing appended but
+the record of the review passes the verification had charged before it, if
+any (`merge_verification_charged`, which settles nothing), and a resume
+settles the verification interrupted and verifies the candidate again under
+a new sequence. A coordinator in a linked checkout of the same
 repository was the process this mattered for
 (`PR11-LINKED-CHECKOUTS-RACE-THE-SHARED-WORKTREE-REGISTRY`): before #329 its
 write in flight was foreign Git state here, the terminal spent one of the
@@ -1193,6 +1196,15 @@ The checkpoint refusals — integration, run end, and a poisoned fold —
 each of which ends the command. Otherwise whatever the branch returns,
 or [`LoopBranch::unimplemented`] for a branch this build has not
 written, which performs nothing and appends nothing.
+
+## `impl TopologyRun` › `fn integrate(`
+
+A width-1 integration through the frozen `integrate()`. When it returns an error, the passes
+`IntegrationCx` kept are recorded first (`record_charged`), so a verification's own error, an
+unresolved reviewer, or a refused repair registration after a judged rejection no longer leaves them
+charged in memory only; then `integration_settled` runs as before. A width-1 step holds no stored
+interrupt, so a failed record append simply becomes the step's error, and the verification's error is
+kept as a warning (`superseded`).
 
 ## `impl TopologyRun` › `pub(super) fn admitted(&self) -> Result<Admitted, UpstrokeError> {`
 
@@ -2086,6 +2098,13 @@ bundle for the funnels, and the seams and ledgers the verification runs
 through. One object, so `emit`, `verify` and `converted` are all `&mut
 self` methods over disjoint fields rather than three overlapping borrows.
 
+## `struct IntegrationCx<'a, 'h>` › `charged: Vec<crate::events::ReviewRecord>,`
+
+A copy of every review pass `verify` charged, kept beside the account's own vector so that
+`TopologyRun::integrate` can record them when the frozen `integrate()` returns an error, after which
+it appends nothing. It is copied before `verified` maps the outcome and consumes the vector, and it
+dies with the `IntegrationCx`, so a width-1 step offers its passes once.
+
 ## `pub fn verification_body(` › `let (diff_parent, diff_tree) = if job.already_present {`
 
 The review diff: the proposal against the head for a stale
@@ -2249,6 +2268,19 @@ completion arrives, before `integrate()` appends the terminal
 (`TopologyRun::charge_reviews`). The total and its position before the terminal
 are the width-1 loop's.
 
+## `pub(super) struct Charged {`
+
+The passes a verification charged, for the sequence they belong to: what `record_charged` appends as
+`merge_verification_charged`. The width-1 step builds one from `IntegrationCx`'s copy; the
+coordinator keeps one from a live verification pipeline's completion until the integration or the
+command ends.
+
+## `pub(super) fn superseded(cause: &str) -> String {`
+
+The warning both widths keep when the record's own append fails: that error ends the command, and
+what had ended the verification (its own error, another interrupt, a halt or a shutdown) survives as
+this warning (T-APPEND's "a returned append error ends the command").
+
 ## `pub(super) trait Operator {`
 
 What runs a transition: the run, the seams and the hooks at once (`parts`, one
@@ -2334,6 +2366,21 @@ The provisional `{pipeline, merge}` reservation, through the broker's check.
 
 After `integrate()`: the deferral's progress and the `Progress` of a terminal,
 or, on an error, the integration reservation cancelled when it is still held.
+
+## `impl TopologyRun` › `pub(super) fn record_charged(`
+
+Append the known-spend record, once, when no terminal carries the passes. It asks the fold first: a
+record is refused only when a terminal already recorded the passes (nothing to do), when the
+sequence already has a record (an appender defect the fold catches; warned), or when the fold is
+poisoned (T-APPEND: no further append; warned, and the next open's stable-prefix barrier decides which
+lines survived). The driver's error mapping turns a refusal and an append failure into the same
+`Refused`, so the helper asks before it appends rather than guessing afterwards; whether the sequence
+already has a record it reads from the log the fold admitted. Its append goes through `self.emit(…)?`,
+so the append-error protocol runs for it like every driver append. A stopped run (`stop`, above: a
+registry access's wait inside a transition met an interrupt on the coordinator) refuses this append
+as it refuses every append, before the protocol runs: the fold admits the record, the emitter writes
+nothing, the passes stay unknown spend, and the refusal is the error the recording point hands on, as
+an append error is. The width-1 run never stops.
 
 ## `impl TopologyRun` › `pub(super) fn limit_slots(`
 

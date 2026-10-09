@@ -8455,6 +8455,12 @@ fn every_kind() -> Vec<TopologyEvent> {
                 "  ask the designer  ".to_owned(),
             ),
         }),
+        ev(TopologyEventBody::MergeVerificationCharged {
+            data: MergeVerificationCharged {
+                sequence: SequenceId(0),
+                reviews: vec![review_pass("integration", ReviewPassOutcome::Passed)],
+            },
+        }),
     ];
     assert_eq!(
         events.len(),
@@ -8768,6 +8774,16 @@ fn settled_trace() -> Vec<TopologyEvent> {
         &mut live,
         &mut trace,
         verification_started(ZETA, 2, 1, &head, &proposal),
+    );
+    push(
+        &mut live,
+        &mut trace,
+        ev(TopologyEventBody::MergeVerificationCharged {
+            data: MergeVerificationCharged {
+                sequence: SequenceId(1),
+                reviews: vec![review_pass("integration", ReviewPassOutcome::Passed)],
+            },
+        }),
     );
     push(
         &mut live,
@@ -9144,6 +9160,20 @@ fn one_field_invalid(event: &TopologyEvent) -> Vec<(String, TopologyEvent)> {
                 _ => RunOutcome::Complete,
             };
             case("outcome", TopologyEventBody::RunFinished { data: moved });
+        }
+        TopologyEventBody::MergeVerificationCharged { data } => {
+            let mut moved = data.clone();
+            moved.sequence = SequenceId(moved.sequence.0 + 1);
+            case(
+                "sequence",
+                TopologyEventBody::MergeVerificationCharged { data: moved },
+            );
+            let mut moved = data.clone();
+            moved.reviews.clear();
+            case(
+                "reviews",
+                TopologyEventBody::MergeVerificationCharged { data: moved },
+            );
         }
         TopologyEventBody::CapacitySnapshot { .. }
         | TopologyEventBody::PoolExhausted { .. }

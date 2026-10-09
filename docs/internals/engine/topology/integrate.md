@@ -129,11 +129,26 @@ reported, carried into the park question.
 Whatever the verification charged before it failed. This is here because
 the failure arm has no `Judgement` to take records from and the money was
 still spent: the reviews run in pass order, each one's cost is charged to
-the run as it returns, and a later pass's snapshot or ledger step can then
-fail and take the whole judgement with it. `IntegrationCx::verify` keeps
-what its account was charged and hands it out through this field, so the
-terminal records the same passes the live total already counted and a
-replay reaches that total again.
+the run as it returns, and a later pass's step can then fail and take the
+whole judgement with it. Only two kinds of failure reach this arm
+(`verified`, in `run.rs`): foreign Git state (`UpstrokeError::Git`, as
+from a snapshot the checkout could not make), and a Runner failure that is
+not a cancellation and whose process never started or is established
+gone. For those, `IntegrationCx::verify` hands what its account was
+charged out through this field, so the terminal records the same passes
+the live total already counted and a replay reaches that total again.
+
+A fault that is not Git's — of a snapshot, or of the ledger step, such as
+a registration the registry refuses — and an invocation whose end the
+Runner did not establish propagate out of `integrate` instead and end the
+command, and a cancellation goes on to its cause's ending. None of them
+leaves a terminal that carries the passes, so the driver records them in
+`merge_verification_charged` before the step, the integration or the
+command ends: `TopologyRun::integrate` at width one, from
+`IntegrationCx`'s copy of them, and above it the coordinator, from the
+passes its verification pipeline reported. The record is what counts them
+on replay: `merge_verification_interrupted`, the terminal such a sequence
+is settled with when one is, carries no spend.
 
 Empty for the two Runner arms by construction rather than by choice: a
 `JudgeError::Runner` can only come from a gate verdict, and gates run

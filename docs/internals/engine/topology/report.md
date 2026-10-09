@@ -58,6 +58,16 @@ The wire spelling of an outcome, shared with the refusals that quote it.
 One row per `merge_prepared` or `merge_verification_started`, closed by the terminal that
 followed it in the same sequence.
 
+## `pub fn integration_ledger(events: &[TopologyEvent]) -> Vec<LedgerRow> {` › `TopologyEventBody::MergeVerificationCharged { data } => {`
+
+A known-spend record adds its passes to its sequence's row and marks the row a lower bound
+(`review_cost_incomplete`): a record means the verification ended with no terminal carrying its
+spend, so some of it may be unknown — the pass that was running when it ended, or one a caught panic
+interrupted between its process and its charge. The renderer prints such a row `at least $X (?)`,
+or `? (unknown)` when no pass reported a cost; a row's spend is shown exact only when a terminal
+carries it. The interrupted terminal that may follow sets the row's terminal and detail and leaves its
+cost.
+
 ## `pub fn merged_and_parked(fold: &TopologyFold) -> (u32, u32) {`
 
 The two counts `run_finished` carries, from the task states.

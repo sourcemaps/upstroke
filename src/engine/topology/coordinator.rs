@@ -29,8 +29,8 @@ use super::identity::{
 use super::integrate::{self, Verified, VerifyRequest};
 use super::preflight::{Carried, Registrar};
 use super::run::{
-    DrivenJournal, Driver, Operator, Progress, Retrying, RunSeams, SpendAccount, TopologyRun,
-    VerificationJob, verification_body, verified,
+    Charged, DrivenJournal, Driver, Operator, Progress, Retrying, RunSeams, SpendAccount,
+    TopologyRun, VerificationJob, verification_body, verified,
 };
 use super::seams::TopologyHooks;
 use super::select::{Admitted, Entitlements, Holds, Standing};
@@ -254,6 +254,7 @@ impl TopologyRun {
             in_verify: None,
             arrived: None,
             abandoned: None,
+            charged: None,
             interrupt: None,
             cancelled_work: closure::Cancelled::none(),
             unresolved: Vec::new(),
@@ -420,7 +421,11 @@ impl SnapshotGate {
 // coordinator next acts. Winner and loser: a completion is settled only when its
 // pipeline is live, not cancelled, bound to the identity it names, and that
 // identity is open in the fold; any other message is discarded and counted and
-// releases nothing twice; a fatal completion interrupts as it is received. An
+// releases nothing twice; a fatal completion interrupts as it is received. A
+// verification completion from a live pipeline of this coordinator, settled or
+// discarded, has its review passes charged and kept, and they are recorded
+// (`merge_verification_charged`) when the integration or the command ends with no
+// terminal carrying them. An
 // invocation is released only when its end established that its process is
 // gone: one that ended unresolved, or was never reported ended, keeps its
 // registration and pair for the rest of this process, and interrupts. Every
@@ -475,6 +480,7 @@ struct Coordinator<'s> {
     in_verify: Option<(PipelineId, Identity)>,
     arrived: Option<Verified>,
     abandoned: Option<SequenceId>,
+    charged: Option<Charged>,
     interrupt: Option<Interrupt>,
     cancelled_work: closure::Cancelled,
     unresolved: Vec<String>,
@@ -640,6 +646,11 @@ impl Coordinator<'_> {
         self.run.reserve_integration(key)?;
         let manager = self.seams.manager;
         let terminal = integrate::integrate(&mut DrivenJournal(self), manager, &request);
+        if let (Some(charged), Err(ended)) = (self.charged.take(), &terminal) {
+            if let Err(append) = self.run.record_charged(charged, self.seams, self.hooks) {
+                self.supersede(append, Some(ended));
+            }
+        }
         let settled = self.run.integration_settled(key, terminal);
         self.open_gate();
         let abandoned = self.abandoned.take() == Some(request.sequence);
@@ -883,8 +894,9 @@ impl Coordinator<'_> {
                 let message = format!(
                     "the verification of sequence {} of task {key} was abandoned: the fold no \
                      longer holds its transaction open (a decline, or a failed settlement, \
-                     failed its lineage), so its pipeline was cancelled, its late result \
-                     discarded and nothing is appended for it",
+                     failed its lineage), so its pipeline was cancelled and its late result \
+                     discarded; no terminal is appended for it here, and the coordinator records \
+                     next the review passes it charged, if any (`merge_verification_charged`)",
                     sequence.0
                 );
                 self.run.warn(message.clone());
@@ -895,7 +907,9 @@ impl Coordinator<'_> {
                 Err(UpstrokeError::Refused {
                     message: format!(
                         "the verification of sequence {} of task {key} was interrupted by {}; its \
-                         pipeline was cancelled and nothing further is appended for it",
+                         pipeline was cancelled, no terminal is appended for it here, and the \
+                         coordinator records the review passes it charged, if any \
+                         (`merge_verification_charged`), before the command ends",
                         sequence.0,
                         self.interrupt
                             .as_ref()
@@ -1606,12 +1620,27 @@ impl Coordinator<'_> {
         outcome: Result<Judgement, JudgeError>,
         charged: Vec<ReviewRecord>,
     ) {
+        let reported = match identity {
+            Identity::Verification {
+                sequence,
+                candidate,
+            } if origin == Origin::Pipeline
+                && self
+                    .live
+                    .get(&pipeline)
+                    .is_some_and(|live| live.identity == *identity) =>
+            {
+                Some((*sequence, candidate.key))
+            }
+            _ => None,
+        };
         if self.in_verify.as_ref().map(|(verifying, _)| *verifying) != Some(pipeline)
             || self.arrived.is_some()
         {
             if origin == Origin::Pipeline
                 && self.live.get(&pipeline).is_some_and(|live| live.cancelled)
             {
+                self.keep_discarded(reported, charged);
                 self.retire(pipeline);
                 self.run.record_discard(None);
                 return;
@@ -1624,6 +1653,7 @@ impl Coordinator<'_> {
             return;
         }
         if !self.accepts(origin, pipeline, identity) {
+            self.keep_discarded(reported, charged);
             return;
         }
         let Identity::Verification {
@@ -1635,6 +1665,10 @@ impl Coordinator<'_> {
             return;
         };
         self.run.charge_reviews(candidate.key, &charged);
+        self.charged = Some(Charged {
+            sequence: *sequence,
+            reviews: charged.clone(),
+        });
         match verified(outcome, charged, *sequence) {
             Ok(verified) => {
                 self.retire(pipeline);
@@ -1654,6 +1688,20 @@ impl Coordinator<'_> {
         self.cancel_all();
     }
 
+    fn keep_discarded(
+        &mut self,
+        reported: Option<(SequenceId, TaskKey)>,
+        charged: Vec<ReviewRecord>,
+    ) {
+        if let Some((sequence, key)) = reported {
+            self.run.charge_reviews(key, &charged);
+            self.charged = Some(Charged {
+                sequence,
+                reviews: charged,
+            });
+        }
+    }
+
     fn fail(&mut self, error: UpstrokeError) {
         if self.interrupt.is_none() {
             self.interrupt = Some(Interrupt::Failed(error));
@@ -1662,6 +1710,17 @@ impl Coordinator<'_> {
                 "after the command had begun to end, a further error: {error}"
             ));
         }
+        self.cancel_all();
+    }
+
+    fn supersede(&mut self, append: UpstrokeError, ended: Option<&UpstrokeError>) {
+        let cause = match self.interrupt.take() {
+            Some(Interrupt::Failed(error)) => error.to_string(),
+            Some(interrupt) => interrupt.describe().to_owned(),
+            None => ended.map_or_else(|| "no recorded cause".to_owned(), ToString::to_string),
+        };
+        self.run.warn(super::run::superseded(&cause));
+        self.interrupt = Some(Interrupt::Failed(append));
         self.cancel_all();
     }
 
@@ -1707,6 +1766,11 @@ impl Coordinator<'_> {
         while !self.live.is_empty() {
             self.receive_one();
         }
+        if let Some(charged) = self.charged.take() {
+            if let Err(append) = self.run.record_charged(charged, self.seams, self.hooks) {
+                self.supersede(append, None);
+            }
+        }
         let unresolved = std::mem::take(&mut self.unresolved);
         match self.interrupt.take() {
             Some(Interrupt::Halt) if unresolved.is_empty() => {
@@ -1730,7 +1794,8 @@ impl Coordinator<'_> {
                     message: format!(
                         "the coordinator was shut down: every pending request was withdrawn, \
                          every live pipeline was cancelled and its completion discarded, \
-                         {}nothing was settled or appended, and the run is resumable{}",
+                         {}nothing was settled, nothing was appended but the record of the review \
+                         passes a verification had charged, and the run is resumable{}",
                         if reserved {
                             "a provisional reservation still held was cancelled, "
                         } else {
@@ -3464,6 +3529,7 @@ mod tests {
                 in_verify: None,
                 arrived: None,
                 abandoned: None,
+                charged: None,
                 interrupt: None,
                 cancelled_work: closure::Cancelled::none(),
                 unresolved: Vec::new(),
@@ -6431,6 +6497,7 @@ mod tests {
             in_verify: None,
             arrived: None,
             abandoned: None,
+            charged: None,
             interrupt: None,
             cancelled_work: closure::Cancelled::none(),
             unresolved: Vec::new(),
@@ -10986,6 +11053,7 @@ mod tests {
             &kinds[halted..],
             &[
                 "question_answered",
+                "merge_verification_charged",
                 "merge_verification_interrupted",
                 "run_finished"
             ],
@@ -11378,6 +11446,7 @@ mod tests {
                 in_verify: None,
                 arrived: None,
                 abandoned: None,
+                charged: None,
                 interrupt: None,
                 cancelled_work: closure::Cancelled::none(),
                 unresolved: Vec::new(),
@@ -11744,6 +11813,7 @@ mod tests {
                 in_verify: None,
                 arrived: None,
                 abandoned: None,
+                charged: None,
                 interrupt: None,
                 cancelled_work: closure::Cancelled::none(),
                 unresolved: Vec::new(),
@@ -17879,5 +17949,1985 @@ mod tests {
             observed.len() > after_the_coordinator,
             "the width-1 `step` started containers too: {observed:?}"
         );
+    }
+
+    const PASS_COST: f64 = 0.25;
+
+    const DUPLICATE_OFFER: &str = "offered for a second merge_verification_charged";
+
+    const RECORD_HANDOFF: &str = "o14-fixture-root";
+
+    fn reviewing(verify_reviewers: usize) -> WidePlans {
+        WidePlans {
+            verify_reviewers,
+            ..WidePlans::default()
+        }
+    }
+
+    fn two() -> [WideTask; 2] {
+        [
+            WideTask::independent("alpha"),
+            WideTask::independent("beta"),
+        ]
+    }
+
+    fn unlimited() -> crate::engine::topology::select::Ceiling {
+        crate::engine::topology::select::Ceiling::unlimited()
+    }
+
+    fn answering_two() -> RecordingRunner {
+        RecordingRunner::new().answering(wide_responder(&two(), &[]))
+    }
+
+    fn charged_records(events: &[TopologyEvent]) -> Vec<(SequenceId, Vec<ReviewRecord>)> {
+        events
+            .iter()
+            .filter(|event| event.body.kind() == "merge_verification_charged")
+            .map(|event| {
+                let value = serde_json::to_value(event).expect("an event serializes");
+                let sequence = value["data"]["sequence"]
+                    .as_u64()
+                    .and_then(|sequence| u32::try_from(sequence).ok())
+                    .map(SequenceId)
+                    .expect("a record names its sequence");
+                let reviews = serde_json::from_value(value["data"]["reviews"].clone())
+                    .expect("a record carries review records");
+                (sequence, reviews)
+            })
+            .collect()
+    }
+
+    fn charged_event(sequence: SequenceId, reviews: &[ReviewRecord]) -> TopologyEvent {
+        serde_json::from_value(serde_json::json!({
+            "ts": "2026-10-08T00:00:00.000Z",
+            "event": "merge_verification_charged",
+            "data": {"sequence": sequence.0, "reviews": reviews},
+        }))
+        .expect("the vocabulary has merge_verification_charged")
+    }
+
+    fn started_key(events: &[TopologyEvent], sequence: SequenceId) -> TaskKey {
+        events
+            .iter()
+            .find_map(|event| match &event.body {
+                TopologyEventBody::MergeVerificationStarted { data }
+                    if data.sequence == sequence =>
+                {
+                    Some(data.candidate.key)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("sequence {} has a start", sequence.0))
+    }
+
+    fn started_at(events: &[TopologyEvent], sequence: SequenceId) -> usize {
+        events
+            .iter()
+            .position(|event| {
+                matches!(&event.body,
+                    TopologyEventBody::MergeVerificationStarted { data } if data.sequence == sequence)
+            })
+            .unwrap_or_else(|| panic!("sequence {} has a start", sequence.0))
+    }
+
+    fn unrecorded(events: &[TopologyEvent]) -> Vec<TopologyEvent> {
+        events
+            .iter()
+            .filter(|event| event.body.kind() != "merge_verification_charged")
+            .cloned()
+            .collect()
+    }
+
+    fn terminals_of(events: &[TopologyEvent], sequence: SequenceId) -> Vec<&'static str> {
+        events
+            .iter()
+            .filter(|event| {
+                event.body.sequence() == Some(sequence)
+                    && matches!(
+                        event.body,
+                        TopologyEventBody::MergeVerificationUnavailable { .. }
+                            | TopologyEventBody::MergeVerificationInterrupted { .. }
+                            | TopologyEventBody::MergePrepared { .. }
+                            | TopologyEventBody::MergeRejected { .. }
+                    )
+            })
+            .map(|event| event.body.kind())
+            .collect()
+    }
+
+    fn two_passes_recorded(wide: &Wide, sequence: SequenceId) {
+        let events = wide.env.durable_events();
+        let kinds = kinds_of(&events);
+        let records = charged_records(&events);
+        assert_eq!(
+            records
+                .iter()
+                .map(|(recorded, _)| *recorded)
+                .collect::<Vec<_>>(),
+            vec![sequence],
+            "one merge_verification_charged, for sequence {}: {kinds:?}",
+            sequence.0
+        );
+        let passes: Vec<(String, Option<f64>)> = records
+            .iter()
+            .flat_map(|(_, reviews)| reviews.iter())
+            .map(|review| (review.model.clone(), review.cost_usd))
+            .collect();
+        assert_eq!(
+            passes,
+            vec![
+                ("scaffold-model".to_owned(), Some(PASS_COST)),
+                ("scaffold-second-model".to_owned(), Some(PASS_COST))
+            ],
+            "the record holds both passes, in the order they were charged"
+        );
+        let key = started_key(&events, sequence);
+        let replayed = crate::engine::topology::select::Spend::replay(&events);
+        let without = crate::engine::topology::select::Spend::replay(&unrecorded(&events));
+        let live = wide.run.spend();
+        for (what, replayed, without, live) in [
+            ("run", replayed.run_usd(), without.run_usd(), live.run_usd()),
+            (
+                "task",
+                replayed.task_usd(key),
+                without.task_usd(key),
+                live.task_usd(key),
+            ),
+        ] {
+            assert!(
+                (replayed - live).abs() < 1e-9,
+                "the {what}'s replayed total {replayed} is its live total {live}"
+            );
+            assert!(
+                (replayed - without - 2.0 * PASS_COST).abs() < 1e-9,
+                "the record carries the {what}'s two passes, $0.50: {without} -> {replayed}"
+            );
+        }
+    }
+
+    fn no_second_offer(wide: &Wide) {
+        assert!(
+            !wide
+                .run
+                .warnings()
+                .iter()
+                .any(|warning| warning.contains(DUPLICATE_OFFER)),
+            "no second record was offered: {:?}",
+            wide.run.warnings()
+        );
+    }
+
+    fn records_both_passes(wide: &Wide, sequence: SequenceId) {
+        two_passes_recorded(wide, sequence);
+        no_second_offer(wide);
+    }
+
+    fn stale_at_width_one(
+        tag: &str,
+        verify_reviewers: usize,
+        ceiling: crate::engine::topology::select::Ceiling,
+    ) -> Wide {
+        let tasks = two();
+        let mut wide = Wide::durable(
+            tag,
+            &tasks,
+            3,
+            reviewing(verify_reviewers),
+            holding(&tasks, &[]),
+        );
+        let runner = std::sync::Arc::clone(&wide.env.runner);
+        let mut shut = false;
+        let mut scheduler = Scheduler::scripted(
+            &runner,
+            Box::new(move |view: &Quiescent<'_>| {
+                if shut {
+                    return None;
+                }
+                if view
+                    .live
+                    .iter()
+                    .any(|(_, identity)| matches!(identity, Identity::Verification { .. }))
+                {
+                    shut = true;
+                    assert!(view.injector.inject(ToCoordinator::Shutdown));
+                    return Some(Release::Injected);
+                }
+                released(view, |invocation| attempt_key(invocation) == Some(0))
+            }),
+        );
+        let error =
+            drive(&mut wide, Some(&mut scheduler)).expect_err("the shutdown ends the command");
+        drop(scheduler);
+        assert!(error.to_string().contains("shut down"), "{error}");
+        let events = wide.env.durable_events();
+        assert_eq!(count(&events, "task_merged"), 1, "{:?}", kinds_of(&events));
+        assert_eq!(
+            kinds_of(&events).last(),
+            Some(&"merge_verification_started"),
+            "the first verification was shut down at its gate, before any pass: {:?}",
+            kinds_of(&events)
+        );
+        let (_, resumed) = wide
+            .resume("inc-2", answering_two(), ceiling)
+            .expect("the next process resumes the shut-down run");
+        assert_eq!(
+            terminals_of(&resumed.env.durable_events(), SequenceId(1)),
+            vec!["merge_verification_interrupted"],
+            "the resume settles the shut-down verification interrupted: {:?}",
+            kinds_of_log(&resumed)
+        );
+        resumed
+    }
+
+    fn snapshot_add() -> crate::topology::effects::EffectSiteId {
+        crate::topology::effects::EffectSiteId::Snapshot(
+            crate::topology::effects::SnapshotSite::Add,
+        )
+    }
+
+    fn failing_the_snapshot_after(wide: &Wide, passing: u32) -> CasFailing {
+        let mut hooks = CasFailing::over(wide);
+        hooks.effects.fail_at = Some((snapshot_add(), passing));
+        hooks
+    }
+
+    fn verifying(fold: &TopologyFold, sequence: SequenceId) -> bool {
+        fold.transaction().is_some_and(|open| {
+            open.sequence == sequence
+                && matches!(
+                    open.class,
+                    crate::topology::fold::TransactionClass::VerificationStarted { .. }
+                )
+        })
+    }
+
+    fn review_pass(invocation: &InvocationId, pass: u32) -> bool {
+        matches!(
+            invocation,
+            InvocationId::Sequence {
+                role: crate::runner::invocation::SequenceRole::ReviewPass(index),
+                ..
+            } if *index == pass
+        )
+    }
+
+    fn sequence_invocation(invocation: &InvocationId) -> bool {
+        matches!(invocation, InvocationId::Sequence { .. })
+    }
+
+    fn verification_live(view: &Quiescent<'_>) -> bool {
+        view.live
+            .iter()
+            .any(|(_, identity)| matches!(identity, Identity::Verification { .. }))
+    }
+
+    fn alpha_then_beta(runner: &RecordingRunner) -> Scheduler<'_> {
+        Scheduler::scripted(
+            runner,
+            Box::new(|view: &Quiescent<'_>| {
+                if count(view.run.events(), "task_merged") == 0 {
+                    return released(view, |invocation| attempt_key(invocation) == Some(0));
+                }
+                released(view, |invocation| attempt_key(invocation) == Some(1))
+                    .or_else(|| released(view, sequence_invocation))
+            }),
+        )
+    }
+
+    fn toward_arrival(view: &Quiescent<'_>) -> Option<Option<Release>> {
+        if count(view.run.events(), "task_merged") == 0 {
+            return Some(released(view, |invocation| {
+                attempt_key(invocation) == Some(0)
+            }));
+        }
+        if view.run.fold().transaction().is_none() {
+            return Some(released(view, |invocation| {
+                attempt_key(invocation) == Some(1)
+            }));
+        }
+        if verification_live(view) {
+            return Some(
+                released(view, |invocation| worker(invocation) == Some(TaskKey(2)))
+                    .or_else(|| released(view, sequence_invocation)),
+            );
+        }
+        None
+    }
+
+    fn gamma_gate(view: &Quiescent<'_>) -> Option<InvocationId> {
+        view.invoking
+            .iter()
+            .find(|invocation| {
+                attempt_key(invocation) == Some(2)
+                    && matches!(role_of(invocation), Some(AttemptRole::Gate(_)))
+            })
+            .cloned()
+    }
+
+    fn halting_on_gamma_reviewing(tag: &str, verify_reviewers: usize, durable: bool) -> Wide {
+        let tasks = three();
+        let runner = RecordingRunner::new().answering(
+            crate::engine::topology::scaffold::wide_responder_asking(&tasks, &[], &[2]),
+        );
+        runner.hold();
+        let mut wide = if durable {
+            Wide::durable(tag, &tasks, 3, reviewing(verify_reviewers), runner)
+        } else {
+            Wide::started_with(tag, &tasks, 3, reviewing(verify_reviewers), runner)
+        };
+        halting(&mut wide.env);
+        wide
+    }
+
+    fn halting_at_the_third_pass(runner: &RecordingRunner) -> Scheduler<'_> {
+        Scheduler::scripted(
+            runner,
+            Box::new(|view: &Quiescent<'_>| {
+                if count(view.run.events(), "task_merged") == 0 {
+                    return released(view, |invocation| attempt_key(invocation) == Some(0));
+                }
+                if view.run.fold().transaction().is_none() {
+                    return released(view, |invocation| attempt_key(invocation) == Some(1));
+                }
+                if view
+                    .invoking
+                    .iter()
+                    .any(|invocation| review_pass(invocation, 2))
+                {
+                    return released(view, |invocation| attempt_key(invocation) == Some(2));
+                }
+                released(view, sequence_invocation)
+            }),
+        )
+    }
+
+    struct ArmingOnTheFault {
+        inner: crate::engine::topology::seams::HarnessTopologyHooks,
+        effects: FailingOnce,
+        harness: std::sync::Arc<std::sync::Mutex<crate::topology::effects::HookHarness>>,
+        arm: Option<(
+            crate::topology::effects::SubEffectPoint,
+            crate::topology::effects::InjectionMode,
+        )>,
+        abort_at_the_next_append: bool,
+    }
+
+    impl ArmingOnTheFault {
+        fn over(
+            wide: &Wide,
+            passing: u32,
+            arm: Option<(
+                crate::topology::effects::SubEffectPoint,
+                crate::topology::effects::InjectionMode,
+            )>,
+        ) -> Self {
+            Self {
+                inner: wide.env.hooks(),
+                effects: FailingOnce {
+                    effects: crate::workspace_manager::HarnessEffects::new(std::sync::Arc::clone(
+                        &wide.env.harness,
+                    )),
+                    fail_at: Some((snapshot_add(), passing)),
+                },
+                harness: std::sync::Arc::clone(&wide.env.harness),
+                arm,
+                abort_at_the_next_append: false,
+            }
+        }
+
+        fn fired(&self) -> bool {
+            self.effects.fail_at.is_none()
+        }
+    }
+
+    impl crate::workspace_manager::EffectHooks for ArmingOnTheFault {
+        fn phase(
+            &mut self,
+            site: crate::topology::effects::EffectSiteId,
+            phase: crate::topology::effects::HookPhase,
+        ) -> crate::topology::effects::Injection {
+            let answer = self.effects.phase(site, phase);
+            if matches!(answer, crate::topology::effects::Injection::Error) {
+                if let Some((point, mode)) = self.arm.take() {
+                    self.harness
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .arm(
+                            crate::topology::effects::EffectSiteId::Event(
+                                crate::topology::effects::EventSite::Append,
+                            ),
+                            point,
+                            mode,
+                        )
+                        .expect("the Event append supports the mode at the point");
+                }
+            }
+            answer
+        }
+
+        fn durability_ledger(&self) -> crate::util::DurabilityLedger {
+            self.effects.durability_ledger()
+        }
+
+        fn refusal_cause(&self) -> Option<String> {
+            self.effects.refusal_cause()
+        }
+    }
+
+    impl crate::events::log::EventHooks for ArmingOnTheFault {
+        fn phase(
+            &mut self,
+            site: crate::topology::effects::EventSite,
+            phase: crate::topology::effects::HookPhase,
+        ) {
+            if self.abort_at_the_next_append
+                && self.fired()
+                && site == crate::topology::effects::EventSite::Append
+                && phase == crate::topology::effects::HookPhase::Before
+            {
+                std::process::abort();
+            }
+            self.inner.events().phase(site, phase);
+        }
+
+        fn point(
+            &mut self,
+            site: crate::topology::effects::EventSite,
+            point: crate::topology::effects::SubEffectPoint,
+            mode: crate::topology::effects::InjectionMode,
+        ) -> crate::topology::effects::Injection {
+            self.inner.events().point(site, point, mode)
+        }
+
+        fn written_kill_shape(
+            &mut self,
+            site: crate::topology::effects::EventSite,
+        ) -> crate::events::log::WrittenShape {
+            self.inner.events().written_kill_shape(site)
+        }
+
+        fn durability_ledger(&self) -> crate::util::DurabilityLedger {
+            crate::events::log::EventHooks::durability_ledger(self.inner.event_observer())
+        }
+
+        fn synced(&mut self, record: &crate::events::log::SyncRecord) {
+            self.inner.events().synced(record);
+        }
+    }
+
+    impl TopologyHooks for ArmingOnTheFault {
+        fn effects(&mut self) -> &mut dyn crate::workspace_manager::EffectHooks {
+            self
+        }
+
+        fn rundir(&mut self) -> &mut dyn crate::rundir::RunDirHooks {
+            self.inner.rundir()
+        }
+
+        fn events(&mut self) -> &mut dyn crate::events::log::EventHooks {
+            self
+        }
+
+        fn container(&mut self) -> &mut dyn crate::runner::container::ContainerHooks {
+            self.inner.container()
+        }
+
+        fn spawn(&mut self) -> &mut dyn crate::agent::proc::SpawnHooks {
+            self.inner.spawn()
+        }
+
+        fn folded(&mut self, fold: &TopologyFold, events: &[TopologyEvent]) {
+            self.inner.folded(fold, events);
+        }
+    }
+
+    fn pipelines_failing_the_snapshot_after(
+        wide: &Wide,
+        passing: u32,
+        arm: Option<(
+            crate::topology::effects::SubEffectPoint,
+            crate::topology::effects::InjectionMode,
+        )>,
+    ) -> PipelineSeams {
+        let mut pipelines = wide.env.pipelines();
+        let harness = std::sync::Arc::clone(&wide.env.harness);
+        pipelines.hooks = std::sync::Arc::new(move || {
+            Box::new(ArmingOnTheFault {
+                inner: crate::engine::topology::seams::HarnessTopologyHooks::new(
+                    std::sync::Arc::clone(&harness),
+                ),
+                effects: FailingOnce {
+                    effects: crate::workspace_manager::HarnessEffects::new(std::sync::Arc::clone(
+                        &harness,
+                    )),
+                    fail_at: Some((snapshot_add(), passing)),
+                },
+                harness: std::sync::Arc::clone(&harness),
+                arm,
+                abort_at_the_next_append: false,
+            }) as Box<dyn TopologyHooks + Send>
+        });
+        pipelines
+    }
+
+    fn ledger_row(
+        wide: &Wide,
+        sequence: SequenceId,
+    ) -> (crate::engine::topology::report::LedgerRow, String) {
+        let run_id = wide.run.fold().started().expect("started").run_id.clone();
+        let report = crate::engine::topology::report::TopologyReport::derive(
+            &run_id,
+            wide.run.fold(),
+            &wide.env.durable_events(),
+        )
+        .expect("the report derives");
+        let row = report
+            .integration_ledger
+            .iter()
+            .find(|row| row.sequence == sequence.0)
+            .cloned()
+            .expect("the sequence has a ledger row");
+        (row, report.render())
+    }
+
+    #[test]
+    fn a_verifications_own_error_after_two_paid_passes_is_recorded_before_the_step_ends_at_width_one()
+     {
+        let mut wide = stale_at_width_one("coordinator-o14-r1", 3, unlimited());
+        let mut hooks = failing_the_snapshot_after(&wide, 3);
+        let seams = wide.env.seams();
+        let error = wide
+            .run
+            .step(&seams, &mut hooks)
+            .expect_err("the third reviewer's snapshot add fails");
+        assert!(
+            error.to_string().contains("was made to fail"),
+            "the verification's own error ends the step: {error}"
+        );
+        let events = wide.env.durable_events();
+        let sequence = SequenceId(2);
+        assert_eq!(
+            kinds_of(&events).last(),
+            Some(&"merge_verification_charged"),
+            "the record is the step's last append: {:?}",
+            kinds_of(&events)
+        );
+        records_both_passes(&wide, sequence);
+        assert!(
+            verifying(wide.run.fold(), sequence),
+            "the fold still holds sequence 2 open: {:?}",
+            wide.run.fold().transaction()
+        );
+    }
+
+    #[test]
+    fn a_restart_after_two_recorded_passes_still_refuses_the_ceiling() {
+        let mut wide = stale_at_width_one("coordinator-o14-r2", 3, unlimited());
+        let before = wide.run.spend().run_usd();
+        let mut hooks = failing_the_snapshot_after(&wide, 3);
+        let seams = wide.env.seams();
+        wide.run
+            .step(&seams, &mut hooks)
+            .expect_err("the third reviewer's snapshot add fails");
+        drop(hooks);
+        let live = wide.run.spend().run_usd();
+        assert!(
+            (live - before - 2.0 * PASS_COST).abs() < 1e-9,
+            "the step charged two passes live: {before} -> {live}"
+        );
+        records_both_passes(&wide, SequenceId(2));
+        let limit = before + 1.5 * PASS_COST;
+        let (_, mut resumed) = wide
+            .resume(
+                "inc-3",
+                answering_two(),
+                crate::engine::topology::select::Ceiling {
+                    run_usd: Some(limit),
+                    task_usd: None,
+                },
+            )
+            .expect("the next process resumes");
+        let events = resumed.env.durable_events();
+        let kinds = kinds_of(&events);
+        assert_eq!(
+            terminals_of(&events, SequenceId(2)),
+            vec!["merge_verification_interrupted"],
+            "recovery settles sequence 2 interrupted: {kinds:?}"
+        );
+        assert!(
+            position(&kinds, "merge_verification_charged", 0)
+                < position(&kinds, "merge_verification_interrupted", 1),
+            "recovery's interrupted terminal follows the record: {kinds:?}"
+        );
+        let mut hooks = resumed.env.hooks();
+        let seams = resumed.env.seams();
+        let progress = resumed
+            .run
+            .step(&seams, &mut hooks)
+            .expect("the first step of the restart");
+        assert!(
+            matches!(progress, Progress::BudgetExceeded),
+            "the restart is refused where the incarnation before it was: {progress:?} (limit \
+             {limit}, replayed {})",
+            resumed.run.spend().run_usd()
+        );
+        assert!(
+            !resumed
+                .env
+                .runner
+                .ran()
+                .iter()
+                .any(|ran| review_pass(&ran.invocation, 0)),
+            "no reviewer runs in the restart"
+        );
+    }
+
+    #[test]
+    fn an_unresolved_reviewer_after_two_paid_passes_is_recorded_and_its_transaction_stays_open_at_width_one()
+     {
+        let mut wide = stale_at_width_one("coordinator-o14-r3", 3, unlimited());
+        let sequence = SequenceId(2);
+        wide.env
+            .runner
+            .ending_unresolved(SequenceIdentities::new(sequence).review_pass(2, 0));
+        let mut hooks = wide.env.hooks();
+        let seams = wide.env.seams();
+        let error = wide
+            .run
+            .step(&seams, &mut hooks)
+            .expect_err("the third reviewer's process ends unresolved");
+        assert!(
+            error.to_string().contains("could not establish"),
+            "the unresolved reviewer's error ends the step: {error}"
+        );
+        let events = wide.env.durable_events();
+        assert_eq!(
+            kinds_of(&events).last(),
+            Some(&"merge_verification_charged"),
+            "{:?}",
+            kinds_of(&events)
+        );
+        records_both_passes(&wide, sequence);
+        assert!(
+            terminals_of(&events, sequence).is_empty(),
+            "no terminal settles the verification while its process may run: {:?}",
+            kinds_of(&events)
+        );
+        assert!(verifying(wide.run.fold(), sequence));
+        assert_eq!(
+            crate::engine::topology::select::Entitlements::of(wide.run.fold()).merge_held(),
+            1,
+            "the open transaction still holds its entitlement"
+        );
+        let replayed = crate::engine::topology::select::Spend::replay(&events);
+        let (_, resumed) = wide
+            .resume("inc-3", answering_two(), unlimited())
+            .expect("the next process resumes");
+        let events = resumed.env.durable_events();
+        assert_eq!(
+            terminals_of(&events, sequence),
+            vec!["merge_verification_interrupted"],
+            "the census and recovery settle it interrupted: {:?}",
+            kinds_of(&events)
+        );
+        let again = crate::engine::topology::select::Spend::replay(&events);
+        let key = started_key(&events, sequence);
+        assert!(
+            (again.run_usd() - replayed.run_usd()).abs() < 1e-9
+                && (again.task_usd(key) - replayed.task_usd(key)).abs() < 1e-9,
+            "the interrupted terminal adds no cost and the record is counted once: {} -> {}",
+            replayed.run_usd(),
+            again.run_usd()
+        );
+        records_both_passes(&resumed, sequence);
+    }
+
+    #[test]
+    fn an_unresolved_reviewer_after_two_paid_passes_is_recorded_at_width_three() {
+        let tasks = two();
+        let mut wide = Wide::started_with(
+            "coordinator-o14-r4",
+            &tasks,
+            3,
+            reviewing(3),
+            holding(&tasks, &[]),
+        );
+        let sequence = SequenceId(1);
+        let third = SequenceIdentities::new(sequence).review_pass(2, 0);
+        wide.env.runner.ending_unresolved(third.clone());
+        let runner = std::sync::Arc::clone(&wide.env.runner);
+        let mut scheduler = alpha_then_beta(&runner);
+        let error = drive(&mut wide, Some(&mut scheduler))
+            .expect_err("the unresolved end fails the command");
+        drop(scheduler);
+        assert!(
+            error.to_string().contains("unresolved"),
+            "the unresolved end ends the command: {error}"
+        );
+        records_both_passes(&wide, sequence);
+        let events = wide.env.durable_events();
+        assert!(
+            terminals_of(&events, sequence).is_empty(),
+            "{:?}",
+            kinds_of(&events)
+        );
+        settled_but(&mut wide.run, std::slice::from_ref(&third)).unwrap_or_else(|ledger| {
+            panic!("the unresolved reviewer keeps its registration: {ledger}")
+        });
+        replay_equals_live(&wide);
+    }
+
+    #[test]
+    fn a_halt_after_the_verifications_two_pass_result_arrived_records_both_before_the_interrupted_terminal()
+     {
+        let mut wide = halting_on_gamma_reviewing("coordinator-o14-r5", 2, false);
+        let polls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        wide.env.answers = std::sync::Arc::new(DecliningAtPoll(std::sync::Arc::clone(&polls)));
+        let runner = std::sync::Arc::clone(&wide.env.runner);
+        let mut scheduler = Scheduler::scripted(
+            &runner,
+            Box::new(|view: &Quiescent<'_>| {
+                if !view.run.fold().questions_open() {
+                    return released(view, |invocation| attempt_key(invocation) == Some(2));
+                }
+                if count(view.run.events(), "task_merged") == 0 {
+                    return released(view, |invocation| attempt_key(invocation) == Some(0));
+                }
+                if view.run.fold().transaction().is_none() {
+                    return released(view, |invocation| attempt_key(invocation) == Some(1));
+                }
+                let last = released(view, |invocation| review_pass(invocation, 1));
+                if last.is_some() {
+                    polls.store(2, std::sync::atomic::Ordering::SeqCst);
+                    return last;
+                }
+                released(view, sequence_invocation)
+            }),
+        );
+        let progress = drive(&mut wide, Some(&mut scheduler)).expect("the halted run ends");
+        drop(scheduler);
+        assert_eq!(outcome_of(&progress), RunOutcome::Halted);
+        let events = wide.env.durable_events();
+        let kinds = kinds_of(&events);
+        let halted = position(&kinds, "question_answered", 0);
+        assert_eq!(
+            &kinds[halted..],
+            &[
+                "question_answered",
+                "merge_verification_charged",
+                "merge_verification_interrupted",
+                "run_finished"
+            ],
+            "{kinds:?}"
+        );
+        assert_eq!(
+            wide.run.discarded(),
+            0,
+            "the result was accepted before the halt: {:?}",
+            wide.run.warnings()
+        );
+        let sequence = SequenceId(1);
+        records_both_passes(&wide, sequence);
+        let (row, rendered) = ledger_row(&wide, sequence);
+        assert_eq!(
+            (
+                row.reviews,
+                row.terminal.as_str(),
+                row.review_cost_incomplete
+            ),
+            (2, "merge_verification_interrupted", true),
+            "{row:?}"
+        );
+        assert!(
+            rendered.contains("(2 review(s), cost at least $0.5000 (?))"),
+            "the report reads the record as a lower bound: {rendered}"
+        );
+        replay_equals_live(&wide);
+    }
+
+    #[test]
+    fn a_shutdown_after_the_verifications_two_pass_result_arrived_records_both() {
+        let tasks = three();
+        let mut wide = Wide::started_with(
+            "coordinator-o14-r6",
+            &tasks,
+            3,
+            reviewing(2),
+            holding(&tasks, &[]),
+        );
+        let runner = std::sync::Arc::clone(&wide.env.runner);
+        let mut shut = false;
+        let mut scheduler = Scheduler::scripted(
+            &runner,
+            Box::new(move |view: &Quiescent<'_>| {
+                if shut {
+                    return None;
+                }
+                if let Some(release) = toward_arrival(view) {
+                    return release;
+                }
+                assert!(
+                    gamma_gate(view).is_some(),
+                    "gamma's gate holds its snapshot"
+                );
+                shut = true;
+                assert!(view.injector.inject(ToCoordinator::Shutdown));
+                Some(Release::Injected)
+            }),
+        );
+        let error =
+            drive(&mut wide, Some(&mut scheduler)).expect_err("the shutdown ends the command");
+        drop(scheduler);
+        let message = error.to_string();
+        assert!(
+            message.contains("shut down")
+                && message.contains(
+                    "nothing was appended but the record of the review passes a verification \
+                     had charged"
+                ),
+            "the shutdown's error says what it appended: {message}"
+        );
+        let sequence = SequenceId(1);
+        records_both_passes(&wide, sequence);
+        let events = wide.env.durable_events();
+        assert!(
+            terminals_of(&events, sequence).is_empty(),
+            "{:?}",
+            kinds_of(&events)
+        );
+        replay_equals_live(&wide);
+    }
+
+    #[test]
+    fn another_pipelines_error_after_the_verifications_two_pass_result_arrived_records_both() {
+        let tasks = three();
+        let mut wide = Wide::started_with(
+            "coordinator-o14-r7",
+            &tasks,
+            3,
+            reviewing(2),
+            holding(&tasks, &[]),
+        );
+        let runner = std::sync::Arc::clone(&wide.env.runner);
+        let panicking = std::sync::Arc::clone(&runner);
+        let mut acted = false;
+        let mut scheduler = Scheduler::scripted(
+            &runner,
+            Box::new(move |view: &Quiescent<'_>| {
+                if acted {
+                    return None;
+                }
+                if let Some(release) = toward_arrival(view) {
+                    return release;
+                }
+                let gate = gamma_gate(view).expect("gamma's gate holds its snapshot");
+                acted = true;
+                panicking.panic_when_released(gate.clone());
+                Some(Release::Invocation(gate))
+            }),
+        );
+        let error =
+            drive(&mut wide, Some(&mut scheduler)).expect_err("gamma's panic ends the command");
+        drop(scheduler);
+        assert!(
+            error.to_string().contains("a pipeline panicked"),
+            "the other pipeline's error ends the command: {error}"
+        );
+        let sequence = SequenceId(1);
+        records_both_passes(&wide, sequence);
+        let events = wide.env.durable_events();
+        assert!(
+            terminals_of(&events, sequence).is_empty(),
+            "{:?}",
+            kinds_of(&events)
+        );
+        replay_equals_live(&wide);
+    }
+
+    #[test]
+    fn a_verifications_own_error_after_two_paid_passes_at_width_three_is_recorded_before_the_command_ends()
+     {
+        let tasks = two();
+        let mut wide = Wide::started_with(
+            "coordinator-o14-r8",
+            &tasks,
+            3,
+            reviewing(3),
+            holding(&tasks, &[]),
+        );
+        let pipelines = pipelines_failing_the_snapshot_after(&wide, 3, None);
+        let runner = std::sync::Arc::clone(&wide.env.runner);
+        let mut scheduler = alpha_then_beta(&runner);
+        let mut hooks = wide.env.hooks();
+        let error = wide
+            .run
+            .run_concurrently(
+                &wide.env.seams(),
+                &pipelines,
+                &mut hooks,
+                Some(&mut scheduler),
+            )
+            .expect_err("the third reviewer's snapshot add fails");
+        drop(scheduler);
+        assert!(
+            error.to_string().contains("was made to fail"),
+            "the verification's own error ends the command: {error}"
+        );
+        let events = wide.env.durable_events();
+        assert_eq!(
+            kinds_of(&events).last(),
+            Some(&"merge_verification_charged"),
+            "the record is the command's last append: {:?}",
+            kinds_of(&events)
+        );
+        records_both_passes(&wide, SequenceId(1));
+        replay_equals_live(&wide);
+    }
+
+    #[test]
+    fn a_halt_while_a_paid_verification_runs_records_the_two_passes_its_cancelled_pipeline_reports()
+    {
+        let mut wide = halting_on_gamma_reviewing("coordinator-o14-r9", 3, false);
+        let runner = std::sync::Arc::clone(&wide.env.runner);
+        let mut scheduler = halting_at_the_third_pass(&runner);
+        let progress = drive(&mut wide, Some(&mut scheduler)).expect("the halted run ends");
+        drop(scheduler);
+        assert_eq!(outcome_of(&progress), RunOutcome::Halted);
+        let events = wide.env.durable_events();
+        let kinds = kinds_of(&events);
+        let halted = position(&kinds, "question_answered", 0);
+        let record = position(&kinds, "merge_verification_charged", 0);
+        let interrupted = position(&kinds, "merge_verification_interrupted", 0);
+        let end = position(&kinds, "run_finished", 0);
+        assert!(
+            halted < record && record < interrupted && interrupted < end,
+            "the record, then the closure's interrupted terminal, then the end: {kinds:?}"
+        );
+        let third = SequenceIdentities::new(SequenceId(1)).review_pass(2, 0);
+        assert!(
+            wide.env
+                .runner
+                .endings()
+                .contains(&(third, crate::engine::topology::scaffold::Ending::Cancelled)),
+            "the third pass, held when the halt came, was cancelled: {:?}",
+            wide.env.runner.endings()
+        );
+        records_both_passes(&wide, SequenceId(1));
+        replay_equals_live(&wide);
+    }
+
+    #[test]
+    fn a_decline_while_a_paid_verification_runs_records_its_two_passes_against_the_released_sequence()
+     {
+        let tasks = three();
+        let armed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut wide = Wide::started_with(
+            "coordinator-o14-r10",
+            &tasks,
+            3,
+            reviewing(3),
+            holding(&tasks, &[]),
+        );
+        wide.env.answers = std::sync::Arc::new(DecliningOnceArmed(std::sync::Arc::clone(&armed)));
+        let runner = std::sync::Arc::clone(&wide.env.runner);
+        let arming = std::sync::Arc::clone(&armed);
+        let mut planted: Option<Vec<TopologyEventBody>> = None;
+        let mut scheduler = Scheduler::scripted(
+            &runner,
+            Box::new(move |view: &Quiescent<'_>| {
+                if count(view.run.events(), "task_merged") == 0 {
+                    return released(view, |invocation| attempt_key(invocation) == Some(0));
+                }
+                if let Some(events) = planted.as_mut() {
+                    if !events.is_empty() {
+                        return Some(Release::Append(Box::new(events.remove(0))));
+                    }
+                    arming.store(true, std::sync::atomic::Ordering::SeqCst);
+                    return released(view, |invocation| attempt_key(invocation) == Some(2))
+                        .or_else(|| released(view, sequence_invocation));
+                }
+                let Some(open) = view.run.fold().transaction() else {
+                    return released(view, |invocation| attempt_key(invocation) == Some(1));
+                };
+                if view
+                    .invoking
+                    .iter()
+                    .any(|invocation| review_pass(invocation, 2))
+                {
+                    planted = Some(sibling_parked_on(
+                        view.run,
+                        TaskKey(1),
+                        open.candidate.clone(),
+                    ));
+                    return Some(Release::Append(Box::new(
+                        planted.as_mut().expect("planted").remove(0),
+                    )));
+                }
+                released(view, sequence_invocation)
+            }),
+        );
+        let progress = drive(&mut wide, Some(&mut scheduler))
+            .expect("the decline fails beta's lineage and the run goes on to its end");
+        drop(scheduler);
+        assert_eq!(outcome_of(&progress), RunOutcome::Complete);
+        let events = wide.env.durable_events();
+        let kinds = kinds_of(&events);
+        let decline = position(&kinds, "question_answered", 0);
+        let record = position(&kinds, "merge_verification_charged", 0);
+        assert!(
+            decline < record,
+            "the record follows the decline that released the verification: {kinds:?}"
+        );
+        records_both_passes(&wide, SequenceId(1));
+        replay_equals_live(&wide);
+    }
+
+    #[test]
+    fn a_decline_after_the_verifications_two_pass_result_arrived_records_both_against_the_released_sequence()
+     {
+        let tasks = three();
+        let armed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut wide = Wide::started_with(
+            "coordinator-o14-r11",
+            &tasks,
+            3,
+            reviewing(2),
+            holding(&tasks, &[]),
+        );
+        wide.env.answers = std::sync::Arc::new(DecliningOnceArmed(std::sync::Arc::clone(&armed)));
+        let runner = std::sync::Arc::clone(&wide.env.runner);
+        let arming = std::sync::Arc::clone(&armed);
+        let mut planted: Option<Vec<TopologyEventBody>> = None;
+        let mut scheduler = Scheduler::scripted(
+            &runner,
+            Box::new(move |view: &Quiescent<'_>| {
+                if let Some(events) = planted.as_mut() {
+                    if !events.is_empty() {
+                        return Some(Release::Append(Box::new(events.remove(0))));
+                    }
+                    if !arming.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                        return gamma_gate(view).map(Release::Invocation);
+                    }
+                    return None;
+                }
+                if let Some(release) = toward_arrival(view) {
+                    return release;
+                }
+                assert!(
+                    gamma_gate(view).is_some(),
+                    "gamma's gate holds its snapshot"
+                );
+                let open = view
+                    .run
+                    .fold()
+                    .transaction()
+                    .expect("beta's verification is open")
+                    .candidate
+                    .clone();
+                planted = Some(sibling_parked_on(view.run, TaskKey(1), open));
+                Some(Release::Append(Box::new(
+                    planted.as_mut().expect("planted").remove(0),
+                )))
+            }),
+        );
+        let progress = drive(&mut wide, Some(&mut scheduler))
+            .expect("the decline fails beta's lineage and the run goes on to its end");
+        drop(scheduler);
+        assert_eq!(outcome_of(&progress), RunOutcome::Complete);
+        let events = wide.env.durable_events();
+        let kinds = kinds_of(&events);
+        let decline = position(&kinds, "question_answered", 0);
+        let record = position(&kinds, "merge_verification_charged", 0);
+        assert!(decline < record, "{kinds:?}");
+        assert_eq!(
+            wide.run.discarded(),
+            0,
+            "the result was accepted before the decline: {:?}",
+            wide.run.warnings()
+        );
+        records_both_passes(&wide, SequenceId(1));
+        replay_equals_live(&wide);
+    }
+
+    #[test]
+    fn a_second_recording_of_a_sequence_is_refused_before_its_line_and_warned() {
+        let mut wide = stale_at_width_one("coordinator-o14-r19", 3, unlimited());
+        let mut hooks = failing_the_snapshot_after(&wide, 3);
+        let seams = wide.env.seams();
+        wide.run
+            .step(&seams, &mut hooks)
+            .expect_err("the third reviewer's snapshot add fails");
+        let sequence = SequenceId(2);
+        let (_, reviews) = charged_records(&wide.env.durable_events())
+            .into_iter()
+            .next()
+            .expect("the record");
+        let lines = wide.env.durable_events().len();
+        wide.run
+            .record_charged(
+                super::super::run::Charged { sequence, reviews },
+                &seams,
+                &mut hooks,
+            )
+            .expect("a refused second offer is a warning, not an error");
+        assert_eq!(
+            wide.env.durable_events().len(),
+            lines,
+            "nothing was appended for the second offer"
+        );
+        assert!(
+            wide.run
+                .warnings()
+                .iter()
+                .any(|warning| warning.contains(DUPLICATE_OFFER)),
+            "the refused second offer is warned of: {:?}",
+            wide.run.warnings()
+        );
+        two_passes_recorded(&wide, sequence);
+    }
+
+    #[test]
+    fn the_charged_records_append_error_replaces_the_verifications_error_as_the_commands_outcome() {
+        use crate::topology::effects::{InjectionMode, SubEffectPoint};
+        for (shape, point, present) in [
+            ("partial-write", SubEffectPoint::Written, false),
+            ("sync", SubEffectPoint::Synced, true),
+        ] {
+            let tasks = two();
+            let mut wide = Wide::durable(
+                &format!("coordinator-o14-r20-{shape}"),
+                &tasks,
+                3,
+                reviewing(3),
+                holding(&tasks, &[]),
+            );
+            let pipelines = pipelines_failing_the_snapshot_after(
+                &wide,
+                3,
+                Some((point, InjectionMode::ErrorReturn)),
+            );
+            let runner = std::sync::Arc::clone(&wide.env.runner);
+            let mut scheduler = alpha_then_beta(&runner);
+            let mut hooks = wide.env.hooks();
+            let error = wide
+                .run
+                .run_concurrently(
+                    &wide.env.seams(),
+                    &pipelines,
+                    &mut hooks,
+                    Some(&mut scheduler),
+                )
+                .expect_err("the record's own append fails");
+            drop(scheduler);
+            let message = error.to_string();
+            assert!(
+                message.contains("merge_verification_charged")
+                    && message.contains("was entered and returned"),
+                "{shape}: the command's error is the record's append error: {message}"
+            );
+            assert!(
+                wide.run.warnings().iter().any(|warning| warning
+                    .contains("ends the command in place of what had ended the verification")
+                    && warning.contains("was made to fail")),
+                "{shape}: a warning keeps the verification's own error: {:?}",
+                wide.run.warnings()
+            );
+            assert!(wide.run.fold().is_poisoned(), "{shape}");
+            let durable = kinds_of_log(&wide);
+            assert_eq!(
+                durable.last(),
+                Some(if present {
+                    &"merge_verification_charged"
+                } else {
+                    &"merge_verification_started"
+                }),
+                "{shape}: nothing follows the failed line: {durable:?}"
+            );
+            let (_, resumed) = wide
+                .resume("inc-2", answering_two(), unlimited())
+                .unwrap_or_else(|error| panic!("{shape}: the next process resumes: {error}"));
+            let events = resumed.env.durable_events();
+            assert_eq!(
+                terminals_of(&events, SequenceId(1)),
+                vec!["merge_verification_interrupted"],
+                "{shape}: {:?}",
+                kinds_of(&events)
+            );
+            if present {
+                records_both_passes(&resumed, SequenceId(1));
+            } else {
+                assert!(
+                    charged_records(&events).is_empty(),
+                    "{shape}: the record's line did not survive, so its passes are unknown spend"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_charged_records_append_error_in_finish_replaces_the_halt_and_runs_no_closure() {
+        use crate::topology::effects::{InjectionMode, SubEffectPoint};
+        for (shape, point, present) in [
+            ("partial-write", SubEffectPoint::Written, false),
+            ("sync", SubEffectPoint::Synced, true),
+        ] {
+            let mut wide =
+                halting_on_gamma_reviewing(&format!("coordinator-o14-r21-{shape}"), 3, true);
+            let runner = std::sync::Arc::clone(&wide.env.runner);
+            let mut scheduler = halting_at_the_third_pass(&runner);
+            let mut hooks = HaltArming::over(&wide, point, InjectionMode::ErrorReturn);
+            let pipelines = wide.env.pipelines();
+            let error = wide
+                .run
+                .run_concurrently(
+                    &wide.env.seams(),
+                    &pipelines,
+                    &mut hooks,
+                    Some(&mut scheduler),
+                )
+                .expect_err("the record's own append fails");
+            drop(scheduler);
+            let message = error.to_string();
+            assert!(
+                message.contains("merge_verification_charged")
+                    && message.contains("was entered and returned"),
+                "{shape}: the command's error is the record's append error, not the halt: \
+                 {message}"
+            );
+            assert!(
+                wide.run.warnings().iter().any(|warning| warning
+                    .contains("ends the command in place of what had ended the verification")
+                    && warning.contains("a halting settlement")),
+                "{shape}: a warning names the halting settlement: {:?}",
+                wide.run.warnings()
+            );
+            let durable = kinds_of_log(&wide);
+            let halted = position(&durable, "question_answered", 0);
+            assert!(
+                !durable[halted..].contains(&"merge_verification_interrupted")
+                    && !durable.contains(&"run_finished"),
+                "{shape}: no closure ran: {durable:?}"
+            );
+            assert_eq!(
+                durable.last(),
+                Some(if present {
+                    &"merge_verification_charged"
+                } else {
+                    &"question_answered"
+                }),
+                "{shape}: {durable:?}"
+            );
+            assert!(
+                wide.run.fold().halted_at().is_some(),
+                "{shape}: the halt is recorded in the fold"
+            );
+            let (_, resumed) = finish_resumed_halted(wide, shape);
+            if present {
+                records_both_passes(&resumed, SequenceId(1));
+            } else {
+                assert!(charged_records(&resumed.env.durable_events()).is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn a_verification_that_fails_before_any_charge_records_nothing() {
+        let mut wide = stale_at_width_one("coordinator-o14-c1", 3, unlimited());
+        let mut hooks = failing_the_snapshot_after(&wide, 1);
+        let seams = wide.env.seams();
+        wide.run
+            .step(&seams, &mut hooks)
+            .expect_err("the first reviewer's snapshot add fails");
+        let events = wide.env.durable_events();
+        assert_eq!(
+            kinds_of(&events).last(),
+            Some(&"merge_verification_started"),
+            "nothing is appended for a verification that charged nothing: {:?}",
+            kinds_of(&events)
+        );
+        assert!(charged_records(&events).is_empty());
+        let replayed = crate::engine::topology::select::Spend::replay(&events);
+        assert!((replayed.run_usd() - wide.run.spend().run_usd()).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_publication_failure_after_merge_prepared_records_nothing() {
+        let tasks = two();
+        let mut wide = Wide::started_with(
+            "coordinator-o14-c2",
+            &tasks,
+            3,
+            reviewing(2),
+            holding(&tasks, &[]),
+        );
+        let mut hooks = CasFailing::over(&wide);
+        hooks.fail_after(
+            crate::topology::effects::RefSite::CompareAndSwapIntegration,
+            1,
+        );
+        let runner = std::sync::Arc::clone(&wide.env.runner);
+        let mut scheduler = alpha_then_beta(&runner);
+        let pipelines = wide.env.pipelines();
+        let error = wide
+            .run
+            .run_concurrently(
+                &wide.env.seams(),
+                &pipelines,
+                &mut hooks,
+                Some(&mut scheduler),
+            )
+            .expect_err("beta's verified publication fails its CAS");
+        drop(scheduler);
+        assert!(
+            error.to_string().contains("CompareAndSwapIntegration"),
+            "{error}"
+        );
+        let events = wide.env.durable_events();
+        assert_eq!(
+            kinds_of(&events).last(),
+            Some(&"merge_prepared"),
+            "nothing follows the terminal that carried the passes: {:?}",
+            kinds_of(&events)
+        );
+        assert!(charged_records(&events).is_empty());
+        assert!(
+            !wide
+                .run
+                .warnings()
+                .iter()
+                .any(|warning| warning.contains("merge_verification_charged")),
+            "the fold's refusal of a record a terminal made redundant warns of nothing: {:?}",
+            wide.run.warnings()
+        );
+    }
+
+    #[test]
+    #[ignore = "spawned by the charged record's kill tests"]
+    fn charged_record_kill_child() {
+        let dir = std::path::PathBuf::from(
+            std::env::var("UPSTROKE_TEST_KILL_DIR").expect("the parent names the handoff"),
+        );
+        let torn = match std::env::var("UPSTROKE_TEST_KILL_SHAPE").as_deref() {
+            Ok("before") => false,
+            Ok("torn") => true,
+            other => panic!("the parent names the kill shape: {other:?}"),
+        };
+        let mut wide = stale_at_width_one("coordinator-o14-record-kill", 3, unlimited());
+        crate::workspace_manager::fixture::write_file(
+            &dir.join(RECORD_HANDOFF),
+            wide.env.fixture.root.to_string_lossy().as_bytes(),
+        );
+        let mut hooks = if torn {
+            let mut hooks = ArmingOnTheFault::over(
+                &wide,
+                3,
+                Some((
+                    crate::topology::effects::SubEffectPoint::Written,
+                    crate::topology::effects::InjectionMode::Kill,
+                )),
+            );
+            hooks.inner = wide
+                .env
+                .hooks()
+                .with_written_kill_shape(crate::events::log::WrittenShape::Torn);
+            hooks
+        } else {
+            let mut hooks = ArmingOnTheFault::over(&wide, 3, None);
+            hooks.abort_at_the_next_append = true;
+            hooks
+        };
+        let seams = wide.env.seams();
+        let _ = wide.run.step(&seams, &mut hooks);
+        panic!("the kill at the record's append must have taken this process");
+    }
+
+    fn killed_at_the_record(shape: &str) {
+        let handoff =
+            crate::engine::topology::scaffold::kill_dir(&format!("coordinator-o14-kill-{shape}"));
+        let temporary = crate::engine::topology::scaffold::kill_dir("tmp");
+        let mut environment = vec![
+            ("UPSTROKE_TEST_KILL_DIR", handoff.path().as_os_str()),
+            ("UPSTROKE_TEST_KILL_SHAPE", std::ffi::OsStr::new(shape)),
+        ];
+        environment.extend(crate::engine::topology::scaffold::child_temporary_of(
+            temporary.path(),
+        ));
+        let status = crate::workspace_manager::fixture::run_kill_child_within(
+            "engine::topology::coordinator::tests::charged_record_kill_child",
+            &environment,
+            crate::engine::topology::scaffold::KILL_CHILD_BOUND,
+        )
+        .unwrap_or_else(|| panic!("{shape}: the kill child did not end in time"));
+        assert!(
+            crate::workspace_manager::fixture::died_by_abort(&status),
+            "{shape}: the child died at the record's append: {status:?}"
+        );
+        let root = std::fs::read_to_string(handoff.path().join(RECORD_HANDOFF))
+            .unwrap_or_else(|error| panic!("{shape}: the child left no handoff: {error}"));
+        let env = crate::engine::topology::scaffold::WideEnv::adopted(
+            std::path::PathBuf::from(root),
+            &two(),
+            3,
+            reviewing(3),
+        );
+        let started = env.durable_events();
+        assert_eq!(
+            kinds_of(&started).last(),
+            Some(&"merge_verification_started"),
+            "{shape}: the child died before its record's line was durable: {:?}",
+            kinds_of(&started)
+        );
+        let bytes = std::fs::read(&env.log).expect("the child's log survives it");
+        let tail = bytes
+            .rsplit(|byte| *byte == b'\n')
+            .next()
+            .map(String::from_utf8_lossy)
+            .unwrap_or_default();
+        if shape == "torn" {
+            assert!(
+                tail.contains("merge_verification_charged"),
+                "the child died part-way through writing its record: {tail:?}"
+            );
+        } else {
+            assert!(
+                tail.is_empty()
+                    && !String::from_utf8_lossy(&bytes).contains("merge_verification_charged"),
+                "the child died before writing any of its record: {tail:?}"
+            );
+        }
+        let (_, resumed) = env
+            .resume("inc-3", answering_two(), unlimited())
+            .unwrap_or_else(|error| panic!("{shape}: the next process resumes: {error}"));
+        left_to_recovery_with_unknown_spend(&resumed, shape);
+    }
+
+    fn left_to_recovery_with_unknown_spend(resumed: &Wide, shape: &str) {
+        let events = resumed.env.durable_events();
+        let sequence = SequenceId(2);
+        assert_eq!(
+            terminals_of(&events, sequence),
+            vec!["merge_verification_interrupted"],
+            "{shape}: the census and step (f) settle the verification interrupted: {:?}",
+            kinds_of(&events)
+        );
+        assert!(
+            charged_records(&events).is_empty(),
+            "{shape}: no record survived: {:?}",
+            kinds_of(&events)
+        );
+        let opened = started_at(&events, sequence);
+        let before = crate::engine::topology::select::Spend::replay(&events[..opened]);
+        let after = crate::engine::topology::select::Spend::replay(&events);
+        assert!(
+            (after.run_usd() - before.run_usd()).abs() < 1e-9,
+            "{shape}: the replayed total lacks both passes, which are unknown spend: {} -> {}",
+            before.run_usd(),
+            after.run_usd()
+        );
+    }
+
+    #[test]
+    fn a_kill_before_the_charged_record_leaves_the_verification_to_recovery_with_unknown_spend() {
+        killed_at_the_record("before");
+    }
+
+    #[test]
+    fn a_torn_charged_record_is_truncated_and_recovered_as_before_it() {
+        killed_at_the_record("torn");
+    }
+
+    #[test]
+    fn an_append_error_on_the_charged_record_follows_the_surviving_prefix() {
+        use crate::topology::effects::{InjectionMode, SubEffectPoint};
+        for (shape, point, present) in [
+            ("partial-write", SubEffectPoint::Written, false),
+            ("sync", SubEffectPoint::Synced, true),
+        ] {
+            let mut wide =
+                stale_at_width_one(&format!("coordinator-o14-append-{shape}"), 3, unlimited());
+            let mut hooks =
+                ArmingOnTheFault::over(&wide, 3, Some((point, InjectionMode::ErrorReturn)));
+            let seams = wide.env.seams();
+            let error = wide
+                .run
+                .step(&seams, &mut hooks)
+                .expect_err("the record's own append fails");
+            drop(hooks);
+            let message = error.to_string();
+            assert!(
+                message.contains("merge_verification_charged")
+                    && message.contains("was entered and returned"),
+                "{shape}: the step's error is the append error: {message}"
+            );
+            assert!(
+                wide.run.warnings().iter().any(|warning| warning
+                    .contains("ends the command in place of what had ended the verification")
+                    && warning.contains("was made to fail")),
+                "{shape}: a warning carries the verification's own error: {:?}",
+                wide.run.warnings()
+            );
+            assert!(wide.run.fold().is_poisoned(), "{shape}");
+            let (_, resumed) = wide
+                .resume("inc-3", answering_two(), unlimited())
+                .unwrap_or_else(|error| panic!("{shape}: the next process resumes: {error}"));
+            let events = resumed.env.durable_events();
+            assert_eq!(
+                terminals_of(&events, SequenceId(2)),
+                vec!["merge_verification_interrupted"],
+                "{shape}: {:?}",
+                kinds_of(&events)
+            );
+            if present {
+                records_both_passes(&resumed, SequenceId(2));
+            } else {
+                left_to_recovery_with_unknown_spend(&resumed, shape);
+            }
+        }
+    }
+
+    #[test]
+    fn a_resume_after_a_charged_record_settles_the_verification_interrupted_and_counts_its_passes_once()
+     {
+        let mut wide = stale_at_width_one("coordinator-o14-resume", 3, unlimited());
+        let mut hooks = failing_the_snapshot_after(&wide, 3);
+        let seams = wide.env.seams();
+        wide.run
+            .step(&seams, &mut hooks)
+            .expect_err("the third reviewer's snapshot add fails");
+        drop(hooks);
+        let sequence = SequenceId(2);
+        let (_, reviews) = charged_records(&wide.env.durable_events())
+            .into_iter()
+            .next()
+            .expect("the record is durable");
+        let run_id = wide.run.fold().started().expect("started").run_id.clone();
+        let (_, mut resumed) = wide
+            .resume("inc-3", answering_two(), unlimited())
+            .expect("the next process resumes");
+        let events = resumed.env.durable_events();
+        let kinds = kinds_of(&events);
+        assert_eq!(
+            terminals_of(&events, sequence),
+            vec!["merge_verification_interrupted"],
+            "{kinds:?}"
+        );
+        let manager = resumed.env.fixture.manager.clone();
+        let intents = manager.intents().expect("the intents are listable");
+        assert!(
+            !intents.contains(&crate::engine::topology::integrate::staging_slot(sequence))
+                && !snapshot_names(&intents)
+                    .iter()
+                    .any(|name| name.starts_with("s2-")),
+            "the staging and the snapshots of sequence 2 are reclaimed: {intents:?}"
+        );
+        assert_eq!(
+            manager
+                .direct_ref_target(
+                    crate::engine::topology::integrate::prepared_pin_ref(&run_id, sequence)
+                        .as_str()
+                )
+                .expect("the pin is readable"),
+            None,
+            "the pin is deleted"
+        );
+        let second = resumed
+            .run
+            .fold()
+            .plan_transition(&charged_event(sequence, &reviews))
+            .expect_err("a second record for the sequence is refused after the resume");
+        assert!(
+            second
+                .to_string()
+                .contains("already records the review passes"),
+            "the resumed fold still knows the sequence's record: {second}"
+        );
+        let carrying = TopologyEvent {
+            ts: "2026-10-08T00:00:00.000Z".to_owned(),
+            body: TopologyEventBody::MergeVerificationUnavailable {
+                data: crate::topology::events::MergeVerificationUnavailable {
+                    sequence,
+                    cause: crate::topology::events::UnavailableCause::Infrastructure {
+                        kind: crate::topology::events::InfrastructureKind::ReviewerTimeout,
+                    },
+                    outcome: crate::topology::events::UnavailableOutcome::Deferred { defers: 1 },
+                    reviews,
+                },
+            },
+        };
+        assert!(
+            resumed.run.fold().plan_transition(&carrying).is_err(),
+            "a carrying terminal for the sequence is refused after the resume"
+        );
+        let mut hooks = resumed.env.hooks();
+        let seams = resumed.env.seams();
+        let progress = resumed
+            .run
+            .step(&seams, &mut hooks)
+            .expect("the candidate verifies again");
+        assert!(
+            matches!(progress, Progress::Integrated { sequence: again, .. } if again == SequenceId(3)),
+            "the candidate re-verifies under the next sequence: {progress:?}"
+        );
+        drop(hooks);
+        records_both_passes(&resumed, sequence);
+    }
+
+    #[test]
+    fn refusals_across_resumes_each_record_their_passes_and_the_ceiling_stops_the_run() {
+        let mut wide = stale_at_width_one("coordinator-o14-refusals", 3, unlimited());
+        let start = wide.run.spend().run_usd();
+        let limit = start + 4.0 * PASS_COST;
+        let ceiling = crate::engine::topology::select::Ceiling {
+            run_usd: Some(limit),
+            task_usd: None,
+        };
+        for incarnation in ["inc-3", "inc-4"] {
+            let mut hooks = failing_the_snapshot_after(&wide, 3);
+            let seams = wide.env.seams();
+            wide.run
+                .step(&seams, &mut hooks)
+                .expect_err("the persistent fault refuses the verification again");
+            drop(hooks);
+            wide = wide
+                .resume(incarnation, answering_two(), ceiling)
+                .expect("the next process resumes")
+                .1;
+        }
+        let events = wide.env.durable_events();
+        let records: Vec<(u32, usize)> = charged_records(&events)
+            .iter()
+            .map(|(sequence, reviews)| (sequence.0, reviews.len()))
+            .collect();
+        assert_eq!(
+            records,
+            vec![(2, 2), (3, 2)],
+            "one record of two passes per refused sequence: {:?}",
+            kinds_of(&events)
+        );
+        let replayed = crate::engine::topology::select::Spend::replay(&events);
+        let without = crate::engine::topology::select::Spend::replay(&unrecorded(&events));
+        assert!(
+            (replayed.run_usd() - without.run_usd() - 4.0 * PASS_COST).abs() < 1e-9,
+            "each sequence's passes are counted once: {} -> {}",
+            without.run_usd(),
+            replayed.run_usd()
+        );
+        let mut hooks = wide.env.hooks();
+        let seams = wide.env.seams();
+        let progress = wide.run.step(&seams, &mut hooks).expect("the next step");
+        assert!(
+            matches!(progress, Progress::BudgetExceeded),
+            "the ceiling stops the run: {progress:?}"
+        );
+    }
+
+    struct PlantingAtTheSnapshot {
+        effects: crate::workspace_manager::HarnessEffects,
+        planter: Arc<dyn ReviewInputPolicy + Send + Sync>,
+        passing: Option<u32>,
+    }
+
+    impl crate::workspace_manager::EffectHooks for PlantingAtTheSnapshot {
+        fn phase(
+            &mut self,
+            site: crate::topology::effects::EffectSiteId,
+            phase: crate::topology::effects::HookPhase,
+        ) -> crate::topology::effects::Injection {
+            if site == snapshot_add() && phase == crate::topology::effects::HookPhase::Before {
+                match self.passing {
+                    Some(0) => {
+                        self.passing = None;
+                        self.planter
+                            .problem(&PathBuf::from("merge").join("third-review"), "")
+                            .expect("the fault is planted before the third reviewer's snapshot");
+                    }
+                    Some(left) => self.passing = Some(left - 1),
+                    None => {}
+                }
+            }
+            self.effects.phase(site, phase)
+        }
+
+        fn durability_ledger(&self) -> crate::util::DurabilityLedger {
+            self.effects.durability_ledger()
+        }
+
+        fn refusal_cause(&self) -> Option<String> {
+            self.effects.refusal_cause()
+        }
+    }
+
+    struct PlantingHooks {
+        inner: crate::engine::topology::seams::HarnessTopologyHooks,
+        effects: PlantingAtTheSnapshot,
+    }
+
+    impl PlantingHooks {
+        fn new(
+            harness: &Arc<std::sync::Mutex<crate::topology::effects::HookHarness>>,
+            planter: &Arc<dyn ReviewInputPolicy + Send + Sync>,
+            passing: u32,
+        ) -> Self {
+            Self {
+                inner: crate::engine::topology::seams::HarnessTopologyHooks::new(Arc::clone(
+                    harness,
+                )),
+                effects: PlantingAtTheSnapshot {
+                    effects: crate::workspace_manager::HarnessEffects::new(Arc::clone(harness)),
+                    planter: Arc::clone(planter),
+                    passing: Some(passing),
+                },
+            }
+        }
+    }
+
+    impl TopologyHooks for PlantingHooks {
+        fn effects(&mut self) -> &mut dyn crate::workspace_manager::EffectHooks {
+            &mut self.effects
+        }
+
+        fn rundir(&mut self) -> &mut dyn crate::rundir::RunDirHooks {
+            self.inner.rundir()
+        }
+
+        fn events(&mut self) -> &mut dyn crate::events::log::EventHooks {
+            self.inner.events()
+        }
+
+        fn container(&mut self) -> &mut dyn crate::runner::container::ContainerHooks {
+            self.inner.container()
+        }
+
+        fn spawn(&mut self) -> &mut dyn crate::agent::proc::SpawnHooks {
+            self.inner.spawn()
+        }
+
+        fn folded(&mut self, fold: &TopologyFold, events: &[TopologyEvent]) {
+            self.inner.folded(fold, events);
+        }
+    }
+
+    fn refused_by_the_tear(error: &UpstrokeError) {
+        assert!(
+            matches!(error, UpstrokeError::RegistryRefused { message } if message.contains("commondir")),
+            "the third reviewer's registry access refuses on the torn registration: {error:?}"
+        );
+    }
+
+    fn refused_at_the_third_review(
+        wide: &mut Wide,
+        planter: &Arc<dyn ReviewInputPolicy + Send + Sync>,
+    ) -> UpstrokeError {
+        let mut pipelines = wide.env.pipelines();
+        let (harness, planter) = (Arc::clone(&wide.env.harness), Arc::clone(planter));
+        pipelines.hooks = Arc::new(move || {
+            Box::new(PlantingHooks::new(&harness, &planter, 3)) as Box<dyn TopologyHooks + Send>
+        });
+        let runner = Arc::clone(&wide.env.runner);
+        let mut scheduler = alpha_then_beta(&runner);
+        let mut hooks = wide.env.hooks();
+        wide.run
+            .run_concurrently(
+                &wide.env.seams(),
+                &pipelines,
+                &mut hooks,
+                Some(&mut scheduler),
+            )
+            .expect_err("the third reviewer's snapshot refuses")
+    }
+
+    fn recorded_and_still_open(wide: &Wide, sequence: SequenceId) {
+        let events = wide.env.durable_events();
+        assert_eq!(
+            kinds_of(&events).last(),
+            Some(&"merge_verification_charged"),
+            "the record is the command's last append: {:?}",
+            kinds_of(&events)
+        );
+        assert!(
+            terminals_of(&events, sequence).is_empty(),
+            "the record is no terminal: {:?}",
+            kinds_of(&events)
+        );
+        assert!(
+            verifying(wide.run.fold(), sequence),
+            "the fold still holds the refused verification open: {:?}",
+            wide.run.fold().transaction()
+        );
+        records_both_passes(wide, sequence);
+        replay_equals_live(wide);
+    }
+
+    fn resumed_to_completion(wide: Wide, tasks: &[WideTask], key: TaskKey, sequence: SequenceId) {
+        let live = wide.run.spend().clone();
+        let (_, mut resumed) = wide
+            .resume("inc-2", holding(tasks, &[]), unlimited())
+            .expect("the next process resumes once the fault is repaired");
+        resumed_spend_is_the_live_one(&resumed, key, &live, sequence);
+        let runner = Arc::clone(&resumed.env.runner);
+        let mut scheduler = Scheduler::first(&runner);
+        let progress =
+            drive(&mut resumed, Some(&mut scheduler)).expect("the resumed run completes");
+        drop(scheduler);
+        assert_eq!(outcome_of(&progress), RunOutcome::Complete);
+        records_both_passes(&resumed, sequence);
+    }
+
+    fn untear(admin: &std::path::Path) {
+        for file in ["HEAD", "gitdir", "commondir"] {
+            crate::workspace_manager::fixture::remove_file(&admin.join(file));
+        }
+        crate::workspace_manager::fixture::remove_dir(admin);
+    }
+
+    fn resumed_spend_is_the_live_one(
+        resumed: &Wide,
+        key: TaskKey,
+        live: &crate::engine::topology::select::Spend,
+        sequence: SequenceId,
+    ) {
+        let events = resumed.env.durable_events();
+        let kinds = kinds_of(&events);
+        assert_eq!(
+            terminals_of(&events, sequence),
+            vec!["merge_verification_interrupted"],
+            "recovery settles the refused sequence interrupted: {kinds:?}"
+        );
+        let of_sequence = |kind: &str| {
+            events
+                .iter()
+                .position(|event| {
+                    event.body.kind() == kind && event.body.sequence() == Some(sequence)
+                })
+                .unwrap_or_else(|| panic!("no {kind} for sequence {}: {kinds:?}", sequence.0))
+        };
+        assert!(
+            of_sequence("merge_verification_charged")
+                < of_sequence("merge_verification_interrupted"),
+            "recovery's interrupted terminal follows the record: {kinds:?}"
+        );
+        let replayed = resumed.run.spend();
+        for (what, replayed, live) in [
+            ("run", replayed.run_usd(), live.run_usd()),
+            ("task", replayed.task_usd(key), live.task_usd(key)),
+        ] {
+            assert!(
+                (replayed - live).abs() < 1e-9,
+                "the next process replays the {what}'s total its predecessor charged live, both \
+                 passes included: {live} -> {replayed}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_registry_refusal_after_two_paid_passes_is_recorded_with_both_at_width_three() {
+        let tasks = two();
+        let mut wide = Wide::durable(
+            "coordinator-o14-registry-refusal",
+            &tasks,
+            3,
+            reviewing(3),
+            holding(&tasks, &[]),
+        );
+        let common = wide.env.fixture.manager.common_git_dir().to_path_buf();
+        let _deadline =
+            crate::workspace_manager::RegistryDeadline::hold(&common, WITNESS_REGISTRY_DEADLINE);
+        let (tear, admin) = tearing(&wide, "foreign-at-the-third-review", false);
+        let tear: Arc<dyn ReviewInputPolicy + Send + Sync> = tear;
+        let error = refused_at_the_third_review(&mut wide, &tear);
+        refused_by_the_tear(&error);
+        let sequence = SequenceId(1);
+        recorded_and_still_open(&wide, sequence);
+        let key = started_key(&wide.env.durable_events(), sequence);
+        untear(&admin);
+        resumed_to_completion(wide, &tasks, key, sequence);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_registry_refusal_after_the_takeover_at_the_third_review_is_recorded_with_both_passes() {
+        let tasks = two();
+        let mut wide = Wide::durable(
+            "coordinator-o14-takeover-refusal",
+            &tasks,
+            3,
+            reviewing(3),
+            holding(&tasks, &[]),
+        );
+        let common = wide.env.fixture.manager.common_git_dir().to_path_buf();
+        let _deadline =
+            crate::workspace_manager::RegistryDeadline::hold(&common, WITNESS_REGISTRY_DEADLINE);
+        let base = wide.env.fixture.base.clone();
+        let info = common.join("info");
+        let filter: Arc<dyn ReviewInputPolicy + Send + Sync> = Arc::new(RequiresAFailingFilter {
+            base: base.clone(),
+            info: info.clone(),
+            remaining: std::sync::atomic::AtomicUsize::new(1),
+        });
+        let error = refused_at_the_third_review(&mut wide, &filter);
+        assert!(
+            matches!(&error, UpstrokeError::RegistryRefused { message } if message.contains("b329fails") || message.contains("is gone")),
+            "the third reviewer's checkout fails after the takeover and refuses at once: {error:?}"
+        );
+        let sequence = SequenceId(1);
+        recorded_and_still_open(&wide, sequence);
+        let key = started_key(&wide.env.durable_events(), sequence);
+        crate::workspace_manager::fixture::remove_file(&info.join("attributes"));
+        crate::workspace_manager::fixture::git(
+            &base,
+            &["config", "--remove-section", "filter.b329fails"],
+        );
+        resumed_to_completion(wide, &tasks, key, sequence);
+    }
+
+    #[test]
+    fn a_registry_refusal_after_two_paid_passes_is_recorded_with_both_at_width_one() {
+        let mut wide = stale_at_width_one("coordinator-o14-registry-refusal-w1", 3, unlimited());
+        let common = wide.env.fixture.manager.common_git_dir().to_path_buf();
+        let _deadline =
+            crate::workspace_manager::RegistryDeadline::hold(&common, WITNESS_REGISTRY_DEADLINE);
+        let (tear, admin) = tearing(&wide, "foreign-at-the-third-review", false);
+        let tear: Arc<dyn ReviewInputPolicy + Send + Sync> = tear;
+        let mut hooks = PlantingHooks::new(&wide.env.harness, &tear, 3);
+        let seams = wide.env.seams();
+        let error = wide
+            .run
+            .step(&seams, &mut hooks)
+            .expect_err("the third reviewer's snapshot refuses");
+        drop(hooks);
+        refused_by_the_tear(&error);
+        let sequence = SequenceId(2);
+        let events = wide.env.durable_events();
+        assert_eq!(
+            kinds_of(&events).last(),
+            Some(&"merge_verification_charged"),
+            "the record is the step's last append: {:?}",
+            kinds_of(&events)
+        );
+        assert!(
+            verifying(wide.run.fold(), sequence),
+            "the fold still holds the refused verification open: {:?}",
+            wide.run.fold().transaction()
+        );
+        records_both_passes(&wide, sequence);
+        let key = started_key(&events, sequence);
+        let live = wide.run.spend().clone();
+        untear(&admin);
+        let (_, mut resumed) = wide
+            .resume("inc-3", answering_two(), unlimited())
+            .expect("the next process resumes once the tear is removed");
+        resumed_spend_is_the_live_one(&resumed, key, &live, sequence);
+        let mut hooks = resumed.env.hooks();
+        let seams = resumed.env.seams();
+        let progress = resumed
+            .run
+            .step(&seams, &mut hooks)
+            .expect("the candidate verifies again");
+        drop(hooks);
+        assert!(
+            matches!(progress, Progress::Integrated { sequence: again, .. } if again == SequenceId(3)),
+            "the candidate verifies again under the next sequence: {progress:?}"
+        );
+        records_both_passes(&resumed, sequence);
     }
 }
