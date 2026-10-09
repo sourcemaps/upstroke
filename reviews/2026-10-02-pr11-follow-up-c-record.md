@@ -57,6 +57,9 @@ session on this branch at `6066758b`); its figures are under `~/orch-pr11/logs/p
 Repair round 7 (§6.14), after #329 merged, which merges master `c0ed07a5` (#329's merge, carrying #329's final head
 `53d972e9`) and repairs the i4 review's C-I4-1, is `pr11_fuc_impl7`'s (the same model and effort, a fresh session on
 this branch at `66e8a393`); its figures are under `~/orch-pr11/logs/pr11_fuc_impl7/`, cited as `c6r7/…`.
+Repair round 8 (§6.15), on the orchestrator's disposition of round 7's question, which reproduces and repairs #329's
+T11 class over five of this change's witnesses, is `pr11_fuc_impl8`'s (the same model and effort, a fresh session on
+this branch at `01176762`); its figures are under `~/orch-pr11/logs/pr11_fuc_impl8/`, cited as `c6r8/…`.
 
 **The evidence plan was conservative, by direction.** Read our code, read Git's source at the three versions that
 matter, cite the corruption witnesses #329 already executed at base rather than rebuild them, and run one new witness
@@ -79,7 +82,7 @@ signal no process (§5, opening).
 
 | Phase | State |
 |---|---|
-| Implementation (§6) | **IMPLEMENTED; REVIEWED AT `83516466` (CHANGES_REQUIRED, ONE P1); REPAIRED IN ROUND 3 (§6.10), WHOSE DELTA REVIEW AT `778abee6` PASSED WITH ONE P3; INTEGRATED PROVISIONALLY WITH #329'S HEAD `ce55ca91` IN ROUND 4 (§6.11) AND WITH #329'S HEAD `83006dc4` IN ROUND 5 (§6.12); THAT PROVISIONAL HEAD `6066758b` REVIEWED (i3: THE REGRESSION LENS PASSED, THE REGULAR LENS CHANGES_REQUIRED WITH TWO P3S) AND REPAIRED IN ROUND 6 (§6.13), WHICH ALSO INTEGRATED #329'S HEAD `17bd5652` PROVISIONALLY; ROUND 6 REVIEWED AT `66e8a393` (i4: THE REGRESSION LENS PASSED, THE REGULAR LENS CHANGES_REQUIRED WITH ONE P3); #329 MERGED (`c0ed07a5`) AND ITS FINAL HEAD `53d972e9` INTEGRATED AT `89a65ccd` IN ROUND 7 (§6.14), WHICH ALSO REPAIRS THE i4 P3; ROUND 7 NOT YET REVIEWED — U as §4 and §5 specify, with the PR11 decision appendix's §11 rows for this change.** It is built on master `c0ed07a5`, #329's merge, which carries #329's final head `53d972e9`, merged in at `89a65ccd` (repair round 7: the final integration; the earlier ones were provisional: #329's `17bd5652` at `6b3fe4a0` in round 6, `83006dc4` at `2f2468c3` in round 5 and `ce55ca91` at `905ed0c8` in round 4; first merged at `e46b71d3`), and uses #329's targeted removal, tolerant registry access and coordinator pause as they are. **#329's final code and text are integrated; of the revalidation, native CI and the review of round 7's delta remain (§6.14).** **This change's own frozen change, C-R1 (§6.11), is proposed, conditional on the owner's freeze ruling and not adopted; #329's H1 and revised H3, which the owner adopted on 2026-10-08, are master's (§6.14)**; D4 did not trigger, as this change changes no frozen test (§6.3). Accounting, the packet and every Git child's inherited environment are unchanged. Its merge, under the standing delegation, needs exactly: the owner's choices (E-FUC-3's adoption, O4(a), O7 or R-REF's disposition with O7(a)'s method stopped, O3's or O3-R's route for FUC-D5-GITINDEXFILE (§6.9), the freeze ruling for C-R1 (§6.11), O6 if it is triggered, and O11's item (iv), whose basis is U); the review of round 7's delta; and CI (§6.14). It has no relation to O14(b) (§6.14). Repair round 2 (§6.9) fixed CI's one red leg on `1fc0c911`, a pre-existing Windows-only test whose fixture planted its file under the slot's untagged name, and audited every platform-gated test for the same derivation: there is no other. Repair round 3 (§6.10) fixed the implementation review's five items: the torn-registration repair removes the proven torn instance alone, a resume's recreate reclaims every earlier incarnation's intent before its replacement, Q's three open findings are filed, and two test-only items. Repair round 4 (§6.11) merged #329's head `ce55ca91` provisionally (not its final head; corrected at repair round 5), routed every registry wait of C's cleanup through the coordinator (the repair's and the final sweep's instance removal, the sweep's and the walks' discovery read), proposed C-R1 for the two frozen walks that make the discovery read, and corrected the body's validation paragraph (C-I2-1). Repair round 5 (§6.12) found CI's one red leg on `7904ca71` to be #329's dispatch-intent shutdown witness, a test of #329's (shown on a Linux stand-in, whose thresholds are not a measured causal proof of the guest's failure), routed its fix to #329, merged #329's resulting head `83006dc4` provisionally at `2f2468c3`, and corrected "final head" to provisional throughout. Repair round 6 (§6.13) fixed the i3 review's two P3s: the one routing point round 4's matrix covered only in combination, an attempt's residue discard, now has a witness of its own, through its call site, and a row of its own, and every routing point's row was run again alone; and a current source comment that still called the provisional merge `905ed0c8` #329's final head now says provisional. It then merged #329's head `17bd5652` provisionally at `6b3fe4a0`, as the orchestrator's answer directed: that brings #329's repair of I6-1, which #329's B7 review had already passed when round 6 published (corrected at round 7, C-I4-1), and #329's record of a red at `9bcfb3f3`, carried as the fingerprint match that record calls it. Repair round 7 (§6.14) merged master `c0ed07a5` once #329 merged, #329's final code and text, with no conflict; ran this change's own tests, the routing rows, the platforms and the frozen proof again there; corrected the record's and the body's statements of #329's state (C-I4-1); and read #329's T11 class over this change's witnesses, whose five unheld members are a question to the orchestrator. |
+| Implementation (§6) | **IMPLEMENTED; REVIEWED AT `83516466` (CHANGES_REQUIRED, ONE P1); REPAIRED IN ROUND 3 (§6.10), WHOSE DELTA REVIEW AT `778abee6` PASSED WITH ONE P3; INTEGRATED PROVISIONALLY WITH #329'S HEAD `ce55ca91` IN ROUND 4 (§6.11) AND WITH #329'S HEAD `83006dc4` IN ROUND 5 (§6.12); THAT PROVISIONAL HEAD `6066758b` REVIEWED (i3: THE REGRESSION LENS PASSED, THE REGULAR LENS CHANGES_REQUIRED WITH TWO P3S) AND REPAIRED IN ROUND 6 (§6.13), WHICH ALSO INTEGRATED #329'S HEAD `17bd5652` PROVISIONALLY; ROUND 6 REVIEWED AT `66e8a393` (i4: THE REGRESSION LENS PASSED, THE REGULAR LENS CHANGES_REQUIRED WITH ONE P3); #329 MERGED (`c0ed07a5`) AND ITS FINAL HEAD `53d972e9` INTEGRATED AT `89a65ccd` IN ROUND 7 (§6.14), WHICH ALSO REPAIRS THE i4 P3; REPAIR ROUND 8 (§6.15) REPAIRED #329'S T11 CLASS OVER FIVE OF THIS CHANGE'S WITNESSES, TEST CODE AND NOTES ONLY; ROUNDS 7 AND 8 NOT YET REVIEWED — U as §4 and §5 specify, with the PR11 decision appendix's §11 rows for this change.** It is built on master `c0ed07a5`, #329's merge, which carries #329's final head `53d972e9`, merged in at `89a65ccd` (repair round 7: the final integration; the earlier ones were provisional: #329's `17bd5652` at `6b3fe4a0` in round 6, `83006dc4` at `2f2468c3` in round 5 and `ce55ca91` at `905ed0c8` in round 4; first merged at `e46b71d3`), and uses #329's targeted removal, tolerant registry access and coordinator pause as they are. **#329's final code and text are integrated; of the revalidation, native CI and the review of rounds 7 and 8's delta remain (§6.14, §6.15).** **This change's own frozen change, C-R1 (§6.11), is proposed, conditional on the owner's freeze ruling and not adopted; #329's H1 and revised H3, which the owner adopted on 2026-10-08, are master's (§6.14)**; D4 did not trigger, as this change changes no frozen test (§6.3). Accounting, the packet and every Git child's inherited environment are unchanged. Its merge, under the standing delegation, needs exactly: the owner's choices (E-FUC-3's adoption, O4(a), O7 or R-REF's disposition with O7(a)'s method stopped, O3's or O3-R's route for FUC-D5-GITINDEXFILE (§6.9), the freeze ruling for C-R1 (§6.11), O6 if it is triggered, and O11's item (iv), whose basis is U); the review of rounds 7 and 8's delta; and CI (§6.14, §6.15). It has no relation to O14(b) (§6.14). Repair round 2 (§6.9) fixed CI's one red leg on `1fc0c911`, a pre-existing Windows-only test whose fixture planted its file under the slot's untagged name, and audited every platform-gated test for the same derivation: there is no other. Repair round 3 (§6.10) fixed the implementation review's five items: the torn-registration repair removes the proven torn instance alone, a resume's recreate reclaims every earlier incarnation's intent before its replacement, Q's three open findings are filed, and two test-only items. Repair round 4 (§6.11) merged #329's head `ce55ca91` provisionally (not its final head; corrected at repair round 5), routed every registry wait of C's cleanup through the coordinator (the repair's and the final sweep's instance removal, the sweep's and the walks' discovery read), proposed C-R1 for the two frozen walks that make the discovery read, and corrected the body's validation paragraph (C-I2-1). Repair round 5 (§6.12) found CI's one red leg on `7904ca71` to be #329's dispatch-intent shutdown witness, a test of #329's (shown on a Linux stand-in, whose thresholds are not a measured causal proof of the guest's failure), routed its fix to #329, merged #329's resulting head `83006dc4` provisionally at `2f2468c3`, and corrected "final head" to provisional throughout. Repair round 6 (§6.13) fixed the i3 review's two P3s: the one routing point round 4's matrix covered only in combination, an attempt's residue discard, now has a witness of its own, through its call site, and a row of its own, and every routing point's row was run again alone; and a current source comment that still called the provisional merge `905ed0c8` #329's final head now says provisional. It then merged #329's head `17bd5652` provisionally at `6b3fe4a0`, as the orchestrator's answer directed: that brings #329's repair of I6-1, which #329's B7 review had already passed when round 6 published (corrected at round 7, C-I4-1), and #329's record of a red at `9bcfb3f3`, carried as the fingerprint match that record calls it. Repair round 7 (§6.14) merged master `c0ed07a5` once #329 merged, #329's final code and text, with no conflict; ran this change's own tests, the routing rows, the platforms and the frozen proof again there; corrected the record's and the body's statements of #329's state (C-I4-1); and read #329's T11 class over this change's witnesses, whose five unheld members it put to the orchestrator as a question. Repair round 8 (§6.15), on the orchestrator's disposition, reproduced that class on its own runs at `01176762` and repaired it in `6041aa55`, test code and notes only: each of the five holds its repository's registry deadline at the production length, a nominal deadline, every assertion unchanged; under the stand-in the five pass, with the holds set back to 500 ms exactly the five are red again, and every routing row gives exactly its red set. No native failure of the five has been observed. |
 | Design, round 5 (§5) | Reviewed by design review round 5 on `30026823` (`~/orch-pr11/reviews/review-330-d5-triage.md`), whose items against U §6 takes. Round 5 read: **PROPOSED — the last design round before the owner's consolidated question; the owner's decisions D1 to D5 (§5.9).** It answers design review round 4, whose three lenses returned CHANGES_REQUIRED on `12375c7e` with one P1: Git's shared rerere state crosses U's instance boundary. Every engine Git command now runs with rerere disabled, executed on 2.43.0 and 2.55.0 for its effect: no engine pick reads or writes `rr-cache` (§5.2). The common git dir is censused path by path, by plain listings and trace2 on both versions, and the census adds `worktree.useRelativePaths=false` (§5.3). Terminal finalization's last step sweeps every earlier incarnation's instance in non-frozen manager code, and the window after it is R-UR, P3, with E-FUC-3's stated exception (§5.4). R-REF is the owner's decision D5 and blocks G6 until it is made (§5.5). This head changes no production code. |
 | Design, round 4 (§4) | Superseded in part by §5; §5.11 lists what it replaces. Round 4 read: **PROPOSED — U repaired, retention withdrawn, Q frozen; the owner's decisions D1 to D4 (§4.15).** It answers design review round 3, whose three lenses returned CHANGES_REQUIRED on `a0464f43` with one P1, in U's tag, and the looping signal raised the third time (§4.1). The production incarnation id now carries host randomness through the standard library's `RandomState`, and the tag is 60 bits of a hash of it (§4.2). Every walk discovers other incarnations' instances no intent names, executed again with saved evidence on 2.43.0 and 2.55.0 (§4.3). A dead instance that cannot be removed refuses the command, so Q1's order and the outcome equations stand (§4.5). The frozen oracles' replacements are specified fixture by fixture (§4.6). R-REF is regraded and filed (§4.8), Q's open items are restated (§4.9), and R-GU is analysed from DESC's side and filed by #329 (§4.11). This head changes no production code. |
 | Design, round 3 (§3) | Superseded in part by §4; §4.17 lists what it replaces. Round 3 read: **PROPOSED — the closure choice, framed for the owner's decisions D1 to D4 (§3.8).** It answers design review round 2, whose three lenses returned CHANGES_REQUIRED on `a9be94bc`, and the looping signal (§3.1): it proposes the smaller change. Recovery recomputes every slot from non-frozen code and never reads the recorded `worktree_path`, so slot paths and registration names can be unique per coordinator incarnation with no frozen code changed; the packet's T-DISPATCH, R9 and naming texts change instead (erratum E-FUC-3, revised, §3.3.7). Executed with git commands only on 2.43.0 and 2.55.0: a dead incarnation's late add, its `remove_junk` and a `setsid` helper damage a same-path replacement and leave a uniquely named one intact (§3.3.3). R-G is P1, and its in-window variant needs follow-up D's legacy change (§3.4). Q is repaired where no new layer is needed, with PGIDREUSE left open (§3.5). This head changes no production code. |
@@ -5260,6 +5263,10 @@ made through its hooks" among the acts that call for the hold. #329's census cov
   legs (`c6r7/class/unheld-5-at-66e8a393-ci.txt`). The results above are this box's and a stand-in's.
 - **Disposition.** A repair here is beyond this round's brief, so it goes to the orchestrator, with the options and a
   default, in this round's question.
+  *Dated 2026-10-09 (repair round 8, §6.15): the supervisor disposed it as option A in substance, an ordinary
+  authorized repair by a fresh repairer, the prepared candidate being attributed and unreviewed input. §6.15 records
+  the class's reproduction on that round's own runs, the repair `6041aa55` and its proofs, and the ledger's row. The
+  text above is kept as history.*
 
 #### C-I4-1 (P3): the current text misstated #329's review status
 
@@ -5373,4 +5380,186 @@ nor carries any of it.
 #### The ten gates
 
 They run once, at the head that carries this record; the body gives them, and this round's question carries them to
+the orchestrator before any push.
+
+### 6.15 Repair round 8: #329's T11 class over this change's five hook-wait witnesses, reproduced and repaired
+
+**What this subsection is.** The work of `pr11_fuc_impl8` (`claude-opus-5-5`, `max`), a fresh repairer the PR11
+orchestrator (`orch_pr11b`) spawned on this branch at `01176762`, round 7's verified head, under
+`~/orch-pr11/briefs/pr11_fuc_impl8.md` (with its dated precision of 2026-10-09T09:12:12Z) and the orchestrator's note 1
+(`~/orch-pr11/answers/pr11_fuc_impl8-1.md`). Its authority is the supervisor's disposition of round 7's question
+(§6.14): option A in substance, an ordinary authorized repair of the five non-frozen hook-wait witnesses before
+publication, by a fresh repairer, round 7's prepared candidate being attributed and unreviewed input; and the owner's
+B-first execution direction (`~/babysit-pr11/evidence/b-first-owner-approval-and-execution-20261008.md`, sha256
+`77d4340c…`, item 5). Its scope:
+- reproduce the class on this round's own runs, before any repair;
+- repair the five, test code and notes only, keeping every assertion they make;
+- prove the repair: green under the stand-in, red again with the holds set back, green natively, every routing row
+  exact, no production byte moved, the frozen set and the instruments untouched;
+- this record, one ledger row and the body; the final validation once at the final head; then a stop before any push,
+  with a package to the orchestrator (`~/orch-pr11/questions/pr11_fuc_impl8-1.md`).
+
+Its evidence is under `~/orch-pr11/logs/pr11_fuc_impl8/`, cited as `c6r8/…`. Every run was planned before it ran
+(`c6r8/PLAN.md`, with one dated amendment, a pre-commit format and lint check, and one disclosure, a test listing the
+plan had not named). Round 7's evidence, cited here as `c6r7/…`, was read where the orchestrator retained it
+(`~/orch-pr11/logs/orch-c7/retained/L7/`), by exact path, and checked against its pins: 356 files of 356
+(`c6r8/start/retained-verify.txt`). **It adopts no owner decision.** E-FUC-3, O4(a), O7 or R-REF's disposition (O7(a)'s
+method stays stopped), the O3 or O3-R route, C-R1's freeze ruling, O6 if it is triggered, and O11's item (iv) stay the
+owner's.
+
+**The commits:** `6041aa55`, the repair with its notes (`test(workspace)`), and this record's commit. Master was still
+`c0ed07a5` at this round's start (`c6r8/start/ls-remote-master.txt`), so nothing is merged in this round.
+
+#### The class
+
+#329's B14 round (its record's §9.31) found a class among #329's tests: a witness whose own act ends the contention its
+registry access meets runs that access under the test build's 500 ms registry deadline. The access asks for a wait after
+its first failed attempt only if time remains when it reads its clock after that attempt's veto and count (#329's record
+§9.34.4), so a first attempt the platform makes slow can leave none, and the contention only a wait would end is never
+ended: the access makes its final attempt and refuses. Round 7 read the class over this change's witnesses (§6.14) and
+found five that hold no deadline and end their contention through their own hooks, which heal an unreadable registration
+at their first wait:
+- round 4's `intents_pausing_reads_the_registry_through_the_hooks_it_is_handed`,
+  `a_reclaims_walk_reads_the_registry_through_the_hooks_it_is_handed`,
+  `the_final_sweeps_registry_read_waits_through_the_hooks_it_is_handed` and
+  `the_final_sweeps_removal_waits_through_the_hooks_it_is_handed`, in `src/workspace_manager/tests.rs`;
+- round 6's `an_interrupted_attempts_residue_discard_reads_the_registry_through_the_hooks_it_is_handed`, in
+  `src/engine/topology/attempt/tests.rs`.
+
+The eleven coordinator witnesses among this change's tests each build #329's `TearHeld` through their helper, and its
+guard holds `WITNESS_REGISTRY_DEADLINE`; #329's T11 holds `PRODUCTION_REGISTRY_DEADLINE` (traced from Git objects,
+`c6r8/provenance/controls-tearheld.txt`). These twelve are the held controls.
+
+#### The reproduction, on this round's own runs at `01176762`, before any repair
+
+- **The stand-in, S2′** (round 7's `c6r7/class/s2prime.diff`, sha256 `14209b8c…`, read before use and applied only in
+  scratch copies under this round's private build directory, never in the worktree and never committed). In the test
+  build's tail of `src/workspace_manager.rs`, a thread-local flag is set by `note_access_start` at each registry
+  access's start, and `note_contended`, the test build's count of an `Attempt` answer, which the access calls after a
+  failed attempt's veto and before its checks and its clock read, sleeps 600 ms the first time it runs in that access on
+  that thread. So when the access reads its clock after that failed attempt, at least 600 ms have passed since it began,
+  past the test build's 500 ms deadline. It touches no `Return` or `Undecidable` answer, no production code and no test
+  (`c6r8/repro/p2-stand-in-applied.txt`).
+- **This change's own tests, re-derived.** Round 7's method (`c6r7/tools/c-own-tests.py`, copied): each line this
+  change's diff against master adds to a `.rs` file is attributed to the nearest function at or above it, and a library
+  test is this change's when its function is one of those. Over `01176762`'s 3,351 library tests it gives 69, byte for
+  byte round 7's list (`c6r8/derive/VERIFY.txt`). It counts a test by its own lines only: a test changed only through a
+  helper is not in it. The run set is those 69 and #329's T11, 70 tests, four of them `#[ignore]` subprocess children.
+- **Natively** (the worktree at `01176762`): 66 passed, 0 failed, 4 ignored; the five pass
+  (`c6r8/tests/p0p1-native-01176762/JUDGE.txt`).
+- **Under S2′** (a scratch copy of `01176762`): **exactly the five are red**, 61 passed and 4 ignored, and the twelve
+  held controls pass (`c6r8/scratch/p2-s2prime-01176762/JUDGE.txt`). The four manager witnesses refused with "kept this
+  access from completing until its deadline (500ms): 2 attempt(s), the last failed with: failed to read
+  `…/worktrees/unreadable/gitdir`: Is a directory (os error 21)", and the attempt witness failed its assertion that the
+  hooks were asked to wait (`healed_at`: `None`, expected `Some(1)`) (`c6r8/repro/messages-p2.txt`).
+
+Round 7's results at `89a65ccd` and `66e8a393` are its own, and are not relied on here; this round's agree with them.
+
+#### The repair (`6041aa55`)
+
+Each of the five holds its repository's registry deadline at the production length through `RegistryDeadline`, the seam
+#329 documents for a test whose own act ends an access's wait, as #329's `e7ef8afe` does for its class. The guard is the
+test's first statement after its fixture, keyed on the manager's common git dir, which every access of the test passes:
+- the four manager witnesses by `PRODUCTION_REGISTRY_DEADLINE`, #329's constant, unchanged; each gains a doc paragraph
+  stating the wait condition in #329's final wording (its record's §9.34.4);
+- the attempt witness by a constant of its own inside the test, `PRODUCTION_REGISTRY_DEADLINE`, 10 s, since the manager
+  tests' constant is private to their module. Its prose is in its module's notes
+  (`docs/internals/engine/topology/attempt/tests.md`), the module being noted, where the sentence that had the hookless
+  mutant's read sleep "until its 500 ms test deadline" is rewritten, since the hold makes it untrue.
+
+**What does not change** (`c6r8/proofs/assertions-unchanged-H.txt`, from Git objects): in each of the five the change
+only inserts lines, the inserted lines are exactly the guard (and, in the attempt witness, its constant), and every
+assertion line, the "through the hooks it is handed" oracles among them, is byte-identical and in the same order; in
+both files nothing outside the five functions and their doc comments changes. No production line, no deadline constant's
+definition, none of #329's lines, no frozen file, no instrument and no `design/` text changes.
+
+**Round 7's candidate, reviewed and credited** (`c6r7/class/candidate-hold.diff`, sha256 `44d43ae4…`;
+`c6r8/repair/CANDIDATE-REVIEW.md`). The five guards' placement and the four manager guard statements are adopted, byte
+for byte. Rewritten:
+- its module-level `WITNESS_REGISTRY_DEADLINE` in the attempt tests, which sat outside the witness's own lines and
+  reused the name of #329's coordinator constant: now a constant inside the test;
+- every prose line: it cited §6.14 for the repair, stated only the 500 ms side of the wait condition, named the wrong
+  access in the removal witness ("its read"), left the notes' 500 ms sentence in place beside a paragraph that
+  contradicted it, and called the mutant's wait "bounded by the held deadline", which overstates what a nominal deadline
+  bounds.
+
+`6041aa55`'s message credits it.
+
+#### The proofs, at `6041aa55`
+
+- **Green under S2′:** the 70 tests, 66 passed, 0 failed, 4 ignored (`c6r8/scratch/q1-s2prime-H/JUDGE.txt`); the
+  stand-in's file is byte-identical to the reproduction's (`base.txt`, sha256 `8e7be210…` in both).
+- **The catching reversal:** with the five holds alone set back to the test build's 500 ms
+  (`c6r8/repair/reversal-500ms.diff`, made against `6041aa55`), under S2′, **exactly the five are red again**, with the
+  same messages, and the twelve controls pass (`c6r8/scratch/q2-s2prime-H-reversed/JUDGE.txt`,
+  `c6r8/repro/messages-q2.txt`). So the holds are what turns the five green.
+- **Natively:** the 70 tests in each of five runs in the worktree, 66 passed, 0 failed, 4 ignored each
+  (`c6r8/tests/q3-native-H-x5/JUDGE-1.txt` to `JUDGE-5.txt`).
+- **Every routing row** (`c6r8/matrix/VERDICTS.txt`, by `c6r8/tools/rows.py`, round 7's `r7-rows.py` with this round's
+  tree, base and commit, its substitutions and expected red sets unchanged; its diff from round 7's is
+  `c6r8/tools/rows.py.diff-from-c7`). All eleven code-head rows ran at `6041aa55` over 71 tests, the holds committed, so
+  no overlay: **11 of 11 give exactly their expected red sets.** Six of them expect one or more of the five red, and
+  each is red where expected: the attempt-discard row, the instance-removal and sweep-read rows, the `intents_pausing`
+  and `reclaim_intents` rows, and the all-waits row with all five among its fourteen. The hold masks no routing
+  mutation: with its hooks bypassed, a held witness's access still sleeps on the calling thread, its store is never
+  healed, and the witness fails. Round 7's candidate check ran six rows, without the all-waits row; this one runs all
+  eleven. The three historical rows, at `6066758b` and `905ed0c8`, test historical code with round 6's witness laid over
+  it, and this round's test code cannot be laid over them whole: `RegistryDeadline` does not exist at `905ed0c8`, nor
+  `PRODUCTION_REGISTRY_DEADLINE` at `6066758b` (`c6r8/sets/set-relations-and-seams.txt`). They stand as §6.13 records
+  them.
+- **Each run's binary was its own:** every scratch configuration and every row built into one scratch tree path and one
+  base, each export touched to its export time, and the sixteen test binaries' sha256 are all different
+  (`c6r8/proofs/binaries.txt`). Each scratch log names the scratch tree on a Compiling line, and each worktree run's
+  build names the worktree.
+
+#### Two disclosures
+
+**1. The intentional test-deadline change.** The change is to a **nominal** deadline: the five's registry accesses now
+run against the production registry deadline, 10 s (`REGISTRY_ACCESS_DEADLINE`'s `#[cfg(not(test))]` value), instead of
+the test build's 500 ms. Under #329's final access (`tolerant_registry_access`'s documentation in
+`src/workspace_manager.rs`, and #329's record §9.32.4) the deadline is an admission rule checked after each attempt, not
+a wall-clock bound: no wait is asked for longer than the time left before it, and no attempt is admitted after the first
+that begins at or after it; an attempt or a veto already started runs to completion; and the completion of a Git child
+an attempt started is not bounded by the deadline. Nothing here is a guarantee that a hung Git child fails within 10 s,
+nor that one would have failed within 500 ms before. Measured locally, the 70-test set's run totals were 23.97 s
+natively at `01176762` (one run) and 24.19 s to 24.29 s at `6041aa55` (five runs), totals of a set run in parallel and
+not per-test times (`c6r8/tests/*/summary.txt`); no hosted runtime is claimed.
+
+**2. Native against stand-in.** No native failure of the five has been observed. At `66e8a393` they passed on all three
+CI test legs, `test (ubuntu-latest)`, `test (macos-latest)` and `test (winguest)`, in run 37227063019 (round 7's
+retained job logs, read and checked by this round, `c6r8/ci/unheld-5-at-66e8a393-verified.txt`), and they passed in this
+round's native runs on this box. **The exposure and the repair are demonstrated only under S2′, a synthetic 600 ms
+delay**, at `01176762` and at `6041aa55` with the holds set back. Nothing is claimed for any natural run, and no cause
+of any past failure is claimed, since none is on file.
+
+#### The ledger
+
+**`FUC-R7-HOOKWAITDEADLINE`**, one row for the class:
+- P2, portability. The rating follows the class: #329 rated it P2 portability (`FUB-B14-T11TESTDEADLINE`) on an observed
+  guest failure of T11, and these five are the same test-parameter defect, demonstrated the same way. It does not rest
+  on an observed failure of the five, of which there is none;
+- `introduced_by_feature`. Derived from Git (`c6r8/provenance/first-bad-derivation.txt`, `fixture-bodies.txt`): the four
+  manager witnesses were introduced by `2c3e413c` (repair round 4) and the attempt witness by `28b7456b` (repair round
+  6), none of them on master, each without a hold, under the test build's 500 ms deadline; each function is
+  byte-identical at its introducing commit and at `01176762`. At `2c3e413c` the `RegistryDeadline` seam did not yet
+  exist; it came with #329's fix P through `2f2468c3` (`c6r8/provenance/seam-and-controls.txt`). The exposure is claimed
+  only where this round ran the stand-in: `01176762`, and `6041aa55` with the holds set back. No claim is made for any
+  other commit;
+- at `01176762`'s `src/workspace_manager/tests.rs:18829`, the first of the five;
+- `fixed` by `6041aa55`, on the proofs above.
+
+#### What this change's merge still needs
+
+Unchanged from §6.14 but for the delta to review:
+- **the owner's choices:** E-FUC-3's adoption; O4(a); O7, or R-REF's disposition (O7(a)'s method is stopped); the O3 or
+  O3-R route for FUC-D5-GITINDEXFILE; the freeze ruling for C-R1; O6, only if it is triggered (it is not: this round
+  changes no frozen test either); O11's item (iv), whose basis is U;
+- **the review of rounds 7 and 8's delta,** once CI is green on every leg;
+- **CI** on the pushed head: both required contexts;
+- **then the merge under the standing delegation.**
+
+#### The final validation
+
+It runs once, at the head that carries this record: the ten gates, the platform checks, the production-bytes and frozen
+proofs, the branch check and the rollback check. The body gives the results, and this round's package carries them to
 the orchestrator before any push.
