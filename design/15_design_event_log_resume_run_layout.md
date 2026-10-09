@@ -113,10 +113,14 @@ scans.
   left torn, and any other fault of the store, such as a store nothing can write, a registration
   Git cannot list, or a listed path that stays unreadable. A failure the access cannot decide, such
   as a destination holding something the add did not leave, refuses at once.
-- The deadline covers the access's waits, its retries and the start of every attempt; the attempt
-  after a backoff the deadline cut short is made, at the deadline, and is the last. It does not bound
-  the last Git command already running, which a filter, a large checkout or a slow filesystem can
-  extend, nor the short decision after it.
+- The deadline is nominal. The access admits no attempt after the first that begins at or after
+  it, asks for no wait longer than the time left before it, and asks for none once it has passed.
+  So the final attempt is the first that begins at or after the deadline: after a backoff the
+  deadline cut short or, if the deadline passed while an attempt or the short decision after it
+  ran, next, with no backoff before it. A store a writer leaves whole by the deadline is passed.
+  Nothing here bounds the scheduling, the bookkeeping between an attempt and its check, a wait's
+  wake-up, or the runtime of a Git command or of the short decision after it, which a filter, a
+  large checkout or a slow filesystem can extend.
 - On the topology coordinator a wait answers the coordinator's messages instead of sleeping. A wait
   that answers one that ends the command, such as a shutdown, ends the access there, with no further
   attempt, and the transition it waited in: nothing further is appended, published or spawned for
@@ -157,7 +161,12 @@ what a coordinator killed after making an add's destination leaves.
 - The frozen legacy engine's registry accesses do not take this access, and its coordinator discards
   an attempt's output on any error. Both are follow-up D's
   (`PR329-LEGACY-RUNS-IN-LINKED-CHECKOUTS-RACE-THE-SHARED-WORKTREE-REGISTRY`), a separate change
-  under the owner's decision that calls this access.
+  under the owner's decision that calls this access. *By the owner's ruling B-W924-R1, adopted
+  2026-10-08 (the follow-up B record's §9.25 and §9.28):* the legacy gate and review snapshots'
+  add, removal and list each run their Git command again while it dies reading another
+  registration's `commondir` at zero bytes, against a nominal ten-second deadline checked after each
+  attempt (the attempt after a sleep is admitted however late it starts, and no attempt's start or
+  completion has a hard wall-clock bound); nothing else of the legacy engine's accesses changes.
 
 **When a Unix helper does not start.** The cleanup reaper and the job-control guard are forked before any agent exists, and each acknowledges its own startup within a fixed budget. A launch that does not see that acknowledgement fails, ends the helper with one `SIGKILL` and a **bounded** wait — by number, or through the identity the next paragraph describes — and reports what those two calls answered, alongside how long it waited, that budget, the descriptor ceiling the helper was closing against, and how the wait ended: on the helper's own report of the setup step that refused and the error it left, on the acknowledgement pipe closing with no report, or on the budget elapsing with nothing on the pipe. A helper that cannot finish its setup writes that report on the acknowledgement pipe it already owns before it ends, and the wait ends the moment the helper ends on every supported platform. On macOS the wait is a `select`, because `poll` on the FIFO the channel is built from never reports the writer's close. The point of reporting these is one distinction: a helper that had **already ended itself** before the signal, whose report or exit status names which of its own setup steps refused, against one that was **still running** and had to be killed, which says it was still working when the budget ran out. Nothing else is claimed. **The wait after the signal is bounded, and a helper still there when it runs out is left behind.** The wait asks the kernel for what it can answer without blocking and asks again until the helper is collected or a second budget of its own elapses; a helper that has not become collectable by then is one the kernel is not ready to hand back — in uninterruptible I/O with the signal pending, say — so the launch reports that it was left for this process's exit to collect and returns, rather than waiting on it. It must return: these launches hold the barrier under which the signal monitor refuses to kill or stop any registered group, so a launch that never returns is every running agent outliving a `SIGTERM` for as long as the kernel takes. Of the waits that end a helper, one is **not** bounded, and deliberately: the end of a run's cleanup reaper that has **acknowledged** CLEANUP or CANCEL, whose exit is what releases the run's cleanup lease the caller is about to act on, so releasing that caller early would let it proceed against a lease still held. A reaper that did not acknowledge CLEANUP — its pipe ended with no answer, it refused, or the request could not be written — is ended with the bounded wait instead, because its caller acts on nothing: the supervisor answers that failure by arming fail-closed termination of this process and returning an error, and a reaper the wait leaves behind holds the lease until it exits, as a reaper does after any coordinator death. The parent asks the kernel nothing about the helper beyond those two calls and the pipe it was already reading, and in particular a pid is never treated as evidence of which process it names — a wait that answers *not collectable yet* is reported as that and never as the helper: while an embedding host may reap this process's children with a wildcard wait, no observation the parent can make establishes that, and the message says only what the pipe carried and what `kill` and `waitpid` returned.
 
@@ -250,12 +259,14 @@ Every transition is an event `{ts, event, task?, attempt?, rung?, profile?, data
 `upstroke resume <run-id>` replays, verifies the run branch HEAD matches the last committed event (mismatch = refuse with an explanation), re-probes agents, re-snapshots capacity, and continues — parked questions intact. Git and the log cannot be updated atomically, so schema 3 makes the successful settlement itself carry the exact prepared identity: captured full run-branch ref, parent and tree feed hook-free `commit-tree`; the resulting commit, message, and deterministic private pin are verified before `attempt_finished` is appended. Publication compare-and-swaps the **recorded full branch ref**, never mutable symbolic `HEAD`, from the recorded parent to that commit, removes the pin with a non-dereferencing compare-and-swap, and then appends `task_committed`. Resume accepts only the resulting exact crash prefixes: parent plus matching pin means publish that object; commit plus matching pin means remove the pin; commit with the pin already gone means append the missing `task_committed`. A pin without a successful settlement is orphan residue and is removed without dereferencing symbolic refs. Any substituted or symbolic pin, third branch SHA, changed branch identity, or mismatched commit object refuses while preserving evidence. Schema-1/2 success has no prepared identity, so it is **never** adopted from parent plus subject alone; even a matching message can name an arbitrary tree. It also refuses when the frozen plan's digest moved, when the recorded chain structure no longer matches (a rung is an index into that chain), when the branch is gone, and when another process owns either the run or its physical worktree.
 
 **A legacy attempt the worktree registry refused.** *PROPOSED, conditional on the owner's decision O8 (decision B)
-to unfreeze the PR5-frozen legacy modules it changes, and not granted — follow-up D
-(`reviews/2026-10-02-pr11-follow-up-d-record.md` §1, as §2 to §4 amend it, and its Implementation section),
-implemented on draft pull request #331. Nothing in this paragraph is in force until the owner adopts O8 and that pull
-request merges, after follow-up B's (pull request #329), whose registry access it calls. Once in force, it replaces
-the last item of "A registry another process is writing" above, which says the frozen legacy engine's accesses do not
-take that access.* A schema 1–3 run shares its repository's
+to unfreeze the PR5-frozen legacy modules it changes, and on the owner's ruling B-W924-R1-S, and not granted —
+follow-up D (`reviews/2026-10-02-pr11-follow-up-d-record.md` §1, as §2 to §4 amend it, and its Implementation
+section), implemented on draft pull request #331. Nothing in this paragraph is in force until the owner adopts O8 and
+B-W924-R1-S and that pull request merges, after follow-up B's (pull request #329), whose registry access it calls.
+Once in force, it replaces the last item of "A registry another process is writing" above, which says the frozen
+legacy engine's accesses do not take that access, and with it that item's sentence on the owner's ruling B-W924-R1:
+at the legacy snapshots' add, removal and list, the whole of that ruling's scope, B-W924-R1-S supersedes its retry
+with this paragraph's access.* A schema 1–3 run shares its repository's
 worktree registry with every other checkout's runs. Its three Git children that
 enumerate the registry — a gate or review snapshot's `git worktree add`, a snapshot's removal together with the
 `git worktree list` that decides it, and the resume's `git switch` — each run as one attempt of that registry

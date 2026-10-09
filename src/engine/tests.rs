@@ -9909,7 +9909,7 @@ fn v1_role_probe(role: &str) {
         "GIT_NO_REPLACE_OBJECTS is not in this role's environment".to_owned(),
     );
     if role == "gate" && spec.lines().any(|line| line == "worktree true") {
-        let set = probe_git(
+        let set = probe_git_past_another_registrations_write(
             &here,
             &["config", "--worktree", "core.useReplaceRefs", "true"],
         );
@@ -10746,6 +10746,352 @@ fn v1_sibling_run_helper() {
     )
     .expect("a sibling run");
     assert_eq!(report.outcome(), RunOutcome::Complete, "{report:?}");
+}
+
+fn probe_git_past_another_registrations_write(dir: &Path, args: &[&str]) -> Result<String, String> {
+    let mut command = Command::new("git");
+    command.arg("-C").arg(dir).args(args);
+    probe_answer(past_another_registrations_write(
+        dir,
+        std::time::Instant::now() + Duration::from_secs(10),
+        &mut || command.output(),
+    ))
+}
+
+fn past_another_registrations_write(
+    dir: &Path,
+    deadline: std::time::Instant,
+    run: &mut dyn FnMut() -> std::io::Result<std::process::Output>,
+) -> std::io::Result<std::process::Output> {
+    let mut pause = Duration::from_millis(1);
+    loop {
+        let output = run()?;
+        let torn = anothers_empty_commondir_in(&output, dir);
+        let now = std::time::Instant::now();
+        if !torn || now >= deadline {
+            return Ok(output);
+        }
+        std::thread::sleep(pause.min(deadline.saturating_duration_since(now)));
+        pause = pause.saturating_mul(2).min(Duration::from_millis(50));
+    }
+}
+
+fn anothers_empty_commondir_in(output: &std::process::Output, dir: &Path) -> bool {
+    if output.status.code() != Some(128) {
+        return false;
+    }
+    let Some(line) = output.stderr.strip_suffix(b"\n") else {
+        return false;
+    };
+    let Some(registration) = line
+        .strip_prefix(b"fatal: failed to read ")
+        .and_then(|rest| rest.strip_suffix(b"/commondir: Success"))
+    else {
+        return false;
+    };
+    let own = dir
+        .file_name()
+        .map(std::ffi::OsStr::as_encoded_bytes)
+        .unwrap_or_default();
+    let mut components = registration.rsplit(|byte| *byte == b'/');
+    let id = components.next().unwrap_or_default();
+    !line.contains(&b'\n')
+        && components.next() == Some(b"worktrees".as_slice())
+        && !id.is_empty()
+        && !id.starts_with(own)
+}
+
+fn probe_answer(output: std::io::Result<std::process::Output>) -> Result<String, String> {
+    let out = output.map_err(|error| error.to_string())?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_owned())
+    }
+}
+
+#[test]
+fn a_gates_worktree_setting_is_attempted_again_only_past_another_registrations_empty_commondir() {
+    let dir = Path::new("/r/store/worktrees/upstroke-gates-1-01AAAAAAAAAAAAAAAAAAAAAAAA");
+    let other = "fatal: failed to read /r/.git/worktrees/upstroke-gates-2-01BBBBBBBBBBBBBBBBBBBBBBBB\
+                 /commondir: Success\n";
+    let own = "fatal: failed to read /r/.git/worktrees/upstroke-gates-1-01AAAAAAAAAAAAAAAAAAAAAAAA\
+               /commondir: Success\n";
+    let numbered = "fatal: failed to read /r/.git/worktrees/upstroke-gates-1-01AAAAAAAAAAAAAAAAAAAAAAAA1\
+                    /commondir: Success\n";
+    #[cfg(unix)]
+    let exited = |code: i32| {
+        <std::process::ExitStatus as std::os::unix::process::ExitStatusExt>::from_raw(code << 8)
+    };
+    #[cfg(windows)]
+    let exited = |code: u32| {
+        <std::process::ExitStatus as std::os::windows::process::ExitStatusExt>::from_raw(code)
+    };
+    #[cfg(unix)]
+    let signalled =
+        Some(<std::process::ExitStatus as std::os::unix::process::ExitStatusExt>::from_raw(15));
+    #[cfg(not(unix))]
+    let signalled: Option<std::process::ExitStatus> = None;
+    let output = |status, stderr: &str| std::process::Output {
+        status,
+        stdout: Vec::new(),
+        stderr: stderr.as_bytes().to_vec(),
+    };
+    let far = || std::time::Instant::now() + Duration::from_secs(60);
+    let attempt = |deadline: std::time::Instant,
+                   script: Vec<std::process::Output>|
+     -> (Result<std::process::Output, String>, usize) {
+        let mut script = script.into_iter();
+        let mut probes = 0;
+        let read = past_another_registrations_write(dir, deadline, &mut || {
+            probes += 1;
+            script
+                .next()
+                .ok_or_else(|| std::io::Error::other("probed past the script"))
+        });
+        (read.map_err(|error| error.to_string()), probes)
+    };
+    let torn = output(exited(128), other);
+    let set = output(exited(0), "");
+
+    assert_eq!(
+        attempt(far(), vec![torn.clone(), torn.clone(), set.clone()]),
+        (Ok(set.clone()), 3),
+        "past two tears of another registration"
+    );
+    let at_once = [
+        (
+            output(exited(1), other),
+            "the same line, with an exit that is not Git's death",
+        ),
+        (
+            output(exited(128), other.trim_end_matches('\n')),
+            "the same line, unfinished",
+        ),
+        (
+            output(exited(128), &format!("{other}\n")),
+            "the same line and an empty one after it",
+        ),
+        (
+            output(exited(128), &format!("warning: w924\n{other}")),
+            "a second line",
+        ),
+        (
+            output(
+                exited(128),
+                &format!("fatal: failed to read /r/one\n{other}"),
+            ),
+            "two lines, each Git's death",
+        ),
+        (output(exited(128), own), "its own registration"),
+        (
+            output(exited(128), numbered),
+            "its own, under the suffix Git gives a taken name",
+        ),
+        (
+            output(
+                exited(128),
+                "fatal: failed to read /r/.git/worktrees/w/commondir: No such file or directory\n",
+            ),
+            "a removal's",
+        ),
+        (
+            output(
+                exited(128),
+                "fatal: failed to read '/r/.git/worktrees/w/locked'\n",
+            ),
+            "a lock's",
+        ),
+        (
+            output(
+                exited(128),
+                "fatal: --worktree cannot be used with multiple working trees\n",
+            ),
+            "another refusal",
+        ),
+    ]
+    .into_iter()
+    .chain(signalled.map(|status| {
+        (
+            output(status, other),
+            "the same line from a Git a signal ended",
+        )
+    }));
+    for (answer, why) in at_once {
+        assert_eq!(
+            attempt(far(), vec![answer.clone(), set.clone()]),
+            (Ok(answer), 1),
+            "{why}, at once"
+        );
+    }
+    assert_eq!(
+        attempt(std::time::Instant::now(), vec![torn.clone(), set.clone()]),
+        (Ok(torn), 1),
+        "a deadline already past"
+    );
+    assert_eq!(
+        attempt(far(), vec![set.clone()]),
+        (Ok(set), 1),
+        "a success, at once"
+    );
+    assert_eq!(
+        attempt(far(), Vec::new()),
+        (Err("probed past the script".to_owned()), 1),
+        "a probe that cannot start, at once"
+    );
+}
+
+#[test]
+fn a_gates_worktree_setting_answers_what_the_probe_answers_when_nothing_tears() {
+    let (_tree, repo) = temp_engine_repo("w924-probe-answers");
+    let missing = repo.join("w924-no-such-directory");
+    for (dir, args) in [
+        (repo.as_path(), &["rev-parse", "--is-inside-work-tree"][..]),
+        (
+            repo.as_path(),
+            &["rev-parse", "--verify", "w924-no-such-revision"],
+        ),
+        (repo.as_path(), &["config", "--w924-no-such-option"]),
+        (
+            missing.as_path(),
+            &["config", "--worktree", "core.useReplaceRefs", "true"],
+        ),
+    ] {
+        assert_eq!(
+            probe_git_past_another_registrations_write(dir, args),
+            probe_git(dir, args),
+            "{args:?} in {}",
+            dir.display()
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn the_gate_role_sets_its_worktree_value_again_only_past_another_registrations_empty_commondir() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tree = temp_engine_scratch("w924-gate-probe");
+    let other = "fatal: failed to read /r/.git/worktrees/upstroke-gates-2/commondir: Success";
+    let own = "fatal: failed to read /r/.git/worktrees/upstroke-gates-1/commondir: Success";
+    let refused = format!("Err({other:?})");
+    for (case, stderr, ending, probes, recorded) in [
+        (
+            "another-registration",
+            format!("{other}\\n"),
+            "exit 128",
+            2,
+            "ok Ok(\"\")".to_owned(),
+        ),
+        (
+            "exit-1",
+            format!("{other}\\n"),
+            "exit 1",
+            1,
+            format!("FAIL {refused}"),
+        ),
+        (
+            "signal",
+            format!("{other}\\n"),
+            "kill -KILL $$",
+            1,
+            format!("FAIL {refused}"),
+        ),
+        (
+            "unfinished",
+            other.to_owned(),
+            "exit 128",
+            1,
+            format!("FAIL {refused}"),
+        ),
+        (
+            "extra-blank-line",
+            format!("{other}\\n\\n"),
+            "exit 128",
+            1,
+            format!("FAIL {refused}"),
+        ),
+        (
+            "own-registration",
+            format!("{own}\\n"),
+            "exit 128",
+            1,
+            format!("FAIL Err({own:?})"),
+        ),
+        (
+            "unrelated",
+            "fatal: w924 unrelated\\n".to_owned(),
+            "exit 128",
+            1,
+            "FAIL Err(\"fatal: w924 unrelated\")".to_owned(),
+        ),
+    ] {
+        let place = tree.path().join(case);
+        let here = place.join("upstroke-gates-1");
+        let probe = place.join("probe");
+        let bin = place.join("bin");
+        for directory in [&here, &probe, &bin] {
+            fs::create_dir_all(directory).expect("the case's directories");
+        }
+        fs::write(probe.join("spec"), "worktree true\n").expect("the gate's spec");
+        let calls = place.join("calls");
+        let answered = place.join("answered");
+        let git = bin.join("git");
+        fs::write(
+            &git,
+            format!(
+                "#!/bin/sh\n\
+                 if [ \"$3 $4 $5 $6\" = 'config --worktree core.useReplaceRefs true' ]; then\n\
+                 \x20 echo probed >> \"$UPSTROKE_W924_CALLS\"\n\
+                 \x20 if [ ! -e \"$UPSTROKE_W924_ANSWERED\" ]; then\n\
+                 \x20   : > \"$UPSTROKE_W924_ANSWERED\"\n\
+                 \x20   printf '{stderr}' >&2\n\
+                 \x20   {ending}\n\
+                 \x20 fi\n\
+                 \x20 exit 0\n\
+                 fi\n\
+                 exit 1\n"
+            ),
+        )
+        .expect("the case's Git");
+        fs::set_permissions(&git, fs::Permissions::from_mode(0o700)).expect("an executable Git");
+        Command::new(std::env::current_exe().expect("this test binary"))
+            .args([
+                "--exact",
+                "engine::tests::v1_role_probe_gate",
+                "--ignored",
+                "--nocapture",
+            ])
+            .current_dir(&here)
+            .env(ROLE_PROBE, &probe)
+            .env("UPSTROKE_W924_CALLS", &calls)
+            .env("UPSTROKE_W924_ANSWERED", &answered)
+            .env(
+                "PATH",
+                std::env::join_paths([bin.as_path(), Path::new("/usr/bin"), Path::new("/bin")])
+                    .expect("a synthetic PATH"),
+            )
+            .output()
+            .expect("the gate role");
+        let records: Vec<_> = fs::read_dir(probe.join("log"))
+            .expect("the gate's records")
+            .map(|entry| fs::read_to_string(entry.expect("a record").path()).expect("its text"))
+            .collect();
+        let setting: Vec<_> = records
+            .iter()
+            .flat_map(|record| record.lines())
+            .filter_map(|line| line.strip_prefix("gate worktree-true "))
+            .collect();
+        assert_eq!(setting, [recorded.as_str()], "{case}: {records:#?}");
+        assert_eq!(
+            fs::read_to_string(&calls)
+                .expect("the setting's calls")
+                .lines()
+                .count(),
+            probes,
+            "{case}"
+        );
+    }
 }
 
 #[test]

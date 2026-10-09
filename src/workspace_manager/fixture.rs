@@ -871,6 +871,175 @@ pub(crate) fn spawn_ready_helper(
 }
 
 // -----------------------------------------------------------------------
+// A run's cleanup lease, observed told apart, and made unobservable
+// -----------------------------------------------------------------------
+
+/// One observation of the cleanup lease of the run whose public directory is
+/// `public`, made as `rundir`'s own probe makes it and answered told apart:
+/// `Ok(true)` held, `Ok(false)` free, or the error that answered neither.
+///
+/// The production observation (`rundir::observe_cleanup_hold`, through
+/// `cleanup::is_held`) is fail-closed: a lease file that will not open, or a
+/// `flock` that fails other than `EWOULDBLOCK`, reads held, because an
+/// inspection that failed is no evidence that cleanup finished. That answer
+/// is right for a resume deciding whether to take a run, and wrong for a test
+/// deciding whether to wait: a wait that reads an inspection error as a holder
+/// retries the error until it passes. So the probe is the same -- the lease
+/// file opened for reading and writing and never created, an exclusive
+/// `flock` asked for without blocking and given straight back -- and only the
+/// answer differs: what the production observation reads held because it
+/// failed is the error here. A lease file that does not exist is free, as
+/// there. A release that fails is an error too, because the exclusive hold
+/// would then outlive the observation in any fork made meanwhile.
+///
+/// # Errors
+///
+/// The open's error other than `NotFound`, the take's other than
+/// `EWOULDBLOCK`, or the release's.
+#[cfg(unix)]
+pub(crate) fn observe_cleanup_lease(public: &Path) -> std::io::Result<bool> {
+    use std::os::fd::AsRawFd as _;
+
+    let lease = match fs::File::options()
+        .read(true)
+        .write(true)
+        .open(public.join("cleanup.lock"))
+    {
+        Ok(lease) => lease,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    // SAFETY: `lease` owns a live descriptor, and `flock` takes an integer
+    // and a flag and reads nothing through a pointer.
+    if unsafe { libc::flock(lease.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        let error = std::io::Error::last_os_error();
+        return match error.raw_os_error() {
+            Some(code) if code == libc::EWOULDBLOCK || code == libc::EAGAIN => Ok(true),
+            _ => Err(error),
+        };
+    }
+    // SAFETY: as above.
+    if unsafe { libc::flock(lease.as_raw_fd(), libc::LOCK_UN) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(false)
+}
+
+/// [`observe_cleanup_lease`] where there is no lease: the cleanup lease is
+/// Unix's (`rundir::hold_cleanup_lease_for_child`), and the production
+/// observation answers free elsewhere without opening anything, so there is
+/// nothing to tell apart and nothing that can fail.
+#[cfg(not(unix))]
+pub(crate) fn observe_cleanup_lease(public: &Path) -> std::io::Result<bool> {
+    Ok(crate::rundir::observe_cleanup_hold(
+        public,
+        &mut crate::rundir::NoHooks,
+    ))
+}
+
+// The file a test on this thread made unreadable, and the mode to put back,
+// until a lease wait's observation reads the lease held
+// (`a_wait_read_the_lease_held`). Thread-local for the removal observer's
+// reason above: a test's lease waits run on the thread of the test that armed
+// it, and a process-wide slot would be another test's as often as this one's.
+#[cfg(unix)]
+thread_local! {
+    static UNREADABLE_UNTIL_READ_HELD: RefCell<Option<(PathBuf, u32)>> =
+        const { RefCell::new(None) };
+}
+
+/// Make the file at `path` unreadable to this process, mode `000`, until a
+/// lease wait on this thread reads the run's cleanup lease held: that wait's
+/// acknowledgement puts the mode back ([`a_wait_read_the_lease_held`]), and
+/// dropping the answer puts it back otherwise. The inspection error a wait
+/// meets is then real, `EACCES`, and lasts exactly until a wait has read it as
+/// a holder: a wait that tells an inspection error from a holder fails on it,
+/// and one that reads the error as a holder clears it by reading it so, and
+/// passes.
+///
+/// # Panics
+///
+/// When a file is already armed on this thread; when the mode cannot be read
+/// or set; and when `path` still opens for reading at mode `000`: root, or a
+/// process holding `CAP_DAC_OVERRIDE`, opens through it, and a test built on
+/// the error would then measure nothing. The mode has been put back before
+/// that panic.
+#[cfg(unix)]
+pub(crate) fn unreadable_until_read_held(path: &Path) -> UnreadableUntilReadHeld {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let mode = fs::metadata(path)
+        .unwrap_or_else(|error| panic!("the mode of {}: {error}", path.display()))
+        .permissions()
+        .mode();
+    UNREADABLE_UNTIL_READ_HELD.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        assert!(
+            slot.is_none(),
+            "one file is made unreadable at a time on this thread"
+        );
+        *slot = Some((path.to_path_buf(), mode));
+    });
+    let armed = UnreadableUntilReadHeld {
+        _not_send: PhantomData,
+    };
+    set_mode(path, 0o000);
+    match fs::File::open(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => armed,
+        opened => panic!(
+            "prerequisite not met: {} answered {opened:?} at mode 000, so the mode bit did not \
+             bind (running as root or with CAP_DAC_OVERRIDE); this needs an unprivileged user",
+            path.display()
+        ),
+    }
+}
+
+/// [`unreadable_until_read_held`]'s file, armed on this thread: whether it is
+/// unreadable still, and its mode put back when this drops, if no lease wait
+/// put it back first.
+#[cfg(unix)]
+pub(crate) struct UnreadableUntilReadHeld {
+    /// Not `Send`: the slot it ends is this thread's.
+    _not_send: PhantomData<*const ()>,
+}
+
+#[cfg(unix)]
+impl UnreadableUntilReadHeld {
+    /// Whether no lease wait on this thread has read the lease held since the
+    /// file was made unreadable: it is unreadable still.
+    pub(crate) fn never_read_held(&self) -> bool {
+        UNREADABLE_UNTIL_READ_HELD.with(|slot| slot.borrow().is_some())
+    }
+}
+
+#[cfg(unix)]
+impl Drop for UnreadableUntilReadHeld {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let Some((path, mode)) = UNREADABLE_UNTIL_READ_HELD.with(|slot| slot.borrow_mut().take())
+        else {
+            return;
+        };
+        if fs::set_permissions(&path, fs::Permissions::from_mode(mode)).is_err() {
+            // Gone already, with the scratch tree it was in: nothing to put
+            // back, and the tree's own reclaim reports what it cannot remove.
+        }
+    }
+}
+
+/// A lease wait's acknowledgement of an observation that read the run's
+/// cleanup lease held, on this thread: put back the mode of the file
+/// [`unreadable_until_read_held`] armed, if one is armed, and nothing
+/// otherwise.
+#[cfg(unix)]
+pub(crate) fn a_wait_read_the_lease_held() {
+    if let Some((path, mode)) = UNREADABLE_UNTIL_READ_HELD.with(|slot| slot.borrow_mut().take()) {
+        set_mode(&path, mode);
+    }
+}
+
+// -----------------------------------------------------------------------
 // A fork parked with one inherited descriptor, held until it is released
 // -----------------------------------------------------------------------
 

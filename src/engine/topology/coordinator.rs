@@ -4178,6 +4178,10 @@ mod tests {
             WidePlans::default(),
             holding(&tasks, &[]),
         );
+        let _deadline = crate::workspace_manager::RegistryDeadline::hold(
+            wide.env.fixture.manager.common_git_dir(),
+            WITNESS_REGISTRY_DEADLINE,
+        );
         let common = wide.env.fixture.manager.common_git_dir().to_path_buf();
         let before = crate::workspace_manager::contended_attempts(&common);
         let (policy, _admin) = tearing(&wide, "foreign-in-flight", true);
@@ -4573,6 +4577,8 @@ mod tests {
 
     type FoldAct = (fn(&TopologyEventBody) -> bool, Box<dyn FnMut()>);
 
+    const WITNESS_REGISTRY_DEADLINE: Duration = Duration::from_secs(10);
+
     struct TearHeld {
         inner: crate::engine::topology::seams::HarnessTopologyHooks,
         at: TearAt,
@@ -4581,6 +4587,7 @@ mod tests {
         planting: Option<crate::workspace_manager::fixture::AccessPlanting>,
         armed: bool,
         also: Option<FoldAct>,
+        _deadline: crate::workspace_manager::RegistryDeadline,
     }
 
     impl TearHeld {
@@ -4610,6 +4617,10 @@ mod tests {
                 planting: None,
                 armed: false,
                 also: None,
+                _deadline: crate::workspace_manager::RegistryDeadline::hold(
+                    wide.env.fixture.manager.common_git_dir(),
+                    WITNESS_REGISTRY_DEADLINE,
+                ),
             }
         }
 
@@ -4971,6 +4982,15 @@ mod tests {
             "registry-served-publish",
             &[],
             TearAt::Fold(merge_prepared_of_beta),
+        );
+    }
+
+    #[test]
+    fn a_pipeline_is_served_while_a_publications_swap_recheck_waits_on_a_torn_registration() {
+        served_while_alpha_waits(
+            "registry-served-swap-recheck",
+            &[],
+            TearAt::Access(merge_prepared_of_beta, 2),
         );
     }
 
@@ -5770,9 +5790,12 @@ mod tests {
             drop(scheduler);
             hooks.finish().expect("the tear was planted");
             drop(hooks);
-            let at_shutdown = injected
-                .get()
-                .expect("the shutdown was injected while the tear stood");
+            let Some(at_shutdown) = injected.get() else {
+                panic!(
+                    "the shutdown was injected while the tear stood: it was not, and the command \
+                     ended on {error}"
+                );
+            };
             let warnings = wide.run.warnings().join("\n");
             assert!(
                 error.to_string().contains("shut"),
@@ -5904,6 +5927,123 @@ mod tests {
                     "{:?}",
                     kinds_of(events)
                 );
+                assert_eq!(
+                    of_key(events, "attempt_started", 1),
+                    0,
+                    "{:?}",
+                    kinds_of(events)
+                );
+                assert_eq!(
+                    workers_of(wide, 1),
+                    0,
+                    "no pipeline was spawned for the stopped dispatch"
+                );
+            },
+        );
+    }
+
+    // Protocol (standards §10): the slow witness owns the worker that holds its
+    // access's first contended answer. The build step spawns the worker and
+    // sends it, with the sender that cancels its wait for that answer, over a
+    // channel to the check step, its one owner past the run. `finish` cancels
+    // what is left of that wait and joins the worker; a worker that panicked
+    // dropped its release unsent, which let the held access go on at once, and
+    // the witness fails on it rather than passing without the delay it is
+    // about. A scenario that unwinds first drops the channel, and the drop
+    // cancels and joins the worker in the same way, saying what it found.
+    struct DelayedRelease {
+        cancel: std::sync::mpsc::Sender<()>,
+        worker: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl DelayedRelease {
+        fn finish(&mut self) -> Result<(), String> {
+            let Some(worker) = self.worker.take() else {
+                return Ok(());
+            };
+            let _ = self.cancel.send(());
+            worker.join().map_err(|_| {
+                "the worker that held the access's first contended answer panicked, so its \
+                 release dropped unsent and the access went on without the delay"
+                    .to_owned()
+            })
+        }
+    }
+
+    impl Drop for DelayedRelease {
+        fn drop(&mut self) {
+            if let Err(why) = self.finish() {
+                if std::thread::panicking() {
+                    crate::workspace_manager::fixture::say(&why);
+                } else {
+                    panic!("{why}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_delayed_release_whose_worker_panicked_fails_its_witness() {
+        let (cancel, _cancelled) = std::sync::mpsc::channel::<()>();
+        let worker = std::thread::spawn(|| {
+            panic!("an injected failure of a delayed release's worker, before its delay");
+        });
+        let mut delayed = DelayedRelease {
+            cancel,
+            worker: Some(worker),
+        };
+        let finished = delayed.finish();
+        assert!(
+            matches!(&finished, Err(why) if why.contains("panicked")
+                && why.contains("without the delay")),
+            "a worker that panicked is reported, not taken for its delay: {finished:?}"
+        );
+    }
+
+    #[test]
+    fn a_shutdown_answered_inside_a_slow_dispatchs_intent_starts_no_attempt_and_spawns_nothing() {
+        let (handing, handed) = std::sync::mpsc::channel::<DelayedRelease>();
+        stopped_in_its_wait(
+            "shutdown-wait-intent-slow",
+            StoppedInItsWait {
+                at: TearAt::Fold(task_dispatched_of(1)),
+                torn: Torn::CommondirEmpty,
+                finish_at_shutdown: true,
+            },
+            move |tag| {
+                let wide = two_held(tag);
+                let common = wide.env.fixture.manager.common_git_dir().to_path_buf();
+                let before = crate::workspace_manager::contended_attempts(&common);
+                let release = crate::workspace_manager::hold_next_contended(&common);
+                let (cancel, cancelled) = std::sync::mpsc::channel::<()>();
+                let worker = std::thread::spawn(move || {
+                    let deadline = std::time::Instant::now() + BOUND;
+                    while crate::workspace_manager::contended_attempts(&common) == before
+                        && cancelled.try_recv() == Err(std::sync::mpsc::TryRecvError::Empty)
+                        && std::time::Instant::now() < deadline
+                    {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    std::thread::sleep(Duration::from_millis(700));
+                    let _ = release.send(());
+                });
+                handing
+                    .send(DelayedRelease {
+                        cancel,
+                        worker: Some(worker),
+                    })
+                    .expect("the check step holds the worker's channel");
+                wide
+            },
+            first_released,
+            move |wide, _| {
+                let mut delayed = handed
+                    .try_recv()
+                    .expect("the build step handed its worker over");
+                if let Err(why) = delayed.finish() {
+                    panic!("{why}");
+                }
+                let events = wide.run.events();
                 assert_eq!(
                     of_key(events, "attempt_started", 1),
                     0,
@@ -6153,6 +6293,25 @@ mod tests {
     }
 
     #[test]
+    fn a_shutdown_answered_inside_a_publications_swap_recheck_publishes_nothing() {
+        stopped_in_its_wait(
+            "shutdown-wait-swap-recheck",
+            StoppedInItsWait {
+                at: TearAt::Access(merge_prepared_of_beta, 2),
+                torn: Torn::CommondirEmpty,
+                finish_at_shutdown: true,
+            },
+            two_held_gated(&[]),
+            beta_settles_first,
+            |wide, _| {
+                let events = wide.run.events();
+                assert_eq!(count(events, "merge_prepared"), 1, "{:?}", kinds_of(events));
+                assert_eq!(count(events, "task_merged"), 0, "{:?}", kinds_of(events));
+            },
+        );
+    }
+
+    #[test]
     fn a_shutdown_answered_inside_a_stale_picks_wait_classifies_nothing_into_the_log() {
         stopped_in_its_wait(
             "shutdown-wait-pick",
@@ -6329,6 +6488,10 @@ mod tests {
                 WidePlans::default(),
                 holding(&tasks, &[]),
             );
+            let _deadline = crate::workspace_manager::RegistryDeadline::hold(
+                wide.env.fixture.manager.common_git_dir(),
+                WITNESS_REGISTRY_DEADLINE,
+            );
             let mut hooks = wide.env.hooks();
             let seams = wide.env.seams();
             let alpha = crate::engine::topology::run::begin_dispatch(
@@ -6414,6 +6577,10 @@ mod tests {
                 WidePlans::default(),
                 holding(&tasks, &[]),
             );
+            let _deadline = crate::workspace_manager::RegistryDeadline::hold(
+                wide.env.fixture.manager.common_git_dir(),
+                WITNESS_REGISTRY_DEADLINE,
+            );
             let mut hooks = wide.env.hooks();
             let seams = wide.env.seams();
             let pipelines = wide.env.pipelines();
@@ -6468,6 +6635,10 @@ mod tests {
                 2,
                 WidePlans::default(),
                 RecordingRunner::new().answering(wide_responder(&tasks, &[])),
+            );
+            let _deadline = crate::workspace_manager::RegistryDeadline::hold(
+                wide.env.fixture.manager.common_git_dir(),
+                WITNESS_REGISTRY_DEADLINE,
             );
             let mut hooks = wide.env.hooks();
             let seams = wide.env.seams();

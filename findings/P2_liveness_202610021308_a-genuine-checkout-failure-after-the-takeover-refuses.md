@@ -1,14 +1,14 @@
 ---
 id: PR329-A-GENUINE-CHECKOUT-FAILURE-AFTER-THE-TAKEOVER-REFUSES
 severity: P2
-disposition: deferred
+disposition: accepted-risk
 category: liveness
 pr: 329
 reviewed_sha: 4a126215be58fea36271db3423180d38c1bf3183
 location: src/workspace_manager.rs:2649
 provenance: introduced_by_feature
 first_bad: PR #329's design round 8 (its record §7.3, R14), which answers an add failure after Git may have taken the destination over with a refusal; prior ID FUB-D5-GENUINE (PR #329's design review round 5, at the reviewed SHA above), whose consequence this is, reopened deliberately
-guard: before G6, the owner's disposition, asked in the PR11 orchestrator's one consolidated owner question after design reviews B9 (#329), C5 (#330) and D3 (#331), where round 8's narrowing is classified; it becomes accepted-risk if the owner keeps PR #329's record §7.3 and the design is amended to match, and otherwise the closure needs machinery that tells a genuine checkout failure from a prune's deletion
+guard: before G6, the owner's disposition, asked in the PR11 orchestrator's one consolidated owner question after design reviews B9 (#329), C5 (#330) and D3 (#331), where round 8's narrowing is classified; it becomes accepted-risk if the owner keeps PR #329's record §7.3 and the design is amended to match, and otherwise the closure needs machinery that tells a genuine checkout failure from a prune's deletion; met on 2026-10-08, when the owner kept §7.3 under O9(a) and `design/26` was amended to match at `5146f976`, so the disposition is accepted-risk (Accepted, below)
 ---
 
 ## Failure sequence
@@ -76,3 +76,22 @@ A verification whose snapshot checkout fails after the takeover ends the command
 appended, and its resume verifies again under a new sequence
 (`a_verification_whose_snapshot_checkout_fails_after_the_takeover_ends_resumably_and_its_resume_reverifies`).
 `design/26` is unchanged, pending the owner's disposition (O9).
+
+## Accepted (2026-10-08, PR #329's B11 round)
+
+**This file's own guard is met.** It "becomes accepted-risk if the owner keeps PR #329's record §7.3 and the design is
+amended to match", and both hold:
+- **The owner kept §7.3.** The owner's answer of 2026-10-08 adopted O9(a), which accepts R14 as a liveness and semantic
+  cost (the decision appendix's §7.1). It is relayed in `~/babysit-pr11/evidence/b-first-owner-approval-and-execution-20261008.md`
+  (sha256 `77d4340c…`) and recorded in `~/orch-pr11/owner-package/ADOPTION-B-FIRST-20261008.md` (sha256 `7e9c26b8…`).
+- **The design is amended to match** at `5146f976` (the record's §9.28.2). In `design/26`, a registry refusal is not an
+  unavailable settlement, and a cause that persists stops the run at each resume until the content or the environment
+  changes. The "In force" section's last sentence above is superseded.
+
+**This applies the owner's acceptance; it is not an automatic disposition** (the orchestrator's answer 1 to
+`pr11_fub_impl16`, 2026-10-08). What stays open beside it:
+- **The clearing gap:** `PR329-R14-A-CANDIDATE-NO-ENVIRONMENT-CHANGE-ANSWERS-HAS-NO-CLEARING-PROCEDURE` (P2, deferred,
+  for B's review to grade). A candidate whose content no environment change lets the host check out has no supported
+  clearing procedure.
+- **The operator view and the clearing procedure** are in the record's §9.28.4. **The persistence wording**, measured
+  against the P3 the owner question names, is in the record's §9.28.10.
