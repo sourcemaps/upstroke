@@ -6217,8 +6217,8 @@ fn every_path_entry_this_runner_searches_names_a_location_on_its_own() {
         "the table lost its teeth: it must hold entries of both kinds on both platforms"
     );
 
-    let absent = root.join("never-created");
-    let probe = std::fs::symlink_metadata(&absent)
+    let bin = root.join("bin");
+    let probe = std::fs::symlink_metadata(&bin)
         .expect_err("a directory nothing has created must not exist");
     assert_eq!(
         probe.kind(),
@@ -6226,8 +6226,8 @@ fn every_path_entry_this_runner_searches_names_a_location_on_its_own() {
         "the fixture must be absent, not merely unreadable, to count a finished search"
     );
     let error = resolve_program(
-        "upstroke-no-such-program",
-        &composed(&[("PATH", path_of(&[&absent]).as_os_str())]),
+        "x",
+        &composed(&[("PATH", path_of(&[&bin]).as_os_str())]),
         KeyCase::current(),
         naming,
     )
@@ -6248,7 +6248,6 @@ fn every_path_entry_this_runner_searches_names_a_location_on_its_own() {
         "an absent entry names a location and was skipped: {message}"
     );
 
-    let bin = root.join("bin");
     let found = program_file(&bin, &shim_file_name("x"));
     assert_eq!(
         resolve_program(

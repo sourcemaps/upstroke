@@ -2995,7 +2995,8 @@ red on byte-identical source. This repairs
 `PR262-UNREACHABLE-PATH-ENTRY-ABORTS-PROGRAM-RESOLUTION` without moving
 that policy: an unanswerable candidate still stops the search, mere
 absence is still walked past, and both are decided here by construction
-rather than by the machine the suite runs on.
+rather than by the machine the suite runs on, on any machine whose
+temporary directory can hold the positive case's own paths (below).
 
 ## `fn every_path_entry_this_runner_searches_names_a_location_on_its_own() {` › `fn search_summary(message: &str) -> Option<&str> {`
 
@@ -3058,15 +3059,32 @@ The stop is the policy
 this test relies on it rather than restating it, so a change to that
 policy reddens both.
 
-## `fn every_path_entry_this_runner_searches_names_a_location_on_its_own() {` › `let absent = root.join("never-created");`
+## `fn every_path_entry_this_runner_searches_names_a_location_on_its_own() {` › `let bin = root.join("bin");`
 
 The count of a finished search, `1 directory searched,`, is asserted
-only for an entry that is absent by construction: a directory under this
-test's own scratch root that nothing creates, checked to be `NotFound`
-up front (the shape of `never_created_directory` in `naming.rs`'s
-tests). Every candidate under it is a genuine `NotFound`, so the walk
-runs to its end and is counted, whatever a network share or
-`/usr/local/bin` would say.
+only for an entry that is absent by construction: the positive case's
+own entry, `bin` under this test's scratch root, asked for the positive
+case's own program, `x`, before anything has created either, and checked
+to be `NotFound` up front. Its search asks exactly the paths the
+positive case's search asks once `program_file` has installed `x` — the
+same entry and the same candidates — while their directory does not
+exist yet, so each answers `NotFound` and the walk runs to its end and
+is counted, whatever a network share or `/usr/local/bin` would say.
+
+The candidates are the positive case's on purpose. A missing directory
+does not by itself make every path beneath it `NotFound`: a path longer
+than the platform allows is refused for its length first, whatever
+exists, as Linux's `ENAMETOOLONG` (os error 36). The directory this
+case once used, `never-created`, had a candidate 33 bytes longer than
+the positive case's file, so a temporary directory long enough for the
+positive case but not for that candidate stopped the search there and
+failed the test on unchanged source (`P335-R2-PL-1`). Asking only the
+positive case's own paths, the case asks nothing the positive case does
+not: under any temporary directory short enough for the positive case
+to install and find its program, this search runs to its end. Under one
+too long even for that, the test cannot pass at all, and this case
+fails openly — at its own absence check, or at the refusal it requires,
+naming the `Filesystem` stop — never on a count read from a path.
 
 Its `PATH` is built by `path_of`, as every `PATH` this test passes is —
 the table's entries and the positive case's — and as both witnesses
@@ -3081,10 +3099,11 @@ searched around: `path_of` refuses it as both witnesses' `join_paths`
 refuse it, and the test fails there rather than search anywhere in its
 place.
 
-## `fn every_path_entry_this_runner_searches_names_a_location_on_its_own() {` › `let bin = root.join("bin");`
+## `fn every_path_entry_this_runner_searches_names_a_location_on_its_own() {` › `let found = program_file(&bin, &shim_file_name("x"));`
 
 And "searched" means searched: the one kind of entry that is not
-skipped does find a program in it.
+skipped does find a program in it — the same entry, once the program is
+installed there.
 
 ## `fn an_empty_path_entry_never_reaches_the_workspaces_own_copy_of_a_bare_name() {`
 
