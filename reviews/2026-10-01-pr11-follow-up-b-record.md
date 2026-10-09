@@ -11454,7 +11454,8 @@ hunk touches it), which panicked at `src/workspace_manager/tests.rs:15909:23`: "
 meets the repaired store: RegistryRefused { message: \"the worktree registry
 /tmp/upstroke-registry-access-final-T8YA1T8S37/common/worktrees kept this access from completing until its deadline
 (500ms): 14 attempt(s), the last failed with: git error: attempt 14 failed\" }". Observed, and only this: 14 attempts,
-the 14th failed, the refusal at the 500 ms deadline, and no attempt after the 14th. No per-attempt clock trace exists,
+the 14th failed, a refusal whose message names the configured 500 ms deadline (its elapsed time unmeasured), and no
+attempt after the 14th. No per-attempt clock trace exists,
 and the box's load during the gate was not sampled. D2's other results on file, from the triage's table: `ok` at the
 test gate at `f8909137` and at `421cfab0`, in B13's four guest suites (`f8909137`, `d91ca49b` twice, `421cfab0`), in
 the hosted `windows-latest` queue run at `120c8c8c`, and in B14's guest suite at `dea03555` (2,923 passed, 0 failed,
@@ -11493,7 +11494,8 @@ Figures are under `~/orch-pr11/logs/pr11_fub_impl20/`, cited as `impl20/…`. Ev
 §9.31.12 records it: D2 (`the_final_attempt_passes_a_failure_repaired_by_the_deadline`) at the box's test gate at
 `dea03555`, "deadline (500ms): 14 attempt(s), the last failed with: git error: attempt 14 failed".
 
-**Observed, and only this:** 14 attempts, the 14th failed, the refusal at the 500 ms deadline, and no attempt after the
+**Observed, and only this:** 14 attempts, the 14th failed, a refusal whose message names the configured 500 ms
+deadline (its elapsed time unmeasured), and no attempt after the
 14th. No per-attempt clock trace exists, and the box's load was not sampled. **The historical timing is unknown,** and
 where the attempts fell cannot be recovered.
 
@@ -11728,9 +11730,12 @@ The body and the round's package record their results. A red is returned as red 
 - **Builds:** every build on this box ran through `upstroke-build` on this lane's iso, by its physical path, never
   `/mnt/ramtarget`.
 - **Private copies** are under `/tmp/pr11-fub-impl20-*` (`impl20/runs/*/copies.txt`), left in place, cleanup being out
-  of scope. Among them are four patch-application dry checks, with no build. The first was vacuous, because the
+  of scope. Among them are five patch-application dry checks, with no build. The first was vacuous, because the
   instrumentation tool refused (`impl20/runs/dry/FIRST-DRY-CHECK-REFUSALS.md`); it is kept as its own row.
 - **Nothing read or touched beyond the round:** no process table, environment value or credential was read. No process
   was killed or signalled, and no safety limit was reached.
 - **Before this section was committed:** no guest run was made in this round, nothing was pushed, and the pull
   request's body was not edited.
+- *Corrected 2026-10-09, before publication (the orchestrator's answer 4): "four" dry checks to five (the fifth,
+  `dry5-r2applycheck`, 01:44Z); in §9.31.12 and §9.32.1, "the refusal at the 500 ms deadline" to a refusal whose
+  message names the configured deadline, its elapsed time unmeasured.*
