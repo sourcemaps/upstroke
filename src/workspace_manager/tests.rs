@@ -18825,9 +18825,22 @@ fn an_earlier_registration_only_instance(
 /// waits through the hooks — which heal the store — and the attempt after
 /// the wait finds the earlier instance its registration alone names. Nothing
 /// sleeps on the calling thread.
+///
+/// Its read waits to the production deadline (the follow-up C record's §6.15,
+/// the class of the follow-up B record's §9.31), so it asks for the wait after
+/// its first failed attempt only if time remains when it reads its clock after
+/// that attempt's veto and count. If the deadline has passed by then, wherever
+/// the time went (the attempt, its veto, the count, or its thread descheduled),
+/// it asks for no wait: it makes its final attempt, or refuses if the failed
+/// attempt was already its final one (the follow-up B record's §9.32 and
+/// §9.34).
 #[test]
 fn intents_pausing_reads_the_registry_through_the_hooks_it_is_handed() {
     let fixture = Fixture::created("pausing-intents");
+    let _deadline = super::RegistryDeadline::hold(
+        fixture.manager.common_git_dir(),
+        PRODUCTION_REGISTRY_DEADLINE,
+    );
     let earlier = of_incarnation(&fixture, "inc-0");
     let slot = Slot::Staging { sequence: 4 };
     an_earlier_registration_only_instance(&fixture, &earlier, &slot);
@@ -18858,9 +18871,22 @@ fn intents_pausing_reads_the_registry_through_the_hooks_it_is_handed() {
 /// §6.11: a reclaim's walk (`reclaim_intents`) enumerates through the hooks
 /// it is handed, so its registry read waits through them, and the earlier
 /// instance it finds is reclaimed.
+///
+/// Its walk's read waits to the production deadline (the follow-up C record's
+/// §6.15, the class of the follow-up B record's §9.31), so it asks for the wait
+/// after its first failed attempt only if time remains when it reads its clock
+/// after that attempt's veto and count. If the deadline has passed by then,
+/// wherever the time went (the attempt, its veto, the count, or its thread
+/// descheduled), it asks for no wait: it makes its final attempt, or refuses if
+/// the failed attempt was already its final one (the follow-up B record's §9.32
+/// and §9.34).
 #[test]
 fn a_reclaims_walk_reads_the_registry_through_the_hooks_it_is_handed() {
     let fixture = Fixture::created("pausing-reclaim");
+    let _deadline = super::RegistryDeadline::hold(
+        fixture.manager.common_git_dir(),
+        PRODUCTION_REGISTRY_DEADLINE,
+    );
     let earlier = of_incarnation(&fixture, "inc-0");
     let slot = Slot::Staging { sequence: 4 };
     an_earlier_registration_only_instance(&fixture, &earlier, &slot);
@@ -18888,9 +18914,22 @@ fn a_reclaims_walk_reads_the_registry_through_the_hooks_it_is_handed() {
 /// §6.11: terminal finalization's final sweep reads the registry through the
 /// hooks it is handed. Its read meets a registration it cannot read, waits
 /// through the hooks, and then removes the earlier instance it found.
+///
+/// The sweep's read waits to the production deadline (the follow-up C record's
+/// §6.15, the class of the follow-up B record's §9.31), so it asks for the wait
+/// after its first failed attempt only if time remains when it reads its clock
+/// after that attempt's veto and count. If the deadline has passed by then,
+/// wherever the time went (the attempt, its veto, the count, or its thread
+/// descheduled), it asks for no wait: it makes its final attempt, or refuses if
+/// the failed attempt was already its final one (the follow-up B record's §9.32
+/// and §9.34).
 #[test]
 fn the_final_sweeps_registry_read_waits_through_the_hooks_it_is_handed() {
     let fixture = Fixture::created("pausing-sweep-read");
+    let _deadline = super::RegistryDeadline::hold(
+        fixture.manager.common_git_dir(),
+        PRODUCTION_REGISTRY_DEADLINE,
+    );
     let earlier = of_incarnation(&fixture, "inc-0");
     let slot = fixture.task("alpha", 1);
     late_add(&fixture, &earlier.slot_path(&slot));
@@ -18919,9 +18958,22 @@ fn the_final_sweeps_registry_read_waits_through_the_hooks_it_is_handed() {
 /// handed. The unreadable registration is planted just before the removal's
 /// own access, the third of the call (the gate's list, the sweep's read, the
 /// removal), so only the removal's scan meets it.
+///
+/// The removal's scan waits to the production deadline (the follow-up C
+/// record's §6.15, the class of the follow-up B record's §9.31), so it asks for
+/// the wait after its first failed attempt only if time remains when it reads
+/// its clock after that attempt's veto and count. If the deadline has passed by
+/// then, wherever the time went (the attempt, its veto, the count, or its
+/// thread descheduled), it asks for no wait: it makes its final attempt, or
+/// refuses if the failed attempt was already its final one (the follow-up B
+/// record's §9.32 and §9.34).
 #[test]
 fn the_final_sweeps_removal_waits_through_the_hooks_it_is_handed() {
     let fixture = Fixture::created("pausing-sweep-removal");
+    let _deadline = super::RegistryDeadline::hold(
+        fixture.manager.common_git_dir(),
+        PRODUCTION_REGISTRY_DEADLINE,
+    );
     let earlier = of_incarnation(&fixture, "inc-0");
     let slot = fixture.task("alpha", 1);
     late_add(&fixture, &earlier.slot_path(&slot));

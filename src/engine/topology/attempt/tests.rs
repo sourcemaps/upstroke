@@ -2146,7 +2146,12 @@ impl TopologyHooks for HealsTheStoreAtAWait<'_> {
 
 #[test]
 fn an_interrupted_attempts_residue_discard_reads_the_registry_through_the_hooks_it_is_handed() {
+    const PRODUCTION_REGISTRY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
     let mut run = Run::started("discard-pausing");
+    let _deadline = crate::workspace_manager::RegistryDeadline::hold(
+        run.fixture.manager.common_git_dir(),
+        PRODUCTION_REGISTRY_DEADLINE,
+    );
     let dispatched = run.dispatch(ALPHA, 0);
     let plan = run.attempt_plan(ALPHA, 1);
     let mut process = Process::new();
