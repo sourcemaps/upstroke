@@ -685,7 +685,10 @@ a later error, which is right for a second error while the command is already en
 this one: T-APPEND makes a returned append error the command's error. So the stored interrupt is
 replaced and kept as a warning (`superseded`): the stored error, a halt's or a shutdown's description,
 or else the frozen `integrate()`'s own error. No closure follows a halt it replaced, and none could
-append on the poisoned fold. It is called only at the two recording points.
+append on the poisoned fold. It is called only at the two recording points. A stopped run's refusal of
+the record (a registry access's wait met the interrupt, so the run's emitter refuses every append and
+writes nothing) reaches it the same way: that refusal ends the command, the interrupt it replaced is
+the warning, and the passes the record would have carried are charged live only.
 
 ## `impl Coordinator<'_>` › `fn finish(&mut self) -> Result<Progress, UpstrokeError> {`
 
@@ -2509,3 +2512,33 @@ The control beside T15: a destination that cannot be made is Git state at once, 
 runs (`workspace_manager`'s destination step, after the add's gate), so `decisions.repairs.not_repairs` applies as it did:
 one `merge_verification_unavailable` (Deferred), and the run completes with both candidates
 merged. Green before #329 too, where Git's own add failed to make the destination.
+
+## `mod tests` › `struct PlantingAtTheSnapshot {`
+
+Plants one of #329's own faults just before the verification's fourth snapshot add, the third
+reviewer's, by asking the planter for the review-input problem of a path under `merge`, as the
+verification asks it: the gate's and the first two reviewers' snapshots are made and their passes
+charged first. The planter is #329's `TearsAForeignRegistration` (T2′'s registration that stays
+torn) or `RequiresAFailingFilter` (T15's required filter that fails).
+
+## `mod tests` › `fn a_registry_refusal_after_two_paid_passes_is_recorded_with_both_at_width_three() {`
+
+B's charged refusal (the O14(b) proposal's witness for B, §7): the third reviewer's snapshot meets
+T2′'s torn registration, and its access refuses at its deadline as `UpstrokeError::RegistryRefused`
+naming `commondir` after passes 0 and 1 were charged. The command ends with the record of both as its
+last append, no terminal, and the transaction open; replay and the live totals agree, and the record
+carries $0.50 of them. With the tear removed, the next process's recovery settles the sequence
+interrupted after the record, its replayed spend is the live spend of the process before it, and
+the resumed run completes with the passes counted once. Red at #329's merge, where the log ends at
+`merge_verification_started` and the passes are charged live only.
+
+## `mod tests` › `fn a_registry_refusal_after_two_paid_passes_is_recorded_with_both_at_width_one() {`
+
+The same refusal at width 1, through `step`: the record is the step's last append, and the resumed
+step verifies the candidate again under the next sequence.
+
+## `mod tests` › `fn a_registry_refusal_after_the_takeover_at_the_third_review_is_recorded_with_both_passes() {`
+
+The refusal's third face, O9(a)'s: T15's failing filter is planted before the third reviewer's
+snapshot, its checkout fails after Git took the destination over, and the access refuses at once.
+The record and the resume are as at width 3. Unix only, as T15 is.

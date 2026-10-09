@@ -511,9 +511,11 @@ it is attempted again until its deadline, and a registration still in the
 way then — another process's write that has not finished, a write a dead
 process left torn, a registration nobody is writing — refuses as
 `UpstrokeError::RegistryRefused`, which the last arm passes on, so the
-command ends resumably, with the transaction open and nothing appended, and
-a resume settles the verification interrupted and verifies the candidate
-again under a new sequence. A coordinator in a linked checkout of the same
+command ends resumably, with the transaction open and nothing appended but
+the record of the review passes the verification had charged before it, if
+any (`merge_verification_charged`, which settles nothing), and a resume
+settles the verification interrupted and verifies the candidate again under
+a new sequence. A coordinator in a linked checkout of the same
 repository was the process this mattered for
 (`PR11-LINKED-CHECKOUTS-RACE-THE-SHARED-WORKTREE-REGISTRY`): before #329 its
 write in flight was foreign Git state here, the terminal spent one of the
@@ -2374,7 +2376,11 @@ poisoned (T-APPEND: no further append; warned, and the next open's stable-prefix
 lines survived). The driver's error mapping turns a refusal and an append failure into the same
 `Refused`, so the helper asks before it appends rather than guessing afterwards; whether the sequence
 already has a record it reads from the log the fold admitted. Its append goes through `self.emit(…)?`,
-so the append-error protocol runs for it like every driver append.
+so the append-error protocol runs for it like every driver append. A stopped run (`stop`, above: a
+registry access's wait inside a transition met an interrupt on the coordinator) refuses this append
+as it refuses every append, before the protocol runs: the fold admits the record, the emitter writes
+nothing, the passes stay unknown spend, and the refusal is the error the recording point hands on, as
+an append error is. The width-1 run never stops.
 
 ## `impl TopologyRun` › `pub(super) fn limit_slots(`
 
