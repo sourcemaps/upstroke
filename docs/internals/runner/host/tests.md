@@ -2957,6 +2957,13 @@ Rooted on Unix; on Windows a leading separator is relative to the
 A UNC share names a location on Windows and is an ordinary file name
 on Unix.
 
+Which share it would name is never asked: the test's program name
+carries an interior NUL, so the first candidate under this entry is
+refused before any request leaves the process, and no answer from an
+SMB stack — "no such share", `os error 64` or none at all — can reach
+the verdict (`PR262-UNREACHABLE-PATH-ENTRY-ABORTS-PROGRAM-RESOLUTION`,
+below).
+
 ## `fn every_path_entry_this_runner_searches_names_a_location_on_its_own() {`
 
 Every `PATH` entry this runner searches names a location on its own.
@@ -2974,6 +2981,55 @@ The written table is checked against `Path::is_absolute` first, so the
 row below is a claim about `resolve_program` and not about `std`. What
 varies is the entry; what is held constant is the program name, the
 candidates and the composed environment.
+
+The table answers one question: **which entries are searched**. It is
+kept apart from the other one, **what a searched entry's candidates
+answer**, because the two were once fused. Each absolute entry used to
+be walked to its end and the count asserted, so whether the UNC row
+passed was the answer of whatever `\\server\share` reached: an answer
+meaning "no such share" maps to `NotFound` and the walk completed;
+`os error 64` ("the specified network name is no longer available")
+does not, so the deliberate stop fired instead and a required leg went
+red on byte-identical source. This repairs
+`PR262-UNREACHABLE-PATH-ENTRY-ABORTS-PROGRAM-RESOLUTION` without moving
+that policy: an unanswerable candidate still stops the search, mere
+absence is still walked past, and both are decided here by construction
+rather than by the machine the suite runs on.
+
+## `fn every_path_entry_this_runner_searches_names_a_location_on_its_own() {` › `let program = "upstroke\u{0}no-such-program";`
+
+The program every table entry is asked about: a bare name, so the walk
+runs, with an interior NUL, so no candidate under any entry can be
+answered. std refuses such a path before it reaches a system call — the
+property `undeterminable_directory` in `naming.rs`'s tests stands on —
+and the fixture asserts that up front for each entry it searches: the
+refusal is not `NotFound`, and it carries no operating-system error
+code, so nothing on the machine, local disk or network share, was asked.
+A platform that answered otherwise would fail the fixture rather than
+the rule.
+
+So an absolute entry's walk stops at its first candidate, and that stop
+is what "searched" is read from: a `stat` failure whose path is a
+candidate directly under that entry and whose source is the refusal the
+probe met. A relative entry is never stat'ed at all and must report
+itself skipped. Neither outcome depends on what exists at
+`/usr/local/bin` or on what a network share answers, because neither is
+ever asked.
+
+The stop is the policy
+`an_undetermined_candidate_stops_the_search_before_a_later_match` pins;
+this test relies on it rather than restating it, so a change to that
+policy reddens both.
+
+## `fn every_path_entry_this_runner_searches_names_a_location_on_its_own() {` › `let absent = root.join("never-created");`
+
+The count of a finished search, `1 directory searched,`, is asserted
+only for an entry that is absent by construction: a directory under this
+test's own scratch root that nothing creates, checked to be `NotFound`
+up front (the shape of `never_created_directory` in `naming.rs`'s
+tests). Every candidate under it is a genuine `NotFound`, so the walk
+runs to its end and is counted, whatever a network share or
+`/usr/local/bin` would say.
 
 ## `fn every_path_entry_this_runner_searches_names_a_location_on_its_own() {` › `let bin = root.join("bin");`
 
