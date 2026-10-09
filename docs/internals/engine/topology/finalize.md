@@ -159,6 +159,14 @@ Git again. Nothing here changed: the witnesses are in this module's `mod tests`,
 function directly over the same-kind and the cross-kind fixture, stop it at each of its phases, and
 pin the refusal of a torn registration no intent names.
 
+**Its enumeration waits through the hooks it is handed:** the proposed frozen hunk C-R1, conditional on
+the owner's freeze ruling and not adopted (`reviews/2026-10-02-pr11-follow-up-c-record.md` §6.11). The
+walk enumerates through `WorkspaceManager::intents_pausing(hooks.effects())`, so the registry read that
+discovers earlier incarnations' instances waits through these hooks. On the topology coordinator, which
+lends itself as them, a closure's or a finalization's wait answers its messages, and one that answers a
+shutdown ends the scrub there. Without C-R1 the walk calls the hookless `intents()`, whose read sleeps
+on the calling thread.
+
 ## `fn delete_refs_under(`
 
 Every ref under a prefix of the run's namespace, deleted expected-old at the value just read,

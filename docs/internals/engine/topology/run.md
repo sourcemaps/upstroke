@@ -1640,6 +1640,10 @@ normally finds none.
 ## `fn reclaim_snapshots_of(`
 
 Remove every snapshot intent and worktree whose name `names` owns, and no other.
+The walk enumerates through `intents_pausing` with the caller's hooks, so the
+registry read that discovers earlier incarnations' instances waits through
+them: on the coordinator, a closure's reclaim answers its messages while that
+read waits (the follow-up C record, §6.11).
 
 ## `fn settle<O: Operator + ?Sized>(`
 

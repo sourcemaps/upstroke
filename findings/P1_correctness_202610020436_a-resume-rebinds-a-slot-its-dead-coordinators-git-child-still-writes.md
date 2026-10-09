@@ -154,3 +154,31 @@ removal to the instance's own registration, and adds no global-prune fallback
 (`no_production_argv_of_the_manager_names_prune`,
 `no_removal_prunes_another_processs_registration_and_the_store_goes_only_when_empty`). This finding is unchanged and
 open.
+
+## What #330's implementation closes, and why this finding stays open (2026-10-03)
+
+**Closed: the slot-reuse routes.** PR11 follow-up C's implementation (#330, `reviews/2026-10-02-pr11-follow-up-c-record.md`,
+its "Implementation" section) builds U: a slot instance per coordinator incarnation, named by a tag of the incarnation's
+id, whose production form carries a draw from the host; every walk reaching every incarnation's instance; no retention;
+a final sweep at terminal finalization; and the switch set (maintenance, rerere, relative paths, lazy fetch, transports,
+prompts) on every engine Git child. No resume recreates or verifies a slot at a path or registration name an earlier
+incarnation used, so the sequences above — the late `reset --hard`, the junk removal of the recreated registration and
+checkout, the late `HEAD` write, a filter's helper — act on the dead incarnation's own instance. Two routes are witnessed
+through the production funnels: `desc_filter_route_a_dead_adds_junk_removal_cannot_reach_the_successors_slot` and
+`desc_helper_route_a_dead_filters_late_helper_cannot_reach_the_successors_slot`, each red when every incarnation renders
+one tag.
+
+**Why it stays open.** The record's §5.8 leaves residuals of this finding's class under U that the implementation does
+not close, each filed where its owner decides it:
+- **R-REF**, the Windows ref write a terminated `update-ref` can land after its successor reclaimed the lock:
+  `PR330-A-DEAD-COORDINATORS-WINDOWS-REF-WRITE-CAN-LAND-AFTER-ITS-RESUME-RECLAIMED-THE-LOCK`, the owner's D5 (O7).
+- **R-UR**, an instance a still-running earlier writer creates after the final sweep, and its accounting:
+  `FUC-D5-ACCOUNT`, the owner's D1 (O4).
+- **R-GU**, a prune no engine process starts: `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION` (O1).
+- **R-G2**, legacy-started maintenance pruning a registration in its add window: `FUC-D2-RG`, follow-up D's (O8, O10).
+- **FUC-D5-GITINDEXFILE**, an inherited `GIT_INDEX_FILE` defeating instance isolation: filed with `FUB-D9-ENV` (O3 or O3-R).
+
+The two frozen oracles §5.8 also lists are replaced and demonstrated by this change (R-O1 to R-O3 with their mutations),
+so they are not among the residuals. The record does not say this change closes the whole finding; it is deleted when
+the residuals above are closed or accepted by the owner, and #330's merge itself waits on the owner's adoption of the
+record's erratum E-FUC-3, whose naming the implementation follows.

@@ -133,3 +133,38 @@ corrects that. Filing it decides nothing about its repair route, which is the ow
 from the implementation review's executed facts (its regression lens's finding 3,
 `/home/ubuntu/orch-pr11/reviews/review-329-i1-regression-54a1ff14.review.md`). The P1, its grade, its guard and its
 discovery pin `reviewed_sha` are unchanged.
+
+## Extended at PR11 follow-up C's implementation (2026-10-03): FUC-D5-GITINDEXFILE
+
+**The same class, found against #330's U, filed here rather than duplicated.** #330's design review round 5 found it as
+**FUC-D5-GITINDEXFILE, P1**: the design lens (reasoned, on the executed late add) and the added winiso lens (the path
+override executed on Git 2.43 and 2.55 with #330's round-5 switches; the damage reasoned), triaged in
+`/home/ubuntu/orch-pr11/reviews/review-330-d5-triage.md:22` and `:62`.
+
+**Its consequence for #330: it defeats U's instance isolation.** U gives each coordinator incarnation its own slot
+instances, so a dead incarnation's Git writers act only on their own instance's paths and registration
+(`reviews/2026-10-02-pr11-follow-up-c-record.md`, §4 and §5). An inherited `GIT_INDEX_FILE` names one index for every
+engine Git child, whatever instance it runs in: Git honours it over the worktree's own index, and neither builder clears
+or binds it (`WorkspaceManager::command` and `read_only_command` in `src/workspace_manager.rs` at #330's implementation
+bind the switch set and `GIT_NO_REPLACE_OBJECTS` only). So a coordinator launched with it set, a dead incarnation's late
+add whose `reset --hard` writes that shared index, and the successor's `candidate_write_tree` then captures the base tree
+instead of the worker's edits. Its other face, found by the same lens: Q's drain would not stop live commands writing an
+inherited alternate index either, so Q's untouched-user-checkout guarantee fails the same way. The audit list the lens
+gives for both builders, before repository discovery: `GIT_INDEX_FILE`, `GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`,
+`GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES`, `GIT_NAMESPACE`, `GIT_CONFIG_*`, `GIT_SHALLOW_FILE`,
+`GIT_GRAFT_FILE`. #330's common-git-dir census ran under a clean environment (`census_commondir.py:72` in
+`~/orch-pr11/logs/pr11_fuc_design5/census/`), so it could not see this; the appendix's §4.6 asks for the census to be
+repeated under inherited overrides with the remedy.
+
+**What #330's implementation changes here, and what it does not.**
+- It does not change any Git child's inherited environment: that is O3's (ENV-1) or O3-R's, and the brief puts it out
+  of #330's scope. FUC-D5-GITINDEXFILE stays open, P1, with this file, and blocks G6 with it.
+- **This file's protocol route is closed by #330's binding.** Both manager builders now bind `GIT_ALLOW_PROTOCOL` to the
+  empty value, after the inherited environment (a `Command` binding replaces an inherited value of the same name), so an
+  inherited `GIT_ALLOW_PROTOCOL=file` no longer overrides `protocol.file.allow=never`; the binding is pinned by
+  `both_builders_carry_the_engine_switch_set_and_its_bindings`. That is the appendix's row for it (§4.2, the kept
+  variables' table), reached without ENV-1's removals because the binding alone overrides the value. Every other route of
+  this file stays open.
+
+**Owner:** the PR11 owner's decision **O3** (ENV-1 in the manager's two builders), or **O3-R** if the owner folds the
+host runner's role environment into it. #330's ledger maps FUC-D5-GITINDEXFILE's row to this file.

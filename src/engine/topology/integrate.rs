@@ -1030,7 +1030,7 @@ fn reclaim_snapshots(
     journal: &mut dyn IntegrationJournal,
     manager: &WorkspaceManager,
 ) -> Result<(), UpstrokeError> {
-    for slot in manager.intents()? {
+    for slot in manager.intents_pausing(journal.hooks().effects())? {
         if matches!(slot, Slot::Snapshot { .. }) {
             manager.remove_worktree(journal.hooks().effects(), &slot)?;
             manager.remove_intent(journal.hooks().effects(), &slot)?;

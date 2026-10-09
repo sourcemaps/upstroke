@@ -2499,19 +2499,24 @@ fn charge_allowance(&mut self) {}
             (
                 "src/workspace_manager.rs",
                 2,
-                8,
+                10,
                 0,
                 "authoritative Git again, and the same answer: \
                  `std::process::Command` methods on git invocations, never a \
                  CommandSpec. The two `.stdin(` are `Stdio::null()` on the two \
                  builders — these funnels feed no payload to a child — and of \
-                 the eight `.env(`, six are the fixed author/committer identity \
+                 the ten `.env(`, six are the fixed author/committer identity \
                  and dates that make a commit-tree a function of its inputs \
-                 rather than of the machine, and the other two are \
+                 rather than of the machine, two are \
                  `NO_REPLACEMENT_OBJECTS` on the shared builder and on \
-                 `read_only_git`, so that every command this manager spawns \
+                 `read_only_git`'s, so that every command this manager spawns \
                  reads the objects the repository holds rather than whatever \
-                 `git replace` has been pointed at them. A gate or reviewer \
+                 `git replace` has been pointed at them, and the last two are \
+                 the loop over `ENGINE_GIT_ENVIRONMENT` in each builder, the \
+                 fixed `GIT_NO_LAZY_FETCH`, `GIT_ALLOW_PROTOCOL` (empty) and \
+                 `GIT_TERMINAL_PROMPT` bindings that keep a manager Git child \
+                 from fetching, starting a transport or prompting (PR11 \
+                 follow-up C). A gate or reviewer \
                  process gets the environment this runner composes, and \
                  `HostEnvironment::compose` and `ContainerEnvironment::compose` \
                  put the same pair there — a composed vector, not a \

@@ -539,7 +539,7 @@ impl AttemptContext<'_> {
             generation: dispatched.generation.0,
             attempt: attempt.0,
         };
-        for slot in self.manager.intents()? {
+        for slot in self.manager.intents_pausing(self.hooks.effects())? {
             let Slot::Snapshot { name } = &slot else {
                 continue;
             };
