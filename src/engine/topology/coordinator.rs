@@ -19930,4 +19930,256 @@ mod tests {
         );
         records_both_passes(&resumed, sequence);
     }
+
+    fn retained_attempt_finished_of_delta(body: &TopologyEventBody) -> bool {
+        matches!(body, TopologyEventBody::AttemptFinished { data } if data.key == TaskKey(3))
+    }
+
+    fn stopped_inside_a_retrys_wait(
+        wide: &mut Wide,
+        at: TearAt,
+        order: Script<'static>,
+    ) -> (UpstrokeError, usize) {
+        let common = wide.env.fixture.manager.common_git_dir().to_path_buf();
+        let contended = crate::workspace_manager::contended_attempts(&common);
+        let mut hooks = TearHeld::waking(wide, "foreign-held", at, Wakes::Never);
+        hooks.tearing(Torn::CommondirEmpty);
+        let injected = std::rc::Rc::new(std::cell::Cell::new(None));
+        let script = a_shutdown_injected_once_the_tear_stands(
+            hooks.planted(),
+            std::rc::Rc::clone(&injected),
+            Some(hooks.plant.clone()),
+            order,
+        );
+        let pipelines = wide.env.pipelines();
+        let runner = Arc::clone(&wide.env.runner);
+        let mut scheduler = Scheduler::scripted(&runner, script);
+        let slept = crate::workspace_manager::fixture::slept_pauses();
+        let error = wide
+            .run
+            .run_concurrently(
+                &wide.env.seams(),
+                &pipelines,
+                &mut hooks,
+                Some(&mut scheduler),
+            )
+            .expect_err("a shutdown answered inside the retry's wait ends the command");
+        drop(scheduler);
+        hooks.finish().expect("the tear was planted");
+        drop(hooks);
+        let Some(at_shutdown) = injected.get() else {
+            panic!(
+                "the shutdown was injected while the tear stood: it was not, and the command \
+                 ended on {error}"
+            );
+        };
+        assert!(
+            crate::workspace_manager::contended_attempts(&common) > contended,
+            "the retry's access failed on the tear first, so the shutdown came inside its wait"
+        );
+        assert_eq!(
+            crate::workspace_manager::fixture::slept_pauses(),
+            slept,
+            "no wait of a registry access the coordinator made slept on its thread"
+        );
+        (error, at_shutdown)
+    }
+
+    fn stopped_and_recorded(
+        wide: &Wide,
+        error: &UpstrokeError,
+        at_shutdown: usize,
+        sequence: SequenceId,
+        retried: TaskKey,
+    ) {
+        let events = wide.env.durable_events();
+        let kinds = kinds_of(&events);
+        let key = started_key(&events, sequence);
+        let replayed = crate::engine::topology::select::Spend::replay(&events);
+        let live = wide.run.spend();
+        let (run_live, run_replayed) = (live.run_usd(), replayed.run_usd());
+        let (task_live, task_replayed) = (live.task_usd(key), replayed.task_usd(key));
+        assert!(
+            (run_live - run_replayed).abs() < 1e-9 && (task_live - task_replayed).abs() < 1e-9,
+            "the passes charged before the stop are recorded, so replay counts what was charged \
+             live: the run ${run_live:.2} live and ${run_replayed:.2} replayed, the verifying task \
+             {} ${task_live:.2} live and ${task_replayed:.2} replayed, {} record(s), and after the \
+             shutdown {:?}",
+            key.index(),
+            count(&events, "merge_verification_charged"),
+            kinds_of(wide.run.events())
+                .get(at_shutdown..)
+                .unwrap_or_default()
+        );
+        records_both_passes(wide, sequence);
+        let message = error.to_string();
+        assert!(
+            message.contains("shut down")
+                && message.contains(
+                    "nothing was appended but the record of the review passes a verification \
+                     had charged"
+                ),
+            "the command ends on the shutdown, which says what it appended: {message}"
+        );
+        let warnings = wide.run.warnings().join("\n");
+        assert!(
+            warnings.contains("a registry access's wait inside a transition met a shutdown"),
+            "the retry's wait answered the shutdown and stopped the run: {warnings}"
+        );
+        assert!(
+            !warnings
+                .contains("the append recording the review passes a verification charged failed"),
+            "the record's append did not fail: {warnings}"
+        );
+        assert_eq!(
+            kinds_of(wide.run.events()).get(at_shutdown..),
+            Some(&["merge_verification_charged"][..]),
+            "nothing but the record was appended after the wait answered the shutdown"
+        );
+        assert_eq!(
+            of_key(&events, "attempt_started", retried.0),
+            1,
+            "the stopped retry started no attempt: {kinds:?}"
+        );
+        assert!(
+            terminals_of(&events, sequence).is_empty(),
+            "the record is no terminal: {kinds:?}"
+        );
+        assert!(
+            verifying(wide.run.fold(), sequence),
+            "the fold still holds the verification open: {:?}",
+            wide.run.fold().transaction()
+        );
+        replay_equals_live(wide);
+        published_as_the_log_authorizes(wide);
+        assert!(wide.run.invocations_balance(), "{warnings}");
+        assert!(
+            wide.run.stopped().is_none(),
+            "the run reopens when its coordinator is gone"
+        );
+    }
+
+    fn sequence_endings(
+        wide: &Wide,
+        sequence: SequenceId,
+    ) -> Vec<(InvocationId, crate::engine::topology::scaffold::Ending)> {
+        wide.env
+            .runner
+            .endings()
+            .into_iter()
+            .filter(|(invocation, _)| {
+                matches!(invocation, InvocationId::Sequence { sequence: of, .. } if *of == sequence)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_shutdown_answered_inside_a_retrys_wait_records_the_passes_its_cancelled_verification_charged()
+     {
+        let tasks = [
+            WideTask::independent("beta"),
+            WideTask::independent("alpha"),
+            WideTask::independent("gamma"),
+        ];
+        let mut wide = Wide::durable(
+            "coordinator-o14b2-cancelled",
+            &tasks,
+            3,
+            reviewing(3),
+            holding(&tasks, &[(0, 1)]),
+        );
+        let (error, at_shutdown) = stopped_inside_a_retrys_wait(
+            &mut wide,
+            TearAt::Fold(retained_attempt_finished_of_beta),
+            Box::new(|view: &Quiescent<'_>| {
+                if count(view.run.events(), "task_merged") == 0 {
+                    return released(view, |invocation| attempt_key(invocation) == Some(1));
+                }
+                if view
+                    .invoking
+                    .iter()
+                    .any(|invocation| review_pass(invocation, 2))
+                {
+                    return released(view, |invocation| attempt_key(invocation) == Some(0))
+                        .or(Some(Release::Nothing));
+                }
+                released(view, |invocation| attempt_key(invocation) == Some(2)).or_else(|| {
+                    released(view, |invocation| {
+                        sequence_invocation(invocation) && !review_pass(invocation, 2)
+                    })
+                })
+            }),
+        );
+        let sequence = SequenceId(1);
+        let endings = sequence_endings(&wide, sequence);
+        assert!(
+            endings
+                .iter()
+                .any(|(invocation, ending)| review_pass(invocation, 2)
+                    && *ending == crate::engine::topology::scaffold::Ending::Cancelled),
+            "the third reviewer was still running, and the shutdown cancelled it: {endings:?}"
+        );
+        stopped_and_recorded(&wide, &error, at_shutdown, sequence, TaskKey(0));
+        let key = started_key(&wide.env.durable_events(), sequence);
+        resumed_to_completion(wide, &tasks, key, sequence);
+    }
+
+    #[test]
+    fn a_shutdown_answered_inside_a_retrys_wait_after_the_result_arrived_records_both() {
+        let tasks = [
+            WideTask::independent("alpha"),
+            WideTask::independent("beta"),
+            WideTask::independent("gamma"),
+            WideTask::independent("delta"),
+        ];
+        let mut wide = Wide::durable(
+            "coordinator-o14b2-arrived",
+            &tasks,
+            4,
+            reviewing(2),
+            holding(&tasks, &[(3, 1)]),
+        );
+        let (error, at_shutdown) = stopped_inside_a_retrys_wait(
+            &mut wide,
+            TearAt::Fold(retained_attempt_finished_of_delta),
+            Box::new(|view: &Quiescent<'_>| {
+                if count(view.run.events(), "task_merged") == 0 {
+                    return released(view, |invocation| attempt_key(invocation) == Some(0));
+                }
+                if view.run.fold().transaction().is_none() {
+                    return released(view, |invocation| attempt_key(invocation) == Some(1));
+                }
+                if verification_live(view) {
+                    return released(view, |invocation| {
+                        matches!(worker(invocation), Some(TaskKey(2) | TaskKey(3)))
+                    })
+                    .or_else(|| released(view, sequence_invocation));
+                }
+                released(view, |invocation| {
+                    attempt_key(invocation) == Some(3)
+                        && matches!(role_of(invocation), Some(AttemptRole::Gate(_)))
+                })
+                .or_else(|| released(view, |_| true))
+            }),
+        );
+        let sequence = SequenceId(1);
+        let endings = sequence_endings(&wide, sequence);
+        assert!(
+            endings.len() == 3
+                && endings.iter().all(|(_, ending)| {
+                    *ending == crate::engine::topology::scaffold::Ending::Completed
+                }),
+            "the verification's gate and both reviewers ended before the shutdown, so its \
+             result had arrived: {endings:?}"
+        );
+        assert!(
+            sequence_endings(&wide, sequence)
+                .iter()
+                .all(|(invocation, _)| !review_pass(invocation, 2)),
+            "two reviewers verify"
+        );
+        stopped_and_recorded(&wide, &error, at_shutdown, sequence, TaskKey(3));
+        let key = started_key(&wide.env.durable_events(), sequence);
+        resumed_to_completion(wide, &tasks, key, sequence);
+    }
 }
