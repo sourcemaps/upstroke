@@ -1159,6 +1159,18 @@ Thirty seconds, the value B-W924-R1's witnesses waited (three of its ten-second 
 when B-W924-R1-S (proposed) withdrew that ruling's `REGISTRY_TEAR_DEADLINE` with its helper. A
 healthy act ends long before it.
 
+## `const PRODUCTION_REGISTRY_DEADLINE: Duration = Duration::from_secs(10);`
+
+The production registry deadline: `REGISTRY_ACCESS_DEADLINE`'s `#[cfg(not(test))]` value, which a
+test build cannot name. A witness of the tolerant access whose script needs more than one failed
+attempt of one access holds it for its own repository
+(`crate::workspace_manager::RegistryDeadline::hold`), so that one attempt the platform makes slow
+does not use up the test build's 500 ms before the attempt the script needs (the follow-up D
+record's §5.21). Under B-W924-R1-S (proposed). It is as NOMINAL as the test build's: an admission
+rule checked after each attempt, with no hard elapsed bound and no bound on a running Git child's
+completion, so a hold never makes a hung child fail within ten seconds. A witness whose oracle is
+the refusal at the deadline keeps the test build's.
+
 ## `fn refusal_attempts(message: &str) -> usize {`
 
 The attempt count a registry refusal names, read from its `<count> attempt(s)`. The witnesses of
@@ -1188,7 +1200,11 @@ failure, the snapshot stays registered; with only the list's failure returned at
 stops before its intent is removed; with the list run once after the access, the list reads the
 registration whole and the fourth reading is never taken. B-W924-R1's script, empty, whole, empty,
 would show only the removal past a tear here: the list would read the registration whole both
-times.
+times. Its repository's accesses wait to `PRODUCTION_REGISTRY_DEADLINE` (the follow-up D record's
+§5.21): the cleanup's second attempt, whose list reads the scripted tear, must not be its access's
+last. Under round D8's stand-in, which ends each access's first `Attempt` answer 600 ms later, the
+test build's 500 ms made it the last, and the cleanup stopped before its hooks and its intent were
+removed; that is shown under the stand-in only, and no natural failure is claimed.
 
 ## `fn an_empty_commondir_of_the_snapshots_own_registration_is_attempted_again_until_the_deadline_and_refused()`
 

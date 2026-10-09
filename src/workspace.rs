@@ -4984,6 +4984,9 @@ mod tests {
     const WEDGED_TEAR_FIXTURE: Duration = Duration::from_secs(30);
 
     #[cfg(target_os = "linux")]
+    const PRODUCTION_REGISTRY_DEADLINE: Duration = Duration::from_secs(10);
+
+    #[cfg(target_os = "linux")]
     fn refusal_attempts(message: &str) -> usize {
         let (before, _) = message
             .split_once(" attempt(s)")
@@ -5020,6 +5023,10 @@ mod tests {
     fn a_snapshots_removal_and_its_list_are_attempted_again_past_another_registrations_empty_commondir()
      {
         let fixture = SnapshotRepo::new("w924-cleanup-past-a-tear");
+        let _deadline = crate::workspace_manager::RegistryDeadline::hold(
+            &common_git_dir_of(&fixture.repo),
+            PRODUCTION_REGISTRY_DEADLINE,
+        );
         let snapshot = fixture.snapshot().expect("a snapshot");
         let (path, hooks, intent) = (
             snapshot.path.clone(),
