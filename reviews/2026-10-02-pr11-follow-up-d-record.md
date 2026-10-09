@@ -40,7 +40,10 @@ figures are under `~/orch-pr11/logs/pr11_fud_impl2/`, cited as `fudi2/…`. Its 
 implements R-D1's preservation design, is `pr11_fud_impl3`'s; its figures are under `~/orch-pr11/logs/pr11_fud_impl3/`,
 cited as `fudi3/…`. Its repair round 4 (§5.18) is `pr11_fud_impl4`'s; its figures are under
 `~/orch-pr11/logs/pr11_fud_impl4/`, cited as `fudi4/…`. Its repair round 5 (§5.19) is `pr11_fud_impl5`'s; its figures
-are under `~/orch-pr11/logs/pr11_fud_impl5/`, cited as `fudi5/…`.
+are under `~/orch-pr11/logs/pr11_fud_impl5/`, cited as `fudi5/…`. Round D6 (`pr11_fud_impl6`) stopped before
+publication with a returned dependency and wrote no section; its evidence under `~/orch-pr11/logs/pr11_fud_impl6/` is
+cited as `fudi6/…`. Round D7 (§5.20), follow-up B's final integration with option S, is `pr11_fud_impl7`'s; its
+figures are under `~/orch-pr11/logs/pr11_fud_impl7/`, cited as `fudi7/…`.
 
 ## 0. Status
 
@@ -55,6 +58,7 @@ are under `~/orch-pr11/logs/pr11_fud_impl5/`, cited as `fudi5/…`.
 | Implementation, round 3 (§5.17) | **R-D1's preservation design, round 4, implemented as a draft, and PROPOSED — conditional on O8, exactly as D's own texts.** The proposal `~/orch-pr11/owner-package/RD1-PRESERVATION-PROPOSAL.md` (sha256 `f9e81c07…5415`; its regression lens PASSED, its required regular verdict UNMET, its routing held): part K (a kept pin written whatever `HEAD` is), part G4 (the resume's guarded exact discard of the attempt in flight, behind a kept pin and a copy that same resume made durable) and part N (an attempt error after the worker ran, and a publication failure, keep the checkout and pin it), with the design's three instrument rows. B's published head `55029628` is merged **provisionally**, not as B's final head. N1 and N2 are filed. Not merge-ready, unreviewed, and R-D1's preservation is the owner's through O8. |
 | Implementation, repair round 4 (§5.18) | **The hosted-Linux failure of T-R10 at `202c0805` repaired, on the same terms: draft, PROPOSED, conditional on O8, and not merge-ready.** CI run 37202558686 failed one test on the runner's Git 2.55.0. T-R10's operator `fetch --prune` ran Git's automatic maintenance, whose `geometric` default (from Git 2.54) can prune the planted torn registration before the operator's repair, in a race. It is a test defect: F2's fetch now runs with automatic maintenance off, and nothing it asserts changes. The cause is executed on a Git 2.55.0 stand-in, red before, green after, and red again under a mutation; round 3's other 69 tests do not depend on it. No production code, finding, instrument, cost or limit changes; #329's `55029628` stays merged provisionally. Unreviewed. |
 | Implementation, repair round 5 (§5.19) | **D2's D-I2-1 repaired, on the same terms: draft, PROPOSED, conditional on O8, and not merge-ready.** D2, one regression lens at `fb1717b1`, executed that the orphan shared index files an inherited `GIT_TEST_SPLIT_INDEX` leaves outlast the checkout's next split write. The record, the notes, the R-D7 finding and the body now state the true reach: Git's expiry removes an orphan only at a later split write of the checkout's own index that creates a shared index file, once the orphan is older than the checkout's `splitIndex.sharedIndexExpire`; with the default it stays at least two weeks, with `never` for good, and captures can accumulate them. An `include_str!` test pins the notes, red at `fb1717b1` and green after. No behaviour, production code, instrument or other cost changes; #329's `55029628` stays merged provisionally; R-D1's regular review stays unmet. Unreviewed. |
+| Implementation, round D7 (§5.20) | **Follow-up B integrated FINAL (`c0ed07a5`, B's final head `53d972e9`), with option S PROPOSED — conditional on O8 and on the owner's ruling B-W924-R1-S, and not adopted; B-W924-R1 stays operative on master.** At the snapshot path's three registry commands, D's access supersedes B-W924-R1's retry, whose call-site wrapping, helper and constants are withdrawn by its documented ordered rollback; `src/workspace.rs`'s production region is D's `1be2e2ad`'s. Each of R1's six superseded tests is mapped to a witness, green at the head and red under its own reversal, and O8's semantic changes are asserted and disclosed, not claimed as equivalences. Not merge-ready and not reviewed: R-D1's regular review stays HELD and UNMET, and D's requested regular review stays OUTSTANDING after integration. Stopped before publication. |
 
 ## 1. Design
 
@@ -4236,3 +4240,235 @@ and a run counts only if its log names the tree on its Compiling line.
 - **CI at this round's head is not waited on;** the orchestrator reads native CI.
 
 The pull request body records the head the ten gates passed at, with the logs under `fudi5/gates/`.
+
+### 5.20 Round D7: follow-up B integrated FINAL, with option S PROPOSED at the three snapshot registry commands
+
+> **On §5's terms, with one condition added:** a draft, PROPOSED, conditional on the owner's decision O8 **and on the
+> owner's ruling B-W924-R1-S**, and not merge-ready. B-W924-R1 stays operative on master; O8 and B-W924-R1-S are not
+> adopted. This round is not a review: R-D1's regular review stays HELD and UNMET, D's full requested regular review
+> stays OUTSTANDING after this integration, and R-D1's design round stays held. The round adds two commits on
+> `1be2e2ad`, the merge `b9559a4e` and this record's commit, with no rebase, and no `reviewed_sha` is re-stamped.
+> Nothing is pushed: the round stops before publication.
+
+**Who and on what.** `pr11_fud_impl7` (`claude-opus-5-5`, `max`), a fresh worker `orch_pr11b` spawned on 2026-10-09 on
+`1be2e2ad`. Its brief is `~/orch-pr11/briefs/pr11_fud_impl7.md`. The supervisor's direction
+`/home/ubuntu/babysit-pr11/evidence/d-post-b-integration-sequencing-20261008.md` (sha256 `d2742ace…`, checked) wins
+over it. Its specification is the orchestrator's `~/orch-pr11/logs/orch-d7/R1-O8-ASSESSMENT-AND-S-PROPOSAL.md`. It was
+revised during the round from `a1f06ae0…` to `f5a6a4bf…`, by a dated evidence precision to its §3.4 that STATE records,
+with the orchestrator's note `~/orch-pr11/answers/pr11_fud_impl7-1.md` (`5c1bdcef…`) (`fudi7/start/`).
+
+Round D6 (`pr11_fud_impl6`) prepared the merge's independent resolutions and characterised the nested candidate N. It
+then stopped with the returned dependency and wrote no section; its package is `~/orch-pr11/questions/pr11_fud_impl6-1.md`
+(`d305f765…`). Its evidence, opened only where its manifest (`69ce3cb5…`) lists a file, is cited as `fudi6/…`. This
+round's figures are under `~/orch-pr11/logs/pr11_fud_impl7/`, cited as `fudi7/…`. No stopped-review artifact was read,
+and no broad search was run. One boundary event is disclosed in §5.20.8.
+
+#### 5.20.1 The landing, and the start
+
+- **B has landed** (`fudi7/start/ls-remote-1.txt`, `landing-and-ancestry.txt`). Master is `c0ed07a5`, #329's merge
+  commit: its parents are `5c222ff2` and B's final head `53d972e9`, and its tree is `53d972e9`'s.
+- **The merge base** of `c0ed07a5` and `1be2e2ad`, and of `53d972e9` and `1be2e2ad`, is `55029628`, the only one: D's
+  provisional integration of B. Master has 69 commits D lacks, and D has 19 that master lacks.
+- **The start state:** #331 was OPEN and a DRAFT at `1be2e2ad` (`fudi7/start/pr331-start.json`). The worktree was clean
+  at that head, with no operation in progress, judged from Git state alone (`fudi7/start/worktree-start.txt`). The
+  round works on local branch `pr11-fud-impl7` (`branch.txt`).
+
+#### 5.20.2 The merge, and each conflict's resolution
+
+The merge ran `git -c merge.conflictStyle=diff3 -c rerere.enabled=false merge --no-ff --no-commit c0ed07a5` on the box's
+Git 2.43.0 (`fudi7/merge/merge-run.txt`, `config.txt`).
+- **The conflicts:** four files, nine hunks. Each conflicted file is byte-identical to D6's
+  (`fudi7/merge/conflicted-vs-d6.txt`), so D6's prepared rules apply as written.
+- **Step A:** the rules applied unchanged, with D6's own `resolve.py` (`5e56a8e6…`) and `RULES.txt` (`8fe764cd…`),
+  copied with their hashes (`fudi7/d6-reused/SHA256SUMS.txt`). The returned hunks take option S's texts
+  (`fudi7/merge/resolve-stepA.txt`).
+- **Step B:** S's dependent edits follow (`fudi7/merge/stepB*.txt`).
+
+| File | Hunk | Class | Resolution |
+|---|---|---|---|
+| `src/workspace.rs` (PR5-frozen) | 1, `add_gate_worktree` | RETURNED | S: D's side, the add as the access's attempt; R1's wrapping withdrawn |
+| | 2, `cleanup_gate_workspace` | RETURNED | S: D's side, the removal and its list as one attempt; R1's wrapping withdrawn |
+| | 3, the end of `mod tests` | independent | D6's `theirs+ours`; then S maps R1's tests (§5.20.4) |
+| | auto-merged: `worktree_is_registered` and R1's helpers | RETURNED (S) | R1's wrapping withdrawn, the anchor's function restored; the helper, its predicate, its destination check and its two constants removed |
+| `effects/allowlist.toml` (instrument) | 1 and 2, `src/workspace.rs`'s entry | RETURNED | S: the composed entry (§5.20.3) |
+| `docs/internals/workspace.md` | 1, the amendment paragraph | RETURNED | S: the composed paragraph |
+| | 2, function sections | independent | D6's `ours+theirs`; then S withdraws R1's four helper sections with the helpers |
+| | 3, test sections | independent | D6's `theirs+ours`; then the mapped tests' sections |
+| `findings/P1_…_an-external-prune-…` | 1 | independent | D6's `theirs+ours`: D6's prepared file, byte for byte (`662d98f9…`) |
+| `design/15` (auto-merged) | — | RETURNED, semantic | S: D's paragraph's preface (§5.20.3); master's item unchanged |
+
+- **Auto-merged, checked in the index** (`fudi7/merge/integrity-index.txt`): the 17 B-only paths are master's blobs,
+  and the 16 D-only paths are D's. `src/engine/tests.rs` is master's blob, with B-W924-R2 inside it, followed by D's
+  appended tail, byte for byte.
+- **The merge commit** is `b9559a4e`, with parents `1be2e2ad` and `c0ed07a5` (`fudi7/merge/commit.txt`). Its message is
+  `fudi7/merge/commit-message.txt`.
+
+#### 5.20.3 Option S's proposed hunks, and O8's texts rebased
+
+All of it is **PROPOSED, conditional on O8 and on B-W924-R1-S, and not adopted.** Until both are adopted, B-W924-R1
+governs on master (the specification's §3.1).
+- **`src/workspace.rs`, production.** D's legacy access runs at the add, and at the removal with the list that decides
+  it.
+  - **R1's wrapping is withdrawn at its three commands,** `worktree_is_registered` included, whose only caller is the
+    cleanup's attempt. The withdrawal follows R1's documented ordered rollback (B's record §9.25.4), at those commands
+    only.
+  - **R1's helpers go too.** The specification names R1's helper and its deadline as removed. The other four items
+    R1's ruling lists are its `_until` loop, its predicate `read_anothers_empty_commondir`, its destination check
+    `is_an_empty_directory` and its backoff constant. Once the call sites go, nothing uses them, so `-D warnings`
+    removes them with it, as the rollback does.
+  - **The production region is D's `1be2e2ad`'s, byte for byte** (sha256 `471443e4…`;
+    `fudi7/merge/stepB1-production.txt`, and `fudi7/frozen/frozen-proof-b9559a4e.txt` §3).
+- **`src/workspace.rs`, tests:** §5.20.4.
+- **`effects/allowlist.toml`:** the composed `src/workspace.rs` entry (`fudi7/s-texts/allowlist-entry-as-parsed.txt`).
+  It reads "AMENDED THREE TIMES":
+  - the first amendment, as master has it;
+  - the second, B-W924-R1's clause, verbatim as adopted;
+  - D's amendment as the third, D's text otherwise unchanged;
+  - then the third's supersession of the second, by B-W924-R1-S, at the second's three commands, which are the whole of
+    its scope. It names the withdrawn items and the nominal deadline's limit, and ends "Until O8 and B-W924-R1-S are
+    both adopted, the second amendment governs".
+
+  Its comment marks it PROPOSED on both decisions. Its `allows` are unchanged.
+- **`docs/internals/workspace.md`:** the amendment paragraph keeps B-W924-R1 as adopted and governing on master, states
+  its proposed supersession, and gives D's paragraph as the proposed third. R1's four helper sections go with the
+  helpers. The mapped tests' sections, and two new ones (`WEDGED_TEAR_FIXTURE`, `refusal_attempts`), follow §5.20.4.
+- **`design/15`:** D's proposed paragraph is now conditional on B-W924-R1-S too. Once in force, it replaces the legacy
+  item "and with it that item's sentence on the owner's ruling B-W924-R1". Master's item, with R1's adopted sentence,
+  is unchanged.
+- **O8's texts, rebased onto master, as exhibits** (`fudi7/instruments/allowlist-entries-b9559a4e.txt`):
+  - the `effects/allowlist.toml` texts for `src/engine/attempt.rs`, `coordinator.rs`, `resume.rs` and `tests.rs` are
+    D's, unchanged;
+  - `src/workspace.rs`'s is the composed one.
+
+  Annex R.1's literal "'AMENDED ONCE' becomes 'AMENDED TWICE'" no longer applies to master. Rebased, the entry reads
+  "AMENDED THREE TIMES", and D's amendment is the third.
+- **Unchanged:** B-W924-R2, H1 (`bf62256e`) and H3 (`407b27cb`).
+- **Two stale statements, left as they are:**
+  - **R2's notes** still name R1's predicate "in `src/workspace.rs`" (`docs/internals/engine/tests.md:2903`), where S
+    removes it. They sit inside R2's adopted scope, which no change touches without its own ruling. So they are left
+    as they are, and returned with the package.
+  - **D's legacy finding** still says that its design's `src/workspace.rs` text "takes a second amendment" (`:131`).
+    That is the design's history, and this section supersedes the ordinal.
+
+#### 5.20.4 The witnesses, row by row
+
+The specification's §3.4 maps each of R1's six superseded tests, and this round must establish each row with evidence.
+No overall equivalence is claimed. **Every deadline here, R1's and the access's, is a nominal admission rule, checked
+after each attempt, with no hard elapsed bound. Every time below is characterization on this box's Linux test build,
+not a production guarantee.**
+
+**How the runs were made** (`fudi7/witness/`):
+- **The trees:** `git archive` copies of `b9559a4e` under a private root (`scratch-root.txt`), one for the control and
+  one per mutation. Each mutation is `fudi7/tools/mutate.py`'s exact replacement, its old text matched once
+  (`mutation-*.diff`).
+- **The runner:** D6's `charrun.py`, unchanged, through `upstroke-build` on this round's private base. Every file is
+  touched; the lib test binary is built once, its Compiling line naming the copy and its sha256 recorded (`*/meta.txt`:
+  six different binaries). Then each test runs alone, by its full path with `--exact`, with a 180 s SIGKILL bound on
+  its own process group. No run was killed.
+- **The reasons:** each failure's reason is read from its log (`*/panics.txt`, by `fudi7/tools/panics.py`).
+
+**The reversals:**
+- **M1,** the add's access reversed: its veto answers `Return`, so the add's first failure comes back at once, as Git
+  state, as before D.
+- **M2,** the cleanup's access reversed: its veto answers `Return`.
+- **M2b,** the list's repair alone reversed: a failure of the list is returned at once, and the removal's is still
+  attempted again.
+- **M2c,** the list run once after the access, which attempts the removal alone, on its exit status.
+- **M3,** the add veto's not-empty arm reversed: a destination that is not empty is attempted again.
+
+| R1's test (master) → its S counterpart | R1's assertions | Retained under S | Changed, as O8 proposes | Evidence: green on the control; red under |
+|---|---|---|---|---|
+| `…outlasts_the_deadline_returns_the_adds_error` → `…outlasts_the_deadline_refuses_naming_the_adds_error` | the add's own Git error; on a test build, at least 10 s and under 15 s; the destination still empty | the add's Git error, named as the **last** failure; two attempts or more, each answered `Attempt` (the count equals the rise of `contended_attempts`); not silent; the destination an empty directory | the outcome's **kind**: `RegistryRefused`, naming the count and the last failure, in place of the add's Git error. The timing is past the access's nominal deadline (500 ms on a test build), asserted only from below; R1's window is not carried | green, 0.564 s. Red under M1: "a registry refusal, never Git { … failed to read .git/worktrees/w924-other/commondir: Success }". D's `a_snapshot_add_beside_a_tear_that_stays_refuses_…`: green, 1.065 s; red under M1 |
+| `a_snapshot_add_is_attempted_again_past_…` (**kept unchanged**) | a transient tear is attempted past; the add succeeds, is registered, and is reclaimed | all of them: the test passes under S as written | none beyond D's access and its contended count | green, 0.064 s. Red under M1: "the add met the tear and stopped". D's `a_snapshot_add_beside_a_tear_its_writer_finishes_is_attempted_past`: green, 0.064 s; red under M1 |
+| `…removal_and_its_list_are_attempted_again_past_…` (same name; S's script) | the removal and the list are each attempted past a tear | both, with the list's tear read **after** the removal passed: the script is empty, whole, whole, empty, and the cleanup runs to its end | none beyond D's access | green, 0.064 s. Red under M2 (the readings stop at two), M2b (the cleanup stops before its intent) and M2c (the list never takes the fourth reading). D's removal test is green, 0.064 s, and red under M2 and M2b but **green under M2c**: the list's own coverage rests on this witness |
+| `an_empty_commondir_of_the_snapshots_own_registration_is_returned_at_once` → `…_is_attempted_again_until_the_deadline_and_refused` | its own registration is not attempted again: Git's failure, at once, under 5 s | none of R1's classification. Kept: Git's failure, naming the registration, as the last failure; restored, the snapshot is reclaimed | **PROPOSED (O8):** attempted again until the nominal deadline, then refused, after two attempts or more | green, 0.564 s. Red under M2: "a registry refusal, never Git { … verifying gate-worktree reclamation failed … }" |
+| `another_registrations_commondir_git_cannot_read_is_returned_at_once` → `…_is_attempted_again_until_the_deadline_and_refused` | an unreadable `commondir`: Git's failure, at once | none of R1's classification. Kept: the add's Git failure (`Is a directory`), as the last failure | **PROPOSED (O8):** the same as the row above | green, 1.065 s, including the snapshot's cleanup, which meets the same directory. Red under M1 |
+| `a_destination_no_longer_empty_returns_the_adds_first_error` → `a_destination_no_longer_empty_refuses_at_once_naming_the_adds_first_error` | a touched destination: the add's first error, with no further attempt | the add's first failure, with no further attempt: "stopped after 1 attempt(s)", and no `Attempt` answer | the outcome's **kind**: a registry refusal at the add's veto ("is not empty"), in place of the add's Git error. The specification's row says that none is proposed; the evidence shows this one, which is O8's own text ("never as Git state") | green, 0.064 s. Red under M3 ("16 attempt(s), the last failed with: … already exists") and under M1. D's veto witness: green, 0.063 s; red under M3 |
+
+**R1's other five tests,** outside §3.4's six rows:
+- **The FIFO fixture's three tests** (`a_commondir_server_that_*`) are kept unchanged, with the fixture. They are green,
+  and red under M1, since each asserts that the add goes on past the tear it serves. The containment keeps its
+  thirty-second bound, now `WEDGED_TEAR_FIXTURE`, since `REGISTRY_TEAR_DEADLINE` went with the helper.
+- **R1's predicate test and loop test go with what they test:**
+  `only_another_registrations_empty_commondir_reads_as_attempted_again` and
+  `a_registry_command_is_attempted_again_only_while_its_answer_allows`. Their assertions are not claimed as kept.
+  - **The classification** is O8's proposed change: the access classifies nothing.
+  - **The loop's other properties** are covered by the access's contract tests on master, unchanged. Attempting past
+    failures to a success: `workspace_manager::tests::a_registry_access_passes_two_failures_and_returns_the_success_after_them`.
+    A caller's answer ending the attempts: `…_returns_a_vetoed_failure_unchanged_after_one_attempt` and
+    `an_undecidable_veto_refuses_at_once_naming_why`. The admission rule:
+    `the_final_attempt_follows_an_attempt_the_deadline_passed_during`, `…_passes_a_failure_repaired_by_the_deadline`
+    and `a_veto_that_blocks_past_the_deadline_is_followed_by_the_final_attempt_alone`.
+  - **"Any other failure, at once" and "a command that cannot start, at once"** are O8's proposed change too: the
+    access attempts any failure of an attempt again.
+
+**No nested composition was built, and no bound was relaxed.** No test deadline was lengthened. R1's 15 s bound is not
+raised; it goes with its test. The new witnesses assert no upper elapsed limit at all.
+
+**The control's other witnesses** stayed green (`fudi7/witness/control/results.tsv`): D's
+`a_snapshot_whose_checkout_cannot_be_made_…`, the switch, and D's two engine witnesses.
+
+**Against D6's runs at the parents, cited unchanged** (`fudi7/d6-cited/`): R1's lasting-tear test took 10.09 s at
+master, where its S counterpart takes 0.56 s. None of D's witnesses is slower than at `1be2e2ad`; the largest
+difference is 0.10 s.
+
+#### 5.20.5 Validation at the integrated head
+
+- **The ten gates,** once, at the final head, through `upstroke-build` on this round's private base, each in the
+  foreground (`fudi7/gates/`; the body names the head).
+- **D's own named tests and witnesses, and the replacement witnesses,** in gate 3's run, by their per-test lines
+  (`fudi7/gates/…/named-tests.txt`).
+- **The notes pin** (`workspace::tests::the_private_index_notes_tie_an_orphan_shared_index_to_the_checkouts_expiry`), and
+  `src/export.rs`'s two `include_str!` tests of `design/15`, in gate 3's run.
+- **Platforms** (`fudi7/platform/code-b9559a4e/`, each Checking line naming this worktree): Windows clippy, Windows MSRV
+  with `-D warnings`, macOS clippy and the Linux MSRV with `-D warnings`, each rc 0 with no warning. Nothing ran on
+  Windows or macOS. CI is the truth for those legs, and none ran for this round.
+- **Development checks before the gates, not counted:** clippy, the workspace tests, the full suite and the six scripts
+  at `b9559a4e` (`fudi7/dev/`).
+
+#### 5.20.6 The frozen proof, and the instruments
+
+`fudi7/tools/frozen-proof7.sh` ran at the merge (`fudi7/frozen/frozen-proof-b9559a4e.txt`). This record's commit
+changes no code, and the body cites the proof at the final head.
+- **G6's R-D set:** 34 of 34 equal master's, with H1 and H3 as adopted.
+- **The PR5 legacy section** (24 paths; `FROZEN_LEGACY_ALLOWLIST` equals master's, and `src/effects.rs` is unchanged):
+  19 equal master's. The other five are D's and S's, each PROPOSED:
+  - `src/engine/attempt.rs`, `coordinator.rs` and `resume.rs` are D's bytes; B did not touch them;
+  - `src/engine/tests.rs` is master's blob with D's tail appended;
+  - `src/workspace.rs`'s production region is D's. Its test module is master's up to R1's tests, then S's mapping of
+    R1's region, then D's appended tail.
+- **The second limb:** `CLAUDE.md`, `AGENTS.md`, `MAINTAINING.md` and `findings/PROCESS.md` are unchanged.
+- **The instruments** (`fudi7/instruments/allowlist-entries-b9559a4e.txt`):
+  - of `effects/allowlist.toml`'s 51 entries, 46 are master's, and so is the preamble;
+  - four are D's O8 texts, unchanged;
+  - one, `src/workspace.rs`'s, is the composed entry, whose `allows` are master's and D's;
+  - `clippy.toml`, `effects/wrappers.toml` and `src/runner/contract.rs` are D's, byte for byte.
+- **The effects census against the composed entry** runs in gate 3. No check reads the entry's words, only its
+  `LEGACY-EFFECT` marker (`src/effects/tests.rs`). So what passes only through proposed instruments is §5.17.9's list,
+  with the composed text in place of D's.
+- **The allow-probe:** with the module's allow removed on a scratch copy, clippy reports 243 disallowed denials in
+  `src/workspace.rs`, none on a line S writes (`fudi7/instruments/allow-probe-attribution.txt`).
+
+#### 5.20.7 What stays, and what remains
+
+- **B-W924-R1 stays operative on master.** O8 is unadopted, and B-W924-R1-S is proposed.
+- **R-D1's regular review is HELD and UNMET.** D's full requested regular review stays OUTSTANDING after this
+  integration, within its held boundaries, with no routing. R-D1's design round stays held. This round reviews nothing.
+- **The remaining requirements:** the owner's two ADOPTIONS, O8 and B-W924-R1-S; the held regular verdict on the
+  integrated head; and CI. Then ORCH §1 governs the merge, with only its existing second-limb reservation.
+- **Separate:** G6, with N1's and N2's classification on the final range.
+- **Not executed:** Windows and macOS (§5.20.5); and the production deadline of ten seconds, since every time here is
+  a test build's.
+
+#### 5.20.8 Operations, and one boundary event
+
+- **One boundary event, disclosed.** This round's first command listed `~/orch-pr11/briefs/` (`ls -la`, the last thirty
+  names) before the brief had been read; the brief forbids listing a shared directory. Only file names were listed. No
+  file of that listing was opened beyond D's six briefs, named by exact path, and the listing was not repeated.
+- **Other workers' evidence** was opened only by exact path, after `lstat` as a regular file and with a non-blocking
+  open. D6's was opened only where its manifest lists the file, after `sha256sum -c` of that line (`fudi7/start/`,
+  `d6-reused/`, `d6-cited/`).
+- **Left in place, since cleanup is out of scope:** the scratch root `/tmp/pr11-fud-impl7.NP08E8`, and this round's
+  private base. No background process of this round's is left running.
+
+The draft body records the head the ten gates passed at, with the logs under `fudi7/gates/`.
