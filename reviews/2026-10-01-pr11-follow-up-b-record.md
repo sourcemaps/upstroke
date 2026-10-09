@@ -11393,3 +11393,24 @@ being out of scope. One variant copy was made again after its tool changed, and 
 (`impl19/c5/copies.txt`). No process table was read and no environment value or credential; no process was killed or
 signalled but by a run's own safety timeout, which none reached. Before this section was committed no guest run was
 made in this round. Nothing was pushed, and the pull request's body was not edited.
+
+#### 9.31.12 The final head's test gate: red on D2, a fact, with no cause claimed
+
+*Added 2026-10-09 by the B15 round (`pr11_fub_impl20`, `claude-opus-5-5`, `max`), under its brief
+(`~/orch-pr11/briefs/pr11_fub_impl20.md`, sha256 `4aa3447e…`) and the orchestrator's triage of this red
+(`~/orch-pr11/logs/orch-b14/t4-red-dea03555/TRIAGE.md`, `8128b20e…`, its `SHA256SUMS` checked): the note B14's package
+owed.* This round's final-head validation ran the test gate on this box at `dea03555` (`cargo test --all-targets
+--all-features` through `upstroke-build`, 00:30:49Z to 00:33:06Z), and it exited 101: the library 3,171 passed, 1
+failed, 130 ignored, in 104.03 s, the binary's tests not run after it (`orch-b14/t4-red-dea03555/03-test.log`, sha256
+`6eb8f3b8…`; `run.txt` beside it). The failed test is D2, T4's final-attempt witness
+`the_final_attempt_passes_a_failure_repaired_by_the_deadline` (FUD-D1-PROGRESS; added at `58c7c203`, and no B13 or B14
+hunk touches it), which panicked at `src/workspace_manager/tests.rs:15909:23`: "the final attempt, at the deadline,
+meets the repaired store: RegistryRefused { message: \"the worktree registry
+/tmp/upstroke-registry-access-final-T8YA1T8S37/common/worktrees kept this access from completing until its deadline
+(500ms): 14 attempt(s), the last failed with: git error: attempt 14 failed\" }". Observed, and only this: 14 attempts,
+the 14th failed, the refusal at the 500 ms deadline, and no attempt after the 14th. No per-attempt clock trace exists,
+and the box's load during the gate was not sampled. D2's other results on file, from the triage's table: `ok` at the
+test gate at `f8909137` and at `421cfab0`, in B13's four guest suites (`f8909137`, `d91ca49b` twice, `421cfab0`), in
+the hosted `windows-latest` queue run at `120c8c8c`, and in B14's guest suite at `dea03555` (2,923 passed, 0 failed,
+515.72 s; `suite-dea03555.log`, `245cf049…`), which ended about 60 s before this gate began. No cause is claimed. It is
+not run again, it stays its own row, and no later result disposes of it.
