@@ -6123,6 +6123,11 @@ const PATH_ENTRY_TABLE: &[(&str, bool, bool)] = &[
 
 #[test]
 fn every_path_entry_this_runner_searches_names_a_location_on_its_own() {
+    fn search_summary(message: &str) -> Option<&str> {
+        let (_, after) = message.split_once("this runner composes (")?;
+        after.split_once(')').map(|(summary, _)| summary)
+    }
+
     let root = scratch("path-entry-rule");
     let naming = ProgramNaming::current();
     let program = "upstroke\u{0}no-such-program";
@@ -6194,10 +6199,8 @@ fn every_path_entry_this_runner_searches_names_a_location_on_its_own() {
             relative += 1;
             let message = error.to_string();
             assert!(
-                message.contains(
-                    "0 directories searched, 1 PATH entry skipped as not \
-                                  absolute"
-                ),
+                search_summary(&message).is_some_and(|summary| summary
+                    .contains("0 directories searched, 1 PATH entry skipped as not absolute")),
                 "`{entry}` does not name a location and was searched: {message}"
             );
         }
@@ -6225,11 +6228,11 @@ fn every_path_entry_this_runner_searches_names_a_location_on_its_own() {
     .expect_err("nothing of that name is installed there")
     .to_string();
     assert!(
-        message.contains("1 directory searched,"),
+        search_summary(&message).is_some_and(|summary| summary.contains("1 directory searched,")),
         "an absent entry names a location and was not searched to its end: {message}"
     );
     assert!(
-        !message.contains("skipped"),
+        search_summary(&message).is_some_and(|summary| !summary.contains("skipped")),
         "an absent entry names a location and was skipped: {message}"
     );
 

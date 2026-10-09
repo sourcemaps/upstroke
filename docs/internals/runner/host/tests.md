@@ -2996,6 +2996,28 @@ that policy: an unanswerable candidate still stops the search, mere
 absence is still walked past, and both are decided here by construction
 rather than by the machine the suite runs on.
 
+## `fn every_path_entry_this_runner_searches_names_a_location_on_its_own() {` › `fn search_summary(message: &str) -> Option<&str> {`
+
+What a refusal says about the search itself: the parenthesised clause
+after "this runner composes", which gives the number of directories
+searched, the number of entries skipped as not absolute, and the
+candidates. Every assertion this test makes on a refusal's text reads
+that clause and nothing else.
+
+The rest of the message is not the test's to read. It goes on to echo
+the `PATH` it was given, and a `PATH` built from the scratch root
+carries the spelling of the temporary directory, which belongs to the
+machine. Read whole, the message let that spelling decide: under a
+temporary directory named `temp-skipped`, a search that had finished
+without skipping anything read as skipped (`P335-PL-1`), and a spelling
+that holds `1 directory searched,` would have satisfied the count for a
+search that counted nothing. The clause is written before the echo and
+holds only text this test constructs — the counts, its own program name
+and the default extensions — so the first opening is always the
+resolver's own, and no spelling of the temporary directory can reach
+the clause, add to it or close it early. A refusal without the clause
+fails the assertion that reads it.
+
 ## `fn every_path_entry_this_runner_searches_names_a_location_on_its_own() {` › `let program = "upstroke\u{0}no-such-program";`
 
 The program every table entry is asked about: a bare name, so the walk
