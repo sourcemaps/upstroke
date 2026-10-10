@@ -2968,3 +2968,273 @@ as the entry and a `.git` that is a symbolic link to the Git directory; on
 Windows and macOS, the entry spelled in upper case. Every role of every run read
 the recorded graph, and afterwards the operator's Git still reads the
 replacements.
+
+## `const TORN_REGISTRATION: &str = "foreign-torn";`
+
+The tests appended by follow-up D (proposed, conditional on the owner's decision O8;
+`reviews/2026-10-02-pr11-follow-up-d-record.md`, its Implementation section) drive the
+real legacy engine — `run_with` and `resume_harness` — through a worktree registry another
+process has torn. Their residue is a foreign registration under this name: `gitdir`
+written as Git writes it (`GitdirRule::native().spelling`) and `commondir` opened and
+empty, the state a writer killed while it writes `commondir` leaves. Every enumeration
+of the store dies on it. `repair_the_torn_registration` is the operator's repair.
+
+## `fn tear_after_capture(`
+
+The after-capture hooks (`RunOptions::after_candidate_capture`, a test-only seam of the
+legacy attempt) record the captured branch, parent and tree beside the repository
+(`record_the_capture`, read back by `captured`) and then make the state each test
+needs: the residue alone (`tear_after_capture`); the index changed after the capture
+(`unstage_and_tear_after_capture`, FUB-D5-INDEX's interleaving); `HEAD` moved after the
+capture (`move_head_and_tear_after_capture`, R-D1; since R-D1's part K the kept pin is
+written anyway, and T-R3 below asserts its captured identity); a ref blocking the kept pin's
+name (`block_the_kept_pin_and_tear_after_capture`, T-P8's trigger since part K); the
+snapshot store made impossible (`block_the_snapshot_store_after_capture`); an attempt
+error that is not the registry's (`fail_after_capture`); a replacement of the worker's
+new file's blob, or of the captured tree by its parent's, made at capture
+(`replace_the_new_blob_and_tear_after_capture`,
+`replace_the_captured_tree_and_tear_after_capture`, FUD-D1-REPLACE). The residue is
+planted after the capture so that the gate or review snapshot is the first registry
+access that meets it.
+
+## `fn kept_pins(repo: &Path) -> Vec<(String, String)> {`
+
+Every `-kept` pin under `refs/upstroke/prepared/`, with the commit it names, read with
+`for-each-ref`: what the coordinator kept, and what no resume may remove.
+
+## `fn follow_the_restore(repo: &Path, warning: &str, pin: &str) -> String {`
+
+Runs the command the resume's warning advertises for a `HEAD` still at the pin's parent,
+exactly as an operator would, from the checkout's root: the warning's backticked
+`git …` spans, `<pin>` replaced, the first whose subcommand is `restore` (or round 5's
+`checkout`). `follow_the_pick` runs the command it advertises for a later `HEAD`: the
+first after the restore that is neither the pin's removal nor `git diff --cached`.
+`differences_from_the_pin` compares the checkout's files and index with what the pin
+records, read with the replacement controls: every path's bytes, no index path outside
+the pin, and the index's tree. The repositories that compare bytes set
+`core.autocrlf=false`, because the restore writes working files through the checkout's
+own conversions (FUD-D4-RESTOREBYTES).
+
+## `struct ShapedWorker {`
+
+A worker that edits a tracked file, adds one and deletes one before the fake's own edit:
+FUB-D5-RESTORE's shape, whose recovery must restore the deletion too.
+`struct TearingWorker {` plants the residue from inside a resumed attempt, as any worker
+writes beside its checkout, so the resume's own attempt is refused with no seam.
+
+## `fn a_registry_refusal_after_capture_keeps_and_pins_the_captured_candidate_across_both_resumes() {`
+
+T-P1, T-P3 and T-P5. A tear that stays, planted right after the capture: the run ends as
+a registry refusal naming the kept pin, the checkout still holds the candidate, and the
+pin's commit has the captured tree and parent. The resume while the residue stays
+refuses at its reclaim and changes nothing: the status and the pin are as before. After
+the repair the resume completes, names the pin, and leaves it. Red at master, where the
+snapshot's Git error discards the output; red when the refused arm discards
+(`m-discard`) and when the resume removes kept pins (`m-removepin`).
+
+## `fn a_kept_pin_holds_the_captured_tree_when_the_index_changed_after_capture() {`
+
+T-P2 (FUB-D5-INDEX). The index is unstaged after the capture; the pin holds the captured
+tree, not the index's, and after the resume discarded the checkout's copy, following the
+warning brings the worker's file back. Red when the coordinator pins the live index and
+`HEAD` (`m-index`).
+
+## `fn following_the_kept_pin_warning_at_its_parent_restores_deletions_too() {`
+
+T-P4 (FUB-D5-RESTORE). A tracked edit, a new file and a deletion: following the warning's
+restore leaves the checkout and the index exactly the pin's tree, deletion included. Red
+under round 5's `git checkout <pin> -- .` (`m-restore`).
+
+## `fn following_the_kept_pin_warning_on_a_later_head_applies_exactly_the_kept_change() {`
+
+T-P4b. The resumed run commits the task again, so `HEAD` is past the pin's parent; the
+warning's command for a later `HEAD` stages exactly `A new.txt`, `D deleted.txt` and
+`M tracked.txt`, and the new commit stays.
+
+## `fn a_topology_slots_torn_registration_refuses_a_legacy_snapshot_and_keeps_its_output() {`
+
+T-P6, (e2′) itself: the residue is a topology slot's registration, which the workspace
+manager adds (`a_torn_topology_slot`, through its funnels) and its fixture's
+`tear_registration` tears, in the same repository's shared store. The run is refused
+with the candidate kept and pinned; once the topology writer finishes, the resume
+completes, names the pin and keeps it.
+
+## `fn an_attempt_error_that_is_not_a_registry_refusal_keeps_the_output_pinned() {`
+
+T-P7 and T-P7b (`a_snapshot_failure_that_is_not_the_registrys_keeps_the_output_pinned`),
+reconciled by R-D1's part N (the proposal's §7, round 2's hunks): an attempt error that is not
+a registry refusal — the after-capture step's own error, or a snapshot store that cannot be
+made — keeps the checkout and pins it, and the error stays the attempt's own: T-P7's is the
+`Git` error naming "not the registry's" inside `WithWarnings`, with the warning "is kept in
+this checkout and pinned at"; T-P7b's is not `RegistryRefused`. Both were D's controls for "every
+other error discards", which N reverses by design; no assertion about the error's identity is
+dropped. Red when N1 discards again (`n1-discard`) and T-P7 when it pins nothing (`n1-nopin`);
+T-P7b also when every snapshot error records the candidate (`m-keepall`).
+
+## `fn a_kept_pin_that_cannot_be_written_is_reported_and_nothing_is_discarded() {`
+
+T-P8 (R-D1), reconciled by part K: a ref below the kept pin's name (`…-kept/blocker`) makes
+`prepare_commit_from_candidate` fail, where a moved `HEAD` no longer does: the refusal says
+pinning failed, nothing is discarded, and no pin exists. Its FUB-D5-INDEX role on a moved `HEAD`
+moved to T-R3 (`a_branch_moved_after_capture_keeps_the_output_pinned_at_its_captured_identity`).
+Red under `m-discard` and when the refused arm discards on a failed pin (`m-pinfail-discards`).
+
+## `fn a_review_snapshot_refused_after_capture_keeps_and_pins_the_candidate() {`
+
+T-P9: the review snapshot's site — no gates, one reviewer — with the same result as T-P1.
+
+## `struct OnceContended {`
+
+The writer of a tear on its own thread, gated by the registry access's
+`CONTENDED_ATTEMPTS` handshake for the repository's canonical common git dir
+(`canonical_common_git_dir_of`), with a watchdog, as `src/workspace.rs`'s twin.
+
+## `fn a_legacy_run_completes_past_a_tear_its_writer_finishes() {`
+
+T-L6, (e1): the legacy engine completes past a tear its writer finishes after the
+snapshot add's first failed attempt, with nothing discarded and no pin.
+`a_legacy_run_completes_past_a_topology_slot_its_writer_finishes` is (e2) itself: the
+writer is a topology slot's registration the manager added and tore, finished the way its
+writer finishes it. Both red at master, where the first failed add is Git state and the
+coordinator discards.
+
+## `fn the_kept_pin_restore_writes_the_recorded_blob_under_a_blob_replacement() {`
+
+T-P10 and T-P11 (FUD-D1-REPLACE, at the pin's parent): a blob replacement of the worker's
+new file, and a tree replacement of the captured tree by its parent's. Following the
+warning's restore leaves every path of the pin's recorded tree with that blob's bytes, no
+other index path, and the index's tree the pin's. T-P12 and T-P12g
+(`the_kept_pin_pick_applies_the_recorded_change_under_a_tree_replacement`,
+`the_kept_pin_pick_takes_the_recorded_parent_under_a_graft`) do the same on a later
+`HEAD`, under a tree replacement made at capture and a `git replace --graft` of the pin
+made after the resumed run's commit. Red when the warning's commands lose their
+replacement controls (`m-plain`).
+
+## `fn every_kept_pin_is_named_after_a_second_refusal_on_the_next_resume() {`
+
+T-P13 (FUD-D1-PINWARN, the concurrency lens's sequence): a refusal keeps attempt 1; after
+the repair the resume's own attempt 2 is refused too (its worker plants the residue) and
+kept; after the second repair the successful resume names both pins and removes neither.
+Red when the lookup reads only the attempts still in flight (`m-interrupted`).
+
+## `fn named_after_a_failed_resume(tag: &str, retire: bool) {`
+
+T-P14 (`a_kept_pin_is_named_after_a_resume_that_failed`) and T-P15
+(`a_removed_kept_pin_is_named_no_more`), the regression lens's sequence: a refusal, then a
+resume whose worker cannot spawn, which settles attempt 1 as interrupted and fails before
+its report (the replayed log shows attempt 1 no longer in flight), then a successful
+resume. It names the pin, which survives; with `git update-ref -d <pin>` between the two,
+it names none. T-P14 is red under `m-interrupted`.
+
+## `const ENGINE_CALL_BOUND: Duration = Duration::from_secs(300);`
+
+The tests of R-D1's preservation design, round 4 (`~/orch-pr11/owner-package/RD1-PRESERVATION-PROPOSAL.md`, sha256
+`f9e81c07…`; parts K, G4 and N, proposed, conditional on O8; record §5.17), appended after D's. Every call into the
+legacy engine is bounded: an in-process run or resume by `bounded` (a watchdog thread and a channel's `recv_timeout`, so
+a wedged engine fails the test at the bound instead of hanging the suite; `bounded_run`, `bounded_resume`), and a child
+of this test binary by `bounded_child` (output to a file, `try_wait` polled, killed and reaped at the bound). The bound
+is generous for CI's slowest leg and times no healthy step: every wait inside the tests is a handshake (an after-capture
+hook, a child's exit, a shim's marker), never time alone.
+
+## `fn rd1_repo(tag: &str) -> (ScratchTree, PathBuf) {`
+
+The harness's repository shape: `tracked.txt`, `deleted.txt`, a tracked `.gitignore` (`ignored.flag`) and `sub/t.txt`,
+with `core.autocrlf=false` because bytes are compared, and one gated task. `kept_pin_of`, `pin_target`, `blob_at`,
+`kept_copies`, `restore_the_pin_from` (the `git fetch <copy> <pin>:<pin>` the copy warning advertises) and
+`forget_every_unreferenced_object` (every reflog expired, `gc --prune=now`) read what the engine kept.
+
+## `struct ShapingWorker {`
+
+A worker whose output is a named shape written into its checkout (`shape_named`: the harness's cases, from the paid
+output to an ignored directory where `HEAD` has a file, a nested repository, an unreadable file, a CRLF output or a name
+that is not UTF-8), the fake adapter's own run then adding nothing. With `then_exit` the process dies right after the
+shape is written: `die_inside_an_attempt` runs the legacy engine that way in a child of this test binary
+(`kept_shape_child_dies_inside_an_attempt`), the killed-mid-attempt pattern of
+`killing_a_run_mid_attempt_leaves_a_resumable_record`, so the log ends with the attempt in flight and nothing captured or
+pinned. `resume_and_die_inside_the_attempt` does the same to a resume, after its guarded discard ran, so a second resume
+finds an attempt in flight again. `UnparsedWorker` writes the output and then fails the adapter's parse.
+
+## `struct ChildEngine {`
+
+A resume or a run in a child of this test binary, its result written to a report file (`report_of`): the fixtures
+`kept_engine_child_resumes`, `kept_engine_child_runs`, `kept_engine_child_runs_and_fails_after_capture` and
+`kept_engine_child_runs_and_tears_after_capture`. A child is how a test gives the engine an environment of its own —
+`GIT_TEST_SPLIT_INDEX` inherited, or a `git` shim first on `PATH` — with no `std::env::set_var` in this process.
+
+## `struct GitShim {`
+
+A `git` first on a child's `PATH` (Unix): it logs every invocation and runs each `ShimRule`'s action once, before the
+matching invocation or after it with the real `git`'s status kept. A rule matches the subcommand, found past `-C <dir>`,
+`-c <setting>` and other leading options, and a word the arguments hold. An action's own Git runs through `foreign`,
+the real `git` with none of the engine child's own variables (`GIT_INDEX_FILE`, `GIT_NO_REPLACE_OBJECTS`), as another
+client's would; without it a foreign `reset` meant for the checkout's index ran against the capture's private one.
+`kill -KILL $PPID` in an action kills the engine at that exact child.
+
+## `struct PartWay {`
+
+What stops a first resume's discard part-way: on Unix the leftover's directory read-only, after checking the mode bit
+binds; on Windows the file held open by this process with `FILE_SHARE_READ` only, so that Git reads it and its unlink
+fails. The proposal names `share_mode(0)`, which would deny Git's own read too: the capture would then not hold the file,
+and the part-way stop it predicts would not arise.
+
+## `fn a_kept_pin_is_written_whatever_head_is_when_the_snapshot_is_refused() {`
+
+The tests of R-D1's own cases, each red at D's head as the merge has it: T-R1
+(`a_branch_moved_before_capture_and_back_keeps_the_output_through_the_first_resume`, A1 and A1t — the worker moves the
+branch, with or without a foreign change in the moved commit's tree, and the hook moves it back), T-R2 (A1h, put back
+with `reset --hard`), T-R3 (A2, A2h: the refusal names `git update-ref`; T-P8's FUB-D5-INDEX role), T-R4 (A3 to A6:
+detached, another branch, the branch deleted, its ref symbolic — the tear repaired before the operator's restore, which
+lists the worktrees), T-R5 and T-R6 (B1, B2; Unix, mode bits), `a_store_fault_at_the_pins_objects_or_its_reflog_loses_nothing`
+(B3, B4; an object store that takes no object fails the gate snapshot's own commit first, so that run ends through N1's
+arm, its pin failing too), T-R7 (C1, C2, C4), T-R8 (C3), T-R9 (E1, and E2 with a shim that kills the run at the pin's
+`update-ref`), T-R10 (F1, F2: `update-ref -d`, and a `fetch --prune` from a bare remote), T-R11 (X3) and T-R12 (X2, the
+control). Each pinned output is checked by its tree, and the warning's restore is followed where the case resumes.
+
+F2's fetch runs with `-c maintenance.auto=false -c gc.auto=0`, two of the four settings the engine's own Git children
+carry (`AUTO_MAINTENANCE_REFUSED`, `src/workspace.rs`). From Git 2.54 a fetch's automatic maintenance takes the
+`geometric` strategy, whose `worktree-prune` task removes the torn registration: its `gitdir` names a checkout that does
+not exist, and it has no index. The maintenance detaches, so it races the operator's repair, and where it wins the
+repair finds nothing to remove. That is how T-R10 failed on the hosted runner's Git 2.55.0. Without the two settings,
+Git's maintenance policy, not the engine, would decide what the repair finds. F2's case, the pin pruned by
+`fetch --prune`, is unchanged.
+
+## `fn a_foreign_index_reset_during_the_resumes_capture_cannot_change_the_kept_tree() {`
+
+The tests of round 2's cases: T-RD1-1 (another client's `reset` before the capture's `write-tree`, Unix), T-RD1-2
+(assume-unchanged), T-RD1-3 (the pin deleted after the copy's `list-heads`, and before the revert's `read-tree -m`;
+the copy restores it after every reflog expired and `gc --prune=now`), T-RD1-4 (V1, V3), T-RD1-5 (an interrupted UTF-8
+write), T-GRESET (the unlink and the write forms, healed for the second resume), T-N1a, T-N1c (a shim moves the branch
+during the capture's diff; Unix), `an_error_after_the_worker_wrote_and_before_its_capture_keeps_the_output_pinned` (N1d),
+`an_earlier_attempts_retained_output_is_kept_when_the_next_worker_cannot_start` (N1e: a same-session retry whose worker
+cannot spawn), T-N2a to T-N2c (the settlement's line torn by `FailTheLegacyAppendNumbered<4>`, whose number the test
+checks against the log), T-X10, T-X16, T-X18, T-X19 and T-X20, and the controls X4
+(`every_kind_of_change_is_pinned_and_an_ignored_file_survives`), X6
+(`a_resume_that_dies_before_its_revert_is_finished_by_the_next`) and X17
+(`a_leftover_whose_name_is_not_utf8_is_pinned_then_reverted`, Linux: a name APFS refuses). T-X10's resumed attempt then
+fails on what the discard left, so its leftovers warning is not delivered (R-D5): the test reads the log's
+`run_resumed` record instead. T-X20's first resume runs with the event log read-only, so it stops after its guarded
+discard having recorded nothing, and the second finds the same attempt in flight, as the design's two resumes in a row
+do; the second does not refuse, and whether its attempt commits is the nested repository's to decide.
+
+## `fn a_retry_after_a_deleted_pin_restores_it_from_the_untouched_copy() {`
+
+The tests of round 3's cases: T-RD2-1, -1b (a shim deletes the restored pin before the revert), -1m (the pin moved to
+another upstroke-identity commit), -1c (a `.partial` cut short, planted), T-RD2-2, -2r, -2p, -2u, -2n, -2b (a shim
+writes the deleted file again before the revert), and T-RD2-3, -3e, -3s, -3w, -3h and -3p (each condition turns
+`core.autocrlf` on through `autocrlf_through`, written as Git reads it; the first of two resumes dies inside its
+attempt, so both passed the guarded discard).
+
+## `fn a_capture_leaves_a_split_index_readable_and_pins() {`
+
+The tests of round 4's cases: T-RD3-1 (N1's arm on a split index with `splitIndex.sharedIndexExpire=now`; the hook
+records the `sharedindex.*` set at the arm, so the comparison sees only the pin's own writes), T-RD3-1g, T-RD3-1e (the
+split forced by `GIT_TEST_SPLIT_INDEX` inherited by a child, for the run and for the resume), T-RD3-1f (Unix: a logging
+fsmonitor hook; only its calls in the checkout's own directory are counted, since a snapshot's worktree is another
+directory), `a_hostile_repository_keeps_its_index_readable_and_its_monitor_unqueried` (the proposal's §10.4 shared-state
+check: split index, untracked cache and the hook together, the hook counted only while the engine runs), T-RD3-2 and
+T-RD3-2r (a shim lists the run's public directory at the first `read-tree -m`: a fresh copy, renamed into place, beside a
+planted one), T-RD3-2p (the run's public directory read-only: the resume cannot write its own copy, refuses, and
+discards nothing) and T-RD2-1cr (a shim cuts the copy `bundle create` wrote and kills the resume, so the crash leaves
+what a crash leaves: a `.partial` under round 4, a final name under `copy-in-place`). The fsyncs themselves are traced
+outside the suite (record §5.17).
+
