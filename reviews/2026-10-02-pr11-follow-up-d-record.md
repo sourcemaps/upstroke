@@ -4648,3 +4648,126 @@ corrected in place, each change marked as this round's, and the second event is 
   private base. No background process of this round's is left running.
 
 The draft body records the head the ten gates passed at, with the logs under `fudi8/gates/`.
+
+### 5.22 Round D9, 2026-10-10: #335 integrated, master `5355b829` merged within D's existing conditional scope
+
+> **On §5.21's terms, unchanged:** a draft, PROPOSED, conditional on the owner's decision O8 and on the owner's ruling
+> B-W924-R1-S, and not merge-ready. O8 and B-W924-R1-S stay UNADOPTED, and B-W924-R1 stays operative on master. S
+> stays a PROPOSED conditional composition, and round D8's hold of the removal-and-list witness (§5.21.4) lives inside
+> S's conditional draft only. This round is ordinary integration under the existing bar: not a review, not an
+> adoption, not a disposition of D's natural red (§5.22.4), and not a new owner occasion. D's full requested review
+> stays HELD and OUTSTANDING, with no reroute and no substitute. The round adds two commits on `5b69e2ef`, the
+> merge `78e55cb4` and this record's commit, with no rebase, and no `reviewed_sha` is re-stamped. Nothing is pushed:
+> the round stops before push.
+
+**Who and on what.** `pr11_fud_impl9` (`claude-opus-5-5`, `max`), a fresh worker `orch_pr11b` spawned on 2026-10-10
+on `5b69e2ef`. Its brief is `~/orch-pr11/briefs/pr11_fud_impl9.md`. The supervisor's direction
+`/home/ubuntu/babysit-pr11/evidence/d-native-fixture-prerequisite-direction-20261009.md` (sha256 `93f609a3…`,
+checked) wins over it; this round works under its sentence "After any prerequisite lands, its integration into D is
+ordinary fresh-worker work only within D's existing conditional scope; preserve all owner-adoption and held-review
+bars." #335's landing is the orchestrator's record `~/orch-pr11/logs/orch-merge-335/LANDING.md` (`477cb127…`).
+This round's figures are under `~/orch-pr11/logs/pr11_fud_impl9/`, cited as `fudi9/…`, and the hashes of its inputs
+are in `fudi9/inputs/READ-LOG.txt`.
+
+#### 5.22.1 The landing, and the start
+
+- **#335 has landed** (`fudi9/git/ls-remote-start.txt`, `fudi9/git/heads.txt`). Master is `5355b829`, #335's
+  merge commit. Its first parent is `c0ed07a5`, the master round D7 merged (§5.20), and its second is `e62c8d8f`,
+  which the landing record names as #335's final reviewed head. Its first-parent range from `c0ed07a5` is that one
+  commit.
+- **D's head** on the remote was `5b69e2ef`, round D8's, and its merge base with `5355b829` is `c0ed07a5`.
+- **The start state:** the worktree was clean at `5b69e2ef`, with no operation in progress, judged from Git state
+  alone (`fudi9/git/state-start.txt`). The round works on local branch `pr11-fud-impl9`
+  (`fudi9/git/branch-create.txt`).
+- **What the range changes** (`fudi9/git/master-paths-over-base.txt`): `docs/internals/runner/host/tests.md` (M),
+  `src/runner/host/tests.rs` (M) and
+  `findings/P2_portability_202609102200_an-unreachable-path-entry-aborts-program-resolution.md` (D). The brief
+  records each as a subject path, per #335's merge determination. B's landing touched none of the three
+  (`fudi9/proof/b-landing-vs-range-paths.txt`).
+- **No path is changed by both sides** (`fudi9/git/paths-changed-by-both.txt`, empty): D's 23 paths over
+  `c0ed07a5` (`fudi9/git/d-paths-over-base.txt`) and the range's three are disjoint.
+
+#### 5.22.2 The merge
+
+- **The command:** `git merge --no-ff --no-log --no-edit -F <message> 5355b829` on the box's Git 2.43.0
+  (`fudi9/git/merge.txt`; the message is `fudi9/git/merge-message.txt`). A dry `git merge-tree --write-tree` of the
+  same two commits had given the same tree, with no conflict (`fudi9/git/dry-merge-tree.txt`).
+- **No conflict, and nothing resolved.** The merge commit is `78e55cb4`, with parents `5b69e2ef` and `5355b829`; its
+  tree is `657e6898`.
+
+#### 5.22.3 The proofs, on the merge itself
+
+`fudi9/tools/proof.sh` ran at `78e55cb4` (`fudi9/proof/PROOF-RESULTS.txt`). Each diff is saved under
+`fudi9/proof/`, with its sha256 in `fudi9/proof/DIFFS.sha256`.
+
+| Proof | This diff | is byte-identical to | Size | sha256 of each |
+|---|---|---|---|---|
+| (a) the merge brings exactly master's landed change | `git diff 5b69e2ef 78e55cb4` | `git diff c0ed07a5 5355b829` | 22,744 bytes, 3 paths | `67ce7c650649fe620c1fefe9649999a505654c67dcc2f8212c4a2b81f31ffe81` |
+| (b) D's net change is unchanged | `git diff 5355b829 78e55cb4` | `git diff c0ed07a5 5b69e2ef` | 902,047 bytes, 23 paths | `ec64e240fadd1bc9100c7ea14663bd7ab5a92638402583a9b14dfd10aebc66a3` |
+
+- **Hardened:** the same two pairs with `--full-index --binary --no-color --no-ext-diff --no-renames` are
+  byte-identical too (`840d9e03…` for (a), `5b3a6850…` for (b)).
+- **What (b) covers:** D's whole change over master, so D's scope, its three instrument hunks, its O8 and S texts, and
+  round D8's hold. B's adopted hunks are master's. The merge changes none of them, since (a)'s three paths hold none,
+  and S's proposed withdrawal at B-W924-R1's three commands is part of (b), unchanged and still PROPOSED.
+- **(c), no new instrument change:**
+  - (b)'s changed-path set is D's same 23 paths, with the same statuses (`fudi9/proof/c-b-lhs.name-status`,
+    `fudi9/proof/c-b-rhs.name-status`).
+  - Against `c0ed07a5` the merge changes 26 paths, D's 23 and the range's three, and each holds its own side's
+    blob (`fudi9/proof/c-blob-table.tsv`).
+  - The instrument check matches `CLAUDE.md`'s known instruments and the lint and toolchain configuration
+    (`.github/`, `scripts/`, `.cargo/`, a root toolchain file, `Cargo.*`, `clippy.toml`, `rustfmt.toml`,
+    `deny.toml`, `.config/`, `effects/`, `src/effects*`; the set is not closed). The merge's change against its first
+    parent has no such path. Its change against master has exactly D's three, `clippy.toml`,
+    `effects/allowlist.toml` and `effects/wrappers.toml`, each D's blob. The merge carries no instrument change that
+    neither side carries.
+  - **The second limb:** `CLAUDE.md`, `AGENTS.md`, `MAINTAINING.md` and `findings/PROCESS.md` are `c0ed07a5`'s
+    blobs at the merge.
+- **The host runner at the merge** (`fudi9/proof/runner-host-blobs.txt`): `src/runner/host/tests.rs` is #335's
+  blob `c0f231f7`. The two policy witnesses, as the finding #335 deleted names them, are in
+  `src/runner/host/naming.rs`: `an_undetermined_candidate_stops_the_search_before_a_later_match` (`:372`) and
+  `a_directory_that_is_merely_absent_is_walked_past_to_a_later_match` (`:408`). That file is the same blob,
+  `bfdfe43b`, at `c0ed07a5`, `5b69e2ef`, `5355b829` and the merge. `src/runner/contract.rs` is D's
+  `0b604106`. This round touches nothing of the merged fixture's subject.
+
+#### 5.22.4 D's natural red at `5b69e2ef`, kept as history
+
+- **The red:** CI 37919168028 ran at `5b69e2ef`, and its `test (winguest)` job failed on
+  `runner::host::tests::every_path_entry_this_runner_searches_names_a_location_on_its_own`, with `os error 64`: the
+  fingerprint of `PR262-UNREACHABLE-PATH-ENTRY-ABORTS-PROGRAM-RESOLUTION`. The orchestrator's triage records it
+  (`~/orch-pr11/logs/orch-d8/ci-red-37919168028/TRIAGE.md`, `6c0381f0…`, with its two dated addenda), and it
+  stays preserved, as history.
+- **Unestablished:** its cause, any indirect contribution from D's change, and the reach of `src/runner/contract.rs`
+  into that test. This record does not call the red resolved, flaky, pre-existing or not D's, and #335's integration
+  is no disposition of it.
+- **Separate:** the integrated head's own CI is separate evidence, which the orchestrator records. A required-CI red at
+  D's final head stays D's own merge-bar item, separate from the adoption and review bars.
+
+#### 5.22.5 The bars, unchanged
+
+- **The owner's two ADOPTIONS,** O8 and B-W924-R1-S, both unadopted. B-W924-R1 stays operative on master, and S stays
+  PROPOSED and conditional, with round D8's hold inside it.
+- **D's full requested review:** HELD and OUTSTANDING, with no reroute and no substitute. #335's reviews are #335's;
+  they are not, and are not recorded as, D's requested review.
+- **Required CI green at D's final head,** with the red at `5b69e2ef` as history, under §5.22.4's limits.
+- **The merge decision,** under the existing bar. No review exemption is claimed.
+
+#### 5.22.6 Validation at the final head, and operations
+
+- **The proofs ran at the merge, `78e55cb4`.** This record's commit changes this file only, and no compiled input
+  reads it: no `include_str!` names a file under `reviews/`, and `Cargo.toml` excludes `reviews/` from the package
+  (`fudi9/proof/record-not-compiled.txt`).
+- **At the final head, once:** the ten gates, through `upstroke-build` on this round's private base, each in the
+  foreground (`fudi9/gates/`). The Linux results of
+  `runner::host::tests::every_path_entry_this_runner_searches_names_a_location_on_its_own` and of the two policy
+  witnesses are named from gate 3's run. The characterization of rounds D7 and D8 (§5.20.4, §5.21) is cited unchanged
+  and not re-run: the merge's change is (a)'s three paths, and none of them holds a witness, fixture or production
+  line those rounds characterized. A red is kept and returned, never re-run to green.
+- **Operations:** up to this record's commit, every input was read by exact path, no shared directory was listed, and
+  no shared process table, environment or CI was read (`fudi9/inputs/READ-LOG.txt`). Free disk is measured by
+  statvfs of this round's own private base, before and after each build (`fudi9/disk.log`). No boundary event, up to
+  this record's commit. Left in place, since cleanup is out of scope: this round's private base, and its scratch
+  directories under `/tmp`. No background process of this round's is left running.
+
+The gates' results are in `fudi9/gates/`, the draft body and this round's package; this record reports none, since
+they run after its commit.
