@@ -388,7 +388,9 @@ under the temporary directory that this process owns and never creates
 `symlink_metadata` before use: every candidate under it is a genuine
 `NotFound`, whatever another process or a retained fixture has left in
 the shared temporary directory (`SWEEP-HOST-NAMING-005`, which is what
-pointing `PATH` at the ambient directory itself was). `this_test_binary`
+pointing `PATH` at the ambient directory itself was). It serves the
+absence control; the walked-past control builds its own, for the reason
+given with that test below. `this_test_binary`
 is the directory and bare file name of the running test executable — the
 one program every platform has installed and executable by construction,
 and so the only "later match" a module that cannot write a file can
@@ -408,9 +410,32 @@ test binary's own directory second, and the answer must be the
 the variant's fields, not on its rendering. Restoring `b9c73630`'s
 fall-through fails this test and nothing else in the `runner::host`
 suite. `a_directory_that_is_merely_absent_is_walked_past_to_a_later_match`
-is its control: the never-created directory first, the binary second,
+is its control: a never-created directory first, the binary second,
 and the binary must be found. Making `NotFound` propagate fails it, the
 absence control above, and twenty-one tests of row 44's suite.
+
+Its never-created directory is its own and not `never_created_directory`'s:
+a name of the same kind (`upstroke-naming-walked-past-`, the process id and
+the clock) at the root of the test binary's own path — `/`, or the drive or
+share the binary runs from — asserted absent with `symlink_metadata` the
+same way. A missing directory does not make every path beneath it
+`NotFound`: a path longer than the platform allows is refused for its
+length first, as Linux's `ENAMETOOLONG` (os error 36). Under the temporary
+directory the candidate was the temporary directory's length plus 77 bytes
+and the process id's digits, so under a 4,027-byte temporary directory it
+passed 4,096 bytes, the search rightly stopped there with `Filesystem`, and
+this control failed on unchanged source, the class `P335-R2-PL-1` repaired in
+`src/runner/host/tests.rs`'s PATH-entry fixture. This repairs
+`PR335-ABSENT-WITNESS-CANDIDATE-EXCEEDS-PATH-LIMIT`. At the root no byte of
+the temporary directory reaches the candidate: it is the root, the
+fixed-shape name and the binary's own file name, which on Unix is at most
+335 bytes (one for the root, 28 for the tag, ten for a process id, two
+separators, 39 for the clock, 255 for one file name), below Linux's 4,096
+and macOS's 1,024, so neither the temporary directory's length nor its
+spelling can decide this verdict. The entry is absolute whenever the
+binary's directory is, so the search asks it rather than skipping it;
+under a relative temporary directory the old entry was relative, the
+search skipped it, and this control passed without walking anything past.
 
 `a_pathext_entry_no_string_can_carry_reaches_the_candidate_intact`
 drives `ProgramNaming::Windows` — on every platform, per the grid — with
