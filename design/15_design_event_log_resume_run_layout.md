@@ -235,15 +235,21 @@ abandoned.
 **What stays outside it.**
 - The run's refs are shared by every incarnation of the run, by design. On Unix the cleanup lease
   orders an engine `update-ref`; on Windows a terminated one's ref write landing after its
-  successor reclaimed the lock is
-  `PR330-A-DEAD-COORDINATORS-WINDOWS-REF-WRITE-CAN-LAND-AFTER-ITS-RESUME-RECLAIMED-THE-LOCK`, the
-  owner's decision before G6.
+  successor reclaimed the lock is a window accepted as decision D5(b), under the owner's delegation
+  of 2026-10-11, and filed as
+  `PR330-A-DEAD-COORDINATORS-WINDOWS-REF-WRITE-CAN-LAND-AFTER-ITS-RESUME-RECLAIMED-THE-LOCK` (the
+  record's §6.16).
 - A coordinator started with Git's repository variables in its environment (`GIT_INDEX_FILE`,
   `GIT_DIR` and their family) hands them to every engine Git child, which then reads and writes
   the repository or index they name whatever its instance: the finding `FUB-D9-ENV`, with its
-  instance-isolation consequence `FUC-D5-GITINDEXFILE`, the owner's decision before G6.
+  instance-isolation consequence `FUC-D5-GITINDEXFILE`, which their own change before G6 remedies:
+  the route selected under the owner's delegation of 2026-10-11, the adoptions its candidate draft
+  names staying the owner's (the record's §6.16).
 - An instance a still-running earlier writer creates after terminal finalization's last sweep has
-  no class in the run's resource accounting until the owner rules on it (the record's §5.4).
+  no class in the run's resource accounting until A-12 lands. O4(a), adopted under the owner's
+  delegation of 2026-10-11, accounts such an instance rather than preventing it, and its class is
+  A-12's: the ledger's own change, after follow-up C merges and before G6, PR12 and any topology
+  activation (the record's §5.4 and §6.16).
 - A prune the engine did not start (a host agent's, the user's, an IDE's, or Git's own maintenance
   in another checkout), and the frozen legacy engine's maintenance, are outside it: the
   external-prune finding and follow-up D's.
