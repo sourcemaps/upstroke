@@ -3587,11 +3587,14 @@ impl<F: Fn(Liveness) -> Liveness + Send + Sync> ContainerRuntime for Scripted<'_
     fn collect(&self, name: &str) -> Result<ContainerExecution, RuntimeError> {
         self.0.collect(name)
     }
-    fn create(&self, spec: &CreateSpec) -> Result<super::runtime::CreatedContainer, RuntimeError> {
-        self.0.create(spec)
+    fn create(
+        &self,
+        covered: CoveredCreate<'_>,
+    ) -> Result<super::runtime::CreatedContainer, RuntimeError> {
+        self.0.create(covered)
     }
-    fn start(&self, name: &str) -> Result<(), RuntimeError> {
-        self.0.start(name)
+    fn start(&self, covered: CoveredStart<'_>) -> Result<(), RuntimeError> {
+        self.0.start(covered)
     }
     fn stop(&self, name: &str, mode: StopMode) -> Result<Settled, RuntimeError> {
         self.0.stop(name, mode)
