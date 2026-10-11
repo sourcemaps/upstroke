@@ -168,3 +168,14 @@ repeated under inherited overrides with the remedy.
 
 **Owner:** the PR11 owner's decision **O3** (ENV-1 in the manager's two builders), or **O3-R** if the owner folds the
 host runner's role environment into it. #330's ledger maps FUC-D5-GITINDEXFILE's row to this file.
+
+**The route, selected 2026-10-11 (PR #330's repair round 9).** O3-R (ii)'s form: "its own change before G6, carried by
+the option (C) draft, the only implemented candidate", and "The adoptions that draft names stay the owner's, through its
+own question"; the option is "(ii) File it and fix it by its own change before G6." That selection is an agent decision
+by `pr11_decide_c` under the owner's delegation of 2026-10-11 (babysit's 0194a1e4…), in its decision report
+(`~/orch-pr11/logs/pr11_decide_c/DECISION-REPORT.md`, sha256 `19b080be…`, section 3, C-4), and not the owner's own
+selection. So this file, and with it FUC-D5-GITINDEXFILE, is remedied by its own change before G6, not by #330:
+- it stays open, P1 and `deferred`, and G6 stays blocked through Q4, Q6 and DESC until that change lands;
+- the selection adopts none of O3's options 1 to 3, O3-R (i) or (iii), option (C)'s own adoptions, or ENV-C's packaging
+  question, and approves no remedy's code;
+- if the option (C) draft does not land, the route stands and needs another candidate change.

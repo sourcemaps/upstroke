@@ -170,8 +170,9 @@ what a coordinator killed after making an add's destination leaves.
 
 **A dead coordinator's Git writers and the slot its resume uses.** *In force for the topology's
 slots, as `reviews/2026-10-02-pr11-follow-up-c-record.md` designs them (§4, completed in §5) and its
-implementation section records. The packet names the untagged paths, so this needs the owner's
-adoption of that record's erratum E-FUC-3; until then this paragraph states what the code does.*
+implementation section records. The packet names the untagged paths; that record's erratum
+E-FUC-3, which amends them for U's instances, is adopted as composed, under the owner's delegation
+of 2026-10-11 (that record's §6.16).*
 
 **The defect.** A coordinator killed inside a Git write leaves that write's processes running:
 the add's checkout child, a filter and anything it starts. They name the slot by path or by
