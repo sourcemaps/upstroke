@@ -2900,7 +2900,7 @@ returned at once.
 
 ## `fn anothers_empty_commondir_in(output: &std::process::Output, dir: &Path) -> bool {`
 
-The rule, B-W924-R1's (`read_anothers_empty_commondir` in `src/workspace.rs`) in
+The rule as B-W924-R1 stated it (its predicate, `read_anothers_empty_commondir`, was in `src/workspace.rs` until B-W924-R1-S withdrew it) in
 a copy of its own: exit 128, Git's death; standard error exactly one line, ended
 by its newline; that line Git's `fatal: failed to read `, a path whose last
 components are `worktrees` and a registration's name, then `/commondir:
