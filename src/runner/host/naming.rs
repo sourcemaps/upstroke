@@ -406,19 +406,20 @@ mod tests {
 
     #[test]
     fn a_directory_that_is_merely_absent_is_walked_past_to_a_later_match() {
-        let (dir, name) = this_test_binary();
-        let root = dir
-            .ancestors()
-            .last()
-            .expect("a path is among its own ancestors");
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("the clock is after the epoch")
-            .as_nanos();
-        let absent = root.join(format!(
-            "upstroke-naming-walked-past-{}-{nanos}",
-            std::process::id()
-        ));
+        #[cfg(unix)]
+        let (later, program, _opened) = {
+            use std::os::fd::AsRawFd as _;
+            let exe = std::env::current_exe().expect("the test binary has a path");
+            let opened = std::fs::File::open(&exe).expect("the test binary opens for reading");
+            (
+                PathBuf::from("/dev/fd"),
+                opened.as_raw_fd().to_string(),
+                opened,
+            )
+        };
+        #[cfg(windows)]
+        let (later, program) = this_test_binary();
+        let absent = later.join("upstroke-naming-walked-past");
         let probe = std::fs::symlink_metadata(&absent)
             .expect_err("a directory nothing has created must not exist");
         assert_eq!(
@@ -426,11 +427,11 @@ mod tests {
             std::io::ErrorKind::NotFound,
             "the fixture must be absent, not merely unreadable, to be a control"
         );
-        let path = std::env::join_paths([absent.as_path(), dir.as_path()])
+        let path = std::env::join_paths([absent.as_path(), later.as_path()])
             .expect("neither entry carries the PATH separator");
 
         let resolved = resolve_program(
-            &name,
+            &program,
             &composed(&[("PATH", path.as_os_str())]),
             KeyCase::Sensitive,
             ProgramNaming::current(),
@@ -438,7 +439,7 @@ mod tests {
         .expect("a not-found miss continues the search to the installed program");
         assert_eq!(
             resolved,
-            dir.join(&name),
+            later.join(&program),
             "the search must reach the program past an absent directory"
         );
     }

@@ -410,32 +410,61 @@ test binary's own directory second, and the answer must be the
 the variant's fields, not on its rendering. Restoring `b9c73630`'s
 fall-through fails this test and nothing else in the `runner::host`
 suite. `a_directory_that_is_merely_absent_is_walked_past_to_a_later_match`
-is its control: a never-created directory first, the binary second,
-and the binary must be found. Making `NotFound` propagate fails it, the
-absence control above, and twenty-one tests of row 44's suite.
+is its control: a never-created directory first, a directory the test
+binary is found in second, and the binary must be found. Making
+`NotFound` propagate fails it, the absence control above, and twenty-one
+tests of row 44's suite.
 
 Its never-created directory is its own and not `never_created_directory`'s:
-a name of the same kind (`upstroke-naming-walked-past-`, the process id and
-the clock) at the root of the test binary's own path — `/`, or the drive or
-share the binary runs from — asserted absent with `symlink_metadata` the
-same way. A missing directory does not make every path beneath it
-`NotFound`: a path longer than the platform allows is refused for its
-length first, as Linux's `ENAMETOOLONG` (os error 36). Under the temporary
-directory the candidate was the temporary directory's length plus 77 bytes
-and the process id's digits, so under a 4,027-byte temporary directory it
-passed 4,096 bytes, the search rightly stopped there with `Filesystem`, and
-this control failed on unchanged source, the class `P335-R2-PL-1` repaired in
-`src/runner/host/tests.rs`'s PATH-entry fixture. This repairs
-`PR335-ABSENT-WITNESS-CANDIDATE-EXCEEDS-PATH-LIMIT`. At the root no byte of
-the temporary directory reaches the candidate: it is the root, the
-fixed-shape name and the binary's own file name, which on Unix is at most
-335 bytes (one for the root, 28 for the tag, ten for a process id, two
-separators, 39 for the clock, 255 for one file name), below Linux's 4,096
-and macOS's 1,024, so neither the temporary directory's length nor its
-spelling can decide this verdict. The entry is absolute whenever the
-binary's directory is, so the search asks it rather than skipping it;
-under a relative temporary directory the old entry was relative, the
-search skipped it, and this control passed without walking anything past.
+`upstroke-naming-walked-past`, a child of the very directory the later
+match is found in, so it is looked up in the directory the later match's
+own lookup is made in, and it is asserted absent with `symlink_metadata`
+the same way. The test reads no clock, and no byte of the temporary
+directory reaches either entry. The absent entry is absolute because the
+later entry is, so the search asks it rather than skipping it.
+
+On Unix the later entry is the process's descriptor directory `/dev/fd`,
+and the program is the number of a descriptor the test holds open,
+read-only, on its own binary: the later match is `/dev/fd/<n>`, which
+`stat` follows to the binary. That directory holds exactly the process's
+open descriptors, by number (Linux's `/proc/self/fd`, macOS's devfs), so
+a name that is not a number is answered `ENOENT` and nothing can create
+one there, and neither the binary's location nor its spelling reaches
+either entry. Every byte of the absent candidate,
+`/dev/fd/upstroke-naming-walked-past/<n>`, is constructed: 36 bytes and
+the descriptor's decimal digits, at most ten for a `c_int`, against a
+`PATH_MAX` of 4,096 on Linux and 1,024 on macOS. Its two prerequisites
+are `/dev/fd`, which `src/rundir/tests.rs`'s `descriptors_open_on`
+already lists on both Unix legs, and a test binary the process can open
+for reading.
+
+On Windows the later entry is the test binary's own directory, from
+`this_test_binary`, and the absent entry is its never-created child of
+the same name, which nothing in the build writes there. `join_paths`
+refuses an entry on Windows only for a double quote, which no Windows file
+name holds, so the directory's spelling cannot make it refuse, and
+`split_paths`, which unquotes on Windows, recombines with it as std
+documents. Its length reaches both entries: each
+candidate under the absent entry is the later match's own path, the
+directory and the binary's name, with 28 more units, and four more again
+under a default extension.
+
+A missing directory does not make every path beneath it `NotFound`: a
+path longer than the platform allows is refused for its length first, as
+Linux's `ENAMETOOLONG` (os error 36). Under the temporary directory the
+candidate was the temporary directory's length plus 77 bytes and the
+process id's digits, so under a 4,027-byte temporary directory it passed
+4,096 bytes, the search rightly stopped there with `Filesystem`, and this
+control failed on unchanged source, the class `P335-R2-PL-1` repaired in
+`src/runner/host/tests.rs`'s PATH-entry fixture; under a relative
+temporary directory that entry was relative, the search skipped it, and
+this control passed without walking anything past. This repairs
+`PR335-ABSENT-WITNESS-CANDIDATE-EXCEEDS-PATH-LIMIT`. The first repair, a
+name with the process id and the clock at the root of the binary's path,
+made the root's answer for a name the later match never looks up a
+prerequisite, read the clock, and kept the binary's directory as the later
+entry, which a Unix `PATH` cannot carry once it holds a `:`; the
+construction above repairs `PR336-PL-1`, `PR336-PL-2` and `PR336-PL-3`.
 
 `a_pathext_entry_no_string_can_carry_reaches_the_candidate_intact`
 drives `ProgramNaming::Windows` — on every platform, per the grid — with
