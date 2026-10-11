@@ -411,8 +411,11 @@ test binary's own directory second, and the answer must be the
 the variant's fields, not on its rendering. Restoring `b9c73630`'s
 fall-through fails this test and nothing else in the `runner::host`
 suite. `a_directory_that_is_merely_absent_is_walked_past_to_a_later_match`
-is its control: a never-created directory first, a directory the test
-binary is found in second, and the binary must be found. Making
+is its control: a never-created directory first, the later entry
+second, and the program must be found in the later entry. Both the
+later entry and the program depend on the platform, as given below:
+`exe` in `/proc/self` on Linux, `sh` in `/bin` on macOS and any other
+Unix, and the test binary in its own directory on Windows. Making
 `NotFound` propagate fails it, the absence control above, and twenty-one
 tests of row 44's suite.
 
