@@ -423,20 +423,30 @@ the same way. The test reads no clock, and no byte of the temporary
 directory reaches either entry. The absent entry is absolute because the
 later entry is, so the search asks it rather than skipping it.
 
-On Unix the later entry is the process's descriptor directory `/dev/fd`,
-and the program is the number of a descriptor the test holds open,
-read-only, on its own binary: the later match is `/dev/fd/<n>`, which
-`stat` follows to the binary. That directory holds exactly the process's
-open descriptors, by number (Linux's `/proc/self/fd`, macOS's devfs), so
-a name that is not a number is answered `ENOENT` and nothing can create
-one there, and neither the binary's location nor its spelling reaches
-either entry. Every byte of the absent candidate,
+On Linux the later entry is `/proc/self` and the program is `exe`: the
+later match is `/proc/self/exe`, the link to the running executable that
+`std::env::current_exe` itself reads there, which `stat` follows to the
+binary. procfs fills a process's directory from a fixed set of names, so
+`upstroke-naming-walked-past` is answered `ENOENT` and nothing can create
+it. Every byte of the absent candidate,
+`/proc/self/upstroke-naming-walked-past/exe`, 42 of them, is
+constructed, against Linux's `PATH_MAX` of 4,096, and its one
+prerequisite is the procfs `current_exe` already needs.
+
+On macOS, and any other Unix, the later entry is the process's
+descriptor directory `/dev/fd`, and the program is the number of a
+descriptor the test holds open, read-only, on its own binary: the later
+match is `/dev/fd/<n>`, which `stat` follows to the binary. That
+directory holds exactly the process's open descriptors, by number, so a
+name that is not a number is answered `ENOENT` and nothing can create
+one there. Every byte of the absent candidate,
 `/dev/fd/upstroke-naming-walked-past/<n>`, is constructed: 36 bytes and
-the descriptor's decimal digits, at most ten for a `c_int`, against a
-`PATH_MAX` of 4,096 on Linux and 1,024 on macOS. Its two prerequisites
-are `/dev/fd`, which `src/rundir/tests.rs`'s `descriptors_open_on`
-already lists on both Unix legs, and a test binary the process can open
-for reading.
+the descriptor's decimal digits, at most ten for a `c_int`, against
+macOS's `PATH_MAX` of 1,024. Its prerequisites are `/dev/fd`, which
+`src/rundir/tests.rs`'s `descriptors_open_on` already lists on both Unix
+legs, a free descriptor, and a test binary the process can open for
+reading. On Linux and macOS alike, neither the binary's location nor its
+spelling reaches either entry.
 
 On Windows the later entry is the test binary's own directory, from
 `this_test_binary`, and the absent entry is its never-created child of

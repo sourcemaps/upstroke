@@ -406,7 +406,9 @@ mod tests {
 
     #[test]
     fn a_directory_that_is_merely_absent_is_walked_past_to_a_later_match() {
-        #[cfg(unix)]
+        #[cfg(target_os = "linux")]
+        let (later, program) = (PathBuf::from("/proc/self"), "exe".to_owned());
+        #[cfg(all(unix, not(target_os = "linux")))]
         let (later, program, _opened) = {
             use std::os::fd::AsRawFd as _;
             let exe = std::env::current_exe().expect("the test binary has a path");
