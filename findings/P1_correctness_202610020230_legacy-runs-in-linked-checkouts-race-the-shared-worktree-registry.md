@@ -8,7 +8,7 @@ reviewed_sha: 92c4ca81f9209d218df4534ee71d3445dc2906e1
 location: src/workspace.rs:871
 provenance: pre_existing
 first_bad: predates PR11: the legacy engine's four registry Git children have run untolerant since before PR5 froze `src/workspace.rs`; measured at the Git level on master `92c4ca81`'s argv by PR #329's first design round
-guard: follow-up D's implementation, on draft #331 and PROPOSED conditional on the owner's decision O8 (decision B), closes (e1) and (e2) by corrected B1′, (e1′) and (e2′) by B-PRESERVE, and R-D1 — a refused attempt whose kept pin cannot be written (FUD-D4-PINSAMEFAULT's one storage fault), or whose HEAD moved from the captured parent (#331's early review, E1) — by R-D1's preservation design, round 4 (`~/orch-pr11/owner-package/RD1-PRESERVATION-PROPOSAL.md`, sha256 `f9e81c07…`: K, G4 and N, implemented by #331's implementation round 3 with its instrument rows, conditional on O8 as D's texts are); this file stays open until that pull request merges — after PR #329, O8's adoption, and the required reviews, the regular verdict on R-D1's design among them, which is unmet
+guard: follow-up D's implementation, on draft #331, adopted on 2026-10-11 with decision O8 (decision B) as an agent decision by `pr11_decide_d` under the owner's delegation of 2026-10-11 (babysit's `0194a1e4…`) and in force only from #331's merge, closes (e1) and (e2) by corrected B1′, (e1′) and (e2′) by B-PRESERVE, and R-D1 — a refused attempt whose kept pin cannot be written (FUD-D4-PINSAMEFAULT's one storage fault), or whose HEAD moved from the captured parent (#331's early review, E1) — by R-D1's preservation design, round 4 (`~/orch-pr11/owner-package/RD1-PRESERVATION-PROPOSAL.md`, sha256 `f9e81c07…`: K, G4 and N, implemented by #331's implementation round 3 with its instrument rows, adopted with O8 as D's texts are); this file stays open until that pull request merges — after PR #329, O8's adoption, and the required reviews, the regular verdict on R-D1's design among them, which is unmet
 ---
 
 ## Failure sequence
@@ -159,10 +159,11 @@ stays open under its guard.
 
 ## Follow-up D's implementation (2026-10-03, draft #331): what it closes, and why this file stays
 
-**Implemented, and not granted.** Follow-up D's reviewed proposal is implemented on PR #331's branch, a draft, as its
-record's Implementation section gives it (`reviews/2026-10-02-pr11-follow-up-d-record.md`). Its five
-`effects/allowlist.toml` texts, and `design/15`'s paragraph, are **proposed, conditional on the owner's decision O8**,
-and nothing of it is in force until the owner adopts O8 and that pull request merges, after PR #329.
+**Implemented, and adopted on 2026-10-11 with decision O8, as an agent decision by `pr11_decide_d` under the owner's
+delegation of 2026-10-11 (babysit's `0194a1e4…`).** Follow-up D's reviewed proposal is implemented on PR #331's branch,
+a draft, as its record's Implementation section gives it (`reviews/2026-10-02-pr11-follow-up-d-record.md`). Its five
+`effects/allowlist.toml` texts, and `design/15`'s paragraph, are **adopted with O8**, and nothing of it is in force
+until that pull request merges, after PR #329.
 
 **What it closes once merged, with its regression tests.**
 - **(e1) and (e2), a write in flight:** the three registry children each run as one attempt of PR #329's
@@ -197,7 +198,9 @@ remains is **R-D1**, inside this file's consequence, the discard of paid output 
   engine's consequence is reasoned. Through a tear, the finding's own trigger, it needs an independent ref-store fault.
 
 **Grading and G6, unchanged by this note.** The file keeps P1; nothing here regrades it. (e2) and (e2′) block G6 until D
-is merged and validated, which needs O8 and PR #329 merged (O9, O14, O11). The restore lens found R-D1's one-fault case
+is merged and validated, which needs O8, adopted on 2026-10-11 as an agent decision by `pr11_decide_d` under the
+owner's delegation of 2026-10-11 (babysit's `0194a1e4…`), and PR #329 merged (O9, O14, O11). The restore lens found
+R-D1's one-fault case
 legacy-only, with no independent mixed blocker shown. No waiver and no acceptance is inferred.
 
 ## R-D1's moved-`HEAD` case (2026-10-03, #331's early review, item E1)
@@ -230,15 +233,16 @@ D's proposed `src/workspace.rs` text does not name and whose `HEAD` refusal D's 
 
 ## R-D1's preservation, implemented (2026-10-04, #331's implementation round 3)
 
-**Implemented on draft #331, and not granted.** R-D1's preservation design, round 4
+**Implemented on draft #331, and adopted on 2026-10-11 with decision O8, as an agent decision by `pr11_decide_d` under
+the owner's delegation of 2026-10-11 (babysit's `0194a1e4…`).** R-D1's preservation design, round 4
 (`~/orch-pr11/owner-package/RD1-PRESERVATION-PROPOSAL.md`, sha256
 `f9e81c078dc4be62e1c4cda24563ecb061e3971b1b06e438cc63a85a09a95415`), is implemented on #331's branch as its record's
 §5.17 gives it: part K (a kept pin is written whatever `HEAD` is), part G4 (the resume removes the attempt in flight's
 copy only once a kept pin of upstroke's and a copy of it that same resume made durable both hold it, capturing through a
 private index file of the checkout's own Git directory, and reverting exactly the captured changes), and part N (an
 attempt error after the worker ran, and a reviewed candidate whose publication fails, keep the checkout and pin what it
-holds). Its code, its amended `effects/allowlist.toml` texts and its `design/15` sentences are **proposed, conditional
-on the owner's decision O8**, exactly as D's own are; its three instrument rows (two `effects/wrappers.toml` rows with
+holds). Its code, its amended `effects/allowlist.toml` texts and its `design/15` sentences are **adopted with
+O8**, exactly as D's own are, and in force only from #331's merge; its three instrument rows (two `effects/wrappers.toml` rows with
 their `clippy.toml` denials, and the payload census of `src/runner/contract.rs`, five `.env(` to seven) are first-limb
 instrument rows under the standing delegation, as the supervisor reads it, and not an owner adoption.
 
@@ -266,7 +270,9 @@ the checkout before the copy exists, or the run's directory after it; the inheri
 instant inside phase A between Git's up-to-date check of a file and its unlink; what a disk or a kernel does). The new
 refusals and costs are the proposal's §9.1, disclosed in the record.
 
-**Why this file stays.** The implementation is a draft: O8 is not adopted, the regular verdict on R-D1's design is
+**Why this file stays.** The implementation is a draft: O8 was adopted on 2026-10-11 as an agent decision by
+`pr11_decide_d` under the owner's delegation of 2026-10-11 (babysit's `0194a1e4…`), but the regular verdict on R-D1's
+design is
 unmet (its routing held and unassigned), D's merge waits on PR #329, and the required reviews of this implementation
 have not run. Nothing here waives preservation, regrades this file, or clears G6; (e2) and (e2′) block G6 until D is
 merged and validated. N1 and N2, found beside R-D1, are filed on their own

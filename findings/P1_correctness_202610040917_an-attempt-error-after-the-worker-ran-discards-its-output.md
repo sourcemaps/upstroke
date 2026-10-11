@@ -8,7 +8,7 @@ reviewed_sha: 88376a108e50362487ef1f374b633f63d71599ee
 location: src/engine/coordinator.rs:577
 provenance: pre_existing
 first_bad: 372f0c02c3b6af3eb19503e9f16872206dd4906e
-guard: follow-up D's implementation round 3 (`pr11_fud_impl3`, on draft #331), PROPOSED conditional on the owner's decision O8 (decision B): part N of `~/orch-pr11/owner-package/RD1-PRESERVATION-PROPOSAL.md` (round 4; N as round 2 proposed it, its pin's capture now G4's) keeps the checkout and pins what it holds at the attempt's kept pin on every such error; until that lands and is validated this file stays open, and nothing here accepts the loss
+guard: follow-up D's implementation round 3 (`pr11_fud_impl3`, on draft #331), adopted on 2026-10-11 with decision O8 (decision B) as an agent decision by `pr11_decide_d` under the owner's delegation of 2026-10-11 (babysit's `0194a1e4…`) and in force only from #331's merge: part N of `~/orch-pr11/owner-package/RD1-PRESERVATION-PROPOSAL.md` (round 4; N as round 2 proposed it, its pin's capture now G4's) keeps the checkout and pins what it holds at the attempt's kept pin on every such error; until that lands and is validated this file stays open, and nothing here accepts the loss
 ---
 
 ## Failure sequence
@@ -103,7 +103,8 @@ checkout's copy only once the pin and a durable copy of it hold it. Tests and mu
 Filed from its draft (`~/orch-pr11/logs/pr11_rd1_round4/drafts/`), with its severity, review pin (`reviewed_sha`, D's
 head), provenance and first-bad commit as the draft gives them; only the guard's first words name this round.
 
-**Implemented on draft #331, PROPOSED conditional on the owner's decision O8**, as part N of R-D1's preservation
+**Implemented on draft #331, and adopted on 2026-10-11 with decision O8 as an agent decision by `pr11_decide_d` under
+the owner's delegation of 2026-10-11 (babysit's `0194a1e4…`)**, as part N of R-D1's preservation
 design, round 4 (sha256 `f9e81c07…`), with the coordinator's `kept_on_error` and `Workspace::pin_checkout`
 (`reviews/2026-10-02-pr11-follow-up-d-record.md` §5.17). Its engine witnesses, each red at D's head as the merge has it
 and green here:

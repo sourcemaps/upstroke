@@ -395,8 +395,9 @@ design review round 1, the regular lens's F5). PR #329's record carries the same
 ## At #331's implementation (2026-10-03): the legacy face
 
 Recorded here, and not in a file of its own, because this file is the class's (its "Reconciliation"). Follow-up D's
-implementation is on PR #331's branch, a draft; its texts are **proposed, conditional on the owner's decision O8**, and
-nothing below is in force until the owner adopts O8 and that pull request merges after this one.
+implementation is on PR #331's branch, a draft; its texts were **adopted on 2026-10-11 with decision O8, as an agent
+decision by `pr11_decide_d` under the owner's delegation of 2026-10-11 (babysit's `0194a1e4…`)**, and nothing below
+is in force until that pull request merges after this one.
 
 - **Face 1, legacy: its discard is closed by D, once merged.** After a failed snapshot add, D's veto
   (`legacy_add_veto`) attempts again only over an empty destination it can remove; a destination gone — the end state a

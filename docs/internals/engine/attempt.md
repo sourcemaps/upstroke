@@ -12,7 +12,7 @@ LEGACY-EFFECT: this module is in the **frozen legacy section** of
 `effects/allowlist.toml`, which carries its justification and the condition
 under which the section shrinks. `decisions.effect_site_inventory.mechanism` (2).
 
-**Proposed, conditional on the owner's decision O8 (decision B), and not granted.** Follow-up D (#331, a draft) amends this module's freeze; the amendment is its row's text in `effects/allowlist.toml`, marked there as proposed, and the record `reviews/2026-10-02-pr11-follow-up-d-record.md` (§1 to §4, and its Implementation section) is why. Nothing it adds is in force until the owner adopts O8 and the pull request merges. In this module it is one more argument of `run_attempt`, the type
+**Adopted on 2026-10-11 with decision O8 (decision B), as an agent decision by `pr11_decide_d` under the owner's delegation of 2026-10-11 (babysit's `0194a1e4…`).** Follow-up D (#331, a draft) amends this module's freeze; the amendment is its row's text in `effects/allowlist.toml`, marked there as adopted, and the record `reviews/2026-10-02-pr11-follow-up-d-record.md` (§1 to §4, and its Implementation section) is why. Nothing it adds is in force until the pull request merges. In this module it is one more argument of `run_attempt`, the type
 that argument holds and the function that fills it, below.
 
 ## `const MAX_FEEDBACK_ENTRIES: usize = 6;`
@@ -148,7 +148,9 @@ coordinator discards the checkout as before
 Run one attempt and verify it, without deciding what happens next: the
 caller owns commit, rollback, retry, and escalation (§11/§14).
 
-`refused` is follow-up D's slot (proposed, conditional on O8): it is filled only
+`refused` is follow-up D's slot (adopted with O8 on 2026-10-11 as an agent decision by
+`pr11_decide_d` under the owner's delegation of 2026-10-11 (babysit's `0194a1e4…`), and in
+force only from #331's merge): it is filled only
 at the two snapshot calls, through `note_refused`, when the snapshot's
 registry access refused. The error `run_attempt` returns, its return type, and
 every other `?` are as before; the coordinator reads the slot after an error.

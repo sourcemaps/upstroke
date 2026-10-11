@@ -13,7 +13,7 @@ LEGACY-EFFECT: this module is in the **frozen legacy section** of
 `effects/allowlist.toml`, which carries its justification and the condition
 under which the section shrinks. `decisions.effect_site_inventory.mechanism` (2).
 
-**Proposed, conditional on the owner's decision O8 (decision B), and not granted.** Follow-up D (#331, a draft) amends this module's freeze; the amendment is its row's text in `effects/allowlist.toml`, marked there as proposed, and the record `reviews/2026-10-02-pr11-follow-up-d-record.md` (§1 to §4, and its Implementation section) is why. Nothing it adds is in force until the owner adopts O8 and the pull request merges. In this module it is one constant, `KEPT_PIN_SUFFIX`, and one arm
+**Adopted on 2026-10-11 with decision O8 (decision B), as an agent decision by `pr11_decide_d` under the owner's delegation of 2026-10-11 (babysit's `0194a1e4…`).** Follow-up D (#331, a draft) amends this module's freeze; the amendment is its row's text in `effects/allowlist.toml`, marked there as adopted, and the record `reviews/2026-10-02-pr11-follow-up-d-record.md` (§1 to §4, and its Implementation section) is why. Nothing it adds is in force until the pull request merges. In this module it is one constant, `KEPT_PIN_SUFFIX`, and one arm
 of the attempt's error path, below.
 
 ## `pub fn run(opts: &RunOptions) -> Result<RunReport, UpstrokeError> {`
@@ -214,7 +214,9 @@ was known when the run started.
 
 ## `fn kept_on_error(`
 
-R-D1's part N (proposed, conditional on O8; `PR331-AN-ATTEMPT-ERROR-AFTER-THE-WORKER-RAN-DISCARDS-ITS-OUTPUT`
+R-D1's part N (adopted with O8 on 2026-10-11 as an agent decision by `pr11_decide_d` under the owner's delegation
+of 2026-10-11 (babysit's `0194a1e4…`), and in force only from #331's merge;
+`PR331-AN-ATTEMPT-ERROR-AFTER-THE-WORKER-RAN-DISCARDS-ITS-OUTPUT`
 and `PR331-A-REVIEWED-CANDIDATE-IS-DISCARDED-WHEN-ITS-PUBLICATION-FAILS`): every arm that
 discarded the checkout after the worker ran now keeps it and pins what it holds at the
 attempt's kept pin — the prepared pin followed by `KEPT_PIN_SUFFIX`, which this module
@@ -531,7 +533,9 @@ hand the user a half-staged workspace either (§14).
 
 ## `fn step_task(&mut self, index: usize) -> Result<bool, UpstrokeError> {` › `if let Some(candidate) = refused {`
 
-The one exception, follow-up D's B-PRESERVE (proposed, conditional on O8): when the
+The one exception, follow-up D's B-PRESERVE (adopted with O8 on 2026-10-11 as an agent decision
+by `pr11_decide_d` under the owner's delegation of 2026-10-11 (babysit's `0194a1e4…`), and in
+force only from #331's merge): when the
 attempt's gate or review snapshot was refused by the worktree registry after the
 worker's output was captured, `run_attempt` recorded the captured candidate, and
 this arm does not discard the checkout. It pins that candidate — the branch ref,

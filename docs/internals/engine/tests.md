@@ -2971,7 +2971,9 @@ replacements.
 
 ## `const TORN_REGISTRATION: &str = "foreign-torn";`
 
-The tests appended by follow-up D (proposed, conditional on the owner's decision O8;
+The tests appended by follow-up D (adopted with decision O8 on 2026-10-11 as an agent decision by
+`pr11_decide_d` under the owner's delegation of 2026-10-11 (babysit's `0194a1e4…`), and in force
+only from #331's merge;
 `reviews/2026-10-02-pr11-follow-up-d-record.md`, its Implementation section) drive the
 real legacy engine — `run_with` and `resume_harness` — through a worktree registry another
 process has torn. Their residue is a foreign registration under this name: `gitdir`
@@ -3129,7 +3131,9 @@ it names none. T-P14 is red under `m-interrupted`.
 ## `const ENGINE_CALL_BOUND: Duration = Duration::from_secs(300);`
 
 The tests of R-D1's preservation design, round 4 (`~/orch-pr11/owner-package/RD1-PRESERVATION-PROPOSAL.md`, sha256
-`f9e81c07…`; parts K, G4 and N, proposed, conditional on O8; record §5.17), appended after D's. Every call into the
+`f9e81c07…`; parts K, G4 and N, adopted with O8 on 2026-10-11 as an agent decision by `pr11_decide_d` under the
+owner's delegation of 2026-10-11 (babysit's `0194a1e4…`), and in force only from #331's merge; record §5.17), appended
+after D's. Every call into the
 legacy engine is bounded: an in-process run or resume by `bounded` (a watchdog thread and a channel's `recv_timeout`, so
 a wedged engine fails the test at the bound instead of hanging the suite; `bounded_run`, `bounded_resume`), and a child
 of this test binary by `bounded_child` (output to a file, `try_wait` polled, killed and reaped at the bound). The bound

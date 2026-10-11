@@ -44,18 +44,20 @@ module reads that constant and calls none of the manager's funnels.
 and §9.28). The snapshot path's three registry commands run again past another
 registration's empty `commondir`, and nothing else in the module changes. It
 governs on master. In this draft it is superseded at those three commands, the
-whole of its scope, by the third amendment below, under the owner's ruling
-B-W924-R1-S, which is **proposed, effective only together with O8, and not
-adopted**: its call-site wrapping, its helper, its predicate, its destination
+whole of its scope, by the third amendment below, under ruling B-W924-R1-S, which was
+**adopted with O8 on 2026-10-11, as an agent decision by `pr11_decide_d` under the owner's
+delegation of 2026-10-11 (babysit's `0194a1e4…`), and is in force only from #331's merge**:
+its call-site wrapping, its helper, its predicate, its destination
 check and its two constants are withdrawn by its documented ordered rollback (the
 follow-up B record's §9.25.4), at those commands only, and each of its regression
 tests is mapped to a witness of the third amendment's access (the follow-up D
 record's §5.20). The allowlist row records all three amendments.
 
-A third amendment is **proposed, conditional on the owner's decision O8 (decision B)
-and on the owner's ruling B-W924-R1-S, and not granted**: follow-up D (#331, a draft), to close
+A third amendment was **adopted on 2026-10-11, with decision O8 (decision B) and ruling
+B-W924-R1-S, as an agent decision by `pr11_decide_d` under the owner's delegation of
+2026-10-11 (babysit's `0194a1e4…`)**: follow-up D (#331, a draft), to close
 `PR329-LEGACY-RUNS-IN-LINKED-CHECKOUTS-RACE-THE-SHARED-WORKTREE-REGISTRY` and R-G. The
-row's text in `effects/allowlist.toml` gives it exactly, marked there as proposed, and
+row's text in `effects/allowlist.toml` gives it exactly, marked there as adopted, and
 the record `reviews/2026-10-02-pr11-follow-up-d-record.md` (§1 to §4, and its
 Implementation section) is why. It is three things. The three Git children that
 enumerate the shared worktree registry — `switch_branch`'s `git switch`,
@@ -68,7 +70,7 @@ sha256 `f9e81c07…`, D's implementation round 3, its record §5.17), a legacy a
 output is kept: a kept pin is written whatever `HEAD` is (part K), `pin_checkout` pins
 what the checkout holds (part N's capture), and `discard_into_kept_pin` removes the
 checkout's copy only once a kept pin and a copy of it the same process made durable
-both hold it (part G4). Their sections below say how. Nothing it adds is in force until the owner adopts O8 and B-W924-R1-S and the pull request
+both hold it (part G4). Their sections below say how. Nothing it adds is in force until the pull request
 merges. The module still calls no funnel of the manager: the access takes no site.
 
 The section "may only shrink after PR5 (the test compares against the frozen
@@ -171,7 +173,9 @@ request's evidence). With this, both pass on all four.
 
 `-c maintenance.auto=false -c gc.auto=0 -c gc.autoDetach=false -c
 maintenance.autoDetach=false`, which `git_command` passes after `REPLACE_REFS_REFUSED`
-(follow-up D's R-G, proposed, conditional on O8). Git's automatic maintenance can
+(follow-up D's R-G, adopted with O8 on 2026-10-11 as an agent decision by `pr11_decide_d`
+under the owner's delegation of 2026-10-11 (babysit's `0194a1e4…`), and in force only from
+#331's merge). Git's automatic maintenance can
 start a `git worktree prune` that deletes a registration with no `gitdir` at once,
 whatever the expiry — the state another checkout's add is in before its first
 write (`should_prune_worktree`). Five builtins start it (`am`, `commit`, `fetch`,
@@ -219,7 +223,9 @@ see.
 `every_git_child_of_this_module_is_built_where_replacements_are_refused` holds
 the shape; see its section.
 
-Follow-up D (proposed, conditional on O8) adds `AUTO_MAINTENANCE_REFUSED` after
+Follow-up D (adopted with O8 on 2026-10-11 as an agent decision by `pr11_decide_d` under the
+owner's delegation of 2026-10-11 (babysit's `0194a1e4…`), and in force only from #331's merge)
+adds `AUTO_MAINTENANCE_REFUSED` after
 `REPLACE_REFS_REFUSED`; see its section. The census's assertions about the builder
 still hold: one `Command::new(`, the pair set, `REPLACE_REFS_REFUSED` passed, and the
 fourteen call sites in the same functions in the same order.
@@ -300,8 +306,9 @@ subcommand. Git names an index file only through that variable, never by an argu
 configuration key, and another Git directory reads another configuration (the proposal's
 §4.2-§4.3), so this is the one faithful private capture. The plain builder (`git`,
 `git_output`, `git_path`) never sets it. The two `.env(` it adds are the payload census's row
-for this module, five to seven (`src/runner/contract.rs`), an additional conditional proposal
-with O8's texts.
+for this module, five to seven (`src/runner/contract.rs`), a conditional proposal beside O8's
+texts, which were adopted on 2026-10-11 as an agent decision by `pr11_decide_d` under the
+owner's delegation of 2026-10-11 (babysit's `0194a1e4…`).
 
 ## `impl Workspace` › `pub(crate) fn run_git_with_private_hooks(`
 
@@ -392,8 +399,10 @@ branch when the operator has wandered off it.
 
 `git switch` refuses a branch checked out elsewhere by scanning the worktree
 registry (`die_if_checked_out`) before it changes anything, so it dies on another
-checkout's registration half written. Under follow-up D (proposed, conditional on
-O8) the switch is one attempt of `tolerant_registry_access`, with no hold and a
+checkout's registration half written. Under follow-up D (adopted with O8 on 2026-10-11 as
+an agent decision by `pr11_decide_d` under the owner's delegation of 2026-10-11 (babysit's
+`0194a1e4…`), and in force only from #331's merge) the switch is one attempt of
+`tolerant_registry_access`, with no hold and a
 veto that always answers `Again::Attempt`: a failed attempt changed nothing, so the
 next attempt is the same attempt. A failure that outlasts the access's deadline —
 contention, residue, or a genuine failure of the switch, which the access cannot
@@ -514,7 +523,9 @@ not necessarily UTF-8 on Unix.
 ## `impl Workspace` › `fn add_gate_worktree(`
 
 The snapshot's add, as one attempt of `tolerant_registry_access` (follow-up D,
-proposed, conditional on O8): the `git worktree add` child and its exit check. It
+adopted with O8 on 2026-10-11 as an agent decision by `pr11_decide_d` under the owner's
+delegation of 2026-10-11 (babysit's `0194a1e4…`), and in force only from #331's merge): the
+`git worktree add` child and its exit check. It
 holds the registry lock shared, as the manager's adds do, under the canonical common
 git dir `canonical_common_dir` resolves, so a legacy process's lock key and refusal
 text match the manager's for the same repository. Its veto is `legacy_add_veto`.
@@ -539,7 +550,9 @@ veto, and the verification below then fails as Git state: that is R-D9, inside
 Prepare and pin a commit from the exact candidate identities already
 used by gates and review. This never rereads the mutable index.
 
-R-D1's part K (proposed, conditional on O8): `HEAD` is observed and compared with the
+R-D1's part K (adopted with O8 on 2026-10-11 as an agent decision by `pr11_decide_d` under the
+owner's delegation of 2026-10-11 (babysit's `0194a1e4…`), and in force only from #331's
+merge): `HEAD` is observed and compared with the
 captured branch and parent only for a pin whose name does not end with `KEPT_PIN_SUFFIX`. A
 kept pin, which nothing publishes, is written from the parent and tree it is given whatever
 `HEAD` is — moved, detached, on another branch, unborn or symbolic — with every other
@@ -759,8 +772,10 @@ Use the exact stable store whose synced intents resume will reclaim.
 ## `fn cleanup_gate_workspace(`
 
 A snapshot's removal and the list that decides whether it took the registration are
-**one** attempt of `tolerant_registry_access` (follow-up D, proposed, conditional on
-O8), with no hold and a veto that always answers `Again::Attempt`. The attempt
+**one** attempt of `tolerant_registry_access` (follow-up D, adopted with O8 on 2026-10-11 as
+an agent decision by `pr11_decide_d` under the owner's delegation of 2026-10-11 (babysit's
+`0194a1e4…`), and in force only from #331's merge), with no hold and a veto that always
+answers `Again::Attempt`. The attempt
 succeeds when the list does not register the path, whatever the removal's exit
 status — the existing treatment, which counts an already-unregistered destination
 ("is not a working tree") as reclaimed — and fails with the removal's words while the
@@ -796,8 +811,10 @@ round 3's R1, `eef97e41`, and round 6's I2-1, `22d70ef6`) takes the wait out of
 the access), the manager's own calls passing their hooks'
 `EffectHooks::registry_pause`, whose default is this same sleep. The legacy module has no
 hooks, so it passes this function, and its accesses wait as they did when the access
-slept inside itself. Part of follow-up D's draft (#331), proposed, conditional on the
-owner's decision O8, adapted to B's provisional head by the merge that took it.
+slept inside itself. Part of follow-up D's draft (#331), adopted with O8 on 2026-10-11 as an
+agent decision by `pr11_decide_d` under the owner's delegation of 2026-10-11 (babysit's
+`0194a1e4…`), and in force only from #331's merge, adapted to B's provisional head by the
+merge that took it.
 
 ## `fn legacy_add_veto(path: &Path) -> Again {`
 
@@ -1098,9 +1115,11 @@ the census rather than hiding from it.
 
 ## `enum Served {`
 
-*B-W924-R1's witnesses, SYNTHETIC CONTROLS (the follow-up B record's §9.25).* Under the owner's
-ruling B-W924-R1-S, **proposed** and effective only together with O8, which supersedes B-W924-R1 at
-its three commands, they witness the tolerant access there instead (the follow-up D record's §5.20).
+*B-W924-R1's witnesses, SYNTHETIC CONTROLS (the follow-up B record's §9.25).* Under ruling
+B-W924-R1-S, which supersedes B-W924-R1 at its three commands and was **adopted** with O8 on
+2026-10-11 as an agent decision by `pr11_decide_d` under the owner's delegation of 2026-10-11
+(babysit's `0194a1e4…`), in force only from #331's merge, they witness the tolerant access
+there instead (the follow-up D record's §5.20).
 What a planted registration's `commondir` gives the next reader:
 `Served::Torn`, zero bytes, or `Served::Whole`, `../..` and a newline.
 
@@ -1156,7 +1175,9 @@ opened without blocking, then the rename) left open.
 TEST-HARNESS CONTAINMENT, not a bound of the code under test: how long a witness waits for an
 act that a planted tear or a FIFO may have wedged before it releases the fixture itself and fails.
 Thirty seconds, the value B-W924-R1's witnesses waited (three of its ten-second deadlines), kept
-when B-W924-R1-S (proposed) withdrew that ruling's `REGISTRY_TEAR_DEADLINE` with its helper. A
+when B-W924-R1-S (adopted with O8 on 2026-10-11 as an agent decision by `pr11_decide_d` under
+the owner's delegation of 2026-10-11 (babysit's `0194a1e4…`), and in force only from #331's
+merge) withdrew that ruling's `REGISTRY_TEAR_DEADLINE` with its helper. A
 healthy act ends long before it.
 
 ## `const PRODUCTION_REGISTRY_DEADLINE: Duration = Duration::from_secs(10);`
@@ -1166,7 +1187,9 @@ test build cannot name. A witness of the tolerant access whose script needs more
 attempt of one access holds it for its own repository
 (`crate::workspace_manager::RegistryDeadline::hold`), so that one attempt the platform makes slow
 does not use up the test build's 500 ms before the attempt the script needs (the follow-up D
-record's §5.21). Under B-W924-R1-S (proposed). It is as NOMINAL as the test build's: an admission
+record's §5.21). Under B-W924-R1-S (adopted with O8 on 2026-10-11 as an agent decision by
+`pr11_decide_d` under the owner's delegation of 2026-10-11 (babysit's `0194a1e4…`), and in force
+only from #331's merge). It is as NOMINAL as the test build's: an admission
 rule checked after each attempt, with no hard elapsed bound and no bound on a running Git child's
 completion, so a hold never makes a hung child fail within ten seconds. A witness whose oracle is
 the refusal at the deadline keeps the test build's.
@@ -1184,12 +1207,16 @@ once: the add's first attempt reads the tear and dies, the attempt after it
 reads the registration whole, and the snapshot is made, registered, and
 reclaimed by its drop. With the repair reverted, the add fails as the CI
 witness did: `git worktree add failed: fatal: failed to read …/commondir:
-Success`. Under B-W924-R1-S (proposed) the repair it
+Success`. Under B-W924-R1-S (adopted with O8 on 2026-10-11 as an agent decision by
+`pr11_decide_d` under the owner's delegation of 2026-10-11 (babysit's `0194a1e4…`), and in force
+only from #331's merge) the repair it
 witnesses is the tolerant access at the add, and the test is unchanged.
 
 ## `fn a_snapshots_removal_and_its_list_are_attempted_again_past_another_registrations_empty_commondir()`
 
-*Under B-W924-R1-S (proposed): B-W924-R1's witness, its script changed for the tolerant access.* A
+*Under B-W924-R1-S (adopted with O8 on 2026-10-11 as an agent decision by `pr11_decide_d` under
+the owner's delegation of 2026-10-11 (babysit's `0194a1e4…`), and in force only from #331's
+merge): B-W924-R1's witness, its script changed for the tolerant access.* A
 snapshot's drop while another registration reads empty, whole, whole, then empty. The cleanup runs
 the removal and the list that decides it as one attempt of the access: the first attempt's removal
 reads the tear and its list the whole registration, which still lists the snapshot; the next
@@ -1208,8 +1235,10 @@ removed; that is shown under the stand-in only, and no natural failure is claime
 
 ## `fn an_empty_commondir_of_the_snapshots_own_registration_is_attempted_again_until_the_deadline_and_refused()`
 
-*Under B-W924-R1-S (proposed), in place of B-W924-R1's
-`an_empty_commondir_of_the_snapshots_own_registration_is_returned_at_once`: a change O8 proposes,
+*Under B-W924-R1-S (adopted with O8 on 2026-10-11 as an agent decision by `pr11_decide_d` under
+the owner's delegation of 2026-10-11 (babysit's `0194a1e4…`), and in force only from #331's
+merge), in place of B-W924-R1's
+`an_empty_commondir_of_the_snapshots_own_registration_is_returned_at_once`: a change O8 makes,
 not an equivalence.* The snapshot's own registration's `commondir` emptied. The cleanup's access
 classifies nothing, so it attempts the removal and its list again until the access's nominal
 deadline (500 ms in a test build, an admission rule checked after each attempt, with no hard elapsed
@@ -1220,8 +1249,10 @@ registration is no other process's write in flight.
 
 ## `fn another_registrations_commondir_git_cannot_read_is_attempted_again_until_the_deadline_and_refused()`
 
-*Under B-W924-R1-S (proposed), in place of B-W924-R1's
-`another_registrations_commondir_git_cannot_read_is_returned_at_once`: a change O8 proposes, not an
+*Under B-W924-R1-S (adopted with O8 on 2026-10-11 as an agent decision by `pr11_decide_d` under
+the owner's delegation of 2026-10-11 (babysit's `0194a1e4…`), and in force only from #331's
+merge), in place of B-W924-R1's
+`another_registrations_commondir_git_cannot_read_is_returned_at_once`: a change O8 makes, not an
 equivalence.* Another registration's `commondir` a directory: Git dies reading it, `Is a
 directory`, and the add's access attempts it again, over an empty destination it removes and makes
 again each time, until the nominal deadline, then refuses as a registry refusal naming the add's
@@ -1230,7 +1261,9 @@ drop ignores. B-W924-R1 waited only on an empty read, and returned this at once.
 
 ## `fn another_registrations_empty_commondir_that_outlasts_the_deadline_refuses_naming_the_adds_error()`
 
-*Under B-W924-R1-S (proposed), in place of B-W924-R1's
+*Under B-W924-R1-S (adopted with O8 on 2026-10-11 as an agent decision by `pr11_decide_d` under
+the owner's delegation of 2026-10-11 (babysit's `0194a1e4…`), and in force only from #331's
+merge), in place of B-W924-R1's
 `another_registrations_empty_commondir_that_outlasts_the_deadline_returns_the_adds_error`.* Another
 registration's `commondir` left empty. `add_gate_worktree`, called directly so that the snapshot's
 cleanup after it is not timed with it, is attempted again, each time over the empty destination it
@@ -1238,7 +1271,7 @@ removes and makes again, and refuses as a registry refusal no earlier than the a
 deadline (500 ms in a test build). The refusal names two attempts or more, each answered
 `Attempt`, and as the last failure the add's own Git error naming the registration; the destination
 is still an empty directory. Kept from B-W924-R1's test: the add's error named, attempts made again,
-an empty destination, and no silent outcome. Changed, as O8 proposes: the outcome's kind, from the
+an empty destination, and no silent outcome. Changed by O8: the outcome's kind, from the
 add's Git error to the refusal, and the timing, from B-W924-R1's ten-second deadline with a
 five-second allowance to the access's nominal deadline, an admission rule with no hard elapsed
 bound, of which no upper limit is asserted. Bounded: if the add has not returned at
@@ -1246,11 +1279,13 @@ bound, of which no upper limit is asserted. Bounded: if the add has not returned
 
 ## `fn a_destination_no_longer_empty_refuses_at_once_naming_the_adds_first_error() {`
 
-*Under B-W924-R1-S (proposed), in place of B-W924-R1's
+*Under B-W924-R1-S (adopted with O8 on 2026-10-11 as an agent decision by `pr11_decide_d` under
+the owner's delegation of 2026-10-11 (babysit's `0194a1e4…`), and in force only from #331's
+merge), in place of B-W924-R1's
 `a_destination_no_longer_empty_returns_the_adds_first_error`.* The add's destination written to
 while Git is blocked reading the tear: the add's veto finds a directory that is not empty and
 refuses at once, after one attempt and with no `Attempt` answer, naming the add's first failure as
-it was. Kept: the first failure, with no further attempt. Changed, as O8 proposes: the outcome's
+it was. Kept: the first failure, with no further attempt. Changed by O8: the outcome's
 kind, a registry refusal rather than the add's Git error. Run again, the add would fail on the
 destination instead.
 

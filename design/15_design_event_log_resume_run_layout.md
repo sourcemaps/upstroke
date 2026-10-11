@@ -258,11 +258,12 @@ Every transition is an event `{ts, event, task?, attempt?, rung?, profile?, data
 
 `upstroke resume <run-id>` replays, verifies the run branch HEAD matches the last committed event (mismatch = refuse with an explanation), re-probes agents, re-snapshots capacity, and continues — parked questions intact. Git and the log cannot be updated atomically, so schema 3 makes the successful settlement itself carry the exact prepared identity: captured full run-branch ref, parent and tree feed hook-free `commit-tree`; the resulting commit, message, and deterministic private pin are verified before `attempt_finished` is appended. Publication compare-and-swaps the **recorded full branch ref**, never mutable symbolic `HEAD`, from the recorded parent to that commit, removes the pin with a non-dereferencing compare-and-swap, and then appends `task_committed`. Resume accepts only the resulting exact crash prefixes: parent plus matching pin means publish that object; commit plus matching pin means remove the pin; commit with the pin already gone means append the missing `task_committed`. A pin without a successful settlement is orphan residue and is removed without dereferencing symbolic refs. Any substituted or symbolic pin, third branch SHA, changed branch identity, or mismatched commit object refuses while preserving evidence. Schema-1/2 success has no prepared identity, so it is **never** adopted from parent plus subject alone; even a matching message can name an arbitrary tree. It also refuses when the frozen plan's digest moved, when the recorded chain structure no longer matches (a rung is an index into that chain), when the branch is gone, and when another process owns either the run or its physical worktree.
 
-**A legacy attempt the worktree registry refused.** *PROPOSED, conditional on the owner's decision O8 (decision B)
-to unfreeze the PR5-frozen legacy modules it changes, and on the owner's ruling B-W924-R1-S, and not granted —
-follow-up D (`reviews/2026-10-02-pr11-follow-up-d-record.md` §1, as §2 to §4 amend it, and its Implementation
-section), implemented on draft pull request #331. Nothing in this paragraph is in force until the owner adopts O8 and
-B-W924-R1-S and that pull request merges, after follow-up B's (pull request #329), whose registry access it calls.
+**A legacy attempt the worktree registry refused.** *ADOPTED on 2026-10-11, with decision O8 (decision B) to
+unfreeze the PR5-frozen legacy modules it changes and with ruling B-W924-R1-S, as an agent decision by
+`pr11_decide_d` under the owner's delegation of 2026-10-11 (babysit's `0194a1e4…`) — follow-up D
+(`reviews/2026-10-02-pr11-follow-up-d-record.md` §1, as §2 to §4 amend it, and its Implementation section),
+implemented on draft pull request #331. Nothing in this paragraph is in force until that pull request merges, after
+follow-up B's (pull request #329), whose registry access it calls.
 Once in force, it replaces the last item of "A registry another process is writing" above, which says the frozen
 legacy engine's accesses do not take that access, and with it that item's sentence on the owner's ruling B-W924-R1:
 at the legacy snapshots' add, removal and list, the whole of that ruling's scope, B-W924-R1-S supersedes its retry

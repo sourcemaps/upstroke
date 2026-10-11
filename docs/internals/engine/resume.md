@@ -8,7 +8,7 @@ LEGACY-EFFECT: this module is in the **frozen legacy section** of
 `effects/allowlist.toml`, which carries its justification and the condition
 under which the section shrinks. `decisions.effect_site_inventory.mechanism` (2).
 
-**Proposed, conditional on the owner's decision O8 (decision B), and not granted.** Follow-up D (#331, a draft) amends this module's freeze; the amendment is its row's text in `effects/allowlist.toml`, marked there as proposed, and the record `reviews/2026-10-02-pr11-follow-up-d-record.md` (§1 to §4, and its Implementation section) is why. Nothing it adds is in force until the owner adopts O8 and the pull request merges. In this module it is the kept-pin lookup and its warning, R-D1's guarded discard of the attempt in flight (part G4) and its three warnings, and the moved-branch refusal's `git update-ref`, below.
+**Adopted on 2026-10-11 with decision O8 (decision B), as an agent decision by `pr11_decide_d` under the owner's delegation of 2026-10-11 (babysit's `0194a1e4…`).** Follow-up D (#331, a draft) amends this module's freeze; the amendment is its row's text in `effects/allowlist.toml`, marked there as adopted, and the record `reviews/2026-10-02-pr11-follow-up-d-record.md` (§1 to §4, and its Implementation section) is why. Nothing it adds is in force until the pull request merges. In this module it is the kept-pin lookup and its warning, R-D1's guarded discard of the attempt in flight (part G4) and its three warnings, and the moved-branch refusal's `git update-ref`, below.
 
 ## `pub fn resume(opts: &ResumeOptions) -> Result<RunReport, UpstrokeError> {`
 
@@ -216,7 +216,9 @@ HEAD and is removed with an expected-old-value CAS before retrying.
 
 ## `let mut kept = Vec::new();`
 
-Follow-up D's lookup (proposed, conditional on O8). For every attempt the replayed
+Follow-up D's lookup (adopted with O8 on 2026-10-11 as an agent decision by `pr11_decide_d`
+under the owner's delegation of 2026-10-11 (babysit's `0194a1e4…`), and in force only from
+#331's merge). For every attempt the replayed
 log records — each task's attempts from the first to the last one started, which
 `AttemptStarted` sets and the coordinator numbers contiguously — the resume asks
 `prepared_pin_target` whether the coordinator kept that attempt's candidate at its
@@ -244,7 +246,9 @@ attempt back to the last commit, and an attempt that never reported is
 no different — the session that would have explained these edits is
 gone, so nothing can verify them.
 
-R-D1's part G4 (proposed, conditional on O8): when the checkout holds uncommitted paths and
+R-D1's part G4 (adopted with O8 on 2026-10-11 as an agent decision by `pr11_decide_d` under the
+owner's delegation of 2026-10-11 (babysit's `0194a1e4…`), and in force only from #331's
+merge): when the checkout holds uncommitted paths and
 the replayed log records exactly one attempt in flight, the resume removes them only through
 `Workspace::discard_into_kept_pin`, with that attempt's kept pin (the prepared pin followed
 by `KEPT_PIN_SUFFIX`, message `[upstroke] kept: <task> attempt <n>`) and the run's public

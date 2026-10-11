@@ -50,8 +50,10 @@ decision, as D's did. Nothing here is proposed.
 
 ## R-D1's guarded discard shares the delivery limit (2026-10-04, #331's implementation round 3)
 
-R-D1's preservation design, round 4, implemented on draft #331 and PROPOSED conditional on the owner's decision O8
-(`reviews/2026-10-02-pr11-follow-up-d-record.md` §5.17), gives the resume three more warnings: the pin it put back from
+R-D1's preservation design, round 4, implemented on draft #331 and adopted on 2026-10-11 with decision O8 as an agent
+decision by `pr11_decide_d` under the owner's delegation of 2026-10-11 (babysit's `0194a1e4…`), in force only from
+#331's merge (`reviews/2026-10-02-pr11-follow-up-d-record.md` §5.17), gives the resume three more warnings: the pin it
+put back from
 a copy, the fresh copy it wrote (with the `git fetch` that restores the pin from it), and what stayed in the checkout.
 **They are delivered as the kept-pin warning is, and lost the same way:** a resume whose later step fails returns that
 error without them. Executed by `an_unreadable_leftover_and_a_nested_repository_are_left_in_place_and_named`: the

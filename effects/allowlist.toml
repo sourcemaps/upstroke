@@ -831,8 +831,10 @@ being absent from it would be the one omission nobody would think to look for.""
 # refuses an allow written anywhere in that file again.
 # ---------------------------------------------------------------------------
 
-# PROPOSED, conditional on the owner's decision O8 (decision B), and not granted: the
-# AMENDED ONCE paragraph at the end of this entry's text is follow-up D's draft (#331).
+# ADOPTED with O8 (decision B) on 2026-10-11, as an agent decision by `pr11_decide_d`
+# under the owner's delegation of 2026-10-11 (babysit's `0194a1e4…`), and in force only
+# from #331's merge: the AMENDED ONCE paragraph at the end of this entry's text is
+# follow-up D's draft (#331).
 [[legacy]]
 path = "src/engine/coordinator.rs"
 allows = ["clippy::disallowed_methods"]
@@ -876,8 +878,10 @@ warning. Of the workspace the module now also calls `pin_checkout`, and \
 nothing else in the module moves."""
 shrinks_when = "PR7-PR11 route the legacy coordinator's teardown through the RunDir husk funnels, which need the ownership proof this slice adds."
 
-# PROPOSED, conditional on the owner's decision O8 (decision B), and not granted: the
-# AMENDED ONCE paragraph at the end of this entry's text is follow-up D's draft (#331).
+# ADOPTED with O8 (decision B) on 2026-10-11, as an agent decision by `pr11_decide_d`
+# under the owner's delegation of 2026-10-11 (babysit's `0194a1e4…`), and in force only
+# from #331's merge: the AMENDED ONCE paragraph at the end of this entry's text is
+# follow-up D's draft (#331).
 [[legacy]]
 path = "src/engine/resume.rs"
 allows = ["clippy::disallowed_methods"]
@@ -917,8 +921,10 @@ calls, and `discard_into_kept_pin`; of the event log it reads the replayed \
 state and changes nothing; and nothing else in the module moves."""
 shrinks_when = "the schema-4 coordinator asks questions through RunDir.WriteQuestionPayload directly, at which point this call site goes."
 
-# PROPOSED, conditional on the owner's decision O8 (decision B), and not granted: the
-# AMENDED ONCE paragraph at the end of this entry's text is follow-up D's draft (#331).
+# ADOPTED with O8 (decision B) on 2026-10-11, as an agent decision by `pr11_decide_d`
+# under the owner's delegation of 2026-10-11 (babysit's `0194a1e4…`), and in force only
+# from #331's merge: the AMENDED ONCE paragraph at the end of this entry's text is
+# follow-up D's draft (#331).
 [[legacy]]
 path = "src/engine/attempt.rs"
 allows = ["clippy::disallowed_methods"]
@@ -960,11 +966,12 @@ effect added here is reviewed into `allows`, with the forbid lifted for that \
 lint in the same change, rather than appearing silently."""
 shrinks_when = "immediately — it can be dropped from this list at any time without weakening anything; the forbid it carries needs no row."
 
-# PROPOSED, conditional on the owner's decision O8 (decision B) and on the owner's ruling
-# B-W924-R1-S, and not granted: the third amendment in this entry's text, and its
+# ADOPTED with O8 (decision B) and ruling B-W924-R1-S on 2026-10-11, as an agent decision
+# by `pr11_decide_d` under the owner's delegation of 2026-10-11 (babysit's `0194a1e4…`),
+# and in force only from #331's merge: the third amendment in this entry's text, and its
 # supersession of the second at that amendment's three commands, are follow-up D's draft
-# (#331). Until both are adopted, the second amendment (B-W924-R1, adopted 2026-10-08)
-# governs on master.
+# (#331). Until that pull request merges, the second amendment (B-W924-R1, adopted
+# 2026-10-08) governs on master.
 [[legacy]]
 path = "src/workspace.rs"
 allows = ["clippy::disallowed_methods", "clippy::disallowed_types"]
@@ -1087,8 +1094,10 @@ destination check and its two constants \
 `is_an_empty_directory`, `REGISTRY_TEAR_DEADLINE`, \
 `REGISTRY_TEAR_BACKOFF_CEILING`), which nothing calls then, are removed, as \
 its documented ordered rollback removes them, at those commands only, and each \
-of its regression tests is mapped to a witness of the access. Until O8 and \
-B-W924-R1-S are both adopted, the second amendment governs. Every other \
+of its regression tests is mapped to a witness of the access. O8 and \
+B-W924-R1-S were adopted on 2026-10-11, as an agent decision by \
+`pr11_decide_d` under the owner's delegation of 2026-10-11 (babysit's \
+`0194a1e4…`), and until #331 merges, the second amendment governs. Every other \
 behaviour of the module stays frozen. The schema-4 equivalents live behind \
 funnels in `crate::workspace_manager`, and nothing here calls a funnel: the \
 constant is read, and the tolerant access is called, which takes no site."""
@@ -1306,8 +1315,10 @@ Its whole value is that it is unchanged, so its `OpenOptions`, `set_len`, \
 `write_all`, `flush` and `sync_data` must stay exactly where they are."""
 shrinks_when = "the byte-identity obligation retires with the legacy engine; the file goes with it."
 
-# PROPOSED, conditional on the owner's decision O8 (decision B), and not granted: the
-# AMENDED ONCE paragraph at the end of this entry's text is follow-up D's draft (#331).
+# ADOPTED with O8 (decision B) on 2026-10-11, as an agent decision by `pr11_decide_d`
+# under the owner's delegation of 2026-10-11 (babysit's `0194a1e4…`), and in force only
+# from #331's merge: the AMENDED ONCE paragraph at the end of this entry's text is
+# follow-up D's draft (#331).
 [[legacy]]
 path = "src/engine/tests.rs"
 allows = ["clippy::disallowed_methods", "clippy::disallowed_types"]

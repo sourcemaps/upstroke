@@ -57,8 +57,10 @@ proposed.
 
 ## R-D1's preservation adds to what accumulates (2026-10-04, #331's implementation round 3)
 
-R-D1's preservation design, round 4 (sha256 `f9e81c07…`), implemented on draft #331 and PROPOSED conditional on the
-owner's decision O8 (`reviews/2026-10-02-pr11-follow-up-d-record.md` §5.17), keeps more, and the engine still removes
+R-D1's preservation design, round 4 (sha256 `f9e81c07…`), implemented on draft #331 and adopted on 2026-10-11 with
+decision O8 as an agent decision by `pr11_decide_d` under the owner's delegation of 2026-10-11 (babysit's
+`0194a1e4…`), in force only from #331's merge (`reviews/2026-10-02-pr11-follow-up-d-record.md` §5.17), keeps more,
+and the engine still removes
 none of it; the operator does:
 - **pins:** one per attempt that part N keeps (an attempt error after the worker ran, or a reviewed candidate whose
   publication fails) or that the resume's guarded discard (part G4) pins at the resume, beside the coordinator's;
