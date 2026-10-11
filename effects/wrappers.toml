@@ -137,11 +137,15 @@ effect_free = [
     "add_snapshot",
     "argv",
     "assert_publishable",
+    "assert_publishable_pausing",
     "base",
     "candidate_diff",
     "changed_paths",
+    "changed_paths_pausing",
     "commit_parent",
+    "commit_parent_pausing",
     "commit_tree_sha",
+    "commit_tree_sha_pausing",
     "common_git_dir",
     "derive",
     "direct_ref_target",
@@ -157,6 +161,7 @@ effect_free = [
     "parse",
     "private_root",
     "proposal_state",
+    "proposal_state_pausing",
     "quiescence",
     "reclaim_intents",
     "refs_under",
@@ -170,9 +175,11 @@ effect_free = [
     "resolution_manifest",
     "resolved_conflicts",
     "revalidate",
+    "revalidate_pausing",
     "row",
     "slot_path",
     "temporary_object_files",
+    "tolerant_registry_access",
     "unreachable_objects",
     "unresolved_conflicts",
     "worktree_records",
@@ -327,6 +334,7 @@ effect_free = [
     "consult",
     "durability_ledger",
     "funnel",
+    "funnel_lending",
     "harness",
     "ledger",
     "new",
@@ -335,6 +343,7 @@ effect_free = [
     "poisoned",
     "recording_durability",
     "refusal_cause",
+    "registry_pause",
 ]
 
 # Slot and snapshot name arithmetic, and the intent record they are written into. Pure string and path work; not one of these reads or writes the filesystem. `Slot`'s five effect-site accessors are deliberately NOT here -- they stay in the parent, where the site-inventory census reads them by path.
@@ -855,6 +864,12 @@ effect_free = [
 # convention pointed at were exactly where an effectful `pub(super)` fn had
 # gone undenied. If one of these `fn`s is ever reclassified effectful, the
 # stored path can name it for the denylist, which is what the field is for.
+# `ManagedRepository::verify_include` READS the include file and compares its
+# bytes, and is classified EFFECT-FREE for the tree's own reason: a read-only
+# inspection is not an effect (`naming.rs`'s `is_program` below is the
+# precedent). The file is written by `Workspace::recorded_objects_scope` in
+# `src/workspace.rs`, which is effectful and denied; nothing in this child
+# creates, writes, renames or removes a path.
 [[module]]
 path = "src/runner/host/environment.rs"
 crate_path = "upstroke::runner::host::environment"
@@ -864,15 +879,23 @@ effectful_unnameable = []
 effect_free = [
     "base",
     "case",
+    "common_dir",
     "compose",
     "current",
     "from_process",
+    "include",
+    "keyword",
     "lookup",
+    "native",
+    "new",
     "objects",
+    "parameters",
     "preflight",
     "reading",
     "reserved_values",
     "same_key",
+    "spelling",
+    "verify_include",
     "with_base",
 ]
 
@@ -882,7 +905,7 @@ effect_free = [
 # the precedent, and `ContainerRuntime`'s inspections are classified the same
 # way beside it). Nothing here creates, writes, renames or removes a path, and
 # the spawn that follows a resolution is the parent's `HostRunner::run`, which
-# `runner::tests::every_production_process_start_is_classified` accounts for
+# `runner::contract::tests::every_production_process_start_is_classified` accounts for
 # under `src/runner/host.rs`.
 [[module]]
 path = "src/runner/host/naming.rs"
@@ -916,7 +939,7 @@ effect_free = [
 # resolution is required to call them ("resolved by read-only inspection"). They
 # do start a `docker` subprocess, and that subprocess start is accounted by
 # `src/runner/container.rs`'s row in
-# `runner::tests::every_production_process_start_is_classified` rather than
+# `runner::contract::tests::every_production_process_start_is_classified` rather than
 # here.
 [[module]]
 path = "src/runner/container.rs"
@@ -935,7 +958,7 @@ funnel = [
     # published half never landed. The frozen `ContainerSite` has eight
     # variants and this is that same site, not a ninth.
     "remove_staged_intent",
-    "launch",
+    # `launch` is test-only since PR11 follow-up A (`FUA-I1-MACRO`): `#[cfg(test)] mod uncovered`.
     "release",
     # `release` keeping whether the container itself was stopped and removed,
     # for the runner's process-fate classification (the reviews of `916852c9`,
@@ -1093,7 +1116,7 @@ effect_free = [
 #     A read is not an effect on this denylist, which governs creation,
 #     writing, removal, rename and process start -- and that includes a denied
 #     primitive asked in a mode that mutates nothing, which is what
-#     `observe_child_group` (`waitid` with `WNOWAIT`) already records.
+#     `ambient_contains` (`OpenProcess` with query rights) already records.
 # A `_with` seam whose production instantiation is the entry point beside it is
 # classified as that entry point (`join_ambient_job_with` is the precedent).
 # The rule is NOT immediate-call-only. The first version of these rows exempted
@@ -1267,6 +1290,12 @@ effect_free = [
     "validate_inputs",
 ]
 
+# `Workspace::recorded_objects_scope` is effectful: it creates the private
+# root's `git` directory and writes the include file the v0.1 runner's role
+# processes read the recorded graph through, staging it beside the file and
+# renaming it into place, outside any RunDir site. Its only callers are the two
+# conductor entry points, `run_harness` and `resume_harness`, which are denied
+# already.
 [[module]]
 path = "src/workspace.rs"
 crate_path = "upstroke::workspace"
@@ -1280,6 +1309,7 @@ effectful = [
     "Workspace::prepared_commit_matches",
     "Workspace::prepared_pin_target",
     "Workspace::ensure_run_exclusions",
+    "Workspace::recorded_objects_scope",
 ]
 effectful_unnameable = [
     "drop",
@@ -1376,8 +1406,13 @@ effect_free = [
 [[module]]
 path = "src/agent/proc.rs"
 crate_path = "upstroke::agent::proc"
-shared = { deref = 2, drop = 5, fmt = 2 }
+shared = { deref = 2, drop = 6 }
 funnel = [
+    # PR11 follow-up A (`PR11-REAPER-CONTAINER-SCOPE-UNREGISTERED`): `arm_container_reaper` takes
+    # `ProcessSite::Terminate` by value, refuses any other site, and forks one cleanup reaper through the
+    # Terminate site's own fork, holding no cleanup lease and no process group, for a container runner's
+    # incarnation; `ContainerReaper`'s `Drop` (the sixth `drop` below) cancels it.
+    "arm_container_reaper",
     "run_with_timeout_at",
     # The same funnel keeping the process fate it established
     # (`ProcessFailure`), for the host Runner's `RunnerError`.
@@ -1430,10 +1465,11 @@ effectful_unnameable = [
     # `begin`, the funnel row above, and `prepare` is a step between it and
     # `finish`, as `pipe_io::configure` is a step of the Spawn site.
     "prepare",
-    # One name, five `Drop` impls: `Job`'s, `OpenHandle`'s and `Snapshot`'s
+    # One name, six `Drop` impls: `Job`'s, `OpenHandle`'s and `Snapshot`'s
     # close a Win32 handle (a job's with KILL_ON_JOB_CLOSE, which terminates
     # whatever is still in it); `Supervisor`'s cancels the reaper or finishes
-    # the group; `GroupSnapshot`'s is test-only bookkeeping.
+    # the group; `ContainerReaper`'s cancels its container reaper, with a
+    # bounded wait for its exit; `GroupSnapshot`'s is test-only bookkeeping.
     "drop",
 ]
 effect_free = [
@@ -1444,29 +1480,20 @@ effect_free = [
     # `process_alive` open a handle with `PROCESS_QUERY_LIMITED_INFORMATION |
     # SYNCHRONIZE` and ask it (`IsProcessInJob`, `GetProcessTimes`, a
     # zero-timeout `WaitForSingleObject`), then close it: a denied primitive
-    # (`OpenProcess`) in a mode that mutates nothing, classified as
-    # `observe_child_group`'s `waitid` with `WNOWAIT` is below, and as the
+    # (`OpenProcess`) in a mode that mutates nothing, classified as the
     # `pub` wrappers over them in `src/agent/proc/ambient.rs` already are.
+    # The test-only group oracle this sentence used to cite,
+    # `observe_child_group`, is under `cfg(all(unix, test))` with the rest of
+    # its record, and since #325 `effects::production_code` reads that gate,
+    # so none of them is in this domain.
     "ambient_contains",
     "ambient_established",
-    # The test-only group oracle and its lifecycle record. `observe_child_group`
-    # asks `waitid` with `WNOWAIT`, `getpgid` and on macOS `proc_pidinfo`,
-    # every one a read of process-table state that reaps, signals and moves
-    # nothing; `await_exit_without_reaping` blocks in the same `WNOWAIT` wait
-    # on a helper thread and leaves the child for its owner to reap. The rest
-    # read the record.
-    "await_exit_without_reaping",
-    "child_leads_its_own_group",
     "deref",
     "deref_mut",
-    "exit_answer",
     "fmt",
-    "had_exited_before_the_look",
-    "leads_own_group",
     # A pure decision over a memoised `Result`: it clones a message or returns
     # `Ok`, and touches nothing.
     "memoised_outcome",
-    "observe_child_group",
     # See `ambient_contains`.
     "process_alive",
     "process_creation_time",
@@ -1533,18 +1560,13 @@ effect_free = [
     # `join_ambient_job` over an explicit join step, so the error arm can be
     # executed at all. Same classification as the entry point it implements.
     "join_ambient_job_with",
-    # `#[cfg(all(windows, test))]`: writes a value into a process-local
-    # `OnceLock` so a subprocess helper can carry a real ambient failure. No
-    # effect outside this process, and no production caller at all.
-    "poison_ambient_for_tests",
     "process_alive",
     "process_creation_time",
     # Writes a value into a process-local `OnceLock<Mutex<..>>` that every
     # cleanup reaper started afterwards renders into argv before its `fork`.
     # No effect outside this process: the reaper performs the effect, inside
     # `Container.Stop`/`Container.Remove`'s own primitives, and only after its
-    # coordinator has died. The same classification `poison_ambient_for_tests`
-    # carries, for the same reason.
+    # coordinator has died.
     "set_container_reclaim_scope",
 ]
 
@@ -1619,7 +1641,7 @@ effect_free = ["drop", "record", "settle", "spawn", "take"]
 # and `runner::host::HostRunner::run` record -- and checks the text through
 # `bin::extract_version` and `bin::boundary_refused` (effect-free rows), the
 # private `checked_help`/`validate_help`, and `advertises_flag` and
-# `missing_effort_levels` in `src/agent/mod.rs`, token scans of a string in a
+# `missing_effort_levels` in `src/agent/adapter.rs`, token scans of a string in a
 # module outside the classified set. Claude's and Copilot's stop there.
 # Codex's does not: `probe -> validate_effort_config_key ->
 # MissingOutputSchema::create` performs `std::fs::create_dir` on a directory
@@ -1975,6 +1997,10 @@ effect = [
 not_an_effect = [
     "BPF_ABS",
     "BPF_JEQ",
+    # The jump on a set bit, with which the rundir tests' policy that refuses
+    # every open but a directory's tests the flags for `O_DIRECTORY`
+    # (`refuse_nondirectory_opens_on_this_thread`, `PR320-R5-MAIN-002`).
+    "BPF_JSET",
     "BPF_JMP",
     "BPF_K",
     "BPF_LD",
@@ -2072,16 +2098,35 @@ not_an_effect = [
     "STDERR_FILENO",
     "STDIN_FILENO",
     "STDOUT_FILENO",
+    # The number of `clock_nanosleep`, which the rundir tests hand a seccomp
+    # policy so that every rest an owner takes answers `EINTR`
+    # (`PR320-R5-MAIN-006`); the effect is `syscall`.
+    "SYS_clock_nanosleep",
     "SYS_clone3",
+    # The number of `close`, which the parked-fork isolation witness hands a seccomp
+    # policy so that one descriptor's close answers `EIO`; the effect is `syscall`.
+    "SYS_close",
     "SYS_close_range",
     "SYS_fcntl",
     "SYS_getdents64",
     "SYS_kill",
+    # The number of `openat`, which the rundir tests hand a seccomp policy so
+    # that every open but a directory's answers `EINTR` (`PR320-R5-MAIN-002`);
+    # the effect is `syscall`.
+    "SYS_openat",
     "SYS_pidfd_open",
     "SYS_pidfd_send_signal",
     "SYS_prctl",
+    # The number of `sendto`, the call a Unix-socket write makes, which the
+    # rundir tests hand a seccomp policy so that a parked fork's release
+    # answers `EINTR` (`PR320-R5-MAIN-003`); the effect is `syscall`.
+    "SYS_sendto",
     "SYS_wait4",
     "SYS_waitid",
+    # The number of `write`, which the rundir tests hand a seccomp policy so
+    # that writes to descriptor 2 answer `EINTR` or `EIO` (`PR320-R5-MAIN-001`,
+    # `PR320-R5-REG-001`, `PR320-R5-REG-002`); the effect is `syscall`.
+    "SYS_write",
     "SZOMB",
     "WEXITED",
     "WEXITSTATUS",
@@ -2106,6 +2151,10 @@ not_an_effect = [
     "getgroups",
     "getpgid",
     "getpgrp",
+    # The identity of what a descriptor is open on, asked of the kernel through the
+    # number itself by the rundir tests' identity scan (`descriptors_open_on`): a
+    # metadata read that owns, opens and closes nothing.
+    "fstat",
     "getpid",
     "getppid",
     "getrlimit",
@@ -2131,6 +2180,9 @@ not_an_effect = [
     "sleep",
     "sock_filter",
     "sock_fprog",
+    # The struct `fstat` and `stat` write, and the `stat` of a path the identity
+    # scan compares each descriptor's identity against; metadata reads.
+    "stat",
     "suseconds_t",
     "sysconf",
     "time_t",

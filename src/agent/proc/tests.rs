@@ -132,6 +132,8 @@ fn excessive_output_is_bounded_and_terminates_the_tree() {
         b"",
         Duration::from_secs(30),
         TEST_LIMIT,
+        &[],
+        &|| false,
         &mut NoHooks,
     )
     .expect("supervise noisy child");
@@ -158,6 +160,8 @@ fn the_output_allowance_bounds_stderr_as_well_as_stdout() {
         b"",
         Duration::from_secs(60),
         TEST_LIMIT,
+        &[],
+        &|| false,
         &mut NoHooks,
     )
     .expect("supervise a modest stderr writer");
@@ -186,6 +190,8 @@ fn the_output_allowance_bounds_stderr_as_well_as_stdout() {
         b"",
         Duration::from_secs(60),
         TEST_LIMIT,
+        &[],
+        &|| false,
         &mut NoHooks,
     )
     .expect("supervise a noisy stderr child");
@@ -399,6 +405,8 @@ fn a_fault_at_the_terminate_funnel_settles_the_child_and_reports_its_fate(
         command,
         b"",
         Duration::from_secs(3),
+        &[],
+        &|| false,
         &mut hooks,
     )
     .expect_err("the armed fault ends the supervision");
@@ -462,6 +470,8 @@ fn a_fault_at_the_terminate_funnel_settles_the_child_and_reports_its_fate(
         shell("echo next"),
         b"",
         Duration::from_secs(30),
+        &[],
+        &|| false,
         &mut hooks,
     )
     .unwrap_or_else(|failure| panic!("{tag}: the next command runs: {}", failure.error));
@@ -567,6 +577,8 @@ fn a_spawn_fault_whose_cleanup_termination_faults_after_its_primitive_reports_th
         command,
         b"",
         Duration::from_secs(30),
+        &[],
+        &|| false,
         &mut hooks,
     )
     .expect_err("the error after the spawn ends the supervision");
@@ -664,8 +676,8 @@ fn kill_tree_stores_a_terminated_groups_fate_before_its_after_phase_errs() {
 fn a_child_registered_pre_exec_is_settled_when_the_parent_never_registers_it() {
     use std::os::unix::process::ExitStatusExt;
 
-    let supervisor =
-        termination::Supervisor::begin(ProcessSite::Terminate).expect("start a private reaper");
+    let supervisor = termination::Supervisor::begin(ProcessSite::Terminate, &[])
+        .expect("start a private reaper");
     let mut command = Command::new(Path::new("/bin/sh"));
     command
         .args(["-c", "sleep 60"])
@@ -766,8 +778,8 @@ impl Drop for ReapedChild {
 #[cfg(unix)]
 #[test]
 fn an_exited_but_unreaped_child_still_answers_for_its_own_group() {
-    let mut supervisor =
-        termination::Supervisor::begin(ProcessSite::Terminate).expect("start a private reaper");
+    let mut supervisor = termination::Supervisor::begin(ProcessSite::Terminate, &[])
+        .expect("start a private reaper");
     let mut command = Command::new(Path::new("/bin/sh"));
     command
         .args(["-c", "read line; exit 0"])
@@ -872,8 +884,8 @@ fn a_child_left_in_this_processs_group_never_answers_for_its_own() {
 #[cfg(unix)]
 #[test]
 fn a_reaped_childs_pid_never_answers_for_its_own_group() {
-    let mut supervisor =
-        termination::Supervisor::begin(ProcessSite::Terminate).expect("start a private reaper");
+    let mut supervisor = termination::Supervisor::begin(ProcessSite::Terminate, &[])
+        .expect("start a private reaper");
     let mut command = shell("read line; exit 0");
     command
         .stdin(Stdio::piped())
@@ -1137,12 +1149,15 @@ fn timeout_kills_the_process_tree_quickly() {
 #[cfg(unix)]
 #[test]
 fn timeout_kills_a_background_grandchild_before_it_can_escape() {
-    let marker = std::env::temp_dir().join(format!(
-        "upstroke-proc-tree-{}-{}.marker",
-        std::process::id(),
-        std::thread::current().name().unwrap_or("unnamed")
-    ));
-    let _ = std::fs::remove_file(&marker);
+    let parent = std::env::temp_dir();
+    let tree = match crate::rundir::scratch_tree::acquire(&parent, "proc-tree") {
+        Ok(tree) => tree,
+        Err(refusal) => panic!(
+            "a scratch tree for `proc-tree` under {}: {refusal:?}",
+            parent.display()
+        ),
+    };
+    let marker = tree.path().join("marker");
 
     let mut command = shell("(sleep 1; printf leaked > \"$UPSTROKE_MARKER\") & wait");
     command.env("UPSTROKE_MARKER", &marker);
@@ -1151,7 +1166,6 @@ fn timeout_kills_a_background_grandchild_before_it_can_escape() {
 
     thread::sleep(Duration::from_millis(1300));
     let leaked = marker.exists();
-    let _ = std::fs::remove_file(&marker);
     assert!(
         !leaked,
         "the timed-out process group's background grandchild survived"
@@ -1475,8 +1489,8 @@ fn unix_reaper_reparent_helper() {
     }
     let ready = std::path::PathBuf::from(std::env::var_os("UPSTROKE_READY").expect("ready path"));
     let agent = std::path::PathBuf::from(std::env::var_os("UPSTROKE_AGENT").expect("agent path"));
-    let mut supervisor =
-        termination::Supervisor::begin(ProcessSite::Terminate).expect("start a private reaper");
+    let mut supervisor = termination::Supervisor::begin(ProcessSite::Terminate, &[])
+        .expect("start a private reaper");
     let mut command = Command::new("/bin/sh");
     command
         .args(["-c", "sleep 120"])
@@ -1996,6 +2010,8 @@ fn the_output_limit_path_settles_a_windows_grandchild_too() {
         b"",
         Duration::from_secs(60),
         64 * 1024,
+        &[],
+        &|| false,
         &mut NoHooks,
     )
     .expect("supervise the tree");
@@ -2541,7 +2557,10 @@ extern "C" fn record_custom_aux_signal(_: libc::c_int) {
 #[cfg(unix)]
 struct SignalHelper {
     child: Child,
-    scratch: std::path::PathBuf,
+    /// The guard over the helper's own tree. Its `Drop` reclaims the tree,
+    /// so neither [`SignalHelper::complete`] nor [`SignalHelper`]'s `Drop`
+    /// removes anything itself.
+    scratch: crate::rundir::scratch_tree::ScratchTree,
     marker: std::path::PathBuf,
     finish: std::path::PathBuf,
     diagnostic: std::path::PathBuf,
@@ -2558,7 +2577,6 @@ impl SignalHelper {
 
     fn complete(&mut self) {
         self.active = false;
-        let _ = std::fs::remove_dir_all(&self.scratch);
     }
 
     fn diagnostic(&self) -> String {
@@ -2579,7 +2597,6 @@ impl Drop for SignalHelper {
         let _ = unsafe { libc::kill(-self.pid(), libc::SIGKILL) };
         let _ = self.child.kill();
         let _ = self.child.wait();
-        let _ = std::fs::remove_dir_all(&self.scratch);
     }
 }
 
@@ -2587,22 +2604,27 @@ impl Drop for SignalHelper {
 fn spawn_signal_helper(tag: &str, expect_return: bool, ignore_sighup: bool) -> SignalHelper {
     use std::os::unix::process::CommandExt;
 
-    let scratch = std::env::temp_dir().join(format!(
-        "upstroke-proc-{tag}-{}-{}-{}",
-        std::process::id(),
-        std::thread::current().name().unwrap_or("unnamed"),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock after epoch")
-            .as_nanos()
-    ));
-    let _ = std::fs::remove_dir_all(&scratch);
-    std::fs::create_dir_all(&scratch).expect("scratch dir");
-    let ready = scratch.join("ready");
-    let marker = scratch.join("leaked");
-    let finish = scratch.join("finish");
-    let diagnostic = scratch.join("helper.log");
-    let reaper_pid_path = scratch.join("reaper.pid");
+    // The helper here built
+    // `temp_dir()/upstroke-proc-<tag>-<pid>-<thread>-<nanos>` and pre-cleaned
+    // it with a discarded `remove_dir_all` before it had any claim on the name
+    // (`PR64-CLEANUP-003-SCRATCH-PRECLEAN`). `acquire` refuses an occupied
+    // root rather than emptying it, and the guard -- held by the
+    // `SignalHelper` below -- reclaims the tree however this helper's life
+    // ends (`PR7-SCRATCH-FIXTURE-LEAK`).
+    let parent = std::env::temp_dir();
+    let scratch = match crate::rundir::scratch_tree::acquire(&parent, &format!("proc-{tag}")) {
+        Ok(tree) => tree,
+        Err(refusal) => panic!(
+            "a scratch tree for `proc-{tag}` under {}: {refusal:?}",
+            parent.display()
+        ),
+    };
+    let root = scratch.path();
+    let ready = root.join("ready");
+    let marker = root.join("leaked");
+    let finish = root.join("finish");
+    let diagnostic = root.join("helper.log");
+    let reaper_pid_path = root.join("reaper.pid");
     let diagnostic_stdout = std::fs::File::create(&diagnostic).expect("helper diagnostic");
     let diagnostic_stderr = diagnostic_stdout
         .try_clone()
@@ -2672,7 +2694,7 @@ fn spawn_signal_helper(tag: &str, expect_return: bool, ignore_sighup: bool) -> S
     }
     if tag == "crash-lease" {
         helper
-            .env("UPSTROKE_CLEANUP_PUBLIC", scratch.join("run"))
+            .env("UPSTROKE_CLEANUP_PUBLIC", scratch.path().join("run"))
             .env("UPSTROKE_TEST_CLEANUP_DELAY_MS", "700");
     }
     let child = helper.spawn().expect("spawn signal helper");
@@ -2947,7 +2969,7 @@ fn sigkill_of_upstroke_job_still_reaps_the_isolated_agent_group() {
 #[test]
 fn sigkill_keeps_resume_locked_out_until_agent_cleanup_finishes() {
     let mut helper = spawn_signal_helper("crash-lease", true, false);
-    let public = helper.scratch.join("run");
+    let public = helper.scratch.path().join("run");
     let helper_pgid = helper.pid();
     assert_eq!(unsafe { libc::kill(-helper_pgid, libc::SIGKILL) }, 0);
     wait_for_exit(&mut helper.child, Duration::from_secs(10))
@@ -3242,8 +3264,8 @@ fn unix_reaper_container_helper() {
             .expect("a scope");
     super::set_container_reclaim_scope(Some(&scope)).expect("arm the reaper");
 
-    let mut supervisor =
-        termination::Supervisor::begin(ProcessSite::Terminate).expect("start a private reaper");
+    let mut supervisor = termination::Supervisor::begin(ProcessSite::Terminate, &[])
+        .expect("start a private reaper");
     let mut command = Command::new("/bin/sh");
     command
         .args(["-c", "sleep 120"])
@@ -3271,15 +3293,19 @@ fn unix_reaper_kills_labeled_containers() {
     const PRIVATE_ROOT: &str = "/srv/upstroke-reaper-fixture/private";
     const INCARNATION: &str = "01KZTAAAAAAAAAAAAAAAAAAAAA";
 
-    fn scratch(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "upstroke-reaper-containers-{tag}-{}-{}",
-            std::process::id(),
-            crate::ulid::ulid()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("scratch");
-        dir
+    /// A scratch tree for one cell, guarded by the token that authorises its
+    /// deletion. The helper here pre-cleaned a name it had no claim on and
+    /// left the root behind (`PR64-CLEANUP-003-SCRATCH-PRECLEAN`,
+    /// `PR7-SCRATCH-FIXTURE-LEAK`).
+    fn scratch(tag: &str) -> crate::rundir::scratch_tree::ScratchTree {
+        let parent = std::env::temp_dir();
+        match crate::rundir::scratch_tree::acquire(&parent, tag) {
+            Ok(tree) => tree,
+            Err(refusal) => panic!(
+                "a scratch tree for `{tag}` under {}: {refusal:?}",
+                parent.display()
+            ),
+        }
     }
     fn alive(pid: i32) -> bool {
         // SAFETY: signal 0 performs no delivery.
@@ -3319,7 +3345,8 @@ fn unix_reaper_kills_labeled_containers() {
             (false, true) => "path-dies",
             _ => "path-lives",
         };
-        let dir = scratch(cell);
+        let tree = scratch(cell);
+        let dir = tree.path();
         let stub = dir.join(STUB_NAME);
         let log = dir.join("argv.log");
         std::fs::write(
@@ -3356,7 +3383,7 @@ fn unix_reaper_kills_labeled_containers() {
             .args(["unix_reaper_container_helper", "--ignored", "--nocapture"])
             .env("UPSTROKE_REAPER_CONTAINERS", "1")
             .env("UPSTROKE_STUB", &named)
-            .env("UPSTROKE_STUB_DIR", &dir)
+            .env("UPSTROKE_STUB_DIR", dir)
             .env("UPSTROKE_ROOT", PRIVATE_ROOT)
             .env("UPSTROKE_INCARNATION", INCARNATION)
             .env("UPSTROKE_AGENT", &agent_path)
@@ -3366,7 +3393,7 @@ fn unix_reaper_kills_labeled_containers() {
             .stderr(Stdio::null());
         if bare {
             let inherited = std::env::var_os("PATH").unwrap_or_default();
-            let mut search = vec![dir.clone()];
+            let mut search = vec![dir.to_path_buf()];
             search.extend(std::env::split_paths(&inherited));
             coordinator.env(
                 "PATH",
@@ -3390,7 +3417,6 @@ fn unix_reaper_kills_labeled_containers() {
                  settle path: {:?}",
                 std::fs::read_to_string(&log)
             );
-            let _ = std::fs::remove_dir_all(&dir);
             continue;
         }
 
@@ -3475,7 +3501,6 @@ fn unix_reaper_kills_labeled_containers() {
             let _ = libc::kill(agent_pid, libc::SIGKILL);
             let _ = libc::kill(-agent_pid, libc::SIGKILL);
         }
-        let _ = std::fs::remove_dir_all(&dir);
         assert!(
             settled,
             "the container half replaced the process half: the agent group survived"
@@ -3713,29 +3738,85 @@ fn a_dead_producer_ends_the_wait_without_spending_the_bound() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn a_producer_whose_reader_cannot_be_started_is_killed_and_reaped() {
+    let mut command = Command::new(std::env::current_exe().expect("test executable"));
+    command
+        .args([
+            "--exact",
+            "agent::proc::tests::no_test_is_named_this",
+            "--ignored",
+            "--nocapture",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let child = command.spawn().expect("spawn the producer");
+    let pid = child.id();
+    let asked = std::cell::Cell::new(None);
+    let adopted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        drop(readiness::Producer::adopt_with(child, |reader_of| {
+            asked.set(Some(reader_of));
+            readiness::unstartable_reader()
+        }));
+    }));
+    assert_eq!(
+        asked.get(),
+        Some(pid),
+        "the adoption asked for the reader of the child it was handed"
+    );
+    assert!(
+        adopted.is_err(),
+        "the producer {pid} was adopted although its reader could not be started"
+    );
+    assert!(
+        !crate::workspace_manager::fixture::process_exists(pid),
+        "the producer {pid} outlived its failed adoption, neither killed nor reaped"
+    );
+}
+
 #[test]
 fn the_bound_is_the_callers_and_it_does_not_time_a_healthy_producer() {
     let scratch = Scratch::new("deadline");
 
     let silent = scratch.join("never");
     let mut producer = readiness_producer("silent", Some(&silent), Stdio::null());
-    let mut spent = Vec::new();
+    const BOUND: Duration = Duration::from_millis(120);
+    let started = Instant::now();
+    match readiness::await_signal(&silent, producer.child(), BOUND) {
+        readiness::Waited::TimedOut(reported) => assert_eq!(reported, BOUND),
+        other => panic!("a silent producer must time the wait out, not give {other:?}"),
+    }
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= BOUND,
+        "ended before its own bound: {elapsed:?} < {BOUND:?}"
+    );
+
+    const STEP: Duration = Duration::from_millis(60);
+    let mut readings_per_bound = Vec::new();
     for bound in [Duration::from_millis(120), Duration::from_millis(480)] {
-        let started = Instant::now();
-        match readiness::await_signal(&silent, producer.child(), bound) {
+        let origin = Instant::now();
+        let readings = std::cell::Cell::new(0_u32);
+        let mut clock = || {
+            let reading = origin + STEP * readings.get();
+            readings.set(readings.get() + 1);
+            reading
+        };
+        match readiness::await_signal_by(&silent, producer.child(), bound, &mut clock) {
             readiness::Waited::TimedOut(reported) => assert_eq!(reported, bound),
             other => panic!("a silent producer must time the wait out, not give {other:?}"),
         }
-        let elapsed = started.elapsed();
-        assert!(
-            elapsed >= bound,
-            "ended before its own bound: {elapsed:?} < {bound:?}"
-        );
-        spent.push(elapsed);
+        readings_per_bound.push(readings.get());
     }
-    assert!(
-        spent[1] > spent[0],
-        "the wait spends the bound it was given, not one of its own: {spent:?}"
+    assert_eq!(
+        readings_per_bound,
+        [3, 9],
+        "the wait ends at the first reading of its clock past the bound it was given -- one \
+         reading for the deadline, then one per poll -- so a bound of 120 ms ends at the third \
+         reading of a clock that advances {STEP:?} a reading, and one of 480 ms at the ninth; a \
+         bound of the wait's own would end both at the same reading: {readings_per_bound:?}"
     );
     drop(producer);
 
@@ -4121,6 +4202,8 @@ fn a_spawn_that_fails_before_any_process_exists_is_never_started() {
         Command::new("upstroke-no-such-program-a5f2"),
         b"",
         Duration::from_secs(30),
+        &[],
+        &|| false,
         &mut NoHooks,
     )
     .expect_err("an absent program cannot be spawned");
@@ -4166,6 +4249,8 @@ fn a_containment_failure_after_the_spawn_leaves_the_fate_unresolved() {
             shell("sleep 30"),
             b"",
             Duration::from_secs(30),
+            &[],
+            &|| false,
             &mut hooks,
         )
         .expect_err("the funnel was made to fail after the spawn");

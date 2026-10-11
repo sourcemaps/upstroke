@@ -59,7 +59,7 @@ initialization, admission, the first credential-volume use, and
 `RunnerPreflight`. [`census_returns_the_only_token_that_reaches_a_consumer`]
 is the source census that says no other construction exists.
 
-## `#![deny(`
+## `#![cfg_attr(not(test), forbid(clippy::disallowed_methods))]`
 
 `PR6-LANEF-004`: the Container funnel's module-level allow is an INNER
 attribute, and a Rust lint level is scoped by the MODULE TREE rather than by
@@ -70,6 +70,23 @@ is what makes `decisions.effect_site_inventory.mechanism` (1)'s BUILD error
 true of a lane's module, which is the leg the source census cannot supply.
 Enforced for every file in this directory by `runner::container::tests::
 every_child_module_of_the_container_funnel_states_its_own_lint_level`.
+
+**`forbid`, not `deny`, since 2026-09-23 -- conditional for one lint and
+plain for two.** A `deny` is a level an inner `allow` lowers, and #318
+executed that here: a `macro_rules!` emitting `#[allow(clippy::disallowed_methods)]
+pub fn ..(..) { std::fs::write(..) }` at the bottom of the production region,
+called from the production body of `prepared_pin_ref` in
+`engine::topology::integrate`, passed clippy over all targets and the whole
+effects suite and wrote its bytes
+(`~/orch-pr10/repair-318-r2-evidence/witnesses-prefix/PW2-*`). The only
+allowance of `disallowed_methods` below this file is its whole-file
+`tests.rs`, which exists in the lib test target alone, so the `forbid` is
+applied to every build without `cfg(test)` -- the lib target the three clippy
+legs check -- and the test module's allowance compiles as it did; the same
+patch is `E0453` at the generated attribute (`controls-final/PX2-*`).
+`disallowed_types` and `disallowed_macros` are allowed by nothing below, so
+they are `forbid` in every build. `effects::tests::no_deny_of_a_governed_lint_is_excused_by_test_code_alone`
+names this file the day the conditional `forbid` goes back to `deny`.
 
 ## `pub const VIEWS_DIR: &str = "views";`
 
@@ -890,16 +907,26 @@ filters cost nothing.
 This type is a **value**, deliberately: the reaper is a `fork`-only child in
 a multithreaded process and may call nothing that allocates, so every string
 it will ever need is rendered here, on the parent side, before the fork.
-[`crate::agent::proc::set_container_reclaim_scope`] is where it is handed
-over.
+It is handed over by value, to [`crate::agent::proc::arm_container_reaper`],
+by the container runner's cover (`exec::Reaping::cover`); the process-wide
+[`crate::agent::proc::set_container_reclaim_scope`], which host reapers read,
+has only test callers.
 
-**What a later slice must connect.** Nothing registers a scope in this
-slice: `production_effect` is "none" and no run selects a container Runner
-until PR12. PR7's `TopologyRun` registers it once run identity exists — the
-private root from `run_started.private_dir` and the incarnation from
-`run_started(4)`/`run_resumed(4)` — and must ensure a supervisor is live
-across a container invocation, or the window is closed only by the next
-write command's census.
+**What was connected, and where** (PR11 follow-up A, which repairs
+`PR11-REAPER-CONTAINER-SCOPE-UNREGISTERED`). This paragraph used to say PR7's
+`TopologyRun` would register a scope once run identity exists and must keep a
+supervisor live across every container invocation; rounds R5 to R7 of PR11
+tried that at an incarnation's entries and each review found a container
+launch before the arming point. The scope is now built and armed **inside the
+launch funnel**: `ContainerRunner::contain` covers each invocation before
+`launch`, the first cover arms the runner's reaper with a scope built from the
+runner's own `RunIdentity` (the private root and incarnation every container
+it starts is labeled with), and the reaper stays armed until every container
+that runner started is established gone, or until the process exits. Nothing
+in `engine::topology` registers anything. What PR12 still connects is the
+runner itself: building one `ContainerRunner` per incarnation from the run's
+record — its recorded private root and this incarnation — and using it for the
+incarnation's every container invocation.
 
 ## `impl ReaperContainerScope` › `pub fn new(`
 
@@ -912,6 +939,15 @@ label value carries a byte that would end the argument or start another
 filter — a newline, a comma, or an `=`. The reaper cannot report a
 malformed selector: it has no error channel and no allocator, so the
 check is here.
+
+## `impl ReaperContainerScope` › `pub fn selects(&self, labels: &BTreeMap<String, String>) -> bool {`
+
+Whether a container labeled `labels` is one this scope's listing would find: its
+`upstroke.private_root` and `upstroke.incarnation` values are exactly the two filter values
+`list_argv` renders. The container runner's cover asks it of every container before its
+intent, and of the scope it is about to arm before it forks anything (`exec::Reaping::cover`,
+`R7-D2` and `FUA-D1-DES-2`), so no reaper is armed over a scope that would not list what it
+must kill.
 
 ## `impl ReaperContainerScope` › `pub fn program(&self) -> &Path {`
 

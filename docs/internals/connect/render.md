@@ -41,16 +41,21 @@ the name `main` calls and `effects/wrappers.toml` classifies, delegating to
 `connect::render` and `connect`'s externally reachable surface is the same
 four functions the wrapper census already records.
 
-## `#![forbid(clippy::disallowed_methods, clippy::disallowed_macros)]`
+## `#![forbid(`
 
-The two effect denials are **restored** here rather than inherited. A lint
-level is scoped by the module tree and not by the file, so `super`'s
-`#![allow(clippy::disallowed_methods, clippy::disallowed_macros)]` — which it
-carries because it creates a directory and writes the operator's pools file —
-would otherwise reach every line below. Nothing here touches a file or a
-process, so that allowance has no business here, and re-denying is what keeps
-this module out of `effects/allowlist.toml`: an allowance is what that file
-records, and this module takes none.
+The two effect denials `super` allows are **restored** here rather than
+inherited. A lint level is scoped by the module tree and not by the file, so
+`super`'s `#![allow(clippy::disallowed_methods, clippy::disallowed_macros)]`
+— which it carries because it creates a directory and writes the operator's
+pools file — would otherwise reach every line below. Nothing here touches a
+file or a process, so that allowance has no business here, and re-denying is
+what keeps this module out of `effects/allowlist.toml`: an allowance is what
+that file records, and this module takes none. The third lint,
+`disallowed_types`, joined the fence in #318's third round: `super` states
+nothing for it, so this file took it from `-D warnings` alone, a level an
+inner `allow` the placement scan does not read lowers;
+`every_unclassified_production_file_states_each_governed_lint_or_inherits_its_forbid`
+names the pair the day it is dropped.
 
 Not in tension with a file written entirely with `writeln!`: these render
 onto a `String`, which is `std::fmt::Write::write_fmt`, and `clippy.toml`

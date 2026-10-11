@@ -60,7 +60,7 @@ The `Host` / `host-v1` `Runner`.
 |---|---|
 | `new()` | A host runner over this process's environment. Infallible; `crate::runner::policy::resolve_host` is the checked entry point and returns the same record. |
 | `with_environment(env)` | A host runner over an explicit environment. Does **not** clear `resolved` — a decision, not an omission. |
-| `with_hooks(hooks)` | Observe (and, for the ST-07 subset, inject at) the containment sub-effect points of every spawn this runner performs. |
+| `with_hooks(hooks)` | Observe (and, for the ST-07 subset, inject at) the containment sub-effect points of every spawn this runner performs that does not carry its own observer. An installed observer is shared, so invocations on one runner take turns while it is installed. |
 | `policy()` | The record this runner declares: `RunnerPolicy{kind: Host, policy: host-v1, image: None, credential_volumes: None}`. Exposed because INV-23 records it in three places. |
 | `policy_digest()` | `runner_policy_sha256` of `policy()` — the marker's value and the value every container intent carries. |
 | `environment()` | The environment contract this runner composes under. |
@@ -71,10 +71,13 @@ The `Host` / `host-v1` `Runner`.
 **Fields.** The source keeps the lock protocol beside `HostRunner`. The runner
 owns both locks and never nests them. `resolved` serializes each lookup and caches
 its success or error before another caller can read it. Its guard is released
-before `hooks` is acquired. The hooks guard covers startup or an entire supervised
-run, so a shared runner supervises one process at a time even when its callers are
-concurrent. Guards release on return or unwind; a poisoned lock retains its inner
-state. The process funnel's RAII owners handle child cleanup.
+before `hooks` is acquired. `hooks` exists only when a runner-level observer was
+installed; its guard then covers startup or an entire supervised run, so a runner
+with an installed observer supervises one process at a time even when its callers
+are concurrent. A call that carries its own observer (`RunnerCall::observed_by`),
+or a runner with none installed — production's — takes no `hooks` guard, and its
+invocations run at once. Guards release on return or unwind; a poisoned lock
+retains its inner state. The process funnel's RAII owners handle child cleanup.
 
 ### `ProgramQuestion`
 
@@ -98,7 +101,8 @@ composed values. `None` is "the composed environment does not carry that key at 
 | `program_searches()` | How many program names **this thread** has actually searched a filesystem for. Incremented by `resolve_program` on entry. |
 | `containment_establishments()` | How many times **this thread** has established write-command containment. Incremented by `Contained::new`, so the count and the tokens cannot disagree. |
 
-`RESOLUTIONS`, `SEARCHES` and `ESTABLISHMENTS` are the thread-local cells behind the three.
+`RESOLUTIONS`, `SEARCHES` and `ESTABLISHMENTS` are the thread-local cells behind the three, declared in
+`src/runner/host/counters.rs` since 2026-09-26 and imported here ([`counters.md`](host/counters.md) says why).
 
 ### Containment
 
@@ -158,10 +162,18 @@ The three fields that decide the answer are the three the key carries.
 
 ## `HostRunner::hooks`
 
-Held for the whole of one `run`, so one `HostRunner` supervises one process at a time. That is not a
-limitation today — `Runner::run` is synchronous until PR11 and the substrate is sequential — but
-PR11's concurrent scheduler will need an observer per invocation rather than per runner, and this is
-where that shows up.
+The runner-level observer, present only when `with_hooks` installed one. Until PR11 it was always
+present (`NoHooks` by default) and held for the whole of one `run`, so one `HostRunner` supervised one
+process at a time whatever its callers asked — production included, since the lock was taken for
+`NoHooks` too. This note said PR11's concurrent scheduler would need "an observer per invocation
+rather than per runner", and PR11 made it so in two parts: the observer an invocation carries in its
+`RunnerCall` is its own and is used without any lock, and a runner with no observer installed takes
+no lock at all. An installed observer keeps the old contract — shared, and so taken in turns — which
+is what every test that installs one relies on.
+`two_invocations_on_one_host_runner_run_at_once_each_carrying_its_own_observation` holds the first
+part (two children that each wait for the other's marker both succeed, and each observer saw its own
+child's pid and one spawn's points, no more); `a_runner_level_observer_still_takes_invocations_one_at_a_time`
+holds the second (the same pair under an installed observer: exactly one outlives its wait).
 
 ## `HostRunner::with_environment`
 
@@ -196,11 +208,45 @@ ordering predicate ("resolved once per spawn, before any of the spawn") and the 
 
 ## `impl Runner for HostRunner` — `run`
 
+`run` returns the boxed future the contract promises, and the future does the whole of the work in
+its first poll, on the polling thread, through `HostRunner::supervise` — the synchronous body `run`
+had before PR11, unchanged except for the three things the call now carries — and, since PR11
+phase 3, the run's cleanup-lease paths, which it hands on. Why on the polling
+thread is `docs/internals/runner/contract.md`'s ("Where the work happens"): the reaper's cleanup
+lease is thread-scoped, and so is the observation export.
+
+## `impl HostRunner` › `fn supervise(`
+
+**Cancellation.** A call cancelled before `supervise` begins is refused before anything else is
+done — not the include check, not composition, not the name resolution — as `RunnerError::cancelled`
+with fate `NeverStarted`; `a_call_cancelled_before_it_starts_spawns_nothing` holds that nothing was
+spawned and that the resolution counter did not move. Once the process runs, the funnel's supervision
+loop reads the call's `Cancellation` as its `stop` predicate, beside the timeout and the output bound;
+when it answers yes the funnel terminates the tree through the same path a timeout takes (the Unix
+reaper's group settlement, the Windows private job), and `supervise` reports
+`RunnerError::cancelled(.., Gone)` only because the `stop` closure recorded that it was the reason the
+funnel stopped. A process that exits on its own in the same tick is reported as the output it produced:
+the invocation ended, and what ended it is what the report says.
+`cancelling_a_running_invocation_terminates_it_and_reports_it_cancelled` holds the report and its
+promptness against a child that would have run 300 seconds, and, on Unix,
+`cancelling_an_invocation_ends_every_process_of_its_tree` holds the tree: a child and its background
+grandchild hold a fifo open, and the fifo reads end of file once the Runner has reported.
+
+**The observer.** The call's own `SpawnHooks` observer when it carries one, with no lock; otherwise
+the runner-level observer under its guard when one is installed; otherwise a local `NoHooks`.
+
+**The leases.** The call's cleanup-lease paths go to `proc::run_with_timeout_classified`, whose
+Unix reaper holds them together with the ones the supervising thread's scope holds, deduplicated —
+so a process a coordinator's pipeline starts, on a thread that never entered the run's scope, is
+reaped by a reaper holding the run's lease (the working record's R-Z).
+`a_call_carrying_the_runs_cleanup_leases_is_reaped_by_a_reaper_that_holds_them` holds it.
+
 ### What the error says about the process
 
-Every error is a `RunnerError` carrying a [`ProcessFate`]. The environment
-composition and the name resolution happen before anything is spawned, so
-their refusals are `NeverStarted`; everything after is the funnel's own
+Every error is a `RunnerError` carrying a [`ProcessFate`]. The include check
+of a `RecordedIn` reading, the environment composition and the name
+resolution happen before anything is spawned, so their refusals are
+`NeverStarted`; everything after is the funnel's own
 classification through `proc::run_with_timeout_classified` — `NeverStarted`
 for a spawn that created nothing, `Gone` once the process group (Unix) or
 the job (Windows) was established empty, `Unresolved` where the funnel
@@ -210,6 +256,17 @@ exited. A reaped direct child is never the evidence, because it says
 nothing about the descendants that shared its group. The distinction
 exists for the integration verification, which may settle an outage
 terminal only on a fate that says no process survives.
+
+### Why the include is checked before every role
+
+Under `ObjectGraph::RecordedIn`, `run` asks `ManagedRepository::verify_include` before it composes
+anything, and does not start the role unless the include file holds exactly
+`RECORDED_OBJECTS_INCLUDE`. Git reads a missing include as nothing at all, so a role started after
+the file went missing would read the replaced graph with nothing to say so. Checking once per role
+rather than once per run is what makes "the include is there whenever a role starts" true, not
+merely "it was there when the run began". Every run and resume writes the file again before its
+first role; between those, a role that finds it missing or altered is refused as `NeverStarted`. The
+check reads the file; it never writes it.
 
 ### Where the program name is resolved
 
@@ -450,18 +507,41 @@ Infallible because `host-v1`'s record is a constant with nothing to inspect;
 
 ## `HostRunner::for_legacy_workspace`
 
-The runner the schema-1..3 conductor installs, and the only thing that separates it from
-[`HostRunner::new`](#hostrunnernew) is which object graph its children read.
+The runner the schema-1..3 conductor installs. It reads `ObjectGraph::RecordedIn(repository)`: its
+gates, reviewers and implementers read the recorded graph in the repository the run manages wherever
+their Git names its Git directory in a spelling the conditions match, and whatever the configuration
+says in other repositories. Two exceptions are measured and filed, not repaired: a spelling the
+filesystem equates with the stored one that the conditions do not match reads the replaced graph in the
+managed repository
+(`PR326-A-SPELLING-THE-FILESYSTEM-EQUATES-READS-REPLACEMENTS-IN-THE-MANAGED-REPOSITORY`, P1), and an
+alias spelled in the other case can make the conditions reach a repository beside it
+(`PR326-A-JUNCTION-MAKES-A-CASE-SENSITIVE-DIRECTORY-READ-AS-FOLDING`, P2). [`HostRunner::new`](#hostrunnernew) still reads
+`ObjectGraph::Recorded`, the process-wide variable, for the schema-4 host path, whose repair is
+`PR326-SCHEMA4-ROLE-ENVIRONMENT-REFUSES-REPLACEMENTS-EVERYWHERE`'s and stays deferred with it. The
+two policies are distinct so that repairing this one changed nothing on that path.
 
-`src/workspace.rs` produces the v0.1 workspace and its gate snapshots, sets no
-`NO_REPLACEMENT_OBJECTS` on any of its Git children, and is frozen by `effects/allowlist.toml`'s
-`[[legacy]]` row — `invariants_preserved[1]`, "this module's behaviour untouched". A consumer that
-read a different object graph from that producer failed `git diff --exit-code HEAD` over a checkout
-nothing had touched (measured, git 2.43; PR #271 round 1's regression finding), so this runner reads
-`ObjectGraph::AsReplaced` and the schema-4 path keeps the isolated default. See
-[`ObjectGraph`](host/environment.md) for the whole of that reasoning. `engine::run`,
-`engine::resume` and the two `#[cfg(test)]` coordinator entries beneath them are its call sites, and
-they are all of them: a runner built anywhere else judges the recorded graph.
+The `ManagedRepository` comes from `Workspace::recorded_objects_scope`, which `engine::run_harness`
+and `engine::resume_harness` call on `Workspace::open(repo_root)` before anything else: it names the
+repository's canonical common directory and writes the include file under the private root. The
+two `#[cfg(test)]` coordinator entries beneath them do the same.
+
+Until `LEGACY-WORKSPACE-READS-REPLACEMENT-OBJECTS` closed it read `ObjectGraph::AsReplaced`. That
+was PR #271's repair (`a55f7049`) for a v0.1 gate regression: `src/workspace.rs`, which produces
+the v0.1 workspace and its gate snapshots, set no `NO_REPLACEMENT_OBJECTS` on its Git children and
+was frozen, so a consumer reading the recorded graph failed `git diff --exit-code HEAD` over a
+checkout nothing had touched. Closing the finding put every Git child of that module on the
+recorded graph, and the same measurement then failed the other way: `for_legacy_workspace` still
+reading `AsReplaced` failed that gate over an untouched snapshot of a replaced tree, where a runner
+reading `Recorded` passed it (git 2.43). So the runner moved with its producer, in the same change,
+first to `Recorded`. Two reviews of #326 then showed that reading was wrong for v0.1: the variable
+reached the repositories a gate creates for itself, and on Git 2.41 it lost to a configured `true`.
+See [`ObjectGraph`](host/environment.md) for both, and for why producer and consumer must agree.
+
+The constructor is kept rather than folded into `HostRunner::new`, deliberately: it keeps
+the v0.1 path's choice of graph stated at the one place that path builds its runner, its
+`effect_free` entry in `effects/wrappers.toml`, and the `CONSTRUCTORS` census.
+`engine::run_harness`, `engine::resume_harness` and the two `#[cfg(test)]` coordinator entries
+beneath them are its call sites, and they are all of them.
 
 ## `HostRunner::policy`
 

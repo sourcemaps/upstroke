@@ -30,6 +30,7 @@ use crate::ir::{
     ResolvedEffortPolicy, Task, TaskId, TaskKind, Usage, WorkerProfile,
 };
 use crate::review;
+use crate::rundir::scratch_tree::ScratchTree;
 use crate::rundir::{self, RunLock, RunPaths, WorktreeLock};
 use crate::runner::CommandSpec;
 use crate::topology::effects::EventSite;
@@ -91,6 +92,7 @@ struct FakeAdapter {
 
     reports_cost: bool,
     calls: Mutex<Calls>,
+    role_probe: Option<RoleProbe>,
 }
 
 #[derive(Default)]
@@ -120,6 +122,7 @@ impl FakeAdapter {
             probe_error: None,
             reports_cost: true,
             calls: Mutex::new(Calls::default()),
+            role_probe: None,
         }
     }
 
@@ -131,7 +134,13 @@ impl FakeAdapter {
             probe_error: None,
             reports_cost: true,
             calls: Mutex::new(Calls::default()),
+            role_probe: None,
         }
+    }
+
+    fn probing(mut self, probe: RoleProbe) -> Self {
+        self.role_probe = Some(probe);
+        self
     }
 
     fn broken(mut self, message: &'static str) -> Self {
@@ -317,6 +326,9 @@ impl AgentAdapter for FakeAdapter {
                 })?;
             }
 
+            if let Some(probe) = &self.role_probe {
+                return Ok(probe.reviewer.clone());
+            }
             return Ok(shell_spec(&format!("echo {REVIEW_MARKER}")));
         }
         let index = {
@@ -397,6 +409,10 @@ impl AgentAdapter for FakeAdapter {
             fs::write(&questions, "not a directory\n").map_err(|e| UpstrokeError::Agent {
                 message: format!("fake could not block question writes: {e}"),
             })?;
+        }
+        if let Some(probe) = &self.role_probe {
+            probe.read_as_the_operator_does(&run.workspace);
+            return Ok(probe.worker.clone());
         }
         Ok(shell_spec("exit 0"))
     }
@@ -532,6 +548,11 @@ struct FakeSource {
 impl FakeSource {
     fn copilot(&self) -> &FakeAdapter {
         self.copilot.as_ref().expect("this source has a copilot")
+    }
+
+    fn probing_with(mut self, probe: RoleProbe) -> Self {
+        self.adapter = self.adapter.probing(probe);
+        self
     }
 }
 
@@ -683,10 +704,55 @@ fn mutate_index_after_candidate_capture(
     })
 }
 
-fn temp_engine_repo(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("upstroke-engine-{tag}-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).expect("create repo dir");
+/// A scratch tree this test owns, without a repository in it, guarded by the
+/// token that authorises its deletion.
+///
+/// **Bind the guard to a live local**: `let _ = temp_engine_scratch("x")`
+/// drops it at the end of that statement and deletes the fixture.
+fn temp_engine_scratch(tag: &str) -> ScratchTree {
+    let parent = std::env::temp_dir();
+    match crate::rundir::scratch_tree::acquire(&parent, tag) {
+        Ok(tree) => tree,
+        Err(refusal) => panic!(
+            "a scratch tree for `{tag}` under {}: {refusal:?}",
+            parent.display()
+        ),
+    }
+}
+
+/// A git repository in a scratch tree this test owns, guarded by the token
+/// that authorises the tree's deletion.
+///
+/// The helper here built `temp_dir()/upstroke-engine-<tag>-<pid>` and
+/// pre-cleaned it with a discarded `remove_dir_all` before it had any claim on
+/// the name, then returned a root nothing reclaimed
+/// (`PR64-CLEANUP-003-SCRATCH-PRECLEAN`, `PR7-SCRATCH-FIXTURE-LEAK`).
+/// `acquire` refuses an occupied root rather than emptying it, keys on a ULID
+/// no recycled pid can supply, and reclaims on drop.
+///
+/// # The repository is a CHILD of the tree, not the tree itself
+///
+/// [`private_root_for`] puts a run's private half at
+/// `<repo>-home`, a **sibling** of the repository, because the design keeps
+/// the two halves apart (`DESIGN.md` §15, and
+/// `agent_authored_files_land_outside_the_workspace`). A repository that was
+/// the tree root would therefore put its private half beside the tree, where
+/// no guard reaches it -- measured at 159 surviving `…-home` directories in
+/// one green suite run. As a child, both halves are inside the guarded tree.
+///
+/// **Bind the guard to a live local**: `let (_tree, repo) = …` keeps the tree
+/// for the rest of the scope; dropping the guard deletes the repository.
+fn temp_engine_repo(tag: &str) -> (ScratchTree, PathBuf) {
+    let parent = std::env::temp_dir();
+    let tree = match crate::rundir::scratch_tree::acquire(&parent, tag) {
+        Ok(tree) => tree,
+        Err(refusal) => panic!(
+            "a scratch tree for `{tag}` under {}: {refusal:?}",
+            parent.display()
+        ),
+    };
+    let dir = tree.path().join("repo");
+    fs::create_dir(&dir).expect("the repository, a child of the guarded tree");
     git_in(&dir, &["init", "-q", "-b", "main"]);
     git_in(&dir, &["config", "user.email", "test@upstroke.local"]);
     git_in(&dir, &["config", "user.name", "upstroke tests"]);
@@ -699,7 +765,7 @@ fn temp_engine_repo(tag: &str) -> PathBuf {
     .expect("plan");
     git_in(&dir, &["add", "-A"]);
     git_in(&dir, &["commit", "-q", "-m", "seed"]);
-    dir
+    (tree, dir)
 }
 
 fn seed(repo: &Path, plan: &str, config: Option<&str>) {
@@ -723,29 +789,42 @@ fn options(repo: &Path) -> RunOptions {
 }
 
 fn no_pools() -> PathBuf {
-    static PATH: OnceLock<PathBuf> = OnceLock::new();
-    PATH.get_or_init(|| {
-        let dir =
-            std::env::temp_dir().join(format!("upstroke-engine-nopools-{}", std::process::id()));
-        fs::create_dir_all(&dir).expect("scratch dir");
-        let path = dir.join("pools.toml");
-        fs::write(
-            &path,
-            "# no pools
+    /// The tree and the file, held together so the tree outlives every
+    /// reader. The root was `temp_dir()/upstroke-engine-nopools-<pid>`,
+    /// created and never removed (`PR7-SCRATCH-FIXTURE-LEAK`); it is
+    /// process-wide because every test here reads it.
+    struct Shared {
+        _tree: ScratchTree,
+        path: PathBuf,
+    }
+
+    static SHARED: OnceLock<Shared> = OnceLock::new();
+    SHARED
+        .get_or_init(|| {
+            let tree = temp_engine_scratch("engine-nopools");
+            let path = tree.path().join("pools.toml");
+            fs::write(
+                &path,
+                "# no pools
 ",
-        )
-        .expect("empty pools file");
-        path
-    })
-    .clone()
+            )
+            .expect("empty pools file");
+            Shared { _tree: tree, path }
+        })
+        .path
+        .clone()
 }
 
+/// The run's private half: a **sibling** of the repository, as the design keeps
+/// the two apart, and a fixed name rather than `<repo>-home`.
+///
+/// The repository is a child of its own guarded tree ([`temp_engine_repo`]), so
+/// a sibling of it is inside that tree and no second fixture can collide on the
+/// name. Four characters rather than nine matter because this segment is in the
+/// deepest path the suite builds and Windows refuses a `$GIT_DIR` past 220
+/// characters; `rundir::scratch_tree`'s `NAME_ENTROPY` records the whole budget.
 fn private_root_for(repo: &Path) -> PathBuf {
-    let name = repo
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "run".to_owned());
-    repo.with_file_name(format!("{name}-home"))
+    repo.with_file_name("home")
 }
 
 fn resume_options(repo: &Path, run_id: &str) -> ResumeOptions {
@@ -811,7 +890,7 @@ fn fail_the_third_legacy_append() -> Box<dyn crate::events::log::EventHooks> {
 
 #[test]
 fn a_returned_legacy_append_error_stops_the_run() {
-    let repo = temp_engine_repo("legacy-append-error");
+    let (_tree, repo) = temp_engine_repo("legacy-append-error");
     let mut opts = options(&repo);
     opts.log_hooks = Some(fail_the_third_legacy_append);
     let source = fake(Effect::EditFile);
@@ -831,7 +910,7 @@ fn a_returned_legacy_append_error_stops_the_run() {
 
 #[test]
 fn a_returned_legacy_append_error_still_leaves_the_partial_report() {
-    let repo = temp_engine_repo("legacy-append-partial");
+    let (_tree, repo) = temp_engine_repo("legacy-append-partial");
     let mut opts = options(&repo);
     opts.log_hooks = Some(fail_the_third_legacy_append);
     let source = fake(Effect::EditFile);
@@ -873,7 +952,7 @@ fn a_returned_legacy_append_error_still_leaves_the_partial_report() {
 
 #[test]
 fn happy_path_commits_one_commit_per_task() {
-    let repo = temp_engine_repo("happy");
+    let (_tree, repo) = temp_engine_repo("happy");
     let source = fake(Effect::EditFile);
     let report = run_with(&options(&repo), &source).expect("run succeeds");
 
@@ -915,7 +994,7 @@ fn happy_path_commits_one_commit_per_task() {
 
 #[test]
 fn gates_review_and_commit_use_one_frozen_candidate_tree() {
-    let repo = temp_engine_repo("one-frozen-candidate");
+    let (_tree, repo) = temp_engine_repo("one-frozen-candidate");
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 depends= -->\n",
@@ -1000,7 +1079,7 @@ fn gates_review_and_commit_use_one_frozen_candidate_tree() {
 
 #[test]
 fn an_oversized_review_diff_is_settled_once_before_the_task_parks() {
-    let repo = temp_engine_repo("oversizedreviewsettlement");
+    let (_tree, repo) = temp_engine_repo("oversizedreviewsettlement");
     seed(
         &repo,
         "## Generate the large fixture\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -1097,7 +1176,7 @@ fn an_oversized_review_diff_is_settled_once_before_the_task_parks() {
 
 #[test]
 fn opaque_review_input_has_distinct_failure_and_remediation() {
-    let repo = temp_engine_repo("opaquereviewsettlement");
+    let (_tree, repo) = temp_engine_repo("opaquereviewsettlement");
     seed(
         &repo,
         "## Generate an opaque artifact\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -1125,7 +1204,7 @@ fn opaque_review_input_has_distinct_failure_and_remediation() {
 
 #[test]
 fn opaque_test_task_parks_before_test_provenance_retry() {
-    let repo = temp_engine_repo("opaquetestprovenance");
+    let (_tree, repo) = temp_engine_repo("opaquetestprovenance");
     seed(
         &repo,
         "## Add the regression\n<!-- upstroke: id=t1 kind=test depends= -->\n",
@@ -1161,7 +1240,7 @@ fn opaque_test_task_parks_before_test_provenance_retry() {
 
 #[test]
 fn failed_parking_payload_still_settles_and_cleans_the_attempt() {
-    let repo = temp_engine_repo("oversizedreviewquestionwrite");
+    let (_tree, repo) = temp_engine_repo("oversizedreviewquestionwrite");
     seed(
         &repo,
         "## Generate the large fixture\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -1223,7 +1302,7 @@ fn failed_parking_payload_still_settles_and_cleans_the_attempt() {
 
 #[test]
 fn dirty_tree_is_refused() {
-    let repo = temp_engine_repo("dirty");
+    let (_tree, repo) = temp_engine_repo("dirty");
     fs::write(repo.join("stray.txt"), "uncommitted\n").expect("stray");
     let source = fake(Effect::EditFile);
     let err = run_with(&options(&repo), &source).expect_err("must refuse");
@@ -1234,7 +1313,7 @@ fn dirty_tree_is_refused() {
 
 #[test]
 fn sparse_checkout_preflight_refusal_leaves_worktree_clean() {
-    let repo = temp_engine_repo("sparse-worker-preflight");
+    let (_tree, repo) = temp_engine_repo("sparse-worker-preflight");
     git_in(&repo, &["update-index", "--skip-worktree", "README.md"]);
     let source = fake(Effect::EditFile);
 
@@ -1274,7 +1353,7 @@ fn sparse_checkout_preflight_refusal_leaves_worktree_clean() {
 
 #[test]
 fn passing_configured_gates_commit_and_are_reported() {
-    let repo = temp_engine_repo("gatepass");
+    let (_tree, repo) = temp_engine_repo("gatepass");
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 depends= -->\n",
@@ -1293,7 +1372,7 @@ fn passing_configured_gates_commit_and_are_reported() {
 
 #[test]
 fn ignored_worker_input_cannot_make_a_gate_pass() {
-    let repo = temp_engine_repo("ignored-gate-input");
+    let (_tree, repo) = temp_engine_repo("ignored-gate-input");
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 depends= -->\n",
@@ -1324,7 +1403,7 @@ fn ignored_worker_input_cannot_make_a_gate_pass() {
 
 #[test]
 fn unresolvable_gate_refuses_at_preflight() {
-    let repo = temp_engine_repo("gateresolve");
+    let (_tree, repo) = temp_engine_repo("gateresolve");
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 depends= -->\n",
@@ -1342,7 +1421,7 @@ fn unresolvable_gate_refuses_at_preflight() {
 
 #[test]
 fn test_task_without_test_code_fails_provenance() {
-    let repo = temp_engine_repo("provenance");
+    let (_tree, repo) = temp_engine_repo("provenance");
     seed(
         &repo,
         "## Test the widget\n<!-- upstroke: id=tt depends= -->\nAdd coverage.\n",
@@ -1363,7 +1442,7 @@ fn test_task_without_test_code_fails_provenance() {
 
 #[test]
 fn test_task_adding_real_tests_passes_provenance() {
-    let repo = temp_engine_repo("provenance-ok");
+    let (_tree, repo) = temp_engine_repo("provenance-ok");
     seed(
         &repo,
         "## Test the widget\n<!-- upstroke: id=tt depends= -->\n",
@@ -1378,7 +1457,7 @@ fn test_task_adding_real_tests_passes_provenance() {
 
 #[test]
 fn gate_residue_is_scrubbed_not_committed() {
-    let repo = temp_engine_repo("residue");
+    let (_tree, repo) = temp_engine_repo("residue");
 
     seed(
         &repo,
@@ -1402,7 +1481,7 @@ fn gate_residue_is_scrubbed_not_committed() {
 
 #[test]
 fn the_reviewer_is_read_only_and_bound_to_the_review_tier() {
-    let repo = temp_engine_repo("reviewbinding");
+    let (_tree, repo) = temp_engine_repo("reviewbinding");
     let source = fake(Effect::EditFile);
     let report = run_with(&options(&repo), &source).expect("run");
     let settings = paths_of(&repo, &report.run_id).settings();
@@ -1435,7 +1514,7 @@ fn the_reviewer_is_read_only_and_bound_to_the_review_tier() {
 
 #[test]
 fn review_can_be_switched_off_explicitly() {
-    let repo = temp_engine_repo("noreview");
+    let (_tree, repo) = temp_engine_repo("noreview");
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 depends= -->\n",
@@ -1454,7 +1533,7 @@ fn review_can_be_switched_off_explicitly() {
 
 #[test]
 fn reviewer_spend_is_attributed_separately() {
-    let repo = temp_engine_repo("reviewcost");
+    let (_tree, repo) = temp_engine_repo("reviewcost");
     let source = fake(Effect::EditFile);
     let report = run_with(&options(&repo), &source).expect("run");
     let t1 = task(&report, "t1");
@@ -1487,7 +1566,7 @@ fn cross_vendor_opts(repo: &Path) -> RunOptions {
 
 #[test]
 fn a_second_opinion_runs_a_second_family_and_leaves_the_primary_alone() {
-    let repo = temp_engine_repo("secondopinion");
+    let (_tree, repo) = temp_engine_repo("secondopinion");
     seed(&repo, FRONTIER_AUTH_PLAN, Some(SECOND_OPINION_CONFIG));
     let source = cross_vendor(
         vec![Effect::EditFile],
@@ -1518,7 +1597,7 @@ fn a_second_opinion_runs_a_second_family_and_leaves_the_primary_alone() {
 
 #[test]
 fn a_second_opinion_that_fails_fails_the_attempt() {
-    let repo = temp_engine_repo("secondopinionfail");
+    let (_tree, repo) = temp_engine_repo("secondopinionfail");
     seed(&repo, FRONTIER_AUTH_PLAN, Some(SECOND_OPINION_CONFIG));
     let source = cross_vendor(
         vec![Effect::EditFile],
@@ -1547,7 +1626,7 @@ fn a_second_opinion_that_fails_fails_the_attempt() {
 
 #[test]
 fn a_failing_first_pass_never_spends_the_second_reviewer() {
-    let repo = temp_engine_repo("shortcircuit");
+    let (_tree, repo) = temp_engine_repo("shortcircuit");
     seed(&repo, FRONTIER_AUTH_PLAN, Some(SECOND_OPINION_CONFIG));
     let source = cross_vendor(
         vec![Effect::EditFile],
@@ -1569,7 +1648,7 @@ fn a_failing_first_pass_never_spends_the_second_reviewer() {
 
 #[test]
 fn a_frontier_task_is_not_reviewed_by_the_model_that_wrote_it() {
-    let repo = temp_engine_repo("selfreview");
+    let (_tree, repo) = temp_engine_repo("selfreview");
     seed(&repo, FRONTIER_AUTH_PLAN, Some(FRONTIER_ONLY_CONFIG));
 
     let source = cross_vendor(
@@ -1587,7 +1666,7 @@ fn a_frontier_task_is_not_reviewed_by_the_model_that_wrote_it() {
 
 #[test]
 fn a_lower_rung_keeps_the_frontier_reviewer() {
-    let repo = temp_engine_repo("noneedtorebind");
+    let (_tree, repo) = temp_engine_repo("noneedtorebind");
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -1607,7 +1686,7 @@ fn a_lower_rung_keeps_the_frontier_reviewer() {
 
 #[test]
 fn a_configured_second_opinion_with_no_second_family_refuses_before_spending() {
-    let repo = temp_engine_repo("nosecondfamily");
+    let (_tree, repo) = temp_engine_repo("nosecondfamily");
     seed(&repo, FRONTIER_AUTH_PLAN, Some(SECOND_OPINION_CONFIG));
     let source = source(vec![Effect::EditFile], vec![ReviewBehavior::Pass]);
     let error = run_with(&cross_vendor_opts(&repo), &source)
@@ -1627,7 +1706,7 @@ fn a_configured_second_opinion_with_no_second_family_refuses_before_spending() {
 
 #[test]
 fn without_a_second_vendor_self_review_warns_rather_than_refusing() {
-    let repo = temp_engine_repo("selfreviewwarn");
+    let (_tree, repo) = temp_engine_repo("selfreviewwarn");
     seed(&repo, FRONTIER_AUTH_PLAN, Some(FRONTIER_ONLY_CONFIG));
     let source = source(vec![Effect::EditFile], vec![ReviewBehavior::Pass]);
     let report = run_with(&cross_vendor_opts(&repo), &source).expect("run still works");
@@ -1646,7 +1725,7 @@ fn without_a_second_vendor_self_review_warns_rather_than_refusing() {
 
 #[test]
 fn an_unprobeable_cross_family_reviewer_downgrades_instead_of_halting() {
-    let repo = temp_engine_repo("brokencopilot");
+    let (_tree, repo) = temp_engine_repo("brokencopilot");
     seed(&repo, FRONTIER_AUTH_PLAN, Some(FRONTIER_ONLY_CONFIG));
     let source = FakeSource {
         adapter: FakeAdapter::new(vec![Effect::EditFile], vec![ReviewBehavior::Pass]),
@@ -1682,7 +1761,7 @@ fn an_unprobeable_cross_family_reviewer_downgrades_instead_of_halting() {
 
 #[test]
 fn the_same_broken_reviewer_is_fatal_when_the_config_asked_for_it() {
-    let repo = temp_engine_repo("brokenrequired");
+    let (_tree, repo) = temp_engine_repo("brokenrequired");
     seed(&repo, FRONTIER_AUTH_PLAN, Some(SECOND_OPINION_CONFIG));
     let source = FakeSource {
         adapter: FakeAdapter::new(vec![Effect::EditFile], vec![ReviewBehavior::Pass]),
@@ -1695,7 +1774,7 @@ fn the_same_broken_reviewer_is_fatal_when_the_config_asked_for_it() {
 
 #[test]
 fn a_resume_keeps_the_reviewers_the_run_started_with() {
-    let repo = temp_engine_repo("resumereviewers");
+    let (_tree, repo) = temp_engine_repo("resumereviewers");
     seed(
         &repo,
         "## Rotate the signing key\n\
@@ -1778,7 +1857,7 @@ fn resume_runs_with_the_effort_policy_the_run_recorded_not_todays_config() {
     let original = "[interaction]\nmode = \"never\"\n\n\
                         [routing]\nimplement = { chain = [\"small\"], attempts_per = 1 }\n\n\
                         [routing.effort]\nimplementation = \"xhigh\"\nreview = \"max\"\n";
-    let (repo, run_id) = parked_run_with_config("resumeeffort", original);
+    let (_tree, repo, run_id) = parked_run_with_config("resumeeffort", original);
     fs::write(
         repo.join("upstroke.toml"),
         "[interaction]\nmode = \"never\"\n\n\
@@ -1830,7 +1909,7 @@ fn resume_runs_with_the_effort_policy_the_run_recorded_not_todays_config() {
 fn resume_restores_the_recorded_worker_binding_before_preflight() {
     let original = "[interaction]\nmode = \"never\"\n\n\
                         [routing]\nimplement = { chain = [\"small\"], attempts_per = 1 }\n";
-    let (repo, run_id) = parked_run_with_config("resumebinding", original);
+    let (_tree, repo, run_id) = parked_run_with_config("resumebinding", original);
     fs::write(
         repo.join("upstroke.toml"),
         "[interaction]\nmode = \"never\"\n\n\
@@ -1874,7 +1953,7 @@ fn the_resume_that_rederives_an_old_logs_effort_records_it_for_the_next_one() {
     let original = "[interaction]\nmode = \"never\"\n\n\
                         [routing]\nimplement = { chain = [\"small\"], attempts_per = 1 }\n\n\
                         [routing.effort]\nimplementation = \"xhigh\"\nreview = \"max\"\n";
-    let (repo, run_id) = parked_run_with_config("oldlogeffort", original);
+    let (_tree, repo, run_id) = parked_run_with_config("oldlogeffort", original);
     let paths = paths_of(&repo, &run_id);
     rewrite_run_started_as_schema_one(&paths, &["effort_policy"]);
 
@@ -1982,7 +2061,7 @@ fn the_resume_that_rederives_an_old_logs_effort_records_it_for_the_next_one() {
 fn the_resume_that_rederives_an_old_review_plan_records_it_for_the_next_one() {
     let original = "[interaction]\nmode = \"never\"\n\n\
                         [routing]\nimplement = { chain = [\"small\"], attempts_per = 1 }\n";
-    let (repo, run_id) = parked_run_with_config("oldlogreviews", original);
+    let (_tree, repo, run_id) = parked_run_with_config("oldlogreviews", original);
     let paths = paths_of(&repo, &run_id);
     rewrite_run_started_as_schema_two(&paths);
     strip_run_started_field(&paths, "reviews");
@@ -2044,7 +2123,7 @@ fn the_resume_that_rederives_an_old_review_plan_records_it_for_the_next_one() {
 
 #[test]
 fn a_schema_two_resume_records_the_complete_review_barrier_before_work() {
-    let (repo, run_id) = parked_run("schema2reviewbarrier");
+    let (_tree, repo, run_id) = parked_run("schema2reviewbarrier");
     let paths = paths_of(&repo, &run_id);
     rewrite_run_started_as_schema_two(&paths);
     fs::write(
@@ -2119,7 +2198,7 @@ fn a_schema_two_resume_records_the_complete_review_barrier_before_work() {
 
 #[test]
 fn max_parallel_above_one_refuses_before_the_run_touches_the_workspace() {
-    let repo = temp_engine_repo("maxparallelrefusal");
+    let (_tree, repo) = temp_engine_repo("maxparallelrefusal");
     seed(
         &repo,
         "## Doomed\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -2168,7 +2247,7 @@ fn worktree_lock_path(repo: &Path) -> PathBuf {
 
 #[test]
 fn a_refused_ceiling_beats_the_lease_rather_than_racing_it() {
-    let repo = temp_engine_repo("ceilingbeforelease");
+    let (_tree, repo) = temp_engine_repo("ceilingbeforelease");
     seed(
         &repo,
         "## Doomed\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -2227,7 +2306,7 @@ fn a_refused_ceiling_beats_the_lease_rather_than_racing_it() {
 
 #[test]
 fn a_refused_ceiling_beats_both_locks_on_resume() {
-    let (repo, run_id) = parked_run("resumeceilingbeforelocks");
+    let (_tree, repo, run_id) = parked_run("resumeceilingbeforelocks");
     let paths = paths_of(&repo, &run_id);
     rewrite_run_started_as_schema_two(&paths);
     fs::write(
@@ -2281,7 +2360,7 @@ fn config_with_repairs(repairs: u32) -> String {
 
 #[test]
 fn the_analysis_adopted_under_the_lease_is_the_one_its_own_bytes_were_validated_from() {
-    let repo = temp_engine_repo("confirmunderlease");
+    let (_tree, repo) = temp_engine_repo("confirmunderlease");
     let config = repo.join("upstroke.toml");
     let mut opts = options(&repo);
     opts.config_path = Some(config.clone());
@@ -2326,7 +2405,7 @@ fn the_analysis_adopted_under_the_lease_is_the_one_its_own_bytes_were_validated_
 
 #[test]
 fn the_gate_derivation_is_taken_under_the_lease_not_carried_over_it() {
-    let repo = temp_engine_repo("gatesunderlease");
+    let (_tree, repo) = temp_engine_repo("gatesunderlease");
     let mut opts = options(&repo);
     opts.config_path = Some(repo.join("upstroke.toml"));
     fs::write(opts.config_path.as_ref().expect("config path"), "").expect("an empty config");
@@ -2472,7 +2551,7 @@ fn legacy_resume_pair(tag: &str, fixture: LegacyFixture) -> Vec<LegacyArm> {
         ("control", LEGACY_RESUME_NO_LIMITS),
         ("limits", LEGACY_RESUME_LIMITS),
     ] {
-        let (repo, run_id) = parked_run(&format!("legacylimits-{tag}-{arm}"));
+        let (_tree, repo, run_id) = parked_run(&format!("legacylimits-{tag}-{arm}"));
         let paths = paths_of(&repo, &run_id);
         rewrite_run_started_as_schema_two(&paths);
         if matches!(fixture, LegacyFixture::InterruptedAttempt) {
@@ -2588,7 +2667,7 @@ fn a_legacy_resume_is_not_reinterpreted_by_the_new_engine_limits() {
 
 #[test]
 fn schema_two_review_markers_upgrade_independently_of_timeout() {
-    let (repo, run_id) = parked_run("schema2reviewmarkers");
+    let (_tree, repo, run_id) = parked_run("schema2reviewmarkers");
     let paths = paths_of(&repo, &run_id);
     let recorded_timeout = events::recorded_reviews(&events_of(&repo, &run_id))
         .and_then(|plan| plan.pass_timeout_secs)
@@ -2629,7 +2708,7 @@ fn schema_two_review_markers_upgrade_independently_of_timeout() {
 
 #[test]
 fn schema_two_inconsistent_review_identity_is_refused_before_upgrade_and_spend() {
-    let (repo, run_id) = parked_run("schema2badreviewidentity");
+    let (_tree, repo, run_id) = parked_run("schema2badreviewidentity");
     let paths = paths_of(&repo, &run_id);
     let text = fs::read_to_string(paths.events()).expect("log");
     let mut rewritten = false;
@@ -2707,7 +2786,7 @@ fn a_resume_whose_effort_policy_did_not_move_says_nothing_about_it() {
     let config = "[interaction]\nmode = \"never\"\n\n\
                       [routing]\nimplement = { chain = [\"small\"], attempts_per = 1 }\n\n\
                       [routing.effort]\nimplementation = \"xhigh\"\nreview = \"max\"\n";
-    let (repo, run_id) = parked_run_with_config("effortunmoved", config);
+    let (_tree, repo, run_id) = parked_run_with_config("effortunmoved", config);
     let resumed = resume_answering(&repo, &run_id, Effect::EditFile);
     assert_eq!(resumed.outcome(), RunOutcome::Complete, "{resumed:?}");
     assert!(
@@ -2722,7 +2801,7 @@ fn a_resume_whose_effort_policy_did_not_move_says_nothing_about_it() {
 
 #[test]
 fn a_log_written_before_step_9_still_gets_reviewed_on_resume() {
-    let repo = temp_engine_repo("oldlogresume");
+    let (_tree, repo) = temp_engine_repo("oldlogresume");
     seed(
         &repo,
         "## Rotate the signing key\n\
@@ -2757,7 +2836,7 @@ fn a_log_written_before_step_9_still_gets_reviewed_on_resume() {
 
 #[test]
 fn an_unavailable_reviewer_is_recorded_as_such_not_as_a_rejection() {
-    let repo = temp_engine_repo("outagerecord");
+    let (_tree, repo) = temp_engine_repo("outagerecord");
     seed(&repo, FRONTIER_AUTH_PLAN, Some(SECOND_OPINION_CONFIG));
     let source = cross_vendor(
         vec![Effect::EditFile],
@@ -2781,7 +2860,7 @@ fn an_unavailable_reviewer_is_recorded_as_such_not_as_a_rejection() {
 
 #[test]
 fn second_reviewer_spawn_failure_settles_worker_and_first_review_evidence() {
-    let repo = temp_engine_repo("secondreviewerspawnsettlement");
+    let (_tree, repo) = temp_engine_repo("secondreviewerspawnsettlement");
     seed(&repo, FRONTIER_AUTH_PLAN, Some(SECOND_OPINION_CONFIG));
     let source = cross_vendor(
         vec![Effect::EditFile],
@@ -2836,7 +2915,7 @@ fn second_reviewer_spawn_failure_settles_worker_and_first_review_evidence() {
 
 #[test]
 fn a_total_missing_an_unreported_reviewer_is_marked_rather_than_implied() {
-    let repo = temp_engine_repo("partialcost");
+    let (_tree, repo) = temp_engine_repo("partialcost");
     seed(&repo, FRONTIER_AUTH_PLAN, Some(SECOND_OPINION_CONFIG));
     let source = FakeSource {
         adapter: FakeAdapter::new(vec![Effect::EditFile], vec![ReviewBehavior::Pass]),
@@ -2862,7 +2941,7 @@ fn a_total_missing_an_unreported_reviewer_is_marked_rather_than_implied() {
 
 #[test]
 fn every_model_that_judged_a_task_is_listed_beside_the_cost_of_all_of_them() {
-    let repo = temp_engine_repo("reviewtrail");
+    let (_tree, repo) = temp_engine_repo("reviewtrail");
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -2889,7 +2968,7 @@ fn every_model_that_judged_a_task_is_listed_beside_the_cost_of_all_of_them() {
 
 #[test]
 fn each_pass_writes_its_own_verdict_transcript() {
-    let repo = temp_engine_repo("passtranscripts");
+    let (_tree, repo) = temp_engine_repo("passtranscripts");
     seed(&repo, FRONTIER_AUTH_PLAN, Some(SECOND_OPINION_CONFIG));
     let source = cross_vendor(
         vec![Effect::EditFile],
@@ -2907,7 +2986,7 @@ fn each_pass_writes_its_own_verdict_transcript() {
 
 #[test]
 fn the_run_record_survives_completion() {
-    let repo = temp_engine_repo("record");
+    let (_tree, repo) = temp_engine_repo("record");
     let source = fake(Effect::EditFile);
     let report = run_with(&options(&repo), &source).expect("run");
     let report_path = repo
@@ -2932,7 +3011,7 @@ fn the_run_record_survives_completion() {
 
 #[test]
 fn forward_dependencies_run_in_topo_order_not_plan_order() {
-    let repo = temp_engine_repo("topo");
+    let (_tree, repo) = temp_engine_repo("topo");
     seed(
         &repo,
         "## Second by dependency\n<!-- upstroke: id=late depends=early -->\n\n\
@@ -3058,12 +3137,13 @@ fn prompt_names_the_allowed_gate_commands() {
         artifacts_in: Vec::new(),
         artifacts_out: Vec::new(),
     };
-    let run_dir = std::env::temp_dir().join(format!("upstroke-prompt-{}", std::process::id()));
+    let tree = temp_engine_scratch("prompt");
+    let run_dir = tree.path();
     fs::create_dir_all(run_dir.join("artifacts")).expect("run dir");
     let prompt = materialize_prompt(
         crate::engine::assembly::WorkerSubject::of(&task),
         &["cargo check --all-targets".to_owned()],
-        &run_dir,
+        run_dir,
         None,
     );
     assert!(prompt.contains("EXACTLY these commands"));
@@ -3075,7 +3155,7 @@ fn prompt_names_the_allowed_gate_commands() {
     let bare = materialize_prompt(
         crate::engine::assembly::WorkerSubject::of(&task),
         &[],
-        &run_dir,
+        run_dir,
         None,
     );
     assert!(!bare.contains("EXACTLY these commands"));
@@ -3083,8 +3163,8 @@ fn prompt_names_the_allowed_gate_commands() {
 
 #[test]
 fn prompt_wires_artifacts_to_real_files() {
-    let run_dir = std::env::temp_dir().join(format!("upstroke-artifact-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&run_dir);
+    let tree = temp_engine_scratch("artifact");
+    let run_dir = tree.path();
     fs::create_dir_all(run_dir.join("artifacts")).expect("run dir");
     let mut task = Task {
         id: TaskId::from("t1"),
@@ -3103,7 +3183,7 @@ fn prompt_wires_artifacts_to_real_files() {
     let prompt = materialize_prompt(
         crate::engine::assembly::WorkerSubject::of(&task),
         &[],
-        &run_dir,
+        run_dir,
         None,
     );
     assert!(prompt.contains("did \n     not leave one") || prompt.contains("did not leave one"));
@@ -3113,14 +3193,14 @@ fn prompt_wires_artifacts_to_real_files() {
     );
 
     fs::write(
-        artifact_path(&run_dir, "api-contract"),
+        artifact_path(run_dir, "api-contract"),
         "cursor = base64(offset)",
     )
     .expect("artifact");
     let prompt = materialize_prompt(
         crate::engine::assembly::WorkerSubject::of(&task),
         &[],
-        &run_dir,
+        run_dir,
         None,
     );
     assert!(
@@ -3133,7 +3213,7 @@ fn prompt_wires_artifacts_to_real_files() {
     let bare = materialize_prompt(
         crate::engine::assembly::WorkerSubject::of(&task),
         &[],
-        &run_dir,
+        run_dir,
         None,
     );
     assert!(!bare.contains("artifact"));
@@ -3141,7 +3221,7 @@ fn prompt_wires_artifacts_to_real_files() {
 
 #[test]
 fn a_gate_failure_recovers_on_the_same_rung_via_session_resume() {
-    let repo = temp_engine_repo("resume");
+    let (_tree, repo) = temp_engine_repo("resume");
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -3191,7 +3271,7 @@ fn a_gate_failure_recovers_on_the_same_rung_via_session_resume() {
 
 #[test]
 fn exhausting_a_rung_escalates_with_a_fresh_session_and_the_history() {
-    let repo = temp_engine_repo("escalate");
+    let (_tree, repo) = temp_engine_repo("escalate");
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -3237,7 +3317,7 @@ fn exhausting_a_rung_escalates_with_a_fresh_session_and_the_history() {
 
 #[test]
 fn a_parked_question_does_not_stop_the_runnable_frontier() {
-    let repo = temp_engine_repo("park");
+    let (_tree, repo) = temp_engine_repo("park");
     seed(
         &repo,
         "## Doomed\n<!-- upstroke: id=t1 kind=implement depends= -->\n\n\
@@ -3286,7 +3366,7 @@ fn a_parked_question_does_not_stop_the_runnable_frontier() {
 
 #[test]
 fn answering_the_question_retries_the_task_with_the_operators_words() {
-    let repo = temp_engine_repo("answered");
+    let (_tree, repo) = temp_engine_repo("answered");
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -3372,7 +3452,7 @@ fn assert_unclassified_on_disk(line: &serde_json::Value) {
 
 #[test]
 fn the_legacy_ingest_writes_an_unclassified_design_defect() {
-    let repo = temp_engine_repo("legacydefectbytes");
+    let (_tree, repo) = temp_engine_repo("legacydefectbytes");
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -3405,7 +3485,7 @@ fn the_legacy_ingest_writes_an_unclassified_design_defect() {
 
 #[test]
 fn the_resume_repair_writes_an_unclassified_design_defect() {
-    let repo = temp_engine_repo("legacydefectresume");
+    let (_tree, repo) = temp_engine_repo("legacydefectresume");
     seed(
         &repo,
         "## Doomed\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -3447,7 +3527,7 @@ fn the_resume_repair_writes_an_unclassified_design_defect() {
 
 #[test]
 fn declining_fails_the_task_and_halt_is_the_default() {
-    let repo = temp_engine_repo("declined");
+    let (_tree, repo) = temp_engine_repo("declined");
     seed(
         &repo,
         "## Doomed\n<!-- upstroke: id=t1 kind=implement depends= -->\n\n\
@@ -3487,7 +3567,7 @@ fn resume_repairs_every_decline_settlement_crash_prefix() {
         ("answered", "question_answered"),
         ("defect", "design_defect"),
     ] {
-        let repo = temp_engine_repo(&format!("declineprefix-{tag}"));
+        let (_tree, repo) = temp_engine_repo(&format!("declineprefix-{tag}"));
         seed(
             &repo,
             "## Doomed\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -3560,7 +3640,7 @@ fn resume_repairs_every_decline_settlement_crash_prefix() {
 
 #[test]
 fn schema_two_decline_prefix_preserves_or_refuses_unknown_halt_policy() {
-    let repo = temp_engine_repo("legacydeclinepolicy");
+    let (_tree, repo) = temp_engine_repo("legacydeclinepolicy");
     seed(
         &repo,
         "## Doomed\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -3603,7 +3683,7 @@ fn schema_two_decline_prefix_preserves_or_refuses_unknown_halt_policy() {
 
 #[test]
 fn on_task_failure_continue_keeps_independent_work_moving() {
-    let repo = temp_engine_repo("continue");
+    let (_tree, repo) = temp_engine_repo("continue");
     seed(
         &repo,
         "## Doomed\n<!-- upstroke: id=t1 kind=implement depends= -->\n\n\
@@ -3645,7 +3725,7 @@ fn on_task_failure_continue_keeps_independent_work_moving() {
 
 #[test]
 fn a_rate_limit_defers_without_spending_an_attempt() {
-    let repo = temp_engine_repo("ratelimit");
+    let (_tree, repo) = temp_engine_repo("ratelimit");
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -3692,7 +3772,7 @@ fn a_rate_limit_defers_without_spending_an_attempt() {
 
 #[test]
 fn a_pool_that_never_returns_ends_at_the_human_rung() {
-    let repo = temp_engine_repo("ratelimit-forever");
+    let (_tree, repo) = temp_engine_repo("ratelimit-forever");
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -3734,7 +3814,7 @@ fn a_pool_that_never_returns_ends_at_the_human_rung() {
 
 #[test]
 fn an_unavailable_reviewer_defers_the_task_instead_of_escalating_it() {
-    let repo = temp_engine_repo("reviewdown");
+    let (_tree, repo) = temp_engine_repo("reviewdown");
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -3773,7 +3853,7 @@ fn an_unavailable_reviewer_defers_the_task_instead_of_escalating_it() {
 
 #[test]
 fn a_reviewer_asking_for_a_human_parks_without_spending_the_chain() {
-    let repo = temp_engine_repo("needshuman");
+    let (_tree, repo) = temp_engine_repo("needshuman");
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -3816,7 +3896,7 @@ fn a_reviewer_asking_for_a_human_parks_without_spending_the_chain() {
 
 #[test]
 fn a_worker_can_stop_and_ask_rather_than_guess() {
-    let repo = temp_engine_repo("workerasks");
+    let (_tree, repo) = temp_engine_repo("workerasks");
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n\n\
@@ -3885,7 +3965,7 @@ fn a_worker_can_stop_and_ask_rather_than_guess() {
 
 #[test]
 fn ci_mode_parks_rather_than_failing_and_says_so() {
-    let repo = temp_engine_repo("ci");
+    let (_tree, repo) = temp_engine_repo("ci");
     seed(
         &repo,
         "## Doomed\n<!-- upstroke: id=t1 kind=implement depends= -->\n\n\
@@ -3923,7 +4003,7 @@ fn ci_mode_parks_rather_than_failing_and_says_so() {
 
 #[test]
 fn an_unanswerable_question_is_never_asked_twice() {
-    let repo = temp_engine_repo("noloop");
+    let (_tree, repo) = temp_engine_repo("noloop");
     seed(
         &repo,
         "## Doomed\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -3976,7 +4056,7 @@ impl AnswerSource for CountingAnswers {
 
 #[test]
 fn agent_errors_and_empty_diffs_carry_feedback_the_retry_can_use() {
-    let repo = temp_engine_repo("feedback");
+    let (_tree, repo) = temp_engine_repo("feedback");
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -4000,7 +4080,7 @@ fn agent_errors_and_empty_diffs_carry_feedback_the_retry_can_use() {
 
 #[test]
 fn an_unparseable_reviewer_fails_after_one_reask() {
-    let repo = temp_engine_repo("reviewprose");
+    let (_tree, repo) = temp_engine_repo("reviewprose");
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -4037,7 +4117,7 @@ fn an_unparseable_reviewer_fails_after_one_reask() {
 
 #[test]
 fn gate_logs_are_named_by_the_collision_free_stem() {
-    let repo = temp_engine_repo("gatelogs");
+    let (_tree, repo) = temp_engine_repo("gatelogs");
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -4141,7 +4221,7 @@ fn raw_object_after(line: &str, key: &str) -> Option<String> {
 
 #[test]
 fn the_legacy_wire_and_report_carry_no_feedback_on_the_attempt_record() {
-    let repo = temp_engine_repo("legacy-no-detail");
+    let (_tree, repo) = temp_engine_repo("legacy-no-detail");
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -4457,7 +4537,7 @@ fn an_outage_is_never_reclassified_as_a_question() {
 
 #[test]
 fn a_halted_run_stops_asking_and_keeps_naming_the_real_cause() {
-    let repo = temp_engine_repo("haltpark");
+    let (_tree, repo) = temp_engine_repo("haltpark");
     seed(
         &repo,
         "## Asks a question\n<!-- upstroke: id=t1 kind=implement depends= -->\n\n\
@@ -4685,7 +4765,7 @@ fn live_state_equals_replayed_state_across_every_ladder_path() {
         answers,
     } in scenarios
     {
-        let repo = temp_engine_repo(&format!("replay-{name}"));
+        let (_tree, repo) = temp_engine_repo(&format!("replay-{name}"));
         seed(
             &repo,
             plan.unwrap_or(
@@ -4732,7 +4812,7 @@ fn live_state_equals_replayed_state_across_every_ladder_path() {
 
 #[test]
 fn an_aborting_error_still_leaves_a_replayable_log() {
-    let repo = temp_engine_repo("abortlog");
+    let (_tree, repo) = temp_engine_repo("abortlog");
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -4800,7 +4880,7 @@ fn task_report_costing(worker: Option<f64>, review: Option<f64>) -> TaskReport {
 
 #[test]
 fn a_live_run_reads_as_running_rather_than_halted() {
-    let repo = temp_engine_repo("livestatus");
+    let (_tree, repo) = temp_engine_repo("livestatus");
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n\n\
@@ -4856,7 +4936,7 @@ fn a_live_run_reads_as_running_rather_than_halted() {
 
 #[test]
 fn a_truncated_run_resumes_without_spending_the_interrupted_attempt() {
-    let repo = temp_engine_repo("resumetrunc");
+    let (_tree, repo) = temp_engine_repo("resumetrunc");
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -4935,7 +5015,7 @@ fn a_truncated_run_resumes_without_spending_the_interrupted_attempt() {
 
 #[test]
 fn killing_a_run_mid_attempt_leaves_a_resumable_record() {
-    let repo = temp_engine_repo("crashkill");
+    let (_tree, repo) = temp_engine_repo("crashkill");
     seed(
         &repo,
         "## First\n<!-- upstroke: id=t1 kind=implement depends= -->\n\n\
@@ -5055,41 +5135,48 @@ fn crash_child_dies_inside_an_attempt() {
     std::process::exit(0);
 }
 
-const V1_OBJECT_GRAPH_GATE: &str = "[[gates]]\nname = \"object-graph\"\n\
-     cmd = 'git diff --exit-code probe-recorded probe-replacing'\n";
+const V1_OBJECT_GRAPH_GATES: &str = "[[gates]]\nname = \"snapshot-bytes\"\n\
+     cmd = 'git grep --no-index -q -F recorded -- probe.txt'\n\n\
+     [[gates]]\nname = \"object-graph\"\n\
+     cmd = 'git grep -q -F recorded HEAD -- probe.txt'\n";
 
-fn replaced_probe_repo(tag: &str, plan: &str, config: &str) -> PathBuf {
-    let repo = temp_engine_repo(tag);
+/// The guard comes back with the path because it owns the root the path is
+/// under: dropping it here would reclaim the repository before the caller's
+/// first assertion.
+fn replaced_probe_repo(tag: &str, plan: &str, config: &str) -> (ScratchTree, PathBuf) {
+    let (tree, repo) = temp_engine_repo(tag);
     crate::workspace_manager::fixture::pin_replacement_refs_in(&repo);
-    seed(&repo, plan, Some(config));
-
-    git_in(&repo, &["checkout", "-q", "-b", "probe"]);
     fs::write(repo.join("probe.txt"), "recorded\n").expect("the recorded probe");
-    git_in(&repo, &["add", "-A"]);
-    git_in(&repo, &["commit", "-q", "-m", "recorded"]);
-    let recorded = git_in(&repo, &["rev-parse", "HEAD"]).trim().to_owned();
-    git_in(&repo, &["tag", "probe-recorded"]);
+    seed(&repo, plan, Some(config));
+    let recorded = git_in(&repo, &["rev-parse", "HEAD:probe.txt"])
+        .trim()
+        .to_owned();
 
-    fs::write(repo.join("probe.txt"), "replacing\n").expect("the replacing probe");
-    git_in(&repo, &["add", "-A"]);
-    git_in(&repo, &["commit", "-q", "-m", "replacing"]);
-    let replacing = git_in(&repo, &["rev-parse", "HEAD"]).trim().to_owned();
-    git_in(&repo, &["tag", "probe-replacing"]);
-    assert_ne!(recorded, replacing, "two distinct commits");
+    fs::write(repo.join("replacing.txt"), "replacing\n").expect("the replacing probe");
+    let replacing = git_in(&repo, &["hash-object", "-w", "replacing.txt"])
+        .trim()
+        .to_owned();
+    fs::remove_file(repo.join("replacing.txt")).expect("the replacing probe's file");
+    assert_ne!(recorded, replacing, "two distinct blobs");
 
-    git_in(&repo, &["checkout", "-q", "main"]);
-    git_in(&repo, &["branch", "-q", "-D", "probe"]);
     git_in(&repo, &["replace", &recorded, &replacing]);
     assert_eq!(
         git_in(&repo, &["replace", "-l"]).trim(),
         recorded,
         "the replacement is in place"
     );
+    assert_eq!(
+        git_in(&repo, &["show", "HEAD:probe.txt"]),
+        "replacing\n",
+        "a Git child that does not refuse the replacement reads the replacing \
+         blob in the tree every snapshot of this run starts from; without that \
+         neither gate measures anything"
+    );
     assert!(
         git_in(&repo, &["status", "--porcelain"]).trim().is_empty(),
         "the fixture left the worktree dirty"
     );
-    repo
+    (tree, repo)
 }
 
 #[test]
@@ -5100,7 +5187,8 @@ fn the_v1_conductor_runs_and_resumes_on_the_graph_its_own_workspace_wrote() {
     assert!(
         status.success(),
         "the child drives `engine::run_harness` and `engine::resume_harness` over a \
-         repository whose probe commit carries a replacement, and ended {status:?}"
+         repository whose committed probe blob carries a replacement, and ended \
+         {status:?}"
     );
 }
 
@@ -5112,25 +5200,29 @@ fn v1_object_graph_helper() {
     }
     crate::workspace_manager::fixture::assert_replacement_controls_pinned("v1-object-graph");
 
-    let repo = replaced_probe_repo(
+    let (_tree, repo) = replaced_probe_repo(
         "v1graphrun",
         "## Implement the widget\n<!-- upstroke: id=t1 depends= -->\n",
-        &format!("[interaction]\nmode = \"never\"\n\n{V1_OBJECT_GRAPH_GATE}"),
+        &format!("[interaction]\nmode = \"never\"\n\n{V1_OBJECT_GRAPH_GATES}"),
     );
     let mut opts = options(&repo);
     opts.config_path = Some(repo.join("upstroke.toml"));
     let report = run_with(&opts, &fake(Effect::EditFile)).expect("the run");
-    assert_eq!(report.gates, ["object-graph"], "{report:?}");
+    assert_eq!(
+        report.gates,
+        ["snapshot-bytes", "object-graph"],
+        "{report:?}"
+    );
     assert_eq!(report.outcome(), RunOutcome::Complete, "{report:?}");
     assert!(committed(&report, "t1"), "{report:?}");
 
-    let repo = replaced_probe_repo(
+    let (_tree, repo) = replaced_probe_repo(
         "v1graphresume",
         "## Doomed\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
         &format!(
             "[interaction]\nmode = \"never\"\n\n\
              [routing]\nimplement = {{ chain = [\"small\"], attempts_per = 1 }}\n\n\
-             {V1_OBJECT_GRAPH_GATE}"
+             {V1_OBJECT_GRAPH_GATES}"
         ),
     );
     let mut opts = options(&repo);
@@ -5160,14 +5252,142 @@ fn v1_object_graph_helper() {
         &fake(Effect::EditFile),
     )
     .expect("the resume");
-    assert_eq!(resumed.gates, ["object-graph"], "{resumed:?}");
+    assert_eq!(
+        resumed.gates,
+        ["snapshot-bytes", "object-graph"],
+        "{resumed:?}"
+    );
     assert_eq!(resumed.outcome(), RunOutcome::Complete, "{resumed:?}");
     assert!(committed(&resumed, "t1"), "{resumed:?}");
 }
 
 #[test]
+fn a_checkout_a_replacement_rewrote_is_refused_with_a_check_the_reader_can_run() {
+    let status = crate::workspace_manager::fixture::run_replacement_witness_child(
+        "engine::tests::replaced_head_refusal_helper",
+    );
+    assert!(
+        status.success(),
+        "the child refuses a run, and a resume off the run branch, over a checkout that \
+         a replacement of HEAD rewrote, and ended {status:?}"
+    );
+}
+
+fn replace_head_with_a_sibling(repo: &Path) {
+    crate::workspace_manager::fixture::pin_replacement_refs_in(repo);
+    let head = git_in(repo, &["rev-parse", "HEAD"]).trim().to_owned();
+    let parent = git_in(repo, &["rev-parse", "HEAD^"]).trim().to_owned();
+    fs::write(repo.join("README.md"), "replaced\n").expect("the replacing content");
+    git_in(repo, &["add", "README.md"]);
+    let tree = git_in(repo, &["write-tree"]).trim().to_owned();
+    git_in(repo, &["reset", "-q", "--hard", &head]);
+    let sibling = git_in(
+        repo,
+        &["commit-tree", &tree, "-p", &parent, "-m", "replacing"],
+    )
+    .trim()
+    .to_owned();
+    git_in(repo, &["replace", &head, &sibling]);
+    git_in(repo, &["reset", "-q", "--hard", "HEAD"]);
+    assert_eq!(
+        fs::read_to_string(repo.join("README.md"))
+            .expect("the checked-out README")
+            .replace("\r\n", "\n"),
+        "replaced\n",
+        "the checkout was written through the replacement"
+    );
+    assert!(
+        git_in(repo, &["status", "--porcelain"]).trim().is_empty(),
+        "plain `git status` reads the replacement and reports the checkout clean"
+    );
+    assert_eq!(
+        git_in(
+            repo,
+            &[
+                "--no-replace-objects",
+                "-c",
+                "core.useReplaceRefs=false",
+                "status",
+                "--porcelain"
+            ]
+        )
+        .trim(),
+        "M  README.md",
+        "the command the refusal names lists what upstroke finds, and the repository pins \
+         `core.useReplaceRefs = true`, which on Git 2.41 outranks the variable alone"
+    );
+}
+
+#[test]
+#[ignore = "subprocess helper"]
+fn replaced_head_refusal_helper() {
+    if std::env::var_os(crate::workspace_manager::fixture::REPLACEMENT_WITNESS).is_none() {
+        return;
+    }
+    crate::workspace_manager::fixture::assert_replacement_controls_pinned("replaced-head-refusal");
+
+    let (_tree, repo) = temp_engine_repo("replacedheadrun");
+    seed(
+        &repo,
+        "## Implement the widget\n<!-- upstroke: id=t1 depends= -->\n",
+        Some("[interaction]\nmode = \"never\"\n"),
+    );
+    replace_head_with_a_sibling(&repo);
+    let mut opts = options(&repo);
+    opts.config_path = Some(repo.join("upstroke.toml"));
+    let refused = run_with(&opts, &fake(Effect::EditFile))
+        .expect_err("a checkout that differs from what HEAD records is refused")
+        .to_string();
+    for named in [
+        "not clean",
+        "`git --no-replace-objects -c core.useReplaceRefs=false status`",
+        "`git replace -l`",
+    ] {
+        assert!(refused.contains(named), "`{named}` in: {refused}");
+    }
+    assert_eq!(
+        git_in(&repo, &["rev-parse", "--abbrev-ref", "HEAD"]).trim(),
+        "main",
+        "no run branch was created"
+    );
+
+    let (_tree, repo) = temp_engine_repo("replacedheadresume");
+    seed(
+        &repo,
+        "## Doomed\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
+        Some(
+            "[interaction]\nmode = \"never\"\n\n\
+             [routing]\nimplement = { chain = [\"small\"], attempts_per = 1 }\n",
+        ),
+    );
+    let mut opts = options(&repo);
+    opts.config_path = Some(repo.join("upstroke.toml"));
+    let parked = run_with(
+        &opts,
+        &source(vec![Effect::NoEdit], vec![ReviewBehavior::Pass]),
+    )
+    .expect("the first run");
+    assert_eq!(parked.outcome(), RunOutcome::Parked, "{parked:?}");
+    git_in(&repo, &["switch", "-q", "main"]);
+    replace_head_with_a_sibling(&repo);
+    let refused = resume_with(
+        &resume_options(&repo, &parked.run_id),
+        &fake(Effect::EditFile),
+    )
+    .expect_err("a resume off the run branch over that checkout is refused")
+    .to_string();
+    for named in [
+        "uncommitted changes",
+        "`git --no-replace-objects -c core.useReplaceRefs=false status`",
+        "`git replace -l`",
+    ] {
+        assert!(refused.contains(named), "`{named}` in: {refused}");
+    }
+}
+
+#[test]
 fn a_parked_run_is_answered_out_of_band_and_resumed() {
-    let repo = temp_engine_repo("answerresume");
+    let (_tree, repo) = temp_engine_repo("answerresume");
     seed(
         &repo,
         "## Doomed\n<!-- upstroke: id=t1 kind=implement depends= -->\n\n\
@@ -5232,7 +5452,7 @@ fn a_parked_run_is_answered_out_of_band_and_resumed() {
 
 #[test]
 fn an_answer_arriving_mid_run_unparks_without_a_hard_block() {
-    let repo = temp_engine_repo("midrun");
+    let (_tree, repo) = temp_engine_repo("midrun");
     seed(
         &repo,
         "## Asks a question\n<!-- upstroke: id=t1 kind=implement depends= -->\n\n\
@@ -5287,7 +5507,7 @@ impl AnswerSource for AnsweringViaFile {
 
 #[test]
 fn blocking_propagates_transitively_and_against_plan_order() {
-    let repo = temp_engine_repo("blocked");
+    let (_tree, repo) = temp_engine_repo("blocked");
     seed(
         &repo,
         "## Last\n<!-- upstroke: id=late kind=implement depends=mid -->\n\n\
@@ -5319,7 +5539,7 @@ fn blocking_propagates_transitively_and_against_plan_order() {
 
 #[test]
 fn answering_a_blocker_releases_the_chain_behind_it() {
-    let repo = temp_engine_repo("unblock");
+    let (_tree, repo) = temp_engine_repo("unblock");
     seed(
         &repo,
         "## Last\n<!-- upstroke: id=late kind=implement depends=mid -->\n\n\
@@ -5354,7 +5574,7 @@ fn answering_a_blocker_releases_the_chain_behind_it() {
 
 #[test]
 fn an_exhausted_pool_and_a_silent_operator_still_terminate() {
-    let repo = temp_engine_repo("terminate");
+    let (_tree, repo) = temp_engine_repo("terminate");
     seed(
         &repo,
         "## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n\n\
@@ -5415,12 +5635,15 @@ fn resume_err(repo: &Path, run_id: &str) -> String {
 const PARKED_RUN_CONFIG: &str = "[interaction]\nmode = \"never\"\n\n\
          [routing]\nimplement = { chain = [\"small\"], attempts_per = 1 }\n";
 
-fn parked_run(tag: &str) -> (PathBuf, String) {
+/// The guard comes back with the path because it owns the root the path is
+/// under: dropping it here would reclaim the repository before the caller's
+/// first assertion.
+fn parked_run(tag: &str) -> (ScratchTree, PathBuf, String) {
     parked_run_with_config(tag, PARKED_RUN_CONFIG)
 }
 
-fn parked_run_with_config(tag: &str, config: &str) -> (PathBuf, String) {
-    let repo = temp_engine_repo(tag);
+fn parked_run_with_config(tag: &str, config: &str) -> (ScratchTree, PathBuf, String) {
+    let (tree, repo) = temp_engine_repo(tag);
     seed(
         &repo,
         "## Doomed\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -5431,12 +5654,12 @@ fn parked_run_with_config(tag: &str, config: &str) -> (PathBuf, String) {
     let source = source(vec![Effect::NoEdit], vec![ReviewBehavior::Pass]);
     let report = run_with(&opts, &source).expect("run");
     assert_eq!(report.outcome(), RunOutcome::Parked);
-    (repo, report.run_id)
+    (tree, repo, report.run_id)
 }
 
 #[test]
 fn resume_refuses_schema_two_failed_attempt_without_recorded_decision() {
-    let (repo, run_id) = parked_run("legacyfailedprefix");
+    let (_tree, repo, run_id) = parked_run("legacyfailedprefix");
     let paths = paths_of(&repo, &run_id);
     rewrite_run_started_as_schema_two(&paths);
     strip_event_field(&paths, "attempt_finished", "parking");
@@ -5458,7 +5681,7 @@ fn resume_refuses_schema_two_failed_attempt_without_recorded_decision() {
 
 #[test]
 fn resume_refuses_when_the_branch_moved_under_it() {
-    let (repo, run_id) = parked_run("headmoved");
+    let (_tree, repo, run_id) = parked_run("headmoved");
     fs::write(repo.join("someone-else.txt"), "a hand-made commit\n").expect("file");
     git_in(&repo, &["add", "-A"]);
     git_in(&repo, &["commit", "-q", "-m", "not the engine's work"]);
@@ -5473,7 +5696,7 @@ fn resume_refuses_when_the_branch_moved_under_it() {
 
 #[test]
 fn resume_refuses_when_the_frozen_plan_changed() {
-    let (repo, run_id) = parked_run("planmoved");
+    let (_tree, repo, run_id) = parked_run("planmoved");
     fs::write(
         repo.join("plan.md"),
         "## Doomed\n<!-- upstroke: id=t1 kind=implement depends= -->\nNow with a body.\n",
@@ -5493,7 +5716,7 @@ fn resume_refuses_when_the_frozen_plan_changed() {
 
 #[test]
 fn status_export_and_resume_refuse_mutated_normalized_plan_bytes() {
-    let (repo, run_id) = parked_run("normalized-plan-tamper");
+    let (_tree, repo, run_id) = parked_run("normalized-plan-tamper");
     let plan_path = paths_of(&repo, &run_id).plan_json();
     let mut plan: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&plan_path).expect("frozen plan"))
@@ -5536,7 +5759,7 @@ fn status_export_and_resume_refuse_mutated_normalized_plan_bytes() {
 
 #[test]
 fn resume_refuses_schema_two_spend_question_without_task_parked() {
-    let (repo, run_id) = parked_run("legacyspendprefix");
+    let (_tree, repo, run_id) = parked_run("legacyspendprefix");
     let paths = paths_of(&repo, &run_id);
     rewrite_run_started_as_schema_two(&paths);
     strip_event_field(&paths, "attempt_finished", "parking");
@@ -5590,7 +5813,7 @@ fn resume_refuses_schema_two_spend_question_without_task_parked() {
 
 #[test]
 fn legacy_status_still_refuses_a_mismatched_self_reported_plan_hash() {
-    let (repo, run_id) = parked_run("legacy-status-plan-hash");
+    let (_tree, repo, run_id) = parked_run("legacy-status-plan-hash");
     let paths = paths_of(&repo, &run_id);
     rewrite_run_started_as_schema_two(&paths);
     let plan_path = paths.plan_json();
@@ -5617,7 +5840,7 @@ fn legacy_status_still_refuses_a_mismatched_self_reported_plan_hash() {
 
 #[test]
 fn legacy_upgrade_never_blesses_a_modified_normalized_snapshot() {
-    let (repo, run_id) = parked_run("legacy-plan-upgrade-tamper");
+    let (_tree, repo, run_id) = parked_run("legacy-plan-upgrade-tamper");
     let paths = paths_of(&repo, &run_id);
     rewrite_run_started_as_schema_two(&paths);
     let plan_path = paths.plan_json();
@@ -5646,7 +5869,7 @@ fn legacy_upgrade_never_blesses_a_modified_normalized_snapshot() {
 
 #[test]
 fn resume_compares_canonical_source_semantics_to_the_recorded_plan_digest() {
-    let (repo, run_id) = parked_run("source-semantics-digest");
+    let (_tree, repo, run_id) = parked_run("source-semantics-digest");
     fs::write(
         repo.join("plan.md"),
         "## Changed semantics\n<!-- upstroke: id=t1 kind=implement depends= -->\nDifferent body.\n",
@@ -5677,7 +5900,7 @@ fn resume_compares_canonical_source_semantics_to_the_recorded_plan_digest() {
 
 #[test]
 fn resume_refuses_when_routing_moved_under_a_recorded_rung() {
-    let (repo, run_id) = parked_run("chainmoved");
+    let (_tree, repo, run_id) = parked_run("chainmoved");
     fs::write(
         repo.join("upstroke.toml"),
         "[interaction]\nmode = \"never\"\n\n\
@@ -5690,7 +5913,7 @@ fn resume_refuses_when_routing_moved_under_a_recorded_rung() {
     assert!(err.contains("`t1` ran on [small]"), "names the task: {err}");
 }
 
-fn parked_run_with_gate(tag: &str, cmd: &str) -> (PathBuf, String) {
+fn parked_run_with_gate(tag: &str, cmd: &str) -> (ScratchTree, PathBuf, String) {
     parked_run_with_config(tag, &gate_config(cmd))
 }
 
@@ -5716,7 +5939,7 @@ fn resume_answering(repo: &Path, run_id: &str, effect: Effect) -> RunReport {
 
 #[test]
 fn resume_runs_the_gates_the_run_recorded_not_todays() {
-    let (repo, run_id) = parked_run_with_gate("gaterecorded", "git --version");
+    let (_tree, repo, run_id) = parked_run_with_gate("gaterecorded", "git --version");
 
     fs::write(
         repo.join("upstroke.toml"),
@@ -5753,7 +5976,7 @@ fn resume_runs_the_gates_the_run_recorded_not_todays() {
 
 #[test]
 fn a_resume_with_a_gate_record_is_not_refused_over_todays_gates_section() {
-    let (repo, run_id) = parked_run_with_gate("gate_record_lenient", "git --version");
+    let (_tree, repo, run_id) = parked_run_with_gate("gate_record_lenient", "git --version");
     fs::write(
         repo.join("upstroke.toml"),
         format!(
@@ -5793,7 +6016,7 @@ fn a_resume_with_a_gate_record_is_not_refused_over_todays_gates_section() {
 
 #[test]
 fn a_resume_with_no_gate_record_refuses_the_gate_shapes_a_fresh_run_refuses() {
-    let (repo, run_id) = parked_run_with_gate("gate_record_absent", "git --version");
+    let (_tree, repo, run_id) = parked_run_with_gate("gate_record_absent", "git --version");
     let paths = paths_of(&repo, &run_id);
     strip_event_data_field(&paths, "run_started", "gate_cmds");
     let before = fs::read_to_string(paths.events()).expect("the log before");
@@ -5834,7 +6057,7 @@ fn a_resume_with_no_gate_record_refuses_the_gate_shapes_a_fresh_run_refuses() {
 
 #[test]
 fn the_report_labels_gates_from_the_record_not_todays_config() {
-    let (repo, run_id) = parked_run_with_gate("gatelabel", "git --version");
+    let (_tree, repo, run_id) = parked_run_with_gate("gatelabel", "git --version");
 
     fs::write(repo.join("upstroke.toml"), PARKED_RUN_CONFIG).expect("edit config");
 
@@ -5852,7 +6075,7 @@ fn the_report_labels_gates_from_the_record_not_todays_config() {
 
 #[test]
 fn a_resume_whose_gates_did_not_move_says_nothing_about_them() {
-    let (repo, run_id) = parked_run_with_gate("gateunmoved", "git --version");
+    let (_tree, repo, run_id) = parked_run_with_gate("gateunmoved", "git --version");
     let resumed = resume_answering(&repo, &run_id, Effect::EditFile);
     assert_eq!(resumed.outcome(), RunOutcome::Complete, "{resumed:?}");
     assert!(
@@ -5941,7 +6164,7 @@ fn a_gate_difference_is_described_without_inventing_edits() {
 
 #[test]
 fn a_log_that_predates_the_gate_record_rederives_and_says_what_it_can() {
-    let (repo, run_id) = parked_run_with_gate("oldgatelog", "git --version");
+    let (_tree, repo, run_id) = parked_run_with_gate("oldgatelog", "git --version");
     strip_run_started_field(&paths_of(&repo, &run_id), "gate_cmds");
 
     fs::write(
@@ -5969,7 +6192,7 @@ fn a_log_that_predates_the_gate_record_rederives_and_says_what_it_can() {
 
 #[test]
 fn the_resume_that_rederives_an_old_logs_gates_records_them_for_the_next_one() {
-    let (repo, run_id) = parked_run_with_gate("oldgateestablish", "git --version");
+    let (_tree, repo, run_id) = parked_run_with_gate("oldgateestablish", "git --version");
     strip_run_started_field(&paths_of(&repo, &run_id), "gate_cmds");
 
     let first = resume_answering(&repo, &run_id, Effect::NoEdit);
@@ -6023,7 +6246,7 @@ fn the_resume_that_rederives_an_old_logs_gates_records_them_for_the_next_one() {
 
 #[test]
 fn an_old_gateless_log_is_not_warned_at_about_nothing() {
-    let (repo, run_id) = parked_run("oldgatelessslog");
+    let (_tree, repo, run_id) = parked_run("oldgatelessslog");
     strip_run_started_field(&paths_of(&repo, &run_id), "gate_cmds");
 
     let resumed = resume_answering(&repo, &run_id, Effect::EditFile);
@@ -6036,7 +6259,7 @@ fn an_old_gateless_log_is_not_warned_at_about_nothing() {
 
 #[test]
 fn resume_refuses_when_the_run_branch_is_gone() {
-    let (repo, run_id) = parked_run("branchgone");
+    let (_tree, repo, run_id) = parked_run("branchgone");
     let branch = git_in(&repo, &["rev-parse", "--abbrev-ref", "HEAD"])
         .trim()
         .to_owned();
@@ -6049,7 +6272,7 @@ fn resume_refuses_when_the_run_branch_is_gone() {
 
 #[test]
 fn resume_refuses_to_switch_over_uncommitted_work() {
-    let (repo, run_id) = parked_run("dirtyelsewhere");
+    let (_tree, repo, run_id) = parked_run("dirtyelsewhere");
     git_in(&repo, &["switch", "-q", "main"]);
     fs::write(
         repo.join("my-own-work.txt"),
@@ -6067,14 +6290,14 @@ fn resume_refuses_to_switch_over_uncommitted_work() {
 
 #[test]
 fn resume_refuses_a_run_that_already_finished_or_halted() {
-    let repo = temp_engine_repo("finished");
+    let (_tree, repo) = temp_engine_repo("finished");
     let complete = fake(Effect::EditFile);
     let report = run_with(&options(&repo), &complete).expect("run");
     assert_eq!(report.outcome(), RunOutcome::Complete);
     let err = resume_err(&repo, &report.run_id);
     assert!(err.contains("already completed"), "got: {err}");
 
-    let repo = temp_engine_repo("halted");
+    let (_tree, repo) = temp_engine_repo("halted");
     seed(
         &repo,
         "## Doomed\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -6100,7 +6323,7 @@ fn resume_refuses_a_run_that_already_finished_or_halted() {
 
 #[test]
 fn resume_refuses_while_another_process_holds_the_run() {
-    let (repo, run_id) = parked_run("locked");
+    let (_tree, repo, run_id) = parked_run("locked");
     let paths = paths_of(&repo, &run_id);
     let _held = RunLock::acquire(&paths.public).expect("hold it");
 
@@ -6110,14 +6333,14 @@ fn resume_refuses_while_another_process_holds_the_run() {
 
 #[test]
 fn an_unknown_run_id_lists_what_is_there() {
-    let (repo, _) = parked_run("unknownid");
+    let (_tree, repo, _) = parked_run("unknownid");
     let err = resume_err(&repo, "01NOPE");
     assert!(err.contains("known runs"), "got: {err}");
 }
 
 #[test]
 fn status_reports_a_live_run_and_the_ledger_reads_from_the_log() {
-    let repo = temp_engine_repo("statusledger");
+    let (_tree, repo) = temp_engine_repo("statusledger");
     let source = fake(Effect::EditFile);
     let report = run_with(&options(&repo), &source).expect("run");
 
@@ -6160,7 +6383,7 @@ fn status_reports_a_live_run_and_the_ledger_reads_from_the_log() {
 
 #[test]
 fn following_a_finished_run_replays_it_and_stops() {
-    let repo = temp_engine_repo("follow");
+    let (_tree, repo) = temp_engine_repo("follow");
     let source = fake(Effect::EditFile);
     let report = run_with(&options(&repo), &source).expect("run");
 
@@ -6187,7 +6410,7 @@ fn following_a_finished_run_replays_it_and_stops() {
 
 #[test]
 fn follow_ignores_a_terminal_marker_superseded_by_resume() {
-    let repo = temp_engine_repo("followresume");
+    let (_tree, repo) = temp_engine_repo("followresume");
     let source = fake(Effect::EditFile);
     let report = run_with(&options(&repo), &source).expect("run");
     let paths = paths_of(&repo, &report.run_id);
@@ -6289,7 +6512,7 @@ fn follow_waits_at_held_historical_terminal_until_resume_marker() {
         }
     }
 
-    let repo = temp_engine_repo("followheldterminal");
+    let (_tree, repo) = temp_engine_repo("followheldterminal");
     let report = run_with(&options(&repo), &fake(Effect::EditFile)).expect("run");
     let paths = paths_of(&repo, &report.run_id);
     let loaded = replay_of(&repo, &report.run_id);
@@ -6308,7 +6531,7 @@ fn follow_waits_at_held_historical_terminal_until_resume_marker() {
 
 #[test]
 fn transcripts_live_outside_the_workspace_and_survive_a_rollback() {
-    let repo = temp_engine_repo("private");
+    let (_tree, repo) = temp_engine_repo("private");
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -6533,7 +6756,7 @@ fn recreate_prepared_pin(repo: &Path, prepared: &events::PreparedCommit, target:
 
 #[test]
 fn resume_adopts_the_commit_it_made_but_never_recorded() {
-    let repo = temp_engine_repo("adoptcommit");
+    let (_tree, repo) = temp_engine_repo("adoptcommit");
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -6594,7 +6817,7 @@ fn resume_recovers_every_prepared_commit_ref_crash_prefix() {
         ("prepared-head-with-pin", false, true),
         ("prepared-head-no-pin", false, false),
     ] {
-        let repo = temp_engine_repo(tag);
+        let (_tree, repo) = temp_engine_repo(tag);
         seed(
             &repo,
             "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -6648,7 +6871,7 @@ fn resume_recovers_every_prepared_commit_ref_crash_prefix() {
 
 #[test]
 fn resume_removes_a_pin_whose_successful_settlement_never_landed() {
-    let repo = temp_engine_repo("prepared-orphan");
+    let (_tree, repo) = temp_engine_repo("prepared-orphan");
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -6695,7 +6918,7 @@ fn resume_removes_a_pin_whose_successful_settlement_never_landed() {
 
 #[test]
 fn resume_refuses_a_substituted_prepared_pin_without_deleting_it() {
-    let repo = temp_engine_repo("prepared-pin-mismatch");
+    let (_tree, repo) = temp_engine_repo("prepared-pin-mismatch");
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -6730,7 +6953,7 @@ fn resume_refuses_a_substituted_prepared_pin_without_deleting_it() {
 
 #[test]
 fn resume_refuses_symbolic_run_ref_at_already_published_prepared_prefix() {
-    let repo = temp_engine_repo("prepared-symbolic-run-ref");
+    let (_tree, repo) = temp_engine_repo("prepared-symbolic-run-ref");
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -6790,7 +7013,7 @@ fn resume_refuses_symbolic_run_ref_at_already_published_prepared_prefix() {
 
 #[test]
 fn recovered_prepared_commit_precedes_unrelated_answer_defect_repair() {
-    let repo = temp_engine_repo("prepared-before-repair");
+    let (_tree, repo) = temp_engine_repo("prepared-before-repair");
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -6888,7 +7111,7 @@ fn recovered_prepared_commit_precedes_unrelated_answer_defect_repair() {
 
 #[test]
 fn resume_refuses_an_arbitrary_tree_with_the_same_parent_and_subject() {
-    let repo = temp_engine_repo("adoptforeign");
+    let (_tree, repo) = temp_engine_repo("adoptforeign");
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -6914,7 +7137,7 @@ fn resume_refuses_an_arbitrary_tree_with_the_same_parent_and_subject() {
 
 #[test]
 fn legacy_success_without_prepared_identity_is_never_adopted_by_subject() {
-    let repo = temp_engine_repo("legacy-subject");
+    let (_tree, repo) = temp_engine_repo("legacy-subject");
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -6939,7 +7162,7 @@ fn legacy_success_without_prepared_identity_is_never_adopted_by_subject() {
 
 #[test]
 fn resume_writes_where_the_run_recorded_not_where_defaults_point() {
-    let repo = temp_engine_repo("privatedir");
+    let (_tree, repo) = temp_engine_repo("privatedir");
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -6976,7 +7199,7 @@ fn resume_writes_where_the_run_recorded_not_where_defaults_point() {
 
 #[test]
 fn resume_makes_a_stale_question_payload_agree_with_the_log() {
-    let repo = temp_engine_repo("stalepayload");
+    let (_tree, repo) = temp_engine_repo("stalepayload");
     seed(
         &repo,
         "## Doomed\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -7083,7 +7306,7 @@ fn a_private_run_collision_refuses_before_early_error_cleanup() {
 
 #[test]
 fn a_run_that_never_started_leaves_no_directory_behind() {
-    let repo = temp_engine_repo("husk");
+    let (_tree, repo) = temp_engine_repo("husk");
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -7147,7 +7370,7 @@ impl AnswerSource for BacklogAnswers {
 
 #[test]
 fn a_typed_answer_survives_another_question_being_answered_at_the_same_time() {
-    let repo = temp_engine_repo("backlog");
+    let (_tree, repo) = temp_engine_repo("backlog");
     seed(
         &repo,
         "## First\n<!-- upstroke: id=t1 kind=implement depends= -->\n\n\
@@ -7183,7 +7406,7 @@ fn a_typed_answer_survives_another_question_being_answered_at_the_same_time() {
 
 #[test]
 fn an_answer_file_that_changes_nothing_does_not_spin_the_scheduler() {
-    let repo = temp_engine_repo("nullanswer");
+    let (_tree, repo) = temp_engine_repo("nullanswer");
     seed(
         &repo,
         "## Doomed\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -7220,7 +7443,7 @@ fn an_answer_file_that_changes_nothing_does_not_spin_the_scheduler() {
 
 #[test]
 fn a_legacy_answer_file_with_a_foreign_column_still_parks_rather_than_erroring() {
-    let repo = temp_engine_repo("foreigncolumn");
+    let (_tree, repo) = temp_engine_repo("foreigncolumn");
     seed(
         &repo,
         "## Doomed\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -7291,7 +7514,7 @@ impl Sleeper for LockReleasingSleeper {
 
 #[test]
 fn following_waits_out_a_silent_live_run_and_stops_once_it_dies() {
-    let repo = temp_engine_repo("followlive");
+    let (_tree, repo) = temp_engine_repo("followlive");
     let source = fake(Effect::EditFile);
     let report = run_with(&options(&repo), &source).expect("run");
     let paths = paths_of(&repo, &report.run_id);
@@ -7346,7 +7569,7 @@ fn budget_events(events: &[events::Event]) -> Vec<&events::BudgetExceeded> {
 
 #[test]
 fn a_run_budget_stops_the_run_exactly_once_and_survives_replay() {
-    let repo = temp_engine_repo("budgetstop");
+    let (_tree, repo) = temp_engine_repo("budgetstop");
     seed(
         &repo,
         "## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n\n\
@@ -7392,7 +7615,7 @@ fn a_run_budget_stops_the_run_exactly_once_and_survives_replay() {
 
 #[test]
 fn a_task_budget_also_ends_the_run_and_says_which_ceiling_it_was() {
-    let repo = temp_engine_repo("taskbudget");
+    let (_tree, repo) = temp_engine_repo("taskbudget");
     seed(
         &repo,
         "## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -7425,7 +7648,7 @@ fn a_task_budget_also_ends_the_run_and_says_which_ceiling_it_was() {
 
 #[test]
 fn resuming_with_a_higher_ceiling_continues_the_run_the_budget_stopped() {
-    let repo = temp_engine_repo("budgetresume");
+    let (_tree, repo) = temp_engine_repo("budgetresume");
     seed(
         &repo,
         "## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n\n\
@@ -7462,7 +7685,7 @@ fn resuming_with_a_higher_ceiling_continues_the_run_the_budget_stopped() {
 
 #[test]
 fn a_resume_that_does_not_raise_the_ceiling_stops_again_rather_than_running_past_it() {
-    let repo = temp_engine_repo("budgetresumelow");
+    let (_tree, repo) = temp_engine_repo("budgetresumelow");
     seed(
         &repo,
         "## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n\n\
@@ -7494,7 +7717,7 @@ fn a_resume_that_does_not_raise_the_ceiling_stops_again_rather_than_running_past
 
 #[test]
 fn a_frontier_escalation_over_the_threshold_parks_for_approval_then_runs_it() {
-    let repo = temp_engine_repo("approvespend");
+    let (_tree, repo) = temp_engine_repo("approvespend");
     seed(
         &repo,
         "## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -7552,7 +7775,7 @@ fn a_frontier_escalation_over_the_threshold_parks_for_approval_then_runs_it() {
 
 #[test]
 fn a_declined_spend_approval_fails_the_task_through_the_halt_policy() {
-    let repo = temp_engine_repo("declinespend");
+    let (_tree, repo) = temp_engine_repo("declinespend");
     seed(
         &repo,
         "## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -7595,7 +7818,7 @@ fn a_declined_spend_approval_fails_the_task_through_the_halt_policy() {
 
 #[test]
 fn a_chain_that_starts_at_frontier_never_asks_to_approve_spend() {
-    let repo = temp_engine_repo("frontierstart");
+    let (_tree, repo) = temp_engine_repo("frontierstart");
     seed(
         &repo,
         "## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -7624,7 +7847,7 @@ fn a_chain_that_starts_at_frontier_never_asks_to_approve_spend() {
 
 #[test]
 fn attempts_are_attributed_to_the_pool_that_paid_them() {
-    let repo = temp_engine_repo("poolattrib");
+    let (_tree, repo) = temp_engine_repo("poolattrib");
     seed(
         &repo,
         "## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -7700,7 +7923,7 @@ fn attempts_are_attributed_to_the_pool_that_paid_them() {
 
 #[test]
 fn a_pinned_live_attempt_records_its_selection_origin() {
-    let repo = temp_engine_repo("pinorigin");
+    let (_tree, repo) = temp_engine_repo("pinorigin");
     seed(
         &repo,
         "## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -7727,7 +7950,7 @@ fn a_pinned_live_attempt_records_its_selection_origin() {
 
 #[test]
 fn a_rate_limit_marks_its_pool_exhausted_and_a_recovery_retires_the_signal() {
-    let repo = temp_engine_repo("poolexhausted");
+    let (_tree, repo) = temp_engine_repo("poolexhausted");
     seed(
         &repo,
         "## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -7778,7 +8001,7 @@ fn a_rate_limit_marks_its_pool_exhausted_and_a_recovery_retires_the_signal() {
 
 #[test]
 fn reviewer_rate_limit_retires_recovered_implementer_pool_live() {
-    let repo = temp_engine_repo("reviewerlimitretiresworker");
+    let (_tree, repo) = temp_engine_repo("reviewerlimitretiresworker");
     seed(&repo, FRONTIER_AUTH_PLAN, Some(SECOND_OPINION_CONFIG));
     let pools = pools_file(
         &repo,
@@ -7817,7 +8040,7 @@ fn reviewer_rate_limit_retires_recovered_implementer_pool_live() {
 
 #[test]
 fn the_budget_flag_is_validated_like_the_config_key() {
-    let repo = temp_engine_repo("budgetflag");
+    let (_tree, repo) = temp_engine_repo("budgetflag");
     seed(
         &repo,
         "## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -7841,7 +8064,7 @@ fn the_budget_flag_is_validated_like_the_config_key() {
 
 #[test]
 fn a_spend_approval_is_not_fed_back_to_the_agent_as_an_instruction() {
-    let repo = temp_engine_repo("approvalfeedback");
+    let (_tree, repo) = temp_engine_repo("approvalfeedback");
     seed(
         &repo,
         "## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -7886,7 +8109,7 @@ fn a_spend_approval_is_not_fed_back_to_the_agent_as_an_instruction() {
 
 #[test]
 fn picking_an_option_is_an_un_park_and_not_a_decision() {
-    let repo = temp_engine_repo("cannedoption");
+    let (_tree, repo) = temp_engine_repo("cannedoption");
     seed(
         &repo,
         "## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -7943,7 +8166,7 @@ fn picking_an_option_is_an_un_park_and_not_a_decision() {
 
 #[test]
 fn one_outage_records_one_signal_however_many_deferrals_it_causes() {
-    let repo = temp_engine_repo("onesignal");
+    let (_tree, repo) = temp_engine_repo("onesignal");
     seed(
         &repo,
         "## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -7976,7 +8199,7 @@ fn one_outage_records_one_signal_however_many_deferrals_it_causes() {
 
 #[test]
 fn a_budget_stop_hands_back_a_clean_tree() {
-    let repo = temp_engine_repo("budgetdirty");
+    let (_tree, repo) = temp_engine_repo("budgetdirty");
     seed(
         &repo,
         "## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -8208,7 +8431,7 @@ fn a_report_for_a_dead_run_never_says_a_task_is_running() {
 
 #[test]
 fn a_budget_stop_keeps_its_outcome_while_a_resume_holds_the_lock() {
-    let repo = temp_engine_repo("resumewindow");
+    let (_tree, repo) = temp_engine_repo("resumewindow");
     seed(
         &repo,
         "## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -8239,7 +8462,7 @@ fn a_budget_stop_keeps_its_outcome_while_a_resume_holds_the_lock() {
 
 #[test]
 fn a_budget_stop_survives_a_git_that_cannot_clean_the_tree() {
-    let repo = temp_engine_repo("budgetjam");
+    let (_tree, repo) = temp_engine_repo("budgetjam");
     seed(
         &repo,
         "## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -8277,7 +8500,7 @@ fn a_budget_stop_survives_a_git_that_cannot_clean_the_tree() {
 
 #[test]
 fn a_budget_stop_survives_a_stale_decline_file() {
-    let repo = temp_engine_repo("budgetdecline");
+    let (_tree, repo) = temp_engine_repo("budgetdecline");
     seed(
         &repo,
         "## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n\n\
@@ -8325,8 +8548,8 @@ impl RecordingRunner {
     }
 }
 
-impl crate::runner::Runner for RecordingRunner {
-    fn run(
+impl crate::runner::contract::tests::InlineRunner for RecordingRunner {
+    fn run_inline(
         &self,
         request: &crate::runner::RunnerRequest,
     ) -> Result<ProcessOutput, crate::runner::RunnerError> {
@@ -8339,7 +8562,7 @@ impl crate::runner::Runner for RecordingRunner {
             slotted: request.role.is_slotted(),
             stdin: String::from_utf8_lossy(&request.command.stdin).into_owned(),
         });
-        crate::runner::Runner::run(&self.inner, request)
+        crate::runner::Runner::run_blocking(&self.inner, request)
     }
 }
 
@@ -8353,7 +8576,7 @@ fn program_stem(program: &str) -> String {
 
 #[test]
 fn the_legacy_engine_routes_every_process_through_the_runner() {
-    let repo = temp_engine_repo("routed");
+    let (_tree, repo) = temp_engine_repo("routed");
     seed(
         &repo,
         "## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n\n\
@@ -8514,7 +8737,7 @@ fn the_legacy_engine_routes_every_process_through_the_runner() {
 
 #[test]
 fn a_retried_attempt_with_two_passes_and_a_reask_assigns_every_identity_from_production() {
-    let repo = temp_engine_repo("identities");
+    let (_tree, repo) = temp_engine_repo("identities");
     seed(
         &repo,
         FRONTIER_AUTH_PLAN,
@@ -8608,7 +8831,7 @@ fn a_retried_attempt_with_two_passes_and_a_reask_assigns_every_identity_from_pro
 
 #[test]
 fn a_worker_that_cannot_be_spawned_returns_an_error_and_settles_nothing() {
-    let repo = temp_engine_repo("workerspawn");
+    let (_tree, repo) = temp_engine_repo("workerspawn");
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -8846,7 +9069,7 @@ fn public_facade_entry_points() -> Vec<String> {
 
 #[test]
 fn every_public_write_coordinator_entry_point_establishes_containment() {
-    let repo = temp_engine_repo("containment-facade");
+    let (_tree, repo) = temp_engine_repo("containment-facade");
     let mut run_opts = options(&repo);
     run_opts.plan_path = repo.join("absent-plan.md");
     let mut resume_opts = ResumeOptions::new("01ABSENTRUN".to_owned(), repo.clone());
@@ -8908,7 +9131,7 @@ fn every_public_write_coordinator_entry_point_establishes_containment() {
 
 #[test]
 fn no_read_only_public_entry_point_establishes_containment() {
-    let repo = temp_engine_repo("containment-readonly");
+    let (_tree, repo) = temp_engine_repo("containment-readonly");
     let scratch = private_root_for(&repo);
     fs::create_dir_all(&scratch).expect("scratch");
     let absent = repo.join("absent-plan.md");
@@ -8992,7 +9215,7 @@ fn no_read_only_public_entry_point_establishes_containment() {
 
 #[test]
 fn a_facade_run_refuses_before_any_effect_when_containment_fails() {
-    let repo = temp_engine_repo("containment-order");
+    let (_tree, repo) = temp_engine_repo("containment-order");
     let mut opts = options(&repo);
     opts.plan_path = repo.join("absent-plan.md");
     let source = source(vec![Effect::EditFile], vec![ReviewBehavior::Pass]);
@@ -9038,7 +9261,7 @@ fn a_facade_run_refuses_before_any_effect_when_containment_fails() {
 
 #[test]
 fn a_facade_resume_refuses_before_any_effect_when_containment_fails() {
-    let repo = temp_engine_repo("containment-order-resume");
+    let (_tree, repo) = temp_engine_repo("containment-order-resume");
     let mut opts = ResumeOptions::new("01ABSENTRUN".to_owned(), repo.clone());
     opts.pools_path = Some(no_pools());
     opts.private_root = Some(private_root_for(&repo));
@@ -9546,4 +9769,1455 @@ fn a_resume_whose_ambient_job_join_errs_runs_nothing_and_the_next_resume_converg
     drop(hooks);
 
     resume_parked(&tree, &repo, &run_id, &record, tag);
+}
+
+const ROLE_PROBE: &str = "UPSTROKE_V1_ROLE_PROBE";
+
+/// The repository a role creates inside its own working directory. Its name is
+/// short because Windows' `MAX_PATH` is 260 characters and a gate's working
+/// directory is the product's snapshot, nested in the private root at
+/// `runs/<ULID>/gate-worktrees/worktrees/upstroke-gates-<pid>-<ULID>`: the
+/// longest path Git writes in it, `.git/refs/replace/<40 hex>.lock`, is checked
+/// against [`WINDOWS_MAX_PATH`] as the `path-budget` record, so a name that grows
+/// fails there, with the length, before Git's "Filename too long".
+const INSIDE_FIXTURE: &str = "fx";
+
+/// Windows' `MAX_PATH`, 260 characters with the terminating null.
+const WINDOWS_MAX_PATH: usize = 260;
+
+#[derive(Clone)]
+struct RoleProbe {
+    worker: CommandSpec,
+    reviewer: CommandSpec,
+    operator_reads: Option<(PathBuf, String)>,
+}
+
+impl RoleProbe {
+    fn new(overlay: &[(&str, &str)]) -> Self {
+        let exe = std::env::current_exe()
+            .expect("this test binary")
+            .to_string_lossy()
+            .into_owned();
+        let helper = |test: &str| {
+            let mut spec = CommandSpec::new(exe.clone())
+                .arg("--exact")
+                .arg(test)
+                .arg("--ignored")
+                .arg("--nocapture");
+            for (key, value) in overlay {
+                spec = spec.env(*key, *value);
+            }
+            spec
+        };
+        Self {
+            worker: helper("engine::tests::v1_role_probe_worker"),
+            reviewer: helper("engine::tests::v1_role_probe_reviewer"),
+            operator_reads: None,
+        }
+    }
+
+    fn reading_as_the_operator(mut self, record: &Path, blob: &str) -> Self {
+        self.operator_reads = Some((record.to_path_buf(), blob.to_owned()));
+        self
+    }
+
+    fn read_as_the_operator_does(&self, workspace: &Path) {
+        if let Some((record, blob)) = &self.operator_reads {
+            let read = git_in(workspace, &["cat-file", "-p", blob]);
+            fs::write(
+                record.join(format!("operator-{}", crate::ulid::ulid())),
+                format!("operator blob {}\n", read.trim()),
+            )
+            .expect("the operator's reading");
+        }
+    }
+}
+
+fn role_probe_gates() -> String {
+    format!(
+        "[[gates]]\nname = \"role-probe\"\n\
+         cmd = '\"{}\" --exact engine::tests::v1_role_probe_gate --ignored --nocapture'\n",
+        std::env::current_exe().expect("this test binary").display()
+    )
+}
+
+fn probe_git(dir: &Path, args: &[&str]) -> Result<String, String> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .map_err(|error| error.to_string())?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_owned())
+    }
+}
+
+fn probe_fixture(parent: &Path, name: &str) -> Result<String, String> {
+    let fixture = parent.join(name);
+    let read = (|| {
+        fs::create_dir_all(&fixture).map_err(|error| error.to_string())?;
+        let git = |args: &[&str]| probe_git(&fixture, args).map(|out| out.trim().to_owned());
+        git(&["init", "-q"])?;
+        fs::write(fixture.join("f.txt"), "recorded\n").map_err(|error| error.to_string())?;
+        git(&["add", "f.txt"])?;
+        // `maintenance.autoDetach=false` works around
+        // PR326-MACOS-A-DAEMONIZING-DESCENDANT-HANGS-UP-THE-ROLE, owner ruling
+        // 2026-09-28: a commit whose auto-maintenance detaches forks, exits and
+        // calls setsid, and on macOS the role that ran it then dies of SIGHUP.
+        // The witnesses avoid that trigger; the defect is filed, not absent.
+        git(&[
+            "-c",
+            "user.name=probe",
+            "-c",
+            "user.email=probe@upstroke.local",
+            "-c",
+            "maintenance.autoDetach=false",
+            "commit",
+            "-q",
+            "-m",
+            "recorded",
+        ])?;
+        let recorded = git(&["rev-parse", "HEAD:f.txt"])?;
+        fs::write(fixture.join("replacing.txt"), "replacing\n")
+            .map_err(|error| error.to_string())?;
+        let replacing = git(&["hash-object", "-w", "replacing.txt"])?;
+        git(&["replace", &recorded, &replacing])?;
+        git(&["cat-file", "-p", &recorded])
+    })();
+    let _ = fs::remove_dir_all(&fixture);
+    read
+}
+
+fn v1_role_probe(role: &str) {
+    let Some(dir) = std::env::var_os(ROLE_PROBE) else {
+        return;
+    };
+    let dir = PathBuf::from(dir);
+    let spec = fs::read_to_string(dir.join("spec")).expect("the spec the witness wrote");
+    let here = std::env::current_dir().expect("this role's working directory");
+    let mut record: Vec<String> = Vec::new();
+    let mut note = |check: &str, ok: bool, detail: String| {
+        let verdict = if ok { "ok" } else { "FAIL" };
+        record.push(format!("{role} {check} {verdict} {detail}"));
+    };
+    note(
+        "variable",
+        std::env::var_os("GIT_NO_REPLACE_OBJECTS").is_none(),
+        "GIT_NO_REPLACE_OBJECTS is not in this role's environment".to_owned(),
+    );
+    if role == "gate" && spec.lines().any(|line| line == "worktree true") {
+        let set = probe_git_past_another_registrations_write(
+            &here,
+            &["config", "--worktree", "core.useReplaceRefs", "true"],
+        );
+        note("worktree-true", set.is_ok(), format!("{set:?}"));
+    }
+    let trimmed = |read: Result<String, String>| read.map(|out| out.trim().to_owned());
+    for line in spec.lines() {
+        let (kind, rest) = line.split_once(' ').unwrap_or((line, ""));
+        let (first, second) = rest.split_once(' ').unwrap_or((rest, ""));
+        match kind {
+            "include" => {
+                let origin = probe_git(
+                    &here,
+                    &[
+                        "config",
+                        "-z",
+                        "--show-origin",
+                        "--get",
+                        "core.useReplaceRefs",
+                    ],
+                );
+                let expected = format!("file:{}\0false\0", rest.replace('\\', "/"));
+                let read = origin.clone().map(|origin| origin.replace('\\', "/"));
+                note("include", read == Ok(expected), format!("{origin:?}"));
+            }
+            "blob" => {
+                let read = trimmed(probe_git(&here, &["cat-file", "-p", first]));
+                note("blob", read.as_deref() == Ok(second), format!("{read:?}"));
+            }
+            "tree" => {
+                let read = trimmed(probe_git(
+                    &here,
+                    &["rev-parse", &format!("{first}:inner.txt")],
+                ));
+                note("tree", read.as_deref() == Ok(second), format!("{read:?}"));
+            }
+            "commit" => {
+                let read = trimmed(probe_git(&here, &["log", "-1", "--format=%s", first]));
+                note("commit", read.as_deref() == Ok(second), format!("{read:?}"));
+            }
+            "candidate" if role == "worker" => {
+                fs::write(here.join("candidate.txt"), format!("{first}\n"))
+                    .expect("the worker's candidate");
+                let replacing = dir.join(format!("replacing-{}", std::process::id()));
+                fs::write(&replacing, format!("{second}\n")).expect("the replacing content");
+                let recorded = trimmed(probe_git(&here, &["hash-object", "-w", "candidate.txt"]));
+                let replacement = trimmed(probe_git(
+                    &here,
+                    &["hash-object", "-w", &replacing.to_string_lossy()],
+                ));
+                let installed = match (&recorded, &replacement) {
+                    (Ok(recorded), Ok(replacement)) => {
+                        probe_git(&here, &["replace", "-f", recorded, replacement])
+                    }
+                    _ => Err(format!("{recorded:?} {replacement:?}")),
+                };
+                note(
+                    "candidate-replaced",
+                    installed.is_ok(),
+                    format!("{installed:?}"),
+                );
+                let read = match &recorded {
+                    Ok(recorded) => trimmed(probe_git(&here, &["cat-file", "-p", recorded])),
+                    Err(error) => Err(error.clone()),
+                };
+                note(
+                    "candidate",
+                    read.as_deref() == Ok(first),
+                    format!("{read:?}"),
+                );
+            }
+            "candidate" => {
+                let read = trimmed(probe_git(&here, &["show", "HEAD:candidate.txt"]));
+                note(
+                    "candidate",
+                    read.as_deref() == Ok(first),
+                    format!("{read:?}"),
+                );
+                let recorded = trimmed(probe_git(&here, &["hash-object", "candidate.txt"]));
+                let listed = trimmed(probe_git(&here, &["replace", "-l"]));
+                note(
+                    "candidate-replacement-installed",
+                    matches!((&recorded, &listed), (Ok(id), Ok(list)) if list.lines().any(|line| line == id)),
+                    format!("{recorded:?} in {listed:?}"),
+                );
+                let diff = probe_git(&here, &["diff", "--quiet", "--exit-code", "HEAD"]);
+                note("diff", diff.is_ok(), format!("{diff:?}"));
+                let status = trimmed(probe_git(&here, &["status", "--porcelain"]));
+                note("status", status.as_deref() == Ok(""), format!("{status:?}"));
+            }
+            "worktree" => {}
+            _ => note(
+                "spec",
+                false,
+                format!("a spec line this probe cannot read: {line:?}"),
+            ),
+        }
+    }
+    let outside = format!("fixture-{role}-{}", std::process::id());
+    for (place, parent, name) in [
+        ("inside", here.clone(), INSIDE_FIXTURE),
+        ("outside", dir.join("fixtures"), outside.as_str()),
+    ] {
+        if place == "inside" {
+            let deepest = parent
+                .join(name)
+                .join(".git")
+                .join("refs")
+                .join("replace")
+                .join(format!("{}.lock", "0".repeat(40)));
+            let length = deepest.to_string_lossy().chars().count();
+            note(
+                "path-budget",
+                !cfg!(windows) || length < WINDOWS_MAX_PATH,
+                format!("{length} {}", deepest.display()),
+            );
+        }
+        let read = probe_fixture(&parent, name);
+        note(
+            &format!("fixture-{place}"),
+            read.as_deref() == Ok("replacing"),
+            format!("{read:?}"),
+        );
+    }
+    let failed = record.iter().any(|line| line.contains(" FAIL "));
+    let log = dir.join("log");
+    fs::create_dir_all(&log).expect("the record's directory");
+    fs::write(
+        log.join(format!(
+            "{role}-{}-{}",
+            std::process::id(),
+            crate::ulid::ulid()
+        )),
+        record.join("\n") + "\n",
+    )
+    .expect("the record");
+    if role == "gate" && failed {
+        std::process::exit(1);
+    }
+}
+
+#[test]
+#[ignore = "a v0.1 worker the role witnesses start"]
+fn v1_role_probe_worker() {
+    v1_role_probe("worker");
+}
+
+#[test]
+#[ignore = "a v0.1 gate the role witnesses start"]
+fn v1_role_probe_gate() {
+    v1_role_probe("gate");
+}
+
+#[test]
+#[ignore = "a v0.1 reviewer the role witnesses start"]
+fn v1_role_probe_reviewer() {
+    use std::io::Write as _;
+
+    if std::env::var_os(ROLE_PROBE).is_none() {
+        return;
+    }
+    v1_role_probe("reviewer");
+    std::io::stdout()
+        .write_all(format!("{REVIEW_MARKER}\n").as_bytes())
+        .expect("the review marker");
+}
+
+fn take_role_records(probe: &Path) -> Vec<String> {
+    let log = probe.join("log");
+    let mut lines = Vec::new();
+    let mut entries: Vec<PathBuf> = fs::read_dir(&log)
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .collect()
+        })
+        .unwrap_or_default();
+    entries.sort();
+    for entry in entries {
+        let text = fs::read_to_string(&entry).expect("a role's record");
+        lines.extend(text.lines().map(str::to_owned));
+        fs::remove_file(&entry).expect("the record, taken");
+    }
+    lines
+}
+
+fn assert_every_role_read_the_recorded_graph(records: &[String], when: &str) {
+    for role in ["worker", "gate", "reviewer"] {
+        assert!(
+            records
+                .iter()
+                .any(|line| line.starts_with(&format!("{role} "))),
+            "{when}: no {role} ran a probe: {records:#?}"
+        );
+    }
+    let failed: Vec<&String> = records
+        .iter()
+        .filter(|line| !line.contains(" ok "))
+        .collect();
+    assert!(failed.is_empty(), "{when}: {failed:#?}");
+}
+
+fn take_role_and_operator_records(probe: &Path) -> (Vec<String>, Vec<String>) {
+    take_role_records(probe)
+        .into_iter()
+        .partition(|line| !line.starts_with("operator "))
+}
+
+fn challenge_every_scope(truthful: &Path, probe: &Path) -> Vec<(&'static str, std::ffi::OsString)> {
+    vec![
+        ("GIT_CONFIG_SYSTEM", truthful.as_os_str().to_owned()),
+        ("GIT_CONFIG_NOSYSTEM", "0".into()),
+        ("GIT_CONFIG_GLOBAL", truthful.as_os_str().to_owned()),
+        ("GIT_CONFIG_COUNT", "1".into()),
+        ("GIT_CONFIG_KEY_0", "core.useReplaceRefs".into()),
+        ("GIT_CONFIG_VALUE_0", "true".into()),
+        (
+            "GIT_CONFIG_PARAMETERS",
+            "'core.useReplaceRefs'='true'".into(),
+        ),
+        (ROLE_PROBE, probe.as_os_str().to_owned()),
+    ]
+}
+
+const OVERLAY_SAYS_TRUE: [(&str, &str); 4] = [
+    ("GIT_CONFIG_COUNT", "1"),
+    ("GIT_CONFIG_KEY_0", "core.useReplaceRefs"),
+    ("GIT_CONFIG_VALUE_0", "true"),
+    ("GIT_CONFIG_PARAMETERS", "'core.useReplaceRefs'='true'"),
+];
+
+fn install_a_replaced_graph(repo: &Path, probe: &Path) -> (String, String) {
+    fs::create_dir_all(repo.join("dir")).expect("the replaced tree's directory");
+    fs::write(repo.join("blob.txt"), "recorded-blob\n").expect("the replaced blob");
+    fs::write(repo.join("dir").join("inner.txt"), "recorded-tree\n").expect("the replaced tree");
+    git_in(repo, &["add", "-A"]);
+    git_in(repo, &["commit", "-q", "-m", "recorded-commit"]);
+    let id = |spec: &str| git_in(repo, &["rev-parse", spec]).trim().to_owned();
+    let (commit, blob, tree, inner) = (
+        id("HEAD"),
+        id("HEAD:blob.txt"),
+        id("HEAD:dir"),
+        id("HEAD:dir/inner.txt"),
+    );
+    let written = |name: &str, content: &str| {
+        let file = probe.join(name);
+        fs::write(&file, content).expect("a replacing object's content");
+        git_in(repo, &["hash-object", "-w", &file.to_string_lossy()])
+            .trim()
+            .to_owned()
+    };
+    let replacing_blob = written("replacing-blob", "replacing-blob\n");
+    let replacing_inner = written("replacing-inner", "replacing-tree\n");
+    let index = probe.join("replacing-index");
+    let with_index = |args: &[&str]| {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .env("GIT_INDEX_FILE", &index)
+            .output()
+            .expect("run git");
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    };
+    with_index(&[
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        &format!("100644,{replacing_inner},inner.txt"),
+    ]);
+    let replacing_tree = with_index(&["write-tree"]);
+    let replacing_commit = git_in(
+        repo,
+        &[
+            "commit-tree",
+            &id("HEAD^{tree}"),
+            "-p",
+            "HEAD^",
+            "-m",
+            "replacing-commit",
+        ],
+    )
+    .trim()
+    .to_owned();
+    git_in(repo, &["replace", &blob, &replacing_blob]);
+    git_in(repo, &["replace", &tree, &replacing_tree]);
+    git_in(repo, &["replace", &commit, &replacing_commit]);
+    crate::workspace_manager::fixture::pin_replacement_refs_in(repo);
+    git_in(repo, &["config", "extensions.worktreeConfig", "true"]);
+    git_in(
+        repo,
+        &["config", "--worktree", "core.useReplaceRefs", "true"],
+    );
+    (
+        blob.clone(),
+        format!(
+            "blob {blob} recorded-blob\ntree {tree} {inner}\ncommit {commit} recorded-commit\n\
+             candidate recorded-candidate replacing-candidate\nworktree true\n"
+        ),
+    )
+}
+
+fn assert_every_scope_says_true(repo: &Path) {
+    let scopes = git_in(
+        repo,
+        &["config", "--show-scope", "--get-all", "core.useReplaceRefs"],
+    );
+    for scope in ["system", "global", "local", "worktree"] {
+        assert!(
+            scopes.lines().any(|line| line == format!("{scope}\ttrue")),
+            "the challenge must reach Git at `{scope}` scope: {scopes:?}"
+        );
+    }
+    assert_eq!(
+        scopes
+            .lines()
+            .filter(|line| *line == "command\ttrue")
+            .count(),
+        2,
+        "and at command scope twice, `GIT_CONFIG_COUNT` and `GIT_CONFIG_PARAMETERS`: {scopes:?}"
+    );
+    assert!(
+        !scopes.contains("false"),
+        "nothing the operator has says `false`: {scopes:?}"
+    );
+}
+
+fn configuration_of(repo: &Path, also: &[&Path]) -> Vec<(PathBuf, Vec<u8>)> {
+    let common = PathBuf::from(
+        git_in(
+            repo,
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        )
+        .trim(),
+    );
+    let mut files: Vec<PathBuf> = also.iter().map(|file| file.to_path_buf()).collect();
+    let mut named: Vec<PathBuf> = fs::read_dir(&common)
+        .expect("the common directory")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with("config"))
+        })
+        .collect();
+    named.sort();
+    files.extend(named);
+    files
+        .into_iter()
+        .map(|file| {
+            let bytes = fs::read(&file).expect("a configuration file");
+            (file, bytes)
+        })
+        .collect()
+}
+
+#[test]
+fn the_v1_conductor_keeps_every_role_on_the_recorded_graph_of_its_own_repository() {
+    let tree = temp_engine_scratch("v1-role-graph");
+    let truthful = tree.path().join("true.gitconfig");
+    fs::write(&truthful, "[core]\n\tuseReplaceRefs = true\n").expect("a `true` for two scopes");
+    let status = crate::workspace_manager::fixture::run_challenged_replacement_witness_child(
+        "engine::tests::v1_role_graph_helper",
+        &challenge_every_scope(&truthful, tree.path()),
+    );
+    assert!(
+        status.success(),
+        "the child runs and resumes a v0.1 run whose worker, gates and reviewers each read \
+         a repository with blob, tree and commit replacements, under `core.useReplaceRefs = \
+         true` at every scope, and ended {status:?}"
+    );
+}
+
+#[test]
+#[ignore = "subprocess helper"]
+fn v1_role_graph_helper() {
+    if std::env::var_os(crate::workspace_manager::fixture::REPLACEMENT_WITNESS).is_none() {
+        return;
+    }
+    let probe = PathBuf::from(std::env::var_os(ROLE_PROBE).expect("the probe's directory"));
+    let truthful = PathBuf::from(std::env::var_os("GIT_CONFIG_GLOBAL").expect("the challenge"));
+    fs::create_dir_all(probe.join("fixtures")).expect("the fixtures' parent");
+    fs::create_dir_all(probe.join("log")).expect("the records' directory");
+
+    let (_tree, repo) = temp_engine_repo("v1g");
+    seed(
+        &repo,
+        "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
+        Some(&format!(
+            "[interaction]\nmode = \"never\"\n\n\
+             [routing]\nimplement = {{ chain = [\"small\"], attempts_per = 1 }}\n\n{}",
+            role_probe_gates()
+        )),
+    );
+    let (blob, spec) = install_a_replaced_graph(&repo, &probe);
+    let include = private_root_for(&repo)
+        .join("git")
+        .join("recorded-objects.gitconfig");
+    fs::write(
+        probe.join("spec"),
+        format!("include {}\n{spec}", include.display()),
+    )
+    .expect("the probe's spec");
+    assert_every_scope_says_true(&repo);
+    assert_eq!(
+        git_in(&repo, &["cat-file", "-p", &blob]).trim(),
+        "replacing-blob",
+        "the operator's own Git honours the replacements, or nothing below is measured"
+    );
+    let configuration = configuration_of(&repo, &[&truthful]);
+
+    let mut opts = options(&repo);
+    opts.config_path = Some(repo.join("upstroke.toml"));
+    let probing =
+        RoleProbe::new(&OVERLAY_SAYS_TRUE).reading_as_the_operator(&probe.join("log"), &blob);
+    let first = run_with(
+        &opts,
+        &source(vec![Effect::EditFile], vec![ReviewBehavior::Fail]).probing_with(probing.clone()),
+    )
+    .expect("the first run");
+    assert_eq!(first.outcome(), RunOutcome::Parked, "{first:?}");
+    let (records, operator) = take_role_and_operator_records(&probe);
+    assert_every_role_read_the_recorded_graph(&records, "the first run");
+    assert!(
+        !operator.is_empty()
+            && operator
+                .iter()
+                .all(|line| line == "operator blob replacing-blob"),
+        "while the run's roles read the recorded graph, the operator's own Git kept reading \
+         the replacements: {operator:?}"
+    );
+    assert_eq!(
+        configuration_of(&repo, &[&truthful]),
+        configuration,
+        "the run changed no Git configuration"
+    );
+    assert_eq!(
+        fs::read(&include).expect("the include"),
+        crate::runner::host::RECORDED_OBJECTS_INCLUDE
+    );
+
+    fs::remove_file(&include).expect("the include, gone before the resume");
+    let question = first
+        .questions
+        .first()
+        .expect("a question was raised")
+        .question
+        .id
+        .to_string();
+    crate::answer::answer(
+        &repo,
+        &question[..8],
+        crate::answer::Reply::Text("the widget lives in src/widget.rs".to_owned()),
+    )
+    .expect("answer");
+    let resumed = resume_with(
+        &resume_options(&repo, &first.run_id),
+        &source(vec![Effect::EditFile], vec![ReviewBehavior::Pass]).probing_with(probing),
+    )
+    .expect("the resume");
+    assert_eq!(resumed.outcome(), RunOutcome::Complete, "{resumed:?}");
+    assert!(committed(&resumed, "t1"), "{resumed:?}");
+    let (records, operator) = take_role_and_operator_records(&probe);
+    assert_every_role_read_the_recorded_graph(&records, "the resume");
+    assert!(
+        !operator.is_empty()
+            && operator
+                .iter()
+                .all(|line| line == "operator blob replacing-blob"),
+        "{operator:?}"
+    );
+    assert_eq!(
+        fs::read(&include).expect("the include the resume wrote again"),
+        crate::runner::host::RECORDED_OBJECTS_INCLUDE
+    );
+    assert_eq!(
+        configuration_of(&repo, &[&truthful]),
+        configuration,
+        "the resume changed no Git configuration"
+    );
+    assert_eq!(
+        git_in(&repo, &["cat-file", "-p", &blob]).trim(),
+        "replacing-blob",
+        "and afterwards the operator's Git still honours the replacements"
+    );
+    assert_eq!(
+        git_in(
+            &repo,
+            &[
+                "--no-replace-objects",
+                "-c",
+                "core.useReplaceRefs=false",
+                "show",
+                "HEAD:candidate.txt"
+            ]
+        )
+        .trim(),
+        "recorded-candidate",
+        "the task committed the bytes its worker wrote, not the replacement it installed"
+    );
+}
+
+fn include_for(entry: &Path) -> PathBuf {
+    private_root_for(entry)
+        .join("git")
+        .join("recorded-objects.gitconfig")
+}
+
+fn write_probe_spec(probe: &Path, entry: &Path, spec: &str) {
+    for directory in ["fixtures", "log"] {
+        fs::create_dir_all(probe.join(directory)).expect("the probe's directories");
+    }
+    fs::write(
+        probe.join("spec"),
+        format!("include {}\n{spec}", include_for(entry).display()),
+    )
+    .expect("the probe's spec");
+}
+
+#[test]
+fn a_gate_that_replaces_objects_in_its_own_fixture_passes_under_the_v1_runner() {
+    let tree = temp_engine_scratch("v1-own-fixture");
+    let status = crate::workspace_manager::fixture::run_challenged_replacement_witness_child(
+        "engine::tests::v1_own_fixture_helper",
+        &[(ROLE_PROBE, tree.path().as_os_str().to_owned())],
+    );
+    assert!(
+        status.success(),
+        "the child runs a v0.1 task in a repository with nothing under `refs/replace/`, \
+         whose worker, gate and reviewer each create a repository of their own, install a \
+         replacement in it and read it back, and ended {status:?}"
+    );
+}
+
+#[test]
+#[ignore = "subprocess helper"]
+fn v1_own_fixture_helper() {
+    if std::env::var_os(crate::workspace_manager::fixture::REPLACEMENT_WITNESS).is_none() {
+        return;
+    }
+    crate::workspace_manager::fixture::assert_replacement_controls_pinned("v1-own-fixture");
+    let probe = PathBuf::from(std::env::var_os(ROLE_PROBE).expect("the probe's directory"));
+    let (_tree, repo) = temp_engine_repo("v1o");
+    seed(
+        &repo,
+        "## Implement the widget\n<!-- upstroke: id=t1 depends= -->\n",
+        Some(&format!(
+            "[interaction]\nmode = \"never\"\n\n{}",
+            role_probe_gates()
+        )),
+    );
+    assert!(
+        git_in(&repo, &["replace", "-l"]).trim().is_empty(),
+        "the managed repository holds no replacement"
+    );
+    write_probe_spec(&probe, &repo, "");
+    let mut opts = options(&repo);
+    opts.config_path = Some(repo.join("upstroke.toml"));
+    let report = run_with(
+        &opts,
+        &fake(Effect::EditFile).probing_with(RoleProbe::new(&[])),
+    )
+    .expect("the run");
+    let (records, _) = take_role_and_operator_records(&probe);
+    assert_eq!(
+        report.outcome(),
+        RunOutcome::Complete,
+        "{report:?}\n{records:#?}"
+    );
+    assert_every_role_read_the_recorded_graph(&records, "the run");
+}
+
+#[test]
+fn a_refused_an_interrupted_and_a_resumed_v1_run_leave_git_configuration_as_they_found_it() {
+    let tree = temp_engine_scratch("v1-configuration");
+    let truthful = tree.path().join("true.gitconfig");
+    fs::write(&truthful, "[core]\n\tuseReplaceRefs = true\n").expect("a `true` for two scopes");
+    let status = crate::workspace_manager::fixture::run_challenged_replacement_witness_child(
+        "engine::tests::v1_configuration_helper",
+        &challenge_every_scope(&truthful, tree.path()),
+    );
+    assert!(
+        status.success(),
+        "the child refuses a run over a dirty checkout, kills one inside its attempt and \
+         resumes it, comparing every Git configuration file after each, and ended {status:?}"
+    );
+}
+
+#[test]
+#[ignore = "subprocess helper"]
+fn v1_configuration_helper() {
+    if std::env::var_os(crate::workspace_manager::fixture::REPLACEMENT_WITNESS).is_none() {
+        return;
+    }
+    let probe = PathBuf::from(std::env::var_os(ROLE_PROBE).expect("the probe's directory"));
+    let truthful = PathBuf::from(std::env::var_os("GIT_CONFIG_GLOBAL").expect("the challenge"));
+    let (_tree, repo) = temp_engine_repo("v1c");
+    seed(
+        &repo,
+        "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
+        Some(&format!(
+            "[interaction]\nmode = \"never\"\n\n\
+             [routing]\nimplement = {{ chain = [\"small\"], attempts_per = 1 }}\n\n{}",
+            role_probe_gates()
+        )),
+    );
+    let (blob, spec) = install_a_replaced_graph(&repo, &probe);
+    write_probe_spec(&probe, &repo, &spec);
+    assert_every_scope_says_true(&repo);
+    let configuration = configuration_of(&repo, &[&truthful]);
+    let mut opts = options(&repo);
+    opts.config_path = Some(repo.join("upstroke.toml"));
+
+    fs::write(repo.join("stray.txt"), "stray\n").expect("a stray file");
+    let refused = run_with(
+        &opts,
+        &fake(Effect::EditFile).probing_with(RoleProbe::new(&OVERLAY_SAYS_TRUE)),
+    )
+    .expect_err("a checkout with a stray file is refused")
+    .to_string();
+    assert!(refused.contains("not clean"), "{refused}");
+    assert_eq!(
+        configuration_of(&repo, &[&truthful]),
+        configuration,
+        "a refused run changed no Git configuration"
+    );
+    fs::remove_file(repo.join("stray.txt")).expect("the stray file, gone");
+
+    let died = Command::new(std::env::current_exe().expect("this test binary"))
+        .args([
+            "--exact",
+            "engine::tests::v1_interrupted_run_helper",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env("UPSTROKE_V1_INTERRUPTED_REPO", &repo)
+        .output()
+        .expect("spawn the run that dies");
+    assert_eq!(
+        died.status.code(),
+        Some(CRASH_EXIT_CODE),
+        "the run must die inside its attempt: {}",
+        String::from_utf8_lossy(&died.stderr)
+    );
+    assert_eq!(
+        configuration_of(&repo, &[&truthful]),
+        configuration,
+        "an interrupted run changed no Git configuration"
+    );
+    let run_id = rundir::latest_run(&repo).expect("the interrupted run");
+
+    let include = include_for(&repo);
+    fs::remove_file(&include).expect("the include both runs wrote, gone before the resume");
+    let resumed = resume_with(
+        &resume_options(&repo, &run_id),
+        &fake(Effect::EditFile).probing_with(
+            RoleProbe::new(&OVERLAY_SAYS_TRUE).reading_as_the_operator(&probe.join("log"), &blob),
+        ),
+    )
+    .expect("the resume");
+    let (records, operator) = take_role_and_operator_records(&probe);
+    assert_eq!(
+        resumed.outcome(),
+        RunOutcome::Complete,
+        "{resumed:?}\n{records:#?}"
+    );
+    assert_every_role_read_the_recorded_graph(&records, "the resume of an interrupted run");
+    assert!(
+        !operator.is_empty()
+            && operator
+                .iter()
+                .all(|line| line == "operator blob replacing-blob"),
+        "{operator:?}"
+    );
+    assert_eq!(
+        fs::read(&include).expect("the include the resume wrote again"),
+        crate::runner::host::RECORDED_OBJECTS_INCLUDE
+    );
+    assert_eq!(
+        configuration_of(&repo, &[&truthful]),
+        configuration,
+        "the resume changed no Git configuration"
+    );
+}
+
+#[test]
+#[ignore = "spawned by the configuration witness"]
+fn v1_interrupted_run_helper() {
+    let Some(repo) = std::env::var_os("UPSTROKE_V1_INTERRUPTED_REPO") else {
+        return;
+    };
+    let repo = PathBuf::from(repo);
+    let mut opts = options(&repo);
+    opts.config_path = Some(repo.join("upstroke.toml"));
+    let _ = run_with(
+        &opts,
+        &fake(Effect::Exit).probing_with(RoleProbe::new(&OVERLAY_SAYS_TRUE)),
+    );
+    std::process::exit(0);
+}
+
+#[test]
+fn sibling_v1_runs_in_one_repository_share_one_include_and_keep_their_roles_recorded() {
+    let tree = temp_engine_scratch("v1-siblings");
+    let status = crate::workspace_manager::fixture::run_challenged_replacement_witness_child(
+        "engine::tests::v1_siblings_helper",
+        &[(ROLE_PROBE, tree.path().as_os_str().to_owned())],
+    );
+    assert!(
+        status.success(),
+        "the child starts two v0.1 runs at once, in two linked worktrees of one repository \
+         with replacements, over one private root with no include in it yet, and ended \
+         {status:?}"
+    );
+}
+
+#[test]
+#[ignore = "subprocess helper"]
+fn v1_siblings_helper() {
+    if std::env::var_os(crate::workspace_manager::fixture::REPLACEMENT_WITNESS).is_none() {
+        return;
+    }
+    crate::workspace_manager::fixture::assert_replacement_controls_pinned("v1-siblings");
+    let probe = PathBuf::from(std::env::var_os(ROLE_PROBE).expect("the probe's directory"));
+    let (_tree, repo) = temp_engine_repo("v1s");
+    seed(
+        &repo,
+        "## Implement the widget\n<!-- upstroke: id=t1 depends= -->\n",
+        Some(&format!(
+            "[interaction]\nmode = \"never\"\n\n{}",
+            role_probe_gates()
+        )),
+    );
+    let (blob, spec) = install_a_replaced_graph(&repo, &probe);
+    let home = private_root_for(&repo);
+    assert!(!home.exists(), "no run has written an include yet");
+    let mut checkouts = Vec::new();
+    for sibling in ["a", "b"] {
+        let checkout = repo.with_file_name(format!("sibling-{sibling}"));
+        git_in(
+            &repo,
+            &[
+                "--no-replace-objects",
+                "-c",
+                "core.useReplaceRefs=false",
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                &format!("sibling-{sibling}"),
+                &checkout.to_string_lossy(),
+            ],
+        );
+        git_in(
+            &checkout,
+            &["config", "--worktree", "core.useReplaceRefs", "true"],
+        );
+        assert_eq!(
+            private_root_for(&checkout),
+            home,
+            "both siblings' runs keep their private half, and the include, under one root"
+        );
+        let records = probe.join(format!("sibling-{sibling}"));
+        write_probe_spec(
+            &records,
+            &checkout,
+            &spec.replace("-candidate", &format!("-candidate-{sibling}")),
+        );
+        checkouts.push((sibling, checkout, records));
+    }
+    let configuration = configuration_of(&repo, &[]);
+    let children: Vec<_> = checkouts
+        .into_iter()
+        .map(|(sibling, checkout, records)| {
+            let child = Command::new(std::env::current_exe().expect("this test binary"))
+                .args([
+                    "--exact",
+                    "engine::tests::v1_sibling_run_helper",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env("UPSTROKE_V1_SIBLING_CHECKOUT", &checkout)
+                .env(ROLE_PROBE, &records)
+                .spawn()
+                .expect("spawn a sibling run");
+            (sibling, records, child)
+        })
+        .collect();
+    let ended: Vec<_> = children
+        .into_iter()
+        .map(|(sibling, records, mut child)| {
+            (sibling, records, child.wait().expect("a sibling run"))
+        })
+        .collect();
+    for (sibling, records, status) in ended {
+        assert!(status.success(), "sibling {sibling} ended {status:?}");
+        let (records, _) = take_role_and_operator_records(&records);
+        assert_every_role_read_the_recorded_graph(&records, &format!("sibling {sibling}"));
+    }
+    assert_eq!(
+        fs::read(home.join("git").join("recorded-objects.gitconfig")).expect("the shared include"),
+        crate::runner::host::RECORDED_OBJECTS_INCLUDE
+    );
+    assert_eq!(
+        configuration_of(&repo, &[]),
+        configuration,
+        "two runs at once changed no Git configuration"
+    );
+    assert_eq!(
+        git_in(&repo, &["cat-file", "-p", &blob]).trim(),
+        "replacing-blob",
+        "and the operator's Git still honours the replacements"
+    );
+}
+
+#[test]
+#[ignore = "spawned by the siblings witness"]
+fn v1_sibling_run_helper() {
+    let Some(checkout) = std::env::var_os("UPSTROKE_V1_SIBLING_CHECKOUT") else {
+        return;
+    };
+    let checkout = PathBuf::from(checkout);
+    let mut opts = options(&checkout);
+    opts.config_path = Some(checkout.join("upstroke.toml"));
+    let report = run_with(
+        &opts,
+        &fake(Effect::EditFile).probing_with(RoleProbe::new(&[])),
+    )
+    .expect("a sibling run");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:?}");
+}
+
+fn probe_git_past_another_registrations_write(dir: &Path, args: &[&str]) -> Result<String, String> {
+    let mut command = Command::new("git");
+    command.arg("-C").arg(dir).args(args);
+    probe_answer(past_another_registrations_write(
+        dir,
+        std::time::Instant::now() + Duration::from_secs(10),
+        &mut || command.output(),
+    ))
+}
+
+fn past_another_registrations_write(
+    dir: &Path,
+    deadline: std::time::Instant,
+    run: &mut dyn FnMut() -> std::io::Result<std::process::Output>,
+) -> std::io::Result<std::process::Output> {
+    let mut pause = Duration::from_millis(1);
+    loop {
+        let output = run()?;
+        let torn = anothers_empty_commondir_in(&output, dir);
+        let now = std::time::Instant::now();
+        if !torn || now >= deadline {
+            return Ok(output);
+        }
+        std::thread::sleep(pause.min(deadline.saturating_duration_since(now)));
+        pause = pause.saturating_mul(2).min(Duration::from_millis(50));
+    }
+}
+
+fn anothers_empty_commondir_in(output: &std::process::Output, dir: &Path) -> bool {
+    if output.status.code() != Some(128) {
+        return false;
+    }
+    let Some(line) = output.stderr.strip_suffix(b"\n") else {
+        return false;
+    };
+    let Some(registration) = line
+        .strip_prefix(b"fatal: failed to read ")
+        .and_then(|rest| rest.strip_suffix(b"/commondir: Success"))
+    else {
+        return false;
+    };
+    let own = dir
+        .file_name()
+        .map(std::ffi::OsStr::as_encoded_bytes)
+        .unwrap_or_default();
+    let mut components = registration.rsplit(|byte| *byte == b'/');
+    let id = components.next().unwrap_or_default();
+    !line.contains(&b'\n')
+        && components.next() == Some(b"worktrees".as_slice())
+        && !id.is_empty()
+        && !id.starts_with(own)
+}
+
+fn probe_answer(output: std::io::Result<std::process::Output>) -> Result<String, String> {
+    let out = output.map_err(|error| error.to_string())?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_owned())
+    }
+}
+
+#[test]
+fn a_gates_worktree_setting_is_attempted_again_only_past_another_registrations_empty_commondir() {
+    let dir = Path::new("/r/store/worktrees/upstroke-gates-1-01AAAAAAAAAAAAAAAAAAAAAAAA");
+    let other = "fatal: failed to read /r/.git/worktrees/upstroke-gates-2-01BBBBBBBBBBBBBBBBBBBBBBBB\
+                 /commondir: Success\n";
+    let own = "fatal: failed to read /r/.git/worktrees/upstroke-gates-1-01AAAAAAAAAAAAAAAAAAAAAAAA\
+               /commondir: Success\n";
+    let numbered = "fatal: failed to read /r/.git/worktrees/upstroke-gates-1-01AAAAAAAAAAAAAAAAAAAAAAAA1\
+                    /commondir: Success\n";
+    #[cfg(unix)]
+    let exited = |code: i32| {
+        <std::process::ExitStatus as std::os::unix::process::ExitStatusExt>::from_raw(code << 8)
+    };
+    #[cfg(windows)]
+    let exited = |code: u32| {
+        <std::process::ExitStatus as std::os::windows::process::ExitStatusExt>::from_raw(code)
+    };
+    #[cfg(unix)]
+    let signalled =
+        Some(<std::process::ExitStatus as std::os::unix::process::ExitStatusExt>::from_raw(15));
+    #[cfg(not(unix))]
+    let signalled: Option<std::process::ExitStatus> = None;
+    let output = |status, stderr: &str| std::process::Output {
+        status,
+        stdout: Vec::new(),
+        stderr: stderr.as_bytes().to_vec(),
+    };
+    let far = || std::time::Instant::now() + Duration::from_secs(60);
+    let attempt = |deadline: std::time::Instant,
+                   script: Vec<std::process::Output>|
+     -> (Result<std::process::Output, String>, usize) {
+        let mut script = script.into_iter();
+        let mut probes = 0;
+        let read = past_another_registrations_write(dir, deadline, &mut || {
+            probes += 1;
+            script
+                .next()
+                .ok_or_else(|| std::io::Error::other("probed past the script"))
+        });
+        (read.map_err(|error| error.to_string()), probes)
+    };
+    let torn = output(exited(128), other);
+    let set = output(exited(0), "");
+
+    assert_eq!(
+        attempt(far(), vec![torn.clone(), torn.clone(), set.clone()]),
+        (Ok(set.clone()), 3),
+        "past two tears of another registration"
+    );
+    let at_once = [
+        (
+            output(exited(1), other),
+            "the same line, with an exit that is not Git's death",
+        ),
+        (
+            output(exited(128), other.trim_end_matches('\n')),
+            "the same line, unfinished",
+        ),
+        (
+            output(exited(128), &format!("{other}\n")),
+            "the same line and an empty one after it",
+        ),
+        (
+            output(exited(128), &format!("warning: w924\n{other}")),
+            "a second line",
+        ),
+        (
+            output(
+                exited(128),
+                &format!("fatal: failed to read /r/one\n{other}"),
+            ),
+            "two lines, each Git's death",
+        ),
+        (output(exited(128), own), "its own registration"),
+        (
+            output(exited(128), numbered),
+            "its own, under the suffix Git gives a taken name",
+        ),
+        (
+            output(
+                exited(128),
+                "fatal: failed to read /r/.git/worktrees/w/commondir: No such file or directory\n",
+            ),
+            "a removal's",
+        ),
+        (
+            output(
+                exited(128),
+                "fatal: failed to read '/r/.git/worktrees/w/locked'\n",
+            ),
+            "a lock's",
+        ),
+        (
+            output(
+                exited(128),
+                "fatal: --worktree cannot be used with multiple working trees\n",
+            ),
+            "another refusal",
+        ),
+    ]
+    .into_iter()
+    .chain(signalled.map(|status| {
+        (
+            output(status, other),
+            "the same line from a Git a signal ended",
+        )
+    }));
+    for (answer, why) in at_once {
+        assert_eq!(
+            attempt(far(), vec![answer.clone(), set.clone()]),
+            (Ok(answer), 1),
+            "{why}, at once"
+        );
+    }
+    assert_eq!(
+        attempt(std::time::Instant::now(), vec![torn.clone(), set.clone()]),
+        (Ok(torn), 1),
+        "a deadline already past"
+    );
+    assert_eq!(
+        attempt(far(), vec![set.clone()]),
+        (Ok(set), 1),
+        "a success, at once"
+    );
+    assert_eq!(
+        attempt(far(), Vec::new()),
+        (Err("probed past the script".to_owned()), 1),
+        "a probe that cannot start, at once"
+    );
+}
+
+#[test]
+fn a_gates_worktree_setting_answers_what_the_probe_answers_when_nothing_tears() {
+    let (_tree, repo) = temp_engine_repo("w924-probe-answers");
+    let missing = repo.join("w924-no-such-directory");
+    for (dir, args) in [
+        (repo.as_path(), &["rev-parse", "--is-inside-work-tree"][..]),
+        (
+            repo.as_path(),
+            &["rev-parse", "--verify", "w924-no-such-revision"],
+        ),
+        (repo.as_path(), &["config", "--w924-no-such-option"]),
+        (
+            missing.as_path(),
+            &["config", "--worktree", "core.useReplaceRefs", "true"],
+        ),
+    ] {
+        assert_eq!(
+            probe_git_past_another_registrations_write(dir, args),
+            probe_git(dir, args),
+            "{args:?} in {}",
+            dir.display()
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn the_gate_role_sets_its_worktree_value_again_only_past_another_registrations_empty_commondir() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tree = temp_engine_scratch("w924-gate-probe");
+    let other = "fatal: failed to read /r/.git/worktrees/upstroke-gates-2/commondir: Success";
+    let own = "fatal: failed to read /r/.git/worktrees/upstroke-gates-1/commondir: Success";
+    let refused = format!("Err({other:?})");
+    for (case, stderr, ending, probes, recorded) in [
+        (
+            "another-registration",
+            format!("{other}\\n"),
+            "exit 128",
+            2,
+            "ok Ok(\"\")".to_owned(),
+        ),
+        (
+            "exit-1",
+            format!("{other}\\n"),
+            "exit 1",
+            1,
+            format!("FAIL {refused}"),
+        ),
+        (
+            "signal",
+            format!("{other}\\n"),
+            "kill -KILL $$",
+            1,
+            format!("FAIL {refused}"),
+        ),
+        (
+            "unfinished",
+            other.to_owned(),
+            "exit 128",
+            1,
+            format!("FAIL {refused}"),
+        ),
+        (
+            "extra-blank-line",
+            format!("{other}\\n\\n"),
+            "exit 128",
+            1,
+            format!("FAIL {refused}"),
+        ),
+        (
+            "own-registration",
+            format!("{own}\\n"),
+            "exit 128",
+            1,
+            format!("FAIL Err({own:?})"),
+        ),
+        (
+            "unrelated",
+            "fatal: w924 unrelated\\n".to_owned(),
+            "exit 128",
+            1,
+            "FAIL Err(\"fatal: w924 unrelated\")".to_owned(),
+        ),
+    ] {
+        let place = tree.path().join(case);
+        let here = place.join("upstroke-gates-1");
+        let probe = place.join("probe");
+        let bin = place.join("bin");
+        for directory in [&here, &probe, &bin] {
+            fs::create_dir_all(directory).expect("the case's directories");
+        }
+        fs::write(probe.join("spec"), "worktree true\n").expect("the gate's spec");
+        let calls = place.join("calls");
+        let answered = place.join("answered");
+        let git = bin.join("git");
+        fs::write(
+            &git,
+            format!(
+                "#!/bin/sh\n\
+                 if [ \"$3 $4 $5 $6\" = 'config --worktree core.useReplaceRefs true' ]; then\n\
+                 \x20 echo probed >> \"$UPSTROKE_W924_CALLS\"\n\
+                 \x20 if [ ! -e \"$UPSTROKE_W924_ANSWERED\" ]; then\n\
+                 \x20   : > \"$UPSTROKE_W924_ANSWERED\"\n\
+                 \x20   printf '{stderr}' >&2\n\
+                 \x20   {ending}\n\
+                 \x20 fi\n\
+                 \x20 exit 0\n\
+                 fi\n\
+                 exit 1\n"
+            ),
+        )
+        .expect("the case's Git");
+        fs::set_permissions(&git, fs::Permissions::from_mode(0o700)).expect("an executable Git");
+        Command::new(std::env::current_exe().expect("this test binary"))
+            .args([
+                "--exact",
+                "engine::tests::v1_role_probe_gate",
+                "--ignored",
+                "--nocapture",
+            ])
+            .current_dir(&here)
+            .env(ROLE_PROBE, &probe)
+            .env("UPSTROKE_W924_CALLS", &calls)
+            .env("UPSTROKE_W924_ANSWERED", &answered)
+            .env(
+                "PATH",
+                std::env::join_paths([bin.as_path(), Path::new("/usr/bin"), Path::new("/bin")])
+                    .expect("a synthetic PATH"),
+            )
+            .output()
+            .expect("the gate role");
+        let records: Vec<_> = fs::read_dir(probe.join("log"))
+            .expect("the gate's records")
+            .map(|entry| fs::read_to_string(entry.expect("a record").path()).expect("its text"))
+            .collect();
+        let setting: Vec<_> = records
+            .iter()
+            .flat_map(|record| record.lines())
+            .filter_map(|line| line.strip_prefix("gate worktree-true "))
+            .collect();
+        assert_eq!(setting, [recorded.as_str()], "{case}: {records:#?}");
+        assert_eq!(
+            fs::read_to_string(&calls)
+                .expect("the setting's calls")
+                .lines()
+                .count(),
+            probes,
+            "{case}"
+        );
+    }
+}
+
+#[test]
+fn the_v1_include_names_the_managed_repository_however_its_path_is_spelled() {
+    let tree = temp_engine_scratch("v1-shapes");
+    let status = crate::workspace_manager::fixture::run_challenged_replacement_witness_child(
+        "engine::tests::v1_shapes_helper",
+        &[(ROLE_PROBE, tree.path().as_os_str().to_owned())],
+    );
+    assert!(
+        status.success(),
+        "the child runs a v0.1 task in repositories with replacements whose paths carry \
+         glob characters, spaces and a quote, that are entered through a symbolic link, \
+         keep their Git directory elsewhere or behind a link, are linked worktrees, or are \
+         spelled in another case, and ended {status:?}"
+    );
+}
+
+fn shaped_engine_repo(repo: &Path) {
+    git_in(repo, &["config", "user.email", "test@upstroke.local"]);
+    git_in(repo, &["config", "user.name", "upstroke tests"]);
+    fs::write(repo.join("README.md"), "seed\n").expect("seed");
+    seed(
+        repo,
+        "## Implement the widget\n<!-- upstroke: id=t1 depends= -->\n",
+        Some(&format!(
+            "[interaction]\nmode = \"never\"\n\n{}",
+            role_probe_gates()
+        )),
+    );
+}
+
+#[test]
+#[ignore = "subprocess helper"]
+fn v1_shapes_helper() {
+    if std::env::var_os(crate::workspace_manager::fixture::REPLACEMENT_WITNESS).is_none() {
+        return;
+    }
+    crate::workspace_manager::fixture::assert_replacement_controls_pinned("v1-shapes");
+    let probe = PathBuf::from(std::env::var_os(ROLE_PROBE).expect("the probe's directory"));
+    let tree = temp_engine_scratch("v1p");
+    let root = tree.path();
+    let init = |repo: &Path, args: &[&str]| {
+        fs::create_dir_all(repo).expect("the repository's directory");
+        let mut all = vec!["init", "-q", "-b", "main"];
+        all.extend_from_slice(args);
+        git_in(repo, &all);
+    };
+    let mut shapes: Vec<(&str, PathBuf)> = Vec::new();
+
+    let spelled = if cfg!(windows) {
+        "a [x] '"
+    } else {
+        "a [x]*? '"
+    };
+    let repo = root.join(spelled).join("repo");
+    init(&repo, &[]);
+    shapes.push(("glob characters, spaces and a quote", repo));
+
+    let store = root.join("s").join("store.git");
+    let repo = root.join("s").join("repo");
+    init(&repo, &["--separate-git-dir", &store.to_string_lossy()]);
+    shapes.push(("a separate Git directory", repo));
+
+    let main = root.join("l").join("main");
+    init(&main, &[]);
+    shaped_engine_repo(&main);
+    let repo = root.join("l").join("repo");
+    git_in(
+        &main,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "linked",
+            &repo.to_string_lossy(),
+        ],
+    );
+    shapes.push(("entered through a linked worktree", repo));
+
+    #[cfg(unix)]
+    {
+        let real = root.join("e").join("real");
+        init(&real, &[]);
+        let link = root.join("e").join("repo");
+        std::os::unix::fs::symlink(&real, &link).expect("a link to the repository");
+        shapes.push(("entered through a symbolic link", link));
+
+        let repo = root.join("g").join("repo");
+        init(&repo, &[]);
+        let elsewhere = root.join("g").join("elsewhere.git");
+        fs::rename(repo.join(".git"), &elsewhere).expect("the Git directory, moved");
+        std::os::unix::fs::symlink(&elsewhere, repo.join(".git")).expect("a link to it");
+        shapes.push(("a Git directory behind a symbolic link", repo));
+    }
+    if cfg!(any(windows, target_os = "macos")) {
+        let repo = root.join("c").join("repo");
+        init(&repo, &[]);
+        shapes.push(("spelled in another case", root.join("c").join("REPO")));
+    }
+
+    for (shape, entry) in shapes {
+        if shape != "entered through a linked worktree" {
+            shaped_engine_repo(&entry);
+        }
+        let (blob, spec) = install_a_replaced_graph(&entry, &probe);
+        write_probe_spec(&probe, &entry, &spec);
+        let mut opts = options(&entry);
+        opts.config_path = Some(entry.join("upstroke.toml"));
+        let report = run_with(
+            &opts,
+            &fake(Effect::EditFile).probing_with(RoleProbe::new(&[])),
+        )
+        .unwrap_or_else(|error| panic!("{shape}: the run: {error}"));
+        let (records, _) = take_role_and_operator_records(&probe);
+        assert_eq!(
+            report.outcome(),
+            RunOutcome::Complete,
+            "{shape}: {report:?}\n{records:#?}"
+        );
+        assert_every_role_read_the_recorded_graph(&records, shape);
+        assert_eq!(
+            git_in(&entry, &["cat-file", "-p", &blob]).trim(),
+            "replacing-blob",
+            "{shape}: the operator's Git still honours the replacements"
+        );
+    }
 }

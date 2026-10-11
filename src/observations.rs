@@ -1,5 +1,11 @@
 //! Extended notes: `docs/internals/observations.md`
 
+#![forbid(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    clippy::disallowed_macros
+)]
+
 use std::sync::{Arc, Mutex, PoisonError};
 
 use serde::{Deserialize, Serialize};

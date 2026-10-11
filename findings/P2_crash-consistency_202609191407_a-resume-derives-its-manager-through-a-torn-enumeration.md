@@ -82,3 +82,13 @@ refuses, runs the forced removal of every torn registration an intent names, as 
 `effects/wrappers.toml`. With the store repaired there, `assert_publishable` needs nothing of its own.
 The witness is a whole resume whose manager is derived by that path after the tear, over a torn open
 generation, with the manager as its refs, recreating the generation's worktree.
+
+## At #329's implementation (2026-10-03)
+
+`WorkspaceManager::derive` over such a registration now refuses as `UpstrokeError::RegistryRefused` after the access's
+deadline (10 s; 500 ms under test), writing nothing, where it returned Git state at once
+(`derive_over_a_registration_the_list_dies_on_refuses_and_the_operators_remedy_clears_it`; `reviews/2026-10-01-pr11-follow-up-b-record.md` §6.5). **The manual
+recovery is now documented.** `design/15`'s paragraph "A registry another process is writing", now in force, says the
+operator removes the registration directory and the checkout it names, once no Git process is writing it, and resumes.
+The test executes that remedy. The grading above kept this P2 because no document described a recovery. That reason no
+longer holds. Reclassifying it is a reviewer's call (`findings/README.md`), so the severity is unchanged here.

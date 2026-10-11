@@ -1582,7 +1582,7 @@ fn spawn_kill_child(dir: &Path, site: &str) -> ProcessOutput {
         Duration::from_secs(120),
         identities.gate(0, 0),
     );
-    let output = runner.run(&request).expect("the child spawns");
+    let output = runner.run_blocking(&request).expect("the child spawns");
     assert_ne!(
         output.code,
         Some(0),

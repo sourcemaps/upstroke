@@ -58,7 +58,7 @@ earlier step was skipped. Dense from 0, and pairwise distinct — asserted by
 
 Every ordinal above, for the uniqueness assertion.
 
-## `fn probe(&self, runner: &dyn Runner) -> Result<Caps, UpstrokeError> {` › `let help = runner.run(&probe_request(`
+## `fn probe(&self, runner: &dyn Runner) -> Result<Caps, UpstrokeError> {` › `let help = runner.run_blocking(&probe_request(`
 
 Capabilities are read from `--help`, not assumed: this CLI has
 removed and hidden flags between releases, and a missing flag must

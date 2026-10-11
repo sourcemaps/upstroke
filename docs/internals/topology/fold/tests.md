@@ -588,7 +588,7 @@ and accepts the same starts as the live one.
 
 `RunState::charge_allowance`, as a value.
 
-`runner::tests::the_rungs_allowance_is_counted_in_one_production_place`
+`runner::contract::tests::the_rungs_allowance_is_counted_in_one_production_place`
 carries a `SPELLINGS` fixture listing the ways this call can be written.
 That fixture is a `&str`, so rustc never reads it and a path in it can name
 nothing at all — it named `TaskFold::charge_allowance` for a round. This is
@@ -617,7 +617,7 @@ would satisfy half of this and fail the other.
 
 ### The behavioural half of the `runner` census
 
-`runner::tests::the_rungs_allowance_is_counted_in_one_production_place`
+`runner::contract::tests::the_rungs_allowance_is_counted_in_one_production_place`
 counts the *spelling* `charge_allowance(` in each applier's body, and a
 count over text cannot enforce a property about calls: an alias and a
 closure of the same name leave its per-applier map and its subtree total

@@ -14,8 +14,9 @@ source, documentation, workflows, release machinery and this file.
    pushing.
 3. **Run the ten-command baseline** (`CODING_STANDARDS.md` §2) before every push, then wait for
    the two required contexts: `upstroke-ci` (formatting, Clippy on three platforms, the Linux and macOS
-   test matrix, the Windows suite on its self-hosted ephemeral runner `test (winguest)`, the
-   MSRV matrix, the six Bash gates) and `upstroke-pr-policy` (title, body sections, ledger). A
+   test matrix, the Windows suite in `test-windows` -- on its self-hosted ephemeral runner for a
+   pull request or push, on `windows-latest` for a merge-queue entry -- the MSRV matrix, the six
+   Bash gates) and `upstroke-pr-policy` (title, body sections, ledger). A
    branch behind `master` is not updated by hand to merge once the ruleset carries the merge
    queue (Repository rules): the queue builds the entry on `master`'s head and runs both
    contexts there (step 7), so update it only when the change needs what `master` gained.
@@ -349,16 +350,31 @@ that held. Each of those four was a round's P1 on its own — a helper that chec
 reused the previous capture's bytes when its destination would not open, and one that took its names
 from a glob after a separate command's exit 0 read an unreadable directory as an empty one. Owning a
 file establishes nothing about reading it, and a successful producer establishes nothing about a
-successful read. `test-pr-policy.sh`
-holds the rest of the file to an **allowlist** — below the audited region a command may only be a
-shell builtin from a short list or a function the file defines, and nothing may redirect from a path
-— because five rounds of closing unsafe calls one at a time produced more of them each round, and
-the ban list that replaced those cases was itself walked past by an assignment prefix, a `command
---`, and a reader it did not name. That check is a text scan over one file: it bounds what is
-written in the validator, not what bash can be made to do, and what it buys is that **the reviewed
-surface is the audited region**, which the gate caps at 250 lines. It is a helper and not a
-guarantee: a command word written entirely inside quotes leaves nothing on the line for a text scan
-to read, and a command reached through an `eval` of a string it cannot see is outside any such scan.
+successful read. Below the audited region `test-pr-policy.sh` **lints** the rest of the file against
+an **allowlist** — a command may only be a shell builtin from a short list or a function the file
+defines, and of the audited region's functions only the three helpers, not the primitive they share;
+nothing may redirect from a path, and a backtick is refused — because five rounds of
+closing unsafe calls one at a time produced more of them each round, and the ban list that replaced
+those cases was itself walked past by an assignment prefix, a `command --`, and a reader it did not
+name. **That lint is best-effort and it is not a guarantee.** It is a text scan over one file, and a
+text scan cannot bound what a file does: it was walked past in three consecutive review rounds of
+#251, each time by a construct nobody had listed, the third a command substitution inside arithmetic
+that its arithmetic rule deleted before the command scan read it. It is aimed at mistakes made in
+good faith, such as git called directly or a file read with `<`, and not at an author set on getting
+past it, and some constructs written in good faith get past it too. The misses found so far are
+listed in the gate and tested there in both directions — the lint passes each, and bash run on each
+reaches git or lists a directory — and that list is what has been found, not all there is. **The
+guarantee that is real is the audited region: a stated number of lines, few enough to read whole,
+and every edit to it is an edit under `.github/scripts/`, which the first limb of step 7 leaves with
+the owner.** The rest of the file is read as any diff is read, with the lint beside the reading and
+not in place of it. The gate caps the region at 250 lines, comments included; the cap bounds that
+number and nothing else, and it is fenced accordingly. It has moved once, from 200 to 250, in the
+#251 commit that also grew the code it admitted; the raise is kept, with its reason stated beside
+the cap, because moving comments out would bring the region back under 200 with no code touched and
+restore the number without restoring what there is to read. **A pull request that raises the cap
+again states its reason in its body and is not the pull request that grows the region.** No check
+enforces that fence; a raise is an edit to a gate script, which the first limb of step 7 keeps out
+of standing delegation and with the owner.
 
 **A directory handed in as a listing is answered out of git's records, not out of the checkout.**
 The directory form locates the repository and the path within it and then reads `git ls-files -s`
@@ -488,7 +504,7 @@ defect exactly as a change to the gate file does. `.cargo/` and the CI-contract 
 `src/effects/` were the second, and neither sits in any directory the earlier lists named: a root
 `.cargo/config.toml` that binds a target `runner` has Cargo compile every test harness and hand each
 one to a wrapper that exits zero, and the test that refuses such a file is itself in the tree and
-editable by the same pull request. `ci.yml` already names that mechanism, in the self-hosted step
+editable by the same pull request. `ci.yml` already names that mechanism, in the Windows test step
 that counts what libtest reported rather than trusting the exit status. **What the property turns on
 is what a file governs, not what kind of file it is**: the test that refuses a `.cargo/config.toml`
 decides what every other pull request may add, where a test asserting that `src/util/terminal.rs`

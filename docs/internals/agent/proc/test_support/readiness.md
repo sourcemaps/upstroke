@@ -66,7 +66,12 @@ child of a funnel inherits the funnel's allow silently -- which is
 `PR6-LANEF-004`, measured twice in the Container subtree, and this file is
 the first out-of-line child the Process funnel has ever had. All three
 governed lints are therefore stated here rather than inherited, and all three
-are stated as DENIALS.
+are stated as DENIALS: `disallowed_methods` as `deny`, for the reason below,
+and `disallowed_types` and `disallowed_macros` as `forbid`, the denial no
+attribute below can lower, because nothing in this file lowers either. They
+shared the one `deny` until 2026-09-26, which the fence census excused whole
+by the expectations of the one lint; `forbid` of the two compiles (clippy
+`-D warnings`, measured at `a3767bcc` on Linux, Windows and macOS).
 
 **The denial is the whole statement, and the six exceptions are per site.**
 This file used to open with a blanket `#![allow(clippy::disallowed_methods)]`
@@ -79,8 +84,10 @@ a claim about six lines of it. A seventh denied call, or a denied call in a
 function that has nothing to do with publication, arrives under the same
 allowance and nothing says so.
 
-So the lint is denied at file scope like the other two, and each of the six
-call sites carries its own `#[expect(clippy::disallowed_methods, reason = …)]`.
+So the lint is denied at file scope like the other two, at `deny` rather than
+`forbid` because `forbid` would make each expectation below it `E0453`, and
+each of the six call sites carries its own
+`#[expect(clippy::disallowed_methods, reason = …)]`.
 That makes the compiler the authority on the count, in both directions and
 under the `-D warnings` the gate runs with:
 
@@ -285,6 +292,32 @@ then exited between the stat above and this call, and
 a signal that is on disk is a signal however dead its
 producer now is.
 
+## `pub(crate) fn await_signal_by(`
+
+[`await_signal`] with `now` in place of `Instant::now`: the clock the
+wait reads, once for its deadline and then once per poll, before it
+sleeps. The seam through which the wait's bound is tested without the
+wall clock: a test that drives the clock reads which reading ended the
+wait, and a stall of the waiting thread between two readings changes no
+reading, where it changes every wall-clock duration
+(`agent::proc::tests::the_bound_is_the_callers_and_it_does_not_time_a_healthy_producer`,
+after `PR320-R4-WAIT-ORDER-READ-FROM-THE-WALL`). `await_signal` is this
+with the wall clock.
+
+The rest between two polls is one attempt: `rest_within` in
+`workspace_manager::fixture`, one `nanosleep` on Unix capped at what the
+reading just taken leaves of the deadline, and never made again. The
+reading that decided the deadline is the one the rest is capped by, so
+the count of readings above is unchanged. `thread::sleep` made a refused
+or interrupted sleep again inside itself for what it had left, so a wait
+whose every rest a policy refused never came back to its deadline: the
+same hidden retry as the lease waits' (`PR320-R6-REG-001`), in the wait
+this pull request added
+(`rundir::tests::a_readiness_wait_whose_every_rest_is_refused_times_out_at_its_bound`).
+`published` is still read with `read_published`, whose open and read
+retry an interruption inside std; it is reached once, after the signal
+exists, and is outside the wait's rest.
+
 ## `fn published(signal: &Path) -> Waited {`
 
 [`read_published`] as a [`Waited`].
@@ -346,9 +379,48 @@ write handle closing ends it — so terminating the child, reaping it
 and joining the reader are one ordered operation, and the only place
 that ordering can be guaranteed on a panicking path is a `Drop`.
 
-## `impl Producer` › `pub(crate) fn adopt(mut child: Child) -> Self {`
+## `pub(crate) fn unstartable_reader() -> thread::Builder {`
 
-Adopt `child`, draining its stdout if it was piped.
+A builder whose thread no system can start: it asks for a stack of
+2^(`usize::BITS` − 2) bytes, 2^62 on a 64-bit target, more than any address
+space maps, so `spawn` fails in the OS itself — `pthread_create` answers `EAGAIN` on Linux and macOS, and
+`CreateThread` cannot reserve it on Windows. For the tests that make a
+fixture's reader thread fail to start after its child was spawned
+(`a_producer_whose_reader_cannot_be_started_is_killed_and_reaped`,
+`a_linked_child_whose_reader_cannot_be_started_is_killed_and_reaped`,
+review round 4's `R4-REG-1`). Unix only, because both callers are — each finds its child gone by
+its pid with `fixture::process_exists` — and an ungated definition with only Unix callers is dead
+code on the Windows legs, which `-D warnings` makes a build error there (the Windows-target clippy on
+this box found it).
+
+## `impl Producer` › `pub(crate) fn adopt(child: Child) -> Self {`
+
+Adopt `child`, draining its stdout if it was piped: `adopt_with` and a
+default builder.
+
+## `impl Producer` › `pub(crate) fn adopt_with(`
+
+Adopt `child`, its reader started from the builder `reader` returns when
+it is handed the child's pid.
+
+**The child is owned before the reader is started.** Starting a thread
+can fail — the system can refuse one — and a failure there unwinds out of
+this function. Until review round 4 (`R4-REG-1`, found in the PR11 record's
+`LinkedChild`, whose construction had the same order) the reader was
+started first and the value built after it, so such an unwind dropped a
+bare `Child`, whose drop neither kills nor reaps, and the child outlived
+its adoption. The value is now built first, with no reader, and the reader
+is installed once it has started: a reader that cannot be started unwinds
+through the destructor above, which kills and reaps the child and finds no
+reader to join.
+
+The thread is started as `thread::Builder::spawn(builder, ..)`, in its
+path form, not `builder.spawn(..)`: `runner::container::tests`'
+`the_readiness_allowance_names_the_paths_it_is_written_against` counts the
+denied primitives this file reaches by their call forms, and `.spawn(` is
+one of `std::process::Command::spawn`'s — a thread is not a process, and the
+file still reaches exactly the five primitives its allowlist row is written
+against.
 
 ## `impl Producer` › `pub(crate) fn child(&mut self) -> &mut Child {`
 

@@ -20,11 +20,8 @@
 // Allowlist placement: the **funnel section** of `effects/allowlist.toml`, which
 // carries this module's review clause -- effects only inside site-taking APIs,
 // no writable handle returned. `decisions.effect_site_inventory.mechanism` (2).
-#![allow(
-    clippy::disallowed_methods,
-    clippy::disallowed_types,
-    clippy::disallowed_macros
-)]
+#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#![cfg_attr(not(test), forbid(clippy::disallowed_macros))]
 
 use std::collections::BTreeSet;
 use std::fs::{self, File};
@@ -2174,11 +2171,19 @@ pub fn observe_cleanup_hold(public: &Path, hooks: &mut dyn RunDirHooks) -> bool 
 /// racing one of them would refuse a ref write over a hold that is already
 /// gone. `EINTR` is retried.
 ///
-/// **Inherited by this child only.** `File::open` sets `CLOEXEC`; the
-/// `pre_exec` clears it in the child between `fork` and `exec`, so no other
-/// process this coordinator spawns receives the descriptor. A `fork` without
-/// `exec` in this process -- the Unix reaper -- would inherit it, and the
-/// reaper's own hold on the same file is shared already, so nothing changes.
+/// **Inherited by this child across its `exec`, and by every other fork of
+/// this process until its own.** `File::open` sets `CLOEXEC`; the `pre_exec`
+/// clears it in the child between `fork` and `exec`, so this child keeps the
+/// descriptor past `exec` and nothing else does. A `fork` copies the whole
+/// descriptor table, though, so every child any thread of this process forks
+/// while the descriptor is open holds a copy, and the shared lease with it,
+/// until that child's `exec` closes it or the child closes it itself: a
+/// spawn's fork-to-exec window, or the Unix reaper's `close_inherited_fds`
+/// (the reaper's own hold on the same file is shared already). Such a copy is
+/// a hold the exclusive probes see for as long as it lasts, in the next
+/// coordinator as in this process; the recovery tests, which resume in the
+/// process that drove the run, wait for this process's own copies to be
+/// released before a later resume (`engine::topology::recover::tests`).
 ///
 /// # Errors
 ///
@@ -2385,23 +2390,16 @@ pub fn is_running(public: &Path) -> bool {
 
 #[cfg(unix)]
 mod cleanup {
+    mod scopes;
+
+    use self::scopes::ACTIVE;
     use super::{cleanup_lock_file, refused};
     use crate::error::UpstrokeError;
-    use std::cell::RefCell;
-    use std::collections::BTreeMap;
     use std::fs::File;
     use std::marker::PhantomData;
     use std::os::fd::AsRawFd;
     use std::path::{Path, PathBuf};
     use std::rc::Rc;
-
-    thread_local! {
-        // v0.1 drives a run synchronously inside an explicit scope. Thread-
-        // local registration gives concurrent library/test runs the exact
-        // cleanup path for their own reapers instead of conservatively leasing
-        // every run active in the process.
-        static ACTIVE: RefCell<BTreeMap<PathBuf, usize>> = const { RefCell::new(BTreeMap::new()) };
-    }
 
     #[derive(Debug)]
     pub(super) struct CleanupLease {

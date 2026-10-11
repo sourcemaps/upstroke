@@ -118,6 +118,87 @@ one arming that goes through `super::classify_docker_failure`.
 
 (3) Substitution injection: what `create` will report for this name.
 
+## `pub(crate) struct Journaled {`
+
+---------------------------------------------------------------------------
+(7) The daemon every coordinator process of a test reaches (PR11 phase 5)
+---------------------------------------------------------------------------
+
+## `pub(crate) struct Journaled {`
+
+One runtime operation as the fake received it: which handle asked (`actor`),
+the operation, its target and, for a create, the credential volumes it mounts
+(`detail`). The journal is the single order of every operation of every
+process that shares this fake — the order a Docker daemon imposes on its
+clients, and the only order in which "observed terminated before its first
+use" is a statement at all. An entry is made on entry, before an armed failure
+answers, so an operation that failed has its place too.
+
+## `pub(crate) struct Launch<'a> {`
+
+What a start policy sees of a container being started: its labels, which name
+the invocation it runs.
+
+## `pub(crate) enum Start {`
+
+What a started container does. `Hold` is the fake as it always was: running
+until a test moves it. `Exit` exits at once with the given execution — a probe
+that succeeds. `Run` runs the given body on a thread of its own as the
+container's process: the container is running until the body returns, and a
+stop cancels the body through the `Cancellation` it was handed and waits for
+it. `engine::topology::scaffold::Contained` makes the body the scaffold
+double's invocation of the same request, so a coordinator's containers answer
+to the deterministic scheduler (the PR11 record, R-AP).
+
+## `pub(crate) type StartPolicy = Arc<dyn Fn(&Launch<'_>) -> Start + Send + Sync>;`
+
+Chosen per handle (`starting`), so processes sharing one fake start their
+containers differently: a live coordinator's run the double, a dead one's hold
+until its process is killed, a probe exits.
+
+## `struct Starting(Option<StartPolicy>);`
+
+A named wrapper so that `FakeRuntime` keeps its `Debug`: a policy is a closure.
+
+## `struct Process {`
+
+A `Start::Run` container's process: its kill switch and its thread.
+
+## `struct Pace {`
+
+A barrier on one container: each of `ops` on `target` proceeds only once
+`parties` different actors have arrived at it. Two reclaimers paced at `Stop`
+and `Remove` have both listed and classified the container before either kills
+it, and have both observed it terminated before either removes it — the
+interleaving "two concurrent reclaimers converge" is about, forced rather than
+hoped for, and deterministic without a clock. A party that never arrives fails
+the one waiting after `PACE_BOUND`, and the message counts both.
+
+## `pub(crate) const PACE_BOUND: Duration = Duration::from_secs(120);`
+
+How long a paced party waits for the other: a bound that decides a failure,
+never an order.
+
+## `struct State` › `journal: Vec<Journaled>,`
+
+(7) The journal.
+
+## `struct State` › `processes: BTreeMap<String, Process>,`
+
+(7) The processes of `Start::Run` containers that are running, by container
+name.
+
+## `struct State` › `pace: Option<Pace>,`
+
+(7) The barrier a test armed, if any.
+
+## `impl Drop for State {`
+
+The last handle's drop cancels every process still running and joins it, so a
+test that fails with containers held leaves no thread behind. A process body
+never touches the fake's state, so the join cannot wait on the lock being
+dropped.
+
 ## `pub(crate) struct FakeRuntime {`
 
 `Clone`, with its state behind an `Arc<Mutex<_>>` since the repair round of
@@ -131,6 +212,12 @@ The fake container runtime.
 
 Interior-mutable so it can be handed out as `&dyn ContainerRuntime` and
 still be armed and inspected by the test that holds it.
+
+Three fields since PR11 phase 5, all per handle except the condition: `changed`
+is the condition every journal entry and every process exit signals (shared
+by every handle); `actor` is the handle's name in the journal; `starting` is
+its start policy. A handle made by `new` is unnamed and holds every container
+it starts, as the fake always did.
 
 ## `impl FakeRuntime` › `pub(crate) fn new(trace: ContainerTrace) -> Self {`
 
@@ -249,14 +336,79 @@ the *set* of operations happened without pinning their order holds none
 of them". The log shares its handle with the funnel's trace, so a single
 sequence contains the funnel phases, the durability steps and these.
 
-## `fn create(&self, spec: &CreateSpec) -> Result<CreatedContai…` › `let reported = state`
+## `impl FakeRuntime` › `pub(crate) fn acting_as(&self, actor: &str) -> Self {`
+
+Another handle on the same fake, named `actor` in the journal, holding every
+container it starts until told otherwise. Each process of a test gets its own —
+each child through its daemon, and the parent's coordinator, pre-flight and
+census — so the one order also says who did what.
+
+## `impl FakeRuntime` › `pub(crate) fn starting(mut self, policy: StartPolicy) -> Self {`
+
+This handle's start policy.
+
+## `impl FakeRuntime` › `pub(crate) fn journal(&self) -> Vec<Journaled> {`
+
+The journal so far.
+
+## `impl FakeRuntime` › `pub(crate) fn await_journal(`
+
+Wait until `done` holds of the journal, or `within` passes, and say whether it
+held. Every entry and every process exit wakes it: this is how a parent learns
+that a child coordinator has its containers running without asking the child
+anything.
+
+## `impl FakeRuntime` › `pub(crate) fn pace(&self, target: &str, ops: &[RuntimeOp], parties: usize) {`
+
+Arm the barrier; see `Pace`.
+
+## `impl FakeRuntime` › `fn paced(&self, op: RuntimeOp, target: &str) -> Result<(), RuntimeError> {`
+
+The barrier's wait, made on entry.
+
+## `impl FakeRuntime` › `fn enter_with(&self, op: RuntimeOp, target: &str, detail: String) -> Result<(), RuntimeError> {`
+
+`enter` with a create's volumes: the journal entry, then the barrier, then the
+armed answers as before.
+
+## `impl FakeRuntime` › `fn daemon_create(&self, spec: &CreateSpec) -> Result<CreatedContainer, RuntimeError> {`
+
+The fake's own create, which the trait method delegates to and the daemon
+calls.
+
+**Why the four effect bodies moved out of the trait methods.** `clippy.toml`
+denies calling `ContainerRuntime::create`, `start`, `stop` and `remove` outside
+the container funnel's allowlisted modules, and this file forbids the lint.
+The daemon performs a child's create by calling the fake's own body — another
+item — so a child's operation reaches the same code a local caller's does, and
+no file calls a governed method it may not.
+
+## `impl FakeRuntime` › `fn daemon_start(&self, name: &str) -> Result<(), RuntimeError> {`
+
+Start, then do what the handle's policy says the container does.
+
+## `impl FakeRuntime` › `fn settle_process(&self, name: &str) {`
+
+At every observation: a `Start::Run` container whose process has returned is
+`Exited`, with the process's output as its execution.
+
+## `impl FakeRuntime` › `fn kill_process(&self, name: &str) {`
+
+Cancel a `Start::Run` container's process and wait for it.
+
+## `impl FakeRuntime` › `fn exited(&self, name: &str, process: Process) {`
+
+Join a process and record its execution; a body that panicked exits with no
+code.
+
+## `fn daemon_create(&self, spec: &CreateSpec) -> Result<Creat…` › `let reported = state`
 
 The reported id is a **separate input** from the requested one. With
 nothing injected the healthy runtime reports what it was asked for;
 with an injection it reports something else, and that is the only
 reason `substituted_image_id_refused_before_start` is constructible.
 
-## `fn stop(&self, name: &str, _mode: StopMode) -> Result<Settled, RuntimeError> {`
+## `fn daemon_stop(&self, name: &str, _mode: StopMode) -> Result<Settled, RuntimeError> {`
 
 The armed answer goes through the production normalizer
 (`super::settle_stop`), so a diagnostic set with `set_docker_stderr` is
@@ -269,12 +421,58 @@ Idempotent and tolerant of already-gone as before: a container the fake
 does not hold is a stop that succeeded, because two concurrent reclaimers
 must converge.
 
-## `fn remove(&self, name: &str) -> Result<Settled, RuntimeError> {`
+A `Start::Run` container's process is cancelled and waited for once the stop
+is entered and before its answer is settled, so a stop that succeeded leaves
+no process running — what `docker kill` does to a container's process.
+
+## `fn daemon_remove(&self, name: &str) -> Result<Settled, RuntimeError> {`
 
 The same through `super::settle_remove`: the container leaves the fake only
 on `ProcessGone`, so a test that arms another reclaimer's removal sees the
 container survive exactly as the daemon's would.
 
+
+## `pub(crate) const RUNTIME_REQUEST: &str = "UPSTROKE-RUNTIME-REQUEST ";`
+
+The wire between a child process and the parent's daemon: a child writes
+`RUNTIME_REQUEST` and one JSON object naming `op` and its arguments on one
+stdout line; the parent answers on the child's stdin with `RUNTIME_REPLY` and
+`{"ok": …}` or `{"err": {kind, operation, detail}}` on one line; `CHILD_EVENT`
+and a JSON value is a child's report to its test. A reader finds a prefix
+anywhere in a line, because libtest's own `test <name> ... ` shares the child's
+stdout without a newline.
+
+## `impl FakeRuntime` › `pub(crate) fn serve(`
+
+The daemon loop: every request a child sends is answered against this handle,
+in the order it arrives, until the child's stdout closes; its events go to
+`events`, and anything else (libtest's lines) is returned for diagnosis. One
+daemon thread per child and one fake for all of them, so a child's operations
+interleave with the parent's and every other child's in the journal.
+
+## `impl FakeRuntime` › `fn answer(&self, request: &Value) -> Value {`
+
+One request, answered. The read-only operations go through the trait, whose
+read-only methods are not governed; the four effects through the `daemon_*`
+bodies.
+
+## `pub(crate) struct LinkedRuntime {`
+
+A child process's container runtime: every operation is a request line to the
+parent's daemon and a wait for its reply. One request at a time (`turn`), so
+replies cannot cross; a child coordinator's pipeline threads wait their turn as
+they would on a daemon's socket. A parent that does not answer within
+`LINK_BOUND` is `Unreachable`, which the census and the runner already refuse
+over.
+
+## `impl LinkedRuntime` › `fn call(&self, op: RuntimeOp, arguments: Value) -> Result<Value, RuntimeError> {`
+
+Send, wait, decode.
+
+## `fn spec_json(spec: &CreateSpec) -> Value {`
+
+The codec: each type the trait carries, as JSON and back (`*_json`, `*_of`). A
+path travels as its lossy string, which every path a test makes is.
 
 ## `pub(crate) struct FakeOwnerLiveness {`
 
@@ -540,3 +738,132 @@ The precondition, checked rather than documented. Before this the doc
 below said "callers must build them from their own fixed constants" and
 one of the two callers did exactly that -- fixed, and therefore shared
 with every concurrent slot. See [`unscoped_names`].
+
+## `struct State` › `reaper_program: Option<PathBuf>,`
+
+The relay stub once `install_reaper_relay` installed one; `None` until then. Shared by every
+`acting_as` view of one fake, so a runner built over any of them arms its reaper with the same
+program.
+
+## `struct State` › `covers: Option<Vec<(String, bool)>>,`
+
+`Some` once `observing_covers` asked for it: every container started from then on, with
+whether an armed container reaper in this process selected its labels at the instant it
+started.
+
+## `impl FakeRuntime` › `pub(crate) fn observing_covers(&self) {`
+
+The design property's in-process observation (PR11 follow-up A): "while any container this
+incarnation started may still be running, an armed reaper holding the run's container scope
+exists". `daemon_start` records, for each start, whether
+`agent::proc::armed_container_reaper_selects` answers yes for the container's
+`upstroke.private_root` and `upstroke.incarnation` labels. It sees only reapers armed in this
+process, so the two-process witnesses do not use it; they observe the reaper's calls instead.
+
+## `impl FakeRuntime` › `pub(crate) fn starts_observed(&self) -> Vec<(String, bool)> {`
+
+What `observing_covers` recorded, in start order.
+
+## `pub(crate) const NO_OP_REAPER_PROGRAM: &str = "/usr/bin/true";`
+
+The fake's reaper program until a relay is installed: a reaper armed over it that outlives its
+coordinator runs `/usr/bin/true ps …`, lists nothing and exits, so the many tests that build a
+`ContainerRunner` over the fake and never look at a reaper arm one that touches nothing.
+`/usr/bin/true` exists on both Unix legs; Windows arms no reaper.
+
+## `impl ContainerRuntime for FakeRuntime` › `fn reaper_program(&self) -> PathBuf {`
+
+The relay stub if one is installed, else `NO_OP_REAPER_PROGRAM` — never the trait's `docker`
+default, which would arm a reaper over a real CLI where one is installed.
+
+## `impl FakeRuntime` › `fn observe_cover(&self, name: &str, labels: &BTreeMap<String, String>) {`
+
+Called from `daemon_start` after the container is marked running and before its start policy
+plays it. On Windows there is no reaper and nothing is observed as covered.
+
+## `fn reaper_stub() -> String {`
+
+The relay: a `/bin/sh` program a reaper execs as its `docker`. **It finds its relay from its
+own path** (`relay=${0%/*}`; the reaper `execv`s the absolute program, so `$0` is it), never
+from an environment variable — round R5's stub read a variable only the two-process witness
+set, so the in-process control's reaper wrote its calls nowhere the test looked (`R6-D2`).
+It appends each call's arguments to `calls`, tab-separated. `ps` answers from `listing` the
+way the daemon would: each line is a container's name, private-root label and incarnation
+label, and only the names whose two labels equal the two `--filter label=…` values are
+printed — so a scope that does not select a container does not find it. `rm` drops the named
+container from `listing`; `kill` changes nothing, as `docker kill` leaves a container listed
+until it is removed.
+
+## `#[cfg(unix)]` › `const REAPER_RELAY_CHILD_BOUND: Duration = Duration::from_secs(120);`
+
+The deadline `run_test_isolated` gives each of the relay's two children below: generous against
+a child that starts, writes or runs one small script and ends, and the bound that makes a child
+held at its host launch's end a failed test rather than a wedged run.
+
+## `impl FakeRuntime` › `pub(crate) fn install_reaper_relay(&self, relay: &Path) -> PathBuf {`
+
+Has `reaper_relay_install_child` write the relay in an isolated child of the test binary,
+under `REAPER_RELAY_CHILD_BOUND`, then makes its stub this fake's reaper program. It requires
+the child's success, libtest's `1 passed` (a misnamed child runs zero tests and exits `0`) and
+the program on disk.
+
+The write is a host launch (`write_program_in_its_own_process`, below), and a host launch ends
+in a wait for its reaper's acknowledged exit that is unbounded by design. Made in the test's own
+process it held the test, and the suite, for as long as that reaper was stopped; made in the
+child, it holds only the child (`FUA-I4-RELAY`, PR #328's implementation review round 4). Every
+test that installs a relay — the stopped-container-reaper test in `agent/proc.rs`, the
+coordinator's reaper controls, creation's P4 probe witness — gets the bound from here.
+
+## `impl FakeRuntime` › `pub(crate) fn run_reaper_relay(relay: &Path, args: &[&str]) -> Option<i32> {`
+
+Runs the relay's program with `args` in `reaper_relay_run_child`, an isolated child under
+`REAPER_RELAY_CHILD_BOUND`, and answers its exit code, which the child writes to a file of a
+scratch tree this call owns. The coordinator's reaper controls run their relay self-check
+through it (`R6-D2`): the run is a host launch, so it belongs in a bounded child for the reason
+`install_reaper_relay` gives.
+
+## `impl FakeRuntime` › `pub(crate) fn publish_for_reaper(&self, relay: &Path) -> Vec<(String, String, String)> {`
+
+Writes the listing from every container the fake holds, with their recorded labels (`-` for
+one a seeded container lacks). A witness publishes before it kills the coordinator: the reaper
+notices the death within one of its 10-millisecond polls and lists at once.
+
+## `impl FakeRuntime` › `pub(crate) fn reaper_calls(relay: &Path) -> Vec<Vec<String>> {`
+
+The calls the stub recorded, one argument vector each, in order.
+
+## `impl FakeRuntime` › `pub(crate) fn deliver_reaper_calls(&self, relay: &Path) -> Vec<String> {`
+
+Applies each recorded `kill` and `rm` to this fake as the actor `reaper`, so a witness reads in
+the journal that the containers were stopped and removed by the reaper's own calls.
+
+## `#[cfg(unix)]` › `fn reaper_relay_install_child() {`
+
+The isolated writer `install_reaper_relay` runs: the relay directory and its empty listing,
+then the stub through `write_program_in_its_own_process`. Ignored, so libtest never runs it in
+its own process; only `install_reaper_relay` starts it, by name, under its bound.
+
+## `#[cfg(unix)]` › `fn reaper_relay_run_child() {`
+
+The isolated runner `run_reaper_relay` runs: the relay's program with the arguments its parent
+names, through `run_program_in_its_own_process`, and the exit code (or `no code`) written to the
+file its parent names. This fake forbids the stdout macros, so the answer travels by file.
+
+## `const REAPER_PROGRAM_QUERY: &str = "reaper-program";`
+
+A request on the link that is not a runtime operation: the child's `LinkedRuntime` asks the
+parent's fake which program its reaper runs. The parent's fake is the one source, so a
+two-process witness installs its relay once, on the fake it serves, and the child coordinator
+arms over that relay without being told anything else.
+
+## `impl LinkedRuntime` › `fn exchange(&self, op: RuntimeOp, request: &Value) -> Result<Value, RuntimeError> {`
+
+One request and its reply, under the runtime's turn; `call` builds a runtime operation's
+request and hands it here, and `reaper_program` sends the query.
+
+## `impl ContainerRuntime for LinkedRuntime` › `fn reaper_program(&self) -> PathBuf {`
+
+The parent fake's answer. A link that does not answer yields an empty path, which the reaper's
+program resolution refuses, so the launch is refused rather than arming a reaper that would
+silently reclaim nothing.
+

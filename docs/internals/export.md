@@ -50,6 +50,19 @@ writer can never emit `:60`. Rejecting leap-second notation avoids accepting
 it on arbitrary dates (which requires an external announcement table) while
 retaining every timestamp an authentic Upstroke writer can produce.
 
+## `struct Fixture` › `_tree: crate::rundir::scratch_tree::ScratchTree,`
+
+The guard over the tree `Fixture::new` acquired, declared last so it drops after everything
+else the fixture holds.
+
+## `impl Fixture` › `fn new(tag: &str, events: Vec<Value>, tasks: Vec<Value>) -> Self {`
+
+The root was `temp_dir()/upstroke-export-<tag>-<pid>-<n>`: a process id and a counter that
+restarts at zero in every process, created over whatever stood there and removed by a `Drop` that
+discarded the result, so a process drawing a recycled pid could compute the name a crashed
+predecessor had left and build over it (`PR7-SCRATCH-FIXTURE-LEAK`). `acquire` refuses an
+occupied root, names it with a ULID, and reclaims it when the guard drops.
+
 ## `fn exported_timestamps_use_the_supported_rfc3339_profile()` › `"2024-02-29T23:59:60.123Z",`
 
 `:60` is not accepted blindly on a leap-year date, and even a

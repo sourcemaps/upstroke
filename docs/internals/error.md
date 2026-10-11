@@ -4,6 +4,23 @@ Extended notes for [`src/error.rs`](../../src/error.rs).
 
 These notes preserve the module comments after the annotation repairs. Item headings quote source lines for navigation.
 
+## `#![forbid(`
+
+The three governed lints are `forbid` here since #318's third round: this file
+stated no level for any of them and inherited none, so each took its level
+from `-D warnings` alone, which an inner `allow` the placement scan does not
+read -- macro-written, or spelled apart -- lowers; #318's second MAIN review
+executed exactly that in `src/plan/mod.rs` and reached `std::fs::write` from
+a production topology body while clippy and every governance test passed
+(`GUARD-DECISION-SILENT-PRODUCTION-FILES-OUTSIDE-THE-ROLL-CALL`). A leaf with no children.
+`forbid`, not `deny`, because it compiles: nothing in the file allows a governed lint, and clippy over all targets exits 0 with the fence in place. A downgrade beneath
+a `forbid` is `E0453` however it is written or generated, and the enforcement
+is the lint gate's -- rustc resolves no `clippy::` lint, so `cargo build` and
+`cargo test` compile what clippy refuses. `effects::tests::every_unclassified_production_file_states_each_governed_lint_or_inherits_its_forbid`
+names this file the day the fence is removed, and
+`every_fence_of_a_governed_lint_forbids_wherever_forbid_would_compile` the
+day it drops to `deny`.
+
 ## `#[derive(Debug)]`
 
 Structural problems found in a parsed plan, collected so a single run
@@ -86,6 +103,27 @@ things, a question already answered, an option that does not exist.
 Carries its own whole sentence, because prefixing these with a
 command's name (`cannot resume …` on a `status` lookup) misdescribes
 what the operator was actually doing.
+
+## `RegistryRefused { message: String },`
+
+A worktree-registry access that did not complete:
+`workspace_manager::tolerant_registry_access` attempted it again until its
+deadline, or its caller could not decide whether another attempt was safe, or
+this process's own registry lock stayed held until the deadline. The store a
+writer in another checkout leaves half-written, a registration a dead process
+left torn, and a registration nobody is writing all end here, and none of them
+is Git state. Displayed as its message, which names the store, the deadline,
+the attempt count and the last failure's text, like [`Self::Refused`].
+
+It is a variant of its own, and not `Refused`, so that a caller can tell a
+registry refusal by its type: `engine::topology::run::verified` maps only
+`Git` to `Verified::Unavailable`, so this one ends the command resumably and
+appends nothing, and the legacy engine's proposed preservation (follow-up D,
+not in force) keys on it (`reviews/2026-10-01-pr11-follow-up-b-record.md`
+§5.5, §7.6). It is never
+`Git`: registry state that reached a verification's Git arm spent a valid
+candidate's deferrals and parked it
+(`PR11-LINKED-CHECKOUTS-RACE-THE-SHARED-WORKTREE-REGISTRY`).
 
 ## `#[error(transparent)]`
 

@@ -920,36 +920,75 @@ mod tests {
     use std::env;
     use std::sync::OnceLock;
 
+    /// The scratch trees these tests share, guarded for the life of the
+    /// process.
+    ///
+    /// Each of the three roots below was
+    /// `temp_dir()/upstroke-<what>-<pid>`, created and never removed
+    /// (`PR7-SCRATCH-FIXTURE-LEAK`). They are process-wide because every
+    /// test here reads them, so nothing narrower can own them; a `static`'s
+    /// `Drop` is one of the two this suite genuinely never runs, and one
+    /// tree per process is what that costs.
+    fn tree(tag: &str) -> crate::rundir::scratch_tree::ScratchTree {
+        let parent = env::temp_dir();
+        match crate::rundir::scratch_tree::acquire(&parent, tag) {
+            Ok(tree) => tree,
+            Err(refusal) => panic!(
+                "a scratch tree for `{tag}` under {}: {refusal:?}",
+                parent.display()
+            ),
+        }
+    }
+
+    /// A guarded tree and a path inside it, held together so the tree
+    /// outlives every reader.
+    struct Shared {
+        _tree: crate::rundir::scratch_tree::ScratchTree,
+        path: PathBuf,
+    }
+
     fn scratch(name: &str, content: &str) -> PathBuf {
-        let dir = env::temp_dir().join(format!("upstroke-config-tests-{}", std::process::id()));
-        fs::create_dir_all(&dir).expect("create scratch dir");
+        static SHARED: OnceLock<Shared> = OnceLock::new();
+        let dir = &SHARED
+            .get_or_init(|| {
+                let tree = tree("config-tests");
+                let path = tree.path().to_path_buf();
+                Shared { _tree: tree, path }
+            })
+            .path;
         let path = dir.join(name);
         fs::write(&path, content).expect("write scratch file");
         path
     }
 
     fn missing() -> PathBuf {
-        static PATH: OnceLock<PathBuf> = OnceLock::new();
-        PATH.get_or_init(|| {
-            let dir =
-                env::temp_dir().join(format!("upstroke-config-nopools-{}", std::process::id()));
-            fs::create_dir_all(&dir).expect("scratch dir");
-            let path = dir.join("pools.toml");
-            fs::write(
-                &path,
-                "# no pools
+        static SHARED: OnceLock<Shared> = OnceLock::new();
+        SHARED
+            .get_or_init(|| {
+                let tree = tree("config-nopools");
+                let path = tree.path().join("pools.toml");
+                fs::write(
+                    &path,
+                    "# no pools
 ",
-            )
-            .expect("empty pools file");
-            path
-        })
-        .clone()
+                )
+                .expect("empty pools file");
+                Shared { _tree: tree, path }
+            })
+            .path
+            .clone()
     }
 
     fn hermetic() -> PathBuf {
-        let dir = env::temp_dir().join(format!("upstroke-config-hermetic-{}", std::process::id()));
-        fs::create_dir_all(&dir).expect("hermetic dir");
-        dir
+        static SHARED: OnceLock<Shared> = OnceLock::new();
+        SHARED
+            .get_or_init(|| {
+                let tree = tree("config-hermetic");
+                let path = tree.path().to_path_buf();
+                Shared { _tree: tree, path }
+            })
+            .path
+            .clone()
     }
 
     #[test]

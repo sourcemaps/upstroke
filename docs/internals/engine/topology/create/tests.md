@@ -235,9 +235,14 @@ Everything a run needs, assembled around whichever doubles a test wants.
 The run's Runner, which the caller owns because the capabilities it
 hands the probes are built from it and the pair together.
 
-## `impl<'a> Driver<'a>` › `fn leak_into_the_pair(&self, agent: &str) {`
+## `impl<'a> Driver<'a>` › `fn leak_into_the_pair(&self) {`
 
 Leave an unsettled registration in the granted pair.
+
+The stray is an unslotted identity, the shell probe's ordinal 7, because since
+PR11's broker the pair carries the slot table too: an agent probe's identity
+leaked here would hold that agent's slot, and the agent's real probe would be
+refused its pair at P4, before the append this fixture exists to reach.
 
 The balance check is only worth something if it reads a **populated**
 pair rather than an empty one it could never have failed on, and since a
@@ -634,7 +639,7 @@ reading any other would report the run clean and this assertion would fail.
 A probe that uses what it is handed, because P4 now refuses one that does
 not: the leak this test needs is seeded by the owner of the pair below.
 
-## `fn a_leaked_probe_registration_is_reported_by_the_append_error() {` › `driver.leak_into_the_pair(AGENT);`
+## `fn a_leaked_probe_registration_is_reported_by_the_append_error() {` › `driver.leak_into_the_pair();`
 
 Seeded by the owner of the pair, because a probe can no longer leak:
 what it is handed settles what it registers. The property under test is
@@ -1187,10 +1192,10 @@ failed. The `bf927f3` review's third P1.
 This asserts the counts, because the counts are what tell the two accounts
 apart: one process accounted, or two.
 
-## `fn the_creation_ledger_accounts_every_probe_process()` › `let slots = slots.lock().unwrap_or_else(PoisonError::into_inner);`
+## `fn the_creation_ledger_accounts_every_probe_process()` › `let slots = ledger.slots();`
 
-And the slot the failing process took was released, so a second agent
-could still be probed after this one refused.
+And the slot the failing process took was released, and nothing is left
+waiting, so a second agent could still be probed after this one refused.
 
 ## `struct OneAdapter {`
 
@@ -1240,7 +1245,7 @@ other pair for it to reach.**
 
 The measurement the row asks for, and it needs two pairs to be worth
 anything: a witness over one pair is true however many pairs exist. So a
-**second** pair is granted here, over its own ledger and its own slots, and
+**second** pair is granted here, over its own ledger and the slot table in it, and
 handed to nobody. The probe registers; the caller's pair accounts it; the
 second stays empty.
 
@@ -1377,22 +1382,29 @@ it registered on the failure path too.
 **The closing balance consumes both halves of the binding.**
 
 `permits.protocol` asks for "registered/completed/cancelled exactly once"
-and R4 for a pair given back; `ProbePair::balances` is the conjunction, and
-the slot half had no witness at all — the check was two field reads at the
-call site and every fixture that reached it had an empty `SlotAssertion`, so
-deleting the R4 conjunct changed nothing anybody could see.
+and R3 for a pair given back; `ProbePair::balances` answers both. Before
+PR11 they were two values — a ledger and a `SlotAssertion` — and the slot
+half had no witness at all: the check was two field reads at the call site
+and every fixture that reached it had an empty table, so deleting the slot
+conjunct changed nothing anybody could see. Since PR11's broker the table is
+inside the ledger and a pair is released only by settling the registration
+that holds it, so the two cannot disagree; what is left to show is that the
+balance reads both.
 
-Each half is driven on its own, so a balance that answered on one of them
-fails here rather than passing on the other's evidence.
+So it is driven through the states that tell them apart: a registration
+running with its pair held, a second request waiting behind it and then
+withdrawn — the pair still held, so no balance — and the first settled, which
+releases the pair and balances both.
 
-## `fn the_granted_pairs_balance_answers_for_the_ledger_and_the_slots() {` › `let id = PreflightIdentities::agent(AGENT, 0).expect("a probe identity");`
+## `fn the_granted_pairs_balance_answers_for_the_ledger_and_the_slots() {` › `let first = PreflightIdentities::agent(AGENT, 0).expect("a probe identity");`
 
-The R3 half: a registration that never settled.
+A registration running with its pair held.
 
-## `fn the_granted_pairs_balance_answers_for_the_ledger_and_the_slots() {` › `slots`
+## `fn the_granted_pairs_balance_answers_for_the_ledger_and_the_slots() {` › `let second = PreflightIdentities::agent(AGENT, 1).expect("a probe identity");`
 
-The R4 half: a pair taken and not given back. The ledger is clean
-throughout, so only the slot conjunct can answer.
+A request waiting for the one slot of `AGENT`, then withdrawn: granted
+nothing, and the table still does not balance, because the first holds its
+pair.
 
 ## `fn the_deletion_boundary_falls_between_p5_and_p5b() {`
 
@@ -1527,3 +1539,34 @@ nothing, so there is no event to replay. `startup::tests` carries the same prefi
 the funnels, with the error at the coordinate returned rather than fatal. Its fixture is built
 with `Fixture::at` inside a `rundir::scratch_tree` tree the witness holds, reclaimed when the
 witness returns and when it unwinds.
+
+## `impl crate::runner::container::runtime::ContainerRuntime for Inventory` › `fn reaper_program(&self) -> PathBuf {`
+
+The inventory backs a `ContainerRunner`, so it names the fake's no-op program rather than
+keeping the trait's `docker` default, which would arm a reaper over the real CLI where one is on
+`PATH` and be refused where none is (PR11 follow-up A).
+
+## `fn create_over_containers(`
+
+A fresh run's creation with production `RunnerProbes` (the shell and one agent) over a
+`ContainerRunner`.
+
+## `fn a_fresh_runs_p4_probe_container_is_killed_by_its_reaper_before_run_started() {`
+
+`R7-D1`: the creator, in a child over the parent's fake, is killed inside its first P4 probe
+while the run directory is still a husk — before `run_started` — and the reaper its runner armed
+at that probe's cover lists it by its labels, kills and removes it, and lists again to find
+nothing, before any census. ST-16 (k)'s census path is unchanged for what the reaper leaves: the
+husk and the probe's intent and view.
+
+The relay is written by an isolated child of the test binary under a deadline
+(`FakeRuntime::install_reaper_relay`), so this test makes no host launch of its own
+(`FUA-I4-RELAY`, PR #328's implementation review round 4): a host launch ends in a wait for its
+reaper's acknowledged exit that is unbounded by design, and made here one stopped reaper held the
+test, and the suite with it.
+
+## `fn every_container_a_fresh_runs_creation_starts_is_covered_by_an_armed_reaper_with_its_scope() {`
+
+The design property for creation: the shell and agent probes each start under an armed reaper
+whose scope selects their labels.
+

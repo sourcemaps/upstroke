@@ -8,7 +8,7 @@ reviewed_sha: db67a82b48f308d4b933830c57784a3e902c726b
 location: src/workspace_manager.rs:4833
 provenance: pre_existing
 first_bad: PR5-RD-003
-guard: an owner decision on which of `PR5-RD-003`'s two convergence rules gives way, taken up by the next change to the missing-store branch of `revalidate_removal_proving`
+guard: an owner decision on which of `PR5-RD-003`'s two convergence rules gives way, taken up with closure 3 of `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION` or by the next change to the missing-store branch of `revalidate_removal_proving` after #329
 ---
 
 ## Failure sequence
@@ -72,3 +72,18 @@ removal has pruned the store.
 Round 3 took the prune out of the empty-`commondir` branch, and
 `PR308-R3-SKIPPED-PRUNE-KEEPS-ANOTHER-RUNS-TORN-REGISTRATION` records what that cost, so the prune is the
 trade-off between the two findings and one change should settle both.
+
+## At #329's implementation (2026-10-03)
+
+**The engine no longer produces this state.** #329 removed every `git worktree prune` the manager ran: a forced removal
+deletes only the registration its scan bound to its own slot, and the store only when that leaves it empty
+(`remove_bound`; `reviews/2026-10-01-pr11-follow-up-b-record.md` §2.5 and §3.5). Step 2 above, another slot's removal ending in `git worktree prune`, no longer
+happens. That is this file's second shape, "no forced removal prunes an entry whose checkout may stand", and neither of
+§24's two rules gave way. Witnessed by `no_removal_prunes_another_processs_registration_and_the_store_goes_only_when_empty`.
+
+**What remains.** A prune no engine process starts (a user's, an agent's, Git's automatic or scheduled maintenance) can
+still empty the store while such a checkout stands, and the missing-store branch still refuses that checkout on every
+attempt. That is the store-gone shape of `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its closure 3.
+#329 changed the missing-store branch only to let an empty directory at the target bind nothing (the destination an add
+makes before Git runs), which a standing checkout is not, and took no owner decision, so this file stays open and its
+guard carries to that closure or the next change to the branch.

@@ -26,8 +26,10 @@ have.
 
 `PR6-LANEF-004`: this file states its level **of its own** rather than
 inheriting the Container funnel's inner `#![allow(...)]` through the module
-tree. `resolve.rs`, the production half, carries `#![deny(...)]` for all
-three and reaches no denied primitive at all.
+tree. `resolve.rs`, the production half, reaches no denied primitive at all
+and, since #318 (2026-09-23), forbids all three in the production build --
+`cfg_attr(not(test), forbid(..))` for the two lints this module allows, a
+plain `forbid` for `disallowed_macros`; it carried `#![deny(...)]` before.
 
 WHAT IT NEEDS THE ALLOW FOR, and the residual is stated rather than implied:
 it builds real temporary Git repositories (`std::process::Command` running
@@ -714,7 +716,7 @@ The recording is the point: an empty log proves the command refused before
 pre-flight ever tried to resolve an agent, which is what "before any effect"
 buys and what a refusal returning the right message would not.
 
-## `fn temp_repo(tag: &str) -> PathBuf {`
+## `fn temp_repo(tag: &str) -> (ScratchTree, PathBuf) {`
 
 A clean repository with a two-task plan, seeded and committed.
 

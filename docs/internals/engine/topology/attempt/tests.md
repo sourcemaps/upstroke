@@ -25,16 +25,17 @@ the test writes what the worker would have written.
 
 ## `struct Process {`
 
-Every invocation identity of an attempt, and its ledger and slot table.
+The process-lifetime ledger of the attempts a test drives: R4, with R3's
+slot table inside it.
 
-A helper rather than a repeated block, because the two ledgers are
-process-lifetime state that must be *one* per run: a test that built a fresh
-[`SlotAssertion`] per call would assert a single slotted invocation against
-an empty table and never see the overlap the assertion exists to catch.
+A helper rather than a repeated block, because the ledger is process-lifetime
+state that must be *one* per run: a test that built a fresh ledger per call
+would register every slotted invocation against an empty table and never see
+the hold the table exists to see.
 
 ## `impl Process` › `fn balances(&self) -> bool {`
 
-The two process-end conditions, together.
+The process-end condition: every registration settled, every pair released.
 
 ## `macro_rules! context {`
 
@@ -102,22 +103,55 @@ witness below puts after the charge.
 `run.rs`'s `SpendAccount`, which is private to it: the run total a ceiling
 reads, and the records an unavailable terminal carries out.
 
-## `fn a_completed_review_is_charged_before_its_identity_is_settled() {`
+## `fn a_completed_review_is_charged_before_its_processes_are_checked_against_the_grant() {`
 
 **A review pass that returned, billed, is charged before anything fallible runs
 after it.**
 
-PR8-R2-CHARGE-ORDER. Settling the identities the pass reports is fallible — an
-identity already registered is refused — and a refusal there must not discard a
-cost the agent has already incurred. A completed, billed review whose cost is
-carried nowhere is the defect this pull request exists to close; after the
-record gained the charge, the ordering is the whole of what keeps it closed on
-this path.
+PR8-R2-CHARGE-ORDER. What follows a pass is fallible — since PR11, first of all
+the check that every process the pass reports ran through the slot pair it was
+handed — and a refusal there must not discard a cost the agent has already
+incurred. A completed, billed review whose cost is carried nowhere is the
+defect PR8's change existed to close; after the record gained the charge, the
+ordering is the whole of what keeps it closed on this path.
 
-The duplicate registration is injected. Ordinary scheduler generation of a
-duplicate review identity is not established, here or in the review that found
-this; what is established is that no fallible step may sit between the pass
-returning and the charge.
+The fault is injected: the double reports one process and runs it nowhere.
+This test used to inject a duplicate registration of the identity the pass
+reported, because the judge then registered a pass's identities after it
+returned; since the broker registers them before each process starts
+(`PR7-R3-ATTEMPT-002`), the fallible step after the pass is the grant check,
+and that is what is driven here. What is established is unchanged: no
+fallible step may sit between the pass returning and the charge.
+
+## `struct ContendingReview<'r> {`
+
+A review pass that proves, mid-run, that its pair is held: it runs its pass
+on another thread with the scaffold runner holding it, then asks the runner
+it was handed for a second process of the same agent — the re-ask — while the
+first is still running.
+
+## `impl ReviewPasses for ContendingReview<'_>` › `self.recording.stop_holding();`
+
+The second request must not hang the test if a regression lets it reach the
+runner: with the hold lifted it would return at once, and its `expect_err`
+would fail instead.
+
+## `fn a_review_pass_registers_and_holds_its_pair_while_its_process_runs() {`
+
+**The witness for `PR7-R3-ATTEMPT-002-REVIEWERS-TAKE-NO-SLOT`.** A review pass
+reached the Runner through the `ReviewPasses` seam with the raw runner and was
+entered in the ledger only after it returned, so it held no slot while it ran.
+
+Here a real [`Judge`] runs one review pass whose process the scaffold runner
+holds mid-run. While it runs, a second process of the same agent is refused
+by the broker — at `max_per_agent = 1`, with INV-18's sentence — naming the
+running pass as the holder: so the pass was registered and granted its pair
+before its process started, and holds it while the process runs. Afterwards
+the worker and the pass each took and released their pair once, the refused
+process was withdrawn without reaching the Runner, and the ledger balances.
+
+The broker's own half — a reviewer and a worker of one agent serialize on its
+slot — is `permits::tests::a_reviewer_and_a_worker_of_one_agent_never_hold_its_slot_at_once`.
 
 ## `fn a_refused_gate_ends_the_set_and_its_cause_survives() {`
 
@@ -269,7 +303,7 @@ The exclusion is the whole content of the clause — "gate invocations and the
 shell probe acquire no slot" — and a scheduler that gave a gate one would
 halve the parallelism of every run without failing anything else. It is
 asserted from **both** sides: [`is_slotted`] over each identity, and the
-[`SlotAssertion`] refusing a gate outright.
+ledger refusing a gate a pair outright.
 
 ## `fn gates_take_no_slot_and_the_worker_and_reviewers_do()` › `let assessed = context!(run, process)`
 
@@ -437,8 +471,8 @@ test's own act and not part of what the retry did.
 
 ## `fn a_refused_slot_acquisition_settles_the_registration_it_took() {`
 
-**R4 / `permits.protocol`.** A slot acquisition the assertion refuses must
-not leave the invocation registered.
+**R4 / `permits.protocol`.** A pair the synchronous substrate cannot be
+granted must not leave the invocation registered.
 
 "The invocation ledger records registered/completed/cancelled exactly once
 and **balances at process end**", and [`InvocationLedger::balances`] states
@@ -449,19 +483,23 @@ abandon a `Running` entry — and at process end that entry is
 check that cannot tell a bookkeeping mistake from a lost process reports
 both or neither.
 
-The refusal is driven the way a real one arrives: a pair is already held.
-At `max_parallel = 1` [`SlotAssertion`] refuses rather than queues, which is
-its whole purpose, so this is the refusal the substrate actually produces
-rather than a synthetic error injected at the seam.
+The refusal is driven the way a real one arrives: a pair is already held. The
+synchronous substrate cannot wait for it — INV-18, "The coordinator never
+blocks on an entitlement, provisional reservation, or slot" — so the worker's
+request is withdrawn and refused, and the test pins that sentence rather than
+any wording about how the substrate implements it. This is the refusal the
+substrate actually produces rather than a synthetic error injected at the
+seam.
 
-The held pair is deliberately **not** registered in the ledger, so the
-ledger's own balance is a statement about the worker alone: after the
-refusal nothing is running, one entry is cancelled, and none is completed.
+The hold is an agent probe of the worker's agent, registered with its pair
+under the pre-flight's standing: the order rule admits a probe without a
+pipeline, and the worker cannot tell whose hold it is. After the refusal the
+worker's registration is cancelled once, nothing is left waiting, and when
+the squatter's own process ends the ledger balances.
 
-## `fn a_refused_slot_acquisition_settles_the_registration_it_took() {` › `let squatter = AttemptIdentities::new(ALPHA, GenerationId(9), AttemptNumber(9)).worker();`
+## `fn a_refused_slot_acquisition_settles_the_registration_it_took() {` › `let squatter = crate::engine::topology::identity::PreflightIdentities::agent(AGENT, 9)`
 
-Something else holds the one pair. `cancel_all_running` is not involved:
-this invocation is in the slot table and not in the ledger.
+Something else holds the one pair of the worker's agent.
 
 ## `fn a_refused_slot_acquisition_settles_the_registration_it_took() {` › `assert_eq!(`
 
@@ -733,13 +771,14 @@ The in-flight *invocation* is built directly, because a synchronous
 substrate cannot leave one any other way: `Runner::run` returns before the
 coordinator can observe a halt, so a registration that never settled is
 exactly the state a halt arriving **during** a run leaves, and the honest
-way to test the cancellation is to put the ledgers in it. Both ledgers are
-then required to balance, which is the process-end condition
-`permits.protocol` states.
+way to test the cancellation is to put the ledger in it. The ledger — its slot
+table included — is then required to balance, which is the process-end
+condition `permits.protocol` states.
 
 ## `fn halt_cancels_in_flight_attempt()` › `let reviewer = started.identities.review_pass(0, 0);`
 
-A reviewer whose completion never ran, holding the pair its role takes.
+A reviewer whose completion never ran, holding the pair its role takes,
+registered with the attempt's standing read from the fold.
 
 ## `fn stage_elements() -> Vec<ResidueElement> {`
 
@@ -1485,3 +1524,12 @@ disk), stages the resolution, keeps every spelling of the name out of the
 candidate where the two are one file, and removes it under that spelling;
 where they are two files, the variant is a second file of the repository's,
 captured as one, and the manifest spelt as written is excluded and removed.
+
+## `fn the_registration_notes_keep_an_invocation_whose_process_is_unresolved() {`
+
+Review round 2's `R2-REG-2` (the PR11 record, §13, round R2). The `execute` section of
+`docs/internals/engine/topology/attempt.md` said an invocation is ended completed or cancelled and that
+both of the Runner call's answers settle its registration — false since round R1, where an unresolved
+end keeps the registration running and its pair held until this process exits
+(`InvocationLedger::end`). The pin holds the retention, in both of the section's paragraphs that state
+it, and that the two retired sentences do not come back.

@@ -2,12 +2,13 @@
 
 // Allowlist placement: the funnel section of `effects/allowlist.toml`, which
 // carries this module's review clause. `effect_site_inventory.mechanism` (2).
-#![allow(
-    clippy::disallowed_methods,
-    clippy::disallowed_types,
-    clippy::disallowed_macros
+#![allow(clippy::disallowed_types)]
+#![cfg_attr(
+    not(test),
+    forbid(clippy::disallowed_methods, clippy::disallowed_macros)
 )]
 
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -16,12 +17,13 @@ use std::sync::{Mutex, PoisonError};
 
 use crate::agent::proc::{self, NoHooks, SpawnHooks};
 use crate::agent::{ProcessOutput, claude, codex, copilot};
-use crate::error::UpstrokeError;
+use crate::error::{ProcessFate, UpstrokeError};
 use crate::gates::ShellKind;
 use crate::runner::invocation::InvocationId;
 use crate::runner::policy::{host_policy, runner_policy_sha256};
 use crate::runner::{
-    AgentId, CommandSpec, ExecutionRole, ProbeTarget, Runner, RunnerError, RunnerRequest,
+    AgentId, CommandSpec, ExecutionRole, ProbeTarget, RunFuture, Runner, RunnerCall, RunnerError,
+    RunnerRequest,
 };
 use crate::topology::effects::ProcessSite;
 use crate::topology::events::RunnerPolicy;
@@ -30,7 +32,10 @@ mod probe;
 pub use self::probe::{SHELL_PROBE_COMMAND, SHELL_PROBE_TIMEOUT, run_shell_probe};
 
 mod environment;
-pub use self::environment::{HostEnvironment, KeyCase, ObjectGraph};
+pub use self::environment::{
+    CONFIG_PARAMETERS, GitdirRule, HostEnvironment, KeyCase, ManagedRepository, ObjectGraph,
+    RECORDED_OBJECTS_INCLUDE,
+};
 
 pub const RESERVED_ALWAYS: &[&str] = &["PATH", "HOME", "USERPROFILE"];
 
@@ -67,15 +72,18 @@ const fn supplies_credentials(role: &ExecutionRole) -> bool {
 // This runner owns both locks. `resolved` serializes each program lookup and
 // caches its success or error before releasing the guard. Concurrent callers
 // reuse that result. It is released before `hooks` is acquired; the locks never
-// nest. `hooks` gives one caller exclusive access to the mutable observer during
-// startup or an entire supervised run, so callers on one runner wait their turn.
-// Guards release on return or unwind. Poisoned locks retain their inner state;
-// child cleanup during a run belongs to the process funnel's RAII owners.
+// nest. `hooks` exists only when a runner-level observer was installed, and then
+// gives one caller exclusive access to it during startup or an entire supervised
+// run, so callers on one runner wait their turn. A call that carries its own
+// observer, or a runner with none installed, takes no `hooks` guard, and its
+// invocations run at once. Guards release on return or unwind. Poisoned locks
+// retain their inner state; child cleanup during a run belongs to the process
+// funnel's RAII owners.
 pub struct HostRunner {
     policy: RunnerPolicy,
     digest: String,
     environment: HostEnvironment,
-    hooks: Mutex<Box<dyn SpawnHooks + Send>>,
+    hooks: Option<Mutex<Box<dyn SpawnHooks + Send>>>,
     resolved: Mutex<BTreeMap<ProgramQuestion, Result<PathBuf, String>>>,
 }
 
@@ -111,15 +119,16 @@ impl HostRunner {
             policy,
             digest,
             environment: HostEnvironment::from_process(),
-            hooks: Mutex::new(Box::new(NoHooks)),
+            hooks: None,
             resolved: Mutex::new(BTreeMap::new()),
         }
     }
 
     #[must_use]
-    pub fn for_legacy_workspace() -> Self {
-        Self::new()
-            .with_environment(HostEnvironment::from_process().reading(ObjectGraph::AsReplaced))
+    pub fn for_legacy_workspace(repository: ManagedRepository) -> Self {
+        Self::new().with_environment(
+            HostEnvironment::from_process().reading(ObjectGraph::RecordedIn(repository)),
+        )
     }
 
     #[must_use]
@@ -131,7 +140,7 @@ impl HostRunner {
     #[must_use]
     pub fn with_hooks(self, hooks: Box<dyn SpawnHooks + Send>) -> Self {
         Self {
-            hooks: Mutex::new(hooks),
+            hooks: Some(Mutex::new(hooks)),
             ..self
         }
     }
@@ -152,8 +161,13 @@ impl HostRunner {
     }
 
     pub fn start_write_command(&self) -> Result<Contained, UpstrokeError> {
-        let mut hooks = self.hooks.lock().unwrap_or_else(PoisonError::into_inner);
-        contain_write_command(&mut **hooks)
+        match &self.hooks {
+            Some(hooks) => {
+                let mut hooks = hooks.lock().unwrap_or_else(PoisonError::into_inner);
+                contain_write_command(&mut **hooks)
+            }
+            None => contain_write_command(&mut NoHooks),
+        }
     }
 
     pub fn shell_probe(
@@ -196,7 +210,30 @@ impl HostRunner {
 }
 
 impl Runner for HostRunner {
-    fn run(&self, request: &RunnerRequest) -> Result<ProcessOutput, RunnerError> {
+    fn run<'a>(&'a self, request: &'a RunnerRequest, call: RunnerCall<'a>) -> RunFuture<'a> {
+        Box::pin(async move { self.supervise(request, call) })
+    }
+}
+
+impl HostRunner {
+    fn supervise(
+        &self,
+        request: &RunnerRequest,
+        call: RunnerCall<'_>,
+    ) -> Result<ProcessOutput, RunnerError> {
+        let parts = call.into_parts();
+        let cancellation = parts.cancellation;
+        if cancellation.is_cancelled() {
+            return Err(RunnerError::cancelled(
+                &request.invocation,
+                ProcessFate::NeverStarted,
+            ));
+        }
+        if let ObjectGraph::RecordedIn(repository) = self.environment.objects() {
+            repository
+                .verify_include()
+                .map_err(|error| RunnerError::never_started(&request.invocation, error))?;
+        }
         let composed = self
             .environment
             .compose(&request.role, request.agent.as_ref(), &request.command.env)
@@ -208,16 +245,47 @@ impl Runner for HostRunner {
         command.current_dir(&request.workspace);
         command.env_clear();
         command.envs(composed);
-        let mut hooks = self.hooks.lock().unwrap_or_else(PoisonError::into_inner);
-        proc::run_with_timeout_classified(
-            ProcessSite::Spawn,
-            ProcessSite::Terminate,
-            command,
-            &request.command.stdin,
-            request.timeout,
-            &mut **hooks,
-        )
-        .map_err(|failure| RunnerError::new(&request.invocation, failure.fate, failure.error))
+        let stopped = Cell::new(false);
+        let stop = || {
+            let requested = cancellation.is_cancelled();
+            if requested {
+                stopped.set(true);
+            }
+            requested
+        };
+        let leases = parts.leases;
+        let supervised = |hooks: &mut dyn SpawnHooks| {
+            proc::run_with_timeout_classified(
+                ProcessSite::Spawn,
+                ProcessSite::Terminate,
+                command,
+                &request.command.stdin,
+                request.timeout,
+                leases,
+                &stop,
+                hooks,
+            )
+        };
+        let outcome = match (parts.spawn, &self.hooks) {
+            (Some(observer), _) => supervised(observer),
+            (None, Some(hooks)) => {
+                let mut hooks = hooks.lock().unwrap_or_else(PoisonError::into_inner);
+                supervised(&mut **hooks)
+            }
+            (None, None) => supervised(&mut NoHooks),
+        };
+        match outcome {
+            Ok(_) if stopped.get() => Err(RunnerError::cancelled(
+                &request.invocation,
+                ProcessFate::Gone,
+            )),
+            Ok(output) => Ok(output),
+            Err(failure) => Err(RunnerError::new(
+                &request.invocation,
+                failure.fate,
+                failure.error,
+            )),
+        }
     }
 }
 
@@ -257,10 +325,8 @@ fn cmd_switch_index(program: &Path, spec: &CommandSpec) -> Option<usize> {
 mod naming;
 use self::naming::{ProgramNaming, composed_value, resolve_program};
 
-thread_local! {
-    static RESOLUTIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-    static SEARCHES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-}
+mod counters;
+use self::counters::{ESTABLISHMENTS, RESOLUTIONS, SEARCHES};
 
 #[must_use]
 pub fn program_resolutions() -> u64 {
@@ -293,10 +359,6 @@ mod proof {
 }
 
 pub use self::proof::{Contained, contain_write_command};
-
-thread_local! {
-    static ESTABLISHMENTS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-}
 
 #[must_use]
 pub fn containment_establishments() -> u64 {

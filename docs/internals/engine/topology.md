@@ -128,6 +128,13 @@ the facade re-exports them and denies these same three lints, and
 `effects::tests::the_engine_facade_allows_no_governed_lint_and_refuses_both_escape_routes`
 holds that of every module this subtree descends from.
 
+## `pub mod coordinator;`
+
+PR11 phase 3's Tokio coordinator: [`TopologyRun::run_concurrently`], additive
+beside [`TopologyRun::step`], which stays the width-1 path. Both run every transition through the same functions in `run`;
+the coordinator runs an attempt's and a verification's bodies on pipeline
+threads. Neither is a production path yet (PR12).
+
 ## `pub mod preflight;`
 
 The schema-4 attempt-plan assembler, which lives engine-side.

@@ -87,7 +87,7 @@ impl AgentAdapter for CodexAdapter {
     fn probe(&self, runner: &dyn Runner) -> Result<Caps, UpstrokeError> {
         let invocation = cli();
         let out = runner
-            .run(&probe_request(
+            .run_blocking(&probe_request(
                 ADAPTER_ID,
                 invocation.spec(&["--version".to_owned()])?,
                 probe_ordinal::VERSION,
@@ -121,14 +121,14 @@ impl AgentAdapter for CodexAdapter {
         }
         let version = bin::extract_version(&out.stdout);
 
-        let fresh_help = runner.run(&probe_request(
+        let fresh_help = runner.run_blocking(&probe_request(
             ADAPTER_ID,
             invocation.spec(&["exec".to_owned(), "--help".to_owned()])?,
             probe_ordinal::EXEC_HELP,
             PROBE_TIMEOUT,
         )?)?;
         let fresh_help = checked_help(&invocation.display(), "exec", &fresh_help)?;
-        let resume_help = runner.run(&probe_request(
+        let resume_help = runner.run_blocking(&probe_request(
             ADAPTER_ID,
             invocation.spec(&["exec".to_owned(), "resume".to_owned(), "--help".to_owned()])?,
             probe_ordinal::RESUME_HELP,
@@ -138,7 +138,7 @@ impl AgentAdapter for CodexAdapter {
         validate_probe_contract(&version, &fresh_help, &resume_help)?;
         validate_effort_config_key(runner, &invocation, &version)?;
 
-        let models = runner.run(&probe_request(
+        let models = runner.run_blocking(&probe_request(
             ADAPTER_ID,
             invocation.spec(&["debug".to_owned(), "models".to_owned()])?,
             probe_ordinal::PROBE_MODELS,
@@ -173,7 +173,7 @@ impl AgentAdapter for CodexAdapter {
     fn discover(&self, runner: &dyn Runner, _caps: &Caps) -> Result<Discovery, UpstrokeError> {
         let invocation = cli();
         let out = runner
-            .run(&probe_request(
+            .run_blocking(&probe_request(
                 ADAPTER_ID,
                 invocation.spec(&["login".to_owned(), "status".to_owned()])?,
                 probe_ordinal::LOGIN_STATUS,
@@ -183,7 +183,7 @@ impl AgentAdapter for CodexAdapter {
                 bin::boundary_refused(CLI, INSTALL_HINT, &UpstrokeError::from(cause))
             })?;
         let mut discovery = parse_login_status(&out);
-        let models = runner.run(&probe_request(
+        let models = runner.run_blocking(&probe_request(
             ADAPTER_ID,
             invocation.spec(&["debug".to_owned(), "models".to_owned()])?,
             probe_ordinal::DISCOVER_MODELS,
@@ -384,7 +384,7 @@ fn run_config_parser_probe(
     schema_path: &std::path::Path,
     ordinal: u32,
 ) -> Result<ProcessOutput, UpstrokeError> {
-    Ok(runner.run(&probe_request(
+    Ok(runner.run_blocking(&probe_request(
         ADAPTER_ID,
         invocation.spec(&config_probe_args(surface, assignment, schema_path))?,
         ordinal,
@@ -1351,8 +1351,8 @@ mod tests {
         }
     }
 
-    impl Runner for RecordingRunner {
-        fn run(
+    impl crate::runner::contract::tests::InlineRunner for RecordingRunner {
+        fn run_inline(
             &self,
             request: &crate::runner::RunnerRequest,
         ) -> Result<ProcessOutput, crate::runner::RunnerError> {

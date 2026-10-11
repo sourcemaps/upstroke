@@ -11,6 +11,7 @@ use std::sync::Arc;
 use super::*;
 use crate::gates::ShellKind;
 use crate::rundir::RunPaths;
+use crate::rundir::scratch_tree::ScratchTree;
 use crate::runner::container::intent::LABEL_PRIVATE_ROOT;
 use crate::runner::container::runtime::{
     ContainerExecution, ContainerTrace, CreatedContainer, DiscoveredContainer, ImageInspection,
@@ -187,11 +188,12 @@ impl ContainerRuntime for Runtime {
     fn collect(&self, name: &str) -> Result<ContainerExecution, RuntimeError> {
         self.0.fake.collect(name)
     }
-    fn create(&self, spec: &CreateSpec) -> Result<CreatedContainer, RuntimeError> {
-        self.0.fake.create(spec)
+    fn create(&self, covered: CoveredCreate<'_>) -> Result<CreatedContainer, RuntimeError> {
+        self.0.fake.create(covered)
     }
-    fn start(&self, name: &str) -> Result<(), RuntimeError> {
-        self.0.fake.start(name)?;
+    fn start(&self, covered: CoveredStart<'_>) -> Result<(), RuntimeError> {
+        let name = covered.name();
+        self.0.fake.start(covered)?;
         if self.0.exit_on_start {
             self.0.fake.set_container_state(name, Liveness::Exited);
             if let Some(execution) = self
@@ -212,9 +214,16 @@ impl ContainerRuntime for Runtime {
     fn remove(&self, name: &str) -> Result<Settled, RuntimeError> {
         self.0.fake.remove(name)
     }
+    fn reaper_program(&self) -> PathBuf {
+        self.0.fake.reaper_program()
+    }
 }
 
 struct Fixture {
+    /// The guard over the root [`Fixture::new`] acquired, kept for the
+    /// fixture's whole life so the tree is reclaimed when it drops -- on a
+    /// panicking assertion as much as on a normal return.
+    _tree: ScratchTree,
     root: PathBuf,
     repo: PathBuf,
     private_root: PathBuf,
@@ -227,36 +236,103 @@ struct Fixture {
     runtime: Runtime,
 }
 
-impl Fixture {
-    fn new(tag: &str, exit_on_start: bool) -> Self {
-        let root = repo::scratch(tag);
-        let repo_dir = root.join("repo");
-        let (head, _) = repo::repository(&repo_dir);
+struct Layout {
+    repo: PathBuf,
+    private_root: PathBuf,
+    paths: RunPaths,
+    task_a: PathBuf,
+    task_b: PathBuf,
+    merge: PathBuf,
+}
+
+impl Layout {
+    fn of(root: &std::path::Path) -> Self {
+        let repo = root.join("repo");
         let private_root = root.join("private");
-        let paths = RunPaths::with_private_root(&repo_dir, RUN_ID, &private_root);
-        paths.create().expect("the run's two halves");
-        std::fs::write(paths.events(), format!("{EVENT_LOG_MARKER}\n")).expect("the public log");
+        let paths = RunPaths::with_private_root(&repo, RUN_ID, &private_root);
+        let execution_root =
+            crate::workspace_manager::execution_root_of(&private_root, repo_key(), RUN_ID);
+        Self {
+            task_a: execution_root.join("tasks").join("kalpha-g0"),
+            task_b: execution_root.join("tasks").join("kbeta-g0"),
+            merge: execution_root.join("merge").join("s0"),
+            repo,
+            private_root,
+            paths,
+        }
+    }
+
+    fn build(&self) {
+        let (head, _) = repo::repository(&self.repo);
+        self.paths.create().expect("the run's two halves");
+        std::fs::write(self.paths.events(), format!("{EVENT_LOG_MARKER}\n"))
+            .expect("the public log");
         std::fs::write(
-            paths.transcripts().join("k0-a1.md"),
+            self.paths.transcripts().join("k0-a1.md"),
             "PRIVATE-TRANSCRIPT-a5f2\n",
         )
         .expect("a private artifact");
         std::fs::create_dir_all(crate::runner::container::intent::containers_dir(
-            &private_root,
+            &self.private_root,
         ))
         .expect("the container namespace");
-
-        let execution_root =
-            crate::workspace_manager::execution_root_of(&private_root, repo_key(), RUN_ID);
-        let task_a = execution_root.join("tasks").join("kalpha-g0");
-        let task_b = execution_root.join("tasks").join("kbeta-g0");
-        let merge = execution_root.join("merge").join("s0");
-        for at in [&task_a, &task_b, &merge] {
-            repo::worktree(&repo_dir, at, &head);
+        for at in [&self.task_a, &self.task_b, &self.merge] {
+            repo::worktree(&self.repo, at, &head);
         }
-        std::fs::write(task_b.join("sibling.txt"), "SIBLING-WORKTREE-a5f2\n")
+        std::fs::write(self.task_b.join("sibling.txt"), "SIBLING-WORKTREE-a5f2\n")
             .expect("a sibling file");
+    }
+}
 
+#[cfg(unix)]
+const FIXTURE_ROOT: &str = "UPSTROKE_TEST_EXEC_FIXTURE_ROOT";
+
+#[cfg(unix)]
+const FIXTURE_CHILD_BOUND: Duration = Duration::from_secs(120);
+
+#[cfg(unix)]
+#[test]
+#[ignore = "isolated builder of Fixture::built_in_a_bounded_child"]
+fn fixture_tree_child() {
+    let root = PathBuf::from(std::env::var_os(FIXTURE_ROOT).expect("the parent names the root"));
+    Layout::of(&root).build();
+}
+
+impl Fixture {
+    fn new(tag: &str, exit_on_start: bool) -> Self {
+        let tree = repo::scratch(tag);
+        Layout::of(tree.path()).build();
+        Self::over(tree, exit_on_start)
+    }
+
+    #[cfg(unix)]
+    fn built_in_a_bounded_child(tag: &str, exit_on_start: bool) -> Self {
+        let tree = repo::scratch(tag);
+        let ended = crate::agent::proc::test_support::run_test_isolated(
+            "runner::container::exec::tests::fixture_tree_child",
+            &[(FIXTURE_ROOT, tree.path().as_os_str())],
+            FIXTURE_CHILD_BOUND,
+        );
+        assert!(
+            ended.status.is_some_and(|status| status.success())
+                && ended.stdout.contains("1 passed"),
+            "an isolated child of this test binary built the fixture's repository and \
+             worktrees under {} within {FIXTURE_CHILD_BOUND:?}: {ended}",
+            tree.path().display()
+        );
+        Self::over(tree, exit_on_start)
+    }
+
+    fn over(tree: ScratchTree, exit_on_start: bool) -> Self {
+        let root = tree.path().to_path_buf();
+        let Layout {
+            repo: repo_dir,
+            private_root,
+            paths,
+            task_a,
+            task_b,
+            merge,
+        } = Layout::of(&root);
         let trace = ContainerTrace::recording();
         Self {
             identity: RunIdentity {
@@ -268,6 +344,7 @@ impl Fixture {
             },
             runtime: Runtime::new(trace.clone(), exit_on_start),
             trace,
+            _tree: tree,
             root,
             repo: repo_dir,
             private_root,
@@ -609,7 +686,7 @@ fn the_runner_reports_what_it_established_about_the_process_when_it_fails() {
             runner = runner.with_hooks(Box::new(hooks));
         }
 
-        let error = runner.run(&request).expect_err(case);
+        let error = runner.run_blocking(&request).expect_err(case);
         assert_eq!(error.fate, cell.expected, "{case}: {error}");
         assert!(
             error.to_string().contains(cell.expected.describe()),
@@ -669,7 +746,7 @@ fn a_container_the_runtime_cannot_confirm_stopped_keeps_its_mounted_git_view_and
 
     let error = fixture
         .runner()
-        .run(&request)
+        .run_blocking(&request)
         .expect_err("the runtime lost the gate");
     assert_eq!(error.fate, ProcessFate::Unresolved, "{error}");
     assert_eq!(
@@ -1218,7 +1295,7 @@ fn every_container_is_created_from_the_recorded_id_even_after_the_reference_move
     );
 
     fixture.trace.clear();
-    runner.run(&request).expect("runs");
+    runner.run_blocking(&request).expect("runs");
     assert_eq!(
         fixture
             .trace
@@ -1293,7 +1370,7 @@ fn a_substituted_reported_image_id_refuses_before_start_in_both_phases() {
             .fake()
             .substitute_reported_image_id(name.as_str(), OTHER_IMAGE_ID);
 
-        let refusal = runner.run(&request).expect_err("{phase}: refused");
+        let refusal = runner.run_blocking(&request).expect_err("{phase}: refused");
         let message = refusal.to_string();
         assert!(message.contains(IMAGE_ID), "{phase}: {message}");
         assert!(message.contains(OTHER_IMAGE_ID), "{phase}: {message}");
@@ -1590,7 +1667,9 @@ fn failing_preflight_probe_on_resume_refuses_before_recovery_event_and_reclaims_
                 Duration::from_secs(10),
             )
             .expect("an agent probe request");
-            let output = runner.run(&request).expect("the spawn itself succeeds");
+            let output = runner
+                .run_blocking(&request)
+                .expect("the spawn itself succeeds");
             assert_eq!(output.code, exit, "the CLI failed inside the image");
             assert!(output.stderr.contains("command not found"));
         }
@@ -1900,7 +1979,7 @@ fn a_completed_invocation_releases_in_the_contracts_order_and_reports_the_result
         ContainerName::new(repo_key(), RUN_ID, INCARNATION_1, &request.invocation).expect("a name");
 
     let output = runner
-        .run(&request)
+        .run_blocking(&request)
         .expect("a non-zero exit is not an error");
     assert_eq!(output.code, Some(3), "a non-zero exit is a ProcessOutput");
     assert_eq!(output.stdout, "the work is done\n");
@@ -1986,7 +2065,7 @@ fn a_container_that_outlives_its_timeout_is_stopped_and_removed() {
         ContainerName::new(repo_key(), RUN_ID, INCARNATION_1, &request.invocation).expect("a name");
 
     let output = runner
-        .run(&request)
+        .run_blocking(&request)
         .expect("a timeout is an output, not an error");
     assert!(output.timed_out);
     assert_eq!(
@@ -2059,7 +2138,7 @@ fn output_beyond_the_bound_is_truncated_and_reported_as_limited() {
             Duration::from_secs(10),
             gate_id(0),
         );
-        let output = runner.run(&request).expect("runs");
+        let output = runner.run_blocking(&request).expect("runs");
         assert_eq!(output.output_limited, limited, "{tag}");
         assert_eq!(output.stdout.len(), bytes.min(16), "{tag}");
         assert_eq!(output.code, Some(0), "{tag}: the exit status is held fixed");
@@ -2095,7 +2174,7 @@ fn a_credential_volume_is_never_created_or_pruned_by_any_disposition() {
                 Duration::from_secs(10),
                 worker_id(0),
             );
-            fixture.runner().run(&request).expect("completes");
+            fixture.runner().run_blocking(&request).expect("completes");
         }),
         ("cancelled by timeout", |fixture| {
             let mut request = worker_request(
@@ -2106,7 +2185,7 @@ fn a_credential_volume_is_never_created_or_pruned_by_any_disposition() {
                 worker_id(1),
             );
             request.timeout = Duration::ZERO;
-            fixture.runner().run(&request).expect("times out");
+            fixture.runner().run_blocking(&request).expect("times out");
         }),
         ("refused for a substituted image id", |fixture| {
             let request = worker_request(
@@ -2122,7 +2201,10 @@ fn a_credential_volume_is_never_created_or_pruned_by_any_disposition() {
                 .runtime
                 .fake()
                 .substitute_reported_image_id(name.as_str(), OTHER_IMAGE_ID);
-            fixture.runner().run(&request).expect_err("refuses");
+            fixture
+                .runner()
+                .run_blocking(&request)
+                .expect_err("refuses");
         }),
         ("refused at a funnel phase", |fixture| {
             let mut hooks = RecordingHooks::new(fixture.trace.clone());
@@ -2150,7 +2232,7 @@ fn a_credential_volume_is_never_created_or_pruned_by_any_disposition() {
                 worker_id(3),
             );
             runner
-                .run(&request)
+                .run_blocking(&request)
                 .expect_err("the funnel was made to fail");
         }),
         ("reclaimed as an orphan", |fixture| {
@@ -2270,7 +2352,7 @@ fn a_launch_that_fails_after_a_committed_effect_still_releases_everything() {
                 .expect("a name");
 
             let refusal = runner
-                .run(&request)
+                .run_blocking(&request)
                 .expect_err("the funnel was made to fail");
             assert!(
                 refusal.to_string().contains(site.name()),
@@ -2445,13 +2527,13 @@ fn every_at_run_end_outcome_is_driven_through_its_mechanism_and_the_ledgers_bala
 
         match mechanism {
             Mechanism::Complete => {
-                fixture.runner().run(&request).expect("completes");
+                fixture.runner().run_blocking(&request).expect("completes");
             }
             Mechanism::Cancel => {
                 let fixture = Fixture::new(&format!("outcome-{outcome}-live"), false);
                 let mut request = request.clone();
                 request.timeout = Duration::ZERO;
-                let output = fixture.runner().run(&request).expect("times out");
+                let output = fixture.runner().run_blocking(&request).expect("times out");
                 assert!(
                     output.timed_out,
                     "[{outcome}] the cancellation cell did not cancel anything"
@@ -2479,7 +2561,10 @@ fn every_at_run_end_outcome_is_driven_through_its_mechanism_and_the_ledgers_bala
                     .runtime
                     .fake()
                     .substitute_reported_image_id(name.as_str(), OTHER_IMAGE_ID);
-                fixture.runner().run(&request).expect_err("refuses");
+                fixture
+                    .runner()
+                    .run_blocking(&request)
+                    .expect_err("refuses");
             }
             Mechanism::Census => {
                 let mut hooks = RecordingHooks::new(fixture.trace.clone());
@@ -2998,7 +3083,7 @@ fn every_role_writes_and_syncs_its_own_six_field_intent_before_its_container_is_
         let name = ContainerName::new(repo_key(), RUN_ID, INCARNATION_1, &request.invocation)
             .expect("a name");
         expected.push((name.as_str().to_owned(), request.invocation.render()));
-        runner.run(request).expect("runs");
+        runner.run_blocking(request).expect("runs");
     }
 
     let seen = seen.lock().unwrap_or_else(PoisonError::into_inner).clone();
@@ -3119,7 +3204,7 @@ fn a_container_is_created_and_started_only_under_its_own_intent_record() {
         ContainerSite::Create,
         &fixture.runtime,
         &proof,
-        &spec,
+        CoveredCreate::without_a_reaper(&spec),
     )
     .expect_err("`other` has no record of its own");
     let message = refusal.to_string();
@@ -3142,7 +3227,7 @@ fn a_container_is_created_and_started_only_under_its_own_intent_record() {
         ContainerSite::Create,
         &fixture.runtime,
         &proof,
-        &plan.launch.spec,
+        CoveredCreate::without_a_reaper(&plan.launch.spec),
     )
     .expect("its own proof creates");
     assert_eq!(
@@ -3154,6 +3239,7 @@ fn a_container_is_created_and_started_only_under_its_own_intent_record() {
         ContainerSite::Start,
         &fixture.runtime,
         &proof,
+        CoveredStart::without_a_reaper(mine.as_str()),
     )
     .expect("and starts the container the proof names");
     assert_eq!(
@@ -3161,6 +3247,93 @@ fn a_container_is_created_and_started_only_under_its_own_intent_record() {
             .runtime
             .fake()
             .container(mine.as_str())
+            .map(|held| held.state),
+        Some(Liveness::Running)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_start_cover_starts_only_the_container_it_was_minted_for() {
+    let fixture = Fixture::built_in_a_bounded_child("start-cover-binding", false);
+    let mut hooks = RecordingHooks::new(fixture.trace.clone());
+    let plan = fixture
+        .runner()
+        .plan(&worker_request(
+            ShellKind::Sh.spec("exit 0"),
+            fixture.task_a.clone(),
+            AgentId::new("claude-code"),
+            Duration::from_secs(10),
+            worker_id(0),
+        ))
+        .expect("plans");
+    let other = ContainerName::new(repo_key(), RUN_ID, INCARNATION_1, &worker_id(1))
+        .expect("another worker's name");
+    let written = crate::runner::container::write_intent(
+        &mut hooks,
+        ContainerSite::WriteIntent,
+        &fixture.private_root,
+        &plan.launch.name,
+        &plan.launch.intent,
+    )
+    .expect("the record publishes and certifies");
+    crate::runner::container::create_container(
+        &mut hooks,
+        ContainerSite::Create,
+        &fixture.runtime,
+        &written,
+        CoveredCreate::without_a_reaper(&plan.launch.spec),
+    )
+    .expect("its own cover creates");
+
+    fixture.trace.clear();
+    let refused = crate::runner::container::start_container(
+        &mut hooks,
+        ContainerSite::Start,
+        &fixture.runtime,
+        &written,
+        CoveredStart::without_a_reaper(other.as_str()),
+    )
+    .expect_err("a cover minted for `other` does not start this container");
+    let message = refused.error.to_string();
+    assert!(
+        !refused.attempted,
+        "refused before the runtime was asked: {message}"
+    );
+    assert!(message.contains(other.as_str()), "{message}");
+    assert!(
+        message.contains("expected_failures_refusals[6]"),
+        "{message}"
+    );
+    assert_eq!(
+        fixture.trace.rendered(),
+        Vec::<String>::new(),
+        "the mismatch refused and something still happened: {:#?}",
+        fixture.trace.rendered()
+    );
+    assert_eq!(
+        fixture
+            .runtime
+            .fake()
+            .container(plan.launch.name.as_str())
+            .map(|held| held.state),
+        Some(Liveness::Exited),
+        "created, and still not started"
+    );
+
+    crate::runner::container::start_container(
+        &mut hooks,
+        ContainerSite::Start,
+        &fixture.runtime,
+        &written,
+        CoveredStart::without_a_reaper(plan.launch.spec.name.as_str()),
+    )
+    .expect("the cover minted for it starts it");
+    assert_eq!(
+        fixture
+            .runtime
+            .fake()
+            .container(plan.launch.name.as_str())
             .map(|held| held.state),
         Some(Liveness::Running)
     );
@@ -3220,7 +3393,7 @@ fn a_launch_that_fails_at_any_step_releases_everything_it_reached() {
                 fixture.runtime.fake().set_failing(RuntimeOp::Stop);
             }
 
-            let refusal = runner.run(&request).expect_err("the launch fails");
+            let refusal = runner.run_blocking(&request).expect_err("the launch fails");
             let message = refusal.to_string();
             assert!(
                 message.contains(marker),
@@ -3617,11 +3790,12 @@ fn real_docker_runs_from_the_recorded_image_id_and_composes_over_the_image_envir
         Err(reason) => return no_image(&reason),
     };
 
-    let root = repo::scratch("real-env");
+    let tree = repo::scratch("real-env");
+    let root = tree.path();
     let run_id = gated_run("env");
     let repo_dir = root.join("repo");
     repo::repository(&repo_dir);
-    let identity = real_identity(&root, &repo_dir, run_id);
+    let identity = real_identity(root, &repo_dir, run_id);
     let workspace = root.join("plain-workspace");
     std::fs::create_dir_all(&workspace).expect("a workspace");
     let _residue = LeaveNoResidue {
@@ -3675,7 +3849,7 @@ fn real_docker_runs_from_the_recorded_image_id_and_composes_over_the_image_envir
     );
     assert_eq!(plan.launch.spec.image_id, image_id);
 
-    let output = runner.run(&request).expect("runs");
+    let output = runner.run_blocking(&request).expect("runs");
     assert_eq!(output.code, Some(0), "stderr: {}", output.stderr);
     let line = |key: &str| -> String {
         output
@@ -3733,11 +3907,12 @@ fn real_docker_refuses_a_reviewer_write_to_its_read_only_mount() {
         Err(reason) => return no_image(&reason),
     };
 
-    let root = repo::scratch("real-ro");
+    let tree = repo::scratch("real-ro");
+    let root = tree.path();
     let run_id = gated_run("readonly");
     let repo_dir = root.join("repo");
     repo::repository(&repo_dir);
-    let identity = real_identity(&root, &repo_dir, run_id);
+    let identity = real_identity(root, &repo_dir, run_id);
     let _residue = LeaveNoResidue {
         docker: (*docker).clone(),
         private_root: identity.private_root.clone(),
@@ -3787,7 +3962,7 @@ fn real_docker_refuses_a_reviewer_write_to_its_read_only_mount() {
             Some(role_is_review),
             "{tag}: the mount disposition"
         );
-        let output = runner.run(&request).expect("runs");
+        let output = runner.run_blocking(&request).expect("runs");
         let wrote = workspace.join("probe.txt").exists();
         outcomes.push((
             tag,
@@ -3832,11 +4007,12 @@ fn real_docker_confines_a_gate_to_its_mount() {
         Err(reason) => return no_image(&reason),
     };
 
-    let root = repo::scratch("real-confine");
+    let tree = repo::scratch("real-confine");
+    let root = tree.path();
     let run_id = gated_run("confine");
     let repo_dir = root.join("repo");
     let (head, _) = repo::repository(&repo_dir);
-    let identity = real_identity(&root, &repo_dir, run_id);
+    let identity = real_identity(root, &repo_dir, run_id);
     let paths = RunPaths::with_private_root(&repo_dir, run_id, &identity.private_root);
     let execution_root =
         crate::workspace_manager::execution_root_of(&identity.private_root, repo_key(), run_id);
@@ -3894,7 +4070,7 @@ fn real_docker_confines_a_gate_to_its_mount() {
         Duration::from_secs(60),
         gate_id(0),
     );
-    let output = runner.run(&request).expect("runs");
+    let output = runner.run_blocking(&request).expect("runs");
 
     assert!(
         output.stdout.contains("MY-OWN-WORKTREE-a5f2"),
@@ -3939,11 +4115,12 @@ fn real_docker_a_gate_write_outside_every_declared_mount_fails() {
         Err(reason) => return no_image(&reason),
     };
 
-    let root = repo::scratch("real-outside");
+    let tree = repo::scratch("real-outside");
+    let root = tree.path();
     let run_id = gated_run("outside");
     let repo_dir = root.join("repo");
     let (head, _) = repo::repository(&repo_dir);
-    let identity = real_identity(&root, &repo_dir, run_id);
+    let identity = real_identity(root, &repo_dir, run_id);
     let execution_root =
         crate::workspace_manager::execution_root_of(&identity.private_root, repo_key(), run_id);
     let mine = execution_root.join("tasks").join("kalpha-g0");
@@ -4001,7 +4178,7 @@ fn real_docker_a_gate_write_outside_every_declared_mount_fails() {
     }
     assert!(plan.launch.spec.read_only_root);
 
-    let output = runner.run(&request).expect("runs");
+    let output = runner.run_blocking(&request).expect("runs");
     let said = |path: &str| -> String {
         output
             .stdout
@@ -4049,11 +4226,12 @@ fn real_docker_the_daemon_holds_exactly_the_specs_mounts_and_a_read_only_root() 
         Err(reason) => return no_image(&reason),
     };
 
-    let root = repo::scratch("real-daemonspec");
+    let tree = repo::scratch("real-daemonspec");
+    let root = tree.path();
     let run_id = gated_run("daemonspec");
     let repo_dir = root.join("repo");
     let (head, _) = repo::repository(&repo_dir);
-    let identity = real_identity(&root, &repo_dir, run_id);
+    let identity = real_identity(root, &repo_dir, run_id);
     let execution_root =
         crate::workspace_manager::execution_root_of(&identity.private_root, repo_key(), run_id);
     let mine = execution_root.join("tasks").join("kalpha-g0");
@@ -4117,7 +4295,7 @@ fn real_docker_the_daemon_holds_exactly_the_specs_mounts_and_a_read_only_root() 
         ContainerSite::Create,
         docker.as_ref(),
         &written,
-        &plan.launch.spec,
+        CoveredCreate::without_a_reaper(&plan.launch.spec),
     )
     .expect("created");
 
@@ -4220,11 +4398,12 @@ fn real_docker_a_worktree_binary_cannot_shadow_the_certified_cli() {
         Err(reason) => return no_image(&reason),
     };
 
-    let root = repo::scratch("real-shadow");
+    let tree = repo::scratch("real-shadow");
+    let root = tree.path();
     let run_id = gated_run("shadow");
     let repo_dir = root.join("repo");
     let (head, _) = repo::repository(&repo_dir);
-    let identity = real_identity(&root, &repo_dir, run_id);
+    let identity = real_identity(root, &repo_dir, run_id);
     let execution_root =
         crate::workspace_manager::execution_root_of(&identity.private_root, repo_key(), run_id);
     let mine = execution_root.join("tasks").join("kalpha-g0");
@@ -4255,7 +4434,7 @@ fn real_docker_a_worktree_binary_cannot_shadow_the_certified_cli() {
     .expect("a container policy")
     .with_poll(Duration::from_millis(10));
     let refusal = hostile
-        .run(&gate_request(
+        .run_blocking(&gate_request(
             ShellKind::Sh.spec("claude"),
             mine.clone(),
             Duration::from_secs(60),
@@ -4303,7 +4482,7 @@ fn real_docker_a_worktree_binary_cannot_shadow_the_certified_cli() {
 
     let mut answers: Vec<(&str, BTreeMap<String, String>)> = Vec::new();
     for (tag, request) in [("the attempt", gate), ("the probe", probe)] {
-        let output = runner.run(&request).expect("runs");
+        let output = runner.run_blocking(&request).expect("runs");
         assert_eq!(output.code, Some(0), "{tag}: stderr {}", output.stderr);
         let mut read = BTreeMap::new();
         for line in output.stdout.lines() {
@@ -4361,12 +4540,13 @@ fn real_docker_a_git_dependent_gate_sees_only_the_role_view() {
         Err(reason) => return no_image(&reason),
     };
 
-    let root = repo::scratch("real-gitview");
+    let tree = repo::scratch("real-gitview");
+    let root = tree.path();
     let run_id = gated_run("gitview");
     let repo_dir = root.join("repo");
     let (head, _) = repo::repository(&repo_dir);
     let planted = repo::engine_refs(&repo_dir, &head);
-    let identity = real_identity(&root, &repo_dir, run_id);
+    let identity = real_identity(root, &repo_dir, run_id);
     let execution_root =
         crate::workspace_manager::execution_root_of(&identity.private_root, repo_key(), run_id);
     let workspace = execution_root.join("tasks").join("kalpha-g0");
@@ -4403,7 +4583,7 @@ fn real_docker_a_git_dependent_gate_sees_only_the_role_view() {
         Duration::from_secs(60),
         gate_id(0),
     );
-    let output = runner.run(&request).expect("runs");
+    let output = runner.run_blocking(&request).expect("runs");
     assert_eq!(output.code, Some(0), "stderr: {}", output.stderr);
     let line = |key: &str| -> String {
         output
@@ -4467,11 +4647,12 @@ fn real_docker_adapter_parsing_matches_the_host_table() {
         Err(reason) => return no_image(&reason),
     };
 
-    let root = repo::scratch("real-parity");
+    let tree = repo::scratch("real-parity");
+    let root = tree.path();
     let run_id = gated_run("parity");
     let repo_dir = root.join("repo");
     repo::repository(&repo_dir);
-    let identity = real_identity(&root, &repo_dir, run_id);
+    let identity = real_identity(root, &repo_dir, run_id);
     let workspace = root.join("parity-workspace");
     std::fs::create_dir_all(&workspace).expect("a workspace");
     let _residue = LeaveNoResidue {
@@ -4488,8 +4669,8 @@ fn real_docker_adapter_parsing_matches_the_host_table() {
     .expect("a container policy")
     .with_poll(Duration::from_millis(10));
 
-    let container_rows = crate::runner::tests::adapter_parse_parity(&runner, &workspace);
-    let host_rows = crate::runner::tests::adapter_parse_parity(
+    let container_rows = crate::runner::contract::tests::adapter_parse_parity(&runner, &workspace);
+    let host_rows = crate::runner::contract::tests::adapter_parse_parity(
         &crate::runner::host::HostRunner::new(),
         &workspace,
     );
@@ -4543,10 +4724,11 @@ fn real_docker_withholds_an_image_credential_variable_from_a_role_that_takes_non
          would be vacuous: {declared}"
     );
 
-    let root = repo::scratch("real-credenv");
+    let tree = repo::scratch("real-credenv");
+    let root = tree.path();
     let repo_dir = root.join("repo");
     repo::repository(&repo_dir);
-    let identity = real_identity(&root, &repo_dir, gated_run("credenv"));
+    let identity = real_identity(root, &repo_dir, gated_run("credenv"));
     let workspace = root.join("plain-workspace");
     std::fs::create_dir_all(&workspace).expect("a workspace");
     let _residue = LeaveNoResidue {
@@ -4572,7 +4754,7 @@ fn real_docker_withholds_an_image_credential_variable_from_a_role_that_takes_non
          printf 'CONTROL=[%s]\\n' \"${{{control_key}}}\""
     ));
     let request = gate_request(spec, workspace, Duration::from_secs(60), gate_id(0));
-    let output = runner.run(&request).expect("runs");
+    let output = runner.run_blocking(&request).expect("runs");
     assert_eq!(output.code, Some(0), "stderr: {}", output.stderr);
     let line = |key: &str| -> String {
         output
@@ -4641,10 +4823,11 @@ fn real_docker_a_container_contains_a_daemonised_descendant() {
         Err(reason) => return no_image(&reason),
     };
 
-    let root = repo::scratch("real-descendant");
+    let tree = repo::scratch("real-descendant");
+    let root = tree.path();
     let repo_dir = root.join("repo");
     repo::repository(&repo_dir);
-    let identity = real_identity(&root, &repo_dir, gated_run("descendant"));
+    let identity = real_identity(root, &repo_dir, gated_run("descendant"));
     let workspace = root.join("plain-workspace");
     std::fs::create_dir_all(&workspace).expect("a workspace");
     let _residue = LeaveNoResidue {
@@ -4690,7 +4873,7 @@ fn real_docker_a_container_contains_a_daemonised_descendant() {
             }
             (leader, descendant)
         });
-        let output = runner.run(&request).expect("runs");
+        let output = runner.run_blocking(&request).expect("runs");
         assert!(output.timed_out, "the fixture did not reach its timeout");
         sampler.join().expect("the sampler panicked")
     });
@@ -4756,4 +4939,1381 @@ fn every_gated_test_of_this_lane_is_counted() {
             "`{name}` is counted and is not a test here"
         );
     }
+}
+
+struct CancelAfter {
+    inner: RecordingHooks,
+    cancellation: crate::runner::Cancellation,
+    at: crate::topology::effects::EffectSiteId,
+}
+
+impl ContainerHooks for CancelAfter {
+    fn phase(
+        &mut self,
+        site: crate::topology::effects::EffectSiteId,
+        phase: crate::topology::effects::HookPhase,
+    ) -> crate::topology::effects::Injection {
+        if site == self.at && phase == crate::topology::effects::HookPhase::After {
+            self.cancellation.cancel();
+        }
+        self.inner.phase(site, phase)
+    }
+
+    fn trace(&self) -> ContainerTrace {
+        self.inner.trace()
+    }
+}
+
+#[test]
+fn a_cancelled_container_invocation_is_released_through_the_reclaim_steps_before_it_reports() {
+    let fixture = Fixture::new("cancel-running", false);
+    let runner = fixture.runner();
+    let request = worker_request(
+        ShellKind::Sh.spec("sleep 600"),
+        fixture.task_a.clone(),
+        AgentId::new("claude-code"),
+        Duration::from_secs(600),
+        worker_id(0),
+    );
+    let name =
+        ContainerName::new(repo_key(), RUN_ID, INCARNATION_1, &request.invocation).expect("a name");
+    let cancellation = crate::runner::Cancellation::new();
+    let mut observer = CancelAfter {
+        inner: RecordingHooks::new(fixture.trace.clone()),
+        cancellation: cancellation.clone(),
+        at: crate::topology::effects::EffectSiteId::Container(ContainerSite::Start),
+    };
+
+    let error = runner
+        .run_blocking_with(
+            &request,
+            RunnerCall::new(cancellation).observed_in_container_by(&mut observer),
+        )
+        .expect_err("a cancelled invocation reports an error, not an output");
+    assert!(error.is_cancelled(), "{error}");
+    assert_eq!(error.fate, ProcessFate::Gone, "{error}");
+
+    let rendered = fixture.trace.rendered();
+    let at = |needle: &str| {
+        fixture
+            .trace
+            .position_starting(needle)
+            .unwrap_or_else(|| panic!("`{needle}` is not in {rendered:#?}"))
+    };
+    assert!(
+        at("site:Start:before") < at("site:Stop:before"),
+        "{rendered:#?}"
+    );
+    assert!(
+        at("site:Stop:before") < at("site:Remove:before"),
+        "{rendered:#?}"
+    );
+    assert!(
+        at("site:Remove:before") < at("site:UnmountGitView:before"),
+        "{rendered:#?}"
+    );
+    assert!(
+        at("site:UnmountGitView:before") < at("site:RemoveIntent:before"),
+        "{rendered:#?}"
+    );
+    assert!(fixture.runtime.fake().container_names().is_empty());
+    assert!(
+        list_intents(&fixture.private_root)
+            .expect("scan")
+            .is_empty()
+    );
+    assert!(
+        !fixture
+            .private_root
+            .join("views")
+            .join(name.as_str())
+            .exists()
+    );
+    assert!(
+        !fixture.trace.ops().contains(&RuntimeOp::Collect),
+        "a cancelled invocation's output is not collected: {rendered:#?}"
+    );
+}
+
+#[test]
+fn a_container_call_cancelled_before_it_starts_writes_no_intent() {
+    let fixture = Fixture::new("cancel-before", true);
+    let runner = fixture.runner();
+    let request = worker_request(
+        ShellKind::Sh.spec("exit 0"),
+        fixture.task_a.clone(),
+        AgentId::new("claude-code"),
+        Duration::from_secs(60),
+        worker_id(1),
+    );
+    let cancellation = crate::runner::Cancellation::new();
+    cancellation.cancel();
+    let error = runner
+        .run_blocking_with(&request, RunnerCall::new(cancellation))
+        .expect_err("a cancelled call reports an error");
+    assert!(error.is_cancelled(), "{error}");
+    assert_eq!(error.fate, ProcessFate::NeverStarted, "{error}");
+    assert!(
+        fixture.trace.rendered().is_empty(),
+        "nothing was reached: {:#?}",
+        fixture.trace.rendered()
+    );
+    assert!(fixture.runtime.fake().container_names().is_empty());
+    assert!(
+        list_intents(&fixture.private_root)
+            .expect("scan")
+            .is_empty()
+    );
+}
+
+#[cfg(unix)]
+const UNARMED_LAUNCHERS: &[&str] = &["launch", "create_container", "start_container"];
+
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Naming {
+    Call,
+    Value,
+    Import,
+    Alias,
+    Reexport,
+    Field,
+    MacroArgument,
+}
+
+#[cfg(unix)]
+fn is_identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+#[cfg(unix)]
+fn identifier_occurrences(code: &str, name: &str) -> Vec<usize> {
+    let bytes = code.as_bytes();
+    code.match_indices(name)
+        .map(|(at, _)| at)
+        .filter(|at| {
+            let before = at.checked_sub(1).and_then(|index| bytes.get(index));
+            let after = bytes.get(at + name.len());
+            !before.is_some_and(|byte| is_identifier_byte(*byte))
+                && !after.is_some_and(|byte| is_identifier_byte(*byte))
+        })
+        .collect()
+}
+
+#[cfg(unix)]
+fn ends_with_word(text: &str, word: &str) -> bool {
+    text.strip_suffix(word).is_some_and(|before| {
+        !before
+            .as_bytes()
+            .last()
+            .is_some_and(|byte| is_identifier_byte(*byte))
+    })
+}
+
+#[cfg(unix)]
+fn declaration_starts_at(code: &str, at: usize) -> bool {
+    let head = code[..at].trim_end();
+    head.is_empty()
+        || head.ends_with([';', '{', '}', ']'])
+        || ends_with_word(head, "pub")
+        || head.ends_with(')')
+}
+
+#[cfg(unix)]
+fn use_declaration_of(code: &str, at: usize) -> Option<usize> {
+    identifier_occurrences(&code[..at], "use")
+        .into_iter()
+        .rev()
+        .find(|start| !code[*start..at].contains(';') && declaration_starts_at(code, *start))
+}
+
+#[cfg(unix)]
+fn is_public(code: &str, use_at: usize) -> bool {
+    let head = code[..use_at].trim_end();
+    if ends_with_word(head, "pub") {
+        return true;
+    }
+    head.strip_suffix(')')
+        .and_then(|inside| inside.rfind('(').map(|open| &inside[..open]))
+        .is_some_and(|before| ends_with_word(before.trim_end(), "pub"))
+}
+
+#[cfg(unix)]
+fn macro_arguments(code: &str) -> Vec<(usize, usize)> {
+    let bytes = code.as_bytes();
+    let mut spans = Vec::new();
+    for (bang, _) in code.match_indices('!') {
+        let named = bang
+            .checked_sub(1)
+            .and_then(|index| bytes.get(index))
+            .is_some_and(|byte| is_identifier_byte(*byte));
+        let rest = &code[bang + 1..];
+        let open = bang + 1 + (rest.len() - rest.trim_start().len());
+        if !named || !matches!(bytes.get(open), Some(b'(' | b'[' | b'{')) {
+            continue;
+        }
+        let mut depth = 0_usize;
+        for (offset, byte) in bytes.iter().enumerate().skip(open) {
+            match byte {
+                b'(' | b'[' | b'{' => depth += 1,
+                b')' | b']' | b'}' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        spans.push((open, offset));
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    spans
+}
+
+#[cfg(unix)]
+fn inside_a_macro_argument(spans: &[(usize, usize)], at: usize) -> bool {
+    spans.iter().any(|(open, close)| *open < at && at < *close)
+}
+
+#[cfg(unix)]
+fn namings(code: &str, name: &str) -> Vec<(Naming, usize)> {
+    let macros = macro_arguments(code);
+    let mut found = Vec::new();
+    for at in identifier_occurrences(code, name) {
+        if inside_a_macro_argument(&macros, at) {
+            found.push((Naming::MacroArgument, at));
+            continue;
+        }
+        let before = code[..at].trim_end();
+        let after = code[at + name.len()..].trim_start();
+        if ends_with_word(before, "fn") || before.ends_with('.') {
+            continue;
+        }
+        let kind = match use_declaration_of(code, at) {
+            Some(use_at) if is_public(code, use_at) => Naming::Reexport,
+            Some(_) if ends_with_word(after.split_whitespace().next().unwrap_or(""), "as") => {
+                Naming::Alias
+            }
+            Some(_) => Naming::Import,
+            None if after.starts_with('(') => Naming::Call,
+            None if after.starts_with(':') && !after.starts_with("::") => Naming::Field,
+            None => Naming::Value,
+        };
+        found.push((kind, at));
+    }
+    found
+}
+
+#[cfg(unix)]
+fn primitive_namings(code: &str, name: &str) -> Vec<(String, usize)> {
+    let macros = macro_arguments(code);
+    let mut found = Vec::new();
+    for at in identifier_occurrences(code, name) {
+        let before = code[..at].trim_end();
+        let after = code[at + name.len()..].trim_start();
+        let in_a_macro = inside_a_macro_argument(&macros, at);
+        if !in_a_macro && ends_with_word(before, "fn") {
+            continue;
+        }
+        if !in_a_macro && after.starts_with("::") && !after.starts_with("::<") {
+            continue;
+        }
+        let called = after.starts_with('(');
+        let pathed = before.ends_with("::");
+        let colon = after.starts_with(':') && !after.starts_with("::");
+        if !(in_a_macro || colon || called || pathed || use_declaration_of(code, at).is_some()) {
+            continue;
+        }
+        let argument = after
+            .strip_prefix('(')
+            .and_then(|arguments| arguments.split(')').next())
+            .map(str::trim);
+        if !in_a_macro && called && matches!(argument, Some("true" | "false")) {
+            continue;
+        }
+        let separator = if before.ends_with("::") {
+            "::"
+        } else if before.ends_with('.') {
+            "."
+        } else {
+            ""
+        };
+        let path = &before[..before.len() - separator.len()];
+        let receiver = if separator.is_empty() {
+            ""
+        } else {
+            let start = path
+                .rfind(|character: char| !(character.is_alphanumeric() || character == '_'))
+                .map_or(0, |end| end + 1);
+            &path[start..]
+        };
+        let next = after.chars().next().map(String::from).unwrap_or_default();
+        let spelled = format!("{receiver}{separator}{name}{next}");
+        found.push((
+            if in_a_macro {
+                format!("{spelled} in a macro argument")
+            } else {
+                spelled
+            },
+            at,
+        ));
+    }
+    found
+}
+
+#[cfg(unix)]
+fn stated_disallowed_methods(source: &str) -> Option<bool> {
+    let blanked = crate::effects::blank_comments(source);
+    let mut rest = blanked.trim_start();
+    let mut allowed = false;
+    let mut guarded = false;
+    while let Some(after) = rest.strip_prefix("#![") {
+        let mut depth = 1_usize;
+        let mut end = None;
+        for (offset, character) in after.char_indices() {
+            match character {
+                '[' => depth += 1,
+                ']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(offset);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(end) = end else {
+            break;
+        };
+        let attribute: String = after[..end].split_whitespace().collect();
+        rest = after[end + 1..].trim_start();
+        if !attribute.contains("clippy::disallowed_methods") {
+            continue;
+        }
+        let (applies, level) = match attribute.strip_prefix("cfg_attr(") {
+            Some(conditional) if conditional.starts_with("test,") => continue,
+            Some(conditional) => match conditional.strip_prefix("not(test),") {
+                Some(level) => (true, level.to_owned()),
+                None => (false, conditional.to_owned()),
+            },
+            None => (true, attribute.clone()),
+        };
+        if level.starts_with("allow(") {
+            allowed = true;
+        } else if applies {
+            guarded = true;
+        }
+    }
+    if allowed {
+        Some(false)
+    } else if guarded {
+        Some(true)
+    } else {
+        None
+    }
+}
+
+#[cfg(unix)]
+fn parent_module(src: &Path, module: &Path) -> Option<PathBuf> {
+    let relative = module.strip_prefix(src).ok()?;
+    let mut segments: Vec<String> = relative
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    if segments.last().is_some_and(|last| last == "mod.rs") {
+        segments.pop();
+    } else if let Some(last) = segments.last_mut() {
+        *last = last.trim_end_matches(".rs").to_owned();
+    }
+    if segments == ["lib"] || segments == ["main"] {
+        return None;
+    }
+    segments.pop();
+    if segments.is_empty() {
+        return Some(src.join("lib.rs"));
+    }
+    let parent = segments.join("/");
+    let found = [
+        src.join(format!("{parent}.rs")),
+        src.join(&parent).join("mod.rs"),
+    ]
+    .into_iter()
+    .find(|candidate| candidate.is_file());
+    assert!(
+        found.is_some(),
+        "the parent module of {} is neither {parent}.rs nor {parent}/mod.rs, so its lint level \
+         cannot be read",
+        module.display()
+    );
+    found
+}
+
+#[cfg(unix)]
+fn clippy_refuses_the_primitives_in(src: &Path, file: &Path) -> bool {
+    let mut module = Some(file.to_path_buf());
+    while let Some(current) = module {
+        let source = std::fs::read_to_string(&current).expect("a module source");
+        if let Some(guarded) = stated_disallowed_methods(&source) {
+            return guarded;
+        }
+        module = parent_module(src, &current);
+    }
+    true
+}
+
+#[cfg(unix)]
+fn enclosing_fn(code: &str, at: usize) -> Option<String> {
+    let bytes = code.as_bytes();
+    identifier_occurrences(code, "fn")
+        .into_iter()
+        .filter(|start| *start < at)
+        .rev()
+        .find_map(|start| {
+            let name = code[start + 2..].trim_start();
+            let end = name
+                .find(|character: char| !(character.is_alphanumeric() || character == '_'))
+                .unwrap_or(name.len());
+            if end == 0 {
+                return None;
+            }
+            let open = start + code[start..].find('{')?;
+            let mut depth = 0_usize;
+            let mut close = None;
+            for (offset, byte) in bytes.iter().enumerate().skip(open) {
+                match byte {
+                    b'{' => depth += 1,
+                    b'}' => {
+                        depth = depth.checked_sub(1)?;
+                        if depth == 0 {
+                            close = Some(offset);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            (open < at && close.is_some_and(|close| at < close)).then(|| name[..end].to_owned())
+        })
+}
+
+#[cfg(unix)]
+#[test]
+fn the_naming_reader_names_an_alias_a_function_value_and_a_re_export_of_an_unarmed_launcher() {
+    let snippet = "\
+use super::launch as start_uncovered;
+pub use super::create_container as create_uncovered;
+pub(crate) use super::start_container;
+use super::{mount_git_view, start_container, write_intent};
+use super::*;
+fn bypass(hooks: &mut dyn ContainerHooks) {
+    let uncovered = super::start_container;
+    uncovered(hooks);
+    launch(hooks, runtime, view, plan);
+    crate::runner::container::create_container(hooks);
+}
+fn launch(&self, plan: &InvocationPlan) {
+    self.launch(hooks);
+    let spec = &plan.launch.spec;
+    let built = InvocationPlan { launch: spec.clone() };
+}
+";
+    let mut read: Vec<(&str, Naming, usize)> = Vec::new();
+    for name in UNARMED_LAUNCHERS {
+        for (kind, at) in namings(snippet, name) {
+            read.push((name, kind, snippet[..at].lines().count()));
+        }
+    }
+    read.sort();
+    let mut expected = vec![
+        ("launch", Naming::Alias, 1),
+        ("create_container", Naming::Reexport, 2),
+        ("start_container", Naming::Reexport, 3),
+        ("start_container", Naming::Import, 4),
+        ("start_container", Naming::Value, 7),
+        ("launch", Naming::Call, 9),
+        ("create_container", Naming::Call, 10),
+        ("launch", Naming::Field, 15),
+    ];
+    expected.sort();
+    assert_eq!(
+        read, expected,
+        "the reader names every alias, re-export, import, function value, call and field \
+         initializer of an unarmed launcher, and no definition, method call or field access"
+    );
+    assert_eq!(
+        enclosing_fn(
+            snippet,
+            snippet.find("launch(hooks, runtime").expect("the call")
+        ),
+        Some("bypass".to_owned())
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn the_naming_reader_names_a_launcher_inside_a_macro_argument_whatever_follows_it() {
+    let snippet = "\
+macro_rules! uncovered_delegate {
+    ($function:ident: $($argument:expr),* $(,)?) => {
+        super::$function($($argument),*)
+    };
+}
+pub fn delta_uncovered(hooks: &mut dyn ContainerHooks, plan: &LaunchPlan) -> bool {
+    uncovered_delegate!(launch: hooks, runtime, view, plan).is_ok()
+}
+fn braces(hooks: &mut dyn ContainerHooks) {
+    uncovered_delegate! { start_container: hooks, site, runtime, intent };
+    spliced![plan.launch, hooks];
+    let unchanged = a != (b);
+}
+struct InvocationPlan {
+    launch: LaunchPlan,
+}
+";
+    let mut read: Vec<(&str, Naming, usize)> = Vec::new();
+    for name in UNARMED_LAUNCHERS {
+        for (kind, at) in namings(snippet, name) {
+            read.push((name, kind, snippet[..at].lines().count()));
+        }
+    }
+    read.sort();
+    let mut expected = vec![
+        ("launch", Naming::MacroArgument, 7),
+        ("start_container", Naming::MacroArgument, 10),
+        ("launch", Naming::MacroArgument, 11),
+        ("launch", Naming::Field, 15),
+    ];
+    expected.sort();
+    assert_eq!(
+        read, expected,
+        "a macro can splice any identifier of its argument anywhere, so the reader names every \
+         occurrence of an unarmed launcher inside a macro's delimiters -- `name:`, `.name` and \
+         all -- and a field declaration outside one; `!=` opens no macro"
+    );
+    assert_eq!(
+        enclosing_fn(
+            snippet,
+            snippet.find("launch: hooks").expect("the macro argument")
+        ),
+        Some("delta_uncovered".to_owned())
+    );
+
+    let primitives = "\
+fn plant(runtime: &dyn ContainerRuntime) {
+    delegate!(start: runtime, \"probe\");
+    let options = OpenOptions::new().create(true);
+}
+struct Span {
+    start: usize,
+}
+";
+    let mut spelled: Vec<String> = ["create", "start"]
+        .into_iter()
+        .flat_map(|name| primitive_namings(primitives, name))
+        .map(|(spelled, _)| spelled)
+        .collect();
+    spelled.sort();
+    assert_eq!(
+        spelled,
+        ["start:", "start: in a macro argument"],
+        "the primitives' reader names a `create` or `start` inside a macro argument and a field \
+         named after one, and still passes over `OpenOptions::create(true)`"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn the_lint_level_walk_reads_a_stated_or_inherited_allowance_and_a_production_forbid() {
+    let tree = repo::scratch("lint-level-walk");
+    let src = tree.path().join("src");
+    let write = |relative: &str, text: &str| {
+        let path = src.join(relative);
+        std::fs::create_dir_all(path.parent().expect("a parent")).expect("a directory");
+        std::fs::write(&path, text).expect("a module");
+        path
+    };
+    write("lib.rs", "pub mod allowing;\npub mod silent;\n");
+    write(
+        "allowing.rs",
+        "//! notes\n\n// a reason\n#![allow(clippy::disallowed_methods)]\n\npub mod inherits;\npub mod forbids;\n",
+    );
+    let inherits = write("allowing/inherits.rs", "pub fn f() {}\n");
+    let forbids = write(
+        "allowing/forbids.rs",
+        "#![cfg_attr(not(test), forbid(clippy::disallowed_methods))]\npub fn f() {}\n",
+    );
+    let test_only = write(
+        "silent.rs",
+        "#![cfg_attr(test, allow(clippy::disallowed_methods))]\npub fn f() {}\n",
+    );
+    let allowing = src.join("allowing.rs");
+    assert_eq!(
+        [
+            clippy_refuses_the_primitives_in(&src, &allowing),
+            clippy_refuses_the_primitives_in(&src, &inherits),
+            clippy_refuses_the_primitives_in(&src, &forbids),
+            clippy_refuses_the_primitives_in(&src, &test_only),
+        ],
+        [false, false, true, true],
+        "a stated allowance, one a silent child inherits, a production forbid beneath it, and an \
+         allowance that holds in tests alone"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn every_container_start_in_production_is_reached_only_through_a_covered_launch() {
+    let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = Vec::new();
+    let mut stack = vec![src.clone()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).expect("src is readable") {
+            let path = entry.expect("a directory entry").path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+    let test_modules = crate::effects::census_domain::whole_file_test_modules(&src, &files, 13);
+    assert!(
+        test_modules.contains(
+            &src.join("runner")
+                .join("container")
+                .join("exec")
+                .join("tests.rs")
+        ),
+        "this file is declared `#[cfg(test)] mod tests;` and the scan has to know it"
+    );
+    let relative = |path: &Path| {
+        path.strip_prefix(env!("CARGO_MANIFEST_DIR"))
+            .unwrap_or(path)
+            .components()
+            .map(|component| component.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/")
+    };
+
+    let mut scanned = 0_usize;
+    let mut scanned_bytes = 0_usize;
+    let mut found: Vec<(String, &str, Naming, Option<String>)> = Vec::new();
+    let mut naming_start_container: BTreeSet<String> = BTreeSet::new();
+    let mut primitives: Vec<(String, String, Option<String>)> = Vec::new();
+    let mut operations: Vec<(String, String, Option<String>)> = Vec::new();
+    let mut guarded = 0_usize;
+    let mut unguarded: BTreeSet<String> = BTreeSet::new();
+    let mut covered_launch = None;
+    let mut funnels = None;
+    let mut runtime_trait = None;
+    let mut test_mints: Vec<(String, Option<String>)> = Vec::new();
+    for path in &files {
+        if test_modules.contains(path) {
+            continue;
+        }
+        let source = std::fs::read_to_string(path).expect("a source file");
+        let production = crate::effects::production_code(&source);
+        let dense = production
+            .as_bytes()
+            .iter()
+            .filter(|byte| !byte.is_ascii_whitespace())
+            .count();
+        assert!(dense > 0, "{}'s region is empty", path.display());
+        scanned += 1;
+        scanned_bytes += dense;
+        let file = relative(path);
+        for name in UNARMED_LAUNCHERS {
+            for (kind, at) in namings(&production, name) {
+                if *name == "start_container" {
+                    naming_start_container.insert(file.clone());
+                }
+                found.push((file.clone(), name, kind, enclosing_fn(&production, at)));
+            }
+        }
+        if clippy_refuses_the_primitives_in(&src, path) {
+            guarded += 1;
+        } else {
+            unguarded.insert(file.clone());
+            for primitive in ["create", "start"] {
+                for (spelled, at) in primitive_namings(&production, primitive) {
+                    primitives.push((file.clone(), spelled, enclosing_fn(&production, at)));
+                }
+            }
+        }
+        for operation in ["RuntimeOp::Create", "RuntimeOp::Start"] {
+            for (at, _) in production.match_indices(operation) {
+                operations.push((
+                    file.clone(),
+                    operation.to_owned(),
+                    enclosing_fn(&production, at),
+                ));
+            }
+        }
+        for at in identifier_occurrences(&production, "without_a_reaper") {
+            test_mints.push((file.clone(), enclosing_fn(&production, at)));
+        }
+        match file.as_str() {
+            "src/runner/container/exec.rs" => covered_launch = Some(production),
+            "src/runner/container.rs" => funnels = Some(production),
+            "src/runner/container/runtime.rs" => runtime_trait = Some(production),
+            _ => {}
+        }
+    }
+    assert!(scanned > 40, "the walk found only {scanned} source files");
+    assert!(
+        scanned_bytes > 750_000,
+        "the {scanned} regions hold {scanned_bytes} non-whitespace bytes between them"
+    );
+
+    found.sort();
+    let mut expected = vec![
+        (
+            "src/runner/container/exec.rs".to_owned(),
+            "create_container",
+            Naming::Import,
+            None,
+        ),
+        (
+            "src/runner/container/exec.rs".to_owned(),
+            "start_container",
+            Naming::Import,
+            None,
+        ),
+        (
+            "src/runner/container/exec.rs".to_owned(),
+            "create_container",
+            Naming::Call,
+            Some("launch".to_owned()),
+        ),
+        (
+            "src/runner/container/exec.rs".to_owned(),
+            "start_container",
+            Naming::Call,
+            Some("launch".to_owned()),
+        ),
+        (
+            "src/runner/container/exec.rs".to_owned(),
+            "launch",
+            Naming::Field,
+            None,
+        ),
+        (
+            "src/runner/container/exec.rs".to_owned(),
+            "launch",
+            Naming::Field,
+            Some("plan".to_owned()),
+        ),
+    ];
+    expected.sort();
+    assert_eq!(
+        found, expected,
+        "a production region names an unarmed launcher — the free `launch`, `create_container` or \
+         `start_container` — outside the two funnels that may: by a call, an import, an alias, a \
+         function value, a re-export, a field or anywhere inside a macro's argument. Every \
+         container must be started through `ContainerRunner::launch`, which only `contain` calls \
+         with the cover its reaper armed; the free `launch` is test-only, `mod uncovered`"
+    );
+    assert_eq!(
+        naming_start_container,
+        ["src/runner/container/exec.rs"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>()
+    );
+
+    primitives.sort();
+    let mut expected_primitives: Vec<(String, String, Option<String>)> = [
+        (
+            "src/agent/codex.rs",
+            "MissingOutputSchema::create(",
+            "validate_effort_config_key",
+        ),
+        (
+            "src/agent/proc.rs",
+            "Drain::start(",
+            "run_with_timeout_and_limit",
+        ),
+        (
+            "src/agent/proc.rs",
+            "Drain::start(",
+            "run_with_timeout_and_limit",
+        ),
+        (
+            "src/agent/proc.rs",
+            "Feeder::start(",
+            "run_with_timeout_and_limit",
+        ),
+        (
+            "src/agent/proc.rs",
+            "Job::create(",
+            "spawn_suspended_in_job_with",
+        ),
+        ("src/agent/proc.rs", "Job::create,", "create_ambient"),
+        ("src/agent/proc.rs", "create(", "create_with"),
+        (
+            "src/engine/resume.rs",
+            "paths.create(",
+            "resume_harness_inner_on",
+        ),
+        ("src/agent/proc.rs", "create:", ""),
+        ("src/export.rs", "start:", ""),
+        ("src/export.rs", "start:", ""),
+        ("src/util.rs", "start. in a macro argument", "tail"),
+        ("src/runner/container.rs", "File::create(", "write_synced"),
+        (
+            "src/runner/container.rs",
+            "runtime.create(",
+            "create_container",
+        ),
+        (
+            "src/runner/container.rs",
+            "runtime.start(",
+            "start_container",
+        ),
+        (
+            "src/runner/container/view.rs",
+            "File::create(",
+            "write_file",
+        ),
+        ("src/workspace.rs", ".create(", "create_private_dir"),
+        (
+            "src/workspace.rs",
+            "PendingGateWorkspace::create(",
+            "gate_snapshot_for_candidate_in_with_mode",
+        ),
+        (
+            "src/workspace.rs",
+            "PrivateHooksDir::create(",
+            "git_output_with_input",
+        ),
+        (
+            "src/workspace.rs",
+            "PrivateHooksDir::create(",
+            "run_git_with_private_hooks",
+        ),
+        ("src/workspace.rs", "builder.create(", "create_private_dir"),
+    ]
+    .into_iter()
+    .map(|(file, spelled, function)| {
+        (
+            file.to_owned(),
+            spelled.to_owned(),
+            (!function.is_empty()).then(|| function.to_owned()),
+        )
+    })
+    .collect();
+    expected_primitives.sort();
+    assert!(
+        guarded > 100
+            && unguarded.contains("src/runner/container.rs")
+            && unguarded.contains("src/runner/container/view.rs")
+            && !unguarded.contains("src/runner/container/exec.rs")
+            && !unguarded.contains("src/runner/container/census.rs")
+            && !unguarded.contains("src/engine/topology/attempt.rs"),
+        "the lint-level walk read {guarded} modules where clippy refuses the runtime's primitives \
+         and these where it cannot: {unguarded:?}; the funnel and the Git view allow the lint, \
+         `exec.rs` and `census.rs` forbid it, and `engine/topology/attempt.rs` inherits \
+         `engine/topology.rs`'s forbid"
+    );
+    assert_eq!(
+        primitives, expected_primitives,
+        "a production module where clippy cannot refuse `ContainerRuntime::create` or `::start` — \
+         its effective `clippy::disallowed_methods` level is `allow`, stated or inherited — names a \
+         `create` or `start` call or path this list does not hold. If it is not a container \
+         runtime's, add it here; if it is, it starts a container no cover dominates"
+    );
+    operations.sort();
+    assert_eq!(
+        operations,
+        vec![
+            (
+                "src/runner/container.rs".to_owned(),
+                "RuntimeOp::Create".to_owned(),
+                Some("create".to_owned())
+            ),
+            (
+                "src/runner/container.rs".to_owned(),
+                "RuntimeOp::Create".to_owned(),
+                Some("create".to_owned())
+            ),
+            (
+                "src/runner/container.rs".to_owned(),
+                "RuntimeOp::Create".to_owned(),
+                Some("create".to_owned())
+            ),
+            (
+                "src/runner/container.rs".to_owned(),
+                "RuntimeOp::Start".to_owned(),
+                Some("start".to_owned())
+            ),
+        ],
+        "the real runtime's `docker create` and `docker start` are reached only from its \
+         `ContainerRuntime::create` and `::start`"
+    );
+
+    assert!(
+        test_mints.is_empty(),
+        "a production region names `without_a_reaper`, the test-only mint of a cover's proofs: \
+         {test_mints:?}"
+    );
+    let signature = |code: &str, definition: &str| {
+        let definitions: Vec<usize> = code.match_indices(definition).map(|(at, _)| at).collect();
+        assert_eq!(definitions.len(), 1, "one `{definition}`");
+        let end = definitions[0]
+            + code[definitions[0]..]
+                .find(['{', ';'])
+                .expect("a signature ends");
+        code[definitions[0]..end].to_owned()
+    };
+    let funnels = funnels.expect("container.rs is scanned");
+    let runtime_trait = runtime_trait.expect("runtime.rs is scanned");
+    for (code, definition, proof) in [
+        (&funnels, "fn create_container(", "CoveredCreate<"),
+        (&funnels, "fn start_container(", "CoveredStart<"),
+        (&runtime_trait, "fn create(", "CoveredCreate<"),
+        (&runtime_trait, "fn start(", "CoveredStart<"),
+    ] {
+        assert!(
+            signature(code, definition).contains(proof),
+            "`{definition}` no longer takes `{proof}…>`: a start primitive that takes no proof \
+             can be called with no cover, whatever spelling reaches it"
+        );
+    }
+
+    let exec = covered_launch.expect("exec.rs is scanned");
+    let launch = signature(&exec, "fn launch(");
+    assert!(
+        launch.contains("CoveredCreate<") && launch.contains("CoveredStart<"),
+        "`ContainerRunner::launch` takes the two proofs the cover minted"
+    );
+    let launches: Vec<usize> = exec
+        .match_indices("self.launch(")
+        .map(|(at, _)| at)
+        .collect();
+    assert_eq!(launches.len(), 1, "one call of the covered launch");
+    assert_eq!(
+        enclosing_fn(&exec, launches[0]).as_deref(),
+        Some("contain"),
+        "the covered launch is called from `contain`"
+    );
+    let covers: Vec<usize> = exec
+        .match_indices(".cover(")
+        .map(|(at, _)| at)
+        .filter(|at| enclosing_fn(&exec, *at).as_deref() == Some("contain"))
+        .collect();
+    assert!(
+        covers.len() == 1 && covers[0] < launches[0],
+        "`contain` covers its invocation before it calls the launch"
+    );
+    for construction in ["Covered {", "CoveredCreate {", "CoveredStart {"] {
+        let made: Vec<usize> = exec.match_indices(construction).map(|(at, _)| at).collect();
+        assert!(
+            made.len() == 1 && enclosing_fn(&exec, made[0]).as_deref() == Some("cover"),
+            "`{construction}…}}` is built only by the cover that armed the reaper, and \
+             exec.rs builds it {} time(s)",
+            made.len()
+        );
+    }
+    let mint = exec.find("mod cover {").expect("the cover's module");
+    let mint_end = block_end(&exec, mint + "mod cover ".len()).expect("the module closes");
+    assert!(
+        identifier_occurrences(&exec[mint..mint_end], "mod").len() == 1,
+        "the module that mints the proofs declares no module of its own in production: a child \
+         module sees its private fields"
+    );
+}
+
+#[cfg(unix)]
+fn reaper_spec(private_root: &Path, incarnation: &str) -> CreateSpec {
+    CreateSpec {
+        name: format!("upstroke-reaper-scope-{incarnation}"),
+        image_id: IMAGE_ID.to_owned(),
+        labels: [
+            (
+                LABEL_PRIVATE_ROOT.to_owned(),
+                crate::runner::container::intent::private_root_label(private_root),
+            ),
+            (LABEL_INCARNATION.to_owned(), incarnation.to_owned()),
+        ]
+        .into_iter()
+        .collect(),
+        mounts: Vec::new(),
+        env: Vec::new(),
+        command: Vec::new(),
+        workdir: None,
+        read_only_root: true,
+    }
+}
+
+#[cfg(unix)]
+fn armed_for(private_root: &Path, incarnation: &str) -> bool {
+    crate::agent::proc::armed_container_reaper_selects(
+        &crate::runner::container::intent::private_root_label(private_root),
+        incarnation,
+    )
+}
+
+#[cfg(unix)]
+#[test]
+fn a_scope_that_does_not_select_its_containers_labels_is_refused_with_no_reaper_armed() {
+    let fixture = Fixture::built_in_a_bounded_child("reaper-scope-refused", true);
+    let reaping = Reaping::default();
+    let foreign = reaper_spec(&fixture.private_root, INCARNATION_2);
+
+    let refused = reaping
+        .cover(&fixture.runtime, &fixture.identity, &foreign)
+        .err()
+        .expect("a container its runner's scope does not select is refused");
+    assert!(
+        refused.to_string().contains("would not find it"),
+        "the refusal says why: {refused}"
+    );
+    {
+        let state = reaping.state.lock().unwrap_or_else(PoisonError::into_inner);
+        assert!(
+            state.armed.is_none() && state.in_flight == 0 && !state.unsettled,
+            "the refused cover armed nothing and counted nothing"
+        );
+    }
+    assert!(
+        !armed_for(&fixture.private_root, INCARNATION_1)
+            && !armed_for(&fixture.private_root, INCARNATION_2),
+        "no reaper was forked for either scope: nothing arms until the scope is validated"
+    );
+
+    let own = reaper_spec(&fixture.private_root, INCARNATION_1);
+    let (covered, _, _) = reaping
+        .cover(&fixture.runtime, &fixture.identity, &own)
+        .expect("the runner's own container is covered");
+    assert!(
+        armed_for(&fixture.private_root, INCARNATION_1),
+        "the control: a container the scope selects arms the runner's reaper"
+    );
+    covered.settle(ProcessFate::NeverStarted);
+    drop(reaping);
+    assert!(
+        !armed_for(&fixture.private_root, INCARNATION_1),
+        "every cover settled with an established end, so dropping the runner disarmed it"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_container_whose_labels_differ_from_the_armed_scope_is_refused_before_its_intent() {
+    let fixture = Fixture::built_in_a_bounded_child("reaper-scope-armed-foreign", true);
+    let runner = fixture.runner();
+    let foreign = RunIdentity {
+        incarnation: INCARNATION_2.to_owned(),
+        ..fixture.identity.clone()
+    };
+    let armed_for_another = reaper_spec(&fixture.private_root, INCARNATION_2);
+    let (covered, _, _) = runner
+        .reaping
+        .cover(&fixture.runtime, &foreign, &armed_for_another)
+        .expect("a reaper armed for another incarnation, as a caller-built one would have been");
+    covered.settle(ProcessFate::NeverStarted);
+    assert!(armed_for(&fixture.private_root, INCARNATION_2));
+
+    let request = gate_request(
+        ShellKind::Sh.spec("exit 0"),
+        fixture.task_a.clone(),
+        Duration::from_secs(10),
+        gate_id(0),
+    );
+    let refused = runner
+        .run_blocking(&request)
+        .expect_err("the runner's container is not selected by the armed scope");
+    assert_eq!(refused.fate, ProcessFate::NeverStarted, "{refused}");
+    assert!(
+        refused.to_string().contains("would not find it"),
+        "the refusal says why: {refused}"
+    );
+    assert!(
+        list_intents(&fixture.private_root)
+            .expect("the container namespace is readable")
+            .is_empty(),
+        "no intent was written for a container its reaper would not find"
+    );
+    assert!(
+        !fixture
+            .runtime
+            .fake()
+            .journal()
+            .iter()
+            .any(|entry| entry.op == RuntimeOp::Create),
+        "nothing was created: {:?}",
+        fixture.runtime.fake().journal()
+    );
+    assert!(
+        !armed_for(&fixture.private_root, INCARNATION_1),
+        "and no second reaper was armed for the runner's own scope"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_runner_whose_container_is_unresolved_keeps_its_reaper_armed_past_its_drop() {
+    let fixture = Fixture::built_in_a_bounded_child("reaper-unresolved-kept", false);
+    for op in [RuntimeOp::Observe, RuntimeOp::Stop, RuntimeOp::Remove] {
+        fixture.runtime.fake().set_unreachable(op);
+    }
+    let runner = fixture.runner();
+    let request = gate_request(
+        ShellKind::Sh.spec("exit 0"),
+        fixture.task_a.clone(),
+        Duration::from_secs(10),
+        gate_id(0),
+    );
+    let error = runner
+        .run_blocking(&request)
+        .expect_err("the runtime cannot observe, stop or remove the container");
+    assert_eq!(error.fate, ProcessFate::Unresolved, "{error}");
+    assert!(armed_for(&fixture.private_root, INCARNATION_1));
+    drop(runner);
+    assert!(
+        armed_for(&fixture.private_root, INCARNATION_1),
+        "a runner whose container may still run leaves its reaper armed past its last handle, \
+         until the process exits"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_runner_whose_containers_all_ended_disarms_its_reaper_at_its_drop() {
+    let fixture = Fixture::built_in_a_bounded_child("reaper-ended-disarmed", true);
+    let runner = fixture.runner();
+    let completed = gate_request(
+        ShellKind::Sh.spec("exit 0"),
+        fixture.task_a.clone(),
+        Duration::from_secs(10),
+        gate_id(0),
+    );
+    runner
+        .run_blocking(&completed)
+        .expect("the container ran and was released");
+    fixture.runtime.fake().set_unreachable(RuntimeOp::Observe);
+    let released = gate_request(
+        ShellKind::Sh.spec("exit 0"),
+        fixture.task_a.clone(),
+        Duration::from_secs(10),
+        gate_id(1),
+    );
+    let error = runner
+        .run_blocking(&released)
+        .expect_err("the observation is lost and the release completes");
+    assert_eq!(error.fate, ProcessFate::Gone, "{error}");
+    assert!(armed_for(&fixture.private_root, INCARNATION_1));
+    drop(runner);
+    assert!(
+        !armed_for(&fixture.private_root, INCARNATION_1),
+        "every container the runner started is established gone, so its drop disarmed the reaper"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_panic_inside_contain_leaves_the_reaper_armed() {
+    use crate::topology::effects::{EffectSiteId, HookPhase, Injection};
+
+    struct PanicsAfterStart;
+
+    impl ContainerHooks for PanicsAfterStart {
+        fn phase(&mut self, site: EffectSiteId, phase: HookPhase) -> Injection {
+            assert!(
+                !(site == EffectSiteId::Container(ContainerSite::Start)
+                    && phase == HookPhase::After),
+                "a panic inside `contain`, after the container started"
+            );
+            Injection::Proceed
+        }
+    }
+
+    let fixture = Fixture::built_in_a_bounded_child("reaper-panic-kept", false);
+    let runner = fixture.runner().with_hooks(Box::new(PanicsAfterStart));
+    let request = gate_request(
+        ShellKind::Sh.spec("exit 0"),
+        fixture.task_a.clone(),
+        Duration::from_secs(10),
+        gate_id(0),
+    );
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        runner.run_blocking(&request)
+    }));
+    assert!(unwound.is_err(), "the hook panicked inside the invocation");
+    drop(runner);
+    assert!(
+        armed_for(&fixture.private_root, INCARNATION_1),
+        "a container whose invocation unwound has no established end, so the reaper stays armed"
+    );
+}
+
+#[cfg(unix)]
+const REAPER_TESTS: &[(&str, &[&str])] = &[
+    (
+        "src/agent/proc.rs",
+        &[
+            "run_isolated",
+            "a_container_reaper_is_armed_only_at_the_terminate_site",
+            "container_reaper_whose_cancellation_fails_child",
+            "a_container_reapers_failed_cancellation_ends_its_caller_through_the_signal_monitor",
+            "container_reaper_stopped_before_its_cancellation_child",
+            "a_stopped_container_reaper_ends_its_caller_rather_than_releasing_it",
+            "container_reaper_lease_child",
+            "an_armed_container_reaper_holds_no_cleanup_lease",
+            "container_reaper_stopped_after_its_acknowledgement_child",
+            "a_container_reaper_stopped_after_acknowledging_its_cancel_does_not_wedge_its_caller",
+        ],
+    ),
+    (
+        "src/engine/topology/coordinator.rs",
+        &[
+            "reaper_finished",
+            "reclaimed_by_its_reaper",
+            "a_resume_killed_inside_its_pre_flight_probe",
+            "a_resuming_incarnations_pre_flight_probe_container_is_killed_by_its_reaper_when_the_coordinator_dies_inside_it",
+            "the_reapers_scope_is_the_runners_identity_and_selects_its_first_probe",
+            "stranded_child",
+            "a_runner_whose_containers_are_unresolved_keeps_its_reaper_armed_past_its_last_handle_until_the_process_exits",
+            "a_contained_run_with_its_reaper_relayed",
+            "released_by_their_own_runner_and_never_reaped",
+            "a_coordinator_that_ends_disarms_its_reaper_and_kills_nothing_at_width_three",
+            "a_runner_whose_containers_all_ended_disarms_its_reaper_and_the_relay_is_never_called",
+            "every_container_an_incarnation_starts_is_covered_by_an_armed_reaper_with_its_scope",
+        ],
+    ),
+    (
+        "src/engine/topology/create/tests.rs",
+        &[
+            "fresh_p4_probe_child",
+            "a_fresh_runs_p4_probe_container_is_killed_by_its_reaper_before_run_started",
+            "every_container_a_fresh_runs_creation_starts_is_covered_by_an_armed_reaper_with_its_scope",
+        ],
+    ),
+    (
+        "src/runner/container/exec/tests.rs",
+        &[
+            "a_scope_that_does_not_select_its_containers_labels_is_refused_with_no_reaper_armed",
+            "a_container_whose_labels_differ_from_the_armed_scope_is_refused_before_its_intent",
+            "a_runner_whose_container_is_unresolved_keeps_its_reaper_armed_past_its_drop",
+            "a_runner_whose_containers_all_ended_disarms_its_reaper_at_its_drop",
+            "a_panic_inside_contain_leaves_the_reaper_armed",
+        ],
+    ),
+];
+
+#[cfg(unix)]
+fn block_end(code: &str, open: usize) -> Option<usize> {
+    let mut depth = 0_usize;
+    for (offset, byte) in code.as_bytes().iter().enumerate().skip(open) {
+        match byte {
+            b'{' => depth += 1,
+            b'}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(offset);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+#[cfg(unix)]
+fn negated_hold_reads_outside_a_bounded_wait(body: &str) -> Vec<String> {
+    let mut unbounded = Vec::new();
+    for read in ["observe_cleanup_hold", "is_running"] {
+        for at in identifier_occurrences(body, read) {
+            if !body[at + read.len()..].trim_start().starts_with('(') {
+                continue;
+            }
+            let path = body[..at].trim_end_matches(|character: char| {
+                character.is_alphanumeric() || character == '_' || character == ':'
+            });
+            if !path.trim_end().ends_with('!') {
+                continue;
+            }
+            let bounded = ["loop", "while"].iter().any(|keyword| {
+                identifier_occurrences(&body[..at], keyword)
+                    .into_iter()
+                    .filter_map(|start| {
+                        let open = start + body[start..].find('{')?;
+                        let end = block_end(body, open)?;
+                        (open < at && at < end).then_some(&body[start..end])
+                    })
+                    .any(|block| block.contains("deadline") || block.contains("elapsed()"))
+            });
+            if !bounded {
+                let line = body[..at].lines().count();
+                unbounded.push(format!("`!{read}(` at line {line} of the body"));
+            }
+        }
+    }
+    unbounded
+}
+
+#[cfg(unix)]
+#[test]
+fn no_reaper_test_reads_a_hold_as_released_once() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut scanned = 0_usize;
+    let mut negated_reads = 0_usize;
+    let mut violations = Vec::new();
+    for (file, functions) in REAPER_TESTS {
+        let source = crate::effects::blank_comments(
+            &std::fs::read_to_string(root.join(file)).expect("a source"),
+        );
+        for function in *functions {
+            let definitions: Vec<usize> = source
+                .match_indices(&format!("fn {function}("))
+                .map(|(at, _)| at)
+                .collect();
+            assert_eq!(
+                definitions.len(),
+                1,
+                "`{function}` is defined once in {file}, so this census reads it"
+            );
+            let open = definitions[0] + source[definitions[0]..].find('{').expect("a body");
+            let end = block_end(&source, open).expect("a closed body");
+            let body = &source[definitions[0]..=end];
+            scanned += 1;
+            negated_reads += ["observe_cleanup_hold", "is_running"]
+                .iter()
+                .map(|read| identifier_occurrences(body, read).len())
+                .sum::<usize>();
+            for unbounded in negated_hold_reads_outside_a_bounded_wait(body) {
+                violations.push(format!("{file}: `{function}`: {unbounded}"));
+            }
+        }
+    }
+    assert!(scanned >= 25, "the census read {scanned} functions");
+    assert!(
+        negated_reads >= 1,
+        "the census found no hold read at all, so it is reading nothing"
+    );
+    assert!(
+        violations.is_empty(),
+        "a reaper test reads a cleanup hold as released with one read: a sibling thread's fork \
+         holds an inherited lease descriptor for a moment \
+         (`PR281-CLEANUP-LEASE-HOLD-OUTLIVED-AND-ITS-UNREADABLE-TWIN`), so every `not held` read \
+         polls within a bound: {violations:#?}"
+    );
+    assert_eq!(
+        negated_hold_reads_outside_a_bounded_wait(
+            "fn once() { assert!(!crate::rundir::observe_cleanup_hold(&public, &mut NoHooks)); }"
+        )
+        .len(),
+        1,
+        "the reader names a one-shot read"
+    );
+    assert!(
+        negated_hold_reads_outside_a_bounded_wait(
+            "fn polled() { loop { if !observe_cleanup_hold(&public, &mut NoHooks) { return; } \
+             if Instant::now() >= deadline { return; } } }"
+        )
+        .is_empty(),
+        "and accepts a read polled within a deadline"
+    );
 }

@@ -1334,7 +1334,7 @@ Splicing would have lost both the fragment and the new event;
 newline-terminating the fragment would have left an unparseable
 line in the middle, which the reader must refuse outright.
 
-## `let dir = scratch("alltorn");`
+## `let tree = scratch("alltorn");`
 
 The pathological case: killed while writing the very first event.
 

@@ -9,6 +9,15 @@ as it is in the source, so the heading is the grep string that finds the code.
 Command and argument descriptions also remain in explicit Clap attributes in the source:
 they generate the installed CLI's short and long help. The notes preserve the longer prose.
 
+## `#![forbid(non_local_definitions)]`
+
+The binary crate's copy of the library root's line (see
+[`lib.md`](lib.md)): this file is the root of its own crate, and a lint
+level stated in `src/lib.rs` does not reach it. Added on 2026-09-26 (PR
+#325) and pinned by
+`effects::tests::every_crate_root_forbids_non_local_definitions`, which
+reads every target root `cargo metadata` reports.
+
 ## `#![allow(`
 
 upstroke — headless orchestration engine for AI coding agents.
@@ -495,7 +504,7 @@ The runtime tests above hold everything from `run_wired` down. `run` is
 the one link above them that no test can call — `Cli::parse` reads this
 process's real argv — so it is held the way this project already holds
 claims of exactly this shape: by reading the source
-(`runner::tests::every_production_process_start_is_classified`,
+(`runner::contract::tests::every_production_process_start_is_classified`,
 `every_production_runner_request_is_built_by_its_roles_builder`).
 
 The oracle is narrow on purpose. Both functions are pure delegations,
@@ -584,3 +593,10 @@ somehow began with the latch set would make them vacuous. And the record
 file is the evidence the child ran: a libtest filter that matches nothing
 exits 0, so a parent that read only the exit status would pass with no
 child at all.
+
+## `fn a_write_command_establishes_the_ambient_job_and_a_read_only_command_does_not()` › `let record = std::env::temp_dir().join(format!(`
+
+Named with a ULID, not the pid: a later process under a recycled pid computed the old name
+again, which the old code answered with a discarded `remove_file` before anything had a claim on
+it (`PR64-CLEANUP-003-SCRATCH-PRECLEAN`). The test build's scratch-tree token is not reachable
+from the binary's tests: the library they link is built without `cfg(test)`.

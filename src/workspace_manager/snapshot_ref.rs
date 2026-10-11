@@ -52,8 +52,9 @@
 //! `design/15_design_event_log_resume_run_layout.md`, "What an exact snapshot
 //! is exact against", is the product sentence: a snapshot is exact against the
 //! objects the repository holds, and no adapter, image or overlay can turn that
-//! off. The v0.1 conductor's runner reads the other graph, which costs this
-//! nothing: no snapshot of this manager is ever taken on that path.
+//! off. The v0.1 conductor takes no snapshot of this manager; how its own
+//! workspace and runner read the recorded graph is that section's second
+//! paragraph.
 //!
 //! **What a [`Snapshot`] holds together** (§5, §6): its fields are private
 //! and it has one constructor, [`Snapshot::new`], visible to the parent only.
@@ -408,14 +409,14 @@ mod tests {
     fn an_ephemeral_head_is_both_the_head_and_the_ephemeral_commit() {
         let created = id(64);
         let snapshot = Snapshot::new(
-            SnapshotName::review(1, 2, 0),
+            SnapshotName::review(0, 1, 2, 0),
             PathBuf::from("checkout"),
             SnapshotHead::Ephemeral(created.clone()),
         );
         assert_eq!(
             snapshot.slot(),
             &Slot::Snapshot {
-                name: SnapshotName::review(1, 2, 0)
+                name: SnapshotName::review(0, 1, 2, 0)
             }
         );
         assert_eq!(snapshot.head(), &created);
@@ -432,36 +433,36 @@ mod tests {
             Snapshot::new(name, PathBuf::from(path), head)
         };
         let gates = build(
-            SnapshotName::gates(1, 1),
+            SnapshotName::gates(0, 1, 1),
             "a",
             SnapshotHead::Ephemeral(id(40)),
         );
         assert_eq!(
             gates,
             build(
-                SnapshotName::gates(1, 1),
+                SnapshotName::gates(0, 1, 1),
                 "a",
                 SnapshotHead::Ephemeral(id(40))
             )
         );
         for other in [
             build(
-                SnapshotName::gates(1, 2),
+                SnapshotName::gates(0, 1, 2),
                 "a",
                 SnapshotHead::Ephemeral(id(40)),
             ),
             build(
-                SnapshotName::gates(1, 1),
+                SnapshotName::gates(0, 1, 1),
                 "b",
                 SnapshotHead::Ephemeral(id(40)),
             ),
             build(
-                SnapshotName::gates(1, 1),
+                SnapshotName::gates(0, 1, 1),
                 "a",
                 SnapshotHead::Existing(id(40)),
             ),
             build(
-                SnapshotName::gates(1, 1),
+                SnapshotName::gates(0, 1, 1),
                 "a",
                 SnapshotHead::Ephemeral(id(64)),
             ),

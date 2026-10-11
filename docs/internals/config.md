@@ -43,8 +43,9 @@ The capture is built in memory -- a `FileSnapshot` holding the bytes, the
 state `snapshot_file` records for a file it has read -- and goes through
 `load_captured`, the same path `load` takes once its capture exists, so no
 temporary file, directory or cleanup is part of the oracle (§12): the suite's
-`scratch` helper writes predictable per-process paths with no owning guard,
-and a regression added by a sweep does not lean on it.
+`scratch` helper writes into one tree per process that a `static` holds, so
+nothing reclaims it when the process exits, and a regression added by a sweep
+does not lean on it.
 
 ## `gates: Option<toml::Value>,`
 
@@ -771,7 +772,7 @@ does not exist is now a hard error (a path someone typed and that is not
 there is a typo), and passing `None` here would reach for the operator's
 real `~/.upstroke/pools.toml` — which no test may touch.
 
-## `static PATH: OnceLock<PathBuf> = OnceLock::new();`
+## `fn missing() -> PathBuf {` › `static SHARED: OnceLock<Shared> = OnceLock::new();`
 
 Created once: the file is identical for every caller, and rewriting
 one shared path from parallel tests means truncating it under a

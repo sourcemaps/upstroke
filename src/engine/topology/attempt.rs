@@ -27,9 +27,11 @@ use crate::workspace_manager::{
 
 use super::dispatch::{self, Dispatched, EventEmitter};
 use super::identity::{
-    AttemptIdentities, InvocationLedger, SequenceIdentities, SlotAssertion, SlotPair, is_slotted,
+    AttemptIdentities, InvocationEnd, InvocationLedger, SequenceIdentities, SlotPair, is_slotted,
 };
+use super::preflight::{Carried, Registering, Registrar, Slots};
 use super::seams::TopologyHooks;
+use super::select::Standing;
 
 #[derive(Debug, Clone)]
 pub struct ReviewerPlan {
@@ -385,7 +387,6 @@ pub struct AttemptContext<'a> {
     pub hooks: &'a mut dyn TopologyHooks,
     pub emitter: &'a mut dyn EventEmitter,
     pub runner: &'a dyn Runner,
-    pub slots: &'a mut SlotAssertion,
     pub ledger: &'a mut InvocationLedger,
     pub adapters: &'a dyn AdapterSource,
     pub paths: &'a RunPaths,
@@ -400,24 +401,11 @@ impl AttemptContext<'_> {
             .map_err(|failure| failure.discharging(self.ledger))
     }
 
-    fn judge_core(&mut self) -> Judge<'_> {
-        Judge {
-            manager: self.manager,
-            hooks: &mut *self.hooks,
-            runner: self.runner,
-            slots: &mut *self.slots,
-            ledger: &mut *self.ledger,
-            adapters: self.adapters,
-            paths: self.paths,
-            reviews: self.reviews,
-        }
-    }
-
-    pub fn start(
+    pub fn announce(
         &mut self,
         site: AttemptSite<'_>,
         plan: &AttemptPlan,
-    ) -> Result<AttemptRun, UpstrokeError> {
+    ) -> Result<(), UpstrokeError> {
         self.emit(TopologyEventBody::AttemptStarted {
             data: AttemptStarted4 {
                 key: site.key,
@@ -429,8 +417,15 @@ impl AttemptContext<'_> {
                 resume_session: plan.resume_session.clone(),
                 materialization_observed: plan.materialization_observed,
             },
-        })?;
+        })
+    }
 
+    pub fn start(
+        &mut self,
+        site: AttemptSite<'_>,
+        plan: &AttemptPlan,
+    ) -> Result<AttemptRun, UpstrokeError> {
+        self.announce(site, plan)?;
         self.run_worker(site, plan)
     }
 
@@ -439,86 +434,197 @@ impl AttemptContext<'_> {
         site: AttemptSite<'_>,
         plan: &AttemptPlan,
     ) -> Result<AttemptRun, UpstrokeError> {
-        let identities = AttemptIdentities::new(site.key, site.generation, plan.attempt);
-        let invocation = identities.worker();
-        let request = worker_request(
-            plan.worker.clone(),
-            site.worktree.to_path_buf(),
-            plan.agent.clone(),
-            plan.worker_timeout,
-            invocation.clone(),
-        );
-        let worker = self.judge_core().execute(&request, plan.pool.clone())?;
-        Ok(AttemptRun { identities, worker })
+        let standing = self
+            .emitter
+            .standing(&AttemptIdentities::new(site.key, site.generation, plan.attempt).worker());
+        let ledger = std::sync::Mutex::new(&mut *self.ledger);
+        let carried = Carried::default();
+        let mut judge = Judge {
+            manager: self.manager,
+            hooks: &mut *self.hooks,
+            runner: self.runner,
+            standing,
+            registrar: &ledger,
+            carried: &carried,
+            adapters: self.adapters,
+            paths: self.paths,
+            reviews: self.reviews,
+        };
+        judge.run_worker(site, plan)
     }
 
     pub fn capture(&mut self, site: AttemptSite<'_>) -> Result<Capture, UpstrokeError> {
-        // What the manifest governs: the index's unmerged entries, and the
-        // entries a previous capture of this generation resolved (a retained
-        // retry revising one). When the index holds neither, the manifest is
-        // not read, and whatever the file says has no effect on this capture
-        // — nor on a later one: the staging removes the worker's manifest
-        // whether or not it was read (`candidate_stage`), so that a
-        // declaration is applied once, by the capture of the attempt that
-        // wrote it. A refused manifest outlives its capture (a refusal stages
-        // nothing), as does one whose capture fails before that removal; a
-        // further capture of this worktree would read either again, and the
-        // driver makes none — a refusal is not resumable and a capture error
-        // interrupts the attempt, and either closes the generation
-        // (`RESOLUTION_MANIFEST`'s doc, `design/26` §26.4).
-        let unmerged = self.manager.unresolved_conflicts(site.slot)?;
-        let resolved = self.manager.resolved_conflicts(site.slot)?;
-        let resolutions = if unmerged.is_empty() && resolved.is_empty() {
-            Vec::new()
-        } else {
-            let manifest = self.manager.resolution_manifest(site.slot)?;
-            let plan = plan_resolutions(&unmerged, &resolved, &manifest);
-            if !plan.refused.is_empty() {
-                let tree = self
-                    .manager
-                    .commit_tree_sha(site.base.as_str())?
-                    .ok_or_else(|| UpstrokeError::Git {
-                        message: format!(
-                            "the recorded base {} has no tree; an unresolved capture cannot \
-                             name the tree the worktree started from",
-                            site.base
-                        ),
-                    })?;
-                return Ok(Capture {
-                    tree,
-                    parent: site.base.0.clone(),
-                    unresolved: plan.refused,
-                });
-            }
-            plan.staged
-        };
-        self.manager
-            .candidate_stage(self.hooks.effects(), site.slot, &resolutions)?;
-        if !resolutions.is_empty() {
-            let left = self.manager.unresolved_conflicts(site.slot)?;
-            if !left.is_empty() {
-                return Err(UpstrokeError::Git {
-                    message: format!(
-                        "the capture staged every declared resolution and the index of {} \
-                         still holds unmerged entries: {}",
-                        site.worktree.display(),
-                        left.join(", ")
-                    ),
-                });
-            }
-        }
-        let tree = self
-            .manager
-            .candidate_write_tree(self.hooks.effects(), site.slot)?;
-        Ok(Capture {
-            tree,
-            parent: site.base.0.clone(),
-            unresolved: Vec::new(),
-        })
+        capture_tree(self.manager, &mut *self.hooks, site)
     }
 
     pub fn assess(
         &mut self,
+        site: AttemptSite<'_>,
+        plan: &AttemptPlan,
+        run: &AttemptRun,
+        capture: &Capture,
+        diff: &str,
+        kind: crate::ir::TaskKind,
+    ) -> Result<Assessment, UpstrokeError> {
+        Assessor {
+            adapters: self.adapters,
+            input_policy: self.input_policy,
+        }
+        .assess(site, plan, run, capture, diff, kind)
+    }
+
+    pub fn judge(
+        &mut self,
+        site: AttemptSite<'_>,
+        plan: &AttemptPlan,
+        judging: Judging<'_>,
+        inputs: &ReviewInputs,
+        invocations: &dyn Fn(u32) -> review::ReviewInvocations,
+    ) -> Result<Judgement, UpstrokeError> {
+        let standing = self.emitter.standing(&judging.run.identities.worker());
+        let ledger = std::sync::Mutex::new(&mut *self.ledger);
+        let carried = Carried::default();
+        let mut judge = Judge {
+            manager: self.manager,
+            hooks: &mut *self.hooks,
+            runner: self.runner,
+            standing,
+            registrar: &ledger,
+            carried: &carried,
+            adapters: self.adapters,
+            paths: self.paths,
+            reviews: self.reviews,
+        };
+        judge.judge_attempt(site, plan, judging, inputs, invocations)
+    }
+
+    pub fn settle_interrupted(
+        &mut self,
+        dispatched: &Dispatched,
+        attempt: AttemptNumber,
+        outcome: AttemptOutcome,
+    ) -> Result<(), UpstrokeError> {
+        self.emit(TopologyEventBody::AttemptInterrupted {
+            data: AttemptInterrupted4 {
+                key: dispatched.key,
+                generation: dispatched.generation,
+                attempt,
+                lease: dispatched.closing_disposition(),
+                detail: outcome.detail().to_owned(),
+            },
+        })?;
+        self.discard_residue(dispatched, attempt)
+    }
+
+    // Called between synchronous Runner invocations, after their children exit.
+    // This context cancels remaining registrations, which releases every held slot
+    // pair, before appending the terminal event and reclaiming the attempt's residue.
+    pub fn cancel_in_flight(
+        &mut self,
+        dispatched: &Dispatched,
+        attempt: AttemptNumber,
+    ) -> Result<usize, UpstrokeError> {
+        let cancelled = self.ledger.cancel_all_running();
+        self.settle_interrupted(dispatched, attempt, AttemptOutcome::Cancelled)?;
+        Ok(cancelled)
+    }
+
+    fn discard_residue(
+        &mut self,
+        dispatched: &Dispatched,
+        attempt: AttemptNumber,
+    ) -> Result<(), UpstrokeError> {
+        let names = JudgeNames::Attempt {
+            key: dispatched.key.0,
+            generation: dispatched.generation.0,
+            attempt: attempt.0,
+        };
+        for slot in self.manager.intents()? {
+            let Slot::Snapshot { name } = &slot else {
+                continue;
+            };
+            if names.owns(name) {
+                self.manager.remove_worktree(self.hooks.effects(), &slot)?;
+                self.manager.remove_intent(self.hooks.effects(), &slot)?;
+            }
+        }
+        dispatch::scrub(self.manager, self.hooks, &dispatched.slot)
+    }
+}
+
+fn capture_tree(
+    manager: &WorkspaceManager,
+    hooks: &mut dyn TopologyHooks,
+    site: AttemptSite<'_>,
+) -> Result<Capture, UpstrokeError> {
+    // What the manifest governs: the index's unmerged entries, and the
+    // entries a previous capture of this generation resolved (a retained
+    // retry revising one). When the index holds neither, the manifest is
+    // not read, and whatever the file says has no effect on this capture
+    // — nor on a later one: the staging removes the worker's manifest
+    // whether or not it was read (`candidate_stage`), so that a
+    // declaration is applied once, by the capture of the attempt that
+    // wrote it. A refused manifest outlives its capture (a refusal stages
+    // nothing), as does one whose capture fails before that removal; a
+    // further capture of this worktree would read either again, and the
+    // driver makes none — a refusal is not resumable and a capture error
+    // interrupts the attempt, and either closes the generation
+    // (`RESOLUTION_MANIFEST`'s doc, `design/26` §26.4).
+    let unmerged = manager.unresolved_conflicts(site.slot)?;
+    let resolved = manager.resolved_conflicts(site.slot)?;
+    let resolutions = if unmerged.is_empty() && resolved.is_empty() {
+        Vec::new()
+    } else {
+        let manifest = manager.resolution_manifest(site.slot)?;
+        let plan = plan_resolutions(&unmerged, &resolved, &manifest);
+        if !plan.refused.is_empty() {
+            let tree = manager
+                .commit_tree_sha(site.base.as_str())?
+                .ok_or_else(|| UpstrokeError::Git {
+                    message: format!(
+                        "the recorded base {} has no tree; an unresolved capture cannot \
+                             name the tree the worktree started from",
+                        site.base
+                    ),
+                })?;
+            return Ok(Capture {
+                tree,
+                parent: site.base.0.clone(),
+                unresolved: plan.refused,
+            });
+        }
+        plan.staged
+    };
+    manager.candidate_stage(hooks.effects(), site.slot, &resolutions)?;
+    if !resolutions.is_empty() {
+        let left = manager.unresolved_conflicts(site.slot)?;
+        if !left.is_empty() {
+            return Err(UpstrokeError::Git {
+                message: format!(
+                    "the capture staged every declared resolution and the index of {} \
+                     still holds unmerged entries: {}",
+                    site.worktree.display(),
+                    left.join(", ")
+                ),
+            });
+        }
+    }
+    let tree = manager.candidate_write_tree(hooks.effects(), site.slot)?;
+    Ok(Capture {
+        tree,
+        parent: site.base.0.clone(),
+        unresolved: Vec::new(),
+    })
+}
+
+struct Assessor<'a> {
+    adapters: &'a dyn AdapterSource,
+    input_policy: &'a dyn ReviewInputPolicy,
+}
+
+impl Assessor<'_> {
+    fn assess(
+        &self,
         site: AttemptSite<'_>,
         plan: &AttemptPlan,
         run: &AttemptRun,
@@ -565,84 +671,110 @@ impl AttemptContext<'_> {
         }
         Ok(Assessment { outcome, failure })
     }
+}
 
-    pub fn judge(
-        &mut self,
-        site: AttemptSite<'_>,
-        plan: &AttemptPlan,
-        judging: Judging<'_>,
-        inputs: &ReviewInputs,
-        invocations: &dyn Fn(u32) -> review::ReviewInvocations,
-    ) -> Result<Judgement, UpstrokeError> {
-        let Judging {
-            run,
-            capture,
-            assessed,
-        } = judging;
-        let subject = Subject {
-            snapshot: SnapshotOf::Tree {
-                tree: captured_object_id("`git write-tree`", capture.tree.clone())?,
-                parent: captured_object_id("the recorded base commit", capture.parent.clone())?,
-            },
-            disposal: SnapshotDisposal::AsEachRoleFinishes,
-            names: JudgeNames::Attempt {
-                generation: site.generation.0,
-                attempt: plan.attempt.0,
-            },
-            identities: JudgeIdentities::Attempt(run.identities),
-            stem: format!("{}-{}", inputs.stem, plan.attempt.0),
-            gates: &plan.gates,
-            reviewers: &plan.reviewers,
-            inputs,
-            prior_failure: assessed.failure.clone(),
-            invocations,
-        };
-        Ok(self.judge_core().judge(&subject, &mut NoReviewAccount)?)
-    }
+#[derive(Debug, Clone)]
+pub struct AttemptJob {
+    pub key: crate::topology::registry::TaskKey,
+    pub generation: crate::topology::events::GenerationId,
+    pub base: crate::topology::events::CommitSha,
+    pub slot: Slot,
+    pub worktree: PathBuf,
+    pub plan: AttemptPlan,
+    pub entry: crate::topology::registry::TaskEntry,
+}
 
-    pub fn settle_interrupted(
-        &mut self,
-        dispatched: &Dispatched,
-        attempt: AttemptNumber,
-        outcome: AttemptOutcome,
-    ) -> Result<(), UpstrokeError> {
-        self.emit(TopologyEventBody::AttemptInterrupted {
-            data: AttemptInterrupted4 {
-                key: dispatched.key,
-                generation: dispatched.generation,
-                attempt,
-                lease: dispatched.closing_disposition(),
-                detail: outcome.detail().to_owned(),
-            },
-        })?;
-        self.discard_residue(dispatched)
-    }
-
-    // Called between synchronous Runner invocations, after their children exit.
-    // This context cancels remaining registrations and releases the held slot pair
-    // before appending the terminal event and reclaiming the attempt's residue.
-    pub fn cancel_in_flight(
-        &mut self,
-        dispatched: &Dispatched,
-        attempt: AttemptNumber,
-    ) -> Result<usize, UpstrokeError> {
-        let cancelled = self.ledger.cancel_all_running();
-        if let Some(held) = self.slots.held().cloned() {
-            self.slots.release(&held)?;
+impl AttemptJob {
+    #[must_use]
+    pub fn site(&self) -> AttemptSite<'_> {
+        AttemptSite {
+            key: self.key,
+            generation: self.generation,
+            base: &self.base,
+            slot: &self.slot,
+            worktree: &self.worktree,
         }
-        self.settle_interrupted(dispatched, attempt, AttemptOutcome::Cancelled)?;
-        Ok(cancelled)
     }
 
-    fn discard_residue(&mut self, dispatched: &Dispatched) -> Result<(), UpstrokeError> {
-        for slot in self.manager.intents()? {
-            if matches!(slot, Slot::Snapshot { .. }) {
-                self.manager.remove_worktree(self.hooks.effects(), &slot)?;
-                self.manager.remove_intent(self.hooks.effects(), &slot)?;
-            }
-        }
-        dispatch::scrub(self.manager, self.hooks, &dispatched.slot)
+    #[must_use]
+    pub const fn identities(&self) -> AttemptIdentities {
+        AttemptIdentities::new(self.key, self.generation, self.plan.attempt)
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct Judged {
+    pub capture: Capture,
+    pub assessed: Assessment,
+    pub judgement: Judgement,
+}
+
+pub struct Work<'a> {
+    pub manager: &'a WorkspaceManager,
+    pub hooks: &'a mut dyn TopologyHooks,
+    pub runner: &'a dyn Runner,
+    pub standing: Standing,
+    pub registrar: &'a dyn Registrar,
+    pub carried: &'a Carried,
+    pub adapters: &'a dyn AdapterSource,
+    pub paths: &'a RunPaths,
+    pub plans: &'a dyn AttemptPlans,
+    pub reviews: &'a dyn ReviewPasses,
+    pub input_policy: &'a dyn ReviewInputPolicy,
+}
+
+impl Work<'_> {
+    pub fn judge(&mut self) -> Judge<'_> {
+        Judge {
+            manager: self.manager,
+            hooks: &mut *self.hooks,
+            runner: self.runner,
+            standing: self.standing,
+            registrar: self.registrar,
+            carried: self.carried,
+            adapters: self.adapters,
+            paths: self.paths,
+            reviews: self.reviews,
+        }
+    }
+}
+
+pub fn attempt_body(work: &mut Work<'_>, job: &AttemptJob) -> Result<Judged, UpstrokeError> {
+    let site = job.site();
+    let run = work.judge().run_worker(site, &job.plan)?;
+    let capture = capture_tree(work.manager, &mut *work.hooks, site)?;
+    let diff = work
+        .manager
+        .candidate_diff(site.slot, &capture.parent, &capture.tree)?;
+    let assessed = Assessor {
+        adapters: work.adapters,
+        input_policy: work.input_policy,
+    }
+    .assess(site, &job.plan, &run, &capture, &diff, job.entry.spec.kind)?;
+    let inputs = work.plans.inputs(&InputsRequest {
+        entry: &job.entry,
+        diff,
+    })?;
+    let identities = run.identities;
+    let judgement = work.judge().judge_attempt(
+        site,
+        &job.plan,
+        Judging {
+            run: &run,
+            capture: &capture,
+            assessed: &assessed,
+        },
+        &inputs,
+        &move |pass| review::ReviewInvocations {
+            pass: identities.review_pass(pass, 0),
+            reask: identities.review_reask(pass, 0),
+        },
+    )?;
+    Ok(Judged {
+        capture,
+        assessed,
+        judgement,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -665,17 +797,24 @@ impl SnapshotOf {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JudgeNames {
-    Attempt { generation: u32, attempt: u32 },
-    Integration { sequence: u64 },
+    Attempt {
+        key: u32,
+        generation: u32,
+        attempt: u32,
+    },
+    Integration {
+        sequence: u64,
+    },
 }
 
 impl JudgeNames {
     fn gates(self) -> SnapshotName {
         match self {
             Self::Attempt {
+                key,
                 generation,
                 attempt,
-            } => SnapshotName::gates(generation, attempt),
+            } => SnapshotName::gates(key, generation, attempt),
             Self::Integration { sequence } => SnapshotName::integration(sequence),
         }
     }
@@ -683,11 +822,30 @@ impl JudgeNames {
     fn review(self, pass: u32) -> SnapshotName {
         match self {
             Self::Attempt {
+                key,
                 generation,
                 attempt,
-            } => SnapshotName::review(generation, attempt, pass),
+            } => SnapshotName::review(key, generation, attempt, pass),
             Self::Integration { sequence } => SnapshotName::integration_review(sequence, pass),
         }
+    }
+
+    #[must_use]
+    pub fn owns(self, name: &SnapshotName) -> bool {
+        if *name == self.gates() {
+            return true;
+        }
+        let first = self.review(0);
+        let Some(stem) = first.as_str().strip_suffix('0') else {
+            return false;
+        };
+        name.as_str()
+            .strip_prefix(stem)
+            .is_some_and(|pass| !pass.is_empty() && pass.bytes().all(|byte| byte.is_ascii_digit()))
+    }
+
+    const fn gated(self) -> bool {
+        matches!(self, Self::Attempt { .. })
     }
 }
 
@@ -702,13 +860,6 @@ impl JudgeIdentities {
         match self {
             Self::Attempt(ids) => ids.gate(gate, ordinal),
             Self::Sequence(ids) => ids.gate(gate, ordinal),
-        }
-    }
-
-    fn review_reask(self, reask: u32, ordinal: u32) -> InvocationId {
-        match self {
-            Self::Attempt(ids) => ids.review_reask(reask, ordinal),
-            Self::Sequence(ids) => ids.review_reask(reask, ordinal),
         }
     }
 }
@@ -753,14 +904,68 @@ pub struct Judge<'a> {
     pub manager: &'a WorkspaceManager,
     pub hooks: &'a mut dyn TopologyHooks,
     pub runner: &'a dyn Runner,
-    pub slots: &'a mut SlotAssertion,
-    pub ledger: &'a mut InvocationLedger,
+    pub standing: Standing,
+    pub registrar: &'a dyn Registrar,
+    pub carried: &'a Carried,
     pub adapters: &'a dyn AdapterSource,
     pub paths: &'a RunPaths,
     pub reviews: &'a dyn ReviewPasses,
 }
 
 impl Judge<'_> {
+    pub fn run_worker(
+        &mut self,
+        site: AttemptSite<'_>,
+        plan: &AttemptPlan,
+    ) -> Result<AttemptRun, UpstrokeError> {
+        let identities = AttemptIdentities::new(site.key, site.generation, plan.attempt);
+        let invocation = identities.worker();
+        let request = worker_request(
+            plan.worker.clone(),
+            site.worktree.to_path_buf(),
+            plan.agent.clone(),
+            plan.worker_timeout,
+            invocation,
+        );
+        let worker = self.execute(&request, plan.pool.clone())?;
+        Ok(AttemptRun { identities, worker })
+    }
+
+    pub fn judge_attempt(
+        &mut self,
+        site: AttemptSite<'_>,
+        plan: &AttemptPlan,
+        judging: Judging<'_>,
+        inputs: &ReviewInputs,
+        invocations: &dyn Fn(u32) -> review::ReviewInvocations,
+    ) -> Result<Judgement, UpstrokeError> {
+        let Judging {
+            run,
+            capture,
+            assessed,
+        } = judging;
+        let subject = Subject {
+            snapshot: SnapshotOf::Tree {
+                tree: captured_object_id("`git write-tree`", capture.tree.clone())?,
+                parent: captured_object_id("the recorded base commit", capture.parent.clone())?,
+            },
+            disposal: SnapshotDisposal::AsEachRoleFinishes,
+            names: JudgeNames::Attempt {
+                key: site.key.0,
+                generation: site.generation.0,
+                attempt: plan.attempt.0,
+            },
+            identities: JudgeIdentities::Attempt(run.identities),
+            stem: format!("{}-{}", inputs.stem, plan.attempt.0),
+            gates: &plan.gates,
+            reviewers: &plan.reviewers,
+            inputs,
+            prior_failure: assessed.failure.clone(),
+            invocations,
+        };
+        Ok(self.judge(&subject, &mut NoReviewAccount)?)
+    }
+
     pub fn judge(
         &mut self,
         subject: &Subject<'_>,
@@ -770,7 +975,7 @@ impl Judge<'_> {
         let mut gates = Vec::with_capacity(subject.gates.len());
         if !subject.gates.is_empty() && failure.is_none() {
             let snapshot = self
-                .snapshot(subject.names.gates(), &subject.snapshot)
+                .snapshot(subject.names, subject.names.gates(), &subject.snapshot)
                 .map_err(JudgeError::Other)?;
             for (index, gate) in subject.gates.iter().enumerate() {
                 let invocation = subject
@@ -815,8 +1020,7 @@ impl Judge<'_> {
                 }
             }
             if subject.disposal == SnapshotDisposal::AsEachRoleFinishes {
-                self.manager
-                    .remove_snapshot(self.hooks.effects(), &snapshot)
+                self.release(subject.names, &snapshot)
                     .map_err(JudgeError::Other)?;
             }
         }
@@ -828,7 +1032,7 @@ impl Judge<'_> {
             }
             let pass = u32::try_from(index).unwrap_or(u32::MAX);
             let snapshot = self
-                .snapshot(subject.names.review(pass), &subject.snapshot)
+                .snapshot(subject.names, subject.names.review(pass), &subject.snapshot)
                 .map_err(JudgeError::Other)?;
             let adapter = self.adapters.get(reviewer.agent.as_str()).ok_or_else(|| {
                 JudgeError::Other(UpstrokeError::Refused {
@@ -841,9 +1045,17 @@ impl Judge<'_> {
                 })
             })?;
             let inputs = subject.inputs;
-            let outcome = self
-                .reviews
-                .run(
+            let (outcome, through_the_pair) = {
+                let registering = Registering::new(
+                    self.runner,
+                    self.registrar,
+                    Slots::Pipeline {
+                        standing: self.standing,
+                        pool: crate::engine::attempt::pool_option(&reviewer.profile.pool),
+                    },
+                )
+                .carrying(self.carried);
+                let outcome = self.reviews.run(
                     &review::ReviewCx {
                         adapter,
                         profile: reviewer.profile.clone(),
@@ -862,10 +1074,12 @@ impl Judge<'_> {
                         stem: subject.stem.clone(),
                         timeout: reviewer.timeout,
                     },
-                    self.runner,
+                    &registering,
                     &(subject.invocations)(pass),
-                )
-                .map_err(JudgeError::Other)?;
+                );
+                (outcome, registering.completed())
+            };
+            let outcome = outcome.map_err(JudgeError::Other)?;
 
             let unavailable = matches!(outcome.result, review::ReviewResult::Unavailable { .. });
             let cost_usd = outcome.cost_usd;
@@ -887,20 +1101,20 @@ impl Judge<'_> {
             account.charge(&record);
             reviews.push(record);
 
-            let ids = (subject.invocations)(pass);
-            for ordinal in 0..invocations {
-                let id = if ordinal == 0 {
-                    ids.pass.clone()
-                } else {
-                    subject.identities.review_reask(pass, ordinal - 1)
-                };
-                self.ledger.register(&id).map_err(JudgeError::Other)?;
-                self.ledger.complete(&id).map_err(JudgeError::Other)?;
+            if invocations != through_the_pair {
+                return Err(JudgeError::Other(UpstrokeError::Refused {
+                    message: format!(
+                        "review pass {pass} reports {invocations} process(es) and \
+                         {through_the_pair} ran through the slot pair it was handed: \
+                         `permits.agent_pool_slots` gives every review_pass and review_reask its \
+                         atomic `{{agent, pool?}}` pair, so a process the broker did not register \
+                         ran outside it"
+                    ),
+                }));
             }
 
             if subject.disposal == SnapshotDisposal::AsEachRoleFinishes {
-                self.manager
-                    .remove_snapshot(self.hooks.effects(), &snapshot)
+                self.release(subject.names, &snapshot)
                     .map_err(JudgeError::Other)?;
             }
         }
@@ -912,16 +1126,33 @@ impl Judge<'_> {
         })
     }
 
-    fn snapshot(&mut self, name: SnapshotName, of: &SnapshotOf) -> Result<Snapshot, UpstrokeError> {
+    fn snapshot(
+        &mut self,
+        names: JudgeNames,
+        name: SnapshotName,
+        of: &SnapshotOf,
+    ) -> Result<Snapshot, UpstrokeError> {
+        if names.gated() {
+            self.registrar.snapshot_begin()?;
+        }
         self.manager
             .add_snapshot(self.hooks.effects(), &name, &of.input())
     }
 
-    // This sequential context owns the invocation ledger and slot assertion.
-    // Register before acquiring the atomic agent/pool pair; a refused acquisition
-    // cancels that registration. Runner::run returns before the pair is released,
-    // then each registered invocation is completed or cancelled exactly once.
-    // Keep settlement here so a run_registered error cannot leave a Running entry.
+    fn release(&mut self, names: JudgeNames, snapshot: &Snapshot) -> Result<(), UpstrokeError> {
+        self.manager
+            .remove_snapshot(self.hooks.effects(), snapshot)?;
+        if names.gated() {
+            self.registrar.snapshot_end();
+        }
+        Ok(())
+    }
+
+    // Every invocation is admitted by the registrar before it runs and ended
+    // through it exactly once after the Runner returns: the synchronous
+    // registrar grants a pair at once or refuses (R-O), a pipeline's waits for
+    // the coordinator's grant. The call carries the pipeline's cancellation and
+    // cleanup-lease paths (the defaults when nothing is carried).
     pub fn execute(
         &mut self,
         request: &RunnerRequest,
@@ -935,59 +1166,42 @@ impl Judge<'_> {
         request: &RunnerRequest,
         pool: Option<String>,
     ) -> Result<ProcessOutput, JudgeError> {
-        self.ledger
-            .register(&request.invocation)
+        let slots = self.pair_for(request, pool).map_err(JudgeError::Other)?;
+        self.registrar
+            .admit(&request.invocation, slots)
             .map_err(JudgeError::Other)?;
-        match self.run_registered(request, pool) {
-            Ok(Ok(output)) => {
-                self.ledger
-                    .complete(&request.invocation)
-                    .map_err(JudgeError::Other)?;
-                Ok(output)
-            }
-            Ok(Err(error)) => {
-                self.ledger
-                    .cancel(&request.invocation)
-                    .map_err(JudgeError::Other)?;
-                Err(JudgeError::Runner(error))
-            }
-            Err(error) => {
-                drop(self.ledger.cancel(&request.invocation));
-                Err(JudgeError::Other(error))
-            }
-        }
+        let outcome = self.runner.run_blocking_with(request, self.carried.call());
+        self.registrar
+            .ended(&request.invocation, InvocationEnd::of(&outcome))
+            .map_err(JudgeError::Other)?;
+        outcome.map_err(JudgeError::Runner)
     }
 
-    fn run_registered(
-        &mut self,
+    fn pair_for(
+        &self,
         request: &RunnerRequest,
         pool: Option<String>,
-    ) -> Result<Result<ProcessOutput, RunnerError>, UpstrokeError> {
-        let slotted = is_slotted(&request.invocation);
-        if slotted {
-            let agent = request
-                .agent
-                .as_ref()
-                .ok_or_else(|| UpstrokeError::Refused {
-                    message: format!(
-                        "`{}` is a slotted invocation and its request names no agent; the pair it \
-                         would take is `{{agent, pool?}}` and there is no agent to key it by",
-                        request.invocation
-                    ),
-                })?;
-            self.slots.acquire(
-                &request.invocation,
-                SlotPair {
-                    agent: agent.as_str().to_owned(),
-                    pool,
-                },
-            )?;
+    ) -> Result<Option<(SlotPair, Standing)>, UpstrokeError> {
+        if !is_slotted(&request.invocation) {
+            return Ok(None);
         }
-        let output = self.runner.run(request);
-        if slotted {
-            self.slots.release(&request.invocation)?;
-        }
-        Ok(output)
+        let agent = request
+            .agent
+            .as_ref()
+            .ok_or_else(|| UpstrokeError::Refused {
+                message: format!(
+                    "`{}` is a slotted invocation and its request names no agent; the pair it \
+                     would take is `{{agent, pool?}}` and there is no agent to key it by",
+                    request.invocation
+                ),
+            })?;
+        Ok(Some((
+            SlotPair {
+                agent: agent.as_str().to_owned(),
+                pool,
+            },
+            self.standing,
+        )))
     }
 
     fn verdict(

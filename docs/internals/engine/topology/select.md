@@ -717,3 +717,103 @@ The live integration account charges here as each pass completes
 same way from the records a durable terminal carries, so a replayed total
 accumulates by the same additions in the same order as the total the
 incarnation that wrote them held.
+
+## `pub const MERGE_ENTITLEMENTS: usize = 1;`
+
+---------------------------------------------------------------------------
+What the fold admits: the entitlements and a pipeline's standing
+---------------------------------------------------------------------------
+
+## `pub const MERGE_ENTITLEMENTS: usize = 1;`
+
+`permits.merge`: "one entitlement".
+
+## `pub struct Entitlements {`
+
+R1 and R2, read from the fold: the pipeline entitlements held, whether the
+merge entitlement is held, the recorded `max_parallel`, and whether the fold
+is poisoned.
+
+`permits.pipeline`: "fold-derived held count = generations in
+{OpenNoAttempt, InFlight, Promoting} plus unresolved integration transactions
+…; RetainedIdle holds none; a queued candidate holds none"; `permits.merge`:
+"fold-derived held iff an integration transaction is unresolved". The fold
+already counts both — `TopologyFold::pipeline_held` is the generation-class
+count plus one for an open transaction, the same count its own `ready`
+compares with `max_parallel` — so this **reads** them rather than deriving
+them a second time, and the fold stays the one place the rule lives.
+
+**Never stored.** A value of this type is a reading of one fold at one
+moment; the broker takes it per call and keeps nothing of it, so the counts
+are recomputed from the fold at every process start and after every append
+("crash_reconstruction: entitlements recomputed from the fold at start").
+
+**Here, in `select.rs`, and not in the broker's module.** It is what
+selection reads — the "pipeline entitlement reservable (fold-derived count
+below max_parallel)" clause of `ready` and `ready_retry` — and it reads the
+fold, which this module already names. The census
+`events::log::tests::the_stable_prefix_barrier_is_the_only_way_a_log_becomes_a_topology_fold`
+keeps a list of every production module that names `TopologyFold`, and that
+test is in PR11's frozen set; putting the fold readers where the fold is
+already named keeps the broker, the attempt and the pre-flight off the list.
+
+## `impl Entitlements` › `pub fn of(fold: &TopologyFold) -> Self {`
+
+The fold's entitlements now. A fold with no `run_started` records a
+`max_parallel` of zero, so nothing is reservable from it.
+
+## `pub enum Holds {`
+
+What a pipeline holds, as the fold shows it: a pre-flight probe holds no
+entitlement and needs none; an attempt in flight holds the pipeline; a
+started verification holds the pipeline and the merge; anything else holds
+nothing a slot may be requested under.
+
+## `enum Pipeline {`
+
+The pipeline an invocation belongs to, read off its identity: the attempt
+`(key, generation, attempt)`, the integration `sequence`, or the pre-flight.
+
+## `pub struct Standing {`
+
+A pipeline, and what the fold shows it holding: the precondition of a
+slotted registration.
+
+`permits.deadlock_freedom`: "acquisition order pipeline -> merge -> {agent,
+pool} (atomic pair)". PR11's broker makes the order an API rule rather than a
+convention: [`crate::engine::topology::identity::InvocationLedger::register_slotted`]
+takes a `Standing` and refuses a slotted request whose pipeline holds
+nothing, so no process can hold an agent or pool slot while its pipeline
+waits for an entitlement — the hold-and-wait the order exists to exclude.
+Record §3 R-N states the rule.
+
+Per pipeline rather than per invocation, so a judgement reads it once and
+presents it for the worker, each review pass and each re-ask of the same
+attempt; `admits` checks that the invocation belongs to the pipeline read.
+
+## `impl Standing` › `pub fn of(fold: &TopologyFold, invocation: &InvocationId) -> Self {`
+
+The standing of `invocation`'s pipeline.
+
+An attempt stands when the fold's generation is `InFlight` with **that**
+attempt number: the attempt's processes run between `attempt_started` and
+its settlement, and an identity from an earlier attempt is stale (INV-20).
+A sequence stands when the fold's open transaction is **that** sequence and
+its verification has started: verification processes run between
+`merge_verification_started` and its terminal. A probe always stands. A
+poisoned fold admits nothing.
+
+## `impl Standing` › `pub const fn preflight() -> Self {`
+
+The pre-flight's standing, for the boundary that runs the probes without a
+fold: it admits probe identities and nothing else.
+
+## `impl Standing` › `pub(super) fn admits(&self, invocation: &InvocationId) -> Result<(), UpstrokeError> {`
+
+Whether this standing admits a slotted request of `invocation`.
+
+### Errors
+
+[`UpstrokeError::Refused`] when `invocation` belongs to another pipeline,
+or when the pipeline holds nothing.
+

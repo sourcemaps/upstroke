@@ -14,17 +14,17 @@ use crate::events::AttemptRecord;
 use crate::interaction::Sleeper;
 use crate::topology::events::{
     AttemptNumber, CandidateLeaseEffect, CandidateRef, CommitSha, FrozenQuestion,
-    GenerationCloseReason, GenerationId, InfrastructureKind, Materialization, SequenceId,
-    SessionId, TopologyEvent,
+    GenerationCloseReason, GenerationId, InfrastructureKind, Materialization, RunStarted4,
+    SequenceId, SessionId, TopologyEvent,
 };
 use crate::topology::fold::{FrozenInputs, TopologyFold};
 use crate::topology::registry::TaskKey;
 use crate::workspace_manager::WorkspaceManager;
 
 use super::attempt::{
-    Assessment, AttemptContext, AttemptPlan, AttemptPlans, AttemptSite, Capture, InputsRequest,
-    Judge, JudgeError, JudgeIdentities, JudgeNames, Judgement, Judging, PlanRequest,
-    ReviewInputPolicy, ReviewPasses, SnapshotDisposal, SnapshotOf, Subject, VerificationRequest,
+    AttemptContext, AttemptJob, AttemptPlans, AttemptSite, InputsRequest, JudgeError,
+    JudgeIdentities, JudgeNames, Judged, Judgement, PlanRequest, ReviewAccount, ReviewInputPolicy,
+    ReviewPasses, SnapshotDisposal, SnapshotOf, Subject, VerificationRequest, Work, attempt_body,
 };
 use super::candidate::{
     CandidateJournal, JudgedTree, append_candidate_created, append_candidate_prepared,
@@ -32,29 +32,30 @@ use super::candidate::{
 };
 use super::closure;
 use super::dispatch::{
-    DispatchKind, DispatchRequest, Dispatched, EventEmitter, OpenGeneration, dispatch,
-    resume_open_no_attempt, task_slot,
+    DispatchJournal, DispatchKind, DispatchRequest, Dispatched, EventEmitter, OpenGeneration,
+    dispatch_through, resume_open_no_attempt, task_slot,
 };
 use super::emit::{EmitFailure, EmitState, RunIdentity, emit};
 use super::finalize;
-use super::identity::{
-    InvocationLedger, ReservationKind, Reservations, SequenceIdentities, SlotAssertion,
-};
+use super::identity::{InvocationLedger, ReservationKind, SequenceIdentities, SlotLimits};
 use super::integrate::{
     self, IntegrationJournal, IntegrationRequest, Terminal, Verification, Verified, VerifyRequest,
 };
+use super::permits::PermitBroker;
+use super::preflight::Carried;
 use super::recover::RunHandle;
 use super::seams::{IdSource, TimeSource, TopologyHooks};
-use super::select::{Admitted, Ceiling, Spend, Step, checkpoint, select};
+use super::select::{Admitted, Ceiling, Entitlements, Spend, Standing, Step, checkpoint, select};
 use super::settle::{
-    Deferral, FinishedAttempt, ManagedWorktrees, RetryOutcome, RetryRequest, close_generation,
-    retry, settle_failed,
+    Deferral, FinishedAttempt, ManagedWorktrees, RetryOutcome, RetryRequest, WorktreeVerify,
+    close_generation, settle_failed,
 };
 
 pub struct RunEmitter<'a> {
     pub identity: &'a RunIdentity,
     pub state: EmitState<'a>,
     pub clock: &'a dyn TimeSource,
+    pub stopped: Option<&'a str>,
 }
 
 impl EventEmitter for RunEmitter<'_> {
@@ -63,8 +64,17 @@ impl EventEmitter for RunEmitter<'_> {
         body: TopologyEventBody,
         hooks: &mut dyn TopologyHooks,
     ) -> Result<(), EmitFailure> {
+        if let Some(why) = self.stopped {
+            return Err(EmitFailure::Clean(UpstrokeError::Refused {
+                message: format!("nothing further is appended in this process: {why}"),
+            }));
+        }
         emit(self.identity, &mut self.state, self.clock, body, hooks)?;
         Ok(())
+    }
+
+    fn standing(&self, invocation: &crate::runner::InvocationId) -> Standing {
+        Standing::of(self.state.fold, invocation)
     }
 }
 
@@ -86,11 +96,33 @@ impl CandidateJournal for RunJournal<'_, '_> {
     }
 }
 
+impl IntegrationJournal for RunJournal<'_, '_> {
+    fn emit(&mut self, body: TopologyEventBody) -> Result<(), UpstrokeError> {
+        self.emitter
+            .emit(body, self.hooks)
+            .map_err(|failure| failure.discharging(self.invocations))
+    }
+
+    fn fold(&self) -> &TopologyFold {
+        self.emitter.state.fold
+    }
+
+    fn hooks(&mut self) -> &mut dyn TopologyHooks {
+        &mut *self.hooks
+    }
+
+    fn converted(&mut self, key: TaskKey) -> Result<(), UpstrokeError> {
+        self.emitter
+            .state
+            .reservations
+            .convert(key, ReservationKind::Integration)
+    }
+}
+
 struct IntegrationCx<'a, 'h> {
     emitter: RunEmitter<'a>,
     hooks: &'h mut dyn TopologyHooks,
     invocations: &'h mut InvocationLedger,
-    slots: &'h mut SlotAssertion,
     spend: &'h mut Spend,
     seams: &'h RunSeams<'a>,
 }
@@ -115,6 +147,531 @@ impl IntegrationJournal for IntegrationCx<'_, '_> {
             .state
             .reservations
             .convert(key, ReservationKind::Integration)
+    }
+}
+
+pub(super) trait Operator {
+    fn parts(&mut self) -> (&mut TopologyRun, &RunSeams<'_>, &mut dyn TopologyHooks);
+
+    fn driven(&self) -> &TopologyRun;
+
+    fn registry(&mut self) -> &mut dyn TopologyHooks;
+}
+
+pub(super) trait Driver: Operator {
+    fn seams(&self) -> &RunSeams<'_>;
+
+    fn verify(&mut self, request: &VerifyRequest<'_>) -> Result<Verified, UpstrokeError>;
+}
+
+pub(super) struct Stepping<'a, 's> {
+    pub run: &'a mut TopologyRun,
+    pub seams: &'a RunSeams<'s>,
+    pub hooks: &'a mut dyn TopologyHooks,
+}
+
+impl Operator for Stepping<'_, '_> {
+    fn parts(&mut self) -> (&mut TopologyRun, &RunSeams<'_>, &mut dyn TopologyHooks) {
+        (&mut *self.run, self.seams, &mut *self.hooks)
+    }
+
+    fn driven(&self) -> &TopologyRun {
+        self.run
+    }
+
+    fn registry(&mut self) -> &mut dyn TopologyHooks {
+        &mut *self.hooks
+    }
+}
+
+struct OperatorJournal<'o, O: ?Sized>(&'o mut O);
+
+impl<O: Operator + ?Sized> DispatchJournal for OperatorJournal<'_, O> {
+    fn emit(&mut self, body: TopologyEventBody) -> Result<(), EmitFailure> {
+        let (run, seams, hooks) = self.0.parts();
+        run.emit_undischarged(body, seams, hooks)
+    }
+
+    fn hooks(&mut self) -> &mut dyn TopologyHooks {
+        self.0.registry()
+    }
+}
+
+impl<O: Operator + ?Sized> IntegrationJournal for OperatorJournal<'_, O> {
+    fn emit(&mut self, body: TopologyEventBody) -> Result<(), UpstrokeError> {
+        let (run, seams, hooks) = self.0.parts();
+        run.emit(body, seams, hooks)
+    }
+
+    fn fold(&self) -> &TopologyFold {
+        self.0.driven().fold()
+    }
+
+    fn hooks(&mut self) -> &mut dyn TopologyHooks {
+        self.0.registry()
+    }
+
+    fn converted(&mut self, key: TaskKey) -> Result<(), UpstrokeError> {
+        self.0.parts().0.convert_integration(key)
+    }
+}
+
+struct PausingRefs<'a, 'h> {
+    manager: &'a WorkspaceManager,
+    hooks: std::cell::Cell<Option<&'h mut dyn crate::workspace_manager::EffectHooks>>,
+}
+
+impl<'a, 'h> PausingRefs<'a, 'h> {
+    fn new(
+        manager: &'a WorkspaceManager,
+        hooks: &'h mut dyn crate::workspace_manager::EffectHooks,
+    ) -> Self {
+        Self {
+            manager,
+            hooks: std::cell::Cell::new(Some(hooks)),
+        }
+    }
+}
+
+impl super::create::IntegrationRefs for PausingRefs<'_, '_> {
+    fn assert_publishable(&self, refname: &str) -> Result<(), UpstrokeError> {
+        let hooks = self.hooks.take().ok_or_else(|| UpstrokeError::Refused {
+            message: format!(
+                "the dispatch's head check asked whether `{refname}` is publishable from inside \
+                 that same check, and its hooks are lent once; nothing was dispatched"
+            ),
+        })?;
+        let checked = self
+            .manager
+            .assert_publishable_pausing(&mut *hooks, refname);
+        self.hooks.set(Some(hooks));
+        checked
+    }
+
+    fn direct_target(&self, refname: &str) -> Result<Option<String>, UpstrokeError> {
+        self.manager.direct_ref_target(refname)
+    }
+
+    fn create_zero_old(
+        &self,
+        hooks: &mut dyn crate::workspace_manager::EffectHooks,
+        refname: &str,
+        new: &str,
+    ) -> Result<(), UpstrokeError> {
+        super::create::IntegrationRefs::create_zero_old(self.manager, hooks, refname, new)
+    }
+}
+
+pub(super) fn begin_dispatch<O: Operator + ?Sized>(
+    operator: &mut O,
+    manager: &WorkspaceManager,
+    key: TaskKey,
+    generation: GenerationId,
+    continuing: bool,
+) -> Result<AttemptJob, UpstrokeError> {
+    let dispatched = if continuing {
+        continue_open(operator, manager, key, generation)?
+    } else {
+        dispatch_ready(operator, manager, key, generation)?
+    };
+    let (run, seams, hooks) = operator.parts();
+    run.first_attempt(&dispatched, seams, hooks)
+}
+
+fn dispatch_ready<O: Operator + ?Sized>(
+    operator: &mut O,
+    manager: &WorkspaceManager,
+    key: TaskKey,
+    generation: GenerationId,
+) -> Result<Dispatched, UpstrokeError> {
+    let (kind, started, published) = operator.driven().dispatch_inputs(key)?;
+    let base = integrate::dispatch_head(
+        &PausingRefs::new(manager, operator.registry().effects()),
+        &started,
+        &published,
+        key,
+    )?;
+    let request = DispatchRequest {
+        key,
+        generation,
+        base,
+        kind,
+    };
+    operator.parts().0.reserve_dispatch(key)?;
+    let dispatched = dispatch_through(manager, &mut OperatorJournal(&mut *operator), &request);
+    operator.parts().0.dispatch_settled(key, dispatched)
+}
+
+fn continue_open<O: Operator + ?Sized>(
+    operator: &mut O,
+    manager: &WorkspaceManager,
+    key: TaskKey,
+    generation: GenerationId,
+) -> Result<Dispatched, UpstrokeError> {
+    let (open, kind) = operator.driven().open_to_continue(key, generation)?;
+    let resumed = resume_open_no_attempt(manager, operator.registry(), &open)?;
+    operator.parts().0.deferral.progressed();
+    Ok(Dispatched {
+        key,
+        generation,
+        base: open.base,
+        worktree: manager.slot_path(&open.slot),
+        slot: open.slot,
+        kind,
+        materialized: resumed.materialized,
+    })
+}
+
+pub(super) fn begin_retry<O: Operator + ?Sized>(
+    operator: &mut O,
+    manager: &WorkspaceManager,
+    key: TaskKey,
+    generation: GenerationId,
+) -> Result<Retrying, UpstrokeError> {
+    let request = {
+        let (run, seams, _) = operator.parts();
+        run.retry_request(key, generation, seams)?
+    };
+    let begun = {
+        let run = operator.parts().0;
+        super::settle::retry_begin(&run.handle.fold, run.broker.halves().0, &request)?
+    };
+    let verified = ManagedWorktrees::new(manager).verify(
+        operator.registry().effects(),
+        &request.slot,
+        &crate::workspace_manager::Quiescence::HoldsTree(request.retained_tree.clone()),
+    );
+    let outcome = {
+        let run = operator.parts().0;
+        super::settle::retry_end(
+            &run.handle.fold,
+            run.broker.halves().0,
+            &request,
+            begun,
+            verified,
+        )?
+    };
+    match outcome {
+        RetryOutcome::Start(started) => {
+            let (run, seams, hooks) = operator.parts();
+            let job = run.retry_started(generation, *started, &request.slot, seams, hooks)?;
+            Ok(Retrying::Started(Box::new(job)))
+        }
+        RetryOutcome::Close { closed, .. } => {
+            {
+                let (run, seams, hooks) = operator.parts();
+                run.retry_closed(key, closed, seams, hooks)?;
+            }
+            super::dispatch::scrub(manager, operator.registry(), &request.slot)?;
+            Ok(Retrying::Closed { key })
+        }
+    }
+}
+
+pub(super) fn settle_judged<O: Operator + ?Sized>(
+    operator: &mut O,
+    manager: &WorkspaceManager,
+    job: &AttemptJob,
+    judged: &Judged,
+) -> Result<Progress, UpstrokeError> {
+    let accepted = judged.judgement.accepted();
+    let spent_attempt = settle(
+        operator,
+        manager,
+        job.site(),
+        &job.plan,
+        Produced {
+            capture: &judged.capture,
+            assessed: &judged.assessed,
+            judgement: &judged.judgement,
+        },
+    )?;
+    Ok(Progress::Settled {
+        key: job.key,
+        accepted,
+        spent_attempt,
+    })
+}
+
+fn settle<O: Operator + ?Sized>(
+    operator: &mut O,
+    manager: &WorkspaceManager,
+    site: AttemptSite<'_>,
+    plan: &super::attempt::AttemptPlan,
+    produced: Produced<'_>,
+) -> Result<bool, UpstrokeError> {
+    let record = crate::engine::classify::attempt_record(
+        plan.attempt.0,
+        crate::engine::classify::AttemptFacts {
+            tier: plan.binding.tier,
+            model: &plan.binding.model,
+            pool: plan.pool.clone(),
+            resumed: plan.resume_session.is_some(),
+            outcome: &produced.assessed.outcome,
+            reviews: &produced.judgement.reviews,
+            failure: produced.judgement.failure.as_ref(),
+            feedback: crate::engine::classify::FeedbackCarrier::AttemptRecord,
+        },
+    );
+    let Some(failure) = produced.judgement.failure.as_ref() else {
+        promote_candidate(operator, manager, site, plan, produced.capture, record)?;
+        return Ok(crate::ladder::spends_allowance(None));
+    };
+    let (closed, spent_attempt) = {
+        let (run, seams, hooks) = operator.parts();
+        run.settle_failure(site, plan, produced, record, failure, seams, hooks)?
+    };
+    if closed {
+        super::dispatch::scrub(manager, operator.registry(), site.slot)?;
+    }
+    Ok(spent_attempt)
+}
+
+fn promote_candidate<O: Operator + ?Sized>(
+    operator: &mut O,
+    manager: &WorkspaceManager,
+    site: AttemptSite<'_>,
+    plan: &super::attempt::AttemptPlan,
+    capture: &super::attempt::Capture,
+    record: AttemptRecord,
+) -> Result<(), UpstrokeError> {
+    let actual_paths =
+        manager.changed_paths_pausing(operator.registry().effects(), site.slot, &capture.parent)?;
+    let (judged, run_id) =
+        operator
+            .driven()
+            .judged_tree(site, plan, capture, &record, actual_paths)?;
+    let unpinned = write_candidate_commit(manager, operator.registry(), &run_id, judged)?;
+    let pinned = pin_candidate(manager, operator.registry(), unpinned)?;
+    operator.parts().0.record_promoted(site.key, &record);
+    let promoting = {
+        let (run, seams, hooks) = operator.parts();
+        run.with_journal(seams, hooks, |journal| {
+            append_candidate_prepared(journal, pinned)
+        })?
+    };
+    let referenced = create_candidates_ref(manager, operator.registry(), promoting)?;
+    let created = {
+        let (run, seams, hooks) = operator.parts();
+        run.with_journal(seams, hooks, |journal| {
+            append_candidate_created(journal, referenced)
+        })?
+    };
+    reclaim_after_creation(manager, operator.registry(), site.slot, created)?;
+    Ok(())
+}
+
+pub(super) fn hard_block<O: Operator + ?Sized>(
+    operator: &mut O,
+    seams: &RunSeams<'_>,
+    questions: &[QuestionId],
+) -> Result<Progress, UpstrokeError> {
+    for id in questions {
+        let asked = operator.driven().open_question(id)?;
+        let answer = match seams.answers.resolve(&asked.question)? {
+            Answer::Unanswered => continue,
+            answer => answer,
+        };
+        let answer4 = operator.driven().answer_for(id, &asked, answer, seams)?;
+        let (run, seams, hooks) = operator.parts();
+        return run.ingest_answer(id, asked.key, answer4, seams, hooks);
+    }
+    close_run(operator, seams, &closure::Cancelled::none())
+}
+
+pub(super) fn close_run<O: Operator + ?Sized>(
+    operator: &mut O,
+    seams: &RunSeams<'_>,
+    cancelled: &closure::Cancelled,
+) -> Result<Progress, UpstrokeError> {
+    let manager = seams.manager;
+    let (outcome, interrupted) = {
+        let fold = operator.driven().fold();
+        let outcome = closure::ending_outcome(fold)?;
+        let interrupted = closure::settleable(fold, &outcome, cancelled)?;
+        (outcome, interrupted)
+    };
+    for interrupted in interrupted {
+        {
+            let (run, seams, hooks) = operator.parts();
+            run.emit(interrupted.interrupted(), seams, hooks)?;
+        }
+        reclaim_interrupted(operator, manager, &interrupted)?;
+    }
+    complete_promotions(operator, manager)?;
+    complete_publication(operator, manager)?;
+
+    let reason = GenerationCloseReason::RunEnding {
+        outcome: outcome.clone(),
+    };
+    let mut closed = 0;
+    for key in closure::closable(operator.driven().fold()) {
+        let slot = {
+            let (run, seams, hooks) = operator.parts();
+            let event = close_generation(run.fold(), key, reason.clone())?;
+            let slot = task_slot(key, event.generation);
+            run.emit(
+                TopologyEventBody::GenerationClosed { data: event },
+                seams,
+                hooks,
+            )?;
+            run.retained.remove(&key);
+            slot
+        };
+        super::dispatch::scrub(manager, operator.registry(), &slot)?;
+        closed += 1;
+    }
+
+    {
+        let run = operator.parts().0;
+        if run.broker.halves().0.cancel_any() {
+            run.warnings.push(
+                "run-end closure found a provisional reservation still held and cancelled it"
+                    .to_owned(),
+            );
+        }
+    }
+
+    let (fold, events, run_id) = {
+        let (run, seams, hooks) = operator.parts();
+        closure::confirm_derived(run.fold(), &outcome)?;
+        let finished = closure::run_finished(run.fold(), outcome.clone());
+        run.emit(
+            TopologyEventBody::RunFinished { data: finished },
+            seams,
+            hooks,
+        )?;
+        run.finished_record()
+    };
+    let finalized = finalize::finalize(
+        &finalize::Finalize {
+            manager,
+            public: &seams.paths.public,
+            private: &seams.paths.private,
+            run_id: &run_id,
+            fold: &fold,
+            events: &events,
+        },
+        operator.registry(),
+    )?;
+    Ok(Progress::Finished {
+        outcome,
+        closed,
+        report_written: finalized.report_written,
+        execution_root_removed: finalized.execution_root_removed,
+    })
+}
+
+fn reclaim_interrupted<O: Operator + ?Sized>(
+    operator: &mut O,
+    manager: &WorkspaceManager,
+    interrupted: &closure::InFlight,
+) -> Result<(), UpstrokeError> {
+    match interrupted {
+        closure::InFlight::Attempt {
+            key,
+            generation,
+            attempt,
+            ..
+        } => {
+            operator.parts().0.retained.remove(key);
+            reclaim_snapshots_of(
+                manager,
+                operator.registry(),
+                JudgeNames::Attempt {
+                    key: key.0,
+                    generation: generation.0,
+                    attempt: attempt.0,
+                },
+            )?;
+            super::dispatch::scrub(manager, operator.registry(), &task_slot(*key, *generation))
+        }
+        closure::InFlight::Verification { sequence, pin, .. } => {
+            let hooks = operator.registry();
+            if let Some((pin, proposed)) = pin {
+                integrate::prune_pin(hooks, manager, pin, proposed)?;
+            }
+            let staging = integrate::staging_slot(*sequence);
+            manager.remove_worktree(hooks.effects(), &staging)?;
+            manager.remove_intent(hooks.effects(), &staging)?;
+            reclaim_snapshots_of(
+                manager,
+                hooks,
+                JudgeNames::Integration {
+                    sequence: u64::from(sequence.0),
+                },
+            )
+        }
+    }
+}
+
+fn complete_promotions<O: Operator + ?Sized>(
+    operator: &mut O,
+    manager: &WorkspaceManager,
+) -> Result<(), UpstrokeError> {
+    let (run_id, promoting) = {
+        let run = operator.driven();
+        (run.identity.run_id.clone(), closure::promoting(run.fold()))
+    };
+    for key in promoting {
+        let Some(promoting) =
+            super::candidate::recovery_for(manager, &run_id, operator.driven().fold(), key)?
+                .promotion
+        else {
+            continue;
+        };
+        let slot = task_slot(key, promoting.candidate().generation);
+        let referenced = create_candidates_ref(manager, operator.registry(), promoting)?;
+        let created = {
+            let (run, seams, hooks) = operator.parts();
+            run.with_journal(seams, hooks, |journal| {
+                append_candidate_created(journal, referenced)
+            })?
+        };
+        reclaim_after_creation(manager, operator.registry(), &slot, created)?;
+    }
+    Ok(())
+}
+
+fn complete_publication<O: Operator + ?Sized>(
+    operator: &mut O,
+    manager: &WorkspaceManager,
+) -> Result<(), UpstrokeError> {
+    let Some(authorized) = integrate::Authorized::from_fold(operator.driven().fold())? else {
+        return Ok(());
+    };
+    integrate::publish(&mut OperatorJournal(operator), manager, authorized)?;
+    Ok(())
+}
+
+pub(super) struct DrivenJournal<'d, D: ?Sized>(pub &'d mut D);
+
+impl<D: Driver + ?Sized> IntegrationJournal for DrivenJournal<'_, D> {
+    fn emit(&mut self, body: TopologyEventBody) -> Result<(), UpstrokeError> {
+        let (run, seams, hooks) = self.0.parts();
+        run.emit(body, seams, hooks)
+    }
+
+    fn fold(&self) -> &TopologyFold {
+        self.0.driven().fold()
+    }
+
+    fn hooks(&mut self) -> &mut dyn TopologyHooks {
+        self.0.registry()
+    }
+
+    fn converted(&mut self, key: TaskKey) -> Result<(), UpstrokeError> {
+        self.0.parts().0.convert_integration(key)
+    }
+}
+
+impl<D: Driver + ?Sized> Verification for DrivenJournal<'_, D> {
+    fn verify(&mut self, request: &VerifyRequest<'_>) -> Result<Verified, UpstrokeError> {
+        self.0.verify(request)
+    }
+
+    fn ids(&self) -> &dyn super::seams::IdSource {
+        self.0.seams().ids
     }
 }
 
@@ -145,40 +702,36 @@ fn implementer_binding(
 
 impl Verification for IntegrationCx<'_, '_> {
     fn verify(&mut self, request: &VerifyRequest<'_>) -> Result<Verified, UpstrokeError> {
+        let job = VerificationJob::of(self.emitter.state.fold, request)?;
         let mut charged = Vec::new();
-        match self.judge_proposal(request, &mut charged) {
-            Ok(judgement) => Ok(Verified::Judged(judgement)),
-            Err(JudgeError::Runner(error)) => match error.fate {
-                ProcessFate::NeverStarted => Ok(Verified::Unavailable {
-                    kind: InfrastructureKind::RunnerSpawnFailure,
-                    detail: error.to_string(),
-                    reviews: charged,
-                }),
-                ProcessFate::Gone => Ok(Verified::Unavailable {
-                    kind: InfrastructureKind::Other {
-                        detail: format!(
-                            "the Runner lost `{}` after its process started and has since \
-                             established the process is gone; nothing was judged",
-                            error.invocation
-                        ),
-                    },
-                    detail: error.to_string(),
-                    reviews: charged,
-                }),
-                ProcessFate::Unresolved => Err(error.into()),
-            },
-            Err(JudgeError::Other(UpstrokeError::Git { message })) => Ok(Verified::Unavailable {
-                kind: InfrastructureKind::Other {
-                    detail: format!(
-                        "foreign Git state observed by the verification of sequence {}: {message}",
-                        request.sequence.0
-                    ),
-                },
-                detail: message,
-                reviews: charged,
-            }),
-            Err(JudgeError::Other(error)) => Err(error),
-        }
+        let outcome = {
+            let ledger = std::sync::Mutex::new(&mut *self.invocations);
+            let carried = Carried::default();
+            let standing = Standing::of(
+                self.emitter.state.fold,
+                &SequenceIdentities::new(request.sequence).gate(0, 0),
+            );
+            let mut work = Work {
+                manager: self.seams.manager,
+                hooks: &mut *self.hooks,
+                runner: self.seams.runner,
+                standing,
+                registrar: &ledger,
+                carried: &carried,
+                adapters: self.seams.adapters,
+                paths: self.seams.paths,
+                plans: self.seams.plans,
+                reviews: self.seams.reviews,
+                input_policy: self.seams.input_policy,
+            };
+            let mut account = SpendAccount {
+                spend: Some(&mut *self.spend),
+                key: request.candidate.key,
+                charged: &mut charged,
+            };
+            verification_body(&mut work, &job, &mut account)
+        };
+        verified(outcome, charged, request.sequence)
     }
 
     fn ids(&self) -> &dyn super::seams::IdSource {
@@ -186,160 +739,199 @@ impl Verification for IntegrationCx<'_, '_> {
     }
 }
 
-impl IntegrationCx<'_, '_> {
-    fn judge_proposal(
-        &mut self,
-        request: &VerifyRequest<'_>,
-        charged: &mut Vec<crate::events::ReviewRecord>,
-    ) -> Result<Judgement, JudgeError> {
-        let key = request.candidate.key;
-        let (entry, base, implementer) = {
-            let fold = &*self.emitter.state.fold;
-            let entry = fold
-                .registry()
-                .and_then(|registry| registry.get(key))
-                .cloned()
-                .ok_or_else(|| {
-                    JudgeError::Other(UpstrokeError::Refused {
-                        message: format!("task {key} is not in this run's registry"),
-                    })
-                })?;
-            let base = fold
-                .task(key)
-                .and_then(|task| {
-                    task.generations
-                        .iter()
-                        .find(|generation| generation.id == request.candidate.generation)
-                })
-                .and_then(|generation| generation.candidate.as_ref())
-                .map(|prepared| prepared.base_sha.clone());
-            (
-                entry,
-                base,
-                implementer_binding(fold, key).map_err(JudgeError::Other)?,
-            )
-        };
-
-        let (diff_parent, diff_tree) = if request.already_present {
-            let base = base.ok_or_else(|| {
-                JudgeError::Other(UpstrokeError::Refused {
-                    message: "an already-present verification needs the candidate's recorded \
-                              base to review its original patch"
-                        .to_owned(),
-                })
-            })?;
-            (base.0, request.candidate.commit_sha.0.clone())
-        } else {
-            (request.head.0.clone(), request.proposed.0.clone())
-        };
-        let diff = self
-            .seams
-            .manager
-            .candidate_diff(request.staging, &diff_parent, &diff_tree)
-            .map_err(JudgeError::Other)?;
-
-        let plan = self
-            .seams
-            .plans
-            .verification(&VerificationRequest {
-                entry: &entry,
-                implementer,
-            })
-            .map_err(JudgeError::Other)?;
-
-        let prior_failure =
-            match crate::engine::classify::unjudgeable_diff(&diff, !plan.reviewers.is_empty()) {
-                Some(failure) => Some(failure),
-                None => {
-                    let tree = self
-                        .seams
-                        .manager
-                        .commit_tree_sha(request.proposed.as_str())
-                        .map_err(JudgeError::Other)?
-                        .ok_or_else(|| {
-                            JudgeError::Other(UpstrokeError::Git {
-                                message: format!(
-                                    "the proposed commit {} has no tree; the review-input policy \
-                                     cannot be consulted for it",
-                                    request.proposed
-                                ),
-                            })
-                        })?;
-                    let staging = self.seams.manager.slot_path(request.staging);
-                    self.seams
-                        .input_policy
-                        .problem(&staging, &tree)
-                        .map_err(JudgeError::Other)?
-                        .map(crate::engine::classify::review_input_failure)
-                }
-            };
-
-        let inputs = self
-            .seams
-            .plans
-            .inputs(&InputsRequest {
-                entry: &entry,
-                diff,
-            })
-            .map_err(JudgeError::Other)?;
-
-        let proposed = crate::workspace_manager::ObjectId::new(request.proposed.0.clone())
-            .map_err(|refusal| {
-                JudgeError::Other(UpstrokeError::Refused {
-                    message: format!(
-                        "the recorded proposal of sequence {} is not an object id: {refusal}",
-                        request.sequence.0
+pub fn verified(
+    outcome: Result<Judgement, JudgeError>,
+    charged: Vec<crate::events::ReviewRecord>,
+    sequence: SequenceId,
+) -> Result<Verified, UpstrokeError> {
+    match outcome {
+        Ok(judgement) => Ok(Verified::Judged(judgement)),
+        Err(JudgeError::Runner(error)) if error.is_cancelled() => Err(error.into()),
+        Err(JudgeError::Runner(error)) => match error.fate {
+            ProcessFate::NeverStarted => Ok(Verified::Unavailable {
+                kind: InfrastructureKind::RunnerSpawnFailure,
+                detail: error.to_string(),
+                reviews: charged,
+            }),
+            ProcessFate::Gone => Ok(Verified::Unavailable {
+                kind: InfrastructureKind::Other {
+                    detail: format!(
+                        "the Runner lost `{}` after its process started and has since \
+                         established the process is gone; nothing was judged",
+                        error.invocation
                     ),
-                })
-            })?;
-        let identities = SequenceIdentities::new(request.sequence);
-        let mut judge = Judge {
-            manager: self.seams.manager,
-            hooks: &mut *self.hooks,
-            runner: self.seams.runner,
-            slots: self.slots,
-            ledger: self.invocations,
-            adapters: self.seams.adapters,
-            paths: self.seams.paths,
-            reviews: self.seams.reviews,
-        };
-        let mut account = SpendAccount {
-            spend: &mut *self.spend,
-            key,
-            charged,
-        };
-        judge.judge(
-            &Subject {
-                snapshot: SnapshotOf::Commit(proposed),
-                disposal: SnapshotDisposal::AfterTheTerminal,
-                names: JudgeNames::Integration {
-                    sequence: u64::from(request.sequence.0),
                 },
-                identities: JudgeIdentities::Sequence(identities),
-                stem: format!("integration-s{}", request.sequence.0),
-                gates: &plan.gates,
-                reviewers: &plan.reviewers,
-                inputs: &inputs,
-                prior_failure,
-                invocations: &move |pass| review::ReviewInvocations {
-                    pass: identities.review_pass(pass, 0),
-                    reask: identities.review_reask(pass, 0),
-                },
+                detail: error.to_string(),
+                reviews: charged,
+            }),
+            ProcessFate::Unresolved => Err(error.into()),
+        },
+        Err(JudgeError::Other(UpstrokeError::Git { message })) => Ok(Verified::Unavailable {
+            kind: InfrastructureKind::Other {
+                detail: format!(
+                    "foreign Git state observed by the verification of sequence {}: {message}",
+                    sequence.0
+                ),
             },
-            &mut account,
-        )
+            detail: message,
+            reviews: charged,
+        }),
+        Err(JudgeError::Other(error)) => Err(error),
     }
 }
 
-struct SpendAccount<'a> {
-    spend: &'a mut Spend,
-    key: TaskKey,
-    charged: &'a mut Vec<crate::events::ReviewRecord>,
+#[derive(Debug, Clone)]
+pub struct VerificationJob {
+    pub candidate: CandidateRef,
+    pub sequence: SequenceId,
+    pub staging: crate::workspace_manager::Slot,
+    pub head: CommitSha,
+    pub proposed: CommitSha,
+    pub already_present: bool,
+    entry: crate::topology::registry::TaskEntry,
+    base: Option<CommitSha>,
+    implementer: crate::review::PassBinding,
 }
 
-impl crate::engine::topology::attempt::ReviewAccount for SpendAccount<'_> {
+impl VerificationJob {
+    pub fn of(fold: &TopologyFold, request: &VerifyRequest<'_>) -> Result<Self, UpstrokeError> {
+        let key = request.candidate.key;
+        let entry = fold
+            .registry()
+            .and_then(|registry| registry.get(key))
+            .cloned()
+            .ok_or_else(|| UpstrokeError::Refused {
+                message: format!("task {key} is not in this run's registry"),
+            })?;
+        let base = fold
+            .task(key)
+            .and_then(|task| {
+                task.generations
+                    .iter()
+                    .find(|generation| generation.id == request.candidate.generation)
+            })
+            .and_then(|generation| generation.candidate.as_ref())
+            .map(|prepared| prepared.base_sha.clone());
+        Ok(Self {
+            candidate: request.candidate.clone(),
+            sequence: request.sequence,
+            staging: request.staging.clone(),
+            head: request.head.clone(),
+            proposed: request.proposed.clone(),
+            already_present: request.already_present,
+            entry,
+            base,
+            implementer: implementer_binding(fold, key)?,
+        })
+    }
+}
+
+pub fn verification_body(
+    work: &mut Work<'_>,
+    job: &VerificationJob,
+    account: &mut dyn ReviewAccount,
+) -> Result<Judgement, JudgeError> {
+    let (diff_parent, diff_tree) = if job.already_present {
+        let base = job.base.as_ref().ok_or_else(|| {
+            JudgeError::Other(UpstrokeError::Refused {
+                message: "an already-present verification needs the candidate's recorded \
+                          base to review its original patch"
+                    .to_owned(),
+            })
+        })?;
+        (base.0.clone(), job.candidate.commit_sha.0.clone())
+    } else {
+        (job.head.0.clone(), job.proposed.0.clone())
+    };
+    let diff = work
+        .manager
+        .candidate_diff(&job.staging, &diff_parent, &diff_tree)
+        .map_err(JudgeError::Other)?;
+
+    let plan = work
+        .plans
+        .verification(&VerificationRequest {
+            entry: &job.entry,
+            implementer: job.implementer.clone(),
+        })
+        .map_err(JudgeError::Other)?;
+
+    let prior_failure =
+        match crate::engine::classify::unjudgeable_diff(&diff, !plan.reviewers.is_empty()) {
+            Some(failure) => Some(failure),
+            None => {
+                let tree = work
+                    .manager
+                    .commit_tree_sha(job.proposed.as_str())
+                    .map_err(JudgeError::Other)?
+                    .ok_or_else(|| {
+                        JudgeError::Other(UpstrokeError::Git {
+                            message: format!(
+                                "the proposed commit {} has no tree; the review-input policy \
+                                 cannot be consulted for it",
+                                job.proposed
+                            ),
+                        })
+                    })?;
+                let staging = work.manager.slot_path(&job.staging);
+                work.input_policy
+                    .problem(&staging, &tree)
+                    .map_err(JudgeError::Other)?
+                    .map(crate::engine::classify::review_input_failure)
+            }
+        };
+
+    let inputs = work
+        .plans
+        .inputs(&InputsRequest {
+            entry: &job.entry,
+            diff,
+        })
+        .map_err(JudgeError::Other)?;
+
+    let proposed =
+        crate::workspace_manager::ObjectId::new(job.proposed.0.clone()).map_err(|refusal| {
+            JudgeError::Other(UpstrokeError::Refused {
+                message: format!(
+                    "the recorded proposal of sequence {} is not an object id: {refusal}",
+                    job.sequence.0
+                ),
+            })
+        })?;
+    let identities = SequenceIdentities::new(job.sequence);
+    work.judge().judge(
+        &Subject {
+            snapshot: SnapshotOf::Commit(proposed),
+            disposal: SnapshotDisposal::AfterTheTerminal,
+            names: JudgeNames::Integration {
+                sequence: u64::from(job.sequence.0),
+            },
+            identities: JudgeIdentities::Sequence(identities),
+            stem: format!("integration-s{}", job.sequence.0),
+            gates: &plan.gates,
+            reviewers: &plan.reviewers,
+            inputs: &inputs,
+            prior_failure,
+            invocations: &move |pass| review::ReviewInvocations {
+                pass: identities.review_pass(pass, 0),
+                reask: identities.review_reask(pass, 0),
+            },
+        },
+        account,
+    )
+}
+
+pub struct SpendAccount<'a> {
+    pub spend: Option<&'a mut Spend>,
+    pub key: TaskKey,
+    pub charged: &'a mut Vec<crate::events::ReviewRecord>,
+}
+
+impl ReviewAccount for SpendAccount<'_> {
     fn charge(&mut self, review: &crate::events::ReviewRecord) {
-        self.spend.record_review_cost(self.key, review.cost_usd);
+        if let Some(spend) = self.spend.as_deref_mut() {
+            spend.record_review_cost(self.key, review.cost_usd);
+        }
         self.charged.push(review.clone());
     }
 }
@@ -553,9 +1145,15 @@ struct Retained {
 
 #[derive(Debug, Clone, Copy)]
 struct Produced<'a> {
-    capture: &'a Capture,
-    assessed: &'a Assessment,
+    capture: &'a super::attempt::Capture,
+    assessed: &'a super::attempt::Assessment,
     judgement: &'a Judgement,
+}
+
+#[derive(Debug)]
+pub enum Retrying {
+    Started(Box<AttemptJob>),
+    Closed { key: TaskKey },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -603,15 +1201,15 @@ pub enum Progress {
 pub struct TopologyRun {
     handle: RunHandle,
     identity: RunIdentity,
-    reservations: Reservations,
-    invocations: InvocationLedger,
+    broker: PermitBroker,
     warnings: Vec<String>,
+    discarded: u32,
     ceiling: Ceiling,
     spend: Spend,
     deferral: Deferral,
-    slots: SlotAssertion,
     retained: BTreeMap<TaskKey, Retained>,
     brief: Brief,
+    stopped: Option<String>,
 }
 
 impl TopologyRun {
@@ -624,18 +1222,19 @@ impl TopologyRun {
         };
         let spend = Spend::replay(&handle.events);
         let brief = Brief::replay(&handle.events);
+        let broker = PermitBroker::for_run(&Entitlements::of(&handle.fold));
         Self {
             handle,
             identity,
-            reservations: Reservations::new(),
-            invocations: InvocationLedger::new(),
+            broker,
             warnings: Vec::new(),
+            discarded: 0,
             ceiling,
             spend,
             deferral: Deferral::default_backoff(),
-            slots: SlotAssertion::new(),
             retained: BTreeMap::new(),
             brief,
+            stopped: None,
         }
     }
 
@@ -645,11 +1244,11 @@ impl TopologyRun {
 
     #[must_use]
     pub fn holds_entitlement(&mut self) -> bool {
-        self.reservations.cancel_any()
+        self.broker.halves().0.cancel_any()
     }
 
     pub fn invocations_balance(&self) -> bool {
-        self.invocations.balances()
+        self.broker.invocations().balances()
     }
 
     pub const fn spend(&self) -> &Spend {
@@ -673,13 +1272,51 @@ impl TopologyRun {
     }
 
     #[must_use]
+    pub const fn discarded(&self) -> u32 {
+        self.discarded
+    }
+
+    pub(super) fn record_discard(&mut self, warning: Option<String>) {
+        self.discarded = self.discarded.saturating_add(1);
+        self.warnings.extend(warning);
+    }
+
+    pub(super) fn warn(&mut self, warning: String) {
+        self.warnings.push(warning);
+    }
+
+    pub(super) fn stop(&mut self, why: String) {
+        if self.stopped.is_none() {
+            self.stopped = Some(why);
+        }
+    }
+
+    pub(super) fn reopen(&mut self) {
+        self.stopped = None;
+    }
+
+    pub(super) fn stopped(&self) -> Option<&str> {
+        self.stopped.as_deref()
+    }
+
+    #[must_use]
     pub fn entitlements_held(&self) -> u32 {
-        self.reservations.entitlements_held()
+        self.broker.reservations().entitlements_held()
     }
 
     #[must_use]
     pub const fn reservations_cancelled(&self) -> u32 {
-        self.reservations.cancelled()
+        self.broker.reservations().cancelled()
+    }
+
+    #[must_use]
+    pub const fn reservations_peak(&self) -> usize {
+        self.broker.reservations().peak()
+    }
+
+    #[must_use]
+    pub fn broker_duplicates(&self) -> u32 {
+        self.broker.duplicates()
     }
 
     #[must_use]
@@ -697,32 +1334,22 @@ impl TopologyRun {
         if let Some(answered) = self.ingest_answers(seams, hooks)? {
             return Ok(answered);
         }
-        let selected = select(&self.handle.fold, &self.ceiling, &self.spend);
-
-        let admitted = checkpoint(selected)?;
-        match admitted {
-            Admitted::BudgetExceeded(exceeded) => {
-                self.emit(
-                    TopologyEventBody::BudgetExceeded { data: *exceeded },
-                    seams,
-                    hooks,
-                )?;
-                Ok(Progress::BudgetExceeded)
-            }
-            Admitted::Backoff => {
-                let elapsed = self.deferral.wait(seams.sleeper);
-                let (waited_ms, round) = (elapsed.waited_ms, elapsed.round);
-                self.emit(
-                    TopologyEventBody::DeferWaitElapsed { data: elapsed },
-                    seams,
-                    hooks,
-                )?;
-                Ok(Progress::Waited { waited_ms, round })
-            }
+        match self.admitted()? {
+            Admitted::BudgetExceeded(exceeded) => self.exceed_budget(*exceeded, seams, hooks),
+            Admitted::Backoff => self.back_off(seams, hooks),
             Admitted::Integrate { candidate } => self.integrate(*candidate, seams, hooks),
             Admitted::Retry {
                 key, generation, ..
-            } => self.retry_ready(key, generation, seams, hooks),
+            } => {
+                let manager = seams.manager;
+                match begin_retry(&mut self.stepping(seams, hooks), manager, key, generation)? {
+                    Retrying::Started(job) => {
+                        let judged = self.judge_inline(&job, seams, hooks)?;
+                        settle_judged(&mut self.stepping(seams, hooks), manager, &job, &judged)
+                    }
+                    Retrying::Closed { key } => Ok(Progress::GenerationClosed { key }),
+                }
+            }
             Admitted::Dispatch {
                 key,
                 generation,
@@ -733,58 +1360,122 @@ impl TopologyRun {
                 generation,
                 continuing,
             } => {
-                let dispatched = if continuing {
-                    self.continue_open(key, generation, seams, hooks)?
-                } else {
-                    self.dispatch_ready(key, generation, seams, hooks)?
-                };
-                self.run_first_attempt(&dispatched, seams, hooks)
+                let manager = seams.manager;
+                let job = begin_dispatch(
+                    &mut self.stepping(seams, hooks),
+                    manager,
+                    key,
+                    generation,
+                    continuing,
+                )?;
+                let judged = self.judge_inline(&job, seams, hooks)?;
+                settle_judged(&mut self.stepping(seams, hooks), manager, &job, &judged)
             }
-            Admitted::HardBlock { questions } => self.hard_block(&questions, seams, hooks),
-            Admitted::Closure(_) => self.close_run(seams, hooks),
+            Admitted::HardBlock { questions } => {
+                hard_block(&mut self.stepping(seams, hooks), seams, &questions)
+            }
+            Admitted::Closure(_) => close_run(
+                &mut self.stepping(seams, hooks),
+                seams,
+                &closure::Cancelled::none(),
+            ),
         }
     }
 
-    fn run_first_attempt(
+    fn stepping<'a, 's>(
+        &'a mut self,
+        seams: &'a RunSeams<'s>,
+        hooks: &'a mut dyn TopologyHooks,
+    ) -> Stepping<'a, 's> {
+        Stepping {
+            run: self,
+            seams,
+            hooks,
+        }
+    }
+
+    pub(super) fn admitted(&self) -> Result<Admitted, UpstrokeError> {
+        checkpoint(select(&self.handle.fold, &self.ceiling, &self.spend))
+    }
+
+    pub(super) fn cleanup_scope(&self) -> crate::rundir::CleanupScope {
+        self.handle.cleanup_scope()
+    }
+
+    pub(super) fn exceed_budget(
+        &mut self,
+        exceeded: crate::topology::events::BudgetExceeded4,
+        seams: &RunSeams<'_>,
+        hooks: &mut dyn TopologyHooks,
+    ) -> Result<Progress, UpstrokeError> {
+        self.emit(
+            TopologyEventBody::BudgetExceeded { data: exceeded },
+            seams,
+            hooks,
+        )?;
+        Ok(Progress::BudgetExceeded)
+    }
+
+    pub(super) fn back_off(
+        &mut self,
+        seams: &RunSeams<'_>,
+        hooks: &mut dyn TopologyHooks,
+    ) -> Result<Progress, UpstrokeError> {
+        let elapsed = self.deferral.wait(seams.sleeper);
+        let (waited_ms, round) = (elapsed.waited_ms, elapsed.round);
+        self.emit(
+            TopologyEventBody::DeferWaitElapsed { data: elapsed },
+            seams,
+            hooks,
+        )?;
+        Ok(Progress::Waited { waited_ms, round })
+    }
+
+    fn first_attempt(
         &mut self,
         dispatched: &Dispatched,
         seams: &RunSeams<'_>,
         hooks: &mut dyn TopologyHooks,
-    ) -> Result<Progress, UpstrokeError> {
+    ) -> Result<AttemptJob, UpstrokeError> {
         let key = dispatched.key;
-        let (plan, capture, assessed, judgement) = self.attempt(
-            dispatched.site(),
-            RunAs {
-                attempt: Self::FIRST_ATTEMPT,
-                rung: self.ladder_position(key)?.0,
-                resume_session: None,
-                feedback: self.brief.lines(key),
-                announced: false,
-                materialized: dispatched.materialized,
-            },
-            seams,
-            hooks,
-        )?;
-        let accepted = judgement.accepted();
-        let spent_attempt = self.settle(
-            dispatched.site(),
-            &plan,
-            Produced {
-                capture: &capture,
-                assessed: &assessed,
-                judgement: &judgement,
-            },
-            seams,
-            hooks,
-        )?;
-        Ok(Progress::Settled {
-            key,
-            accepted,
-            spent_attempt,
-        })
+        let run_as = RunAs {
+            attempt: Self::FIRST_ATTEMPT,
+            rung: self.ladder_position(key)?.0,
+            resume_session: None,
+            feedback: self.brief.lines(key),
+            announced: false,
+            materialized: dispatched.materialized,
+        };
+        self.prepare_attempt(dispatched.site(), run_as, seams, hooks)
     }
 
-    fn ingest_answers(
+    fn judge_inline(
+        &mut self,
+        job: &AttemptJob,
+        seams: &RunSeams<'_>,
+        hooks: &mut dyn TopologyHooks,
+    ) -> Result<Judged, UpstrokeError> {
+        let standing = Standing::of(&self.handle.fold, &job.identities().worker());
+        let (_, invocations) = self.broker.halves();
+        let ledger = std::sync::Mutex::new(invocations);
+        let carried = Carried::default();
+        let mut work = Work {
+            manager: seams.manager,
+            hooks,
+            runner: seams.runner,
+            standing,
+            registrar: &ledger,
+            carried: &carried,
+            adapters: seams.adapters,
+            paths: seams.paths,
+            plans: seams.plans,
+            reviews: seams.reviews,
+            input_policy: seams.input_policy,
+        };
+        attempt_body(&mut work, job)
+    }
+
+    pub(super) fn ingest_answers(
         &mut self,
         seams: &RunSeams<'_>,
         hooks: &mut dyn TopologyHooks,
@@ -812,41 +1503,46 @@ impl TopologyRun {
         Ok(None)
     }
 
-    fn dispatch_ready(
+    fn dispatch_inputs(
+        &self,
+        key: TaskKey,
+    ) -> Result<(DispatchKind, RunStarted4, Vec<TopologyEvent>), UpstrokeError> {
+        let kind = self.dispatch_kind(key)?;
+        let published = self
+            .handle
+            .events
+            .iter()
+            .rev()
+            .find(|event| matches!(event.body, TopologyEventBody::TaskMerged { .. }))
+            .cloned()
+            .into_iter()
+            .collect();
+        Ok((kind, self.handle.started.clone(), published))
+    }
+
+    fn reserve_dispatch(&mut self, key: TaskKey) -> Result<(), UpstrokeError> {
+        self.broker.reserve(
+            &Entitlements::of(&self.handle.fold),
+            key,
+            ReservationKind::Dispatch,
+        )
+    }
+
+    fn dispatch_settled(
         &mut self,
         key: TaskKey,
-        generation: GenerationId,
-        seams: &RunSeams<'_>,
-        hooks: &mut dyn TopologyHooks,
+        dispatched: Result<Dispatched, EmitFailure>,
     ) -> Result<Dispatched, UpstrokeError> {
-        let request = self.dispatch_request(key, generation, seams)?;
-
-        self.reservations.take(key, ReservationKind::Dispatch)?;
-
-        let dispatched = {
-            let mut emitter = RunEmitter {
-                identity: &self.identity,
-                state: EmitState {
-                    fold: &mut self.handle.fold,
-                    log: &mut self.handle.log,
-                    events: &mut self.handle.events,
-                    reservations: &mut self.reservations,
-                    warnings: &mut self.warnings,
-                },
-                clock: seams.clock,
-            };
-            dispatch(seams.manager, hooks, &mut emitter, &request)
-        };
-
+        let (reservations, invocations) = self.broker.halves();
         match dispatched {
             Ok(dispatched) => {
-                self.reservations.convert(key, ReservationKind::Dispatch)?;
+                reservations.convert(key, ReservationKind::Dispatch)?;
                 self.deferral.progressed();
                 Ok(dispatched)
             }
             Err(error) => {
-                let _ = self.reservations.cancel(key, ReservationKind::Dispatch);
-                Err(error.discharging(&mut self.invocations))
+                let cancelled = reservations.cancel(key, ReservationKind::Dispatch);
+                Err(error.discharging(invocations).with_cleanup(cancelled))
             }
         }
     }
@@ -857,12 +1553,12 @@ impl TopologyRun {
         seams: &RunSeams<'_>,
         hooks: &mut dyn TopologyHooks,
     ) -> Result<Progress, UpstrokeError> {
-        let request =
-            IntegrationRequest::from_log(&self.handle.fold, &self.handle.events, &candidate)?;
+        let request = self.integration_request(&candidate)?;
         let key = candidate.key;
-        self.reservations.take(key, ReservationKind::Integration)?;
+        self.reserve_integration(key)?;
 
         let terminal = {
+            let (reservations, invocations) = self.broker.halves();
             let mut cx = IntegrationCx {
                 emitter: RunEmitter {
                     identity: &self.identity,
@@ -870,20 +1566,46 @@ impl TopologyRun {
                         fold: &mut self.handle.fold,
                         log: &mut self.handle.log,
                         events: &mut self.handle.events,
-                        reservations: &mut self.reservations,
+                        reservations,
                         warnings: &mut self.warnings,
                     },
                     clock: seams.clock,
+                    stopped: self.stopped.as_deref(),
                 },
                 hooks,
-                invocations: &mut self.invocations,
-                slots: &mut self.slots,
+                invocations,
                 spend: &mut self.spend,
                 seams,
             };
             integrate::integrate(&mut cx, seams.manager, &request)
         };
+        self.integration_settled(key, terminal)
+    }
 
+    pub(super) fn integration_request(
+        &self,
+        candidate: &CandidateRef,
+    ) -> Result<IntegrationRequest, UpstrokeError> {
+        IntegrationRequest::from_log(&self.handle.fold, &self.handle.events, candidate)
+    }
+
+    pub(super) fn reserve_integration(&mut self, key: TaskKey) -> Result<(), UpstrokeError> {
+        self.broker.reserve(
+            &Entitlements::of(&self.handle.fold),
+            key,
+            ReservationKind::Integration,
+        )
+    }
+
+    pub(super) fn convert_integration(&mut self, key: TaskKey) -> Result<(), UpstrokeError> {
+        self.broker.convert(key, ReservationKind::Integration)
+    }
+
+    pub(super) fn integration_settled(
+        &mut self,
+        key: TaskKey,
+        terminal: Result<Terminal, UpstrokeError>,
+    ) -> Result<Progress, UpstrokeError> {
         match terminal {
             Ok(terminal) => {
                 self.deferral.progressed();
@@ -906,31 +1628,44 @@ impl TopologyRun {
                 })
             }
             Err(error) => {
-                if !self.reservations.is_empty() {
-                    self.reservations
-                        .cancel(key, ReservationKind::Integration)?;
+                if self.broker.reservations().held(key) == Some(ReservationKind::Integration) {
+                    self.broker
+                        .cancel_reservation(key, ReservationKind::Integration)?;
                 }
                 Err(error)
             }
         }
     }
 
-    fn hard_block(
-        &mut self,
-        questions: &[QuestionId],
-        seams: &RunSeams<'_>,
-        hooks: &mut dyn TopologyHooks,
-    ) -> Result<Progress, UpstrokeError> {
-        for id in questions {
-            let asked = self.open_question(id)?;
-            let answer = match seams.answers.resolve(&asked.question)? {
-                Answer::Unanswered => continue,
-                answer => answer,
-            };
-            let answer4 = self.answer_for(id, &asked, answer, seams)?;
-            return self.ingest_answer(id, asked.key, answer4, seams, hooks);
+    pub(super) fn verification_job(
+        &self,
+        request: &VerifyRequest<'_>,
+    ) -> Result<VerificationJob, UpstrokeError> {
+        VerificationJob::of(&self.handle.fold, request)
+    }
+
+    pub(super) fn charge_reviews(&mut self, key: TaskKey, reviews: &[crate::events::ReviewRecord]) {
+        self.spend.record_reviews(key, reviews);
+    }
+
+    pub(super) fn broker_mut(&mut self) -> &mut PermitBroker {
+        &mut self.broker
+    }
+
+    pub(super) fn cancel_provisional(&mut self) -> bool {
+        self.broker.halves().0.cancel_any()
+    }
+
+    pub(super) fn limit_slots(&mut self, limits: SlotLimits) -> Result<(), UpstrokeError> {
+        if !self.broker.balances() {
+            return Err(UpstrokeError::Refused {
+                message: "the run's broker holds an unsettled reservation or invocation, so its \
+                          slot limits cannot be replaced; nothing was spawned"
+                    .to_owned(),
+            });
         }
-        self.close_run(seams, hooks)
+        self.broker = PermitBroker::for_pipelines(limits);
+        Ok(())
     }
 
     fn answer_for(
@@ -1056,13 +1791,11 @@ impl TopologyRun {
         })
     }
 
-    fn continue_open(
-        &mut self,
+    fn open_to_continue(
+        &self,
         key: TaskKey,
         generation: GenerationId,
-        seams: &RunSeams<'_>,
-        hooks: &mut dyn TopologyHooks,
-    ) -> Result<Dispatched, UpstrokeError> {
+    ) -> Result<(OpenGeneration, DispatchKind), UpstrokeError> {
         let base = self
             .handle
             .fold
@@ -1083,37 +1816,25 @@ impl TopologyRun {
                 source: dispatched_source(&self.handle.events, key, generation)?,
             },
         };
-        let slot = task_slot(key, generation);
         let open = OpenGeneration {
             key,
             generation,
-            base: base.clone(),
-            slot: slot.clone(),
+            base,
+            slot: task_slot(key, generation),
             source: match &kind {
                 DispatchKind::Ordinary { .. } => None,
                 DispatchKind::Repair { source, .. } => Some(source.clone()),
             },
         };
-        let resumed = resume_open_no_attempt(seams.manager, hooks, &open)?;
-        self.deferral.progressed();
-        Ok(Dispatched {
-            key,
-            generation,
-            base,
-            worktree: seams.manager.slot_path(&slot),
-            slot,
-            kind,
-            materialized: resumed.materialized,
-        })
+        Ok((open, kind))
     }
 
-    fn retry_ready(
-        &mut self,
+    fn retry_request(
+        &self,
         key: TaskKey,
         generation: GenerationId,
         seams: &RunSeams<'_>,
-        hooks: &mut dyn TopologyHooks,
-    ) -> Result<Progress, UpstrokeError> {
+    ) -> Result<RetryRequest, UpstrokeError> {
         let position = self.ladder_position(key)?;
         let held = self
             .retained
@@ -1139,159 +1860,90 @@ impl TopologyRun {
                     position.0
                 ),
             })?;
-        let slot_for_run = task_slot(key, generation);
-        let slot = slot_for_run.clone();
         let pool = seams.plans.pool_for(&binding.agent);
         let materialization = self.retry_materialization(key);
-
-        let outcome = {
-            let worktrees = ManagedWorktrees::new(seams.manager);
-            retry(
-                &self.handle.fold,
-                &mut self.reservations,
-                &worktrees,
-                hooks.effects(),
-                &RetryRequest {
-                    key,
-                    slot,
-                    retained_tree: held.tree.clone(),
-                    binding,
-                    rung: position.0,
-                    pool: pool.clone(),
-                    materialization,
-                },
-            )?
-        };
-
-        match outcome {
-            RetryOutcome::Start(started) => {
-                let run_as = RunAs {
-                    attempt: started.attempt,
-                    rung: started.rung,
-                    resume_session: started.resume_session.clone(),
-                    feedback: self.brief.lines(key),
-                    announced: true,
-                    materialized: started.materialization_observed,
-                };
-                self.emit(
-                    TopologyEventBody::AttemptStarted { data: *started },
-                    seams,
-                    hooks,
-                )?;
-                self.reservations.convert(key, ReservationKind::Retry)?;
-                self.deferral.progressed();
-
-                let base = self
-                    .handle
-                    .fold
-                    .task(key)
-                    .and_then(|task| task.generations.iter().find(|held| held.id == generation))
-                    .map(|held| held.base_sha.clone())
-                    .ok_or_else(|| UpstrokeError::Refused {
-                        message: format!(
-                            "generation {} of task {} left the fold mid-retry",
-                            generation.0,
-                            key.index()
-                        ),
-                    })?;
-                let worktree = seams.manager.slot_path(&slot_for_run);
-                let site = AttemptSite {
-                    key,
-                    generation,
-                    base: &base,
-                    slot: &slot_for_run,
-                    worktree: &worktree,
-                };
-                let (plan, capture, assessed, judgement) =
-                    self.attempt(site, run_as, seams, hooks)?;
-                let accepted = judgement.accepted();
-                let spent_attempt = self.settle(
-                    site,
-                    &plan,
-                    Produced {
-                        capture: &capture,
-                        assessed: &assessed,
-                        judgement: &judgement,
-                    },
-                    seams,
-                    hooks,
-                )?;
-                return Ok(Progress::Settled {
-                    key,
-                    accepted,
-                    spent_attempt,
-                });
-            }
-            RetryOutcome::Close { closed, .. } => {
-                self.emit(
-                    TopologyEventBody::GenerationClosed { data: closed },
-                    seams,
-                    hooks,
-                )?;
-                self.retained.remove(&key);
-                super::dispatch::scrub(seams.manager, hooks, &slot_for_run)?;
-            }
-        }
-        Ok(Progress::GenerationClosed { key })
+        Ok(RetryRequest {
+            key,
+            slot: task_slot(key, generation),
+            retained_tree: held.tree,
+            binding,
+            rung: position.0,
+            pool,
+            materialization,
+        })
     }
 
-    fn close_run(
+    fn retry_started(
         &mut self,
+        generation: GenerationId,
+        started: crate::topology::events::AttemptStarted4,
+        slot_for_run: &crate::workspace_manager::Slot,
         seams: &RunSeams<'_>,
         hooks: &mut dyn TopologyHooks,
-    ) -> Result<Progress, UpstrokeError> {
-        let outcome = closure::ending_outcome(&self.handle.fold)?;
-        closure::refuse_unclosable(&self.handle.fold)?;
-
-        let reason = GenerationCloseReason::RunEnding {
-            outcome: outcome.clone(),
+    ) -> Result<AttemptJob, UpstrokeError> {
+        let key = started.key;
+        let run_as = RunAs {
+            attempt: started.attempt,
+            rung: started.rung,
+            resume_session: started.resume_session.clone(),
+            feedback: self.brief.lines(key),
+            announced: true,
+            materialized: started.materialization_observed,
         };
-        let mut closed = 0;
-        for key in closure::closable(&self.handle.fold) {
-            let event = close_generation(&self.handle.fold, key, reason.clone())?;
-            let slot = task_slot(key, event.generation);
-            self.emit(
-                TopologyEventBody::GenerationClosed { data: event },
-                seams,
-                hooks,
-            )?;
-            self.retained.remove(&key);
-            super::dispatch::scrub(seams.manager, hooks, &slot)?;
-            closed += 1;
-        }
-
-        if self.reservations.cancel_any() {
-            self.warnings.push(
-                "run-end closure found a provisional reservation still held and cancelled it"
-                    .to_owned(),
-            );
-        }
-
-        closure::confirm_derived(&self.handle.fold, &outcome)?;
-        let finished = closure::run_finished(&self.handle.fold, outcome.clone());
         self.emit(
-            TopologyEventBody::RunFinished { data: finished },
+            TopologyEventBody::AttemptStarted { data: started },
             seams,
             hooks,
         )?;
+        self.broker.convert(key, ReservationKind::Retry)?;
+        self.deferral.progressed();
 
-        let finalized = finalize::finalize(
-            &finalize::Finalize {
-                manager: seams.manager,
-                public: &seams.paths.public,
-                private: &seams.paths.private,
-                run_id: &self.identity.run_id,
-                fold: &self.handle.fold,
-                events: &self.handle.events,
-            },
+        let base = self
+            .handle
+            .fold
+            .task(key)
+            .and_then(|task| task.generations.iter().find(|held| held.id == generation))
+            .map(|held| held.base_sha.clone())
+            .ok_or_else(|| UpstrokeError::Refused {
+                message: format!(
+                    "generation {} of task {} left the fold mid-retry",
+                    generation.0,
+                    key.index()
+                ),
+            })?;
+        let worktree = seams.manager.slot_path(slot_for_run);
+        let site = AttemptSite {
+            key,
+            generation,
+            base: &base,
+            slot: slot_for_run,
+            worktree: &worktree,
+        };
+        self.prepare_attempt(site, run_as, seams, hooks)
+    }
+
+    fn retry_closed(
+        &mut self,
+        key: TaskKey,
+        closed: crate::topology::events::GenerationClosed,
+        seams: &RunSeams<'_>,
+        hooks: &mut dyn TopologyHooks,
+    ) -> Result<(), UpstrokeError> {
+        self.emit(
+            TopologyEventBody::GenerationClosed { data: closed },
+            seams,
             hooks,
         )?;
-        Ok(Progress::Finished {
-            outcome,
-            closed,
-            report_written: finalized.report_written,
-            execution_root_removed: finalized.execution_root_removed,
-        })
+        self.retained.remove(&key);
+        Ok(())
+    }
+
+    fn finished_record(&self) -> (TopologyFold, Vec<TopologyEvent>, String) {
+        (
+            self.handle.fold.clone(),
+            self.handle.events.clone(),
+            self.identity.run_id.clone(),
+        )
     }
 
     fn retry_materialization(&self, key: TaskKey) -> Option<Materialization> {
@@ -1306,13 +1958,13 @@ impl TopologyRun {
     const FIRST_ATTEMPT: crate::topology::events::AttemptNumber =
         crate::topology::events::AttemptNumber(1);
 
-    fn attempt(
+    fn prepare_attempt(
         &mut self,
         site: AttemptSite<'_>,
         run_as: RunAs,
         seams: &RunSeams<'_>,
         hooks: &mut dyn TopologyHooks,
-    ) -> Result<(AttemptPlan, Capture, Assessment, Judgement), UpstrokeError> {
+    ) -> Result<AttemptJob, UpstrokeError> {
         let key = site.key;
         let binding = self
             .handle
@@ -1349,96 +2001,63 @@ impl TopologyRun {
             materialization_observed: run_as.materialized,
         })?;
 
-        let mut emitter = RunEmitter {
-            identity: &self.identity,
-            state: EmitState {
-                fold: &mut self.handle.fold,
-                log: &mut self.handle.log,
-                events: &mut self.handle.events,
-                reservations: &mut self.reservations,
-                warnings: &mut self.warnings,
-            },
-            clock: seams.clock,
-        };
-        let mut cx = AttemptContext {
-            manager: seams.manager,
-            hooks,
-            emitter: &mut emitter,
-            runner: seams.runner,
-            slots: &mut self.slots,
-            ledger: &mut self.invocations,
-            adapters: seams.adapters,
-            paths: seams.paths,
-            reviews: seams.reviews,
-            input_policy: seams.input_policy,
-        };
-
-        let run = if run_as.announced {
-            cx.run_worker(site, &plan)?
-        } else {
-            cx.start(site, &plan)?
-        };
-        let capture = cx.capture(site)?;
-        let diff = seams
-            .manager
-            .candidate_diff(site.slot, &capture.parent, &capture.tree)?;
-
-        let assessed = cx.assess(site, &plan, &run, &capture, &diff, entry.spec.kind)?;
-
-        let inputs = seams.plans.inputs(&InputsRequest {
-            entry: &entry,
-            diff,
-        })?;
-
-        let judgement = cx.judge(
-            site,
-            &plan,
-            Judging {
-                run: &run,
-                capture: &capture,
-                assessed: &assessed,
-            },
-            &inputs,
-            &|pass| review::ReviewInvocations {
-                pass: run.identities.review_pass(pass, 0),
-                reask: run.identities.review_reask(pass, 0),
-            },
-        )?;
-        Ok((plan, capture, assessed, judgement))
+        if !run_as.announced {
+            let (reservations, invocations) = self.broker.halves();
+            let mut emitter = RunEmitter {
+                identity: &self.identity,
+                state: EmitState {
+                    fold: &mut self.handle.fold,
+                    log: &mut self.handle.log,
+                    events: &mut self.handle.events,
+                    reservations,
+                    warnings: &mut self.warnings,
+                },
+                clock: seams.clock,
+                stopped: self.stopped.as_deref(),
+            };
+            AttemptContext {
+                manager: seams.manager,
+                hooks,
+                emitter: &mut emitter,
+                runner: seams.runner,
+                ledger: invocations,
+                adapters: seams.adapters,
+                paths: seams.paths,
+                reviews: seams.reviews,
+                input_policy: seams.input_policy,
+            }
+            .announce(site, &plan)?;
+        }
+        Ok(AttemptJob {
+            key,
+            generation: site.generation,
+            base: site.base.clone(),
+            slot: site.slot.clone(),
+            worktree: site.worktree.to_path_buf(),
+            plan,
+            entry,
+        })
     }
 
-    fn settle(
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the run's side of a failed settlement takes the attempt's site, plan, \
+                  products, record and failure, and the run's seams and hooks; the closed \
+                  slot's scrub stays with the caller, which holds the operator"
+    )]
+    fn settle_failure(
         &mut self,
         site: AttemptSite<'_>,
-        plan: &AttemptPlan,
+        plan: &super::attempt::AttemptPlan,
         produced: Produced<'_>,
+        record: AttemptRecord,
+        failure: &crate::ladder::AttemptFailure,
         seams: &RunSeams<'_>,
         hooks: &mut dyn TopologyHooks,
-    ) -> Result<bool, UpstrokeError> {
+    ) -> Result<(bool, bool), UpstrokeError> {
         let Produced {
-            capture,
-            assessed,
-            judgement,
+            capture, assessed, ..
         } = produced;
-        let record = crate::engine::classify::attempt_record(
-            plan.attempt.0,
-            crate::engine::classify::AttemptFacts {
-                tier: plan.binding.tier,
-                model: &plan.binding.model,
-                pool: plan.pool.clone(),
-                resumed: plan.resume_session.is_some(),
-                outcome: &assessed.outcome,
-                reviews: &judgement.reviews,
-                failure: judgement.failure.as_ref(),
-                feedback: crate::engine::classify::FeedbackCarrier::AttemptRecord,
-            },
-        );
-
-        let Some(failure) = judgement.failure.as_ref() else {
-            self.promote_candidate(site, plan, capture, record, seams, hooks)?;
-            return Ok(crate::ladder::spends_allowance(None));
-        };
-
         let policy = self.ladder_policy(site.key)?;
 
         let defers = self.deferrals_recorded(site.key)?;
@@ -1511,24 +2130,18 @@ impl TopologyRun {
             seams,
             hooks,
         )?;
-        if closed {
-            super::dispatch::scrub(seams.manager, hooks, site.slot)?;
-        }
-        Ok(settled.spent_attempt)
+        Ok((closed, settled.spent_attempt))
     }
 
-    fn promote_candidate(
-        &mut self,
+    fn judged_tree(
+        &self,
         site: AttemptSite<'_>,
-        plan: &AttemptPlan,
-        capture: &Capture,
-        record: AttemptRecord,
-        seams: &RunSeams<'_>,
-        hooks: &mut dyn TopologyHooks,
-    ) -> Result<(), UpstrokeError> {
+        plan: &super::attempt::AttemptPlan,
+        capture: &super::attempt::Capture,
+        record: &AttemptRecord,
+        actual_paths: crate::topology::paths::PathSet,
+    ) -> Result<(JudgedTree, String), UpstrokeError> {
         let key = site.key;
-        let actual_paths = seams.manager.changed_paths(site.slot, &capture.parent)?;
-
         let judged = JudgedTree {
             key,
             generation: site.generation,
@@ -1551,23 +2164,12 @@ impl TopologyRun {
                 },
             },
         };
+        Ok((judged, self.identity.run_id.clone()))
+    }
 
-        let run_id = self.identity.run_id.clone();
-        let unpinned = write_candidate_commit(seams.manager, hooks, &run_id, judged)?;
-        let pinned = pin_candidate(seams.manager, hooks, unpinned)?;
-
-        self.spend.record(key, &record);
-        self.brief.record(key, &record);
-
-        let promoting = self.with_journal(seams, hooks, |journal| {
-            append_candidate_prepared(journal, pinned)
-        })?;
-        let referenced = create_candidates_ref(seams.manager, hooks, promoting)?;
-        let created = self.with_journal(seams, hooks, |journal| {
-            append_candidate_created(journal, referenced)
-        })?;
-        reclaim_after_creation(seams.manager, hooks, site.slot, created)?;
-        Ok(())
+    fn record_promoted(&mut self, key: TaskKey, record: &AttemptRecord) {
+        self.spend.record(key, record);
+        self.brief.record(key, record);
     }
 
     fn with_journal<T>(
@@ -1576,6 +2178,7 @@ impl TopologyRun {
         hooks: &mut dyn TopologyHooks,
         run: impl FnOnce(&mut RunJournal<'_, '_>) -> Result<T, UpstrokeError>,
     ) -> Result<T, UpstrokeError> {
+        let (reservations, invocations) = self.broker.halves();
         let mut journal = RunJournal {
             emitter: RunEmitter {
                 identity: &self.identity,
@@ -1583,13 +2186,14 @@ impl TopologyRun {
                     fold: &mut self.handle.fold,
                     log: &mut self.handle.log,
                     events: &mut self.handle.events,
-                    reservations: &mut self.reservations,
+                    reservations,
                     warnings: &mut self.warnings,
                 },
                 clock: seams.clock,
+                stopped: self.stopped.as_deref(),
             },
             hooks,
-            invocations: &mut self.invocations,
+            invocations,
         };
         run(&mut journal)
     }
@@ -1716,27 +2320,6 @@ impl TopologyRun {
             .map(|lineage| lineage.root)
     }
 
-    fn dispatch_request(
-        &self,
-        key: TaskKey,
-        generation: GenerationId,
-        seams: &RunSeams<'_>,
-    ) -> Result<DispatchRequest, UpstrokeError> {
-        let kind = self.dispatch_kind(key)?;
-        let base = integrate::dispatch_head(
-            seams.manager,
-            &self.handle.started,
-            &self.handle.events,
-            key,
-        )?;
-        Ok(DispatchRequest {
-            key,
-            generation,
-            base,
-            kind,
-        })
-    }
-
     fn dispatch_kind(&self, key: TaskKey) -> Result<DispatchKind, UpstrokeError> {
         let entry = self
             .handle
@@ -1766,27 +2349,53 @@ impl TopologyRun {
         })
     }
 
-    fn emit(
+    pub(super) fn emit(
         &mut self,
         body: TopologyEventBody,
         seams: &RunSeams<'_>,
         hooks: &mut dyn TopologyHooks,
     ) -> Result<(), UpstrokeError> {
+        self.emit_undischarged(body, seams, hooks)
+            .map_err(|failure| failure.discharging(self.broker.halves().1))
+    }
+
+    fn emit_undischarged(
+        &mut self,
+        body: TopologyEventBody,
+        seams: &RunSeams<'_>,
+        hooks: &mut dyn TopologyHooks,
+    ) -> Result<(), EmitFailure> {
         let mut emitter = RunEmitter {
             identity: &self.identity,
             state: EmitState {
                 fold: &mut self.handle.fold,
                 log: &mut self.handle.log,
                 events: &mut self.handle.events,
-                reservations: &mut self.reservations,
+                reservations: self.broker.halves().0,
                 warnings: &mut self.warnings,
             },
             clock: seams.clock,
+            stopped: self.stopped.as_deref(),
         };
-        emitter
-            .emit(body, hooks)
-            .map_err(|failure| failure.discharging(&mut self.invocations))
+        emitter.emit(body, hooks)
     }
+}
+
+fn reclaim_snapshots_of(
+    manager: &WorkspaceManager,
+    hooks: &mut dyn TopologyHooks,
+    names: JudgeNames,
+) -> Result<(), UpstrokeError> {
+    for slot in manager.intents()? {
+        let crate::workspace_manager::Slot::Snapshot { name } = &slot else {
+            continue;
+        };
+        if names.owns(name) {
+            manager.remove_worktree(hooks.effects(), &slot)?;
+            manager.remove_intent(hooks.effects(), &slot)?;
+        }
+    }
+    Ok(())
 }
 
 fn rejected_source(events: &[TopologyEvent], key: TaskKey) -> Result<CandidateRef, UpstrokeError> {

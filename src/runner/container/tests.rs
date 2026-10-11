@@ -22,29 +22,44 @@ use super::runtime::{
     Mount, OwnerLiveness, RuntimeError, RuntimeOp, StopMode, TracePhase,
 };
 use super::{
-    DOCKER_GATED_TESTS, DisposableDirView, DockerCli, FakeOwnerLiveness, FakeRuntime, FoundIntent,
-    GitView, GitViewRequest, LaunchPlan, Launched, NoHooks, OrphanWindow, PS_FIELD_SEPARATOR,
-    PS_FORMAT, PS_LABELS, RacingPause, RecordingHooks, TERMINATION_OBSERVATIONS,
-    classify_docker_failure, create_container, docker_gate, is_unreachable_diagnostic, launch,
-    list_intents, mount_git_view, observe_terminated, parse_ps_output, read_intent, reclaim,
-    release, remove_container, remove_intent, start_container, stop_container, unmount_git_view,
-    write_intent,
+    CoveredCreate, CoveredStart, DOCKER_GATED_TESTS, DisposableDirView, DockerCli,
+    FakeOwnerLiveness, FakeRuntime, FoundIntent, GitView, GitViewRequest, LaunchPlan, Launched,
+    NoHooks, OrphanWindow, PS_FIELD_SEPARATOR, PS_FORMAT, PS_LABELS, RacingPause, RecordingHooks,
+    TERMINATION_OBSERVATIONS, classify_docker_failure, create_container, docker_gate,
+    is_unreachable_diagnostic, launch, list_intents, mount_git_view, observe_terminated,
+    parse_ps_output, read_intent, reclaim, release, remove_container, remove_intent,
+    start_container, stop_container, unmount_git_view, write_intent,
 };
 use crate::error::UpstrokeError;
+use crate::rundir::scratch_tree::ScratchTree;
 use crate::runner::{AgentId, CommandSpec, InvocationId, ProbeTarget, host};
 use crate::topology::effects::{
     Adjacent, ContainerSite, DurableEvent, EffectSiteId, FaultRow, ResourceRow, SiteScope,
 };
 
-fn scratch(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "upstroke-container-{tag}-{}-{:?}",
-        std::process::id(),
-        std::thread::current().id()
-    ));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).expect("a scratch private root");
-    dir
+/// A scratch tree for one test, guarded by the token that authorises its
+/// deletion.
+///
+/// The helper here built `temp_dir()/upstroke-container-<tag>-<pid>-<thread>` and pre-cleaned it with a
+/// discarded `remove_dir_all` before it had any claim on the name, then
+/// returned a root nothing reclaimed (`PR64-CLEANUP-003-SCRATCH-PRECLEAN`,
+/// `PR7-SCRATCH-FIXTURE-LEAK`). A thread id distinguishes two fixtures inside
+/// one process and nothing else: a second process, or a second run of this one
+/// under a pid Windows recycled, reaches the same name. `acquire` refuses an
+/// occupied root rather than emptying it, keys on a ULID no recycled pid can
+/// supply, and reclaims on drop.
+///
+/// **Bind the guard to a live local**: `let _ = scratch("x")` drops it at the
+/// end of that statement and deletes the fixture.
+fn scratch(tag: &str) -> ScratchTree {
+    let parent = std::env::temp_dir();
+    match crate::rundir::scratch_tree::acquire(&parent, tag) {
+        Ok(tree) => tree,
+        Err(refusal) => panic!(
+            "a scratch tree for `{tag}` under {}: {refusal:?}",
+            parent.display()
+        ),
+    }
 }
 
 type RacingObserver = Box<dyn FnMut(usize, RacingPause)>;
@@ -291,6 +306,11 @@ fn spec_for(
 }
 
 struct Fixture {
+    /// The guard over the root [`Fixture::new`] acquired, kept for the
+    /// fixture's whole life so the tree is reclaimed when it drops -- on a
+    /// panicking assertion as much as on a normal return. `None` when the
+    /// caller supplied a root it guards itself ([`Fixture::at`]).
+    _tree: Option<ScratchTree>,
     root: PathBuf,
     trace: ContainerTrace,
     runtime: FakeRuntime,
@@ -300,42 +320,18 @@ struct Fixture {
 
 impl Fixture {
     fn new(tag: &str, run: &str, incarnation: &str, invocation: &InvocationId) -> Self {
-        let root = scratch(tag);
-        let trace = ContainerTrace::recording();
-        let runtime = FakeRuntime::new(trace.clone());
-        runtime.add_image(IMAGE_ID, Some(MANIFEST_DIGEST));
-        runtime.add_image(OTHER_IMAGE_ID, None);
-        runtime.tag(IMAGE_REFERENCE, IMAGE_ID);
-        let record = intent_for(run, incarnation, invocation);
-        let name = name_for(run, incarnation, invocation);
-        let spec = spec_for(&name, &record, &root, IMAGE_ID);
-        let view = GitViewRequest {
-            path: root.join("views").join(name.as_str()),
-            workspace: PathBuf::from("/srv/work/task"),
-            head: Some("0".repeat(40)),
-        };
-        Self {
-            plan: LaunchPlan {
-                private_root: root.clone(),
-                name,
-                invocation: invocation.clone(),
-                intent: record,
-                spec,
-                view,
-            },
-            view: DisposableDirView::new(trace.clone()),
-            runtime,
-            trace,
-            root,
-        }
+        let tree = scratch(tag);
+        let mut fixture = Self::at(tree.path().to_path_buf(), run, incarnation, invocation);
+        fixture._tree = Some(tree);
+        fixture
     }
 
     /// [`Fixture::new`], built in `root`, a directory the caller owns.
     ///
     /// For the witnesses that hold a `rundir::scratch_tree` guard over their
     /// fixture, so that the guard reclaims the fixture's private root however
-    /// the witness ends (#292's review round 6). [`Fixture::new`]'s pid-named
-    /// root is left as it was.
+    /// the witness ends (#292's review round 6). [`Fixture::new`] now holds a
+    /// guard of its own and reaches its root through this.
     fn at(root: PathBuf, run: &str, incarnation: &str, invocation: &InvocationId) -> Self {
         let trace = ContainerTrace::recording();
         let runtime = FakeRuntime::new(trace.clone());
@@ -351,6 +347,9 @@ impl Fixture {
             head: Some("0".repeat(40)),
         };
         Self {
+            // `at` is handed a root the caller guards; `new` puts its own
+            // guard in immediately after this returns.
+            _tree: None,
             plan: LaunchPlan {
                 private_root: root.clone(),
                 name,
@@ -436,14 +435,15 @@ fn a_pre_clean_of_a_strangers_name_refuses_before_it_reclaims_anything() {
     let trace = ContainerTrace::recording();
     let runtime = FakeRuntime::new(trace.clone());
     let view = DisposableDirView::new(ContainerTrace::off());
-    let root = scratch("preclean-refusal");
+    let tree = scratch("preclean-refusal");
+    let root = tree.path();
     let theirs =
         ContainerName::new(STRANGERS, RUN, INCARNATION, &shell_probe()).expect("a container name");
 
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
     let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        super::fake::preclean_names(&runtime, &view, &root, &[&theirs]);
+        super::fake::preclean_names(&runtime, &view, root, &[&theirs]);
     }))
     .expect_err("the pre-clean accepted a name built from another slot's repo key");
     std::panic::set_hook(hook);
@@ -553,12 +553,16 @@ fn the_fake_can_report_an_image_id_that_differs_from_the_one_create_asked_for() 
         read_only_root: true,
     };
 
-    let honest = runtime.create(&spec).expect("created");
+    let honest = runtime
+        .create(CoveredCreate::without_a_reaper(&spec))
+        .expect("created");
     assert_eq!(honest.reported_image_id, IMAGE_ID);
     runtime.remove(&spec.name).expect("removed");
 
     runtime.substitute_reported_image_id(&spec.name, OTHER_IMAGE_ID);
-    let substituted = runtime.create(&spec).expect("created");
+    let substituted = runtime
+        .create(CoveredCreate::without_a_reaper(&spec))
+        .expect("created");
     assert_eq!(substituted.reported_image_id, OTHER_IMAGE_ID);
     assert_ne!(
         substituted.reported_image_id, spec.image_id,
@@ -608,10 +612,17 @@ fn volume_presence_is_a_toggle_and_absence_refuses_a_create() {
         workdir: None,
         read_only_root: true,
     };
-    let refused = runtime.create(&spec).expect_err("an absent volume refuses");
+    let refused = runtime
+        .create(CoveredCreate::without_a_reaper(&spec))
+        .expect_err("an absent volume refuses");
     assert!(!refused.is_unreachable(), "the runtime answered; it failed");
     runtime.add_volume("upstroke-claude");
-    assert!(runtime.create(&spec).is_ok(), "and present, it creates");
+    assert!(
+        runtime
+            .create(CoveredCreate::without_a_reaper(&spec))
+            .is_ok(),
+        "and present, it creates"
+    );
 }
 
 #[test]
@@ -644,7 +655,7 @@ fn the_availability_toggle_is_per_operation_so_ps_can_answer_while_inspect_canno
             RuntimeOp::Observe => runtime.observe("x").is_err(),
             RuntimeOp::Collect => runtime.collect("x").is_err(),
             RuntimeOp::Create => runtime
-                .create(&CreateSpec {
+                .create(CoveredCreate::without_a_reaper(&CreateSpec {
                     name: "x".to_owned(),
                     image_id: IMAGE_ID.to_owned(),
                     labels: BTreeMap::new(),
@@ -653,9 +664,9 @@ fn the_availability_toggle_is_per_operation_so_ps_can_answer_while_inspect_canno
                     command: Vec::new(),
                     workdir: None,
                     read_only_root: true,
-                })
+                }))
                 .is_err(),
-            RuntimeOp::Start => runtime.start("x").is_err(),
+            RuntimeOp::Start => runtime.start(CoveredStart::without_a_reaper("x")).is_err(),
             RuntimeOp::Stop => runtime.stop("x", StopMode::Kill).is_err(),
             RuntimeOp::Remove => runtime.remove("x").is_err(),
         })
@@ -729,8 +740,9 @@ fn owner_liveness_answers_one_bit_and_carries_no_incarnation() {
     assert!(!liveness.is_running(&live));
 
     let probe = super::runtime::LockProbe;
+    let liveness_root = scratch("liveness");
     assert!(
-        !probe.is_running(&scratch("liveness")),
+        !probe.is_running(liveness_root.path()),
         "a directory with no run.lock has no live owner"
     );
 }
@@ -751,8 +763,12 @@ fn the_call_log_is_ordered_and_holds_every_operation() {
         read_only_root: true,
     };
     runtime.probe().expect("reachable");
-    runtime.create(&spec).expect("created");
-    runtime.start(&spec.name).expect("started");
+    runtime
+        .create(CoveredCreate::without_a_reaper(&spec))
+        .expect("created");
+    runtime
+        .start(CoveredStart::without_a_reaper(&spec.name))
+        .expect("started");
     runtime.stop(&spec.name, StopMode::Kill).expect("stopped");
     runtime.observe(&spec.name).expect("observed");
     runtime.remove(&spec.name).expect("removed");
@@ -999,7 +1015,7 @@ fn every_container_site_is_taken_by_value_by_a_funnel_that_hooks_both_phases() {
         ContainerSite::Create,
         &fixture.runtime,
         &written,
-        &fixture.plan.spec,
+        CoveredCreate::without_a_reaper(&fixture.plan.spec),
     )
     .expect("created");
     let view_path = mount_git_view(
@@ -1009,7 +1025,14 @@ fn every_container_site_is_taken_by_value_by_a_funnel_that_hooks_both_phases() {
         &fixture.plan.view,
     )
     .expect("view");
-    start_container(&mut hooks, ContainerSite::Start, &fixture.runtime, &written).expect("started");
+    start_container(
+        &mut hooks,
+        ContainerSite::Start,
+        &fixture.runtime,
+        &written,
+        CoveredStart::without_a_reaper(&fixture.plan.spec.name),
+    )
+    .expect("started");
     stop_container(
         &mut hooks,
         ContainerSite::Stop,
@@ -1063,7 +1086,8 @@ fn a_funnel_api_refuses_a_site_that_does_not_name_its_operation() {
     let mut accepted = 0;
     let mut refused = 0;
     for (index, own_site) in ContainerSite::ALL.iter().copied().enumerate() {
-        let root = scratch(&format!("site-guard-{index}"));
+        let tree = scratch(&format!("site-guard-{index}"));
+        let root = tree.path();
         let trace = ContainerTrace::recording();
         let runtime = FakeRuntime::new(trace.clone());
         runtime.add_image(IMAGE_ID, Some(MANIFEST_DIGEST));
@@ -1073,26 +1097,26 @@ fn a_funnel_api_refuses_a_site_that_does_not_name_its_operation() {
             InvocationId::probe(ProbeTarget::Shell, ordinal).expect("a probe identity");
         let name = name_for(RUN_A, INCARNATION_1, &invocation);
         let record = intent_for(RUN_A, INCARNATION_1, &invocation);
-        let spec = spec_for(&name, &record, &root, IMAGE_ID);
+        let spec = spec_for(&name, &record, root, IMAGE_ID);
         let view_path = root.join("views").join(name.as_str());
         let request = GitViewRequest {
             path: view_path.clone(),
             workspace: PathBuf::from("/srv/work/task"),
             head: None,
         };
-        let intent_path = name.intent_path(&root);
-        let labels = record.labels(&root);
+        let intent_path = name.intent_path(root);
+        let labels = record.labels(root);
         let seed = |state: Liveness| {
             runtime.seed_container(name.as_str(), labels.clone(), IMAGE_ID, IMAGE_ID, state);
         };
         let proof = matches!(own_site, ContainerSite::Create | ContainerSite::Start).then(|| {
-            fs::create_dir_all(containers_dir(&root)).expect("the namespace");
+            fs::create_dir_all(containers_dir(root)).expect("the namespace");
             fs::write(
                 &intent_path,
                 serde_json::to_vec(&record).expect("a serializable record"),
             )
             .expect("the record this container's proof reads");
-            crate::runner::container::intent::IntentWritten::certify(&root, &name)
+            crate::runner::container::intent::IntentWritten::certify(root, &name)
                 .expect("the record is on disk, so it certifies")
         });
 
@@ -1107,22 +1131,36 @@ fn a_funnel_api_refuses_a_site_that_does_not_name_its_operation() {
                 fs::create_dir_all(&view_path).expect("a view there is to remove");
             }
             ContainerSite::RemoveIntent => {
-                fs::create_dir_all(containers_dir(&root)).expect("the namespace");
+                fs::create_dir_all(containers_dir(root)).expect("the namespace");
                 fs::write(&intent_path, b"{}").expect("a record there is to remove");
             }
         }
 
         let drive = |site: ContainerSite, hooks: &mut RecordingHooks| match own_site {
             ContainerSite::WriteIntent => {
-                write_intent(hooks, site, &root, &name, &record).map(|_| ())
+                write_intent(hooks, site, root, &name, &record).map(|_| ())
             }
             ContainerSite::Create => {
                 let proof = proof.as_ref().expect("the Create cell mints one");
-                create_container(hooks, site, &runtime, proof, &spec).map(|_| ())
+                create_container(
+                    hooks,
+                    site,
+                    &runtime,
+                    proof,
+                    CoveredCreate::without_a_reaper(&spec),
+                )
+                .map(|_| ())
             }
             ContainerSite::Start => {
                 let proof = proof.as_ref().expect("the Start cell mints one");
-                start_container(hooks, site, &runtime, proof).map_err(|failure| failure.error)
+                start_container(
+                    hooks,
+                    site,
+                    &runtime,
+                    proof,
+                    CoveredStart::without_a_reaper(name.as_str()),
+                )
+                .map_err(|failure| failure.error)
             }
 
             ContainerSite::MountGitView => mount_git_view(hooks, site, &view, &request).map(|_| ()),
@@ -1132,7 +1170,7 @@ fn a_funnel_api_refuses_a_site_that_does_not_name_its_operation() {
             ContainerSite::Remove => remove_container(hooks, site, &runtime, &name).map(|_| ()),
 
             ContainerSite::UnmountGitView => unmount_git_view(hooks, site, &view, &view_path),
-            ContainerSite::RemoveIntent => remove_intent(hooks, site, &root, &name),
+            ContainerSite::RemoveIntent => remove_intent(hooks, site, root, &name),
         };
 
         for wrong in ContainerSite::ALL.iter().copied() {
@@ -1481,7 +1519,8 @@ fn the_intent_record_carries_the_six_fields_and_each_is_read_back() {
 
 #[test]
 fn an_intent_record_with_an_unknown_field_is_refused() {
-    let root = scratch("unknown-field");
+    let tree = scratch("unknown-field");
+    let root = tree.path();
     let path = root.join("bad.intent");
     fs::write(
         &path,
@@ -1634,7 +1673,8 @@ fn a_hostile_name_component_is_refused_and_the_refusal_says_why() {
 
 #[test]
 fn probe_name_reuse_across_incarnations_never_collides() {
-    let root = scratch("probe-reuse");
+    let tree = scratch("probe-reuse");
+    let root = tree.path();
     let mut names = BTreeSet::new();
     let mut paths = BTreeSet::new();
     for incarnation in [INCARNATION_1, INCARNATION_2] {
@@ -1648,7 +1688,7 @@ fn probe_name_reuse_across_incarnations_never_collides() {
             );
             let name = name_for(RUN_A, incarnation, &invocation);
             names.insert(name.as_str().to_owned());
-            paths.insert(name.intent_path(&root));
+            paths.insert(name.intent_path(root));
         }
     }
     assert_eq!(
@@ -1665,14 +1705,14 @@ fn probe_name_reuse_across_incarnations_never_collides() {
             write_intent(
                 &mut hooks,
                 ContainerSite::WriteIntent,
-                &root,
+                root,
                 &name,
                 &intent_for(RUN_A, incarnation, &invocation),
             )
             .expect("written");
         }
     }
-    let found = list_intents(&root).expect("scanned");
+    let found = list_intents(root).expect("scanned");
     assert_eq!(found.len(), 4);
     let incarnations: BTreeSet<&str> = found
         .iter()
@@ -2402,11 +2442,14 @@ impl ContainerRuntime for DockerLikeStop<'_> {
     fn collect(&self, name: &str) -> Result<ContainerExecution, RuntimeError> {
         self.inner.collect(name)
     }
-    fn create(&self, spec: &CreateSpec) -> Result<super::runtime::CreatedContainer, RuntimeError> {
-        self.inner.create(spec)
+    fn create(
+        &self,
+        covered: CoveredCreate<'_>,
+    ) -> Result<super::runtime::CreatedContainer, RuntimeError> {
+        self.inner.create(covered)
     }
-    fn start(&self, name: &str) -> Result<(), RuntimeError> {
-        self.inner.start(name)
+    fn start(&self, covered: CoveredStart<'_>) -> Result<(), RuntimeError> {
+        self.inner.start(covered)
     }
 
     fn stop(&self, name: &str, mode: StopMode) -> Result<Settled, RuntimeError> {
@@ -2701,11 +2744,14 @@ impl ContainerRuntime for NeverTerminates<'_> {
     fn collect(&self, name: &str) -> Result<ContainerExecution, RuntimeError> {
         self.0.collect(name)
     }
-    fn create(&self, spec: &CreateSpec) -> Result<super::runtime::CreatedContainer, RuntimeError> {
-        self.0.create(spec)
+    fn create(
+        &self,
+        covered: CoveredCreate<'_>,
+    ) -> Result<super::runtime::CreatedContainer, RuntimeError> {
+        self.0.create(covered)
     }
-    fn start(&self, name: &str) -> Result<(), RuntimeError> {
-        self.0.start(name)
+    fn start(&self, covered: CoveredStart<'_>) -> Result<(), RuntimeError> {
+        self.0.start(covered)
     }
     fn stop(&self, name: &str, mode: StopMode) -> Result<Settled, RuntimeError> {
         self.0.stop(name, mode)
@@ -2761,9 +2807,10 @@ fn the_namespace_scan_reads_every_record_and_skips_the_staged_half() {
 
 #[test]
 fn an_absent_containers_directory_is_an_empty_namespace() {
-    let root = scratch("empty-namespace");
-    assert!(!containers_dir(&root).exists());
-    assert_eq!(list_intents(&root).expect("scanned"), Vec::new());
+    let tree = scratch("empty-namespace");
+    let root = tree.path();
+    assert!(!containers_dir(root).exists());
+    assert_eq!(list_intents(root).expect("scanned"), Vec::new());
 }
 
 #[test]
@@ -2884,6 +2931,14 @@ fn every_child_module_of_the_container_funnel_states_its_own_lint_level() {
         "src/rundir.rs",
         "src/workspace_manager.rs",
     ];
+    const FORBIDDEN_IN_A_FUNNEL: [(&str, &str); 6] = [
+        ("src/runner/container.rs", "clippy::disallowed_macros"),
+        ("src/agent/proc.rs", "clippy::disallowed_macros"),
+        ("src/runner/host.rs", "clippy::disallowed_methods"),
+        ("src/runner/host.rs", "clippy::disallowed_macros"),
+        ("src/rundir.rs", "clippy::disallowed_macros"),
+        ("src/workspace_manager.rs", "clippy::disallowed_macros"),
+    ];
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
 
     let mut children: Vec<PathBuf> = Vec::new();
@@ -2988,22 +3043,33 @@ fn every_child_module_of_the_container_funnel_states_its_own_lint_level() {
     for funnel in FUNNELS {
         let source = fs::read_to_string(root.join(funnel)).expect("a funnel module");
         for lint in GOVERNED {
+            let forbidden = FORBIDDEN_IN_A_FUNNEL.contains(&(funnel, lint));
+            let level = if forbidden { "forbid" } else { "allow" };
             assert_eq!(
                 stated_lint_level(&source, lint),
-                Some("allow"),
-                "the funnel `{funnel}` no longer allows `{lint}`"
+                Some(level),
+                "the funnel `{funnel}` no longer states `{level}` for `{lint}`"
             );
-            assert!(allowlist_records(funnel, lint));
+            assert_eq!(
+                allowlist_records(funnel, lint),
+                !forbidden,
+                "the allowlist row of `{funnel}` disagrees with its `{level}` of `{lint}`"
+            );
         }
     }
 
     let readiness = fs::read_to_string(root.join("src/agent/proc/test_support/readiness.rs"))
         .expect("the readiness child");
     for lint in GOVERNED {
+        let level = if lint == GOVERNED[0] {
+            "deny"
+        } else {
+            "forbid"
+        };
         assert_eq!(
             stated_lint_level(&readiness, lint),
-            Some("deny"),
-            "`readiness.rs` no longer denies `{lint}` at file scope"
+            Some(level),
+            "`readiness.rs` no longer states `{level}` for `{lint}` at file scope"
         );
     }
     assert!(allowlist_records(
@@ -3768,7 +3834,8 @@ fn real_docker_creates_from_an_id_reports_it_and_reclaims_idempotently() {
         Err(reason) => return no_image(&reason),
     };
 
-    let root = scratch("real-docker");
+    let tree = scratch("real-docker");
+    let root = tree.path().to_path_buf();
     let invocation = shell_probe();
     let record = intent_for(RUN_A, INCARNATION_1, &invocation);
     let name = name_for(RUN_A, INCARNATION_1, &invocation);
@@ -3878,8 +3945,12 @@ fn real_docker_kill_on_an_already_exited_container_is_tolerated() {
         read_only_root: true,
     };
     let _ = docker.remove(name);
-    docker.create(&spec).expect("created");
-    docker.start(name).expect("started");
+    docker
+        .create(CoveredCreate::without_a_reaper(&spec))
+        .expect("created");
+    docker
+        .start(CoveredStart::without_a_reaper(name))
+        .expect("started");
     assert!(
         wait_until_terminated(docker.as_ref(), name).is_terminated(),
         "the fixture container has to actually be exited"
@@ -3941,8 +4012,12 @@ fn real_docker_returns_both_streams_of_a_container_separately() {
         read_only_root: true,
     };
     let _ = docker.remove(name);
-    docker.create(&spec).expect("created");
-    docker.start(name).expect("started");
+    docker
+        .create(CoveredCreate::without_a_reaper(&spec))
+        .expect("created");
+    docker
+        .start(CoveredStart::without_a_reaper(name))
+        .expect("started");
     wait_until_terminated(docker.as_ref(), name);
 
     let collected = docker.collect(name).expect("collected");
@@ -4326,7 +4401,9 @@ fn real_docker_renders_a_comma_bearing_label_value_whole() {
         workdir: None,
         read_only_root: true,
     };
-    docker.create(&spec).expect("create the labelled container");
+    docker
+        .create(CoveredCreate::without_a_reaper(&spec))
+        .expect("create the labelled container");
 
     let found = docker
         .containers_with_label(LABEL_PRIVATE_ROOT, &root)
@@ -4396,17 +4473,25 @@ fn real_docker_prints_the_transcribed_unreachable_diagnostics() {
         format!("unix:///nonexistent-{}/docker.sock", std::process::id()),
     ));
 
+    // The unreadable directory is built INSIDE an acquired tree rather than
+    // beside one. The fixture here built `temp_dir()/upstroke-r2-denied-<pid>`
+    // and pre-cleaned it with a discarded `remove_dir_all` before it had any
+    // claim on the name (`PR64-CLEANUP-003-SCRATCH-PRECLEAN`); a chmod-000
+    // directory is also one a reclaim cannot descend, so it is the child and
+    // not the root, and the permissions are restored below before the guard
+    // reclaims the tree (`PR7-SCRATCH-FIXTURE-LEAK`).
+    #[cfg(unix)]
+    let denied_tree = scratch("r2-denied");
     #[cfg(unix)]
     let denied = {
         use std::os::unix::fs::PermissionsExt as _;
-        let dir = std::env::temp_dir().join(format!("upstroke-r2-denied-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).expect("a scratch directory");
+        let dir = denied_tree.path().join("denied");
+        fs::create_dir(&dir).expect("a scratch directory");
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o000)).expect("chmod 000");
         let reachable = fs::read_dir(&dir).is_ok();
         if reachable {
-            let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o755));
-            let _ = fs::remove_dir_all(&dir);
+            fs::set_permissions(&dir, fs::Permissions::from_mode(0o755))
+                .expect("restore the directory the guard has to reclaim");
             None
         } else {
             cases.push((
@@ -4443,11 +4528,14 @@ fn real_docker_prints_the_transcribed_unreachable_diagnostics() {
         "the permission case did not run: this process may be root"
     );
 
+    // The permissions go back before the guard drops: a chmod-000 directory
+    // is one `remove_dir_all` cannot descend, so leaving it would turn the
+    // reclaim into a reported failure. The removal itself is the guard's.
     #[cfg(unix)]
     if let Some(dir) = denied {
         use std::os::unix::fs::PermissionsExt as _;
-        let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o755));
-        let _ = fs::remove_dir_all(&dir);
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755))
+            .expect("restore the directory the guard has to reclaim");
     }
 }
 
@@ -4461,7 +4549,8 @@ fn real_docker_fails_locally_without_ever_saying_a_container_is_gone() {
         return skipped(&reason);
     }
 
-    let root = scratch("local-failure-phrases");
+    let tree = scratch("local-failure-phrases");
+    let root = tree.path();
     let target = "upstroke-c";
     let phrases = [
         "no such container",
@@ -4545,7 +4634,6 @@ fn real_docker_fails_locally_without_ever_saying_a_container_is_gone() {
         phrases.len() * 4,
         "every phrase was measured against every command"
     );
-    let _ = fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -4585,11 +4673,15 @@ fn real_docker_lists_the_state_the_settlement_observation_reads() {
         "a listing that succeeded and holds nothing is the daemon saying the container is gone"
     );
 
-    docker.create(&spec(&name)).expect("created");
     docker
-        .create(&spec(&longer))
+        .create(CoveredCreate::without_a_reaper(&spec(&name)))
+        .expect("created");
+    docker
+        .create(CoveredCreate::without_a_reaper(&spec(&longer)))
         .expect("the colliding name created");
-    docker.start(&longer).expect("the colliding name started");
+    docker
+        .start(CoveredStart::without_a_reaper(&longer))
+        .expect("the colliding name started");
 
     let listing = docker
         .raw(
@@ -4622,7 +4714,9 @@ fn real_docker_lists_the_state_the_settlement_observation_reads() {
         Liveness::Running
     );
 
-    docker.start(&name).expect("started");
+    docker
+        .start(CoveredStart::without_a_reaper(&name))
+        .expect("started");
     assert_eq!(docker.observe(&name).expect("reachable"), Liveness::Running);
     assert_eq!(
         docker.stop(&name, StopMode::Kill).expect("killed"),
@@ -4657,9 +4751,10 @@ fn container_lock_probe_child_holds_the_run() {
 
 #[test]
 fn the_production_lock_probe_sees_a_lock_another_process_holds() {
-    let root = scratch("lock-probe-held");
+    let tree = scratch("lock-probe-held");
+    let root = tree.path();
     let paths =
-        crate::rundir::RunPaths::with_private_root(&root, "01KZRN48A4ZK3AEDST3RJ8HMA4", &root);
+        crate::rundir::RunPaths::with_private_root(root, "01KZRN48A4ZK3AEDST3RJ8HMA4", root);
     paths.create().expect("the run directories");
     let ready = root.join("held");
     let probe = super::runtime::LockProbe;
@@ -4716,7 +4811,6 @@ fn the_production_lock_probe_sees_a_lock_another_process_holds() {
         );
         std::thread::yield_now();
     }
-    let _ = fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -4778,7 +4872,8 @@ fn every_view_discard_removes_through_the_one_racing_removal() {
 fn discarding_a_role_view_twice_converges() {
     let trace = ContainerTrace::recording();
     let view: &dyn GitView = &super::view::RoleGitView::new(trace.clone());
-    let root = scratch("role-view-twice");
+    let tree = scratch("role-view-twice");
+    let root = tree.path();
     let path = root.join("views").join("upstroke-k-r-i-h");
     fs::create_dir_all(path.join("objects").join("pack")).expect("a view with depth");
     fs::write(path.join("HEAD"), b"0000\n").expect("a file in it");
@@ -4797,7 +4892,8 @@ fn a_role_view_that_cannot_be_removed_refuses_and_records_nothing() {
 
     let trace = ContainerTrace::recording();
     let view: &dyn GitView = &super::view::RoleGitView::new(trace.clone());
-    let root = scratch("role-view-protected");
+    let tree = scratch("role-view-protected");
+    let root = tree.path();
     let parent = root.join("views");
     let path = parent.join("upstroke-k-r-i-h");
     fs::create_dir_all(&path).expect("the view");
@@ -4830,7 +4926,6 @@ fn a_role_view_that_cannot_be_removed_refuses_and_records_nothing() {
     );
 
     let _ = fs::set_permissions(&parent, fs::Permissions::from_mode(0o755));
-    let _ = fs::remove_dir_all(&root);
 }
 
 #[cfg(windows)]
@@ -4938,7 +5033,8 @@ fn windows_a_view_whose_remover_stalls_delete_pending_converges_once_the_stall_e
         ),
     ];
     for (tag, view) in views {
-        let root = scratch(&format!("stalled-remover-{tag}"));
+        let tree = scratch(&format!("stalled-remover-{tag}"));
+        let root = tree.path();
         let path = root.join("views").join("upstroke-k-r-i-h");
         fs::create_dir_all(&path).expect("an orphan view, empty as the census seeds it");
         let pending = windows_posix_delete_pending(&path);
@@ -4959,7 +5055,6 @@ fn windows_a_view_whose_remover_stalls_delete_pending_converges_once_the_stall_e
             !path.exists(),
             "[{tag}] the view is gone once the stall ends"
         );
-        let _ = fs::remove_dir_all(&root);
     }
 }
 
@@ -5041,7 +5136,6 @@ fn windows_a_view_held_delete_pending_past_the_budget_refuses_and_keeps_the_inte
     .expect("once the name has gone the retained intent is reclaimed by the next census");
     assert!(!view_path.exists());
     assert!(!launched.intent_path.exists());
-    let _ = fs::remove_dir_all(&fixture.root);
 }
 
 #[test]
@@ -5110,7 +5204,6 @@ fn windows_an_intent_whose_remover_stalls_delete_pending_is_read_and_removed_onc
     });
     windows_assert_converged_through_the_wait("removal", &schedule);
     assert!(!path.exists());
-    let _ = fs::remove_dir_all(&fixture.root);
 }
 
 #[test]
@@ -5166,7 +5259,7 @@ fn a_create_whose_named_volume_is_absent_is_refused_before_any_effect() {
                 ContainerSite::Create,
                 &fixture.runtime,
                 &written,
-                &spec,
+                CoveredCreate::without_a_reaper(&spec),
             );
 
             if present && reachable {

@@ -490,18 +490,27 @@ The container's exit status and captured output.
 [`RuntimeError`] when the runtime cannot be reached or the collection
 fails.
 
-## `pub trait ContainerRuntime: Send + Sync` › `fn create(&self, spec: &CreateSpec) -> Result<CreatedContainer, RuntimeError>;`
+## `use super::exec::{CoveredCreate, CoveredStart};`
 
-Create a container **from an image id**, and report the id the runtime
-used.
+The cover's two proofs, minted only by `exec`'s `Reaping::cover` (`FUA-I2-MACRO-WS`).
+`create` and `start` take them by value, so this trait's two start primitives cannot be
+called without a cover from any module, whatever spells the call: `clippy.toml`'s
+`disallowed_methods` denial of both still holds, and no longer has to be the guard in the
+twenty-seven modules that allow that lint.
+
+## `pub trait ContainerRuntime: Send + Sync` › `fn create(&self, covered: CoveredCreate<'_>) -> Result<CreatedContainer, RuntimeError>;`
+
+Create the container `covered.spec()` describes — the one the cover validated — **from an
+image id**, and report the id the runtime used. An implementation takes the proof and reads
+the spec from it; there is no other spec to create from.
 
 ### Errors
 
 [`RuntimeError`] when the runtime cannot be reached or creation fails.
 
-## `pub trait ContainerRuntime: Send + Sync` › `fn start(&self, name: &str) -> Result<(), RuntimeError>;`
+## `pub trait ContainerRuntime: Send + Sync` › `fn start(&self, covered: CoveredStart<'_>) -> Result<(), RuntimeError>;`
 
-Start it.
+Start `covered.name()`.
 
 ### Errors
 
@@ -531,6 +540,19 @@ gone.
 
 [`RuntimeError`] when the runtime cannot be reached, or the removal
 fails for a reason other than the container being absent.
+
+## `pub trait ContainerRuntime: Send + Sync` › `fn reaper_program(&self) -> PathBuf {`
+
+The program a container runner's reaper execs to list, kill and remove the runner's
+containers when its coordinator dies (PR11 follow-up A). The default is the `docker` CLI the
+real runtime runs itself (`DOCKER_PROGRAM`), so `DockerCli` inherits it and gains no
+function; `agent::proc` resolves a bare name on `PATH` before the fork and refuses one it
+cannot resolve. **Every test double that backs a `ContainerRunner` overrides it**: the fake
+answers its relay stub once one is installed and a no-op program (`/usr/bin/true`) otherwise,
+the linked runtime asks the parent's fake, and `exec/tests.rs`'s `Runtime` and
+`create/tests.rs`'s `Inventory` delegate or answer the no-op. A double that kept the default
+would arm a reaper over the real CLI where one is on `PATH` — this build box — and be
+refused at its first launch where none is, CI's macOS leg.
 
 ## `pub trait OwnerLiveness: Send + Sync {`
 

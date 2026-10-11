@@ -2,11 +2,8 @@
 
 // LEGACY-EFFECT: this module is in the frozen legacy section of
 // `effects/allowlist.toml`, which carries its justification.
-#![allow(
-    clippy::disallowed_methods,
-    clippy::disallowed_types,
-    clippy::disallowed_macros
-)]
+#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#![forbid(clippy::disallowed_macros)]
 
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
@@ -16,6 +13,8 @@ use std::process::{Command, Output, Stdio};
 
 use crate::error::UpstrokeError;
 use crate::events::PreparedCommit;
+use crate::runner::host::{GitdirRule, ManagedRepository, RECORDED_OBJECTS_INCLUDE};
+use crate::workspace_manager::NO_REPLACEMENT_OBJECTS;
 
 pub struct Workspace {
     root: PathBuf,
@@ -38,6 +37,18 @@ pub(crate) const REVIEW_DIFF_FLAGS: &[&str] = &[
     "--no-textconv",
     "--no-color",
 ];
+
+const REPLACE_REFS_REFUSED: [&str; 2] = ["-c", "core.useReplaceRefs=false"];
+
+fn git_command(directory: &Path) -> Command {
+    let mut command = Command::new("git");
+    command
+        .arg("-C")
+        .arg(directory)
+        .args(REPLACE_REFS_REFUSED)
+        .env(NO_REPLACEMENT_OBJECTS.0, NO_REPLACEMENT_OBJECTS.1);
+    command
+}
 
 impl Workspace {
     pub fn open(root: &Path) -> Result<Self, UpstrokeError> {
@@ -75,6 +86,26 @@ impl Workspace {
             });
         }
         Ok(git_dir)
+    }
+
+    pub fn recorded_objects_scope(
+        &self,
+        private_root: Option<&Path>,
+    ) -> Result<ManagedRepository, UpstrokeError> {
+        let private_root =
+            private_root.map_or_else(crate::rundir::default_private_root, Path::to_path_buf);
+        let common = self.git_path(&["rev-parse", "--path-format=absolute", "--git-common-dir"])?;
+        let common = fs::canonicalize(&common).map_err(|source| UpstrokeError::Io {
+            path: common.clone(),
+            source,
+        })?;
+        let directory =
+            std::path::absolute(private_root.join("git")).map_err(|source| UpstrokeError::Io {
+                path: private_root.to_path_buf(),
+                source,
+            })?;
+        let include = write_recorded_objects_include(&directory)?;
+        ManagedRepository::new(&common, &include, GitdirRule::native())
     }
 
     fn git_path(&self, args: &[&str]) -> Result<PathBuf, UpstrokeError> {
@@ -128,14 +159,13 @@ impl Workspace {
     }
 
     fn git_output(&self, args: &[&str]) -> Result<Vec<u8>, UpstrokeError> {
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(&self.root)
-            .args(args)
-            .output()
-            .map_err(|e| UpstrokeError::Git {
-                message: format!("failed to run git: {e}"),
-            })?;
+        let output =
+            git_command(&self.root)
+                .args(args)
+                .output()
+                .map_err(|e| UpstrokeError::Git {
+                    message: format!("failed to run git: {e}"),
+                })?;
         if !output.status.success() {
             return Err(UpstrokeError::Git {
                 message: format!(
@@ -155,9 +185,7 @@ impl Workspace {
         let hooks = PrivateHooksDir::create()?;
         let mut hooks_config = OsString::from("core.hooksPath=");
         hooks_config.push(&hooks.path);
-        Command::new("git")
-            .arg("-C")
-            .arg(&self.root)
+        git_command(&self.root)
             .arg("-c")
             .arg(hooks_config)
             .args(["-c", "core.fsmonitor=false"])
@@ -200,9 +228,7 @@ impl Workspace {
         let hooks = PrivateHooksDir::create()?;
         let mut hooks_config = OsString::from("core.hooksPath=");
         hooks_config.push(&hooks.path);
-        let mut child = Command::new("git")
-            .arg("-C")
-            .arg(&self.root)
+        let mut child = git_command(&self.root)
             .arg("-c")
             .arg(hooks_config)
             .args(["-c", "core.fsmonitor=false"])
@@ -260,9 +286,7 @@ impl Workspace {
         message: &str,
     ) -> Result<String, UpstrokeError> {
         let args = ["commit-tree", tree_oid, "-p", parent_oid, "-m", message];
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(&self.root)
+        let output = git_command(&self.root)
             .args(args)
             .env("GIT_AUTHOR_NAME", "upstroke")
             .env("GIT_AUTHOR_EMAIL", "upstroke@upstroke.local")
@@ -298,6 +322,7 @@ impl Workspace {
     }
 
     pub fn ensure_execution_prerequisites(&self) -> Result<(), UpstrokeError> {
+        require_git_floor(&self.git(&["version"])?)?;
         require_check_attr_source(self.git_output_with_input(
             &["check-attr", "--source=HEAD", "--stdin", "-z", "filter"],
             Vec::new(),
@@ -352,9 +377,7 @@ impl Workspace {
     }
 
     pub fn current_branch_ref(&self) -> Result<String, UpstrokeError> {
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(&self.root)
+        let output = git_command(&self.root)
             .args(["symbolic-ref", "--quiet", "--no-recurse", "HEAD"])
             .output()
             .map_err(|e| UpstrokeError::Git {
@@ -393,9 +416,7 @@ impl Workspace {
     }
 
     pub fn parent_sha(&self, sha: &str) -> Result<Option<String>, UpstrokeError> {
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(&self.root)
+        let output = git_command(&self.root)
             .args(["rev-parse", "--verify", "--quiet"])
             .arg(format!("{sha}^"))
             .output()
@@ -436,9 +457,7 @@ impl Workspace {
     }
 
     pub fn branch_exists(&self, name: &str) -> Result<bool, UpstrokeError> {
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(&self.root)
+        let output = git_command(&self.root)
             .args(["rev-parse", "--verify", "--quiet"])
             .arg(format!("refs/heads/{name}"))
             .output()
@@ -857,9 +876,8 @@ impl Workspace {
     ) -> Result<(), UpstrokeError> {
         let mut hooks_config = OsString::from("core.hooksPath=");
         hooks_config.push(hooks_path);
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(&self.root)
+        let mut command = git_command(&self.root);
+        command
             .arg("-c")
             .arg(hooks_config)
             .args([
@@ -872,11 +890,15 @@ impl Workspace {
                 "--force",
             ])
             .arg(path)
-            .arg(commit)
-            .output()
-            .map_err(|e| UpstrokeError::Git {
-                message: format!("failed to run git worktree add: {e}"),
-            })?;
+            .arg(commit);
+        let output = output_past_anothers_empty_commondir(
+            path.file_name().unwrap_or_default(),
+            &mut || is_an_empty_directory(path),
+            &mut || command.output(),
+        )
+        .map_err(|e| UpstrokeError::Git {
+            message: format!("failed to run git worktree add: {e}"),
+        })?;
         if !output.status.success() {
             return Err(UpstrokeError::Git {
                 message: format!(
@@ -891,9 +913,7 @@ impl Workspace {
     fn verify_gate_worktree(&self, path: &Path, hooks_path: &Path) -> Result<(), UpstrokeError> {
         let mut hooks_config = OsString::from("core.hooksPath=");
         hooks_config.push(hooks_path);
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(path)
+        let output = git_command(path)
             .arg("-c")
             .arg(hooks_config)
             .args([
@@ -1021,9 +1041,7 @@ impl Workspace {
         if self.validate_prepared_ref(&prepared.pin_ref).is_err() {
             return Ok(false);
         }
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(&self.root)
+        let output = git_command(&self.root)
             .args(["cat-file", "commit", &prepared.commit_sha])
             .output()
             .map_err(|e| UpstrokeError::Git {
@@ -1080,9 +1098,7 @@ impl Workspace {
     }
 
     fn symbolic_ref_target(&self, refname: &str) -> Result<Option<String>, UpstrokeError> {
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(&self.root)
+        let output = git_command(&self.root)
             .args(["symbolic-ref", "--quiet", "--no-recurse", refname])
             .output()
             .map_err(|e| UpstrokeError::Git {
@@ -1117,9 +1133,7 @@ impl Workspace {
                 ),
             });
         }
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(&self.root)
+        let output = git_command(&self.root)
             .args(["rev-parse", "--verify", "--quiet", pin_ref])
             .output()
             .map_err(|e| UpstrokeError::Git {
@@ -1226,10 +1240,35 @@ impl Workspace {
     }
 }
 
+const GIT_FLOOR: (u32, u32) = (2, 41);
+
+fn require_git_floor(reported: &str) -> Result<(), UpstrokeError> {
+    let reported = reported.trim();
+    let found = reported.strip_prefix("git version ").and_then(|version| {
+        let mut numbers = version.split(|character: char| !character.is_ascii_digit());
+        let major = numbers.next()?.parse::<u32>().ok()?;
+        let minor = numbers.next()?.parse::<u32>().ok()?;
+        Some((major, minor))
+    });
+    match found {
+        Some(found) if found >= GIT_FLOOR => Ok(()),
+        _ => Err(UpstrokeError::Refused {
+            message: format!(
+                "Git {}.{} or newer is required, and `git version` reports `{reported}`: \
+                 upstroke keeps the Git commands its gates, reviewers and implementers run \
+                 in this repository on the objects it records through configuration, and \
+                 Git 2.40's `git merge-tree` reads what `git replace` substitutes for them \
+                 whatever the configuration says",
+                GIT_FLOOR.0, GIT_FLOOR.1
+            ),
+        }),
+    }
+}
+
 fn require_check_attr_source(probe: Result<Vec<u8>, UpstrokeError>) -> Result<(), UpstrokeError> {
     probe.map(|_| ()).map_err(|error| UpstrokeError::Refused {
         message: format!(
-            "Git 2.40 or newer is required: upstroke must bind filter-attribute checks to the exact captured tree with `git check-attr --source` before gates or review ({error})"
+            "Git 2.41 or newer is required: upstroke must bind filter-attribute checks to the exact captured tree with `git check-attr --source` before gates or review ({error})"
         ),
     })
 }
@@ -1468,6 +1507,44 @@ fn create_private_dir_all(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+const RECORDED_OBJECTS_INCLUDE_NAME: &str = "recorded-objects.gitconfig";
+
+fn write_recorded_objects_include(directory: &Path) -> Result<PathBuf, UpstrokeError> {
+    let include = directory.join(RECORDED_OBJECTS_INCLUDE_NAME);
+    let holds_it =
+        |path: &Path| fs::read(path).is_ok_and(|bytes| bytes == RECORDED_OBJECTS_INCLUDE);
+    if holds_it(&include) {
+        return Ok(include);
+    }
+    let io = |path: &Path| {
+        let path = path.to_path_buf();
+        move |source| UpstrokeError::Io { path, source }
+    };
+    create_private_dir_all(directory).map_err(io(directory))?;
+    let staged = directory.join(format!(
+        "{RECORDED_OBJECTS_INCLUDE_NAME}.{}-{}.tmp",
+        std::process::id(),
+        crate::ulid::ulid()
+    ));
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&staged)
+        .and_then(|mut file| file.write_all(RECORDED_OBJECTS_INCLUDE))
+        .map_err(io(&staged))?;
+    match fs::rename(&staged, &include) {
+        Ok(()) => Ok(include),
+        Err(source) => {
+            let _ = fs::remove_file(&staged);
+            if holds_it(&include) {
+                Ok(include)
+            } else {
+                Err(io(&include)(source))
+            }
+        }
+    }
+}
+
 fn remove_ephemeral_store(store: Option<&Path>) {
     if let Some(store) = store {
         let _ = fs::remove_dir(store);
@@ -1482,9 +1559,8 @@ fn cleanup_gate_workspace(
 ) -> Result<(), UpstrokeError> {
     let mut hooks_config = OsString::from("core.hooksPath=");
     hooks_config.push(hooks_path);
-    let removal = Command::new("git")
-        .arg("-C")
-        .arg(source_root)
+    let mut command = git_command(source_root);
+    command
         .arg("-c")
         .arg(&hooks_config)
         .args([
@@ -1494,11 +1570,15 @@ fn cleanup_gate_workspace(
             "remove",
             "--force",
         ])
-        .arg(path)
-        .output()
-        .map_err(|error| UpstrokeError::Git {
-            message: format!("failed to remove gate worktree {}: {error}", path.display()),
-        })?;
+        .arg(path);
+    let removal = output_past_anothers_empty_commondir(
+        path.file_name().unwrap_or_default(),
+        &mut || true,
+        &mut || command.output(),
+    )
+    .map_err(|error| UpstrokeError::Git {
+        message: format!("failed to remove gate worktree {}: {error}", path.display()),
+    })?;
     if worktree_is_registered(source_root, path, &hooks_config)? {
         return Err(UpstrokeError::Git {
             message: format!(
@@ -1534,23 +1614,23 @@ fn worktree_is_registered(
     path: &Path,
     hooks_config: &std::ffi::OsStr,
 ) -> Result<bool, UpstrokeError> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(source_root)
-        .arg("-c")
-        .arg(hooks_config)
-        .args([
-            "-c",
-            "core.fsmonitor=false",
-            "worktree",
-            "list",
-            "--porcelain",
-            "-z",
-        ])
-        .output()
-        .map_err(|error| UpstrokeError::Git {
-            message: format!("failed to verify gate-worktree reclamation: {error}"),
-        })?;
+    let mut command = git_command(source_root);
+    command.arg("-c").arg(hooks_config).args([
+        "-c",
+        "core.fsmonitor=false",
+        "worktree",
+        "list",
+        "--porcelain",
+        "-z",
+    ]);
+    let output = output_past_anothers_empty_commondir(
+        path.file_name().unwrap_or_default(),
+        &mut || true,
+        &mut || command.output(),
+    )
+    .map_err(|error| UpstrokeError::Git {
+        message: format!("failed to verify gate-worktree reclamation: {error}"),
+    })?;
     if !output.status.success() {
         return Err(UpstrokeError::Git {
             message: format!(
@@ -1564,6 +1644,70 @@ fn worktree_is_registered(
         .split(|byte| *byte == 0)
         .filter_map(|field| field.strip_prefix(b"worktree "))
         .any(|field| git_path_field_matches(field, path)))
+}
+
+const REGISTRY_TEAR_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+
+const REGISTRY_TEAR_BACKOFF_CEILING: std::time::Duration = std::time::Duration::from_millis(50);
+
+fn output_past_anothers_empty_commondir(
+    own: &std::ffi::OsStr,
+    may_repeat: &mut dyn FnMut() -> bool,
+    run: &mut dyn FnMut() -> std::io::Result<Output>,
+) -> std::io::Result<Output> {
+    output_past_anothers_empty_commondir_until(
+        std::time::Instant::now() + REGISTRY_TEAR_DEADLINE,
+        own,
+        may_repeat,
+        run,
+    )
+}
+
+fn output_past_anothers_empty_commondir_until(
+    deadline: std::time::Instant,
+    own: &std::ffi::OsStr,
+    may_repeat: &mut dyn FnMut() -> bool,
+    run: &mut dyn FnMut() -> std::io::Result<Output>,
+) -> std::io::Result<Output> {
+    let mut pause = std::time::Duration::from_millis(1);
+    loop {
+        let output = run()?;
+        if !read_anothers_empty_commondir(&output, own) || !may_repeat() {
+            return Ok(output);
+        }
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            return Ok(output);
+        }
+        std::thread::sleep(pause.min(deadline.saturating_duration_since(now)));
+        pause = pause.saturating_mul(2).min(REGISTRY_TEAR_BACKOFF_CEILING);
+    }
+}
+
+fn read_anothers_empty_commondir(output: &Output, own: &std::ffi::OsStr) -> bool {
+    if output.status.code() != Some(128) {
+        return false;
+    }
+    let Some(line) = output.stderr.strip_suffix(b"\n") else {
+        return false;
+    };
+    let Some(registration) = line
+        .strip_prefix(b"fatal: failed to read ")
+        .and_then(|rest| rest.strip_suffix(b"/commondir: Success"))
+    else {
+        return false;
+    };
+    let mut components = registration.rsplit(|byte| *byte == b'/');
+    let id = components.next().unwrap_or_default();
+    !line.contains(&b'\n')
+        && components.next() == Some(b"worktrees".as_slice())
+        && !id.is_empty()
+        && !id.starts_with(own.as_encoded_bytes())
+}
+
+fn is_an_empty_directory(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir())
+        && fs::read_dir(path).is_ok_and(|mut entries| entries.next().is_none())
 }
 
 #[cfg(unix)]
@@ -1624,10 +1768,40 @@ mod tests {
 
     use crate::agent::proc::test_support::readiness;
 
-    fn temp_repo(tag: &str) -> PathBuf {
-        let dir = env::temp_dir().join(format!("upstroke-ws-{tag}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).expect("create repo dir");
+    /// A scratch tree for one test, guarded by the token that authorises its
+    /// deletion.
+    ///
+    /// The helper here built `temp_dir()/upstroke-ws-<tag>-<pid>` and
+    /// pre-cleaned it with a discarded `remove_dir_all` before it had any
+    /// claim on the name, then returned a root nothing reclaimed
+    /// (`PR64-CLEANUP-003-SCRATCH-PRECLEAN`, `PR7-SCRATCH-FIXTURE-LEAK`).
+    /// `acquire` refuses an occupied root rather than emptying it, keys on a
+    /// ULID no recycled pid can supply, and reclaims on drop.
+    ///
+    /// **Bind the guard to a live local**: `let _ = scratch("x")` drops it at
+    /// the end of that statement and deletes the fixture.
+    fn scratch(tag: &str) -> crate::rundir::scratch_tree::ScratchTree {
+        let parent = env::temp_dir();
+        match crate::rundir::scratch_tree::acquire(&parent, tag) {
+            Ok(tree) => tree,
+            Err(refusal) => panic!(
+                "a scratch tree for `{tag}` under {}: {refusal:?}",
+                parent.display()
+            ),
+        }
+    }
+
+    /// A git repository in a scratch tree this test owns. The guard comes back
+    /// with the path because it owns the root the path is under: dropping it
+    /// here would reclaim the repository before the caller's first assertion.
+    fn temp_repo(tag: &str) -> (crate::rundir::scratch_tree::ScratchTree, PathBuf) {
+        let tree = scratch(tag);
+        // A CHILD of the tree, not the tree itself: a linked worktree is a
+        // sibling of its repository (`exclusions_work_in_a_linked_worktree`),
+        // and a repository that was the root would put that sibling outside
+        // every guard.
+        let dir = tree.path().join("repo");
+        fs::create_dir(&dir).expect("the repository, a child of the guarded tree");
         let run = |args: &[&str]| {
             let out = Command::new("git")
                 .arg("-C")
@@ -1647,7 +1821,7 @@ mod tests {
         fs::write(dir.join("README.md"), "seed\n").expect("seed file");
         run(&["add", "-A"]);
         run(&["commit", "-q", "-m", "seed"]);
-        dir
+        (tree, dir)
     }
 
     fn run_git(repo: &Path, args: &[&str]) -> Vec<u8> {
@@ -1679,17 +1853,16 @@ mod tests {
 
     #[test]
     fn open_requires_a_git_worktree() {
-        let repo = temp_repo("open");
+        let (_tree, repo) = temp_repo("open");
         assert!(Workspace::open(&repo).is_ok());
 
-        let plain = env::temp_dir().join(format!("upstroke-ws-plain-{}", std::process::id()));
-        fs::create_dir_all(&plain).expect("plain dir");
-        assert!(Workspace::open(&plain).is_err());
+        let plain_tree = scratch("ws-plain");
+        assert!(Workspace::open(plain_tree.path()).is_err());
     }
 
     #[test]
     fn sparse_checkout_is_refused_before_worker_spend() {
-        let repo = temp_repo("sparse-preflight");
+        let (_tree, repo) = temp_repo("sparse-preflight");
         run_git(&repo, &["update-index", "--skip-worktree", "README.md"]);
         run_git(&repo, &["update-index", "--assume-unchanged", "README.md"]);
         let workspace = Workspace::open(&repo).expect("open");
@@ -1716,13 +1889,197 @@ mod tests {
         }))
         .expect_err("missing exact-tree attribute support must fail closed")
         .to_string();
-        assert!(error.contains("Git 2.40 or newer"), "{error}");
+        assert!(error.contains("Git 2.41 or newer"), "{error}");
         assert!(error.contains("check-attr --source"), "{error}");
     }
 
     #[test]
+    fn a_git_older_than_the_floor_is_refused_by_name() {
+        for (reported, accepted) in [
+            ("git version 2.40.0", false),
+            ("git version 2.40.4\n", false),
+            ("git version 2.39.5 (Apple Git-154)", false),
+            ("git version 1.99.9", false),
+            ("git version 2.41.0", true),
+            ("git version 2.41.0.windows.1\r\n", true),
+            ("git version 2.43.0", true),
+            ("git version 2.45.GIT", true),
+            ("git version 3.0.0", true),
+            ("git version 2", false),
+            ("git version two", false),
+            ("", false),
+        ] {
+            let verdict = require_git_floor(reported);
+            assert_eq!(verdict.is_ok(), accepted, "{reported:?}: {verdict:?}");
+            if let Err(refused) = verdict {
+                let refused = refused.to_string();
+                assert!(
+                    refused.contains("Git 2.41 or newer is required")
+                        && refused.contains(reported.trim()),
+                    "{refused}"
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn execution_prerequisites_ask_git_its_version_and_refuse_2_40() {
+        let status = Command::new(env::current_exe().expect("this test binary"))
+            .args([
+                "--exact",
+                "workspace::tests::git_2_40_prerequisites_helper",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("UPSTROKE_GIT_FLOOR_WITNESS", "1")
+            .status()
+            .expect("spawn the helper");
+        assert!(
+            status.success(),
+            "the helper runs the execution prerequisites with a `git` on PATH that reports \
+             2.40.0, and ended {status:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "subprocess helper"]
+    fn git_2_40_prerequisites_helper() {
+        use std::os::unix::fs::PermissionsExt;
+
+        if env::var_os("UPSTROKE_GIT_FLOOR_WITNESS").is_none() {
+            return;
+        }
+        let (_tree, repo) = temp_repo("git-floor");
+        let real = String::from_utf8(
+            Command::new("sh")
+                .args(["-c", "command -v git"])
+                .output()
+                .expect("find git")
+                .stdout,
+        )
+        .expect("a UTF-8 path")
+        .trim()
+        .to_owned();
+        let bin = repo.with_file_name("bin");
+        fs::create_dir(&bin).expect("the stub's directory");
+        let asked = repo.with_file_name("asked");
+        let stub = bin.join("git");
+        fs::write(
+            &stub,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n\
+                 case \" $* \" in *' version '*) echo 'git version 2.40.0'; exit 0;; esac\n\
+                 exec '{real}' \"$@\"\n",
+                asked.display()
+            ),
+        )
+        .expect("the stub");
+        fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).expect("an executable stub");
+        let path = format!("{}:{}", bin.display(), env::var("PATH").expect("a PATH"));
+        let out = Command::new(env::current_exe().expect("this test binary"))
+            .args([
+                "--exact",
+                "workspace::tests::git_2_40_prerequisites_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("PATH", path)
+            .env("UPSTROKE_GIT_FLOOR_REPO", &repo)
+            .output()
+            .expect("spawn the child");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+        let asked = fs::read_to_string(&asked).expect("what the stub was asked");
+        assert!(
+            asked.lines().any(|line| line.ends_with(" version")),
+            "the prerequisites asked the `git` on PATH for its version: {asked}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "subprocess helper"]
+    fn git_2_40_prerequisites_child() {
+        let Some(repo) = env::var_os("UPSTROKE_GIT_FLOOR_REPO") else {
+            return;
+        };
+        let refused = Workspace::open(Path::new(&repo))
+            .expect("open")
+            .ensure_execution_prerequisites()
+            .expect_err("Git 2.40 is below the floor")
+            .to_string();
+        assert!(
+            refused.contains("Git 2.41 or newer is required")
+                && refused.contains("git version 2.40.0")
+                && refused.contains("merge-tree"),
+            "{refused}"
+        );
+    }
+
+    #[test]
+    fn the_recorded_objects_scope_names_the_repositorys_own_common_directory() {
+        let (tree, repo) = temp_repo("recorded-scope");
+        let private = tree.path().join("home");
+        let ws = Workspace::open(&repo).expect("open");
+        let scope = ws
+            .recorded_objects_scope(Some(&private))
+            .expect("the scope the v0.1 runner reads");
+        assert_eq!(
+            scope.common_dir(),
+            fs::canonicalize(repo.join(".git")).expect("the canonical common directory"),
+        );
+        let include = private.join("git").join("recorded-objects.gitconfig");
+        assert_eq!(scope.include(), include);
+        assert_eq!(
+            fs::read(&include).expect("the include"),
+            RECORDED_OBJECTS_INCLUDE
+        );
+        scope.verify_include().expect("the include verifies");
+
+        fs::write(&include, "[core]\n\tuseReplaceRefs = true\n").expect("an altered include");
+        ws.recorded_objects_scope(Some(&private))
+            .expect("a second scope");
+        assert_eq!(
+            fs::read(&include).expect("the include, written again"),
+            RECORDED_OBJECTS_INCLUDE,
+            "an altered include is replaced, never adopted"
+        );
+        let linked = tree.path().join("linked");
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                &linked.to_string_lossy(),
+            ],
+        );
+        assert_eq!(
+            Workspace::open(&linked)
+                .expect("open the linked worktree")
+                .recorded_objects_scope(Some(&private))
+                .expect("its scope")
+                .parameters(),
+            scope.parameters(),
+            "a linked worktree names the same repository"
+        );
+        let staged: Vec<_> = fs::read_dir(private.join("git"))
+            .expect("the include's directory")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name())
+            .collect();
+        assert_eq!(staged.len(), 1, "no staged copy is left behind: {staged:?}");
+    }
+
+    #[test]
     fn clean_detection_and_rollback() {
-        let repo = temp_repo("clean");
+        let (_tree, repo) = temp_repo("clean");
         let ws = Workspace::open(&repo).expect("open");
         assert!(ws.is_clean().expect("clean check"));
 
@@ -1739,7 +2096,7 @@ mod tests {
 
     #[test]
     fn branch_diff_commit_cycle() {
-        let repo = temp_repo("cycle");
+        let (_tree, repo) = temp_repo("cycle");
         let ws = Workspace::open(&repo).expect("open");
         ws.create_branch("upstroke/run-TEST").expect("branch");
         assert_eq!(
@@ -1773,7 +2130,7 @@ mod tests {
 
     #[test]
     fn captured_candidate_keeps_one_parent_tree_and_diff() {
-        let repo = temp_repo("captured-candidate");
+        let (_tree, repo) = temp_repo("captured-candidate");
         let ws = Workspace::open(&repo).expect("open");
         let original_parent = ws.head_sha_full().expect("parent before capture");
         fs::write(repo.join("README.md"), "first candidate\n").expect("first edit");
@@ -1826,7 +2183,7 @@ mod tests {
 
     #[test]
     fn prepared_commit_uses_frozen_objects_identity_and_hook_free_ref_transactions() {
-        let repo = temp_repo("prepared");
+        let (_tree, repo) = temp_repo("prepared");
         let ws = Workspace::open(&repo).expect("open");
         let hook_marker = repo.join("hook-ran");
         ws.git(&["config", "core.hooksPath", ".githooks"])
@@ -1902,7 +2259,7 @@ mod tests {
 
     #[test]
     fn prepared_pins_reject_symbolic_refs_without_touching_the_victim() {
-        let repo = temp_repo("prepared-symbolic-pin");
+        let (_tree, repo) = temp_repo("prepared-symbolic-pin");
         let ws = Workspace::open(&repo).expect("open");
         let victim_before = ws.head_sha_full().expect("victim target");
         run_git(&repo, &["branch", "victim", &victim_before]);
@@ -1951,7 +2308,7 @@ mod tests {
 
     #[test]
     fn prepared_publication_refuses_same_oid_symbolic_head_change_after_capture() {
-        let repo = temp_repo("prepared-branch-binding");
+        let (_tree, repo) = temp_repo("prepared-branch-binding");
         let ws = Workspace::open(&repo).expect("open");
         fs::write(repo.join("README.md"), "reviewed candidate\n").expect("candidate");
         let candidate = ws.capture_candidate().expect("capture on main");
@@ -2021,7 +2378,7 @@ mod tests {
 
     #[test]
     fn run_exclusions_hide_upstroke_dir() {
-        let repo = temp_repo("exclude");
+        let (_tree, repo) = temp_repo("exclude");
         let ws = Workspace::open(&repo).expect("open");
         ws.ensure_run_exclusions().expect("exclude");
         ws.ensure_run_exclusions().expect("idempotent");
@@ -2036,12 +2393,12 @@ mod tests {
 
     #[test]
     fn exclusions_work_in_a_linked_worktree() {
-        let repo = temp_repo("worktree-main");
-        let linked = repo.parent().expect("parent").join(format!(
-            "upstroke-ws-worktree-linked-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&linked);
+        let (_tree, repo) = temp_repo("worktree-main");
+        // A SIBLING of the repository and therefore inside the guarded tree,
+        // which reclaims it: `temp_dir()/upstroke-ws-worktree-linked-<pid>`
+        // was outside every guard and was pre-cleaned on the way in
+        // (`PR64-CLEANUP-003-SCRATCH-PRECLEAN`, `PR7-SCRATCH-FIXTURE-LEAK`).
+        let linked = repo.with_file_name("worktree-linked");
         let out = Command::new("git")
             .arg("-C")
             .arg(&repo)
@@ -2075,7 +2432,7 @@ mod tests {
 
     #[test]
     fn open_normalizes_to_the_worktree_toplevel() {
-        let repo = temp_repo("toplevel");
+        let (_tree, repo) = temp_repo("toplevel");
         let nested = repo.join("crates").join("inner");
         fs::create_dir_all(&nested).expect("nested dirs");
         let ws = Workspace::open(&nested).expect("open from a subdirectory");
@@ -2092,10 +2449,14 @@ mod tests {
     fn worktree_git_dir_preserves_non_utf8_repo_path() {
         use std::os::unix::ffi::OsStringExt;
 
-        let mut name = format!("upstroke-ws-non-utf8-git-dir-{}-", std::process::id()).into_bytes();
+        // The non-UTF-8 name is what this test is about, so it is built
+        // INSIDE an acquired tree rather than beside one: `acquire` names its
+        // own root and that name is UTF-8. The guard reclaims the tree, and
+        // the repository under it, however this test ends.
+        let tree = scratch("ws-non-utf8-git-dir");
+        let mut name = b"repo-".to_vec();
         name.push(0xff);
-        let repo = env::temp_dir().join(OsString::from_vec(name));
-        let _ = fs::remove_dir_all(&repo);
+        let repo = tree.path().join(OsString::from_vec(name));
         fs::create_dir(&repo).expect("create non-UTF-8 repo");
         run_git(&repo, &["init", "-q", "-b", "main"]);
         run_git(&repo, &["config", "user.email", "test@upstroke.local"]);
@@ -2118,12 +2479,11 @@ mod tests {
             .expect("canonical resolved git dir"),
             fs::canonicalize(repo.join(".git")).expect("canonical expected git dir")
         );
-        fs::remove_dir_all(repo).expect("remove non-UTF-8 repo");
     }
 
     #[test]
     fn capture_diff_is_immune_to_user_diff_config() {
-        let repo = temp_repo("extdiff");
+        let (_tree, repo) = temp_repo("extdiff");
         let set = |k: &str, v: &str| {
             let out = Command::new("git")
                 .arg("-C")
@@ -2146,7 +2506,7 @@ mod tests {
 
     #[test]
     fn opaque_git_diffs_are_rejected_before_review() {
-        let repo = temp_repo("opaque-diff");
+        let (_tree, repo) = temp_repo("opaque-diff");
         let ws = Workspace::open(&repo).expect("open");
 
         fs::write(repo.join(".gitattributes"), "hidden.rs -diff\n").expect("attributes");
@@ -2165,7 +2525,7 @@ mod tests {
 
     #[test]
     fn non_utf8_text_diff_is_refused_before_review() {
-        let repo = temp_repo("non-utf8-diff");
+        let (_tree, repo) = temp_repo("non-utf8-diff");
         let ws = Workspace::open(&repo).expect("open");
         fs::write(repo.join("invalid.rs"), b"fn changed() { // \xff\n}\n").expect("invalid text");
 
@@ -2177,7 +2537,7 @@ mod tests {
 
     #[test]
     fn ignored_worker_input_is_absent_from_gate_snapshot() {
-        let repo = temp_repo("ignored-gate-input");
+        let (_tree, repo) = temp_repo("ignored-gate-input");
         let ws = Workspace::open(&repo).expect("open");
         fs::write(repo.join(".gitignore"), "worker-toggle\n").expect("ignore rule");
         ws.capture_diff().expect("stage ignore rule");
@@ -2209,7 +2569,7 @@ mod tests {
 
     #[test]
     fn filtered_paths_are_refused_before_gates_and_review() {
-        let repo = temp_repo("filtered-evidence");
+        let (_tree, repo) = temp_repo("filtered-evidence");
         let ws = Workspace::open(&repo).expect("open");
         fs::write(
             repo.join(".gitattributes"),
@@ -2240,7 +2600,7 @@ mod tests {
 
     #[test]
     fn filter_on_unchanged_tracked_path_is_refused_before_materialization() {
-        let repo = temp_repo("filter-on-unchanged-path");
+        let (_tree, repo) = temp_repo("filter-on-unchanged-path");
         let ws = Workspace::open(&repo).expect("open");
         fs::write(repo.join("unchanged.txt"), "tracked baseline\n").expect("tracked file");
         ws.capture_diff().expect("stage baseline file");
@@ -2272,7 +2632,7 @@ mod tests {
 
     #[test]
     fn capture_candidate_refuses_filter_before_candidate_helper_executes() {
-        let repo = temp_repo("pre-add-filter-helper");
+        let (_tree, repo) = temp_repo("pre-add-filter-helper");
         fs::create_dir_all(repo.join(".githooks")).expect("helper directory");
         fs::write(
             repo.join(".githooks").join("filter-helper"),
@@ -2322,7 +2682,7 @@ mod tests {
 
     #[test]
     fn status_and_switch_refuse_filter_before_candidate_helper_executes() {
-        let repo = temp_repo("status-filter-helper");
+        let (_tree, repo) = temp_repo("status-filter-helper");
         fs::create_dir_all(repo.join(".githooks")).expect("helper directory");
         fs::write(
             repo.join(".githooks").join("status-filter"),
@@ -2418,7 +2778,7 @@ mod tests {
 
     #[test]
     fn capture_candidate_disables_candidate_fsmonitor() {
-        let repo = temp_repo("capture-fsmonitor");
+        let (_tree, repo) = temp_repo("capture-fsmonitor");
         fs::create_dir_all(repo.join(".githooks")).expect("hooks directory");
         fs::write(
             repo.join(".githooks").join("fsmonitor"),
@@ -2459,7 +2819,7 @@ mod tests {
 
     #[test]
     fn capture_candidate_disables_post_index_change_hook() {
-        let repo = temp_repo("capture-post-index-change");
+        let (_tree, repo) = temp_repo("capture-post-index-change");
         fs::create_dir_all(repo.join(".githooks")).expect("hooks directory");
         fs::write(
             repo.join(".githooks").join("post-index-change"),
@@ -2496,7 +2856,7 @@ mod tests {
 
     #[test]
     fn branch_creation_and_switch_do_not_execute_post_checkout_hook() {
-        let repo = temp_repo("branch-post-checkout");
+        let (_tree, repo) = temp_repo("branch-post-checkout");
         fs::create_dir_all(repo.join(".githooks")).expect("hooks directory");
         fs::write(
             repo.join(".githooks").join("post-checkout"),
@@ -2529,7 +2889,7 @@ mod tests {
 
     #[test]
     fn branch_switch_refuses_filter_before_target_helper_executes() {
-        let repo = temp_repo("branch-filter-helper");
+        let (_tree, repo) = temp_repo("branch-filter-helper");
         fs::create_dir_all(repo.join(".githooks")).expect("helper directory");
         fs::write(
             repo.join(".githooks").join("smudge-helper"),
@@ -2577,7 +2937,7 @@ mod tests {
 
     #[test]
     fn commit_and_discard_do_not_execute_candidate_hooks() {
-        let repo = temp_repo("commit-reset-hooks");
+        let (_tree, repo) = temp_repo("commit-reset-hooks");
         fs::create_dir_all(repo.join(".githooks")).expect("hooks directory");
         fs::write(
             repo.join(".githooks").join("pre-commit"),
@@ -2625,7 +2985,7 @@ mod tests {
 
     #[test]
     fn discard_refuses_target_filter_before_candidate_helper_executes() {
-        let repo = temp_repo("reset-filter-helper");
+        let (_tree, repo) = temp_repo("reset-filter-helper");
         fs::write(
             repo.join(".gitattributes"),
             "README.md filter=upstroke-reset\n",
@@ -2672,7 +3032,7 @@ mod tests {
 
     #[test]
     fn gate_snapshot_does_not_execute_post_checkout_hook() {
-        let repo = temp_repo("snapshot-checkout-hook");
+        let (_tree, repo) = temp_repo("snapshot-checkout-hook");
         run_git(&repo, &["config", "core.autocrlf", "false"]);
         run_git(&repo, &["config", "core.hooksPath", ".githooks"]);
         fs::create_dir_all(repo.join(".githooks")).expect("hooks directory");
@@ -2713,7 +3073,7 @@ mod tests {
 
     #[test]
     fn failed_gate_snapshot_add_cleans_registered_worktree() {
-        let repo = temp_repo("failed-snapshot-add-cleanup");
+        let (_tree, repo) = temp_repo("failed-snapshot-add-cleanup");
         let ws = Workspace::open(&repo).expect("open");
         let parent = ws.head_sha_full().expect("parent");
         let tree = ws.staged_tree_oid().expect("tree");
@@ -2757,7 +3117,7 @@ mod tests {
 
     #[test]
     fn unexpected_materialization_residue_is_rejected_and_cleaned() {
-        let repo = temp_repo("snapshot-residue-cleanup");
+        let (_tree, repo) = temp_repo("snapshot-residue-cleanup");
         let ws = Workspace::open(&repo).expect("open");
         let parent = ws.head_sha_full().expect("parent");
         let tree = ws.staged_tree_oid().expect("tree");
@@ -2830,7 +3190,7 @@ mod tests {
 
     #[test]
     fn hard_killed_snapshot_owner_is_reclaimed_before_resume() {
-        let repo = temp_repo("snapshot-hard-kill");
+        let (_tree, repo) = temp_repo("snapshot-hard-kill");
         let store = env::temp_dir().join(format!(
             "upstroke-snapshot-store-{}-{}",
             std::process::id(),
@@ -2903,7 +3263,7 @@ mod tests {
     fn gate_snapshot_target_is_atomically_private() {
         use std::os::unix::fs::PermissionsExt;
 
-        let repo = temp_repo("private-snapshot-target");
+        let (_tree, repo) = temp_repo("private-snapshot-target");
         let system_temp = env::temp_dir();
         let system_temp_mode = fs::metadata(&system_temp)
             .expect("system temp metadata")
@@ -3018,14 +3378,17 @@ mod tests {
     fn gate_snapshot_accepts_non_utf8_tmpdir_on_linux() {
         use std::os::unix::ffi::OsStringExt;
 
-        let repo = temp_repo("non-utf8-snapshot-root");
+        let (_tree, repo) = temp_repo("non-utf8-snapshot-root");
         let ws = Workspace::open(&repo).expect("open");
         let parent = ws.head_sha_full().expect("parent");
         let tree = ws.staged_tree_oid().expect("tree");
-        let mut name = format!("upstroke-non-utf8-tmp-{}-", std::process::id()).into_bytes();
+        // Built inside an acquired tree for the reason
+        // `worktree_git_dir_preserves_non_utf8_repo_path` gives: `acquire`
+        // names its own root, and that name is UTF-8.
+        let snapshot_tree = scratch("non-utf8-tmp");
+        let mut name = b"tmp-".to_vec();
         name.push(0xff);
-        let temp_root = env::temp_dir().join(OsString::from_vec(name));
-        let _ = fs::remove_dir_all(&temp_root);
+        let temp_root = snapshot_tree.path().join(OsString::from_vec(name));
         fs::create_dir(&temp_root).expect("non-UTF-8 temp root");
 
         let snapshot = ws
@@ -3039,8 +3402,8 @@ mod tests {
 
     #[test]
     fn dirty_submodule_worktree_is_refused_before_gates() {
-        let child = temp_repo("dirty-submodule-child");
-        let repo = temp_repo("dirty-submodule-parent");
+        let (_tree, child) = temp_repo("dirty-submodule-child");
+        let (_tree, repo) = temp_repo("dirty-submodule-parent");
         let add = Command::new("git")
             .arg("-C")
             .arg(&repo)
@@ -3077,8 +3440,8 @@ mod tests {
 
     #[test]
     fn clean_unchanged_submodule_is_refused_before_gate_snapshot() {
-        let child = temp_repo("clean-submodule-child");
-        let repo = temp_repo("clean-submodule-parent");
+        let (_tree, child) = temp_repo("clean-submodule-child");
+        let (_tree, repo) = temp_repo("clean-submodule-parent");
         let output = Command::new("git")
             .arg("-C")
             .arg(&repo)
@@ -3111,5 +3474,1229 @@ mod tests {
         };
         assert!(error.contains("nested"), "{error}");
         assert!(error.contains("mode 160000"), "{error}");
+    }
+
+    fn committed(repo: &Path, content: &str, message: &str) -> (String, String) {
+        fs::write(repo.join("f.txt"), content).expect("the committed content");
+        run_git(repo, &["add", "-A"]);
+        run_git(repo, &["commit", "-q", "-m", message]);
+        let read = |revision: &str| {
+            String::from_utf8(run_git(repo, &["rev-parse", revision]))
+                .expect("an object id is ASCII")
+                .trim()
+                .to_owned()
+        };
+        (read("HEAD"), read("HEAD^{tree}"))
+    }
+
+    #[test]
+    fn a_replaced_parent_leaves_the_captured_candidate_unchanged() {
+        let status = crate::workspace_manager::fixture::run_replacement_witness_child(
+            "workspace::tests::replaced_parent_capture_helper",
+        );
+        assert!(
+            status.success(),
+            "the child captures one candidate with and without a replacement of its \
+             parent installed, with every ambient control over `refs/replace/*` taken \
+             away from it, and ended {status:?}"
+        );
+    }
+
+    #[test]
+    #[ignore = "subprocess helper"]
+    fn replaced_parent_capture_helper() {
+        use crate::workspace_manager::fixture::{
+            REPLACEMENT_WITNESS, assert_replacement_controls_pinned, pin_replacement_refs_in,
+        };
+
+        if env::var_os(REPLACEMENT_WITNESS).is_none() {
+            return;
+        }
+        assert_replacement_controls_pinned("legacy-capture");
+
+        let (_tree, repo) = temp_repo("replaced-parent");
+        pin_replacement_refs_in(&repo);
+        let (parent, _) = committed(&repo, "one\n", "the recorded parent");
+        let (replacing, _) = committed(&repo, "two\n", "the replacing commit");
+        run_git(&repo, &["reset", "-q", "--hard", &parent]);
+        fs::write(repo.join("f.txt"), "agent-edit\n").expect("the agent's edit");
+
+        let ws = Workspace::open(&repo).expect("open");
+        let without = ws
+            .capture_candidate()
+            .expect("capture with no replacement installed");
+        assert_eq!(without.parent_oid, parent);
+        assert!(
+            without.diff.contains("\n-one\n") && without.diff.contains("\n+agent-edit\n"),
+            "{}",
+            without.diff
+        );
+
+        run_git(&repo, &["replace", &parent, &replacing]);
+        assert_eq!(
+            run_git(&repo, &["show", &format!("{parent}:f.txt")]),
+            b"two\n",
+            "a Git child that honours `refs/replace/*` reads the replacing commit \
+             wherever the parent is named; without that this test measures nothing"
+        );
+
+        let with = ws
+            .capture_candidate()
+            .expect("capture with the parent replaced");
+        assert_eq!(
+            with, without,
+            "the review payload must describe the parent the prepared commit records, \
+             not the commit `refs/replace/` points it at"
+        );
+    }
+
+    #[test]
+    fn a_replaced_candidate_tree_materialises_as_recorded() {
+        let status = crate::workspace_manager::fixture::run_replacement_witness_child(
+            "workspace::tests::replaced_tree_snapshot_helper",
+        );
+        assert!(
+            status.success(),
+            "the child materialises a gate snapshot of a tree that carries a \
+             replacement, with every ambient control over `refs/replace/*` taken \
+             away from it, and ended {status:?}"
+        );
+    }
+
+    #[test]
+    #[ignore = "subprocess helper"]
+    fn replaced_tree_snapshot_helper() {
+        use crate::workspace_manager::fixture::{
+            REPLACEMENT_WITNESS, assert_replacement_controls_pinned, pin_replacement_refs_in,
+        };
+
+        if env::var_os(REPLACEMENT_WITNESS).is_none() {
+            return;
+        }
+        assert_replacement_controls_pinned("legacy-snapshot");
+
+        let (_tree, repo) = temp_repo("replaced-tree");
+        pin_replacement_refs_in(&repo);
+        let (parent, recorded_tree) = committed(&repo, "recorded\n", "the recorded tree");
+        let (_, replacing_tree) = committed(&repo, "replacing\n", "the replacing tree");
+        run_git(&repo, &["reset", "-q", "--hard", &parent]);
+        run_git(&repo, &["replace", &recorded_tree, &replacing_tree]);
+        assert_eq!(
+            run_git(&repo, &["show", &format!("{recorded_tree}:f.txt")]),
+            b"replacing\n",
+            "a Git child that honours `refs/replace/*` reads the replacing tree \
+             wherever the recorded one is named; without that this test measures nothing"
+        );
+
+        let ws = Workspace::open(&repo).expect("open");
+        let snapshot = ws
+            .gate_snapshot_for_candidate(&parent, &recorded_tree)
+            .expect("materialise the recorded tree");
+        assert_eq!(
+            fs::read_to_string(snapshot.workspace().root().join("f.txt"))
+                .expect("the materialised file")
+                .replace("\r\n", "\n"),
+            "recorded\n",
+            "a gate snapshot must hold the tree its ephemeral commit records"
+        );
+    }
+
+    #[test]
+    fn a_rollback_over_a_replaced_tree_restores_the_recorded_bytes() {
+        let status = crate::workspace_manager::fixture::run_replacement_witness_child(
+            "workspace::tests::replaced_tree_rollback_helper",
+        );
+        assert!(
+            status.success(),
+            "the child rolls an edit back over a HEAD whose tree carries a replacement, \
+             with every ambient control over `refs/replace/*` taken away from it, and \
+             ended {status:?}"
+        );
+    }
+
+    #[test]
+    #[ignore = "subprocess helper"]
+    fn replaced_tree_rollback_helper() {
+        use crate::workspace_manager::fixture::{
+            REPLACEMENT_WITNESS, assert_replacement_controls_pinned, pin_replacement_refs_in,
+        };
+
+        if env::var_os(REPLACEMENT_WITNESS).is_none() {
+            return;
+        }
+        assert_replacement_controls_pinned("legacy-rollback");
+
+        let (_tree, repo) = temp_repo("replaced-rollback");
+        pin_replacement_refs_in(&repo);
+        let (parent, recorded_tree) = committed(&repo, "recorded\n", "the recorded tree");
+        let (_, replacing_tree) = committed(&repo, "replacing\n", "the replacing tree");
+        run_git(&repo, &["reset", "-q", "--hard", &parent]);
+        run_git(&repo, &["replace", &recorded_tree, &replacing_tree]);
+        assert_eq!(
+            run_git(&repo, &["show", "HEAD:f.txt"]),
+            b"replacing\n",
+            "a Git child that honours `refs/replace/*` reads the replacing tree at HEAD; \
+             without that this test measures nothing"
+        );
+        fs::write(repo.join("f.txt"), "agent-edit\n").expect("the agent's edit");
+
+        Workspace::open(&repo)
+            .expect("open")
+            .discard_uncommitted()
+            .expect("the rollback");
+        assert_eq!(
+            fs::read_to_string(repo.join("f.txt"))
+                .expect("the rolled-back file")
+                .replace("\r\n", "\n"),
+            "recorded\n",
+            "a rollback restores the bytes HEAD records, not the replacement's"
+        );
+    }
+
+    fn test_module_span(code: &str) -> Result<(usize, usize), String> {
+        let identifier = |byte: Option<&u8>| {
+            byte.is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+        };
+        let bytes = code.as_bytes();
+        let modules: Vec<usize> = code
+            .match_indices("mod tests")
+            .map(|(at, _)| at)
+            .filter(|at| {
+                !identifier(bytes.get(at.wrapping_sub(1)))
+                    && !identifier(bytes.get(at + "mod tests".len()))
+            })
+            .collect();
+        let [module] = modules.as_slice() else {
+            return Err(format!(
+                "one test module, the only span this census does not read: {modules:?}"
+            ));
+        };
+        let attribute = code
+            .get(..*module)
+            .map(str::trim_end)
+            .filter(|before| before.ends_with("#[cfg(test)]"))
+            .map(|before| before.len() - "#[cfg(test)]".len())
+            .ok_or(
+                "the test module is not configured out of production by the attribute above it",
+            )?;
+        let after = module + "mod tests".len();
+        let rest = code.get(after..).unwrap_or_default();
+        let next = after + (rest.len() - rest.trim_start().len());
+        match bytes.get(next) {
+            Some(b';') => Ok((attribute, next)),
+            Some(b'{') => {
+                let mut depth = 0_usize;
+                for (at, byte) in bytes.iter().enumerate().skip(next) {
+                    match byte {
+                        b'{' => depth += 1,
+                        b'}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                return Ok((attribute, at));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                Err("the test module's body never closes".to_owned())
+            }
+            other => Err(format!(
+                "`mod tests` is followed by {:?}, which is neither an inline body nor the end \
+                 of a declaration whose body lives in another file",
+                other.map(|byte| char::from(*byte))
+            )),
+        }
+    }
+
+    #[test]
+    fn the_census_reads_past_a_test_module_declared_out_of_line() {
+        let span = |source: &str| {
+            let code = crate::effects::blank_comments_and_strings(source);
+            test_module_span(&code).map(|(start, end)| {
+                let mut kept = code.clone();
+                kept.replace_range(start..=end, "");
+                kept
+            })
+        };
+        let inline =
+            span("fn a() {}\n#[cfg(test)]\nmod tests {\n    fn b() { { } }\n}\nfn c() {}\n")
+                .expect("an inline test module");
+        assert!(
+            inline.contains("fn a()")
+                && inline.contains("fn c()")
+                && !inline.contains("fn b()")
+                && !inline.contains("mod tests"),
+            "an inline test module is taken out through the brace that closes it: {inline:?}"
+        );
+        let out_of_line = span(
+            "#[path = \"t.rs\"]\n#[cfg(test)]\nmod tests;\nfn helper() -> Command {\n    \
+             Command::new(\"git\")\n}\n",
+        )
+        .expect("a test module declared out of line");
+        assert!(
+            out_of_line.contains("fn helper()")
+                && out_of_line.contains("Command::new(")
+                && !out_of_line.contains("mod tests"),
+            "a test module declared out of line is taken out through its `;` alone, and the \
+             helper after it stays where the census reads it: {out_of_line:?}"
+        );
+        for malformed in [
+            "#[cfg(test)]\nmod tests\nfn helper() {}\n",
+            "#[cfg(test)]\nmod tests {\n    fn b() {}\n",
+            "mod tests {}\n",
+            "#[cfg(test)]\nmod tests {}\n#[cfg(test)]\nmod tests;\n",
+        ] {
+            assert!(
+                span(malformed).is_err(),
+                "a shape the census cannot place is refused, never read: {malformed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_git_child_of_this_module_is_built_where_replacements_are_refused() {
+        let source = include_str!("workspace.rs");
+        let mut code = crate::effects::blank_comments_and_strings(source);
+        assert_eq!(
+            code.len(),
+            source.len(),
+            "the blanking must keep every byte where it was, or the span taken out \
+             below is not the test module's"
+        );
+        let (attribute, end) =
+            test_module_span(&code).expect("the one test module this census does not read");
+        code.replace_range(attribute..=end, &" ".repeat(end + 1 - attribute));
+
+        for present in [
+            "fn git_output(",
+            "fn run_git_with_private_hooks(",
+            "fn git_output_with_input(",
+            "fn commit_tree_with_upstroke_identity(",
+            "fn add_gate_worktree(",
+            "fn verify_gate_worktree(",
+            "fn prepared_pin_target(",
+            "fn cleanup_gate_workspace(",
+            "fn worktree_is_registered(",
+            "impl Drop for GateWorkspace",
+        ] {
+            assert!(
+                code.contains(present),
+                "the blanked production region does not contain `{present}`, so the \
+                 census below measures nothing: {} bytes",
+                code.len()
+            );
+        }
+
+        let start = code
+            .find("fn git_command(")
+            .expect("the builder every Git child of this module comes from");
+        let open = start
+            + code
+                .get(start..)
+                .and_then(|rest| rest.find('{'))
+                .expect("the builder's body");
+        let mut depth = 0_usize;
+        let mut close = None;
+        for (at, byte) in code.bytes().enumerate().skip(open) {
+            match byte {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = Some(at);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let close = close.expect("the builder's body closes");
+        let builder: String = code
+            .get(start..=close)
+            .expect("the builder's span")
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect();
+
+        assert_eq!(
+            code.matches("Command::new(").count(),
+            1,
+            "LEGACY-WORKSPACE-READS-REPLACEMENT-OBJECTS: a Git child this module builds \
+             anywhere but `git_command` reads whatever `refs/replace/*` describes"
+        );
+        assert_eq!(builder.matches("Command::new(").count(), 1);
+        assert!(
+            builder.contains(".env(NO_REPLACEMENT_OBJECTS.0,NO_REPLACEMENT_OBJECTS.1)"),
+            "the builder must set the pair on every child it builds: {builder}"
+        );
+        assert!(
+            builder.contains(".args(REPLACE_REFS_REFUSED)"),
+            "and refuse replacements at command scope too, which on git 2.40 and 2.41 is \
+             what outranks a `core.useReplaceRefs = true` in any configuration: {builder}"
+        );
+        assert_eq!(
+            REPLACE_REFS_REFUSED,
+            ["-c", "core.useReplaceRefs=false"],
+            "the census blanks string literals, so the setting is read here"
+        );
+
+        let import = code.find("use std::process::").expect("the process import");
+        let import_end = import
+            + code
+                .get(import..)
+                .and_then(|rest| rest.find(';'))
+                .expect("the import ends");
+        let identifier = |byte: Option<&u8>| {
+            byte.is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+        };
+        let named: Vec<usize> = code
+            .match_indices("Command")
+            .map(|(at, _)| at)
+            .filter(|at| {
+                !identifier(code.as_bytes().get(at.wrapping_sub(1)))
+                    && !identifier(code.as_bytes().get(at + "Command".len()))
+            })
+            .collect();
+        let renamed: Vec<usize> = named
+            .iter()
+            .copied()
+            .filter(|at| {
+                code.get(at + "Command".len()..)
+                    .map(str::trim_start)
+                    .and_then(|rest| rest.strip_prefix("as"))
+                    .is_some_and(|rest| !identifier(rest.as_bytes().first()))
+            })
+            .collect();
+        assert!(
+            renamed.is_empty(),
+            "`Command` is imported under another name at byte offsets {renamed:?}, and a \
+             Git child built through that name is one the count above cannot see"
+        );
+        let elsewhere: Vec<usize> = named
+            .iter()
+            .copied()
+            .filter(|at| !(import..import_end).contains(at) && !(start..=close).contains(at))
+            .collect();
+        assert!(
+            elsewhere.is_empty(),
+            "`Command` is named outside the process import and `git_command` at byte \
+             offsets {elsewhere:?}"
+        );
+
+        let bytes = code.as_bytes();
+        let mut callers: Vec<&str> = Vec::new();
+        for (at, name) in code.match_indices("git_command") {
+            if identifier(bytes.get(at.wrapping_sub(1)))
+                || identifier(bytes.get(at + name.len()))
+                || (start..=close).contains(&at)
+            {
+                continue;
+            }
+            assert!(
+                code.get(at + name.len()..)
+                    .map(str::trim_start)
+                    .is_some_and(|rest| rest.starts_with('(')),
+                "`git_command` is named at byte offset {at} without being called, and a \
+                 Git child built through that value is one the list below cannot place"
+            );
+            let keyword = code
+                .get(..at)
+                .and_then(|before| {
+                    before
+                        .rmatch_indices("fn")
+                        .map(|(keyword, _)| keyword)
+                        .find(|keyword| {
+                            !identifier(bytes.get(keyword.wrapping_sub(1)))
+                                && bytes
+                                    .get(keyword + "fn".len())
+                                    .is_some_and(u8::is_ascii_whitespace)
+                        })
+                })
+                .expect("every call of the builder sits inside a function");
+            let signature = code
+                .get(keyword + "fn".len()..)
+                .map(str::trim_start)
+                .expect("the enclosing function's name");
+            let signature = signature.strip_prefix("r#").unwrap_or(signature);
+            let end = signature
+                .find(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+                .unwrap_or(signature.len());
+            callers.push(signature.get(..end).expect("an identifier"));
+        }
+        assert_eq!(
+            callers,
+            [
+                "git_output",
+                "run_git_with_private_hooks",
+                "git_output_with_input",
+                "commit_tree_with_upstroke_identity",
+                "current_branch_ref",
+                "parent_sha",
+                "branch_exists",
+                "add_gate_worktree",
+                "verify_gate_worktree",
+                "prepared_commit_matches",
+                "symbolic_ref_target",
+                "prepared_pin_target",
+                "cleanup_gate_workspace",
+                "worktree_is_registered",
+            ],
+            "every Git child of this module is a call of `git_command`, so a new one moves \
+             no `Command::new(` count anywhere: it moves this list, in source order, and \
+             whoever adds it names its function here"
+        );
+
+        for undo in ["env_remove(", "env_clear("] {
+            assert_eq!(
+                code.matches(undo).count(),
+                0,
+                "`{undo}` can take the pair back off a child `git_command` built"
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Served {
+        Torn,
+        Whole,
+    }
+
+    #[cfg(target_os = "linux")]
+    struct SnapshotRepo {
+        _tree: crate::rundir::scratch_tree::ScratchTree,
+        repo: PathBuf,
+        ws: Workspace,
+        parent: String,
+        tree_oid: String,
+        store: PathBuf,
+    }
+
+    #[cfg(target_os = "linux")]
+    impl SnapshotRepo {
+        fn new(tag: &str) -> Self {
+            let (tree, repo) = temp_repo(tag);
+            let ws = Workspace::open(&repo).expect("open");
+            let parent = ws.head_sha_full().expect("parent");
+            let tree_oid = ws.staged_tree_oid().expect("tree");
+            let store = tree.path().join("store");
+            Self {
+                _tree: tree,
+                repo,
+                ws,
+                parent,
+                tree_oid,
+                store,
+            }
+        }
+
+        fn snapshot(&self) -> Result<GateWorkspace, UpstrokeError> {
+            self.ws
+                .gate_snapshot_for_candidate_in_store(&self.parent, &self.tree_oid, &self.store)
+        }
+
+        fn registered(&self, path: &Path) -> bool {
+            run_git(&self.repo, &["worktree", "list", "--porcelain", "-z"])
+                .split(|byte| *byte == 0)
+                .filter_map(|field| field.strip_prefix(b"worktree "))
+                .any(|field| git_path_field_matches(field, path))
+        }
+
+        fn commondir_as_git_names_it(id: &std::ffi::OsStr) -> PathBuf {
+            Path::new(".git")
+                .join("worktrees")
+                .join(id)
+                .join("commondir")
+        }
+
+        fn plant_another_registration(&self, id: &str) -> PathBuf {
+            let entry = self.repo.join(".git").join("worktrees").join(id);
+            fs::create_dir_all(&entry).expect("another checkout's registration");
+            let checkout = self.repo.with_file_name(id).join(".git");
+            fs::write(
+                entry.join("gitdir"),
+                [checkout.as_os_str().as_encoded_bytes(), b"\n"].concat(),
+            )
+            .expect("its gitdir");
+            fs::write(
+                entry.join("HEAD"),
+                run_git(&self.repo, &["rev-parse", "HEAD"]),
+            )
+            .expect("its HEAD");
+            entry
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn make_fifo(path: &Path) -> std::io::Result<()> {
+        let made = Command::new("mkfifo").arg(path).status()?;
+        if made.success() {
+            Ok(())
+        } else {
+            Err(std::io::Error::other(format!(
+                "mkfifo {}: {made:?}",
+                path.display()
+            )))
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn serving_commondir<T>(
+        entry: &Path,
+        script: &[Served],
+        on_serve: &(dyn Fn(usize) + Sync),
+        act: impl FnOnce() -> T,
+    ) -> (T, Vec<Served>) {
+        use std::os::unix::fs::OpenOptionsExt;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let commondir = entry.join("commondir");
+        let whole = entry.join("commondir.whole");
+        let next = entry.join("commondir.next");
+        fs::write(&whole, "../..\n").expect("the whole commondir, made ready");
+        make_fifo(&commondir).expect("the first FIFO");
+        let stopped = AtomicBool::new(false);
+        let serve = || -> std::io::Result<Vec<Served>> {
+            let mut served = Vec::new();
+            for (at, reading) in script.iter().enumerate() {
+                let mut writer = OpenOptions::new().write(true).open(&commondir)?;
+                if stopped.load(Ordering::SeqCst) {
+                    fs::rename(&whole, &commondir)?;
+                    return Ok(served);
+                }
+                on_serve(at);
+                if at + 1 == script.len() {
+                    fs::rename(&whole, &commondir)?;
+                } else {
+                    make_fifo(&next)?;
+                    fs::rename(&next, &commondir)?;
+                }
+                if *reading == Served::Whole {
+                    writer.write_all(b"../..\n")?;
+                }
+                drop(writer);
+                served.push(*reading);
+            }
+            Ok(served)
+        };
+        let (acted, served) = std::thread::scope(|scope| {
+            let server = scope.spawn(|| {
+                let served = std::panic::catch_unwind(std::panic::AssertUnwindSafe(&serve));
+                if !matches!(served, Ok(Ok(_))) {
+                    release_commondir_readers(&commondir, &whole);
+                }
+                served.unwrap_or_else(|panicked| std::panic::resume_unwind(panicked))
+            });
+            let acted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(act));
+            stopped.store(true, Ordering::SeqCst);
+            let release = (!server.is_finished()).then(|| {
+                OpenOptions::new()
+                    .read(true)
+                    .custom_flags(libc::O_NONBLOCK)
+                    .open(&commondir)
+            });
+            let served = server.join();
+            drop(release);
+            (acted, served)
+        });
+        let acted = acted.unwrap_or_else(|panicked| std::panic::resume_unwind(panicked));
+        let served = served
+            .unwrap_or_else(|panicked| std::panic::resume_unwind(panicked))
+            .expect("the commondir's server");
+        (acted, served)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn release_commondir_readers(commondir: &Path, whole: &Path) {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let reader = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(commondir);
+        let writer = OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(commondir);
+        let _ = fs::rename(whole, commondir);
+        drop((writer, reader));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_snapshot_add_is_attempted_again_past_another_registrations_empty_commondir() {
+        let fixture = SnapshotRepo::new("w924-add-past-a-tear");
+        let entry = fixture.plant_another_registration("w924-other");
+        let (added, served) =
+            serving_commondir(&entry, &[Served::Torn], &|_| {}, || fixture.snapshot());
+        assert_eq!(
+            served,
+            [Served::Torn],
+            "the add's first attempt read the other registration's commondir empty"
+        );
+        let snapshot =
+            added.unwrap_or_else(|error| panic!("the add met the tear and stopped: {error}"));
+        let path = snapshot.path.clone();
+        assert!(fixture.registered(&path), "the snapshot is registered");
+        drop(snapshot);
+        assert!(!fixture.registered(&path), "and its cleanup removed it");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_snapshots_removal_and_its_list_are_attempted_again_past_another_registrations_empty_commondir()
+     {
+        let fixture = SnapshotRepo::new("w924-cleanup-past-a-tear");
+        let snapshot = fixture.snapshot().expect("a snapshot");
+        let (path, hooks, intent) = (
+            snapshot.path.clone(),
+            snapshot.hooks_path.clone(),
+            snapshot.intent_path.clone(),
+        );
+        let entry = fixture.plant_another_registration("w924-other");
+        let ((), served) = serving_commondir(
+            &entry,
+            &[Served::Torn, Served::Whole, Served::Torn],
+            &|_| {},
+            || drop(snapshot),
+        );
+        assert_eq!(
+            served,
+            [Served::Torn, Served::Whole, Served::Torn],
+            "the removal read the other registration's commondir empty, then whole, and the \
+             list after it empty"
+        );
+        assert!(
+            !fixture.registered(&path),
+            "the removal was attempted again past the tear"
+        );
+        assert!(
+            !path.exists() && !hooks.exists() && !intent.exists(),
+            "and so was the list, so the cleanup ran to its end"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_empty_commondir_of_the_snapshots_own_registration_is_returned_at_once() {
+        let fixture = SnapshotRepo::new("w924-own-tear");
+        let snapshot = fixture.snapshot().expect("a snapshot");
+        let own = fixture
+            .repo
+            .join(".git")
+            .join("worktrees")
+            .join(snapshot.path.file_name().expect("a snapshot's name"));
+        let commondir = own.join("commondir");
+        let whole = fs::read(&commondir).expect("its own commondir");
+        fs::write(&commondir, "").expect("its own commondir, emptied");
+        let started = std::time::Instant::now();
+        let cleaned = cleanup_gate_workspace(
+            &snapshot.source_root,
+            &snapshot.path,
+            &snapshot.hooks_path,
+            &snapshot.intent_path,
+        );
+        let elapsed = started.elapsed();
+        fs::write(&commondir, whole).expect("its own commondir, restored");
+        let error = match cleaned {
+            Ok(()) => panic!("a cleanup over its own empty commondir passed"),
+            Err(error) => error.to_string(),
+        };
+        let named = format!(
+            "fatal: failed to read {}: Success",
+            SnapshotRepo::commondir_as_git_names_it(
+                snapshot.path.file_name().expect("a snapshot's name")
+            )
+            .display()
+        );
+        assert!(
+            error.contains("verifying gate-worktree reclamation failed: ")
+                && error.ends_with(&named),
+            "{error}"
+        );
+        assert!(
+            elapsed < REGISTRY_TEAR_DEADLINE / 2,
+            "its own registration is never waited on: {elapsed:?}"
+        );
+        let path = snapshot.path.clone();
+        drop(snapshot);
+        assert!(!fixture.registered(&path), "restored, it is reclaimed");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn another_registrations_commondir_git_cannot_read_is_returned_at_once() {
+        let fixture = SnapshotRepo::new("w924-unreadable");
+        let entry = fixture.plant_another_registration("w924-other");
+        fs::create_dir(entry.join("commondir")).expect("a commondir Git cannot read");
+        let started = std::time::Instant::now();
+        let added = fixture.snapshot();
+        let elapsed = started.elapsed();
+        let error = match added {
+            Ok(_) => panic!("an add over an unreadable commondir passed"),
+            Err(error) => error.to_string(),
+        };
+        let named = format!(
+            "git worktree add failed: fatal: failed to read {}: Is a directory",
+            SnapshotRepo::commondir_as_git_names_it(std::ffi::OsStr::new("w924-other")).display()
+        );
+        assert!(error.ends_with(&named), "{error}");
+        assert!(
+            elapsed < REGISTRY_TEAR_DEADLINE / 2,
+            "a failure that is not an empty read is never waited on: {elapsed:?}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn another_registrations_empty_commondir_that_outlasts_the_deadline_returns_the_adds_error() {
+        let fixture = SnapshotRepo::new("w924-outlasting-tear");
+        let entry = fixture.plant_another_registration("w924-other");
+        let commondir = entry.join("commondir");
+        fs::write(&commondir, "").expect("an empty commondir nobody writes");
+        let commit = fixture
+            .ws
+            .git(&[
+                "commit-tree",
+                &fixture.tree_oid,
+                "-p",
+                &fixture.parent,
+                "-m",
+                "w924",
+            ])
+            .expect("a commit to add");
+        let destination = fixture.store.join("w924-destination");
+        let hooks = fixture.store.join("w924-hooks");
+        fs::create_dir_all(&destination).expect("an empty destination");
+        fs::create_dir_all(&hooks).expect("an empty hooks directory");
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let ended = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let started = std::time::Instant::now();
+                let added = fixture
+                    .ws
+                    .add_gate_worktree(&destination, &hooks, commit.trim());
+                let _ = sender.send((added, started.elapsed()));
+            });
+            let ended = receiver.recv_timeout(REGISTRY_TEAR_DEADLINE * 3);
+            if ended.is_err() {
+                fs::write(&commondir, "../..\n").expect("the tear ended, so the add can stop");
+            }
+            ended
+        });
+        let (added, elapsed) = ended.unwrap_or_else(|_| {
+            panic!(
+                "the add was still attempting {:?} after it began",
+                REGISTRY_TEAR_DEADLINE * 3
+            )
+        });
+        let error = match added {
+            Ok(()) => panic!("an add over a tear nobody ends passed"),
+            Err(error) => error.to_string(),
+        };
+        let named = format!(
+            "git worktree add failed: fatal: failed to read {}: Success",
+            SnapshotRepo::commondir_as_git_names_it(std::ffi::OsStr::new("w924-other")).display()
+        );
+        assert!(error.ends_with(&named), "the add's own error: {error}");
+        assert!(
+            elapsed >= REGISTRY_TEAR_DEADLINE,
+            "it was attempted again until its deadline: {elapsed:?}"
+        );
+        assert!(
+            elapsed < REGISTRY_TEAR_DEADLINE + Duration::from_secs(5),
+            "and no longer: {elapsed:?}"
+        );
+        assert!(
+            is_an_empty_directory(&destination),
+            "and the destination was never taken"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_destination_no_longer_empty_returns_the_adds_first_error() {
+        let fixture = SnapshotRepo::new("w924-touched-destination");
+        let entry = fixture.plant_another_registration("w924-other");
+        let worktrees = fixture.store.join("worktrees");
+        let touch = |_: usize| {
+            for destination in fs::read_dir(&worktrees).expect("the store's worktrees") {
+                let destination = destination.expect("a destination").path();
+                fs::write(destination.join("w924-planted"), "not the add's\n")
+                    .expect("a file in the add's destination");
+            }
+        };
+        let (added, served) = serving_commondir(&entry, &[Served::Torn], &touch, || {
+            fixture.snapshot().map(drop)
+        });
+        assert_eq!(served, [Served::Torn], "the add read the tear once");
+        let error = match added {
+            Ok(()) => panic!("an add whose destination was touched passed"),
+            Err(error) => error.to_string(),
+        };
+        let named = format!(
+            "git worktree add failed: fatal: failed to read {}: Success",
+            SnapshotRepo::commondir_as_git_names_it(std::ffi::OsStr::new("w924-other")).display()
+        );
+        assert!(
+            error.ends_with(&named),
+            "a destination Git may have taken returns the first error, unchanged: {error}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    fn serving_commondir_under_containment(
+        fixture: &SnapshotRepo,
+        entry: &Path,
+        script: &[Served],
+        on_serve: &(dyn Fn(usize) + Sync),
+    ) -> (
+        std::thread::Result<Vec<Served>>,
+        Option<Result<(), String>>,
+        bool,
+    ) {
+        let (ended, wait) = std::sync::mpsc::channel();
+        let mut added = None;
+        std::thread::scope(|scope| {
+            let containment = scope.spawn(move || {
+                let wedged = wait.recv_timeout(REGISTRY_TEAR_DEADLINE * 3)
+                    == Err(std::sync::mpsc::RecvTimeoutError::Timeout);
+                if wedged {
+                    use std::os::unix::fs::OpenOptionsExt;
+
+                    let commondir = entry.join("commondir");
+                    let reader = OpenOptions::new()
+                        .read(true)
+                        .custom_flags(libc::O_NONBLOCK)
+                        .open(&commondir);
+                    let writer = OpenOptions::new()
+                        .write(true)
+                        .custom_flags(libc::O_NONBLOCK)
+                        .open(&commondir);
+                    let _ = fs::rename(entry.join("commondir.whole"), &commondir);
+                    drop((writer, reader));
+                }
+                wedged
+            });
+            let served = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                serving_commondir(entry, script, on_serve, || {
+                    added = Some(
+                        fixture
+                            .snapshot()
+                            .map(drop)
+                            .map_err(|error| error.to_string()),
+                    );
+                })
+                .1
+            }));
+            let _ = ended.send(());
+            let contained = containment
+                .join()
+                .unwrap_or_else(|panicked| std::panic::resume_unwind(panicked));
+            (served, added, contained)
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_commondir_server_that_panics_releases_its_reader_and_its_panic_reaches_the_caller() {
+        let fixture = SnapshotRepo::new("w924-server-panics");
+        let entry = fixture.plant_another_registration("w924-other");
+        let (served, added, contained) =
+            serving_commondir_under_containment(&fixture, &entry, &[Served::Torn], &|_| {
+                panic!("w924: the commondir's server failed")
+            });
+        assert!(
+            !contained,
+            "the server's unwinding left the add's next Git waiting on its FIFO, until the \
+             witness's containment released it"
+        );
+        let panicked = match served {
+            Ok(served) => panic!("a server that panicked returned {served:?}"),
+            Err(panicked) => panicked,
+        };
+        assert_eq!(
+            panicked.downcast_ref::<&str>(),
+            Some(&"w924: the commondir's server failed"),
+            "the server's own panic reached the caller"
+        );
+        assert_eq!(
+            added,
+            Some(Ok(())),
+            "the add read the tear, and then the whole commondir the release put in place"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_commondir_server_that_fails_releases_its_reader_and_its_error_reaches_the_caller() {
+        let fixture = SnapshotRepo::new("w924-server-fails");
+        let entry = fixture.plant_another_registration("w924-other");
+        let (served, added, contained) = serving_commondir_under_containment(
+            &fixture,
+            &entry,
+            &[Served::Torn, Served::Whole],
+            &|_| {
+                fs::write(entry.join("commondir.next"), "")
+                    .expect("a file where the next FIFO would go");
+            },
+        );
+        assert!(
+            !contained,
+            "the server's failure left the add's next Git waiting on its FIFO, until the \
+             witness's containment released it"
+        );
+        let panicked = match served {
+            Ok(served) => panic!("a server that failed returned {served:?}"),
+            Err(panicked) => panicked,
+        };
+        let message = panicked
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .unwrap_or_default();
+        assert!(
+            message.starts_with("the commondir's server: ") && message.contains("mkfifo"),
+            "the server's own error reached the caller: {message:?}"
+        );
+        assert_eq!(
+            added,
+            Some(Ok(())),
+            "the add read the tear, and then the whole commondir the release put in place"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_commondir_server_that_serves_its_script_ends_without_the_containment() {
+        let fixture = SnapshotRepo::new("w924-server-serves");
+        let entry = fixture.plant_another_registration("w924-other");
+        let (served, added, contained) =
+            serving_commondir_under_containment(&fixture, &entry, &[Served::Torn], &|_| {});
+        assert!(
+            !contained,
+            "a server that serves its script needs no release"
+        );
+        assert_eq!(served.ok(), Some(vec![Served::Torn]), "it served the tear");
+        assert_eq!(added, Some(Ok(())), "and the add went on past it");
+    }
+
+    #[test]
+    fn only_another_registrations_empty_commondir_reads_as_attempted_again() {
+        let status = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .output()
+                .expect("run git")
+                .status
+        };
+        let died = status(&["-C", "w924-no-such-directory", "status"]);
+        assert_eq!(died.code(), Some(128), "Git's death");
+        let refused = status(&["--w924-no-such-option"]);
+        assert_eq!(refused.code(), Some(129), "Git's usage refusal");
+        let succeeded = status(&["--version"]);
+        let output = |status, stderr: &str| Output {
+            status,
+            stdout: Vec::new(),
+            stderr: stderr.as_bytes().to_vec(),
+        };
+        let own = std::ffi::OsStr::new("upstroke-gates-1-01AAAAAAAAAAAAAAAAAAAAAAAA");
+        let other = "fatal: failed to read /r/.git/worktrees/upstroke-gates-2-01BBBBBBBBBBBBBBBBBBBBBBBB\
+                     /commondir: Success\n";
+        assert!(read_anothers_empty_commondir(&output(died, other), own));
+        assert!(read_anothers_empty_commondir(
+            &output(
+                died,
+                "fatal: failed to read .git/worktrees/w/commondir: Success\n"
+            ),
+            own
+        ));
+        for (stderr, why) in [
+            (
+                "fatal: failed to read /r/.git/worktrees/upstroke-gates-1-01AAAAAAAAAAAAAAAAAAAAAAAA\
+                 /commondir: Success\n",
+                "its own registration",
+            ),
+            (
+                "fatal: failed to read /r/.git/worktrees/upstroke-gates-1-01AAAAAAAAAAAAAAAAAAAAAAAA1\
+                 /commondir: Success\n",
+                "its own, under the suffix Git gives a taken name",
+            ),
+            (
+                "fatal: failed to read /r/.git/worktrees/w/commondir: No such file or directory\n",
+                "a removal's",
+            ),
+            (
+                "fatal: failed to read /r/.git/worktrees/w/commondir: Is a directory\n",
+                "a file Git cannot read",
+            ),
+            (
+                "fatal: failed to read '/r/.git/worktrees/w/locked'\n",
+                "a lock's",
+            ),
+            (
+                "fatal: failed to read /r/.git/worktrees/w/gitdir: Success\n",
+                "a gitdir's",
+            ),
+            (
+                "fatal: failed to read /r/.git/w/commondir: Success\n",
+                "a path outside the registry",
+            ),
+            (
+                "fatal: failed to read /r/.git/worktrees//commondir: Success\n",
+                "no registration's name",
+            ),
+            (
+                "warning: w924\nfatal: failed to read /r/.git/worktrees/w/commondir: Success\n",
+                "a second line",
+            ),
+            (
+                "fatal: failed to read /r/one\nfatal: failed to read /r/.git/worktrees/w/commondir: Success\n",
+                "two lines, each Git's death",
+            ),
+            (
+                "fatal: failed to read /r/.git/worktrees/w/commondir: Success",
+                "an unfinished line",
+            ),
+            (
+                "error: failed to read /r/.git/worktrees/w/commondir: Success\n",
+                "not Git's death",
+            ),
+        ] {
+            assert!(
+                !read_anothers_empty_commondir(&output(died, stderr), own),
+                "{why}: {stderr:?}"
+            );
+        }
+        assert!(
+            !read_anothers_empty_commondir(&output(refused, other), own),
+            "an exit that is not Git's death"
+        );
+        assert!(
+            !read_anothers_empty_commondir(&output(succeeded, other), own),
+            "a success"
+        );
+        assert!(
+            !read_anothers_empty_commondir(&output(died, other), std::ffi::OsStr::new("")),
+            "a command whose own registration is unknown"
+        );
+    }
+
+    #[test]
+    fn a_registry_command_is_attempted_again_only_while_its_answer_allows() {
+        let status = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .output()
+                .expect("run git")
+                .status
+        };
+        let output = |status, stderr: &str| Output {
+            status,
+            stdout: Vec::new(),
+            stderr: stderr.as_bytes().to_vec(),
+        };
+        let torn = output(
+            status(&["-C", "w924-no-such-directory", "status"]),
+            "fatal: failed to read /r/.git/worktrees/other/commondir: Success\n",
+        );
+        let unrelated = output(torn.status, "fatal: w924 something else\n");
+        let passed = output(status(&["--version"]), "");
+        let own = std::ffi::OsStr::new("mine");
+        let far = || std::time::Instant::now() + Duration::from_secs(60);
+        let attempt = |deadline: std::time::Instant,
+                       repeat: bool,
+                       script: Vec<Output>|
+         -> (std::io::Result<Output>, usize, usize) {
+            let mut script = script.into_iter();
+            let (mut runs, mut asked) = (0, 0);
+            let got = output_past_anothers_empty_commondir_until(
+                deadline,
+                own,
+                &mut || {
+                    asked += 1;
+                    repeat
+                },
+                &mut || {
+                    runs += 1;
+                    script
+                        .next()
+                        .ok_or_else(|| std::io::Error::other("ran past the script"))
+                },
+            );
+            (got, runs, asked)
+        };
+
+        let (got, runs, asked) = attempt(
+            far(),
+            true,
+            vec![torn.clone(), torn.clone(), passed.clone()],
+        );
+        assert_eq!(got.expect("the third attempt"), passed, "past two tears");
+        assert_eq!(
+            (runs, asked),
+            (3, 2),
+            "each tear asked once, the success not at all"
+        );
+
+        let (got, runs, asked) = attempt(far(), true, vec![unrelated.clone(), passed.clone()]);
+        assert_eq!(
+            got.expect("the first attempt"),
+            unrelated,
+            "any other failure, at once"
+        );
+        assert_eq!((runs, asked), (1, 0));
+
+        let (got, runs, asked) = attempt(far(), false, vec![torn.clone(), passed.clone()]);
+        assert_eq!(
+            got.expect("the first attempt"),
+            torn,
+            "a caller that answers no"
+        );
+        assert_eq!((runs, asked), (1, 1));
+
+        let (got, runs, asked) = attempt(
+            std::time::Instant::now(),
+            true,
+            vec![torn.clone(), passed.clone()],
+        );
+        assert_eq!(
+            got.expect("the first attempt"),
+            torn,
+            "a deadline already past"
+        );
+        assert_eq!((runs, asked), (1, 1));
+
+        let deadline = std::time::Instant::now() + Duration::from_millis(30);
+        let mut ended: Vec<std::time::Instant> = Vec::new();
+        let got =
+            output_past_anothers_empty_commondir_until(deadline, own, &mut || true, &mut || {
+                if ended.last().is_some_and(|end| *end >= deadline) {
+                    return Err(std::io::Error::other(
+                        "attempted after an attempt that ended at or past the deadline",
+                    ));
+                }
+                ended.push(std::time::Instant::now());
+                Ok(torn.clone())
+            });
+        let returned = std::time::Instant::now();
+        assert_eq!(
+            got.expect("the last attempt"),
+            torn,
+            "the tear at the deadline, as it read"
+        );
+        assert!(
+            returned >= deadline,
+            "the last attempt is the one at the deadline"
+        );
+        let (_, before_the_last) = ended.split_last().expect("one attempt at least");
+        assert!(
+            before_the_last.iter().all(|end| *end < deadline),
+            "attempted again only after an attempt that ended before the deadline: {ended:?}, \
+             the deadline {deadline:?}"
+        );
+
+        let (got, runs, asked) = attempt(far(), true, Vec::new());
+        assert!(got.is_err(), "a command that cannot start, at once");
+        assert_eq!((runs, asked), (1, 0));
     }
 }

@@ -362,6 +362,31 @@ fn report_to_stderr(message: &str) -> io::Result<()> {
     stderr.flush()
 }
 
+/// How many characters of a fresh ULID the root's name carries.
+///
+/// **A budget, measured, not a taste.** The whole 26 were carried until
+/// 2026-09-25, and two nested roots then cost 88 characters of a Windows
+/// path: measured on the CI guest, `git worktree add` under one of these
+/// trees died on `fatal: '$GIT_DIR' too big`, which Git raises when
+/// `$GIT_DIR` exceeds `PATH_MAX - 40` — 220 characters where `PATH_MAX` is
+/// 260. The suite's worst-case path was 246 characters at that spelling
+/// against 227 before the migration, and the legs that ran it went red.
+///
+/// **What the suffix has to defeat is a recycled process id**, which is the
+/// whole of `PR64-CLEANUP-003-SCRATCH-PRECLEAN`'s and
+/// `PR7-SCRATCH-FIXTURE-LEAK`'s key requirement, and ten Crockford base32
+/// characters are fifty bits of `crate::ulid`'s SHA-256 digest over clock,
+/// pid and nonce. A pid is a short decimal number and cannot supply them.
+/// The name still proves nothing on its own — the exclusive create is what
+/// refuses an occupied one — so what is traded here is collision *frequency*
+/// and not any guarantee, and a collision is a refusal rather than a
+/// deletion.
+///
+/// The characters are taken from the **end** of the id. `crate::ulid`'s
+/// first ten characters encode the clock, which two fixtures in one
+/// millisecond share; the last sixteen are the digest, which they do not.
+const NAME_ENTROPY: usize = 10;
+
 /// Acquire a scratch tree under `parent`, named for `tag` and a fresh ULID.
 ///
 /// **Fail-closed.** The root is created with a non-recursive, exclusive
@@ -371,15 +396,17 @@ fn report_to_stderr(message: &str) -> io::Result<()> {
 /// stat this code could lose a race to, and every other answer refuses.
 ///
 /// **An occupied root is refused at acquisition.** The name carries `tag` so that a
-/// human reading a leftover tree can tell what left it, and a fresh ULID
-/// because a tag is not enough: two processes, or two runs of one process,
-/// collide on a tag-and-pid name, and colliding on a path somebody else is
-/// using is precisely what made the old pre-clean destructive. `crate::ulid`
-/// hashes separately encoded clock, pid and nonce fields, which removes the
-/// old seed's pid/nonce cancellation. The name remains deterministic and
-/// does not prove uniqueness or ownership. Exclusive creation refuses an
-/// occupied name at that instant. Identity checks detect later replacements
-/// visible at a checked use or reclaim, subject to the module's stated gaps.
+/// human reading a leftover tree can tell what left it, and the tail of a
+/// fresh ULID because a tag is not enough: two processes, or two runs of one
+/// process, collide on a tag-and-pid name, and colliding on a path somebody
+/// else is using is precisely what made the old pre-clean destructive.
+/// `crate::ulid` hashes separately encoded clock, pid and nonce fields, which
+/// removes the old seed's pid/nonce cancellation. [`NAME_ENTROPY`] says how
+/// much of that hash the name carries and why it is not all of it. The name
+/// remains deterministic and does not prove uniqueness or ownership.
+/// Exclusive creation refuses an occupied name at that instant. Identity
+/// checks detect later replacements visible at a checked use or reclaim,
+/// subject to the module's stated gaps.
 ///
 /// # Errors
 ///
@@ -387,10 +414,13 @@ fn report_to_stderr(message: &str) -> io::Result<()> {
 /// [`ScratchAcquireRefusal::Undecidable`] for every other answer. Neither
 /// deletes, moves or truncates anything.
 pub(crate) fn acquire(parent: &Path, tag: &str) -> Result<ScratchTree, ScratchAcquireRefusal> {
-    acquire_named(
-        parent,
-        &format!("upstroke-scratch-{tag}-{}", crate::ulid::ulid()),
-    )
+    let id = crate::ulid::ulid();
+    // `get` rather than a slice: §7 denies panicking indexing, and a shorter
+    // id than the budget would be the whole of it rather than a panic.
+    let suffix = id
+        .get(id.len().saturating_sub(NAME_ENTROPY)..)
+        .unwrap_or(&id);
+    acquire_named(parent, &format!("upstroke-{tag}-{suffix}"))
 }
 
 /// [`acquire`] over an exact name.
@@ -802,9 +832,9 @@ impl NoSecondToken for ScratchTreeOwnership {
 
 mod witnesses {
     use super::{
-        DuplicationRefused, NoSecondToken, ScratchAcquireRefusal, ScratchReclaimFailure,
-        ScratchTree, ScratchTreeOwnership, acquire, acquire_named, fs, io, proves_absent,
-        remove_scratch_tree, remove_scratch_tree_with, report_to_stderr,
+        DuplicationRefused, NAME_ENTROPY, NoSecondToken, ScratchAcquireRefusal,
+        ScratchReclaimFailure, ScratchTree, ScratchTreeOwnership, acquire, acquire_named, fs, io,
+        proves_absent, remove_scratch_tree, remove_scratch_tree_with, report_to_stderr,
     };
     use std::path::Path;
 
@@ -965,8 +995,11 @@ mod witnesses {
     /// Three assertions kill that mutation independently. The second
     /// `acquire` **succeeds** — under a constant suffix it would refuse the
     /// still-live first root as `Occupied`; the two roots **differ**; and
-    /// each basename's suffix is **26 Crockford base32 characters**, which
-    /// a pid string is not.
+    /// each basename's suffix is exactly [`NAME_ENTROPY`] **Crockford base32
+    /// characters**, which a pid string is not. The suffix was the whole
+    /// 26-character id until the Windows path budget shortened it; what the
+    /// witness measures is unchanged, because a decimal pid is neither ten
+    /// Crockford characters nor twenty-six.
     #[test]
     fn the_same_tag_twice_gets_two_distinct_ulid_named_roots() {
         /// Crockford base32, the alphabet `crate::ulid` builds an id from.
@@ -976,7 +1009,7 @@ mod witnesses {
         const CROCKFORD: &[u8] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
         /// The tag is fixed, so the whole of the variation under test is
         /// what follows it.
-        const PREFIX: &str = "upstroke-scratch-twice-";
+        const PREFIX: &str = "upstroke-twice-";
 
         let parent = acquire(&temp_parent(), "same-tag").expect("a parent tree");
 
@@ -1013,8 +1046,8 @@ mod witnesses {
                 .to_owned();
             assert_eq!(
                 suffix.len(),
-                26,
-                "a ULID is 26 characters; `{suffix}` is not one"
+                NAME_ENTROPY,
+                "the name carries {NAME_ENTROPY} characters of a ULID; `{suffix}` is not that"
             );
             assert!(
                 suffix.bytes().all(|byte| CROCKFORD.contains(&byte)),
@@ -1449,7 +1482,7 @@ mod witnesses {
             "the line is the reporter's own shape: {stderr:?}"
         );
         assert!(
-            stderr.contains("upstroke-scratch-unobserved-"),
+            stderr.contains("upstroke-unobserved-"),
             "the line names the refused tree itself — the one acquired under the \
                  child's `unobserved` tag: {stderr:?}"
         );

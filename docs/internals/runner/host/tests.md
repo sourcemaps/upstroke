@@ -142,21 +142,142 @@ Witnessed failing with the upsert removed from `compose`
 surviving, since this key is deliberately not a reserved one that gets
 stripped) and with it moved above the overlay loop (`Some("0")`).
 
-## `fn the_v1_conductors_environment_composes_no_replacement_isolation() {`
+## `fn the_v1_conductors_environment_confines_the_recorded_graph_to_its_repository() {`
 
-The other half of the pair above: the v0.1 conductor's environment adds
-nothing, so a gate over a v0.1 checkout reads the graph that checkout
-was written from (PR #271, round 1's regression finding).
+The v0.1 conductor's environment keeps the recorded graph to the repository the
+run manages. It replaces `the_v1_conductors_environment_disables_replacement_objects`,
+which pinned the process-wide variable: round 4 of #326 moved the v0.1 runner off
+it, because a variable reaches every repository a role touches, and on Git 2.41
+it loses to a configured `true`.
 
-The base carries a value of its own and the assertion is that it
-*survives* — an exemption that stripped the key would be a third graph,
-not the producer's. The last line pins the connection to production:
-`HostRunner::for_legacy_workspace`, which `engine::run` and
-`engine::resume` install, is an environment reading `AsReplaced`.
+It asserts four things. The constructor reads `ObjectGraph::RecordedIn` with the
+repository it was given. Over every role, both name rules and five sources of
+`GIT_CONFIG_PARAMETERS` — none, empty, the base's `true`, an overlay's, and both
+— the composed value is the inherited one, a space, and the two includes, or the
+includes alone: never before an inherited entry, never with a leading space, and
+one variable however the base spelled its name. `GIT_NO_REPLACE_OBJECTS` is never
+composed, and an operator who exports it keeps their own value. And the
+constructor's own environment, over this process's base, ends with the includes.
 
-Witnessed failing with the `ObjectGraph::Recorded` condition removed from
-`compose` (`Some("1")` for every role and both name rules), which is the
-head this repair was written against.
+Witnessed failing with the includes placed before the inherited entries, and with
+the constructor back on `ObjectGraph::Recorded`.
+
+Its repository is a real directory under a scratch tree (`managed_repository`):
+since #326 round 5 the scope asks each directory on the path whether it folds
+case, and a path that is not there is refused. Since round 6 it also asks the
+common directory, through the `refs` every common directory holds, so the
+fixture creates `refs` too.
+
+## `fn the_includes_refuse_a_common_directory_git_cannot_read_in_a_key() {`
+
+A newline in the path and a relative directory or include are refused before
+any directory is asked anything, and a common directory that is not there is
+refused because the scope cannot ask it whether it folds case. Unix-only,
+because a Unix absolute path is not absolute on Windows.
+
+Until #326 round 5 this test also pinned the entries byte for byte, for a path
+that did not exist. The entries now depend on what each directory on the path
+answers, so `src/runner/host/environment.rs`'s inline tests pin them, supplying
+the answers, and the Windows twin that stood beside this test moved there too.
+
+## `fn the_windows_rule_spells_a_path_as_git_for_windows_does() {`
+
+`GitdirRule::Windows` over the shapes `std::fs::canonicalize` gives on Windows
+(`\\?\C:\…`, `\\?\UNC\server\share\…`) and over already-plain ones, on every
+platform: no prefix, forward slashes, `//server/share` for a share. Also that
+the keyword is `gitdir:` under both rules, and that the native rule is `Windows`
+on Windows and `Posix` everywhere else, macOS included.
+
+## `fn a_v1_role_never_starts_without_the_include_that_confines_its_recorded_graph() {`
+
+`HostRunner::run` under `RecordedIn` refuses a gate while the include is missing,
+holds `true`, or is empty, as `ProcessFate::NeverStarted` naming the file, and
+runs it once the file holds the exact bytes. Its common directory is created
+first, with the `refs` every common directory holds, because the scope asks
+each directory on the path, and the common directory itself through `refs`,
+whether it folds case.
+
+## `fn a_repository_whose_path_differs_from_the_managed_one_only_in_case_keeps_its_replacements() {`
+
+The negative witness for #326 round 5's blocking finding: the v0.1 include must
+not reach a repository whose path differs from the managed one only in case.
+The work is `v1_case_sibling_helper`'s, in a child whose environment
+`run_replacement_witness_child` has cleared of every ambient replacement
+control.
+
+Against `49243a24`, with this witness alone added, it failed on this box (exit
+101): under `PosixFoldingCase`, macOS's rule then, the gate in `Repo` read
+`recorded` from `repo`, which had installed a replacement, and with the rule
+list narrowed to `Windows` the same assertion failed under that rule. Both
+used `gitdir/i:`; `Posix`, which ran first, passed.
+
+Round 6 extended its capitals check to the linked worktree's Git directory
+(`read_case_siblings`). Against `c453705f`, with those 24 lines alone added and
+`TMPDIR` on a case-folding ext4 mount, it failed with Git 2.43.0 and with Git
+2.41.0 (exit 101): under `Posix` the gate read `replacing` through
+`…/Repo/.git/WORKTREES/Repo-linked`. With that spelling removed, the
+all-capitals one failed the same way, and with the rule list narrowed to
+`Windows` the `WORKTREES` spelling did. On ext4, which keeps case, the check
+does not run, so only a folding temporary directory can show it.
+
+## `fn case_git(dir: &Path, args: &[&str]) -> String {`
+
+The witness's own Git, in its own process rather than through the runner, with
+an identity and without auto-maintenance, so no background process outlives a
+commit in the scratch tree.
+
+## `fn replaced_repository(repo: &Path) -> String {`
+
+A repository whose committed blob `recorded` is replaced by `replacing`, checked
+live outside any run before anything is measured; it returns the blob's id.
+
+## `fn read_case_siblings(dir: &Path, include: &Path) -> bool {`
+
+One layout: `Repo` managed, and beside it `repo` and `rEPO`, the second being
+the spelling the scope itself looks up. When the directory keeps case they are
+repositories of their own with their own replacements; when it folds they are
+`Repo`, and creating them finds it there. For every rule this platform's Git
+reads (both on Unix; on Windows only `Windows`, since the `Posix` rule keeps a
+Windows path's backslashes and Git for Windows spells its Git directory with
+forward slashes), a scope over `Repo`'s canonical
+common directory and `HostRunner::for_legacy_workspace` run gates that read:
+
+- `Repo` and its linked worktree: `recorded`;
+- each sibling, from `Repo` and from the sibling itself: `replacing` when it is
+  a repository of its own, `recorded` when it is `Repo`;
+- when the directory folds, `Repo` through a Git directory named `REPO/.GIT`
+  under the layout's directory spelled in capitals: `recorded`. Given with
+  `--git-dir`, that spelling reaches Git's condition as spelled on Linux, whose
+  realpath does not look the case up; reached with `-C`, Git named the
+  repository in its stored case, as `pwd -P` does (both measured on a
+  case-folding ext4 mount), which is why the `-C` reads alone could not tell a
+  scope that never folds from one that does;
+- when the directory folds, `Repo`'s linked worktree through its Git
+  directory given with `--git-dir`, spelled as Git stores it, with
+  `worktrees` alone in capitals, and with every component the test controls
+  in capitals: `recorded`. The linked worktree's name under `worktrees` is
+  taken from Git (`rev-parse --absolute-git-dir`), not assumed. Until #326
+  round 6 nothing read a linked worktree's Git directory in another case, and
+  the scope matched `worktrees` as a literal.
+
+It returns whether the directory kept case.
+
+## `fn v1_case_sibling_helper() {`
+
+Runs `read_case_siblings` in the temporary directory, and on Windows again in a
+directory `fsutil file setCaseSensitiveInfo` makes case-sensitive, inside the
+folding temporary directory. It prints which halves ran, in lines beginning
+`v1-case-sibling:`, so a CI log shows it.
+
+Where the leg declares `UPSTROKE_TEST_TEMP_FOLDS_CASE=1` (macOS and Windows) the
+temporary directory must fold, or the declaration and the filesystem disagree;
+elsewhere its behaviour is observed, not required, as
+`the_temporary_object_scan_resolves_case_aliases_as_the_filesystem_does` treats
+the same declaration. So the case-sensitive half runs where the temporary
+directory keeps case, as on this box, and on Windows wherever `fsutil`
+succeeds; macOS runs the folding half only, since case sensitivity there is a
+property of a whole volume. A Windows machine where `fsutil` fails prints that
+and runs the folding half.
 
 ## `fn a_reserved_key_the_base_does_not_carry_is_not_supplied()` › `let environment =`
 
@@ -1368,7 +1489,7 @@ five:
   value: `ShellKind::spec` and `bin::Invocation::spec` are the only two
   spec constructors this crate has and both write `env: Vec::new()`,
   and no call site adds an overlay entry (asserted by
-  `runner::tests::every_production_command_spec_payload_is_classified`);
+  `runner::contract::tests::every_production_command_spec_payload_is_classified`);
 * **timeout** — each role's own production default, five distinct
   values.
 
@@ -1507,7 +1628,7 @@ constants, five distinct values, none of them this fixture's.
 Field 7: the overlay. Empty everywhere, because that is production's
 only value — both spec constructors write `env: Vec::new()` and no
 call site adds an entry
-(`runner::tests::every_production_command_spec_payload_is_classified`
+(`runner::contract::tests::every_production_command_spec_payload_is_classified`
 is the tripwire for a call site that starts to). Stated as an
 assertion rather than left to silence: the day production carries an
 overlay, this row has to become a varying dimension like the four
@@ -1671,7 +1792,7 @@ containment *operation* ran for this role's child. A funnel that fired
 the hooks for a probe while skipping the operation would pass the first
 and fail the third.
 
-`runner::tests::the_spawn_site_files_every_role_under_one_context_and_the_count_says_which`
+`runner::contract::tests::the_spawn_site_files_every_role_under_one_context_and_the_count_says_which`
 does **not** discharge this: counting that two roles fall outside the
 site's declared context proves the mismatch exists; it does not prove
 the hooks execute on those roles. A counted admission is not runtime
@@ -1757,7 +1878,7 @@ The point's kill coordinate is *inside* this call, after the real
 ambient join. Reaching the line after it means the kill never
 fired, and the parent reads a clean exit as exactly that.
 
-## `fn spawn_funnel_kill_helper()` › `let _ = runner.run(&crate::runner::gate_request(`
+## `fn spawn_funnel_kill_helper()` › `let _ = runner.run_blocking(&crate::runner::gate_request(`
 
 Every point this platform declares is reached by an ordinary spawn,
 which is what `every_role_reaches_the_containment_points_of_this_
@@ -2073,7 +2194,7 @@ The kill hook: after `CreateProcess` and before private-job
 assignment. `apply_io` aborts, so no destructor runs and the
 ambient handle is closed only by the kernel.
 
-## `fn windows_ambient_coordinator_helper()` › `let _ = runner.run(&request);`
+## `fn windows_ambient_coordinator_helper()` › `let _ = runner.run_blocking(&request);`
 
 Aborts inside `run`, at `CreatedSuspended`.
 
@@ -2400,7 +2521,7 @@ reintroduce: a resolution remembered anywhere — a `OnceLock`, a field, a
 process-wide cache — hands the first boundary's answer to the second,
 and a value that is correct on first use and wrong on the second is
 invisible to any test that constructs one runner.
-`agent::built_program_tests` holds that for the adapters; this holds it
+`agent::adapter::built_program_tests` holds that for the adapters; this holds it
 for the boundary, with real spawns.
 
 Both orders, because "the first caller wins" is a property of order, and
@@ -2589,7 +2710,7 @@ still there.
 The oracle. A boundary that had not decided yet reaches `second`, so
 "resolve per spawn" really does change the answer here.
 
-## `fn one_boundary_executes_one_file_for_a_name_across_a_probe_and_the_attempt() {` › `let outcome = runner.run(&attempt);`
+## `fn one_boundary_executes_one_file_for_a_name_across_a_probe_and_the_attempt() {` › `let outcome = runner.run_blocking(&attempt);`
 
 The claim. The runner that certified `first` does not silently run
 `second`.
@@ -2752,7 +2873,7 @@ borrows that one runner for pre-flight and every attempt.
 each of the three agent CLIs runs by bare name exactly as it runs by
 path.
 
-The equivalence `agent::built_program_tests::the_host_runner_executes_a_
+The equivalence `agent::adapter::built_program_tests::the_host_runner_executes_a_
 bare_program_name_as_it_executes_the_resolved_path` claims, over the
 installation shape that one cannot express. That row uses `git` — a
 native `.exe`, which `CreateProcessW` reaches from a bare name whether or
@@ -2794,7 +2915,7 @@ difference in output can only be a difference in which file ran.
 
 The three names `bin::Invocation::named` ships, written here rather
 than read from the adapters' private `CLI` constants;
-`agent::built_program_tests::an_adapters_program_is_the_boundarys_…`
+`agent::adapter::built_program_tests::an_adapters_program_is_the_boundarys_…`
 is what ties each adapter to its own name.
 
 ## `fn an_npm_style_installation_runs_by_bare_name_exactly_as_it_runs_by_path() {` › `let mut contents: Vec<String> = std::fs::read_dir(&bin)`
@@ -2817,7 +2938,8 @@ Written from the two platforms' rules rather than read from
 `Path::is_absolute`, and then checked against it for the platform this
 is running on — the Windows column on the guest, the Unix column here.
 Every entry is free of both `PATH` separators, so one entry stays one
-entry under `std::env::split_paths` on either platform.
+entry under `std::env::split_paths` on either platform. None holds a
+`"` either, so `path_of` hands each back exactly as written.
 
 ## `("", false, false),`
 
@@ -2835,6 +2957,13 @@ Rooted on Unix; on Windows a leading separator is relative to the
 
 A UNC share names a location on Windows and is an ordinary file name
 on Unix.
+
+Which share it would name is never asked: the test's program name
+carries an interior NUL, so the first candidate under this entry is
+refused before any request leaves the process, and no answer from an
+SMB stack — "no such share", `os error 64` or none at all — can reach
+the verdict (`PR262-UNREACHABLE-PATH-ENTRY-ABORTS-PROGRAM-RESOLUTION`,
+below).
 
 ## `fn every_path_entry_this_runner_searches_names_a_location_on_its_own() {`
 
@@ -2854,10 +2983,127 @@ row below is a claim about `resolve_program` and not about `std`. What
 varies is the entry; what is held constant is the program name, the
 candidates and the composed environment.
 
+The table answers one question: **which entries are searched**. It is
+kept apart from the other one, **what a searched entry's candidates
+answer**, because the two were once fused. Each absolute entry used to
+be walked to its end and the count asserted, so whether the UNC row
+passed was the answer of whatever `\\server\share` reached: an answer
+meaning "no such share" maps to `NotFound` and the walk completed;
+`os error 64` ("the specified network name is no longer available")
+does not, so the deliberate stop fired instead and a required leg went
+red on byte-identical source. This repairs
+`PR262-UNREACHABLE-PATH-ENTRY-ABORTS-PROGRAM-RESOLUTION` without moving
+that policy: an unanswerable candidate still stops the search, mere
+absence is still walked past, and both are decided here by construction
+rather than by the machine the suite runs on, on any machine whose
+temporary directory can hold the positive case's own paths (below).
+
+## `fn every_path_entry_this_runner_searches_names_a_location_on_its_own() {` › `fn search_summary(message: &str) -> Option<&str> {`
+
+What a refusal says about the search itself: the parenthesised clause
+after "this runner composes", which gives the number of directories
+searched, the number of entries skipped as not absolute, and the
+candidates. Every assertion this test makes on a refusal's text reads
+that clause and nothing else.
+
+The rest of the message is not the test's to read. It goes on to echo
+the `PATH` it was given, and a `PATH` built from the scratch root
+carries the spelling of the temporary directory, which belongs to the
+machine. Read whole, the message let that spelling decide: under a
+temporary directory named `temp-skipped`, a search that had finished
+without skipping anything read as skipped (`P335-PL-1`), and a spelling
+that holds `1 directory searched,` would have satisfied the count for a
+search that counted nothing. In a refusal the clause is written before
+the echo and holds only text this test constructs — the counts, its own
+program name and the default extensions — so the first opening is the
+resolver's own, and no spelling of the temporary directory can reach
+the clause, add to it or close it early. A refusal without the clause
+fails the assertion that reads it.
+
+That holds of a refusal and of nothing else, so the clause is read from
+a refusal only. Both readers, the relative entries' and the absent
+entry's, first require `UpstrokeError::Refused`, and any other answer
+fails the case, naming its variant, before any of its text is read.
+Another error's message is no summary, and it can carry the machine's
+text: a `Filesystem` error's is "failed to stat" followed by the
+candidate's path, which begins with the temporary directory's spelling,
+and that spelling can hold the clause's own opening. Read as text, such
+an error passed for a finished search: under a temporary directory with
+a component named `this runner composes (1 directory searched,)`, long
+enough that the absent entry's candidate could not be asked, the
+resolver rightly stopped with `Filesystem`, and the test read the clause
+out of the path (`P335-R2-REG-1`).
+
+## `fn every_path_entry_this_runner_searches_names_a_location_on_its_own() {` › `let program = "upstroke\u{0}no-such-program";`
+
+The program every table entry is asked about: a bare name, so the walk
+runs, with an interior NUL, so no candidate under any entry can be
+answered. std refuses such a path before it reaches a system call — the
+property `undeterminable_directory` in `naming.rs`'s tests stands on —
+and the fixture asserts that up front for each entry it searches: the
+refusal is not `NotFound`, and it carries no operating-system error
+code, so nothing on the machine, local disk or network share, was asked.
+A platform that answered otherwise would fail the fixture rather than
+the rule.
+
+So an absolute entry's walk stops at its first candidate, and that stop
+is what "searched" is read from: a `stat` failure whose path is a
+candidate directly under that entry and whose source is the refusal the
+probe met. A relative entry is never stat'ed at all and must report
+itself skipped. Neither outcome depends on what exists at
+`/usr/local/bin` or on what a network share answers, because neither is
+ever asked.
+
+The stop is the policy
+`an_undetermined_candidate_stops_the_search_before_a_later_match` pins;
+this test relies on it rather than restating it, so a change to that
+policy reddens both.
+
 ## `fn every_path_entry_this_runner_searches_names_a_location_on_its_own() {` › `let bin = root.join("bin");`
 
+The count of a finished search, `1 directory searched,`, is asserted
+only for an entry that is absent by construction: the positive case's
+own entry, `bin` under this test's scratch root, asked for the positive
+case's own program, `x`, before anything has created either, and checked
+to be `NotFound` up front. Its search asks exactly the paths the
+positive case's search asks once `program_file` has installed `x` — the
+same entry and the same candidates — while their directory does not
+exist yet, so each answers `NotFound` and the walk runs to its end and
+is counted, whatever a network share or `/usr/local/bin` would say.
+
+The candidates are the positive case's on purpose. A missing directory
+does not by itself make every path beneath it `NotFound`: a path longer
+than the platform allows is refused for its length first, whatever
+exists, as Linux's `ENAMETOOLONG` (os error 36). The directory this
+case once used, `never-created`, had a candidate 33 bytes longer than
+the positive case's file, so a temporary directory long enough for the
+positive case but not for that candidate stopped the search there and
+failed the test on unchanged source (`P335-R2-PL-1`). Asking only the
+positive case's own paths, the case asks nothing the positive case does
+not: under any temporary directory short enough for the positive case
+to install and find its program, this search runs to its end. Under one
+too long even for that, the test cannot pass at all, and this case
+fails openly — at its own absence check, or at the refusal it requires,
+naming the `Filesystem` stop — never on a count read from a path.
+
+Its `PATH` is built by `path_of`, as every `PATH` this test passes is —
+the table's entries and the positive case's — and as both witnesses
+build theirs with `std::env::join_paths`, so the one entry searched is
+the directory whose absence was just checked. Handed over as the raw
+path, a temporary directory spelled with the platform's separator, a
+`;` on Windows or a `:` on Unix, split into two entries, and the search
+ran somewhere this test had never checked (`P335-PL-2`). `join_paths`
+quotes a `;` on Windows and the search unquotes it again. A spelling no
+`PATH` can carry — a `:` on Unix, a `"` on Windows — is refused, never
+searched around: `path_of` refuses it as both witnesses' `join_paths`
+refuse it, and the test fails there rather than search anywhere in its
+place.
+
+## `fn every_path_entry_this_runner_searches_names_a_location_on_its_own() {` › `let found = program_file(&bin, &shim_file_name("x"));`
+
 And "searched" means searched: the one kind of entry that is not
-skipped does find a program in it.
+skipped does find a program in it — the same entry, once the program is
+installed there.
 
 ## `fn an_empty_path_entry_never_reaches_the_workspaces_own_copy_of_a_bare_name() {`
 
@@ -3002,3 +3248,106 @@ so that no spelling is counted from prose.
 
 And the two are the run and the resume facade, each of which then
 borrows that one runner for pre-flight and every attempt.
+
+## `struct Witness {`
+
+A per-invocation `SpawnHooks` observer for PR11's tests: the pids `child_created` reported, the
+containment points in the order they fired, and the thread each child was created from. It is the
+observer a test hands one call through `RunnerCall::observed_by`, so what it records is that
+invocation's and no other's.
+
+## `fn scratch_tree(tag: &str) -> crate::rundir::scratch_tree::ScratchTree {`
+
+The new tests take their scratch directory from `rundir::scratch_tree::acquire`, which refuses an
+occupied root and reclaims the tree when the guard drops, rather than from this file's older
+`scratch`, which leaves its directory behind.
+
+## `fn wait_for_file(path: &Path, within: Duration) -> bool {`
+
+The handshake the cancellation tests wait on: the child publishes a marker once it is running, and
+the test acts only after seeing it, bounded so a child that never starts fails the test instead of
+hanging it. A condition with a deadline, not a sleep standing in for one.
+
+## `fn the_blocking_adapter_supervises_the_process_on_the_calling_thread() {`
+
+Parity for the blocking adapter (the PR11 record, R-A): the child is created from the thread that
+called `run_blocking_with`, so the thread-scoped state on the spawn path — the reaper's cleanup-lease
+paths and the observation export's attribution — is the caller's, as it was when `run` was
+synchronous. The call's own observer also saw the spawn's containment points.
+
+## `fn a_call_cancelled_before_it_starts_spawns_nothing() {`
+
+A call cancelled before the runner looks at it is refused as `NeverStarted` with nothing spawned and
+nothing observed, and before the program name is even resolved — the resolution counter does not
+move.
+
+## `fn cancelling_a_running_invocation_terminates_it_and_reports_it_cancelled() {`
+
+The protocol's order on a real child, on every platform: the child announces itself, the test
+cancels from another thread, and the invocation reports `RunnerError::cancelled` with fate `Gone` —
+the Runner terminated the process before it reported. The bound on the time from the cancel to the
+report is against a child that would otherwise have run 300 seconds.
+
+## `fn cancelling_an_invocation_ends_every_process_of_its_tree() {`
+
+Unix. The tree, not just the child: the child opens a fifo for writing, starts a background
+grandchild that inherits the descriptor, and announces itself; the fifo's reading end reports
+`WouldBlock` (writers exist) before the cancel, so the end of file after it is not vacuous. After the
+Runner reports the invocation cancelled, every writer is gone and the fifo reads end of file — the
+same oracle `agent::proc`'s `kill_tree_settles_the_whole_unix_group_before_it_returns` uses for a
+timeout, with the same bounded read loop for the kernel's closing of a killed process's
+descriptors.
+
+## `fn rendezvous_helper() {`
+
+Subprocess helper (`--ignored`): publish this child's marker, wait — bounded — for the peer's, and
+print this process's pid. Two children that each wait for the other both succeed only if they ran at
+the same time.
+
+## `fn two_invocations_on_one_host_runner_run_at_once_each_carrying_its_own_observation() {`
+
+`HostRunner::hooks`' PR11 debt, discharged. Two invocations on one runner, each carrying its own
+observer, run at once — both rendezvous children exit 0 — and each observer saw exactly its own
+child's pid and exactly one spawn's containment points, the sequence a lone invocation records.
+Before PR11 the runner held its one observer's lock for a whole supervised run, and the pair could not
+overlap.
+
+## `fn a_runner_level_observer_still_takes_invocations_one_at_a_time() {`
+
+The control, and the contract kept for every test that installs an observer: under `with_hooks` the
+same pair takes turns, so exactly one child outlives its (shortened) wait for the other. It also
+shows the rendezvous oracle can fail.
+
+## `fn a_call_carrying_the_runs_cleanup_leases_is_reaped_by_a_reaper_that_holds_them() {`
+
+PR11's carried cleanup leases (the working record's R-Z). A pipeline thread
+has not entered the run's cleanup scope — the scope is thread-local and its
+owner is the coordinator's thread — so the Unix reaper of a process it spawns
+holds the run's R28 lease only if the call carries the lease paths. The
+control carries none, and nothing holds the lease while its child runs.
+After each call the hold must have ended with the reaper, read as a
+bounded wait under the test's own 60-second bound, the one its readiness
+handshake waits: a sibling test thread's fork can hold a copy of the lease
+for a moment after the reaper exits (the mechanism of
+`PR281-CLEANUP-LEASE-HOLD-OUTLIVED-AND-ITS-UNREADABLE-TWIN`), and a hold
+that outlives the bound fails the test.
+
+## `mod inherited_writer` › `fn writes_leave_no_writer_in_another_threads_fork(`
+
+The FIFO oracle, shared since PR11 follow-up A: a writer fills a FIFO larger than its pipe while
+another thread forks a holder of this process's inherited descriptors; once the writer is done,
+the reader sees end-of-file only if no fork holds a writer. The marker shims and the container
+fake's relay writer are each judged by it.
+
+## `mod inherited_writer` › `fn the_reaper_relay_writer_leaves_no_writer_in_another_threads_fork() {`
+
+`R6-D3`: the relay stub a container reaper execs is written by
+`runner::container::write_program_in_its_own_process`, a process of its own, so no fork of the
+test process holds a writer of it and its `execv` cannot fail `ETXTBSY`. Written in-process
+instead (`fua-m11`), the reader never sees end-of-file.
+
+Its helper runs under `proc::test_support::run_test_isolated` and a 180-second deadline, not
+through the host funnel as its sibling's does (`FUA-I4-RELAY`, PR #328's implementation review
+round 4): the funnel's end waits for its reaper's acknowledged exit without a bound, by design,
+so a stopped reaper there held this test, and the suite with it.
+

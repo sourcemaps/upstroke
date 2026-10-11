@@ -19,8 +19,8 @@ use crate::rundir::{
 use crate::rundir::{HuskDisposition, Reclaimable};
 use crate::runner::container::ContainerHooks;
 use crate::runner::container::runtime::{
-    ContainerExecution, CreateSpec, CreatedContainer, DiscoveredContainer, ImageInspection,
-    Liveness, RuntimeError, RuntimeOp, StopMode,
+    ContainerExecution, CreatedContainer, DiscoveredContainer, ImageInspection, Liveness,
+    RuntimeError, RuntimeOp, StopMode,
 };
 use crate::topology::effects::{
     EffectSiteId, HookHarness, HookPhase, Injection, InjectionMode, LockSite, RunDirSite,
@@ -387,7 +387,7 @@ impl Probes for RecordingProbes {
             });
         }
         through
-            .run(&probe_request_for(invocation, None))
+            .run_blocking(&probe_request_for(invocation, None))
             .map(|_output| ())
             .map_err(UpstrokeError::from)
     }
@@ -406,7 +406,7 @@ impl Probes for RecordingProbes {
             });
         }
         through
-            .run(&probe_request_for(
+            .run_blocking(&probe_request_for(
                 PreflightIdentities::agent(agent, 0)?,
                 Some(agent),
             ))
@@ -539,6 +539,15 @@ fn ensure_integration_ref_refuses_a_null_base_whether_the_ref_is_absent_or_at_it
 }
 
 struct Fixture {
+    /// The guard over the root [`Fixture::new`] acquired, kept for the
+    /// fixture's whole life so the tree is reclaimed when it drops -- on a
+    /// panicking assertion as much as on a normal return. `None` when the
+    /// caller supplied a root it guards itself ([`Fixture::at`]).
+    ///
+    /// The root was `temp_dir()/upstroke-create-<tag>-<ulid>`, created and
+    /// never removed: `PR7-SCRATCH-FIXTURE-LEAK`, measured at 58 of these
+    /// surviving one green suite run.
+    _tree: Option<crate::rundir::scratch_tree::ScratchTree>,
     root: PathBuf,
     repo: PathBuf,
     private_root: PathBuf,
@@ -547,18 +556,17 @@ struct Fixture {
 
 impl Fixture {
     fn new(tag: &str) -> Self {
-        let root =
-            std::env::temp_dir().join(format!("upstroke-create-{tag}-{}", crate::ulid::ulid()));
-        let repo = root.join("repo");
-        let private_root = root.join("private");
-        create_private_dir(&repo, &mut NoRunDirHooks).expect("repo root");
-        create_private_dir(&private_root, &mut NoRunDirHooks).expect("private root");
-        Self {
-            repo,
-            private_root,
-            repo_key: RepoKey::v1(&root.join("git-dir")),
-            root,
-        }
+        let parent = std::env::temp_dir();
+        let tree = match crate::rundir::scratch_tree::acquire(&parent, tag) {
+            Ok(tree) => tree,
+            Err(refusal) => panic!(
+                "a scratch tree for `{tag}` under {}: {refusal:?}",
+                parent.display()
+            ),
+        };
+        let mut fixture = Self::at(tree.path());
+        fixture._tree = Some(tree);
+        fixture
     }
 
     fn at(root: &Path) -> Self {
@@ -567,6 +575,9 @@ impl Fixture {
         create_private_dir(&repo, &mut NoRunDirHooks).expect("repo root");
         create_private_dir(&private_root, &mut NoRunDirHooks).expect("private root");
         Self {
+            // `at` is handed a root the caller guards; `new` puts its own
+            // guard in immediately after this returns.
+            _tree: None,
             repo,
             private_root,
             repo_key: RepoKey::v1(&root.join("git-dir")),
@@ -716,7 +727,6 @@ struct Driver<'a> {
     runner: RunnerPolicy,
     execution: RecordingRunner,
     ledger: std::sync::Mutex<InvocationLedger>,
-    slots: std::sync::Mutex<SlotAssertion>,
     warnings: Vec<String>,
 }
 
@@ -730,13 +740,12 @@ impl<'a> Driver<'a> {
             runner: crate::runner::policy::host_policy(),
             execution: RecordingRunner::default(),
             ledger: std::sync::Mutex::new(InvocationLedger::new()),
-            slots: std::sync::Mutex::new(SlotAssertion::new()),
             warnings: Vec::new(),
         }
     }
 
-    fn leak_into_the_pair(&self, agent: &str) {
-        let id = PreflightIdentities::agent(agent, 7).expect("a probe identity");
+    fn leak_into_the_pair(&self) {
+        let id = PreflightIdentities::shell(7).expect("a probe identity");
         self.ledger
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -758,7 +767,7 @@ impl<'a> Driver<'a> {
             refs: self.refs,
             clock: &clock,
             runner: &self.execution,
-            pair: ProbePair::grant(&self.ledger, &self.slots),
+            pair: ProbePair::grant(&self.ledger),
         };
         create_run(self.fixture.checked(), request, hooks, &mut self.warnings)
     }
@@ -1743,7 +1752,7 @@ fn a_leaked_probe_registration_is_reported_by_the_append_error() {
         InjectionMode::ErrorReturn,
     );
     let mut driver = Driver::new(&fixture, &probes, &refs);
-    driver.leak_into_the_pair(AGENT);
+    driver.leak_into_the_pair();
     let refused = driver
         .run(&mut hooks)
         .expect_err("the append returned an error");
@@ -2460,7 +2469,7 @@ fn spawn_and_wait(child: &str, root: &Path, site: &str, ordinal: u32) -> Option<
         ),
     );
     let runner = crate::runner::host::HostRunner::new();
-    let output = runner.run(&request).expect("the child spawns");
+    let output = runner.run_blocking(&request).expect("the child spawns");
     assert!(
         !output.timed_out,
         "the child did not die within the timeout"
@@ -2836,7 +2845,11 @@ impl crate::runner::container::runtime::ContainerRuntime for Inventory {
         })
     }
 
-    fn create(&self, spec: &CreateSpec) -> Result<CreatedContainer, RuntimeError> {
+    fn create(
+        &self,
+        covered: crate::runner::container::CoveredCreate<'_>,
+    ) -> Result<CreatedContainer, RuntimeError> {
+        let spec = covered.spec();
         self.note(format!("create {}", spec.name));
         self.state
             .lock()
@@ -2848,7 +2861,11 @@ impl crate::runner::container::runtime::ContainerRuntime for Inventory {
         })
     }
 
-    fn start(&self, name: &str) -> Result<(), RuntimeError> {
+    fn start(
+        &self,
+        covered: crate::runner::container::CoveredStart<'_>,
+    ) -> Result<(), RuntimeError> {
+        let name = covered.name();
         self.note(format!("start {name}"));
         Ok(())
     }
@@ -2880,6 +2897,10 @@ impl crate::runner::container::runtime::ContainerRuntime for Inventory {
             .unwrap_or_else(PoisonError::into_inner)
             .remove(name);
         Ok(crate::runner::container::runtime::Settled::ProcessGone)
+    }
+
+    fn reaper_program(&self) -> PathBuf {
+        PathBuf::from(crate::runner::container::NO_OP_REAPER_PROGRAM)
     }
 }
 
@@ -2967,7 +2988,7 @@ impl Probes for ContainerProbes {
 
     fn agent(&self, agent: &str, through: &AgentProbe<'_>) -> Result<(), UpstrokeError> {
         through
-            .run(&probe_request_for(
+            .run_blocking(&probe_request_for(
                 PreflightIdentities::agent(agent, 0)?,
                 Some(agent),
             ))
@@ -3003,7 +3024,6 @@ fn container_probe_kill_child() {
     let clock = Fixed::default();
     let agents = agents();
     let ledger = std::sync::Mutex::new(InvocationLedger::new());
-    let slots = std::sync::Mutex::new(SlotAssertion::new());
     let request = Request {
         repo_root: &fixture.repo,
         repo_key: fixture.repo_key.clone(),
@@ -3015,7 +3035,7 @@ fn container_probe_kill_child() {
         refs: &refs,
         clock: &clock,
         runner: &execution,
-        pair: ProbePair::grant(&ledger, &slots),
+        pair: ProbePair::grant(&ledger),
     };
     let mut warnings = Vec::new();
     let _ = create_run(checked, request, &mut hooks, &mut warnings);
@@ -3241,8 +3261,8 @@ impl RecordingRunner {
     }
 }
 
-impl crate::runner::Runner for RecordingRunner {
-    fn run(
+impl crate::runner::contract::tests::InlineRunner for RecordingRunner {
+    fn run_inline(
         &self,
         request: &crate::runner::RunnerRequest,
     ) -> Result<crate::agent::proc::ProcessOutput, crate::runner::RunnerError> {
@@ -3266,8 +3286,8 @@ struct FailsTheSecondRequest {
     seen: Mutex<Vec<String>>,
 }
 
-impl crate::runner::Runner for FailsTheSecondRequest {
-    fn run(
+impl crate::runner::contract::tests::InlineRunner for FailsTheSecondRequest {
+    fn run_inline(
         &self,
         request: &crate::runner::RunnerRequest,
     ) -> Result<crate::agent::proc::ProcessOutput, crate::runner::RunnerError> {
@@ -3311,7 +3331,7 @@ impl crate::agent::AgentAdapter for TwoRequestAdapter {
                 ordinal,
                 std::time::Duration::from_secs(5),
             )?;
-            runner.run(&request)?;
+            runner.run_blocking(&request)?;
         }
         Ok(crate::agent::Caps {
             version: "1.0".to_owned(),
@@ -3357,8 +3377,7 @@ fn the_creation_ledger_accounts_every_probe_process() {
     let runner = FailsTheSecondRequest::default();
     let source = TwoRequestSource::default();
     let ledger = std::sync::Mutex::new(InvocationLedger::new());
-    let slots = std::sync::Mutex::new(SlotAssertion::new());
-    let pair = ProbePair::grant(&ledger, &slots);
+    let pair = ProbePair::grant(&ledger);
     let probes = RunnerProbes {
         shell: crate::gates::ShellKind::Sh,
         workspace: std::env::temp_dir(),
@@ -3390,11 +3409,12 @@ fn the_creation_ledger_accounts_every_probe_process() {
         ledger.running()
     );
 
-    let slots = slots.lock().unwrap_or_else(PoisonError::into_inner);
+    let slots = ledger.slots();
     assert!(
-        slots.held().is_none(),
-        "the refused probe kept its slot pair: {:?}",
-        slots.held()
+        slots.is_empty(),
+        "the refused probe kept its slot pair: held {:?}, pending {:?}",
+        slots.holders(),
+        slots.pending()
     );
 }
 
@@ -3419,7 +3439,7 @@ impl crate::agent::AgentAdapter for OneAdapter {
             0,
             std::time::Duration::from_secs(5),
         )?;
-        runner.run(&request)?;
+        runner.run_blocking(&request)?;
         Ok(crate::agent::Caps {
             version: "1.0".to_owned(),
             json_output: true,
@@ -3464,8 +3484,7 @@ fn the_production_probes_run_both_halves_through_the_runs_runner() {
     let runner = RecordingRunner::default();
     let source = OneSource::default();
     let ledger = std::sync::Mutex::new(InvocationLedger::new());
-    let slots = std::sync::Mutex::new(SlotAssertion::new());
-    let pair = ProbePair::grant(&ledger, &slots);
+    let pair = ProbePair::grant(&ledger);
     let probes = RunnerProbes {
         shell: crate::gates::ShellKind::Sh,
         workspace: std::env::temp_dir(),
@@ -3596,7 +3615,7 @@ impl Probes for RunsThroughWhatItIsHanded {
             probe_request_for(invocation, None)
         };
         let outcome = through
-            .run(&request)
+            .run_blocking(&request)
             .map(|_| ())
             .map_err(UpstrokeError::from)
             .map_err(|e| e.to_string());
@@ -3620,7 +3639,7 @@ impl Probes for RunsThroughWhatItIsHanded {
             )
         };
         let outcome = through
-            .run(&request)
+            .run_blocking(&request)
             .map(|_| ())
             .map_err(UpstrokeError::from)
             .map_err(|e| e.to_string());
@@ -3638,12 +3657,10 @@ fn an_agent_probe_registers_only_into_the_pair_its_caller_bound() {
     let probes = RunsThroughWhatItIsHanded::new(false);
 
     let ledger = Mutex::new(InvocationLedger::new());
-    let slots = Mutex::new(SlotAssertion::new());
-    let granted = ProbePair::grant(&ledger, &slots);
+    let granted = ProbePair::grant(&ledger);
 
     let other_ledger = Mutex::new(InvocationLedger::new());
-    let other_slots = Mutex::new(SlotAssertion::new());
-    let unbound = ProbePair::grant(&other_ledger, &other_slots);
+    let unbound = ProbePair::grant(&other_ledger);
 
     probes
         .agent(AGENT, &granted.agent_probe(&runner))
@@ -3676,8 +3693,7 @@ fn the_two_probe_paths_refuse_each_others_identities() {
     let runner = RecordingRunner::default();
     let probes = RunsThroughWhatItIsHanded::new(true);
     let ledger = Mutex::new(InvocationLedger::new());
-    let slots = Mutex::new(SlotAssertion::new());
-    let pair = ProbePair::grant(&ledger, &slots);
+    let pair = ProbePair::grant(&ledger);
 
     let shell_id = PreflightIdentities::shell(0).expect("the shell identity");
     probes
@@ -3720,8 +3736,7 @@ fn the_shell_probe_registers_without_taking_a_slot() {
     let runner = RecordingRunner::default();
     let probes = RunsThroughWhatItIsHanded::new(false);
     let ledger = Mutex::new(InvocationLedger::new());
-    let slots = Mutex::new(SlotAssertion::new());
-    let pair = ProbePair::grant(&ledger, &slots);
+    let pair = ProbePair::grant(&ledger);
 
     let shell_id = PreflightIdentities::shell(0).expect("the shell identity");
     probes
@@ -3734,15 +3749,11 @@ fn the_shell_probe_registers_without_taking_a_slot() {
         (1, 0),
         "the shell probe was not accounted in the granted pair"
     );
-    drop(accounted);
     assert!(
-        slots
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .held()
-            .is_none(),
-        "the shell probe left a slot pair held"
+        accounted.slots().is_empty() && accounted.slots().granted() == 0,
+        "the shell probe took a slot pair"
     );
+    drop(accounted);
     assert_eq!(runner.requests().len(), 1);
     assert_eq!(runner.requests()[0].invocation, shell_id);
     assert!(pair.balances());
@@ -3753,8 +3764,7 @@ fn a_probe_that_registers_nothing_does_not_move_the_grant() {
     let runner = RecordingRunner::default();
     let probes = IgnoresTheCapability::agent_only();
     let ledger = Mutex::new(InvocationLedger::new());
-    let slots = Mutex::new(SlotAssertion::new());
-    let pair = ProbePair::grant(&ledger, &slots);
+    let pair = ProbePair::grant(&ledger);
 
     let before = pair.accounted();
     probes
@@ -3840,12 +3850,12 @@ impl Probes for IgnoresTheCapability {
         let request = probe_request_for(invocation, None);
         if self.ignore_shell {
             self.elsewhere
-                .run(&request)
+                .run_blocking(&request)
                 .map(|_| ())
                 .map_err(UpstrokeError::from)
         } else {
             through
-                .run(&request)
+                .run_blocking(&request)
                 .map(|_| ())
                 .map_err(UpstrokeError::from)
         }
@@ -3858,12 +3868,12 @@ impl Probes for IgnoresTheCapability {
         );
         if self.substitutes(agent) {
             self.elsewhere
-                .run(&request)
+                .run_blocking(&request)
                 .map(|_| ())
                 .map_err(UpstrokeError::from)
         } else {
             through
-                .run(&request)
+                .run_blocking(&request)
                 .map(|_| ())
                 .map_err(UpstrokeError::from)
         }
@@ -3930,8 +3940,8 @@ struct RefusesEveryRequest {
     seen: Mutex<usize>,
 }
 
-impl crate::runner::Runner for RefusesEveryRequest {
-    fn run(
+impl crate::runner::contract::tests::InlineRunner for RefusesEveryRequest {
+    fn run_inline(
         &self,
         request: &crate::runner::RunnerRequest,
     ) -> Result<crate::agent::proc::ProcessOutput, crate::runner::RunnerError> {
@@ -3949,12 +3959,11 @@ impl crate::runner::Runner for RefusesEveryRequest {
 fn the_grant_counts_a_probe_process_that_started_and_failed() {
     let runner = RefusesEveryRequest::default();
     let ledger = Mutex::new(InvocationLedger::new());
-    let slots = Mutex::new(SlotAssertion::new());
-    let pair = ProbePair::grant(&ledger, &slots);
+    let pair = ProbePair::grant(&ledger);
 
     let before = pair.accounted();
     pair.agent_probe(&runner)
-        .run(&probe_request_for(
+        .run_blocking(&probe_request_for(
             PreflightIdentities::agent(AGENT, 0).expect("an agent identity"),
             Some(AGENT),
         ))
@@ -3985,50 +3994,77 @@ fn the_grant_counts_a_probe_process_that_started_and_failed() {
 
 #[test]
 fn the_granted_pairs_balance_answers_for_the_ledger_and_the_slots() {
+    use crate::engine::topology::identity::{Admission, SlotPair};
+    use crate::engine::topology::select::Standing;
+
     let ledger = Mutex::new(InvocationLedger::new());
-    let slots = Mutex::new(SlotAssertion::new());
-    let pair = ProbePair::grant(&ledger, &slots);
+    let pair = ProbePair::grant(&ledger);
     assert!(pair.balances(), "a fresh pair balances");
 
-    let id = PreflightIdentities::agent(AGENT, 0).expect("a probe identity");
-    ledger
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .register(&id)
-        .expect("the registration");
-    assert!(!pair.balances(), "an unsettled registration balanced");
-    ledger
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .complete(&id)
-        .expect("the settlement");
-    assert!(pair.balances(), "a settled registration did not balance");
+    let slotted = |id: &crate::runner::InvocationId| {
+        ledger
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .register_slotted(
+                id,
+                SlotPair {
+                    agent: AGENT.to_owned(),
+                    pool: None,
+                },
+                &Standing::preflight(),
+            )
+            .expect("the registration")
+    };
+    let settle = |id: &crate::runner::InvocationId, complete: bool| {
+        let mut ledger = ledger.lock().unwrap_or_else(PoisonError::into_inner);
+        if complete {
+            ledger.complete(id)
+        } else {
+            ledger.cancel(id)
+        }
+        .expect("the settlement")
+    };
 
-    slots
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .acquire(
-            &id,
-            crate::engine::topology::identity::SlotPair {
-                agent: AGENT.to_owned(),
-                pool: None,
-            },
-        )
-        .expect("the pair");
+    let first = PreflightIdentities::agent(AGENT, 0).expect("a probe identity");
+    assert_eq!(slotted(&first), Admission::Granted);
+    assert!(
+        !pair.balances(),
+        "a registration running with its pair held balanced"
+    );
+
+    let second = PreflightIdentities::agent(AGENT, 1).expect("a probe identity");
+    assert_eq!(
+        slotted(&second),
+        Admission::Pending,
+        "the one slot of `{AGENT}` is held, so the second waits"
+    );
+    assert_eq!(
+        settle(&second, false),
+        Vec::<crate::runner::InvocationId>::new(),
+        "withdrawing the waiting request grants nothing"
+    );
+    assert!(
+        !pair.balances(),
+        "the first still holds its pair, so the table cannot balance"
+    );
+
+    assert_eq!(
+        settle(&first, true),
+        Vec::<crate::runner::InvocationId>::new(),
+        "nothing waits behind the first once the second withdrew"
+    );
+    assert!(
+        pair.balances(),
+        "a settled registration and a released pair did not balance"
+    );
     assert!(
         ledger
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .balances(),
-        "the ledger half must be clean, or this proves nothing about the slot half"
+            .slots()
+            .is_empty(),
+        "and the slot table is empty again"
     );
-    assert!(!pair.balances(), "a held slot pair balanced");
-    slots
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .release(&id)
-        .expect("the release");
-    assert!(pair.balances(), "a released pair did not balance");
 }
 
 #[test]
@@ -4616,5 +4652,268 @@ fn a_kill_after_the_plan_is_written_leaves_a_husk_the_next_census_reclaims_priva
     assert!(
         crate::rundir::run_dir_names(&fixture.repo).is_empty(),
         "no run directory is left for the next command to step around"
+    );
+}
+
+#[cfg(unix)]
+fn reaped_p4_host() -> crate::runner::container::FakeRuntime {
+    let host = crate::runner::container::FakeRuntime::new(
+        crate::runner::container::runtime::ContainerTrace::off(),
+    );
+    host.add_image(IMAGE_ID, Some("sha256:manifest"));
+    host.tag(IMAGE_REFERENCE, IMAGE_ID);
+    host.add_volume(CREDENTIAL_VOLUME);
+    host
+}
+
+#[cfg(unix)]
+fn p4_execution(
+    fixture: &Fixture,
+    checked: &PreLockChecked,
+    runtime: Box<dyn crate::runner::container::runtime::ContainerRuntime>,
+) -> crate::runner::container::exec::ContainerRunner {
+    let identity = crate::runner::container::exec::RunIdentity {
+        private_root: checked.private_root().to_path_buf(),
+        run_id: checked.run_id().to_owned(),
+        run_dir: fixture.public(),
+        incarnation: checked.incarnation().0.clone(),
+        repo_key: fixture.repo_key.as_str().to_owned(),
+    };
+    crate::runner::container::exec::ContainerRunner::new(
+        checked.runner_policy().clone(),
+        identity,
+        &fixture.repo,
+        crate::runner::container::env::ContainerEnvironment::from_image(vec![(
+            "PATH".to_owned(),
+            "/usr/bin:/bin".to_owned(),
+        )]),
+        runtime,
+    )
+    .expect("a container runner over the resolved policy")
+    .with_view(Box::new(crate::runner::container::DisposableDirView::new(
+        crate::runner::container::runtime::ContainerTrace::off(),
+    )))
+    .with_poll(std::time::Duration::from_millis(5))
+}
+
+#[cfg(unix)]
+fn create_over_containers(
+    fixture: &Fixture,
+    runtime: &dyn crate::runner::container::runtime::ContainerRuntime,
+    execution_runtime: Box<dyn crate::runner::container::runtime::ContainerRuntime>,
+) -> Result<Started, Refused> {
+    let selection = container_selection();
+    let checked = super::super::prelock::check(&super::super::prelock::PreLock {
+        selection: &selection,
+        runtime: Some(runtime),
+        private_root: &fixture.private_root,
+        ids: &Fixed::default(),
+    })
+    .expect("the container policy resolves by inspection");
+    let execution = p4_execution(fixture, &checked, execution_runtime);
+    let source = OneSource::default();
+    let probes = RunnerProbes {
+        shell: crate::gates::ShellKind::Sh,
+        workspace: fixture.repo.clone(),
+        adapters: &source,
+        policy_digest: execution.policy_digest().to_owned(),
+    };
+    let refs = FakeRefs::empty();
+    let mut hooks = TestHooks::new();
+    let plan_bytes = normalized_plan();
+    let clock = Fixed::default();
+    let agents = agents();
+    let ledger = std::sync::Mutex::new(InvocationLedger::new());
+    let request = Request {
+        repo_root: &fixture.repo,
+        repo_key: fixture.repo_key.clone(),
+        normalized_plan: &plan_bytes,
+        inputs: inputs(),
+        record: record(&agents, checked.runner_policy().clone()),
+        agents: &agents,
+        probes: &probes,
+        refs: &refs,
+        clock: &clock,
+        runner: &execution,
+        pair: ProbePair::grant(&ledger),
+    };
+    create_run(checked, request, &mut hooks, &mut Vec::new())
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "spawned by a_fresh_runs_p4_probe_container_is_killed_by_its_reaper_before_run_started"]
+fn fresh_p4_probe_child() {
+    let parent = crate::engine::topology::scaffold::ParentSide::attach();
+    let root = PathBuf::from(std::env::var_os("UPSTROKE_TEST_FRESH_ROOT").expect("the root"));
+    let fixture = Fixture::at(&root);
+    let runtime = parent.runtime();
+    let created = create_over_containers(&fixture, &runtime, Box::new(parent.runtime()));
+    panic!("the parent kills this creator inside its first P4 probe; it returned {created:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_fresh_runs_p4_probe_container_is_killed_by_its_reaper_before_run_started() {
+    use crate::runner::container::FakeRuntime;
+    use crate::runner::container::intent::{LABEL_INCARNATION, LABEL_PRIVATE_ROOT};
+    use crate::runner::container::runtime::{Liveness, RuntimeOp};
+    let bound = std::time::Duration::from_secs(120);
+    let fixture = Fixture::new("reaper-fresh-p4");
+    let host = reaped_p4_host();
+    let relay = fixture.root.join("relay");
+    host.install_reaper_relay(&relay);
+    let mut environment = vec![("UPSTROKE_TEST_FRESH_ROOT", fixture.root.as_os_str())];
+    environment.extend(crate::engine::topology::scaffold::child_temporary_of(
+        &fixture.root,
+    ));
+    let child = crate::engine::topology::scaffold::Served::spawn(
+        "engine::topology::create::tests::fresh_p4_probe_child",
+        &environment,
+        &fixture.root.join("child.stderr"),
+        host.acting_as(INCARNATION),
+    );
+    assert!(
+        host.await_journal(bound, |journal| journal
+            .iter()
+            .any(|entry| entry.op == RuntimeOp::Start)),
+        "the creator's first P4 probe container starts: {:?}; its stderr {}",
+        host.journal(),
+        child.stderr()
+    );
+    let started = std::time::Instant::now();
+    let running = loop {
+        let running: Vec<String> = host
+            .container_names()
+            .into_iter()
+            .filter(|name| {
+                host.container(name)
+                    .is_some_and(|container| container.state == Liveness::Running)
+            })
+            .collect();
+        if !running.is_empty() || started.elapsed() > bound {
+            break running;
+        }
+        crate::workspace_manager::fixture::rest_within(
+            std::time::Duration::from_millis(10),
+            bound.saturating_sub(started.elapsed()),
+        );
+    };
+    assert_eq!(running.len(), 1, "one P4 probe container runs: {running:?}");
+    let probe = running[0].clone();
+    assert!(
+        matches!(
+            crate::rundir::classify_run_dir(&fixture.public()),
+            crate::rundir::RunDirClass::Husk
+        ),
+        "the creator is killed before `run_started`: the run directory is still a husk"
+    );
+    assert!(
+        FakeRuntime::reaper_calls(&relay).is_empty(),
+        "the reaper acts on nothing while its creator lives"
+    );
+    host.publish_for_reaper(&relay);
+    let censused = |host: &FakeRuntime| {
+        host.journal()
+            .iter()
+            .filter(|entry| entry.op == RuntimeOp::ListByLabel)
+            .count()
+    };
+    let censused_before_the_death = censused(&host);
+    let died = child.kill();
+    assert!(!died.success(), "the creator was killed: {died:?}");
+    drop(child);
+
+    let started = std::time::Instant::now();
+    let calls = loop {
+        let calls = FakeRuntime::reaper_calls(&relay);
+        if (calls.len() >= 4
+            && calls
+                .last()
+                .and_then(|call| call.first())
+                .map(String::as_str)
+                == Some("ps"))
+            || started.elapsed() > bound
+        {
+            break calls;
+        }
+        crate::workspace_manager::fixture::rest_within(
+            std::time::Duration::from_millis(10),
+            bound.saturating_sub(started.elapsed()),
+        );
+    };
+    let labels = host
+        .container(&probe)
+        .expect("the probe, as the daemon recorded it")
+        .labels;
+    let filters: Vec<String> = [LABEL_PRIVATE_ROOT, LABEL_INCARNATION]
+        .iter()
+        .map(|key| {
+            format!(
+                "label={key}={}",
+                labels.get(*key).cloned().unwrap_or_default()
+            )
+        })
+        .collect();
+    let verbs: Vec<(String, String)> = calls
+        .iter()
+        .map(|call| {
+            (
+                call.first().cloned().unwrap_or_default(),
+                call.last().cloned().unwrap_or_default(),
+            )
+        })
+        .collect();
+    assert!(
+        calls.len() == 4
+            && filters.iter().all(|filter| calls[0].contains(filter))
+            && verbs[1] == ("kill".to_owned(), probe.clone())
+            && verbs[2] == ("rm".to_owned(), probe.clone())
+            && calls[3] == calls[0],
+        "the creator's reaper listed its P4 probe by the run's private root and this \
+         incarnation, killed and removed it, and listed again to find nothing: {calls:?}"
+    );
+    let delivered = host.deliver_reaper_calls(&relay);
+    assert!(
+        host.container(&probe).is_none(),
+        "the P4 probe container is gone, by its reaper's calls: {delivered:?}"
+    );
+    assert_eq!(
+        censused(&host),
+        censused_before_the_death,
+        "no census listed the runtime after the creator died"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn every_container_a_fresh_runs_creation_starts_is_covered_by_an_armed_reaper_with_its_scope() {
+    use crate::runner::container::runtime::{ContainerExecution, RuntimeOp};
+    let fixture = Fixture::new("reaper-covers-p4");
+    let host = reaped_p4_host().starting(Arc::new(|_: &crate::runner::container::Launch<'_>| {
+        crate::runner::container::Start::Exit(ContainerExecution {
+            exit_code: Some(0),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        })
+    }));
+    host.observing_covers();
+    create_over_containers(&fixture, &host, Box::new(host.clone()))
+        .expect("the run is created over its P4 probe containers");
+    let observed = host.starts_observed();
+    let created = host
+        .journal()
+        .iter()
+        .filter(|entry| entry.op == RuntimeOp::Create)
+        .count();
+    assert!(
+        observed.len() >= 2 && observed.len() == created,
+        "the shell probe and the agent probe each started in a container under observation: \
+         {observed:?}, {created} created"
+    );
+    assert!(
+        observed.iter().all(|(_, covered)| *covered),
+        "every P4 probe container started under an armed reaper whose scope selects its labels: \
+         {observed:?}"
     );
 }

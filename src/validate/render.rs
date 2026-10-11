@@ -1,6 +1,10 @@
 //! Extended notes: `docs/internals/validate/render.md`
 
-#![forbid(clippy::disallowed_methods)]
+#![forbid(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    clippy::disallowed_macros
+)]
 
 use crate::capacity;
 use crate::config::Config;

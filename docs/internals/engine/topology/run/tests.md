@@ -147,6 +147,70 @@ on a total.
 Calls, not definitions — neither is defined here, but the filter is the
 one the barrier census learned to use and costs nothing.
 
+## `const DRIVEN_TRANSITIONS: [(&str, usize, usize); 5] = [`
+
+The five transitions both drivers run, with how many times each driver calls
+each: `step` settles twice (the retry arm and the dispatch arm) and closes the
+run twice (its closure arm, and its hard block falling through with the
+operator it was handed); the coordinator closes the run twice (idle, and a
+halt's `finish`).
+
+## `fn transition_calls(code: &str, transition: &str) -> Vec<(String, bool)> {`
+
+Every call of `transition` in blanked production code, as its first argument
+with its whitespace collapsed — so a call rustfmt splits after its parenthesis
+reads as one that it does not — and whether it was called as a method. A name
+that ends a longer identifier is not a call of it, and the generic definition
+(`transition<O`) is not one either.
+
+## `fn transition_bypasses(run: &str, coordinator: &str) -> Vec<String> {`
+
+What the census reports: a transition not defined exactly once generic over
+its operator, a driver that calls it another number of times than
+[`DRIVEN_TRANSITIONS`] says, or any one call whose operator is not the
+driver's own — `&mut self.stepping(seams, hooks)` or the operator a generic
+transition was handed in `run.rs`, `self` in `coordinator.rs`.
+
+## `fn driver_sources() -> (String, String) {`
+
+The two drivers' production code, blanked, with their line endings normalised.
+
+## `fn both_drivers_run_each_transition_through_the_one_generic_function() {`
+
+**Both drivers run each transition through the one generic function** (R-T,
+follow-up B's repair round 3; every call site since repair round 6, I2-4).
+`begin_dispatch`, `begin_retry`, `settle_judged`, `close_run` and `hard_block`
+are each defined once, generic over the operator that runs them, and **every
+call** of each, in both drivers, hands it the driver's own operator: the
+width-1 `step` its [`Stepping`], the coordinator itself. Until repair round 6
+the census asked only that one such call exist, so one settlement handed a
+foreign operator beside a correct one passed it, and the whole suite with it
+(the delta review's R9). Its domain is the drivers' production code, which
+the census checks reaches the functions it must (`step`, `idle`, `finish`,
+`registry_pause`).
+`coordinator::tests::every_append_of_the_width_one_step_a_retrys_settlement_included_folds_through_the_callers_hooks`
+is the behavioural witness, and
+`coordinator::tests::the_width_one_step_runs_the_same_transitions_and_its_access_waits_by_sleeping`
+the control.
+
+## `fn the_r_t_census_reports_one_call_that_bypasses_its_driver() {`
+
+The census's positive control (standards §12): the real sources pass it; the
+reviews' two spellings of the single-call mutation — the retry arm's
+settlement handed a `Stepping` with fresh `NoTopologyHooks`, written as a
+literal or through `stepping` — are each reported once, under either
+spelling; so is the coordinator's settlement handed a `Stepping` of its own,
+and a closure called as the run's own method.
+
+## `fn driver_sources() -> (String, String) {` › `let read = |file: &str| {`
+
+Line endings are normalised before the source is blanked. rustfmt splits the
+`step`'s call of `begin_dispatch` after its parenthesis, so that needle spells
+a line break, and a checkout with Windows line endings holds `\r\n` there:
+without the normalisation the census fails a source that satisfies it. It did
+on `test (winguest)` at `f9c88fdb` (follow-up B's R8), while every Linux and
+macOS leg passed.
+
 ## `fn the_frozen_pool_table_is_read_through_one_seam() {`
 
 **The frozen pool table is read through one seam.**
@@ -245,6 +309,20 @@ So this census keeps a real and narrower job: the two *literals* name an
 authority rather than inventing a value. It is not a witness that the value
 arriving at them is right.
 
+**Its domain is asserted** (follow-up B's repair round 6, the delta review's
+census audit). Until then it read the first `AttemptStarted4` literal of each
+file, so a second literal in either file, or a third arm in another, went
+unread while the test said "both arms". It now walks every production source
+of the crate (whole-file test modules skipped), requires that exactly these
+two files construct the event, once each, and reads every literal it finds;
+the counter's own fixture shows a second literal counted and the definition
+not.
+
+## `fn attempt_started_constructions(code: &str) -> Vec<usize> {`
+
+Where `code` constructs `AttemptStarted4`: every `AttemptStarted4 {` that is
+not the struct's definition.
+
 ## `fn the_settled_notes_separate_the_successful_and_the_failed_settlement() {`
 
 `PR160-NOTES-SUCCESS-SETTLEMENT`. The `Progress::Settled` section of
@@ -325,3 +403,60 @@ is only required to describe a whole branch while its arm reads
 the opposite prose, and this says so at the point where the two claims
 diverge rather than leaving a stale pin to fail with a message about
 Markdown.
+
+## `mod scaffold_runner {`
+
+The substrate's runner double, `scaffold::RecordingRunner`, is what PR11's coordinator tests drive
+(`tests_acceptance.determinism`: "FakeRunner with explicit start/complete control, recorded
+RunnerRequests, InvocationIds (incl. shell and agent probes), and the declared RunnerPolicy and
+image id each invocation executed under … and to fail a shell or agent probe on demand"). These
+tests hold the double to that sentence before anything leans on it.
+
+## `mod scaffold_runner` › `fn the_scaffold_runner_holds_each_invocation_until_the_test_completes_it_in_any_order() {`
+
+Three invocations on three threads all start and wait; the test delivers their results in reverse
+order, and each gets its own; the endings are recorded in the order the test delivered them; every
+request is recorded with its identity.
+
+## `mod scaffold_runner` › `fn the_scaffold_runner_refuses_and_counts_a_second_completion_and_an_unknown_one() {`
+
+A completion is delivered exactly once: a second delivery for one invocation, and a delivery for an
+invocation the runner never held, are refused and both counted, and the first delivery stands.
+
+## `mod scaffold_runner` › `fn the_scaffold_runner_ends_a_cancelled_or_dropped_invocation_exactly_once() {`
+
+A held invocation whose call is cancelled from another thread resolves cancelled with fate `Gone`,
+and a completion after that finds nothing to complete; a held invocation whose future is dropped
+releases its hold and is recorded abandoned; a call already cancelled when it reaches the runner is
+cancelled with fate `NeverStarted`, starts no process and is recorded cancelled before start. One
+ending each.
+
+## `mod scaffold_runner` › `fn a_late_call_waits_at_the_door_until_admitted_and_a_barred_one_until_cancelled() {`
+
+Under late entry a call starts only once it is admitted, and until then is not inside the runner;
+a barred call is inside once it waits at its door, is never started by an admission, and ends
+cancelled before start when its call is cancelled. What the coordinator's scheduler and
+`a_shutdown_releases_each_invocation_once_whether_pending_unstarted_running_or_finished` lean on.
+
+## `mod scaffold_runner` › `fn the_scaffold_runner_records_the_policy_and_image_each_invocation_ran_under() {`
+
+By default an invocation records the host policy and no image; under a declared container policy it
+records that policy and its immutable image id, beside the request it carried.
+
+## `mod scaffold_runner` › `fn the_scaffold_runner_fails_a_shell_or_agent_probe_on_demand() {`
+
+Through a real consumer: the production shell probe (`host::run_shell_probe`) refuses when the
+double was told to fail the next shell probe with an exit code, and passes on the one after, since a
+failure is used once; an agent probe told to never start is a `NeverStarted` error that is not a
+cancellation. Failed probes are recorded like any request.
+
+## `fn the_closure_notes_say_what_closure_does_under_concurrency_and_what_it_still_refuses() {`
+
+Review round 2's `R2-REG-1` (the PR11 record, §13, round R2). The `Self::Closure` section of
+`docs/internals/engine/topology/run.md` still said the concurrent half of closure — in-flight
+cancellation, the budget drain, promotion and publication inside closure — was refused by
+`closure::refuse_unclosable` naming PR11, after phase 4 had built all of it into
+[`TopologyRun::close_run`]. The pin holds what the section says now — the concurrent half done in
+`close_run`, a halt's vouched identities settled, a budget stop drained, only unvouched in-flight work
+refused — and that the retired sentence does not come back. It matches on the prose with its whitespace
+collapsed, as the pins above do.

@@ -18,8 +18,8 @@ an effect: the spawn belongs to whichever `Runner` the caller passes, which
 for `host-v1` is the parent module's `HostRunner::run`.
 
 The request *constructor* stays in the parent and is deliberately not here.
-`runner::tests::every_production_runner_request_is_built_by_its_roles_builder`
-and `runner::tests::a_command_is_assembled_in_one_production_place_per_role`
+`runner::contract::tests::every_production_runner_request_is_built_by_its_roles_builder`
+and `runner::contract::tests::a_command_is_assembled_in_one_production_place_per_role`
 pin `RunnerRequest`'s and `ShellKind::spec`'s one production construction
 site per role by file, and `src/runner/host.rs` is the pinned file -- the
 same kind of pin that keeps `Contained`'s mint and the reserved-key
@@ -31,6 +31,8 @@ vocabulary in the parent. Construction is pinned; execution is not.
 level is scoped by the module tree and not by the file, so an out-of-line
 child of `src/runner/host.rs` would otherwise inherit that file's inner
 `#![allow(clippy::disallowed_methods, disallowed_types, disallowed_macros)]`
+(its allow of all three when this was written; since 2026-09-26 it allows
+`clippy::disallowed_types` alone and forbids the other two in production)
 -- `PR6-LANEF-004`, and the mistake two W1 pull requests each made
 independently. Nothing here reaches a governed primitive, so all three are
 DENIED rather than allowed, and this module takes no `effects/allowlist.toml`

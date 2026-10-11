@@ -11,9 +11,11 @@
 //! stating exactly.** [`safe_component`] is what makes a [`Slot`] path
 //! containment-by-construction — a name that could escape the execution root is
 //! refused, whatever produced it. Uniqueness across roles and attempts is a
-//! weaker guarantee: [`SnapshotName`]'s three constructors encode the role, the
-//! generation and the attempt into the name, so a caller that goes through them
-//! cannot collide — but they are not the only way to obtain one.
+//! weaker guarantee: [`SnapshotName`]'s constructors encode the role and, for an
+//! attempt's snapshots, the task, the generation and the attempt (for an
+//! integration's, the sequence) into the name, so a caller that goes through them
+//! cannot collide — not even two tasks judged at once at the same generation and
+//! attempt — but they are not the only way to obtain one.
 //! [`Slot::from_intent_name`] reconstructs a [`Slot::Snapshot`] straight from an
 //! on-disk intent filename, so that reclaim never has to trust a path stored
 //! inside a record, and a name reconstructed that way carries whatever the
@@ -82,20 +84,23 @@ pub enum Slot {
     },
     /// `snapshots/<name>` — an exact gate or review snapshot, R24.
     Snapshot {
-        /// The snapshot's name. Built through one of [`SnapshotName`]'s three
-        /// constructors it encodes the role, the generation and the attempt, so
-        /// callers going through them cannot collide; see that type for why
-        /// that is not a property of every `SnapshotName`.
+        /// The snapshot's name. Built through one of [`SnapshotName`]'s
+        /// constructors it encodes the role and the task, generation and attempt
+        /// (or the sequence) it judges, so callers going through them cannot
+        /// collide; see that type for why that is not a property of every
+        /// `SnapshotName`.
         name: SnapshotName,
     },
 }
 
 /// A snapshot's name.
 ///
-/// The three constructors below encode the role, the generation and the attempt
-/// into the string, which is how a caller that uses them satisfies
+/// The constructors below encode the role and, for an attempt's snapshots, the
+/// task, the generation and the attempt (for an integration's, the sequence) into
+/// the string, which is how a caller that uses them satisfies
 /// `decisions.workspace_candidates.snapshots`' "never reused across roles or
-/// attempts". It is **not** a property of the type: `Slot::from_intent_name`
+/// attempts" — and, since attempts of different tasks run at once from PR11, across
+/// tasks: two tasks at the same generation and attempt name different slots. It is **not** a property of the type: `Slot::from_intent_name`
 /// rebuilds one straight from an on-disk intent filename, so a reconstructed
 /// name carries whatever the filename carried. The module doc says where that
 /// leaves the guarantee.
@@ -103,16 +108,16 @@ pub enum Slot {
 pub struct SnapshotName(String);
 
 impl SnapshotName {
-    /// The one snapshot the whole gate set runs on.
+    /// The one snapshot the whole gate set of task `key`'s attempt runs on.
     #[must_use]
-    pub fn gates(generation: u32, attempt: u32) -> Self {
-        Self(format!("g{generation}-a{attempt}-gates"))
+    pub fn gates(key: u32, generation: u32, attempt: u32) -> Self {
+        Self(format!("k{key}-g{generation}-a{attempt}-gates"))
     }
 
-    /// One fresh snapshot per reviewer.
+    /// One fresh snapshot per reviewer of task `key`'s attempt.
     #[must_use]
-    pub fn review(generation: u32, attempt: u32, reviewer: u32) -> Self {
-        Self(format!("g{generation}-a{attempt}-review{reviewer}"))
+    pub fn review(key: u32, generation: u32, attempt: u32, reviewer: u32) -> Self {
+        Self(format!("k{key}-g{generation}-a{attempt}-review{reviewer}"))
     }
 
     /// The snapshot an integration transaction's gate set runs on.
@@ -809,10 +814,10 @@ mod tests {
             Slot::Staging { sequence: 0 },
             Slot::Staging { sequence: u64::MAX },
             Slot::Snapshot {
-                name: SnapshotName::gates(1, 2),
+                name: SnapshotName::gates(0, 1, 2),
             },
             Slot::Snapshot {
-                name: SnapshotName::review(1, 2, 3),
+                name: SnapshotName::review(0, 1, 2, 3),
             },
             Slot::Snapshot {
                 name: SnapshotName::integration(4),
@@ -836,6 +841,43 @@ mod tests {
                 "the intent name is the namespace, the component and the suffix"
             );
         }
+    }
+
+    #[test]
+    fn two_tasks_judged_at_one_generation_and_attempt_name_different_snapshots() {
+        let names = [
+            SnapshotName::gates(0, 1, 1),
+            SnapshotName::gates(1, 1, 1),
+            SnapshotName::gates(0, 1, 2),
+            SnapshotName::review(0, 1, 1, 0),
+            SnapshotName::review(1, 1, 1, 0),
+            SnapshotName::review(0, 1, 1, 1),
+            SnapshotName::integration(1),
+            SnapshotName::integration_review(1, 0),
+        ];
+        let unique: std::collections::BTreeSet<&str> =
+            names.iter().map(SnapshotName::as_str).collect();
+        assert_eq!(
+            unique.len(),
+            names.len(),
+            "two snapshots of different tasks, attempts, roles or reviewers share a name: \
+             {names:?}"
+        );
+        for name in &names {
+            let slot = Slot::Snapshot { name: name.clone() };
+            slot.validate()
+                .unwrap_or_else(|error| panic!("`{name}` is not a valid slot component: {error}"));
+            assert_eq!(
+                Slot::from_intent_name(&slot.intent_name()).as_ref(),
+                Some(&slot),
+                "`{name}` does not survive the intent-name round trip"
+            );
+        }
+        assert_eq!(SnapshotName::gates(7, 2, 3).as_str(), "k7-g2-a3-gates");
+        assert_eq!(
+            SnapshotName::review(7, 2, 3, 4).as_str(),
+            "k7-g2-a3-review4"
+        );
     }
 
     #[test]
@@ -1146,7 +1188,7 @@ mod tests {
     fn the_reader_accepts_exactly_the_fields_a_record_writes() {
         let record = IntentRecord::new(
             &Slot::Snapshot {
-                name: SnapshotName::gates(1, 1),
+                name: SnapshotName::gates(0, 1, 1),
             },
             "run".to_owned(),
             "01".to_owned(),

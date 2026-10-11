@@ -296,35 +296,502 @@ fn every_composed_environment_disables_replacement_objects() {
     );
 }
 
+fn managed_repository() -> (crate::rundir::scratch_tree::ScratchTree, ManagedRepository) {
+    let tree = crate::rundir::scratch_tree::acquire(&std::env::temp_dir(), "v1-scope")
+        .expect("a scratch tree");
+    let name = if cfg!(windows) {
+        "repo [x]"
+    } else {
+        "repo [x]*?"
+    };
+    let common = tree.path().join(name).join(".git");
+    std::fs::create_dir_all(common.join("refs")).expect("a common directory the scope can look up");
+    let common = std::fs::canonicalize(&common).expect("its canonical path");
+    let include = tree.path().join("recorded-objects.gitconfig");
+    let repository = ManagedRepository::new(&common, &include, GitdirRule::native())
+        .expect("a repository the runner can scope");
+    (tree, repository)
+}
+
 #[test]
-fn the_v1_conductors_environment_composes_no_replacement_isolation() {
+fn the_v1_conductors_environment_confines_the_recorded_graph_to_its_repository() {
+    let (_tree, repository) = managed_repository();
+    let legacy = HostRunner::for_legacy_workspace(repository.clone());
+    assert_eq!(
+        legacy.environment().objects(),
+        &ObjectGraph::RecordedIn(repository.clone()),
+        "the environment `engine::run` and `engine::resume` install must read the objects \
+         the repository holds, which is the graph `src/workspace.rs` writes the v0.1 \
+         workspace and its gate snapshots from, and only in that repository"
+    );
+    let ours = repository.parameters().to_owned();
+    let inherited = "'core.useReplaceRefs'='true'";
+    let overlaid = "'core.useReplaceRefs'='true' 'color.ui'='false'";
     let mut rows = 0_usize;
     for case in KeyCase::ALL {
-        let mut base = synthetic_base();
-        base.push((
-            os(NO_REPLACEMENT_OBJECTS.0),
-            os("whatever-the-operator-exported"),
-        ));
-        let environment = HostEnvironment::with_base(base, *case).reading(ObjectGraph::AsReplaced);
-        for role in ExecutionRole::all() {
-            let composed = environment
-                .compose(&role, Some(&AgentId::new(claude::ADAPTER_ID)), &[])
-                .unwrap_or_else(|error| panic!("{role} ({case:?}) was refused: {error}"));
-            assert_eq!(
-                value(&composed, NO_REPLACEMENT_OBJECTS.0, *case),
-                Some(OsStr::new("whatever-the-operator-exported")),
-                "{role} ({case:?}): the v0.1 conductor's own base is what its \
-                 children read, and this boundary must add nothing to it"
-            );
-            rows += 1;
+        let spelling = match case {
+            KeyCase::Sensitive => CONFIG_PARAMETERS.to_owned(),
+            KeyCase::Insensitive => CONFIG_PARAMETERS.to_ascii_lowercase(),
+        };
+        for (base_value, overlay_value, prefix) in [
+            (None, None, None),
+            (Some(""), None, None),
+            (Some(inherited), None, Some(inherited)),
+            (None, Some(overlaid), Some(overlaid)),
+            (Some(inherited), Some(overlaid), Some(overlaid)),
+        ] {
+            let mut base = synthetic_base();
+            if let Some(value) = base_value {
+                base.push((os(&spelling), os(value)));
+            }
+            let overlay: Vec<(String, String)> = overlay_value
+                .map(|value| vec![(CONFIG_PARAMETERS.to_owned(), value.to_owned())])
+                .unwrap_or_default();
+            let environment = HostEnvironment::with_base(base, *case)
+                .reading(legacy.environment().objects().clone());
+            for role in ExecutionRole::all() {
+                let composed = environment
+                    .compose(&role, Some(&AgentId::new(claude::ADAPTER_ID)), &overlay)
+                    .unwrap_or_else(|error| panic!("{role} ({case:?}) was refused: {error}"));
+                let mut expected = prefix.map(OsString::from).unwrap_or_default();
+                if !expected.is_empty() {
+                    expected.push(" ");
+                }
+                expected.push(&ours);
+                assert_eq!(
+                    value(&composed, CONFIG_PARAMETERS, *case),
+                    Some(expected.as_os_str()),
+                    "{role} ({case:?}, base {base_value:?}, overlay {overlay_value:?}): the \
+                     includes must come after every inherited entry, because Git reads \
+                     `GIT_CONFIG_PARAMETERS` after the counted pairs and the last value wins"
+                );
+                assert_eq!(
+                    composed
+                        .iter()
+                        .filter(|(name, _)| case.same_key(name, OsStr::new(CONFIG_PARAMETERS)))
+                        .count(),
+                    1,
+                    "{role} ({case:?}): one variable, however the base spelled it"
+                );
+                assert_eq!(
+                    value(&composed, NO_REPLACEMENT_OBJECTS.0, *case),
+                    None,
+                    "{role} ({case:?}): the process-wide variable reaches every repository a \
+                     role creates, which is the regression this policy replaces"
+                );
+                rows += 1;
+            }
         }
     }
-    assert_eq!(rows, 5 * KeyCase::ALL.len(), "every role, both key cases");
     assert_eq!(
-        HostRunner::for_legacy_workspace().environment().objects(),
-        ObjectGraph::AsReplaced,
-        "and that is the environment `engine::run` and `engine::resume` install"
+        rows,
+        5 * 5 * KeyCase::ALL.len(),
+        "every role, every source, both key cases"
     );
+
+    let mut base = synthetic_base();
+    base.push((os(NO_REPLACEMENT_OBJECTS.0), os("the-operators-own")));
+    let composed = HostEnvironment::with_base(base, KeyCase::current())
+        .reading(legacy.environment().objects().clone())
+        .compose(&ExecutionRole::Gate, None, &[])
+        .expect("compose");
+    assert_eq!(
+        value(&composed, NO_REPLACEMENT_OBJECTS.0, KeyCase::current()),
+        Some(OsStr::new("the-operators-own")),
+        "an operator who exports the variable keeps it: the runner neither adds nor removes it"
+    );
+    for role in ExecutionRole::all() {
+        let composed = legacy
+            .environment()
+            .compose(&role, Some(&AgentId::new(claude::ADAPTER_ID)), &[])
+            .unwrap_or_else(|error| panic!("{role} was refused: {error}"));
+        let parameters = value(&composed, CONFIG_PARAMETERS, legacy.environment().case())
+            .map(|value| value.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        assert!(
+            parameters.ends_with(&*ours.to_string_lossy()),
+            "{role}: the constructor's own environment, over this process's base, ends with \
+             the includes"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn the_includes_refuse_a_common_directory_git_cannot_read_in_a_key() {
+    let include = Path::new("/home/u/.upstroke/git/recorded-objects.gitconfig");
+    let refused =
+        ManagedRepository::new(Path::new("/srv/new\nline/.git"), include, GitdirRule::Posix)
+            .expect_err("Git refuses a newline in a configuration key")
+            .to_string();
+    assert!(refused.contains("newline"), "{refused}");
+    for (common, included) in [
+        ("relative/.git", "/home/u/include"),
+        ("/srv/repo/.git", "relative/include"),
+    ] {
+        let refused =
+            ManagedRepository::new(Path::new(common), Path::new(included), GitdirRule::Posix)
+                .expect_err("Git reads neither a relative condition nor a relative include")
+                .to_string();
+        assert!(refused.contains("absolute"), "{refused}");
+    }
+    let refused = ManagedRepository::new(
+        Path::new("/srv/upstroke-no-such-repository/.git"),
+        include,
+        GitdirRule::Posix,
+    )
+    .expect_err("a directory that is not there cannot say whether it folds case")
+    .to_string();
+    assert!(
+        refused.contains("in another case") && refused.contains("upstroke-no-such-repository"),
+        "{refused}"
+    );
+}
+
+#[test]
+fn the_windows_rule_spells_a_path_as_git_for_windows_does() {
+    for (canonical, spelled) in [
+        (r"\\?\C:\Users\Me\repo\.git", "C:/Users/Me/repo/.git"),
+        (
+            r"\\?\UNC\server\share\repo\.git",
+            "//server/share/repo/.git",
+        ),
+        (r"C:\Users\Me\repo\.git", "C:/Users/Me/repo/.git"),
+        ("C:/Users/Me/repo/.git", "C:/Users/Me/repo/.git"),
+    ] {
+        assert_eq!(
+            GitdirRule::Windows.spelling(canonical.as_bytes()),
+            spelled.as_bytes(),
+            "{canonical}"
+        );
+    }
+    assert_eq!(
+        GitdirRule::Posix.spelling(br"/srv/a\b/.git"),
+        br"/srv/a\b/.git".to_vec(),
+        "a Unix path is spelled as it is"
+    );
+    for rule in GitdirRule::ALL {
+        assert_eq!(
+            rule.keyword(),
+            "gitdir:",
+            "{rule:?}: `gitdir/i:` folds every component, whatever the directory holding it does"
+        );
+    }
+    assert_eq!(
+        GitdirRule::native(),
+        if cfg!(windows) {
+            GitdirRule::Windows
+        } else {
+            GitdirRule::Posix
+        }
+    );
+    assert_eq!(GitdirRule::ALL.len(), 2);
+}
+
+#[test]
+fn a_v1_role_never_starts_without_the_include_that_confines_its_recorded_graph() {
+    let tree = crate::rundir::scratch_tree::acquire(&std::env::temp_dir(), "v1-include-gone")
+        .expect("a scratch tree");
+    let include = tree.path().join("recorded-objects.gitconfig");
+    let workspace = tree.path().join("ws");
+    std::fs::create_dir(&workspace).expect("a workspace");
+    std::fs::create_dir_all(tree.path().join("repo.git").join("refs")).expect("a common directory");
+    let repository = ManagedRepository::new(
+        &tree.path().join("repo.git"),
+        &include,
+        GitdirRule::native(),
+    )
+    .expect("a scope");
+    let runner = HostRunner::for_legacy_workspace(repository);
+    let request = || {
+        crate::runner::gate_request(
+            native().spec("exit 0"),
+            workspace.clone(),
+            crate::config::DEFAULT_GATE_TIMEOUT,
+            gate_invocation(),
+        )
+    };
+    for (state, bytes) in [
+        ("missing", None),
+        (
+            "altered",
+            Some(b"[core]\n\tuseReplaceRefs = true\n".as_slice()),
+        ),
+        ("empty", Some(b"".as_slice())),
+    ] {
+        if let Some(bytes) = bytes {
+            std::fs::write(&include, bytes).expect("the include, altered");
+        }
+        let refused = runner
+            .run_blocking(&request())
+            .expect_err("a role without its include must not start");
+        assert_eq!(
+            refused.fate,
+            crate::error::ProcessFate::NeverStarted,
+            "{state}: {refused}"
+        );
+        let message = refused.source.to_string();
+        assert!(
+            message.contains("refusing to start a role process")
+                && message.contains(&include.display().to_string()),
+            "{state}: {message}"
+        );
+    }
+    std::fs::write(&include, RECORDED_OBJECTS_INCLUDE).expect("the include, whole");
+    runner
+        .run_blocking(&request())
+        .expect("with its include in place the role starts");
+}
+
+#[test]
+fn a_repository_whose_path_differs_from_the_managed_one_only_in_case_keeps_its_replacements() {
+    let status = crate::workspace_manager::fixture::run_replacement_witness_child(
+        "runner::host::tests::v1_case_sibling_helper",
+    );
+    assert!(
+        status.success(),
+        "the child scopes a v0.1 runner to `Repo` under each rule this platform's Git reads, \
+         beside `repo`, and has its gates read both, and ended {status:?}"
+    );
+}
+
+fn case_git(dir: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args([
+            "-c",
+            "user.name=upstroke tests",
+            "-c",
+            "user.email=tests@upstroke.local",
+            "-c",
+            "maintenance.auto=false",
+        ])
+        .args(args)
+        .output()
+        .expect("run git");
+    assert!(
+        out.status.success(),
+        "git {args:?} in {}: {}",
+        dir.display(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_owned()
+}
+
+fn replaced_repository(repo: &Path) -> String {
+    case_git(repo, &["init", "-q"]);
+    std::fs::write(repo.join("f.txt"), "recorded\n").expect("the recorded blob");
+    case_git(repo, &["add", "f.txt"]);
+    case_git(repo, &["commit", "-q", "-m", "recorded"]);
+    let recorded = case_git(repo, &["rev-parse", "HEAD:f.txt"]);
+    std::fs::write(repo.join("replacing.txt"), "replacing\n").expect("the replacing blob");
+    let replacing = case_git(repo, &["hash-object", "-w", "replacing.txt"]);
+    case_git(repo, &["replace", &recorded, &replacing]);
+    assert_eq!(
+        case_git(repo, &["cat-file", "-p", &recorded]),
+        "replacing",
+        "{}: outside any run the replacement is live, or nothing below is measured",
+        repo.display()
+    );
+    recorded
+}
+
+fn read_case_siblings(dir: &Path, include: &Path) -> bool {
+    let managed = dir.join("Repo");
+    std::fs::create_dir_all(&managed).expect("the managed repository's directory");
+    let managed_blob = replaced_repository(&managed);
+    let siblings: Vec<(PathBuf, String, bool)> = ["repo", "rEPO"]
+        .into_iter()
+        .map(|name| {
+            let sibling = dir.join(name);
+            match std::fs::create_dir(&sibling) {
+                Ok(()) => {
+                    let blob = replaced_repository(&sibling);
+                    (sibling, blob, true)
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    (sibling, managed_blob.clone(), false)
+                }
+                Err(error) => panic!("{}: {error}", sibling.display()),
+            }
+        })
+        .collect();
+    let separate = siblings.iter().all(|(_, _, separate)| *separate);
+    assert!(
+        separate || siblings.iter().all(|(_, _, separate)| !*separate),
+        "{}: the directory found one spelling of `Repo` and not the other: {siblings:?}",
+        dir.display()
+    );
+    let linked = dir.join("Repo-linked");
+    case_git(
+        &managed,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            &linked.to_string_lossy(),
+        ],
+    );
+    let id = PathBuf::from(case_git(&linked, &["rev-parse", "--absolute-git-dir"]))
+        .file_name()
+        .map(|id| id.to_string_lossy().into_owned())
+        .expect("the linked worktree's own Git directory");
+    let common = std::fs::canonicalize(managed.join(".git")).expect("the common directory");
+    let rules = GitdirRule::ALL
+        .iter()
+        .filter(|rule| cfg!(unix) || **rule == GitdirRule::Windows);
+    for rule in rules {
+        let scope = ManagedRepository::new(&common, include, *rule).expect("the managed scope");
+        let runner = HostRunner::for_legacy_workspace(scope);
+        let read_as = |workspace: &Path, how: &str, repository: &Path, blob: &str| {
+            let output = runner
+                .run_blocking(&crate::runner::gate_request(
+                    CommandSpec::new("git")
+                        .arg(how)
+                        .arg(repository.to_string_lossy())
+                        .arg("cat-file")
+                        .arg("-p")
+                        .arg(blob),
+                    workspace.to_path_buf(),
+                    crate::config::DEFAULT_GATE_TIMEOUT,
+                    gate_invocation(),
+                ))
+                .expect("the gate runs");
+            assert_eq!(output.code, Some(0), "{rule:?}: {output:?}");
+            output.stdout.trim().to_owned()
+        };
+        let read = |workspace: &Path, repository: &Path, blob: &str| {
+            read_as(workspace, "-C", repository, blob)
+        };
+        for (workspace, what) in [
+            (&managed, "the managed repository"),
+            (&linked, "its linked worktree"),
+        ] {
+            assert_eq!(
+                read(workspace, workspace, &managed_blob),
+                "recorded",
+                "{rule:?}, {}: a gate in {what} reads the objects it records",
+                dir.display()
+            );
+        }
+        let expected = if separate { "replacing" } else { "recorded" };
+        for (sibling, blob, _) in &siblings {
+            for workspace in [&managed, sibling] {
+                assert_eq!(
+                    read(workspace, sibling, blob),
+                    expected,
+                    "{rule:?}, {}: a gate in {} reads {}, which is {}",
+                    dir.display(),
+                    workspace.display(),
+                    sibling.display(),
+                    if separate {
+                        "a repository of its own and keeps its replacement"
+                    } else {
+                        "the managed repository spelled in another case"
+                    }
+                );
+            }
+        }
+        if !separate {
+            let name = dir
+                .file_name()
+                .map(|name| name.to_string_lossy().to_ascii_uppercase())
+                .expect("the layout's own directory");
+            let respelled = dir.with_file_name(name).join("REPO").join(".GIT");
+            assert_eq!(
+                read_as(&managed, "--git-dir", &respelled, &managed_blob),
+                "recorded",
+                "{rule:?}: a gate names the managed repository's Git directory as {}, which \
+                 Git keeps as spelled wherever its realpath does not look the case up",
+                respelled.display()
+            );
+            let stored = managed.join(".git");
+            for (spelled, how) in [
+                (stored.join("worktrees").join(&id), "as Git stores it"),
+                (
+                    stored.join("WORKTREES").join(&id),
+                    "with `worktrees` in capitals",
+                ),
+                (
+                    respelled.join("WORKTREES").join(id.to_ascii_uppercase()),
+                    "in capitals",
+                ),
+            ] {
+                assert_eq!(
+                    read_as(&linked, "--git-dir", &spelled, &managed_blob),
+                    "recorded",
+                    "{rule:?}: a gate names its linked worktree's Git directory {how}, as {}, \
+                     which Git keeps as spelled wherever its realpath does not look the case up",
+                    spelled.display()
+                );
+            }
+        }
+    }
+    separate
+}
+
+#[test]
+#[ignore = "subprocess helper"]
+fn v1_case_sibling_helper() {
+    if std::env::var_os(crate::workspace_manager::fixture::REPLACEMENT_WITNESS).is_none() {
+        return;
+    }
+    crate::workspace_manager::fixture::assert_replacement_controls_pinned("v1-case-sibling");
+    let tree =
+        crate::rundir::scratch_tree::acquire(&std::env::temp_dir(), "v1k").expect("a scratch tree");
+    let include = tree.path().join("recorded-objects.gitconfig");
+    std::fs::write(&include, RECORDED_OBJECTS_INCLUDE).expect("the include");
+    let temporary = tree.path().join("t");
+    let separate = read_case_siblings(&temporary, &include);
+    if std::env::var_os("UPSTROKE_TEST_TEMP_FOLDS_CASE").is_some_and(|value| value == "1") {
+        assert!(
+            !separate,
+            "UPSTROKE_TEST_TEMP_FOLDS_CASE=1 declares that {} folds case, but `repo` beside \
+             `Repo` is a directory of its own",
+            temporary.display()
+        );
+    }
+    println!(
+        "v1-case-sibling: {} {}",
+        temporary.display(),
+        if separate {
+            "is case-sensitive, and `repo` kept its replacement under every rule"
+        } else {
+            "folds case, and `repo` read the managed repository's recorded graph"
+        }
+    );
+    if cfg!(windows) {
+        let sensitive = tree.path().join("s");
+        std::fs::create_dir(&sensitive).expect("a directory to make case-sensitive");
+        let enabled = Command::new("fsutil")
+            .args(["file", "setCaseSensitiveInfo"])
+            .arg(&sensitive)
+            .arg("enable")
+            .output()
+            .expect("run fsutil");
+        if enabled.status.success() {
+            assert!(
+                read_case_siblings(&sensitive, &include),
+                "fsutil made {} case-sensitive, so `repo` beside `Repo` is a directory of its \
+                 own",
+                sensitive.display()
+            );
+            println!(
+                "v1-case-sibling: {} is case-sensitive inside a folding directory, and `repo` \
+                 kept its replacement",
+                sensitive.display()
+            );
+        } else {
+            println!(
+                "v1-case-sibling: fsutil could not make {} case-sensitive ({}), so only the \
+                 folding half ran here",
+                sensitive.display(),
+                String::from_utf8_lossy(&enabled.stdout).trim()
+            );
+        }
+    }
 }
 
 #[test]
@@ -533,7 +1000,7 @@ fn environment_dump_helper() {
 }
 
 fn dumped_environment(runner: &HostRunner, request: &RunnerRequest) -> Vec<String> {
-    let output = runner.run(request).expect("run the dump helper");
+    let output = runner.run_blocking(request).expect("run the dump helper");
     assert_eq!(output.code, Some(0), "{output:?}");
     let body = output
         .stdout
@@ -1170,7 +1637,7 @@ fn supervision_parity_tests() {
         };
         let started = std::time::Instant::now();
         let actual = runner
-            .run(&request)
+            .run_blocking(&request)
             .unwrap_or_else(|error| panic!("{}: runner supervision: {error}", fixture.name));
         let elapsed = started.elapsed();
 
@@ -1355,7 +1822,7 @@ fn the_runner_returns_the_childs_whole_output_for_every_production_request_shape
             ] {
                 let cell = format!("{id}/{what}/{role_name}");
                 let output = runner
-                    .run(&request)
+                    .run_blocking(&request)
                     .unwrap_or_else(|error| panic!("{cell}: {error}"));
                 assert_transparent(&cell, &output);
                 roles.insert(role_name);
@@ -1381,7 +1848,7 @@ fn the_runner_returns_the_childs_whole_output_for_every_production_request_shape
         .expect("a probe identity for a shipped adapter");
         let cell = format!("{}/probe", adapter.id());
         let output = runner
-            .run(&request)
+            .run_blocking(&request)
             .unwrap_or_else(|error| panic!("{cell}: {error}"));
         assert_transparent(&cell, &output);
         roles.insert("Probe");
@@ -1418,7 +1885,7 @@ fn the_runner_returns_the_childs_whole_output_for_every_production_request_shape
         crate::config::DEFAULT_GATE_TIMEOUT,
         gate_invocation(),
     );
-    let output = runner.run(&request).expect("the gate role");
+    let output = runner.run_blocking(&request).expect("the gate role");
     assert_transparent("gate/shell", &output);
     roles.insert("Gate");
     cells += 1;
@@ -1525,7 +1992,7 @@ fn the_runner_bounds_output_at_the_same_allowance_the_direct_funnel_does() {
     };
     let started = std::time::Instant::now();
     let routed = HostRunner::new()
-        .run(&request)
+        .run_blocking(&request)
         .expect("runner supervision of a noisy child");
     let routed_elapsed = started.elapsed();
     let _ = std::fs::remove_dir_all(&workspace);
@@ -1582,7 +2049,7 @@ fn the_runner_executes_in_the_requested_workspace() {
         agent: None,
         invocation: gate_invocation(),
     };
-    let output = HostRunner::new().run(&request).expect("run");
+    let output = HostRunner::new().run_blocking(&request).expect("run");
     assert_eq!(output.code, Some(0), "{output:?}");
     assert!(marker.exists(), "the child did not run in the workspace");
     let _ = std::fs::remove_dir_all(&workspace);
@@ -1615,7 +2082,7 @@ fn the_overlay_reaches_the_child_and_a_reserved_key_never_gets_that_far() {
         agent: None,
         invocation: gate_invocation(),
     };
-    let output = HostRunner::new().run(&request).expect("run");
+    let output = HostRunner::new().run_blocking(&request).expect("run");
     assert!(
         output.stdout.contains("[reached]"),
         "the overlay did not reach the child: {output:?}"
@@ -1629,7 +2096,7 @@ fn the_overlay_reaches_the_child_and_a_reserved_key_never_gets_that_far() {
         ..request
     };
     let error = HostRunner::new()
-        .run(&hijack)
+        .run_blocking(&hijack)
         .expect_err("a reserved key must be refused before any spawn");
     assert!(error.to_string().contains("PATH"), "{error}");
     let _ = std::fs::remove_dir_all(&workspace);
@@ -1674,7 +2141,7 @@ fn a_gate_child_is_told_where_no_agents_credentials_live() {
         agent: Some(AgentId::new(codex::ADAPTER_ID)),
         invocation: gate_invocation(),
     };
-    let gate = runner.run(&request).expect("gate runs");
+    let gate = runner.run_blocking(&request).expect("gate runs");
     assert_eq!(gate.code, Some(0), "{gate:?}");
     for value in [
         "/home/upstroke/.codex",
@@ -1689,7 +2156,7 @@ fn a_gate_child_is_told_where_no_agents_credentials_live() {
     }
 
     let worker = runner
-        .run(&RunnerRequest {
+        .run_blocking(&RunnerRequest {
             role: ExecutionRole::Implement,
             ..request
         })
@@ -1712,8 +2179,8 @@ fn a_gate_child_is_told_where_no_agents_credentials_live() {
 
 struct StubRunner(Box<dyn Fn() -> Result<ProcessOutput, UpstrokeError> + Send + Sync>);
 
-impl Runner for StubRunner {
-    fn run(&self, request: &RunnerRequest) -> Result<ProcessOutput, RunnerError> {
+impl crate::runner::contract::tests::InlineRunner for StubRunner {
+    fn run_inline(&self, request: &RunnerRequest) -> Result<ProcessOutput, RunnerError> {
         (self.0)().map_err(|error| RunnerError::never_started(&request.invocation, error))
     }
 }
@@ -1963,7 +2430,7 @@ fn host_shell_probe_succeeds_with_recorded_shell_and_fails_when_shell_missing() 
         request.command.program
     );
     let error = runner
-        .run(&request)
+        .run_blocking(&request)
         .expect_err("a program that is not there cannot be spawned");
     let message = error.to_string();
     assert!(message.contains("spawn"), "{message}");
@@ -2107,7 +2574,9 @@ fn observed_points(runner_hooks: HarnessHooks) -> BTreeSet<SubEffectPoint> {
         agent: None,
         invocation: gate_invocation(),
     };
-    let output = runner.run(&request).expect("run through the funnel");
+    let output = runner
+        .run_blocking(&request)
+        .expect("run through the funnel");
     assert_eq!(output.code, Some(0), "{output:?}");
     let _ = std::fs::remove_dir_all(&workspace);
     let harness = harness.lock().expect("harness");
@@ -2153,7 +2622,9 @@ fn point_order() -> Vec<SubEffectPoint> {
         agent: None,
         invocation: gate_invocation(),
     };
-    let output = runner.run(&request).expect("run through the funnel");
+    let output = runner
+        .run_blocking(&request)
+        .expect("run through the funnel");
     assert_eq!(output.code, Some(0), "{output:?}");
     let _ = std::fs::remove_dir_all(&workspace);
     order.lock().expect("order").clone()
@@ -2521,7 +2992,7 @@ fn run_in_role(
         return runner.shell_probe(native(), workspace, shell_probe_invocation());
     }
     let request = production_request(role, workspace)?;
-    let output = runner.run(&request)?;
+    let output = runner.run_blocking(&request)?;
     assert_eq!(output.code, Some(0), "{role}: {output:?}");
     Ok(())
 }
@@ -2834,7 +3305,7 @@ fn every_production_invocation_identity_reaches_the_containment_points() {
         let witness = RoleWitness::new();
         let runner = HostRunner::new().with_hooks(Box::new(witness.handle()));
         let output = runner
-            .run(request)
+            .run_blocking(request)
             .unwrap_or_else(|error| panic!("{what}: {error}"));
         assert_eq!(output.code, Some(0), "{what}: {output:?}");
         let harness = witness.harness.lock().expect("harness");
@@ -2883,7 +3354,7 @@ fn every_shipped_agent_binding_reaches_the_containment_points() {
             worker_invocation(),
         );
         assert_eq!(request.agent.as_ref().map(AgentId::as_str), Some(*id));
-        let output = runner.run(&request);
+        let output = runner.run_blocking(&request);
         let _ = std::fs::remove_dir_all(&workspace);
         let output = output.unwrap_or_else(|error| panic!("{id}: {error}"));
         assert_eq!(output.code, Some(0), "{id}: {output:?}");
@@ -2967,7 +3438,7 @@ fn every_production_program_shape_reaches_the_containment_points() {
             crate::engine::DEFAULT_ATTEMPT_TIMEOUT,
             worker_invocation(),
         );
-        let output = runner.run(&request);
+        let output = runner.run_blocking(&request);
         let _ = std::fs::remove_dir_all(&workspace);
         let output = output.unwrap_or_else(|error| panic!("{}: {error}", shape.what));
         assert_eq!(output.code, Some(0), "{}: {output:?}", shape.what);
@@ -3013,7 +3484,7 @@ fn every_production_program_shape_reaches_the_containment_points() {
                 crate::engine::DEFAULT_ATTEMPT_TIMEOUT,
                 worker_invocation(),
             );
-            let outcome = runner.run(&request);
+            let outcome = runner.run_blocking(&request);
             let _ = std::fs::remove_dir_all(&workspace);
             let error = outcome.err().unwrap_or_else(|| {
                 panic!(
@@ -3103,7 +3574,7 @@ fn the_cli_roles_of_the_grid_run_a_shim_shaped_program_through_the_funnel() {
         let runner = HostRunner::new().with_hooks(Box::new(witness.handle()));
         std::fs::create_dir_all(&request.workspace).expect("the request's workspace");
         let output = runner
-            .run(request)
+            .run_blocking(request)
             .unwrap_or_else(|error| panic!("{what}: {error}"));
         assert_eq!(output.code, Some(0), "{what}: {output:?}");
         assert!(
@@ -3130,7 +3601,7 @@ fn the_cli_roles_of_the_grid_run_a_shim_shaped_program_through_the_funnel() {
 fn the_grids_agent_cli_child_runs_no_test_and_exits_zero() {
     let workspace = scratch("agent-cli-child");
     let output = HostRunner::new()
-        .run(&RunnerRequest {
+        .run_blocking(&RunnerRequest {
             command: agent_cli_command(WORKER_STDIN.as_bytes()),
             workspace: workspace.clone(),
             role: ExecutionRole::Gate,
@@ -3261,7 +3732,7 @@ fn spawn_funnel_kill_helper() {
     start_write_command(&mut proc::NoHooks)
         .expect("the helper establishes containment before it spawns anything");
     let runner = HostRunner::new().with_hooks(Box::new(KillAtPoint(point)));
-    let _ = runner.run(&crate::runner::gate_request(
+    let _ = runner.run_blocking(&crate::runner::gate_request(
         shell_command(),
         workspace.clone(),
         crate::config::DEFAULT_GATE_TIMEOUT,
@@ -3430,7 +3901,9 @@ fn the_pre_exec_containment_step_runs_in_the_forked_child() {
         agent: None,
         invocation: gate_invocation(),
     };
-    let output = runner.run(&request).expect("run through the funnel");
+    let output = runner
+        .run_blocking(&request)
+        .expect("run through the funnel");
     assert_eq!(output.code, Some(0), "{output:?}");
     let _ = std::fs::remove_dir_all(&workspace);
 
@@ -3864,7 +4337,7 @@ fn windows_ambient_coordinator_helper() {
         agent: None,
         invocation: gate_invocation(),
     };
-    let _ = runner.run(&request);
+    let _ = runner.run_blocking(&request);
     unreachable!("the coordinator helper was supposed to die at CreatedSuspended");
 }
 
@@ -4252,7 +4725,47 @@ mod inherited_writer {
         assert_eq!(output.code, Some(0), "{output:?}");
 
         let fifo_name = "shim fifo ' $name";
-        let fifo = root.0.join(fifo_name);
+        writes_leave_no_writer_in_another_threads_fork(&root.0.join(fifo_name), |fifo, marker| {
+            assert_eq!(marker_shim(&root.0, fifo_name, marker), fifo);
+        });
+    }
+
+    #[test]
+    fn the_reaper_relay_writer_leaves_no_writer_in_another_threads_fork() {
+        let ended = proc::test_support::run_test_isolated(
+            "runner::host::tests::inherited_writer::reaper_relay_writer_helper",
+            &[],
+            Duration::from_secs(180),
+        );
+        assert!(
+            ended.status.is_some_and(|status| status.success()),
+            "the isolated inherited-writer witness ended within its bound: {ended}"
+        );
+        assert!(
+            ended.stdout.contains("1 passed"),
+            "the helper must run one test: {ended}"
+        );
+    }
+
+    #[test]
+    #[ignore = "subprocess helper; holds forked descriptors away from other tests"]
+    fn reaper_relay_writer_helper() {
+        let root = Scratch(scratch("reaper-relay-writer"));
+        writes_leave_no_writer_in_another_threads_fork(
+            &root.0.join("relay fifo ' $name"),
+            |fifo, marker| {
+                crate::runner::container::write_program_in_its_own_process(
+                    fifo,
+                    &shim_script(marker),
+                );
+            },
+        );
+    }
+
+    fn writes_leave_no_writer_in_another_threads_fork(
+        fifo: &Path,
+        write: impl FnOnce(&Path, &str) + Send,
+    ) {
         let name =
             std::ffi::CString::new(fifo.as_os_str().as_bytes()).expect("a NUL-free FIFO path");
         // SAFETY: name is a live NUL-terminated path in our private scratch
@@ -4265,7 +4778,7 @@ mod inherited_writer {
         let mut reader = std::fs::OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NONBLOCK)
-            .open(&fifo)
+            .open(fifo)
             .expect("open the FIFO reader before the shim writer");
         // SAFETY: reader owns a live FIFO descriptor. F_SETPIPE_SZ takes an
 
@@ -4280,11 +4793,11 @@ mod inherited_writer {
         let expected = shim_script(&marker).into_bytes();
         let mut actual = vec![0; expected.len()];
         std::thread::scope(|scope| {
-            let writer = scope.spawn(|| marker_shim(&root.0, fifo_name, &marker));
+            let writer = scope.spawn(|| write(fifo, &marker));
             read_fifo(&mut reader, &mut actual[..1]);
             let held = hold_inherited_descriptors();
             read_fifo(&mut reader, &mut actual[1..]);
-            assert_eq!(writer.join().expect("join the shim writer"), fifo);
+            writer.join().expect("join the shim writer");
             held.assert_alive();
             let eof = reader.read(&mut [0_u8]);
             held.assert_alive();
@@ -4726,7 +5239,7 @@ fn a_bare_name_that_only_pathext_resolves_runs_through_the_host_runner() {
         );
 
         let output = runner
-            .run(&named_request(name, argument, &workspace))
+            .run_blocking(&named_request(name, argument, &workspace))
             .unwrap_or_else(|error| panic!(".{extension}: {error}"));
         assert_eq!(output.code, Some(0), ".{extension}: {output:?}");
         assert!(
@@ -4765,7 +5278,7 @@ fn two_runners_in_one_process_resolve_one_name_against_their_own_environments() 
 
     let ran = |runner: &HostRunner, which: &str| -> String {
         let output = runner
-            .run(&named_request(&name, "arg", &workspace))
+            .run_blocking(&named_request(&name, "arg", &workspace))
             .unwrap_or_else(|error| panic!("{which}: {error}"));
         assert_eq!(output.code, Some(0), "{which}: {output:?}");
         output.stdout.trim().to_owned()
@@ -4806,7 +5319,7 @@ fn an_absolute_program_is_spawned_as_given_even_when_path_holds_that_name() {
         .to_owned();
 
     let by_path = runner
-        .run(&named_request(&program, "arg", &workspace))
+        .run_blocking(&named_request(&program, "arg", &workspace))
         .expect("an absolute shim spawns");
     assert_eq!(by_path.code, Some(0), "{by_path:?}");
     assert_eq!(
@@ -4816,7 +5329,7 @@ fn an_absolute_program_is_spawned_as_given_even_when_path_holds_that_name() {
     );
 
     let by_name = runner
-        .run(&named_request(&name, "arg", &workspace))
+        .run_blocking(&named_request(&name, "arg", &workspace))
         .expect("the bare name resolves on PATH");
     assert_eq!(by_name.stdout.trim(), "ONPATH:arg");
     let _ = std::fs::remove_dir_all(&root);
@@ -4881,7 +5394,7 @@ fn a_program_is_resolved_once_per_spawn_before_any_of_it_and_never_before_compos
 
         let before = program_resolutions();
         let output = runner
-            .run(&named_request(&program, "arg", &workspace))
+            .run_blocking(&named_request(&program, "arg", &workspace))
             .unwrap_or_else(|error| panic!("{what}: {error}"));
         assert_eq!(output.stdout.trim(), "ONCE:arg", "{what}");
         assert_eq!(
@@ -4916,7 +5429,7 @@ fn a_program_is_resolved_once_per_spawn_before_any_of_it_and_never_before_compos
     request.command.env = vec![("PATH".to_owned(), "/somewhere/else".to_owned())];
     let before = program_resolutions();
     let error = runner
-        .run(&request)
+        .run_blocking(&request)
         .expect_err("an overlay naming a reserved key is refused pre-flight");
     assert!(error.to_string().contains("reserved"), "{error}");
     assert_eq!(
@@ -4936,7 +5449,7 @@ fn a_program_is_resolved_once_per_spawn_before_any_of_it_and_never_before_compos
         .with_hooks(Box::new(witness.handle()));
     let before = program_resolutions();
     let error = runner
-        .run(&named_request(&name, "arg", &workspace))
+        .run_blocking(&named_request(&name, "arg", &workspace))
         .expect_err("a name that matches nothing is refused");
     assert!(error.to_string().contains(&name), "{error}");
     assert_eq!(
@@ -5066,7 +5579,7 @@ fn a_resolved_cmd_keeps_the_raw_tail_rule() {
         gate_invocation(),
     );
     let out = HostRunner::new()
-        .run(&request)
+        .run_blocking(&request)
         .expect("a gate's shell runs through the runner");
     assert_eq!(
         out.stdout.trim(),
@@ -5155,7 +5668,7 @@ fn one_boundary_executes_one_file_for_a_name_across_a_probe_and_the_attempt() {
         .expect("a worker carries a chosen program");
 
     let searches = program_searches();
-    let certified = runner.run(&probe).expect("the probe runs the CLI");
+    let certified = runner.run_blocking(&probe).expect("the probe runs the CLI");
     assert_eq!(
         certified.stdout.trim(),
         "FIRST:arg",
@@ -5167,7 +5680,7 @@ fn one_boundary_executes_one_file_for_a_name_across_a_probe_and_the_attempt() {
 
     let fresh = HostRunner::new().with_environment(environment());
     let moved = fresh
-        .run(
+        .run_blocking(
             &role_request_for(&ExecutionRole::Implement, &name, "arg", &workspace)
                 .expect("a worker carries a chosen program"),
         )
@@ -5178,7 +5691,7 @@ fn one_boundary_executes_one_file_for_a_name_across_a_probe_and_the_attempt() {
         "the fixture cannot tell the two installations apart, so it proves nothing"
     );
 
-    let outcome = runner.run(&attempt);
+    let outcome = runner.run_blocking(&attempt);
     let (how, said) = match &outcome {
         Ok(output) => (
             format!("it ran and exited {:?}", output.code),
@@ -5258,7 +5771,7 @@ fn one_name_is_searched_once_for_a_boundary_and_asked_for_once_per_spawn() {
     let mut stdouts = BTreeSet::new();
     for (role, request) in &requests {
         let output = runner
-            .run(request)
+            .run_blocking(request)
             .unwrap_or_else(|error| panic!("{role}: {error}"));
         assert_eq!(output.code, Some(0), "{role}: {output:?}");
         stdouts.insert(output.stdout.trim().to_owned());
@@ -5362,7 +5875,7 @@ fn a_refused_name_is_refused_identically_without_asking_the_filesystem_again() {
     let searches = program_searches();
     let resolutions = program_resolutions();
     let first = runner
-        .run(&named_request(&name, "arg", &workspace))
+        .run_blocking(&named_request(&name, "arg", &workspace))
         .expect_err("nothing of that name is installed");
     assert!(
         matches!(*first.source, UpstrokeError::Refused { .. })
@@ -5374,7 +5887,7 @@ fn a_refused_name_is_refused_identically_without_asking_the_filesystem_again() {
 
     marker_shim(&bin, &shim_file_name(&name), "LATE");
     let again = runner
-        .run(&named_request(&name, "arg", &workspace))
+        .run_blocking(&named_request(&name, "arg", &workspace))
         .expect_err("this boundary already answered for that name")
         .to_string();
     assert_eq!(again, first, "the replayed refusal is not the first one");
@@ -5391,7 +5904,7 @@ fn a_refused_name_is_refused_identically_without_asking_the_filesystem_again() {
 
     let fresh = HostRunner::new().with_environment(environment());
     let output = fresh
-        .run(&named_request(&name, "arg", &workspace))
+        .run_blocking(&named_request(&name, "arg", &workspace))
         .expect("a boundary that had not answered yet finds it");
     assert_eq!(output.stdout.trim(), "LATE:arg");
     let _ = std::fs::remove_dir_all(&root);
@@ -5571,7 +6084,7 @@ fn an_npm_style_installation_runs_by_bare_name_exactly_as_it_runs_by_path() {
             ("the resolved path", located),
         ] {
             let output = runner
-                .run(&named_request(&program, "arg", &workspace))
+                .run_blocking(&named_request(&program, "arg", &workspace))
                 .unwrap_or_else(|error| panic!("{cli}: {what}: {error}"));
             assert_eq!(output.code, Some(0), "{cli}: {what}: {output:?}");
             assert_eq!(
@@ -5610,8 +6123,18 @@ const PATH_ENTRY_TABLE: &[(&str, bool, bool)] = &[
 
 #[test]
 fn every_path_entry_this_runner_searches_names_a_location_on_its_own() {
+    fn search_summary(message: &str) -> Option<&str> {
+        let (_, after) = message.split_once("this runner composes (")?;
+        after.split_once(')').map(|(summary, _)| summary)
+    }
+
     let root = scratch("path-entry-rule");
     let naming = ProgramNaming::current();
+    let program = "upstroke\u{0}no-such-program";
+    assert!(
+        naming.is_bare_name(program),
+        "the program must be a bare name for any entry to be searched: {program:?}"
+    );
     let mut located = 0_usize;
     let mut relative = 0_usize;
     for (entry, on_unix, on_windows) in PATH_ENTRY_TABLE {
@@ -5621,31 +6144,69 @@ fn every_path_entry_this_runner_searches_names_a_location_on_its_own() {
             expected,
             "`{entry}`: this platform disagrees with the table"
         );
-        let message = resolve_program(
-            "upstroke-no-such-program",
-            &composed(&[("PATH", OsStr::new(entry))]),
+        let error = resolve_program(
+            program,
+            &composed(&[("PATH", path_of(&[Path::new(entry)]).as_os_str())]),
             KeyCase::current(),
             naming,
         )
-        .expect_err("nothing of that name exists anywhere")
-        .to_string();
+        .expect_err("nothing of that name exists anywhere");
         if expected {
             located += 1;
-            assert!(
-                message.contains("1 directory searched,"),
-                "`{entry}` names a location and was not searched: {message}"
+            let probe = std::fs::metadata(Path::new(entry).join(program))
+                .expect_err("a name with an interior NUL cannot be stat'ed");
+            assert_ne!(
+                probe.kind(),
+                std::io::ErrorKind::NotFound,
+                "`{entry}`: the fixture must fail with something other than not-found to decide \
+                 anything"
             );
-            assert!(
-                !message.contains("skipped"),
-                "`{entry}` names a location and was skipped: {message}"
+            assert_eq!(
+                probe.raw_os_error(),
+                None,
+                "`{entry}`: the fixture must be refused before the platform is asked: {probe}"
             );
+            match error {
+                UpstrokeError::Filesystem {
+                    operation,
+                    path,
+                    source,
+                } => {
+                    assert_eq!(operation, "stat");
+                    assert_eq!(
+                        path.parent(),
+                        Some(Path::new(entry)),
+                        "`{entry}` names a location and the search stopped somewhere else: {path:?}"
+                    );
+                    assert!(
+                        path.file_name()
+                            .and_then(OsStr::to_str)
+                            .is_some_and(|name| name.starts_with(program)),
+                        "`{entry}`: the candidate asked about is not this program's: {path:?}"
+                    );
+                    assert_eq!(
+                        (source.kind(), source.raw_os_error()),
+                        (probe.kind(), None),
+                        "`{entry}`: the source carried must be the refusal the probe met: {source}"
+                    );
+                }
+                other => panic!(
+                    "`{entry}` names a location and its search did not stop at its own candidate: \
+                     {other}"
+                ),
+            }
         } else {
             relative += 1;
-            assert!(
-                message.contains(
-                    "0 directories searched, 1 PATH entry skipped as not \
-                                  absolute"
+            let message = match error {
+                UpstrokeError::Refused { message } => message,
+                other => panic!(
+                    "`{entry}` does not name a location and was searched: expected \
+                     `UpstrokeError::Refused`, got {other:?}"
                 ),
+            };
+            assert!(
+                search_summary(&message).is_some_and(|summary| summary
+                    .contains("0 directories searched, 1 PATH entry skipped as not absolute")),
                 "`{entry}` does not name a location and was searched: {message}"
             );
         }
@@ -5657,6 +6218,36 @@ fn every_path_entry_this_runner_searches_names_a_location_on_its_own() {
     );
 
     let bin = root.join("bin");
+    let probe = std::fs::symlink_metadata(&bin)
+        .expect_err("a directory nothing has created must not exist");
+    assert_eq!(
+        probe.kind(),
+        std::io::ErrorKind::NotFound,
+        "the fixture must be absent, not merely unreadable, to count a finished search"
+    );
+    let error = resolve_program(
+        "x",
+        &composed(&[("PATH", path_of(&[&bin]).as_os_str())]),
+        KeyCase::current(),
+        naming,
+    )
+    .expect_err("nothing of that name is installed there");
+    let message = match error {
+        UpstrokeError::Refused { message } => message,
+        other => panic!(
+            "an absent entry names a location and its search did not finish: expected \
+             `UpstrokeError::Refused`, got {other:?}"
+        ),
+    };
+    assert!(
+        search_summary(&message).is_some_and(|summary| summary.contains("1 directory searched,")),
+        "an absent entry names a location and was not searched to its end: {message}"
+    );
+    assert!(
+        search_summary(&message).is_some_and(|summary| !summary.contains("skipped")),
+        "an absent entry names a location and was skipped: {message}"
+    );
+
     let found = program_file(&bin, &shim_file_name("x"));
     assert_eq!(
         resolve_program(
@@ -5744,7 +6335,7 @@ fn an_empty_path_entry_never_reaches_the_workspaces_own_copy_of_a_bare_name() {
         let runner = HostRunner::new()
             .with_environment(environment)
             .with_hooks(Box::new(witness.handle()));
-        let outcome = runner.run(&named_request(&name, "arg", &workspace));
+        let outcome = runner.run_blocking(&named_request(&name, "arg", &workspace));
         if *runner_expected == "<refused>" {
             let error = outcome
                 .as_ref()
@@ -5836,7 +6427,7 @@ fn a_relative_path_entry_is_refused_even_when_it_names_a_real_directory() {
         ))
         .with_hooks(Box::new(witness.handle()));
     let error = runner
-        .run(&named_request(&name, "arg", &workspace))
+        .run_blocking(&named_request(&name, "arg", &workspace))
         .expect_err("a relative PATH entry contributes no candidate")
         .to_string();
     assert!(
@@ -5851,7 +6442,7 @@ fn a_relative_path_entry_is_refused_even_when_it_names_a_real_directory() {
 
     let reachable = HostRunner::new()
         .with_environment(environment_on_path(&[&bin], Some(REAL_PATHEXT)))
-        .run(&named_request(&name, "arg", &workspace))
+        .run_blocking(&named_request(&name, "arg", &workspace))
         .expect("the same installation, named absolutely");
     assert_eq!(reachable.stdout.trim(), "RELATIVE:arg");
     assert!(absolute.is_absolute());
@@ -6069,4 +6660,487 @@ fn the_lock_protocol_stays_beside_the_host_runner_fields() {
          who starts in the prose is sent to the site instead of being told that \
          the whole of this module's prose lives in the notes"
     );
+}
+
+#[derive(Debug, Default)]
+struct Witness {
+    children: Vec<u32>,
+    points: Vec<SubEffectPoint>,
+    threads: Vec<std::thread::ThreadId>,
+}
+
+impl SpawnHooks for Witness {
+    fn point(&mut self, point: SubEffectPoint) -> Injection {
+        self.points.push(point);
+        Injection::Proceed
+    }
+
+    fn child_created(&mut self, pid: u32) {
+        self.children.push(pid);
+        self.threads.push(std::thread::current().id());
+    }
+}
+
+fn scratch_tree(tag: &str) -> crate::rundir::scratch_tree::ScratchTree {
+    let parent = std::env::temp_dir();
+    match crate::rundir::scratch_tree::acquire(&parent, tag) {
+        Ok(tree) => tree,
+        Err(refusal) => panic!(
+            "a scratch tree for `{tag}` under {}: {refusal:?}",
+            parent.display()
+        ),
+    }
+}
+
+fn wait_for_file(path: &Path, within: Duration) -> bool {
+    let deadline = std::time::Instant::now() + within;
+    while !path.exists() {
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    true
+}
+
+#[test]
+fn the_blocking_adapter_supervises_the_process_on_the_calling_thread() {
+    let runner = HostRunner::new();
+    let request = crate::runner::gate_request(
+        native().spec("exit 0"),
+        std::env::temp_dir(),
+        Duration::from_secs(60),
+        gate_invocation(),
+    );
+    let mut seen = Witness::default();
+    let output = runner
+        .run_blocking_with(&request, RunnerCall::default().observed_by(&mut seen))
+        .expect("the gate runs");
+    assert_eq!(output.code, Some(0), "{output:?}");
+    assert_eq!(
+        seen.threads,
+        vec![std::thread::current().id()],
+        "the child was created from the thread that called the adapter"
+    );
+    assert!(
+        !seen.points.is_empty(),
+        "the call's own observer saw the spawn's containment points"
+    );
+}
+
+#[test]
+fn a_call_cancelled_before_it_starts_spawns_nothing() {
+    let runner = HostRunner::new();
+    let request = crate::runner::gate_request(
+        native().spec("exit 0"),
+        std::env::temp_dir(),
+        Duration::from_secs(60),
+        gate_invocation(),
+    );
+    let cancellation = crate::runner::Cancellation::new();
+    cancellation.cancel();
+    let resolutions = program_resolutions();
+    let mut seen = Witness::default();
+    let error = runner
+        .run_blocking_with(
+            &request,
+            RunnerCall::new(cancellation).observed_by(&mut seen),
+        )
+        .expect_err("a cancelled call reports an error");
+    assert!(error.is_cancelled(), "{error}");
+    assert_eq!(error.fate, ProcessFate::NeverStarted, "{error}");
+    assert!(
+        seen.children.is_empty() && seen.points.is_empty(),
+        "nothing was spawned: {seen:?}"
+    );
+    assert_eq!(
+        program_resolutions(),
+        resolutions,
+        "the call was refused before its program was even resolved"
+    );
+}
+
+#[test]
+fn cancelling_a_running_invocation_terminates_it_and_reports_it_cancelled() {
+    let tree = scratch_tree("cancel-running");
+    let dir = tree.path().to_path_buf();
+    let ready = dir.join("ready");
+    let script = if cfg!(windows) {
+        "echo ready> \"%UPSTROKE_READY%\" & ping -n 300 127.0.0.1 > NUL"
+    } else {
+        ": > \"$UPSTROKE_READY\"; sleep 300"
+    };
+    let mut command = native().spec(script);
+    command.env.push((
+        "UPSTROKE_READY".to_owned(),
+        ready.to_string_lossy().into_owned(),
+    ));
+    let request = crate::runner::gate_request(
+        command,
+        dir.clone(),
+        Duration::from_secs(600),
+        gate_invocation(),
+    );
+    let runner = HostRunner::new();
+    let cancellation = crate::runner::Cancellation::new();
+    let mut seen = Witness::default();
+    let (outcome, after_cancel) = std::thread::scope(|scope| {
+        let driver = scope.spawn(|| {
+            runner.run_blocking_with(
+                &request,
+                RunnerCall::new(cancellation.clone()).observed_by(&mut seen),
+            )
+        });
+        let started = wait_for_file(&ready, Duration::from_secs(60));
+        let cancelled_at = std::time::Instant::now();
+        cancellation.cancel();
+        let outcome = driver.join().expect("the driving thread");
+        assert!(started, "the child never announced itself");
+        (outcome, cancelled_at.elapsed())
+    });
+    let error = outcome.expect_err("a cancelled invocation reports an error, not an output");
+    assert!(error.is_cancelled(), "{error}");
+    assert_eq!(
+        error.fate,
+        ProcessFate::Gone,
+        "the Runner terminated the process before it reported: {error}"
+    );
+    assert_eq!(error.invocation, request.invocation);
+    assert_eq!(seen.children.len(), 1, "{seen:?}");
+    assert!(
+        after_cancel < Duration::from_secs(60),
+        "the cancellation took {after_cancel:?} to end a child that would have run 300 seconds"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn cancelling_an_invocation_ends_every_process_of_its_tree() {
+    use std::io::Read;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let tree = scratch_tree("cancel-tree");
+    let dir = tree.path().to_path_buf();
+    let fifo = dir.join("writers");
+    let ready = dir.join("ready");
+    let path = std::ffi::CString::new(fifo.as_os_str().as_bytes()).expect("a path without NUL");
+    // SAFETY: `path` is a NUL-terminated string that outlives the call.
+    let made = unsafe { libc::mkfifo(path.as_ptr(), 0o600) };
+    assert_eq!(made, 0, "mkfifo: {}", std::io::Error::last_os_error());
+    let mut writers = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(&fifo)
+        .expect("open the fifo's reading end");
+    let mut command =
+        native().spec("exec 3>\"$UPSTROKE_FIFO\"; sleep 300 & : > \"$UPSTROKE_READY\"; wait");
+    command.env.push((
+        "UPSTROKE_FIFO".to_owned(),
+        fifo.to_string_lossy().into_owned(),
+    ));
+    command.env.push((
+        "UPSTROKE_READY".to_owned(),
+        ready.to_string_lossy().into_owned(),
+    ));
+    let request = crate::runner::gate_request(
+        command,
+        dir.clone(),
+        Duration::from_secs(600),
+        gate_invocation(),
+    );
+    let runner = HostRunner::new();
+    let cancellation = crate::runner::Cancellation::new();
+    let mut byte = [0_u8; 1];
+    let (outcome, held_before) = std::thread::scope(|scope| {
+        let driver = scope
+            .spawn(|| runner.run_blocking_with(&request, RunnerCall::new(cancellation.clone())));
+        let started = wait_for_file(&ready, Duration::from_secs(60));
+        let held_before = matches!(
+            writers.read(&mut byte),
+            Err(ref error) if error.kind() == std::io::ErrorKind::WouldBlock
+        );
+        cancellation.cancel();
+        let outcome = driver.join().expect("the driving thread");
+        assert!(started, "the child never announced itself");
+        (outcome, held_before)
+    });
+    assert!(
+        held_before,
+        "the child and its background grandchild hold the fifo open before the cancel, so \
+         the end of file after it is not vacuous"
+    );
+    let error = outcome.expect_err("a cancelled invocation reports an error");
+    assert!(error.is_cancelled(), "{error}");
+    assert_eq!(error.fate, ProcessFate::Gone, "{error}");
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let every_writer_gone = loop {
+        match writers.read(&mut byte) {
+            Ok(0) => break true,
+            Ok(_) => continue,
+            Err(ref error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                if std::time::Instant::now() >= deadline {
+                    break false;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => panic!("reading the fifo: {error}"),
+        }
+    };
+    assert!(
+        every_writer_gone,
+        "a process of the cancelled invocation's tree still held the fifo after the Runner \
+         reported it cancelled"
+    );
+}
+
+const RENDEZVOUS_OWN: &str = "UPSTROKE_RENDEZVOUS_OWN";
+const RENDEZVOUS_PEER: &str = "UPSTROKE_RENDEZVOUS_PEER";
+const RENDEZVOUS_WITHIN_MS: &str = "UPSTROKE_RENDEZVOUS_WITHIN_MS";
+
+#[test]
+#[ignore = "subprocess helper"]
+fn rendezvous_helper() {
+    let (Some(own), Some(peer)) = (
+        std::env::var_os(RENDEZVOUS_OWN),
+        std::env::var_os(RENDEZVOUS_PEER),
+    ) else {
+        return;
+    };
+    let within = std::env::var(RENDEZVOUS_WITHIN_MS)
+        .ok()
+        .and_then(|ms| ms.parse().ok())
+        .map_or(Duration::from_secs(60), Duration::from_millis);
+    std::fs::write(&own, std::process::id().to_string()).expect("publish this child's marker");
+    let deadline = std::time::Instant::now() + within;
+    while !Path::new(&peer).exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the peer invocation never started while this one ran"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    println!("<<PID {} PID>>", std::process::id());
+}
+
+fn rendezvous_request(
+    dir: &Path,
+    own: &Path,
+    peer: &Path,
+    ordinal: u32,
+    within: Option<Duration>,
+) -> RunnerRequest {
+    let mut env = vec![
+        (
+            RENDEZVOUS_OWN.to_owned(),
+            own.to_string_lossy().into_owned(),
+        ),
+        (
+            RENDEZVOUS_PEER.to_owned(),
+            peer.to_string_lossy().into_owned(),
+        ),
+    ];
+    if let Some(within) = within {
+        env.push((
+            RENDEZVOUS_WITHIN_MS.to_owned(),
+            within.as_millis().to_string(),
+        ));
+    }
+    crate::runner::gate_request(
+        CommandSpec {
+            program: this_test_binary(),
+            args: vec![
+                "rendezvous_helper".to_owned(),
+                "--ignored".to_owned(),
+                "--nocapture".to_owned(),
+            ],
+            env,
+            stdin: Vec::new(),
+        },
+        dir.to_path_buf(),
+        Duration::from_secs(180),
+        InvocationId::attempt(
+            TaskKey(0),
+            GenerationId(0),
+            AttemptNumber(1),
+            AttemptRole::Gate(ordinal),
+            0,
+        ),
+    )
+}
+
+fn reported_pid(output: &ProcessOutput) -> u32 {
+    output
+        .stdout
+        .split("<<PID ")
+        .nth(1)
+        .and_then(|rest| rest.split(" PID>>").next())
+        .and_then(|pid| pid.trim().parse().ok())
+        .unwrap_or_else(|| panic!("the helper reported no pid: {output:?}"))
+}
+
+#[test]
+fn two_invocations_on_one_host_runner_run_at_once_each_carrying_its_own_observation() {
+    let tree = scratch_tree("rendezvous");
+    let dir = tree.path().to_path_buf();
+    let (a, b) = (dir.join("a"), dir.join("b"));
+    let runner = HostRunner::new();
+
+    let mut alone = Witness::default();
+    let lone = rendezvous_request(&dir, &dir.join("alone"), &dir, 9, None);
+    runner
+        .run_blocking_with(&lone, RunnerCall::default().observed_by(&mut alone))
+        .expect("a lone rendezvous finds its peer already there");
+
+    let request_a = rendezvous_request(&dir, &a, &b, 0, None);
+    let request_b = rendezvous_request(&dir, &b, &a, 1, None);
+    let mut seen_a = Witness::default();
+    let mut seen_b = Witness::default();
+    let (output_a, output_b) = std::thread::scope(|scope| {
+        let first = scope.spawn(|| {
+            runner.run_blocking_with(&request_a, RunnerCall::default().observed_by(&mut seen_a))
+        });
+        let second = scope.spawn(|| {
+            runner.run_blocking_with(&request_b, RunnerCall::default().observed_by(&mut seen_b))
+        });
+        (
+            first.join().expect("the first driving thread"),
+            second.join().expect("the second driving thread"),
+        )
+    });
+    let output_a = output_a.expect("the first invocation runs");
+    let output_b = output_b.expect("the second invocation runs");
+    assert_eq!(
+        (output_a.code, output_b.code),
+        (Some(0), Some(0)),
+        "each child waited for the other's marker, so both succeed only if they overlapped: \
+         {output_a:?} {output_b:?}"
+    );
+    let (pid_a, pid_b) = (reported_pid(&output_a), reported_pid(&output_b));
+    assert_ne!(pid_a, pid_b);
+    assert_eq!(
+        seen_a.children,
+        vec![pid_a],
+        "the first observer saw its own child only"
+    );
+    assert_eq!(
+        seen_b.children,
+        vec![pid_b],
+        "the second observer saw its own child only"
+    );
+    assert_eq!(
+        seen_a.points, alone.points,
+        "the first observer saw one spawn's points, none of the other's"
+    );
+    assert_eq!(
+        seen_b.points, alone.points,
+        "the second observer saw one spawn's points, none of the other's"
+    );
+}
+
+#[test]
+fn a_runner_level_observer_still_takes_invocations_one_at_a_time() {
+    let tree = scratch_tree("rendezvous-serialized");
+    let dir = tree.path().to_path_buf();
+    let (a, b) = (dir.join("a"), dir.join("b"));
+    let runner = HostRunner::new().with_hooks(Box::new(Witness::default()));
+    let within = Some(Duration::from_secs(3));
+    let request_a = rendezvous_request(&dir, &a, &b, 0, within);
+    let request_b = rendezvous_request(&dir, &b, &a, 1, within);
+    let (output_a, output_b) = std::thread::scope(|scope| {
+        let first = scope.spawn(|| runner.run_blocking(&request_a));
+        let second = scope.spawn(|| runner.run_blocking(&request_b));
+        (
+            first.join().expect("the first driving thread"),
+            second.join().expect("the second driving thread"),
+        )
+    });
+    let codes = [
+        output_a.expect("the first invocation runs").code,
+        output_b.expect("the second invocation runs").code,
+    ];
+    assert_eq!(
+        codes.iter().filter(|code| **code == Some(0)).count(),
+        1,
+        "under one runner-level observer the invocations take turns, so exactly one child \
+         outlived its wait for the other: {codes:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_call_carrying_the_runs_cleanup_leases_is_reaped_by_a_reaper_that_holds_them() {
+    let tree = scratch_tree("carried-leases");
+    let dir = tree.path().to_path_buf();
+    let public = dir.join("public");
+    std::fs::create_dir_all(&public).expect("a run directory");
+    let lock = crate::rundir::RunLock::acquire(&public).expect("the run lock");
+    let leases = {
+        let _scope = lock.enter_cleanup_scope();
+        crate::rundir::active_cleanup_lease_paths()
+    };
+    assert_eq!(leases.len(), 1, "the run has one cleanup lease: {leases:?}");
+    assert!(
+        crate::rundir::active_cleanup_lease_paths().is_empty(),
+        "this thread has left the run's scope, like a pipeline thread that never entered it"
+    );
+
+    let bound = Duration::from_secs(60);
+    for carried in [false, true] {
+        let ready = dir.join(format!("ready-{carried}"));
+        let mut command = native().spec(": > \"$UPSTROKE_READY\"; sleep 300");
+        command.env.push((
+            "UPSTROKE_READY".to_owned(),
+            ready.to_string_lossy().into_owned(),
+        ));
+        let request = crate::runner::gate_request(
+            command,
+            dir.clone(),
+            Duration::from_secs(600),
+            gate_invocation(),
+        );
+        let runner = HostRunner::new();
+        let cancellation = crate::runner::Cancellation::new();
+        let held_while_running = std::thread::scope(|scope| {
+            let driver = scope.spawn(|| {
+                let call = RunnerCall::new(cancellation.clone());
+                let call = if carried {
+                    call.holding_cleanup_leases(&leases)
+                } else {
+                    call
+                };
+                runner.run_blocking_with(&request, call)
+            });
+            let started = wait_for_file(&ready, bound);
+            let held = crate::rundir::observe_cleanup_hold(&public, &mut crate::rundir::NoHooks);
+            cancellation.cancel();
+            let outcome = driver.join().expect("the driving thread");
+            assert!(
+                started,
+                "carried {carried}: the child never announced itself"
+            );
+            let error = outcome.expect_err("the cancelled child reports cancelled");
+            assert!(error.is_cancelled(), "carried {carried}: {error}");
+            held
+        });
+        assert_eq!(
+            held_while_running, carried,
+            "carried {carried}: the reaper holds the run's cleanup lease exactly when the call \
+             carries it"
+        );
+        let waiting = std::time::Instant::now();
+        let mut held = crate::rundir::observe_cleanup_hold(&public, &mut crate::rundir::NoHooks);
+        while held && waiting.elapsed() < bound {
+            crate::workspace_manager::fixture::rest_within(
+                Duration::from_millis(20),
+                bound.saturating_sub(waiting.elapsed()),
+            );
+            held = crate::rundir::observe_cleanup_hold(&public, &mut crate::rundir::NoHooks);
+        }
+        assert!(
+            !held,
+            "carried {carried}: the hold ended with the reaper within {bound:?}"
+        );
+    }
+    drop(lock);
 }

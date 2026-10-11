@@ -55,16 +55,18 @@ not the marker: it is the `#[cfg(test)] mod tests;` declaration in
 `effects::census_domain::declared_whole_file_test_modules` derives into their
 skip set.
 
-## `fn scratch(tag: &str) -> PathBuf {`
+## `fn scratch(tag: &str) -> ScratchTree {`
 
 ---------------------------------------------------------------------------
 Fixtures
 ---------------------------------------------------------------------------
 
-## `fn scratch(tag: &str) -> PathBuf {`
+## `fn scratch(tag: &str) -> ScratchTree {`
 
-A scratch private root. Thread id is in the name because
-[`concurrent_reclaimers_converge`] runs two of these at once.
+A scratch private root, acquired through the scratch-tree token. Every call
+is a distinct tree, so [`concurrent_reclaimers_converge`], which runs two of
+these at once, gets two; the helper this replaced put the thread id in a
+pid-keyed name for that (`PR7-SCRATCH-FIXTURE-LEAK`).
 
 ## `const REPO_KEY_A: &str = "0123456789abcdef";`
 
@@ -361,7 +363,7 @@ moves.
 
 The five steps, in the packet's order, all before the token existed.
 
-## `fn orphan_reclaimed_before_slot_reset()` › `let root = scratch("blocks-admission");`
+## `fn orphan_reclaimed_before_slot_reset()` › `let tree = scratch("blocks-admission");`
 
 The other half: a container that cannot be observed terminated blocks
 admission, so there is no token at all.

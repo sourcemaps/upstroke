@@ -1,10 +1,8 @@
 //! Extended notes: `docs/internals/engine/mod.md`
 
-#![deny(
-    clippy::disallowed_methods,
-    clippy::disallowed_types,
-    clippy::disallowed_macros
-)]
+#![deny(clippy::disallowed_methods)]
+#![cfg_attr(not(test), forbid(clippy::disallowed_types))]
+#![forbid(clippy::disallowed_macros)]
 
 mod assembly;
 mod attempt;

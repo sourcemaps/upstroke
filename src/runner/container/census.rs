@@ -1,10 +1,7 @@
 //! Extended notes: `docs/internals/runner/container/census.md`
 
-#![deny(
-    clippy::disallowed_methods,
-    clippy::disallowed_types,
-    clippy::disallowed_macros
-)]
+#![cfg_attr(not(test), forbid(clippy::disallowed_methods))]
+#![forbid(clippy::disallowed_types, clippy::disallowed_macros)]
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -815,6 +812,12 @@ impl ReaperContainerScope {
     #[must_use]
     pub fn program(&self) -> &Path {
         &self.program
+    }
+
+    #[must_use]
+    pub fn selects(&self, labels: &BTreeMap<String, String>) -> bool {
+        labels.get(LABEL_PRIVATE_ROOT) == Some(&self.private_root)
+            && labels.get(LABEL_INCARNATION) == Some(&self.incarnation)
     }
 
     #[must_use]

@@ -57,7 +57,7 @@ would move the whole-file census, for the reason `policy.rs` gives: one
 written inside a comment is the exact shape that once derived a phantom skip
 and removed a real file from every census below it, and the blanking that
 now defeats it is not a reason to write another. Measured instead of
-asserted -- `runner::tests::every_production_process_start_is_classified`,
+asserted -- `runner::contract::tests::every_production_process_start_is_classified`,
 `every_production_command_spec_payload_is_classified` and
 `runner::container::resolve::tests::no_module_outside_the_container_runner_writes_a_container_intent`
 are green with this file in their domain, and

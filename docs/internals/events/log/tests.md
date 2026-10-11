@@ -30,16 +30,19 @@ Allowlist placement: the **funnel section** of `effects/allowlist.toml`, which
 carries this module's review clause -- effects only inside site-taking APIs,
 no writable handle returned. `decisions.effect_site_inventory.mechanism` (2).
 
-## `static SCRATCH: AtomicU32 = AtomicU32::new(0);`
+## `fn scratch(tag: &str) -> ScratchTree {`
 
 ---------------------------------------------------------------------------
 Fixtures
 ---------------------------------------------------------------------------
 
-## `fn scratch(tag: &str) -> PathBuf {`
+## `fn scratch(tag: &str) -> ScratchTree {`
 
-A directory of this test's own. Numbered as well as named, because several
-of the grids below want a fresh log per cell.
+A scratch tree of this test's own, acquired through the scratch-tree token
+and reclaimed when its guard drops. Every call is a fresh tree, which is what
+the grids below that want a fresh log per cell rely on; the helper this
+replaced numbered pid-keyed roots from a process-wide counter to get the same
+effect within one process (`PR7-SCRATCH-FIXTURE-LEAK`).
 
 ## `fn event_log_message(error: &UpstrokeError) -> &str {`
 
@@ -864,7 +867,7 @@ half of the same clause.
 
 The enum is the list; a step added later has no test and says so.
 
-## `fn every_barrier_step_is_reachable_and_named()` › `let missing = scratch("barrier-open-fails")`
+## `fn every_barrier_step_is_reachable_and_named()` › `let tree = scratch("barrier-open-fails");`
 
 `OpenLog` is the one step the tests above do not produce, because it is
 the ordinary I/O failure: a log whose directory does not exist.
@@ -898,7 +901,7 @@ is stronger than equality of anything derived from them, not weaker.
 Hash rather than length: a one-character edit does not move a length, and
 "the surviving prefix is the before-append one" is a claim about bytes.
 
-## `fn seeded_prefix(tag: &str) -> (PathBuf, Vec<u8>, Vec<TopologyEvent>) {`
+## `fn seeded_prefix(tag: &str) -> (LogFixture, Vec<u8>, Vec<TopologyEvent>) {`
 
 A durable before-append prefix, and the events it replays to.
 
@@ -911,7 +914,7 @@ would hold for the wrong reason.
 
 What the log would hold if the killed append had committed.
 
-## `fn replayable_prefix(tag: &str) -> (PathBuf, Vec<u8>) {`
+## `fn replayable_prefix(tag: &str) -> (LogFixture, Vec<u8>) {`
 
 A durable prefix a run's checked fold accepts: `run_started`, with the
 registry digest this module's frozen inputs derive. `seeded_prefix`'s line

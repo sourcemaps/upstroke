@@ -1,5 +1,11 @@
 //! Extended notes: `docs/internals/ir.md`
 
+#![forbid(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    clippy::disallowed_macros
+)]
+
 use std::fmt;
 use std::path::PathBuf;
 use std::time::Duration;

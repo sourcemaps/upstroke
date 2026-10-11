@@ -42,7 +42,7 @@
 
 [[funnel]]
 path = "src/workspace_manager.rs"
-allows = ["clippy::disallowed_methods", "clippy::disallowed_types", "clippy::disallowed_macros"]
+allows = ["clippy::disallowed_methods", "clippy::disallowed_types"]
 packet = "effect_site_inventory.mechanism (2): named first in the funnel-module list"
 review = """
 Every effect is issued inside a `funnel` call taking an `EffectSiteId` by value \
@@ -164,7 +164,7 @@ thing actually providing it."""
 
 [[funnel]]
 path = "src/runner/host.rs"
-allows = ["clippy::disallowed_methods", "clippy::disallowed_types", "clippy::disallowed_macros"]
+allows = ["clippy::disallowed_types"]
 packet = "effect_site_inventory.mechanism (2): src/runner/{host,container,invocation}.rs"
 review = """
 The Process funnel: `FunnelGroup::Process.module()` is this file. Process start \
@@ -207,7 +207,7 @@ rather than an accident of the module tree."""
 
 [[funnel]]
 path = "src/agent/proc.rs"
-allows = ["clippy::disallowed_methods", "clippy::disallowed_types", "clippy::disallowed_macros"]
+allows = ["clippy::disallowed_methods", "clippy::disallowed_types"]
 packet = "effect_site_inventory.mechanism (2): Process funnel primitives beneath src/runner/host.rs"
 review = """
 The Process supervision primitives. Spawn enters through an API taking \
@@ -325,7 +325,7 @@ CODING_STANDARDS.md §12's readiness protocol, moved out of line from \
 `src/agent/proc.rs` and given attributes of its own in the same commit -- \
 never inheriting one. A Rust lint level is scoped by the MODULE TREE and not by \
 the file, so this file would have inherited the Process funnel's \
-`#![allow(disallowed_methods, disallowed_types, disallowed_macros)]` silently: \
+file-scope `#![allow(..)]` silently: \
 that is `PR6-LANEF-004`, measured twice in the Container subtree, and this is \
 the first out-of-line child the Process funnel has ever had. \
 ALL THREE GOVERNED LINTS ARE DENIED AT FILE SCOPE, AND THE ALLOWANCE IS SIX \
@@ -362,7 +362,9 @@ functions return `std::io::Result<()>`, `Vec<String>` and `Waited`, and \
 `Producer::child` hands back the `&mut Child` its caller already owns. \
 `clippy::disallowed_types` and `clippy::disallowed_macros` are RE-DENIED here \
 rather than inherited, so a `std::process::Command`, a `std::fs::OpenOptions` \
-or a `println!` in this file is still a build error. \
+or a `println!` in this file is still a build error -- and since 2026-09-26 at \
+`forbid`, not `deny`: nothing in the file lowers either, so no attribute below \
+can reopen them, a macro-written or spelled-apart allow included. \
 `runner::container::tests::every_child_module_of_the_container_funnel_states_\
 its_own_lint_level` is the census that refuses a Process- or Container-funnel \
 child stating neither, and \
@@ -372,7 +374,7 @@ saying the same thing."""
 
 [[funnel]]
 path = "src/runner/container.rs"
-allows = ["clippy::disallowed_methods", "clippy::disallowed_types", "clippy::disallowed_macros"]
+allows = ["clippy::disallowed_methods", "clippy::disallowed_types"]
 packet = "effect_site_inventory.mechanism (2): src/runner/{host,container,invocation}.rs; `FunnelGroup::Container.module()`"
 review = """
 The Container funnel, added by PR6: `FunnelGroup::Container.module()` is this \
@@ -383,7 +385,7 @@ here (`write_intent`, `create`, `start`, `mount_git_view`, `stop`, `remove`, \
 refuses a site that does not name its operation. Every effect is issued inside \
 one of them: the `docker` CLI (`DockerCli`, the only `std::process::Command` \
 in the file -- a coordinator-side control-plane call that deliberately does not \
-cross the boundary, with its row in `runner::tests::every_production_process_\
+cross the boundary, with its row in `runner::contract::tests::every_production_process_\
 start_is_classified`), the intent record's stage/fsync/rename/dir-fsync through \
 `util::fsync_file` and `util::fsync_dir`, and the R19 view directory. \
 NO PUBLIC FUNCTION RETURNS A WRITABLE HANDLE: the APIs return `PathBuf`, \
@@ -444,8 +446,12 @@ The startup census's test module (PR6 lane C), given an attribute of its own by 
 repair round F1 for the same reason as `src/runner/container/tests.rs`: it used \
 to inherit the funnel's allow through the module tree. It plants intents, views \
 and labelled containers for the census to classify and reclaim, which is what \
-needs `fs::write` and `fs::create_dir_all`; `census.rs` itself now carries \
-`#![deny(...)]` and reaches no denied primitive. `clippy::disallowed_types` and \
+needs `fs::write` and `fs::create_dir_all`; `census.rs` itself reaches no \
+denied primitive and, since #318 (2026-09-23), carries \
+`#![cfg_attr(not(test), forbid(clippy::disallowed_methods))]` beside \
+`#![forbid(clippy::disallowed_types, clippy::disallowed_macros)]` -- a \
+production fence this module's allowance cannot lower, where the `#![deny(...)]` \
+it carried before could be. `clippy::disallowed_types` and \
 `clippy::disallowed_macros` are re-denied here."""
 
 [[funnel]]
@@ -458,9 +464,12 @@ repair round F1 built the guard, so this file arrived with NO attribute of its \
 own and inherited the Container funnel's allow through the module tree — \
 `PR6-LANEF-004` reopening, caught by `runner::container::tests::every_child_\
 module_of_the_container_funnel_states_its_own_lint_level` and red on the merged \
-tree. `resolve.rs`, the PRODUCTION half, carries `#![deny(...)]` for all three \
-governed lints and reaches no denied primitive at all, so the build-error leg of \
-`mechanism` (1) holds for lane B's production code. \
+tree. `resolve.rs`, the PRODUCTION half, reaches no denied primitive at all \
+and, since #318 (2026-09-23), carries \
+`#![cfg_attr(not(test), forbid(clippy::disallowed_methods, clippy::disallowed_types))]` \
+beside `#![forbid(clippy::disallowed_macros)]` -- it carried `#![deny(...)]` of \
+all three before -- so the build-error leg of `mechanism` (1) holds for lane \
+B's production code. \
 THE RESIDUAL, STATED RATHER THAN IMPLIED: this is the one child of \
 `src/runner/container/` that allows `clippy::disallowed_types` as well as \
 `clippy::disallowed_methods`, because its fixtures build real temporary Git \
@@ -482,8 +491,10 @@ allows = []
 packet = "effect_site_inventory.mechanism (2), by attachment: the `ContainerRunner`, declared beside src/runner/container.rs"
 review = """
 The `ContainerRunner` (PR6 lane A). Its PRODUCTION REGION performs no denied \
-effect at all and carries a file-level `#![deny(clippy::disallowed_methods, \
-disallowed_types, disallowed_macros)]`, so a container primitive called from a \
+effect at all and, since #318 (2026-09-23), carries a file-level \
+`#![cfg_attr(not(test), forbid(clippy::disallowed_methods))]` beside \
+`#![forbid(clippy::disallowed_types, clippy::disallowed_macros)]` -- a \
+`#![deny(...)]` of all three before -- so a container primitive called from a \
 lane's production code here is a build error — which is the guarantee \
 `PR6-LANEF-004` found had been inherited away. \
 THIS ROW ALLOWS NOTHING NOW, AND THAT IS A CHANGE. It carried \
@@ -512,8 +523,9 @@ covered by the outer allow that stood on its declaration in `exec.rs` while \
 stating nothing itself: that is `PR6-LANEF-004`, and `runner::container::tests::every_\
 child_module_of_the_container_funnel_states_its_own_lint_level` refuses a child \
 that does not state its own level. \
-THE ALLOWANCE IS NOT WIDER THAN WHAT MOVED. `exec.rs` carries a file-level \
-`#![deny(...)]` of all three governed lints and carried, while these bodies \
+THE ALLOWANCE IS NOT WIDER THAN WHAT MOVED. `exec.rs` fences all three \
+governed lints at file level (`#![deny(...)]` when these bodies moved out; \
+`forbid` in the production build since #318) and carried, while these bodies \
 were inline in it, an OUTER `#[allow(clippy::disallowed_methods)]` on the test \
 declaration, so the test region already had exactly this one lint allowed and \
 the other two denied. These same bodies made these same calls there; the move \
@@ -551,8 +563,8 @@ container name before the create for exactly that case (`reviews/FINDINGS.md` \
 `clippy::disallowed_types` and `clippy::disallowed_macros` are RE-DENIED here \
 rather than inherited -- both measured at zero sites -- so a \
 `std::process::Command` or a `println!` in this file is still a build error. \
-The PRODUCTION region of `exec.rs` keeps its file-level deny and is untouched \
-by this row."""
+The PRODUCTION region of `exec.rs` keeps its own file-level fence -- `forbid` \
+in the production build since #318 -- and is untouched by this row."""
 
 [[funnel]]
 path = "src/runner/invocation.rs"
@@ -564,7 +576,7 @@ listed because the packet lists it."""
 
 [[funnel]]
 path = "src/rundir.rs"
-allows = ["clippy::disallowed_methods", "clippy::disallowed_types", "clippy::disallowed_macros"]
+allows = ["clippy::disallowed_methods", "clippy::disallowed_types"]
 packet = "effect_site_inventory.mechanism (2): the lock and run-directory funnels in src/rundir.rs"
 review = """
 Every run-directory, answer and lock effect is issued inside a `funnel` call \
@@ -757,7 +769,7 @@ shrink."""
 
 [[funnel]]
 path = "src/effects/tests.rs"
-allows = ["clippy::disallowed_methods", "clippy::disallowed_types", "clippy::disallowed_macros"]
+allows = ["clippy::disallowed_methods", "clippy::disallowed_types"]
 packet = "effect_site_inventory.outputs, by attachment: the `#[cfg(test)] mod tests;` of src/effects.rs"
 review = """
 This layer's own test module. It compiles the build-refusal fixtures as \
@@ -769,8 +781,10 @@ path = "src/effects.rs"
 allows = []
 packet = "effect_site_inventory.outputs: clippy.toml; effects/allowlist.toml; the wrapper classification; the residue-class evidence record"
 review = """
-This enforcement layer itself, and it carries NO attribute — which is a stronger \
-claim than any other entry in this section makes. Its whole surface is paths, \
+This enforcement layer itself. It carries no allowance and, since #318, a \
+production fence -- `#![cfg_attr(not(test), forbid(..))]` of all three governed \
+lints, conditional because its whole-file test children allow them -- which is a \
+stronger claim than any other entry in this section makes. Its whole surface is paths, \
 parsers and classification over `&str`; it reaches no denied primitive, and the \
 one `std::process::Command` its text contains is inside `DENIAL_FIXTURES`, a \
 string constant that `src/effects/tests.rs` compiles in order to prove it is \
@@ -868,29 +882,65 @@ allows = []
 packet = "effect_site_inventory.mechanism (2): schema-1..3 engine paths"
 legacy_effect = """
 LEGACY-EFFECT: named by the packet in the frozen legacy list. Reaches no denied \
-primitive today, so it carries no allow. Since #306 round 3 it carries \
-`#![deny(..)]` of all three governed lints instead, because its parent \
-`src/engine/mod.rs` then allowed `disallowed_methods` and a lint level inherits \
-down the module tree: without that deny an effect added here was exempt by \
-inheritance while this row still read `allows = []`, which is exactly the \
-promise the third review of #306 found broken in `assembly.rs` \
-(`PR306-FACADE-ALLOW-ESCAPES-TO-SIBLINGS`). The parent's allow is gone since \
-2026-09-20 and the deny stays, held for every module the facade declares \
-whatever the facade writes. Listed so that a legacy effect \
-added here is reviewed into `allows`, with the deny lifted in the same change, \
-rather than appearing silently."""
-shrinks_when = "immediately — it can be dropped from this list at any time without weakening anything; the deny it carries needs no row."
+primitive today, so it carries no allow. Since #312 it carries \
+`#![forbid(..)]` of all three governed lints; from #306 round 3 until then it \
+carried `#![deny(..)]`, because its parent `src/engine/mod.rs` then allowed \
+`disallowed_methods` and a lint level inherits down the module tree: without a \
+fence an effect added here was exempt by inheritance while this row still read \
+`allows = []`, which is exactly the promise the third review of #306 found \
+broken in `assembly.rs` (`PR306-FACADE-ALLOW-ESCAPES-TO-SIBLINGS`). The \
+parent's allow is gone since 2026-09-20 and the fence stays, held for every \
+module the facade declares whatever the facade writes. Listed so that a legacy \
+effect added here is reviewed into `allows`, with the forbid lifted for that \
+lint in the same change, rather than appearing silently."""
+shrinks_when = "immediately — it can be dropped from this list at any time without weakening anything; the forbid it carries needs no row."
 
 [[legacy]]
 path = "src/workspace.rs"
-allows = ["clippy::disallowed_methods", "clippy::disallowed_types", "clippy::disallowed_macros"]
+allows = ["clippy::disallowed_methods", "clippy::disallowed_types"]
 packet = "effect_site_inventory.mechanism (2): legacy branch/checkout/commit operations in src/workspace.rs"
 legacy_effect = """
 LEGACY-EFFECT: the schema-1..3 engine's Git operations — branch, checkout, \
 stage, commit, rollback — each a `std::process::Command` on the system git, plus \
 the working-tree writes around them. `invariants_preserved[1]` requires this \
-module's behaviour untouched; the schema-4 equivalents live behind funnels in \
-`crate::workspace_manager` and nothing here calls them."""
+module's behaviour untouched, AMENDED TWICE. First, to close \
+`LEGACY-WORKSPACE-READS-REPLACEMENT-OBJECTS`, by the route that finding's guard \
+names ("an owner decision to unfreeze the module for this one change"). That \
+amendment is three things and no more. Every Git child is built by \
+`git_command`, which sets `crate::workspace_manager::NO_REPLACEMENT_OBJECTS` \
+and passes `-c core.useReplaceRefs=false` ahead of the child's own arguments, \
+which are otherwise what they were, so these operations read the objects the \
+repository holds rather than whatever `refs/replace/*` points at them: two \
+controls, because on Git 2.41 a configured `true` outranks the variable. \
+`Workspace::recorded_objects_scope` asks Git for the repository's common \
+directory and writes, under the private root and never into any Git \
+configuration, the include file through which the v0.1 runner keeps its role \
+processes on that graph. `ensure_execution_prerequisites` refuses a Git older \
+than 2.41 by name, the floor the owner raised on 2026-09-28 because Git 2.40's \
+`merge-tree` ignores the setting, and the `check-attr --source` refusal states \
+the same floor. Second, by the owner's ruling B-W924-R1, adopted 2026-10-08: \
+the gate and review snapshots' `git worktree add` (`add_gate_worktree`), the \
+snapshot cleanup's `git worktree remove --force` (`cleanup_gate_workspace`) and \
+its `git worktree list` (`worktree_is_registered`) each run their built command \
+again, after a sleep of one millisecond doubling to fifty, while it exits 128 \
+with exactly one standard-error line `fatal: failed to read \
+<…>/worktrees/<id>/commondir: Success`, `<id>` neither the caller's own \
+registration nor that name with anything after it, and, for the add, while its \
+destination is still an empty directory; against a deadline ten seconds after \
+its first attempt began, checked after each attempt: the first attempt to end \
+at or past it is the last, a sleep before it is asked to end no later than it, \
+and the attempt after that sleep is admitted however late it starts, so neither \
+that attempt's start nor any Git child's completion has a hard wall-clock bound \
+(`output_past_anothers_empty_commondir`, \
+`output_past_anothers_empty_commondir_until`, `read_anothers_empty_commondir`, \
+`is_an_empty_directory`, `REGISTRY_TEAR_DEADLINE`, \
+`REGISTRY_TEAR_BACKOFF_CEILING`); and the module's regression tests of that \
+rule. Every other outcome is returned as before; past the deadline the last \
+attempt's failure, in the module's form. No argv, environment, error type or \
+message changes, and nothing else in the module. Every other behaviour of the \
+module stays frozen. The schema-4 \
+equivalents live behind funnels in `crate::workspace_manager` and nothing here \
+calls them: the constant is read, and no funnel is called."""
 shrinks_when = "the schema-4 engine replaces the legacy paths that call this module (PR7-PR11); the module goes with them."
 
 [[legacy]]
@@ -958,8 +1008,10 @@ packet = "effect_site_inventory.mechanism (2): src/capacity.rs"
 legacy_effect = """
 LEGACY-EFFECT: named by the packet in the frozen legacy list. Reaches no denied \
 primitive today — PR4 moved its process starts behind the Runner — so it carries \
-no attribute; listed so a legacy effect added here is reviewed rather than \
-silent."""
+no allow; since #316 it carries `#![forbid(..)]` of all three governed lints, \
+the fence Gate 5's fourth run found it lacking. Listed so a legacy effect \
+added here is reviewed into `allows`, with the forbid lifted for that lint in \
+the same change, rather than silent."""
 shrinks_when = "immediately — it can be dropped from this list at any time without weakening anything."
 
 [[legacy]]

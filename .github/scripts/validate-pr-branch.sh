@@ -293,12 +293,17 @@
 # the day a badly named file landed on master -- including the pull request that
 # was going to fix it. What a pull request may be held to is what it does.
 #
-# NEITHER INPUT IS BUILT HERE. Nothing below the AUDITED HELPERS END marker may
-# run a command that is not a shell builtin or redirect from a path, so this
-# file cannot run `git diff` or read a blob, and .github/scripts/test-pr-policy.sh
-# fails the build if it tries. .github/scripts/changed-in-range.sh builds both,
-# the workflow calls it, the fixtures call it too, and they arrive here as
-# LISTINGS read through `read_file` exactly as the three finding listings are.
+# NEITHER INPUT IS BUILT HERE. This file runs git only through `git_probe`, and
+# every call to it, directly or through `ledger_probe`, asks `rev-parse` or
+# `ls-files`, so it takes no diff and reads no blob. Those calls are why, and
+# not the rule for the lines below the AUDITED HELPERS END marker, stated further
+# down: it lets a call to `git_probe` through whatever the call asks. That part
+# of the file is read as any diff is read, with .github/scripts/test-pr-policy.sh
+# linting it for the mistakes that would break the rule, beside the reading and
+# not in place of it.
+# .github/scripts/changed-in-range.sh builds both, the workflow calls it, the
+# fixtures call it too, and they arrive here as LISTINGS read through
+# `read_file` exactly as the three finding listings are.
 # That is the precedent findings-in-range.sh set and the reason it exists.
 #
 #   changed-paths    one path per line, as `git diff --name-only` spells it.
@@ -511,12 +516,17 @@
 # only place this file runs git, `read_file` the only place it opens a file for
 # reading, `list_dir` the only place it enumerates a directory -- and `capture`
 # is the only place any of the three obtains a byte.
-# .github/scripts/test-pr-policy.sh FAILS THE BUILD if anything below the
-# AUDITED HELPERS END marker runs a command that is not a shell builtin or a
-# function defined in this file, or redirects from a path. That is a text scan
-# over one file and it bounds what is WRITTEN here rather than what bash can be
-# made to do; what it buys is that the reviewed surface is the audited region,
-# and the region is capped at a size that can be read in one sitting.
+# .github/scripts/test-pr-policy.sh LINTS everything below the AUDITED HELPERS
+# END marker for a command that is not a shell builtin or a function defined in
+# this file, a call to `capture` or anything else the region keeps to itself, a
+# redirection from a path, and a backtick. It is a best-effort text scan and not
+# a proof: it is aimed at mistakes made in good faith, it has been walked past
+# by constructs nobody had listed, and the misses found so far are listed and
+# tested there. The guarantee is the audited region: a stated number of lines,
+# capped in that gate and few enough to read whole, and every edit to it is an
+# edit under .github/scripts/, which the first limb of MAINTAINING.md step 7
+# leaves with the owner. The rest of the file is read as any diff is read, with
+# the lint beside the reading and not in place of it.
 #
 # `git_probe`'s contract is the part that matters: the caller ENUMERATES the exit
 # statuses it is prepared to read as answers, and any other status refuses the
@@ -833,17 +843,17 @@ fail() {
 
 # ==== AUDITED HELPERS BEGIN ===================================================
 #
-# The only place this file runs a command, opens a file for reading or
-# enumerates a directory -- and, because three rounds of repairs each left one
-# helper a private route to its bytes, THE ONLY PLACE ANY BYTES ARE CAPTURED.
+# The only place this file may run a command, open a file for reading or
+# enumerate a directory -- and, because three rounds of repairs each left one
+# helper a private route to its bytes, THE ONLY PLACE ANY BYTES MAY BE CAPTURED.
 # `capture` is that primitive; `git_probe`, `read_file` and `list_dir` are its
 # only callers and have no other route to bytes at all. The block above is the
-# history each contract was written out of; this region is the code.
-#
-# .github/scripts/test-pr-policy.sh asserts over the rest of the file by shape:
-# below AUDITED HELPERS END nothing may run a command that is not a shell
-# builtin or a function defined here, and nothing may redirect from a path. Keep
-# this region readable in one sitting; that is the whole of its value.
+# history each contract was written out of; this region is the code. The rest
+# of the file is read as any diff is read, with the lint of it in
+# .github/scripts/test-pr-policy.sh beside the reading and not in place of it.
+# This region is capped in that gate and few enough lines to read whole, and
+# every edit to it is an edit under .github/scripts/, which the first limb of
+# MAINTAINING.md step 7 leaves with the owner.
 
 # Where a private copy goes: this script's own directory, mode 700 from mktemp,
 # so a copy taken here cannot be replaced between the check and the parse --

@@ -1,4 +1,9 @@
 //! Extended notes: `docs/internals/error.md`
+#![forbid(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    clippy::disallowed_macros
+)]
 use std::fmt;
 use std::path::PathBuf;
 
@@ -146,6 +151,9 @@ pub enum UpstrokeError {
 
     #[error("{message}")]
     Refused { message: String },
+
+    #[error("{message}")]
+    RegistryRefused { message: String },
 
     #[error("{0}")]
     Validation(ValidationErrors),

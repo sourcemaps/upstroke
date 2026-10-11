@@ -285,6 +285,7 @@ mod tests {
     use super::*;
     use crate::agent::{AgentAdapter, AuthState, Caps, ProcessOutput, TaskRun};
     use crate::ir::Outcome;
+    use crate::rundir::scratch_tree::ScratchTree;
     use crate::runner::CommandSpec;
     use std::path::Path;
 
@@ -367,12 +368,27 @@ mod tests {
         }
     }
 
-    fn scratch(tag: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("upstroke-connect-{tag}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).expect("scratch dir");
-        dir.join("pools.toml")
+    /// A scratch tree for one test, guarded by the token that authorises
+    /// its deletion. The caller joins `pools.toml` onto `tree.path()`.
+    ///
+    /// The helper here built `temp_dir()/upstroke-connect-<tag>-<pid>` and
+    /// pre-cleaned it with a discarded `remove_dir_all` before it had any
+    /// claim on the name, then returned a path under a root nothing
+    /// reclaimed (`PR64-CLEANUP-003-SCRATCH-PRECLEAN`,
+    /// `PR7-SCRATCH-FIXTURE-LEAK`). `acquire` refuses an occupied root
+    /// rather than emptying it, keys on a ULID no recycled pid can supply,
+    /// and reclaims on drop. It returns the tree rather than the file path
+    /// because a guard dropped at the end of the calling statement takes
+    /// the file with it.
+    fn scratch(tag: &str) -> ScratchTree {
+        let parent = std::env::temp_dir();
+        match crate::rundir::scratch_tree::acquire(&parent, tag) {
+            Ok(tree) => tree,
+            Err(refusal) => panic!(
+                "a scratch tree for `{tag}` under {}: {refusal:?}",
+                parent.display()
+            ),
+        }
     }
 
     fn connect(path: &Path, force: bool) -> ConnectReport {
@@ -777,7 +793,8 @@ mod tests {
 
     #[test]
     fn a_missing_agent_skips_its_pool_without_taking_the_others_with_it() {
-        let path = scratch("partial");
+        let tree = scratch("partial");
+        let path = tree.path().join("pools.toml");
         let report = connect(&path, false);
         assert_eq!(report.outcome, Wrote::Written);
         let written = fs::read_to_string(&path).expect("file");
@@ -799,7 +816,8 @@ mod tests {
 
     #[test]
     fn what_connect_writes_parses_back_into_the_pools_it_describes() {
-        let path = scratch("roundtrip");
+        let tree = scratch("roundtrip");
+        let path = tree.path().join("pools.toml");
         connect(&path, false);
         let mut warnings = Vec::new();
         let hermetic = path.parent().expect("parent").to_path_buf();
@@ -819,7 +837,8 @@ mod tests {
 
     #[test]
     fn an_existing_file_that_differs_is_never_clobbered() {
-        let path = scratch("clobber");
+        let tree = scratch("clobber");
+        let path = tree.path().join("pools.toml");
         let mine = "[pools.claude-code]\nkind = \"subscription-window\"\nagent = \
                     \"claude-code\"\nprofile = \"work\"\nmonthly_allowance = 300\n";
         fs::write(&path, mine).expect("hand-written file");
@@ -856,7 +875,8 @@ mod tests {
 
     #[test]
     fn operator_keys_with_toml_escapes_survive_a_force_and_read_back_unchanged() {
-        let path = scratch("escapes");
+        let tree = scratch("escapes");
+        let path = tree.path().join("pools.toml");
         let mine = "[pools.claude-code]\nkind = \"subscription-window\"\nagent = \"claude-code\"\n\
                     profile = 'C:\\Users\\me\\.claude-work'\nendpoint = \"http://host/#frag \\\"q\\\"\"\n";
         fs::write(&path, mine).expect("hand-written file");
@@ -896,7 +916,8 @@ mod tests {
                 }),
             }],
         };
-        let path = scratch("escaped-key");
+        let tree = scratch("escaped-key");
+        let path = tree.path().join("pools.toml");
         let opts = ConnectOptions {
             pools_path: Some(path.clone()),
             force: false,
@@ -927,7 +948,8 @@ mod tests {
 
     #[test]
     fn a_file_connect_cannot_parse_carries_nothing_and_the_refusal_does_not_claim_otherwise() {
-        let path = scratch("unparseable");
+        let tree = scratch("unparseable");
+        let path = tree.path().join("pools.toml");
         let mine = "[pools.claude-code]\nkind = \"subscription-window\"\nagent = \"claude-code\"\n\
                     profile = \"work\"\nthis line is not toml\n";
         fs::write(&path, mine).expect("hand-written file");
@@ -956,7 +978,8 @@ mod tests {
 
     #[test]
     fn re_connecting_an_unchanged_machine_reports_unchanged_rather_than_a_conflict() {
-        let path = scratch("idempotent");
+        let tree = scratch("idempotent");
+        let path = tree.path().join("pools.toml");
         connect(&path, false);
         let first = fs::read_to_string(&path).expect("file");
 
@@ -974,7 +997,8 @@ mod tests {
 
     #[test]
     fn a_login_between_connects_updates_the_file() {
-        let path = scratch("relogin");
+        let tree = scratch("relogin");
+        let path = tree.path().join("pools.toml");
         let with = |auth: AuthState| Machine {
             adapters: vec![FakeAdapter {
                 id: "claude-code",
@@ -1040,9 +1064,10 @@ mod tests {
                 }),
             }],
         };
+        let tree = scratch("crosscheck");
         let report = run_with(
             &ConnectOptions {
-                pools_path: Some(scratch("crosscheck")),
+                pools_path: Some(tree.path().join("pools.toml")),
                 force: false,
             },
             &machine,
@@ -1068,7 +1093,8 @@ mod tests {
                 discovery: Some(Discovery::unknown().with_note("no auth query exists")),
             }],
         };
-        let path = scratch("shape");
+        let tree = scratch("shape");
+        let path = tree.path().join("pools.toml");
         let report = run_with(
             &ConnectOptions {
                 pools_path: Some(path),

@@ -467,6 +467,13 @@ under any scheduling.
 Through the shell, the sleeper is a grandchild — exactly the
 claude.cmd shim shape this module must handle.
 
+## `fn timeout_kills_a_background_grandchild_before_it_can_escape() {` › `let parent = std::env::temp_dir();`
+
+The marker was `temp_dir()/upstroke-proc-tree-<pid>-<test>.marker`, opened by a discarded
+`remove_file` of a name a later process under a recycled pid computes again
+(`PR64-CLEANUP-003-SCRATCH-PRECLEAN`). It is now in a tree this test acquired, whose guard
+reclaims it.
+
 ## `fn every_pipe_writer_is_gone(fd: libc::c_int) -> bool {`
 
 Whether every writer of `fd`'s pipe is gone, asked of the kernel and
@@ -1220,6 +1227,27 @@ spend, so the claim is that the wait does not wait it out: a waiter that
 only watched its signal would report "nothing published in five
 minutes", which is the clock talking rather than the death.
 
+## `fn a_producer_whose_reader_cannot_be_started_is_killed_and_reaped() {`
+
+**A reader that cannot be started.** Review round 4's `R4-REG-1` (the PR11
+record, §13), in the constructor that had the same order as the one the
+finding named: `Producer::adopt` started the reader of the child's stdout
+before anything owned the child, so a thread the system refused unwound past
+a bare `Child`, whose drop neither kills nor reaps, and the child outlived
+its adoption.
+
+The refusal is the OS's, not a simulation: `readiness::unstartable_reader`
+asks for a stack no address space can map, so `pthread_create` answers
+`EAGAIN`. The adoption must panic — it cannot hand back a producer with no
+reader for a piped stdout — and must unwind through the producer's drop,
+leaving nothing under the child's pid, not even a zombie
+(`fixture::process_exists` counts one). The builder is asked for with the
+child's pid, which the test checks, so a refusal that came from anywhere
+else is not read as this one. The child is told to run a test no test has
+the name of, so it exits at once of its own accord and leaves nothing
+behind itself; at the start head it was left unreaped. Unix, because a pid
+is what answers for the child; the adoption is the same code on Windows.
+
 ## `fn the_bound_is_the_callers_and_it_does_not_time_a_healthy_producer() {`
 
 **Effective deadlines.** The bound is the caller's, it bounds the wait
@@ -1234,8 +1262,20 @@ still be useless.
 
 ## `fn the_bound_is_the_callers_and_it_does_not_time_a_healthy_producer` › `let silent = scratch.join("never");`
 
-Two bounds against one silent producer: each wait ends at the value
-its caller passed, and the longer bound spends longer.
+One bound against one silent producer, on the wall clock: the wait
+reports the bound its caller passed and does not end before it -- a
+lower bound, which a loaded runner cannot fail. Then two bounds, 120 ms
+and 480 ms, through `await_signal_by` on a clock the test drives, sixty
+milliseconds a reading: the wait reads the clock once for its deadline
+and once per poll, so the first ends at its third reading and the second
+at its ninth, which is the deadline being the caller's bound and nothing
+else -- a bound of the wait's own, whatever its value, would end both at
+the same reading. The oracle before this one compared the two waits'
+wall-clock durations and required the longer bound to have spent longer,
+which a stall of the first wait past their difference of 360 ms fails: CI's
+Windows guest measured the 120 ms wait at 558.8 ms against the 480 ms
+wait's 485.5 ms (`PR320-R4-WAIT-ORDER-READ-FROM-THE-WALL`). A reading count
+has no stall in it.
 
 ## `fn the_bound_is_the_callers_and_it_does_not_time_a_healthy_producer` › `const GENEROUS: Duration = Duration::from_secs(30);`
 

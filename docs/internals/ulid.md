@@ -14,6 +14,23 @@ The inputs have separate fixed-width encodings, so a pid bit cannot cancel
 a nonce bit before hashing. These deterministic names are not secrets or
 proof of ownership. Filesystem callers must reserve new roots exclusively.
 
+## `#![forbid(`
+
+The three governed lints are `forbid` here since #318's third round: this file
+stated no level for any of them and inherited none, so each took its level
+from `-D warnings` alone, which an inner `allow` the placement scan does not
+read -- macro-written, or spelled apart -- lowers; #318's second MAIN review
+executed exactly that in `src/plan/mod.rs` and reached `std::fs::write` from
+a production topology body while clippy and every governance test passed
+(`GUARD-DECISION-SILENT-PRODUCTION-FILES-OUTSIDE-THE-ROLL-CALL`). A leaf with no children; its one per-site `#[expect]` is of `clippy::indexing_slicing`, not a governed lint, so the `forbid` does not reach it.
+`forbid`, not `deny`, because it compiles: nothing in the file allows a governed lint, and clippy over all targets exits 0 with the fence in place. A downgrade beneath
+a `forbid` is `E0453` however it is written or generated, and the enforcement
+is the lint gate's -- rustc resolves no `clippy::` lint, so `cargo build` and
+`cargo test` compile what clippy refuses. `effects::tests::every_unclassified_production_file_states_each_governed_lint_or_inherits_its_forbid`
+names this file the day the fence is removed, and
+`every_fence_of_a_governed_lint_forbids_wherever_forbid_would_compile` the
+day it drops to `deny`.
+
 ## `static NONCE: AtomicU64 = AtomicU64::new(0);`
 
 Monotonic per-process nonce: many calls can share one millisecond, so the

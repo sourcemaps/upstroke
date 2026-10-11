@@ -28,7 +28,7 @@ pub fn run_shell_probe(
 ) -> Result<(), UpstrokeError> {
     let request = shell_probe_request(shell, workspace, invocation);
     let output = runner
-        .run(&request)
+        .run_blocking(&request)
         .map_err(|error| UpstrokeError::Refused {
             message: format!(
                 "pre-flight: the recorded shell `{}` could not be run through the runner: {error}",

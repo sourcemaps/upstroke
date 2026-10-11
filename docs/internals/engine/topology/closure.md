@@ -10,20 +10,28 @@ excerpt within the preceding item when a heading names both an item and a line i
 
 ## Module
 
-Run-end closure at `max_parallel = 1`: the pure half of `run_end_policy`'s closure procedure.
-`TopologyRun::close_run` (`run.md`) is the acting half; everything here reads a fold and answers
-a question about it, appends nothing and touches no file.
+Run-end closure: the pure half of `run_end_policy`'s closure procedure. `TopologyRun::close_run`
+(`run.md`) is the acting half; everything here reads a fold and answers a question about it,
+appends nothing and touches no file.
 
 `decisions.run_end_policy.closure_procedure`, in order: (1) the ending outcome is derived —
-halt, then budget, then the fold's own `derived_outcome`; (2)–(4) in-flight attempts, promoting
-generations and unresolved transactions are settled, promoted and completed; (5) every open
+halt, then budget, then the fold's own `derived_outcome`; (2) in-flight attempts and
+verifications are settled interrupted at Halted (a budget stop drains them instead); (3)
+promoting generations are promoted; (4) authorized publications are completed; (5) every open
 generation is closed `RunEnding { outcome }` with its worktree scrubbed; (5b) deferred items
-stay as they are (void at Halted, resumably open at BudgetExceeded); (6) the derived outcome is
-confirmed against the closed fold and `run_finished` is appended. Steps (2)–(4) are the
-refusals below, by the reading PR10's record states (§3 R1): the synchronous loop never leaves
-an attempt in flight, a generation promoting or a transaction open when it reaches closure, and
-a fresh process's recovery steps (d)–(f) settle, promote and complete them before the loop runs,
-so a fold in one of those shapes at closure is a state this build cannot have produced.
+stay as they are (void at Halted, resumably open at BudgetExceeded); (6)–(8) provisional
+reservations are cancelled, the derived outcome is confirmed against the closed fold and
+`run_finished` is appended.
+
+**Step (2) settles only what its caller vouches for** (the working record's R-AF, PR11 phase 4).
+The coordinator hands the closure the in-flight identities whose pipelines it cancelled and saw
+end ([`Cancelled`]); anything else in flight is refused, appending nothing. The synchronous loop
+and the coordinator's idle closure vouch for nothing, which keeps PR10's refusal for them: the
+synchronous loop never leaves an attempt or a verification in flight when it reaches closure, and a
+fresh process's recovery steps (d) and (f) settle a dead coordinator's before the loop runs.
+**Steps (3) and (4) are completed wherever the closure finds them** (R-AG): no coordinator schedule
+reaches either at a live end, because a promotion and a publication each run from their first
+append to their last on the coordinator's thread, and recovery step (f) completes one an error left.
 
 ## `pub fn ending_outcome(fold: &TopologyFold) -> Result<RunOutcome, UpstrokeError> {`
 
@@ -41,19 +49,69 @@ refused before anything is derived.
 
 ## `pub fn refuse_unclosable(fold: &TopologyFold) -> Result<(), UpstrokeError> {`
 
-Steps (2)–(4) as refusals naming PR11. An in-flight generation, a promoting one or an
-unresolved transaction at closure is not closed here and not appended for: `checkpoint_refusals`
-— "an intermediate build refuses, before any append, any operation whose terminals it does not
-implement" — and the terminals of closure under concurrency (in-flight cancellation, the budget
-drain, promotion and publication completion inside closure) are `tokio_boundary`'s, PR11.
-`TopologyRun::close_run` consults it after the ending outcome and before its first append;
-`closure_refuses_an_in_flight_generation_and_an_unresolved_transaction_before_any_append`
-replays the two logs and holds the refusal.
+Step (2) for a caller that vouches for nothing: every in-flight attempt and started verification
+is refused, before any append. [`settleable`] with an empty [`Cancelled`] refuses the same work
+with the same sentence, which keeps the words the frozen
+`closure_refuses_an_in_flight_generation_and_an_unresolved_transaction_before_any_append` holds
+(`recover/tests.rs`: "is in flight", "is unresolved", "PR11", "nothing was appended").
 
 ## `pub fn unclosable(fold: &TopologyFold) -> Vec<String> {`
 
-The shapes [`refuse_unclosable`] names, one line each, so the refusal and the diagnostic read
-the same list.
+The in-flight work [`in_flight`] finds, one line each, so the refusal and the diagnostic read the
+same list. A promoting generation and a prepared transaction are no longer here: the closure
+completes them (steps (3) and (4)), and [`blockers`] still names them.
+
+## `pub enum InFlight {`
+
+Step (2)'s work: an attempt in flight (its key, generation, attempt number and the lease its
+interruption records, by kind, as recovery records it), or a started verification (its sequence,
+its candidate's task, and — for a stale-clean basis — the pin and the proposal it pins).
+
+## `impl InFlight` › `pub fn describe(&self) -> String {`
+
+The line a refusal or a diagnostic names it by.
+
+## `impl InFlight` › `pub fn interrupted(&self) -> TopologyEventBody {`
+
+The terminal a halt appends for it: `attempt_interrupted` or `merge_verification_interrupted`, each
+saying the run halted. An attempt's says the coordinator cancelled its pipeline and the Runner
+terminated its processes before the terminal was appended. A verification's says its pipeline had
+ended — cancelled by the coordinator, or with a result the halt discards unprepared, since a halt
+recorded after the result arrived and before `integrate()` prepared it still interrupts it (the
+working record's round R2) — and that the Runner had established the end of each of its processes.
+Either is what vouching for it means.
+
+## `pub fn in_flight(fold: &TopologyFold) -> Vec<InFlight> {`
+
+Every in-flight attempt in key order, then the started verification if one is open — recovery's
+order, step (d) before step (f).
+
+## `pub struct Cancelled {`
+
+The in-flight identities a coordinator vouches for: attempts by key, generation and attempt, and
+verifications by sequence. The coordinator records each identity when it cancels its pipeline, and a
+verification's sequence when an interrupt ends `verify`, whether or not its result had arrived; it
+hands the set over only after every pipeline has ended with its termination established
+(`coordinator.md`, `finish`).
+
+## `impl Cancelled` › `pub fn vouches(&self, item: &InFlight) -> bool {`
+
+Whether `item` is one of them.
+
+## `pub fn settleable(`
+
+Step (2)'s gate. Every in-flight item must be vouched for, or the closure is refused naming the
+ones that are not, before any append. Vouched in-flight work outside a Halted ending is refused
+too: a budget stop drains its pipelines to their natural settlements and never cancels one, so a
+cancelled identity at a BudgetExceeded end is a coordinator defect, not work to settle.
+
+## `fn unvouched_refusal(found: &[String]) -> UpstrokeError {`
+
+The one sentence both refusals use.
+
+## `pub fn promoting(fold: &TopologyFold) -> Vec<TaskKey> {`
+
+Step (3)'s selection: every task holding a `Promoting` generation, in key order.
 
 ## `pub fn closable(fold: &TopologyFold) -> Vec<TaskKey> {`
 
@@ -75,9 +133,9 @@ R5): the fold checks the outcome and `halted_at`, and the counts are a projectio
 
 ## `pub fn blockers(fold: &TopologyFold) -> Vec<String> {`
 
-Why a fold is not ending, for an operator: the unclosable shapes first, then every open or
-retained generation, every deferred task, every verification-deferred candidate, and
-structurally admissible work. The last line, "of a state this module cannot name", is the
+Why a fold is not ending, for an operator: the in-flight work first, then every open, retained or
+promoting generation, every deferred task, a prepared transaction not yet published, every
+verification-deferred candidate, and structurally admissible work. The last line, "of a state this module cannot name", is the
 `DerivedOutcome::FoldError` arm's; the totality census asserts that arm is never reached in the
 fold's derivation over every explored state (`the_derived_outcome_is_total_over_every_explored_state`),
 and says nothing about this function's text.

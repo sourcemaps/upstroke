@@ -35,10 +35,6 @@ A scratch directory tree, made through the run-directory funnel.
 directory-creation funnel — driven here with production's no-op
 observer so a fixture contributes nothing to the coverage evidence.
 
-## `fn drop_dir(path: &Path) {`
-
-Remove a fixture tree, through the funnel that owns tree removal.
-
 ## `struct Fixture {`
 
 A real repository, a real private root, a manager over both, and one

@@ -50,7 +50,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
     fn probe(&self, runner: &dyn Runner) -> Result<Caps, UpstrokeError> {
         let invocation = cli();
         let out = runner
-            .run(&probe_request(
+            .run_blocking(&probe_request(
                 ADAPTER_ID,
                 invocation.spec(&["--version".to_owned()])?,
                 probe_ordinal::VERSION,
@@ -84,7 +84,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
         }
         let version = bin::extract_version(&out.stdout);
 
-        let help = runner.run(&probe_request(
+        let help = runner.run_blocking(&probe_request(
             ADAPTER_ID,
             invocation.spec(&["--help".to_owned()])?,
             probe_ordinal::HELP,
@@ -115,7 +115,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
     fn discover(&self, runner: &dyn Runner, _caps: &Caps) -> Result<Discovery, UpstrokeError> {
         let invocation = cli();
         let out = runner
-            .run(&probe_request(
+            .run_blocking(&probe_request(
                 ADAPTER_ID,
                 invocation.spec(&["auth".to_owned(), "status".to_owned(), "--json".to_owned()])?,
                 probe_ordinal::AUTH_STATUS,

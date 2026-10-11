@@ -51,6 +51,14 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 thiserror = "2"
+# The schema-4 coordinator's scheduler (PR11): pipelines run on the runtime's blocking pool
+# and hand typed completions back over its channels, while the coordinator stays a plain
+# thread. `rt`, `rt-multi-thread` and `sync` and nothing else: no `process`, `fs`, `net`,
+# `signal` or `io-*`, because Tokio schedules and never spawns or touches a file, no `time`,
+# because nothing waits on Tokio's clock, and no `macros`, whose proc-macro tree nothing here
+# needs. Pinned exactly for `globset`'s reason: 1.53.1 declares rust-version 1.71, and
+# Tokio's MSRV rolls forward.
+tokio = { version = "=1.53.1", default-features = false, features = ["rt", "rt-multi-thread", "sync"] }
 toml = "0.8"
 
 # TEST-ONLY, and the shipped library carries no YAML parser: the CI workflow-shape

@@ -372,6 +372,13 @@ region.
 
 The same two counts, **per thread and per half**.
 
+The per-thread cell holding them, `THREAD_BARRIERS`, is declared in
+`src/util/thread_barriers.rs` and imported here (`mod thread_barriers;`),
+since 2026-09-26: this file allows `clippy::disallowed_methods`, and no
+macro is invoked outside a function body in a file that does not forbid
+every governed lint, so its `thread_local!` moved to a module that forbids
+all three.
+
 [`BARRIERS`] is process-wide, so an assertion on its delta can only be a
 *lower bound* while the suite is threaded — and a lower bound is satisfied by
 barriers some other test's thread performed, which is exactly the hole
@@ -621,7 +628,7 @@ A day boundary and the last second before one.
 The log is read back with a plain string compare in places; the
 zero-padded fixed-width form is what makes that legitimate.
 
-## `let dir = std::env::temp_dir().join(format!("upstroke-util-path-{}", std::process::id()));`
+## `let tree = scratch("util-path");`
 
 The empty-PATH-segment guard in find_program rests on this: a bare
 name must not resolve against the process CWD. Verified by probing

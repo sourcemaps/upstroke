@@ -544,9 +544,11 @@ pub fn run_review(
                 invocations.reask.clone()
             },
         );
-        let output = match runner.run(&request) {
+        let output = match runner.run_blocking(&request) {
             Ok(output) => output,
-            Err(error) if error.fate.is_unresolved() => return Err(error.into()),
+            Err(error) if error.is_cancelled() || error.fate.is_unresolved() => {
+                return Err(error.into());
+            }
             Err(error) => {
                 let never_started = matches!(error.fate, crate::error::ProcessFate::NeverStarted);
                 let mut outcome = unavailable_after_error(
@@ -1097,11 +1099,8 @@ mod tests {
                 "review transcript write failed",
             ),
         ] {
-            let root = std::env::temp_dir().join(format!(
-                "upstroke-review-unavailable-{}-{stage:?}",
-                std::process::id()
-            ));
-            std::fs::create_dir_all(&root).expect("review scratch");
+            let tree = review_tree(&format!("review-unavailable-{stage:?}"));
+            let root = tree.path().to_path_buf();
             let blocked_reviews = root.join("reviews-not-a-directory");
             let reviews_dir = if matches!(stage, UnavailableStage::Transcript) {
                 std::fs::write(&blocked_reviews, "blocks transcript writes\n")
@@ -1142,14 +1141,13 @@ mod tests {
                 } => assert!(detail.contains(expected), "{detail}"),
                 other => panic!("unexpected review result for {stage:?}: {other:?}"),
             }
-            let _ = std::fs::remove_dir_all(&root);
         }
     }
 
     struct FatedRunner(crate::error::ProcessFate);
 
-    impl Runner for FatedRunner {
-        fn run(
+    impl crate::runner::contract::tests::InlineRunner for FatedRunner {
+        fn run_inline(
             &self,
             request: &RunnerRequest,
         ) -> Result<crate::agent::ProcessOutput, crate::runner::RunnerError> {
@@ -1168,9 +1166,8 @@ mod tests {
         use crate::error::ProcessFate;
 
         let task = task();
-        let root =
-            std::env::temp_dir().join(format!("upstroke-review-fate-{}", std::process::id()));
-        std::fs::create_dir_all(&root).expect("review scratch");
+        let tree = review_tree("review-fate");
+        let root = tree.path().to_path_buf();
         let adapter = UnavailableAdapter {
             stage: UnavailableStage::Spawn,
         };
@@ -1227,7 +1224,61 @@ mod tests {
                  reviewer's own `AgentError` cannot say so"
             );
         }
-        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    struct CancellingRunner;
+
+    impl crate::runner::contract::tests::InlineRunner for CancellingRunner {
+        fn run_inline(
+            &self,
+            request: &RunnerRequest,
+        ) -> Result<crate::agent::ProcessOutput, crate::runner::RunnerError> {
+            Err(crate::runner::RunnerError::cancelled(
+                &request.invocation,
+                crate::error::ProcessFate::Gone,
+            ))
+        }
+    }
+
+    #[test]
+    fn a_cancelled_review_process_propagates_instead_of_reporting_the_review_unavailable() {
+        let task = task();
+        let tree = review_tree("review-cancelled");
+        let root = tree.path().to_path_buf();
+        let adapter = UnavailableAdapter {
+            stage: UnavailableStage::Spawn,
+        };
+        let cx = ReviewCx {
+            adapter: &adapter,
+            profile: profile_for("cancel-test", "test-model", "review", Effort::High),
+            lens: Lens::Acceptance,
+            task: ReviewSubject::of(&task),
+            diff: "diff --git a/a.rs b/a.rs\n+++ b/a.rs\n+fn x() {}\n",
+            artifacts: &[],
+            decisions: &[],
+            workspace: &root,
+            settings_dir: &root,
+            reviews_dir: &root,
+            stem: "cancelled".to_owned(),
+            timeout: Duration::from_secs(60),
+        };
+        let error = run_review(&cx, &CancellingRunner, &review_ids()).expect_err(
+            "a process its pipeline's cancellation ended is not an unavailable reviewer",
+        );
+        assert!(
+            matches!(
+                error,
+                UpstrokeError::Runner {
+                    fate: crate::error::ProcessFate::Gone,
+                    ..
+                }
+            ),
+            "the cancellation reaches the caller as the Runner's error: {error:?}"
+        );
+        assert!(
+            error.to_string().contains("cancelled"),
+            "and says it was cancelled: {error}"
+        );
     }
 
     #[test]
@@ -1580,8 +1631,8 @@ mod tests {
         seen: std::sync::Mutex<Vec<(ExecutionRole, String)>>,
     }
 
-    impl Runner for RecordingRunner {
-        fn run(
+    impl crate::runner::contract::tests::InlineRunner for RecordingRunner {
+        fn run_inline(
             &self,
             request: &RunnerRequest,
         ) -> Result<crate::agent::ProcessOutput, crate::runner::RunnerError> {
@@ -1589,17 +1640,14 @@ mod tests {
                 .lock()
                 .expect("recorder")
                 .push((request.role.clone(), request.invocation.render()));
-            Runner::run(&self.inner, request)
+            self.inner.run_blocking(request)
         }
     }
 
     #[test]
     fn the_one_format_reask_is_its_own_invocation_not_a_second_run_of_the_first() {
-        let root = std::env::temp_dir().join(format!(
-            "upstroke-review-reask-identity-{}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&root).expect("review scratch");
+        let tree = review_tree("review-reask-identity");
+        let root = tree.path().to_path_buf();
         let task = task();
         let adapter = DeadlineAdapter::new();
         let cx = ReviewCx {
@@ -1622,7 +1670,6 @@ mod tests {
         };
 
         let outcome = run_review(&cx, &runner, &review_ids()).expect("review result");
-        let _ = std::fs::remove_dir_all(&root);
         assert_eq!(outcome.invocations, 2, "the format re-ask was attempted");
 
         let seen = runner.seen.lock().expect("recorder").clone();
@@ -1642,9 +1689,8 @@ mod tests {
 
     #[test]
     fn verdict_reask_uses_the_remaining_pass_deadline() {
-        let root =
-            std::env::temp_dir().join(format!("upstroke-review-deadline-{}", std::process::id()));
-        std::fs::create_dir_all(&root).expect("review scratch");
+        let tree = review_tree("review-deadline");
+        let root = tree.path().to_path_buf();
         let task = task();
         let adapter = DeadlineAdapter::new();
         let cx = ReviewCx {
@@ -1663,7 +1709,6 @@ mod tests {
         };
 
         let outcome = run_review(&cx, &host(), &review_ids()).expect("review result");
-        let _ = std::fs::remove_dir_all(&root);
         assert_eq!(outcome.invocations, 2, "the format re-ask was attempted");
         assert!(
             matches!(
@@ -1809,26 +1854,52 @@ mod tests {
         );
     }
 
+    /// A guarded tree and a path inside it, held together so the tree
+    /// outlives every reader. The roots below were
+    /// `temp_dir()/upstroke-review-<what>-<pid>`, created and never removed
+    /// (`PR7-SCRATCH-FIXTURE-LEAK`).
+    struct Shared {
+        _tree: crate::rundir::scratch_tree::ScratchTree,
+        path: std::path::PathBuf,
+    }
+
+    fn review_tree(tag: &str) -> crate::rundir::scratch_tree::ScratchTree {
+        let parent = std::env::temp_dir();
+        match crate::rundir::scratch_tree::acquire(&parent, tag) {
+            Ok(tree) => tree,
+            Err(refusal) => panic!(
+                "a scratch tree for `{tag}` under {}: {refusal:?}",
+                parent.display()
+            ),
+        }
+    }
+
     fn scratch_config(name: &str, body: &str) -> Config {
-        let dir = std::env::temp_dir().join(format!("upstroke-review-plan-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("scratch dir");
+        static SHARED: std::sync::OnceLock<Shared> = std::sync::OnceLock::new();
+        let dir = &SHARED
+            .get_or_init(|| {
+                let tree = review_tree("review-plan");
+                let path = tree.path().to_path_buf();
+                Shared { _tree: tree, path }
+            })
+            .path;
         let path = dir.join(name);
         std::fs::write(&path, body).expect("write config");
         let mut warnings = Vec::new();
-        crate::config::load(Some(&path), &dir, Some(&no_pools()), &mut warnings).expect("load")
+        crate::config::load(Some(&path), dir, Some(&no_pools()), &mut warnings).expect("load")
     }
 
     fn no_pools() -> std::path::PathBuf {
-        static PATH: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
-        PATH.get_or_init(|| {
-            let dir = std::env::temp_dir()
-                .join(format!("upstroke-review-nopools-{}", std::process::id()));
-            std::fs::create_dir_all(&dir).expect("scratch dir");
-            let path = dir.join("pools.toml");
-            std::fs::write(&path, "# no pools\n").expect("empty pools file");
-            path
-        })
-        .clone()
+        static SHARED: std::sync::OnceLock<Shared> = std::sync::OnceLock::new();
+        SHARED
+            .get_or_init(|| {
+                let tree = review_tree("review-nopools");
+                let path = tree.path().join("pools.toml");
+                std::fs::write(&path, "# no pools\n").expect("empty pools file");
+                Shared { _tree: tree, path }
+            })
+            .path
+            .clone()
     }
 
     fn auth_plan(cfg: &Config) -> (Plan, Vec<ResolvedChain>) {

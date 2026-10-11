@@ -77,3 +77,12 @@ reads, and every future fixture author will read it the strong way.
 Whether the image is cleaned before freezing, or the leg clears `%TEMP%`
 before the suite, is the operator's call and outside this repository; what
 belongs here is that no fixture may depend on the answer.
+
+---
+
+**2026-09-25: the sibling row this one cites is closed.** `PR64-CLEANUP-003-SCRATCH-PRECLEAN` was
+closed at `b10c07ffe8822c7eaa5dc8b5fc8ff2fa7faaa874`, so the two references above to it as a live row are references to a closed
+one; `git log --diff-filter=D -- findings/ reviews/findings/` recovers the file. Nothing about
+**this** row changes: the frozen image still ships the roots it measured, and a fixture that now
+refuses an occupied root rather than pre-cleaning it does not remove what is already in the image —
+it makes those roots *more* durable, because refusal is the new answer to finding one occupied.

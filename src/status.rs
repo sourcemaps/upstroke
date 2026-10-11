@@ -267,19 +267,24 @@ mod tests {
 
     #[test]
     fn status_asked_for_a_husk_id_names_which_husk_it_is() {
-        let root = std::env::temp_dir().join(format!(
-            "upstroke-status-husk-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|since| since.as_nanos())
-                .unwrap_or_default()
-        ));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).expect("scratch");
+        // The fixture here built `temp_dir()/upstroke-status-husk-<pid>-<nanos>`
+        // and pre-cleaned it with a discarded `remove_dir_all` before it had
+        // any claim on the name (`PR64-CLEANUP-003-SCRATCH-PRECLEAN`), and
+        // nothing reclaimed it (`PR7-SCRATCH-FIXTURE-LEAK`). `acquire`
+        // refuses an occupied root rather than emptying it and the guard
+        // reclaims the tree however this test ends.
+        let parent = std::env::temp_dir();
+        let tree = match crate::rundir::scratch_tree::acquire(&parent, "status-husk") {
+            Ok(tree) => tree,
+            Err(refusal) => panic!(
+                "a scratch tree for `status-husk` under {}: {refusal:?}",
+                parent.display()
+            ),
+        };
+        let root = tree.path();
         let status = std::process::Command::new("git")
             .arg("-C")
-            .arg(&root)
+            .arg(root)
             .args(["init", "-q", "-b", "main"])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -288,8 +293,8 @@ mod tests {
         assert!(status.success(), "git init");
 
         let husk = "01STATUSHUSK00000000000000";
-        std::fs::create_dir_all(rundir::public_dir(&root, husk)).expect("husk");
-        let Err(error) = load(&root, Some(husk)) else {
+        std::fs::create_dir_all(rundir::public_dir(root, husk)).expect("husk");
+        let Err(error) = load(root, Some(husk)) else {
             panic!("a husk is not a run and status must not load one");
         };
         let said = error.to_string();
@@ -306,8 +311,6 @@ mod tests {
             said.contains("records no private locator"),
             "and its locator, or that there is none: {said}"
         );
-
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

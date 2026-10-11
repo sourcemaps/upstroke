@@ -1,5 +1,6 @@
 //! Extended notes: `docs/internals/lib.md`
 
+#![forbid(non_local_definitions)]
 pub mod agent;
 pub mod answer;
 pub mod capacity;
