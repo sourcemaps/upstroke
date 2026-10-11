@@ -180,5 +180,6 @@ not close, each filed where its owner decides it:
 
 The two frozen oracles §5.8 also lists are replaced and demonstrated by this change (R-O1 to R-O3 with their mutations),
 so they are not among the residuals. The record does not say this change closes the whole finding; it is deleted when
-the residuals above are closed or accepted by the owner, and #330's merge itself waits on the owner's adoption of the
-record's erratum E-FUC-3, whose naming the implementation follows.
+the residuals above are closed or accepted by the owner, and #330's merge no longer waits on the record's erratum
+E-FUC-3, whose naming the implementation follows: it was adopted as composed on 2026-10-11 by an agent decision under
+the owner's delegation (the record's §6.16).

@@ -5611,7 +5611,9 @@ are the orchestrator's records, not this change's. The evidence is under `~/orch
 `c6r9/…`. The validation runs once at the final head, and the round then stops before any push, with a package to the
 orchestrator.
 
-**The commits:** `29bdbd13`, the design texts and the three findings (`docs(design)`), and this record's commit.
+**The commits:** `29bdbd13`, the design texts and the three findings (`docs(design)`); `ffc0914c`, this record's first
+commit (`docs(record)`); and the commit of the orchestrator's answer 1, below, which corrects the DESC finding's
+sentence and adds this record's note of it (`docs(findings)`).
 
 #### The six decisions, as made
 
@@ -5703,6 +5705,20 @@ inferred: no merge, closure or certification, and every merge bar stands (the re
   the erratum, which amends the packet's untagged paths for U's instances, is adopted as composed, under the owner's
   delegation of 2026-10-11, and cites this section (`c6r9/edits/design15-paragraph.txt`). None of the sentences
   `src/export.rs` pins in that file changes.
+
+#### The orchestrator's answer 1 (2026-10-11)
+
+At this round's question 1 (waiting for capacity at gate 01), the orchestrator's answer 1
+(`~/orch-pr11/answers/pr11_fuc_impl9-1.md`, sha256 `32009d6d…`) disposed of three points:
+- **R-REF's disposition stays `deferred`,** with its dated acceptance section: that keeps it filed with the acceptance
+  recorded, as D5(b) requires.
+- **The DESC finding's sentence on E-FUC-3 is corrected in place.** It said that this change's merge waited on the
+  owner's adoption of the erratum, which the adoption made false. It now says that the merge no longer waits on it,
+  adopted as composed on 2026-10-11 by an agent decision under the owner's delegation, and cites this section. Every
+  other word of the finding stays, "closed or accepted by the owner" for the residuals among them
+  (`c6r9/a1/edits-a1.txt`). The orchestrator classed the correction with item (b)'s merge-needs lists, as the adoption's
+  direct consequence.
+- **§6.13's "Bounds." line is kept** under C8-R1's rule for dated sections, and the sweep's flag on it stays recorded.
 
 #### C8-R1 (P3): the C-R1 risk statement promised an unsupported time bound
 
