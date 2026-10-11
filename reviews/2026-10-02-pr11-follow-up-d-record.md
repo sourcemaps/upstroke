@@ -4771,3 +4771,195 @@ are in `fudi9/inputs/READ-LOG.txt`.
 
 The gates' results are in `fudi9/gates/`, the draft body and this round's package; this record reports none, since
 they run after its commit.
+
+### 5.23 Round D10, 2026-10-11: O8 and B-W924-R1-S adopted by an agent decision under the owner's delegation; D's status words, and B-W924-R2's one dependent line
+
+> **The adoption, recorded.** On 2026-10-11, O8, with its texts rebased onto master, and ruling B-W924-R1-S were
+> ADOPTED together, with the dependent-note choice (i), as an agent decision by `pr11_decide_d` under the owner's
+> delegation of 2026-10-11 (babysit's `0194a1e4…`). It is not the owner's own selection, not a pull request review
+> verdict, and not D's held full review or a substitute for it; it waives no test, finding triage or merge bar.
+> Nothing it adopts is in force until #331 merges: until then B-W924-R1 stays operative on master, and if #331 never
+> merges, B-W924-R1 stays. This round makes D's texts say so, in words only, and changes no code, test, deadline or
+> instrument value. D's full requested review stays HELD and OUTSTANDING, required CI at D's final head and ORCH §1's
+> merge bar are unchanged, and no `reviewed_sha` is re-stamped. Nothing is pushed: the round stops before push.
+
+**Who and on what.** `pr11_fud_impl10` (`claude-opus-5-5`, `max`), a fresh worker `orch_pr11b` spawned on 2026-10-11
+on `0ec7631b`, with master at `5355b829`. Its brief is `~/orch-pr11/briefs/pr11_fud_impl10.md`, whose scope is the
+decision's section 4, step 4, items (a) to (f). This round's figures are under `~/orch-pr11/logs/pr11_fud_impl10/`,
+cited as `fudi10/…`, and the hashes of its inputs are in `fudi10/inputs/VERIFY.txt`.
+
+#### 5.23.1 The decision
+
+- **The report:** `/home/ubuntu/orch-pr11/logs/pr11_decide_d/DECISION-REPORT.md`, by `pr11_decide_d`
+  (`claude-opus-5-5`, `max`), sha256 `7d51d7e9b288dca632eb8e5ae7bd63660877a12912d3ba2cd0d918d44e16c00d`.
+- **Its authority:** section 2 of the owner's delegation of 2026-10-11, carried by babysit_pr11
+  (`/home/ubuntu/orch-pr11/logs/pr11_decide_d/inputs/authority/owner-blocker-decision-workers-20261011.md`),
+  sha256 `0194a1e4bda561cac66a47e9c67bd92e2430c0677f24aa770c93f6151fac699f`.
+- **Verified:** both hashes, and the report's 33 staged inputs (`fudi10/inputs/VERIFY.txt`).
+- **Adopted:**
+  - O8: the five `[[legacy]]` texts of `effects/allowlist.toml`, as the joint exhibit rebased them onto master, with
+    every `allows` unchanged;
+  - ruling B-W924-R1-S: D's access at the snapshot path's three registry commands, which are the whole of
+    B-W924-R1's scope; its five differences; its eleven-test mapping; and round D8's hold of the removal-and-list
+    witness (§5.21.4);
+  - the supersession of B-W924-R1 at those commands, with its withdrawal by its documented ordered rollback there
+    only, in force only from #331's merge;
+  - the nominal deadline costs as stated, with no hard elapsed bound;
+  - the dependent-note choice (i).
+- **Not adopted:** R, N and the choice (ii); Annex R.1's literal; any certification of D's code; any change on
+  master before #331's merge; any change to B-W924-R2's code, H1 or H3; and the merge.
+
+#### 5.23.2 The status words, each line changed
+
+`fudi10/tools/status-census.py` listed every added line of `git diff 5355b829 0ec7631b`, D's net change, that holds
+a status word (proposed, conditional, not granted, not adopted and their kin) or names O8 or B-W924-R1-S:
+272 lines, 166 of them in this record (`fudi10/census/status-census-base-0ec7631b.tsv`). The decision's starting list (its
+`CHECKS.txt` §8: 8 lines in the allowlist, 3 in `design/15`, 21 in `docs/internals/workspace.md` and none in
+`src/workspace.rs`) lies inside it, and all 32 are changed (`fudi10/census/starting-list-check-17936500.txt`).
+
+Every text outside this record that gave either status now states the adoption, as "an agent decision by
+`pr11_decide_d` under the owner's delegation of 2026-10-11 (babysit's `0194a1e4…`)", and, where it stated a condition,
+keeps the true one: in force only from #331's merge. `fudi10/tools/apply-status-edits.py` made 49 exact
+replacements, 56 occurrences in 13 files, each refused unless its old text matched its count
+(`fudi10/texts/status-edits-applied-v2.tsv`). In the table, an edit marked * carries no attribution of its own: it
+sits inside a text whose own edit states the adoption (W2's paragraph, W18's headers, F1's guard, F4's paragraph).
+The lines are this head's, and the record's commit does not move them.
+
+| Edit | File | Lines at this head | What it said |
+|---|---|---|---|
+| A1 | `effects/allowlist.toml` | 834-837, 881-884, 924-927, 1318-1321 | the comment above each AMENDED ONCE entry: "PROPOSED, conditional on the owner's decision O8 (decision B), and not granted" |
+| A2 | `effects/allowlist.toml` | 969-974 | the comment above the composed `src/workspace.rs` entry: "PROPOSED, conditional on the owner's decision O8 (decision B) and on the owner's ruling B-W924-R1-S, and not granted", and "Until both are adopted, the second amendment … governs on master" |
+| A3 | `effects/allowlist.toml` | 1097-1100 | the composed entry's `legacy_effect` text: "Until O8 and B-W924-R1-S are both adopted, the second amendment governs." |
+| D1 | `design/15` | 261-266 | D's paragraph's italic status clause: "PROPOSED, conditional on the owner's decision O8 (decision B) … and on the owner's ruling B-W924-R1-S, and not granted", and in force "until the owner adopts O8 and B-W924-R1-S and that pull request merges" |
+| W1 | `docs/internals/workspace.md` | 47-50 | the second amendment's paragraph: B-W924-R1-S "**proposed, effective only together with O8, and not adopted**" |
+| W2 | `docs/internals/workspace.md` | 56-58 | the third amendment's paragraph: "**proposed, conditional on the owner's decision O8 (decision B) and on the owner's ruling B-W924-R1-S, and not granted**" |
+| W3* | `docs/internals/workspace.md` | 60 | the same paragraph: "marked there as proposed" |
+| W4* | `docs/internals/workspace.md` | 73-74 | the same paragraph: "until the owner adopts O8 and B-W924-R1-S and the pull request merges" |
+| W5 | `docs/internals/workspace.md` | 176-178 | `AUTO_MAINTENANCE_REFUSED`: "(follow-up D's R-G, proposed, conditional on O8)" |
+| W6 | `docs/internals/workspace.md` | 226-228 | `git_command`: "Follow-up D (proposed, conditional on O8)" |
+| W7 | `docs/internals/workspace.md` | 309-311 | the private-hooks builders: the payload census row, "an additional conditional proposal with O8's texts" |
+| W8 | `docs/internals/workspace.md` | 402-405 | `switch_branch`: "Under follow-up D (proposed, conditional on O8)" |
+| W9 | `docs/internals/workspace.md` | 525-528 | `add_gate_worktree`: "(follow-up D, proposed, conditional on O8)" |
+| W10 | `docs/internals/workspace.md` | 553-555 | `prepare_commit_from_candidate`: "R-D1's part K (proposed, conditional on O8)" |
+| W11 | `docs/internals/workspace.md` | 775-778 | `cleanup_gate_workspace`: "(follow-up D, proposed, conditional on O8)" |
+| W12 | `docs/internals/workspace.md` | 814-817 | `legacy_registry_pause`: "proposed, conditional on the owner's decision O8" |
+| W13 | `docs/internals/workspace.md` | 1118-1122 | `enum Served`: "Under the owner's ruling B-W924-R1-S, **proposed** and effective only together with O8" |
+| W14 | `docs/internals/workspace.md` | 1178-1180 | `WEDGED_TEAR_FIXTURE`: "B-W924-R1-S (proposed)" |
+| W15 | `docs/internals/workspace.md` | 1190-1192 | `PRODUCTION_REGISTRY_DEADLINE`: "Under B-W924-R1-S (proposed)." |
+| W16 | `docs/internals/workspace.md` | 1210-1212 | the kept add witness: "Under B-W924-R1-S (proposed)" |
+| W17 | `docs/internals/workspace.md` | 1217-1219 | the rescripted removal-and-list witness: "*Under B-W924-R1-S (proposed):" |
+| W18 | `docs/internals/workspace.md` | 1238-1240, 1252-1254, 1264-1266, 1282-1284 | the four replaced or renamed witnesses: "*Under B-W924-R1-S (proposed), in place of B-W924-R1's" |
+| W19* | `docs/internals/workspace.md` | 1241-1242 | the own-registration witness: "a change O8 proposes" |
+| W20* | `docs/internals/workspace.md` | 1255-1256 | the unreadable-`commondir` witness: "a change O8 proposes" |
+| W21* | `docs/internals/workspace.md` | 1274, 1288 | the lasting-tear and touched-destination witnesses: "Changed, as O8 proposes:" |
+| H1 | `docs/internals/engine/attempt.md` | 15 | the module's status sentence: "**Proposed, conditional on the owner's decision O8 (decision B), and not granted.**", "marked there as proposed", "until the owner adopts O8 and the pull request merges" |
+| H2 | `docs/internals/engine/coordinator.md` | 16 | the same three phrases |
+| H3 | `docs/internals/engine/resume.md` | 11 | the same three phrases |
+| N1 | `docs/internals/engine/attempt.md` | 151-153 | `run_attempt`: "follow-up D's slot (proposed, conditional on O8)" |
+| N2 | `docs/internals/engine/coordinator.md` | 217-219 | `kept_on_error`: "R-D1's part N (proposed, conditional on O8;" |
+| N3 | `docs/internals/engine/coordinator.md` | 536-538 | `if let Some(candidate) = refused {`: "B-PRESERVE (proposed, conditional on O8)" |
+| N4 | `docs/internals/engine/resume.md` | 219-221 | `let mut kept = Vec::new();`: "Follow-up D's lookup (proposed, conditional on O8)" |
+| N5 | `docs/internals/engine/resume.md` | 249-251 | the resume's discard: "R-D1's part G4 (proposed, conditional on O8)" |
+| N6 | `docs/internals/engine/tests.md` | 2974-2976 | `TORN_REGISTRATION`: "follow-up D (proposed, conditional on the owner's decision O8;" |
+| N7 | `docs/internals/engine/tests.md` | 3134-3136 | `ENGINE_CALL_BOUND`: "parts K, G4 and N, proposed, conditional on O8" |
+| F1 | the finding `legacy-runs-in-linked-checkouts-race-the-shared-worktree-registry` | 11 | the guard: "PROPOSED conditional on the owner's decision O8 (decision B)" |
+| F2* | the finding `legacy-runs-in-linked-checkouts-race-the-shared-worktree-registry` | 11 | the same guard: "conditional on O8 as D's texts are" |
+| F3 | the finding `legacy-runs-in-linked-checkouts-race-the-shared-worktree-registry` | 162-166 | "**Implemented, and not granted.**", "**proposed, conditional on the owner's decision O8**", "until the owner adopts O8" |
+| F4 | the finding `legacy-runs-in-linked-checkouts-race-the-shared-worktree-registry` | 236-237 | "**Implemented on draft #331, and not granted.**" |
+| F5* | the finding `legacy-runs-in-linked-checkouts-race-the-shared-worktree-registry` | 244-245 | the same paragraph: "**proposed, conditional on the owner's decision O8**" |
+| F6 | the finding `legacy-runs-in-linked-checkouts-race-the-shared-worktree-registry` | 273-275 | "O8 is not adopted" |
+| F14 | the finding `legacy-runs-in-linked-checkouts-race-the-shared-worktree-registry` | 201-203 | "which needs O8 and PR #329 merged" |
+| F7 | the finding `an-external-prune-deletes-an-engine-worktrees-registration` | 398-400 | "**proposed, conditional on the owner's decision O8**", "until the owner adopts O8" |
+| F8 | the finding `an-attempt-error-after-the-worker-ran-discards-its-output` | 11 | the guard: "PROPOSED conditional on the owner's decision O8 (decision B)" |
+| F9 | the finding `an-attempt-error-after-the-worker-ran-discards-its-output` | 106-107 | "**Implemented on draft #331, PROPOSED conditional on the owner's decision O8**" |
+| F10 | the finding `a-reviewed-candidate-is-discarded-when-its-publication-fails` | 11 | the guard: "PROPOSED conditional on the owner's decision O8 (decision B)" |
+| F11 | the finding `a-reviewed-candidate-is-discarded-when-its-publication-fails` | 86-87 | "**Implemented on draft #331, PROPOSED conditional on the owner's decision O8**" |
+| F12 | the finding `a-resume-that-stops-before-its-report-names-no-kept-pin` | 53-56 | "PROPOSED conditional on the owner's decision O8" |
+| F13 | the finding `kept-pins-accumulate-until-the-operator-removes-them` | 60-63 | "PROPOSED conditional on the owner's decision O8" |
+
+**What stays, and why** (`fudi10/census/classified-text-head-17936500.tsv`: 261 lines at the round's text head,
+each classified, none left over):
+- **This record's own sections,** §0's rows and §1 to §5.22, stay as each round wrote them (166 lines): dated
+  history, which round D9's pure append also kept. From 2026-10-11 the status is this section's.
+- **30 lines that give no status of O8 or B-W924-R1-S:** a proposal document cited by name or section (R-D1's
+  preservation proposal, O3-R's option (C)), a finding's own remedy, a claim's own condition, C-SIDE (O8's option
+  (ii), isolated with O1, neither implemented nor adopted), O3's widening of decision B's text, and a test's variable
+  name.
+- **5 lines true as they stand:** the adopted composed text's own words ("By the owner's ruling B-W924-R1-S,
+  the first"), `design/15`'s statement of what S does once in force, two findings' "after O8's adoption" in a
+  paragraph that states the adoption, and the (i) line (§5.23.3).
+- **1 dated line, true only of the text it described:** the legacy finding's E1 section (2026-10-03) says "D's
+  proposed `src/workspace.rs` text does not name" `prepare_commit_from_candidate`. The adopted text names it (part
+  K), so the word stays, as history.
+
+**The instrument path.** Besides TOML comments, edit A3 changed one sentence of the composed entry's
+`legacy_effect` text, because the decision's step 4(a) names it. TOML parses that field as a string, and the one check
+that reads it asks only for its `LEGACY-EFFECT` marker (`src/effects/tests.rs:3186`). Every `allows`, every other key
+and value of all 51 entries, and B-W924-R1's adopted clause are unchanged (§5.23.4). The brief limited this path to
+"words in comments only"; this round's package returns that reading to the orchestrator.
+
+#### 5.23.3 The dependent-note choice (i)
+
+- **The line, found by its content:** B-W924-R2's note for `fn anothers_empty_commondir_in`, at
+  `docs/internals/engine/tests.md:2903` at master `5355b829`, at `0ec7631b` and at this head. That file is
+  blob `9857af50` at `0ec7631b`, as at round D7's `21519f5d`.
+- **It said:** "The rule, B-W924-R1's (`read_anothers_empty_commondir` in `src/workspace.rs`) in".
+- **It says:** "The rule as B-W924-R1 stated it (its predicate, `read_anothers_empty_commondir`, was in
+  `src/workspace.rs` until B-W924-R1-S withdrew it) in".
+- **Nothing else in B-W924-R2's scope changes:** no other line of its notes, and none of its code or tests. No
+  `read_anothers_empty_commondir` stands in `src/` at this head.
+
+#### 5.23.4 What is unchanged, by proof
+
+`fudi10/tools/proofs.py` ran at `17936500`, the round's text head (`fudi10/proofs/text-head-17936500/PROOFS.txt`,
+67 checks, all OK):
+- **Paths:** 13, each modified, each Markdown or `effects/allowlist.toml`. No `.rs`, `Cargo.*`, `.github/`,
+  `scripts/`, `.cargo/`, `clippy.toml`, `effects/wrappers.toml` or second-limb path. Each file's delta is exported
+  beside the proof (`delta-from-base_*.diff`).
+- **`src/workspace.rs`:** the same blob, `8af6a62c`, at `0ec7631b` and here. Its production region, the bytes
+  before its `#[cfg(test)]` `mod tests {`, hashes `471443e47c3da927…`, as at D's `1be2e2ad`; its test region is
+  byte-identical.
+- **`effects/allowlist.toml`, parsed:** the same 27 funnel and 24 legacy entries, and every `allows` equal. The one
+  differing value is the `src/workspace.rs` entry's `legacy_effect`, and replacing exactly the old sentence with the
+  new one turns the earlier text into this one. Its `LEGACY-EFFECT` marker is kept, B-W924-R1's adopted clause
+  (master's second amendment, 1,430 characters) is verbatim, and every changed line is a TOML comment or a line of
+  that one text.
+- **Scope:** every line this round changed was a line D added against master, but the (i) line. In `design/15` the
+  changed lines are 261 to 265 of D's paragraph, which runs from 261 to 299, and nothing else.
+- **Pins:** `src/export.rs`'s four `design/15` sentences and the six clauses of
+  `the_private_index_notes_tie_an_orphan_shared_index_to_the_checkouts_expiry` stand, and the
+  `PRIVATE_INDEX_CONTROLS` section is byte-identical.
+
+#### 5.23.5 The bars, unchanged
+
+- **D's full requested review:** HELD and OUTSTANDING. The decision cannot certify it, clears no provider stop, and
+  neither routes nor substitutes for it; neither does this round.
+- **Required CI green at D's final head:** its own bar. CI 38056908036 ran at `0ec7631b`; it is not this head's run.
+- **The merge:** under ORCH §1, with its existing second-limb reservation. D touches instrument paths
+  (`effects/allowlist.toml`, `clippy.toml`, `effects/wrappers.toml`).
+- **The composition, guarded until the merge** (the decision's §4, step 8): if master, or a merge into #331, changes
+  B-W924-R1's code or texts at the three commands, the composed allowlist entry, the notes' amendment paragraphs or
+  `design/15`'s legacy item, the composition is verified again at the new base. A mechanical re-composition that keeps
+  every adopted text verbatim is covered; a change to O8's or S's substance is a new decision.
+
+#### 5.23.6 Validation at the final head, and operations
+
+- **The proofs ran at `17936500`.** This record's commit appends to this file only, and no compiled input reads it:
+  no `include_str!` in `src/` names a file under `reviews/`.
+- **At the final head, once:** the ten gates, through `upstroke-build` on this round's private base, each in the
+  foreground and each started only when `statvfs` of that base reads at least 10,000,000,000 bytes free
+  (`fudi10/disk.log`); a red is kept and returned, never re-run to green. Then both body validators.
+- **Operations:** the inputs were read by exact path, but for one boundary event below. No shared directory was
+  listed, and no shared process table, environment or credential was read. The pull request's live body and metadata
+  were read with `gh`, and nothing was written to it. The two text commits were cut a second time from `0ec7631b`,
+  before anything was pushed, to add one replacement (F14) that the classification pass found; both cuts are recorded
+  in `fudi10/git/recut-1-before.txt` and `fudi10/git/recut-1-after.txt`. Left in place, since cleanup is out of scope:
+  this round's private base and scratch directories.
+- **One boundary event, disclosed and not repeated:** looking for how earlier rounds measured `src/workspace.rs`'s
+  production region, a recursive `grep` for its hash ran over the decision's staged inputs directory,
+  `/home/ubuntu/orch-pr11/logs/pr11_decide_d/inputs/`, rather than over named files. It printed matching lines only,
+  from four staged inputs (the exhibit, D7's §8 map, the cover and D8's verification); whatever else that directory
+  holds was read by the traversal and not printed.
+
+The gates' results are in `fudi10/gates/`, the body and this round's package; this record reports none, since they run
+after its commit.
