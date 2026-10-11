@@ -393,8 +393,9 @@ absence control; the walked-past control builds its own, for the reason
 given with that test below. `this_test_binary`
 is the directory and bare file name of the running test executable — the
 one program every platform has installed and executable by construction,
-and so the only "later match" a module that cannot write a file can
-offer.
+and so the one "later match" a module that cannot write a file can offer
+on every platform; the walked-past control uses one its platform provides
+on Linux and macOS, as given with that test below.
 
 `a_candidate_this_platform_cannot_stat_is_never_reported_as_absence`
 searches the undeterminable entry alone and requires the `stat` refusal,
@@ -433,20 +434,17 @@ it. Every byte of the absent candidate,
 constructed, against Linux's `PATH_MAX` of 4,096, and its one
 prerequisite is the procfs `current_exe` already needs.
 
-On macOS, and any other Unix, the later entry is the process's
-descriptor directory `/dev/fd`, and the program is the number of a
-descriptor the test holds open, read-only, on its own binary: the later
-match is `/dev/fd/<n>`, which `stat` follows to the binary. That
-directory holds exactly the process's open descriptors, by number, so a
-name that is not a number is answered `ENOENT` and nothing can create
-one there. Every byte of the absent candidate,
-`/dev/fd/upstroke-naming-walked-past/<n>`, is constructed: 36 bytes and
-the descriptor's decimal digits, at most ten for a `c_int`, against
-macOS's `PATH_MAX` of 1,024. Its prerequisites are `/dev/fd`, which
-`src/rundir/tests.rs`'s `descriptors_open_on` already lists on both Unix
-legs, a free descriptor, and a test binary the process can open for
-reading. On Linux and macOS alike, neither the binary's location nor its
-spelling reaches either entry.
+On macOS, and any other Unix, the later entry is `/bin` and the program
+is `sh`: the later match is the system shell `/bin/sh`, and the absent
+candidate is `/bin/upstroke-naming-walked-past/sh`. `/bin` belongs to
+the system, and the name appears nowhere else in this repository, so
+nothing the build or the suite runs creates it there. The branch's
+prerequisite is that `/bin/sh` is what `is_program` accepts, a regular
+file with an execute bit; the suite already requires the shell there,
+since Unix tests in `src/agent/proc/tests.rs` spawn `/bin/sh` by that
+path. Every byte of both candidates is constructed, 35 and 7 of them,
+against macOS's `PATH_MAX` of 1,024. On Linux and macOS alike, neither
+the binary's location nor its spelling reaches either entry.
 
 On Windows the later entry is the test binary's own directory, from
 `this_test_binary`, and the absent entry is its never-created child of
@@ -475,6 +473,10 @@ made the root's answer for a name the later match never looks up a
 prerequisite, read the clock, and kept the binary's directory as the later
 entry, which a Unix `PATH` cannot carry once it holds a `:`; the
 construction above repairs `PR336-PL-1`, `PR336-PL-2` and `PR336-PL-3`.
+The second repair's macOS branch searched `/dev/fd` for the number of a
+descriptor the test held open on its own binary; in its one native macOS
+run the search reported nothing of that name in either directory, so the
+branch now names the system shell at `/bin/sh` instead.
 
 `a_pathext_entry_no_string_can_carry_reaches_the_candidate_intact`
 drives `ProgramNaming::Windows` — on every platform, per the grid — with

@@ -409,16 +409,7 @@ mod tests {
         #[cfg(target_os = "linux")]
         let (later, program) = (PathBuf::from("/proc/self"), "exe".to_owned());
         #[cfg(all(unix, not(target_os = "linux")))]
-        let (later, program, _opened) = {
-            use std::os::fd::AsRawFd as _;
-            let exe = std::env::current_exe().expect("the test binary has a path");
-            let opened = std::fs::File::open(&exe).expect("the test binary opens for reading");
-            (
-                PathBuf::from("/dev/fd"),
-                opened.as_raw_fd().to_string(),
-                opened,
-            )
-        };
+        let (later, program) = (PathBuf::from("/bin"), "sh".to_owned());
         #[cfg(windows)]
         let (later, program) = this_test_binary();
         let absent = later.join("upstroke-naming-walked-past");
