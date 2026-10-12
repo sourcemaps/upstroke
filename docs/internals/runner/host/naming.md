@@ -428,9 +428,12 @@ that name with `-1` to `-9` appended, and returns the first that is
 answered `NotFound`, with that answer, which the test asserts is
 `NotFound` before it searches. A name that exists, or that is answered
 anything but `NotFound`, is passed over and never taken as absent, so an
-entry of the name already in that directory does not fail the test; it
-fails, naming every answer, only when none of the ten is answered
-`NotFound`. The test reads no clock, and no byte of the temporary
+entry of the name already in that directory does not fail the test;
+`absent_child_of` fails, naming every answer, only when none of the ten
+is answered `NotFound`. What the probe establishes holds when it is
+made: an entry of the taken name created in that directory before the
+search reaches it is not excluded, except on Linux, where none can be.
+The test reads no clock, and no byte of the temporary
 directory or of the test binary's location reaches either entry. The
 absent entry is absolute because the later entry is, so the search asks
 it rather than skipping it.
