@@ -395,7 +395,7 @@ is the directory and bare file name of the running test executable — the
 one program every platform has installed and executable by construction,
 and so the one "later match" a module that cannot write a file can offer
 on every platform; the walked-past control uses one its platform provides
-on Linux and macOS, as given with that test below.
+instead, as given with that test below.
 
 `a_candidate_this_platform_cannot_stat_is_never_reported_as_absence`
 searches the undeterminable entry alone and requires the `stat` refusal,
@@ -415,7 +415,7 @@ is its control: an absent directory first, the later entry
 second, and the program must be found in the later entry. Both the
 later entry and the program depend on the platform, as given below:
 `exe` in `/proc/self` on Linux, `sh` in `/bin` on macOS and any other
-Unix, and the test binary in its own directory on Windows. Making
+Unix, and `ntdll.dll` in the system directory on Windows. Making
 `NotFound` propagate fails it, the absence control above, and twenty-one
 tests of row 44's suite.
 
@@ -431,8 +431,9 @@ anything but `NotFound`, is passed over and never taken as absent, so an
 entry of the name already in that directory does not fail the test; it
 fails, naming every answer, only when none of the ten is answered
 `NotFound`. The test reads no clock, and no byte of the temporary
-directory reaches either entry. The absent entry is absolute because the
-later entry is, so the search asks it rather than skipping it.
+directory or of the test binary's location reaches either entry. The
+absent entry is absolute because the later entry is, so the search asks
+it rather than skipping it.
 
 On Linux the later entry is `/proc/self` and the program is `exe`: the
 later match is `/proc/self/exe`, the link to the running executable that
@@ -458,17 +459,25 @@ numbered name, and 7, against macOS's `PATH_MAX` of 1,024. On Linux and
 macOS alike, neither the binary's location nor its spelling reaches
 either entry.
 
-On Windows the later entry is the test binary's own directory, from
-`this_test_binary`, and the absent entry is its child of the first of
-the ten names that directory answers `NotFound`; nothing in the build
-writes any of them there. `join_paths`
-refuses an entry on Windows only for a double quote, which no Windows file
-name holds, so the directory's spelling cannot make it refuse, and
-`split_paths`, which unquotes on Windows, recombines with it as std
-documents. Its length reaches both entries: each
-candidate under the absent entry is the later match's own path, the
-directory and the binary's name, with 28 more units, or 30 under a
-numbered name, and four more again under a default extension.
+On Windows the later entry is the system directory, spelled
+`\\?\GLOBALROOT\SystemRoot\System32` on every installation, and the
+program is `ntdll.dll`: the later match is the native-API library that
+Windows maps into every process, this one included, from that directory.
+`\SystemRoot` is the kernel's own name for the Windows directory, and the
+`\\?\GLOBALROOT` prefix hands the rest of the path to the object manager,
+which resolves that name; std passes a `\\?\` path to the system
+unchanged. So no unit of either entry comes from the binary's location,
+the temporary directory or the environment, and `join_paths`, which
+refuses an entry on Windows only for a double quote, has none to refuse.
+Every unit the test spells is a constant: the later match is 44 UTF-16
+units, the absent entry 62, or 64 under a numbered name, and the longest
+candidate beneath it, under a numbered name and a default extension, 78.
+Windows replaces `\SystemRoot` with the Windows directory, so the file
+system is asked for that directory's own path and at most 53 constant
+units more, and Windows keeps that directory within `MAX_PATH`, 260
+units, far inside the 32,767 of an extended path. As on macOS, the
+branch depends on the system directory answering at least one of the
+ten names `NotFound`, and on `ntdll.dll` being a file there.
 
 A missing directory does not make every path beneath it `NotFound`: a
 path longer than the platform allows is refused for its length first, as
@@ -493,7 +502,12 @@ branch now names the system shell at `/bin/sh` instead. From the second
 repair until `absent_child_of`, the test asserted one fixed name absent,
 so an entry of that name already in `/bin` or in the binary's directory,
 which nothing reserves, failed it before the search
-(`PR336-R4-PL-1`).
+(`PR336-R4-PL-1`). The second repair's Windows branch kept both entries
+in the test binary's own directory, so every candidate under the absent
+entry was the binary's own path and 28 units more, and a binary placed
+within 28 units of Windows's limit failed the test on correct code
+(`PR336-R4-REG-001`); the system directory's constant spelling repairs
+it.
 
 `a_pathext_entry_no_string_can_carry_reaches_the_candidate_intact`
 drives `ProgramNaming::Windows` — on every platform, per the grid — with

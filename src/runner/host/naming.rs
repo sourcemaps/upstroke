@@ -432,7 +432,10 @@ mod tests {
         #[cfg(all(unix, not(target_os = "linux")))]
         let (later, program) = (PathBuf::from("/bin"), "sh".to_owned());
         #[cfg(windows)]
-        let (later, program) = this_test_binary();
+        let (later, program) = (
+            PathBuf::from(r"\\?\GLOBALROOT\SystemRoot\System32"),
+            "ntdll.dll".to_owned(),
+        );
         let (absent, probe) = absent_child_of(&later);
         assert_eq!(
             probe.kind(),
