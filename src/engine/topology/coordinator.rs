@@ -18247,6 +18247,10 @@ mod tests {
 
     const RECORD_HANDOFF: &str = "o14-fixture-root";
 
+    const RECORD_KILL_TAG: &str = "record-kill";
+
+    const RECORD_KILL_TEMPORARY: &str = "tmp";
+
     fn reviewing(verify_reviewers: usize) -> WidePlans {
         WidePlans {
             verify_reviewers,
@@ -19602,7 +19606,7 @@ mod tests {
             Ok("torn") => true,
             other => panic!("the parent names the kill shape: {other:?}"),
         };
-        let mut wide = stale_at_width_one("coordinator-o14-record-kill", 3, unlimited());
+        let mut wide = stale_at_width_one(RECORD_KILL_TAG, 3, unlimited());
         crate::workspace_manager::fixture::write_file(
             &dir.join(RECORD_HANDOFF),
             wide.env.fixture.root.to_string_lossy().as_bytes(),
@@ -19634,7 +19638,7 @@ mod tests {
     fn killed_at_the_record(shape: &str) {
         let handoff =
             crate::engine::topology::scaffold::kill_dir(&format!("coordinator-o14-kill-{shape}"));
-        let temporary = crate::engine::topology::scaffold::kill_dir("tmp");
+        let temporary = crate::engine::topology::scaffold::kill_dir(RECORD_KILL_TEMPORARY);
         let mut environment = vec![
             ("UPSTROKE_TEST_KILL_DIR", handoff.path().as_os_str()),
             ("UPSTROKE_TEST_KILL_SHAPE", std::ffi::OsStr::new(shape)),
@@ -19724,6 +19728,48 @@ mod tests {
     #[test]
     fn a_torn_charged_record_is_truncated_and_recovered_as_before_it() {
         killed_at_the_record("torn");
+    }
+
+    const GUEST_TEMPORARY: &str = r"C:\Users\Administrator\AppData\Local\Temp";
+
+    const GUEST_TEMPORARY_SLACK: usize = 12;
+
+    #[test]
+    fn the_record_kill_childs_deepest_git_dir_fits_the_windows_budget_under_the_guest_lanes_temporary_directory()
+     {
+        assert_eq!(GUEST_TEMPORARY.len(), 41, "{GUEST_TEMPORARY}");
+        let temporary = crate::engine::topology::scaffold::kill_dir(RECORD_KILL_TEMPORARY);
+        let fixture = crate::workspace_manager::fixture::Fixture::created(RECORD_KILL_TAG);
+        let checkout = fixture
+            .manager
+            .slot_path(&crate::workspace_manager::Slot::Snapshot {
+                name: crate::workspace_manager::SnapshotName::review(0, 0, 1, 0),
+            });
+        let nested = temporary
+            .path()
+            .file_name()
+            .expect("the child's temporary directory is named");
+        let root = fixture
+            .root
+            .file_name()
+            .expect("the child's fixture root is named");
+        let private = fixture
+            .private
+            .strip_prefix(&fixture.root)
+            .expect("the private root is inside the fixture's root");
+        let slot = checkout
+            .strip_prefix(fixture.manager.private_root())
+            .expect("the reviewer snapshot is inside the private root");
+        let longer = format!("{GUEST_TEMPORARY}{}", "x".repeat(GUEST_TEMPORARY_SLACK));
+        for temporary_directory in [GUEST_TEMPORARY, longer.as_str()] {
+            let child = std::path::Path::new(temporary_directory)
+                .join(nested)
+                .join(root)
+                .join(private)
+                .join(slot);
+            crate::workspace_manager::fixture::refuse_git_dir_over_the_windows_budget(&child)
+                .unwrap_or_else(|refusal| panic!("under `{temporary_directory}`: {refusal}"));
+        }
     }
 
     #[test]
