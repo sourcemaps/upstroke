@@ -376,7 +376,7 @@ because this module denies the three governed lints and its suite
 therefore cannot build a fixture that writes to a filesystem — every
 `std::fs` creation primitive is on `clippy.toml`'s disallowed list. All
 six are built from values instead, which is also why they are cheap
-enough to sit here. Three fixtures serve them, none of which creates
+enough to sit here. Four fixtures serve them, none of which creates
 anything: `undeterminable_directory` is a `PATH` entry with an interior
 NUL, which every platform rejects before the syscall with `InvalidInput`
 rather than `NotFound`, so the undetermined path is reached identically
@@ -389,8 +389,8 @@ under the temporary directory that this process owns and never creates
 `NotFound`, whatever another process or a retained fixture has left in
 the shared temporary directory (`SWEEP-HOST-NAMING-005`, which is what
 pointing `PATH` at the ambient directory itself was). It serves the
-absence control; the walked-past control builds its own, for the reason
-given with that test below. `this_test_binary`
+absence control; the walked-past control takes its own from
+`absent_child_of`, for the reason given with that test below. `this_test_binary`
 is the directory and bare file name of the running test executable — the
 one program every platform has installed and executable by construction,
 and so the one "later match" a module that cannot write a file can offer
@@ -411,7 +411,7 @@ test binary's own directory second, and the answer must be the
 the variant's fields, not on its rendering. Restoring `b9c73630`'s
 fall-through fails this test and nothing else in the `runner::host`
 suite. `a_directory_that_is_merely_absent_is_walked_past_to_a_later_match`
-is its control: a never-created directory first, the later entry
+is its control: an absent directory first, the later entry
 second, and the program must be found in the later entry. Both the
 later entry and the program depend on the platform, as given below:
 `exe` in `/proc/self` on Linux, `sh` in `/bin` on macOS and any other
@@ -419,11 +419,18 @@ Unix, and the test binary in its own directory on Windows. Making
 `NotFound` propagate fails it, the absence control above, and twenty-one
 tests of row 44's suite.
 
-Its never-created directory is its own and not `never_created_directory`'s:
-`upstroke-naming-walked-past`, a child of the very directory the later
-match is found in, so it is looked up in the directory the later match's
-own lookup is made in, and it is asserted absent with `symlink_metadata`
-the same way. The test reads no clock, and no byte of the temporary
+Its absent directory is its own and not `never_created_directory`'s: a
+child of the very directory the later match is found in, so it is looked
+up in the directory the later match's own lookup is made in. The test
+establishes that it is absent rather than assuming it. `absent_child_of`
+asks `symlink_metadata` there for `upstroke-naming-walked-past`, then for
+that name with `-1` to `-9` appended, and returns the first that is
+answered `NotFound`, with that answer, which the test asserts is
+`NotFound` before it searches. A name that exists, or that is answered
+anything but `NotFound`, is passed over and never taken as absent, so an
+entry of the name already in that directory does not fail the test; it
+fails, naming every answer, only when none of the ten is answered
+`NotFound`. The test reads no clock, and no byte of the temporary
 directory reaches either entry. The absent entry is absolute because the
 later entry is, so the search asks it rather than skipping it.
 
@@ -431,34 +438,37 @@ On Linux the later entry is `/proc/self` and the program is `exe`: the
 later match is `/proc/self/exe`, the link to the running executable that
 `std::env::current_exe` itself reads there, which `stat` follows to the
 binary. procfs fills a process's directory from a fixed set of names, so
-`upstroke-naming-walked-past` is answered `ENOENT` and nothing can create
-it. Every byte of the absent candidate,
-`/proc/self/upstroke-naming-walked-past/exe`, 42 of them, is
-constructed, against Linux's `PATH_MAX` of 4,096, and its one
+none of the ten can exist there, and the first,
+`upstroke-naming-walked-past`, is answered `ENOENT` and taken. Every byte
+of the absent candidate, `/proc/self/upstroke-naming-walked-past/exe`, 42
+of them, is constructed, against Linux's `PATH_MAX` of 4,096, and its one
 prerequisite is the procfs `current_exe` already needs.
 
 On macOS, and any other Unix, the later entry is `/bin` and the program
 is `sh`: the later match is the system shell `/bin/sh`, and the absent
-candidate is `/bin/upstroke-naming-walked-past/sh`. `/bin` belongs to
-the system, and the name appears nowhere else in this repository, so
-nothing the build or the suite runs creates it there. The branch's
-prerequisite is that `/bin/sh` is what `is_program` accepts, a regular
-file with an execute bit; the suite already requires the shell there,
-since Unix tests in `src/agent/proc/tests.rs` spawn `/bin/sh` by that
-path. Every byte of both candidates is constructed, 35 and 7 of them,
-against macOS's `PATH_MAX` of 1,024. On Linux and macOS alike, neither
-the binary's location nor its spelling reaches either entry.
+candidate is `/bin/upstroke-naming-walked-past/sh` unless that name is
+taken there. Nothing in this repository creates any of the ten names,
+but nothing reserves them either, so what the branch depends on is that
+`/bin` answers at least one of them `NotFound`; its other prerequisite
+is that `/bin/sh` is what `is_program` accepts, a regular file with an
+execute bit. The suite already requires the shell there, since Unix
+tests in `src/agent/proc/tests.rs` spawn `/bin/sh` by that path. Every
+byte of both candidates is constructed: 35 of them, or 37 under a
+numbered name, and 7, against macOS's `PATH_MAX` of 1,024. On Linux and
+macOS alike, neither the binary's location nor its spelling reaches
+either entry.
 
 On Windows the later entry is the test binary's own directory, from
-`this_test_binary`, and the absent entry is its never-created child of
-the same name, which nothing in the build writes there. `join_paths`
+`this_test_binary`, and the absent entry is its child of the first of
+the ten names that directory answers `NotFound`; nothing in the build
+writes any of them there. `join_paths`
 refuses an entry on Windows only for a double quote, which no Windows file
 name holds, so the directory's spelling cannot make it refuse, and
 `split_paths`, which unquotes on Windows, recombines with it as std
 documents. Its length reaches both entries: each
 candidate under the absent entry is the later match's own path, the
-directory and the binary's name, with 28 more units, and four more again
-under a default extension.
+directory and the binary's name, with 28 more units, or 30 under a
+numbered name, and four more again under a default extension.
 
 A missing directory does not make every path beneath it `NotFound`: a
 path longer than the platform allows is refused for its length first, as
@@ -479,7 +489,11 @@ construction above repairs `PR336-PL-1`, `PR336-PL-2` and `PR336-PL-3`.
 The second repair's macOS branch searched `/dev/fd` for the number of a
 descriptor the test held open on its own binary; in its one native macOS
 run the search reported nothing of that name in either directory, so the
-branch now names the system shell at `/bin/sh` instead.
+branch now names the system shell at `/bin/sh` instead. From the second
+repair until `absent_child_of`, the test asserted one fixed name absent,
+so an entry of that name already in `/bin` or in the binary's directory,
+which nothing reserves, failed it before the search
+(`PR336-R4-PL-1`).
 
 `a_pathext_entry_no_string_can_carry_reaches_the_candidate_intact`
 drives `ProgramNaming::Windows` — on every platform, per the grid — with

@@ -330,6 +330,27 @@ mod tests {
         (dir, name)
     }
 
+    fn absent_child_of(directory: &std::path::Path) -> (PathBuf, std::io::Error) {
+        let mut passed_over = Vec::new();
+        for attempt in 0..10 {
+            let child = directory.join(match attempt {
+                0 => "upstroke-naming-walked-past".to_owned(),
+                n => format!("upstroke-naming-walked-past-{n}"),
+            });
+            match std::fs::symlink_metadata(&child) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return (child, error);
+                }
+                Ok(_) => passed_over.push(format!("{}: present", child.display())),
+                Err(error) => passed_over.push(format!("{}: {error}", child.display())),
+            }
+        }
+        panic!(
+            "none of the names the walked-past witness tries is absent from {}: {passed_over:?}",
+            directory.display()
+        )
+    }
+
     #[test]
     fn a_candidate_this_platform_cannot_stat_is_never_reported_as_absence() {
         let path = undeterminable_directory().into_os_string();
@@ -412,9 +433,7 @@ mod tests {
         let (later, program) = (PathBuf::from("/bin"), "sh".to_owned());
         #[cfg(windows)]
         let (later, program) = this_test_binary();
-        let absent = later.join("upstroke-naming-walked-past");
-        let probe = std::fs::symlink_metadata(&absent)
-            .expect_err("a directory nothing has created must not exist");
+        let (absent, probe) = absent_child_of(&later);
         assert_eq!(
             probe.kind(),
             std::io::ErrorKind::NotFound,
