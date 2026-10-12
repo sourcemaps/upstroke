@@ -420,47 +420,52 @@ Unix, and `ntdll.dll` in the system directory on Windows. Making
 tests of row 44's suite.
 
 Its absent directory is its own and not `never_created_directory`'s: a
-child of the very directory the later match is found in, so it is looked
-up in the directory the later match's own lookup is made in. The test
-establishes that it is absent rather than assuming it. `absent_child_of`
-asks `symlink_metadata` there for `upstroke-naming-walked-past`, then for
-that name with `-1` to `-9` appended, and returns the first that is
-answered `NotFound`, with that answer, which the test asserts is
-`NotFound` before it searches. A name that exists, or that is answered
-anything but `NotFound`, is passed over and never taken as absent, so an
-entry of the name already in that directory does not fail the test;
-`absent_child_of` fails, naming every answer, only when none of the ten
-is answered `NotFound`. What the probe establishes holds when it is
-made: an entry of the taken name created in that directory before the
-search reaches it is not excluded, except on Linux, where none can be.
-The test reads no clock, and no byte of the temporary
-directory or of the test binary's location reaches either entry. The
-absent entry is absolute because the later entry is, so the search asks
-it rather than skipping it.
+child of a parent that holds no entry of the names it is given and can
+gain none, as given below for each platform: on Linux the later entry
+itself, on macOS the process's own descriptor directory, and on Windows
+the later match itself. The test establishes that it is absent rather
+than assuming it. `absent_child_of` asks `symlink_metadata` in that
+parent for `upstroke-naming-walked-past`, then for that name with `-1`
+to `-9` appended, and returns the first that is answered `NotFound`,
+with that answer, which the test asserts is `NotFound` before it
+searches. A name that exists, or that is answered anything but
+`NotFound`, is passed over and never taken as absent; `absent_child_of`
+fails, naming every answer, only when none of the ten is answered
+`NotFound`. In each of the three parents the first is the one taken.
+What the probe establishes holds when it is made, and in these parents
+it still holds when the search reaches the entry: no entry of the taken
+name can appear there in between. The test reads no clock, and no byte
+of the temporary directory or of the test binary's location reaches
+either entry. The absent entry is absolute because its parent is, so
+the search asks it rather than skipping it.
 
 On Linux the later entry is `/proc/self` and the program is `exe`: the
 later match is `/proc/self/exe`, the link to the running executable that
 `std::env::current_exe` itself reads there, which `stat` follows to the
-binary. procfs fills a process's directory from a fixed set of names, so
-none of the ten can exist there, and the first,
+binary. The absent entry's parent is that same directory: procfs fills a
+process's directory from a fixed set of names and creates nothing else
+there, so none of the ten can exist or be created there, and the first,
 `upstroke-naming-walked-past`, is answered `ENOENT` and taken. Every byte
 of the absent candidate, `/proc/self/upstroke-naming-walked-past/exe`, 42
 of them, is constructed, against Linux's `PATH_MAX` of 4,096, and its one
 prerequisite is the procfs `current_exe` already needs.
 
 On macOS, and any other Unix, the later entry is `/bin` and the program
-is `sh`: the later match is the system shell `/bin/sh`, and the absent
-candidate is `/bin/upstroke-naming-walked-past/sh` unless that name is
-taken there. Nothing in this repository creates any of the ten names,
-but nothing reserves them either, so what the branch depends on is that
-`/bin` answers at least one of them `NotFound`; its other prerequisite
-is that `/bin/sh` is what `is_program` accepts, a regular file with an
-execute bit. The suite already requires the shell there, since Unix
-tests in `src/agent/proc/tests.rs` spawn `/bin/sh` by that path. Every
-byte of both candidates is constructed: 35 of them, or 37 under a
-numbered name, and 7, against macOS's `PATH_MAX` of 1,024. On Linux and
-macOS alike, neither the binary's location nor its spelling reaches
-either entry.
+is `sh`: the later match is the system shell `/bin/sh`, and its
+prerequisite is that `/bin/sh` is what `is_program` accepts, a regular
+file with an execute bit. The suite already requires the shell there,
+since Unix tests in `src/agent/proc/tests.rs` spawn `/bin/sh` by that
+path. The absent entry's parent is `/dev/fd`, the directory of the
+asking process's own open descriptors: macOS answers `ENOENT` for a name
+there that is not a descriptor number, as none of the ten is, and no
+process can create an entry in it, so none of the ten can exist or be
+created there, and the first, `upstroke-naming-walked-past`, is answered
+`ENOENT` and taken. The absent candidate,
+`/dev/fd/upstroke-naming-walked-past/sh`, is answered `ENOENT` at that
+same name. Every byte of both candidates is constructed: 38 of them, or
+40 under a numbered name, and 7, against macOS's `PATH_MAX` of 1,024. On
+Linux and macOS alike, neither the binary's location nor its spelling
+reaches either entry.
 
 On Windows the later entry is the system directory, spelled
 `\\?\GLOBALROOT\SystemRoot\System32` on every installation, and the
@@ -469,18 +474,24 @@ Windows maps into every process, this one included, from that directory.
 `\SystemRoot` is the kernel's own name for the Windows directory, and the
 `\\?\GLOBALROOT` prefix hands the rest of the path to the object manager,
 which resolves that name; std passes a `\\?\` path to the system
-unchanged. So no unit of either entry comes from the binary's location,
-the temporary directory or the environment, and `join_paths`, which
-refuses an entry on Windows only for a double quote, has none to refuse.
-Every unit the test spells is a constant: the later match is 44 UTF-16
-units, the absent entry 62, or 64 under a numbered name, and the longest
-candidate beneath it, under a numbered name and a default extension, 78.
-Windows replaces `\SystemRoot` with the Windows directory, so the file
-system is asked for that directory's own path and at most 53 constant
-units more, and Windows keeps that directory within `MAX_PATH`, 260
-units, far inside the 32,767 of an extended path. As on macOS, the
-branch depends on the system directory answering at least one of the
-ten names `NotFound`, and on `ntdll.dll` being a file there.
+unchanged. The absent entry's parent is the later match itself: a
+regular file holds no entries, so while `ntdll.dll` is the file the
+later match needs, none of the ten can exist or be created beneath it,
+and Windows answers a lookup beneath a file `NotFound`. (Unix answers it
+`ENOTDIR`, at which the search rightly stops, so neither Unix branch can
+use its later match this way.) So the first, `upstroke-naming-walked-past`,
+is answered `NotFound` and taken. No unit of either entry comes from the
+binary's location, the temporary directory or the environment, and
+`join_paths`, which refuses an entry on Windows only for a double quote,
+has none to refuse. Every unit the test spells is a constant: the later
+match is 44 UTF-16 units, the absent entry 72, or 74 under a numbered
+name, and the longest candidate beneath it, under a numbered name and a
+default extension, 88. Windows replaces `\SystemRoot` with the Windows
+directory, so the file system is asked for that directory's own path and
+at most 63 constant units more, and Windows keeps that directory within
+`MAX_PATH`, 260 units, far inside the 32,767 of an extended path. The
+branch depends on `ntdll.dll` being a file there, which is also what
+keeps every name beneath it absent.
 
 A missing directory does not make every path beneath it `NotFound`: a
 path longer than the platform allows is refused for its length first, as
@@ -510,7 +521,17 @@ in the test binary's own directory, so every candidate under the absent
 entry was the binary's own path and 28 units more, and a binary placed
 within 28 units of Windows's limit failed the test on correct code
 (`PR336-R4-REG-001`); the system directory's constant spelling repairs
-it.
+it. `absent_child_of` then looked its ten names up in the later entry's
+own directory on every platform, and on macOS and Windows nothing
+reserves them there: entries of all ten in `/bin` or in the system
+directory, or all ten answered `EACCES` there, failed the test before
+the search, and an `EACCES` for the taken entry's candidate failed it at
+the search (`PR336-R6-PL-001`); and an entry of the taken name created
+there after the probe, holding the program, was found by the search
+ahead of the later match (`PR336-R6-PL-002`), each on correct code. The
+parents above, which can neither hold nor gain an entry of any of the
+ten, repair both; before them the macOS absent candidate was
+`/bin/upstroke-naming-walked-past/sh`.
 
 `a_pathext_entry_no_string_can_carry_reaches_the_candidate_intact`
 drives `ProgramNaming::Windows` — on every platform, per the grid — with

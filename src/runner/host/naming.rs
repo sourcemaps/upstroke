@@ -436,7 +436,12 @@ mod tests {
             PathBuf::from(r"\\?\GLOBALROOT\SystemRoot\System32"),
             "ntdll.dll".to_owned(),
         );
+        #[cfg(target_os = "linux")]
         let (absent, probe) = absent_child_of(&later);
+        #[cfg(all(unix, not(target_os = "linux")))]
+        let (absent, probe) = absent_child_of(std::path::Path::new("/dev/fd"));
+        #[cfg(windows)]
+        let (absent, probe) = absent_child_of(&later.join(&program));
         assert_eq!(
             probe.kind(),
             std::io::ErrorKind::NotFound,
