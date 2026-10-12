@@ -2086,8 +2086,8 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  crate: the pinned test command tests an empty `ci-pass/` while the labels, \
                  shells, checkout and command all still match character for character",
         job: Some("test-windows"),
-        anchor: "    timeout-minutes: ${{ github.event_name == 'merge_group' && 45 || 20 }}\n",
-        replacement: "    timeout-minutes: ${{ github.event_name == 'merge_group' && 45 || 20 }}\n\
+        anchor: "    timeout-minutes: ${{ github.event_name == 'merge_group' && 55 || 20 }}\n",
+        replacement: "    timeout-minutes: ${{ github.event_name == 'merge_group' && 55 || 20 }}\n\
                       \x20   defaults:\n\
                       \x20     run:\n\
                       \x20       working-directory: ci-pass\n",
