@@ -1,6 +1,6 @@
 //! Extended notes: `docs/internals/engine/topology/ledger.md`
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use serde::Serialize;
@@ -9,6 +9,7 @@ use crate::topology::events::{TopologyEvent, TopologyEventBody, UnavailableOutco
 use crate::topology::fold::{GenerationClass, TaskState, TopologyFold};
 use crate::topology::leases::LeaseOwner;
 use crate::topology::registry::{Origin, TaskKey, TaskRegistry};
+use crate::workspace_manager::{InstanceTag, IntentRecord, SlotInstance};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub enum Row {
@@ -192,6 +193,7 @@ pub enum Fact {
     Present(u32),
     Balanced,
     Unbalanced,
+    Late { crossed: u32, attributed: u32 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -203,11 +205,19 @@ pub enum Requirement {
     Balanced,
     Monotone,
     Any,
+    Attributed,
+    AbsentUnlessLate,
+    MonotoneUnlessLate,
 }
 
 impl Requirement {
     #[must_use]
     pub const fn admits(self, before: Fact, after: Fact) -> bool {
+        self.admits_beside(before, after, LateTotals::NONE)
+    }
+
+    #[must_use]
+    pub const fn admits_beside(self, before: Fact, after: Fact, late: LateTotals) -> bool {
         match self {
             Self::Zero | Self::Absent => matches!(after, Fact::Zero | Fact::Absent),
             Self::Present => matches!(after, Fact::Present(_) | Fact::Held(_)),
@@ -217,6 +227,60 @@ impl Requirement {
             Self::Balanced => matches!(after, Fact::Balanced),
             Self::Monotone => after.count() >= before.count(),
             Self::Any => true,
+            Self::Attributed => match after {
+                Fact::Zero | Fact::Absent => true,
+                Fact::Late {
+                    crossed,
+                    attributed,
+                } => crossed == attributed,
+                Fact::Held(_) | Fact::Present(_) | Fact::Balanced | Fact::Unbalanced => false,
+            },
+            Self::AbsentUnlessLate => match after {
+                Fact::Zero | Fact::Absent => true,
+                Fact::Present(_) => late.instances > 0,
+                Fact::Held(_) | Fact::Balanced | Fact::Unbalanced | Fact::Late { .. } => false,
+            },
+            Self::MonotoneUnlessLate => {
+                after.count().saturating_add(late.referenced) >= before.count()
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct LateTotals {
+    pub instances: u32,
+    pub referenced: u32,
+}
+
+impl LateTotals {
+    pub const NONE: Self = Self {
+        instances: 0,
+        referenced: 0,
+    };
+
+    #[must_use]
+    pub fn of(ledger: &Ledger) -> Self {
+        let instances = LATE_ROWS
+            .iter()
+            .filter_map(|(row, _)| ledger.observation(*row)?.part(LATE_PART))
+            .map(|fact| match fact {
+                Fact::Late { attributed, .. } => attributed,
+                Fact::Zero
+                | Fact::Held(_)
+                | Fact::Absent
+                | Fact::Present(_)
+                | Fact::Balanced
+                | Fact::Unbalanced => 0,
+            })
+            .fold(0u32, u32::saturating_add);
+        let referenced = ledger
+            .observation(Row::R27)
+            .and_then(|observation| observation.part(LATE_OBJECTS))
+            .map_or(0, Fact::count);
+        Self {
+            instances,
+            referenced,
         }
     }
 }
@@ -228,12 +292,16 @@ impl Fact {
             Self::Zero | Self::Absent | Self::Unbalanced => 0,
             Self::Held(n) | Self::Present(n) => n,
             Self::Balanced => 1,
+            Self::Late { crossed, .. } => crossed,
         }
     }
 
     #[must_use]
     pub const fn is_zero(self) -> bool {
-        matches!(self, Self::Zero | Self::Absent)
+        matches!(
+            self,
+            Self::Zero | Self::Absent | Self::Late { crossed: 0, .. }
+        )
     }
 }
 
@@ -266,7 +334,18 @@ pub struct Expectation {
     pub row: Row,
     pub class: Class,
     pub holds: Requirement,
-    pub parts: Vec<(&'static str, Requirement)>,
+    pub parts: Vec<(&'static str, Class, Requirement)>,
+    pub kept: Option<Class>,
+}
+
+impl Expectation {
+    #[must_use]
+    pub fn class_beside(&self, after: Fact, late: LateTotals) -> Class {
+        match self.kept {
+            Some(kept) if matches!(after, Fact::Present(_)) && late.instances > 0 => kept,
+            Some(_) | None => self.class,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -320,9 +399,168 @@ pub struct PhysicalInventory {
     pub released_objects_missing: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstanceSeen {
+    pub row: Row,
+    pub name: String,
+    pub directory: bool,
+    pub references: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LateInventory {
+    pub instances: Vec<InstanceSeen>,
+    pub intents: Vec<String>,
+    pub at_sweep: Option<Vec<(Row, String)>>,
+    pub records: Vec<IntentRecord>,
+    pub unreachable_before: Vec<String>,
+}
+
+pub const LATE_ROWS: [(Row, &str); 3] = [
+    (Row::R9, "tasks"),
+    (Row::R10, "merge"),
+    (Row::R24, "snapshots"),
+];
+
+pub const LATE_PART: &str = "late_instances";
+
+pub const LATE_OBJECTS: &str = "late_referenced_objects";
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Census {
+    at_sweep: bool,
+    crossed: BTreeMap<Row, u32>,
+    attributed: BTreeMap<Row, u32>,
+    referenced: u32,
+}
+
+impl Census {
+    fn crossed(&self, row: Row) -> u32 {
+        self.crossed.get(&row).copied().unwrap_or_default()
+    }
+
+    fn attributed(&self, row: Row) -> u32 {
+        self.attributed.get(&row).copied().unwrap_or_default()
+    }
+
+    fn late(&self, row: Row) -> Fact {
+        Fact::Late {
+            crossed: self.crossed(row),
+            attributed: self.attributed(row),
+        }
+    }
+
+    fn instances(&self) -> u32 {
+        self.attributed
+            .values()
+            .copied()
+            .fold(0u32, u32::saturating_add)
+    }
+
+    fn slots(&self, row: Row, slots: u32) -> Fact {
+        slots
+            .checked_sub(self.crossed(row))
+            .map_or(Fact::Unbalanced, presence)
+    }
+
+    fn clause(&self, row: Row) -> String {
+        if self.at_sweep {
+            format!(
+                ", {} of them crossed the final sweep, {} attributed to an earlier incarnation \
+                 of this run",
+                self.crossed(row),
+                self.attributed(row)
+            )
+        } else {
+            String::new()
+        }
+    }
+}
+
+fn earlier_incarnations(
+    events: &[TopologyEvent],
+    records: &[IntentRecord],
+) -> BTreeSet<InstanceTag> {
+    let mut run = None;
+    let mut tags = BTreeSet::new();
+    for event in events {
+        match &event.body {
+            TopologyEventBody::RunStarted { data } => {
+                run = Some(data.run_id.as_str());
+                tags.insert(InstanceTag::of_incarnation(&data.incarnation.0));
+            }
+            TopologyEventBody::RunResumed { data } => {
+                tags.insert(InstanceTag::of_incarnation(&data.incarnation.0));
+            }
+            _ => {}
+        }
+    }
+    for record in records {
+        if run == Some(record.run_id()) {
+            tags.insert(InstanceTag::of_incarnation(record.incarnation()));
+        }
+    }
+    tags
+}
+
+fn take_census(events: &[TopologyEvent], late: &LateInventory) -> Census {
+    let mut census = Census {
+        at_sweep: late.at_sweep.is_some(),
+        ..Census::default()
+    };
+    let Some(listed) = &late.at_sweep else {
+        return census;
+    };
+    let earlier = earlier_incarnations(events, &late.records);
+    let named: BTreeSet<SlotInstance> = late
+        .intents
+        .iter()
+        .filter_map(|name| SlotInstance::from_intent_name(name.as_str()))
+        .collect();
+    let unreachable: BTreeSet<&str> = late.unreachable_before.iter().map(String::as_str).collect();
+    let mut referenced = BTreeSet::new();
+    for seen in &late.instances {
+        let Some((_, namespace)) = LATE_ROWS.iter().find(|(row, _)| *row == seen.row) else {
+            continue;
+        };
+        if !seen.directory {
+            continue;
+        }
+        let Some(instance) = SlotInstance::from_entry(namespace, &seen.name)
+            .filter(|instance| instance.slot().id().is_ok())
+        else {
+            continue;
+        };
+        if named.contains(&instance) {
+            continue;
+        }
+        if listed
+            .iter()
+            .any(|(row, name)| *row == seen.row && *name == seen.name)
+        {
+            continue;
+        }
+        let crossed = census.crossed.entry(seen.row).or_default();
+        *crossed = crossed.saturating_add(1);
+        if instance.tag().is_some_and(|tag| earlier.contains(tag)) {
+            let attributed = census.attributed.entry(seen.row).or_default();
+            *attributed = attributed.saturating_add(1);
+            referenced.extend(
+                seen.references
+                    .iter()
+                    .map(String::as_str)
+                    .filter(|object| unreachable.contains(object)),
+            );
+        }
+    }
+    census.referenced = u32::try_from(referenced.len()).unwrap_or(u32::MAX);
+    census
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Ledger {
     pub observations: Vec<Observation>,
+    pub at_sweep_inventory: bool,
 }
 
 impl Ledger {
@@ -369,6 +607,18 @@ pub fn observe(
     physical: &PhysicalInventory,
     process: &ProcessLocal,
 ) -> Ledger {
+    observe_late(fold, events, physical, &LateInventory::default(), process)
+}
+
+#[must_use]
+pub fn observe_late(
+    fold: &TopologyFold,
+    events: &[TopologyEvent],
+    physical: &PhysicalInventory,
+    late: &LateInventory,
+    process: &ProcessLocal,
+) -> Ledger {
+    let census = take_census(events, late);
     let keys = || (0..u32::try_from(fold.task_count()).unwrap_or(u32::MAX)).map(TaskKey);
     let leases = fold.leases();
 
@@ -525,17 +775,28 @@ pub fn observe(
         },
         Observation {
             row: Row::R9,
-            parts: Vec::new(),
-            fact: presence(physical.task_slots),
-            evidence: format!("{} task intent(s) or worktree(s)", physical.task_slots),
+            parts: vec![Part {
+                name: LATE_PART,
+                fact: census.late(Row::R9),
+            }],
+            fact: census.slots(Row::R9, physical.task_slots),
+            evidence: format!(
+                "{} task intent(s) or worktree(s){}",
+                physical.task_slots,
+                census.clause(Row::R9)
+            ),
         },
         Observation {
             row: Row::R10,
-            parts: Vec::new(),
-            fact: presence(physical.staging_slots),
+            parts: vec![Part {
+                name: LATE_PART,
+                fact: census.late(Row::R10),
+            }],
+            fact: census.slots(Row::R10, physical.staging_slots),
             evidence: format!(
-                "{} staging intent(s) or worktree(s)",
-                physical.staging_slots
+                "{} staging intent(s) or worktree(s){}",
+                physical.staging_slots,
+                census.clause(Row::R10)
             ),
         },
         Observation {
@@ -639,11 +900,20 @@ pub fn observe(
             parts: Vec::new(),
             fact: present(physical.execution_root_present),
             evidence: format!(
-                "the execution root is {}",
+                "the execution root is {}{}",
                 if physical.execution_root_present {
                     "present"
                 } else {
                     "pruned"
+                },
+                if census.at_sweep {
+                    format!(
+                        ", beside {} late instance(s) attributed to an earlier incarnation of \
+                         this run",
+                        census.instances()
+                    )
+                } else {
+                    String::new()
                 }
             ),
         },
@@ -759,11 +1029,15 @@ pub fn observe(
         },
         Observation {
             row: Row::R24,
-            parts: Vec::new(),
-            fact: presence(physical.snapshot_slots),
+            parts: vec![Part {
+                name: LATE_PART,
+                fact: census.late(Row::R24),
+            }],
+            fact: census.slots(Row::R24, physical.snapshot_slots),
             evidence: format!(
-                "{} snapshot intent(s) or worktree(s)",
-                physical.snapshot_slots
+                "{} snapshot intent(s) or worktree(s){}",
+                physical.snapshot_slots,
+                census.clause(Row::R24)
             ),
         },
         Observation {
@@ -801,6 +1075,10 @@ pub fn observe(
                     name: "unreachable_objects",
                     fact: Fact::Present(physical.unreachable_objects),
                 },
+                Part {
+                    name: LATE_OBJECTS,
+                    fact: Fact::Present(census.referenced),
+                },
             ],
             fact: balanced(
                 physical.released_objects_missing == 0 && physical.store_objects_missing == 0,
@@ -808,12 +1086,21 @@ pub fn observe(
             evidence: format!(
                 "{} object(s) released by pruned refs, pins and worktrees checked, {} missing \
                  from Git's store; {} object(s) in the store, {} of those present before and \
-                 missing now; fsck reports {} unreachable object(s) left to Git",
+                 missing now; fsck reports {} unreachable object(s) left to Git{}",
                 physical.released_objects_checked,
                 physical.released_objects_missing,
                 physical.store_objects,
                 physical.store_objects_missing,
-                physical.unreachable_objects
+                physical.unreachable_objects,
+                if census.at_sweep {
+                    format!(
+                        "; {} object(s) unreachable before the command are referenced again by \
+                         a late instance",
+                        census.referenced
+                    )
+                } else {
+                    String::new()
+                }
             ),
         },
         Observation {
@@ -830,76 +1117,128 @@ pub fn observe(
             ),
         },
     ];
-    Ledger { observations }
+    Ledger {
+        observations,
+        at_sweep_inventory: census.at_sweep,
+    }
 }
 
 fn yes(is: bool) -> &'static str {
     if is { "present" } else { "absent" }
 }
 
+fn parts_of(
+    class: Class,
+    parts: &[(&'static str, Requirement)],
+) -> Vec<(&'static str, Class, Requirement)> {
+    parts
+        .iter()
+        .map(|&(name, holds)| (name, class, holds))
+        .collect()
+}
+
 #[must_use]
 pub fn equation(outcome: Outcome) -> Vec<Expectation> {
     use Class::{Consumed, PersistentOutput, Pruned, Released, ResumablyOpen, Void};
-    use Requirement::{Absent, Any, Balanced, Monotone, Present, Retained, Zero};
+    use Requirement::{
+        Absent, AbsentUnlessLate, Any, Attributed, Balanced, Monotone, MonotoneUnlessLate, Present,
+        Retained, Zero,
+    };
+    let run_ended = outcome != Outcome::NoRunFinished;
     let expect = |row, class, holds| Expectation {
         row,
         class,
         holds,
         parts: Vec::new(),
+        kept: None,
+    };
+    let late = |row| Expectation {
+        row,
+        class: Pruned,
+        holds: Absent,
+        parts: vec![(LATE_PART, ResumablyOpen, Attributed)],
+        kept: None,
+    };
+    let root = Expectation {
+        kept: Some(ResumablyOpen),
+        ..expect(Row::R18, Pruned, AbsentUnlessLate)
     };
     let consumed = Expectation {
         row: Row::R14,
         class: Consumed,
         holds: Monotone,
-        parts: vec![
-            ("merge_sequence", Monotone),
-            ("task_keys", Monotone),
-            ("display_ids", Monotone),
-            ("generations", Monotone),
-            ("attempts", Monotone),
-            ("lineage_indexes", Monotone),
-            ("repair_budget_units", Monotone),
-            ("verification_defers", Monotone),
-            ("override_slots", Monotone),
-        ],
+        parts: parts_of(
+            Consumed,
+            &[
+                ("merge_sequence", Monotone),
+                ("task_keys", Monotone),
+                ("display_ids", Monotone),
+                ("generations", Monotone),
+                ("attempts", Monotone),
+                ("lineage_indexes", Monotone),
+                ("repair_budget_units", Monotone),
+                ("verification_defers", Monotone),
+                ("override_slots", Monotone),
+            ],
+        ),
+        kept: None,
     };
     let outputs = Expectation {
         row: Row::R21,
         class: PersistentOutput,
         holds: Present,
-        parts: vec![
-            ("integration_ref", Present),
-            ("events_jsonl", Present),
-            ("plan_normalized", Present),
+        parts: parts_of(
+            PersistentOutput,
+            &[
+                ("integration_ref", Present),
+                ("events_jsonl", Present),
+                ("plan_normalized", Present),
+                (
+                    "report",
+                    if outcome == Outcome::NoRunFinished {
+                        Any
+                    } else {
+                        Present
+                    },
+                ),
+                ("question_payloads", Retained),
+                ("answer_files", Retained),
+                ("partial_files", Retained),
+                ("marker", Absent),
+                ("run_lock_file", Present),
+                ("cleanup_lock_file", if cfg!(unix) { Present } else { Any }),
+                ("owner_record", Present),
+                ("commit_record", Present),
+                ("private_artifacts", Retained),
+            ],
+        ),
+        kept: None,
+    };
+    let mut released_parts = parts_of(
+        Released,
+        &[
+            ("released_objects_missing", Zero),
+            ("store_objects", Monotone),
+            ("store_objects_missing", Zero),
             (
-                "report",
-                if outcome == Outcome::NoRunFinished {
-                    Any
+                "unreachable_objects",
+                if run_ended {
+                    MonotoneUnlessLate
                 } else {
-                    Present
+                    Monotone
                 },
             ),
-            ("question_payloads", Retained),
-            ("answer_files", Retained),
-            ("partial_files", Retained),
-            ("marker", Absent),
-            ("run_lock_file", Present),
-            ("cleanup_lock_file", if cfg!(unix) { Present } else { Any }),
-            ("owner_record", Present),
-            ("commit_record", Present),
-            ("private_artifacts", Retained),
         ],
-    };
+    );
+    if run_ended {
+        released_parts.push((LATE_OBJECTS, ResumablyOpen, Any));
+    }
     let released = Expectation {
         row: Row::R27,
         class: Released,
         holds: Balanced,
-        parts: vec![
-            ("released_objects_missing", Zero),
-            ("store_objects", Monotone),
-            ("store_objects_missing", Zero),
-            ("unreachable_objects", Monotone),
-        ],
+        parts: released_parts,
+        kept: None,
     };
     let mut rows = vec![
         expect(Row::R3, Released, Balanced),
@@ -917,13 +1256,13 @@ pub fn equation(outcome: Outcome) -> Vec<Expectation> {
     let ended = [
         expect(Row::R1, Released, Zero),
         expect(Row::R2, Released, Zero),
-        expect(Row::R9, Pruned, Absent),
-        expect(Row::R10, Pruned, Absent),
+        late(Row::R9),
+        late(Row::R10),
         expect(Row::R12, Pruned, Absent),
-        expect(Row::R18, Pruned, Absent),
+        root,
         expect(Row::R19, Pruned, Absent),
         expect(Row::R23, Pruned, Absent),
-        expect(Row::R24, Pruned, Absent),
+        late(Row::R24),
         expect(Row::R26, Released, Absent),
         expect(Row::R28, Released, Absent),
     ];
@@ -986,6 +1325,7 @@ pub fn equation(outcome: Outcome) -> Vec<Expectation> {
 
 #[must_use]
 pub fn check(before: &Ledger, after: &Ledger, outcome: Outcome) -> Vec<Disagreement> {
+    let late = LateTotals::of(after);
     let mut disagreements = Vec::new();
     for expectation in equation(outcome) {
         let (Some(earlier), Some(later)) = (
@@ -1003,24 +1343,27 @@ pub fn check(before: &Ledger, after: &Ledger, outcome: Outcome) -> Vec<Disagreem
             });
             continue;
         };
-        if !expectation.holds.admits(earlier.fact, later.fact) {
+        if !expectation
+            .holds
+            .admits_beside(earlier.fact, later.fact, late)
+        {
             disagreements.push(Disagreement {
                 row: expectation.row,
                 part: None,
-                class: expectation.class,
+                class: expectation.class_beside(later.fact, late),
                 expected: expectation.holds,
                 before: earlier.fact,
                 after: later.fact,
                 evidence: later.evidence.clone(),
             });
         }
-        for (name, holds) in &expectation.parts {
+        for (name, class, holds) in &expectation.parts {
             let (Some(before_part), Some(after_part)) = (earlier.part(name), later.part(name))
             else {
                 disagreements.push(Disagreement {
                     row: expectation.row,
                     part: Some(name),
-                    class: expectation.class,
+                    class: *class,
                     expected: *holds,
                     before: Fact::Unbalanced,
                     after: Fact::Unbalanced,
@@ -1028,11 +1371,11 @@ pub fn check(before: &Ledger, after: &Ledger, outcome: Outcome) -> Vec<Disagreem
                 });
                 continue;
             };
-            if !holds.admits(before_part, after_part) {
+            if !holds.admits_beside(before_part, after_part, late) {
                 disagreements.push(Disagreement {
                     row: expectation.row,
                     part: Some(name),
-                    class: expectation.class,
+                    class: *class,
                     expected: *holds,
                     before: before_part,
                     after: after_part,
@@ -1048,11 +1391,13 @@ pub fn check(before: &Ledger, after: &Ledger, outcome: Outcome) -> Vec<Disagreem
 pub struct LedgerRecord {
     pub outcome: Outcome,
     pub rows: Vec<LedgerRecordRow>,
+    pub at_sweep_inventory: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LedgerRecordPart {
     pub name: &'static str,
+    pub class: Class,
     pub expected: Requirement,
     pub before: Fact,
     pub after: Fact,
@@ -1075,6 +1420,7 @@ pub struct LedgerRecordRow {
 
 #[must_use]
 pub fn record(before: &Ledger, after: &Ledger, outcome: Outcome) -> LedgerRecord {
+    let late = LateTotals::of(after);
     let rows = equation(outcome)
         .into_iter()
         .filter_map(|expectation| {
@@ -1083,17 +1429,18 @@ pub fn record(before: &Ledger, after: &Ledger, outcome: Outcome) -> LedgerRecord
             let parts: Vec<LedgerRecordPart> = expectation
                 .parts
                 .iter()
-                .map(|(name, holds)| {
+                .map(|(name, class, holds)| {
                     let before_part = earlier.part(name).unwrap_or(Fact::Unbalanced);
                     let after_part = later.part(name).unwrap_or(Fact::Unbalanced);
                     LedgerRecordPart {
                         name,
+                        class: *class,
                         expected: *holds,
                         before: before_part,
                         after: after_part,
                         holds: earlier.part(name).is_some()
                             && later.part(name).is_some()
-                            && holds.admits(before_part, after_part),
+                            && holds.admits_beside(before_part, after_part, late),
                     }
                 })
                 .collect();
@@ -1101,18 +1448,24 @@ pub fn record(before: &Ledger, after: &Ledger, outcome: Outcome) -> LedgerRecord
                 row: expectation.row,
                 resource: expectation.row.resource(),
                 domain: expectation.row.domain(),
-                class: expectation.class,
+                class: expectation.class_beside(later.fact, late),
                 expected: expectation.holds,
                 before: earlier.fact,
                 after: later.fact,
-                holds: expectation.holds.admits(earlier.fact, later.fact)
+                holds: expectation
+                    .holds
+                    .admits_beside(earlier.fact, later.fact, late)
                     && parts.iter().all(|part| part.holds),
                 parts,
                 evidence: later.evidence.clone(),
             })
         })
         .collect();
-    LedgerRecord { outcome, rows }
+    LedgerRecord {
+        outcome,
+        rows,
+        at_sweep_inventory: after.at_sweep_inventory,
+    }
 }
 
 impl LedgerRecord {
@@ -1135,9 +1488,10 @@ impl LedgerRecord {
             ));
             for part in &row.parts {
                 out.push_str(&format!(
-                    "| {} › {} | | | {:?} | {:?} | {:?} | {} | |\n",
+                    "| {} › {} | | {:?} | {:?} | {:?} | {:?} | {} | |\n",
                     row.row,
                     part.name,
+                    part.class,
                     part.expected,
                     part.before,
                     part.after,
@@ -1145,6 +1499,11 @@ impl LedgerRecord {
                 ));
             }
         }
+        out.push_str(if self.at_sweep_inventory {
+            "\nAn at-sweep inventory was taken.\n"
+        } else {
+            "\nNo at-sweep inventory was taken.\n"
+        });
         out
     }
 }
