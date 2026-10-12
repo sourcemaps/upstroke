@@ -78,6 +78,22 @@ ledger's [`LateTotals`], and `admits` reads every requirement as if nothing were
 The after ledger's late facts that `AbsentUnlessLate` and `MonotoneUnlessLate` read: the
 attributed late instances over R9, R10 and R24, and R27's `late_referenced_objects`.
 
+## `pub struct Expectation {`
+
+One row of an outcome's equation: the row's class, its requirement, one requirement per named fact
+(`parts`, each with its own class), and `kept`, the class the row is accounted in instead of
+`class` when a late instance keeps or recreates the resource (A-4). Only R18 in an ended outcome
+has one.
+
+## `pub fn class_beside(&self, after: Fact, late: LateTotals) -> Class {`
+
+The class a row is accounted in for its after fact: `kept` when that fact is `Present` beside at
+least one attributed late instance of the after ledger, `class` otherwise. It reads the facts
+`AbsentUnlessLate` admits a present root on, so the root `check` admits beside a late instance is
+classed `ResumablyOpen`, and an absent root, or a present one beside no late instance, `Pruned`.
+`check` and `record` report a row's class through it. Until #337's first review (A12-R1) the class
+was the equation's alone, and the export classed the root late instances keep `Pruned`.
+
 ## `pub struct ProcessLocal {`
 
 R3, R4, R13, R17, R22 and R28 as the process reports them: the invocation ledger balanced, the
@@ -193,13 +209,24 @@ present — "a command ended by the append-error protocol leaves exactly this sh
 
 In Complete, Parked, Halted and BudgetExceeded a late instance is the exception (A-6): R9, R10 and
 R24's main facts stay `Absent` and their late parts are admitted, classed `ResumablyOpen`; R18 is
-absent, or present only beside a late instance; R27's unreachable objects may fall by what a late
-instance references again. NoRunFinished is unchanged.
+absent, classed `Pruned`, or present only beside a late instance, which keeps or recreates it, and
+then classed `ResumablyOpen` (A-4); R27's unreachable objects may fall by what a late instance
+references again. NoRunFinished is unchanged.
 
 ## `pub fn equation(outcome: Outcome) -> Vec<Expectation>` › `let late = |row| Expectation {`
 
 R9, R10 and R24 in an ended outcome: the main fact `Absent`, and `late_instances`, classed
 `ResumablyOpen`, `Attributed`.
+
+## `pub fn equation(outcome: Outcome) -> Vec<Expectation>` › `let root = Expectation {`
+
+R18 in an ended outcome: `Pruned`, `AbsentUnlessLate`, and kept `ResumablyOpen`. A-4 amends its
+`at_run_end` for Complete and Halted to "pruned unless a late instance keeps or recreates it (then
+resumably_open)", and for Parked and BudgetExceeded to "pruned unless a later resume recreates it,
+or a late instance keeps or recreates it (then resumably_open)"; a later resume's recreation comes
+after the run end this ledger observes, so at the run end the four read alike. It is one fact, not
+a part: the appendix's equation states R18 "`Absent`, or `Present` only when the three late parts
+sum above zero". NoRunFinished's R18 stays `ResumablyOpen`, `Present`.
 
 ## `pub fn equation(outcome: Outcome) -> Vec<Expectation>` › `let consumed = Expectation {`
 
@@ -230,11 +257,13 @@ exists, and returns to R27 when the instance is reclaimed), which is a part of i
 
 Every expectation against the pair; a missing observation is a disagreement too. The requirements
 that read other facts read the after ledger's [`LateTotals`], and a part's disagreement carries the
-part's class.
+part's class. A row's disagreement carries the class `class_beside` gives its after fact, which for
+a disagreeing R18 is `Pruned`; a missing observation keeps the equation's `class`.
 
 ## `pub fn record(before: &Ledger, after: &Ledger, outcome: Outcome) -> LedgerRecord {`
 
 The ledger as a document, one row per expectation with both facts and the evidence, rendered
-as a Markdown table by [`LedgerRecord::render`] for the record. Each part line carries its class,
-the late parts among them, per row and outcome, and the table closes with whether an at-sweep
-inventory was taken (A-12's export).
+as a Markdown table by [`LedgerRecord::render`] for the record. Each row carries the class it is
+accounted in (`class_beside`): the root a late instance keeps is exported `ResumablyOpen`, a
+pruned one `Pruned`. Each part line carries its class, the late parts among them, per row and
+outcome, and the table closes with whether an at-sweep inventory was taken (A-12's export).

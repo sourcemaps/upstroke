@@ -335,6 +335,17 @@ pub struct Expectation {
     pub class: Class,
     pub holds: Requirement,
     pub parts: Vec<(&'static str, Class, Requirement)>,
+    pub kept: Option<Class>,
+}
+
+impl Expectation {
+    #[must_use]
+    pub fn class_beside(&self, after: Fact, late: LateTotals) -> Class {
+        match self.kept {
+            Some(kept) if matches!(after, Fact::Present(_)) && late.instances > 0 => kept,
+            Some(_) | None => self.class,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1133,12 +1144,18 @@ pub fn equation(outcome: Outcome) -> Vec<Expectation> {
         class,
         holds,
         parts: Vec::new(),
+        kept: None,
     };
     let late = |row| Expectation {
         row,
         class: Pruned,
         holds: Absent,
         parts: vec![(LATE_PART, ResumablyOpen, Attributed)],
+        kept: None,
+    };
+    let root = Expectation {
+        kept: Some(ResumablyOpen),
+        ..expect(Row::R18, Pruned, AbsentUnlessLate)
     };
     let consumed = Expectation {
         row: Row::R14,
@@ -1158,6 +1175,7 @@ pub fn equation(outcome: Outcome) -> Vec<Expectation> {
                 ("override_slots", Monotone),
             ],
         ),
+        kept: None,
     };
     let outputs = Expectation {
         row: Row::R21,
@@ -1188,6 +1206,7 @@ pub fn equation(outcome: Outcome) -> Vec<Expectation> {
                 ("private_artifacts", Retained),
             ],
         ),
+        kept: None,
     };
     let mut released_parts = parts_of(
         Released,
@@ -1213,6 +1232,7 @@ pub fn equation(outcome: Outcome) -> Vec<Expectation> {
         class: Released,
         holds: Balanced,
         parts: released_parts,
+        kept: None,
     };
     let mut rows = vec![
         expect(Row::R3, Released, Balanced),
@@ -1233,7 +1253,7 @@ pub fn equation(outcome: Outcome) -> Vec<Expectation> {
         late(Row::R9),
         late(Row::R10),
         expect(Row::R12, Pruned, Absent),
-        expect(Row::R18, Pruned, AbsentUnlessLate),
+        root,
         expect(Row::R19, Pruned, Absent),
         expect(Row::R23, Pruned, Absent),
         late(Row::R24),
@@ -1324,7 +1344,7 @@ pub fn check(before: &Ledger, after: &Ledger, outcome: Outcome) -> Vec<Disagreem
             disagreements.push(Disagreement {
                 row: expectation.row,
                 part: None,
-                class: expectation.class,
+                class: expectation.class_beside(later.fact, late),
                 expected: expectation.holds,
                 before: earlier.fact,
                 after: later.fact,
@@ -1422,7 +1442,7 @@ pub fn record(before: &Ledger, after: &Ledger, outcome: Outcome) -> LedgerRecord
                 row: expectation.row,
                 resource: expectation.row.resource(),
                 domain: expectation.row.domain(),
-                class: expectation.class,
+                class: expectation.class_beside(later.fact, late),
                 expected: expectation.holds,
                 before: earlier.fact,
                 after: later.fact,

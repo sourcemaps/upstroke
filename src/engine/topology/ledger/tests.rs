@@ -970,6 +970,16 @@ fn assert_agrees(command: &Command, outcome: Outcome, what: &str) {
     );
 }
 
+/// The row `record` exports for `row` from a before and an after ledger.
+#[track_caller]
+fn exported(before: &Ledger, after: &Ledger, outcome: Outcome, row: Row) -> LedgerRecordRow {
+    record(before, after, outcome)
+        .rows
+        .into_iter()
+        .find(|exported| exported.row == row)
+        .unwrap_or_else(|| panic!("{row} is exported"))
+}
+
 /// T-ACC-1 (A-12): an earlier incarnation's instance is planted after the
 /// finalizer's task scrub, as T-FIN1 plants one, so that the final sweep has a
 /// removal to make. At the `Before` phase of that removal the observer takes
@@ -1153,10 +1163,12 @@ fn an_unreachable_decrease_with_no_late_instance_is_a_disagreement() {
 /// T-ACC-5 (A-12): a Halted run whose finalization a late task instance
 /// crossed — the planted instance a snapshot, so that the sweep, not a scrub,
 /// takes the at-sweep inventory — keeps its root, the late instance accounted
-/// `ResumablyOpen`; its resume finalizes again, and after it `late_instances`
-/// is zero, R18 absent, and `check` agrees. M-ACC-5, C's discovery passing
-/// over earlier incarnations' task instances, leaves the late instance to the
-/// resume: red.
+/// `ResumablyOpen` and the root it keeps exported `ResumablyOpen` too (A-4,
+/// A-7); its resume finalizes again, and after it `late_instances` is zero, R18
+/// absent and exported `Pruned`, and `check` agrees. M-ACC-5, C's discovery
+/// passing over earlier incarnations' task instances, leaves the late instance
+/// to the resume: red. M-A12-R1, R18's kept class dropped, exports the kept
+/// root `Pruned`: red.
 #[test]
 fn a_halted_runs_late_instance_is_reclaimed_by_its_resumes_finalization() {
     let fixture = Fixture::created("a12-t-acc-5");
@@ -1191,6 +1203,12 @@ fn a_halted_runs_late_instance_is_reclaimed_by_its_resumes_finalization() {
     );
     assert_eq!(halted.after.fact(Row::R18), Some(Fact::Present(1)));
     assert_agrees(&halted, Outcome::Halted, "the Halted run");
+    assert_eq!(
+        exported(&halted.before, &halted.after, Outcome::Halted, Row::R18).class,
+        Class::ResumablyOpen,
+        "the Halted run's root, kept by its late instance, is resumably open until the resume's \
+         finalization reclaims it"
+    );
 
     let resumer = manager(&fixture, RESUMER);
     let again = Start::take(&fixture, &resumer);
@@ -1211,6 +1229,11 @@ fn a_halted_runs_late_instance_is_reclaimed_by_its_resumes_finalization() {
     );
     assert_eq!(resumed.after.fact(Row::R18), Some(Fact::Absent));
     assert_agrees(&resumed, Outcome::Halted, "its resume");
+    assert_eq!(
+        exported(&resumed.before, &resumed.after, Outcome::Halted, Row::R18).class,
+        Class::Pruned,
+        "the resume's finalization reclaims the root: pruned"
+    );
 }
 
 /// T-ACC-6 (A-12, the attribution rule): a manager with incarnation R writes a
@@ -1388,13 +1411,126 @@ fn an_intentless_instance_the_at_sweep_inventory_lists_and_finalization_left_is_
     );
 }
 
+/// A12-R1 (A-4, A-6, the check and the export alone): R18 is one fact whose
+/// class follows the branch that holds, in each of the four ended outcomes. A
+/// root a late instance keeps is exported `ResumablyOpen` and holds; a removed
+/// root is exported `Pruned` and holds; a root present beside no late instance
+/// is exported `Pruned`, does not hold, and is `check`'s one disagreement,
+/// classed `Pruned`. Each outcome's equation states R18 `Pruned`,
+/// `AbsentUnlessLate`, kept `ResumablyOpen`; NoRunFinished's R18 is unchanged.
+/// M-A12-R1, R18's kept class dropped, restores the unconditional `Pruned`:
+/// red.
+#[test]
+fn the_root_a_late_instance_keeps_is_resumably_open_and_otherwise_pruned_in_every_ended_outcome() {
+    let late_task = format!("kbeta-g1_{}", InstanceTag::of_incarnation(CREATOR).as_str());
+    for outcome in [
+        Outcome::Complete,
+        Outcome::Parked,
+        Outcome::Halted,
+        Outcome::BudgetExceeded,
+    ] {
+        let run = Run::of(outcome, CREATOR, &[FINALIZER]);
+        let ledger = |physical: PhysicalInventory, late: LateInventory| {
+            observe_late(&run.fold, &run.events, &physical, &late, &process())
+        };
+        let swept = || LateInventory {
+            at_sweep: Some(Vec::new()),
+            ..LateInventory::default()
+        };
+        let present = || PhysicalInventory {
+            execution_root_present: true,
+            ..balanced_base()
+        };
+        let before = ledger(present(), LateInventory::default());
+        let kept = ledger(
+            PhysicalInventory {
+                task_slots: 1,
+                ..present()
+            },
+            LateInventory {
+                instances: vec![InstanceSeen {
+                    row: Row::R9,
+                    name: late_task.clone(),
+                    references: Vec::new(),
+                }],
+                ..swept()
+            },
+        );
+        let removed = ledger(balanced_base(), swept());
+        let left = ledger(present(), swept());
+        for (after, class, holds, disagreements, what) in [
+            (
+                &kept,
+                Class::ResumablyOpen,
+                true,
+                0,
+                "kept by a late instance",
+            ),
+            (&removed, Class::Pruned, true, 0, "removed"),
+            (
+                &left,
+                Class::Pruned,
+                false,
+                1,
+                "present beside no late instance",
+            ),
+        ] {
+            let root = exported(&before, after, outcome, Row::R18);
+            assert_eq!(
+                (root.class, root.holds),
+                (class, holds),
+                "{outcome:?}, the root {what}: {root:?}"
+            );
+            assert!(
+                record(&before, after, outcome).render().contains(&format!(
+                    "| R18 | execution root directory | {class:?} | AbsentUnlessLate |"
+                )),
+                "{outcome:?}, the root {what}: the table prints its class"
+            );
+            let found = check(&before, after, outcome);
+            assert_eq!(
+                found
+                    .iter()
+                    .map(|disagreement| (disagreement.row, disagreement.part, disagreement.class))
+                    .collect::<Vec<_>>(),
+                vec![(Row::R18, None, Class::Pruned); disagreements],
+                "{outcome:?}, the root {what}: {found:#?}"
+            );
+        }
+        let root = equation(outcome)
+            .into_iter()
+            .find(|expectation| expectation.row == Row::R18)
+            .expect("R18 is in every equation");
+        assert_eq!(
+            (root.class, root.holds, root.kept),
+            (
+                Class::Pruned,
+                Requirement::AbsentUnlessLate,
+                Some(Class::ResumablyOpen)
+            ),
+            "{outcome:?}: pruned unless a late instance keeps or recreates it (then resumably_open)"
+        );
+    }
+    let root = equation(Outcome::NoRunFinished)
+        .into_iter()
+        .find(|expectation| expectation.row == Row::R18)
+        .expect("R18 is in every equation");
+    assert_eq!(
+        (root.class, root.holds, root.kept),
+        (Class::ResumablyOpen, Requirement::Present, None),
+        "NoRunFinished's R18 is unchanged"
+    );
+}
+
 /// The ST-18/G6 evidence (A-12's last bullet): every ended outcome with a late
 /// task, staging and snapshot instance crossing the final sweep, its at-sweep
 /// inventory taken; one late instance of an incarnation that never reached
 /// `run_resumed` (T-ACC-6's shape); and the R27 transition, the snapshot's
-/// `HEAD` making an ephemeral commit reachable again. Each outcome's table is
-/// written to `$UPSTROKE_LEDGER_EXPORT/ledger-late-<outcome>.md` when the
-/// variable names a directory, for the G6 ledger artifact.
+/// `HEAD` making an ephemeral commit reachable again. The root the late
+/// instances keep is exported `ResumablyOpen` in each outcome (A-4, A-6;
+/// M-A12-R1 turns it red). Each outcome's table is written to
+/// `$UPSTROKE_LEDGER_EXPORT/ledger-late-<outcome>.md` when the variable names a
+/// directory, for the G6 ledger artifact.
 #[test]
 fn every_ended_outcome_balances_with_late_instances_crossing_the_final_sweep() {
     for (outcome, finished, tag) in [
@@ -1475,6 +1611,13 @@ fn every_ended_outcome_balances_with_late_instances_crossing_the_final_sweep() {
             command.after.fact(Row::R18),
             Some(Fact::Present(1)),
             "{tag}"
+        );
+        let root = exported(&command.before, &command.after, outcome, Row::R18);
+        assert_eq!(
+            (root.class, root.after, root.holds),
+            (Class::ResumablyOpen, Fact::Present(1), true),
+            "{tag}: the root the late instances keep is exported resumably open (A-4, A-6): \
+             {root:?}"
         );
         let three = u32::try_from(objects.len()).expect("three objects");
         assert_eq!(
