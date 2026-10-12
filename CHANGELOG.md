@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- A schema-4 integration verification that ends with no terminal carrying the review passes it paid
+  for — its own error after a pass was charged, a reviewer whose end the Runner did not establish, a
+  halt, a shutdown, another pipeline's error, or a lineage failure that cancels it — now records
+  those passes in a new `merge_verification_charged` event before the command or the integration
+  ends, so a resumed run's reported spend, and the ceilings checked against it, count what the
+  incarnation before it paid. The record is not a terminal: it settles nothing, so cleanup,
+  readmission and recovery are unchanged, and a crash before its line is durable leaves the passes
+  unknown spend, as before. The fold admits one record per sequence and no terminal that carries
+  passes after it, so no pass is counted twice, and a binary without the kind refuses a log holding
+  one. Schema 4 is unreleased and inert by default, so no released run is affected (`DESIGN.md` §26,
+  "The unavailable terminal's spend").
 - The four Unix helper endings that give up on a helper — the cleanup reaper that never said
   READY, the job-control guard whose descriptors could not be configured, the guard that never
   said READY, and a guard aborted after it said READY — no longer wait for that helper without a

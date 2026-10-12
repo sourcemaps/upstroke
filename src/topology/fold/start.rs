@@ -137,6 +137,9 @@ impl TopologyFold {
             TopologyEventBody::MergeVerificationInterrupted { data } => run
                 .check_verification_interrupted(data)
                 .map(|()| Derived::None),
+            TopologyEventBody::MergeVerificationCharged { data } => {
+                run.check_verification_charged(data).map(|()| Derived::None)
+            }
             TopologyEventBody::MergePrepared { data } => {
                 run.check_merge_prepared(data).map(|()| Derived::None)
             }

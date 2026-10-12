@@ -244,7 +244,7 @@ fn scrub_slots(
     keep: impl Fn(&Slot) -> bool,
 ) -> Result<usize, UpstrokeError> {
     let mut count = 0;
-    for slot in manager.intents()? {
+    for slot in manager.intents_pausing(hooks.effects())? {
         if !keep(&slot) {
             continue;
         }
