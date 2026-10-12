@@ -275,6 +275,7 @@ pub fn verify_or_recreate(
         Ok(()) => Ok(Reuse::Verified),
         Err(failure) => {
             manager.remove_worktree(hooks.effects(), &open.slot)?;
+            manager.remove_intent(hooks.effects(), &open.slot)?;
             create_worktree(manager, hooks, open)?;
             Ok(Reuse::Recreated { failure })
         }
