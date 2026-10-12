@@ -76,6 +76,15 @@ impl Spend {
                         None => spend.record_unattributed_reviews(&data.reviews),
                     }
                 }
+                TopologyEventBody::MergeVerificationCharged { data } => {
+                    match verifying
+                        .as_ref()
+                        .filter(|(sequence, _)| *sequence == data.sequence)
+                    {
+                        Some((_, key)) => spend.record_reviews(*key, &data.reviews),
+                        None => spend.record_unattributed_reviews(&data.reviews),
+                    }
+                }
                 TopologyEventBody::MergePrepared { data } => {
                     if let Some(verification) = &data.verification {
                         spend.record_reviews(data.key, &verification.reviews);

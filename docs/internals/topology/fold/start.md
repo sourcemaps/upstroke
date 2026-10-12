@@ -74,6 +74,10 @@ refusals[21]: a Complete or Halted run is finalized and then refused,
 never continued. A Parked or BudgetExceeded run continues, and the
 only event that continues it is the resume that opens the next epoch.
 
+## `impl TopologyFold` › `TopologyEventBody::MergeVerificationCharged { data } => {`
+
+The known-spend record goes to `check_verification_charged` and derives nothing (RULING Q-2).
+
 ## `impl TopologyFold` › `pub fn derived_outcome(&self) -> DerivedOutcome {`
 
 -----------------------------------------------------------------------

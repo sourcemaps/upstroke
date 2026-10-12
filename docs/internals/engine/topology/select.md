@@ -702,6 +702,14 @@ task overstates one ceiling, while dropping it understates the run's,
 which is the overspend this whole path exists to prevent. So the run
 is charged and no task is.
 
+## `pub fn replay(events: &[TopologyEvent]) -> Self {` › `TopologyEventBody::MergeVerificationCharged { data } => {`
+
+The known-spend record, charged by the same addition as a terminal's reviews and paired with its
+sequence's start without closing it, since the record is not a terminal and the interrupted terminal
+that may follow carries nothing. No start or terminal can come between a start and its record. The
+arm adds what it reads, with no identity rule of its own: every production reader replays a log the
+fold admitted, and the fold admits one record per sequence and no carrying terminal after it.
+
 ## `impl Spend {` › `fn record_unattributed_reviews(&mut self, reviews: &[crate::events::ReviewRecord]) {`
 
 The run half of a charge with no task to bill. See the `None` arm of
