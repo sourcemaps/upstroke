@@ -107,8 +107,9 @@ less than it had been told. As repaired:
   settlement — and `verify` unwinds when its transaction disappears, abandoning the integration
   without ending the command (`R1-CONC-3`). A halt the fold records is acted on before that (round
   R3, below).
-- **A verification's review spend is charged when its completion is accepted**, before the next
-  selection (phase 4; `R1-CONC-4`).
+- **A verification's review spend is charged when a live verification pipeline reports it, accepted
+  or discarded, and recorded when no terminal carries it**, before the next selection (phase 4;
+  `R1-CONC-4`; the O14(b) change's `merge_verification_charged`).
 
 ### What a halt interrupts, where admission stops, and whom a grant reaches (round R2)
 
@@ -333,9 +334,9 @@ Grant every waiting pipeline when the gate grants, in the order they asked.
 ## `struct Coordinator<'s> {`
 
 The source keeps the coordinator's protocol beside the struct (§10): the owner of every shared
-state, the linearization point, a pipeline's transitions, which completion wins, the cleanup after
-an interrupt, why the unbounded channels are bounded, and how a registry access the coordinator
-makes waits only for messages.
+state, the linearization point, a pipeline's transitions, which completion wins, where a
+verification's charged passes go, the cleanup after an interrupt, why the unbounded channels are
+bounded, and how a registry access the coordinator makes waits only for messages.
 
 ## `struct Coordinator<'s>` › `deferred: VecDeque<(Origin, ToCoordinator)>,`
 
@@ -412,10 +413,18 @@ candidate at the head of the queue). A fast integration never reclaims and does 
 ends the admission pass: nothing was started, or the command is already ending — an error the
 interrupt already accounts for is not a second error. A verification abandoned because the fold
 cancelled its transaction (`abandoned`) ends the integration without ending the command:
-`integrate()` appends nothing after `verify`'s error, and admission goes on. Its staging worktree,
+`integrate()` appends no terminal after `verify`'s error; the coordinator records the passes the
+verification charged against the released sequence (`merge_verification_charged`), and admission
+goes on. Its staging worktree,
 pin and snapshots are left for the terminal finalization or the next resume's reclaim, which remove
 any staging and pin no open transaction owns; the snapshots are its own sequence's, and a later
 stale integration's reclaim takes them too.
+
+While the run is stopped, the recording point takes nothing. The stop means a registry access's wait
+inside another transition met the interrupt that ended this integration, as when its verification's
+result had arrived and the gate was draining attempt snapshots. The passes it kept stay in `charged`
+for `finish`, which records them past the stop once every transition has returned, so this
+integration appends nothing after the stop (`O14B2-1`).
 
 ## `impl Coordinator<'_>` › `fn idle(&mut self) -> Result<Progress, UpstrokeError> {`
 
@@ -456,7 +465,8 @@ will not write to.
 
 A refusal when asked inside another verification (one transaction is open at a time); the
 verification job's own refusals; and, when an interrupt ends the command first, a refusal naming
-it — the pipeline was cancelled, and `integrate()` appends nothing further for it. The sequence is
+it — the pipeline was cancelled, `integrate()` appends no terminal for it, and the coordinator
+records the passes it charged, if any (`merge_verification_charged`), before the command ends. The sequence is
 recorded as cancelled, whether or not its result had already arrived, so a halt's closure settles
 the transaction with `merge_verification_interrupted` (R-AF) — a halt recorded after the result
 arrived and before this returned included (round R2: the admission pass's halt check reads the fold's
@@ -646,6 +656,16 @@ does not settle — is the interrupt there and then, with no wait for the snapsh
 `R1-CONC-2`); a result is held for `verify_concurrently`. One that no open verification awaits is a
 cancelled pipeline's end (silent) or stale (warned).
 
+## `impl Coordinator<'_>` › `fn keep_discarded(`
+
+A live verification pipeline's completion that is discarded — its pipeline cancelled (a halt, a
+shutdown, an error elsewhere, an unresolved end), its transaction released, or the fold poisoned —
+still carries the passes its pipeline's account charged as each returned. They are charged to the
+run's spend here, which master never did, and kept for recording. Only a completion from a pipeline
+of this coordinator, live under the identity it names, is kept; stale, foreign and injected ones are
+not. An accepted completion is kept in `verified_arrived` beside its live charge, before `verified`
+consumes the vector.
+
 ## `impl Coordinator<'_>` › `fn cancel_all(&mut self) {`
 
 Cancel every live pipeline's token, withdraw every pending registration, and refuse every reply
@@ -664,19 +684,45 @@ intake has buffered but not applied is answered when it is applied, so its pipel
 itself waiting on the intake (round R1's class search found the phase-3 shape doing that here, and
 `stop` doing it first).
 
+## `impl Coordinator<'_>` › `fn supersede(&mut self, append: UpstrokeError, ended: Option<&UpstrokeError>) {`
+
+The record's own append error, made the command's. `fail` keeps the first interrupt and only warns of
+a later error, which is right for a second error while the command is already ending and wrong for
+this one: T-APPEND makes a returned append error the command's error. So the stored interrupt is
+replaced and kept as a warning (`superseded`): the stored error, a halt's or a shutdown's description,
+or else the frozen `integrate()`'s own error. No closure follows a halt it replaced, and none could
+append on the poisoned fold. It is called only at the two recording points. A stopped run does not
+refuse the record: `integrate`'s recording point leaves it to `finish`, which offers it with the stop
+lifted (`TopologyRun::record_charged_past_the_stop`), so what reaches `supersede` there is the record's
+own append error alone (`O14B2-1`).
+
 ## `impl Coordinator<'_>` › `fn finish(&mut self) -> Result<Progress, UpstrokeError> {`
 
 End the command: cancel, apply messages until no pipeline is live, then act on the interrupt.
 After a halt the closure runs, with the coordinator as its operator (`run::close_run`; I2-2), with
 the identities this coordinator cancelled — unless a cancelled
 pipeline ended with its process unresolved, in which case nothing is appended and the command ends
-resumably naming it. A shutdown cancels any provisional reservation still held (none is expected)
-and ends resumably, appending nothing. An error is returned as it is: after an append error it is
-the protocol's report, and no closure, report or cleanup follows.
+resumably naming it. Before any of that, the passes a verification charged and no terminal carries
+are recorded (`merge_verification_charged`): a completion discarded in the receive loop, or one kept
+earlier and not yet recorded. On a stopped run that record is offered with the stop lifted for the
+offer alone (`TopologyRun::record_charged_past_the_stop`): every transition has returned by then, so it
+is appended for none of them, and the stop holds again for everything after it (`O14B2-1`). A shutdown cancels any provisional reservation still held (none is
+expected) and ends resumably, appending nothing but that record. An error is returned as it is: after
+an append error it is the protocol's report, and no closure, report or cleanup follows. The record's
+own append error is the exception that ends the command in place of what was stored: `supersede`
+makes it the interrupt and keeps what it replaced as a warning.
 
 ## `struct Coordinator<'s>` › `cancelled_work: closure::Cancelled,`
 
 The in-flight identities this coordinator cancelled or abandoned, which a halt's closure settles.
+
+## `struct Coordinator<'s>` › `charged: Option<Charged>,`
+
+The passes of the one open verification, kept from its completion until they are recorded or a
+terminal carries them. Taken, never copied, at both recording points: after the frozen
+`integrate()` returns an error, and after `finish`'s receive loop. On a stopped run `integrate` leaves
+it, and `finish` takes it. One verification is open at a
+time and each pipeline sends one completion, so at most one is kept.
 
 ## `struct Coordinator<'s>` › `unresolved: Vec<String>,`
 
@@ -729,8 +775,9 @@ error-return point, with the cause "nothing further is done in this process: <wh
 effect a transition makes through these hooks — a worktree, an intent, a ref, the integration ref's
 compare-and-swap — is refused before its primitive runs; at a point whose only other answer is
 `Kill` it proceeds, since an `Error` there would invent an error-return contract the point does not
-declare. With the run's emitter refusing every append, a transition that carried on past a stopped
-wait publishes and appends nothing.
+declare. With the run's emitter refusing every append a transition makes, a transition that carried
+on past a stopped wait publishes and appends nothing; the one append past the stop is `finish`'s
+record of the passes a verification charged (`fn finish`).
 
 **`registry_pause`** is one wait of an access a transition makes. It asks the [`Timer`] for a wake
 after the wait's length — no thread per wait, so a wait needs no thread it might not get (I2-3) —
@@ -2475,3 +2522,89 @@ The control beside T15: a destination that cannot be made is Git state at once, 
 runs (`workspace_manager`'s destination step, after the add's gate), so `decisions.repairs.not_repairs` applies as it did:
 one `merge_verification_unavailable` (Deferred), and the run completes with both candidates
 merged. Green before #329 too, where Git's own add failed to make the destination.
+
+## `mod tests` › `struct PlantingAtTheSnapshot {`
+
+Plants one of #329's own faults just before the verification's fourth snapshot add, the third
+reviewer's, by asking the planter for the review-input problem of a path under `merge`, as the
+verification asks it: the gate's and the first two reviewers' snapshots are made and their passes
+charged first. The planter is #329's `TearsAForeignRegistration` (T2′'s registration that stays
+torn) or `RequiresAFailingFilter` (T15's required filter that fails).
+
+## `mod tests` › `fn a_registry_refusal_after_two_paid_passes_is_recorded_with_both_at_width_three() {`
+
+B's charged refusal (the O14(b) proposal's witness for B, §7): the third reviewer's snapshot meets
+T2′'s torn registration, and its access refuses at its deadline as `UpstrokeError::RegistryRefused`
+naming `commondir` after passes 0 and 1 were charged. The command ends with the record of both as its
+last append, no terminal, and the transaction open; replay and the live totals agree, and the record
+carries $0.50 of them. With the tear removed, the next process's recovery settles the sequence
+interrupted after the record, its replayed spend is the live spend of the process before it, and
+the resumed run completes with the passes counted once. Red at #329's merge, where the log ends at
+`merge_verification_started` and the passes are charged live only.
+
+## `mod tests` › `fn a_registry_refusal_after_two_paid_passes_is_recorded_with_both_at_width_one() {`
+
+The same refusal at width 1, through `step`: the record is the step's last append, and the resumed
+step verifies the candidate again under the next sequence.
+
+## `mod tests` › `fn a_registry_refusal_after_the_takeover_at_the_third_review_is_recorded_with_both_passes() {`
+
+The refusal's third face, O9(a)'s: T15's failing filter is planted before the third reviewer's
+snapshot, its checkout fails after Git took the destination over, and the access refuses at once.
+The record and the resume are as at width 3. Unix only, as T15 is.
+
+## `mod tests` › `fn retained_attempt_finished_of_delta(body: &TopologyEventBody) -> bool {`
+
+Delta's (task 3's) retained `attempt_finished`, where the L7 witness plants its tear.
+
+## `mod tests` › `fn stopped_inside_a_retrys_wait(`
+
+The two `O14B2-1` witnesses' run, as #329's `stopped_in_its_wait` runs its own. A registration is
+torn when the retried task's retained `attempt_finished` is folded, so the retry's access fails on it
+and waits, and the shutdown is injected inside that wait, with the tear finished at once so that only
+the stop keeps the access from succeeding. The run ends on the shutdown. It checks that the access
+failed on the tear first and that no wait slept on the coordinator's thread, and returns the
+command's error and the log's length at the injection.
+
+## `mod tests` › `fn stopped_and_recorded(`
+
+What both `O14B2-1` witnesses assert after the stop. The record is first: replay agrees with the
+live totals for the run and the verifying task, and its failure message carries the four totals and
+the count of records, so a red run shows what was lost. Then `records_both_passes`. Then #329's stop,
+as its own witnesses assert it: the command ends on the shutdown, whose error says that nothing was
+appended but the record; the retry's wait answered the shutdown; no append failed; nothing but the
+record was appended after the injection; the retried task started no attempt; no terminal, and the
+transaction still open; the integration ref where the log authorizes it; the invocations balanced;
+the run reopened.
+
+## `mod tests` › `fn sequence_endings(`
+
+How each invocation of one sequence ended, from the recording runner.
+
+## `mod tests` › `fn a_shutdown_answered_inside_a_retrys_wait_records_the_passes_its_cancelled_verification_charged()`
+
+`O14B2-1`'s L6 face, adapted from the regular lens's reproduction in the #334 delta review: its
+composition, scheduling and tear. At width three a verification has charged two $0.25 passes and its
+third reviewer still runs. Beta's failing gate is retried into the tear, and the shutdown is answered
+inside the retry's wait. The cancelled verification's completion is discarded with both passes kept,
+and `finish` records them past the stop. The third reviewer ended cancelled. After the resume, recovery
+settles the sequence interrupted after the record, and the run completes with the passes counted once.
+Red before the repair: the run was $1.75 live and $1.25 replayed, the verifying task $1.00 and $0.50,
+with no record.
+
+## `mod tests` › `fn a_shutdown_answered_inside_a_retrys_wait_after_the_result_arrived_records_both() {`
+
+`O14B2-1`'s L7 face. Four tasks: the verification's gate and both reviewers end while gamma's and
+delta's gates hold snapshots, so its result arrives and is charged while the gate drains. Delta's gate
+then fails, and its retry meets the tear while the gate is still draining. The shutdown answered there
+ends the integration; its recording point leaves the passes to `finish`, which records them past the
+stop. The rest is as the L6 witness. Red before the repair with the same totals, where the
+integration's own offer was refused.
+
+## `mod tests` › `fn the_record_past_a_stop_leaves_the_run_stopped_for_what_follows() {`
+
+`record_charged_past_the_stop` lifts the stop for its one offer only. On a run a wait has stopped, the
+helper is called, and the stop still holds after it: a dispatch begun next is refused by the run's
+emitter and nothing is appended. The refusal keeps #329's words, "nothing further is appended in this
+process", then names the one append made past the stop, the record of the review passes a
+verification had charged, and then the stop.

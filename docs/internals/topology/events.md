@@ -1163,6 +1163,35 @@ The first [`UnavailableDefect`] the event exhibits.
 
 `merge_verification_interrupted`: a process died holding this transaction.
 
+## `pub struct MergeVerificationCharged {`
+
+`merge_verification_charged`: the known-spend record. The review passes a live process charged for
+the verification of `sequence` and is leaving without a terminal that carries them: the
+verification's own error or the refusal of the step after it, an invocation whose end the Runner
+did not establish, a cancellation, a halt, a shutdown, another pipeline's error, or a lineage
+failure that cancelled its transaction (DESIGN §26, "The unavailable terminal's spend").
+
+It is not a terminal. It records no outcome and settles, releases and authorizes nothing: the fold
+applies nothing to the transaction for it, so cleanup and readmission keep their conditions and the
+terminal that settles the verification is the one it would otherwise have been.
+`merge_verification_interrupted` is unchanged and stays the unknown-spend terminal §26's crash table
+makes it; a record appended before it carries what the dead or halted process had charged. The fold
+admits one record per sequence and, once a sequence has one, refuses for it every terminal that
+carries a verification's passes, so they are counted once whatever is appended after it
+(`check_verification_charged`, `check_spend_unrecorded`).
+
+Appended last to the vocabulary, after the informational kinds, so that no existing position moved:
+the O14(b) change's Class C wire change (RULINGS Q-0 and Q-1).
+
+## `pub struct MergeVerificationCharged` › `pub reviews: Vec<ReviewRecord>,`
+
+Every pass the process charged for the sequence, in the order charged, in the shape and strictness
+`merge_verification_unavailable.reviews` has: read through `strict::list`, so an unknown field in an
+embedded record is refused like one in the payload, and required like every schema-4 payload field,
+so a binary that predates the record refuses a log holding one at parse, the safe direction for a
+ceiling. Never empty: a verification that charged nothing has nothing to record, and the fold
+refuses an empty list.
+
 ## `pub enum PreparedDisposition {`
 
 How the integration ref is being moved.
@@ -1429,14 +1458,16 @@ has no production emitter of the record yet: the writer that adds one
 constructs it through `DesignDefect::discovered` by default and
 `::convicted` when the answer file carries a citation.
 
-## `pub const TOPOLOGY_EVENT_KINDS: [&str; 24] = [`
+## `pub const TOPOLOGY_EVENT_KINDS: [&str; 25] = [`
 
 Every tag the vocabulary can write, in declaration order.
 
-The first twenty-one are transactions — a fold applies them and refuses
-what it cannot apply. The last three are informational.
+All but three are transactions — a fold applies them and refuses what it
+cannot apply. The three informational kinds are `capacity_snapshot`,
+`pool_exhausted` and `design_defect`; `merge_verification_charged`, a
+transaction, was appended after them so that no existing position moved.
 
-## `pub const TOPOLOGY_TRANSACTION_KINDS: usize = 21;`
+## `pub const TOPOLOGY_TRANSACTION_KINDS: usize = 22;`
 
 How many of [`TOPOLOGY_EVENT_KINDS`] are transactions rather than
 informational records.
@@ -1469,6 +1500,8 @@ silently answering `None`.
 Deliberately keyless: a verification outage and an interruption
 are facts about a transaction, and the fold resolves the
 candidate from the sequence rather than trusting a second copy.
+The known-spend record `merge_verification_charged` is keyless for
+the same reason.
 
 ## `impl TopologyEventBody` › `pub fn sequence(&self) -> Option<SequenceId> {`
 
@@ -1829,9 +1862,9 @@ compared lengths fails on exactly the mover that isolates it.
 Test-owned oracles for the vocabulary itself
 ------------------------------------------------------------------
 
-## `mod tests` › `const FROZEN_VOCABULARY: [(&str, bool); 24] = [`
+## `mod tests` › `const FROZEN_VOCABULARY: [(&str, bool); 25] = [`
 
-The twenty-four tags a schema-4 log can carry, and whether a fold
+The twenty-five tags a schema-4 log can carry, and whether a fold
 applies each one.
 
 Written down here, in this test module, from the frozen contract.
