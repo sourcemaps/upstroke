@@ -351,6 +351,49 @@ mod tests {
         )
     }
 
+    #[cfg(all(unix, not(target_os = "linux")))]
+    fn descriptor_directory(file: &std::path::Path) -> PathBuf {
+        use std::io::{Seek as _, SeekFrom};
+        use std::os::fd::AsRawFd as _;
+        use std::os::unix::fs::MetadataExt as _;
+        let directory = PathBuf::from("/dev/fd");
+        let mut held = std::fs::File::open(file).unwrap_or_else(|error| {
+            panic!("{} does not open for reading: {error}", file.display())
+        });
+        held.seek(SeekFrom::Start(1))
+            .expect("a file open for reading takes a position");
+        let number = held.as_raw_fd();
+        let entry = directory.join(number.to_string());
+        let mut duplicate = std::fs::File::open(&entry).unwrap_or_else(|error| {
+            panic!(
+                "{} is not shown to be this process's descriptor directory: {} answered {error}",
+                directory.display(),
+                entry.display()
+            )
+        });
+        let (held_file, entry_file) = (
+            held.metadata().expect("an open file answers fstat"),
+            duplicate.metadata().expect("an open file answers fstat"),
+        );
+        assert_eq!(
+            (entry_file.dev(), entry_file.ino()),
+            (held_file.dev(), held_file.ino()),
+            "{} must open the file descriptor {number} holds, {}",
+            entry.display(),
+            file.display()
+        );
+        assert_eq!(
+            duplicate
+                .stream_position()
+                .expect("an open file answers its position"),
+            1,
+            "{} must be descriptor {number} duplicated, at its position, not {} opened anew",
+            entry.display(),
+            file.display()
+        );
+        directory
+    }
+
     #[test]
     fn a_candidate_this_platform_cannot_stat_is_never_reported_as_absence() {
         let path = undeterminable_directory().into_os_string();
@@ -439,7 +482,7 @@ mod tests {
         #[cfg(target_os = "linux")]
         let (absent, probe) = absent_child_of(&later);
         #[cfg(all(unix, not(target_os = "linux")))]
-        let (absent, probe) = absent_child_of(std::path::Path::new("/dev/fd"));
+        let (absent, probe) = absent_child_of(&descriptor_directory(&later.join(&program)));
         #[cfg(windows)]
         let (absent, probe) = absent_child_of(&later.join(&program));
         assert_eq!(
