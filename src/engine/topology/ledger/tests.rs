@@ -13,7 +13,9 @@ use crate::topology::effects::{
 use crate::topology::events::{
     BudgetExceeded4, FrozenQuestion, IncarnationId, QuestionRaised4, RunResumed4, RunStarted4,
 };
-use crate::workspace_manager::fixture::{Fixture, RUN_ID, git, git_os, remove_file, write_file};
+use crate::workspace_manager::fixture::{
+    Fixture, RUN_ID, create_dir, git, git_os, remove_file, write_file,
+};
 use crate::workspace_manager::{
     EffectHooks, NoHooks, Slot, SnapshotName, WorkspaceManager, WriterProof,
 };
@@ -428,8 +430,10 @@ fn names(directory: &Path) -> Vec<String> {
     names
 }
 
-/// Every entry under the three slot namespaces: its row, its path and its
-/// name, whoever created it and whether or not anything registers it.
+/// Every entry under the three slot namespaces, of whatever kind: its row, its
+/// path and its name, whoever created it and whether or not anything
+/// registers it. Which of them is an instance is the census's to decide, from
+/// the entry's kind (`is_directory`) as well as its name.
 fn instance_dirs(manager: &WorkspaceManager) -> Vec<(Row, PathBuf, String)> {
     LATE_ROWS
         .iter()
@@ -440,6 +444,14 @@ fn instance_dirs(manager: &WorkspaceManager) -> Vec<(Row, PathBuf, String)> {
                 .map(move |name| (row, directory.join(&name), name))
         })
         .collect()
+}
+
+/// Whether the entry at `path` is a directory, read as the final sweep's
+/// discovery reads one (`namespace_instances`): with `symlink_metadata`, so
+/// that a link is not followed. A regular file, a link, any other kind, and an
+/// entry whose metadata cannot be read are not directories (A12-R3).
+fn is_directory(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir())
 }
 
 /// The at-sweep inventory's listing: every entry under the slot namespaces,
@@ -616,6 +628,7 @@ impl Inventory {
                 .into_iter()
                 .map(|(row, path, name)| InstanceSeen {
                     row,
+                    directory: is_directory(&path),
                     references: references(&path),
                     name,
                 })
@@ -1387,6 +1400,7 @@ fn an_intentless_instance_the_at_sweep_inventory_lists_and_finalization_left_is_
             instances: vec![InstanceSeen {
                 row: Row::R9,
                 name: name.clone(),
+                directory: true,
                 references: Vec::new(),
             }],
             intents: Vec::new(),
@@ -1451,6 +1465,7 @@ fn the_root_a_late_instance_keeps_is_resumably_open_and_otherwise_pruned_in_ever
                 instances: vec![InstanceSeen {
                     row: Row::R9,
                     name: late_task.clone(),
+                    directory: true,
                     references: Vec::new(),
                 }],
                 ..swept()
@@ -1630,6 +1645,262 @@ fn every_ended_outcome_balances_with_late_instances_crossing_the_final_sweep() {
                 - part_of(&command.after, Row::R27, "unreachable_objects").count(),
             three,
             "{tag}: the unreachable count falls by the ephemeral commit's objects"
+        );
+    }
+}
+
+/// A12-R3 (#337's second review, the regular lens, executed): an entry's name
+/// alone never makes it a late instance. The lens's witness, preserved as
+/// `boundary-witness.patch` (sha256 `aa39b1d061ec221e…`), failed at
+/// `df1f645b`: a regular file at an earlier incarnation's valid task-instance
+/// path was counted `Late { crossed: 1, attributed: 1 }`, `check` agreed and
+/// R18 was exported `ResumablyOpen` and holding, while the next finalization's
+/// discovery, which takes only directories, left the file and the root.
+///
+/// In each ended outcome the final sweep removes a planted instance, the
+/// at-sweep inventory is taken and the root is removed. Then one entry with no
+/// intent appears under the task namespace and recreates the root: a genuine
+/// late instance, a real `git worktree add` at the creator's instance of a
+/// slot; a regular file at that same path; or a directory whose name parses as
+/// an instance's but whose slot `Slot::validate` refuses (an empty key). The
+/// ledger balances exactly where the next finalization's real discovery
+/// reclaims. The late instance is accounted `ResumablyOpen` with the root it
+/// keeps and `check` agrees; the discovery finds it, and the next finalization
+/// removes it and the root. The file and the invalid name are residue: R9's
+/// main fact counts each, the root stands beside no late instance and `check`
+/// disagrees on R9 and R18; the discovery finds nothing, and the next
+/// finalization leaves the entry and the root. M-A12-R3 (the census reading no
+/// kind) and M-A12-R3-OBS (the observer reporting every entry a directory)
+/// turn the file red; M-A12-R3-NAME (the census reading no slot validity) turns
+/// the invalid name red.
+#[test]
+fn only_an_entry_the_next_finalization_reclaims_balances_as_a_late_instance() {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Entry {
+        LateAdd,
+        File,
+        InvalidName,
+    }
+    for (outcome, finished, tag) in [
+        (Outcome::Complete, RunOutcome::Complete, "complete"),
+        (Outcome::Parked, RunOutcome::Parked, "parked"),
+        (Outcome::Halted, RunOutcome::Halted, "halted"),
+        (
+            Outcome::BudgetExceeded,
+            RunOutcome::BudgetExceeded,
+            "budget-exceeded",
+        ),
+    ] {
+        for (entry, kind) in [
+            (Entry::LateAdd, "add"),
+            (Entry::File, "file"),
+            (Entry::InvalidName, "name"),
+        ] {
+            let what = format!("{tag}, {kind}");
+            let fixture = Fixture::created(&format!("a12-r3-{tag}-{kind}"));
+            let run = Run::of(outcome, CREATOR, &[FINALIZER]);
+            let creator = manager(&fixture, CREATOR);
+            let finalizer = manager(&fixture, FINALIZER);
+            let start = Start::take(&fixture, &finalizer);
+            let planted = creator.slot_path(&fixture.task("alpha", 1));
+            let mut sweep = AtSweep::new(&fixture, &finalizer, Vec::new());
+            assert!(
+                finalize_as(
+                    &finalizer,
+                    &finished,
+                    || plant(&fixture, &planted),
+                    &mut sweep
+                ),
+                "{what}: the sweep removes the planted instance, and finalization the root"
+            );
+            let taken = sweep.taken();
+            assert!(
+                taken.listed.is_some(),
+                "{what}: the at-sweep inventory is taken"
+            );
+            let path = match entry {
+                Entry::LateAdd => {
+                    let path = creator.slot_path(&fixture.task("beta", 1));
+                    late_add(&fixture, &path, &fixture.head);
+                    assert!(path.join(".git").is_file(), "{what}: a real Git add");
+                    path
+                }
+                Entry::File => {
+                    let path = creator.slot_path(&fixture.task("beta", 1));
+                    write_file(&path, b"not a worktree, and not an instance directory\n");
+                    assert!(path.is_file(), "{what}: a regular file");
+                    path
+                }
+                Entry::InvalidName => {
+                    let path = finalizer.execution_root().join("tasks").join(format!(
+                        "k-g1_{}",
+                        InstanceTag::of_incarnation(CREATOR).as_str()
+                    ));
+                    create_dir(&path);
+                    assert!(path.is_dir(), "{what}: a directory");
+                    path
+                }
+            };
+            assert!(
+                finalizer.execution_root().exists(),
+                "{what}: the entry recreates the root"
+            );
+            let command = start.ledgers(&fixture, &finalizer, &run, &[], taken);
+            let disagreements = check(&command.before, &command.after, outcome);
+            let root = exported(&command.before, &command.after, outcome, Row::R18);
+            let resumer = manager(&fixture, RESUMER);
+            let discovered = resumer.intents().expect("the real discovery");
+            let removed = finalize_as(&resumer, &finished, || {}, &mut NoHooks);
+            if entry == Entry::LateAdd {
+                assert!(
+                    disagreements.is_empty(),
+                    "{what}: the late instance balances: {disagreements:#?}"
+                );
+                assert_eq!(
+                    part_of(&command.after, Row::R9, LATE_PART),
+                    Fact::Late {
+                        crossed: 1,
+                        attributed: 1
+                    },
+                    "{what}"
+                );
+                assert_eq!(
+                    (root.class, root.after, root.holds),
+                    (Class::ResumablyOpen, Fact::Present(1), true),
+                    "{what}: the root the late instance keeps"
+                );
+                assert_eq!(
+                    discovered,
+                    vec![fixture.task("beta", 1)],
+                    "{what}: the discovery finds the late instance"
+                );
+                assert!(
+                    removed && !path.exists() && !finalizer.execution_root().exists(),
+                    "{what}: the next finalization reclaims the late instance, and the root"
+                );
+            } else {
+                assert_eq!(
+                    disagreeing(&disagreements),
+                    vec![(Row::R9, None), (Row::R18, None)],
+                    "{what}: the residue is a disagreement:\n{}",
+                    record(&command.before, &command.after, outcome).render()
+                );
+                assert_eq!(
+                    part_of(&command.after, Row::R9, LATE_PART),
+                    Fact::Late {
+                        crossed: 0,
+                        attributed: 0
+                    },
+                    "{what}: nothing crossed the final sweep"
+                );
+                assert_eq!(
+                    command.after.fact(Row::R9),
+                    Some(Fact::Present(1)),
+                    "{what}: R9's main fact counts the residue"
+                );
+                assert_eq!(
+                    (root.class, root.after, root.holds),
+                    (Class::Pruned, Fact::Present(1), false),
+                    "{what}: the root stands beside no late instance"
+                );
+                assert!(
+                    discovered.is_empty(),
+                    "{what}: the discovery finds no instance: {discovered:?}"
+                );
+                assert!(
+                    !removed && path.exists() && finalizer.execution_root().exists(),
+                    "{what}: the next finalization leaves the entry, and the root"
+                );
+            }
+        }
+    }
+}
+
+/// A12-R3, the check alone: the census takes for an instance exactly what the
+/// final sweep's discovery takes (`namespace_instances`), a directory, read
+/// without following a link, whose name is a valid slot instance's. Any other
+/// entry under a slot namespace is residue: it never crosses the final sweep
+/// and stays in its row's main fact, and here, alone beside the root, it leaves
+/// R18 present beside no late instance. The observer reports a regular file, a
+/// link, any other kind and an entry whose metadata cannot be read alike, as no
+/// directory (`is_directory`); a link cannot be planted from this module, whose
+/// lint level denies creating one, so the table reads the census over that
+/// fact. Beside an at-sweep inventory that lists none of them, no intent naming
+/// them and each tagged as the run's creator, in R9, R10 and R24: a directory
+/// with a valid name is late and attributed, and `check` agrees; an entry that
+/// is no directory, and a directory whose name parses but whose slot does not
+/// validate (staging has no such name), each leave `check` disagreeing on the
+/// row and on R18. M-A12-R3 makes the entries that are no directory agree, and
+/// M-A12-R3-NAME the invalid names: red.
+#[test]
+fn an_entry_crosses_the_final_sweep_only_as_a_directory_with_a_valid_instance_name() {
+    let run = Run::of(Outcome::Complete, CREATOR, &[FINALIZER]);
+    let tag = InstanceTag::of_incarnation(CREATOR);
+    let named = |component: &str| format!("{component}_{}", tag.as_str());
+    let before = observe_late(
+        &run.fold,
+        &run.events,
+        &balanced_base(),
+        &LateInventory::default(),
+        &process(),
+    );
+    let task = named("kbeta-g1");
+    let staging = named("s1");
+    let snapshot = named("s1-integration");
+    let empty_key = named("k-g1");
+    let dotted = named("s1.integration");
+    for (row, name, directory, late) in [
+        (Row::R9, &task, true, 1),
+        (Row::R9, &task, false, 0),
+        (Row::R9, &empty_key, true, 0),
+        (Row::R10, &staging, true, 1),
+        (Row::R10, &staging, false, 0),
+        (Row::R24, &snapshot, true, 1),
+        (Row::R24, &snapshot, false, 0),
+        (Row::R24, &dotted, true, 0),
+    ] {
+        let what = format!("{row}, `{name}`, directory: {directory}");
+        let after = observe_late(
+            &run.fold,
+            &run.events,
+            &PhysicalInventory {
+                task_slots: u32::from(row == Row::R9),
+                staging_slots: u32::from(row == Row::R10),
+                snapshot_slots: u32::from(row == Row::R24),
+                execution_root_present: true,
+                ..balanced_base()
+            },
+            &LateInventory {
+                instances: vec![InstanceSeen {
+                    row,
+                    name: name.clone(),
+                    directory,
+                    references: Vec::new(),
+                }],
+                at_sweep: Some(Vec::new()),
+                ..LateInventory::default()
+            },
+            &process(),
+        );
+        assert_eq!(
+            part_of(&after, row, LATE_PART),
+            Fact::Late {
+                crossed: late,
+                attributed: late
+            },
+            "{what}"
+        );
+        let mut expected: Vec<(Row, Option<&str>)> = if late == 1 {
+            Vec::new()
+        } else {
+            vec![(row, None), (Row::R18, None)]
+        };
+        expected.sort();
+        let disagreements = check(&before, &after, Outcome::Complete);
+        assert_eq!(
+            disagreeing(&disagreements),
+            expected,
+            "{what}: {disagreements:#?}"
         );
     }
 }

@@ -403,6 +403,7 @@ pub struct PhysicalInventory {
 pub struct InstanceSeen {
     pub row: Row,
     pub name: String,
+    pub directory: bool,
     pub references: Vec<String>,
 }
 
@@ -522,7 +523,12 @@ fn take_census(events: &[TopologyEvent], late: &LateInventory) -> Census {
         let Some((_, namespace)) = LATE_ROWS.iter().find(|(row, _)| *row == seen.row) else {
             continue;
         };
-        let Some(instance) = SlotInstance::from_entry(namespace, &seen.name) else {
+        if !seen.directory {
+            continue;
+        }
+        let Some(instance) = SlotInstance::from_entry(namespace, &seen.name)
+            .filter(|instance| instance.slot().id().is_ok())
+        else {
             continue;
         };
         if named.contains(&instance) {

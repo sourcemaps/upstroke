@@ -29,11 +29,13 @@ execution root (the follow-up C record, §5.4). An earlier incarnation's Git wri
 running can act after that sweep has scanned, and the instance it creates is a late instance: it
 belongs to its slot's row (R9, R10 or R24), classed `ResumablyOpen` — never used, and reclaimed
 with force by the run's next terminal finalization or resume, whose final sweep finds it — and the
-objects its `HEAD` or index references belong to it while it exists. The ledger admits one only on
-two pieces of evidence, and every other case reads as a disagreement, failing closed: an at-sweep
-inventory, taken, that does not list it, and its incarnation attributed to this run. The late
-facts arrive in [`LateInventory`], filled by the test that owns the fixture as the physical
-inventory is (`ledger/tests.rs` for A-12's own evidence); the census over them is this module's.
+objects its `HEAD` or index references belong to it while it exists. The ledger admits one only as
+an entry the final sweep's own discovery takes for an instance, a directory with a valid instance
+name and never a name alone (A12-R3), and only on two pieces of evidence: an at-sweep inventory,
+taken, that does not list it, and its incarnation attributed to this run. Every other case reads as
+a disagreement, failing closed. The late facts arrive in [`LateInventory`], filled by the test that
+owns the fixture as the physical inventory is (`ledger/tests.rs` for A-12's own evidence); the
+census over them is this module's.
 
 ## `pub enum Row {`
 
@@ -111,12 +113,24 @@ observation saw referenced, the whole store as it listed it, and what `fsck` rep
 unreachable, so that nothing present before the run end is gone after it, an
 already-unreachable object included.
 
+## `pub struct InstanceSeen {`
+
+One entry under a slot namespace, as the observer found it: its row, its name, whether it is a
+directory, and the objects its `HEAD` or index references. `directory` is read without following a
+link (`symlink_metadata`), as the final sweep's discovery reads an entry (`namespace_instances`,
+`src/workspace_manager.rs`): a regular file, a link, an entry of any other kind and one whose
+metadata cannot be read are not directories. It is a raw fact like the others, and the census, not
+the observer, decides which entry is an instance. Until #337's second review (A12-R3) the census
+read the name alone, so a regular file at a valid instance path, with no intent or registration,
+counted as a late instance that the next finalization leaves in place.
+
 ## `pub struct LateInventory {`
 
 What A-12 adds to the physical inventory, as raw facts: every entry under the three slot
-namespaces with the objects its `HEAD` or index references (`InstanceSeen`), the intent files the
-inventory found, the at-sweep inventory's listing when one was taken, the intent records of every
-inventory the ledger took of the run, and the before-inventory's unreachable objects.
+namespaces, of whatever kind, with whether it is a directory and the objects its `HEAD` or index
+references (`InstanceSeen`), the intent files the inventory found, the at-sweep inventory's
+listing when one was taken, the intent records of every inventory the ledger took of the run, and
+the before-inventory's unreachable objects.
 
 **Why a struct of its own.** [`PhysicalInventory`] keeps its fields because the frozen
 `ledger_inventory` (`recover/tests.rs`) builds it with an exhaustive struct literal: a field added
@@ -158,13 +172,23 @@ only the creating incarnation. The answer is the set of those incarnations' inst
 
 The late predicate: an entry under a slot namespace that is an instance, that no intent names, and
 that the at-sweep inventory, taken, does not list, has crossed the final sweep; it is attributed
-when its tag is an earlier incarnation's of this run. Without an at-sweep inventory — the sweep
-removed nothing, or none was taken — no instance is late. An earlier incarnation's intentless
-instance the at-sweep inventory lists and finalization left is residue the sweep could discover:
-it stays in its row's main fact, whose `Absent` makes it a disagreement, and one published between
-the sweep's scan and the observation is listed and reads the same way. `late_referenced_objects`
-counts the before-inventory's unreachable objects that an attributed late instance's `HEAD` or
-index references.
+when its tag is an earlier incarnation's of this run. An instance is what the final sweep's
+discovery (`namespace_instances`) takes for one, and so what the run's next finalization reclaims:
+a directory, read without following a link, whose name is a valid slot instance's
+(`SlotInstance::from_entry`, and `Slot::validate` read through `Slot::id`). Without an at-sweep
+inventory — the sweep removed nothing, or none was taken — no instance is late.
+
+Everything else is residue, never late, and stays in its row's main fact, whose `Absent` makes it a
+disagreement; a root that residue alone keeps stands beside no late instance, so R18 disagrees too.
+That covers an entry that is no instance — a regular file, a link, an entry of any other kind, a
+directory whose name is no valid instance's, and an entry whose metadata could not be read — none
+of which the discovery's walk of the namespaces takes for an instance (it passes over the first
+four and refuses the sweep on the last), so that with no registration naming it no finalization
+reclaims it (A12-R3); the census certifies none of them either way. It also covers an earlier
+incarnation's intentless instance the at-sweep inventory lists and finalization left, residue the
+sweep could discover; one published between the sweep's scan and the observation is listed and
+reads the same way. `late_referenced_objects` counts the before-inventory's unreachable objects
+that an attributed late instance's `HEAD` or index references.
 
 ## `pub struct Ledger {`
 
