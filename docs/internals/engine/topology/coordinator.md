@@ -2531,6 +2531,37 @@ verification asks it: the gate's and the first two reviewers' snapshots are made
 charged first. The planter is #329's `TearsAForeignRegistration` (T2′'s registration that stays
 torn) or `RequiresAFailingFilter` (T15's required filter that fails).
 
+## `mod tests` › `const RECORD_KILL_TAG: &str = "record-kill";`
+
+The tag `charged_record_kill_child` builds its fixture under, short on purpose like the other kill children's
+tags. The child's temporary directory is a `kill_dir(RECORD_KILL_TEMPORARY)` tree its parent holds
+(`scaffold::child_temporary_of`), so the fixture lies one scratch tree below the temporary directory, and its deepest
+worktree, the first verification's reviewer snapshot, has a `$GIT_DIR` of the temporary directory plus 153 bytes plus
+this tag. The tag was `coordinator-o14-record-kill`, 27 bytes: under the self-hosted Windows guest's 41-byte
+`C:\Users\Administrator\AppData\Local\Temp` the path was 221, one over Git for Windows' 220
+(`WINDOWS_GIT_DIR_BUDGET`), so the child's first add was refused there, it exited 101 in its setup, and both
+charged-record kill tests failed with the kill never armed (`PR334-RECORD-KILL-CHILD-GITDIR-OVER-THE-WINDOWS-BUDGET`).
+At 11 bytes the path is 205. The test below keeps it within a stated margin.
+
+## `mod tests` › `fn the_record_kill_childs_deepest_git_dir_fits_the_windows_budget_under_the_guest_lanes_temporary_directory()`
+
+The record-kill child's deepest `$GIT_DIR`, rebuilt from the names its run is given and judged by `add_worktree`'s own
+Windows refusal, which `workspace_manager::fixture::refuse_git_dir_over_the_windows_budget` asks on any platform (the
+guard and Git for Windows' rendering are compiled for tests everywhere). The child's temporary directory is named as
+its parent names it, by a real `kill_dir(RECORD_KILL_TEMPORARY)`; the fixture as the child builds it, by a real
+`Fixture::created(RECORD_KILL_TAG)`, which is what `Wide::durable` calls for the incarnation `inc-1`; and the worktree
+as its manager places it, `slot_path` of the reviewer snapshot `k0-g0-a1-review0`, the add the guest refused. The
+private root and the slot below it are read from the fixture and the manager rather than retyped. Only the temporary
+directory is substituted: the guest lane's, 41 bytes as its job logs spell it. Of the slot names `naming.rs` renders,
+an attempt's reviewer snapshot is the longest at equal indices, so only a reviewer snapshot with a two-digit index
+would be deeper.
+
+The add must pass under the guest lane's temporary directory and again under one `GUEST_TEMPORARY_SLACK` bytes
+longer. That is the margin, 12 bytes: it holds the path at or under 208 under the guest lane's, the length it had
+before #330's instance tag, and it refuses a tag of 15 bytes or more. The test reads no platform's own temporary
+directory: it keeps only the names of the trees it makes, rejoins them under the fixed root, and measures the result
+as Git for Windows would be handed it.
+
 ## `mod tests` › `fn a_registry_refusal_after_two_paid_passes_is_recorded_with_both_at_width_three() {`
 
 B's charged refusal (the O14(b) proposal's witness for B, §7): the third reviewer's snapshot meets
