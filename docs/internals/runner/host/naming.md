@@ -434,10 +434,16 @@ fails, naming every answer, only when none of the ten is answered
 `NotFound`. In each of the three parents the first is the one taken.
 What the probe establishes holds when it is made, and in these parents
 it still holds when the search reaches the entry: no entry of the taken
-name can appear there in between. The test reads no clock, and no byte
-of the temporary directory or of the test binary's location reaches
-either entry. The absent entry is absolute because its parent is, so
-the search asks it rather than skipping it.
+name can appear there in between. What a parent's answer still depends
+on is the test's permission to make that lookup at all: on Linux and
+Windows the search the later match's own lookup makes, and on macOS the
+search of `/dev/fd`, as given below. Refused it, `absent_child_of`
+fails, naming every answer, and the test never passes. The candidate
+beneath the taken entry is answered at the same component of its path
+as the probe was, so the search is answered as the probe was. The test
+reads no clock, and no byte of the temporary directory or of the test
+binary's location reaches either entry. The absent entry is absolute
+because its parent is, so the search asks it rather than skipping it.
 
 On Linux the later entry is `/proc/self` and the program is `exe`: the
 later match is `/proc/self/exe`, the link to the running executable that
@@ -458,14 +464,18 @@ since Unix tests in `src/agent/proc/tests.rs` spawn `/bin/sh` by that
 path. The absent entry's parent is `/dev/fd`, the directory of the
 asking process's own open descriptors: macOS answers `ENOENT` for a name
 there that is not a descriptor number, as none of the ten is, and no
-process can create an entry in it, so none of the ten can exist or be
-created there, and the first, `upstroke-naming-walked-past`, is answered
-`ENOENT` and taken. The absent candidate,
-`/dev/fd/upstroke-naming-walked-past/sh`, is answered `ENOENT` at that
-same name. Every byte of both candidates is constructed: 38 of them, or
-40 under a numbered name, and 7, against macOS's `PATH_MAX` of 1,024. On
-Linux and macOS alike, neither the binary's location nor its spelling
-reaches either entry.
+process can create an entry in it (XNU's devfs looks each name up as a
+descriptor number and has no operation that creates one there), so none
+of the ten can exist or be created there, and the first,
+`upstroke-naming-walked-past`, is answered `ENOENT` and taken. The absent
+candidate, `/dev/fd/upstroke-naming-walked-past/sh`, is answered
+`ENOENT` at that same name. Round 2's one native macOS run answered
+`/dev/fd/upstroke-naming-walked-past` `NotFound` and walked the candidate
+beneath it past. The branch's further prerequisite is that `/dev/fd` is
+that directory, which devfs lets every process search. Every byte of
+both candidates is constructed: 38 of them, or 40 under a numbered name,
+and 7, against macOS's `PATH_MAX` of 1,024. On Linux and macOS alike,
+neither the binary's location nor its spelling reaches either entry.
 
 On Windows the later entry is the system directory, spelled
 `\\?\GLOBALROOT\SystemRoot\System32` on every installation, and the
@@ -477,7 +487,10 @@ which resolves that name; std passes a `\\?\` path to the system
 unchanged. The absent entry's parent is the later match itself: a
 regular file holds no entries, so while `ntdll.dll` is the file the
 later match needs, none of the ten can exist or be created beneath it,
-and Windows answers a lookup beneath a file `NotFound`. (Unix answers it
+and Windows answers a lookup beneath a file `NotFound`: its file systems
+fail a path through a file as a path not found, which std reads as
+`NotFound`, and the CI guest measured that answer
+(`PR77-WIN-UNDECIDABLE-STAT-ORACLE`). (Unix answers it
 `ENOTDIR`, at which the search rightly stops, so neither Unix branch can
 use its later match this way.) So the first, `upstroke-naming-walked-past`,
 is answered `NotFound` and taken. No unit of either entry comes from the
@@ -531,7 +544,8 @@ there after the probe, holding the program, was found by the search
 ahead of the later match (`PR336-R6-PL-002`), each on correct code. The
 parents above, which can neither hold nor gain an entry of any of the
 ten, repair both; before them the macOS absent candidate was
-`/bin/upstroke-naming-walked-past/sh`.
+`/bin/upstroke-naming-walked-past/sh`, and the Windows absent entry
+`\\?\GLOBALROOT\SystemRoot\System32\upstroke-naming-walked-past`.
 
 `a_pathext_entry_no_string_can_carry_reaches_the_candidate_intact`
 drives `ProgramNaming::Windows` — on every platform, per the grid — with
