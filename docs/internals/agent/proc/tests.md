@@ -1002,7 +1002,13 @@ whether the coordinator **dies** or exits cleanly. On a clean exit the
 stub is never invoked at all, which is the assertion that keeps a reaper
 from killing a live coordinator's containers on the ordinary settle path.
 
-## `fn unix_reaper_kills_labeled_containers()` › `const STUB_NAME: &str = "upstroke-reaper-docker-stub";`
+The cells run in `reaper_container_cells`, which this test hands its
+three cells and its recording stub. The regression witness
+`the_container_cell_reclaims_its_tree_only_after_the_reapers_last_write`
+drives the same function with a held stub, so the lifetime it pins is
+this test's own and not a copy of it.
+
+## `fn unix_reaper_kills_labeled_containers()` › `&[(true, true), (false, true), (false, false)],`
 
 {program spelling} x {coordinator dies}. The **bare** cell is the
 production shape — `runner::container::DOCKER_PROGRAM` is the bare
@@ -1019,33 +1025,51 @@ clean-exit path the reaper execs nothing at all, so the spelling
 cannot discriminate there and the cell would assert the same absent
 log as the one beside it.
 
-## `fn unix_reaper_kills_labeled_containers()` › `std::fs::write(`
+## `fn unix_reaper_kills_labeled_containers()` › `"#!/bin/sh\n\`
 
 A recording `docker`. It reports one container the first time it
 is listed and nothing once that container has been removed, which
 is what ends the reaper's bounded round loop. `kill` blocks so the
 R28 assertion has a window to observe.
 
-## `fn unix_reaper_kills_labeled_containers()` › `let inherited = std::env::var_os("PATH").unwrap_or_default();`
+The text is a template: `reaper_container_cells` replaces its
+`{CONTAINER_ID}`, so the stub written into each tree is byte for byte
+the one the `format!` this replaced wrote.
+
+## `fn reaper_container_cells(cells: &[(bool, bool)], stub_script: &str) -> Vec<i32> {`
+
+One scratch tree, one disposable coordinator and one reaper per cell,
+`(bare, coordinator_dies)` each, with `stub_script` written into the
+tree as the `docker` the reaper's scope names. It returns each cell's
+reaper pid, in cell order, so that a caller can contain what that reaper
+started once the cell has ended.
+
+## `fn reaper_container_cells(cells: &[(bool, bool)], stub_script: &str) -> Vec<i32>` › `fn group_ended(pgid: i32) -> bool {`
+
+Whether no process of the group `pgid` exists: `kill(-pgid, 0)`
+answering `ESRCH`, and nothing else. A group the caller may not signal
+(`EPERM`) still exists, and no other answer is read as an end.
+
+## `fn reaper_container_cells(cells: &[(bool, bool)], stub_script: &str) -> Vec<i32>` › `let inherited = std::env::var_os("PATH").unwrap_or_default();`
 
 Only through `PATH`: the scratch directory first, the
 inherited entries after it so the stub's own `sleep` still
 resolves.
 
-## `fn unix_reaper_kills_labeled_containers()` › `coordinator.wait().expect("reap the coordinator");`
+## `fn reaper_container_cells(cells: &[(bool, bool)], stub_script: &str) -> Vec<i32>` › `coordinator.wait().expect("reap the coordinator");`
 
 The live half: the coordinator settles its invocation and
 exits. Nothing may have been killed on its behalf.
 
-## `fn unix_reaper_kills_labeled_containers()` › `assert!(`
+## `fn reaper_container_cells(cells: &[(bool, bool)], stub_script: &str) -> Vec<i32>` › `assert!(`
 
 (3) R28 is still held while the container kill is in flight.
 
-## `fn unix_reaper_kills_labeled_containers()` › `let deadline = Instant::now() + Duration::from_secs(30);`
+## `fn reaper_container_cells(cells: &[(bool, bool)], stub_script: &str) -> Vec<i32>` › `let deadline = Instant::now() + Duration::from_secs(30);`
 
 (2) The order, from the stub's own ordered log.
 
-## `fn unix_reaper_kills_labeled_containers()` › `let declared = crate::runner::container::census::ReaperContainerScope::new(`
+## `fn reaper_container_cells(cells: &[(bool, bool)], stub_script: &str) -> Vec<i32>` › `let declared = crate::runner::container::census::ReaperContainerScope::new(`
 
 The removal the reaper **actually executed**, against the
 declaration in `ReaperContainerScope::remove_argv` rather than
@@ -1063,13 +1087,97 @@ one anonymous volume per container into a state no later census
 can discover, the container being gone and nothing else referring
 to the volume.
 
-## `fn unix_reaper_kills_labeled_containers()` › `let filters: Vec<&str> = lines[0]`
+## `fn reaper_container_cells(cells: &[(bool, bool)], stub_script: &str) -> Vec<i32>` › `let filters: Vec<&str> = lines[0]`
 
 (1) Both filters, two distinct values.
 
-## `fn unix_reaper_kills_labeled_containers()` › `let settled_by = Instant::now() + Duration::from_secs(30);`
+## `fn reaper_container_cells(cells: &[(bool, bool)], stub_script: &str) -> Vec<i32>` › `let settled_by = Instant::now() + Duration::from_secs(30);`
 
 (4) The process half still happened.
+
+## `fn reaper_container_cells(cells: &[(bool, bool)], stub_script: &str) -> Vec<i32>` › `let drain_bound = Duration::from_secs(30);`
+
+The tree outlives every writer the reaper started
+(`PR339-CONTAINER-REAPER-TEST-RECLAIMS-BEFORE-THE-REAPERS-LAST-WRITE`).
+The three-line wait above ends while the reaper may still write into
+the tree: the `rm` stub creates `removed` after its log line, and the
+listing that follows a round which settled an id, the one that ends the
+reaper's loop, appends a fourth line and re-creates `argv.log` if the
+reclaim had already unlinked it. One of those landing between
+`remove_dir_all`'s enumeration and its removal of the root fails the
+reclaim with `ENOTEMPTY`, and the guard panics on the normal path. So a
+dying cell does not let its guard drop until the reaper's own process
+group has no member, and past 30 s, the bound of the test's other waits,
+it sends that group SIGKILL, reports whether it was delivered, and fails
+naming the cell, the group and the tree.
+
+Why the group's end is the writers' end. Every process that can write
+into the tree after the last assertion is a stub invocation the reaper
+forked (`list_labeled_containers`, `spawn_docker`), and none of them
+leaves the reaper's group: the reaper made that group its own before
+it reported READY (`setpgid(0, 0)` in `fork_reaper`), so the group's id
+is the pid the coordinator records at `UPSTROKE_TEST_REAPER_PID_PATH`;
+the forked children change no group before `execv`; and the stub is a
+non-interactive `/bin/sh`, which runs no job control, so the one
+command it forks, `sleep`, runs in the foreground and in the same
+group. An ended group is therefore an ended set of writers, observed
+directly. A group id that comes back, a reused pid made a group leader,
+can only lengthen the wait and fail it at the bound; it cannot end the
+wait early.
+
+The reaper's own exit (`alive(reaper_pid)`) would also do here, by
+another route: once its coordinator has died the reaper `_exit`s when
+`settle_after_coordinator_death` returns, and `reclaim_labeled_containers`
+reaps every stub it starts (`reap_bounded`) before it returns. The group
+observes the writers without leaning on that discipline, or on nothing
+killing the reaper before its stubs have ended.
+
+The reaper is an orphan once its coordinator is reaped, so on Linux
+its exit leaves a zombie member until its new parent collects it: the
+same reliance on prompt orphan reaping the `settled_by` wait already
+makes for the agent. Only the dying cells wait. On the clean-exit path
+the coordinator joins its own reaper before it exits (`Supervisor`'s
+drop, `finish`, `Reaper::cleanup`, `close_and_wait`), so that tree has
+no unjoined writer, and the live cell is unchanged.
+
+What this does not settle: a writer outside the analysed fixture paths
+is not excluded by the wait, and the macOS red that filed the finding
+has no established cause.
+
+## `fn the_container_cell_reclaims_its_tree_only_after_the_reapers_last_write() {`
+
+The regression witness for the wait above, through the same
+`reaper_container_cells`: one `path-dies` cell, with a stub that holds
+the `rm` arm two seconds after its log line and then journals, in a
+scratch tree of its own, the status of each write the reaper's stubs
+make after the third line: `rm` and the status of creating `removed`,
+then `ps` and the status of the second listing's append.
+
+When the cell keeps its tree until the reaper's group has ended, both
+writes land and the journal reads `["rm 0", "ps 0"]`. When the guard
+drops right after the cell's last assertion, the old ordering, the tree
+is gone before the hold ends: creating `removed` fails, and the second
+listing's `execv` finds no stub and journals nothing, so the assertion
+fails on a non-zero `rm` status and a missing `ps` line.
+
+It forces the order rather than racing for it. The hold moves the late
+write past the old reclaim entirely, so at the old ordering the write
+finds no tree at all instead of racing the reclaim: the witness pins
+the lifetime ordering, not the native `ENOTEMPTY`, and says nothing
+about macOS. The hold has only to outlast the old ordering's drop,
+which comes a 20 ms poll and a few assertions after the third line.
+
+`removed` is created by `printf ''` rather than `:` here: a failed
+redirection on a special built-in ends a non-interactive shell, which
+would take the journal line with it.
+
+## `fn the_container_cell_reclaims_its_tree_only_after_the_reapers_last_write()` › `let contained_by = Instant::now() + Duration::from_secs(30);`
+
+Before the journal is read, the witness waits for the reaper's group
+itself, so the journal is final and nothing the reaper started still
+runs when it is read, at the old ordering as at the new. The probe is
+written out here rather than taken from the cell's `group_ended`, so a
+mutation of that probe cannot also disable this containment.
 
 ## `const READINESS_ROLE: &str = "UPSTROKE_READINESS_ROLE";`
 

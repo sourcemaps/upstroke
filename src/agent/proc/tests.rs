@@ -3289,6 +3289,21 @@ fn unix_reaper_container_helper() {
 #[cfg(unix)]
 #[test]
 fn unix_reaper_kills_labeled_containers() {
+    reaper_container_cells(
+        &[(true, true), (false, true), (false, false)],
+        "#!/bin/sh\n\
+         printf '%s\\n' \"$*\" >> \"$UPSTROKE_STUB_DIR/argv.log\"\n\
+         case \"$1\" in\n\
+         ps) [ -f \"$UPSTROKE_STUB_DIR/removed\" ] || printf '%s\\n' '{CONTAINER_ID}' ;;\n\
+         kill) : > \"$UPSTROKE_STUB_DIR/killing\"; sleep 1 ;;\n\
+         rm) : > \"$UPSTROKE_STUB_DIR/removed\" ;;\n\
+         esac\n\
+         exit 0\n",
+    );
+}
+
+#[cfg(unix)]
+fn reaper_container_cells(cells: &[(bool, bool)], stub_script: &str) -> Vec<i32> {
     const CONTAINER_ID: &str = "c0ffee0000000000000000000000000000000000000000000000000000000001";
     const PRIVATE_ROOT: &str = "/srv/upstroke-reaper-fixture/private";
     const INCARNATION: &str = "01KZTAAAAAAAAAAAAAAAAAAAAA";
@@ -3310,6 +3325,12 @@ fn unix_reaper_kills_labeled_containers() {
     fn alive(pid: i32) -> bool {
         // SAFETY: signal 0 performs no delivery.
         unsafe { libc::kill(pid, 0) == 0 }
+    }
+    fn group_ended(pgid: i32) -> bool {
+        // SAFETY: signal 0 performs no delivery; a negative pid only asks
+        // whether a process of that group exists.
+        let answered = unsafe { libc::kill(-pgid, 0) };
+        answered == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
     }
     fn read_pid(path: &std::path::Path, timeout: Duration) -> i32 {
         let deadline = Instant::now() + timeout;
@@ -3339,7 +3360,8 @@ fn unix_reaper_kills_labeled_containers() {
     }
 
     const STUB_NAME: &str = "upstroke-reaper-docker-stub";
-    for (bare, coordinator_dies) in [(true, true), (false, true), (false, false)] {
+    let mut reapers = Vec::new();
+    for &(bare, coordinator_dies) in cells {
         let cell = match (bare, coordinator_dies) {
             (true, true) => "bare-dies",
             (false, true) => "path-dies",
@@ -3349,21 +3371,8 @@ fn unix_reaper_kills_labeled_containers() {
         let dir = tree.path();
         let stub = dir.join(STUB_NAME);
         let log = dir.join("argv.log");
-        std::fs::write(
-            &stub,
-            format!(
-                "#!/bin/sh\n\
-                 printf '%s\\n' \"$*\" >> \"$UPSTROKE_STUB_DIR/argv.log\"\n\
-                 case \"$1\" in\n\
-                 ps) [ -f \"$UPSTROKE_STUB_DIR/removed\" ] || printf '%s\\n' '{CONTAINER_ID}' ;;\n\
-                 kill) : > \"$UPSTROKE_STUB_DIR/killing\"; sleep 1 ;;\n\
-                 rm) : > \"$UPSTROKE_STUB_DIR/removed\" ;;\n\
-                 esac\n\
-                 exit 0\n"
-            )
-            .replace("{CONTAINER_ID}", CONTAINER_ID),
-        )
-        .expect("write the stub");
+        std::fs::write(&stub, stub_script.replace("{CONTAINER_ID}", CONTAINER_ID))
+            .expect("write the stub");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
@@ -3407,6 +3416,7 @@ fn unix_reaper_kills_labeled_containers() {
 
         let agent_pid = read_pid(&agent_path, Duration::from_secs(30));
         let reaper_pid = read_pid(&reaper_path, Duration::from_secs(30));
+        reapers.push(reaper_pid);
 
         if !coordinator_dies {
             coordinator.wait().expect("reap the coordinator");
@@ -3505,7 +3515,92 @@ fn unix_reaper_kills_labeled_containers() {
             settled,
             "the container half replaced the process half: the agent group survived"
         );
+
+        let drain_bound = Duration::from_secs(30);
+        let drained_by = Instant::now() + drain_bound;
+        while !group_ended(reaper_pid) && Instant::now() < drained_by {
+            thread::sleep(Duration::from_millis(10));
+        }
+        if !group_ended(reaper_pid) {
+            // SAFETY: integers only, and sent only on this failing path, to a
+            // group last seen with a member.
+            let swept = unsafe { libc::kill(-reaper_pid, libc::SIGKILL) } == 0;
+            panic!(
+                "[{cell}] the reaper's process group {reaper_pid} still had a member \
+                 {drain_bound:?} after the cell's last assertion, so a stub the reaper started \
+                 could still write into {}; SIGKILL to the group delivered: {swept}",
+                dir.display()
+            );
+        }
     }
+    reapers
+}
+
+#[cfg(unix)]
+#[test]
+fn the_container_cell_reclaims_its_tree_only_after_the_reapers_last_write() {
+    let journal_tree =
+        crate::rundir::scratch_tree::acquire(&std::env::temp_dir(), "reaper-late-writes")
+            .expect("a journal tree");
+    let journal = journal_tree.path().join("late-writes");
+    let quoted = journal
+        .to_str()
+        .filter(|path| !path.contains('\''))
+        .expect("a journal path one single-quoted shell word can carry");
+    let stub_script = format!(
+        "#!/bin/sh\n\
+         printf '%s\\n' \"$*\" >> \"$UPSTROKE_STUB_DIR/argv.log\"\n\
+         logged=$?\n\
+         case \"$1\" in\n\
+         ps) if [ -f \"$UPSTROKE_STUB_DIR/removed\" ]; \
+         then printf 'ps %s\\n' \"$logged\" >> '{quoted}'; \
+         else printf '%s\\n' '{{CONTAINER_ID}}'; fi ;;\n\
+         kill) : > \"$UPSTROKE_STUB_DIR/killing\"; sleep 1 ;;\n\
+         rm) sleep 2; printf '' > \"$UPSTROKE_STUB_DIR/removed\"; \
+         printf 'rm %s\\n' \"$?\" >> '{quoted}' ;;\n\
+         esac\n\
+         exit 0\n"
+    );
+    let reaper = reaper_container_cells(&[(false, true)], &stub_script)
+        .first()
+        .copied()
+        .expect("the dying cell's reaper");
+
+    let contained_by = Instant::now() + Duration::from_secs(30);
+    let contained = loop {
+        // SAFETY: signal 0 performs no delivery; a negative pid only asks
+        // whether a process of that group exists.
+        let answered = unsafe { libc::kill(-reaper, 0) };
+        if answered == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+            break true;
+        }
+        if Instant::now() >= contained_by {
+            break false;
+        }
+        thread::sleep(Duration::from_millis(10));
+    };
+    if !contained {
+        // SAFETY: integers only, and sent only on this failing path, to a
+        // group last seen with a member.
+        let swept = unsafe { libc::kill(-reaper, libc::SIGKILL) } == 0;
+        panic!(
+            "the reaper's process group {reaper} outlived this witness's own 30 s containment; \
+             SIGKILL to the group delivered: {swept}"
+        );
+    }
+    let late: Vec<String> = std::fs::read_to_string(&journal)
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(
+        late,
+        ["rm 0", "ps 0"],
+        "each write the reaper's stubs make after the cell's third log line -- `rm` creating \
+         `removed` after a two-second hold, then the second listing's append -- must land in the \
+         cell's tree before the tree is reclaimed; a non-zero status or a missing line is a write \
+         that came after the reclaim"
+    );
 }
 
 const READINESS_ROLE: &str = "UPSTROKE_READINESS_ROLE";
