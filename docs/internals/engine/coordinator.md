@@ -232,6 +232,17 @@ pin and no engine path removes one; the resume's guarded discard (part G4,
 hold it. A new run refuses over the kept checkout as over any uncommitted work, until a resume
 or the operator acts — a disclosed cost (the proposal's §9.1).
 
+When N1's arm cannot pin the checkout, its warning also says what that leaves (F1 of the
+owner's full review of #331, `FUD-FULL-FILTERPIN`, repaired under the owner's instruction "we
+fix F1 and record the rest"): nothing outside the checkout keeps the output, so `git clean` or
+`git reset --hard` there would lose it, and what stopped the pin is to be fixed before a resume —
+for a clean or smudge filter, the attribute that sets it removed or that path moved out of the
+checkout, after copying out anything to keep. One such cause is a path a clean or smudge filter
+attribute covers: `pin_checkout`'s capture refuses it before `git add` could run the filter's
+configured code, as every capture of the module refuses, so that output stays unpinned. The
+reviewed-candidate arms (N2) keep the warning they had: they pin a candidate captured before its
+review, which a filtered path never reaches.
+
 ## `pub(super) struct Run<'a>` › `pub(super) log: EventLog,`
 
 The append-only record. Every mutation below goes through

@@ -239,7 +239,7 @@ torn — never reaches this lookup and names nothing, and one whose later step f
 returns that error without its warnings, as every legacy warning does (R-D5). The
 next resume that reports names every pin again.
 
-## `let discarded = workspace.uncommitted_summary()?;`
+## `let discarded = workspace.uncommitted_summary().map_err(|error| {`
 
 Crash residue: a dead agent's half-written edits. §14 rolls a failed
 attempt back to the last commit, and an attempt that never reported is
@@ -261,6 +261,19 @@ discards as before. The task's index comes from `replayed.state.index_of`, with 
 `.expect()`. It runs after the orphan prepared pin's removal, so N2d's orphan is gone first,
 and before the lookup. The discard warning and `RunResumed.discarded` list the paths found
 less those G4 left in place.
+
+When the listing itself fails and the log records exactly one attempt in flight, the resume
+refuses before discarding anything (F1 of the owner's full review of #331,
+`FUD-FULL-FILTERPIN`, repaired under the owner's instruction "we fix F1 and record the rest").
+The refusal names the attempt and the listing's error, and says that whatever the attempt left
+stays in the checkout, that `git clean` or `git reset --hard` would lose any of it no kept pin
+holds, what to fix first, and that the resume then discards none of it before the attempt's kept
+pin and a copy of that pin it writes hold it, which is part G4 once the listing passes. The
+listing fails when a path carries a clean or smudge filter attribute: `uncommitted_summary`
+refuses before `git status` could run the filter's configured code, and N1's pin, refused for the
+same reason, left the output in the checkout only. With no attempt in flight, or more than one,
+the listing's error returns as before. `in_flight` is read before the listing so that its refusal
+can name the attempt.
 
 ## `if !kept.is_empty() {`
 

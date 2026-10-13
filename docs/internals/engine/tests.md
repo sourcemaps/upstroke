@@ -3242,3 +3242,23 @@ discards nothing) and T-RD2-1cr (a shim cuts the copy `bundle create` wrote and 
 what a crash leaves: a `.partial` under round 4, a final name under `copy-in-place`). The fsyncs themselves are traced
 outside the suite (record §5.17).
 
+## `fn filtered_output(root: &Path) -> std::io::Result<()> {`
+
+The tests of F1 of the owner's full review of #331 (`FUD-FULL-FILTERPIN`, repaired under the owner's instruction "we fix
+F1 and record the rest"): a worker that writes a `.gitattributes` naming a clean/smudge filter (`*.dat filter=lfs`, the
+trigger N1's own finding names), the filtered `paid.dat`, whose bytes are not text, and `agent-output.txt`. Every capture
+refuses the filtered path before `git add` could run the filter, so N1's arm keeps the output unpinned.
+`a_filtered_output_the_pin_cannot_capture_is_kept_and_its_warning_says_how_to_resume`: the error stays the capture's
+filter refusal; the kept note says the pin failed, that nothing outside the checkout keeps the output, and what to do; no
+pin and no copy exist; the checkout holds the three files byte for byte.
+`a_resume_over_a_filtered_output_refuses_saying_how_and_pins_it_once_the_attribute_is_gone`: the resume refuses as a
+resume refusal, not the bare Git error, naming the attempt, the filter, that nothing was discarded and what to do, and
+pins and copies nothing; the advice is then followed (the attribute file copied out and removed), the next resume
+completes, its kept pin holds the paid bytes, and its copy puts the pin back after `update-ref -d`.
+`no_engine_git_child_runs_the_filter_a_worker_attributes_its_output_to` (Unix, as the suite's other configured-command
+witnesses): a filter whose clean and smudge commands append to a marker, under a driver name of its own so that a
+filter configured outside the repository, such as Git LFS's, cannot stand in for it; `git hash-object` shows that Git
+runs it once it evaluates the attribute (the positive control), and no Git child of the run, of the refused resume, or
+of the resume after the filtered path was moved out runs it. The first two are red at the head the review read; the
+third is a control, green there too, and red when the pin's capture evaluates the attribute.
+

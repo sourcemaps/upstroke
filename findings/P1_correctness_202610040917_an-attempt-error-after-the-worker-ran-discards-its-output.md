@@ -123,3 +123,18 @@ required reviews — and is deleted then, with a `fixed` ledger row naming these
 the Q6 / topology-writer face and the R-C-RELSTORE face included, as the section above says. There is no waiver, and
 filing clears no G6 predicate.
 
+## At #331's F1 repair (2026-10-13): the filter trigger is kept, not pinned
+
+The owner's full review of #331 at `1263f2a3` (F1, P2, executed there on Git 2.43.0 and 2.55.0; `FUD-FULL-FILTERPIN`)
+found that one trigger above, a worker that adds a `.gitattributes` naming `filter=lfs`, cannot be pinned:
+`Workspace::pin_checkout`'s capture refuses a path a clean or smudge filter attribute covers before `git add` could run
+the filter's configured code, so the arm keeps the output in the checkout unpinned, and every resume then failed at its
+listing with a bare refusal, before its guarded discard. It is repaired under the owner's instruction "we fix F1 and
+record the rest" by keeping the refusal, so that no Git child runs the filter and nothing is discarded, and by saying
+what is kept: N1's warning says that nothing outside the checkout keeps the output, that `git clean` or
+`git reset --hard` would lose it, and what to fix before resuming; the resume refuses before discarding anything,
+saying the same; and once the attribute or the path is gone, the resume pins and copies the output (part G4). For this
+trigger, "pin what it holds on every such error" above holds only once the filter attribute is gone. Witnesses:
+`a_filtered_output_the_pin_cannot_capture_is_kept_and_its_warning_says_how_to_resume`,
+`a_resume_over_a_filtered_output_refuses_saying_how_and_pins_it_once_the_attribute_is_gone` and
+`no_engine_git_child_runs_the_filter_a_worker_attributes_its_output_to`. This file stays open, as above.

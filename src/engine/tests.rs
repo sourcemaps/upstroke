@@ -16065,3 +16065,223 @@ fn a_hostile_repository_keeps_its_index_readable_and_its_monitor_unqueried() {
         "no engine child queried the checkout's fsmonitor"
     );
 }
+
+fn filtered_output(root: &Path) -> std::io::Result<()> {
+    write_into(root, ".gitattributes", FILTERED_ATTRIBUTE)?;
+    write_into(root, "paid.dat", FILTERED_PAID_BYTES)?;
+    paid_output(root)
+}
+
+const FILTERED_ATTRIBUTE: &[u8] = b"*.dat filter=lfs\n";
+
+const FILTERED_PAID_BYTES: &[u8] = b"paid bytes \x00\x01\xfe\xff\n";
+
+fn the_filtered_output_is_in_the_checkout(repo: &Path) {
+    for (path, bytes) in [
+        (".gitattributes", FILTERED_ATTRIBUTE),
+        ("paid.dat", FILTERED_PAID_BYTES),
+        ("agent-output.txt", b"paid output\n".as_slice()),
+    ] {
+        assert_eq!(
+            file_bytes(repo, path),
+            Some(bytes.to_vec()),
+            "the checkout keeps {path} as the worker wrote it"
+        );
+    }
+}
+
+fn a_run_over_a_filtered_output(repo: &Path) -> Result<RunReport, UpstrokeError> {
+    bounded_run(
+        "the run whose worker attributes a clean/smudge filter to its output",
+        repo,
+        None,
+        shaping(filtered_output),
+    )
+}
+
+#[test]
+fn a_filtered_output_the_pin_cannot_capture_is_kept_and_its_warning_says_how_to_resume() {
+    let (_tree, repo) = rd1_repo("full-f1-warn");
+    let run = a_run_over_a_filtered_output(&repo);
+    let Err(UpstrokeError::WithWarnings(warned)) = &run else {
+        panic!("the capture's own refusal, with the kept note: {run:?}");
+    };
+    assert!(
+        matches!(
+            warned.error.as_ref(),
+            UpstrokeError::Git { message }
+                if message.contains("uses clean/smudge filter `lfs`")
+                    && message.contains("refusing before git add")
+        ),
+        "the error is the capture's filter refusal: {run:?}"
+    );
+    let pin = kept_pin_of(&repo, 1);
+    let warning = warned
+        .warnings
+        .iter()
+        .find(|warning| warning.contains("pinning it at"))
+        .expect("the kept note");
+    for needle in [
+        format!("is kept in this checkout, and pinning it at `{pin}` failed"),
+        "uses clean/smudge filter `lfs`".to_owned(),
+        "Nothing outside this checkout keeps it".to_owned(),
+        "`git clean` or `git reset --hard` there would lose it".to_owned(),
+        "remove the attribute that sets it or move that path out of the checkout".to_owned(),
+        "and then resume".to_owned(),
+    ] {
+        assert!(
+            warning.contains(needle.as_str()),
+            "the note says {needle:?}: {warning}"
+        );
+    }
+    assert_eq!(pin_target(&repo, &pin), None, "no pin holds the output");
+    assert_eq!(kept_pins(&repo), Vec::<(String, String)>::new());
+    assert!(kept_copies(&repo).is_empty(), "and no copy");
+    the_filtered_output_is_in_the_checkout(&repo);
+}
+
+#[test]
+fn a_resume_over_a_filtered_output_refuses_saying_how_and_pins_it_once_the_attribute_is_gone() {
+    let (_tree, repo) = rd1_repo("full-f1-resume");
+    let run = a_run_over_a_filtered_output(&repo);
+    assert!(
+        run.is_err(),
+        "the capture refuses the filtered path: {run:?}"
+    );
+    let pin = kept_pin_of(&repo, 1);
+    let refused = bounded_resume(
+        "the resume over the filtered output",
+        &repo,
+        fake(Effect::EditFile),
+    );
+    let refusal = resume_refusal(&refused, "the resume over the filtered output");
+    for needle in [
+        "attempt 1 of `t1` is in flight".to_owned(),
+        "uses clean/smudge filter `lfs`".to_owned(),
+        "Nothing was discarded".to_owned(),
+        "`git clean` or `git reset --hard` would lose any of it".to_owned(),
+        "remove the attribute that sets it or move that path out of the checkout".to_owned(),
+        format!("the resume discards none of it before `{pin}`"),
+    ] {
+        assert!(
+            refusal.contains(needle.as_str()),
+            "the refusal says {needle:?}: {refusal}"
+        );
+    }
+    assert_eq!(
+        pin_target(&repo, &pin),
+        None,
+        "the refused resume pins nothing"
+    );
+    assert!(kept_copies(&repo).is_empty(), "and copies nothing");
+    the_filtered_output_is_in_the_checkout(&repo);
+
+    let set_aside = repo.with_file_name("gitattributes-set-aside");
+    fs::copy(repo.join(".gitattributes"), &set_aside).expect("the operator copies it out");
+    fs::remove_file(repo.join(".gitattributes")).expect("and removes the attribute");
+    let report = bounded_resume(
+        "the resume once the attribute is gone",
+        &repo,
+        fake(Effect::EditFile),
+    )
+    .expect("the resume completes once the attribute is gone");
+    assert!(committed(&report, "t1"), "{report:?}");
+    let commit = pin_target(&repo, &pin).expect("the resume pinned the attempt's output");
+    assert_eq!(
+        blob_at(&repo, &commit, "paid.dat"),
+        Some(FILTERED_PAID_BYTES.to_vec()),
+        "the pin holds the paid bytes"
+    );
+    assert_eq!(
+        blob_at(&repo, &commit, "agent-output.txt"),
+        Some(b"paid output\n".to_vec()),
+        "and the rest of the output"
+    );
+    assert!(
+        warning_with(&report, "copied outside every ref")
+            .is_some_and(|warning| warning.contains(pin.as_str())),
+        "{report:?}"
+    );
+    let copies = kept_copies(&repo);
+    let [copy] = copies.as_slice() else {
+        panic!("one copy: {copies:?}");
+    };
+    git_in(&repo, &["update-ref", "-d", &pin]);
+    restore_the_pin_from(&repo, copy, &pin);
+    assert_eq!(
+        pin_target(&repo, &pin),
+        Some(commit),
+        "the copy puts the pin back"
+    );
+}
+
+#[cfg(unix)]
+fn marked_filter_output(root: &Path) -> std::io::Result<()> {
+    write_into(root, ".gitattributes", b"*.dat filter=paid-marker\n")?;
+    write_into(root, "paid.dat", FILTERED_PAID_BYTES)?;
+    paid_output(root)
+}
+
+#[cfg(unix)]
+#[test]
+fn no_engine_git_child_runs_the_filter_a_worker_attributes_its_output_to() {
+    let (_tree, repo) = rd1_repo("full-f1-marker");
+    let marker = repo.with_file_name("filter-ran.log");
+    let command = format!("printf ran >> '{}'; cat", marker.display());
+    for key in ["filter.paid-marker.clean", "filter.paid-marker.smudge"] {
+        git_in(&repo, &["config", key, &command]);
+    }
+    fs::write(repo.join(".gitattributes"), "*.dat filter=paid-marker\n").expect("an attribute");
+    fs::write(repo.join("probe.dat"), "probe\n").expect("a filtered path");
+    git_in(&repo, &["hash-object", "probe.dat"]);
+    assert!(
+        marker.exists(),
+        "the configured filter runs when Git evaluates the attribute"
+    );
+    for path in [
+        marker.clone(),
+        repo.join("probe.dat"),
+        repo.join(".gitattributes"),
+    ] {
+        fs::remove_file(path).expect("the control's files go");
+    }
+    let run = bounded_run(
+        "the run whose worker attributes a configured filter to its output",
+        &repo,
+        None,
+        shaping(marked_filter_output),
+    );
+    assert!(
+        run.is_err(),
+        "the capture refuses the filtered path: {run:?}"
+    );
+    assert!(!marker.exists(), "no Git child of the run ran the filter");
+    let refused = bounded_resume(
+        "the resume over the filtered path",
+        &repo,
+        fake(Effect::EditFile),
+    );
+    assert!(refused.is_err(), "{refused:?}");
+    assert!(!marker.exists(), "nor of the refused resume");
+    let moved = repo.with_file_name("paid.dat");
+    fs::rename(repo.join("paid.dat"), &moved).expect("the operator moves the path out");
+    let report = bounded_resume(
+        "the resume once the filtered path is out",
+        &repo,
+        fake(Effect::EditFile),
+    )
+    .expect("the resume completes once the filtered path is out");
+    assert!(committed(&report, "t1"), "{report:?}");
+    assert!(!marker.exists(), "nor of the resume that pinned the rest");
+    assert_eq!(
+        fs::read(&moved).ok(),
+        Some(FILTERED_PAID_BYTES.to_vec()),
+        "the moved path keeps the paid bytes"
+    );
+    let commit = pin_target(&repo, &kept_pin_of(&repo, 1)).expect("the rest is pinned");
+    assert_eq!(
+        blob_at(&repo, &commit, ".gitattributes"),
+        Some(b"*.dat filter=paid-marker\n".to_vec()),
+        "the pin holds what stayed"
+    );
+}

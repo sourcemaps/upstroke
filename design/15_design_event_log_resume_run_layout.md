@@ -267,7 +267,9 @@ follow-up B's (pull request #329), whose registry access it calls.
 Once in force, it replaces the last item of "A registry another process is writing" above, which says the frozen
 legacy engine's accesses do not take that access, and with it that item's sentence on the owner's ruling B-W924-R1:
 at the legacy snapshots' add, removal and list, the whole of that ruling's scope, B-W924-R1-S supersedes its retry
-with this paragraph's access.* A schema 1–3 run shares its repository's
+with this paragraph's access. Its sentences on a pin that cannot be written are follow-up D's repair of F1 of the
+owner's full review of #331, made on 2026-10-13 under the owner's instruction "we fix F1 and record the rest", after
+that adoption.* A schema 1–3 run shares its repository's
 worktree registry with every other checkout's runs. Its three Git children that
 enumerate the registry — a gate or review snapshot's `git worktree add`, a snapshot's removal together with the
 `git worktree list` that decides it, and the resume's `git switch` — each run as one attempt of that registry
@@ -280,8 +282,12 @@ captured candidate — the branch, parent and tree captured before the refusal, 
 then — as a commit at the attempt's prepared pin followed by `-kept`, whatever `HEAD` is by then, since nothing
 publishes a kept pin, and its refusal names that pin. Every other attempt error after its worker ran, and a reviewed
 candidate whose publication fails, keeps the checkout the same way: what the checkout holds, or the reviewed
-candidate, is pinned at that name, and the error names the pin. Of the schema-3 pins, a kept pin is the one without a
-successful settlement that is not orphan residue. A resume removes the checkout's copy of the attempt in flight only
+candidate, is pinned at that name, and the error names the pin, or the pin's failure when it cannot be written. A path
+that a clean or smudge filter attribute covers is one such failure, since no capture lets Git run a filter's configured
+code: the output then stays in the checkout unpinned, the error says that nothing outside the checkout keeps it and what
+to fix first, and while that path stays, a resume of the attempt refuses before discarding anything, saying the same.
+Of the schema-3 pins, a kept pin is the one without a successful settlement that is not orphan residue. A resume
+removes the checkout's copy of the attempt in flight only
 once that attempt's kept pin holds it and a durable copy of the pin that the resume itself has written,
 `kept-<task index>-<attempt>-<ULID>.bundle` in the run's public directory, holds it too: it captures the checkout
 into a private index that changes nothing else of the repository, puts a missing pin back from a copy, writes the pin

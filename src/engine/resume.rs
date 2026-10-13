@@ -561,8 +561,28 @@ pub(super) fn resume_harness_inner_on(
         }
     }
 
-    let discarded = workspace.uncommitted_summary()?;
     let in_flight = replayed.state.interrupted_attempts();
+    let discarded = workspace.uncommitted_summary().map_err(|error| {
+        let [attempt] = in_flight.as_slice() else {
+            return error;
+        };
+        let Some(task_index) = replayed.state.index_of(&attempt.task) else {
+            return error;
+        };
+        let number = attempt.flight.attempt;
+        refuse(format!(
+            "attempt {number} of `{}` is in flight, and listing this checkout's uncommitted \
+             paths stopped: {error}. Nothing was discarded: whatever the attempt left stays in \
+             the checkout, and `git clean` or `git reset --hard` would lose any of it that no \
+             kept pin holds. Fix that first (for a clean or smudge filter, remove the attribute \
+             that sets it or move that path out of the checkout, after copying out anything to \
+             keep), and then resume: the resume discards none of it before \
+             `{}{KEPT_PIN_SUFFIX}` and a copy of that pin it writes in {} hold it.",
+            attempt.task,
+            prepared_pin_ref(&run_id, task_index, number),
+            paths.public.display()
+        ))
+    })?;
     let mut guarded = None;
     if !discarded.is_empty() {
         match in_flight.as_slice() {

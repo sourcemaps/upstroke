@@ -289,6 +289,14 @@ fn kept_on_error(
     what: &str,
     error: UpstrokeError,
 ) -> UpstrokeError {
+    let advice = if candidate.is_some() {
+        ""
+    } else {
+        ". Nothing outside this checkout keeps it, so `git clean` or `git reset --hard` there \
+         would lose it. Fix what stopped the pin first (for a clean or smudge filter, remove the \
+         attribute that sets it or move that path out of the checkout, after copying out \
+         anything to keep), and then resume"
+    };
     let pinned = match candidate {
         Some((branch_ref, parent, tree)) => workspace
             .prepare_commit_from_candidate(branch_ref, parent, tree, pin.message, pin.pin_ref)
@@ -302,7 +310,7 @@ fn kept_on_error(
         )]),
         Ok(None) => error,
         Err(pin_error) => error.with_warnings(vec![format!(
-            "{what} is kept in this checkout, and pinning it at `{}` failed: {pin_error}",
+            "{what} is kept in this checkout, and pinning it at `{}` failed: {pin_error}{advice}",
             pin.pin_ref
         )]),
     }
