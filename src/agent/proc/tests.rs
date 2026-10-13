@@ -1520,6 +1520,8 @@ fn unix_reaper_reparent_helper() {
 #[cfg(unix)]
 #[test]
 fn the_reaper_settles_its_group_on_reparenting_without_waiting_for_pipe_eof() {
+    use std::os::unix::process::CommandExt as _;
+
     fn alive(pid: i32) -> bool {
         // SAFETY: signal 0 performs no delivery; it only asks whether the
         // pid can be signalled.
@@ -1555,6 +1557,7 @@ fn the_reaper_settles_its_group_on_reparenting_without_waiting_for_pipe_eof() {
         .env("UPSTROKE_UNIX_REPARENT", "1")
         .env("UPSTROKE_READY", &ready)
         .env("UPSTROKE_AGENT", &agent)
+        .process_group(0)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -1562,6 +1565,11 @@ fn the_reaper_settles_its_group_on_reparenting_without_waiting_for_pipe_eof() {
         .expect("spawn a disposable coordinator");
     let holder = read_pid(&ready, Duration::from_secs(20));
     let agent_pid = read_pid(&agent, Duration::from_secs(20));
+    let coordinator_group = i32::try_from(coordinator.id()).expect("a pid fits an i32");
+    let holders = GroupHold::join(coordinator_group, || {
+        matches!(coordinator.try_wait(), Ok(None))
+    });
+    let agents = GroupHold::join(agent_pid, || matches!(coordinator.try_wait(), Ok(None)));
     assert!(alive(agent_pid), "the agent never started");
 
     coordinator
@@ -1574,17 +1582,8 @@ fn the_reaper_settles_its_group_on_reparenting_without_waiting_for_pipe_eof() {
          this test would pass without the reparenting check"
     );
 
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while alive(agent_pid) && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(50));
-    }
-    let settled = !alive(agent_pid);
-    // SAFETY: cleanup for the failing case, a no-op for the passing one.
-    unsafe {
-        let _ = libc::kill(holder, libc::SIGKILL);
-        let _ = libc::kill(agent_pid, libc::SIGKILL);
-        let _ = libc::kill(-agent_pid, libc::SIGKILL);
-    }
+    let settled = settle_agent_group(agents, Duration::from_secs(20));
+    drop(holders);
     let _ = std::fs::remove_dir_all(&scratch);
     assert!(
         settled,
@@ -3432,6 +3431,7 @@ fn reaper_container_cells(
             continue;
         }
 
+        let hold = GroupHold::join(agent_pid, || matches!(coordinator.try_wait(), Ok(None)));
         assert!(alive(agent_pid), "the agent never started");
         coordinator.kill().expect("hard-kill the coordinator");
         coordinator.wait().expect("reap the coordinator");
@@ -3503,16 +3503,7 @@ fn reaper_container_cells(
             "two filters carrying one value is one filter"
         );
 
-        let settled_by = Instant::now() + Duration::from_secs(30);
-        while alive(agent_pid) && Instant::now() < settled_by {
-            thread::sleep(Duration::from_millis(50));
-        }
-        let settled = !alive(agent_pid);
-        // SAFETY: cleanup for the failing case, a no-op for the passing one.
-        unsafe {
-            let _ = libc::kill(agent_pid, libc::SIGKILL);
-            let _ = libc::kill(-agent_pid, libc::SIGKILL);
-        }
+        let settled = settle_agent_group(hold, Duration::from_secs(30));
         assert!(
             settled,
             "the container half replaced the process half: the agent group survived"
@@ -3558,6 +3549,76 @@ fn drain_reaper_group(
         thread::sleep(Duration::from_millis(10));
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn group_member(pgid: i32) -> Child {
+    use std::os::unix::process::CommandExt as _;
+
+    Command::new("/bin/sh")
+        .args(["-c", "read -r line"])
+        .process_group(pgid)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap_or_else(|error| panic!("spawn a member into process group {pgid}: {error}"))
+}
+
+#[cfg(unix)]
+struct GroupHold {
+    member: Child,
+    pgid: i32,
+}
+
+#[cfg(unix)]
+impl GroupHold {
+    fn join(pgid: i32, held_throughout: impl FnOnce() -> bool) -> Self {
+        let mut member = group_member(pgid);
+        if !held_throughout() {
+            drop(member.stdin.take());
+            let ended = member.wait();
+            panic!(
+                "process group {pgid} was joined while nothing showed it was still the group the \
+                 test meant, so it is not held: its member ended by its stdin ({ended:?}) and \
+                 nothing was signalled"
+            );
+        }
+        Self { member, pgid }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for GroupHold {
+    fn drop(&mut self) {
+        if matches!(self.member.try_wait(), Ok(None)) {
+            // SAFETY: the member is this test's own child, unreaped and still
+            // running inside the group, so the group has not ended and its
+            // number names it and no other. A negative pid signals every
+            // member, the test's own included.
+            unsafe {
+                let _ = libc::kill(-self.pgid, libc::SIGKILL);
+            }
+        }
+        drop(self.member.stdin.take());
+        let _ = self.member.wait();
+    }
+}
+
+#[cfg(unix)]
+fn settle_agent_group(hold: GroupHold, bound: Duration) -> bool {
+    fn answers(pid: i32) -> bool {
+        // SAFETY: signal 0 performs no delivery.
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+    let agent_pid = hold.pgid;
+    let settled_by = Instant::now() + bound;
+    while answers(agent_pid) && Instant::now() < settled_by {
+        thread::sleep(Duration::from_millis(50));
+    }
+    let settled = !answers(agent_pid);
+    drop(hold);
+    settled
 }
 
 #[cfg(unix)]
@@ -3665,6 +3726,76 @@ fn a_reaper_group_drain_fails_at_its_bound_without_signalling_the_group() {
         None,
         "the member ended by a signal ({status}): the drain signalled a group it held only the \
          number of"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn the_agent_cleanup_signals_nothing_once_the_agent_is_seen_gone() {
+    use std::os::unix::process::ExitStatusExt as _;
+
+    let mut agent = group_member(0);
+    let group = i32::try_from(agent.id()).expect("a pid fits an i32");
+    let mut next_holder = group_member(group);
+    let mut hold = GroupHold::join(group, || matches!(agent.try_wait(), Ok(None)));
+    hold.member
+        .kill()
+        .expect("end the hold's member, as the reaper's settle ends every member");
+    if let Err(reason) = await_exit_without_reaping(hold.member.id(), Duration::from_secs(30)) {
+        panic!("the hold's member did not end: {reason}");
+    }
+    agent
+        .kill()
+        .expect("end the agent, as the reaper's settle ends every member");
+    agent
+        .wait()
+        .expect("collect the agent, as its new parent would");
+
+    let settled = settle_agent_group(hold, Duration::from_secs(5));
+    drop(next_holder.stdin.take());
+    let status = next_holder.wait().expect("reap the number's next holder");
+    assert!(
+        settled,
+        "the agent was collected before the cleanup, yet its pid still answered"
+    );
+    assert_eq!(
+        status.signal(),
+        None,
+        "the process holding the agent's group number once the agent was seen gone ended by a \
+         signal ({status}): the cleanup signalled a number the test no longer held"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn an_agent_still_running_at_its_bound_is_killed_with_its_group() {
+    use std::os::unix::process::ExitStatusExt as _;
+
+    let mut agent = group_member(0);
+    let group = i32::try_from(agent.id()).expect("a pid fits an i32");
+    let mut other = group_member(group);
+    let hold = GroupHold::join(group, || matches!(agent.try_wait(), Ok(None)));
+
+    let settled = settle_agent_group(hold, Duration::from_millis(100));
+    drop(agent.stdin.take());
+    drop(other.stdin.take());
+    let agent_status = agent.wait().expect("reap the agent");
+    let other_status = other.wait().expect("reap the group's other member");
+    assert!(
+        !settled,
+        "the agent ran throughout, yet the cleanup reported it gone"
+    );
+    assert_eq!(
+        agent_status.signal(),
+        Some(libc::SIGKILL),
+        "the agent still running at the bound ended by {agent_status}, not by the cleanup's \
+         SIGKILL to its group"
+    );
+    assert_eq!(
+        other_status.signal(),
+        Some(libc::SIGKILL),
+        "the agent group's other member ended by {other_status}, not by the cleanup's SIGKILL \
+         to the group"
     );
 }
 
