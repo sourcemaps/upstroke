@@ -3625,16 +3625,14 @@ impl GroupHold {
         }
     }
 
-    fn release(&mut self, ends_group: bool) -> Result<std::process::ExitStatus, String> {
+    fn release(&mut self) -> Result<std::process::ExitStatus, String> {
         self.released = true;
-        if ends_group {
-            // SAFETY: only `end_and_collect` below reaps the member, so this
-            // test's own child, running or exited, still keeps the group in
-            // being: its number names that group and no other. A negative pid
-            // signals every member, the test's own included.
-            unsafe {
-                let _ = libc::kill(-self.pgid, libc::SIGKILL);
-            }
+        // SAFETY: only `end_and_collect` below reaps the member, so this
+        // test's own child, running or exited, still keeps the group in
+        // being: its number names that group and no other. A negative pid
+        // signals every member, the test's own included.
+        unsafe {
+            let _ = libc::kill(-self.pgid, libc::SIGKILL);
         }
         let pgid = self.pgid;
         end_and_collect(&mut self.member)
@@ -3648,7 +3646,7 @@ impl Drop for GroupHold {
         if self.released {
             return;
         }
-        if let Err(failure) = self.release(true) {
+        if let Err(failure) = self.release() {
             if thread::panicking() {
                 eprintln!("{failure}");
             } else {
@@ -3670,7 +3668,7 @@ fn settle_agent_group(mut hold: GroupHold, bound: Duration) -> bool {
         thread::sleep(Duration::from_millis(50));
     }
     let settled = !answers(agent_pid);
-    if let Err(failure) = hold.release(!settled) {
+    if let Err(failure) = hold.release() {
         panic!("{failure}");
     }
     settled
@@ -3786,35 +3784,75 @@ fn a_reaper_group_drain_fails_at_its_bound_without_signalling_the_group() {
 
 #[cfg(unix)]
 #[test]
-fn the_agent_cleanup_signals_nothing_once_the_agent_is_seen_gone() {
+fn an_agent_seen_gone_still_has_its_held_group_killed_even_when_its_hold_member_has_exited() {
     use std::os::unix::process::ExitStatusExt as _;
 
     let mut agent = group_member(0);
     let group = i32::try_from(agent.id()).expect("a pid fits an i32");
-    let mut next_holder = group_member(group);
+    let mut other = group_member(group);
     let mut hold = GroupHold::join(group, || matches!(agent.try_wait(), Ok(None)));
     hold.member
         .kill()
-        .expect("end the hold's member, as the reaper's settle ends every member");
+        .expect("end only the hold's member, by its own pid");
     if let Err(reason) = await_exit_without_reaping(hold.member.id(), Duration::from_secs(30)) {
         panic!("the hold's member did not end: {reason}");
     }
-    end_and_collect(&mut agent).expect(
-        "end the agent, as the reaper's settle ends every member, and collect it, as its new \
-         parent would",
-    );
+    let agent_end = end_and_collect(&mut agent);
 
-    let settled = settle_agent_group(hold, Duration::from_secs(5));
-    let status = close_and_collect(&mut next_holder).expect("collect the number's next holder");
+    let settled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        settle_agent_group(hold, Duration::from_secs(5))
+    }));
+    let other_end = close_and_collect(&mut other);
+    agent_end.expect(
+        "end the agent alone, as a reaper that ends only the leader would, and collect it, as \
+         its new parent would",
+    );
+    let settled = settled.expect("the cleanup returned without a failure of its own");
+    let other_status = other_end.expect("collect the group's other member");
     assert!(
         settled,
         "the agent was collected before the cleanup, yet its pid still answered"
     );
     assert_eq!(
-        status.signal(),
-        None,
-        "the process holding the agent's group number once the agent was seen gone ended by a \
-         signal ({status}): the cleanup signalled a number the test no longer held"
+        other_status.signal(),
+        Some(libc::SIGKILL),
+        "the agent group's other member ended by {other_status}, not by the release's SIGKILL to \
+         the group: the agent and the hold's member had ended alone, the member unreaped, and the \
+         cleanup took either for the group's end"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn an_agent_seen_gone_still_has_its_held_group_killed() {
+    use std::os::unix::process::ExitStatusExt as _;
+
+    let mut agent = group_member(0);
+    let group = i32::try_from(agent.id()).expect("a pid fits an i32");
+    let mut other = group_member(group);
+    let hold = GroupHold::join(group, || matches!(agent.try_wait(), Ok(None)));
+    let agent_end = end_and_collect(&mut agent);
+
+    let settled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        settle_agent_group(hold, Duration::from_secs(5))
+    }));
+    let other_end = close_and_collect(&mut other);
+    agent_end.expect(
+        "end the agent alone, as a reaper that ends only the leader would, and collect it, as \
+         its new parent would",
+    );
+    let settled = settled.expect("the cleanup returned without a failure of its own");
+    let other_status = other_end.expect("collect the group's other member");
+    assert!(
+        settled,
+        "the agent was collected before the cleanup, yet its pid still answered"
+    );
+    assert_eq!(
+        other_status.signal(),
+        Some(libc::SIGKILL),
+        "the agent group's other member ended by {other_status}, not by the release's SIGKILL to \
+         the group: the agent alone had ended, and the cleanup took the agent's absence for the \
+         group's end"
     );
 }
 
@@ -4015,6 +4053,114 @@ fn a_refused_join_ends_its_stopped_member_within_its_bound_and_signals_nothing_e
         leader_status.signal(),
         None,
         "the group's leader ended by {leader_status}: the refusal signalled the group's number"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "subprocess helper"]
+fn group_leaving_agent_helper() {
+    let Some(unrelated) = std::env::var_os("UPSTROKE_LEAVE_FOR_GROUP") else {
+        return;
+    };
+    let unrelated: i32 = unrelated
+        .to_str()
+        .and_then(|text| text.parse().ok())
+        .expect("the number of the group to leave for");
+    let mut word = String::new();
+    std::io::stdin()
+        .read_line(&mut word)
+        .expect("the word to leave");
+    // SAFETY: `setpgid(0, …)` moves this process alone, into a group of its
+    // own session; it borrows nothing.
+    let moved = unsafe { libc::setpgid(0, unrelated) };
+    assert_eq!(
+        moved,
+        0,
+        "leaving for process group {unrelated}: {}",
+        std::io::Error::last_os_error()
+    );
+    std::io::copy(&mut std::io::stdin(), &mut std::io::sink()).expect("read to the end of file");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_process_holding_the_agents_pid_outside_its_held_group_is_never_signalled() {
+    use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
+
+    let mut elsewhere = group_member(0);
+    let unrelated = i32::try_from(elsewhere.id()).expect("a pid fits an i32");
+    let mut agent = Command::new(std::env::current_exe().expect("test executable"))
+        .args(["group_leaving_agent_helper", "--ignored", "--nocapture"])
+        .env("UPSTROKE_LEAVE_FOR_GROUP", unrelated.to_string())
+        .process_group(0)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn an agent leading a group of its own");
+    let group = i32::try_from(agent.id()).expect("a pid fits an i32");
+    let mut other = group_member(group);
+    let hold = GroupHold::join(group, || matches!(agent.try_wait(), Ok(None)));
+    let told = match agent.stdin.as_mut() {
+        Some(stdin) => writeln!(stdin, "leave").map_err(|error| error.to_string()),
+        None => Err(String::from("the agent's stdin is not piped")),
+    };
+    let left_by = Instant::now() + Duration::from_secs(30);
+    let left = loop {
+        // SAFETY: `getpgid` reads the group of this test's own child, which
+        // is unreaped, so its pid names it and no other; it borrows nothing.
+        if unsafe { libc::getpgid(group) } == unrelated {
+            break true;
+        }
+        if told.is_err() || Instant::now() >= left_by {
+            break false;
+        }
+        thread::sleep(Duration::from_millis(10));
+    };
+
+    let settled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        settle_agent_group(hold, Duration::from_millis(100))
+    }));
+    let other_end = close_and_collect(&mut other);
+    let agent_end = close_and_collect(&mut agent);
+    let elsewhere_end = close_and_collect(&mut elsewhere);
+    told.expect("tell the agent to leave its group");
+    assert!(
+        left,
+        "the agent never moved from its own group {group} into process group {unrelated}"
+    );
+    let settled = settled.expect("the cleanup returned without a failure of its own");
+    let other_status = other_end.expect("collect the held group's other member");
+    let agent_status = agent_end.expect("collect the agent");
+    let elsewhere_status = elsewhere_end.expect("collect the unrelated group's leader");
+    assert!(
+        !settled,
+        "the process at the agent's pid ran throughout, yet the cleanup reported it gone"
+    );
+    assert_eq!(
+        other_status.signal(),
+        Some(libc::SIGKILL),
+        "the held group's other member ended by {other_status}, not by the release's SIGKILL to \
+         the group the hold holds"
+    );
+    assert_eq!(
+        agent_status.signal(),
+        None,
+        "the process at the agent's pid, outside the group the hold holds, ended by \
+         {agent_status}: the cleanup signalled a number it did not hold"
+    );
+    assert_eq!(
+        agent_status.code(),
+        Some(0),
+        "the process at the agent's pid did not leave its group and end at its end of file: \
+         {agent_status}"
+    );
+    assert_eq!(
+        elsewhere_status.signal(),
+        None,
+        "the leader of the group the agent moved into ended by {elsewhere_status}: the cleanup \
+         signalled a group it did not hold"
     );
 }
 
