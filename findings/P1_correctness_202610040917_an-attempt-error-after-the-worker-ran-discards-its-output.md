@@ -133,8 +133,15 @@ listing with a bare refusal, before its guarded discard. It is repaired under th
 record the rest" by keeping the refusal, so that no Git child runs the filter and nothing is discarded, and by saying
 what is kept: N1's warning says that nothing outside the checkout keeps the output, that `git clean` or
 `git reset --hard` would lose it, and what to fix before resuming; the resume refuses before discarding anything,
-saying the same; and once the attribute or the path is gone, the resume pins and copies the output (part G4). For this
-trigger, "pin what it holds on every such error" above holds only once the filter attribute is gone. Witnesses:
+saying the same; and once the attribute no longer covers a path Git lists for the checkout, the resume pins and copies
+the output (part G4). The fix the advice names is the attribute's removal, after copying out anything to keep.
+Moving the path out of the checkout instead clears an untracked path, but a tracked one stays in the index, which the
+resume's listing checks, so the refusal stands. The advice's first form offered that move; the regression review of
+`cc8ea2ed` executed the tracked case as DF1R-1 (P3), and the advice is corrected under the same instruction. For this
+trigger, "pin what it holds on every such error" above holds only once the filter attribute no longer covers such a
+path. Witnesses:
 `a_filtered_output_the_pin_cannot_capture_is_kept_and_its_warning_says_how_to_resume`,
-`a_resume_over_a_filtered_output_refuses_saying_how_and_pins_it_once_the_attribute_is_gone` and
-`no_engine_git_child_runs_the_filter_a_worker_attributes_its_output_to`. This file stays open, as above.
+`a_resume_over_a_filtered_output_refuses_saying_how_and_pins_it_once_the_attribute_is_gone`,
+`no_engine_git_child_runs_the_filter_a_worker_attributes_its_output_to` and
+`a_tracked_filtered_path_moved_out_stays_refused_and_is_pinned_once_its_attribute_is_gone`. This file stays open, as
+above.

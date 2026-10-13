@@ -236,12 +236,15 @@ When N1's arm cannot pin the checkout, its warning also says what that leaves (F
 owner's full review of #331, `FUD-FULL-FILTERPIN`, repaired under the owner's instruction "we
 fix F1 and record the rest"): nothing outside the checkout keeps the output, so `git clean` or
 `git reset --hard` there would lose it, and what stopped the pin is to be fixed before a resume —
-for a clean or smudge filter, the attribute that sets it removed or that path moved out of the
-checkout, after copying out anything to keep. One such cause is a path a clean or smudge filter
-attribute covers: `pin_checkout`'s capture refuses it before `git add` could run the filter's
-configured code, as every capture of the module refuses, so that output stays unpinned. The
-reviewed-candidate arms (N2) keep the warning they had: they pin a candidate captured before its
-review, which a filtered path never reaches.
+for a clean or smudge filter, the attribute that sets it removed, after copying out anything to
+keep. One such cause is a path a clean or smudge filter attribute covers: `pin_checkout`'s capture
+refuses it before `git add` could run the filter's configured code, as every capture of the module
+refuses, so that output stays unpinned. Moving that path out of the checkout is not offered as the
+fix: a tracked path moved out stays in the index, and the resume's listing checks every path the
+index holds, so the next resume refuses the same way (DF1R-1 of the regression review of
+`cc8ea2ed`, corrected under the same instruction). The reviewed-candidate arms (N2) keep the
+warning they had: they pin a candidate captured before its review, which a filtered path never
+reaches.
 
 ## `pub(super) struct Run<'a>` › `pub(super) log: EventLog,`
 

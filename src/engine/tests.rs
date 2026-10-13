@@ -16130,7 +16130,7 @@ fn a_filtered_output_the_pin_cannot_capture_is_kept_and_its_warning_says_how_to_
         "uses clean/smudge filter `lfs`".to_owned(),
         "Nothing outside this checkout keeps it".to_owned(),
         "`git clean` or `git reset --hard` there would lose it".to_owned(),
-        "remove the attribute that sets it or move that path out of the checkout".to_owned(),
+        "remove the attribute that sets it, after copying out anything to keep".to_owned(),
         "and then resume".to_owned(),
     ] {
         assert!(
@@ -16167,7 +16167,7 @@ fn a_resume_over_a_filtered_output_refuses_saying_how_and_pins_it_once_the_attri
         "uses clean/smudge filter `lfs`".to_owned(),
         "Nothing was discarded".to_owned(),
         "`git clean` or `git reset --hard` would lose any of it".to_owned(),
-        "remove the attribute that sets it or move that path out of the checkout".to_owned(),
+        "remove the attribute that sets it, after copying out anything to keep".to_owned(),
         format!("the resume discards none of it before `{pin}`"),
     ] {
         assert!(
@@ -16287,4 +16287,185 @@ fn no_engine_git_child_runs_the_filter_a_worker_attributes_its_output_to() {
         Some(b"*.dat filter=paid-marker\n".to_vec()),
         "the pin holds what stayed"
     );
+}
+
+const MARKED_ATTRIBUTE: &[u8] = b"*.dat filter=paid-marker\n";
+
+fn marked_output_over_a_tracked_path(root: &Path) -> std::io::Result<()> {
+    write_into(root, ".gitattributes", MARKED_ATTRIBUTE)?;
+    write_into(root, "paid.dat", FILTERED_PAID_BYTES)?;
+    paid_output(root)
+}
+
+fn the_marked_output_is_in_the_checkout(repo: &Path) {
+    for (path, bytes) in [
+        (".gitattributes", MARKED_ATTRIBUTE),
+        ("paid.dat", FILTERED_PAID_BYTES),
+        ("agent-output.txt", b"paid output\n".as_slice()),
+    ] {
+        assert_eq!(
+            file_bytes(repo, path),
+            Some(bytes.to_vec()),
+            "the checkout keeps {path} as the worker wrote it"
+        );
+    }
+}
+
+#[cfg(unix)]
+fn a_marking_filter(repo: &Path) -> Option<PathBuf> {
+    let marker = repo.with_file_name("filter-ran.log");
+    let command = format!("printf ran >> '{}'; cat", marker.display());
+    for key in ["filter.paid-marker.clean", "filter.paid-marker.smudge"] {
+        git_in(repo, &["config", key, &command]);
+    }
+    fs::write(repo.join(".gitattributes"), MARKED_ATTRIBUTE).expect("an attribute");
+    fs::write(repo.join("probe.dat"), "probe\n").expect("a filtered path");
+    git_in(repo, &["hash-object", "probe.dat"]);
+    assert!(
+        marker.exists(),
+        "the configured filter runs when Git evaluates the attribute"
+    );
+    for path in [
+        marker.clone(),
+        repo.join("probe.dat"),
+        repo.join(".gitattributes"),
+    ] {
+        fs::remove_file(path).expect("the control's files go");
+    }
+    Some(marker)
+}
+
+#[cfg(not(unix))]
+fn a_marking_filter(_repo: &Path) -> Option<PathBuf> {
+    None
+}
+
+fn the_marked_filter_never_ran(marker: Option<&Path>, when: &str) {
+    if let Some(marker) = marker {
+        assert!(!marker.exists(), "no Git child {when} ran the filter");
+    }
+}
+
+#[test]
+fn a_tracked_filtered_path_moved_out_stays_refused_and_is_pinned_once_its_attribute_is_gone() {
+    let (_tree, repo) = rd1_repo("df1r-1-tracked");
+    let marker = a_marking_filter(&repo);
+    fs::write(repo.join("paid.dat"), "tracked before the run\n").expect("a tracked path");
+    git_in(&repo, &["add", "paid.dat"]);
+    git_in(&repo, &["commit", "-qm", "track paid.dat"]);
+    let run = bounded_run(
+        "the run whose worker rewrites a tracked path and attributes a filter to it",
+        &repo,
+        None,
+        shaping(marked_output_over_a_tracked_path),
+    );
+    the_marked_filter_never_ran(marker.as_deref(), "of the run over the tracked path");
+    let Err(UpstrokeError::WithWarnings(warned)) = &run else {
+        panic!("the capture's own refusal, with the kept note: {run:?}");
+    };
+    let warning = warned
+        .warnings
+        .iter()
+        .find(|warning| warning.contains("pinning it at"))
+        .expect("the kept note");
+    let pin = kept_pin_of(&repo, 1);
+    assert_eq!(pin_target(&repo, &pin), None, "no pin holds the output");
+    assert!(kept_copies(&repo).is_empty(), "and no copy");
+    the_marked_output_is_in_the_checkout(&repo);
+    let run_id = rundir::latest_run(&repo).expect("the run started");
+    let events = paths_of(&repo, &run_id).events();
+    let log = fs::read(&events).expect("the event log the run left");
+    let refused = bounded_resume(
+        "the resume over the tracked filtered path",
+        &repo,
+        fake(Effect::EditFile),
+    );
+    the_marked_filter_never_ran(marker.as_deref(), "of the refused resume");
+    let refusal = resume_refusal(&refused, "the resume over the tracked filtered path");
+    the_marked_output_is_in_the_checkout(&repo);
+    let moved = repo.with_file_name("paid.dat");
+    fs::rename(repo.join("paid.dat"), &moved).expect("the tracked path moved out");
+    let still = bounded_resume(
+        "the resume once the tracked path is moved out",
+        &repo,
+        fake(Effect::EditFile),
+    );
+    the_marked_filter_never_ran(marker.as_deref(), "of the resume after the move");
+    let still_refused = resume_refusal(&still, "the resume once the tracked path is moved out");
+    assert!(
+        still_refused.contains("path `paid.dat` uses clean/smudge filter `paid-marker`"),
+        "the index still holds the moved path, so its filter still refuses: {still_refused}"
+    );
+    assert_eq!(
+        pin_target(&repo, &pin),
+        None,
+        "no refused resume pins the output"
+    );
+    assert!(kept_copies(&repo).is_empty(), "or copies it");
+    assert_eq!(
+        fs::read(events).ok(),
+        Some(log),
+        "the refused resumes leave the run's event log as it was"
+    );
+    assert_eq!(
+        fs::read(&moved).ok(),
+        Some(FILTERED_PAID_BYTES.to_vec()),
+        "outside the checkout, only the operator's moved file keeps the paid bytes"
+    );
+    fs::rename(moved, repo.join("paid.dat")).expect("the operator puts the path back");
+    let kept = repo.with_file_name("attributes-kept-by-the-operator");
+    fs::copy(repo.join(".gitattributes"), &kept).expect("the operator copies the attribute out");
+    fs::remove_file(repo.join(".gitattributes")).expect("and removes it, as the advice says");
+    let report = bounded_resume(
+        "the resume once the attribute is gone",
+        &repo,
+        fake(Effect::EditFile),
+    )
+    .expect("the resume completes once the attribute is gone");
+    the_marked_filter_never_ran(marker.as_deref(), "of the resume that pinned the output");
+    assert!(committed(&report, "t1"), "{report:?}");
+    let commit = pin_target(&repo, &pin).expect("the resume pinned the attempt's output");
+    assert_eq!(
+        blob_at(&repo, &commit, "paid.dat"),
+        Some(FILTERED_PAID_BYTES.to_vec()),
+        "the pin holds the paid bytes the worker wrote over the tracked path"
+    );
+    assert_eq!(
+        blob_at(&repo, &commit, "agent-output.txt"),
+        Some(b"paid output\n".to_vec()),
+        "and the rest of the output"
+    );
+    assert_eq!(
+        blob_at(&repo, &commit, ".gitattributes"),
+        None,
+        "but not the attribute file the operator removed"
+    );
+    assert_eq!(
+        fs::read(kept).ok(),
+        Some(MARKED_ATTRIBUTE.to_vec()),
+        "which only the operator's own copy keeps"
+    );
+    let copies = kept_copies(&repo);
+    let [copy] = copies.as_slice() else {
+        panic!("one copy: {copies:?}");
+    };
+    git_in(&repo, &["update-ref", "-d", &pin]);
+    restore_the_pin_from(&repo, copy, &pin);
+    assert_eq!(
+        pin_target(&repo, &pin),
+        Some(commit),
+        "the copy puts the pin back"
+    );
+    let advice = "remove the attribute that sets it, after copying out anything to keep";
+    for (what, text) in [
+        ("the kept note", warning.as_str()),
+        ("the refusal", refusal.as_str()),
+        ("the refusal after the move", still_refused.as_str()),
+    ] {
+        assert!(
+            !text.contains("move that path out"),
+            "{what} offers no move-out for a tracked path: {text}"
+        );
+        assert!(text.contains(advice), "{what} says to {advice}: {text}");
+    }
 }

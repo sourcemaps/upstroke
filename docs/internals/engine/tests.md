@@ -3262,3 +3262,20 @@ runs it once it evaluates the attribute (the positive control), and no Git child
 of the resume after the filtered path was moved out runs it. The first two are red at the head the review read; the
 third is a control, green there too, and red when the pin's capture evaluates the attribute.
 
+## `const MARKED_ATTRIBUTE: &[u8] = b"*.dat filter=paid-marker\n";`
+
+The test of DF1R-1 (the regression review of `cc8ea2ed`, P3, executed there; corrected under the owner's instruction "we
+fix F1 and record the rest"): F1's advice first offered moving the filtered path out of the checkout, which does not
+clear a tracked path. `a_tracked_filtered_path_moved_out_stays_refused_and_is_pinned_once_its_attribute_is_gone`
+commits `paid.dat` before the run; its worker rewrites it and writes a `.gitattributes` naming a filter. The run keeps
+the output in the checkout with no pin and no copy, and the resume refuses. The operator then moves `paid.dat` out: it
+stays in the index, so the next resume refuses with the same filter refusal, pins and copies nothing, and leaves the
+run's event log as the run left it; outside the checkout, only the operator's moved file keeps the paid bytes. With the
+path put back and the attribute file copied out and removed, as the advice says, the resume completes: its kept pin
+holds the paid bytes and the rest of the output but not the attribute file, which only the operator's copy keeps, and
+its copy puts the pin back. On Unix the filter's driver appends to a marker, with `git hash-object` as the positive
+control (`a_marking_filter`), and no Git child of the run or of any resume runs it; elsewhere no driver is configured,
+the refusal is the same and the marker is not checked. The words are checked last: the kept note, the refusal and the
+refusal after the move each name the attribute's removal after copying out anything to keep, and none offers to move
+the path out.
+

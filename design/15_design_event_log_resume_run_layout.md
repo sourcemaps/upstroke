@@ -285,7 +285,9 @@ candidate whose publication fails, keeps the checkout the same way: what the che
 candidate, is pinned at that name, and the error names the pin, or the pin's failure when it cannot be written. A path
 that a clean or smudge filter attribute covers is one such failure, since no capture lets Git run a filter's configured
 code: the output then stays in the checkout unpinned, the error says that nothing outside the checkout keeps it and what
-to fix first, and while that path stays, a resume of the attempt refuses before discarding anything, saying the same.
+to fix first, and while the attribute covers a path Git lists for the checkout — every path its index holds, a tracked
+one moved out of the checkout included, and every untracked path not ignored — a resume of the attempt refuses before
+discarding anything, saying the same.
 Of the schema-3 pins, a kept pin is the one without a successful settlement that is not orphan residue. A resume
 removes the checkout's copy of the attempt in flight only
 once that attempt's kept pin holds it and a durable copy of the pin that the resume itself has written,

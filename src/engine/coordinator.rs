@@ -294,8 +294,7 @@ fn kept_on_error(
     } else {
         ". Nothing outside this checkout keeps it, so `git clean` or `git reset --hard` there \
          would lose it. Fix what stopped the pin first (for a clean or smudge filter, remove the \
-         attribute that sets it or move that path out of the checkout, after copying out \
-         anything to keep), and then resume"
+         attribute that sets it, after copying out anything to keep), and then resume"
     };
     let pinned = match candidate {
         Some((branch_ref, parent, tree)) => workspace

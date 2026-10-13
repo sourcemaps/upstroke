@@ -575,9 +575,9 @@ pub(super) fn resume_harness_inner_on(
              paths stopped: {error}. Nothing was discarded: whatever the attempt left stays in \
              the checkout, and `git clean` or `git reset --hard` would lose any of it that no \
              kept pin holds. Fix that first (for a clean or smudge filter, remove the attribute \
-             that sets it or move that path out of the checkout, after copying out anything to \
-             keep), and then resume: the resume discards none of it before \
-             `{}{KEPT_PIN_SUFFIX}` and a copy of that pin it writes in {} hold it.",
+             that sets it, after copying out anything to keep), and then resume: the resume \
+             discards none of it before `{}{KEPT_PIN_SUFFIX}` and a copy of that pin it writes \
+             in {} hold it.",
             attempt.task,
             prepared_pin_ref(&run_id, task_index, number),
             paths.public.display()
