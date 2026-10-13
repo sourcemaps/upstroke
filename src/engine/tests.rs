@@ -16116,6 +16116,10 @@ fn a_filtered_output_the_pin_cannot_capture_is_kept_and_its_warning_says_how_to_
         "the error is the capture's filter refusal: {run:?}"
     );
     let pin = kept_pin_of(&repo, 1);
+    assert_eq!(pin_target(&repo, &pin), None, "no pin holds the output");
+    assert_eq!(kept_pins(&repo), Vec::<(String, String)>::new());
+    assert!(kept_copies(&repo).is_empty(), "and no copy");
+    the_filtered_output_is_in_the_checkout(&repo);
     let warning = warned
         .warnings
         .iter()
@@ -16134,10 +16138,6 @@ fn a_filtered_output_the_pin_cannot_capture_is_kept_and_its_warning_says_how_to_
             "the note says {needle:?}: {warning}"
         );
     }
-    assert_eq!(pin_target(&repo, &pin), None, "no pin holds the output");
-    assert_eq!(kept_pins(&repo), Vec::<(String, String)>::new());
-    assert!(kept_copies(&repo).is_empty(), "and no copy");
-    the_filtered_output_is_in_the_checkout(&repo);
 }
 
 #[test]
@@ -16154,6 +16154,13 @@ fn a_resume_over_a_filtered_output_refuses_saying_how_and_pins_it_once_the_attri
         &repo,
         fake(Effect::EditFile),
     );
+    assert_eq!(
+        pin_target(&repo, &pin),
+        None,
+        "the refused resume pins nothing"
+    );
+    assert!(kept_copies(&repo).is_empty(), "and copies nothing");
+    the_filtered_output_is_in_the_checkout(&repo);
     let refusal = resume_refusal(&refused, "the resume over the filtered output");
     for needle in [
         "attempt 1 of `t1` is in flight".to_owned(),
@@ -16168,16 +16175,12 @@ fn a_resume_over_a_filtered_output_refuses_saying_how_and_pins_it_once_the_attri
             "the refusal says {needle:?}: {refusal}"
         );
     }
-    assert_eq!(
-        pin_target(&repo, &pin),
-        None,
-        "the refused resume pins nothing"
-    );
-    assert!(kept_copies(&repo).is_empty(), "and copies nothing");
-    the_filtered_output_is_in_the_checkout(&repo);
 
-    let set_aside = repo.with_file_name("gitattributes-set-aside");
-    fs::copy(repo.join(".gitattributes"), &set_aside).expect("the operator copies it out");
+    fs::copy(
+        repo.join(".gitattributes"),
+        repo.with_file_name("gitattributes-set-aside"),
+    )
+    .expect("the operator copies it out");
     fs::remove_file(repo.join(".gitattributes")).expect("and removes the attribute");
     let report = bounded_resume(
         "the resume once the attribute is gone",
@@ -16274,7 +16277,7 @@ fn no_engine_git_child_runs_the_filter_a_worker_attributes_its_output_to() {
     assert!(committed(&report, "t1"), "{report:?}");
     assert!(!marker.exists(), "nor of the resume that pinned the rest");
     assert_eq!(
-        fs::read(&moved).ok(),
+        fs::read(moved).ok(),
         Some(FILTERED_PAID_BYTES.to_vec()),
         "the moved path keeps the paid bytes"
     );

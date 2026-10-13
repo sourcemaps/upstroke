@@ -8,7 +8,7 @@ reviewed_sha: 88376a108e50362487ef1f374b633f63d71599ee
 location: src/engine/coordinator.rs:577
 provenance: pre_existing
 first_bad: 372f0c02c3b6af3eb19503e9f16872206dd4906e
-guard: follow-up D's implementation round 3 (`pr11_fud_impl3`, on draft #331), adopted on 2026-10-11 with decision O8 (decision B) as an agent decision by `pr11_decide_d` under the owner's delegation of 2026-10-11 (babysit's `0194a1e4…`) and in force only from #331's merge: part N of `~/orch-pr11/owner-package/RD1-PRESERVATION-PROPOSAL.md` (round 4; N as round 2 proposed it, its pin's capture now G4's) keeps the checkout and pins what it holds at the attempt's kept pin on every such error; until that lands and is validated this file stays open, and nothing here accepts the loss
+guard: follow-up D's implementation round 3 (`pr11_fud_impl3`, on draft #331), adopted on 2026-10-11 with decision O8 (decision B) as an agent decision by `pr11_decide_d` under the owner's delegation of 2026-10-11 (babysit's `0194a1e4…`) and in force only from #331's merge: part N of `~/orch-pr11/owner-package/RD1-PRESERVATION-PROPOSAL.md` (round 4; N as round 2 proposed it, its pin's capture now G4's) keeps the checkout and pins what it holds at the attempt's kept pin on every such error, except an output whose capture the module's clean/smudge filter refusal stops, which it keeps unpinned and says so (`FUD-FULL-FILTERPIN`, follow-up D's F1 repair of 2026-10-13); until that lands and is validated this file stays open, and nothing here accepts the loss
 ---
 
 ## Failure sequence
