@@ -3566,9 +3566,41 @@ fn group_member(pgid: i32) -> Child {
 }
 
 #[cfg(unix)]
+const MEMBER_END_BOUND: Duration = Duration::from_secs(10);
+
+#[cfg(unix)]
+fn end_and_collect(child: &mut Child) -> Result<std::process::ExitStatus, String> {
+    let pid = child.id();
+    child
+        .kill()
+        .map_err(|error| format!("SIGKILL to pid {pid}, a child of this test's own: {error}"))?;
+    await_exit_without_reaping(pid, MEMBER_END_BOUND)?;
+    child
+        .wait()
+        .map_err(|error| format!("collecting pid {pid} once it had exited: {error}"))
+}
+
+#[cfg(unix)]
+fn close_and_collect(child: &mut Child) -> Result<std::process::ExitStatus, String> {
+    drop(child.stdin.take());
+    let pid = child.id();
+    if let Err(reason) = await_exit_without_reaping(pid, MEMBER_END_BOUND) {
+        let ended = end_and_collect(child);
+        return Err(format!(
+            "{reason} once its stdin was closed, so it was ended by SIGKILL to its own pid \
+             ({ended:?})"
+        ));
+    }
+    child
+        .wait()
+        .map_err(|error| format!("collecting pid {pid} once it had exited: {error}"))
+}
+
+#[cfg(unix)]
 struct GroupHold {
     member: Child,
     pgid: i32,
+    released: bool,
 }
 
 #[cfg(unix)]
@@ -3576,37 +3608,58 @@ impl GroupHold {
     fn join(pgid: i32, held_throughout: impl FnOnce() -> bool) -> Self {
         let mut member = group_member(pgid);
         if !held_throughout() {
-            drop(member.stdin.take());
-            let ended = member.wait();
+            let ended = match end_and_collect(&mut member) {
+                Ok(status) => format!("collected: {status}"),
+                Err(reason) => format!("not collected: {reason}"),
+            };
             panic!(
                 "process group {pgid} was joined while nothing showed it was still the group the \
-                 test meant, so it is not held: its member ended by its stdin ({ended:?}) and \
-                 nothing was signalled"
+                 test meant, so it is not held: its member, this test's own child, was ended by \
+                 SIGKILL to its own pid and {ended}, and nothing was sent to the group's number"
             );
         }
-        Self { member, pgid }
+        Self {
+            member,
+            pgid,
+            released: false,
+        }
+    }
+
+    fn release(&mut self, ends_group: bool) -> Result<std::process::ExitStatus, String> {
+        self.released = true;
+        if ends_group {
+            // SAFETY: only `end_and_collect` below reaps the member, so this
+            // test's own child, running or exited, still keeps the group in
+            // being: its number names that group and no other. A negative pid
+            // signals every member, the test's own included.
+            unsafe {
+                let _ = libc::kill(-self.pgid, libc::SIGKILL);
+            }
+        }
+        let pgid = self.pgid;
+        end_and_collect(&mut self.member)
+            .map_err(|reason| format!("the hold on process group {pgid}: {reason}"))
     }
 }
 
 #[cfg(unix)]
 impl Drop for GroupHold {
     fn drop(&mut self) {
-        if matches!(self.member.try_wait(), Ok(None)) {
-            // SAFETY: the member is this test's own child, unreaped and still
-            // running inside the group, so the group has not ended and its
-            // number names it and no other. A negative pid signals every
-            // member, the test's own included.
-            unsafe {
-                let _ = libc::kill(-self.pgid, libc::SIGKILL);
+        if self.released {
+            return;
+        }
+        if let Err(failure) = self.release(true) {
+            if thread::panicking() {
+                eprintln!("{failure}");
+            } else {
+                panic!("{failure}");
             }
         }
-        drop(self.member.stdin.take());
-        let _ = self.member.wait();
     }
 }
 
 #[cfg(unix)]
-fn settle_agent_group(hold: GroupHold, bound: Duration) -> bool {
+fn settle_agent_group(mut hold: GroupHold, bound: Duration) -> bool {
     fn answers(pid: i32) -> bool {
         // SAFETY: signal 0 performs no delivery.
         unsafe { libc::kill(pid, 0) == 0 }
@@ -3617,7 +3670,9 @@ fn settle_agent_group(hold: GroupHold, bound: Duration) -> bool {
         thread::sleep(Duration::from_millis(50));
     }
     let settled = !answers(agent_pid);
-    drop(hold);
+    if let Err(failure) = hold.release(!settled) {
+        panic!("{failure}");
+    }
     settled
 }
 
@@ -3744,16 +3799,13 @@ fn the_agent_cleanup_signals_nothing_once_the_agent_is_seen_gone() {
     if let Err(reason) = await_exit_without_reaping(hold.member.id(), Duration::from_secs(30)) {
         panic!("the hold's member did not end: {reason}");
     }
-    agent
-        .kill()
-        .expect("end the agent, as the reaper's settle ends every member");
-    agent
-        .wait()
-        .expect("collect the agent, as its new parent would");
+    end_and_collect(&mut agent).expect(
+        "end the agent, as the reaper's settle ends every member, and collect it, as its new \
+         parent would",
+    );
 
     let settled = settle_agent_group(hold, Duration::from_secs(5));
-    drop(next_holder.stdin.take());
-    let status = next_holder.wait().expect("reap the number's next holder");
+    let status = close_and_collect(&mut next_holder).expect("collect the number's next holder");
     assert!(
         settled,
         "the agent was collected before the cleanup, yet its pid still answered"
@@ -3777,10 +3829,10 @@ fn an_agent_still_running_at_its_bound_is_killed_with_its_group() {
     let hold = GroupHold::join(group, || matches!(agent.try_wait(), Ok(None)));
 
     let settled = settle_agent_group(hold, Duration::from_millis(100));
-    drop(agent.stdin.take());
-    drop(other.stdin.take());
-    let agent_status = agent.wait().expect("reap the agent");
-    let other_status = other.wait().expect("reap the group's other member");
+    let agent_end = close_and_collect(&mut agent);
+    let other_end = close_and_collect(&mut other);
+    let agent_status = agent_end.expect("collect the agent");
+    let other_status = other_end.expect("collect the group's other member");
     assert!(
         !settled,
         "the agent ran throughout, yet the cleanup reported it gone"
@@ -3796,6 +3848,173 @@ fn an_agent_still_running_at_its_bound_is_killed_with_its_group() {
         Some(libc::SIGKILL),
         "the agent group's other member ended by {other_status}, not by the cleanup's SIGKILL \
          to the group"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn an_agent_outliving_its_bound_is_killed_with_its_group_even_when_its_hold_member_has_exited() {
+    use std::os::unix::process::ExitStatusExt as _;
+
+    let mut agent = group_member(0);
+    let group = i32::try_from(agent.id()).expect("a pid fits an i32");
+    let mut other = group_member(group);
+    let mut hold = GroupHold::join(group, || matches!(agent.try_wait(), Ok(None)));
+    hold.member
+        .kill()
+        .expect("end only the hold's member, by its own pid");
+    if let Err(reason) = await_exit_without_reaping(hold.member.id(), Duration::from_secs(30)) {
+        panic!("the hold's member did not end: {reason}");
+    }
+
+    let settled = settle_agent_group(hold, Duration::from_millis(100));
+    let agent_end = close_and_collect(&mut agent);
+    let other_end = close_and_collect(&mut other);
+    let agent_status = agent_end.expect("collect the agent");
+    let other_status = other_end.expect("collect the group's other member");
+    assert!(
+        !settled,
+        "the agent ran throughout, yet the cleanup reported it gone"
+    );
+    assert_eq!(
+        agent_status.signal(),
+        Some(libc::SIGKILL),
+        "the agent still running at the bound ended by {agent_status}, not by the cleanup's \
+         SIGKILL to its group: the hold's member had exited on its own, unreaped, and the \
+         release took that for the group's end"
+    );
+    assert_eq!(
+        other_status.signal(),
+        Some(libc::SIGKILL),
+        "the agent group's other member ended by {other_status}, not by the cleanup's SIGKILL \
+         to the group, after the hold's member had exited on its own"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_hold_dropped_while_a_failure_unwinds_kills_its_group_even_when_its_member_has_exited() {
+    use std::os::unix::process::ExitStatusExt as _;
+
+    const DELIBERATE: &str = "a failing assertion between a fixture's join and its settle";
+    let mut agent = group_member(0);
+    let group = i32::try_from(agent.id()).expect("a pid fits an i32");
+    let mut other = group_member(group);
+    let mut hold = GroupHold::join(group, || matches!(agent.try_wait(), Ok(None)));
+    hold.member
+        .kill()
+        .expect("end only the hold's member, by its own pid");
+    if let Err(reason) = await_exit_without_reaping(hold.member.id(), Duration::from_secs(30)) {
+        panic!("the hold's member did not end: {reason}");
+    }
+
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let _held_across_the_unwind = hold;
+        panic!("{DELIBERATE}");
+    }));
+    let agent_end = close_and_collect(&mut agent);
+    let other_end = close_and_collect(&mut other);
+    let payload = unwound.expect_err("the body must have left through a panic");
+    let message = payload
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| payload.downcast_ref::<&'static str>().copied());
+    assert_eq!(
+        message,
+        Some(DELIBERATE),
+        "the body left through some other panic, so the release this observes is not the one \
+         claimed"
+    );
+    let agent_status = agent_end.expect("collect the agent");
+    let other_status = other_end.expect("collect the group's other member");
+    assert_eq!(
+        agent_status.signal(),
+        Some(libc::SIGKILL),
+        "the agent ended by {agent_status}, not by the SIGKILL to its group that a hold released \
+         while a failure unwinds owes, once the hold's member had exited on its own"
+    );
+    assert_eq!(
+        other_status.signal(),
+        Some(libc::SIGKILL),
+        "the agent group's other member ended by {other_status}, not by the release's SIGKILL \
+         to the group"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_refused_join_ends_its_stopped_member_within_its_bound_and_signals_nothing_else() {
+    use std::os::unix::process::ExitStatusExt as _;
+
+    let bound = Duration::from_secs(30);
+    let mut leader = group_member(0);
+    let group = i32::try_from(leader.id()).expect("a pid fits an i32");
+    let (sender, receiver) = mpsc::channel();
+    let joiner = thread::spawn(move || {
+        let refused = std::panic::catch_unwind(move || {
+            GroupHold::join(group, move || {
+                // SAFETY: the group's leader is this test's own child, unreaped
+                // until the test collects it, so the group is the test's and
+                // every member of it is a child of the test's own.
+                let stopped = unsafe { libc::kill(-group, libc::SIGSTOP) };
+                assert_eq!(stopped, 0, "stopping the test's own group {group}");
+                false
+            })
+        });
+        let message = match refused {
+            Ok(_held) => None,
+            Err(payload) => Some(match payload.downcast::<String>() {
+                Ok(message) => *message,
+                Err(_) => String::from("a panic whose payload is no message"),
+            }),
+        };
+        let _ = sender.send(message);
+    });
+    let first = receiver.recv_timeout(bound);
+    let late = if first.is_err() {
+        // SAFETY: the leader is still this test's own unreaped child, so the
+        // group is the test's: SIGKILL ends every member, stopped or not, and
+        // whatever the join waits on returns.
+        unsafe {
+            let _ = libc::kill(-group, libc::SIGKILL);
+        }
+        Some(receiver.recv_timeout(bound))
+    } else {
+        None
+    };
+    // SAFETY: as above, the group is the test's; a stopped leader resumes.
+    unsafe {
+        let _ = libc::kill(-group, libc::SIGCONT);
+    }
+    let leader_end = close_and_collect(&mut leader);
+    if first.is_ok() || matches!(late, Some(Ok(_))) {
+        joiner
+            .join()
+            .expect("the joining thread ends once it has reported");
+    }
+    let Ok(message) = first else {
+        panic!(
+            "the refused join had not reported {bound:?} after its group was stopped, so the test \
+             ended its own group by SIGKILL (then {late:?}; the leader {leader_end:?})"
+        );
+    };
+    let message = message.expect("the join held a group nothing showed was still the one meant");
+    assert!(
+        message.contains(&format!(
+            "process group {group} was joined while nothing showed it was still the group the \
+             test meant"
+        )),
+        "the join failed for another reason: {message}"
+    );
+    assert!(
+        message.contains("was ended by SIGKILL to its own pid and collected: signal: 9 (SIGKILL)"),
+        "the refusal did not end and collect its stopped member itself: {message}"
+    );
+    let leader_status = leader_end.expect("collect the group's leader by its end of file");
+    assert_eq!(
+        leader_status.signal(),
+        None,
+        "the group's leader ended by {leader_status}: the refusal signalled the group's number"
     );
 }
 

@@ -684,16 +684,19 @@ zombie, keeps its pid and its group.
 ## `fn the_reaper_settles_its_group_on_reparenting_without_waiting_for_pipe_eof()` › `let settled = settle_agent_group(agents, Duration::from_secs(20));`
 
 The wait for the agent, 20 s as before, then the agent hold's release
-(`settle_agent_group`). The reaper's settle has signalled the whole
-agent group on the passing path, the hold's member included, so the
-release normally sends nothing.
+(`settle_agent_group`). On the passing path the release sends nothing
+to the agent's group, which is the reaper's to settle, and ends only
+its own member; an agent still answering at 20 s has its whole group
+ended while it is held.
 
 ## `fn the_reaper_settles_its_group_on_reparenting_without_waiting_for_pipe_eof()` › `drop(holders);`
 
 After the settle, as the holder's kill was, so the pipe stays held for
-the whole wait and the test cannot pass by an EOF. The hold's member is
-still running, so its release sends the coordinator's group SIGKILL,
-the pipe holder included, while it still holds that group's number.
+the whole wait and the test cannot pass by an EOF. A hold released by
+its drop owes its group's ending, so its release sends the
+coordinator's group SIGKILL, the pipe holder included, while its member
+still holds that group's number, whatever that member's state
+(`PR340-R3-2`).
 
 ## `fn a_real_ambient_join_failure_refuses_the_write_command() {`
 
@@ -1125,7 +1128,8 @@ the whole join the agent, running or a zombie, keeps its pid and its
 group (`GroupHold::join`). From here until `settle_agent_group` releases
 it the group's number is the test's, and so is every probe of the
 agent's pid. A failing assertion in between releases the hold as it
-unwinds, ending the agent's group if nothing has.
+unwinds, ending the agent's whole group while the hold still holds it,
+whatever its member's state (`PR340-R3-2`).
 
 ## `fn reaper_container_cells` › `assert!(`
 
@@ -1163,7 +1167,9 @@ to the volume.
 30 s, and the agent hold is released (`settle_agent_group`). Nothing is
 signalled by the agent's saved numbers (`PR340-R2-1`); the first shape
 sent both of them SIGKILL here after the wait, whether or not the agent
-had been seen gone.
+had been seen gone. An agent still answering at 30 s has its whole
+group ended by the release, while the hold still holds it, before this
+assertion fails.
 
 ## `fn reaper_container_cells` › `let drain_bound = Duration::from_secs(30);`
 
@@ -1257,10 +1263,42 @@ A shell blocked reading its stdin, spawned into the process group
 `pgid` (`process_group`; `0` makes it the leader of a group of its own),
 with its stdin piped from this test, so it runs until the test closes
 that pipe or a signal ends it. It is the member of a `GroupHold`, and
-the agent, the stand-in and the other member of the two tests that
-drive `settle_agent_group` against groups the test owns. A spawn that
-cannot join the group (`setpgid` refused, as for a group that does not
-exist in this session) fails the test where it is called.
+the agent, the stand-in, the leader and the other member of the five
+tests that drive a `GroupHold` against groups the test owns. A spawn
+that cannot join the group (`setpgid` refused, as for a group that does
+not exist in this session) fails the test where it is called.
+
+## `const MEMBER_END_BOUND: Duration = Duration::from_secs(10);`
+
+How long `end_and_collect` and `close_and_collect` wait for a child of
+the test's own to exit (`PR340-R3-1`). After SIGKILL the child's end is
+the kernel's alone, since no stop, handler or mask can delay that
+signal, so the bound bounds a wedged kernel, not a slow shell; after an
+end of file it bounds a shell that should exit at once. It bounds a
+wedge; it is not a measured margin.
+
+## `fn end_and_collect(child: &mut Child) -> Result<std::process::ExitStatus, String> {`
+
+Ends a child of the test's own by SIGKILL to its own pid
+(`Child::kill`) and collects it within `MEMBER_END_BOUND`
+(`await_exit_without_reaping`, then `wait`, which reaps at once). The
+child is unreaped until that `wait`, so its pid is its and no other's
+when the signal is sent; SIGKILL ends it even while a group stop has
+suspended it, where an end of file would wait for it to run. Past the
+bound the answer is an error naming the pid, and the child stays the
+test's unreaped child, so its number is not issued again while the test
+process lives. It is how a `GroupHold` ends its member, and how the
+controls end and collect a process they end themselves.
+
+## `fn close_and_collect(child: &mut Child) -> Result<std::process::ExitStatus, String> {`
+
+Closes a child's stdin and collects it within `MEMBER_END_BOUND`. It
+collects the controls' own children after the release under test has
+run, so their statuses say how each ended: by the release's SIGKILL, or
+by the end of file this sends. A child that has not exited by the bound
+is ended by `end_and_collect` and the answer is an error saying so, so
+the control fails with every child collected rather than waiting
+without a bound or reading a status this function caused.
 
 ## `struct GroupHold {`
 
@@ -1278,6 +1316,15 @@ agent cleanup of the two reaper fixtures lacked: once its coordinator
 was reaped the agent was an orphan its new parent collects, and the test
 had only its pid and its group id, numbers that are free once the agent
 has been collected.
+
+The member's own state says nothing about the rest of the group: it can
+exit alone, killed by its pid or by anything else, while the group's
+other members run on (`PR340-R3-2`). So nothing here reads the member's
+state to decide whether the group still needs ending, and nothing reaps
+it except the release, after any signal to the group: the member is the
+ownership basis, and it lasts until the cleanup that needs it is done.
+`released` records that the release has run, so that the drop after an
+explicit release does nothing more.
 
 The hold changes nothing the reaper decides. Its settle signals the
 whole group, the member included, and then waits only for members that
@@ -1304,27 +1351,44 @@ this process's own waits would fail, so its agent, running or a zombie,
 kept its pid and its group the whole time. For the coordinator's own
 group, the coordinator leads it and is this test's unreaped child. Any
 other answer means the member may have joined a group that had taken
-the number: the member is ended by closing its stdin, nothing is
-signalled, and the test fails there.
+the number, so nothing may be sent to the number: the member, this
+test's own unreaped child, is ended by SIGKILL to its own pid and
+collected within `MEMBER_END_BOUND` (`end_and_collect`), and the test
+fails there, its message saying how the member ended. The join's
+first shape ended the member by closing its stdin and waited for it
+without a bound, so a member a group stop had suspended could not read
+the end of file and the failure was never reported (`PR340-R3-1`).
+
+## `impl GroupHold` › `fn release(&mut self, ends_group: bool) -> Result<std::process::ExitStatus, String> {`
+
+The release: once, on every path. With `ends_group` the whole group gets
+SIGKILL first, while the member, unreaped whether it runs or has
+exited, still keeps the group's number the test's; then, either way, the
+member is ended by its own pid and collected (`end_and_collect`), and
+after that the test holds nothing of the group and sends nothing to its
+number. The signal's answer is not read: whatever it is, it is about
+this group. Whether the group is ended is the caller's decision, from
+what the cleanup owes; the member's state never decides it, since a
+member that has exited proves nothing about the others (`PR340-R3-2`).
+The hold's first shape decided by the member alone: it asked
+`try_wait()`, which reaped a member that had exited, and then sent
+nothing, so a member killed alone left its group's other members
+running. The answer
+is the member's collected status, or an error naming the group when the
+member was not collected within its bound.
 
 ## `impl Drop for GroupHold` › `fn drop(&mut self) {`
 
-The release, on every path: at the end of the cleanup, and while a
-failed assertion unwinds. A member still running means nothing has
-signalled the whole group, so the group gets SIGKILL first, while the
-member keeps its number the test's; a member that ended between the
-look and the signal is still unreaped, so the group is still held when
-the signal is sent. A member that has exited means the group was
-signalled as a whole (the reaper's settle signals every member), and
-nothing is sent. Either way the member's stdin is then closed and the
-member collected; after that the test holds nothing of the group and
-sends nothing to its number. The signal's answer is not read: whatever
-it is, it is about this group. In the fixtures the look can find the
-member still dying from the reaper's own SIGKILL; the group then gets a
-second SIGKILL while it is still held, and holds only members the first
-one has already reached.
+A hold not released by `settle_agent_group` is released here, with its
+group's ending owed: a hold dropped while a failed assertion unwinds,
+whose fixture never reached its settle, and the reparenting test's hold
+on the coordinator's group, whose pipe holder never ends by itself. A
+release that has already run is not repeated. A member not collected
+within its bound fails the test here, or, while another failure is
+already unwinding, is written to stderr instead, since a second panic
+there would abort the whole test process.
 
-## `fn settle_agent_group(hold: GroupHold, bound: Duration) -> bool {`
+## `fn settle_agent_group(mut hold: GroupHold, bound: Duration) -> bool {`
 
 The agent cleanup of both reaper fixtures (`PR340-R2-1`): the wait
 both already made for the agent to stop answering, a probe every 50 ms
@@ -1337,15 +1401,26 @@ it, which lengthens the wait toward its bound and fails it there. It
 returns whether the agent was seen gone; each fixture keeps its own
 assertion on that.
 
+The release ends the agent's whole group exactly when the agent still
+answered at the bound, the failing path, whatever the hold's member did
+in the meantime (`PR340-R3-2`). On the passing path it sends nothing to
+the agent's group or pid: the agent has been seen gone, the group is
+the reaper's to settle, and the release ends only its own member, by
+its own pid. A member not collected within its bound fails the test.
+
 The first shape followed the same wait with `kill(agent_pid, SIGKILL)`
 and `kill(-agent_pid, SIGKILL)`, whatever the wait had found, under a
 comment calling them cleanup for the failing case and a no-op for the
 passing one. On the passing path the agent had been seen gone, so both
 numbers were free, and under a reuse the two signals would have reached
 whatever had taken them. Now nothing is signalled by a saved number:
-the release signals the agent's group only while the hold's member
-still runs, and on the passing path the reaper's settle has normally
-ended that member with the rest of the group.
+the release signals the agent's group only on the failing path, and
+only while the hold's member, still unreaped, keeps the group in being.
+The hold's first shape decided by the member instead, ending the group
+only while its member still ran, so on the failing path a member that
+had exited alone left the agent and the group's other members running;
+and on the passing path it sent the group SIGKILL when its member still
+ran, a signal the passing path does not owe.
 
 ## `fn the_container_cell_reclaims_its_tree_only_after_the_reapers_last_write() {`
 
@@ -1437,18 +1512,21 @@ while the agent leads it. The test then does what the fixture's
 processes do on the passing path: the hold's member and the agent are
 ended, as the reaper's settle ends every member of the group (here by
 their own pids, both being this test's children); the member is left
-unreaped (`await_exit_without_reaping`, so the release finds it ended
-rather than racing its exit); and the agent is collected, as its new
-parent would collect it. Then `settle_agent_group` runs. The agent no
-longer answers, so the cleanup must report it gone, and the stand-in
-must end only when its stdin is closed, with no signal in its status.
+unreaped (`await_exit_without_reaping`), as the reaper's settle leaves
+it, since only the release reaps it; and the agent is collected, as its
+new parent would collect it (`end_and_collect`). Then
+`settle_agent_group` runs. The agent no longer answers, so the cleanup
+must report it gone, and the stand-in must end only when its stdin is
+closed, with no signal in its status (`close_and_collect`).
 
 A cleanup that signals the agent's pid and group after the wait, as the
 first shape did, ends the stand-in by SIGKILL instead, wherever the two
-signals sit relative to the release. Whatever the cleanup sends, it
-reaches no process outside this test's: the stand-in, an unreaped child
-of this test, keeps the group's number in use throughout, and no
-process has the agent's pid any more.
+signals sit relative to the release; so does a release that ends the
+group on the passing path. Whatever the cleanup sends, it reaches no
+process outside this test's: the stand-in, an unreaped child of this
+test, keeps the group's number in use throughout, and no process has
+the agent's pid any more. Every wait is bounded, and every child is
+collected before the assertions.
 
 ## `fn an_agent_still_running_at_its_bound_is_killed_with_its_group() {`
 
@@ -1459,10 +1537,59 @@ own child leading a group of its own, `other` a second member of that
 group, as the reaper's anchor is in the fixtures' agent groups, and the
 hold joins while the agent runs. `settle_agent_group` is given 100 ms
 and must report the agent not gone; then both stdins are closed and
-both processes collected, and each must have ended by SIGKILL, the
-release's signal to the group, not by end of file. A release that
-dropped the group signal leaves both to end by their stdin, and the
-statuses say so.
+both processes collected within a bound (`close_and_collect`), and each
+must have ended by SIGKILL, the release's signal to the group, not by
+end of file. A release that dropped the group signal leaves both to end
+by their stdin, and the statuses say so.
+
+## `fn an_agent_outliving_its_bound_is_killed_with_its_group_even_when_its_hold_member_has_exited() {`
+
+The catching control for `PR340-R3-2`, the regression lens's sequence:
+the previous test with one step added, the hold's member alone ended by
+its own pid and left unreaped (`await_exit_without_reaping`) before the
+settle, as anything other than a signal to the whole group might end it.
+The agent and `other` still run, so the failing path still owes their
+group's ending: the release must send the group SIGKILL while the
+exited member keeps it in being, and both must end by that signal. A
+release that reads the member's state, as the hold's first shape did,
+reaps the exited member, sends nothing, and leaves both to end by their
+stdin: `(None, None)` where `(Some(9), Some(9))` is required.
+
+## `fn a_hold_dropped_while_a_failure_unwinds_kills_its_group_even_when_its_member_has_exited() {`
+
+The same obligation on the path that has no settle: a failed assertion
+between a fixture's join and its settle, which drops the hold while the
+failure unwinds. The hold's member alone is ended and left unreaped, as
+in the previous test; then a panic carrying the hold unwinds through
+`catch_unwind`, and the drop must end the agent's whole group while the
+exited member still holds it. The payload is checked to be the
+deliberate panic, so the release observed is the one claimed; the agent
+and `other` are collected before any assertion, and each must have
+ended by SIGKILL.
+
+## `fn a_refused_join_ends_its_stopped_member_within_its_bound_and_signals_nothing_else() {`
+
+The catching control for `PR340-R3-1`: a refused join reports within a
+bound when its member cannot run, and signals nothing but its member.
+The group is the test's own: its leader is this test's child, unreaped
+until the end, so every signal the test sends to the group reaches its
+own children only. The join's ownership check stops the whole group, as
+a group stop would suspend a newly joined member, then answers that the
+group was not held. The join runs on a thread of its own, under
+`catch_unwind`, and its report, the refusal's message, comes back on a
+channel within 30 s. The message must be the refusal's and must say
+that the member was ended by SIGKILL and collected; the leader, resumed
+and ended by its stdin, must carry no signal, so the refusal sent
+nothing to the group's number.
+
+A refusal that waits for its stopped member without a bound, as the
+join's first shape did, does not report in time: past 30 s the test
+ends its own group by SIGKILL, which the leader still keeps the test's,
+so the waiting join returns; it then collects the leader and fails,
+naming the late report. A refusal that only bounds the wait leaves its
+stopped member behind and says so in its message; one that signals the
+group's number ends the leader by that signal. Every wait is bounded,
+and the leader is collected before any assertion.
 
 ## `const READINESS_ROLE: &str = "UPSTROKE_READINESS_ROLE";`
 
