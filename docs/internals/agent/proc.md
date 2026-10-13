@@ -2979,9 +2979,106 @@ scope, so the lease path the reaper reports is the one the conductor
 registered. The exclusive `flock` the test holds is on its own open
 file description; the child's `close` of the inherited copy does not
 release it, and the child's own `open` and `LOCK_SH | LOCK_NB` refuse
-at once, so no scheduling outcome reaches the assertion. This is also
-the only test that drives `report_setup_failure_and_exit` in a real
-child; the frame's encoding is pinned separately without a fork.
+at once, so the refusal and its report are not a scheduling outcome.
+This is also the only test that drives `report_setup_failure_and_exit`
+in a real child; the frame's encoding is pinned separately without a
+fork.
+
+How the reaper ends after its report is a scheduling outcome, and the
+second assertion is written for both of them
+(`PR274-REAPER-EXIT-ASSERTION-RACES-THE-PARENTS-SIGKILL`).
+`report_setup_failure_and_exit` writes the frame and then calls
+`_exit(1)`; the parent's `await_ready` returns the frame as soon as it
+lands, and `abandon` sends `SIGKILL` and collects the child within
+`HELPER_END_BUDGET`. Which of the child's exit and the parent's kill
+lands first is the scheduler's, and the ending clause says which:
+`having already exited with status 1` or `killed by signal 9`, each
+after `SIGKILL was delivered, and the wait collected it` (on the
+identity path,
+`SIGKILL was delivered through the helper's identity, and the wait through it collected it`).
+Each is a reaper that reported, ended and was collected. Until that
+finding's repair the assertion named only the first, so it failed
+whenever the parent's kill landed between the child's `write` and its
+`_exit`. It now accepts exactly those two clauses, in the words of the
+path `fork_helper` took, through `reported_ending` below. The first
+assertion is unchanged: the refused lease's path reaching the message,
+as a prefix that ends at `failed: `, is what the test exists for. The
+errno stays pinned where it was, by
+`a_setup_failure_report_names_the_step_the_lease_and_the_errno`, which
+spawns nothing and so never meets the race.
+
+## `mod tests` › `fn reported_ending(message: &str, through_identity: bool) -> Option<ReportedEnding> {`
+
+Reads the clause `spawn_reaper` writes after its last `; ending it: `,
+which its failure message puts last, and answers which of the two
+endings of a reaper that reported it is: `ItsOwnExit` for
+`having already exited with status 1` and `TheParentsKill` for
+`killed by signal 9`, each only after
+`SIGKILL was delivered, and the wait collected it, ` in the words
+`describe_helper_end` uses for the path the helper was forked on. The
+clause must be exactly one of the two. Anything else is `None`: another
+exit status, one that only begins with 1 included (the earlier
+`contains` read such a status as 1); another signal; a status that is
+neither; a collection that reported no status; a child still there when
+the bounded wait gave up; a wait that collected nothing; a `SIGKILL`
+that was not delivered; the other path's words; and a clause with more
+after it. Status 1 is `report_setup_failure_and_exit`'s, and signal 9
+is `abandon`'s own `SIGKILL`.
+
+## `mod tests` › `fn the_identity_path_is_on() -> bool {`
+
+Which words `reported_ending` expects: `helper_identity_path_on` on
+Linux, where `fork_helper` reads it, and `false` everywhere else, where
+there is no identity path.
+
+## `mod tests` › `fn a_stand_in_reaper_ended_by(ending: ReportedEnding) -> (HelperEnd, String) {`
+
+Each ending with its winner fixed, so neither is left to the scheduler.
+The stand-in is forked by `fork_helper`, on the path a reaper would be,
+and ended by `Reaper::abandon`, the call `spawn_reaper` makes. For
+`ItsOwnExit` it calls `_exit(1)` at once, and the parent waits, without
+collecting it, until it has exited (`exited_unreaped`, polled within
+`ISOLATED_CHILD_COLLECTION_BOUND`), so the `SIGKILL` from `abandon`
+reaches a child that has already ended itself. For `TheParentsKill` it
+blocks in `pause` and never ends itself, so only that `SIGKILL` can end
+it. Each lives only from its fork to its own `_exit` or the parent's
+kill. A stand-in `abandon` did not collect is collected here before
+anything asserts: one still this test's is killed and collected within
+the same bound, one that has already ended is collected, and one the
+look finds is not this test's is never signalled by its number. What
+happened is returned with the ending, for the assertion's message.
+
+## `mod tests` › `fn assert_either_ending_and_no_other_is_accepted(through_identity: bool) {`
+
+Feeds `reported_ending`, the assertion path the end-to-end test uses,
+with what `describe_helper_end` says of each stand-in, after the report
+`describe_ready_wait` gives for a refused shared lock, and requires each
+of the two endings to be read as itself. Then it feeds every ending
+`reported_ending` must refuse, each built as `waitpid` and the kill
+would have answered it, and the two accepted endings in the other path's
+words, and requires `None` for each.
+
+## `mod tests` › `fn a_reaper_that_reported_may_end_by_its_own_exit_or_the_parents_kill_and_nothing_else() {`
+
+The regression test for
+`PR274-REAPER-EXIT-ASSERTION-RACES-THE-PARENTS-SIGKILL`, on the path
+this process forks helpers on. With the earlier assertion restored in
+`reported_ending`, it fails at the stand-in ended by the parent's kill,
+the ending the sightings recorded, and it fails without a race, because
+that stand-in can end no other way.
+
+## `mod tests` › `fn reported_ending_identity_helper() {`
+
+The same check on the identity path, in a process of its own with
+`UPSTROKE_HELPER_IDENTITY=1`, where both stand-ins are forked with a
+descriptor and ended through it. After it, no child of the fixture is
+left.
+
+## `mod tests` › `fn a_reaper_that_reported_may_end_either_way_through_its_identity() {`
+
+Runs `reported_ending_identity_helper` with the path on, so the
+identity path's pair of words is checked on Linux whatever the suite's
+own environment holds.
 
 ## `mod tests` › `fn run_isolated(`
 
