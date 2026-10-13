@@ -3299,11 +3299,18 @@ fn unix_reaper_kills_labeled_containers() {
          rm) : > \"$UPSTROKE_STUB_DIR/removed\" ;;\n\
          esac\n\
          exit 0\n",
+        &[],
+        || {},
     );
 }
 
 #[cfg(unix)]
-fn reaper_container_cells(cells: &[(bool, bool)], stub_script: &str) -> Vec<i32> {
+fn reaper_container_cells(
+    cells: &[(bool, bool)],
+    stub_script: &str,
+    stub_env: &[(&str, &std::ffi::OsStr)],
+    mut on_drain_wait: impl FnMut(),
+) -> Vec<i32> {
     const CONTAINER_ID: &str = "c0ffee0000000000000000000000000000000000000000000000000000000001";
     const PRIVATE_ROOT: &str = "/srv/upstroke-reaper-fixture/private";
     const INCARNATION: &str = "01KZTAAAAAAAAAAAAAAAAAAAAA";
@@ -3325,12 +3332,6 @@ fn reaper_container_cells(cells: &[(bool, bool)], stub_script: &str) -> Vec<i32>
     fn alive(pid: i32) -> bool {
         // SAFETY: signal 0 performs no delivery.
         unsafe { libc::kill(pid, 0) == 0 }
-    }
-    fn group_ended(pgid: i32) -> bool {
-        // SAFETY: signal 0 performs no delivery; a negative pid only asks
-        // whether a process of that group exists.
-        let answered = unsafe { libc::kill(-pgid, 0) };
-        answered == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
     }
     fn read_pid(path: &std::path::Path, timeout: Duration) -> i32 {
         let deadline = Instant::now() + timeout;
@@ -3400,6 +3401,7 @@ fn reaper_container_cells(cells: &[(bool, bool)], stub_script: &str) -> Vec<i32>
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
+        coordinator.envs(stub_env.iter().copied());
         if bare {
             let inherited = std::env::var_os("PATH").unwrap_or_default();
             let mut search = vec![dir.to_path_buf()];
@@ -3517,18 +3519,12 @@ fn reaper_container_cells(cells: &[(bool, bool)], stub_script: &str) -> Vec<i32>
         );
 
         let drain_bound = Duration::from_secs(30);
-        let drained_by = Instant::now() + drain_bound;
-        while !group_ended(reaper_pid) && Instant::now() < drained_by {
-            thread::sleep(Duration::from_millis(10));
-        }
-        if !group_ended(reaper_pid) {
-            // SAFETY: integers only, and sent only on this failing path, to a
-            // group last seen with a member.
-            let swept = unsafe { libc::kill(-reaper_pid, libc::SIGKILL) } == 0;
+        if let Err(waited) = drain_reaper_group(reaper_pid, drain_bound, &mut on_drain_wait) {
             panic!(
-                "[{cell}] the reaper's process group {reaper_pid} still had a member \
-                 {drain_bound:?} after the cell's last assertion, so a stub the reaper started \
-                 could still write into {}; SIGKILL to the group delivered: {swept}",
+                "[{cell}] process group {reaper_pid} still answered with a member {waited:?} after \
+                 the cell's last assertion (bound {drain_bound:?}), so a stub the reaper started \
+                 may still write into {}; nothing was signalled: the test holds the group's number, \
+                 not the group",
                 dir.display()
             );
         }
@@ -3537,69 +3533,138 @@ fn reaper_container_cells(cells: &[(bool, bool)], stub_script: &str) -> Vec<i32>
 }
 
 #[cfg(unix)]
+fn drain_reaper_group(
+    pgid: i32,
+    bound: Duration,
+    mut on_wait: impl FnMut(),
+) -> Result<(), Duration> {
+    fn group_ended(pgid: i32) -> bool {
+        // SAFETY: signal 0 performs no delivery; a negative pid only asks
+        // whether a process of that group exists.
+        let answered = unsafe { libc::kill(-pgid, 0) };
+        answered == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    }
+    let began = Instant::now();
+    let mut announced = false;
+    while !group_ended(pgid) {
+        let waited = began.elapsed();
+        if waited >= bound {
+            return Err(waited);
+        }
+        if !announced {
+            announced = true;
+            on_wait();
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
 #[test]
 fn the_container_cell_reclaims_its_tree_only_after_the_reapers_last_write() {
     let journal_tree =
         crate::rundir::scratch_tree::acquire(&std::env::temp_dir(), "reaper-late-writes")
             .expect("a journal tree");
-    let journal = journal_tree.path().join("late-writes");
-    let quoted = journal
-        .to_str()
-        .filter(|path| !path.contains('\''))
-        .expect("a journal path one single-quoted shell word can carry");
-    let stub_script = format!(
+    let control = journal_tree
+        .path()
+        .join("it's \"late\" $writes `here` \\ too");
+    std::fs::create_dir(&control).expect("a control directory no shell word can carry");
+    let journal = control.join("late-writes");
+    let gate = control.join("gate");
+    let reaper = reaper_container_cells(
+        &[(false, true)],
         "#!/bin/sh\n\
          printf '%s\\n' \"$*\" >> \"$UPSTROKE_STUB_DIR/argv.log\"\n\
          logged=$?\n\
          case \"$1\" in\n\
          ps) if [ -f \"$UPSTROKE_STUB_DIR/removed\" ]; \
-         then printf 'ps %s\\n' \"$logged\" >> '{quoted}'; \
-         else printf '%s\\n' '{{CONTAINER_ID}}'; fi ;;\n\
+         then printf 'ps %s\\n' \"$logged\" >> \"$UPSTROKE_WITNESS_JOURNAL\"; \
+         else printf '%s\\n' '{CONTAINER_ID}'; fi ;;\n\
          kill) : > \"$UPSTROKE_STUB_DIR/killing\"; sleep 1 ;;\n\
-         rm) sleep 2; printf '' > \"$UPSTROKE_STUB_DIR/removed\"; \
-         printf 'rm %s\\n' \"$?\" >> '{quoted}' ;;\n\
+         rm) held=0; \
+         until [ -e \"$UPSTROKE_WITNESS_GATE\" ] || [ ! -d \"$UPSTROKE_STUB_DIR\" ]; do \
+         held=$((held + 1)); \
+         if [ \"$held\" -gt 1000 ]; then \
+         printf 'rm hold expired\\n' >> \"$UPSTROKE_WITNESS_JOURNAL\"; exit 0; fi; \
+         sleep 0.01; done; \
+         printf '' > \"$UPSTROKE_STUB_DIR/removed\"; \
+         printf 'rm %s\\n' \"$?\" >> \"$UPSTROKE_WITNESS_JOURNAL\" ;;\n\
          esac\n\
-         exit 0\n"
-    );
-    let reaper = reaper_container_cells(&[(false, true)], &stub_script)
-        .first()
-        .copied()
-        .expect("the dying cell's reaper");
+         exit 0\n",
+        &[
+            ("UPSTROKE_WITNESS_JOURNAL", journal.as_os_str()),
+            ("UPSTROKE_WITNESS_GATE", gate.as_os_str()),
+        ],
+        || {
+            std::fs::File::create(gate.as_path()).expect("publish the drain's gate");
+        },
+    )
+    .first()
+    .copied()
+    .expect("the dying cell's reaper");
 
-    let contained_by = Instant::now() + Duration::from_secs(30);
-    let contained = loop {
+    let decided_by = Instant::now() + Duration::from_secs(30);
+    loop {
         // SAFETY: signal 0 performs no delivery; a negative pid only asks
         // whether a process of that group exists.
         let answered = unsafe { libc::kill(-reaper, 0) };
         if answered == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
-            break true;
+            break;
         }
-        if Instant::now() >= contained_by {
-            break false;
-        }
-        thread::sleep(Duration::from_millis(10));
-    };
-    if !contained {
-        // SAFETY: integers only, and sent only on this failing path, to a
-        // group last seen with a member.
-        let swept = unsafe { libc::kill(-reaper, libc::SIGKILL) } == 0;
-        panic!(
-            "the reaper's process group {reaper} outlived this witness's own 30 s containment; \
-             SIGKILL to the group delivered: {swept}"
+        assert!(
+            Instant::now() < decided_by,
+            "process group {reaper} still answered with a member 30 s after the witness's cell \
+             ended; nothing was signalled: the witness holds the group's number, not the group"
         );
+        thread::sleep(Duration::from_millis(10));
     }
-    let late: Vec<String> = std::fs::read_to_string(&journal)
-        .unwrap_or_default()
-        .lines()
-        .map(str::to_owned)
-        .collect();
+    let late: Vec<String> = match std::fs::read_to_string(&journal) {
+        Ok(text) => text.lines().map(str::to_owned).collect(),
+        Err(absent) if absent.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => panic!("reading the journal {}: {error}", journal.display()),
+    };
     assert_eq!(
         late,
         ["rm 0", "ps 0"],
-        "each write the reaper's stubs make after the cell's third log line -- `rm` creating \
-         `removed` after a two-second hold, then the second listing's append -- must land in the \
-         cell's tree before the tree is reclaimed; a non-zero status or a missing line is a write \
-         that came after the reclaim"
+        "the `rm` stub holds its write until the drain's gate exists or the cell's tree is gone, \
+         so `rm` creating `removed` and the second listing's append land in the tree only when \
+         the cell waits for the reaper's group before its reclaim; a non-zero status, a missing \
+         line or `rm hold expired` is a cell that reclaimed first"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_reaper_group_drain_fails_at_its_bound_without_signalling_the_group() {
+    use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
+
+    let mut member = Command::new("/bin/sh")
+        .args(["-c", "read -r line"])
+        .process_group(0)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn a group leader this test owns");
+    let pgid = i32::try_from(member.id()).expect("a pid fits an i32");
+    let mut announced = 0_u32;
+    let outcome = drain_reaper_group(pgid, Duration::from_millis(100), || announced += 1);
+    drop(member.stdin.take());
+    let status = member.wait().expect("reap the group's member");
+    assert!(
+        outcome.is_err(),
+        "the drain reported an end for a group whose member was still running"
+    );
+    assert_eq!(
+        announced, 1,
+        "the drain announced its wait {announced} times"
+    );
+    assert_eq!(
+        status.signal(),
+        None,
+        "the member ended by a signal ({status}): the drain signalled a group it held only the \
+         number of"
     );
 }
 

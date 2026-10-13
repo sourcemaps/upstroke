@@ -1005,8 +1005,8 @@ from killing a live coordinator's containers on the ordinary settle path.
 The cells run in `reaper_container_cells`, which this test hands its
 three cells and its recording stub. The regression witness
 `the_container_cell_reclaims_its_tree_only_after_the_reapers_last_write`
-drives the same function with a held stub, so the lifetime it pins is
-this test's own and not a copy of it.
+drives the same function with a stub that holds its late writes, so the
+lifetime it pins is this test's own and not a copy of it.
 
 ## `fn unix_reaper_kills_labeled_containers()` › `&[(true, true), (false, true), (false, false)],`
 
@@ -1036,40 +1036,52 @@ The text is a template: `reaper_container_cells` replaces its
 `{CONTAINER_ID}`, so the stub written into each tree is byte for byte
 the one the `format!` this replaced wrote.
 
-## `fn reaper_container_cells(cells: &[(bool, bool)], stub_script: &str) -> Vec<i32> {`
+## `fn unix_reaper_kills_labeled_containers()` › `&[],`
+
+No environment of the test's own for the stub, and a drain hook that
+does nothing: the recording stub holds nothing, so there is no gate to
+publish. Both are what the witness below uses.
+
+## `fn reaper_container_cells(`
 
 One scratch tree, one disposable coordinator and one reaper per cell,
 `(bare, coordinator_dies)` each, with `stub_script` written into the
 tree as the `docker` the reaper's scope names. It returns each cell's
-reaper pid, in cell order, so that a caller can contain what that reaper
-started once the cell has ended.
+reaper pid, in cell order, so that a caller can wait for what that
+reaper started once the cell has ended.
 
-## `fn reaper_container_cells(cells: &[(bool, bool)], stub_script: &str) -> Vec<i32>` › `fn group_ended(pgid: i32) -> bool {`
+`stub_env` reaches the stub through the coordinator's environment, which
+the reaper and every stub it starts inherit, as `OsStr` values: a path
+passed there is never text a shell parses, and never converted to
+`str`. `on_drain_wait` runs at most once per dying cell, when the drain
+below first finds the reaper's group with a member and is about to wait
+for it; the witness publishes its gate there.
 
-Whether no process of the group `pgid` exists: `kill(-pgid, 0)`
-answering `ESRCH`, and nothing else. A group the caller may not signal
-(`EPERM`) still exists, and no other answer is read as an end.
+## `fn reaper_container_cells` › `coordinator.envs(stub_env.iter().copied());`
 
-## `fn reaper_container_cells(cells: &[(bool, bool)], stub_script: &str) -> Vec<i32>` › `let inherited = std::env::var_os("PATH").unwrap_or_default();`
+The caller's names, after the fixture's own. The coordinator and its
+reaper read none of them; the stub does.
+
+## `fn reaper_container_cells` › `let inherited = std::env::var_os("PATH").unwrap_or_default();`
 
 Only through `PATH`: the scratch directory first, the
 inherited entries after it so the stub's own `sleep` still
 resolves.
 
-## `fn reaper_container_cells(cells: &[(bool, bool)], stub_script: &str) -> Vec<i32>` › `coordinator.wait().expect("reap the coordinator");`
+## `fn reaper_container_cells` › `coordinator.wait().expect("reap the coordinator");`
 
 The live half: the coordinator settles its invocation and
 exits. Nothing may have been killed on its behalf.
 
-## `fn reaper_container_cells(cells: &[(bool, bool)], stub_script: &str) -> Vec<i32>` › `assert!(`
+## `fn reaper_container_cells` › `assert!(`
 
 (3) R28 is still held while the container kill is in flight.
 
-## `fn reaper_container_cells(cells: &[(bool, bool)], stub_script: &str) -> Vec<i32>` › `let deadline = Instant::now() + Duration::from_secs(30);`
+## `fn reaper_container_cells` › `let deadline = Instant::now() + Duration::from_secs(30);`
 
 (2) The order, from the stub's own ordered log.
 
-## `fn reaper_container_cells(cells: &[(bool, bool)], stub_script: &str) -> Vec<i32>` › `let declared = crate::runner::container::census::ReaperContainerScope::new(`
+## `fn reaper_container_cells` › `let declared = crate::runner::container::census::ReaperContainerScope::new(`
 
 The removal the reaper **actually executed**, against the
 declaration in `ReaperContainerScope::remove_argv` rather than
@@ -1087,15 +1099,15 @@ one anonymous volume per container into a state no later census
 can discover, the container being gone and nothing else referring
 to the volume.
 
-## `fn reaper_container_cells(cells: &[(bool, bool)], stub_script: &str) -> Vec<i32>` › `let filters: Vec<&str> = lines[0]`
+## `fn reaper_container_cells` › `let filters: Vec<&str> = lines[0]`
 
 (1) Both filters, two distinct values.
 
-## `fn reaper_container_cells(cells: &[(bool, bool)], stub_script: &str) -> Vec<i32>` › `let settled_by = Instant::now() + Duration::from_secs(30);`
+## `fn reaper_container_cells` › `let settled_by = Instant::now() + Duration::from_secs(30);`
 
 (4) The process half still happened.
 
-## `fn reaper_container_cells(cells: &[(bool, bool)], stub_script: &str) -> Vec<i32>` › `let drain_bound = Duration::from_secs(30);`
+## `fn reaper_container_cells` › `let drain_bound = Duration::from_secs(30);`
 
 The tree outlives every writer the reaper started
 (`PR339-CONTAINER-REAPER-TEST-RECLAIMS-BEFORE-THE-REAPERS-LAST-WRITE`).
@@ -1106,10 +1118,10 @@ reaper's loop, appends a fourth line and re-creates `argv.log` if the
 reclaim had already unlinked it. One of those landing between
 `remove_dir_all`'s enumeration and its removal of the root fails the
 reclaim with `ENOTEMPTY`, and the guard panics on the normal path. So a
-dying cell does not let its guard drop until the reaper's own process
-group has no member, and past 30 s, the bound of the test's other waits,
-it sends that group SIGKILL, reports whether it was delivered, and fails
-naming the cell, the group and the tree.
+dying cell does not let its guard drop until `drain_reaper_group` finds
+the reaper's own process group without a member. Past 30 s, the bound
+of the test's other waits, it fails naming the cell, the group and the
+tree, and it signals nothing.
 
 Why the group's end is the writers' end. Every process that can write
 into the tree after the last assertion is a stub invocation the reaper
@@ -1121,9 +1133,25 @@ the forked children change no group before `execv`; and the stub is a
 non-interactive `/bin/sh`, which runs no job control, so the one
 command it forks, `sleep`, runs in the foreground and in the same
 group. An ended group is therefore an ended set of writers, observed
-directly. A group id that comes back, a reused pid made a group leader,
-can only lengthen the wait and fail it at the bound; it cannot end the
-wait early.
+directly.
+
+Why nothing is signalled. Once its coordinator is reaped the reaper is
+an orphan its new parent collects, so all the test holds of the group
+is its number, and a number can be reused once the group has ended.
+The probe cannot end the wait early: while the reaper's group has a
+member its id stays in use, and no other group can take it. A reuse
+after the group ended can lengthen the wait to the bound and fail it
+there, a false red, and nothing more, because no path here signals the
+group. The first shape of this drain sent the group SIGKILL on that
+failing path, which under such a reuse would have reached whatever
+group had taken the number (`PR340-R1-1`). Holding the group by
+ownership instead would need a member of the test's own inside the
+reaper's group, which would itself keep the group from ending, and the
+test has no portable way to enumerate a group's other members. What
+that gives up: a group still busy at the bound is left to the reaper's
+own bounds (`reap_bounded` kills a stub that outlives its 30 s), and the
+guard's reclaim while the failure unwinds may report a tree it could
+not remove.
 
 The reaper's own exit (`alive(reaper_pid)`) would also do here, by
 another route: once its coordinator has died the reaper `_exit`s when
@@ -1144,40 +1172,102 @@ What this does not settle: a writer outside the analysed fixture paths
 is not excluded by the wait, and the macOS red that filed the finding
 has no established cause.
 
+## `fn drain_reaper_group(`
+
+Waits for the process group `pgid` to have no member, probing every
+10 ms, and returns how long it waited once `bound` has passed with a
+member still answering. `on_wait` runs once, after the first probe that
+finds a member and before the first pause: the announcement the
+witness's gate is built on. The bound is read before the announcement,
+so a zero bound fails without announcing. Nothing here signals; the only
+call is `kill(-pgid, 0)`. It is a function of its own so that
+`a_reaper_group_drain_fails_at_its_bound_without_signalling_the_group`
+can drive its bounded failure against a group that test owns.
+
+## `fn drain_reaper_group(` › `fn group_ended(pgid: i32) -> bool {`
+
+Whether no process of the group `pgid` exists: `kill(-pgid, 0)`
+answering `ESRCH`, and nothing else. A group the caller may not signal
+(`EPERM`) still exists, and no other answer is read as an end.
+
 ## `fn the_container_cell_reclaims_its_tree_only_after_the_reapers_last_write() {`
 
-The regression witness for the wait above, through the same
-`reaper_container_cells`: one `path-dies` cell, with a stub that holds
-the `rm` arm two seconds after its log line and then journals, in a
-scratch tree of its own, the status of each write the reaper's stubs
-make after the third line: `rm` and the status of creating `removed`,
-then `ps` and the status of the second listing's append.
+The regression witness for the drain, through the same
+`reaper_container_cells`: one `path-dies` cell, whose stub journals, in
+a directory of the witness's own, the status of each write the
+reaper's stubs make after the third line: `rm` and the status of
+creating `removed`, then `ps` and the status of the second listing's
+append.
 
-When the cell keeps its tree until the reaper's group has ended, both
-writes land and the journal reads `["rm 0", "ps 0"]`. When the guard
-drops right after the cell's last assertion, the old ordering, the tree
-is gone before the hold ends: creating `removed` fails, and the second
-listing's `execv` finds no stub and journals nothing, so the assertion
-fails on a non-zero `rm` status and a missing `ps` line.
+The order is forced by synchronization, not by a delay (`PR340-R1-2`).
+After its log line the `rm` stub holds until one of two states has been
+published: the drain's gate, an empty file `on_drain_wait` creates once
+the drain has found the reaper's group with a member and is about to
+wait for it; or the cell's tree gone, which only the guard's reclaim
+does. With the drain, the gate releases the hold while the drain
+waits, so both writes land and the journal reads `["rm 0", "ps 0"]`.
+Without it, the old ordering, nothing publishes the gate, so the hold
+ends only once the reclaim has removed the tree's root: the write comes
+after the reclaim however long the cell takes to reach it, creating
+`removed` fails, and the second listing's `execv` finds no stub and
+journals nothing. A delay anywhere in the cell cannot change that
+outcome. The first shape of this witness held the `rm` arm for a fixed
+two seconds instead, which assumed the cell reached its reclaim within
+them: with the drain removed and three seconds of delay added before
+the guard dropped, it passed.
 
-It forces the order rather than racing for it. The hold moves the late
-write past the old reclaim entirely, so at the old ordering the write
-finds no tree at all instead of racing the reclaim: the witness pins
-the lifetime ordering, not the native `ENOTEMPTY`, and says nothing
-about macOS. The hold has only to outlast the old ordering's drop,
-which comes a 20 ms poll and a few assertions after the third line.
+The hold is bounded: after 1,000 polls of `sleep 0.01`, at least ten
+seconds, the stub journals `rm hold expired` and exits without writing,
+so a cell that neither waits nor reclaims fails the witness rather than
+passing or hanging it. The bound can only fail the witness, and each
+poll tests a published state rather than waiting for time to pass.
+
+What fails at the old ordering, exactly: a write that finds no tree,
+not the native `ENOTEMPTY`. The hold moves the late write past the
+whole reclaim, so it never races `remove_dir_all`; the witness pins the
+lifetime ordering and says nothing about macOS.
+
+The two paths reach the stub as `OsStr` environment values,
+`UPSTROKE_WITNESS_JOURNAL` and `UPSTROKE_WITNESS_GATE`, expanded inside
+double quotes (`PR340-R1-3`): no path is shell source and none is
+converted to `str`, so a temporary directory whose name holds an
+apostrophe, or bytes that are not UTF-8, is carried as it is. Both
+live in a directory whose own name holds an apostrophe, double quotes,
+`$`, backticks, a backslash and spaces, so every run carries such a
+path.
 
 `removed` is created by `printf ''` rather than `:` here: a failed
 redirection on a special built-in ends a non-interactive shell, which
 would take the journal line with it.
 
-## `fn the_container_cell_reclaims_its_tree_only_after_the_reapers_last_write()` › `let contained_by = Instant::now() + Duration::from_secs(30);`
+## `fn the_container_cell_reclaims_its_tree_only_after_the_reapers_last_write()` › `let decided_by = Instant::now() + Duration::from_secs(30);`
 
 Before the journal is read, the witness waits for the reaper's group
-itself, so the journal is final and nothing the reaper started still
-runs when it is read, at the old ordering as at the new. The probe is
-written out here rather than taken from the cell's `group_ended`, so a
-mutation of that probe cannot also disable this containment.
+itself, so the journal is final when it is read, at the old ordering as
+at the new. The probe is written out here rather than taken from
+`drain_reaper_group`, so a mutation of the drain cannot also disable
+this wait. Like the drain it signals nothing: past 30 s it fails
+naming the group.
+
+## `fn the_container_cell_reclaims_its_tree_only_after_the_reapers_last_write()` › `let late: Vec<String> = match std::fs::read_to_string(&journal) {`
+
+A journal that does not exist is a cell whose stubs wrote nothing late;
+any other error reading it fails the witness rather than reading as an
+empty journal.
+
+## `fn a_reaper_group_drain_fails_at_its_bound_without_signalling_the_group() {`
+
+The drain's bounded failure signals nothing (`PR340-R1-1`). The member
+is this test's own child, a shell blocked reading its stdin, which
+`process_group(0)` makes the leader of a group of its own, so the test
+holds that group by ownership: the child is not reaped until the test
+waits for it, and until then its number cannot name another group.
+`drain_reaper_group` is given 100 ms and must fail, having announced
+once. The test then closes the child's stdin, the shell's `read` meets
+end of file and the shell exits, and its status must carry no signal.
+A drain that signalled the group on its failing path, as the first
+shape did, ends the child by that signal before its stdin is closed,
+and the status says so.
 
 ## `const READINESS_ROLE: &str = "UPSTROKE_READINESS_ROLE";`
 
