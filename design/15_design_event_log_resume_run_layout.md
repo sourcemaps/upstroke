@@ -283,11 +283,16 @@ then — as a commit at the attempt's prepared pin followed by `-kept`, whatever
 publishes a kept pin, and its refusal names that pin. Every other attempt error after its worker ran, and a reviewed
 candidate whose publication fails, keeps the checkout the same way: what the checkout holds, or the reviewed
 candidate, is pinned at that name, and the error names the pin, or the pin's failure when it cannot be written. A path
-that a clean or smudge filter attribute covers is one such failure, since no capture lets Git run a filter's configured
-code: the output then stays in the checkout unpinned, the error says that nothing outside the checkout keeps it and what
-to fix first, and while the attribute covers a path Git lists for the checkout — every path its index holds, a tracked
-one moved out of the checkout included, and every untracked path not ignored — a resume of the attempt refuses before
-discarding anything, saying the same.
+that a clean or smudge filter attribute covers is one such failure when Git lists it for the checkout, since a capture
+refuses such a path before `git add` could run the filter's configured code: the output then stays in the checkout
+unpinned, the error says that nothing outside the checkout keeps it and what to fix first, and while the attribute
+covers a path Git lists for the checkout — every path its index holds, a tracked one moved out of the checkout
+included, and every untracked path not ignored — a resume that reaches that listing on the run's branch, with that
+attempt the only one its log records in flight, refuses before discarding anything, saying the same; one that starts
+off the run's branch stops earlier, before it switches to that branch, with the bare filter refusal, discarding
+nothing either. The capture's refusal covers only the paths Git lists for the checkout: an ignored path in the way of
+what `HEAD` holds, which the kept pin's capture adds with `git add -f`, is not checked (`FUD-F1R-IGNOREDFOOTPRINT`,
+open).
 Of the schema-3 pins, a kept pin is the one without a successful settlement that is not orphan residue. A resume
 removes the checkout's copy of the attempt in flight only
 once that attempt's kept pin holds it and a durable copy of the pin that the resume itself has written,
