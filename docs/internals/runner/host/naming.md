@@ -376,7 +376,7 @@ because this module denies the three governed lints and its suite
 therefore cannot build a fixture that writes to a filesystem — every
 `std::fs` creation primitive is on `clippy.toml`'s disallowed list. All
 six are built from values instead, which is also why they are cheap
-enough to sit here. Three fixtures serve them, none of which creates
+enough to sit here. Four fixtures serve them, none of which creates
 anything: `undeterminable_directory` is a `PATH` entry with an interior
 NUL, which every platform rejects before the syscall with `InvalidInput`
 rather than `NotFound`, so the undetermined path is reached identically
@@ -388,11 +388,17 @@ under the temporary directory that this process owns and never creates
 `symlink_metadata` before use: every candidate under it is a genuine
 `NotFound`, whatever another process or a retained fixture has left in
 the shared temporary directory (`SWEEP-HOST-NAMING-005`, which is what
-pointing `PATH` at the ambient directory itself was). `this_test_binary`
+pointing `PATH` at the ambient directory itself was). It serves the
+absence control; the walked-past control takes its own from
+`absent_child_of`, for the reason given with that test below. `this_test_binary`
 is the directory and bare file name of the running test executable — the
 one program every platform has installed and executable by construction,
-and so the only "later match" a module that cannot write a file can
-offer.
+and so the one "later match" a module that cannot write a file can offer
+on every platform; the walked-past control uses one its platform provides
+instead, as given with that test below.
+A fifth, `descriptor_directory`, built only for a Unix other than Linux,
+serves the walked-past control there, as given with that test below; it
+opens two descriptors on a file that exists and creates nothing.
 
 `a_candidate_this_platform_cannot_stat_is_never_reported_as_absence`
 searches the undeterminable entry alone and requires the `stat` refusal,
@@ -408,9 +414,180 @@ test binary's own directory second, and the answer must be the
 the variant's fields, not on its rendering. Restoring `b9c73630`'s
 fall-through fails this test and nothing else in the `runner::host`
 suite. `a_directory_that_is_merely_absent_is_walked_past_to_a_later_match`
-is its control: the never-created directory first, the binary second,
-and the binary must be found. Making `NotFound` propagate fails it, the
-absence control above, and twenty-one tests of row 44's suite.
+is its control: an absent directory first, the later entry
+second, and the program must be found in the later entry. Both the
+later entry and the program depend on the platform, as given below:
+`exe` in `/proc/self` on Linux, `sh` in `/bin` on macOS and any other
+Unix, and `ntdll.dll` in the system directory on Windows. Making
+`NotFound` propagate fails it, the absence control above, and twenty-one
+tests of row 44's suite.
+
+Its absent directory is its own and not `never_created_directory`'s: a
+child of a parent that holds no entry of the names it is given and can
+gain none, as given below for each platform: on Linux the later entry
+itself, on macOS the process's own descriptor directory, and on Windows
+the later match itself. The test establishes that it is absent rather
+than assuming it. `absent_child_of` asks `symlink_metadata` in that
+parent for `upstroke-naming-walked-past`, then for that name with `-1`
+to `-9` appended, and returns the first that is answered `NotFound`,
+with that answer, which the test asserts is `NotFound` before it
+searches. A name that exists, or that is answered anything but
+`NotFound`, is passed over and never taken as absent; `absent_child_of`
+fails, naming every answer, only when none of the ten is answered
+`NotFound`. In each of the three parents the first is the one taken.
+No parent is taken on its spelling alone: on Linux the later match is
+looked up in the parent, and on Windows the parent is the later match,
+so there a missing parent fails the search with the resolver's refusal;
+on macOS the later match does not pass through `/dev/fd`, so before its
+probe the test establishes that `/dev/fd` is the process's descriptor
+directory, as given below.
+What the probe establishes holds when it is made, and in these parents
+it still holds when the search reaches the entry: no entry of the taken
+name can appear there in between. What a parent's answer still depends
+on is the test's permission to make that lookup at all: on Linux and
+Windows the search the later match's own lookup makes, and on macOS the
+search of `/dev/fd`, which `descriptor_directory` makes first, as given
+below. Refused it, the test fails, naming the answer, at
+`descriptor_directory` on macOS and at `absent_child_of` elsewhere, and
+never passes. The candidate
+beneath the taken entry is answered at the same component of its path
+as the probe was, so the search is answered as the probe was. The test
+reads no clock, and no byte of the temporary directory or of the test
+binary's location reaches either entry. The absent entry is absolute
+because its parent is, so the search asks it rather than skipping it.
+
+On Linux the later entry is `/proc/self` and the program is `exe`: the
+later match is `/proc/self/exe`, the link to the running executable that
+`std::env::current_exe` itself reads there, which `stat` follows to the
+binary. The absent entry's parent is that same directory: procfs fills a
+process's directory from a fixed set of names and creates nothing else
+there, so none of the ten can exist or be created there, and the first,
+`upstroke-naming-walked-past`, is answered `ENOENT` and taken. Every byte
+of the absent candidate, `/proc/self/upstroke-naming-walked-past/exe`, 42
+of them, is constructed, against Linux's `PATH_MAX` of 4,096, and its one
+prerequisite is the procfs `current_exe` already needs.
+
+On macOS, and any other Unix, the later entry is `/bin` and the program
+is `sh`: the later match is the system shell `/bin/sh`, and its
+prerequisite is that `/bin/sh` is what `is_program` accepts, a regular
+file with an execute bit. The suite already requires the shell there,
+since Unix tests in `src/agent/proc/tests.rs` spawn `/bin/sh` by that
+path. The absent entry's parent is `/dev/fd`, the directory of the
+asking process's own open descriptors: macOS answers `ENOENT` for a name
+there that is not a descriptor number, as none of the ten is, and no
+process can create an entry in it (XNU's devfs looks each name up as a
+descriptor number and has no operation that creates one there), so none
+of the ten can exist or be created there, and the first,
+`upstroke-naming-walked-past`, is answered `ENOENT` and taken. The absent
+candidate, `/dev/fd/upstroke-naming-walked-past/sh`, is answered
+`ENOENT` at that same name. Round 2's one native macOS run answered
+`/dev/fd/upstroke-naming-walked-past` `NotFound` and walked the candidate
+beneath it past.
+
+All of that holds only where `/dev/fd` is that directory, and the later
+match does not pass through it, so the test establishes it before its
+probe rather than taking it on its spelling. `descriptor_directory`
+opens the later match, `/bin/sh`, for reading, which the test must
+therefore also be able to do, moves that descriptor to position 1, and
+opens `/dev/fd/<n>`, where `<n>` is the descriptor's number. In the
+descriptor directory, opening that name duplicates descriptor `<n>`:
+fd(4) gives it as equivalent to `fcntl(<n>, F_DUPFD, 0)`. So the
+descriptor it returns must be open on the same file, by device and
+inode, at the same position, 1, both read through the two descriptors
+themselves (`fstat` and `lseek`): a `stat` of a `/dev/fd` entry answers
+no open file's identity on macOS, the native answer that
+`descriptors_open_on` in `src/rundir/tests.rs` records. A `/dev/fd` the
+check cannot establish fails the test there, naming the answer, before
+anything is probed: missing, its open answers `ENOENT`; an ordinary
+directory, empty or holding the ten names, has no entry `<n>` and
+answers `ENOENT`; one the test may not search answers `EACCES`; and an
+entry `<n>` put in an ordinary directory opens its file anew, at
+position 0, not as a duplicate. What the check cannot exclude is a
+`/dev/fd` whose entries are made to open, as duplicates, the descriptors
+of a real descriptor directory elsewhere: that is a counterfeit of the
+directory, not its absence. Every byte the branch spells is constructed:
+its candidates, 38 of them, or 40 under a numbered name, and 7, against
+macOS's `PATH_MAX` of 1,024, and the name `descriptor_directory` opens,
+`/dev/fd/` and the descriptor's digits, at most 18. On Linux and macOS
+alike, neither the binary's location nor its spelling reaches either
+entry.
+
+On Windows the later entry is the system directory, spelled
+`\\?\GLOBALROOT\SystemRoot\System32` on every installation, and the
+program is `ntdll.dll`: the later match is the native-API library that
+Windows maps into every process, this one included, from that directory.
+`\SystemRoot` is the kernel's own name for the Windows directory, and the
+`\\?\GLOBALROOT` prefix hands the rest of the path to the object manager,
+which resolves that name; std passes a `\\?\` path to the system
+unchanged. The absent entry's parent is the later match itself: a
+regular file holds no entries, so while `ntdll.dll` is the file the
+later match needs, none of the ten can exist or be created beneath it,
+and Windows answers a lookup beneath a file `NotFound`: its file systems
+fail a path through a file as a path not found, which std reads as
+`NotFound`, and the CI guest measured that answer
+(`PR77-WIN-UNDECIDABLE-STAT-ORACLE`). (Unix answers it
+`ENOTDIR`, at which the search rightly stops, so neither Unix branch can
+use its later match this way.) So the first, `upstroke-naming-walked-past`,
+is answered `NotFound` and taken. No unit of either entry comes from the
+binary's location, the temporary directory or the environment, and
+`join_paths`, which refuses an entry on Windows only for a double quote,
+has none to refuse. Every unit the test spells is a constant: the later
+match is 44 UTF-16 units, the absent entry 72, or 74 under a numbered
+name, and the longest candidate beneath it, under a numbered name and a
+default extension, 88. Windows replaces `\SystemRoot` with the Windows
+directory, so the file system is asked for that directory's own path and
+at most 63 constant units more, and Windows keeps that directory within
+`MAX_PATH`, 260 units, far inside the 32,767 of an extended path. The
+branch depends on `ntdll.dll` being a file there, which is also what
+keeps every name beneath it absent.
+
+A missing directory does not make every path beneath it `NotFound`: a
+path longer than the platform allows is refused for its length first, as
+Linux's `ENAMETOOLONG` (os error 36). Under the temporary directory the
+candidate was the temporary directory's length plus 77 bytes and the
+process id's digits, so under a 4,027-byte temporary directory it passed
+4,096 bytes, the search rightly stopped there with `Filesystem`, and this
+control failed on unchanged source, the class `P335-R2-PL-1` repaired in
+`src/runner/host/tests.rs`'s PATH-entry fixture; under a relative
+temporary directory that entry was relative, the search skipped it, and
+this control passed without walking anything past. This repairs
+`PR335-ABSENT-WITNESS-CANDIDATE-EXCEEDS-PATH-LIMIT`. The first repair, a
+name with the process id and the clock at the root of the binary's path,
+made the root's answer for a name the later match never looks up a
+prerequisite, read the clock, and kept the binary's directory as the later
+entry, which a Unix `PATH` cannot carry once it holds a `:`; the
+construction above repairs `PR336-PL-1`, `PR336-PL-2` and `PR336-PL-3`.
+The second repair's macOS branch searched `/dev/fd` for the number of a
+descriptor the test held open on its own binary; in its one native macOS
+run the search reported nothing of that name in either directory, so the
+branch now names the system shell at `/bin/sh` instead. From the second
+repair until `absent_child_of`, the test asserted one fixed name absent,
+so an entry of that name already in `/bin` or in the binary's directory,
+which nothing reserves, failed it before the search
+(`PR336-R4-PL-1`). The second repair's Windows branch kept both entries
+in the test binary's own directory, so every candidate under the absent
+entry was the binary's own path and 28 units more, and a binary placed
+within 28 units of Windows's limit failed the test on correct code
+(`PR336-R4-REG-001`); the system directory's constant spelling repairs
+it. `absent_child_of` then looked its ten names up in the later entry's
+own directory on every platform, and on macOS and Windows nothing
+reserves them there: entries of all ten in `/bin` or in the system
+directory, or all ten answered `EACCES` there, failed the test before
+the search, and an `EACCES` for the taken entry's candidate failed it at
+the search (`PR336-R6-PL-001`); and an entry of the taken name created
+there after the probe, holding the program, was found by the search
+ahead of the later match (`PR336-R6-PL-002`), each on correct code. The
+parents above, which can neither hold nor gain an entry of any of the
+ten, repair both; before them the macOS absent candidate was
+`/bin/upstroke-naming-walked-past/sh`, and the Windows absent entry
+`\\?\GLOBALROOT\SystemRoot\System32\upstroke-naming-walked-past`.
+Round 7's macOS branch took `/dev/fd` on its spelling: where it was
+missing, as in a chroot without devfs at that path, the probe's `ENOENT`
+was the missing parent's, and where it was an ordinary empty directory,
+that directory's; in both the test passed without the directory that
+keeps occupancy and insertion out, and an ordinary directory there could
+again be given the ten names (`PR336-R7-REG-001`).
+`descriptor_directory` repairs it.
 
 `a_pathext_entry_no_string_can_carry_reaches_the_candidate_intact`
 drives `ProgramNaming::Windows` — on every platform, per the grid — with
