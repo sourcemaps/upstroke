@@ -1520,6 +1520,8 @@ fn unix_reaper_reparent_helper() {
 #[cfg(unix)]
 #[test]
 fn the_reaper_settles_its_group_on_reparenting_without_waiting_for_pipe_eof() {
+    use std::os::unix::process::CommandExt as _;
+
     fn alive(pid: i32) -> bool {
         // SAFETY: signal 0 performs no delivery; it only asks whether the
         // pid can be signalled.
@@ -1555,6 +1557,7 @@ fn the_reaper_settles_its_group_on_reparenting_without_waiting_for_pipe_eof() {
         .env("UPSTROKE_UNIX_REPARENT", "1")
         .env("UPSTROKE_READY", &ready)
         .env("UPSTROKE_AGENT", &agent)
+        .process_group(0)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -1562,6 +1565,11 @@ fn the_reaper_settles_its_group_on_reparenting_without_waiting_for_pipe_eof() {
         .expect("spawn a disposable coordinator");
     let holder = read_pid(&ready, Duration::from_secs(20));
     let agent_pid = read_pid(&agent, Duration::from_secs(20));
+    let coordinator_group = i32::try_from(coordinator.id()).expect("a pid fits an i32");
+    let holders = GroupHold::join(coordinator_group, || {
+        matches!(coordinator.try_wait(), Ok(None))
+    });
+    let agents = GroupHold::join(agent_pid, || matches!(coordinator.try_wait(), Ok(None)));
     assert!(alive(agent_pid), "the agent never started");
 
     coordinator
@@ -1574,17 +1582,8 @@ fn the_reaper_settles_its_group_on_reparenting_without_waiting_for_pipe_eof() {
          this test would pass without the reparenting check"
     );
 
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while alive(agent_pid) && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(50));
-    }
-    let settled = !alive(agent_pid);
-    // SAFETY: cleanup for the failing case, a no-op for the passing one.
-    unsafe {
-        let _ = libc::kill(holder, libc::SIGKILL);
-        let _ = libc::kill(agent_pid, libc::SIGKILL);
-        let _ = libc::kill(-agent_pid, libc::SIGKILL);
-    }
+    let settled = settle_agent_group(agents, Duration::from_secs(20));
+    drop(holders);
     let _ = std::fs::remove_dir_all(&scratch);
     assert!(
         settled,
@@ -3289,6 +3288,28 @@ fn unix_reaper_container_helper() {
 #[cfg(unix)]
 #[test]
 fn unix_reaper_kills_labeled_containers() {
+    reaper_container_cells(
+        &[(true, true), (false, true), (false, false)],
+        "#!/bin/sh\n\
+         printf '%s\\n' \"$*\" >> \"$UPSTROKE_STUB_DIR/argv.log\"\n\
+         case \"$1\" in\n\
+         ps) [ -f \"$UPSTROKE_STUB_DIR/removed\" ] || printf '%s\\n' '{CONTAINER_ID}' ;;\n\
+         kill) : > \"$UPSTROKE_STUB_DIR/killing\"; sleep 1 ;;\n\
+         rm) : > \"$UPSTROKE_STUB_DIR/removed\" ;;\n\
+         esac\n\
+         exit 0\n",
+        &[],
+        || {},
+    );
+}
+
+#[cfg(unix)]
+fn reaper_container_cells(
+    cells: &[(bool, bool)],
+    stub_script: &str,
+    stub_env: &[(&str, &std::ffi::OsStr)],
+    mut on_drain_wait: impl FnMut(),
+) -> Vec<i32> {
     const CONTAINER_ID: &str = "c0ffee0000000000000000000000000000000000000000000000000000000001";
     const PRIVATE_ROOT: &str = "/srv/upstroke-reaper-fixture/private";
     const INCARNATION: &str = "01KZTAAAAAAAAAAAAAAAAAAAAA";
@@ -3339,7 +3360,8 @@ fn unix_reaper_kills_labeled_containers() {
     }
 
     const STUB_NAME: &str = "upstroke-reaper-docker-stub";
-    for (bare, coordinator_dies) in [(true, true), (false, true), (false, false)] {
+    let mut reapers = Vec::new();
+    for &(bare, coordinator_dies) in cells {
         let cell = match (bare, coordinator_dies) {
             (true, true) => "bare-dies",
             (false, true) => "path-dies",
@@ -3349,21 +3371,8 @@ fn unix_reaper_kills_labeled_containers() {
         let dir = tree.path();
         let stub = dir.join(STUB_NAME);
         let log = dir.join("argv.log");
-        std::fs::write(
-            &stub,
-            format!(
-                "#!/bin/sh\n\
-                 printf '%s\\n' \"$*\" >> \"$UPSTROKE_STUB_DIR/argv.log\"\n\
-                 case \"$1\" in\n\
-                 ps) [ -f \"$UPSTROKE_STUB_DIR/removed\" ] || printf '%s\\n' '{CONTAINER_ID}' ;;\n\
-                 kill) : > \"$UPSTROKE_STUB_DIR/killing\"; sleep 1 ;;\n\
-                 rm) : > \"$UPSTROKE_STUB_DIR/removed\" ;;\n\
-                 esac\n\
-                 exit 0\n"
-            )
-            .replace("{CONTAINER_ID}", CONTAINER_ID),
-        )
-        .expect("write the stub");
+        std::fs::write(&stub, stub_script.replace("{CONTAINER_ID}", CONTAINER_ID))
+            .expect("write the stub");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
@@ -3391,6 +3400,7 @@ fn unix_reaper_kills_labeled_containers() {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
+        coordinator.envs(stub_env.iter().copied());
         if bare {
             let inherited = std::env::var_os("PATH").unwrap_or_default();
             let mut search = vec![dir.to_path_buf()];
@@ -3407,6 +3417,7 @@ fn unix_reaper_kills_labeled_containers() {
 
         let agent_pid = read_pid(&agent_path, Duration::from_secs(30));
         let reaper_pid = read_pid(&reaper_path, Duration::from_secs(30));
+        reapers.push(reaper_pid);
 
         if !coordinator_dies {
             coordinator.wait().expect("reap the coordinator");
@@ -3420,6 +3431,7 @@ fn unix_reaper_kills_labeled_containers() {
             continue;
         }
 
+        let hold = GroupHold::join(agent_pid, || matches!(coordinator.try_wait(), Ok(None)));
         assert!(alive(agent_pid), "the agent never started");
         coordinator.kill().expect("hard-kill the coordinator");
         coordinator.wait().expect("reap the coordinator");
@@ -3491,21 +3503,665 @@ fn unix_reaper_kills_labeled_containers() {
             "two filters carrying one value is one filter"
         );
 
-        let settled_by = Instant::now() + Duration::from_secs(30);
-        while alive(agent_pid) && Instant::now() < settled_by {
-            thread::sleep(Duration::from_millis(50));
-        }
-        let settled = !alive(agent_pid);
-        // SAFETY: cleanup for the failing case, a no-op for the passing one.
-        unsafe {
-            let _ = libc::kill(agent_pid, libc::SIGKILL);
-            let _ = libc::kill(-agent_pid, libc::SIGKILL);
-        }
+        let settled = settle_agent_group(hold, Duration::from_secs(30));
         assert!(
             settled,
             "the container half replaced the process half: the agent group survived"
         );
+
+        let drain_bound = Duration::from_secs(30);
+        if let Err(waited) = drain_reaper_group(reaper_pid, drain_bound, &mut on_drain_wait) {
+            panic!(
+                "[{cell}] process group {reaper_pid} still answered with a member {waited:?} after \
+                 the cell's last assertion (bound {drain_bound:?}), so a stub the reaper started \
+                 may still write into {}; nothing was signalled: the test holds the group's number, \
+                 not the group",
+                dir.display()
+            );
+        }
     }
+    reapers
+}
+
+#[cfg(unix)]
+fn drain_reaper_group(
+    pgid: i32,
+    bound: Duration,
+    mut on_wait: impl FnMut(),
+) -> Result<(), Duration> {
+    fn group_ended(pgid: i32) -> bool {
+        // SAFETY: signal 0 performs no delivery; a negative pid only asks
+        // whether a process of that group exists.
+        let answered = unsafe { libc::kill(-pgid, 0) };
+        answered == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    }
+    let began = Instant::now();
+    let mut announced = false;
+    while !group_ended(pgid) {
+        let waited = began.elapsed();
+        if waited >= bound {
+            return Err(waited);
+        }
+        if !announced {
+            announced = true;
+            on_wait();
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn group_member(pgid: i32) -> Child {
+    use std::os::unix::process::CommandExt as _;
+
+    Command::new("/bin/sh")
+        .args(["-c", "read -r line"])
+        .process_group(pgid)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap_or_else(|error| panic!("spawn a member into process group {pgid}: {error}"))
+}
+
+#[cfg(unix)]
+const MEMBER_END_BOUND: Duration = Duration::from_secs(10);
+
+#[cfg(unix)]
+fn end_and_collect(child: &mut Child) -> Result<std::process::ExitStatus, String> {
+    let pid = child.id();
+    child
+        .kill()
+        .map_err(|error| format!("SIGKILL to pid {pid}, a child of this test's own: {error}"))?;
+    await_exit_without_reaping(pid, MEMBER_END_BOUND)?;
+    child
+        .wait()
+        .map_err(|error| format!("collecting pid {pid} once it had exited: {error}"))
+}
+
+#[cfg(unix)]
+fn close_and_collect(child: &mut Child) -> Result<std::process::ExitStatus, String> {
+    drop(child.stdin.take());
+    let pid = child.id();
+    if let Err(reason) = await_exit_without_reaping(pid, MEMBER_END_BOUND) {
+        let ended = end_and_collect(child);
+        return Err(format!(
+            "{reason} once its stdin was closed, so it was ended by SIGKILL to its own pid \
+             ({ended:?})"
+        ));
+    }
+    child
+        .wait()
+        .map_err(|error| format!("collecting pid {pid} once it had exited: {error}"))
+}
+
+#[cfg(unix)]
+struct GroupHold {
+    member: Child,
+    pgid: i32,
+    released: bool,
+}
+
+#[cfg(unix)]
+impl GroupHold {
+    fn join(pgid: i32, held_throughout: impl FnOnce() -> bool) -> Self {
+        let mut member = group_member(pgid);
+        if !held_throughout() {
+            let ended = match end_and_collect(&mut member) {
+                Ok(status) => format!("collected: {status}"),
+                Err(reason) => format!("not collected: {reason}"),
+            };
+            panic!(
+                "process group {pgid} was joined while nothing showed it was still the group the \
+                 test meant, so it is not held: its member, this test's own child, was ended by \
+                 SIGKILL to its own pid and {ended}, and nothing was sent to the group's number"
+            );
+        }
+        Self {
+            member,
+            pgid,
+            released: false,
+        }
+    }
+
+    fn release(&mut self) -> Result<std::process::ExitStatus, String> {
+        self.released = true;
+        // SAFETY: only `end_and_collect` below reaps the member, so this
+        // test's own child, running or exited, still keeps the group in
+        // being: its number names that group and no other. A negative pid
+        // signals every member, the test's own included.
+        unsafe {
+            let _ = libc::kill(-self.pgid, libc::SIGKILL);
+        }
+        let pgid = self.pgid;
+        end_and_collect(&mut self.member)
+            .map_err(|reason| format!("the hold on process group {pgid}: {reason}"))
+    }
+}
+
+#[cfg(unix)]
+impl Drop for GroupHold {
+    fn drop(&mut self) {
+        if self.released {
+            return;
+        }
+        if let Err(failure) = self.release() {
+            if thread::panicking() {
+                eprintln!("{failure}");
+            } else {
+                panic!("{failure}");
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn settle_agent_group(mut hold: GroupHold, bound: Duration) -> bool {
+    fn answers(pid: i32) -> bool {
+        // SAFETY: signal 0 performs no delivery.
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+    let agent_pid = hold.pgid;
+    let settled_by = Instant::now() + bound;
+    while answers(agent_pid) && Instant::now() < settled_by {
+        thread::sleep(Duration::from_millis(50));
+    }
+    let settled = !answers(agent_pid);
+    if let Err(failure) = hold.release() {
+        panic!("{failure}");
+    }
+    settled
+}
+
+#[cfg(unix)]
+#[test]
+fn the_container_cell_reclaims_its_tree_only_after_the_reapers_last_write() {
+    let journal_tree =
+        crate::rundir::scratch_tree::acquire(&std::env::temp_dir(), "reaper-late-writes")
+            .expect("a journal tree");
+    let control = journal_tree
+        .path()
+        .join("it's \"late\" $writes `here` \\ too");
+    std::fs::create_dir(&control).expect("a control directory no shell word can carry");
+    let journal = control.join("late-writes");
+    let gate = control.join("gate");
+    let reaper = reaper_container_cells(
+        &[(false, true)],
+        "#!/bin/sh\n\
+         printf '%s\\n' \"$*\" >> \"$UPSTROKE_STUB_DIR/argv.log\"\n\
+         logged=$?\n\
+         case \"$1\" in\n\
+         ps) if [ -f \"$UPSTROKE_STUB_DIR/removed\" ]; \
+         then printf 'ps %s\\n' \"$logged\" >> \"$UPSTROKE_WITNESS_JOURNAL\"; \
+         else printf '%s\\n' '{CONTAINER_ID}'; fi ;;\n\
+         kill) : > \"$UPSTROKE_STUB_DIR/killing\"; sleep 1 ;;\n\
+         rm) held=0; \
+         until [ -e \"$UPSTROKE_WITNESS_GATE\" ] || [ ! -d \"$UPSTROKE_STUB_DIR\" ]; do \
+         held=$((held + 1)); \
+         if [ \"$held\" -gt 1000 ]; then \
+         printf 'rm hold expired\\n' >> \"$UPSTROKE_WITNESS_JOURNAL\"; exit 0; fi; \
+         sleep 0.01; done; \
+         printf '' > \"$UPSTROKE_STUB_DIR/removed\"; \
+         printf 'rm %s\\n' \"$?\" >> \"$UPSTROKE_WITNESS_JOURNAL\" ;;\n\
+         esac\n\
+         exit 0\n",
+        &[
+            ("UPSTROKE_WITNESS_JOURNAL", journal.as_os_str()),
+            ("UPSTROKE_WITNESS_GATE", gate.as_os_str()),
+        ],
+        || {
+            std::fs::File::create(gate.as_path()).expect("publish the drain's gate");
+        },
+    )
+    .first()
+    .copied()
+    .expect("the dying cell's reaper");
+
+    let decided_by = Instant::now() + Duration::from_secs(30);
+    loop {
+        // SAFETY: signal 0 performs no delivery; a negative pid only asks
+        // whether a process of that group exists.
+        let answered = unsafe { libc::kill(-reaper, 0) };
+        if answered == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+            break;
+        }
+        assert!(
+            Instant::now() < decided_by,
+            "process group {reaper} still answered with a member 30 s after the witness's cell \
+             ended; nothing was signalled: the witness holds the group's number, not the group"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    let late: Vec<String> = match std::fs::read_to_string(&journal) {
+        Ok(text) => text.lines().map(str::to_owned).collect(),
+        Err(absent) if absent.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => panic!("reading the journal {}: {error}", journal.display()),
+    };
+    assert_eq!(
+        late,
+        ["rm 0", "ps 0"],
+        "the `rm` stub holds its write until the drain's gate exists or the cell's tree is gone, \
+         so `rm` creating `removed` and the second listing's append land in the tree only when \
+         the cell waits for the reaper's group before its reclaim; a non-zero status, a missing \
+         line or `rm hold expired` is a cell that reclaimed first"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_reaper_group_drain_fails_at_its_bound_without_signalling_the_group() {
+    use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
+
+    let mut member = Command::new("/bin/sh")
+        .args(["-c", "read -r line"])
+        .process_group(0)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn a group leader this test owns");
+    let pgid = i32::try_from(member.id()).expect("a pid fits an i32");
+    let mut announced = 0_u32;
+    let outcome = drain_reaper_group(pgid, Duration::from_millis(100), || announced += 1);
+    drop(member.stdin.take());
+    let status = member.wait().expect("reap the group's member");
+    assert!(
+        outcome.is_err(),
+        "the drain reported an end for a group whose member was still running"
+    );
+    assert_eq!(
+        announced, 1,
+        "the drain announced its wait {announced} times"
+    );
+    assert_eq!(
+        status.signal(),
+        None,
+        "the member ended by a signal ({status}): the drain signalled a group it held only the \
+         number of"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn an_agent_seen_gone_still_has_its_held_group_killed_even_when_its_hold_member_has_exited() {
+    use std::os::unix::process::ExitStatusExt as _;
+
+    let mut agent = group_member(0);
+    let group = i32::try_from(agent.id()).expect("a pid fits an i32");
+    let mut other = group_member(group);
+    let mut hold = GroupHold::join(group, || matches!(agent.try_wait(), Ok(None)));
+    hold.member
+        .kill()
+        .expect("end only the hold's member, by its own pid");
+    if let Err(reason) = await_exit_without_reaping(hold.member.id(), Duration::from_secs(30)) {
+        panic!("the hold's member did not end: {reason}");
+    }
+    let agent_end = end_and_collect(&mut agent);
+
+    let settled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        settle_agent_group(hold, Duration::from_secs(5))
+    }));
+    let other_end = close_and_collect(&mut other);
+    agent_end.expect(
+        "end the agent alone, as a reaper that ends only the leader would, and collect it, as \
+         its new parent would",
+    );
+    let settled = settled.expect("the cleanup returned without a failure of its own");
+    let other_status = other_end.expect("collect the group's other member");
+    assert!(
+        settled,
+        "the agent was collected before the cleanup, yet its pid still answered"
+    );
+    assert_eq!(
+        other_status.signal(),
+        Some(libc::SIGKILL),
+        "the agent group's other member ended by {other_status}, not by the release's SIGKILL to \
+         the group: the agent and the hold's member had ended alone, the member unreaped, and the \
+         cleanup took either for the group's end"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn an_agent_seen_gone_still_has_its_held_group_killed() {
+    use std::os::unix::process::ExitStatusExt as _;
+
+    let mut agent = group_member(0);
+    let group = i32::try_from(agent.id()).expect("a pid fits an i32");
+    let mut other = group_member(group);
+    let hold = GroupHold::join(group, || matches!(agent.try_wait(), Ok(None)));
+    let agent_end = end_and_collect(&mut agent);
+
+    let settled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        settle_agent_group(hold, Duration::from_secs(5))
+    }));
+    let other_end = close_and_collect(&mut other);
+    agent_end.expect(
+        "end the agent alone, as a reaper that ends only the leader would, and collect it, as \
+         its new parent would",
+    );
+    let settled = settled.expect("the cleanup returned without a failure of its own");
+    let other_status = other_end.expect("collect the group's other member");
+    assert!(
+        settled,
+        "the agent was collected before the cleanup, yet its pid still answered"
+    );
+    assert_eq!(
+        other_status.signal(),
+        Some(libc::SIGKILL),
+        "the agent group's other member ended by {other_status}, not by the release's SIGKILL to \
+         the group: the agent alone had ended, and the cleanup took the agent's absence for the \
+         group's end"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn an_agent_still_running_at_its_bound_is_killed_with_its_group() {
+    use std::os::unix::process::ExitStatusExt as _;
+
+    let mut agent = group_member(0);
+    let group = i32::try_from(agent.id()).expect("a pid fits an i32");
+    let mut other = group_member(group);
+    let hold = GroupHold::join(group, || matches!(agent.try_wait(), Ok(None)));
+
+    let settled = settle_agent_group(hold, Duration::from_millis(100));
+    let agent_end = close_and_collect(&mut agent);
+    let other_end = close_and_collect(&mut other);
+    let agent_status = agent_end.expect("collect the agent");
+    let other_status = other_end.expect("collect the group's other member");
+    assert!(
+        !settled,
+        "the agent ran throughout, yet the cleanup reported it gone"
+    );
+    assert_eq!(
+        agent_status.signal(),
+        Some(libc::SIGKILL),
+        "the agent still running at the bound ended by {agent_status}, not by the cleanup's \
+         SIGKILL to its group"
+    );
+    assert_eq!(
+        other_status.signal(),
+        Some(libc::SIGKILL),
+        "the agent group's other member ended by {other_status}, not by the cleanup's SIGKILL \
+         to the group"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn an_agent_outliving_its_bound_is_killed_with_its_group_even_when_its_hold_member_has_exited() {
+    use std::os::unix::process::ExitStatusExt as _;
+
+    let mut agent = group_member(0);
+    let group = i32::try_from(agent.id()).expect("a pid fits an i32");
+    let mut other = group_member(group);
+    let mut hold = GroupHold::join(group, || matches!(agent.try_wait(), Ok(None)));
+    hold.member
+        .kill()
+        .expect("end only the hold's member, by its own pid");
+    if let Err(reason) = await_exit_without_reaping(hold.member.id(), Duration::from_secs(30)) {
+        panic!("the hold's member did not end: {reason}");
+    }
+
+    let settled = settle_agent_group(hold, Duration::from_millis(100));
+    let agent_end = close_and_collect(&mut agent);
+    let other_end = close_and_collect(&mut other);
+    let agent_status = agent_end.expect("collect the agent");
+    let other_status = other_end.expect("collect the group's other member");
+    assert!(
+        !settled,
+        "the agent ran throughout, yet the cleanup reported it gone"
+    );
+    assert_eq!(
+        agent_status.signal(),
+        Some(libc::SIGKILL),
+        "the agent still running at the bound ended by {agent_status}, not by the cleanup's \
+         SIGKILL to its group: the hold's member had exited on its own, unreaped, and the \
+         release took that for the group's end"
+    );
+    assert_eq!(
+        other_status.signal(),
+        Some(libc::SIGKILL),
+        "the agent group's other member ended by {other_status}, not by the cleanup's SIGKILL \
+         to the group, after the hold's member had exited on its own"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_hold_dropped_while_a_failure_unwinds_kills_its_group_even_when_its_member_has_exited() {
+    use std::os::unix::process::ExitStatusExt as _;
+
+    const DELIBERATE: &str = "a failing assertion between a fixture's join and its settle";
+    let mut agent = group_member(0);
+    let group = i32::try_from(agent.id()).expect("a pid fits an i32");
+    let mut other = group_member(group);
+    let mut hold = GroupHold::join(group, || matches!(agent.try_wait(), Ok(None)));
+    hold.member
+        .kill()
+        .expect("end only the hold's member, by its own pid");
+    if let Err(reason) = await_exit_without_reaping(hold.member.id(), Duration::from_secs(30)) {
+        panic!("the hold's member did not end: {reason}");
+    }
+
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let _held_across_the_unwind = hold;
+        panic!("{DELIBERATE}");
+    }));
+    let agent_end = close_and_collect(&mut agent);
+    let other_end = close_and_collect(&mut other);
+    let payload = unwound.expect_err("the body must have left through a panic");
+    let message = payload
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| payload.downcast_ref::<&'static str>().copied());
+    assert_eq!(
+        message,
+        Some(DELIBERATE),
+        "the body left through some other panic, so the release this observes is not the one \
+         claimed"
+    );
+    let agent_status = agent_end.expect("collect the agent");
+    let other_status = other_end.expect("collect the group's other member");
+    assert_eq!(
+        agent_status.signal(),
+        Some(libc::SIGKILL),
+        "the agent ended by {agent_status}, not by the SIGKILL to its group that a hold released \
+         while a failure unwinds owes, once the hold's member had exited on its own"
+    );
+    assert_eq!(
+        other_status.signal(),
+        Some(libc::SIGKILL),
+        "the agent group's other member ended by {other_status}, not by the release's SIGKILL \
+         to the group"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_refused_join_ends_its_stopped_member_within_its_bound_and_signals_nothing_else() {
+    use std::os::unix::process::ExitStatusExt as _;
+
+    let bound = Duration::from_secs(30);
+    let mut leader = group_member(0);
+    let group = i32::try_from(leader.id()).expect("a pid fits an i32");
+    let (sender, receiver) = mpsc::channel();
+    let joiner = thread::spawn(move || {
+        let refused = std::panic::catch_unwind(move || {
+            GroupHold::join(group, move || {
+                // SAFETY: the group's leader is this test's own child, unreaped
+                // until the test collects it, so the group is the test's and
+                // every member of it is a child of the test's own.
+                let stopped = unsafe { libc::kill(-group, libc::SIGSTOP) };
+                assert_eq!(stopped, 0, "stopping the test's own group {group}");
+                false
+            })
+        });
+        let message = match refused {
+            Ok(_held) => None,
+            Err(payload) => Some(match payload.downcast::<String>() {
+                Ok(message) => *message,
+                Err(_) => String::from("a panic whose payload is no message"),
+            }),
+        };
+        let _ = sender.send(message);
+    });
+    let first = receiver.recv_timeout(bound);
+    let late = if first.is_err() {
+        // SAFETY: the leader is still this test's own unreaped child, so the
+        // group is the test's: SIGKILL ends every member, stopped or not, and
+        // whatever the join waits on returns.
+        unsafe {
+            let _ = libc::kill(-group, libc::SIGKILL);
+        }
+        Some(receiver.recv_timeout(bound))
+    } else {
+        None
+    };
+    // SAFETY: as above, the group is the test's; a stopped leader resumes.
+    unsafe {
+        let _ = libc::kill(-group, libc::SIGCONT);
+    }
+    let leader_end = close_and_collect(&mut leader);
+    if first.is_ok() || matches!(late, Some(Ok(_))) {
+        joiner
+            .join()
+            .expect("the joining thread ends once it has reported");
+    }
+    let Ok(message) = first else {
+        panic!(
+            "the refused join had not reported {bound:?} after its group was stopped, so the test \
+             ended its own group by SIGKILL (then {late:?}; the leader {leader_end:?})"
+        );
+    };
+    let message = message.expect("the join held a group nothing showed was still the one meant");
+    assert!(
+        message.contains(&format!(
+            "process group {group} was joined while nothing showed it was still the group the \
+             test meant"
+        )),
+        "the join failed for another reason: {message}"
+    );
+    assert!(
+        message.contains("was ended by SIGKILL to its own pid and collected: signal: 9 (SIGKILL)"),
+        "the refusal did not end and collect its stopped member itself: {message}"
+    );
+    let leader_status = leader_end.expect("collect the group's leader by its end of file");
+    assert_eq!(
+        leader_status.signal(),
+        None,
+        "the group's leader ended by {leader_status}: the refusal signalled the group's number"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "subprocess helper"]
+fn group_leaving_agent_helper() {
+    let Some(unrelated) = std::env::var_os("UPSTROKE_LEAVE_FOR_GROUP") else {
+        return;
+    };
+    let unrelated: i32 = unrelated
+        .to_str()
+        .and_then(|text| text.parse().ok())
+        .expect("the number of the group to leave for");
+    let mut word = String::new();
+    std::io::stdin()
+        .read_line(&mut word)
+        .expect("the word to leave");
+    // SAFETY: `setpgid(0, …)` moves this process alone, into a group of its
+    // own session; it borrows nothing.
+    let moved = unsafe { libc::setpgid(0, unrelated) };
+    assert_eq!(
+        moved,
+        0,
+        "leaving for process group {unrelated}: {}",
+        std::io::Error::last_os_error()
+    );
+    std::io::copy(&mut std::io::stdin(), &mut std::io::sink()).expect("read to the end of file");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_process_holding_the_agents_pid_outside_its_held_group_is_never_signalled() {
+    use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
+
+    let mut elsewhere = group_member(0);
+    let unrelated = i32::try_from(elsewhere.id()).expect("a pid fits an i32");
+    let mut agent = Command::new(std::env::current_exe().expect("test executable"))
+        .args(["group_leaving_agent_helper", "--ignored", "--nocapture"])
+        .env("UPSTROKE_LEAVE_FOR_GROUP", unrelated.to_string())
+        .process_group(0)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn an agent leading a group of its own");
+    let group = i32::try_from(agent.id()).expect("a pid fits an i32");
+    let mut other = group_member(group);
+    let hold = GroupHold::join(group, || matches!(agent.try_wait(), Ok(None)));
+    let told = match agent.stdin.as_mut() {
+        Some(stdin) => writeln!(stdin, "leave").map_err(|error| error.to_string()),
+        None => Err(String::from("the agent's stdin is not piped")),
+    };
+    let left_by = Instant::now() + Duration::from_secs(30);
+    let left = loop {
+        // SAFETY: `getpgid` reads the group of this test's own child, which
+        // is unreaped, so its pid names it and no other; it borrows nothing.
+        if unsafe { libc::getpgid(group) } == unrelated {
+            break true;
+        }
+        if told.is_err() || Instant::now() >= left_by {
+            break false;
+        }
+        thread::sleep(Duration::from_millis(10));
+    };
+
+    let settled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        settle_agent_group(hold, Duration::from_millis(100))
+    }));
+    let other_end = close_and_collect(&mut other);
+    let agent_end = close_and_collect(&mut agent);
+    let elsewhere_end = close_and_collect(&mut elsewhere);
+    told.expect("tell the agent to leave its group");
+    assert!(
+        left,
+        "the agent never moved from its own group {group} into process group {unrelated}"
+    );
+    let settled = settled.expect("the cleanup returned without a failure of its own");
+    let other_status = other_end.expect("collect the held group's other member");
+    let agent_status = agent_end.expect("collect the agent");
+    let elsewhere_status = elsewhere_end.expect("collect the unrelated group's leader");
+    assert!(
+        !settled,
+        "the process at the agent's pid ran throughout, yet the cleanup reported it gone"
+    );
+    assert_eq!(
+        other_status.signal(),
+        Some(libc::SIGKILL),
+        "the held group's other member ended by {other_status}, not by the release's SIGKILL to \
+         the group the hold holds"
+    );
+    assert_eq!(
+        agent_status.signal(),
+        None,
+        "the process at the agent's pid, outside the group the hold holds, ended by \
+         {agent_status}: the cleanup signalled a number it did not hold"
+    );
+    assert_eq!(
+        agent_status.code(),
+        Some(0),
+        "the process at the agent's pid did not leave its group and end at its end of file: \
+         {agent_status}"
+    );
+    assert_eq!(
+        elsewhere_status.signal(),
+        None,
+        "the leader of the group the agent moved into ended by {elsewhere_status}: the cleanup \
+         signalled a group it did not hold"
+    );
 }
 
 const READINESS_ROLE: &str = "UPSTROKE_READINESS_ROLE";
