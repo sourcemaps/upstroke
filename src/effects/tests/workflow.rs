@@ -1670,7 +1670,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  pull-request guest, a merge-queue entry queues behind whatever pull-request \
                  build holds it, and the queue lane's install step, still conditioned on the \
                  event rather than on the machine, now runs on the guest and installs over \
-                 the image's compiler, under the forty-five minutes meant for the slow host.",
+                 the image's compiler, under the hosted lane's ceiling.",
         job: Some("test-windows"),
         anchor: "    runs-on: ${{ github.event_name == 'merge_group' && 'windows-latest' || fromJSON('[\"self-hosted\", \"windows\", \"winguest\"]') }}\n",
         replacement: "    runs-on: [self-hosted, windows, winguest]\n",
@@ -2086,8 +2086,8 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  crate: the pinned test command tests an empty `ci-pass/` while the labels, \
                  shells, checkout and command all still match character for character",
         job: Some("test-windows"),
-        anchor: "    timeout-minutes: ${{ github.event_name == 'merge_group' && 45 || 20 }}\n",
-        replacement: "    timeout-minutes: ${{ github.event_name == 'merge_group' && 45 || 20 }}\n\
+        anchor: "    timeout-minutes: ${{ github.event_name == 'merge_group' && 55 || 20 }}\n",
+        replacement: "    timeout-minutes: ${{ github.event_name == 'merge_group' && 55 || 20 }}\n\
                       \x20   defaults:\n\
                       \x20     run:\n\
                       \x20       working-directory: ci-pass\n",

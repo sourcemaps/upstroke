@@ -139,13 +139,20 @@ jobs:
   # a queue entry's ref is a fresh `gh-readonly-queue/` branch, and no run on
   # `master` ever saves a hosted `test-windows` cache, so a cache step would
   # upload a cache per entry that no later entry could read. The hosted
-  # timeout is calibrated to the five samples, whose slowest was 28 minutes,
-  # with room for the host lottery windows-latest showed before; the guest
-  # keeps its own. A hung queue entry surfaces in 45 minutes rather than 20.
+  # lane's cancellation ceiling is 55 minutes. Three completed queue samples
+  # took 40.4, 42.0 and 44.5 minutes a job (runs 38185230422, 38191303862 and
+  # 38202717688), and 55 is about 1.24 times the slowest; two other queue runs,
+  # 38199038253 and 38245576405, were cancelled at the earlier 45-minute limit
+  # and are incomplete, their cause unknown. The default branch's ruleset gives
+  # the queue its own `check_response_timeout_minutes` of 60, and this ceiling
+  # leaves a nominal 5-minute interval beneath it, so neither the entry's
+  # completion nor a full 55 minutes for this job is guaranteed. Raised from
+  # 45, the ceiling may hold the job up to 10 minutes longer, and it neither
+  # diagnoses nor cures a hang. The guest keeps its own 20.
   test-windows:
     name: test (${{ github.event_name == 'merge_group' && 'windows-latest' || 'winguest' }})
     runs-on: ${{ github.event_name == 'merge_group' && 'windows-latest' || fromJSON('["self-hosted", "windows", "winguest"]') }}
-    timeout-minutes: ${{ github.event_name == 'merge_group' && 45 || 20 }}
+    timeout-minutes: ${{ github.event_name == 'merge_group' && 55 || 20 }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
