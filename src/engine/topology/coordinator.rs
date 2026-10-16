@@ -12949,7 +12949,7 @@ mod tests {
     #[ignore = "spawned by a_kill_at_the_declines_synced_append_resumes_into_the_interrupted_terminal"]
     fn cancelled_verification_kill_child() {
         let dir = std::path::PathBuf::from(
-            std::env::var("UPSTROKE_TEST_KILL_DIR").expect("the parent names the handoff"),
+            std::env::var_os("UPSTROKE_TEST_KILL_DIR").expect("the parent names the handoff"),
         );
         let tasks = three();
         let armed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -12961,10 +12961,7 @@ mod tests {
             holding(&tasks, &[]),
         );
         wide.env.answers = std::sync::Arc::new(DecliningOnceArmed(std::sync::Arc::clone(&armed)));
-        crate::workspace_manager::fixture::write_file(
-            &dir.join(KILL_HANDOFF),
-            wide.env.fixture.root.to_string_lossy().as_bytes(),
-        );
+        hand_the_kill_root_off(&dir, &wide.env.fixture.root);
         let runner = std::sync::Arc::clone(&wide.env.runner);
         let harness = std::sync::Arc::clone(&wide.env.harness);
         let mut scheduler = cancelling(&runner, sibling_parked_on, move |view| {
@@ -12987,13 +12984,13 @@ mod tests {
         panic!("the kill at the decline's synced append must have taken this process");
     }
 
-    #[test]
-    fn a_kill_at_the_declines_synced_append_resumes_into_the_interrupted_terminal() {
-        let handoff = crate::engine::topology::scaffold::kill_dir("coordinator-cancelled-kill");
-        let temporary = crate::engine::topology::scaffold::kill_dir("tmp");
-        let mut environment = vec![("UPSTROKE_TEST_KILL_DIR", handoff.path().as_os_str())];
+    fn the_decline_kill_resumes_into_the_interrupted_terminal(
+        handoff: &std::path::Path,
+        temporary: &std::path::Path,
+    ) {
+        let mut environment = vec![("UPSTROKE_TEST_KILL_DIR", handoff.as_os_str())];
         environment.extend(crate::engine::topology::scaffold::child_temporary_of(
-            temporary.path(),
+            temporary,
         ));
         let status = crate::workspace_manager::fixture::run_kill_child_within(
             "engine::topology::coordinator::tests::cancelled_verification_kill_child",
@@ -13005,10 +13002,8 @@ mod tests {
             crate::workspace_manager::fixture::died_by_abort(&status),
             "the child died at the decline's synced append: {status:?}"
         );
-        let root = std::fs::read_to_string(handoff.path().join(KILL_HANDOFF))
-            .expect("the child left its fixture root");
         let env = crate::engine::topology::scaffold::WideEnv::adopted(
-            std::path::PathBuf::from(root),
+            the_handed_off_kill_root(handoff),
             &three(),
             3,
             WidePlans::default(),
@@ -13046,6 +13041,105 @@ mod tests {
         );
         assert_eq!(count(&events, "task_merged"), 2);
         replay_equals_live(&resumed);
+    }
+
+    #[test]
+    fn a_kill_at_the_declines_synced_append_resumes_into_the_interrupted_terminal() {
+        let handoff = crate::engine::topology::scaffold::kill_dir("coordinator-cancelled-kill");
+        let temporary = crate::engine::topology::scaffold::kill_dir("tmp");
+        the_decline_kill_resumes_into_the_interrupted_terminal(handoff.path(), temporary.path());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_kill_at_the_declines_synced_append_resumes_through_a_non_utf8_handoff_directory() {
+        let tree = crate::workspace_manager::fixture::scratch("coordinator-kill-handoff");
+        let handoff = tree.path().join(a_name_no_string_can_spell());
+        crate::workspace_manager::fixture::create_dir(&handoff);
+        assert!(
+            handoff.to_str().is_none(),
+            "the handoff directory's name is one no string can spell: {}",
+            handoff.display()
+        );
+        let temporary = crate::engine::topology::scaffold::kill_dir("tmp");
+        the_decline_kill_resumes_into_the_interrupted_terminal(&handoff, temporary.path());
+    }
+
+    #[test]
+    fn the_kill_handoff_hands_the_parent_back_a_root_no_string_can_spell() {
+        let handoff = crate::workspace_manager::fixture::scratch("coordinator-kill-root");
+        let root = handoff.path().join(a_name_no_string_can_spell());
+        assert!(
+            root.to_str().is_none(),
+            "the root's name is one no string can spell: {}",
+            root.display()
+        );
+        hand_the_kill_root_off(handoff.path(), &root);
+        assert_eq!(
+            the_handed_off_kill_root(handoff.path()).as_os_str(),
+            root.as_os_str(),
+            "the parent reads back the child's root, byte for byte"
+        );
+    }
+
+    #[cfg(unix)]
+    fn hand_the_kill_root_off(handoff: &std::path::Path, root: &std::path::Path) {
+        use std::os::unix::ffi::OsStrExt as _;
+        crate::workspace_manager::fixture::write_file(
+            &handoff.join(KILL_HANDOFF),
+            root.as_os_str().as_bytes(),
+        );
+    }
+
+    #[cfg(windows)]
+    fn hand_the_kill_root_off(handoff: &std::path::Path, root: &std::path::Path) {
+        use std::os::windows::ffi::OsStrExt as _;
+        let bytes: Vec<u8> = root
+            .as_os_str()
+            .encode_wide()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        crate::workspace_manager::fixture::write_file(&handoff.join(KILL_HANDOFF), &bytes);
+    }
+
+    #[cfg(unix)]
+    fn the_handed_off_kill_root(handoff: &std::path::Path) -> std::path::PathBuf {
+        use std::os::unix::ffi::OsStringExt as _;
+        std::path::PathBuf::from(std::ffi::OsString::from_vec(
+            std::fs::read(handoff.join(KILL_HANDOFF)).expect("the child left its fixture root"),
+        ))
+    }
+
+    #[cfg(windows)]
+    fn the_handed_off_kill_root(handoff: &std::path::Path) -> std::path::PathBuf {
+        use std::os::windows::ffi::OsStringExt as _;
+        let bytes =
+            std::fs::read(handoff.join(KILL_HANDOFF)).expect("the child left its fixture root");
+        let units: Vec<u16> = bytes
+            .chunks(2)
+            .map(|pair| match *pair {
+                [low, high] => u16::from_le_bytes([low, high]),
+                _ => panic!(
+                    "the handoff holds whole UTF-16 code units, and it is {} bytes",
+                    bytes.len()
+                ),
+            })
+            .collect();
+        std::path::PathBuf::from(std::ffi::OsString::from_wide(&units))
+    }
+
+    #[cfg(unix)]
+    fn a_name_no_string_can_spell() -> std::ffi::OsString {
+        use std::os::unix::ffi::OsStrExt as _;
+        std::ffi::OsStr::from_bytes(b"unspellable-\xff").to_os_string()
+    }
+
+    #[cfg(windows)]
+    fn a_name_no_string_can_spell() -> std::ffi::OsString {
+        use std::os::windows::ffi::OsStringExt as _;
+        let mut units: Vec<u16> = "unspellable-".encode_utf16().collect();
+        units.push(0xD800);
+        std::ffi::OsString::from_wide(&units)
     }
 
     #[derive(Default)]
