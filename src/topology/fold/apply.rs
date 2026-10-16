@@ -74,7 +74,6 @@ impl RunState {
         self.incarnation = resumed.incarnation.clone();
         self.budget_stop = None;
         self.finished = None;
-        self.abandoned = None;
         self.wake_backoff();
     }
 

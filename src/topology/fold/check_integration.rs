@@ -254,11 +254,6 @@ impl RunState {
             });
         }
         self.check_spend_unrecorded(MERGE_VERIFICATION_CHARGED, charged.sequence)?;
-        if self.abandoned == Some(charged.sequence)
-            && charged.sequence.0.saturating_add(1) == self.next_sequence
-        {
-            return Ok(());
-        }
         let transaction = self.open_transaction(MERGE_VERIFICATION_CHARGED, charged.sequence)?;
         if !matches!(
             transaction.class,
