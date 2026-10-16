@@ -642,7 +642,8 @@ cancelled. A cancellation settles nothing unavailable, and what follows it is it
 concurrent driver cancels a verification. A halt then closes the run `Halted`, its closure settling
 the verification interrupted, and no resume continues the run; if the Runner did not establish that
 every process of the run ended, the closure appends nothing and the command ends resumably instead,
-the halt still recorded. A lineage failure cancels the verification's transaction, and the same
+the halt still recorded. A lineage failure cancels the verification's transaction, which the
+coordinator settles `merge_verification_interrupted` once its pipeline has ended, and the same
 command goes on. A shutdown, another pipeline's error or an invocation left unresolved ends the
 command resumably, as any other error that takes the judgement does, and the next resume settles the
 verification interrupted and verifies the candidate again under a new sequence, unless a cause that
@@ -681,8 +682,7 @@ command or the integration ends, and replay charges its passes by the same addit
 terminal and not a finish event: it records no outcome and settles, releases and authorizes nothing,
 so the transaction stays open, cleanup and readmission keep their conditions — a process the Runner
 did not establish as ended still blocks them — and which terminal settles the verification is not
-changed by it. The fold admits the record only for the open verification of its sequence, or for the
-one a lineage failure cancelled while it is still the latest sequence of the incarnation; never with
+changed by it. The fold admits the record only for the open verification of its sequence; never with
 no pass; and at most once for a sequence. Once a sequence has its record, no terminal that carries a
 verification's passes is admitted for it — `merge_verification_interrupted`, which carries none,
 still is — so its spend is counted once, whatever is appended after it. If the record's own append
