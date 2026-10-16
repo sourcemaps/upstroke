@@ -462,6 +462,7 @@ struct Control {
     barred: Vec<InvocationId>,
     unresolved: Vec<InvocationId>,
     panicking: Vec<InvocationId>,
+    ending_unresolved: Vec<InvocationId>,
     doors: Vec<Door>,
     failing: Vec<(ProbeTarget, ProbeFailure)>,
     held: Vec<Held>,
@@ -597,6 +598,7 @@ impl RecordingRunner {
         let result = self
             .respond_to(&request)
             .unwrap_or_else(|| Ok(exited(0, String::new())));
+        let result = self.unresolved_ending(invocation, result);
         self.complete(invocation, result)
     }
 
@@ -614,6 +616,30 @@ impl RecordingRunner {
 
     pub(super) fn panic_when_released(&self, invocation: InvocationId) {
         self.control().panicking.push(invocation);
+    }
+
+    pub(super) fn ending_unresolved(&self, invocation: InvocationId) {
+        self.control().ending_unresolved.push(invocation);
+    }
+
+    fn unresolved_ending(
+        &self,
+        invocation: &InvocationId,
+        result: Result<ProcessOutput, crate::runner::RunnerError>,
+    ) -> Result<ProcessOutput, crate::runner::RunnerError> {
+        if !self.control().ending_unresolved.contains(invocation) {
+            return result;
+        }
+        Err(crate::runner::RunnerError::new(
+            invocation,
+            crate::error::ProcessFate::Unresolved,
+            UpstrokeError::Refused {
+                message: format!(
+                    "the scaffold could not establish that `{invocation}` ended when it was \
+                     released"
+                ),
+            },
+        ))
     }
 
     pub(super) fn bar(&self, invocation: InvocationId) {
@@ -835,7 +861,10 @@ impl RecordingRunner {
             return Started::Held;
         }
         drop(control);
-        if let Some(result) = self.respond_to(request) {
+        if let Some(result) = self
+            .respond_to(request)
+            .map(|result| self.unresolved_ending(&request.invocation, result))
+        {
             let ending = if result.is_ok() {
                 Ending::Completed
             } else {
@@ -2398,6 +2427,12 @@ impl WidePlans {
                 REVIEW_AGENT,
                 "scaffold-second-model",
                 "second_opinion",
+                crate::review::Lens::SecondOpinion,
+            ),
+            (
+                REVIEW_AGENT,
+                "scaffold-third-model",
+                "third_opinion",
                 crate::review::Lens::SecondOpinion,
             ),
         ]

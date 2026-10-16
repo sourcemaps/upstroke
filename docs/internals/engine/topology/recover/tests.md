@@ -714,13 +714,20 @@ takes [`resume_holding`].
 
 ## `impl Fixture` › `fn holder_observed(&self, observation: u32) {`
 
-The wait's acknowledgement of a held observation, and the one thing the
-fixture does with it: release the fork a test put in `release_once_held`,
-once, on the first observation that found the lease held, and record the
+The wait's acknowledgement of a held observation, and the two things the
+fixture does with it. It first hands the acknowledgement to
+`workspace_manager::fixture::a_wait_read_the_lease_held`, which puts back the
+mode of a lease file a test made unreadable on this thread
+(`unreadable_until_read_held`), and does nothing otherwise: the I5-1
+regression tests arm it so that a wait which reads an inspection error as a
+holder clears the error by reading it so, and passes, which those tests
+refuse. Then it releases the fork a test put in `release_once_held`, once, on
+the first observation that found the lease held, and records the
 observation's number and the child's status in `holder_released`. The
 release is `ParkedFork::release`, bounded, and returns with the child
 collected, so the wait's next observation reads the lease free. On Windows
-there is no fork to release and the fn does nothing.
+there is no fork to release and no lease file to put back, and the fn does
+nothing.
 
 ## `fn resume_with(` › `let past_bound = await_previous_incarnations_release(fixture);`
 
@@ -3256,9 +3263,58 @@ recreated the root, besides performing the row's action.
 This is the setup resume that report asks for. `FIRST_RESUMER` resumes the fixture through
 `run_recovery_order` over the real refs and its handle is dropped: the marker is removed, the
 execution root and the integration ref are created, `run_resumed` is the log's second line and no
-process holds the run (all asserted). A witness plants the dead incarnation's work after it, so the
-planted events follow a `run_resumed`, as a stepping incarnation's do. Returns the number of
-durable events, for `kinds_after`.
+process holds the run (all asserted; the last through `assert_no_process_holds_the_run`, which first
+waits for this process's own copies of the run's cleanup lease, and fails at once on an observation
+that fails). A witness plants the dead
+incarnation's work after it, so the planted events follow a `run_resumed`, as a stepping
+incarnation's do. Returns the number of durable events, for `kinds_after`.
+
+## `fn assert_no_process_holds_the_run(fixture: &Fixture, tag: &str) {`
+
+The first incarnation's death, observed. Its resume created the integration ref through
+`update_ref`, which held the run's cleanup lease in this process for the Git child's life, and a
+fork another test thread made in that window keeps a copy until it execs or exits
+(`rundir::hold_cleanup_lease_for_child`). One observation right after the drop can read such a
+copy as a holder of the run (`PR329-A-DROPPED-RESUMES-RUN-STILL-READ-AS-RUNNING`). So this first
+waits those copies out (`await_own_lease_copies_release`) and then reads `rundir::is_running` once.
+
+The wait has the bound every later resume's wait has (`release_bound`) and the same
+acknowledgement (`Fixture::holder_observed`), and it waits only on a lease an observation finds
+held. An observation that fails, which the production observation reads as held, fails here at
+once, as the single observation before the wait did: `is_held` maps an inspection error to a
+holder, and H3's first form, which waited through #320's `wait_for_cleanup_hold_release_observing`,
+retried such an error until it passed (I5-1, the follow-up B record's §9.22). A copy that outlives
+the bound still fails, and the final `is_running` reads the primary lock, this process's claim and
+a lock that cannot be inspected as running at once. A red keeps the witness's message as its prefix
+and adds what the wait stopped on and what acquiring the run lock answers, which tells this
+process's claim (its own pid), another holder of the primary lock (its pid), an observation error
+and a lease held past the bound apart.
+`a_lease_copy_a_sibling_fork_kept_from_the_first_resume_is_waited_out_before_its_death_is_read`,
+`a_lease_copy_that_outlives_the_bound_still_fails_the_first_incarnations_death` and
+`a_lease_observation_that_fails_still_fails_the_first_incarnations_death_at_once` hold the three
+behaviours. Frozen hunk H3 as revised, adopted by the owner's ruling B-W, revised, on 2026-10-08
+(`reviews/2026-10-01-pr11-follow-up-b-record.md` §9.22.3 and §9.28).
+
+## `enum LeaseCopyWait {`
+
+What `await_own_lease_copies_release` stopped on: `Unobservable`, an observation that answered
+neither held nor free (the lease file would not open, or `flock` failed other than
+`EWOULDBLOCK`), with its number and its error; or `PastBound`, a lease every observation found held
+to the bound, as #320's `CleanupHoldPastBound` reports it. Its `Debug` is what the helper's red
+prints, and its `Display` what the creation body's prints.
+
+## `fn await_own_lease_copies_release(fixture: &Fixture) -> Result<(), LeaseCopyWait> {`
+
+The wait for this process's own copies of the run's cleanup lease that comes before the first
+incarnation's death is read (`assert_no_process_holds_the_run`) and before a creation body's first
+resume. It is #320's `wait_for_cleanup_hold_release_observing` -- the fixture's `release_bound`,
+the 50 ms rest bounded by what is left of it (`workspace_manager::fixture::rest_within`), and
+`Fixture::holder_observed` on every held reading -- over observations told apart
+(`workspace_manager::fixture::observe_cleanup_lease`): the production probe's own steps, answering
+the error that the production observation reads as held. A free observation ends the wait, a held
+one is acknowledged and waited on, and one that fails ends it at once with `Unobservable`, before
+any acknowledgement or rest. #320's own wait, which every later resume makes, is unchanged. On
+Windows there is no lease, and the observation answers free.
 
 Two simplifications remain and are the fixture's, not this helper's: `Fixture::manager` derives the
 manager under the creator's incarnation, so an intent planted through it names the creator (the
@@ -5066,7 +5122,24 @@ whose refs seam is the manager. `kill_after_run_started_creates_integration_ref`
 marker standing, a state no creation prefix has. The resume then adopts the marker's removal (it
 enters no `RunDir.RemoveMarker`), creates the ref only when the prefix lacks it (across the prefix
 and the resume, the ref is created once at the recorded name and base), appends `run_resumed`
-after the committed prefix, and the log replays twice to equal states.
+after the committed prefix, and the log replays twice to equal states. **The prefix is the creator's
+work done in this process**, and P8's ref write held the run's cleanup lease here, so before the
+resume, which is the fixture's first, this process's own copies of the lease are waited out as
+before every later resume (`await_own_lease_copies_release`, with the later resume's
+`release_bound`): `PR329-A-CREATION-PREFIX-RESUME-REFUSED-ON-A-HELD-CLEANUP-LEASE` was the first
+resume refused on such a copy. Only a lease an observation finds held is waited on. An observation
+that fails fails the body at once, naming its error, as the resume's own observation refused it
+before the wait; H3's first form counted the prefix as a previous incarnation (`resume_attempts`)
+and waited through #320's `await_previous_incarnations_release`, which retried such an error until
+it passed (I5-1, the follow-up B record's §9.22). A copy that outlives the bound leaves the resume
+to production, whose refusal carries the wait's report (`refusal_after_an_expired_wait`), as after
+#320's wait (`a_lease_copy_that_outlives_the_bound_still_refuses_a_creation_prefixs_first_resume`).
+`before_the_resume` runs just before the wait: nothing for rows 31 and 32; for
+`a_resume_over_a_creation_prefix_waits_out_a_lease_copy_a_sibling_fork_kept_from_its_ref_write` a
+parked fork holding a copy of P8's lease, which the wait releases; and for
+`a_lease_observation_that_fails_still_fails_a_creation_prefixs_first_resume_at_once` the lease file
+made unreadable, which the body must fail on at once rather than wait out. Proposed frozen hunk H3
+as revised, not adopted.
 
 ## `const STAGING_PATH_KILL_CHILD: &str = "engine::topology::recover::tests::staging_path_kill_child";`
 

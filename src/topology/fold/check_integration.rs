@@ -7,6 +7,7 @@ use crate::topology::registry::Lineage;
 const MERGE_VERIFICATION_STARTED: &str = "merge_verification_started";
 const MERGE_VERIFICATION_UNAVAILABLE: &str = "merge_verification_unavailable";
 const MERGE_VERIFICATION_INTERRUPTED: &str = "merge_verification_interrupted";
+const MERGE_VERIFICATION_CHARGED: &str = "merge_verification_charged";
 const MERGE_PREPARED: &str = "merge_prepared";
 const MERGE_REJECTED: &str = "merge_rejected";
 const TASK_MERGED: &str = "task_merged";
@@ -190,6 +191,7 @@ impl RunState {
             });
         }
         self.check_candidate_not_failed(MERGE_VERIFICATION_UNAVAILABLE, transaction)?;
+        self.check_spend_unrecorded(MERGE_VERIFICATION_UNAVAILABLE, unavailable.sequence)?;
         unavailable
             .self_consistency()
             .map_err(|defect| FoldError::InconsistentRecord {
@@ -234,6 +236,59 @@ impl RunState {
                 detail: "the transaction is already authorized to publish; an authorized \
                          publication is completed, never abandoned"
                     .to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    pub(super) fn check_verification_charged(
+        &self,
+        charged: &MergeVerificationCharged,
+    ) -> Result<(), FoldError> {
+        if charged.reviews.is_empty() {
+            return Err(FoldError::InconsistentRecord {
+                kind: MERGE_VERIFICATION_CHARGED,
+                detail: "it records no review pass, and a verification that charged none has nothing to \
+                         record"
+                    .to_owned(),
+            });
+        }
+        self.check_spend_unrecorded(MERGE_VERIFICATION_CHARGED, charged.sequence)?;
+        if self.abandoned == Some(charged.sequence)
+            && charged.sequence.0.saturating_add(1) == self.next_sequence
+        {
+            return Ok(());
+        }
+        let transaction = self.open_transaction(MERGE_VERIFICATION_CHARGED, charged.sequence)?;
+        if !matches!(
+            transaction.class,
+            TransactionClass::VerificationStarted { .. }
+        ) {
+            return Err(FoldError::InconsistentRecord {
+                kind: MERGE_VERIFICATION_CHARGED,
+                detail: "the transaction is already authorized to publish, and its \
+                         `merge_prepared` records what its verification charged"
+                    .to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    pub(super) fn check_spend_unrecorded(
+        &self,
+        kind: &'static str,
+        sequence: SequenceId,
+    ) -> Result<(), FoldError> {
+        if self.charged == Some(sequence) {
+            return Err(FoldError::InconsistentRecord {
+                kind,
+                detail: format!(
+                    "a `merge_verification_charged` already records the review passes the \
+                     verification of sequence {} charged, so this would count them a second time; \
+                     a sequence's passes are recorded once, and after its record no terminal that \
+                     carries passes is admitted for it",
+                    sequence.0
+                ),
             });
         }
         Ok(())
@@ -331,6 +386,7 @@ impl RunState {
                     ));
                 };
                 self.check_candidate_not_failed(MERGE_PREPARED, transaction)?;
+                self.check_spend_unrecorded(MERGE_PREPARED, prepared.sequence)?;
                 if transaction.candidate != prepared.candidate() {
                     return Err(inconsistent(format!(
                         "it publishes task {} generation {} and the open transaction is verifying \
@@ -431,6 +487,7 @@ impl RunState {
                     ));
                 };
                 self.check_candidate_not_failed(MERGE_REJECTED, transaction)?;
+                self.check_spend_unrecorded(MERGE_REJECTED, rejected.sequence)?;
                 if transaction.candidate != rejected.candidate {
                     return Err(inconsistent(format!(
                         "it rejects task {} generation {} and the open transaction is verifying \

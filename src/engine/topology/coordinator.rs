@@ -29,8 +29,8 @@ use super::identity::{
 use super::integrate::{self, Verified, VerifyRequest};
 use super::preflight::{Carried, Registrar};
 use super::run::{
-    DrivenJournal, Driver, Progress, Retrying, RunSeams, SpendAccount, TopologyRun,
-    VerificationJob, verification_body, verified,
+    Charged, DrivenJournal, Driver, Operator, Progress, Retrying, RunSeams, SpendAccount,
+    TopologyRun, VerificationJob, verification_body, verified,
 };
 use super::seams::TopologyHooks;
 use super::select::{Admitted, Entitlements, Holds, Standing};
@@ -151,6 +151,9 @@ pub enum ToCoordinator {
         charged: Vec<ReviewRecord>,
     },
     Shutdown,
+    Wake {
+        token: u64,
+    },
 }
 
 impl ToCoordinator {
@@ -162,8 +165,12 @@ impl ToCoordinator {
             | Self::SnapshotEnd { pipeline }
             | Self::Judged { pipeline, .. }
             | Self::Verified { pipeline, .. } => Some(*pipeline),
-            Self::Shutdown => None,
+            Self::Shutdown | Self::Wake { .. } => None,
         }
+    }
+
+    const fn completes(&self) -> bool {
+        matches!(self, Self::Judged { .. } | Self::Verified { .. })
     }
 }
 
@@ -216,6 +223,9 @@ impl TopologyRun {
             .name()
             .unwrap_or("upstroke-coordinator")
             .to_owned();
+        let (outbox, inbox) = mpsc::unbounded_channel();
+        let (injector, injected) = mpsc::unbounded_channel();
+        let timer = Timer::start(outbox.clone())?;
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
             .max_blocking_threads(usize::try_from(width).unwrap_or(usize::MAX))
@@ -227,8 +237,7 @@ impl TopologyRun {
                      spawned or appended"
                 ),
             })?;
-        let (outbox, inbox) = mpsc::unbounded_channel();
-        let (injector, injected) = mpsc::unbounded_channel();
+        let ledger = hooks.effects().durability_ledger();
         let mut coordinator = Coordinator {
             run: self,
             seams,
@@ -246,12 +255,18 @@ impl TopologyRun {
             in_verify: None,
             arrived: None,
             abandoned: None,
+            charged: None,
             interrupt: None,
             cancelled_work: closure::Cancelled::none(),
             unresolved: Vec::new(),
             buffer: Vec::new(),
             arrivals: 0,
+            deferred: VecDeque::new(),
+            wakes: 0,
+            ledger,
+            refusal: None,
             handles: Vec::new(),
+            timer,
             inbox,
             outbox,
             injected,
@@ -260,6 +275,8 @@ impl TopologyRun {
         };
         let outcome = coordinator.drive();
         coordinator.join();
+        drop(coordinator);
+        self.reopen();
         outcome
     }
 }
@@ -405,7 +422,11 @@ impl SnapshotGate {
 // coordinator next acts. Winner and loser: a completion is settled only when its
 // pipeline is live, not cancelled, bound to the identity it names, and that
 // identity is open in the fold; any other message is discarded and counted and
-// releases nothing twice; a fatal completion interrupts as it is received. An
+// releases nothing twice; a fatal completion interrupts as it is received. A
+// verification completion from a live pipeline of this coordinator, settled or
+// discarded, has its review passes charged and kept, and they are recorded
+// (`merge_verification_charged`) when the integration or the command ends with no
+// terminal carrying them. An
 // invocation is released only when its end established that its process is
 // gone: one that ended unresolved, or was never reported ended, keeps its
 // registration and pair for the rest of this process, and interrupts. Every
@@ -425,6 +446,31 @@ impl SnapshotGate {
 // notifications (an end, a snapshot's end, its completion) sent since it, and the
 // fold's entitlements bound the pipelines. The coordinator keeps the job it
 // settles against; the pipeline takes its own copy.
+//
+// A registry access the coordinator makes waits only for messages (R-F, R-R;
+// the follow-up B record's §9.13 and §9.16): the coordinator lends itself as the
+// transition's hooks — a dispatch, a continuation, a retry, a settlement, an
+// integration, the run-end closure and its finalization — and each wait of the
+// access — a backoff, or a turn of its wait for R-X — is `registry_pause`, which
+// answers messages until the wake its `Timer` sends into its own inbox. The timer
+// is one thread, started with the coordinator before it acts, so no wait needs a
+// thread it may not get. Inside the wait it applies grants, ends, snapshot
+// requests and a shutdown, which append nothing, and defers a completion until
+// the transition returns, so nothing is appended and nothing is selected inside
+// another transition (R-S); under an observer it keeps the canonical buffer and
+// releases an invocation at quiescence, and an observer's append inside the wait
+// is refused. A stale wake is dropped. A wait that ends with an interrupt
+// recorded — a shutdown it answered, or an error that ends the command — stops
+// the run and returns an error: the access stops before another attempt, the
+// run's emitter refuses every further append, and every further effect made
+// through the coordinator's hooks is refused at its `Before`, so the transition
+// publishes, appends and spawns nothing further whatever it does with the error.
+// The one append made past the stop is O14(b)'s record of the review passes a
+// verification charged: an integration's recording point leaves them to
+// `finish`, which records them after its last receive, every transition having
+// returned, with the stop lifted for that append alone. A wait that begins with
+// an interrupt recorded does not wait. The run reopens when the coordinator is
+// gone.
 struct Coordinator<'s> {
     run: &'s mut TopologyRun,
     seams: &'s RunSeams<'s>,
@@ -439,12 +485,18 @@ struct Coordinator<'s> {
     in_verify: Option<(PipelineId, Identity)>,
     arrived: Option<Verified>,
     abandoned: Option<SequenceId>,
+    charged: Option<Charged>,
     interrupt: Option<Interrupt>,
     cancelled_work: closure::Cancelled,
     unresolved: Vec<String>,
     buffer: Vec<(u64, ToCoordinator)>,
     arrivals: u64,
+    deferred: VecDeque<(Origin, ToCoordinator)>,
+    wakes: u64,
+    ledger: crate::util::DurabilityLedger,
+    refusal: Option<String>,
     handles: Vec<tokio::task::JoinHandle<()>>,
+    timer: Timer,
     inbox: mpsc::UnboundedReceiver<ToCoordinator>,
     outbox: mpsc::UnboundedSender<ToCoordinator>,
     injected: mpsc::UnboundedReceiver<ToCoordinator>,
@@ -547,9 +599,9 @@ impl Coordinator<'_> {
                     key, generation, ..
                 } => {
                     self.open_gate();
-                    if let Retrying::Started(job) = self
-                        .run
-                        .begin_retry(key, generation, self.seams, self.hooks)?
+                    let manager = self.seams.manager;
+                    if let Retrying::Started(job) =
+                        super::run::begin_retry(self, manager, key, generation)?
                     {
                         self.spawn_attempt(*job);
                     }
@@ -565,9 +617,9 @@ impl Coordinator<'_> {
                     continuing,
                 } => {
                     self.open_gate();
-                    let job = self
-                        .run
-                        .begin_dispatch(key, generation, continuing, self.seams, self.hooks)?;
+                    let manager = self.seams.manager;
+                    let job =
+                        super::run::begin_dispatch(self, manager, key, generation, continuing)?;
                     self.spawn_attempt(job);
                 }
                 Admitted::Backoff | Admitted::HardBlock { .. } | Admitted::Closure(_) => {
@@ -599,6 +651,13 @@ impl Coordinator<'_> {
         self.run.reserve_integration(key)?;
         let manager = self.seams.manager;
         let terminal = integrate::integrate(&mut DrivenJournal(self), manager, &request);
+        if self.run.stopped().is_none() {
+            if let (Some(charged), Err(ended)) = (self.charged.take(), &terminal) {
+                if let Err(append) = self.run.record_charged(charged, self.seams, self.hooks) {
+                    self.supersede(append, Some(ended));
+                }
+            }
+        }
         let settled = self.run.integration_settled(key, terminal);
         let abandoned = self.abandoned.take() == Some(request.sequence);
         if settled.is_err() && abandoned && self.interrupt.is_none() {
@@ -647,11 +706,12 @@ impl Coordinator<'_> {
         match self.run.admitted()? {
             Admitted::Backoff => self.run.back_off(self.seams, self.hooks),
             Admitted::HardBlock { questions } => {
-                self.run.hard_block(&questions, self.seams, self.hooks)
+                let seams = self.seams;
+                super::run::hard_block(self, seams, &questions)
             }
             Admitted::Closure(_) => {
-                self.run
-                    .close_run(&closure::Cancelled::none(), self.seams, self.hooks)
+                let seams = self.seams;
+                super::run::close_run(self, seams, &closure::Cancelled::none())
             }
             other => Err(UpstrokeError::Refused {
                 message: format!(
@@ -847,7 +907,8 @@ impl Coordinator<'_> {
                      a failed settlement, failed its lineage, so the fold holds its transaction \
                      only until its one terminal, `merge_verification_interrupted`, which is \
                      appended once its pipeline has ended; the pipeline was stopped and its late \
-                     result discarded",
+                     result discarded, and the coordinator records first the review passes it \
+                     charged, if any (`merge_verification_charged`)",
                     sequence.0
                 );
                 self.run.warn(message.clone());
@@ -858,7 +919,9 @@ impl Coordinator<'_> {
                 Err(UpstrokeError::Refused {
                     message: format!(
                         "the verification of sequence {} of task {key} was interrupted by {}; its \
-                         pipeline was cancelled and nothing further is appended for it",
+                         pipeline was cancelled, no terminal is appended for it here, and the \
+                         coordinator records the review passes it charged, if any \
+                         (`merge_verification_charged`), before the command ends",
                         sequence.0,
                         self.interrupt
                             .as_ref()
@@ -870,6 +933,9 @@ impl Coordinator<'_> {
     }
 
     fn next_message(&mut self) -> Result<(Origin, ToCoordinator), UpstrokeError> {
+        if let Some(deferred) = self.deferred.pop_front() {
+            return Ok(deferred);
+        }
         if self.observer.is_none() {
             let message = self.inbox.blocking_recv().ok_or_else(closed)?;
             self.note_receipt(&message);
@@ -891,6 +957,127 @@ impl Coordinator<'_> {
                 return Ok((Origin::Pipeline, message));
             }
             self.observe()?;
+        }
+    }
+
+    fn answer_until_woken(&mut self, token: u64) -> Result<(), UpstrokeError> {
+        let woken = |message: &ToCoordinator| matches!(message, ToCoordinator::Wake { token: sent } if *sent == token);
+        loop {
+            if self.observer.is_none() {
+                let message = self.inbox.blocking_recv().ok_or_else(closed)?;
+                if woken(&message) {
+                    return Ok(());
+                }
+                self.note_receipt(&message);
+                self.answer_paused(Origin::Pipeline, message)?;
+                continue;
+            }
+            if let Ok(message) = self.injected.try_recv() {
+                self.answer_paused(Origin::Injected, message)?;
+                continue;
+            }
+            while let Ok(message) = self.inbox.try_recv() {
+                if woken(&message) {
+                    return Ok(());
+                }
+                self.buffer_paused(message);
+            }
+            if self.any_running() {
+                let message = self.inbox.blocking_recv().ok_or_else(closed)?;
+                if woken(&message) {
+                    return Ok(());
+                }
+                self.buffer_paused(message);
+                continue;
+            }
+            if let Some(message) = self.take_canonical_answerable() {
+                self.answer_paused(Origin::Pipeline, message)?;
+                continue;
+            }
+            if self.observe_paused()? {
+                continue;
+            }
+            let message = self.inbox.blocking_recv().ok_or_else(closed)?;
+            if woken(&message) {
+                return Ok(());
+            }
+            self.buffer_paused(message);
+        }
+    }
+
+    fn answer_paused(
+        &mut self,
+        origin: Origin,
+        message: ToCoordinator,
+    ) -> Result<(), UpstrokeError> {
+        match message {
+            ToCoordinator::Wake { .. } => Ok(()),
+            message if message.completes() => {
+                self.deferred.push_back((origin, message));
+                Ok(())
+            }
+            message => self.handle(origin, message),
+        }
+    }
+
+    fn buffer_paused(&mut self, message: ToCoordinator) {
+        if !matches!(message, ToCoordinator::Wake { .. }) {
+            self.buffer_message(message);
+        }
+    }
+
+    fn take_canonical_answerable(&mut self) -> Option<ToCoordinator> {
+        let index = self
+            .buffer
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, message))| !message.completes())
+            .min_by_key(|(_, (arrival, message))| (message.pipeline(), *arrival))
+            .map(|(index, _)| index)?;
+        Some(self.buffer.remove(index).1)
+    }
+
+    fn observe_paused(&mut self) -> Result<bool, UpstrokeError> {
+        let invoking: Vec<InvocationId> = self
+            .live
+            .values()
+            .filter_map(|live| match &live.busy {
+                Busy::Invoking(invocation) => Some(invocation.clone()),
+                _ => None,
+            })
+            .collect();
+        let live: Vec<(PipelineId, Identity)> = self
+            .live
+            .iter()
+            .map(|(pipeline, entry)| (*pipeline, entry.identity.clone()))
+            .collect();
+        let Some(observer) = self.observer.as_deref_mut() else {
+            return Ok(false);
+        };
+        let view = Quiescent {
+            invoking,
+            live,
+            run: self.run,
+            injector: &self.injector,
+        };
+        match observer.quiescent(&view) {
+            Release::Invocation(invocation) => {
+                let owner = self
+                    .live
+                    .values_mut()
+                    .find(|live| live.busy == Busy::Invoking(invocation.clone()));
+                Ok(owner.is_some_and(|live| {
+                    live.busy = Busy::Running;
+                    true
+                }))
+            }
+            Release::Injected => Ok(!self.injected.is_empty()),
+            Release::Append(_) => Err(UpstrokeError::Refused {
+                message: "the observer asked for an append inside a registry access's wait; \
+                          nothing is appended inside another transition, so the command ends"
+                    .to_owned(),
+            }),
+            Release::Nothing => Ok(false),
         }
     }
 
@@ -970,7 +1157,7 @@ impl Coordinator<'_> {
             ToCoordinator::Admit { .. } | ToCoordinator::SnapshotBegin { .. } => Busy::Awaiting,
             ToCoordinator::Ended { .. } | ToCoordinator::SnapshotEnd { .. } => Busy::Running,
             ToCoordinator::Judged { .. } | ToCoordinator::Verified { .. } => Busy::Done,
-            ToCoordinator::Shutdown => return,
+            ToCoordinator::Shutdown | ToCoordinator::Wake { .. } => return,
         };
         if let Some(pipeline) = message.pipeline() {
             self.set_busy(pipeline, busy);
@@ -1039,6 +1226,7 @@ impl Coordinator<'_> {
                 self.cancel_all();
                 Ok(())
             }
+            ToCoordinator::Wake { .. } => Ok(()),
         }
     }
 
@@ -1432,9 +1620,8 @@ impl Coordinator<'_> {
                 ),
             });
         };
-        self.run
-            .settle_judged(&job, &judged, self.seams, self.hooks)
-            .map(drop)
+        let manager = self.seams.manager;
+        super::run::settle_judged(self, manager, &job, &judged).map(drop)
     }
 
     fn verified_arrived(
@@ -1445,12 +1632,27 @@ impl Coordinator<'_> {
         outcome: Result<Judgement, JudgeError>,
         charged: Vec<ReviewRecord>,
     ) {
+        let reported = match identity {
+            Identity::Verification {
+                sequence,
+                candidate,
+            } if origin == Origin::Pipeline
+                && self
+                    .live
+                    .get(&pipeline)
+                    .is_some_and(|live| live.identity == *identity) =>
+            {
+                Some((*sequence, candidate.key))
+            }
+            _ => None,
+        };
         if self.in_verify.as_ref().map(|(verifying, _)| *verifying) != Some(pipeline)
             || self.arrived.is_some()
         {
             if origin == Origin::Pipeline
                 && self.live.get(&pipeline).is_some_and(|live| live.cancelled)
             {
+                self.keep_discarded(reported, charged);
                 self.retire(pipeline);
                 self.run.record_discard(None);
                 return;
@@ -1463,6 +1665,7 @@ impl Coordinator<'_> {
             return;
         }
         if !self.accepts(origin, pipeline, identity) {
+            self.keep_discarded(reported, charged);
             return;
         }
         let Identity::Verification {
@@ -1474,6 +1677,10 @@ impl Coordinator<'_> {
             return;
         };
         self.run.charge_reviews(candidate.key, &charged);
+        self.charged = Some(Charged {
+            sequence: *sequence,
+            reviews: charged.clone(),
+        });
         match verified(outcome, charged, *sequence) {
             Ok(verified) => {
                 self.retire(pipeline);
@@ -1493,6 +1700,20 @@ impl Coordinator<'_> {
         self.cancel_all();
     }
 
+    fn keep_discarded(
+        &mut self,
+        reported: Option<(SequenceId, TaskKey)>,
+        charged: Vec<ReviewRecord>,
+    ) {
+        if let Some((sequence, key)) = reported {
+            self.run.charge_reviews(key, &charged);
+            self.charged = Some(Charged {
+                sequence,
+                reviews: charged,
+            });
+        }
+    }
+
     fn fail(&mut self, error: UpstrokeError) {
         if self.interrupt.is_none() {
             self.interrupt = Some(Interrupt::Failed(error));
@@ -1501,6 +1722,17 @@ impl Coordinator<'_> {
                 "after the command had begun to end, a further error: {error}"
             ));
         }
+        self.cancel_all();
+    }
+
+    fn supersede(&mut self, append: UpstrokeError, ended: Option<&UpstrokeError>) {
+        let cause = match self.interrupt.take() {
+            Some(Interrupt::Failed(error)) => error.to_string(),
+            Some(interrupt) => interrupt.describe().to_owned(),
+            None => ended.map_or_else(|| "no recorded cause".to_owned(), ToString::to_string),
+        };
+        self.run.warn(super::run::superseded(&cause));
+        self.interrupt = Some(Interrupt::Failed(append));
         self.cancel_all();
     }
 
@@ -1546,11 +1778,20 @@ impl Coordinator<'_> {
         while !self.live.is_empty() {
             self.receive_one();
         }
+        if let Some(charged) = self.charged.take() {
+            if let Err(append) = self
+                .run
+                .record_charged_past_the_stop(charged, self.seams, self.hooks)
+            {
+                self.supersede(append, None);
+            }
+        }
         let unresolved = std::mem::take(&mut self.unresolved);
         match self.interrupt.take() {
             Some(Interrupt::Halt) if unresolved.is_empty() => {
                 let cancelled = std::mem::take(&mut self.cancelled_work);
-                self.run.close_run(&cancelled, self.seams, self.hooks)
+                let seams = self.seams;
+                super::run::close_run(self, seams, &cancelled)
             }
             Some(Interrupt::Halt) => Err(UpstrokeError::Refused {
                 message: format!(
@@ -1568,7 +1809,8 @@ impl Coordinator<'_> {
                     message: format!(
                         "the coordinator was shut down: every pending request was withdrawn, \
                          every live pipeline was cancelled and its completion discarded, \
-                         {}nothing was settled or appended, and the run is resumable{}",
+                         {}nothing was settled, nothing was appended but the record of the review \
+                         passes a verification had charged, and the run is resumable{}",
                         if reserved {
                             "a provisional reservation still held was cancelled, "
                         } else {
@@ -1609,6 +1851,9 @@ impl Coordinator<'_> {
                     .warn(format!("a pipeline's thread ended abnormally: {error}"));
             }
         }
+        if let Some(panicked) = self.timer.stop() {
+            self.run.warn(panicked);
+        }
     }
 }
 
@@ -1622,7 +1867,7 @@ impl Drop for Coordinator<'_> {
     }
 }
 
-impl Driver for Coordinator<'_> {
+impl Operator for Coordinator<'_> {
     fn parts(&mut self) -> (&mut TopologyRun, &RunSeams<'_>, &mut dyn TopologyHooks) {
         (&mut *self.run, self.seams, &mut *self.hooks)
     }
@@ -1631,6 +1876,95 @@ impl Driver for Coordinator<'_> {
         self.run
     }
 
+    fn registry(&mut self) -> &mut dyn TopologyHooks {
+        self
+    }
+}
+
+impl TopologyHooks for Coordinator<'_> {
+    fn effects(&mut self) -> &mut dyn crate::workspace_manager::EffectHooks {
+        self
+    }
+
+    fn rundir(&mut self) -> &mut dyn crate::rundir::RunDirHooks {
+        self.hooks.rundir()
+    }
+
+    fn events(&mut self) -> &mut dyn crate::events::log::EventHooks {
+        self.hooks.events()
+    }
+
+    fn container(&mut self) -> &mut dyn crate::runner::container::ContainerHooks {
+        self.hooks.container()
+    }
+
+    fn spawn(&mut self) -> &mut dyn crate::agent::proc::SpawnHooks {
+        TopologyHooks::spawn(&mut *self.hooks)
+    }
+}
+
+impl crate::workspace_manager::EffectHooks for Coordinator<'_> {
+    fn phase(
+        &mut self,
+        site: crate::topology::effects::EffectSiteId,
+        phase: crate::topology::effects::HookPhase,
+    ) -> crate::topology::effects::Injection {
+        if let Some(why) = self.run.stopped().map(str::to_owned) {
+            if let crate::topology::effects::HookPhase::Point {
+                mode: crate::topology::effects::InjectionMode::Kill,
+                ..
+            } = phase
+            {
+                return crate::topology::effects::Injection::Proceed;
+            }
+            self.refusal = Some(format!("nothing further is done in this process: {why}"));
+            return crate::topology::effects::Injection::Error;
+        }
+        let effects = self.hooks.effects();
+        let answer = effects.phase(site, phase);
+        let cause = if answer == crate::topology::effects::Injection::Proceed {
+            None
+        } else {
+            effects.refusal_cause()
+        };
+        self.refusal = cause;
+        answer
+    }
+
+    fn durability_ledger(&self) -> crate::util::DurabilityLedger {
+        self.ledger.clone()
+    }
+
+    fn refusal_cause(&self) -> Option<String> {
+        self.refusal.clone()
+    }
+
+    fn registry_pause(&mut self, pause: std::time::Duration) -> Result<(), UpstrokeError> {
+        if self.interrupt.is_none() {
+            self.wakes = self.wakes.wrapping_add(1);
+            let token = self.wakes;
+            let waited = match self.timer.wake(token, pause) {
+                Ok(()) => self.answer_until_woken(token),
+                Err(refusal) => Err(refusal),
+            };
+            if let Err(error) = waited {
+                self.fail(error);
+            }
+        }
+        let Some(interrupt) = &self.interrupt else {
+            return Ok(());
+        };
+        let stopped = format!(
+            "a registry access's wait inside a transition met {}, so the access stopped there \
+             and its transition appends, publishes and spawns nothing further",
+            interrupt.describe()
+        );
+        self.run.stop(stopped.clone());
+        Err(UpstrokeError::Refused { message: stopped })
+    }
+}
+
+impl Driver for Coordinator<'_> {
     fn seams(&self) -> &RunSeams<'_> {
         self.seams
     }
@@ -1704,6 +2038,90 @@ impl Registrar for Client {
                 pipeline: self.pipeline,
             });
         }
+    }
+}
+
+// The coordinator's wait timer (the record's §9.16, I2-3 and I2-5). Owner: the
+// coordinator, which starts it before it builds its runtime and stops and joins
+// it when it ends; the thread holds a clone of the coordinator's own outbox.
+// Protocol: one request at a time — a wait does not nest — carries a token and a
+// length; the thread sleeps the length and then sends `Wake { token }` into the
+// inbox. The sleep runs under `catch_unwind`, so a sleep that unwinds is still
+// answered and the thread goes on serving: the thread's only calls are the wait
+// for the next request, the sleep and the send, it ends only when the
+// coordinator drops its sender, and so every request it accepted is answered
+// within its length. A request it can no longer accept is the coordinator's
+// typed refusal, never a sleep. The join reports a sleep that unwound, or a
+// thread that did, as a warning.
+struct Timer {
+    requests: Option<std::sync::mpsc::Sender<(u64, std::time::Duration)>>,
+    thread: Option<std::thread::JoinHandle<u32>>,
+}
+
+impl Timer {
+    fn start(outbox: mpsc::UnboundedSender<ToCoordinator>) -> Result<Self, UpstrokeError> {
+        Self::starting(outbox, std::thread::sleep)
+    }
+
+    fn starting(
+        outbox: mpsc::UnboundedSender<ToCoordinator>,
+        sleep: fn(std::time::Duration),
+    ) -> Result<Self, UpstrokeError> {
+        let (requests, waits) = std::sync::mpsc::channel::<(u64, std::time::Duration)>();
+        let thread = std::thread::Builder::new()
+            .name("upstroke-coordinator-timer".to_owned())
+            .spawn(move || {
+                let mut unwound: u32 = 0;
+                while let Ok((token, pause)) = waits.recv() {
+                    if std::panic::catch_unwind(|| sleep(pause)).is_err() {
+                        unwound = unwound.saturating_add(1);
+                    }
+                    let _ = outbox.send(ToCoordinator::Wake { token });
+                }
+                unwound
+            })
+            .map_err(|error| UpstrokeError::Refused {
+                message: format!(
+                    "the coordinator's wait timer could not be started ({error}), so no registry \
+                     access's wait could be answered without sleeping on the coordinator; \
+                     nothing was spawned or appended, and the run is resumable"
+                ),
+            })?;
+        Ok(Self {
+            requests: Some(requests),
+            thread: Some(thread),
+        })
+    }
+
+    fn wake(&self, token: u64, pause: std::time::Duration) -> Result<(), UpstrokeError> {
+        self.requests
+            .as_ref()
+            .and_then(|requests| requests.send((token, pause)).ok())
+            .ok_or_else(|| UpstrokeError::Refused {
+                message: "the coordinator's wait timer has stopped, so a registry access's wait \
+                          could not be timed; the access stopped rather than sleep on the \
+                          coordinator, and the command ends resumably"
+                    .to_owned(),
+            })
+    }
+
+    fn stop(&mut self) -> Option<String> {
+        self.requests = None;
+        let thread = self.thread.take()?;
+        match thread.join() {
+            Ok(0) => None,
+            Ok(unwound) => Some(format!(
+                "the coordinator's wait timer unwound inside {unwound} of its sleeps and answered \
+                 each wait all the same"
+            )),
+            Err(_) => Some("the coordinator's wait timer's thread panicked".to_owned()),
+        }
+    }
+}
+
+impl Drop for Timer {
+    fn drop(&mut self) {
+        let _ = self.stop();
     }
 }
 
@@ -2576,6 +2994,29 @@ mod tests {
         (progress, watching)
     }
 
+    fn gate_snapshot_names(
+        manager: &WorkspaceManager,
+        key: u32,
+        generation: u32,
+        attempts: &[u32],
+    ) -> Vec<String> {
+        attempts
+            .iter()
+            .map(|attempt| {
+                manager
+                    .slot_path(&crate::workspace_manager::Slot::Snapshot {
+                        name: crate::workspace_manager::SnapshotName::gates(
+                            key, generation, *attempt,
+                        ),
+                    })
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(str::to_owned)
+                    .unwrap_or_default()
+            })
+            .collect()
+    }
+
     fn snapshot_names(intents: &[crate::workspace_manager::Slot]) -> Vec<String> {
         intents
             .iter()
@@ -3071,10 +3512,20 @@ mod tests {
         let seams = wide.env.seams();
         let mut live = BTreeMap::new();
         for (pipeline, key) in [(PipelineId(1), 0), (PipelineId(2), 1)] {
-            let job = wide
-                .run
-                .begin_dispatch(TaskKey(key), GenerationId(0), false, &seams, &mut hooks)
-                .expect("alpha's and beta's attempts start");
+            let job = crate::engine::topology::run::begin_dispatch(
+                &mut crate::engine::topology::run::Stepping {
+                    run: &mut wide.run,
+
+                    seams: &seams,
+
+                    hooks: &mut hooks,
+                },
+                seams.manager,
+                TaskKey(key),
+                GenerationId(0),
+                false,
+            )
+            .expect("alpha's and beta's attempts start");
             live.insert(
                 pipeline,
                 Live {
@@ -3116,12 +3567,18 @@ mod tests {
                 in_verify: None,
                 arrived: None,
                 abandoned: None,
+                charged: None,
                 interrupt: None,
                 cancelled_work: closure::Cancelled::none(),
                 unresolved: Vec::new(),
                 buffer: Vec::new(),
                 arrivals: 0,
+                deferred: VecDeque::new(),
+                wakes: 0,
+                ledger: crate::util::DurabilityLedger::off(),
+                refusal: None,
                 handles: Vec::new(),
+                timer: Timer::start(outbox.clone()).expect("the wait timer starts"),
                 inbox,
                 outbox,
                 injected,
@@ -3602,6 +4059,3778 @@ mod tests {
         replay_equals_live(&resumed);
     }
 
+    // Protocol (standards §10): the policy owns its writer. The verification
+    // that plants the tear stores it once; `finish`, or the drop when a test
+    // unwinds first, cancels it through its channel and joins it, so nothing it
+    // does lands after the fixture is reclaimed. The lock (§6) guards only that
+    // handle, stored once and taken once: `problem` takes `&self` on a
+    // pipeline's thread.
+    struct TearsAForeignRegistration {
+        admin: PathBuf,
+        head: String,
+        common: PathBuf,
+        finishes: bool,
+        watchdog: Duration,
+        remaining: std::sync::atomic::AtomicUsize,
+        writer: std::sync::Mutex<Option<ForeignWriter>>,
+    }
+
+    struct ForeignWriter {
+        cancel: std::sync::mpsc::Sender<()>,
+        handle: std::thread::JoinHandle<Result<(), String>>,
+    }
+
+    impl TearsAForeignRegistration {
+        fn new(
+            admin: PathBuf,
+            head: String,
+            common: PathBuf,
+            finishes: bool,
+            watchdog: Duration,
+        ) -> Self {
+            Self {
+                admin,
+                head,
+                common,
+                finishes,
+                watchdog,
+                remaining: std::sync::atomic::AtomicUsize::new(1),
+                writer: std::sync::Mutex::new(None),
+            }
+        }
+
+        fn finish(&self) -> Result<(), String> {
+            self.settle(true)
+        }
+
+        fn settle(&self, cancel: bool) -> Result<(), String> {
+            let writer = self
+                .writer
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            let Some(ForeignWriter {
+                cancel: canceller,
+                handle,
+            }) = writer
+            else {
+                return Err(format!(
+                    "no writer was started for the registration at {}: no verification planted \
+                     the tear, or it was planted with `finishes` false",
+                    self.admin.display()
+                ));
+            };
+            if cancel {
+                let _ = canceller.send(());
+            }
+            handle.join().unwrap_or_else(|_| {
+                Err(format!(
+                    "the writer of the registration at {} panicked",
+                    self.admin.display()
+                ))
+            })
+        }
+
+        fn start_writer(&self) -> ForeignWriter {
+            let before = crate::workspace_manager::contended_attempts(&self.common);
+            let (admin, common, watchdog) =
+                (self.admin.clone(), self.common.clone(), self.watchdog);
+            let (cancel, cancelled) = std::sync::mpsc::channel::<()>();
+            let handle = std::thread::spawn(move || {
+                let deadline = std::time::Instant::now() + watchdog;
+                loop {
+                    if crate::workspace_manager::contended_attempts(&common) > before {
+                        crate::workspace_manager::fixture::write_file(
+                            &admin.join("commondir"),
+                            b"../..\n",
+                        );
+                        return Ok(());
+                    }
+                    let left = deadline.saturating_duration_since(std::time::Instant::now());
+                    if left.is_zero() {
+                        return Err(format!(
+                            "no registry access failed on the registration planted at {} within \
+                             {watchdog:?}, so its writer wrote nothing",
+                            admin.display()
+                        ));
+                    }
+                    match cancelled.recv_timeout(left.min(Duration::from_millis(1))) {
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                        Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                            return Err(format!(
+                                "the writer of the registration planted at {} was cancelled \
+                                 before any registry access failed on it, and wrote nothing",
+                                admin.display()
+                            ));
+                        }
+                    }
+                }
+            });
+            ForeignWriter { cancel, handle }
+        }
+    }
+
+    impl Drop for TearsAForeignRegistration {
+        fn drop(&mut self) {
+            let held = self
+                .writer
+                .get_mut()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_some();
+            if !held {
+                return;
+            }
+            if let Err(why) = self.settle(true) {
+                if std::thread::panicking() {
+                    crate::workspace_manager::fixture::say(&why);
+                } else {
+                    panic!("{why}");
+                }
+            }
+        }
+    }
+
+    impl ReviewInputPolicy for TearsAForeignRegistration {
+        fn problem(
+            &self,
+            worktree: &std::path::Path,
+            _tree: &str,
+        ) -> Result<Option<String>, UpstrokeError> {
+            let verifying = worktree.parent().and_then(std::path::Path::file_name)
+                == Some(std::ffi::OsStr::new("merge"));
+            if verifying
+                && self
+                    .remaining
+                    .compare_exchange(
+                        1,
+                        0,
+                        std::sync::atomic::Ordering::SeqCst,
+                        std::sync::atomic::Ordering::SeqCst,
+                    )
+                    .is_ok()
+            {
+                let checkout = self.admin.join("foreign-checkout").join(".git");
+                crate::workspace_manager::fixture::write_file(
+                    &self.admin.join("HEAD"),
+                    format!("{}\n", self.head).as_bytes(),
+                );
+                crate::workspace_manager::fixture::write_file(
+                    &self.admin.join("gitdir"),
+                    format!(
+                        "{}\n",
+                        crate::workspace_manager::fixture::as_git_writes_it(&checkout)
+                    )
+                    .as_bytes(),
+                );
+                crate::workspace_manager::fixture::write_file(&self.admin.join("commondir"), b"");
+                if self.finishes {
+                    let writer = self.start_writer();
+                    *self
+                        .writer
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(writer);
+                }
+            }
+            Ok(None)
+        }
+    }
+
+    fn registry_drive(
+        wide: &mut Wide,
+        policy: Arc<dyn ReviewInputPolicy + Send + Sync>,
+    ) -> Result<Progress, UpstrokeError> {
+        let mut hooks = wide.env.hooks();
+        let mut pipelines = wide.env.pipelines();
+        pipelines.input_policy = policy;
+        let runner = Arc::clone(&wide.env.runner);
+        let mut scheduler = Scheduler::first(&runner);
+        wide.run.run_concurrently(
+            &wide.env.seams(),
+            &pipelines,
+            &mut hooks,
+            Some(&mut scheduler),
+        )
+    }
+
+    fn tearing(
+        wide: &Wide,
+        name: &str,
+        finishes: bool,
+    ) -> (Arc<TearsAForeignRegistration>, PathBuf) {
+        let common = wide.env.fixture.manager.common_git_dir().to_path_buf();
+        let admin = common.join("worktrees").join(name);
+        let policy = Arc::new(TearsAForeignRegistration::new(
+            admin.clone(),
+            wide.env.fixture.head.clone(),
+            common,
+            finishes,
+            BOUND,
+        ));
+        (policy, admin)
+    }
+
+    #[test]
+    fn a_verification_beside_another_processs_registration_write_in_flight_spends_no_deferral() {
+        let tasks = [
+            WideTask::independent("alpha"),
+            WideTask::independent("beta"),
+        ];
+        let mut wide = Wide::started_with(
+            "registry-verification-transient",
+            &tasks,
+            2,
+            WidePlans::default(),
+            holding(&tasks, &[]),
+        );
+        let _deadline = crate::workspace_manager::RegistryDeadline::hold(
+            wide.env.fixture.manager.common_git_dir(),
+            WITNESS_REGISTRY_DEADLINE,
+        );
+        let common = wide.env.fixture.manager.common_git_dir().to_path_buf();
+        let before = crate::workspace_manager::contended_attempts(&common);
+        let (policy, _admin) = tearing(&wide, "foreign-in-flight", true);
+        let progress = registry_drive(&mut wide, Arc::<TearsAForeignRegistration>::clone(&policy))
+            .expect("a registration another process finishes writing ends nothing");
+        policy
+            .finish()
+            .expect("an access failed on the tear, and only then did its writer finish it");
+        assert_eq!(outcome_of(&progress), RunOutcome::Complete);
+        let events = wide.run.events();
+        assert_eq!(
+            count(events, "merge_verification_unavailable"),
+            0,
+            "{:?}",
+            kinds_of(events)
+        );
+        assert_eq!(count(events, "task_merged"), 2);
+        assert!(
+            crate::workspace_manager::contended_attempts(&common) > before,
+            "the verification's registry access failed on the write in flight first"
+        );
+        assert!(wide.run.invocations_balance());
+        replay_equals_live(&wide);
+    }
+
+    #[test]
+    fn a_verification_beside_a_registration_that_stays_torn_ends_resumably_and_its_resume_reverifies()
+     {
+        let tasks = [
+            WideTask::independent("alpha"),
+            WideTask::independent("beta"),
+        ];
+        let mut wide = Wide::durable(
+            "registry-verification-static",
+            &tasks,
+            2,
+            WidePlans::default(),
+            holding(&tasks, &[]),
+        );
+        let (policy, admin) = tearing(&wide, "foreign-torn", false);
+        let error = registry_drive(&mut wide, policy)
+            .expect_err("a registration that stays torn ends the command");
+        assert!(
+            matches!(&error, UpstrokeError::RegistryRefused { message } if message.contains("commondir")),
+            "{error:?}"
+        );
+        let kinds = kinds_of_log(&wide);
+        for absent in [
+            "merge_verification_unavailable",
+            "question_asked",
+            "run_finished",
+        ] {
+            assert!(!kinds.contains(&absent), "{absent} in {kinds:?}");
+        }
+        assert_eq!(
+            kinds.last(),
+            Some(&"merge_verification_started"),
+            "nothing durable after the verification began: {kinds:?}"
+        );
+        for file in ["HEAD", "gitdir", "commondir"] {
+            crate::workspace_manager::fixture::remove_file(&admin.join(file));
+        }
+        crate::workspace_manager::fixture::remove_dir(&admin);
+        let (_, mut resumed) = wide
+            .resume(
+                "inc-2",
+                holding(&tasks, &[]),
+                crate::engine::topology::select::Ceiling::unlimited(),
+            )
+            .expect("the next process resumes once the operator removed the registration");
+        let runner = Arc::clone(&resumed.env.runner);
+        let mut scheduler = Scheduler::first(&runner);
+        let progress =
+            drive(&mut resumed, Some(&mut scheduler)).expect("the resumed run completes");
+        drop(scheduler);
+        assert_eq!(outcome_of(&progress), RunOutcome::Complete);
+        let kinds = kinds_of_log(&resumed);
+        assert_eq!(
+            count(
+                &resumed.env.durable_events(),
+                "merge_verification_interrupted"
+            ),
+            1,
+            "{kinds:?}"
+        );
+        assert_eq!(
+            count(
+                &resumed.env.durable_events(),
+                "merge_verification_unavailable"
+            ),
+            0,
+            "{kinds:?}"
+        );
+        assert_eq!(count(&resumed.env.durable_events(), "task_merged"), 2);
+        let sequences: std::collections::BTreeSet<u32> = resumed
+            .env
+            .durable_events()
+            .iter()
+            .filter_map(|event| match &event.body {
+                TopologyEventBody::MergeVerificationStarted { data } => Some(data.sequence.0),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            sequences.len() >= 2,
+            "the interrupted verification verified again under a new sequence: {kinds:?}"
+        );
+        replay_equals_live(&resumed);
+    }
+
+    fn planted_alone(
+        tag: &str,
+        watchdog: Duration,
+    ) -> (
+        crate::rundir::scratch_tree::ScratchTree,
+        TearsAForeignRegistration,
+        PathBuf,
+        PathBuf,
+    ) {
+        let tree = crate::workspace_manager::fixture::scratch(tag);
+        let common = tree.path().join("common");
+        let admin = common.join("worktrees").join("foreign");
+        let policy = TearsAForeignRegistration::new(
+            admin.clone(),
+            "a".repeat(40),
+            common.clone(),
+            true,
+            watchdog,
+        );
+        policy
+            .problem(&tree.path().join("merge").join("s1"), "")
+            .expect("the verification plants the tear");
+        (tree, policy, admin, common)
+    }
+
+    #[test]
+    fn a_foreign_writer_whose_handshake_never_arrives_writes_nothing_and_says_so() {
+        let (_tree, policy, admin, _common) =
+            planted_alone("foreign-writer-unmet", Duration::from_millis(20));
+        let ended = policy.settle(false);
+        assert!(
+            matches!(&ended, Err(why) if why.contains("within 20ms") && why.contains("wrote nothing")),
+            "the writer reports its watchdog: {ended:?}"
+        );
+        assert_eq!(
+            std::fs::read(admin.join("commondir")).expect("the planted commondir"),
+            b"",
+            "a writer whose handshake never came leaves the tear as planted"
+        );
+    }
+
+    #[test]
+    fn a_foreign_writer_is_cancelled_and_joined_before_its_fixture_is_reclaimed() {
+        let (tree, policy, admin, common) = planted_alone("foreign-writer-joined", BOUND);
+        let root = tree.path().to_path_buf();
+        let ended = policy.finish();
+        assert!(
+            matches!(&ended, Err(why) if why.contains("cancelled") && why.contains("wrote nothing")),
+            "the writer was cancelled and joined, and says so: {ended:?}"
+        );
+        assert_eq!(
+            std::fs::read(admin.join("commondir")).expect("the planted commondir"),
+            b"",
+            "the cancelled writer wrote nothing"
+        );
+        drop(policy);
+        drop(tree);
+        assert!(!root.exists(), "the fixture's guard reclaimed its root");
+        {
+            let mut table = crate::workspace_manager::CONTENDED_ATTEMPTS
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let count = table.entry(common).or_default();
+            *count = count.saturating_add(1);
+        }
+        assert!(
+            !root.exists(),
+            "nothing recreated the reclaimed fixture at {}",
+            root.display()
+        );
+    }
+
+    #[derive(Clone, Copy)]
+    enum TearAt {
+        Fold(fn(&TopologyEventBody) -> bool),
+        Access(fn(&TopologyEventBody) -> bool, usize),
+    }
+
+    struct Prober {
+        cancel: std::sync::mpsc::Sender<()>,
+        handle: std::thread::JoinHandle<Result<(), String>>,
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Wakes {
+        Entered,
+        Ended,
+        Contended,
+        Never,
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Torn {
+        CommondirEmpty,
+        GitdirMissing,
+        /// A registration whose `gitdir` cannot be read: a directory stands
+        /// where the file should be. The removal's scan and the registry read
+        /// that discovers earlier incarnations' instances both fail on it,
+        /// where they pass over the two shapes above (the follow-up C record,
+        /// §6.11).
+        GitdirUnreadable,
+    }
+
+    #[derive(Clone)]
+    struct Plant {
+        admin: PathBuf,
+        head: String,
+        runner: Arc<RecordingRunner>,
+        wakes: Wakes,
+        common: PathBuf,
+        torn: Torn,
+    }
+
+    impl Plant {
+        fn finish_tear(&self) {
+            if self.torn == Torn::GitdirUnreadable {
+                crate::workspace_manager::fixture::remove_dir(&self.admin.join("gitdir"));
+            }
+            if matches!(self.torn, Torn::GitdirMissing | Torn::GitdirUnreadable) {
+                self.whole();
+            }
+            crate::workspace_manager::fixture::write_file(
+                &self.admin.join("commondir"),
+                b"../..\n",
+            );
+            if self.torn == Torn::GitdirMissing {
+                crate::workspace_manager::fixture::remove_file(&self.admin.join("locked"));
+            }
+        }
+
+        fn whole(&self) {
+            let checkout = self.admin.join("foreign-checkout").join(".git");
+            crate::workspace_manager::fixture::write_file(
+                &self.admin.join("HEAD"),
+                format!("{}\n", self.head).as_bytes(),
+            );
+            crate::workspace_manager::fixture::write_file(
+                &self.admin.join("gitdir"),
+                format!(
+                    "{}\n",
+                    crate::workspace_manager::fixture::as_git_writes_it(&checkout)
+                )
+                .as_bytes(),
+            );
+        }
+
+        fn tear(&self) -> Prober {
+            self.tear_sampling_every(Duration::from_millis(1))
+        }
+
+        fn tear_sampling_every(&self, every: Duration) -> Prober {
+            match self.torn {
+                Torn::CommondirEmpty => {
+                    self.whole();
+                    crate::workspace_manager::fixture::write_file(
+                        &self.admin.join("commondir"),
+                        b"",
+                    );
+                }
+                Torn::GitdirMissing => {
+                    crate::workspace_manager::fixture::write_file(
+                        &self.admin.join("locked"),
+                        b"initializing\n",
+                    );
+                }
+                Torn::GitdirUnreadable => {
+                    crate::workspace_manager::fixture::write_file(
+                        &self.admin.join("HEAD"),
+                        format!("{}\n", self.head).as_bytes(),
+                    );
+                    crate::workspace_manager::fixture::write_file(
+                        &self.admin.join("commondir"),
+                        b"../..\n",
+                    );
+                    crate::workspace_manager::fixture::create_dir(&self.admin.join("gitdir"));
+                }
+            }
+            let (cancel, cancelled) = std::sync::mpsc::channel::<()>();
+            if self.wakes == Wakes::Never {
+                let handle = std::thread::spawn(move || {
+                    let _ = cancelled.recv_timeout(BOUND);
+                    Ok(())
+                });
+                return Prober { cancel, handle };
+            }
+            let (wakes, common) = (self.wakes, self.common.clone());
+            let progress = move |runner: &RecordingRunner| match wakes {
+                Wakes::Entered => runner.ran().len(),
+                Wakes::Ended => runner.endings().len(),
+                Wakes::Contended => crate::workspace_manager::contended_attempts(&common),
+                Wakes::Never => 0,
+            };
+            let before = progress(&self.runner);
+            let (admin, runner, finishing) =
+                (self.admin.clone(), Arc::clone(&self.runner), self.clone());
+            let handle = std::thread::spawn(move || {
+                let deadline = std::time::Instant::now() + BOUND;
+                loop {
+                    let left = deadline.saturating_duration_since(std::time::Instant::now());
+                    let cancelled_now = !matches!(
+                        cancelled.recv_timeout(left.min(every)),
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                    );
+                    if progress(&runner) > before {
+                        finishing.finish_tear();
+                        return Ok(());
+                    }
+                    if cancelled_now {
+                        return Err(format!(
+                            "{} before the prober of the tear planted at {} was cancelled, so \
+                             the registration stayed torn",
+                            wakes.not_seen(),
+                            admin.display()
+                        ));
+                    }
+                    if left.is_zero() {
+                        return Err(format!(
+                            "{} within {BOUND:?} of the tear planted at {}, so nothing finished \
+                             it",
+                            wakes.not_seen(),
+                            admin.display()
+                        ));
+                    }
+                }
+            });
+            Prober { cancel, handle }
+        }
+    }
+
+    impl Wakes {
+        fn not_seen(self) -> &'static str {
+            match self {
+                Wakes::Entered => "no invocation reached the runner",
+                Wakes::Ended => "no invocation left the runner",
+                Wakes::Contended => "no registry access failed on the tear",
+                Wakes::Never => "nothing was awaited",
+            }
+        }
+    }
+
+    fn lone_plant(tag: &str) -> (crate::rundir::scratch_tree::ScratchTree, Plant) {
+        let tree = crate::workspace_manager::fixture::scratch(tag);
+        let common = tree.path().join("common");
+        let plant = Plant {
+            admin: common.join("worktrees").join("foreign"),
+            head: "a".repeat(40),
+            runner: Arc::new(RecordingRunner::new()),
+            wakes: Wakes::Contended,
+            common,
+            torn: Torn::CommondirEmpty,
+        };
+        (tree, plant)
+    }
+
+    fn cancelled_and_joined(prober: Prober) -> Result<(), String> {
+        let _ = prober.cancel.send(());
+        prober
+            .handle
+            .join()
+            .unwrap_or_else(|_| Err("the prober panicked".to_owned()))
+    }
+
+    #[test]
+    fn a_prober_cancelled_after_the_attempt_it_waits_for_reports_it_and_finishes_the_tear() {
+        let (_tree, plant) = lone_plant("prober-cancelled-after");
+        let prober = plant.tear_sampling_every(BOUND);
+        {
+            let mut table = crate::workspace_manager::CONTENDED_ATTEMPTS
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let count = table.entry(plant.common.clone()).or_default();
+            *count = count.saturating_add(1);
+        }
+        assert_eq!(
+            cancelled_and_joined(prober),
+            Ok(()),
+            "an attempt counted before the cancel was sent is what the prober waited for, however \
+             long the wait the cancel ended"
+        );
+        assert_eq!(
+            std::fs::read(plant.admin.join("commondir")).expect("the finished commondir"),
+            b"../..\n",
+            "the prober finished the tear"
+        );
+    }
+
+    #[test]
+    fn a_prober_cancelled_before_anything_it_waits_for_leaves_the_tear_and_says_so() {
+        let (_tree, plant) = lone_plant("prober-cancelled-before");
+        let prober = plant.tear_sampling_every(BOUND);
+        let ended = cancelled_and_joined(prober);
+        assert!(
+            matches!(&ended, Err(why) if why.contains("no registry access failed on the tear")
+                && why.contains("stayed torn")),
+            "the prober says what it did not see: {ended:?}"
+        );
+        assert_eq!(
+            std::fs::read(plant.admin.join("commondir")).expect("the planted commondir"),
+            b"",
+            "the tear stands as planted"
+        );
+    }
+
+    type FoldAct = (fn(&TopologyEventBody) -> bool, Box<dyn FnMut()>);
+
+    const WITNESS_REGISTRY_DEADLINE: Duration = Duration::from_secs(10);
+
+    struct TearHeld {
+        inner: crate::engine::topology::seams::HarnessTopologyHooks,
+        at: TearAt,
+        plant: Plant,
+        prober: std::rc::Rc<std::cell::RefCell<Option<Prober>>>,
+        planting: Option<crate::workspace_manager::fixture::AccessPlanting>,
+        armed: bool,
+        also: Option<FoldAct>,
+        _deadline: crate::workspace_manager::RegistryDeadline,
+    }
+
+    impl TearHeld {
+        fn new(wide: &Wide, name: &str, at: TearAt) -> Self {
+            Self::waking(wide, name, at, Wakes::Entered)
+        }
+
+        fn waking(wide: &Wide, name: &str, at: TearAt, wakes: Wakes) -> Self {
+            Self {
+                inner: wide.env.hooks(),
+                at,
+                plant: Plant {
+                    admin: wide
+                        .env
+                        .fixture
+                        .manager
+                        .common_git_dir()
+                        .join("worktrees")
+                        .join(name),
+                    head: wide.env.fixture.head.clone(),
+                    runner: Arc::clone(&wide.env.runner),
+                    wakes,
+                    common: wide.env.fixture.manager.common_git_dir().to_path_buf(),
+                    torn: Torn::CommondirEmpty,
+                },
+                prober: std::rc::Rc::new(std::cell::RefCell::new(None)),
+                planting: None,
+                armed: false,
+                also: None,
+                _deadline: crate::workspace_manager::RegistryDeadline::hold(
+                    wide.env.fixture.manager.common_git_dir(),
+                    WITNESS_REGISTRY_DEADLINE,
+                ),
+            }
+        }
+
+        fn tearing(&mut self, torn: Torn) {
+            self.plant.torn = torn;
+        }
+
+        fn planted(&self) -> impl Fn() -> bool + 'static {
+            let prober = std::rc::Rc::clone(&self.prober);
+            move || prober.borrow().is_some()
+        }
+
+        fn finish(&mut self) -> Result<(), String> {
+            let Some(Prober { cancel, handle }) = self.prober.borrow_mut().take() else {
+                return Err(format!(
+                    "the tear at {} was never planted",
+                    self.plant.admin.display()
+                ));
+            };
+            let _ = cancel.send(());
+            handle
+                .join()
+                .unwrap_or_else(|_| Err("the prober panicked".to_owned()))
+        }
+    }
+
+    impl Drop for TearHeld {
+        fn drop(&mut self) {
+            self.planting = None;
+            if self.prober.borrow().is_none() {
+                return;
+            }
+            if let Err(why) = self.finish() {
+                if std::thread::panicking() {
+                    crate::workspace_manager::fixture::say(&why);
+                } else {
+                    panic!("{why}");
+                }
+            }
+        }
+    }
+
+    impl crate::engine::topology::seams::TopologyHooks for TearHeld {
+        fn effects(&mut self) -> &mut dyn crate::workspace_manager::EffectHooks {
+            self.inner.effects()
+        }
+
+        fn rundir(&mut self) -> &mut dyn crate::rundir::RunDirHooks {
+            self.inner.rundir()
+        }
+
+        fn events(&mut self) -> &mut dyn crate::events::log::EventHooks {
+            self.inner.events()
+        }
+
+        fn container(&mut self) -> &mut dyn crate::runner::container::ContainerHooks {
+            self.inner.container()
+        }
+
+        fn spawn(&mut self) -> &mut dyn crate::agent::proc::SpawnHooks {
+            self.inner.spawn()
+        }
+
+        fn folded(&mut self, fold: &TopologyFold, events: &[TopologyEvent]) {
+            self.inner.folded(fold, events);
+            let Some(last) = events.last() else {
+                return;
+            };
+            if self.also.as_ref().is_some_and(|(when, _)| when(&last.body)) {
+                if let Some((_, mut act)) = self.also.take() {
+                    act();
+                }
+            }
+            if self.armed {
+                return;
+            }
+            match self.at {
+                TearAt::Fold(when) if when(&last.body) => {
+                    self.armed = true;
+                    *self.prober.borrow_mut() = Some(self.plant.tear());
+                }
+                TearAt::Access(when, nth) if when(&last.body) => {
+                    self.armed = true;
+                    let (plant, slot) = (self.plant.clone(), std::rc::Rc::clone(&self.prober));
+                    self.planting =
+                        Some(crate::workspace_manager::fixture::before_registry_access(
+                            nth,
+                            Box::new(move |_| {
+                                *slot.borrow_mut() = Some(plant.tear());
+                            }),
+                        ));
+                }
+                TearAt::Fold(_) | TearAt::Access(..) => {}
+            }
+        }
+    }
+
+    fn two_independent() -> [WideTask; 2] {
+        [
+            WideTask::independent("beta"),
+            WideTask::independent("alpha"),
+        ]
+    }
+
+    fn served_through(tag: &str, tasks: &[WideTask], at: TearAt) {
+        let (what, tag, tasks) = (tag.to_owned(), tag.to_owned(), tasks.to_vec());
+        bounded(&what, move || {
+            let mut wide = Wide::started_with(
+                &tag,
+                &tasks,
+                2,
+                WidePlans::default(),
+                RecordingRunner::new().answering(wide_responder(&tasks, &[])),
+            );
+            let common = wide.env.fixture.manager.common_git_dir().to_path_buf();
+            let before = crate::workspace_manager::contended_attempts(&common);
+            let mut hooks = TearHeld::new(&wide, "foreign-held", at);
+            let pipelines = wide.env.pipelines();
+            let slept = crate::workspace_manager::fixture::slept_pauses();
+            let progress = wide
+                .run
+                .run_concurrently(&wide.env.seams(), &pipelines, &mut hooks, None)
+                .expect("the access is passed once the coordinator granted a pipeline meanwhile");
+            assert_eq!(
+                crate::workspace_manager::fixture::slept_pauses(),
+                slept,
+                "no wait of a registry access the coordinator made slept on its thread"
+            );
+            hooks
+                .finish()
+                .expect("an invocation reached the runner while the access waited on the tear");
+            assert_eq!(outcome_of(&progress), RunOutcome::Complete);
+            assert!(
+                crate::workspace_manager::contended_attempts(&common) > before,
+                "the access failed on the tear first"
+            );
+            assert!(wide.run.invocations_balance());
+        });
+    }
+
+    fn attempt_started_of(key: u32) -> fn(&TopologyEventBody) -> bool {
+        match key {
+            0 => {
+                |body| matches!(body, TopologyEventBody::AttemptStarted { data } if data.key == TaskKey(0))
+            }
+            _ => {
+                |body| matches!(body, TopologyEventBody::AttemptStarted { data } if data.key == TaskKey(1))
+            }
+        }
+    }
+
+    fn task_dispatched_of(key: u32) -> fn(&TopologyEventBody) -> bool {
+        match key {
+            0 => {
+                |body| matches!(body, TopologyEventBody::TaskDispatched { data } if data.key == TaskKey(0))
+            }
+            _ => {
+                |body| matches!(body, TopologyEventBody::TaskDispatched { data } if data.key == TaskKey(1))
+            }
+        }
+    }
+
+    #[test]
+    fn a_pipeline_is_granted_while_a_dispatchs_head_check_waits_on_a_torn_registration() {
+        served_through(
+            "registry-served-head",
+            &two_independent(),
+            TearAt::Fold(attempt_started_of(0)),
+        );
+    }
+
+    #[test]
+    fn a_pipeline_is_granted_while_a_dispatchs_revalidation_waits_on_a_torn_registration() {
+        served_through(
+            "registry-served-revalidate",
+            &two_independent(),
+            TearAt::Access(attempt_started_of(0), 2),
+        );
+    }
+
+    #[test]
+    fn a_pipeline_is_granted_while_a_dispatchs_intent_waits_on_a_torn_registration() {
+        served_through(
+            "registry-served-intent",
+            &two_independent(),
+            TearAt::Fold(task_dispatched_of(1)),
+        );
+    }
+
+    #[test]
+    fn a_pipeline_is_granted_while_a_dispatchs_add_gate_waits_on_a_torn_registration() {
+        served_through(
+            "registry-served-add-gate",
+            &two_independent(),
+            TearAt::Access(task_dispatched_of(1), 2),
+        );
+    }
+
+    #[test]
+    fn a_pipeline_is_granted_while_a_dispatchs_add_waits_on_a_torn_registration() {
+        served_through(
+            "registry-served-add",
+            &two_independent(),
+            TearAt::Access(task_dispatched_of(1), 3),
+        );
+    }
+
+    fn beta_settles_while_alpha_holds_its_first_gate(view: &Quiescent<'_>) -> Option<Release> {
+        let beta_live = view.live.iter().any(
+            |(_, identity)| matches!(identity, Identity::Attempt { key, .. } if *key == TaskKey(0)),
+        );
+        released(view, |invocation| {
+            attempt_key(invocation) == Some(1) && role_of(invocation) == Some(AttemptRole::Worker)
+        })
+        .or_else(|| {
+            released(view, |invocation| {
+                attempt_key(invocation) == Some(if beta_live { 0 } else { 1 })
+            })
+        })
+    }
+
+    fn served_while_alpha_waits(tag: &str, failing: &'static [(u32, u32)], at: TearAt) {
+        served_while_alpha_waits_with(tag, failing, at, RunOutcome::Complete, |_, _| {});
+    }
+
+    fn served_while_alpha_waits_with(
+        tag: &str,
+        failing: &'static [(u32, u32)],
+        at: TearAt,
+        outcome: RunOutcome,
+        prepare: impl FnOnce(&Wide, &mut TearHeld) + Send + 'static,
+    ) {
+        let (what, tag) = (tag.to_owned(), tag.to_owned());
+        bounded(&what, move || {
+            let tasks = two_independent();
+            let plans = WidePlans {
+                gates: 2,
+                ..WidePlans::default()
+            };
+            let mut wide = Wide::started_with(&tag, &tasks, 2, plans, holding(&tasks, failing));
+            let common = wide.env.fixture.manager.common_git_dir().to_path_buf();
+            let before = crate::workspace_manager::contended_attempts(&common);
+            let mut hooks = TearHeld::new(&wide, "foreign-held", at);
+            prepare(&wide, &mut hooks);
+            let pipelines = wide.env.pipelines();
+            let runner = Arc::clone(&wide.env.runner);
+            let mut scheduler = Scheduler::scripted(
+                &runner,
+                Box::new(beta_settles_while_alpha_holds_its_first_gate),
+            );
+            let slept = crate::workspace_manager::fixture::slept_pauses();
+            let progress = wide
+                .run
+                .run_concurrently(
+                    &wide.env.seams(),
+                    &pipelines,
+                    &mut hooks,
+                    Some(&mut scheduler),
+                )
+                .expect("the access is passed once the coordinator served a pipeline meanwhile");
+            assert_eq!(
+                crate::workspace_manager::fixture::slept_pauses(),
+                slept,
+                "no wait of a registry access the coordinator made slept on its thread"
+            );
+            drop(scheduler);
+            hooks
+                .finish()
+                .expect("an invocation reached the runner while the access waited on the tear");
+            drop(hooks);
+            assert_eq!(outcome_of(&progress), outcome);
+            assert!(
+                crate::workspace_manager::contended_attempts(&common) > before,
+                "the access failed on the tear first"
+            );
+            assert!(wide.run.invocations_balance());
+        });
+    }
+
+    fn candidate_prepared_of_beta(body: &TopologyEventBody) -> bool {
+        matches!(body, TopologyEventBody::CandidatePrepared { data } if data.key == TaskKey(0))
+    }
+
+    fn candidate_created_of_beta(body: &TopologyEventBody) -> bool {
+        matches!(body, TopologyEventBody::TaskCandidateCreated { data } if data.candidate.key == TaskKey(0))
+    }
+
+    fn merge_prepared_of_beta(body: &TopologyEventBody) -> bool {
+        matches!(body, TopologyEventBody::MergePrepared { data } if data.key == TaskKey(0))
+    }
+
+    fn retained_attempt_finished_of_beta(body: &TopologyEventBody) -> bool {
+        matches!(body, TopologyEventBody::AttemptFinished { data } if data.key == TaskKey(0))
+    }
+
+    fn generation_closed_of_beta(body: &TopologyEventBody) -> bool {
+        matches!(body, TopologyEventBody::GenerationClosed { data } if data.key == TaskKey(0))
+    }
+
+    #[test]
+    fn a_pipeline_is_served_while_a_settlements_path_read_waits_on_a_torn_registration() {
+        served_while_alpha_waits(
+            "registry-served-changed-paths",
+            &[],
+            TearAt::Access(attempt_started_of(1), 1),
+        );
+    }
+
+    #[test]
+    fn a_pipeline_is_served_while_a_settlements_parent_check_waits_on_a_torn_registration() {
+        served_while_alpha_waits(
+            "registry-served-commit-parent",
+            &[],
+            TearAt::Fold(candidate_prepared_of_beta),
+        );
+    }
+
+    #[test]
+    fn a_pipeline_is_served_while_a_settlements_tree_check_waits_on_a_torn_registration() {
+        served_while_alpha_waits(
+            "registry-served-commit-tree",
+            &[],
+            TearAt::Access(candidate_prepared_of_beta, 2),
+        );
+    }
+
+    #[test]
+    fn a_pipeline_is_served_while_a_settlements_worktree_removal_waits_on_a_torn_registration() {
+        served_while_alpha_waits_with(
+            "registry-served-reclaim-worktree",
+            &[],
+            TearAt::Fold(candidate_created_of_beta),
+            RunOutcome::Complete,
+            |_, hooks| hooks.tearing(Torn::GitdirMissing),
+        );
+    }
+
+    #[test]
+    fn a_pipeline_is_served_while_a_settlements_intent_removal_waits_on_a_torn_registration() {
+        served_while_alpha_waits(
+            "registry-served-reclaim-intent",
+            &[],
+            TearAt::Access(candidate_created_of_beta, 2),
+        );
+    }
+
+    #[test]
+    fn a_pipeline_is_served_while_an_integrations_decision_waits_on_a_torn_registration() {
+        served_while_alpha_waits(
+            "registry-served-decide",
+            &[],
+            TearAt::Access(candidate_created_of_beta, 3),
+        );
+    }
+
+    #[test]
+    fn a_pipeline_is_served_while_an_integrations_publication_waits_on_a_torn_registration() {
+        served_while_alpha_waits(
+            "registry-served-publish",
+            &[],
+            TearAt::Fold(merge_prepared_of_beta),
+        );
+    }
+
+    #[test]
+    fn a_pipeline_is_served_while_a_publications_swap_recheck_waits_on_a_torn_registration() {
+        served_while_alpha_waits(
+            "registry-served-swap-recheck",
+            &[],
+            TearAt::Access(merge_prepared_of_beta, 2),
+        );
+    }
+
+    #[test]
+    fn a_pipeline_is_served_while_a_retrys_worktree_check_waits_on_a_torn_registration() {
+        served_while_alpha_waits(
+            "registry-served-retry-verify",
+            &[(0, 1)],
+            TearAt::Fold(retained_attempt_finished_of_beta),
+        );
+    }
+
+    fn alpha_waits_for_the_tear(planted: impl Fn() -> bool + 'static) -> Script<'static> {
+        Box::new(move |view: &Quiescent<'_>| {
+            if planted() {
+                return beta_settles_while_alpha_holds_its_first_gate(view);
+            }
+            let beta_live = view.live.iter().any(
+                |(_, identity)| matches!(identity, Identity::Attempt { key, .. } if *key == TaskKey(0)),
+            );
+            released(view, |invocation| {
+                attempt_key(invocation) == Some(1)
+                    && role_of(invocation) == Some(AttemptRole::Worker)
+            })
+            .or_else(|| {
+                if beta_live {
+                    released(view, |invocation| attempt_key(invocation) == Some(0))
+                } else {
+                    None
+                }
+            })
+            .or(Some(Release::Nothing))
+        })
+    }
+
+    fn served_while_a_repair_waits(
+        tag: &str,
+        failing: &[(u32, u32)],
+        at: TearAt,
+        torn: Torn,
+        residue: bool,
+    ) {
+        let (what, tag, failing) = (tag.to_owned(), tag.to_owned(), failing.to_vec());
+        bounded(&what, move || {
+            let tasks = two_independent();
+            let plans = WidePlans {
+                gates: 2,
+                ..WidePlans::default()
+            };
+            let mut wide = Wide::started_with(&tag, &tasks, 2, plans, holding(&tasks, &failing));
+            let common = wide.env.fixture.manager.common_git_dir().to_path_buf();
+            let leftover = common.join("worktrees").join("residue");
+            let mut hooks = TearHeld::new(&wide, "foreign-held", at);
+            hooks.tearing(torn);
+            if residue {
+                let slot =
+                    crate::engine::topology::dispatch::task_slot(TaskKey(9), GenerationId(0));
+                wide.env
+                    .fixture
+                    .manager
+                    .write_intent(&mut crate::workspace_manager::NoHooks, &slot)
+                    .expect("the residue's intent");
+                let checkout = wide.env.fixture.manager.slot_path(&slot).join(".git");
+                let (admin, head) = (leftover.clone(), wide.env.fixture.head.clone());
+                let (TearAt::Fold(when) | TearAt::Access(when, _)) = at;
+                hooks.also = Some((
+                    when,
+                    Box::new(move || {
+                        crate::workspace_manager::fixture::write_file(
+                            &admin.join("HEAD"),
+                            format!("{head}\n").as_bytes(),
+                        );
+                        crate::workspace_manager::fixture::write_file(
+                            &admin.join("gitdir"),
+                            format!(
+                                "{}\n",
+                                crate::workspace_manager::fixture::as_git_writes_it(&checkout)
+                            )
+                            .as_bytes(),
+                        );
+                        crate::workspace_manager::fixture::write_file(
+                            &admin.join("commondir"),
+                            b"",
+                        );
+                    }),
+                ));
+            }
+            let planted = hooks.planted();
+            let pipelines = wide.env.pipelines();
+            let runner = Arc::clone(&wide.env.runner);
+            let mut scheduler = Scheduler::scripted(&runner, alpha_waits_for_the_tear(planted));
+            let slept = crate::workspace_manager::fixture::slept_pauses();
+            let progress = wide
+                .run
+                .run_concurrently(
+                    &wide.env.seams(),
+                    &pipelines,
+                    &mut hooks,
+                    Some(&mut scheduler),
+                )
+                .expect("the access is passed once the coordinator served a pipeline meanwhile");
+            assert_eq!(
+                crate::workspace_manager::fixture::slept_pauses(),
+                slept,
+                "no wait of a registry access the coordinator made slept on its thread"
+            );
+            drop(scheduler);
+            hooks
+                .finish()
+                .expect("an invocation reached the runner while the access waited on the tear");
+            drop(hooks);
+            assert_eq!(outcome_of(&progress), RunOutcome::Complete);
+            assert!(
+                !leftover.exists(),
+                "the repair removed the dead add's residue"
+            );
+            assert!(wide.run.invocations_balance());
+        });
+    }
+
+    /// The follow-up C record's §6.11: C's instance-only repair (C-I1) waits
+    /// through the coordinator. The residue is an earlier incarnation's: its
+    /// intent of a slot, and the registration of its own instance of that slot,
+    /// torn as a killed `git worktree add` leaves it. The repair's plan names
+    /// that instance by its tag, and the removal that takes it meets a foreign
+    /// registration torn at its own start; a pipeline is served while it
+    /// waits. At `905ed0c8`, the provisional merge of #329's head `ce55ca91`
+    /// (not #329's final head), the instance's removal slept on the
+    /// coordinator's thread, no pipeline was served, and the access refused
+    /// at its deadline.
+    fn served_while_an_earlier_instances_repair_waits(
+        tag: &str,
+        failing: &[(u32, u32)],
+        at: TearAt,
+        torn: Torn,
+    ) {
+        let (what, tag, failing) = (tag.to_owned(), tag.to_owned(), failing.to_vec());
+        bounded(&what, move || {
+            let tasks = two_independent();
+            let plans = WidePlans {
+                gates: 2,
+                ..WidePlans::default()
+            };
+            let mut wide = Wide::started_with(&tag, &tasks, 2, plans, holding(&tasks, &failing));
+            let common = wide.env.fixture.manager.common_git_dir().to_path_buf();
+            let leftover = common.join("worktrees").join("earlier-residue");
+            let mut hooks = TearHeld::new(&wide, "foreign-held", at);
+            hooks.tearing(torn);
+            let earlier = WorkspaceManager::derive(
+                &wide.env.fixture.base,
+                &wide.env.fixture.private,
+                crate::workspace_manager::fixture::RUN_ID,
+                "inc-earlier",
+            )
+            .expect("a manager of the run's earlier incarnation");
+            assert_ne!(
+                earlier.instance_tag(),
+                wide.env.fixture.manager.instance_tag(),
+                "the residue is another incarnation's"
+            );
+            let slot = crate::engine::topology::dispatch::task_slot(TaskKey(9), GenerationId(0));
+            earlier
+                .write_intent(&mut crate::workspace_manager::NoHooks, &slot)
+                .expect("the earlier incarnation's intent");
+            let checkout = earlier.slot_path(&slot).join(".git");
+            let (admin, head) = (leftover.clone(), wide.env.fixture.head.clone());
+            let (TearAt::Fold(when) | TearAt::Access(when, _)) = at;
+            hooks.also = Some((
+                when,
+                Box::new(move || {
+                    crate::workspace_manager::fixture::write_file(
+                        &admin.join("HEAD"),
+                        format!("{head}\n").as_bytes(),
+                    );
+                    crate::workspace_manager::fixture::write_file(
+                        &admin.join("gitdir"),
+                        format!(
+                            "{}\n",
+                            crate::workspace_manager::fixture::as_git_writes_it(&checkout)
+                        )
+                        .as_bytes(),
+                    );
+                    crate::workspace_manager::fixture::write_file(&admin.join("commondir"), b"");
+                }),
+            ));
+            let planted = hooks.planted();
+            let pipelines = wide.env.pipelines();
+            let runner = Arc::clone(&wide.env.runner);
+            let mut scheduler = Scheduler::scripted(&runner, alpha_waits_for_the_tear(planted));
+            let contended = crate::workspace_manager::contended_attempts(&common);
+            let slept = crate::workspace_manager::fixture::slept_pauses();
+            let progress = wide
+                .run
+                .run_concurrently(
+                    &wide.env.seams(),
+                    &pipelines,
+                    &mut hooks,
+                    Some(&mut scheduler),
+                )
+                .expect("the access is passed once the coordinator served a pipeline meanwhile");
+            assert_eq!(
+                crate::workspace_manager::fixture::slept_pauses(),
+                slept,
+                "no wait of a registry access the coordinator made slept on its thread"
+            );
+            drop(scheduler);
+            hooks
+                .finish()
+                .expect("an invocation reached the runner while the access waited on the tear");
+            drop(hooks);
+            assert_eq!(outcome_of(&progress), RunOutcome::Complete);
+            assert!(
+                crate::workspace_manager::contended_attempts(&common) > contended,
+                "the access failed on the tear first"
+            );
+            assert!(
+                !leftover.exists(),
+                "the repair removed the earlier incarnation's torn instance"
+            );
+            assert!(wide.run.invocations_balance());
+        });
+    }
+
+    #[test]
+    fn a_pipeline_is_served_while_an_earlier_instances_repair_removal_waits_on_a_torn_registration()
+    {
+        served_while_an_earlier_instances_repair_waits(
+            "served-earlier-repair-removal",
+            &[],
+            TearAt::Access(candidate_created_of_beta, 4),
+            Torn::GitdirMissing,
+        );
+    }
+
+    #[test]
+    fn a_pipeline_is_served_while_a_verifications_earlier_instance_repair_removal_waits() {
+        served_while_an_earlier_instances_repair_waits(
+            "served-earlier-verify-repair",
+            &[(0, 1)],
+            TearAt::Access(retained_attempt_finished_of_beta, 3),
+            Torn::GitdirMissing,
+        );
+    }
+
+    #[test]
+    fn a_pipeline_is_served_while_an_intent_removals_repair_plan_waits_on_a_torn_registration() {
+        served_while_a_repair_waits(
+            "registry-served-intent-repair-plan",
+            &[],
+            TearAt::Access(candidate_created_of_beta, 3),
+            Torn::GitdirMissing,
+            true,
+        );
+    }
+
+    #[test]
+    fn a_pipeline_is_served_while_an_intent_removals_repair_removal_waits_on_a_torn_registration() {
+        served_while_a_repair_waits(
+            "registry-served-intent-repair-removal",
+            &[],
+            TearAt::Access(candidate_created_of_beta, 4),
+            Torn::GitdirMissing,
+            true,
+        );
+    }
+
+    #[test]
+    fn a_pipeline_is_served_while_an_intent_removals_second_revalidation_waits_on_a_torn_registration()
+     {
+        served_while_a_repair_waits(
+            "registry-served-intent-second-revalidation",
+            &[],
+            TearAt::Access(candidate_created_of_beta, 5),
+            Torn::CommondirEmpty,
+            true,
+        );
+    }
+
+    #[test]
+    fn a_pipeline_is_served_while_a_verifications_repair_plan_waits_on_a_torn_registration() {
+        served_while_a_repair_waits(
+            "registry-served-verify-repair-plan",
+            &[(0, 1)],
+            TearAt::Access(retained_attempt_finished_of_beta, 2),
+            Torn::GitdirMissing,
+            true,
+        );
+    }
+
+    #[test]
+    fn a_pipeline_is_served_while_a_verifications_second_revalidation_waits_on_a_torn_registration()
+    {
+        served_while_a_repair_waits(
+            "registry-served-verify-second-revalidation",
+            &[(0, 1)],
+            TearAt::Access(retained_attempt_finished_of_beta, 4),
+            Torn::CommondirEmpty,
+            true,
+        );
+    }
+
+    #[test]
+    fn a_pipeline_is_served_while_a_verifications_worktree_read_waits_on_a_torn_registration() {
+        served_while_a_repair_waits(
+            "registry-served-verify-worktree-read",
+            &[(0, 1)],
+            TearAt::Access(retained_attempt_finished_of_beta, 2),
+            Torn::CommondirEmpty,
+            false,
+        );
+    }
+
+    fn closing_attempt_finished_of_beta(body: &TopologyEventBody) -> bool {
+        matches!(body, TopologyEventBody::AttemptFinished { data }
+            if data.key == TaskKey(0)
+                && matches!(data.settlement, crate::topology::events::AttemptSettlement::Closed { .. }))
+    }
+
+    #[test]
+    fn a_pipeline_is_served_while_a_closed_retrys_worktree_scrub_waits_on_a_torn_registration() {
+        served_while_a_closed_retry_scrubs(
+            "registry-served-retry-close-worktree",
+            Torn::GitdirMissing,
+        );
+    }
+
+    #[test]
+    fn a_pipeline_is_served_while_a_closed_retrys_intent_scrub_waits_on_a_torn_registration() {
+        served_while_a_closed_retry_scrubs(
+            "registry-served-retry-close-intent",
+            Torn::CommondirEmpty,
+        );
+    }
+
+    fn served_while_a_closed_retry_scrubs(tag: &str, torn: Torn) {
+        served_while_alpha_waits_with(
+            tag,
+            &[(0, 1)],
+            TearAt::Fold(generation_closed_of_beta),
+            RunOutcome::Complete,
+            move |wide, hooks| {
+                hooks.tearing(torn);
+                let slot = wide.env.fixture.manager.slot_path(
+                    &crate::engine::topology::dispatch::task_slot(TaskKey(0), GenerationId(0)),
+                );
+                hooks.also = Some((
+                    retained_attempt_finished_of_beta,
+                    Box::new(move || {
+                        crate::workspace_manager::fixture::write_file(
+                            &slot.join("left-by-hand.txt"),
+                            b"the retained worktree no longer holds the retained tree\n",
+                        );
+                        crate::workspace_manager::fixture::git(&slot, &["add", "left-by-hand.txt"]);
+                    }),
+                ));
+            },
+        );
+    }
+
+    #[test]
+    fn a_pipeline_is_served_while_a_failed_settlements_worktree_scrub_waits_on_a_torn_registration()
+    {
+        served_while_a_failed_settlement_scrubs(
+            "registry-served-settle-scrub-worktree",
+            Torn::GitdirMissing,
+        );
+    }
+
+    #[test]
+    fn a_pipeline_is_served_while_a_failed_settlements_intent_scrub_waits_on_a_torn_registration() {
+        served_while_a_failed_settlement_scrubs(
+            "registry-served-settle-scrub-intent",
+            Torn::CommondirEmpty,
+        );
+    }
+
+    fn served_while_a_failed_settlement_scrubs(tag: &str, torn: Torn) {
+        served_while_alpha_waits_with(
+            tag,
+            &[(0, 1), (0, 2)],
+            TearAt::Fold(closing_attempt_finished_of_beta),
+            RunOutcome::Parked,
+            move |_, hooks| hooks.tearing(torn),
+        );
+    }
+
+    fn alpha_waits_for_gammas_integration(view: &Quiescent<'_>) -> Option<Release> {
+        let gamma_live = view.live.iter().any(
+            |(_, identity)| matches!(identity, Identity::Attempt { key, .. } if *key == TaskKey(2)),
+        );
+        if gamma_live {
+            released(view, |invocation| attempt_key(invocation) != Some(1))
+        } else {
+            released(view, |invocation| attempt_key(invocation) == Some(1))
+        }
+    }
+
+    fn alpha_waits_for_gammas_merge(view: &Quiescent<'_>) -> Option<Release> {
+        let merged = view.run.events().iter().any(|event| {
+            matches!(&event.body, TopologyEventBody::TaskMerged { data } if data.satisfies.contains(&TaskKey(2)))
+        });
+        if merged {
+            released(view, |invocation| attempt_key(invocation) == Some(1))
+        } else {
+            released(view, |invocation| attempt_key(invocation) != Some(1))
+        }
+    }
+
+    fn served_while_a_stale_integration_waits(tag: &str, conflicting: bool, at: TearAt) {
+        served_while_a_stale_integration_waits_under(
+            tag,
+            conflicting,
+            at,
+            Torn::CommondirEmpty,
+            alpha_waits_for_gammas_integration,
+        );
+    }
+
+    fn served_while_a_stale_integration_waits_under(
+        tag: &str,
+        conflicting: bool,
+        at: TearAt,
+        torn: Torn,
+        order: fn(&Quiescent<'_>) -> Option<Release>,
+    ) {
+        let (what, tag) = (tag.to_owned(), tag.to_owned());
+        bounded(&what, move || {
+            let tasks = [
+                WideTask::independent("beta"),
+                WideTask::independent("alpha"),
+                if conflicting {
+                    WideTask::hinted("gamma", &["src/gamma/"], "src/beta/work.txt")
+                } else {
+                    WideTask::independent("gamma")
+                },
+            ];
+            let mut wide =
+                Wide::started_with(&tag, &tasks, 3, WidePlans::default(), holding(&tasks, &[]));
+            let common = wide.env.fixture.manager.common_git_dir().to_path_buf();
+            let before = crate::workspace_manager::contended_attempts(&common);
+            let mut hooks = TearHeld::waking(&wide, "foreign-held", at, Wakes::Ended);
+            hooks.tearing(torn);
+            let pipelines = wide.env.pipelines();
+            let runner = Arc::clone(&wide.env.runner);
+            let mut scheduler = Scheduler::scripted(&runner, Box::new(order));
+            let slept = crate::workspace_manager::fixture::slept_pauses();
+            let progress = wide
+                .run
+                .run_concurrently(
+                    &wide.env.seams(),
+                    &pipelines,
+                    &mut hooks,
+                    Some(&mut scheduler),
+                )
+                .expect("the access is passed once the coordinator served a pipeline meanwhile");
+            assert_eq!(
+                crate::workspace_manager::fixture::slept_pauses(),
+                slept,
+                "no wait of a registry access the coordinator made slept on its thread"
+            );
+            drop(scheduler);
+            hooks
+                .finish()
+                .expect("an invocation left the runner while the access waited on the tear");
+            drop(hooks);
+            assert_eq!(
+                outcome_of(&progress),
+                if conflicting {
+                    RunOutcome::Parked
+                } else {
+                    RunOutcome::Complete
+                },
+                "a conflict's repair leaves the scaffold's conflict unresolved and parks"
+            );
+            assert!(
+                crate::workspace_manager::contended_attempts(&common) > before,
+                "the access failed on the tear first"
+            );
+            let events = wide.env.durable_events();
+            assert_eq!(
+                count(&events, "merge_rejected"),
+                usize::from(conflicting),
+                "{:?}",
+                kinds_of(&events)
+            );
+            assert!(wide.run.invocations_balance());
+        });
+    }
+
+    fn candidate_created_of_gamma(body: &TopologyEventBody) -> bool {
+        matches!(body, TopologyEventBody::TaskCandidateCreated { data } if data.candidate.key == TaskKey(2))
+    }
+
+    fn task_merged_of_gamma(body: &TopologyEventBody) -> bool {
+        matches!(body, TopologyEventBody::TaskMerged { data } if data.satisfies.contains(&TaskKey(2)))
+    }
+
+    fn merge_rejected_of_gamma(body: &TopologyEventBody) -> bool {
+        matches!(body, TopologyEventBody::MergeRejected { data } if data.candidate.key == TaskKey(2))
+    }
+
+    fn repair_dispatched(body: &TopologyEventBody) -> bool {
+        matches!(body, TopologyEventBody::TaskDispatched { data } if data.source_candidate.is_some())
+    }
+
+    #[test]
+    fn a_pipeline_is_served_while_a_stale_integrations_intent_waits_on_a_torn_registration() {
+        served_while_a_stale_integration_waits(
+            "registry-served-stale-intent",
+            false,
+            TearAt::Access(candidate_created_of_gamma, 4),
+        );
+    }
+
+    #[test]
+    fn a_pipeline_is_served_while_a_stale_integrations_add_gate_waits_on_a_torn_registration() {
+        served_while_a_stale_integration_waits(
+            "registry-served-stale-add-gate",
+            false,
+            TearAt::Access(candidate_created_of_gamma, 5),
+        );
+    }
+
+    #[test]
+    fn a_pipeline_is_served_while_a_stale_integrations_add_waits_on_a_torn_registration() {
+        served_while_a_stale_integration_waits(
+            "registry-served-stale-add",
+            false,
+            TearAt::Access(candidate_created_of_gamma, 6),
+        );
+    }
+
+    #[test]
+    fn a_pipeline_is_served_while_a_stale_integrations_pick_waits_on_a_torn_registration() {
+        served_while_a_stale_integration_waits(
+            "registry-served-stale-pick",
+            false,
+            TearAt::Access(candidate_created_of_gamma, 7),
+        );
+    }
+
+    #[test]
+    fn a_pipeline_is_served_while_a_publications_staging_removal_waits_on_a_torn_registration() {
+        served_while_a_stale_integration_waits_under(
+            "registry-served-staging-removal",
+            false,
+            TearAt::Fold(task_merged_of_gamma),
+            Torn::GitdirMissing,
+            alpha_waits_for_gammas_merge,
+        );
+    }
+
+    #[test]
+    fn a_pipeline_is_served_while_a_publications_staging_intent_removal_waits_on_a_torn_registration()
+     {
+        served_while_a_stale_integration_waits_under(
+            "registry-served-staging-intent-removal",
+            false,
+            TearAt::Fold(task_merged_of_gamma),
+            Torn::CommondirEmpty,
+            alpha_waits_for_gammas_merge,
+        );
+    }
+
+    /// The follow-up C record's §6.11, the proposed frozen hunk C-R1: an
+    /// integration's snapshot reclaim enumerates through its journal's hooks
+    /// (`integrate.rs`'s `reclaim_snapshots`, `intents_pausing`), so the registry
+    /// read that discovers earlier incarnations' instances answers the
+    /// coordinator's messages while a pipeline is live. It is the eighth registry
+    /// access after gamma's candidate. Without C-R1 (`2c3e413c`) the read slept
+    /// on the coordinator's thread to its deadline, no pipeline was served, and
+    /// the integration was refused.
+    #[test]
+    fn a_pipeline_is_served_while_an_integrations_snapshot_discovery_waits_on_an_unreadable_registration()
+     {
+        served_while_a_stale_integration_waits_under(
+            "served-integration-discovery",
+            false,
+            TearAt::Access(candidate_created_of_gamma, 8),
+            Torn::GitdirUnreadable,
+            alpha_waits_for_gammas_merge,
+        );
+    }
+
+    #[test]
+    fn a_pipeline_is_served_while_a_conflicts_classification_waits_on_a_torn_registration() {
+        served_while_a_stale_integration_waits(
+            "registry-served-proposal-state",
+            true,
+            TearAt::Access(candidate_created_of_gamma, 8),
+        );
+    }
+
+    #[test]
+    fn a_pipeline_is_served_while_a_rejections_staging_reclaim_waits_on_a_torn_registration() {
+        served_while_a_stale_integration_waits_under(
+            "registry-served-staging-reclaim",
+            true,
+            TearAt::Fold(merge_rejected_of_gamma),
+            Torn::GitdirMissing,
+            alpha_waits_for_gammas_integration,
+        );
+    }
+
+    #[test]
+    fn a_pipeline_is_served_while_a_rejections_staging_intent_reclaim_waits_on_a_torn_registration()
+    {
+        served_while_a_stale_integration_waits(
+            "registry-served-staging-intent-reclaim",
+            true,
+            TearAt::Fold(merge_rejected_of_gamma),
+        );
+    }
+
+    #[test]
+    fn a_pipeline_is_served_while_a_repairs_materialization_waits_on_a_torn_registration() {
+        served_while_a_stale_integration_waits(
+            "registry-served-repair-materialize",
+            true,
+            TearAt::Access(repair_dispatched, 4),
+        );
+    }
+
+    #[test]
+    fn a_pipeline_is_granted_while_a_continued_dispatchs_worktree_check_waits_on_a_torn_registration()
+     {
+        let what = "a_pipeline_is_granted_while_a_continued_dispatchs_worktree_check_waits_on_a_torn_registration";
+        bounded(what, move || {
+            let tasks = [
+                WideTask::independent("alpha"),
+                WideTask::independent("beta"),
+            ];
+            let mut wide = Wide::durable(
+                "registry-served-continued",
+                &tasks,
+                2,
+                WidePlans::default(),
+                RecordingRunner::new().answering(wide_responder(&tasks, &[])),
+            );
+            let beta_slot =
+                wide.env
+                    .fixture
+                    .manager
+                    .slot_path(&crate::engine::topology::dispatch::task_slot(
+                        TaskKey(1),
+                        GenerationId(0),
+                    ));
+            let blocked = beta_slot.clone();
+            let mut breaking = TearHeld::new(&wide, "foreign-unused", TearAt::Fold(|_| false));
+            breaking.also = Some((
+                task_dispatched_of(1),
+                Box::new(move || {
+                    crate::workspace_manager::fixture::write_file(
+                        &blocked,
+                        b"a file where beta's checkout goes\n",
+                    );
+                }),
+            ));
+            let pipelines = wide.env.pipelines();
+            let error = wide
+                .run
+                .run_concurrently(&wide.env.seams(), &pipelines, &mut breaking, None)
+                .expect_err("beta's add meets a file at its destination after `task_dispatched`");
+            drop(breaking);
+            assert!(
+                matches!(&error, UpstrokeError::Git { message } if message.contains("already exists")),
+                "{error:?}"
+            );
+            crate::workspace_manager::fixture::remove_file(&beta_slot);
+            let (_, mut resumed) = wide
+                .resume(
+                    "inc-2",
+                    RecordingRunner::new().answering(wide_responder(&tasks, &[])),
+                    crate::engine::topology::select::Ceiling::unlimited(),
+                )
+                .expect("the next process resumes with beta's generation open and no attempt");
+            let common = resumed.env.fixture.manager.common_git_dir().to_path_buf();
+            let before = crate::workspace_manager::contended_attempts(&common);
+            let mut hooks = TearHeld::new(
+                &resumed,
+                "foreign-held",
+                TearAt::Access(attempt_started_of(0), 1),
+            );
+            let pipelines = resumed.env.pipelines();
+            let slept = crate::workspace_manager::fixture::slept_pauses();
+            let progress = resumed
+                .run
+                .run_concurrently(&resumed.env.seams(), &pipelines, &mut hooks, None)
+                .expect("the continuation's access is passed once alpha was granted meanwhile");
+            assert_eq!(
+                crate::workspace_manager::fixture::slept_pauses(),
+                slept,
+                "no wait of a registry access the coordinator made slept on its thread"
+            );
+            hooks.finish().expect(
+                "an invocation reached the runner while the continuation waited on the tear",
+            );
+            drop(hooks);
+            assert_eq!(outcome_of(&progress), RunOutcome::Complete);
+            assert!(
+                crate::workspace_manager::contended_attempts(&common) > before,
+                "the continuation's access failed on the tear first"
+            );
+            let events = resumed.env.durable_events();
+            let dispatched_beta = events
+                .iter()
+                .filter(|event| {
+                    matches!(&event.body, TopologyEventBody::TaskDispatched { data } if data.key == TaskKey(1))
+                })
+                .count();
+            assert_eq!(
+                dispatched_beta,
+                1,
+                "beta's generation was continued, not dispatched again: {:?}",
+                kinds_of(&events)
+            );
+            assert!(resumed.run.invocations_balance());
+        });
+    }
+
+    #[test]
+    fn the_width_one_step_runs_the_same_transitions_and_its_access_waits_by_sleeping() {
+        let what = "the_width_one_step_runs_the_same_transitions_and_its_access_waits_by_sleeping";
+        bounded(what, move || {
+            let tasks = two_independent();
+            let mut narrow = Wide::started_with(
+                "registry-width-one",
+                &tasks,
+                1,
+                WidePlans::default(),
+                RecordingRunner::new().answering(wide_responder(&tasks, &[])),
+            );
+            let common = narrow.env.fixture.manager.common_git_dir().to_path_buf();
+            let before = crate::workspace_manager::contended_attempts(&common);
+            let mut hooks = TearHeld::waking(
+                &narrow,
+                "foreign-held",
+                TearAt::Fold(task_dispatched_of(1)),
+                Wakes::Contended,
+            );
+            let seams = narrow.env.seams();
+            let slept = crate::workspace_manager::fixture::slept_pauses();
+            let mut steps = 0_u32;
+            let outcome = loop {
+                steps += 1;
+                assert!(steps < 200, "the width-1 loop did not finish");
+                if let Progress::Finished { outcome, .. } =
+                    narrow.run.step(&seams, &mut hooks).expect("a step")
+                {
+                    break outcome;
+                }
+            };
+            hooks
+                .finish()
+                .expect("the dispatch's access failed on the tear, and only then was it finished");
+            drop(hooks);
+            assert_eq!(outcome, RunOutcome::Complete);
+            assert!(
+                crate::workspace_manager::fixture::slept_pauses() > slept,
+                "the width-1 access waited by sleeping on its own thread"
+            );
+            assert!(
+                crate::workspace_manager::contended_attempts(&common) > before,
+                "the width-1 dispatch's intent met the tear and was attempted again"
+            );
+            assert!(narrow.run.invocations_balance());
+        });
+    }
+
+    struct FoldsSeen {
+        inner: crate::engine::topology::seams::HarnessTopologyHooks,
+        seen: Vec<&'static str>,
+    }
+
+    impl TopologyHooks for FoldsSeen {
+        fn effects(&mut self) -> &mut dyn crate::workspace_manager::EffectHooks {
+            self.inner.effects()
+        }
+
+        fn rundir(&mut self) -> &mut dyn crate::rundir::RunDirHooks {
+            self.inner.rundir()
+        }
+
+        fn events(&mut self) -> &mut dyn crate::events::log::EventHooks {
+            self.inner.events()
+        }
+
+        fn container(&mut self) -> &mut dyn crate::runner::container::ContainerHooks {
+            self.inner.container()
+        }
+
+        fn spawn(&mut self) -> &mut dyn crate::agent::proc::SpawnHooks {
+            TopologyHooks::spawn(&mut self.inner)
+        }
+
+        fn folded(&mut self, fold: &TopologyFold, events: &[TopologyEvent]) {
+            self.inner.folded(fold, events);
+            if let Some(last) = events.last() {
+                self.seen.push(last.body.kind());
+            }
+        }
+    }
+
+    #[test]
+    fn every_append_of_the_width_one_step_a_retrys_settlement_included_folds_through_the_callers_hooks()
+     {
+        let tasks = two_independent();
+        let plans = WidePlans {
+            gates: 2,
+            ..WidePlans::default()
+        };
+        let mut narrow = Wide::started_with(
+            "width-one-retry-hooks",
+            &tasks,
+            1,
+            plans,
+            RecordingRunner::new().answering(wide_responder(&tasks, &[(0, 1)])),
+        );
+        let mut hooks = FoldsSeen {
+            inner: narrow.env.hooks(),
+            seen: Vec::new(),
+        };
+        let seams = narrow.env.seams();
+        let before = narrow.run.events().len();
+        let mut steps = 0_u32;
+        let mut retried = false;
+        loop {
+            steps += 1;
+            assert!(steps < 200, "the width-1 loop did not finish");
+            let retrying = matches!(narrow.run.admitted(), Ok(Admitted::Retry { .. }));
+            let progress = narrow.run.step(&seams, &mut hooks).expect("a step");
+            if retrying {
+                retried = true;
+                assert!(
+                    matches!(progress, Progress::Settled { accepted: true, .. }),
+                    "the retry was judged and settled in the same step: {progress:?}"
+                );
+            }
+            if matches!(progress, Progress::Finished { .. }) {
+                break;
+            }
+        }
+        assert!(
+            retried,
+            "the width-1 step retried beta's retained generation"
+        );
+        let appended = kinds_of(&narrow.run.events()[before..]);
+        assert_eq!(
+            hooks.seen, appended,
+            "every event the width-1 step appended, the retry's settlement included, was folded \
+             through the hooks its caller passed"
+        );
+        assert_eq!(
+            narrow
+                .run
+                .events()
+                .iter()
+                .filter(|event| matches!(&event.body,
+                    TopologyEventBody::CandidatePrepared { data } if data.key == TaskKey(0)))
+                .count(),
+            1,
+            "beta's retry settled as its candidate: {appended:?}"
+        );
+    }
+
+    fn a_shutdown_injected_once_the_tear_stands(
+        planted: impl Fn() -> bool + 'static,
+        injected: std::rc::Rc<std::cell::Cell<Option<usize>>>,
+        finish: Option<Plant>,
+        mut order: Script<'static>,
+    ) -> Script<'static> {
+        Box::new(move |view: &Quiescent<'_>| {
+            if injected.get().is_none() && planted() {
+                injected.set(Some(view.run.events().len()));
+                assert!(view.injector.inject(ToCoordinator::Shutdown));
+                if let Some(plant) = &finish {
+                    plant.finish_tear();
+                }
+                return Some(Release::Injected);
+            }
+            order(view)
+        })
+    }
+
+    fn published_as_the_log_authorizes(wide: &Wide) {
+        let started = wide.run.fold().started().expect("a started run").clone();
+        let authorized =
+            crate::engine::topology::integrate::authorized_head(&started, wide.run.events());
+        assert_eq!(
+            wide.env
+                .fixture
+                .manager
+                .direct_ref_target(started.integration_ref.as_str())
+                .expect("the integration ref reads"),
+            Some(authorized.head.0),
+            "the integration ref is where the log authorizes it, so nothing was published after \
+             the shutdown"
+        );
+    }
+
+    struct StoppedInItsWait {
+        at: TearAt,
+        torn: Torn,
+        finish_at_shutdown: bool,
+    }
+
+    fn stopped_in_its_wait(
+        tag: &str,
+        stop: StoppedInItsWait,
+        build: impl FnOnce(&str) -> Wide + Send + 'static,
+        order: impl FnOnce(&TearHeld) -> Script<'static> + Send + 'static,
+        check: impl FnOnce(&Wide, usize) + Send + 'static,
+    ) {
+        let (what, tag) = (tag.to_owned(), tag.to_owned());
+        bounded(&what, move || {
+            let mut wide = build(&tag);
+            let common = wide.env.fixture.manager.common_git_dir().to_path_buf();
+            let contended = crate::workspace_manager::contended_attempts(&common);
+            let mut hooks = TearHeld::waking(&wide, "foreign-held", stop.at, Wakes::Never);
+            hooks.tearing(stop.torn);
+            let injected = std::rc::Rc::new(std::cell::Cell::new(None));
+            let script = a_shutdown_injected_once_the_tear_stands(
+                hooks.planted(),
+                std::rc::Rc::clone(&injected),
+                stop.finish_at_shutdown.then(|| hooks.plant.clone()),
+                order(&hooks),
+            );
+            let pipelines = wide.env.pipelines();
+            let runner = Arc::clone(&wide.env.runner);
+            let mut scheduler = Scheduler::scripted(&runner, script);
+            let slept = crate::workspace_manager::fixture::slept_pauses();
+            let error = wide
+                .run
+                .run_concurrently(
+                    &wide.env.seams(),
+                    &pipelines,
+                    &mut hooks,
+                    Some(&mut scheduler),
+                )
+                .expect_err("a shutdown answered inside the access's wait ends the command");
+            drop(scheduler);
+            hooks.finish().expect("the tear was planted");
+            drop(hooks);
+            let Some(at_shutdown) = injected.get() else {
+                panic!(
+                    "the shutdown was injected while the tear stood: it was not, and the command \
+                     ended on {error}"
+                );
+            };
+            let warnings = wide.run.warnings().join("\n");
+            assert!(
+                error.to_string().contains("shut"),
+                "the command ends on the shutdown: {error}"
+            );
+            assert!(
+                crate::workspace_manager::contended_attempts(&common) > contended,
+                "the access failed on the tear first, so the shutdown came inside its wait"
+            );
+            assert_eq!(
+                crate::workspace_manager::fixture::slept_pauses(),
+                slept,
+                "no wait of a registry access the coordinator made slept on its thread"
+            );
+            let events = wide.run.events();
+            assert_eq!(
+                events.len(),
+                at_shutdown,
+                "nothing was appended after the wait answered the shutdown: {:?}",
+                kinds_of(events.get(at_shutdown..).unwrap_or_default())
+            );
+            published_as_the_log_authorizes(&wide);
+            assert!(wide.run.invocations_balance(), "{warnings}");
+            assert!(
+                wide.run.stopped().is_none(),
+                "the run reopens when its coordinator is gone"
+            );
+            check(&wide, at_shutdown);
+        });
+    }
+
+    fn two_held(tag: &str) -> Wide {
+        let tasks = two_independent();
+        Wide::started_with(tag, &tasks, 2, WidePlans::default(), holding(&tasks, &[]))
+    }
+
+    fn two_held_gated(failing: &'static [(u32, u32)]) -> impl FnOnce(&str) -> Wide + Send {
+        move |tag| {
+            let tasks = two_independent();
+            let plans = WidePlans {
+                gates: 2,
+                ..WidePlans::default()
+            };
+            Wide::started_with(tag, &tasks, 2, plans, holding(&tasks, failing))
+        }
+    }
+
+    fn first_invoking(view: &Quiescent<'_>) -> Option<Release> {
+        let mut invoking = view.invoking.clone();
+        invoking.sort();
+        invoking.first().cloned().map(Release::Invocation)
+    }
+
+    fn first_released(_: &TearHeld) -> Script<'static> {
+        Box::new(first_invoking)
+    }
+
+    fn beta_settles_first(_: &TearHeld) -> Script<'static> {
+        Box::new(beta_settles_while_alpha_holds_its_first_gate)
+    }
+
+    fn workers_of(wide: &Wide, key: u32) -> usize {
+        wide.env
+            .runner
+            .ran()
+            .iter()
+            .filter(|ran| worker(&ran.invocation) == Some(TaskKey(key)))
+            .count()
+    }
+
+    fn of_key(events: &[TopologyEvent], kind: &str, key: u32) -> usize {
+        events
+            .iter()
+            .filter(|event| {
+                event.body.kind() == kind
+                    && serde_json::to_value(&event.body)
+                        .ok()
+                        .as_ref()
+                        .and_then(key_of)
+                        == Some(u64::from(key))
+            })
+            .count()
+    }
+
+    #[test]
+    fn a_shutdown_answered_inside_a_dispatchs_head_check_dispatches_and_spawns_nothing() {
+        stopped_in_its_wait(
+            "shutdown-wait-head",
+            StoppedInItsWait {
+                at: TearAt::Fold(attempt_started_of(0)),
+                torn: Torn::CommondirEmpty,
+                finish_at_shutdown: true,
+            },
+            two_held,
+            first_released,
+            |wide, _| {
+                let events = wide.run.events();
+                assert_eq!(
+                    of_key(events, "task_dispatched", 1),
+                    0,
+                    "{:?}",
+                    kinds_of(events)
+                );
+                assert_eq!(
+                    workers_of(wide, 1),
+                    0,
+                    "no pipeline was spawned for the stopped dispatch"
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn a_shutdown_answered_inside_a_dispatchs_intent_starts_no_attempt_and_spawns_nothing() {
+        stopped_in_its_wait(
+            "shutdown-wait-intent",
+            StoppedInItsWait {
+                at: TearAt::Fold(task_dispatched_of(1)),
+                torn: Torn::CommondirEmpty,
+                finish_at_shutdown: true,
+            },
+            two_held,
+            first_released,
+            |wide, _| {
+                let events = wide.run.events();
+                assert_eq!(
+                    of_key(events, "task_dispatched", 1),
+                    1,
+                    "{:?}",
+                    kinds_of(events)
+                );
+                assert_eq!(
+                    of_key(events, "attempt_started", 1),
+                    0,
+                    "{:?}",
+                    kinds_of(events)
+                );
+                assert_eq!(
+                    workers_of(wide, 1),
+                    0,
+                    "no pipeline was spawned for the stopped dispatch"
+                );
+            },
+        );
+    }
+
+    // Protocol (standards §10): the slow witness owns the worker that holds its
+    // access's first contended answer. The build step spawns the worker and
+    // sends it, with the sender that cancels its wait for that answer, over a
+    // channel to the check step, its one owner past the run. `finish` cancels
+    // what is left of that wait and joins the worker; a worker that panicked
+    // dropped its release unsent, which let the held access go on at once, and
+    // the witness fails on it rather than passing without the delay it is
+    // about. A scenario that unwinds first drops the channel, and the drop
+    // cancels and joins the worker in the same way, saying what it found.
+    struct DelayedRelease {
+        cancel: std::sync::mpsc::Sender<()>,
+        worker: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl DelayedRelease {
+        fn finish(&mut self) -> Result<(), String> {
+            let Some(worker) = self.worker.take() else {
+                return Ok(());
+            };
+            let _ = self.cancel.send(());
+            worker.join().map_err(|_| {
+                "the worker that held the access's first contended answer panicked, so its \
+                 release dropped unsent and the access went on without the delay"
+                    .to_owned()
+            })
+        }
+    }
+
+    impl Drop for DelayedRelease {
+        fn drop(&mut self) {
+            if let Err(why) = self.finish() {
+                if std::thread::panicking() {
+                    crate::workspace_manager::fixture::say(&why);
+                } else {
+                    panic!("{why}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_delayed_release_whose_worker_panicked_fails_its_witness() {
+        let (cancel, _cancelled) = std::sync::mpsc::channel::<()>();
+        let worker = std::thread::spawn(|| {
+            panic!("an injected failure of a delayed release's worker, before its delay");
+        });
+        let mut delayed = DelayedRelease {
+            cancel,
+            worker: Some(worker),
+        };
+        let finished = delayed.finish();
+        assert!(
+            matches!(&finished, Err(why) if why.contains("panicked")
+                && why.contains("without the delay")),
+            "a worker that panicked is reported, not taken for its delay: {finished:?}"
+        );
+    }
+
+    #[test]
+    fn a_shutdown_answered_inside_a_slow_dispatchs_intent_starts_no_attempt_and_spawns_nothing() {
+        let (handing, handed) = std::sync::mpsc::channel::<DelayedRelease>();
+        stopped_in_its_wait(
+            "shutdown-wait-intent-slow",
+            StoppedInItsWait {
+                at: TearAt::Fold(task_dispatched_of(1)),
+                torn: Torn::CommondirEmpty,
+                finish_at_shutdown: true,
+            },
+            move |tag| {
+                let wide = two_held(tag);
+                let common = wide.env.fixture.manager.common_git_dir().to_path_buf();
+                let before = crate::workspace_manager::contended_attempts(&common);
+                let release = crate::workspace_manager::hold_next_contended(&common);
+                let (cancel, cancelled) = std::sync::mpsc::channel::<()>();
+                let worker = std::thread::spawn(move || {
+                    let deadline = std::time::Instant::now() + BOUND;
+                    while crate::workspace_manager::contended_attempts(&common) == before
+                        && cancelled.try_recv() == Err(std::sync::mpsc::TryRecvError::Empty)
+                        && std::time::Instant::now() < deadline
+                    {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    std::thread::sleep(Duration::from_millis(700));
+                    let _ = release.send(());
+                });
+                handing
+                    .send(DelayedRelease {
+                        cancel,
+                        worker: Some(worker),
+                    })
+                    .expect("the check step holds the worker's channel");
+                wide
+            },
+            first_released,
+            move |wide, _| {
+                let mut delayed = handed
+                    .try_recv()
+                    .expect("the build step handed its worker over");
+                if let Err(why) = delayed.finish() {
+                    panic!("{why}");
+                }
+                let events = wide.run.events();
+                assert_eq!(
+                    of_key(events, "attempt_started", 1),
+                    0,
+                    "{:?}",
+                    kinds_of(events)
+                );
+                assert_eq!(
+                    workers_of(wide, 1),
+                    0,
+                    "no pipeline was spawned for the stopped dispatch"
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn a_shutdown_answered_inside_a_continued_dispatchs_wait_starts_no_attempt() {
+        stopped_in_its_wait(
+            "shutdown-wait-continued",
+            StoppedInItsWait {
+                at: TearAt::Access(attempt_started_of(0), 1),
+                torn: Torn::CommondirEmpty,
+                finish_at_shutdown: true,
+            },
+            |tag| {
+                let tasks = [
+                    WideTask::independent("alpha"),
+                    WideTask::independent("beta"),
+                ];
+                let mut wide = Wide::durable(
+                    tag,
+                    &tasks,
+                    2,
+                    WidePlans::default(),
+                    RecordingRunner::new().answering(wide_responder(&tasks, &[])),
+                );
+                let beta_slot = wide.env.fixture.manager.slot_path(
+                    &crate::engine::topology::dispatch::task_slot(TaskKey(1), GenerationId(0)),
+                );
+                let blocked = beta_slot.clone();
+                let mut breaking = TearHeld::new(&wide, "foreign-unused", TearAt::Fold(|_| false));
+                breaking.also = Some((
+                    task_dispatched_of(1),
+                    Box::new(move || {
+                        crate::workspace_manager::fixture::write_file(
+                            &blocked,
+                            b"a file where beta's checkout goes\n",
+                        );
+                    }),
+                ));
+                let pipelines = wide.env.pipelines();
+                let error = wide
+                    .run
+                    .run_concurrently(&wide.env.seams(), &pipelines, &mut breaking, None)
+                    .expect_err(
+                        "beta's add meets a file at its destination after `task_dispatched`",
+                    );
+                drop(breaking);
+                assert!(
+                    matches!(&error, UpstrokeError::Git { message } if message.contains("already exists")),
+                    "{error:?}"
+                );
+                crate::workspace_manager::fixture::remove_file(&beta_slot);
+                let (_, resumed) = wide
+                    .resume(
+                        "inc-2",
+                        holding(&tasks, &[]),
+                        crate::engine::topology::select::Ceiling::unlimited(),
+                    )
+                    .expect("the next process resumes with beta's generation open and no attempt");
+                resumed
+            },
+            first_released,
+            |wide, _| {
+                let events = wide.run.events();
+                assert_eq!(
+                    of_key(events, "attempt_started", 1),
+                    0,
+                    "the continuation started no attempt: {:?}",
+                    kinds_of(events)
+                );
+                assert_eq!(
+                    workers_of(wide, 1),
+                    0,
+                    "no pipeline was spawned for the continuation"
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn a_shutdown_answered_inside_a_retrys_wait_starts_no_retry() {
+        stopped_in_its_wait(
+            "shutdown-wait-retry",
+            StoppedInItsWait {
+                at: TearAt::Fold(retained_attempt_finished_of_beta),
+                torn: Torn::CommondirEmpty,
+                finish_at_shutdown: true,
+            },
+            two_held_gated(&[(0, 1)]),
+            beta_settles_first,
+            |wide, _| {
+                let events = wide.run.events();
+                assert_eq!(
+                    of_key(events, "attempt_started", 0),
+                    1,
+                    "beta's retry was not started: {:?}",
+                    kinds_of(events)
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn a_shutdown_answered_inside_a_settlements_wait_promotes_nothing() {
+        stopped_in_its_wait(
+            "shutdown-wait-settle",
+            StoppedInItsWait {
+                at: TearAt::Access(attempt_started_of(1), 1),
+                torn: Torn::CommondirEmpty,
+                finish_at_shutdown: true,
+            },
+            two_held_gated(&[]),
+            beta_settles_first,
+            |wide, _| {
+                let events = wide.run.events();
+                assert_eq!(
+                    of_key(events, "candidate_prepared", 0),
+                    0,
+                    "{:?}",
+                    kinds_of(events)
+                );
+                assert_eq!(
+                    of_key(events, "attempt_finished", 0),
+                    0,
+                    "{:?}",
+                    kinds_of(events)
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn a_shutdown_answered_inside_a_verifications_wait_starts_no_retry() {
+        stopped_in_its_wait(
+            "shutdown-wait-verify",
+            StoppedInItsWait {
+                at: TearAt::Access(retained_attempt_finished_of_beta, 2),
+                torn: Torn::CommondirEmpty,
+                finish_at_shutdown: true,
+            },
+            two_held_gated(&[(0, 1)]),
+            |hooks| alpha_waits_for_the_tear(hooks.planted()),
+            |wide, _| {
+                let events = wide.run.events();
+                assert_eq!(
+                    of_key(events, "attempt_started", 0),
+                    1,
+                    "the verified retry was not started: {:?}",
+                    kinds_of(events)
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn a_shutdown_answered_inside_a_repairs_wait_starts_no_repair_attempt() {
+        stopped_in_its_wait(
+            "shutdown-wait-repair",
+            StoppedInItsWait {
+                at: TearAt::Access(repair_dispatched, 4),
+                torn: Torn::CommondirEmpty,
+                finish_at_shutdown: true,
+            },
+            |tag| {
+                let tasks = [
+                    WideTask::independent("beta"),
+                    WideTask::independent("alpha"),
+                    WideTask::hinted("gamma", &["src/gamma/"], "src/beta/work.txt"),
+                ];
+                Wide::started_with(tag, &tasks, 3, WidePlans::default(), holding(&tasks, &[]))
+            },
+            |_| Box::new(alpha_waits_for_gammas_integration),
+            |wide, _| {
+                let events = wide.run.events();
+                let repairs: Vec<u32> = events
+                    .iter()
+                    .filter_map(|event| match &event.body {
+                        TopologyEventBody::TaskDispatched { data }
+                            if data.source_candidate.is_some() =>
+                        {
+                            Some(data.key.0)
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(repairs.len(), 1, "{:?}", kinds_of(events));
+                for key in repairs {
+                    assert_eq!(
+                        of_key(events, "attempt_started", key),
+                        0,
+                        "the repair started no attempt: {:?}",
+                        kinds_of(events)
+                    );
+                    assert_eq!(workers_of(wide, key), 0);
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn a_shutdown_answered_inside_an_integrations_decision_prepares_and_publishes_nothing() {
+        stopped_in_its_wait(
+            "shutdown-wait-decide",
+            StoppedInItsWait {
+                at: TearAt::Access(candidate_created_of_beta, 3),
+                torn: Torn::CommondirEmpty,
+                finish_at_shutdown: true,
+            },
+            two_held_gated(&[]),
+            beta_settles_first,
+            |wide, _| {
+                let events = wide.run.events();
+                assert_eq!(count(events, "merge_prepared"), 0, "{:?}", kinds_of(events));
+                assert_eq!(count(events, "task_merged"), 0, "{:?}", kinds_of(events));
+            },
+        );
+    }
+
+    #[test]
+    fn a_shutdown_answered_inside_a_publications_wait_publishes_nothing() {
+        stopped_in_its_wait(
+            "shutdown-wait-publish",
+            StoppedInItsWait {
+                at: TearAt::Fold(merge_prepared_of_beta),
+                torn: Torn::CommondirEmpty,
+                finish_at_shutdown: true,
+            },
+            two_held_gated(&[]),
+            beta_settles_first,
+            |wide, _| {
+                let events = wide.run.events();
+                assert_eq!(count(events, "merge_prepared"), 1, "{:?}", kinds_of(events));
+                assert_eq!(count(events, "task_merged"), 0, "{:?}", kinds_of(events));
+            },
+        );
+    }
+
+    #[test]
+    fn a_shutdown_answered_inside_a_publications_swap_recheck_publishes_nothing() {
+        stopped_in_its_wait(
+            "shutdown-wait-swap-recheck",
+            StoppedInItsWait {
+                at: TearAt::Access(merge_prepared_of_beta, 2),
+                torn: Torn::CommondirEmpty,
+                finish_at_shutdown: true,
+            },
+            two_held_gated(&[]),
+            beta_settles_first,
+            |wide, _| {
+                let events = wide.run.events();
+                assert_eq!(count(events, "merge_prepared"), 1, "{:?}", kinds_of(events));
+                assert_eq!(count(events, "task_merged"), 0, "{:?}", kinds_of(events));
+            },
+        );
+    }
+
+    #[test]
+    fn a_shutdown_answered_inside_a_stale_picks_wait_classifies_nothing_into_the_log() {
+        stopped_in_its_wait(
+            "shutdown-wait-pick",
+            StoppedInItsWait {
+                at: TearAt::Access(candidate_created_of_gamma, 7),
+                torn: Torn::CommondirEmpty,
+                finish_at_shutdown: true,
+            },
+            |tag| {
+                let tasks = [
+                    WideTask::independent("beta"),
+                    WideTask::independent("alpha"),
+                    WideTask::independent("gamma"),
+                ];
+                Wide::started_with(tag, &tasks, 3, WidePlans::default(), holding(&tasks, &[]))
+            },
+            |_| Box::new(alpha_waits_for_gammas_integration),
+            |wide, at_shutdown| {
+                let events = wide.run.events();
+                let after = events.get(at_shutdown..).unwrap_or_default();
+                assert_eq!(count(after, "merge_verification_started"), 0);
+                assert_eq!(count(after, "merge_rejected"), 0);
+            },
+        );
+    }
+
+    fn run_finished(body: &TopologyEventBody) -> bool {
+        matches!(body, TopologyEventBody::RunFinished { .. })
+    }
+
+    fn attempt_interrupted(body: &TopologyEventBody) -> bool {
+        matches!(body, TopologyEventBody::AttemptInterrupted { .. })
+    }
+
+    fn gamma_halts_while_alpha_gates(view: &Quiescent<'_>) -> Option<Release> {
+        let alpha_gating = view.invoking.iter().any(|invocation| {
+            attempt_key(invocation) == Some(0)
+                && matches!(role_of(invocation), Some(AttemptRole::Gate(_)))
+        });
+        if alpha_gating {
+            released(view, |invocation| worker(invocation) == Some(TaskKey(2)))
+        } else {
+            released(view, |invocation| worker(invocation) == Some(TaskKey(0)))
+        }
+    }
+
+    #[test]
+    fn a_shutdown_answered_inside_a_closures_wait_closes_nothing_further() {
+        stopped_in_its_wait(
+            "shutdown-wait-closure",
+            StoppedInItsWait {
+                at: TearAt::Fold(attempt_interrupted),
+                torn: Torn::GitdirMissing,
+                finish_at_shutdown: true,
+            },
+            halting_on_gamma,
+            |_| Box::new(gamma_halts_while_alpha_gates),
+            |wide, _| {
+                let events = wide.run.events();
+                assert_eq!(
+                    count(events, "attempt_interrupted"),
+                    1,
+                    "{:?}",
+                    kinds_of(events)
+                );
+                assert_eq!(count(events, "run_finished"), 0, "{:?}", kinds_of(events));
+            },
+        );
+    }
+
+    #[test]
+    fn a_shutdown_answered_inside_a_finalizations_wait_finalizes_nothing_further() {
+        stopped_in_its_wait(
+            "shutdown-wait-finalize",
+            StoppedInItsWait {
+                at: TearAt::Fold(run_finished),
+                torn: Torn::CommondirEmpty,
+                finish_at_shutdown: true,
+            },
+            two_held,
+            first_released,
+            |wide, _| {
+                let events = wide.run.events();
+                assert_eq!(kinds_of(events).last(), Some(&"run_finished"));
+                assert!(
+                    wide.env.fixture.manager.execution_root().exists(),
+                    "the finalization stopped before it removed the execution root"
+                );
+            },
+        );
+    }
+
+    /// The follow-up C record's §6.11, with the proposed frozen hunk C-R1: a
+    /// shutdown answered inside a wait of the finalization scrub's registry
+    /// read ends the command there. Nothing is scrubbed and the execution root
+    /// stays, and the run is resumable.
+    #[test]
+    fn a_shutdown_answered_inside_a_finalizations_scrub_discovery_finalizes_nothing_further() {
+        stopped_in_its_wait(
+            "shutdown-wait-scrub",
+            StoppedInItsWait {
+                at: TearAt::Access(run_finished, 1),
+                torn: Torn::GitdirUnreadable,
+                finish_at_shutdown: true,
+            },
+            two_held,
+            first_released,
+            |wide, _| {
+                let events = wide.run.events();
+                assert_eq!(kinds_of(events).last(), Some(&"run_finished"));
+                assert!(
+                    wide.env.fixture.manager.execution_root().exists(),
+                    "the finalization stopped before the execution root was removed"
+                );
+            },
+        );
+    }
+
+    /// The follow-up C record's §6.11: a shutdown answered inside a wait of
+    /// the final sweep's registry read ends the command there. The sweep
+    /// removes nothing further, the execution root stays, and the run is
+    /// resumable, as B's contract has it for every wait on the coordinator.
+    #[test]
+    fn a_shutdown_answered_inside_a_final_sweeps_wait_removes_nothing_further() {
+        stopped_in_its_wait(
+            "shutdown-wait-sweep",
+            StoppedInItsWait {
+                at: TearAt::Access(run_finished, 6),
+                torn: Torn::GitdirUnreadable,
+                finish_at_shutdown: true,
+            },
+            two_held,
+            first_released,
+            |wide, _| {
+                let events = wide.run.events();
+                assert_eq!(kinds_of(events).last(), Some(&"run_finished"));
+                assert!(
+                    wide.env.fixture.manager.execution_root().exists(),
+                    "the sweep stopped before the execution root was removed"
+                );
+            },
+        );
+    }
+
+    fn coordinator_of<'s>(
+        run: &'s mut TopologyRun,
+        seams: &'s RunSeams<'s>,
+        hooks: &'s mut dyn TopologyHooks,
+        pipelines: &'s PipelineSeams,
+        live: BTreeMap<PipelineId, Live>,
+    ) -> Coordinator<'s> {
+        let (outbox, inbox) = mpsc::unbounded_channel();
+        let (injector, injected) = mpsc::unbounded_channel();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .build()
+            .expect("a runtime");
+        Coordinator {
+            run,
+            seams,
+            hooks,
+            pipelines,
+            observer: None,
+            leases: Vec::new(),
+            live,
+            replies: BTreeMap::new(),
+            gate: SnapshotGate::default(),
+            next: 1,
+            in_verify: None,
+            arrived: None,
+            abandoned: None,
+            charged: None,
+            interrupt: None,
+            cancelled_work: closure::Cancelled::none(),
+            unresolved: Vec::new(),
+            buffer: Vec::new(),
+            arrivals: 0,
+            deferred: VecDeque::new(),
+            wakes: 0,
+            ledger: crate::util::DurabilityLedger::off(),
+            refusal: None,
+            handles: Vec::new(),
+            timer: Timer::start(outbox.clone()).expect("the wait timer starts"),
+            inbox,
+            outbox,
+            injected,
+            injector: Injector(injector),
+            runtime,
+        }
+    }
+
+    fn plant_commondir_empty(wide: &Wide, name: &str) -> PathBuf {
+        let admin = wide
+            .env
+            .fixture
+            .manager
+            .common_git_dir()
+            .join("worktrees")
+            .join(name);
+        crate::workspace_manager::fixture::write_file(
+            &admin.join("HEAD"),
+            format!("{}\n", wide.env.fixture.head).as_bytes(),
+        );
+        crate::workspace_manager::fixture::write_file(
+            &admin.join("gitdir"),
+            format!(
+                "{}\n",
+                crate::workspace_manager::fixture::as_git_writes_it(&admin.join("checkout/.git"))
+            )
+            .as_bytes(),
+        );
+        crate::workspace_manager::fixture::write_file(&admin.join("commondir"), b"");
+        admin
+    }
+
+    #[test]
+    fn a_shutdown_answered_during_a_registry_pause_dispatches_nothing_and_appends_nothing() {
+        bounded("the review's dispatch witness", || {
+            let tasks = [
+                WideTask::independent("alpha"),
+                WideTask::independent("beta"),
+            ];
+            let mut wide = Wide::started_with(
+                "shutdown-in-pause-dispatch",
+                &tasks,
+                2,
+                WidePlans::default(),
+                holding(&tasks, &[]),
+            );
+            let _deadline = crate::workspace_manager::RegistryDeadline::hold(
+                wide.env.fixture.manager.common_git_dir(),
+                WITNESS_REGISTRY_DEADLINE,
+            );
+            let mut hooks = wide.env.hooks();
+            let seams = wide.env.seams();
+            let alpha = crate::engine::topology::run::begin_dispatch(
+                &mut crate::engine::topology::run::Stepping {
+                    run: &mut wide.run,
+                    seams: &seams,
+                    hooks: &mut hooks,
+                },
+                seams.manager,
+                TaskKey(0),
+                GenerationId(0),
+                false,
+            )
+            .expect("alpha starts first");
+            let cancel = Cancellation::new();
+            let watched = cancel.clone();
+            let live = BTreeMap::from([(
+                PipelineId(1),
+                Live {
+                    identity: attempt_identity(0),
+                    cancel,
+                    cancelled: false,
+                    busy: Busy::Running,
+                    running: None,
+                    job: Some(alpha),
+                },
+            )]);
+            let pipelines = wide.env.pipelines();
+            let admin = plant_commondir_empty(&wide, "shutdown-held");
+            let repair = std::thread::spawn(move || {
+                let until = std::time::Instant::now() + Duration::from_secs(5);
+                while !watched.is_cancelled() && std::time::Instant::now() < until {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                let seen = watched.is_cancelled();
+                crate::workspace_manager::fixture::write_file(&admin.join("commondir"), b"../..\n");
+                seen
+            });
+            let before = wide.run.events().len();
+            let (was_shutdown, result) = {
+                let mut coordinator =
+                    coordinator_of(&mut wide.run, &seams, &mut hooks, &pipelines, live);
+                coordinator
+                    .outbox
+                    .send(ToCoordinator::Shutdown)
+                    .expect("shutdown reaches inbox");
+                let result = crate::engine::topology::run::begin_dispatch(
+                    &mut coordinator,
+                    seams.manager,
+                    TaskKey(1),
+                    GenerationId(0),
+                    false,
+                );
+                (
+                    matches!(coordinator.interrupt, Some(Interrupt::Shutdown)),
+                    result,
+                )
+            };
+            assert!(
+                repair.join().expect("the owned repair thread finishes"),
+                "the coordinator processed the shutdown inside the registry pause"
+            );
+            let appended = kinds_of(&wide.run.events()[before..]);
+            assert!(was_shutdown, "the shutdown was handled mid-pause");
+            assert!(
+                result.is_err() && appended.is_empty(),
+                "a handled shutdown must not dispatch beta or append: {appended:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn a_shutdown_answered_during_an_admitted_dispatchs_pause_spawns_no_pipeline() {
+        bounded("the admission's dispatch", || {
+            let tasks = [
+                WideTask::independent("alpha"),
+                WideTask::independent("beta"),
+            ];
+            let mut wide = Wide::started_with(
+                "shutdown-in-pause-admission",
+                &tasks,
+                2,
+                WidePlans::default(),
+                holding(&tasks, &[]),
+            );
+            let _deadline = crate::workspace_manager::RegistryDeadline::hold(
+                wide.env.fixture.manager.common_git_dir(),
+                WITNESS_REGISTRY_DEADLINE,
+            );
+            let mut hooks = wide.env.hooks();
+            let seams = wide.env.seams();
+            let pipelines = wide.env.pipelines();
+            plant_commondir_empty(&wide, "admission-held");
+            let before = wide.run.events().len();
+            let (shutdown, spawned, admitted) = {
+                let mut coordinator = coordinator_of(
+                    &mut wide.run,
+                    &seams,
+                    &mut hooks,
+                    &pipelines,
+                    BTreeMap::new(),
+                );
+                coordinator
+                    .outbox
+                    .send(ToCoordinator::Shutdown)
+                    .expect("shutdown reaches inbox");
+                let admitted = coordinator.admit();
+                (
+                    matches!(coordinator.interrupt, Some(Interrupt::Shutdown)),
+                    (coordinator.live.len(), coordinator.handles.len()),
+                    admitted,
+                )
+            };
+            assert!(shutdown, "the admission's wait answered the shutdown");
+            assert_eq!(
+                spawned,
+                (0, 0),
+                "no pipeline was spawned after the shutdown"
+            );
+            let error = admitted.expect_err("the stopped dispatch ends the admission pass");
+            assert!(error.to_string().contains("met a shutdown"), "{error}");
+            assert!(
+                wide.run.events()[before..].is_empty(),
+                "{:?}",
+                kinds_of(&wide.run.events()[before..])
+            );
+            assert!(
+                wide.env.runner.ran().is_empty(),
+                "no worker reached the runner"
+            );
+        });
+    }
+
+    #[test]
+    fn a_shutdown_consumed_during_a_registry_wait_publishes_no_candidate() {
+        bounded("the review's integration witness", || {
+            let tasks = two_independent();
+            let mut wide = Wide::started_with(
+                "shutdown-in-wait-integration",
+                &tasks,
+                2,
+                WidePlans::default(),
+                RecordingRunner::new().answering(wide_responder(&tasks, &[])),
+            );
+            let _deadline = crate::workspace_manager::RegistryDeadline::hold(
+                wide.env.fixture.manager.common_git_dir(),
+                WITNESS_REGISTRY_DEADLINE,
+            );
+            let mut hooks = wide.env.hooks();
+            let seams = wide.env.seams();
+            let progress = wide
+                .run
+                .step(&seams, &mut hooks)
+                .expect("prepare one candidate");
+            assert!(
+                matches!(progress, Progress::Settled { accepted: true, .. }),
+                "{progress:?}"
+            );
+            let Admitted::Integrate { candidate } =
+                wide.run.admitted().expect("select a candidate")
+            else {
+                panic!("expected an integration");
+            };
+            let before = wide.run.events().len();
+            let plant = Plant {
+                admin: seams
+                    .manager
+                    .common_git_dir()
+                    .join("worktrees")
+                    .join("review-shutdown-tear"),
+                head: wide.env.fixture.head.clone(),
+                runner: Arc::clone(&wide.env.runner),
+                wakes: Wakes::Contended,
+                common: seams.manager.common_git_dir().to_path_buf(),
+                torn: Torn::CommondirEmpty,
+            };
+            let prober = plant.tear();
+            let pipelines = wide.env.pipelines();
+            let (result, shutdown) = {
+                let mut coordinator = coordinator_of(
+                    &mut wide.run,
+                    &seams,
+                    &mut hooks,
+                    &pipelines,
+                    BTreeMap::new(),
+                );
+                coordinator
+                    .outbox
+                    .send(ToCoordinator::Shutdown)
+                    .expect("queue the shutdown before the registry wait");
+                let result = coordinator.integrate(*candidate);
+                (
+                    result,
+                    matches!(coordinator.interrupt, Some(Interrupt::Shutdown)),
+                )
+            };
+            let _ = prober.cancel.send(());
+            prober
+                .handle
+                .join()
+                .expect("the prober joined")
+                .expect("the access reached contention");
+            assert!(shutdown, "the shutdown was consumed in the wait");
+            let appended = &wide.run.events()[before..];
+            assert!(
+                appended.is_empty(),
+                "result={result:?}; events appended after the wait consumed Shutdown: {:?}",
+                kinds_of(appended)
+            );
+            assert!(
+                matches!(result, Ok(false)),
+                "the interrupted integration ends the admission pass: {result:?}"
+            );
+            published_as_the_log_authorizes(&wide);
+        });
+    }
+
+    #[test]
+    fn a_dispatch_begun_after_a_wait_answered_a_shutdown_appends_nothing() {
+        bounded("a dispatch after a stopped wait", || {
+            let tasks = two_independent();
+            let mut wide = Wide::started_with(
+                "stopped-then-dispatch",
+                &tasks,
+                2,
+                WidePlans::default(),
+                holding(&tasks, &[]),
+            );
+            let mut hooks = wide.env.hooks();
+            let seams = wide.env.seams();
+            let pipelines = wide.env.pipelines();
+            let before = wide.run.events().len();
+            let (stopped, dispatched) = {
+                let mut coordinator = coordinator_of(
+                    &mut wide.run,
+                    &seams,
+                    &mut hooks,
+                    &pipelines,
+                    BTreeMap::new(),
+                );
+                coordinator
+                    .outbox
+                    .send(ToCoordinator::Shutdown)
+                    .expect("shutdown reaches inbox");
+                let stopped = crate::workspace_manager::EffectHooks::registry_pause(
+                    &mut coordinator,
+                    Duration::from_millis(5),
+                );
+                let dispatched = crate::engine::topology::run::begin_dispatch(
+                    &mut coordinator,
+                    seams.manager,
+                    TaskKey(0),
+                    GenerationId(0),
+                    false,
+                );
+                (stopped, dispatched)
+            };
+            let stopped = stopped.expect_err("a wait that answered a shutdown ends in an error");
+            assert!(stopped.to_string().contains("met a shutdown"), "{stopped}");
+            let refused = dispatched.expect_err("the stopped run appends nothing for a dispatch");
+            assert!(
+                refused
+                    .to_string()
+                    .contains("nothing further is appended in this process"),
+                "the run's emitter refused the dispatch's first append: {refused}"
+            );
+            assert!(
+                wide.run.events()[before..].is_empty(),
+                "{:?}",
+                kinds_of(&wide.run.events()[before..])
+            );
+            assert!(wide.run.stopped().is_some());
+            wide.run.reopen();
+        });
+    }
+
+    #[test]
+    fn a_publication_begun_after_a_wait_answered_a_shutdown_moves_no_ref() {
+        bounded("a publication after a stopped wait", || {
+            let tasks = two_independent();
+            let mut wide = Wide::started_with(
+                "stopped-then-publish",
+                &tasks,
+                2,
+                WidePlans::default(),
+                RecordingRunner::new().answering(wide_responder(&tasks, &[])),
+            );
+            let mut hooks = wide.env.hooks();
+            let seams = wide.env.seams();
+            wide.run
+                .step(&seams, &mut hooks)
+                .expect("prepare one candidate");
+            let Admitted::Integrate { candidate } =
+                wide.run.admitted().expect("select a candidate")
+            else {
+                panic!("expected an integration");
+            };
+            let request = wide
+                .run
+                .integration_request(&candidate)
+                .expect("an integration request");
+            let authorized = crate::engine::topology::integrate::Authorized {
+                sequence: request.sequence,
+                key: candidate.key,
+                expected_head: request.authorized.head.clone(),
+                proposed_sha: candidate.commit_sha.clone(),
+                satisfies: request.satisfies.clone(),
+                lease_release: request.lease_release.clone(),
+                integration_ref: request.integration_ref.clone(),
+                pin: None,
+                staging: None,
+            };
+            let before = wide.run.events().len();
+            let pipelines = wide.env.pipelines();
+            let published = {
+                let mut coordinator = coordinator_of(
+                    &mut wide.run,
+                    &seams,
+                    &mut hooks,
+                    &pipelines,
+                    BTreeMap::new(),
+                );
+                coordinator
+                    .outbox
+                    .send(ToCoordinator::Shutdown)
+                    .expect("shutdown reaches inbox");
+                let _ = crate::workspace_manager::EffectHooks::registry_pause(
+                    &mut coordinator,
+                    Duration::from_millis(5),
+                );
+                crate::engine::topology::integrate::publish(
+                    &mut DrivenJournal(&mut coordinator),
+                    seams.manager,
+                    authorized,
+                )
+            };
+            let refused = published.expect_err("the stopped run publishes nothing");
+            assert!(
+                refused
+                    .to_string()
+                    .contains("nothing further is done in this process"),
+                "the compare-and-swap was refused at its `before` hook: {refused}"
+            );
+            assert!(wide.run.events()[before..].is_empty());
+            published_as_the_log_authorizes(&wide);
+            wide.run.reopen();
+        });
+    }
+
+    struct CountsRawPauses {
+        inner: crate::engine::topology::seams::HarnessTopologyHooks,
+        ledger: crate::util::DurabilityLedger,
+        poisoned_cause: Option<String>,
+        raw: usize,
+    }
+
+    impl CountsRawPauses {
+        fn over(wide: &Wide) -> Self {
+            let mut inner = wide.env.hooks();
+            let ledger = inner.effects().durability_ledger();
+            Self {
+                inner,
+                ledger,
+                poisoned_cause: None,
+                raw: 0,
+            }
+        }
+    }
+
+    impl crate::workspace_manager::EffectHooks for CountsRawPauses {
+        fn phase(
+            &mut self,
+            site: crate::topology::effects::EffectSiteId,
+            phase: crate::topology::effects::HookPhase,
+        ) -> crate::topology::effects::Injection {
+            let effects = self.inner.effects();
+            let answer = effects.phase(site, phase);
+            self.poisoned_cause = effects.refusal_cause();
+            answer
+        }
+
+        fn refusal_cause(&self) -> Option<String> {
+            self.poisoned_cause.clone()
+        }
+
+        fn durability_ledger(&self) -> crate::util::DurabilityLedger {
+            self.ledger.clone()
+        }
+
+        fn registry_pause(&mut self, pause: Duration) -> Result<(), UpstrokeError> {
+            self.raw += 1;
+            self.inner.effects().registry_pause(pause)
+        }
+    }
+
+    struct RawPausesUnder {
+        counting: CountsRawPauses,
+        tear: TearHeld,
+    }
+
+    impl TopologyHooks for RawPausesUnder {
+        fn effects(&mut self) -> &mut dyn crate::workspace_manager::EffectHooks {
+            &mut self.counting
+        }
+
+        fn rundir(&mut self) -> &mut dyn crate::rundir::RunDirHooks {
+            self.tear.rundir()
+        }
+
+        fn events(&mut self) -> &mut dyn crate::events::log::EventHooks {
+            self.tear.events()
+        }
+
+        fn container(&mut self) -> &mut dyn crate::runner::container::ContainerHooks {
+            self.tear.container()
+        }
+
+        fn spawn(&mut self) -> &mut dyn crate::agent::proc::SpawnHooks {
+            TopologyHooks::spawn(&mut self.tear)
+        }
+
+        fn folded(&mut self, fold: &TopologyFold, events: &[TopologyEvent]) {
+            self.tear.folded(fold, events);
+        }
+    }
+
+    fn waits_through_the_coordinator(
+        what: &'static str,
+        build: impl FnOnce() -> Wide + Send + 'static,
+        at: TearAt,
+        torn: Torn,
+        order: fn(&Quiescent<'_>) -> Option<Release>,
+        outcome: RunOutcome,
+    ) {
+        bounded(what, move || {
+            let mut wide = build();
+            let common = wide.env.fixture.manager.common_git_dir().to_path_buf();
+            let contended = crate::workspace_manager::contended_attempts(&common);
+            let mut tear = TearHeld::waking(&wide, "foreign-held", at, Wakes::Contended);
+            tear.tearing(torn);
+            let mut hooks = RawPausesUnder {
+                counting: CountsRawPauses::over(&wide),
+                tear,
+            };
+            let pipelines = wide.env.pipelines();
+            let runner = Arc::clone(&wide.env.runner);
+            let mut scheduler = Scheduler::scripted(&runner, Box::new(order));
+            let slept = crate::workspace_manager::fixture::slept_pauses();
+            let progress = wide
+                .run
+                .run_concurrently(
+                    &wide.env.seams(),
+                    &pipelines,
+                    &mut hooks,
+                    Some(&mut scheduler),
+                )
+                .expect("the access is passed once its tear is finished");
+            drop(scheduler);
+            hooks
+                .tear
+                .finish()
+                .expect("the access failed on the tear, and only then was it finished");
+            assert_eq!(outcome_of(&progress), outcome);
+            assert!(
+                crate::workspace_manager::contended_attempts(&common) > contended,
+                "the access failed on the tear first"
+            );
+            assert_eq!(
+                hooks.counting.raw, 0,
+                "the coordinator's caller's raw pause was never used: every wait went through \
+                 the coordinator"
+            );
+            assert_eq!(
+                crate::workspace_manager::fixture::slept_pauses(),
+                slept,
+                "no wait of a registry access the coordinator made slept on its thread"
+            );
+        });
+    }
+
+    #[test]
+    fn a_finalizations_registry_wait_answers_on_the_coordinator() {
+        waits_through_the_coordinator(
+            "a finalization meeting a tear",
+            || two_held("waits-finalization"),
+            TearAt::Fold(run_finished),
+            Torn::CommondirEmpty,
+            first_invoking,
+            RunOutcome::Complete,
+        );
+    }
+
+    #[test]
+    fn a_closures_registry_wait_answers_on_the_coordinator() {
+        waits_through_the_coordinator(
+            "a halt's closure meeting a tear",
+            || halting_on_gamma("waits-closure"),
+            TearAt::Fold(attempt_interrupted),
+            Torn::GitdirMissing,
+            gamma_halts_while_alpha_gates,
+            RunOutcome::Halted,
+        );
+    }
+
+    /// The follow-up C record's §6.11, the proposed frozen hunk C-R1: the
+    /// frozen finalization's scrub enumerates through the coordinator's hooks
+    /// (`finalize.rs`'s `scrub_slots`, `intents_pausing`), so the registry read
+    /// that discovers earlier incarnations' instances waits through the
+    /// coordinator. It is the first registry access after `run_finished`. Without
+    /// C-R1 (`2c3e413c`) the read slept on the coordinator's thread.
+    #[test]
+    fn a_finalizations_scrub_discovery_answers_on_the_coordinator() {
+        waits_through_the_coordinator(
+            "a finalization scrub's registry read meeting an unreadable registration",
+            || two_held("waits-scrub-discovery"),
+            TearAt::Access(run_finished, 1),
+            Torn::GitdirUnreadable,
+            first_invoking,
+            RunOutcome::Complete,
+        );
+    }
+
+    #[test]
+    fn a_final_sweeps_registry_read_answers_on_the_coordinator() {
+        waits_through_the_coordinator(
+            "a final sweep's registry read meeting an unreadable registration",
+            || two_held("waits-sweep-read"),
+            TearAt::Access(run_finished, 6),
+            Torn::GitdirUnreadable,
+            first_invoking,
+            RunOutcome::Complete,
+        );
+    }
+
+    #[test]
+    fn a_closures_snapshot_discovery_answers_on_the_coordinator() {
+        waits_through_the_coordinator(
+            "a closure's snapshot reclaim's registry read meeting an unreadable registration",
+            || halting_on_gamma("waits-closure-discovery"),
+            TearAt::Access(attempt_interrupted, 1),
+            Torn::GitdirUnreadable,
+            gamma_halts_while_alpha_gates,
+            RunOutcome::Halted,
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_wait_answers_a_queued_shutdown_when_no_thread_can_be_started() {
+        bounded("a wait under thread exhaustion", || {
+            let tasks = [WideTask::independent("alpha")];
+            let mut wide = Wide::started_with(
+                "wait-thread-exhaustion",
+                &tasks,
+                1,
+                WidePlans::default(),
+                holding(&tasks, &[]),
+            );
+            let mut hooks = wide.env.hooks();
+            let seams = wide.env.seams();
+            let pipelines = wide.env.pipelines();
+            let mut coordinator = coordinator_of(
+                &mut wide.run,
+                &seams,
+                &mut hooks,
+                &pipelines,
+                BTreeMap::new(),
+            );
+            coordinator
+                .outbox
+                .send(ToCoordinator::Shutdown)
+                .expect("shutdown is queued");
+            crate::workspace_manager::fixture::refuse_syscall_on_this_thread(
+                libc::SYS_clone3,
+                libc::EAGAIN,
+            );
+            let refused = std::thread::Builder::new()
+                .spawn(|| ())
+                .map(|thread| thread.join().is_ok())
+                .expect_err("no thread can be started on this thread any more");
+            assert_eq!(refused.raw_os_error(), Some(libc::EAGAIN), "{refused}");
+            let slept = crate::workspace_manager::fixture::slept_pauses();
+            let stopped = crate::workspace_manager::EffectHooks::registry_pause(
+                &mut coordinator,
+                Duration::from_millis(30),
+            );
+            assert!(
+                matches!(coordinator.interrupt, Some(Interrupt::Shutdown)),
+                "the wait answered the queued shutdown"
+            );
+            assert_eq!(coordinator.inbox.len(), 0, "nothing was left unanswered");
+            assert_eq!(
+                crate::workspace_manager::fixture::slept_pauses(),
+                slept,
+                "the coordinator never slept for the wait"
+            );
+            assert!(
+                stopped
+                    .expect_err("the wait that answered a shutdown ends in an error")
+                    .to_string()
+                    .contains("met a shutdown")
+            );
+            assert!(
+                !coordinator
+                    .run
+                    .warnings()
+                    .iter()
+                    .any(|warning| warning.contains("slept")),
+                "{:?}",
+                coordinator.run.warnings()
+            );
+        });
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_coordinator_whose_timer_cannot_start_refuses_before_it_appends_anything() {
+        bounded("a coordinator under thread exhaustion", || {
+            let tasks = two_independent();
+            let mut wide = Wide::started_with(
+                "timer-thread-exhaustion",
+                &tasks,
+                2,
+                WidePlans::default(),
+                holding(&tasks, &[]),
+            );
+            let mut hooks = wide.env.hooks();
+            let pipelines = wide.env.pipelines();
+            let before = wide.run.events().len();
+            let slept = crate::workspace_manager::fixture::slept_pauses();
+            crate::workspace_manager::fixture::refuse_syscall_on_this_thread(
+                libc::SYS_clone3,
+                libc::EAGAIN,
+            );
+            let error = wide
+                .run
+                .run_concurrently(&wide.env.seams(), &pipelines, &mut hooks, None)
+                .expect_err("a coordinator that cannot start its timer refuses");
+            assert!(
+                matches!(&error, UpstrokeError::Refused { message }
+                    if message.contains("wait timer could not be started")
+                        && message.contains("nothing was spawned or appended")),
+                "{error:?}"
+            );
+            assert_eq!(wide.run.events().len(), before, "nothing was appended");
+            assert!(wide.env.runner.ran().is_empty(), "nothing was spawned");
+            assert_eq!(
+                crate::workspace_manager::fixture::slept_pauses(),
+                slept,
+                "nothing slept"
+            );
+        });
+    }
+
+    fn unwinding_sleep(_: Duration) {
+        panic!("the timer's sleep unwinds, as a timer thread that dies would");
+    }
+
+    #[test]
+    fn a_wait_whose_timer_unwinds_is_still_woken_and_the_timer_serves_the_next() {
+        bounded("a wait whose timer unwinds", || {
+            let tasks = [WideTask::independent("alpha")];
+            let mut wide = Wide::started_with(
+                "timer-unwinds",
+                &tasks,
+                1,
+                WidePlans::default(),
+                holding(&tasks, &[]),
+            );
+            let mut hooks = wide.env.hooks();
+            let seams = wide.env.seams();
+            let pipelines = wide.env.pipelines();
+            let mut coordinator = coordinator_of(
+                &mut wide.run,
+                &seams,
+                &mut hooks,
+                &pipelines,
+                BTreeMap::new(),
+            );
+            coordinator.timer = Timer::starting(coordinator.outbox.clone(), unwinding_sleep)
+                .expect("the wait timer starts");
+            for wait in 1..=2 {
+                crate::workspace_manager::EffectHooks::registry_pause(
+                    &mut coordinator,
+                    Duration::from_millis(5),
+                )
+                .unwrap_or_else(|error| {
+                    panic!("wait {wait} was answered by its wake and nothing else: {error}")
+                });
+            }
+            assert!(coordinator.interrupt.is_none());
+            coordinator.join();
+            assert!(
+                coordinator
+                    .run
+                    .warnings()
+                    .iter()
+                    .any(|warning| warning.contains("unwound inside 2 of its sleeps")),
+                "{:?}",
+                coordinator.run.warnings()
+            );
+        });
+    }
+
+    #[test]
+    fn a_wait_that_begins_after_a_shutdown_does_not_wait() {
+        bounded("a wait after a shutdown", || {
+            let tasks = [WideTask::independent("alpha")];
+            let mut wide = Wide::started_with(
+                "wait-after-shutdown",
+                &tasks,
+                1,
+                WidePlans::default(),
+                holding(&tasks, &[]),
+            );
+            let mut hooks = wide.env.hooks();
+            let seams = wide.env.seams();
+            let pipelines = wide.env.pipelines();
+            let mut coordinator = coordinator_of(
+                &mut wide.run,
+                &seams,
+                &mut hooks,
+                &pipelines,
+                BTreeMap::new(),
+            );
+            coordinator
+                .handle(Origin::Pipeline, ToCoordinator::Shutdown)
+                .expect("the shutdown is applied");
+            let started = std::time::Instant::now();
+            let stopped = crate::workspace_manager::EffectHooks::registry_pause(
+                &mut coordinator,
+                Duration::from_secs(60),
+            )
+            .expect_err("a wait that begins after a shutdown stops at once");
+            assert!(
+                started.elapsed() < Duration::from_secs(30),
+                "the wait did not wait out its length"
+            );
+            assert!(stopped.to_string().contains("met a shutdown"), "{stopped}");
+            assert_eq!(coordinator.wakes, 0, "no wake was asked for");
+        });
+    }
+
+    #[test]
+    fn a_wait_after_its_timer_has_stopped_refuses_at_once_and_never_sleeps() {
+        bounded("a wait with no timer", || {
+            let tasks = [WideTask::independent("alpha")];
+            let mut wide = Wide::started_with(
+                "timer-stopped",
+                &tasks,
+                1,
+                WidePlans::default(),
+                holding(&tasks, &[]),
+            );
+            let mut hooks = wide.env.hooks();
+            let seams = wide.env.seams();
+            let pipelines = wide.env.pipelines();
+            let mut coordinator = coordinator_of(
+                &mut wide.run,
+                &seams,
+                &mut hooks,
+                &pipelines,
+                BTreeMap::new(),
+            );
+            assert_eq!(coordinator.timer.stop(), None);
+            let slept = crate::workspace_manager::fixture::slept_pauses();
+            let started = std::time::Instant::now();
+            let stopped = crate::workspace_manager::EffectHooks::registry_pause(
+                &mut coordinator,
+                Duration::from_secs(60),
+            )
+            .expect_err("a wait that cannot be timed refuses");
+            assert!(
+                started.elapsed() < Duration::from_secs(30),
+                "the wait did not wait out its length"
+            );
+            assert_eq!(crate::workspace_manager::fixture::slept_pauses(), slept);
+            assert!(
+                matches!(&coordinator.interrupt, Some(Interrupt::Failed(UpstrokeError::Refused { message }))
+                    if message.contains("wait timer has stopped")),
+                "the command ends on the typed refusal"
+            );
+            assert!(
+                stopped
+                    .to_string()
+                    .contains("an error that ends the command"),
+                "{stopped}"
+            );
+        });
+    }
+
+    #[cfg(unix)]
+    struct RequiresAFailingFilter {
+        base: PathBuf,
+        info: PathBuf,
+        remaining: std::sync::atomic::AtomicUsize,
+    }
+
+    #[cfg(unix)]
+    impl ReviewInputPolicy for RequiresAFailingFilter {
+        fn problem(
+            &self,
+            worktree: &std::path::Path,
+            _tree: &str,
+        ) -> Result<Option<String>, UpstrokeError> {
+            let verifying = worktree.parent().and_then(std::path::Path::file_name)
+                == Some(std::ffi::OsStr::new("merge"));
+            if verifying
+                && self
+                    .remaining
+                    .compare_exchange(
+                        1,
+                        0,
+                        std::sync::atomic::Ordering::SeqCst,
+                        std::sync::atomic::Ordering::SeqCst,
+                    )
+                    .is_ok()
+            {
+                crate::workspace_manager::fixture::write_file(
+                    &self.info.join("attributes"),
+                    b"* filter=b329fails\n",
+                );
+                for (key, value) in [
+                    ("filter.b329fails.smudge", "false"),
+                    ("filter.b329fails.clean", "cat"),
+                    ("filter.b329fails.required", "true"),
+                ] {
+                    crate::workspace_manager::fixture::git(&self.base, &["config", key, value]);
+                }
+            }
+            Ok(None)
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_verification_whose_snapshot_checkout_fails_after_the_takeover_ends_resumably_and_its_resume_reverifies()
+     {
+        let tasks = [
+            WideTask::independent("alpha"),
+            WideTask::independent("beta"),
+        ];
+        let mut wide = Wide::durable(
+            "registry-verification-genuine",
+            &tasks,
+            2,
+            WidePlans::default(),
+            holding(&tasks, &[]),
+        );
+        let base = wide.env.fixture.base.clone();
+        let info = wide.env.fixture.manager.common_git_dir().join("info");
+        let policy = Arc::new(RequiresAFailingFilter {
+            base: base.clone(),
+            info: info.clone(),
+            remaining: std::sync::atomic::AtomicUsize::new(1),
+        });
+        let error = match registry_drive(&mut wide, policy) {
+            Err(error) => error,
+            Ok(progress) => panic!(
+                "a snapshot whose checkout fails after the takeover ends the command, not \
+                 {progress:?}: {:?}",
+                kinds_of_log(&wide)
+            ),
+        };
+        assert!(
+            matches!(&error, UpstrokeError::RegistryRefused { message } if message.contains("b329fails") || message.contains("is gone")),
+            "{error:?}"
+        );
+        let kinds = kinds_of_log(&wide);
+        assert!(
+            !kinds.contains(&"merge_verification_unavailable") && !kinds.contains(&"run_finished"),
+            "nothing durable: {kinds:?}"
+        );
+        assert_eq!(
+            kinds.last(),
+            Some(&"merge_verification_started"),
+            "{kinds:?}"
+        );
+        crate::workspace_manager::fixture::remove_file(&info.join("attributes"));
+        crate::workspace_manager::fixture::git(
+            &base,
+            &["config", "--remove-section", "filter.b329fails"],
+        );
+        let (_, mut resumed) = wide
+            .resume(
+                "inc-2",
+                holding(&tasks, &[]),
+                crate::engine::topology::select::Ceiling::unlimited(),
+            )
+            .expect("the next process resumes once the environment is repaired");
+        let runner = Arc::clone(&resumed.env.runner);
+        let mut scheduler = Scheduler::first(&runner);
+        let progress =
+            drive(&mut resumed, Some(&mut scheduler)).expect("the resumed run completes");
+        drop(scheduler);
+        assert_eq!(outcome_of(&progress), RunOutcome::Complete);
+        let events = resumed.env.durable_events();
+        assert_eq!(count(&events, "merge_verification_interrupted"), 1);
+        assert_eq!(count(&events, "merge_verification_unavailable"), 0);
+        assert_eq!(count(&events, "task_merged"), 2);
+        replay_equals_live(&resumed);
+    }
+
+    #[cfg(unix)]
+    struct DeniesTheSnapshots {
+        snapshots: PathBuf,
+        remaining: std::sync::atomic::AtomicUsize,
+    }
+
+    #[cfg(unix)]
+    impl ReviewInputPolicy for DeniesTheSnapshots {
+        fn problem(
+            &self,
+            worktree: &std::path::Path,
+            _tree: &str,
+        ) -> Result<Option<String>, UpstrokeError> {
+            let verifying = worktree.parent().and_then(std::path::Path::file_name)
+                == Some(std::ffi::OsStr::new("merge"));
+            if verifying
+                && self
+                    .remaining
+                    .compare_exchange(
+                        1,
+                        0,
+                        std::sync::atomic::Ordering::SeqCst,
+                        std::sync::atomic::Ordering::SeqCst,
+                    )
+                    .is_ok()
+            {
+                crate::workspace_manager::fixture::set_mode(&self.snapshots, 0o555);
+            }
+            Ok(None)
+        }
+    }
+
+    #[cfg(unix)]
+    struct RestoresTheSnapshots {
+        inner: crate::engine::topology::seams::HarnessTopologyHooks,
+        snapshots: PathBuf,
+    }
+
+    #[cfg(unix)]
+    impl crate::engine::topology::seams::TopologyHooks for RestoresTheSnapshots {
+        fn effects(&mut self) -> &mut dyn crate::workspace_manager::EffectHooks {
+            self.inner.effects()
+        }
+        fn rundir(&mut self) -> &mut dyn crate::rundir::RunDirHooks {
+            self.inner.rundir()
+        }
+        fn events(&mut self) -> &mut dyn crate::events::log::EventHooks {
+            self.inner.events()
+        }
+        fn container(&mut self) -> &mut dyn crate::runner::container::ContainerHooks {
+            self.inner.container()
+        }
+        fn spawn(&mut self) -> &mut dyn crate::agent::proc::SpawnHooks {
+            self.inner.spawn()
+        }
+        fn folded(&mut self, fold: &TopologyFold, events: &[TopologyEvent]) {
+            self.inner.folded(fold, events);
+            if events
+                .last()
+                .is_some_and(|event| event.body.kind() == "merge_verification_unavailable")
+            {
+                crate::workspace_manager::fixture::set_mode(&self.snapshots, 0o755);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_verification_whose_snapshot_destination_cannot_be_made_defers_as_before() {
+        let tasks = [
+            WideTask::independent("alpha"),
+            WideTask::independent("beta"),
+        ];
+        let mut wide = Wide::started_with(
+            "registry-verification-destination",
+            &tasks,
+            2,
+            WidePlans::default(),
+            holding(&tasks, &[]),
+        );
+        let snapshots = wide.env.fixture.manager.execution_root().join("snapshots");
+        let _restore = crate::workspace_manager::fixture::ModeRestored::of(&snapshots);
+        let mut pipelines = wide.env.pipelines();
+        pipelines.input_policy = Arc::new(DeniesTheSnapshots {
+            snapshots: snapshots.clone(),
+            remaining: std::sync::atomic::AtomicUsize::new(1),
+        });
+        let mut hooks = RestoresTheSnapshots {
+            inner: wide.env.hooks(),
+            snapshots,
+        };
+        let runner = Arc::clone(&wide.env.runner);
+        let mut scheduler = Scheduler::first(&runner);
+        let progress = wide
+            .run
+            .run_concurrently(
+                &wide.env.seams(),
+                &pipelines,
+                &mut hooks,
+                Some(&mut scheduler),
+            )
+            .expect("a destination that cannot be made is Git state the verification defers on");
+        drop(scheduler);
+        assert_eq!(outcome_of(&progress), RunOutcome::Complete);
+        let events = wide.run.events();
+        assert_eq!(
+            count(events, "merge_verification_unavailable"),
+            1,
+            "{:?}",
+            kinds_of(events)
+        );
+        assert_eq!(count(events, "task_merged"), 2);
+        replay_equals_live(&wide);
+    }
+
     fn arming_on(
         runner: &RecordingRunner,
         harness: std::sync::Arc<std::sync::Mutex<crate::topology::effects::HookHarness>>,
@@ -4043,7 +8272,7 @@ mod tests {
             Ok("complete") => crate::events::log::WrittenShape::Complete,
             other => panic!("the parent names the kill shape: {other:?}"),
         };
-        let mut wide = durable_halting_on_gamma("coordinator-closure-kill");
+        let mut wide = durable_halting_on_gamma("closure-kill");
         crate::workspace_manager::fixture::write_file(
             &dir.join(KILL_HANDOFF),
             wide.env.fixture.root.to_string_lossy().as_bytes(),
@@ -6169,7 +10398,7 @@ mod tests {
             .collect();
         assert_eq!(
             gates,
-            vec!["k0-g0-a1-gates".to_owned(), "k0-g0-a2-gates".to_owned()],
+            gate_snapshot_names(&wide.env.fixture.manager, 0, 0, &[1, 2]),
             "the retry re-gated on a fresh snapshot of its own"
         );
         assert_eq!(count(&events, "task_merged"), 3, "{kinds:?}");
@@ -6861,7 +11090,7 @@ mod tests {
         replay_equals_live(&wide);
     }
 
-    fn bounded(what: &'static str, body: impl FnOnce() + Send + 'static) {
+    fn bounded(what: &str, body: impl FnOnce() + Send + 'static) {
         let name = std::thread::current()
             .name()
             .unwrap_or("coordinator-bounded")
@@ -7112,6 +11341,7 @@ mod tests {
             &kinds[halted..],
             &[
                 "question_answered",
+                "merge_verification_charged",
                 "merge_verification_interrupted",
                 "run_finished"
             ],
@@ -8619,9 +12849,18 @@ mod tests {
         let mut hooks = wide.env.hooks();
         let seams = wide.env.seams();
         for key in [TaskKey(0), TaskKey(1)] {
-            wide.run
-                .begin_dispatch(key, GenerationId(0), false, &seams, &mut hooks)
-                .expect("the root and the unrelated holder start");
+            crate::engine::topology::run::begin_dispatch(
+                &mut crate::engine::topology::run::Stepping {
+                    run: &mut wide.run,
+                    seams: &seams,
+                    hooks: &mut hooks,
+                },
+                seams.manager,
+                key,
+                GenerationId(0),
+                false,
+            )
+            .expect("the root and the unrelated holder start");
         }
         let source = CandidateRef {
             key: TaskKey(0),
@@ -8751,12 +12990,18 @@ mod tests {
                 in_verify: None,
                 arrived: None,
                 abandoned: None,
+                charged: None,
                 interrupt: None,
                 cancelled_work: closure::Cancelled::none(),
                 unresolved: Vec::new(),
                 buffer: Vec::new(),
                 arrivals: 0,
+                deferred: VecDeque::new(),
+                wakes: 0,
+                ledger: crate::util::DurabilityLedger::off(),
+                refusal: None,
                 handles: Vec::new(),
+                timer: Timer::start(outbox.clone()).expect("the wait timer starts"),
                 inbox,
                 outbox,
                 injected,
@@ -8972,9 +13217,18 @@ mod tests {
         let mut hooks = wide.env.hooks();
         let seams = wide.env.seams();
         for key in [TaskKey(0), TaskKey(1), TaskKey(2), TaskKey(3)] {
-            wide.run
-                .begin_dispatch(key, GenerationId(0), false, &seams, &mut hooks)
-                .expect("four unrelated attempts start");
+            crate::engine::topology::run::begin_dispatch(
+                &mut crate::engine::topology::run::Stepping {
+                    run: &mut wide.run,
+                    seams: &seams,
+                    hooks: &mut hooks,
+                },
+                seams.manager,
+                key,
+                GenerationId(0),
+                false,
+            )
+            .expect("four unrelated attempts start");
         }
         let worker =
             |key| AttemptIdentities::new(TaskKey(key), GenerationId(0), AttemptNumber(1)).worker();
@@ -9103,12 +13357,18 @@ mod tests {
                 in_verify: None,
                 arrived: None,
                 abandoned: None,
+                charged: None,
                 interrupt: None,
                 cancelled_work: closure::Cancelled::none(),
                 unresolved: Vec::new(),
                 buffer: Vec::new(),
                 arrivals: 0,
+                deferred: VecDeque::new(),
+                wakes: 0,
+                ledger: crate::util::DurabilityLedger::off(),
+                refusal: None,
                 handles: Vec::new(),
+                timer: Timer::start(outbox.clone()).expect("the wait timer starts"),
                 inbox,
                 outbox,
                 injected,
@@ -9694,7 +13954,7 @@ mod tests {
         let incarnation = child_env("UPSTROKE_TEST_CHILD_INCARNATION");
         let tasks = three();
         let mut wide = Wide::durable_contained(
-            "coordinator-child",
+            "coord-child",
             &tasks,
             3,
             WidePlans::default(),
@@ -12042,7 +16302,7 @@ mod tests {
                     .collect();
                 assert_eq!(
                     beta_gates,
-                    vec!["k1-g0-a1-gates".to_owned(), "k1-g0-a2-gates".to_owned()],
+                    gate_snapshot_names(&wide.env.fixture.manager, 1, 0, &[1, 2]),
                     "seed {seed}: ST-15 — beta's retry re-gated on a fresh snapshot of its own"
                 );
                 let retry_beside = points.iter().any(|point| {
@@ -14297,7 +18557,7 @@ mod tests {
                 .expect("the parent names the cell")
                 .parse()
                 .expect("a cell index");
-            let mut wide = finishing(halted, "interleaving-finalize-kill");
+            let mut wide = finishing(halted, "finalize-kill");
             crate::workspace_manager::fixture::write_file(
                 &dir.join(KILL_HANDOFF),
                 wide.env.fixture.root.to_string_lossy().as_bytes(),
@@ -15233,5 +19493,2363 @@ mod tests {
             observed.len() > after_the_coordinator,
             "the width-1 `step` started containers too: {observed:?}"
         );
+    }
+
+    const PASS_COST: f64 = 0.25;
+
+    const DUPLICATE_OFFER: &str = "offered for a second merge_verification_charged";
+
+    const RECORD_HANDOFF: &str = "o14-fixture-root";
+
+    const RECORD_KILL_TAG: &str = "record-kill";
+
+    const RECORD_KILL_TEMPORARY: &str = "tmp";
+
+    fn reviewing(verify_reviewers: usize) -> WidePlans {
+        WidePlans {
+            verify_reviewers,
+            ..WidePlans::default()
+        }
+    }
+
+    fn two() -> [WideTask; 2] {
+        [
+            WideTask::independent("alpha"),
+            WideTask::independent("beta"),
+        ]
+    }
+
+    fn unlimited() -> crate::engine::topology::select::Ceiling {
+        crate::engine::topology::select::Ceiling::unlimited()
+    }
+
+    fn answering_two() -> RecordingRunner {
+        RecordingRunner::new().answering(wide_responder(&two(), &[]))
+    }
+
+    fn charged_records(events: &[TopologyEvent]) -> Vec<(SequenceId, Vec<ReviewRecord>)> {
+        events
+            .iter()
+            .filter(|event| event.body.kind() == "merge_verification_charged")
+            .map(|event| {
+                let value = serde_json::to_value(event).expect("an event serializes");
+                let sequence = value["data"]["sequence"]
+                    .as_u64()
+                    .and_then(|sequence| u32::try_from(sequence).ok())
+                    .map(SequenceId)
+                    .expect("a record names its sequence");
+                let reviews = serde_json::from_value(value["data"]["reviews"].clone())
+                    .expect("a record carries review records");
+                (sequence, reviews)
+            })
+            .collect()
+    }
+
+    fn charged_event(sequence: SequenceId, reviews: &[ReviewRecord]) -> TopologyEvent {
+        serde_json::from_value(serde_json::json!({
+            "ts": "2026-10-08T00:00:00.000Z",
+            "event": "merge_verification_charged",
+            "data": {"sequence": sequence.0, "reviews": reviews},
+        }))
+        .expect("the vocabulary has merge_verification_charged")
+    }
+
+    fn started_key(events: &[TopologyEvent], sequence: SequenceId) -> TaskKey {
+        events
+            .iter()
+            .find_map(|event| match &event.body {
+                TopologyEventBody::MergeVerificationStarted { data }
+                    if data.sequence == sequence =>
+                {
+                    Some(data.candidate.key)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("sequence {} has a start", sequence.0))
+    }
+
+    fn started_at(events: &[TopologyEvent], sequence: SequenceId) -> usize {
+        events
+            .iter()
+            .position(|event| {
+                matches!(&event.body,
+                    TopologyEventBody::MergeVerificationStarted { data } if data.sequence == sequence)
+            })
+            .unwrap_or_else(|| panic!("sequence {} has a start", sequence.0))
+    }
+
+    fn unrecorded(events: &[TopologyEvent]) -> Vec<TopologyEvent> {
+        events
+            .iter()
+            .filter(|event| event.body.kind() != "merge_verification_charged")
+            .cloned()
+            .collect()
+    }
+
+    fn terminals_of(events: &[TopologyEvent], sequence: SequenceId) -> Vec<&'static str> {
+        events
+            .iter()
+            .filter(|event| {
+                event.body.sequence() == Some(sequence)
+                    && matches!(
+                        event.body,
+                        TopologyEventBody::MergeVerificationUnavailable { .. }
+                            | TopologyEventBody::MergeVerificationInterrupted { .. }
+                            | TopologyEventBody::MergePrepared { .. }
+                            | TopologyEventBody::MergeRejected { .. }
+                    )
+            })
+            .map(|event| event.body.kind())
+            .collect()
+    }
+
+    fn two_passes_recorded(wide: &Wide, sequence: SequenceId) {
+        let events = wide.env.durable_events();
+        let kinds = kinds_of(&events);
+        let records = charged_records(&events);
+        assert_eq!(
+            records
+                .iter()
+                .map(|(recorded, _)| *recorded)
+                .collect::<Vec<_>>(),
+            vec![sequence],
+            "one merge_verification_charged, for sequence {}: {kinds:?}",
+            sequence.0
+        );
+        let passes: Vec<(String, Option<f64>)> = records
+            .iter()
+            .flat_map(|(_, reviews)| reviews.iter())
+            .map(|review| (review.model.clone(), review.cost_usd))
+            .collect();
+        assert_eq!(
+            passes,
+            vec![
+                ("scaffold-model".to_owned(), Some(PASS_COST)),
+                ("scaffold-second-model".to_owned(), Some(PASS_COST))
+            ],
+            "the record holds both passes, in the order they were charged"
+        );
+        let key = started_key(&events, sequence);
+        let replayed = crate::engine::topology::select::Spend::replay(&events);
+        let without = crate::engine::topology::select::Spend::replay(&unrecorded(&events));
+        let live = wide.run.spend();
+        for (what, replayed, without, live) in [
+            ("run", replayed.run_usd(), without.run_usd(), live.run_usd()),
+            (
+                "task",
+                replayed.task_usd(key),
+                without.task_usd(key),
+                live.task_usd(key),
+            ),
+        ] {
+            assert!(
+                (replayed - live).abs() < 1e-9,
+                "the {what}'s replayed total {replayed} is its live total {live}"
+            );
+            assert!(
+                (replayed - without - 2.0 * PASS_COST).abs() < 1e-9,
+                "the record carries the {what}'s two passes, $0.50: {without} -> {replayed}"
+            );
+        }
+    }
+
+    fn no_second_offer(wide: &Wide) {
+        assert!(
+            !wide
+                .run
+                .warnings()
+                .iter()
+                .any(|warning| warning.contains(DUPLICATE_OFFER)),
+            "no second record was offered: {:?}",
+            wide.run.warnings()
+        );
+    }
+
+    fn records_both_passes(wide: &Wide, sequence: SequenceId) {
+        two_passes_recorded(wide, sequence);
+        no_second_offer(wide);
+    }
+
+    fn stale_at_width_one(
+        tag: &str,
+        verify_reviewers: usize,
+        ceiling: crate::engine::topology::select::Ceiling,
+    ) -> Wide {
+        let tasks = two();
+        let mut wide = Wide::durable(
+            tag,
+            &tasks,
+            3,
+            reviewing(verify_reviewers),
+            holding(&tasks, &[]),
+        );
+        let runner = std::sync::Arc::clone(&wide.env.runner);
+        let mut shut = false;
+        let mut scheduler = Scheduler::scripted(
+            &runner,
+            Box::new(move |view: &Quiescent<'_>| {
+                if shut {
+                    return None;
+                }
+                if view
+                    .live
+                    .iter()
+                    .any(|(_, identity)| matches!(identity, Identity::Verification { .. }))
+                {
+                    shut = true;
+                    assert!(view.injector.inject(ToCoordinator::Shutdown));
+                    return Some(Release::Injected);
+                }
+                released(view, |invocation| attempt_key(invocation) == Some(0))
+            }),
+        );
+        let error =
+            drive(&mut wide, Some(&mut scheduler)).expect_err("the shutdown ends the command");
+        drop(scheduler);
+        assert!(error.to_string().contains("shut down"), "{error}");
+        let events = wide.env.durable_events();
+        assert_eq!(count(&events, "task_merged"), 1, "{:?}", kinds_of(&events));
+        assert_eq!(
+            kinds_of(&events).last(),
+            Some(&"merge_verification_started"),
+            "the first verification was shut down at its gate, before any pass: {:?}",
+            kinds_of(&events)
+        );
+        let (_, resumed) = wide
+            .resume("inc-2", answering_two(), ceiling)
+            .expect("the next process resumes the shut-down run");
+        assert_eq!(
+            terminals_of(&resumed.env.durable_events(), SequenceId(1)),
+            vec!["merge_verification_interrupted"],
+            "the resume settles the shut-down verification interrupted: {:?}",
+            kinds_of_log(&resumed)
+        );
+        resumed
+    }
+
+    fn snapshot_add() -> crate::topology::effects::EffectSiteId {
+        crate::topology::effects::EffectSiteId::Snapshot(
+            crate::topology::effects::SnapshotSite::Add,
+        )
+    }
+
+    fn failing_the_snapshot_after(wide: &Wide, passing: u32) -> CasFailing {
+        let mut hooks = CasFailing::over(wide);
+        hooks.effects.fail_at = Some((snapshot_add(), passing));
+        hooks
+    }
+
+    fn verifying(fold: &TopologyFold, sequence: SequenceId) -> bool {
+        fold.transaction().is_some_and(|open| {
+            open.sequence == sequence
+                && matches!(
+                    open.class,
+                    crate::topology::fold::TransactionClass::VerificationStarted { .. }
+                )
+        })
+    }
+
+    fn review_pass(invocation: &InvocationId, pass: u32) -> bool {
+        matches!(
+            invocation,
+            InvocationId::Sequence {
+                role: crate::runner::invocation::SequenceRole::ReviewPass(index),
+                ..
+            } if *index == pass
+        )
+    }
+
+    fn sequence_invocation(invocation: &InvocationId) -> bool {
+        matches!(invocation, InvocationId::Sequence { .. })
+    }
+
+    fn verification_live(view: &Quiescent<'_>) -> bool {
+        view.live
+            .iter()
+            .any(|(_, identity)| matches!(identity, Identity::Verification { .. }))
+    }
+
+    fn alpha_then_beta(runner: &RecordingRunner) -> Scheduler<'_> {
+        Scheduler::scripted(
+            runner,
+            Box::new(|view: &Quiescent<'_>| {
+                if count(view.run.events(), "task_merged") == 0 {
+                    return released(view, |invocation| attempt_key(invocation) == Some(0));
+                }
+                released(view, |invocation| attempt_key(invocation) == Some(1))
+                    .or_else(|| released(view, sequence_invocation))
+            }),
+        )
+    }
+
+    fn toward_arrival(view: &Quiescent<'_>) -> Option<Option<Release>> {
+        if count(view.run.events(), "task_merged") == 0 {
+            return Some(released(view, |invocation| {
+                attempt_key(invocation) == Some(0)
+            }));
+        }
+        if view.run.fold().transaction().is_none() {
+            return Some(released(view, |invocation| {
+                attempt_key(invocation) == Some(1)
+            }));
+        }
+        if verification_live(view) {
+            return Some(
+                released(view, |invocation| worker(invocation) == Some(TaskKey(2)))
+                    .or_else(|| released(view, sequence_invocation)),
+            );
+        }
+        None
+    }
+
+    fn gamma_gate(view: &Quiescent<'_>) -> Option<InvocationId> {
+        view.invoking
+            .iter()
+            .find(|invocation| {
+                attempt_key(invocation) == Some(2)
+                    && matches!(role_of(invocation), Some(AttemptRole::Gate(_)))
+            })
+            .cloned()
+    }
+
+    fn halting_on_gamma_reviewing(tag: &str, verify_reviewers: usize, durable: bool) -> Wide {
+        let tasks = three();
+        let runner = RecordingRunner::new().answering(
+            crate::engine::topology::scaffold::wide_responder_asking(&tasks, &[], &[2]),
+        );
+        runner.hold();
+        let mut wide = if durable {
+            Wide::durable(tag, &tasks, 3, reviewing(verify_reviewers), runner)
+        } else {
+            Wide::started_with(tag, &tasks, 3, reviewing(verify_reviewers), runner)
+        };
+        halting(&mut wide.env);
+        wide
+    }
+
+    fn halting_at_the_third_pass(runner: &RecordingRunner) -> Scheduler<'_> {
+        Scheduler::scripted(
+            runner,
+            Box::new(|view: &Quiescent<'_>| {
+                if count(view.run.events(), "task_merged") == 0 {
+                    return released(view, |invocation| attempt_key(invocation) == Some(0));
+                }
+                if view.run.fold().transaction().is_none() {
+                    return released(view, |invocation| attempt_key(invocation) == Some(1));
+                }
+                if view
+                    .invoking
+                    .iter()
+                    .any(|invocation| review_pass(invocation, 2))
+                {
+                    return released(view, |invocation| attempt_key(invocation) == Some(2));
+                }
+                released(view, sequence_invocation)
+            }),
+        )
+    }
+
+    struct ArmingOnTheFault {
+        inner: crate::engine::topology::seams::HarnessTopologyHooks,
+        effects: FailingOnce,
+        harness: std::sync::Arc<std::sync::Mutex<crate::topology::effects::HookHarness>>,
+        arm: Option<(
+            crate::topology::effects::SubEffectPoint,
+            crate::topology::effects::InjectionMode,
+        )>,
+        abort_at_the_next_append: bool,
+    }
+
+    impl ArmingOnTheFault {
+        fn over(
+            wide: &Wide,
+            passing: u32,
+            arm: Option<(
+                crate::topology::effects::SubEffectPoint,
+                crate::topology::effects::InjectionMode,
+            )>,
+        ) -> Self {
+            Self {
+                inner: wide.env.hooks(),
+                effects: FailingOnce {
+                    effects: crate::workspace_manager::HarnessEffects::new(std::sync::Arc::clone(
+                        &wide.env.harness,
+                    )),
+                    fail_at: Some((snapshot_add(), passing)),
+                },
+                harness: std::sync::Arc::clone(&wide.env.harness),
+                arm,
+                abort_at_the_next_append: false,
+            }
+        }
+
+        fn fired(&self) -> bool {
+            self.effects.fail_at.is_none()
+        }
+    }
+
+    impl crate::workspace_manager::EffectHooks for ArmingOnTheFault {
+        fn phase(
+            &mut self,
+            site: crate::topology::effects::EffectSiteId,
+            phase: crate::topology::effects::HookPhase,
+        ) -> crate::topology::effects::Injection {
+            let answer = self.effects.phase(site, phase);
+            if matches!(answer, crate::topology::effects::Injection::Error) {
+                if let Some((point, mode)) = self.arm.take() {
+                    self.harness
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .arm(
+                            crate::topology::effects::EffectSiteId::Event(
+                                crate::topology::effects::EventSite::Append,
+                            ),
+                            point,
+                            mode,
+                        )
+                        .expect("the Event append supports the mode at the point");
+                }
+            }
+            answer
+        }
+
+        fn durability_ledger(&self) -> crate::util::DurabilityLedger {
+            self.effects.durability_ledger()
+        }
+
+        fn refusal_cause(&self) -> Option<String> {
+            self.effects.refusal_cause()
+        }
+    }
+
+    impl crate::events::log::EventHooks for ArmingOnTheFault {
+        fn phase(
+            &mut self,
+            site: crate::topology::effects::EventSite,
+            phase: crate::topology::effects::HookPhase,
+        ) {
+            if self.abort_at_the_next_append
+                && self.fired()
+                && site == crate::topology::effects::EventSite::Append
+                && phase == crate::topology::effects::HookPhase::Before
+            {
+                std::process::abort();
+            }
+            self.inner.events().phase(site, phase);
+        }
+
+        fn point(
+            &mut self,
+            site: crate::topology::effects::EventSite,
+            point: crate::topology::effects::SubEffectPoint,
+            mode: crate::topology::effects::InjectionMode,
+        ) -> crate::topology::effects::Injection {
+            self.inner.events().point(site, point, mode)
+        }
+
+        fn written_kill_shape(
+            &mut self,
+            site: crate::topology::effects::EventSite,
+        ) -> crate::events::log::WrittenShape {
+            self.inner.events().written_kill_shape(site)
+        }
+
+        fn durability_ledger(&self) -> crate::util::DurabilityLedger {
+            crate::events::log::EventHooks::durability_ledger(self.inner.event_observer())
+        }
+
+        fn synced(&mut self, record: &crate::events::log::SyncRecord) {
+            self.inner.events().synced(record);
+        }
+    }
+
+    impl TopologyHooks for ArmingOnTheFault {
+        fn effects(&mut self) -> &mut dyn crate::workspace_manager::EffectHooks {
+            self
+        }
+
+        fn rundir(&mut self) -> &mut dyn crate::rundir::RunDirHooks {
+            self.inner.rundir()
+        }
+
+        fn events(&mut self) -> &mut dyn crate::events::log::EventHooks {
+            self
+        }
+
+        fn container(&mut self) -> &mut dyn crate::runner::container::ContainerHooks {
+            self.inner.container()
+        }
+
+        fn spawn(&mut self) -> &mut dyn crate::agent::proc::SpawnHooks {
+            self.inner.spawn()
+        }
+
+        fn folded(&mut self, fold: &TopologyFold, events: &[TopologyEvent]) {
+            self.inner.folded(fold, events);
+        }
+    }
+
+    fn pipelines_failing_the_snapshot_after(
+        wide: &Wide,
+        passing: u32,
+        arm: Option<(
+            crate::topology::effects::SubEffectPoint,
+            crate::topology::effects::InjectionMode,
+        )>,
+    ) -> PipelineSeams {
+        let mut pipelines = wide.env.pipelines();
+        let harness = std::sync::Arc::clone(&wide.env.harness);
+        pipelines.hooks = std::sync::Arc::new(move || {
+            Box::new(ArmingOnTheFault {
+                inner: crate::engine::topology::seams::HarnessTopologyHooks::new(
+                    std::sync::Arc::clone(&harness),
+                ),
+                effects: FailingOnce {
+                    effects: crate::workspace_manager::HarnessEffects::new(std::sync::Arc::clone(
+                        &harness,
+                    )),
+                    fail_at: Some((snapshot_add(), passing)),
+                },
+                harness: std::sync::Arc::clone(&harness),
+                arm,
+                abort_at_the_next_append: false,
+            }) as Box<dyn TopologyHooks + Send>
+        });
+        pipelines
+    }
+
+    fn ledger_row(
+        wide: &Wide,
+        sequence: SequenceId,
+    ) -> (crate::engine::topology::report::LedgerRow, String) {
+        let run_id = wide.run.fold().started().expect("started").run_id.clone();
+        let report = crate::engine::topology::report::TopologyReport::derive(
+            &run_id,
+            wide.run.fold(),
+            &wide.env.durable_events(),
+        )
+        .expect("the report derives");
+        let row = report
+            .integration_ledger
+            .iter()
+            .find(|row| row.sequence == sequence.0)
+            .cloned()
+            .expect("the sequence has a ledger row");
+        (row, report.render())
+    }
+
+    #[test]
+    fn a_verifications_own_error_after_two_paid_passes_is_recorded_before_the_step_ends_at_width_one()
+     {
+        let mut wide = stale_at_width_one("coordinator-o14-r1", 3, unlimited());
+        let mut hooks = failing_the_snapshot_after(&wide, 3);
+        let seams = wide.env.seams();
+        let error = wide
+            .run
+            .step(&seams, &mut hooks)
+            .expect_err("the third reviewer's snapshot add fails");
+        assert!(
+            error.to_string().contains("was made to fail"),
+            "the verification's own error ends the step: {error}"
+        );
+        let events = wide.env.durable_events();
+        let sequence = SequenceId(2);
+        assert_eq!(
+            kinds_of(&events).last(),
+            Some(&"merge_verification_charged"),
+            "the record is the step's last append: {:?}",
+            kinds_of(&events)
+        );
+        records_both_passes(&wide, sequence);
+        assert!(
+            verifying(wide.run.fold(), sequence),
+            "the fold still holds sequence 2 open: {:?}",
+            wide.run.fold().transaction()
+        );
+    }
+
+    #[test]
+    fn a_restart_after_two_recorded_passes_still_refuses_the_ceiling() {
+        let mut wide = stale_at_width_one("coordinator-o14-r2", 3, unlimited());
+        let before = wide.run.spend().run_usd();
+        let mut hooks = failing_the_snapshot_after(&wide, 3);
+        let seams = wide.env.seams();
+        wide.run
+            .step(&seams, &mut hooks)
+            .expect_err("the third reviewer's snapshot add fails");
+        drop(hooks);
+        let live = wide.run.spend().run_usd();
+        assert!(
+            (live - before - 2.0 * PASS_COST).abs() < 1e-9,
+            "the step charged two passes live: {before} -> {live}"
+        );
+        records_both_passes(&wide, SequenceId(2));
+        let limit = before + 1.5 * PASS_COST;
+        let (_, mut resumed) = wide
+            .resume(
+                "inc-3",
+                answering_two(),
+                crate::engine::topology::select::Ceiling {
+                    run_usd: Some(limit),
+                    task_usd: None,
+                },
+            )
+            .expect("the next process resumes");
+        let events = resumed.env.durable_events();
+        let kinds = kinds_of(&events);
+        assert_eq!(
+            terminals_of(&events, SequenceId(2)),
+            vec!["merge_verification_interrupted"],
+            "recovery settles sequence 2 interrupted: {kinds:?}"
+        );
+        assert!(
+            position(&kinds, "merge_verification_charged", 0)
+                < position(&kinds, "merge_verification_interrupted", 1),
+            "recovery's interrupted terminal follows the record: {kinds:?}"
+        );
+        let mut hooks = resumed.env.hooks();
+        let seams = resumed.env.seams();
+        let progress = resumed
+            .run
+            .step(&seams, &mut hooks)
+            .expect("the first step of the restart");
+        assert!(
+            matches!(progress, Progress::BudgetExceeded),
+            "the restart is refused where the incarnation before it was: {progress:?} (limit \
+             {limit}, replayed {})",
+            resumed.run.spend().run_usd()
+        );
+        assert!(
+            !resumed
+                .env
+                .runner
+                .ran()
+                .iter()
+                .any(|ran| review_pass(&ran.invocation, 0)),
+            "no reviewer runs in the restart"
+        );
+    }
+
+    #[test]
+    fn an_unresolved_reviewer_after_two_paid_passes_is_recorded_and_its_transaction_stays_open_at_width_one()
+     {
+        let mut wide = stale_at_width_one("coordinator-o14-r3", 3, unlimited());
+        let sequence = SequenceId(2);
+        wide.env
+            .runner
+            .ending_unresolved(SequenceIdentities::new(sequence).review_pass(2, 0));
+        let mut hooks = wide.env.hooks();
+        let seams = wide.env.seams();
+        let error = wide
+            .run
+            .step(&seams, &mut hooks)
+            .expect_err("the third reviewer's process ends unresolved");
+        assert!(
+            error.to_string().contains("could not establish"),
+            "the unresolved reviewer's error ends the step: {error}"
+        );
+        let events = wide.env.durable_events();
+        assert_eq!(
+            kinds_of(&events).last(),
+            Some(&"merge_verification_charged"),
+            "{:?}",
+            kinds_of(&events)
+        );
+        records_both_passes(&wide, sequence);
+        assert!(
+            terminals_of(&events, sequence).is_empty(),
+            "no terminal settles the verification while its process may run: {:?}",
+            kinds_of(&events)
+        );
+        assert!(verifying(wide.run.fold(), sequence));
+        assert_eq!(
+            crate::engine::topology::select::Entitlements::of(wide.run.fold()).merge_held(),
+            1,
+            "the open transaction still holds its entitlement"
+        );
+        let replayed = crate::engine::topology::select::Spend::replay(&events);
+        let (_, resumed) = wide
+            .resume("inc-3", answering_two(), unlimited())
+            .expect("the next process resumes");
+        let events = resumed.env.durable_events();
+        assert_eq!(
+            terminals_of(&events, sequence),
+            vec!["merge_verification_interrupted"],
+            "the census and recovery settle it interrupted: {:?}",
+            kinds_of(&events)
+        );
+        let again = crate::engine::topology::select::Spend::replay(&events);
+        let key = started_key(&events, sequence);
+        assert!(
+            (again.run_usd() - replayed.run_usd()).abs() < 1e-9
+                && (again.task_usd(key) - replayed.task_usd(key)).abs() < 1e-9,
+            "the interrupted terminal adds no cost and the record is counted once: {} -> {}",
+            replayed.run_usd(),
+            again.run_usd()
+        );
+        records_both_passes(&resumed, sequence);
+    }
+
+    #[test]
+    fn an_unresolved_reviewer_after_two_paid_passes_is_recorded_at_width_three() {
+        let tasks = two();
+        let mut wide = Wide::started_with(
+            "coordinator-o14-r4",
+            &tasks,
+            3,
+            reviewing(3),
+            holding(&tasks, &[]),
+        );
+        let sequence = SequenceId(1);
+        let third = SequenceIdentities::new(sequence).review_pass(2, 0);
+        wide.env.runner.ending_unresolved(third.clone());
+        let runner = std::sync::Arc::clone(&wide.env.runner);
+        let mut scheduler = alpha_then_beta(&runner);
+        let error = drive(&mut wide, Some(&mut scheduler))
+            .expect_err("the unresolved end fails the command");
+        drop(scheduler);
+        assert!(
+            error.to_string().contains("unresolved"),
+            "the unresolved end ends the command: {error}"
+        );
+        records_both_passes(&wide, sequence);
+        let events = wide.env.durable_events();
+        assert!(
+            terminals_of(&events, sequence).is_empty(),
+            "{:?}",
+            kinds_of(&events)
+        );
+        settled_but(&mut wide.run, std::slice::from_ref(&third)).unwrap_or_else(|ledger| {
+            panic!("the unresolved reviewer keeps its registration: {ledger}")
+        });
+        replay_equals_live(&wide);
+    }
+
+    #[test]
+    fn a_halt_after_the_verifications_two_pass_result_arrived_records_both_before_the_interrupted_terminal()
+     {
+        let mut wide = halting_on_gamma_reviewing("coordinator-o14-r5", 2, false);
+        let polls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        wide.env.answers = std::sync::Arc::new(DecliningAtPoll(std::sync::Arc::clone(&polls)));
+        let runner = std::sync::Arc::clone(&wide.env.runner);
+        let mut scheduler = Scheduler::scripted(
+            &runner,
+            Box::new(|view: &Quiescent<'_>| {
+                if !view.run.fold().questions_open() {
+                    return released(view, |invocation| attempt_key(invocation) == Some(2));
+                }
+                if count(view.run.events(), "task_merged") == 0 {
+                    return released(view, |invocation| attempt_key(invocation) == Some(0));
+                }
+                if view.run.fold().transaction().is_none() {
+                    return released(view, |invocation| attempt_key(invocation) == Some(1));
+                }
+                let last = released(view, |invocation| review_pass(invocation, 1));
+                if last.is_some() {
+                    polls.store(2, std::sync::atomic::Ordering::SeqCst);
+                    return last;
+                }
+                released(view, sequence_invocation)
+            }),
+        );
+        let progress = drive(&mut wide, Some(&mut scheduler)).expect("the halted run ends");
+        drop(scheduler);
+        assert_eq!(outcome_of(&progress), RunOutcome::Halted);
+        let events = wide.env.durable_events();
+        let kinds = kinds_of(&events);
+        let halted = position(&kinds, "question_answered", 0);
+        assert_eq!(
+            &kinds[halted..],
+            &[
+                "question_answered",
+                "merge_verification_charged",
+                "merge_verification_interrupted",
+                "run_finished"
+            ],
+            "{kinds:?}"
+        );
+        assert_eq!(
+            wide.run.discarded(),
+            0,
+            "the result was accepted before the halt: {:?}",
+            wide.run.warnings()
+        );
+        let sequence = SequenceId(1);
+        records_both_passes(&wide, sequence);
+        let (row, rendered) = ledger_row(&wide, sequence);
+        assert_eq!(
+            (
+                row.reviews,
+                row.terminal.as_str(),
+                row.review_cost_incomplete
+            ),
+            (2, "merge_verification_interrupted", true),
+            "{row:?}"
+        );
+        assert!(
+            rendered.contains("(2 review(s), cost at least $0.5000 (?))"),
+            "the report reads the record as a lower bound: {rendered}"
+        );
+        replay_equals_live(&wide);
+    }
+
+    #[test]
+    fn a_shutdown_after_the_verifications_two_pass_result_arrived_records_both() {
+        let tasks = three();
+        let mut wide = Wide::started_with(
+            "coordinator-o14-r6",
+            &tasks,
+            3,
+            reviewing(2),
+            holding(&tasks, &[]),
+        );
+        let runner = std::sync::Arc::clone(&wide.env.runner);
+        let mut shut = false;
+        let mut scheduler = Scheduler::scripted(
+            &runner,
+            Box::new(move |view: &Quiescent<'_>| {
+                if shut {
+                    return None;
+                }
+                if let Some(release) = toward_arrival(view) {
+                    return release;
+                }
+                assert!(
+                    gamma_gate(view).is_some(),
+                    "gamma's gate holds its snapshot"
+                );
+                shut = true;
+                assert!(view.injector.inject(ToCoordinator::Shutdown));
+                Some(Release::Injected)
+            }),
+        );
+        let error =
+            drive(&mut wide, Some(&mut scheduler)).expect_err("the shutdown ends the command");
+        drop(scheduler);
+        let message = error.to_string();
+        assert!(
+            message.contains("shut down")
+                && message.contains(
+                    "nothing was appended but the record of the review passes a verification \
+                     had charged"
+                ),
+            "the shutdown's error says what it appended: {message}"
+        );
+        let sequence = SequenceId(1);
+        records_both_passes(&wide, sequence);
+        let events = wide.env.durable_events();
+        assert!(
+            terminals_of(&events, sequence).is_empty(),
+            "{:?}",
+            kinds_of(&events)
+        );
+        replay_equals_live(&wide);
+    }
+
+    #[test]
+    fn another_pipelines_error_after_the_verifications_two_pass_result_arrived_records_both() {
+        let tasks = three();
+        let mut wide = Wide::started_with(
+            "coordinator-o14-r7",
+            &tasks,
+            3,
+            reviewing(2),
+            holding(&tasks, &[]),
+        );
+        let runner = std::sync::Arc::clone(&wide.env.runner);
+        let panicking = std::sync::Arc::clone(&runner);
+        let mut acted = false;
+        let mut scheduler = Scheduler::scripted(
+            &runner,
+            Box::new(move |view: &Quiescent<'_>| {
+                if acted {
+                    return None;
+                }
+                if let Some(release) = toward_arrival(view) {
+                    return release;
+                }
+                let gate = gamma_gate(view).expect("gamma's gate holds its snapshot");
+                acted = true;
+                panicking.panic_when_released(gate.clone());
+                Some(Release::Invocation(gate))
+            }),
+        );
+        let error =
+            drive(&mut wide, Some(&mut scheduler)).expect_err("gamma's panic ends the command");
+        drop(scheduler);
+        assert!(
+            error.to_string().contains("a pipeline panicked"),
+            "the other pipeline's error ends the command: {error}"
+        );
+        let sequence = SequenceId(1);
+        records_both_passes(&wide, sequence);
+        let events = wide.env.durable_events();
+        assert!(
+            terminals_of(&events, sequence).is_empty(),
+            "{:?}",
+            kinds_of(&events)
+        );
+        replay_equals_live(&wide);
+    }
+
+    #[test]
+    fn a_verifications_own_error_after_two_paid_passes_at_width_three_is_recorded_before_the_command_ends()
+     {
+        let tasks = two();
+        let mut wide = Wide::started_with(
+            "coordinator-o14-r8",
+            &tasks,
+            3,
+            reviewing(3),
+            holding(&tasks, &[]),
+        );
+        let pipelines = pipelines_failing_the_snapshot_after(&wide, 3, None);
+        let runner = std::sync::Arc::clone(&wide.env.runner);
+        let mut scheduler = alpha_then_beta(&runner);
+        let mut hooks = wide.env.hooks();
+        let error = wide
+            .run
+            .run_concurrently(
+                &wide.env.seams(),
+                &pipelines,
+                &mut hooks,
+                Some(&mut scheduler),
+            )
+            .expect_err("the third reviewer's snapshot add fails");
+        drop(scheduler);
+        assert!(
+            error.to_string().contains("was made to fail"),
+            "the verification's own error ends the command: {error}"
+        );
+        let events = wide.env.durable_events();
+        assert_eq!(
+            kinds_of(&events).last(),
+            Some(&"merge_verification_charged"),
+            "the record is the command's last append: {:?}",
+            kinds_of(&events)
+        );
+        records_both_passes(&wide, SequenceId(1));
+        replay_equals_live(&wide);
+    }
+
+    #[test]
+    fn a_halt_while_a_paid_verification_runs_records_the_two_passes_its_cancelled_pipeline_reports()
+    {
+        let mut wide = halting_on_gamma_reviewing("coordinator-o14-r9", 3, false);
+        let runner = std::sync::Arc::clone(&wide.env.runner);
+        let mut scheduler = halting_at_the_third_pass(&runner);
+        let progress = drive(&mut wide, Some(&mut scheduler)).expect("the halted run ends");
+        drop(scheduler);
+        assert_eq!(outcome_of(&progress), RunOutcome::Halted);
+        let events = wide.env.durable_events();
+        let kinds = kinds_of(&events);
+        let halted = position(&kinds, "question_answered", 0);
+        let record = position(&kinds, "merge_verification_charged", 0);
+        let interrupted = position(&kinds, "merge_verification_interrupted", 0);
+        let end = position(&kinds, "run_finished", 0);
+        assert!(
+            halted < record && record < interrupted && interrupted < end,
+            "the record, then the closure's interrupted terminal, then the end: {kinds:?}"
+        );
+        let third = SequenceIdentities::new(SequenceId(1)).review_pass(2, 0);
+        assert!(
+            wide.env
+                .runner
+                .endings()
+                .contains(&(third, crate::engine::topology::scaffold::Ending::Cancelled)),
+            "the third pass, held when the halt came, was cancelled: {:?}",
+            wide.env.runner.endings()
+        );
+        records_both_passes(&wide, SequenceId(1));
+        replay_equals_live(&wide);
+    }
+
+    #[test]
+    fn a_decline_while_a_paid_verification_runs_records_its_two_passes_against_the_released_sequence()
+     {
+        let tasks = three();
+        let armed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut wide = Wide::started_with(
+            "coordinator-o14-r10",
+            &tasks,
+            3,
+            reviewing(3),
+            holding(&tasks, &[]),
+        );
+        wide.env.answers = std::sync::Arc::new(DecliningOnceArmed(std::sync::Arc::clone(&armed)));
+        let runner = std::sync::Arc::clone(&wide.env.runner);
+        let arming = std::sync::Arc::clone(&armed);
+        let mut planted: Option<Vec<TopologyEventBody>> = None;
+        let mut scheduler = Scheduler::scripted(
+            &runner,
+            Box::new(move |view: &Quiescent<'_>| {
+                if count(view.run.events(), "task_merged") == 0 {
+                    return released(view, |invocation| attempt_key(invocation) == Some(0));
+                }
+                if let Some(events) = planted.as_mut() {
+                    if !events.is_empty() {
+                        return Some(Release::Append(Box::new(events.remove(0))));
+                    }
+                    arming.store(true, std::sync::atomic::Ordering::SeqCst);
+                    return released(view, |invocation| attempt_key(invocation) == Some(2))
+                        .or_else(|| released(view, sequence_invocation));
+                }
+                let Some(open) = view.run.fold().transaction() else {
+                    return released(view, |invocation| attempt_key(invocation) == Some(1));
+                };
+                if view
+                    .invoking
+                    .iter()
+                    .any(|invocation| review_pass(invocation, 2))
+                {
+                    planted = Some(sibling_parked_on(
+                        view.run,
+                        TaskKey(1),
+                        open.candidate.clone(),
+                    ));
+                    return Some(Release::Append(Box::new(
+                        planted.as_mut().expect("planted").remove(0),
+                    )));
+                }
+                released(view, sequence_invocation)
+            }),
+        );
+        let progress = drive(&mut wide, Some(&mut scheduler))
+            .expect("the decline fails beta's lineage and the run goes on to its end");
+        drop(scheduler);
+        assert_eq!(outcome_of(&progress), RunOutcome::Complete);
+        let events = wide.env.durable_events();
+        let kinds = kinds_of(&events);
+        let decline = position(&kinds, "question_answered", 0);
+        let record = position(&kinds, "merge_verification_charged", 0);
+        assert!(
+            decline < record,
+            "the record follows the decline that released the verification: {kinds:?}"
+        );
+        records_both_passes(&wide, SequenceId(1));
+        replay_equals_live(&wide);
+    }
+
+    #[test]
+    fn a_decline_after_the_verifications_two_pass_result_arrived_records_both_against_the_released_sequence()
+     {
+        let tasks = three();
+        let armed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut wide = Wide::started_with(
+            "coordinator-o14-r11",
+            &tasks,
+            3,
+            reviewing(2),
+            holding(&tasks, &[]),
+        );
+        wide.env.answers = std::sync::Arc::new(DecliningOnceArmed(std::sync::Arc::clone(&armed)));
+        let runner = std::sync::Arc::clone(&wide.env.runner);
+        let arming = std::sync::Arc::clone(&armed);
+        let mut planted: Option<Vec<TopologyEventBody>> = None;
+        let mut scheduler = Scheduler::scripted(
+            &runner,
+            Box::new(move |view: &Quiescent<'_>| {
+                if let Some(events) = planted.as_mut() {
+                    if !events.is_empty() {
+                        return Some(Release::Append(Box::new(events.remove(0))));
+                    }
+                    if !arming.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                        return gamma_gate(view).map(Release::Invocation);
+                    }
+                    return None;
+                }
+                if let Some(release) = toward_arrival(view) {
+                    return release;
+                }
+                assert!(
+                    gamma_gate(view).is_some(),
+                    "gamma's gate holds its snapshot"
+                );
+                let open = view
+                    .run
+                    .fold()
+                    .transaction()
+                    .expect("beta's verification is open")
+                    .candidate
+                    .clone();
+                planted = Some(sibling_parked_on(view.run, TaskKey(1), open));
+                Some(Release::Append(Box::new(
+                    planted.as_mut().expect("planted").remove(0),
+                )))
+            }),
+        );
+        let progress = drive(&mut wide, Some(&mut scheduler))
+            .expect("the decline fails beta's lineage and the run goes on to its end");
+        drop(scheduler);
+        assert_eq!(outcome_of(&progress), RunOutcome::Complete);
+        let events = wide.env.durable_events();
+        let kinds = kinds_of(&events);
+        let decline = position(&kinds, "question_answered", 0);
+        let record = position(&kinds, "merge_verification_charged", 0);
+        assert!(decline < record, "{kinds:?}");
+        assert_eq!(
+            wide.run.discarded(),
+            0,
+            "the result was accepted before the decline: {:?}",
+            wide.run.warnings()
+        );
+        records_both_passes(&wide, SequenceId(1));
+        replay_equals_live(&wide);
+    }
+
+    #[test]
+    fn a_second_recording_of_a_sequence_is_refused_before_its_line_and_warned() {
+        let mut wide = stale_at_width_one("coordinator-o14-r19", 3, unlimited());
+        let mut hooks = failing_the_snapshot_after(&wide, 3);
+        let seams = wide.env.seams();
+        wide.run
+            .step(&seams, &mut hooks)
+            .expect_err("the third reviewer's snapshot add fails");
+        let sequence = SequenceId(2);
+        let (_, reviews) = charged_records(&wide.env.durable_events())
+            .into_iter()
+            .next()
+            .expect("the record");
+        let lines = wide.env.durable_events().len();
+        wide.run
+            .record_charged(
+                super::super::run::Charged { sequence, reviews },
+                &seams,
+                &mut hooks,
+            )
+            .expect("a refused second offer is a warning, not an error");
+        assert_eq!(
+            wide.env.durable_events().len(),
+            lines,
+            "nothing was appended for the second offer"
+        );
+        assert!(
+            wide.run
+                .warnings()
+                .iter()
+                .any(|warning| warning.contains(DUPLICATE_OFFER)),
+            "the refused second offer is warned of: {:?}",
+            wide.run.warnings()
+        );
+        two_passes_recorded(&wide, sequence);
+    }
+
+    #[test]
+    fn the_charged_records_append_error_replaces_the_verifications_error_as_the_commands_outcome() {
+        use crate::topology::effects::{InjectionMode, SubEffectPoint};
+        for (shape, point, present) in [
+            ("partial-write", SubEffectPoint::Written, false),
+            ("sync", SubEffectPoint::Synced, true),
+        ] {
+            let tasks = two();
+            let mut wide = Wide::durable(
+                &format!("coordinator-o14-r20-{shape}"),
+                &tasks,
+                3,
+                reviewing(3),
+                holding(&tasks, &[]),
+            );
+            let pipelines = pipelines_failing_the_snapshot_after(
+                &wide,
+                3,
+                Some((point, InjectionMode::ErrorReturn)),
+            );
+            let runner = std::sync::Arc::clone(&wide.env.runner);
+            let mut scheduler = alpha_then_beta(&runner);
+            let mut hooks = wide.env.hooks();
+            let error = wide
+                .run
+                .run_concurrently(
+                    &wide.env.seams(),
+                    &pipelines,
+                    &mut hooks,
+                    Some(&mut scheduler),
+                )
+                .expect_err("the record's own append fails");
+            drop(scheduler);
+            let message = error.to_string();
+            assert!(
+                message.contains("merge_verification_charged")
+                    && message.contains("was entered and returned"),
+                "{shape}: the command's error is the record's append error: {message}"
+            );
+            assert!(
+                wide.run.warnings().iter().any(|warning| warning
+                    .contains("ends the command in place of what had ended the verification")
+                    && warning.contains("was made to fail")),
+                "{shape}: a warning keeps the verification's own error: {:?}",
+                wide.run.warnings()
+            );
+            assert!(wide.run.fold().is_poisoned(), "{shape}");
+            let durable = kinds_of_log(&wide);
+            assert_eq!(
+                durable.last(),
+                Some(if present {
+                    &"merge_verification_charged"
+                } else {
+                    &"merge_verification_started"
+                }),
+                "{shape}: nothing follows the failed line: {durable:?}"
+            );
+            let (_, resumed) = wide
+                .resume("inc-2", answering_two(), unlimited())
+                .unwrap_or_else(|error| panic!("{shape}: the next process resumes: {error}"));
+            let events = resumed.env.durable_events();
+            assert_eq!(
+                terminals_of(&events, SequenceId(1)),
+                vec!["merge_verification_interrupted"],
+                "{shape}: {:?}",
+                kinds_of(&events)
+            );
+            if present {
+                records_both_passes(&resumed, SequenceId(1));
+            } else {
+                assert!(
+                    charged_records(&events).is_empty(),
+                    "{shape}: the record's line did not survive, so its passes are unknown spend"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_charged_records_append_error_in_finish_replaces_the_halt_and_runs_no_closure() {
+        use crate::topology::effects::{InjectionMode, SubEffectPoint};
+        for (shape, point, present) in [
+            ("partial-write", SubEffectPoint::Written, false),
+            ("sync", SubEffectPoint::Synced, true),
+        ] {
+            let mut wide =
+                halting_on_gamma_reviewing(&format!("coordinator-o14-r21-{shape}"), 3, true);
+            let runner = std::sync::Arc::clone(&wide.env.runner);
+            let mut scheduler = halting_at_the_third_pass(&runner);
+            let mut hooks = HaltArming::over(&wide, point, InjectionMode::ErrorReturn);
+            let pipelines = wide.env.pipelines();
+            let error = wide
+                .run
+                .run_concurrently(
+                    &wide.env.seams(),
+                    &pipelines,
+                    &mut hooks,
+                    Some(&mut scheduler),
+                )
+                .expect_err("the record's own append fails");
+            drop(scheduler);
+            let message = error.to_string();
+            assert!(
+                message.contains("merge_verification_charged")
+                    && message.contains("was entered and returned"),
+                "{shape}: the command's error is the record's append error, not the halt: \
+                 {message}"
+            );
+            assert!(
+                wide.run.warnings().iter().any(|warning| warning
+                    .contains("ends the command in place of what had ended the verification")
+                    && warning.contains("a halting settlement")),
+                "{shape}: a warning names the halting settlement: {:?}",
+                wide.run.warnings()
+            );
+            let durable = kinds_of_log(&wide);
+            let halted = position(&durable, "question_answered", 0);
+            assert!(
+                !durable[halted..].contains(&"merge_verification_interrupted")
+                    && !durable.contains(&"run_finished"),
+                "{shape}: no closure ran: {durable:?}"
+            );
+            assert_eq!(
+                durable.last(),
+                Some(if present {
+                    &"merge_verification_charged"
+                } else {
+                    &"question_answered"
+                }),
+                "{shape}: {durable:?}"
+            );
+            assert!(
+                wide.run.fold().halted_at().is_some(),
+                "{shape}: the halt is recorded in the fold"
+            );
+            let (_, resumed) = finish_resumed_halted(wide, shape);
+            if present {
+                records_both_passes(&resumed, SequenceId(1));
+            } else {
+                assert!(charged_records(&resumed.env.durable_events()).is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn a_verification_that_fails_before_any_charge_records_nothing() {
+        let mut wide = stale_at_width_one("coordinator-o14-c1", 3, unlimited());
+        let mut hooks = failing_the_snapshot_after(&wide, 1);
+        let seams = wide.env.seams();
+        wide.run
+            .step(&seams, &mut hooks)
+            .expect_err("the first reviewer's snapshot add fails");
+        let events = wide.env.durable_events();
+        assert_eq!(
+            kinds_of(&events).last(),
+            Some(&"merge_verification_started"),
+            "nothing is appended for a verification that charged nothing: {:?}",
+            kinds_of(&events)
+        );
+        assert!(charged_records(&events).is_empty());
+        let replayed = crate::engine::topology::select::Spend::replay(&events);
+        assert!((replayed.run_usd() - wide.run.spend().run_usd()).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_publication_failure_after_merge_prepared_records_nothing() {
+        let tasks = two();
+        let mut wide = Wide::started_with(
+            "coordinator-o14-c2",
+            &tasks,
+            3,
+            reviewing(2),
+            holding(&tasks, &[]),
+        );
+        let mut hooks = CasFailing::over(&wide);
+        hooks.fail_after(
+            crate::topology::effects::RefSite::CompareAndSwapIntegration,
+            1,
+        );
+        let runner = std::sync::Arc::clone(&wide.env.runner);
+        let mut scheduler = alpha_then_beta(&runner);
+        let pipelines = wide.env.pipelines();
+        let error = wide
+            .run
+            .run_concurrently(
+                &wide.env.seams(),
+                &pipelines,
+                &mut hooks,
+                Some(&mut scheduler),
+            )
+            .expect_err("beta's verified publication fails its CAS");
+        drop(scheduler);
+        assert!(
+            error.to_string().contains("CompareAndSwapIntegration"),
+            "{error}"
+        );
+        let events = wide.env.durable_events();
+        assert_eq!(
+            kinds_of(&events).last(),
+            Some(&"merge_prepared"),
+            "nothing follows the terminal that carried the passes: {:?}",
+            kinds_of(&events)
+        );
+        assert!(charged_records(&events).is_empty());
+        assert!(
+            !wide
+                .run
+                .warnings()
+                .iter()
+                .any(|warning| warning.contains("merge_verification_charged")),
+            "the fold's refusal of a record a terminal made redundant warns of nothing: {:?}",
+            wide.run.warnings()
+        );
+    }
+
+    #[test]
+    #[ignore = "spawned by the charged record's kill tests"]
+    fn charged_record_kill_child() {
+        let dir = std::path::PathBuf::from(
+            std::env::var("UPSTROKE_TEST_KILL_DIR").expect("the parent names the handoff"),
+        );
+        let torn = match std::env::var("UPSTROKE_TEST_KILL_SHAPE").as_deref() {
+            Ok("before") => false,
+            Ok("torn") => true,
+            other => panic!("the parent names the kill shape: {other:?}"),
+        };
+        let mut wide = stale_at_width_one(RECORD_KILL_TAG, 3, unlimited());
+        crate::workspace_manager::fixture::write_file(
+            &dir.join(RECORD_HANDOFF),
+            wide.env.fixture.root.to_string_lossy().as_bytes(),
+        );
+        let mut hooks = if torn {
+            let mut hooks = ArmingOnTheFault::over(
+                &wide,
+                3,
+                Some((
+                    crate::topology::effects::SubEffectPoint::Written,
+                    crate::topology::effects::InjectionMode::Kill,
+                )),
+            );
+            hooks.inner = wide
+                .env
+                .hooks()
+                .with_written_kill_shape(crate::events::log::WrittenShape::Torn);
+            hooks
+        } else {
+            let mut hooks = ArmingOnTheFault::over(&wide, 3, None);
+            hooks.abort_at_the_next_append = true;
+            hooks
+        };
+        let seams = wide.env.seams();
+        let _ = wide.run.step(&seams, &mut hooks);
+        panic!("the kill at the record's append must have taken this process");
+    }
+
+    fn killed_at_the_record(shape: &str) {
+        let handoff =
+            crate::engine::topology::scaffold::kill_dir(&format!("coordinator-o14-kill-{shape}"));
+        let temporary = crate::engine::topology::scaffold::kill_dir(RECORD_KILL_TEMPORARY);
+        let mut environment = vec![
+            ("UPSTROKE_TEST_KILL_DIR", handoff.path().as_os_str()),
+            ("UPSTROKE_TEST_KILL_SHAPE", std::ffi::OsStr::new(shape)),
+        ];
+        environment.extend(crate::engine::topology::scaffold::child_temporary_of(
+            temporary.path(),
+        ));
+        let status = crate::workspace_manager::fixture::run_kill_child_within(
+            "engine::topology::coordinator::tests::charged_record_kill_child",
+            &environment,
+            crate::engine::topology::scaffold::KILL_CHILD_BOUND,
+        )
+        .unwrap_or_else(|| panic!("{shape}: the kill child did not end in time"));
+        assert!(
+            crate::workspace_manager::fixture::died_by_abort(&status),
+            "{shape}: the child died at the record's append: {status:?}"
+        );
+        let root = std::fs::read_to_string(handoff.path().join(RECORD_HANDOFF))
+            .unwrap_or_else(|error| panic!("{shape}: the child left no handoff: {error}"));
+        let env = crate::engine::topology::scaffold::WideEnv::adopted(
+            std::path::PathBuf::from(root),
+            &two(),
+            3,
+            reviewing(3),
+        );
+        let started = env.durable_events();
+        assert_eq!(
+            kinds_of(&started).last(),
+            Some(&"merge_verification_started"),
+            "{shape}: the child died before its record's line was durable: {:?}",
+            kinds_of(&started)
+        );
+        let bytes = std::fs::read(&env.log).expect("the child's log survives it");
+        let tail = bytes
+            .rsplit(|byte| *byte == b'\n')
+            .next()
+            .map(String::from_utf8_lossy)
+            .unwrap_or_default();
+        if shape == "torn" {
+            assert!(
+                tail.contains("merge_verification_charged"),
+                "the child died part-way through writing its record: {tail:?}"
+            );
+        } else {
+            assert!(
+                tail.is_empty()
+                    && !String::from_utf8_lossy(&bytes).contains("merge_verification_charged"),
+                "the child died before writing any of its record: {tail:?}"
+            );
+        }
+        let (_, resumed) = env
+            .resume("inc-3", answering_two(), unlimited())
+            .unwrap_or_else(|error| panic!("{shape}: the next process resumes: {error}"));
+        left_to_recovery_with_unknown_spend(&resumed, shape);
+    }
+
+    fn left_to_recovery_with_unknown_spend(resumed: &Wide, shape: &str) {
+        let events = resumed.env.durable_events();
+        let sequence = SequenceId(2);
+        assert_eq!(
+            terminals_of(&events, sequence),
+            vec!["merge_verification_interrupted"],
+            "{shape}: the census and step (f) settle the verification interrupted: {:?}",
+            kinds_of(&events)
+        );
+        assert!(
+            charged_records(&events).is_empty(),
+            "{shape}: no record survived: {:?}",
+            kinds_of(&events)
+        );
+        let opened = started_at(&events, sequence);
+        let before = crate::engine::topology::select::Spend::replay(&events[..opened]);
+        let after = crate::engine::topology::select::Spend::replay(&events);
+        assert!(
+            (after.run_usd() - before.run_usd()).abs() < 1e-9,
+            "{shape}: the replayed total lacks both passes, which are unknown spend: {} -> {}",
+            before.run_usd(),
+            after.run_usd()
+        );
+    }
+
+    #[test]
+    fn a_kill_before_the_charged_record_leaves_the_verification_to_recovery_with_unknown_spend() {
+        killed_at_the_record("before");
+    }
+
+    #[test]
+    fn a_torn_charged_record_is_truncated_and_recovered_as_before_it() {
+        killed_at_the_record("torn");
+    }
+
+    const GUEST_TEMPORARY: &str = r"C:\Users\Administrator\AppData\Local\Temp";
+
+    const GUEST_TEMPORARY_SLACK: usize = 12;
+
+    #[test]
+    fn the_record_kill_childs_deepest_git_dir_fits_the_windows_budget_under_the_guest_lanes_temporary_directory()
+     {
+        assert_eq!(GUEST_TEMPORARY.len(), 41, "{GUEST_TEMPORARY}");
+        let temporary = crate::engine::topology::scaffold::kill_dir(RECORD_KILL_TEMPORARY);
+        let fixture = crate::workspace_manager::fixture::Fixture::created(RECORD_KILL_TAG);
+        let checkout = fixture
+            .manager
+            .slot_path(&crate::workspace_manager::Slot::Snapshot {
+                name: crate::workspace_manager::SnapshotName::review(0, 0, 1, 0),
+            });
+        let nested = temporary
+            .path()
+            .file_name()
+            .expect("the child's temporary directory is named");
+        let root = fixture
+            .root
+            .file_name()
+            .expect("the child's fixture root is named");
+        let private = fixture
+            .private
+            .strip_prefix(&fixture.root)
+            .expect("the private root is inside the fixture's root");
+        let slot = checkout
+            .strip_prefix(fixture.manager.private_root())
+            .expect("the reviewer snapshot is inside the private root");
+        let longer = format!("{GUEST_TEMPORARY}{}", "x".repeat(GUEST_TEMPORARY_SLACK));
+        for temporary_directory in [GUEST_TEMPORARY, longer.as_str()] {
+            let child = std::path::Path::new(temporary_directory)
+                .join(nested)
+                .join(root)
+                .join(private)
+                .join(slot);
+            crate::workspace_manager::fixture::refuse_git_dir_over_the_windows_budget(&child)
+                .unwrap_or_else(|refusal| panic!("under `{temporary_directory}`: {refusal}"));
+        }
+    }
+
+    #[test]
+    fn an_append_error_on_the_charged_record_follows_the_surviving_prefix() {
+        use crate::topology::effects::{InjectionMode, SubEffectPoint};
+        for (shape, point, present) in [
+            ("partial-write", SubEffectPoint::Written, false),
+            ("sync", SubEffectPoint::Synced, true),
+        ] {
+            let mut wide =
+                stale_at_width_one(&format!("coordinator-o14-append-{shape}"), 3, unlimited());
+            let mut hooks =
+                ArmingOnTheFault::over(&wide, 3, Some((point, InjectionMode::ErrorReturn)));
+            let seams = wide.env.seams();
+            let error = wide
+                .run
+                .step(&seams, &mut hooks)
+                .expect_err("the record's own append fails");
+            drop(hooks);
+            let message = error.to_string();
+            assert!(
+                message.contains("merge_verification_charged")
+                    && message.contains("was entered and returned"),
+                "{shape}: the step's error is the append error: {message}"
+            );
+            assert!(
+                wide.run.warnings().iter().any(|warning| warning
+                    .contains("ends the command in place of what had ended the verification")
+                    && warning.contains("was made to fail")),
+                "{shape}: a warning carries the verification's own error: {:?}",
+                wide.run.warnings()
+            );
+            assert!(wide.run.fold().is_poisoned(), "{shape}");
+            let (_, resumed) = wide
+                .resume("inc-3", answering_two(), unlimited())
+                .unwrap_or_else(|error| panic!("{shape}: the next process resumes: {error}"));
+            let events = resumed.env.durable_events();
+            assert_eq!(
+                terminals_of(&events, SequenceId(2)),
+                vec!["merge_verification_interrupted"],
+                "{shape}: {:?}",
+                kinds_of(&events)
+            );
+            if present {
+                records_both_passes(&resumed, SequenceId(2));
+            } else {
+                left_to_recovery_with_unknown_spend(&resumed, shape);
+            }
+        }
+    }
+
+    #[test]
+    fn a_resume_after_a_charged_record_settles_the_verification_interrupted_and_counts_its_passes_once()
+     {
+        let mut wide = stale_at_width_one("coordinator-o14-resume", 3, unlimited());
+        let mut hooks = failing_the_snapshot_after(&wide, 3);
+        let seams = wide.env.seams();
+        wide.run
+            .step(&seams, &mut hooks)
+            .expect_err("the third reviewer's snapshot add fails");
+        drop(hooks);
+        let sequence = SequenceId(2);
+        let (_, reviews) = charged_records(&wide.env.durable_events())
+            .into_iter()
+            .next()
+            .expect("the record is durable");
+        let run_id = wide.run.fold().started().expect("started").run_id.clone();
+        let (_, mut resumed) = wide
+            .resume("inc-3", answering_two(), unlimited())
+            .expect("the next process resumes");
+        let events = resumed.env.durable_events();
+        let kinds = kinds_of(&events);
+        assert_eq!(
+            terminals_of(&events, sequence),
+            vec!["merge_verification_interrupted"],
+            "{kinds:?}"
+        );
+        let manager = resumed.env.fixture.manager.clone();
+        let intents = manager.intents().expect("the intents are listable");
+        assert!(
+            !intents.contains(&crate::engine::topology::integrate::staging_slot(sequence))
+                && !snapshot_names(&intents)
+                    .iter()
+                    .any(|name| name.starts_with("s2-")),
+            "the staging and the snapshots of sequence 2 are reclaimed: {intents:?}"
+        );
+        assert_eq!(
+            manager
+                .direct_ref_target(
+                    crate::engine::topology::integrate::prepared_pin_ref(&run_id, sequence)
+                        .as_str()
+                )
+                .expect("the pin is readable"),
+            None,
+            "the pin is deleted"
+        );
+        let second = resumed
+            .run
+            .fold()
+            .plan_transition(&charged_event(sequence, &reviews))
+            .expect_err("a second record for the sequence is refused after the resume");
+        assert!(
+            second
+                .to_string()
+                .contains("already records the review passes"),
+            "the resumed fold still knows the sequence's record: {second}"
+        );
+        let carrying = TopologyEvent {
+            ts: "2026-10-08T00:00:00.000Z".to_owned(),
+            body: TopologyEventBody::MergeVerificationUnavailable {
+                data: crate::topology::events::MergeVerificationUnavailable {
+                    sequence,
+                    cause: crate::topology::events::UnavailableCause::Infrastructure {
+                        kind: crate::topology::events::InfrastructureKind::ReviewerTimeout,
+                    },
+                    outcome: crate::topology::events::UnavailableOutcome::Deferred { defers: 1 },
+                    reviews,
+                },
+            },
+        };
+        assert!(
+            resumed.run.fold().plan_transition(&carrying).is_err(),
+            "a carrying terminal for the sequence is refused after the resume"
+        );
+        let mut hooks = resumed.env.hooks();
+        let seams = resumed.env.seams();
+        let progress = resumed
+            .run
+            .step(&seams, &mut hooks)
+            .expect("the candidate verifies again");
+        assert!(
+            matches!(progress, Progress::Integrated { sequence: again, .. } if again == SequenceId(3)),
+            "the candidate re-verifies under the next sequence: {progress:?}"
+        );
+        drop(hooks);
+        records_both_passes(&resumed, sequence);
+    }
+
+    #[test]
+    fn refusals_across_resumes_each_record_their_passes_and_the_ceiling_stops_the_run() {
+        let mut wide = stale_at_width_one("coordinator-o14-refusals", 3, unlimited());
+        let start = wide.run.spend().run_usd();
+        let limit = start + 4.0 * PASS_COST;
+        let ceiling = crate::engine::topology::select::Ceiling {
+            run_usd: Some(limit),
+            task_usd: None,
+        };
+        for incarnation in ["inc-3", "inc-4"] {
+            let mut hooks = failing_the_snapshot_after(&wide, 3);
+            let seams = wide.env.seams();
+            wide.run
+                .step(&seams, &mut hooks)
+                .expect_err("the persistent fault refuses the verification again");
+            drop(hooks);
+            wide = wide
+                .resume(incarnation, answering_two(), ceiling)
+                .expect("the next process resumes")
+                .1;
+        }
+        let events = wide.env.durable_events();
+        let records: Vec<(u32, usize)> = charged_records(&events)
+            .iter()
+            .map(|(sequence, reviews)| (sequence.0, reviews.len()))
+            .collect();
+        assert_eq!(
+            records,
+            vec![(2, 2), (3, 2)],
+            "one record of two passes per refused sequence: {:?}",
+            kinds_of(&events)
+        );
+        let replayed = crate::engine::topology::select::Spend::replay(&events);
+        let without = crate::engine::topology::select::Spend::replay(&unrecorded(&events));
+        assert!(
+            (replayed.run_usd() - without.run_usd() - 4.0 * PASS_COST).abs() < 1e-9,
+            "each sequence's passes are counted once: {} -> {}",
+            without.run_usd(),
+            replayed.run_usd()
+        );
+        let mut hooks = wide.env.hooks();
+        let seams = wide.env.seams();
+        let progress = wide.run.step(&seams, &mut hooks).expect("the next step");
+        assert!(
+            matches!(progress, Progress::BudgetExceeded),
+            "the ceiling stops the run: {progress:?}"
+        );
+    }
+
+    struct PlantingAtTheSnapshot {
+        effects: crate::workspace_manager::HarnessEffects,
+        planter: Arc<dyn ReviewInputPolicy + Send + Sync>,
+        passing: Option<u32>,
+    }
+
+    impl crate::workspace_manager::EffectHooks for PlantingAtTheSnapshot {
+        fn phase(
+            &mut self,
+            site: crate::topology::effects::EffectSiteId,
+            phase: crate::topology::effects::HookPhase,
+        ) -> crate::topology::effects::Injection {
+            if site == snapshot_add() && phase == crate::topology::effects::HookPhase::Before {
+                match self.passing {
+                    Some(0) => {
+                        self.passing = None;
+                        self.planter
+                            .problem(&PathBuf::from("merge").join("third-review"), "")
+                            .expect("the fault is planted before the third reviewer's snapshot");
+                    }
+                    Some(left) => self.passing = Some(left - 1),
+                    None => {}
+                }
+            }
+            self.effects.phase(site, phase)
+        }
+
+        fn durability_ledger(&self) -> crate::util::DurabilityLedger {
+            self.effects.durability_ledger()
+        }
+
+        fn refusal_cause(&self) -> Option<String> {
+            self.effects.refusal_cause()
+        }
+    }
+
+    struct PlantingHooks {
+        inner: crate::engine::topology::seams::HarnessTopologyHooks,
+        effects: PlantingAtTheSnapshot,
+    }
+
+    impl PlantingHooks {
+        fn new(
+            harness: &Arc<std::sync::Mutex<crate::topology::effects::HookHarness>>,
+            planter: &Arc<dyn ReviewInputPolicy + Send + Sync>,
+            passing: u32,
+        ) -> Self {
+            Self {
+                inner: crate::engine::topology::seams::HarnessTopologyHooks::new(Arc::clone(
+                    harness,
+                )),
+                effects: PlantingAtTheSnapshot {
+                    effects: crate::workspace_manager::HarnessEffects::new(Arc::clone(harness)),
+                    planter: Arc::clone(planter),
+                    passing: Some(passing),
+                },
+            }
+        }
+    }
+
+    impl TopologyHooks for PlantingHooks {
+        fn effects(&mut self) -> &mut dyn crate::workspace_manager::EffectHooks {
+            &mut self.effects
+        }
+
+        fn rundir(&mut self) -> &mut dyn crate::rundir::RunDirHooks {
+            self.inner.rundir()
+        }
+
+        fn events(&mut self) -> &mut dyn crate::events::log::EventHooks {
+            self.inner.events()
+        }
+
+        fn container(&mut self) -> &mut dyn crate::runner::container::ContainerHooks {
+            self.inner.container()
+        }
+
+        fn spawn(&mut self) -> &mut dyn crate::agent::proc::SpawnHooks {
+            self.inner.spawn()
+        }
+
+        fn folded(&mut self, fold: &TopologyFold, events: &[TopologyEvent]) {
+            self.inner.folded(fold, events);
+        }
+    }
+
+    fn refused_by_the_tear(error: &UpstrokeError) {
+        assert!(
+            matches!(error, UpstrokeError::RegistryRefused { message } if message.contains("commondir")),
+            "the third reviewer's registry access refuses on the torn registration: {error:?}"
+        );
+    }
+
+    fn refused_at_the_third_review(
+        wide: &mut Wide,
+        planter: &Arc<dyn ReviewInputPolicy + Send + Sync>,
+    ) -> UpstrokeError {
+        let mut pipelines = wide.env.pipelines();
+        let (harness, planter) = (Arc::clone(&wide.env.harness), Arc::clone(planter));
+        pipelines.hooks = Arc::new(move || {
+            Box::new(PlantingHooks::new(&harness, &planter, 3)) as Box<dyn TopologyHooks + Send>
+        });
+        let runner = Arc::clone(&wide.env.runner);
+        let mut scheduler = alpha_then_beta(&runner);
+        let mut hooks = wide.env.hooks();
+        wide.run
+            .run_concurrently(
+                &wide.env.seams(),
+                &pipelines,
+                &mut hooks,
+                Some(&mut scheduler),
+            )
+            .expect_err("the third reviewer's snapshot refuses")
+    }
+
+    fn recorded_and_still_open(wide: &Wide, sequence: SequenceId) {
+        let events = wide.env.durable_events();
+        assert_eq!(
+            kinds_of(&events).last(),
+            Some(&"merge_verification_charged"),
+            "the record is the command's last append: {:?}",
+            kinds_of(&events)
+        );
+        assert!(
+            terminals_of(&events, sequence).is_empty(),
+            "the record is no terminal: {:?}",
+            kinds_of(&events)
+        );
+        assert!(
+            verifying(wide.run.fold(), sequence),
+            "the fold still holds the refused verification open: {:?}",
+            wide.run.fold().transaction()
+        );
+        records_both_passes(wide, sequence);
+        replay_equals_live(wide);
+    }
+
+    fn resumed_to_completion(wide: Wide, tasks: &[WideTask], key: TaskKey, sequence: SequenceId) {
+        let live = wide.run.spend().clone();
+        let (_, mut resumed) = wide
+            .resume("inc-2", holding(tasks, &[]), unlimited())
+            .expect("the next process resumes once the fault is repaired");
+        resumed_spend_is_the_live_one(&resumed, key, &live, sequence);
+        let runner = Arc::clone(&resumed.env.runner);
+        let mut scheduler = Scheduler::first(&runner);
+        let progress =
+            drive(&mut resumed, Some(&mut scheduler)).expect("the resumed run completes");
+        drop(scheduler);
+        assert_eq!(outcome_of(&progress), RunOutcome::Complete);
+        records_both_passes(&resumed, sequence);
+    }
+
+    fn untear(admin: &std::path::Path) {
+        for file in ["HEAD", "gitdir", "commondir"] {
+            crate::workspace_manager::fixture::remove_file(&admin.join(file));
+        }
+        crate::workspace_manager::fixture::remove_dir(admin);
+    }
+
+    fn resumed_spend_is_the_live_one(
+        resumed: &Wide,
+        key: TaskKey,
+        live: &crate::engine::topology::select::Spend,
+        sequence: SequenceId,
+    ) {
+        let events = resumed.env.durable_events();
+        let kinds = kinds_of(&events);
+        assert_eq!(
+            terminals_of(&events, sequence),
+            vec!["merge_verification_interrupted"],
+            "recovery settles the refused sequence interrupted: {kinds:?}"
+        );
+        let of_sequence = |kind: &str| {
+            events
+                .iter()
+                .position(|event| {
+                    event.body.kind() == kind && event.body.sequence() == Some(sequence)
+                })
+                .unwrap_or_else(|| panic!("no {kind} for sequence {}: {kinds:?}", sequence.0))
+        };
+        assert!(
+            of_sequence("merge_verification_charged")
+                < of_sequence("merge_verification_interrupted"),
+            "recovery's interrupted terminal follows the record: {kinds:?}"
+        );
+        let replayed = resumed.run.spend();
+        for (what, replayed, live) in [
+            ("run", replayed.run_usd(), live.run_usd()),
+            ("task", replayed.task_usd(key), live.task_usd(key)),
+        ] {
+            assert!(
+                (replayed - live).abs() < 1e-9,
+                "the next process replays the {what}'s total its predecessor charged live, both \
+                 passes included: {live} -> {replayed}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_registry_refusal_after_two_paid_passes_is_recorded_with_both_at_width_three() {
+        let tasks = two();
+        let mut wide = Wide::durable(
+            "coordinator-o14-registry-refusal",
+            &tasks,
+            3,
+            reviewing(3),
+            holding(&tasks, &[]),
+        );
+        let common = wide.env.fixture.manager.common_git_dir().to_path_buf();
+        let _deadline =
+            crate::workspace_manager::RegistryDeadline::hold(&common, WITNESS_REGISTRY_DEADLINE);
+        let (tear, admin) = tearing(&wide, "foreign-at-the-third-review", false);
+        let tear: Arc<dyn ReviewInputPolicy + Send + Sync> = tear;
+        let error = refused_at_the_third_review(&mut wide, &tear);
+        refused_by_the_tear(&error);
+        let sequence = SequenceId(1);
+        recorded_and_still_open(&wide, sequence);
+        let key = started_key(&wide.env.durable_events(), sequence);
+        untear(&admin);
+        resumed_to_completion(wide, &tasks, key, sequence);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_registry_refusal_after_the_takeover_at_the_third_review_is_recorded_with_both_passes() {
+        let tasks = two();
+        let mut wide = Wide::durable(
+            "coordinator-o14-takeover-refusal",
+            &tasks,
+            3,
+            reviewing(3),
+            holding(&tasks, &[]),
+        );
+        let common = wide.env.fixture.manager.common_git_dir().to_path_buf();
+        let _deadline =
+            crate::workspace_manager::RegistryDeadline::hold(&common, WITNESS_REGISTRY_DEADLINE);
+        let base = wide.env.fixture.base.clone();
+        let info = common.join("info");
+        let filter: Arc<dyn ReviewInputPolicy + Send + Sync> = Arc::new(RequiresAFailingFilter {
+            base: base.clone(),
+            info: info.clone(),
+            remaining: std::sync::atomic::AtomicUsize::new(1),
+        });
+        let error = refused_at_the_third_review(&mut wide, &filter);
+        assert!(
+            matches!(&error, UpstrokeError::RegistryRefused { message } if message.contains("b329fails") || message.contains("is gone")),
+            "the third reviewer's checkout fails after the takeover and refuses at once: {error:?}"
+        );
+        let sequence = SequenceId(1);
+        recorded_and_still_open(&wide, sequence);
+        let key = started_key(&wide.env.durable_events(), sequence);
+        crate::workspace_manager::fixture::remove_file(&info.join("attributes"));
+        crate::workspace_manager::fixture::git(
+            &base,
+            &["config", "--remove-section", "filter.b329fails"],
+        );
+        resumed_to_completion(wide, &tasks, key, sequence);
+    }
+
+    #[test]
+    fn a_registry_refusal_after_two_paid_passes_is_recorded_with_both_at_width_one() {
+        let mut wide = stale_at_width_one("coordinator-o14-registry-refusal-w1", 3, unlimited());
+        let common = wide.env.fixture.manager.common_git_dir().to_path_buf();
+        let _deadline =
+            crate::workspace_manager::RegistryDeadline::hold(&common, WITNESS_REGISTRY_DEADLINE);
+        let (tear, admin) = tearing(&wide, "foreign-at-the-third-review", false);
+        let tear: Arc<dyn ReviewInputPolicy + Send + Sync> = tear;
+        let mut hooks = PlantingHooks::new(&wide.env.harness, &tear, 3);
+        let seams = wide.env.seams();
+        let error = wide
+            .run
+            .step(&seams, &mut hooks)
+            .expect_err("the third reviewer's snapshot refuses");
+        drop(hooks);
+        refused_by_the_tear(&error);
+        let sequence = SequenceId(2);
+        let events = wide.env.durable_events();
+        assert_eq!(
+            kinds_of(&events).last(),
+            Some(&"merge_verification_charged"),
+            "the record is the step's last append: {:?}",
+            kinds_of(&events)
+        );
+        assert!(
+            verifying(wide.run.fold(), sequence),
+            "the fold still holds the refused verification open: {:?}",
+            wide.run.fold().transaction()
+        );
+        records_both_passes(&wide, sequence);
+        let key = started_key(&events, sequence);
+        let live = wide.run.spend().clone();
+        untear(&admin);
+        let (_, mut resumed) = wide
+            .resume("inc-3", answering_two(), unlimited())
+            .expect("the next process resumes once the tear is removed");
+        resumed_spend_is_the_live_one(&resumed, key, &live, sequence);
+        let mut hooks = resumed.env.hooks();
+        let seams = resumed.env.seams();
+        let progress = resumed
+            .run
+            .step(&seams, &mut hooks)
+            .expect("the candidate verifies again");
+        drop(hooks);
+        assert!(
+            matches!(progress, Progress::Integrated { sequence: again, .. } if again == SequenceId(3)),
+            "the candidate verifies again under the next sequence: {progress:?}"
+        );
+        records_both_passes(&resumed, sequence);
+    }
+
+    fn retained_attempt_finished_of_delta(body: &TopologyEventBody) -> bool {
+        matches!(body, TopologyEventBody::AttemptFinished { data } if data.key == TaskKey(3))
+    }
+
+    fn stopped_inside_a_retrys_wait(
+        wide: &mut Wide,
+        at: TearAt,
+        order: Script<'static>,
+    ) -> (UpstrokeError, usize) {
+        let common = wide.env.fixture.manager.common_git_dir().to_path_buf();
+        let contended = crate::workspace_manager::contended_attempts(&common);
+        let mut hooks = TearHeld::waking(wide, "foreign-held", at, Wakes::Never);
+        hooks.tearing(Torn::CommondirEmpty);
+        let injected = std::rc::Rc::new(std::cell::Cell::new(None));
+        let script = a_shutdown_injected_once_the_tear_stands(
+            hooks.planted(),
+            std::rc::Rc::clone(&injected),
+            Some(hooks.plant.clone()),
+            order,
+        );
+        let pipelines = wide.env.pipelines();
+        let runner = Arc::clone(&wide.env.runner);
+        let mut scheduler = Scheduler::scripted(&runner, script);
+        let slept = crate::workspace_manager::fixture::slept_pauses();
+        let error = wide
+            .run
+            .run_concurrently(
+                &wide.env.seams(),
+                &pipelines,
+                &mut hooks,
+                Some(&mut scheduler),
+            )
+            .expect_err("a shutdown answered inside the retry's wait ends the command");
+        drop(scheduler);
+        hooks.finish().expect("the tear was planted");
+        drop(hooks);
+        let Some(at_shutdown) = injected.get() else {
+            panic!(
+                "the shutdown was injected while the tear stood: it was not, and the command \
+                 ended on {error}"
+            );
+        };
+        assert!(
+            crate::workspace_manager::contended_attempts(&common) > contended,
+            "the retry's access failed on the tear first, so the shutdown came inside its wait"
+        );
+        assert_eq!(
+            crate::workspace_manager::fixture::slept_pauses(),
+            slept,
+            "no wait of a registry access the coordinator made slept on its thread"
+        );
+        (error, at_shutdown)
+    }
+
+    fn stopped_and_recorded(
+        wide: &Wide,
+        error: &UpstrokeError,
+        at_shutdown: usize,
+        sequence: SequenceId,
+        retried: TaskKey,
+    ) {
+        let events = wide.env.durable_events();
+        let kinds = kinds_of(&events);
+        let key = started_key(&events, sequence);
+        let replayed = crate::engine::topology::select::Spend::replay(&events);
+        let live = wide.run.spend();
+        let (run_live, run_replayed) = (live.run_usd(), replayed.run_usd());
+        let (task_live, task_replayed) = (live.task_usd(key), replayed.task_usd(key));
+        assert!(
+            (run_live - run_replayed).abs() < 1e-9 && (task_live - task_replayed).abs() < 1e-9,
+            "the passes charged before the stop are recorded, so replay counts what was charged \
+             live: the run ${run_live:.2} live and ${run_replayed:.2} replayed, the verifying task \
+             {} ${task_live:.2} live and ${task_replayed:.2} replayed, {} record(s), and after the \
+             shutdown {:?}",
+            key.index(),
+            count(&events, "merge_verification_charged"),
+            kinds_of(wide.run.events())
+                .get(at_shutdown..)
+                .unwrap_or_default()
+        );
+        records_both_passes(wide, sequence);
+        let message = error.to_string();
+        assert!(
+            message.contains("shut down")
+                && message.contains(
+                    "nothing was appended but the record of the review passes a verification \
+                     had charged"
+                ),
+            "the command ends on the shutdown, which says what it appended: {message}"
+        );
+        let warnings = wide.run.warnings().join("\n");
+        assert!(
+            warnings.contains("a registry access's wait inside a transition met a shutdown"),
+            "the retry's wait answered the shutdown and stopped the run: {warnings}"
+        );
+        assert!(
+            !warnings
+                .contains("the append recording the review passes a verification charged failed"),
+            "the record's append did not fail: {warnings}"
+        );
+        assert_eq!(
+            kinds_of(wide.run.events()).get(at_shutdown..),
+            Some(&["merge_verification_charged"][..]),
+            "nothing but the record was appended after the wait answered the shutdown"
+        );
+        assert_eq!(
+            of_key(&events, "attempt_started", retried.0),
+            1,
+            "the stopped retry started no attempt: {kinds:?}"
+        );
+        assert!(
+            terminals_of(&events, sequence).is_empty(),
+            "the record is no terminal: {kinds:?}"
+        );
+        assert!(
+            verifying(wide.run.fold(), sequence),
+            "the fold still holds the verification open: {:?}",
+            wide.run.fold().transaction()
+        );
+        replay_equals_live(wide);
+        published_as_the_log_authorizes(wide);
+        assert!(wide.run.invocations_balance(), "{warnings}");
+        assert!(
+            wide.run.stopped().is_none(),
+            "the run reopens when its coordinator is gone"
+        );
+    }
+
+    fn sequence_endings(
+        wide: &Wide,
+        sequence: SequenceId,
+    ) -> Vec<(InvocationId, crate::engine::topology::scaffold::Ending)> {
+        wide.env
+            .runner
+            .endings()
+            .into_iter()
+            .filter(|(invocation, _)| {
+                matches!(invocation, InvocationId::Sequence { sequence: of, .. } if *of == sequence)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_shutdown_answered_inside_a_retrys_wait_records_the_passes_its_cancelled_verification_charged()
+     {
+        let tasks = [
+            WideTask::independent("beta"),
+            WideTask::independent("alpha"),
+            WideTask::independent("gamma"),
+        ];
+        let mut wide = Wide::durable(
+            "coordinator-o14b2-cancelled",
+            &tasks,
+            3,
+            reviewing(3),
+            holding(&tasks, &[(0, 1)]),
+        );
+        let (error, at_shutdown) = stopped_inside_a_retrys_wait(
+            &mut wide,
+            TearAt::Fold(retained_attempt_finished_of_beta),
+            Box::new(|view: &Quiescent<'_>| {
+                if count(view.run.events(), "task_merged") == 0 {
+                    return released(view, |invocation| attempt_key(invocation) == Some(1));
+                }
+                if view
+                    .invoking
+                    .iter()
+                    .any(|invocation| review_pass(invocation, 2))
+                {
+                    return released(view, |invocation| attempt_key(invocation) == Some(0))
+                        .or(Some(Release::Nothing));
+                }
+                released(view, |invocation| attempt_key(invocation) == Some(2)).or_else(|| {
+                    released(view, |invocation| {
+                        sequence_invocation(invocation) && !review_pass(invocation, 2)
+                    })
+                })
+            }),
+        );
+        let sequence = SequenceId(1);
+        let endings = sequence_endings(&wide, sequence);
+        assert!(
+            endings
+                .iter()
+                .any(|(invocation, ending)| review_pass(invocation, 2)
+                    && *ending == crate::engine::topology::scaffold::Ending::Cancelled),
+            "the third reviewer was still running, and the shutdown cancelled it: {endings:?}"
+        );
+        stopped_and_recorded(&wide, &error, at_shutdown, sequence, TaskKey(0));
+        let key = started_key(&wide.env.durable_events(), sequence);
+        resumed_to_completion(wide, &tasks, key, sequence);
+    }
+
+    #[test]
+    fn a_shutdown_answered_inside_a_retrys_wait_after_the_result_arrived_records_both() {
+        let tasks = [
+            WideTask::independent("alpha"),
+            WideTask::independent("beta"),
+            WideTask::independent("gamma"),
+            WideTask::independent("delta"),
+        ];
+        let mut wide = Wide::durable(
+            "coordinator-o14b2-arrived",
+            &tasks,
+            4,
+            reviewing(2),
+            holding(&tasks, &[(3, 1)]),
+        );
+        let (error, at_shutdown) = stopped_inside_a_retrys_wait(
+            &mut wide,
+            TearAt::Fold(retained_attempt_finished_of_delta),
+            Box::new(|view: &Quiescent<'_>| {
+                if count(view.run.events(), "task_merged") == 0 {
+                    return released(view, |invocation| attempt_key(invocation) == Some(0));
+                }
+                if view.run.fold().transaction().is_none() {
+                    return released(view, |invocation| attempt_key(invocation) == Some(1));
+                }
+                if verification_live(view) {
+                    return released(view, |invocation| {
+                        matches!(worker(invocation), Some(TaskKey(2) | TaskKey(3)))
+                    })
+                    .or_else(|| released(view, sequence_invocation));
+                }
+                released(view, |invocation| {
+                    attempt_key(invocation) == Some(3)
+                        && matches!(role_of(invocation), Some(AttemptRole::Gate(_)))
+                })
+                .or_else(|| released(view, |_| true))
+            }),
+        );
+        let sequence = SequenceId(1);
+        let endings = sequence_endings(&wide, sequence);
+        assert!(
+            endings.len() == 3
+                && endings.iter().all(|(_, ending)| {
+                    *ending == crate::engine::topology::scaffold::Ending::Completed
+                }),
+            "the verification's gate and both reviewers ended before the shutdown, so its \
+             result had arrived: {endings:?}"
+        );
+        assert!(
+            sequence_endings(&wide, sequence)
+                .iter()
+                .all(|(invocation, _)| !review_pass(invocation, 2)),
+            "two reviewers verify"
+        );
+        stopped_and_recorded(&wide, &error, at_shutdown, sequence, TaskKey(3));
+        let key = started_key(&wide.env.durable_events(), sequence);
+        resumed_to_completion(wide, &tasks, key, sequence);
+    }
+
+    #[test]
+    fn the_record_past_a_stop_leaves_the_run_stopped_for_what_follows() {
+        let tasks = two_independent();
+        let mut wide = Wide::started_with(
+            "stopped-record-then-dispatch",
+            &tasks,
+            2,
+            WidePlans::default(),
+            holding(&tasks, &[]),
+        );
+        let mut hooks = wide.env.hooks();
+        let seams = wide.env.seams();
+        let pipelines = wide.env.pipelines();
+        let before = wide.run.events().len();
+        let (stopped, recorded, still, dispatched) = {
+            let mut coordinator = coordinator_of(
+                &mut wide.run,
+                &seams,
+                &mut hooks,
+                &pipelines,
+                BTreeMap::new(),
+            );
+            coordinator
+                .outbox
+                .send(ToCoordinator::Shutdown)
+                .expect("shutdown reaches inbox");
+            let stopped = crate::workspace_manager::EffectHooks::registry_pause(
+                &mut coordinator,
+                Duration::from_millis(5),
+            );
+            let recorded = coordinator.run.record_charged_past_the_stop(
+                super::super::run::Charged {
+                    sequence: SequenceId(1),
+                    reviews: Vec::new(),
+                },
+                coordinator.seams,
+                coordinator.hooks,
+            );
+            let still = coordinator.run.stopped().map(str::to_owned);
+            let dispatched = crate::engine::topology::run::begin_dispatch(
+                &mut coordinator,
+                seams.manager,
+                TaskKey(0),
+                GenerationId(0),
+                false,
+            );
+            (stopped, recorded, still, dispatched)
+        };
+        let stopped = stopped.expect_err("a wait that answered a shutdown ends in an error");
+        assert!(stopped.to_string().contains("met a shutdown"), "{stopped}");
+        recorded.expect("a record of no pass offers nothing and fails nothing");
+        assert!(
+            still
+                .as_deref()
+                .is_some_and(|why| why.contains("met a shutdown")),
+            "the stop is lifted for the record's offer alone and holds after it: {still:?}"
+        );
+        let refused = dispatched.expect_err("the run is still stopped for what follows the record");
+        assert!(
+            refused
+                .to_string()
+                .contains("nothing further is appended in this process"),
+            "the run's emitter refused the dispatch's first append: {refused}"
+        );
+        assert!(
+            refused.to_string().contains(
+                "but the record of the review passes a verification had charged: a registry \
+                 access's wait inside a transition met a shutdown"
+            ),
+            "the refusal names the one append made past the stop, then the stop: {refused}"
+        );
+        assert!(
+            wide.run.events()[before..].is_empty(),
+            "{:?}",
+            kinds_of(&wide.run.events()[before..])
+        );
+        assert!(wide.run.stopped().is_some());
+        wide.run.reopen();
     }
 }

@@ -18,8 +18,9 @@ The durable run artifacts are **split in two**, by who is allowed to read each h
     gates/<task>-<attempt>-<gate>.log
     gate-worktrees/                    # synced intents + disposable exact snapshots
 ~/.upstroke/workspaces/<repo-key>/<run-id>/  # v0.2; exact path recorded on run_started
-    tasks/<task>-<generation>/          # detached linked worktrees
-    merge/                              # detached integration staging worktree
+    tasks/k<task>-g<generation>_<tag>/  # detached linked worktrees, one instance per incarnation
+    merge/s<sequence>_<tag>/            # detached integration staging worktrees, likewise
+    snapshots/<name>_<tag>/             # exact gate and review snapshots, likewise
 upstroke.toml                       # repo-root config, checked in
 ```
 
@@ -63,15 +64,207 @@ The execution root is created only when the managed base is a real directory, th
 
 Current host-process crash containment is deliberately platform-specific. On Unix, ordinary descendants remain in an isolated process group and a separate cleanup reaper retains the run's cleanup lease if the conductor is killed, as does every `git update-ref` the engine spawns for as long as that child lives, so a resume cannot begin while a ref write of the dead run is still in flight; code that deliberately daemonises out of that group remains outside the host-runner contract. A container invocation is contained on Unix by the container runner's own cleanup reaper, armed before that runner's first container starts and holding no cleanup lease: if the conductor is killed it kills and removes every container the runner started, and it is cancelled only once each of them is established gone; Windows has no such reaper, and a killed conductor's containers are reclaimed by the next write command's startup census. On Windows, each command is created suspended, assigned to a private kill-on-close Job Object, and only then resumed. Direct-child success and timeout both terminate and boundedly observe that job empty; abrupt conductor death closes its non-inheritable handle and lets the kernel terminate ordinary descendants. PID scanning and `taskkill` are not part of the ownership protocol. Exact gate/review worktrees likewise record and sync a private intent before `git worktree add`; resume reclaims every such registration before it switches branches or dispatches another worker.
 
+**A registry another process is writing.** *In force for the topology's registry accesses, as
+`reviews/2026-10-01-pr11-follow-up-b-record.md` designs them (§8, over §7, §6 and §5) and its implementation section
+records. It needs no packet change. The frozen legacy engine's accesses are a separate change, follow-up D, and the
+owner's decision.*
+
+**The defect.** Every checkout of a repository registers its linked worktrees in one shared store,
+`<common git dir>/worktrees/`, and Git writes a registration one file at a time.
+- Every enumeration of the store dies on an entry half written, or prints a record for it that no
+  reader can use: `git worktree list`, the sibling scan inside `git worktree add`, the engine's own
+  scans.
+- `git worktree prune` decides to delete an entry it finds before the entry's `locked` file exists, and
+  deletes it later without looking again, even after the add has locked it and gone on. `git gc` runs
+  that prune, and so does Git's automatic maintenance after a commit, a fetch or a merge in any
+  checkout: through gc when gc is due, and on Git 2.55 whenever an entry looks prunable.
+- The worktree lock excludes a second engine only from the same checkout, so two runs in two linked
+  checkouts of one repository raced in the store
+  (`PR11-LINKED-CHECKOUTS-RACE-THE-SHARED-WORKTREE-REGISTRY`). In an attempt the lost race ended the
+  command resumably. In a merge verification it was foreign Git state: it spent one of the candidate's
+  deferrals, or parked the candidate at `max_defers`.
+
+**Every registry access is attempted again.** Every registry access the workspace manager makes is
+one attempt: a list together with the parse of its output and, where the manager compares the
+worktrees it lists, the resolution of each path the list names; an add; or one of the manager's
+scans.
+- A failed attempt is attempted again, after a short backoff, until the access's deadline. Nothing
+  reads the store, Git's message or a file's timestamps to decide why it failed.
+- A listed path that cannot be read fails its attempt, as a list Git could not finish does. On
+  Windows a checkout that another removal has deleted while some handle on it is still open answers
+  "access denied" to every open until the last such handle closes, and nothing in the error tells it
+  from a path the filesystem denies. A path the resolution reads and refuses, such as a link with
+  nothing behind it, is refused at once.
+- An add first makes its destination as an empty directory. Git takes a destination over only after
+  its own registry steps, and on any later failure removes it with its junk. So a failed add whose
+  destination is still an empty directory the access can remove holds nothing to lose, and is attempted
+  again.
+- Otherwise Git may have taken the destination over, and nothing outside Git can tell a checkout that
+  cannot be made from a prune that deleted the add's own registration: the end states are the same.
+  The access refuses at once, resumably, as a registry refusal, and never returns that failure as Git
+  state. So a verification whose snapshot cannot be made, for a path, a filter or a missing object,
+  stops resumably and spends no deferral, and the run stops at it again until the cause is repaired.
+- After a successful prevalidation — the add's gate, whose list of the registry is an access of its
+  own — a destination that cannot be made, or that is not an empty directory when the add's access
+  begins, is the add's own failure. It is returned as Git state at once, before `git worktree add`
+  runs, so the registry's state cannot reach that answer. A store the gate's list fails on refuses as
+  the registry's first, whatever is at the destination.
+- What outlasts the deadline, ten seconds, refuses resumably, as a registry refusal, never as Git
+  state a verification could defer or park a candidate on: contention, a registration a dead writer
+  left torn, and any other fault of the store, such as a store nothing can write, a registration
+  Git cannot list, or a listed path that stays unreadable. A failure the access cannot decide, such
+  as a destination holding something the add did not leave, refuses at once.
+- The deadline is nominal. The access admits no attempt after the first that begins at or after
+  it, asks for no wait longer than the time left before it, and asks for none once it has passed.
+  So the final attempt is the first that begins at or after the deadline: after a backoff the
+  deadline cut short or, if the deadline passed while an attempt or the short decision after it
+  ran, next, with no backoff before it. A store a writer leaves whole by the deadline is passed.
+  Nothing here bounds the scheduling, the bookkeeping between an attempt and its check, a wait's
+  wake-up, or the runtime of a Git command or of the short decision after it, which a filter, a
+  large checkout or a slow filesystem can extend.
+- On the topology coordinator a wait answers the coordinator's messages instead of sleeping. A wait
+  that answers one that ends the command, such as a shutdown, ends the access there, with no further
+  attempt, and the transition it waited in: nothing further is appended, published or spawned for
+  it, and the run is resumable (the follow-up B record's §9.16).
+
+**Within one process.** The registry lock no longer serialises registry access: retrying makes each
+access safe against another's half-done work, whichever process or thread does it. The lock is held
+shared by adds and alone by the repair that removes torn registrations, which must not read an add of
+the same process in flight as a dead add's residue.
+
+**No engine prune.** The manager's removals delete their own registration directly, and the store
+itself when that leaves it empty. They never run `git worktree prune`, which deletes another
+process's add in flight. A removal that finds no store at all removes an empty directory at its slot:
+what a coordinator killed after making an add's destination leaves.
+
+**What stays outside it.**
+- A coordinator killed inside a Git write leaves that write's processes running on Unix. That they
+  can no longer reach the slot its resume uses is the slot instances' doing, below, not this
+  access's (`PR329-A-RESUME-REBINDS-A-SLOT-ITS-DEAD-COORDINATORS-GIT-CHILD-STILL-WRITES`).
+- An agent's own Git on the host runner and the user's Git in any checkout are attempted past as
+  writers, and their own commands are theirs.
+- A prune that no engine process starts deletes an add's registration in one of two ways. Such a prune
+  is a host agent's, the user's or an IDE's, or Git's automatic maintenance after a commit, a fetch or a
+  merge in any checkout.
+  - So that the add fails, after Git took its destination over: the access refuses that, resumably.
+  - Without failing the add: once Git has written the checkout, the add returns Ok whether the
+    deletion lands before it returns or after, and no access can see that. The checkout is left with
+    no registration, or part of one, its Git commands fail or misread it, and a verification, a gate,
+    a review or a recovery there can reach a durable outcome that is wrong for valid work.
+
+  That is `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, a separate finding that
+  blocks G6 until it is closed or the owner rules on its scope.
+- A writer that died mid-write leaves an entry that stays torn, and the access that meets it refuses
+  resumably. Its own run's resume repairs it when Git can still list the store. When Git's listing
+  dies on that entry, the resume refuses before any repair. The operator then removes that
+  registration directory and the checkout it names, once no Git process is writing it, and resumes.
+- The frozen legacy engine's registry accesses do not take this access, and its coordinator discards
+  an attempt's output on any error. Both are follow-up D's
+  (`PR329-LEGACY-RUNS-IN-LINKED-CHECKOUTS-RACE-THE-SHARED-WORKTREE-REGISTRY`), a separate change
+  under the owner's decision that calls this access. *By the owner's ruling B-W924-R1, adopted
+  2026-10-08 (the follow-up B record's §9.25 and §9.28):* the legacy gate and review snapshots'
+  add, removal and list each run their Git command again while it dies reading another
+  registration's `commondir` at zero bytes, against a nominal ten-second deadline checked after each
+  attempt (the attempt after a sleep is admitted however late it starts, and no attempt's start or
+  completion has a hard wall-clock bound); nothing else of the legacy engine's accesses changes.
+
+**A dead coordinator's Git writers and the slot its resume uses.** *In force for the topology's
+slots, as `reviews/2026-10-02-pr11-follow-up-c-record.md` designs them (§4, completed in §5) and its
+implementation section records. The packet names the untagged paths; that record's erratum
+E-FUC-3, which amends them for U's instances, is adopted as composed, under the owner's delegation
+of 2026-10-11 (that record's §6.16).*
+
+**The defect.** A coordinator killed inside a Git write leaves that write's processes running:
+the add's checkout child, a filter and anything it starts. They name the slot by path or by
+registration name. A resume that recreated the slot at the same path, under the same name, met
+them there: a late `reset --hard` reverted a worker's paid edits, a failed add's junk removal
+deleted the recreated registration and checkout, a late `HEAD` write moved its ref
+(`PR329-A-RESUME-REBINDS-A-SLOT-ITS-DEAD-COORDINATORS-GIT-CHILD-STILL-WRITES`).
+
+**One instance per coordinator incarnation.** A slot is a logical name; what the workspace manager
+creates on disk is an instance of it, named for the incarnation that created it.
+- An instance is the slot's component followed by `_` and a tag: `tasks/k<key>-g<gen>_<tag>`,
+  `merge/s<seq>_<tag>`, `snapshots/<name>_<tag>`; its intent is
+  `intents/<namespace>.<component>_<tag>.intent`, and its registration is Git's, named from the
+  path. The tag is twelve Crockford base32 characters: the first 60 bits of SHA-256 over a fixed
+  domain string and the incarnation's id, so every manager of one incarnation renders one instance.
+- The incarnation id hashes, besides the clock, the pid and a per-process counter, 128 bits the
+  process draws from the host. Two incarnations, in any PID namespace or on any machine sharing a
+  checkout, share a tag only with negligible probability; the guarantee is probabilistic, not
+  absolute.
+- An incarnation adds, verifies and runs commands in its own instance only. Every other
+  incarnation's instance of a slot, and a name written before instances existed, is residue: it is
+  never verified as reusable, never reused, and every reclaim of its slot removes it. So a fresh
+  process's resume reclaims every earlier incarnation's instance of each open generation, its intent
+  included, before it recreates the generation's worktree as its own instance, and a dead writer
+  that acts afterwards acts on its own incarnation's paths.
+
+**Every walk reaches every instance.** The manager's list of slots, which every reclaim walks,
+reports each slot once, from three sources: every intent, tagged or not; every directory under a
+slot namespace that is not the current incarnation's; and every registration whose `gitdir` names
+one, read without Git's enumeration. A dead incarnation's add that had not yet run when its slot was
+reclaimed recreates its checkout and registration but not its intent, and is reached there. The
+current incarnation's own instances count only through their intent, so a torn registration of its
+own that no intent names stays the refusal it was. A slot's removal removes every instance of it in
+one execution of its effect site, each bound to its own registration; an instance that cannot be
+removed refuses the command resumably, as any removal does, and nothing retains it. The repair of a
+registration a killed add left torn, which runs when Git's listing dies on it, removes that one
+instance: the tear says nothing of the slot's other instances, a live one among them.
+
+**Terminal finalization sweeps last.** Before it removes the execution root, the root's removal
+sweeps every earlier incarnation's instance, by directory and by registration, through the removal
+of its kind. An instance an earlier incarnation's still-running writer creates after that sweep's
+scan keeps the root, or recreates it, and is the operator's to remove; the run's next finalization
+or resume reclaims what it then finds.
+
+**Engine Git children.** Every Git child the workspace manager starts runs with automatic
+maintenance off and attached (`maintenance.auto=false`, `gc.auto=0`, `gc.autoDetach=false`,
+`maintenance.autoDetach=false`), with rerere off (`rerere.enabled=false`), with
+`worktree.useRelativePaths=false`, and with `GIT_NO_LAZY_FETCH=1`, `GIT_ALLOW_PROTOCOL` empty and
+`GIT_TERMINAL_PROMPT=0`. So an engine command never starts maintenance that could prune a
+registration from a detached process; an engine cherry-pick neither applies a resolution recorded at
+some other time nor records one, and rerere state is no longer an input to it; an engine add never
+changes the repository's format; and a command that needs an object a partial clone lacks fails,
+naming it, until the operator fetches it.
+
+**On Windows** an add refuses at once, before any registry access, when the `$GIT_DIR` Git for
+Windows would be handed is longer than its budget of 220 bytes in UTF-8, the length Git checks; a
+run cannot move its private root, so such a run is finished by a binary whose names fit, or
+abandoned.
+
+**What stays outside it.**
+- The run's refs are shared by every incarnation of the run, by design. On Unix the cleanup lease
+  orders an engine `update-ref`; on Windows a terminated one's ref write landing after its
+  successor reclaimed the lock is a window accepted as decision D5(b), under the owner's delegation
+  of 2026-10-11, and filed as
+  `PR330-A-DEAD-COORDINATORS-WINDOWS-REF-WRITE-CAN-LAND-AFTER-ITS-RESUME-RECLAIMED-THE-LOCK` (the
+  record's §6.16).
+- A coordinator started with Git's repository variables in its environment (`GIT_INDEX_FILE`,
+  `GIT_DIR` and their family) hands them to every engine Git child, which then reads and writes
+  the repository or index they name whatever its instance: the finding `FUB-D9-ENV`, with its
+  instance-isolation consequence `FUC-D5-GITINDEXFILE`, which their own change before G6 remedies:
+  the route selected under the owner's delegation of 2026-10-11, the adoptions its candidate draft
+  names staying the owner's (the record's §6.16).
+- An instance a still-running earlier writer creates after terminal finalization's last sweep has
+  no class in the run's resource accounting until A-12 lands. O4(a), adopted under the owner's
+  delegation of 2026-10-11, accounts such an instance rather than preventing it, and its class is
+  A-12's: the ledger's own change, after follow-up C merges and before G6, PR12 and any topology
+  activation (the record's §5.4 and §6.16).
+- A prune the engine did not start (a host agent's, the user's, an IDE's, or Git's own maintenance
+  in another checkout), and the frozen legacy engine's maintenance, are outside it: the
+  external-prune finding and follow-up D's.
+
 **When a Unix helper does not start.** The cleanup reaper and the job-control guard are forked before any agent exists, and each acknowledges its own startup within a fixed budget. A launch that does not see that acknowledgement fails, ends the helper with one `SIGKILL` and a **bounded** wait — by number, or through the identity the next paragraph describes — and reports what those two calls answered, alongside how long it waited, that budget, the descriptor ceiling the helper was closing against, and how the wait ended: on the helper's own report of the setup step that refused and the error it left, on the acknowledgement pipe closing with no report, or on the budget elapsing with nothing on the pipe. A helper that cannot finish its setup writes that report on the acknowledgement pipe it already owns before it ends, and the wait ends the moment the helper ends on every supported platform. On macOS the wait is a `select`, because `poll` on the FIFO the channel is built from never reports the writer's close. The point of reporting these is one distinction: a helper that had **already ended itself** before the signal, whose report or exit status names which of its own setup steps refused, against one that was **still running** and had to be killed, which says it was still working when the budget ran out. Nothing else is claimed. **The wait after the signal is bounded, and a helper still there when it runs out is left behind.** The wait asks the kernel for what it can answer without blocking and asks again until the helper is collected or a second budget of its own elapses; a helper that has not become collectable by then is one the kernel is not ready to hand back — in uninterruptible I/O with the signal pending, say — so the launch reports that it was left for this process's exit to collect and returns, rather than waiting on it. It must return: these launches hold the barrier under which the signal monitor refuses to kill or stop any registered group, so a launch that never returns is every running agent outliving a `SIGTERM` for as long as the kernel takes. Of the waits that end a helper, one is **not** bounded, and deliberately: the end of a run's cleanup reaper that has **acknowledged** CLEANUP or CANCEL, whose exit is what releases the run's cleanup lease the caller is about to act on, so releasing that caller early would let it proceed against a lease still held. A reaper that did not acknowledge CLEANUP — its pipe ended with no answer, it refused, or the request could not be written — is ended with the bounded wait instead, because its caller acts on nothing: the supervisor answers that failure by arming fail-closed termination of this process and returning an error, and a reaper the wait leaves behind holds the lease until it exits, as a reaper does after any coordinator death. The parent asks the kernel nothing about the helper beyond those two calls and the pipe it was already reading, and in particular a pid is never treated as evidence of which process it names — a wait that answers *not collectable yet* is reported as that and never as the helper: while an embedding host may reap this process's children with a wildcard wait, no observation the parent can make establishes that, and the message says only what the pipe carried and what `kill` and `waitpid` returned.
 
 **Which process the end of a helper names.** A pid is not evidence of the process holding it: an embedding host may reap this process's children from its own `SIGCHLD` handler with a wildcard wait, a helper collected there leaves its number free for the kernel to hand to another of that host's forks, and no observation the parent can make tells the two apart. By default the end of a helper is the `kill` and the `waitpid` on its number described above, and that is best effort against such a host: the signal and the wait may reach a process that is not the helper. Upstroke asks no obligation of an embedding host for it, and states this rather than leaving it implied. On Linux an embedder may instead turn the identity path on with `UPSTROKE_HELPER_IDENTITY=1`. With it on, each helper is created by `clone3` with `CLONE_PIDFD`, so the descriptor that names it arrives with the child and there is never a helper this process cannot name; it is signalled with `pidfd_send_signal(fd, SIGKILL, NULL, 0)` and collected through the same descriptor, with `waitid(P_PIDFD, fd, WEXITED | WNOHANG)` asked again until the helper is collected or the bounded wait's budget elapses — except at the one wait above that is not bounded, the end of a cleanup reaper that acknowledged CLEANUP or CANCEL, which is `waitid(P_PIDFD, fd, WEXITED)` and blocks until the reaper has ended. None of these can reach a process the descriptor does not name. Those three calls are the whole of the path: it probes nothing, remembers nothing from one launch to the next, and makes no other call and no call by number. **The trust boundary is the host's syscall policy, beside its platform.** Setting the variable is the embedder asserting that its host's kernel and policy permit those three calls with those arguments — `waitid` with both of those sets of options — and answer them as the kernel does. Upstroke makes none of them on a host where that assertion has not been made, because a policy may kill the caller of a system call rather than refuse it, a process killed for a call takes no fallback, and no answer this process could read beforehand would stay true once a filter is installed. When the assertion does not hold: a policy that kills on one of the calls kills this process, as it would for any other call it forbids; a `clone3` that answers an error — `ENOSYS` on a kernel before 5.3 or under a profile that hides the call, `EPERM`, or a resource error such as `EMFILE` — fails the launch with a message naming the call and the variable, and no helper exists; a signal that answers an error, `ESRCH` included, leaves the helper unsignalled and unwaited, and the message says so; a wait that answers an error, `ECHILD` included, leaves the helper uncollected, and the message says so. Nothing falls back to the number. The path needs Linux 5.4, for `waitid` on a descriptor; it costs one descriptor per helper, held for the helper's life; and a launch with no free descriptor fails where the default would have started the helper. On macOS and the other Unix targets the variable has no effect, and the end of a helper is by number.
 
 **Synced intents.** Each intent file is one JSON object with exactly four string fields, in this
 order: `kind`, `slot`, `run_id`, `incarnation`. `kind` is one of `task`, `staging` or `snapshot`.
-`slot` is the slot's identifier, `<namespace>/<component>`, the canonical spelling of a slot the
-engine validated; it names the slot for whoever reads the record, and the filesystem path is
-derived from the intent's file name and the execution root, never from this field. A reader
+`slot` is the identifier of the slot instance the intent records, `<namespace>/<component>_<tag>`,
+the canonical spelling of an instance of a slot the engine validated (a record written before
+instances existed spells `<namespace>/<component>`); it names the instance for whoever reads the
+record, and the filesystem path is derived from the intent's file name and the execution root,
+never from this field. A reader
 accepts no other key, no alias for a key or a kind word, no default for a missing field, and no
 record whose `kind` disagrees with the namespace of its `slot`; any of those is refused. No code
 in the engine acts on a record's contents: reclaim trusts the intent's file name alone, and the
@@ -152,6 +345,59 @@ Every transition is an event `{ts, event, task?, attempt?, rung?, profile?, data
 **One fold, not two.** The engine never mutates run state directly: it appends an event and folds it back in through the same function `resume` and `status` use to rebuild state from the file, and it applies the event *as it will be read back* rather than as constructed. A live run and a replay of its own log are therefore the same computation, not two that agree by inspection. Two things deliberately do not survive replay — a session id and its `resume_next` flag, because both describe a conversation that believed it had left edits in a working tree that a crash has since rolled back (§14 pairs session-resume with tree retention precisely so the two never diverge).
 
 `upstroke resume <run-id>` replays, verifies the run branch HEAD matches the last committed event (mismatch = refuse with an explanation), re-probes agents, re-snapshots capacity, and continues — parked questions intact. Git and the log cannot be updated atomically, so schema 3 makes the successful settlement itself carry the exact prepared identity: captured full run-branch ref, parent and tree feed hook-free `commit-tree`; the resulting commit, message, and deterministic private pin are verified before `attempt_finished` is appended. Publication compare-and-swaps the **recorded full branch ref**, never mutable symbolic `HEAD`, from the recorded parent to that commit, removes the pin with a non-dereferencing compare-and-swap, and then appends `task_committed`. Resume accepts only the resulting exact crash prefixes: parent plus matching pin means publish that object; commit plus matching pin means remove the pin; commit with the pin already gone means append the missing `task_committed`. A pin without a successful settlement is orphan residue and is removed without dereferencing symbolic refs. Any substituted or symbolic pin, third branch SHA, changed branch identity, or mismatched commit object refuses while preserving evidence. Schema-1/2 success has no prepared identity, so it is **never** adopted from parent plus subject alone; even a matching message can name an arbitrary tree. It also refuses when the frozen plan's digest moved, when the recorded chain structure no longer matches (a rung is an index into that chain), when the branch is gone, and when another process owns either the run or its physical worktree.
+
+**A legacy attempt the worktree registry refused.** *ADOPTED on 2026-10-11, with decision O8 (decision B) to
+unfreeze the PR5-frozen legacy modules it changes and with ruling B-W924-R1-S, as an agent decision by
+`pr11_decide_d` under the owner's delegation of 2026-10-11 (babysit's `0194a1e4…`) — follow-up D
+(`reviews/2026-10-02-pr11-follow-up-d-record.md` §1, as §2 to §4 amend it, and its Implementation section),
+implemented on draft pull request #331. Nothing in this paragraph is in force until that pull request merges, after
+follow-up B's (pull request #329), whose registry access it calls.
+Once in force, it replaces the last item of "A registry another process is writing" above, which says the frozen
+legacy engine's accesses do not take that access, and with it that item's sentence on the owner's ruling B-W924-R1:
+at the legacy snapshots' add, removal and list, the whole of that ruling's scope, B-W924-R1-S supersedes its retry
+with this paragraph's access. Its sentences on a pin that cannot be written are follow-up D's repair of F1 of the
+owner's full review of #331, made on 2026-10-13 under the owner's instruction "we fix F1 and record the rest", after
+that adoption.* A schema 1–3 run shares its repository's
+worktree registry with every other checkout's runs. Its three Git children that
+enumerate the registry — a gate or review snapshot's `git worktree add`, a snapshot's removal together with the
+`git worktree list` that decides it, and the resume's `git switch` — each run as one attempt of that registry
+access: a failed attempt is attempted again until the access's deadline, and what outlasts it refuses as a
+registry refusal, never as Git state. After a failed snapshot add, an empty destination the engine can remove
+holds nothing to lose, so it is made again and the add is attempted again; anything else at the destination refuses
+as a registry refusal, so the add's own failure never comes back as Git state. When a snapshot's registry access
+refuses after the worker's output was captured, the coordinator does not discard the checkout: it pins the
+captured candidate — the branch, parent and tree captured before the refusal, never the index as it stands
+then — as a commit at the attempt's prepared pin followed by `-kept`, whatever `HEAD` is by then, since nothing
+publishes a kept pin, and its refusal names that pin. Every other attempt error after its worker ran, and a reviewed
+candidate whose publication fails, keeps the checkout the same way: what the checkout holds, or the reviewed
+candidate, is pinned at that name, and the error names the pin, or the pin's failure when it cannot be written. A path
+that a clean or smudge filter attribute covers is one such failure when Git lists it for the checkout, since a capture
+refuses such a path before `git add` could run the filter's configured code: the output then stays in the checkout
+unpinned, the error says that nothing outside the checkout keeps it and what to fix first, and while the attribute
+covers a path Git lists for the checkout — every path its index holds, a tracked one moved out of the checkout
+included, and every untracked path not ignored — a resume that reaches that listing on the run's branch, with that
+attempt the only one its log records in flight, refuses before discarding anything, saying the same; one that starts
+off the run's branch stops earlier, before it switches to that branch, with the bare filter refusal, discarding
+nothing either. The capture's refusal covers only the paths Git lists for the checkout: an ignored path in the way of
+what `HEAD` holds, which the kept pin's capture adds with `git add -f`, is not checked (`FUD-F1R-IGNOREDFOOTPRINT`,
+open).
+Of the schema-3 pins, a kept pin is the one without a successful settlement that is not orphan residue. A resume
+removes the checkout's copy of the attempt in flight only
+once that attempt's kept pin holds it and a durable copy of the pin that the resume itself has written,
+`kept-<task index>-<attempt>-<ULID>.bundle` in the run's public directory, holds it too: it captures the checkout
+into a private index that changes nothing else of the repository, puts a missing pin back from a copy, writes the pin
+when there is none or checks that it holds every changed path and everything in the discard's way, writes and syncs a
+new copy, and reverts exactly those changes, writing nothing where anything stands; what it did not capture, a new
+file the pin never held and a submodule stay, named. When it cannot, it refuses and removes nothing else. With no
+attempt in flight it discards as before. When it reaches its lookup — a resume that refuses earlier, at its reclaim,
+names none, and one whose later step fails returns that error without its warnings — it looks for a kept pin at every
+attempt the run's log records, and names each one it finds, and the copy of the one it kept, with the `git fetch`
+that restores the pin from it, with the
+commands that take its output back as the repository records it — the index exactly, the working files through the
+checkout's own conversions — deletions included: with replacement objects refused, as every legacy Git command
+refuses them. It never removes a kept pin; the operator does, and a removed pin is named no more. Every legacy Git
+command also runs with Git's automatic maintenance off, so none of them starts a `git maintenance` or
+`git gc --auto` that could prune a registration another checkout is writing.
 
 v0.2 extends that shipped exact-identity rule into two candidate/merge transactions. After fixing the verified tree, the engine creates and temporarily pins an immutable commit object; `candidate_prepared` is the sole successful settlement for that candidate-producing attempt and records exactly one complete attempt/base/commit/tree identity before the authoritative candidate ref moves, so resume adopts only that exact shape. Recovery then appends the missing `task_candidate_created`, whose append position establishes FIFO order. `merge_rejected` similarly embeds the complete frozen repair-task payload and admission state so rejection, task registration, key assignment, `AwaitingRepair`, and either runnable or human-gated repair state are one append rather than a rejection/spawn/question crash window. A human-gated admission's embedded question is itself authoritative for status, notification, and `upstroke answer`; it is not followed by a duplicate `question_raised`. Each `merge_verification_started` has exactly one terminal record: successful evidence lives inside `merge_prepared`, code failure inside `merge_rejected`, and infrastructure/crash outcomes inside unavailable/interrupted events. There is no standalone successful or failed finish event before the state-changing append. `merge_prepared` records disposition, expected integration SHA, proposed SHA, candidate, verification evidence, and repair lineage before `git update-ref` advances the run ref by compare-and-swap. On resume, expected-old means retry that same transition and append `task_merged`, proposed means append the missing `task_merged`, and any third SHA means refuse; `already_present` uses equal expected/proposed SHAs, so the same rule becomes a checked no-op. A proposed commit with no prepared/rejected terminal event is residue and is reverified; a dangling merge-review process is settled as interrupted with unknown spend first. The event schema moves rather than teaching `task_committed` a second meaning. The complete protocol and fault table are §26.
 

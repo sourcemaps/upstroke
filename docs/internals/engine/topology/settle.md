@@ -485,7 +485,10 @@ What a repair's worktree was materialized from. `Some` for a repair,
 
 ## `pub fn retry(`
 
-`T-RETRY`: the retaining incarnation takes its next attempt in place.
+`T-RETRY`: the retaining incarnation takes its next attempt in place. It is
+[`retry_begin`], the verify, and [`retry_end`]; the topology driver runs the
+three apart, with the verify's registry accesses waiting through its operator's
+hooks and no borrow of the run (the follow-up B record's §9.13, R1).
 
 The order is the packet's, and every step of it is load-bearing:
 
@@ -516,6 +519,21 @@ outstanding reservations leaves no room under `max_parallel`, the task
 already holds one, or the fold is poisoned — a Git or containment error from
 the verify, or [`UpstrokeError::Refused`] when the fold holds no retained
 generation for `key`. Every error path cancels the reservation it took.
+
+## `pub struct RetryBegun {`
+
+What [`retry_begin`] found for [`retry_end`]: the retained generation, its
+session and the attempt to start.
+
+## `pub fn retry_begin(`
+
+Steps 1 and 2 of [`retry`]: the retained generation, and the provisional
+reservation.
+
+## `pub fn retry_end(`
+
+Steps 3 and 4 of [`retry`] after the verify: a failed verify cancels the
+reservation and closes the generation; otherwise the attempt to start.
 
 ## `reservations.cancel(request.key, ReservationKind::Retry)?;`
 

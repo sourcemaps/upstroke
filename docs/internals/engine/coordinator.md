@@ -13,6 +13,9 @@ LEGACY-EFFECT: this module is in the **frozen legacy section** of
 `effects/allowlist.toml`, which carries its justification and the condition
 under which the section shrinks. `decisions.effect_site_inventory.mechanism` (2).
 
+**Adopted on 2026-10-11 with decision O8 (decision B), as an agent decision by `pr11_decide_d` under the owner's delegation of 2026-10-11 (babysit's `0194a1e4…`).** Follow-up D (#331, a draft) amends this module's freeze; the amendment is its row's text in `effects/allowlist.toml`, marked there as adopted, and the record `reviews/2026-10-02-pr11-follow-up-d-record.md` (§1 to §4, and its Implementation section) is why. Nothing it adds is in force until the pull request merges. In this module it is one constant, `KEPT_PIN_SUFFIX`, and one arm
+of the attempt's error path, below.
+
 ## `pub fn run(opts: &RunOptions) -> Result<RunReport, UpstrokeError> {`
 
 The v0.1 conductor's public entry points -- `run`, `run_with` and
@@ -208,6 +211,44 @@ record does not describe.
 A fresh run has no signals of its own yet, and §13's other sources are
 not read in v0.1 — so this snapshot is honestly a record of how little
 was known when the run started.
+
+## `fn kept_on_error(`
+
+R-D1's part N (adopted with O8 on 2026-10-11 as an agent decision by `pr11_decide_d` under the owner's delegation
+of 2026-10-11 (babysit's `0194a1e4…`), and in force only from #331's merge;
+`PR331-AN-ATTEMPT-ERROR-AFTER-THE-WORKER-RAN-DISCARDS-ITS-OUTPUT`
+and `PR331-A-REVIEWED-CANDIDATE-IS-DISCARDED-WHEN-ITS-PUBLICATION-FAILS`): every arm that
+discarded the checkout after the worker ran now keeps it and pins what it holds at the
+attempt's kept pin — the prepared pin followed by `KEPT_PIN_SUFFIX`, which this module
+imports from `crate::workspace` since part K moved it there — and returns the error
+unchanged, with a warning naming the pin or the pin's failure (`UpstrokeError::with_warnings`).
+With a captured candidate (N2's three publication arms) it pins that candidate — its branch,
+parent and tree, never the live index — through `prepare_commit_from_candidate`; without one
+(N1's attempt error) it pins the checkout through `Workspace::pin_checkout`, which captures it
+into a private index. Both are written whatever `HEAD` is (part K). `Ok(None)` from
+`pin_checkout` (nothing to keep) returns the error with no warning. Nothing publishes a kept
+pin and no engine path removes one; the resume's guarded discard (part G4,
+`src/engine/resume.rs`) removes the checkout's copy only once the pin and a durable copy of it
+hold it. A new run refuses over the kept checkout as over any uncommitted work, until a resume
+or the operator acts — a disclosed cost (the proposal's §9.1).
+
+When N1's arm cannot pin the checkout, its warning also says what that leaves (F1 of the
+owner's full review of #331, `FUD-FULL-FILTERPIN`, repaired under the owner's instruction "we
+fix F1 and record the rest"): nothing outside the checkout keeps the output, so `git clean` or
+`git reset --hard` there would lose it, and what stopped the pin is to be fixed before a resume —
+for a clean or smudge filter, the attribute that sets it removed, after copying out anything to
+keep. One such cause is a path a clean or smudge filter attribute covers that Git lists for the
+checkout (`git ls-files --cached --others --exclude-standard`: every path the index holds and
+every untracked path not ignored): `pin_checkout`'s capture refuses it before `git add` could run
+the filter's configured code, as every capture of the module refuses such a path, so that output
+stays unpinned. The refusal covers only that listing: an ignored path in the way of what `HEAD`
+holds, which the capture's footprint adds with `git add -f`, is not checked
+(`FUD-F1R-IGNOREDFOOTPRINT`, open). Moving that path out of the checkout is not offered as the
+fix: a tracked path moved out stays in the index, and the resume's listing checks every path the
+index holds, so the next resume refuses the same way (DF1R-1 of the regression review of
+`cc8ea2ed`, corrected under the same instruction). The reviewed-candidate arms (N2) keep the
+warning they had: they pin a candidate captured before its review, which a filtered path never
+reaches.
 
 ## `pub(super) struct Run<'a>` › `pub(super) log: EventLog,`
 
@@ -502,11 +543,37 @@ identity: this task's position in the plan. See
 The same entries the worker prompt quotes as operator
 instruction, routed to the judge as well (§12).
 
-## `fn step_task(&mut self, index: usize) -> Result<bool, UpstrokeError> {` › `match run_attempt(&attempt_cx, workspace, resume.clone()) {`
+## `fn step_task(&mut self, index: usize) -> Result<bool, UpstrokeError> {` › `match run_attempt(&attempt_cx, workspace, resume.clone(), &mut refused) {`
 
 Any error between the agent editing files and the verdict
 leaves the tree dirty; the run cannot continue but must not
 hand the user a half-staged workspace either (§14).
+
+## `fn step_task(&mut self, index: usize) -> Result<bool, UpstrokeError> {` › `if let Some(candidate) = refused {`
+
+The one exception, follow-up D's B-PRESERVE (adopted with O8 on 2026-10-11 as an agent decision
+by `pr11_decide_d` under the owner's delegation of 2026-10-11 (babysit's `0194a1e4…`), and in
+force only from #331's merge): when the
+attempt's gate or review snapshot was refused by the worktree registry after the
+worker's output was captured, `run_attempt` recorded the captured candidate, and
+this arm does not discard the checkout. It pins that candidate — the branch ref,
+parent and tree captured before the refusal, never the index as it stands now —
+through `prepare_commit_from_candidate` at the attempt's prepared pin followed by
+`KEPT_PIN_SUFFIX`, and returns a registry refusal that names the pin, or says that
+pinning it failed (`HEAD` moved after the capture, or the ref store could not be
+written; R-D1). `prepare_commit_from_candidate` writes a hook-free commit with
+upstroke's identity and pins it with a create-only `update-ref`; since R-D1's part K it
+does so for a kept pin whatever `HEAD` is, so a branch moved after the capture no longer
+refuses the pin, and only a store, name or lock that refuses the write does (C1 to C4, B1
+to B5). Every other attempt error keeps the checkout too (part N, `kept_on_error` below).
+The arm calls `prepared_pin_ref` and `prepare_commit_from_candidate`, both of which this
+module already called.
+
+The pin keeps the output on every later invocation: the resume removes the checkout's
+copy only through its guarded discard, which checks that pin, writes a durable copy of it
+and reverts exactly the captured changes, and names the pin with the commands that take
+its output back (`src/engine/resume.rs`). A new run instead of a resume refuses over the
+kept output as it refuses over any uncommitted work.
 
 ## `fn step_task(&mut self, index: usize) -> Result<bool, UpstrokeError> {` › `let next = result.failure.as_ref().map(|failure| {`
 

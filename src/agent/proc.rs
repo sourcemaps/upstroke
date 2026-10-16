@@ -6472,9 +6472,238 @@ mod termination {
                 "the refused lease was not named: {message}"
             );
             assert!(
-                message.contains("having already exited with status 1"),
-                "the reaper's own exit did not reach the message: {message}"
+                reported_ending(&message, the_identity_path_is_on()).is_some(),
+                "the reaper was not ended, after its report, by its own exit or by the parent's \
+                 SIGKILL and then collected: {message}"
             );
+        }
+
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        enum ReportedEnding {
+            ItsOwnExit,
+            TheParentsKill,
+        }
+
+        fn reported_ending(message: &str, through_identity: bool) -> Option<ReportedEnding> {
+            let (by, wait) = if through_identity {
+                (" through the helper's identity", "the wait through it")
+            } else {
+                ("", "the wait")
+            };
+            let (_, ending) = message.rsplit_once("; ending it: ")?;
+            let delivered = format!("SIGKILL was delivered{by}, and {wait} collected it, ");
+            match ending.strip_prefix(delivered.as_str())? {
+                "having already exited with status 1" => Some(ReportedEnding::ItsOwnExit),
+                "killed by signal 9" => Some(ReportedEnding::TheParentsKill),
+                _ => None,
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        fn the_identity_path_is_on() -> bool {
+            helper_identity_path_on()
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        fn the_identity_path_is_on() -> bool {
+            false
+        }
+
+        fn a_stand_in_reaper_ended_by(ending: ReportedEnding) -> (HelperEnd, String) {
+            let (child, identity) = fork_helper().expect("fork a stand-in reaper");
+            if child == 0 {
+                match ending {
+                    // SAFETY: leave the forked child without running destructors,
+                    // with the status `report_setup_failure_and_exit` leaves with.
+                    ReportedEnding::ItsOwnExit => unsafe { libc::_exit(1) },
+                    ReportedEnding::TheParentsKill => loop {
+                        // SAFETY: `pause` takes no argument; only the parent's
+                        // `SIGKILL` ends this child.
+                        unsafe { libc::pause() };
+                    },
+                }
+            }
+            if ending == ReportedEnding::ItsOwnExit {
+                let pid = libc::id_t::try_from(child).expect("a forked child's pid");
+                let deadline = Instant::now() + ISOLATED_CHILD_COLLECTION_BOUND;
+                loop {
+                    match crate::agent::proc::exited_unreaped(pid) {
+                        Ok(true) => break,
+                        Ok(false) if Instant::now() < deadline => {
+                            thread::sleep(Duration::from_millis(1));
+                        }
+                        looked => {
+                            close_fd(identity);
+                            let left = collect_a_stand_in_left_behind(child);
+                            panic!("the stand-in never ended itself ({looked:?}); {left}");
+                        }
+                    }
+                }
+            }
+            let end = Reaper {
+                command_fd: -1,
+                ack_fd: -1,
+                _command_keepalive_fd: -1,
+                pid: child,
+                identity,
+                rest: EndingRest::Resuming,
+            }
+            .abandon();
+            let left = if end.waited == child {
+                String::new()
+            } else {
+                format!(" ({})", collect_a_stand_in_left_behind(child))
+            };
+            (end, left)
+        }
+
+        fn collect_a_stand_in_left_behind(child: libc::pid_t) -> String {
+            let mut status = 0;
+            // SAFETY: `status` is writable and `child` is this test's own fork;
+            // `WNOHANG` collects it only if it has already ended.
+            let looked = unsafe { libc::waitpid(child, &mut status, libc::WNOHANG) };
+            if looked == child {
+                return format!("this test collected the ended stand-in, status {status}");
+            }
+            if looked != 0 {
+                return format!(
+                    "the stand-in was not this test's to collect: {}",
+                    std::io::Error::last_os_error()
+                );
+            }
+            // SAFETY: the look above found `child` still this test's own
+            // unreaped child, so its number names nothing else.
+            let _ = unsafe { libc::kill(child, libc::SIGKILL) };
+            let deadline = Instant::now() + ISOLATED_CHILD_COLLECTION_BOUND;
+            loop {
+                // SAFETY: as for the look above.
+                let waited = unsafe { libc::waitpid(child, &mut status, libc::WNOHANG) };
+                if waited == child {
+                    return format!("this test killed and collected the stand-in, status {status}");
+                }
+                if waited < 0 && !last_errno_is_interrupted() {
+                    return format!(
+                        "collecting the stand-in failed: {}",
+                        std::io::Error::last_os_error()
+                    );
+                }
+                if Instant::now() >= deadline {
+                    return format!(
+                        "the stand-in was still there {ISOLATED_CHILD_COLLECTION_BOUND:?} after \
+                         this test's SIGKILL"
+                    );
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+        }
+
+        fn assert_either_ending_and_no_other_is_accepted(through_identity: bool) {
+            let lease = std::ffi::CString::new("/runs/01J/cleanup.lock").expect("a path");
+            let report = describe_ready_wait(
+                "reaper",
+                ReadyWait::SetupFailed(SetupFailure {
+                    step: SetupStep::LockCleanupLease,
+                    index: 0,
+                    errno: libc::EWOULDBLOCK,
+                }),
+                std::slice::from_ref(&lease),
+            );
+            let message =
+                |end: HelperEnd| format!("{report}; ending it: {}", describe_helper_end(end));
+
+            let accepted =
+                [ReportedEnding::ItsOwnExit, ReportedEnding::TheParentsKill].map(|ending| {
+                    let (end, left) = a_stand_in_reaper_ended_by(ending);
+                    assert_eq!(
+                        end.through_identity, through_identity,
+                        "the stand-in was ended on the other path{left}: {end:?}"
+                    );
+                    assert_eq!(
+                        reported_ending(&message(end), through_identity),
+                        Some(ending),
+                        "a stand-in ended by {ending:?} was not accepted{left}: {}",
+                        message(end)
+                    );
+                    end
+                });
+
+            let ended_as = |kill_errno, waited, wait_errno, status| HelperEnd {
+                kill_errno,
+                waited,
+                wait_errno,
+                status,
+                through_identity,
+            };
+            let collected: libc::pid_t = 4321;
+            let exited = |code: libc::c_int| Some(code << 8);
+            let refused = [
+                ("another exit status", ended_as(0, collected, 0, exited(7))),
+                (
+                    "an exit status that only begins with 1",
+                    ended_as(0, collected, 0, exited(17)),
+                ),
+                (
+                    "another signal",
+                    ended_as(0, collected, 0, Some(libc::SIGTERM)),
+                ),
+                (
+                    "a child that stopped rather than ended",
+                    ended_as(0, collected, 0, Some((libc::SIGSTOP << 8) | 0x7f)),
+                ),
+                (
+                    "a collection that asked for no status",
+                    ended_as(0, collected, 0, None),
+                ),
+                (
+                    "a child still there when the wait gave up",
+                    ended_as(0, STILL_THERE_AT_THE_BUDGET, 0, None),
+                ),
+                (
+                    "a wait that collected nothing",
+                    ended_as(0, -1, libc::ECHILD, None),
+                ),
+                (
+                    "a SIGKILL that answered ESRCH",
+                    ended_as(libc::ESRCH, collected, 0, exited(1)),
+                ),
+            ];
+            for (what, end) in refused {
+                assert_eq!(
+                    reported_ending(&message(end), through_identity),
+                    None,
+                    "{what} was accepted: {}",
+                    message(end)
+                );
+            }
+            for end in accepted {
+                let other = HelperEnd {
+                    through_identity: !through_identity,
+                    ..end
+                };
+                assert_eq!(
+                    reported_ending(&message(other), through_identity),
+                    None,
+                    "the other path's words were accepted: {}",
+                    message(other)
+                );
+            }
+            let [_, killed] = accepted;
+            let continued = format!("{}; and then more", message(killed));
+            assert_eq!(
+                reported_ending(&continued, through_identity),
+                None,
+                "an ending followed by more was accepted: {continued}"
+            );
+            assert_eq!(
+                reported_ending(&report, through_identity),
+                None,
+                "a message with no ending was accepted: {report}"
+            );
+        }
+
+        #[test]
+        fn a_reaper_that_reported_may_end_by_its_own_exit_or_the_parents_kill_and_nothing_else() {
+            assert_either_ending_and_no_other_is_accepted(the_identity_path_is_on());
         }
 
         #[test]
@@ -6923,6 +7152,34 @@ mod termination {
                 ],
             );
             assert_fixture_succeeded("identity READY-failure helper", &output);
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        #[ignore = "subprocess helper"]
+        fn reported_ending_identity_helper() {
+            if fixture_variable("UPSTROKE_REPORTED_ENDING_IDENTITY_HELPER").is_none() {
+                return;
+            }
+            assert!(
+                helper_identity_path_on(),
+                "this fixture is about the path on"
+            );
+            assert_either_ending_and_no_other_is_accepted(true);
+            assert_no_child_left("the stand-in reapers");
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn a_reaper_that_reported_may_end_either_way_through_its_identity() {
+            let output = run_fixture(
+                "reported_ending_identity_helper",
+                &[
+                    ("UPSTROKE_REPORTED_ENDING_IDENTITY_HELPER", "1"),
+                    IDENTITY_ON,
+                ],
+            );
+            assert_fixture_succeeded("reported-ending identity helper", &output);
         }
 
         #[cfg(target_os = "linux")]

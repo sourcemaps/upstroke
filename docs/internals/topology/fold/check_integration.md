@@ -125,6 +125,30 @@ validator.
 
 --- merge_verification_interrupted ------------------------------------
 
+## `impl RunState` › `pub(super) fn check_verification_charged(`
+
+--- merge_verification_charged ----------------------------------------
+
+The known-spend record. Refused with no pass; refused for a sequence that already has one
+(`check_spend_unrecorded`); otherwise admitted only for the open `VerificationStarted` transaction of
+its sequence. That includes a verification a lineage failure cancelled: the fold holds its transaction
+open until its one terminal, so the record of the passes it charged is admitted before
+`merge_verification_interrupted`, and this check does not call `check_candidate_not_failed`. So a
+sequence a terminal settled, an authorized publication (whose `merge_prepared` carries the passes), any
+other sequence, a finished run and a poisoned fold all refuse it.
+
+## `impl RunState` › `pub(super) fn check_spend_unrecorded(`
+
+The one rule that keeps a charged pass from being counted twice: once a sequence has its
+`merge_verification_charged`, nothing that carries a verification's passes is admitted for it. The
+record's own check calls it, and so do the three terminals that carry passes, at the point each has
+found the open `VerificationStarted` transaction: `check_verification_unavailable` after its class
+check, `check_merge_prepared`'s verified arm (`StaleClean | AlreadyPresent`) and
+`check_merge_rejected`'s code-rejection arm. `merge_verification_interrupted` carries none and is
+still admitted, which is what recovery step (f) and a halt's closure append. The rule is the fold's,
+so it holds live (`emit` plans before it writes) and on replay, where a log holding a second record or
+a carrying terminal after one is refused at that line.
+
 ## `impl RunState` › `fn check_candidate_not_failed(`
 
 The rule that gives a verification a lineage failure cancelled its one
@@ -140,11 +164,14 @@ verification of its lineage: the task's own generation closed at
 and a candidate whose task has already failed holds no queue position, so
 no verification starts for it. The verified arm of `check_merge_prepared`,
 the code arm of `check_merge_rejected` and `check_verification_unavailable`
-call it once they know the transaction is `VerificationStarted`; the
-interrupted terminal's check does not. Without it the held transaction
-would admit a verified publication of the failed task's candidate, and
-the other two would be refused only incidentally, by the repair's failed
-ancestor and by the lost queue position.
+call it once they know the transaction is `VerificationStarted`, each
+immediately before its `check_spend_unrecorded`, so a failed task's
+carrying terminal is refused with this error whether or not the
+verification's `merge_verification_charged` was recorded; neither the
+interrupted terminal's check nor the record's calls it. Without it the
+held transaction would admit a verified publication of the failed task's
+candidate, and the other two would be refused only incidentally, by the
+repair's failed ancestor and by the lost queue position.
 
 ## `impl RunState` › `pub(super) fn check_merge_prepared(&self, prepared: &MergePrepared) -> Result<(), FoldErr…`
 

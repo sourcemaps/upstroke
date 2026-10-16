@@ -8,6 +8,8 @@ LEGACY-EFFECT: this module is in the **frozen legacy section** of
 `effects/allowlist.toml`, which carries its justification and the condition
 under which the section shrinks. `decisions.effect_site_inventory.mechanism` (2).
 
+**Adopted on 2026-10-11 with decision O8 (decision B), as an agent decision by `pr11_decide_d` under the owner's delegation of 2026-10-11 (babysit's `0194a1e4…`).** Follow-up D (#331, a draft) amends this module's freeze; the amendment is its row's text in `effects/allowlist.toml`, marked there as adopted, and the record `reviews/2026-10-02-pr11-follow-up-d-record.md` (§1 to §4, and its Implementation section) is why. Nothing it adds is in force until the pull request merges. In this module it is the kept-pin lookup and its warning, R-D1's guarded discard of the attempt in flight (part G4) and its three warnings, and the moved-branch refusal's `git update-ref`, below.
+
 ## `pub fn resume(opts: &ResumeOptions) -> Result<RunReport, UpstrokeError> {`
 
 The v0.1 conductor's public resume entry points -- `resume`, `resume_with` and
@@ -193,6 +195,11 @@ killed engine's durable snapshot registrations are reclaimed first.
 §15's check, before anything is discarded: if HEAD moved, refusing has
 to leave the operator's tree exactly as they left it.
 
+Its refusal names the command that moves the branch back without touching the
+checkout, `git update-ref refs/heads/<branch> <recorded>` (R-D1's text hardening): the
+checkout may hold an interrupted attempt's output, and `git reset --hard`, the common way
+to do what the refusal says, would empty it (A2h). Part K keeps that output pinned anyway.
+
 ## `let mut adopted = None;`
 
 A schema-3 successful settlement durably names the exact commit object
@@ -207,12 +214,97 @@ A pin with no successful settlement is from a crash between preparing
 the object and appending AttemptFinished. It has no authority to move
 HEAD and is removed with an expected-old-value CAS before retrying.
 
-## `let discarded = workspace.uncommitted_summary()?;`
+## `let mut kept = Vec::new();`
+
+Follow-up D's lookup (adopted with O8 on 2026-10-11 as an agent decision by `pr11_decide_d`
+under the owner's delegation of 2026-10-11 (babysit's `0194a1e4…`), and in force only from
+#331's merge). For every attempt the replayed
+log records — each task's attempts from the first to the last one started, which
+`AttemptStarted` sets and the coordinator numbers contiguously — the resume asks
+`prepared_pin_target` whether the coordinator kept that attempt's candidate at its
+prepared pin followed by `KEPT_PIN_SUFFIX`. Every name the coordinator can write is
+among them, because it writes a kept pin only for the attempt it is running, whose
+`AttemptStarted` is already in the log. It reads the replayed state and changes no
+event.
+
+It looks at every recorded attempt, not only those still in flight: the resume's
+own `AttemptInterrupted` clears an attempt's in-flight state, so a resume that
+settled the attempt and then failed before its report would otherwise lose the pin
+for every later resume (FUD-D1-PINWARN;
+`a_kept_pin_is_named_after_a_resume_that_failed`). It costs three Git processes per
+recorded attempt per resume.
+
+A resume that refuses earlier — at the reclaim above, while a registration stays
+torn — never reaches this lookup and names nothing, and one whose later step fails
+returns that error without its warnings, as every legacy warning does (R-D5). The
+next resume that reports names every pin again.
+
+## `let discarded = workspace.uncommitted_summary().map_err(|error| {`
 
 Crash residue: a dead agent's half-written edits. §14 rolls a failed
 attempt back to the last commit, and an attempt that never reported is
 no different — the session that would have explained these edits is
 gone, so nothing can verify them.
+
+R-D1's part G4 (adopted with O8 on 2026-10-11 as an agent decision by `pr11_decide_d` under the
+owner's delegation of 2026-10-11 (babysit's `0194a1e4…`), and in force only from #331's
+merge): when the checkout holds uncommitted paths and
+the replayed log records exactly one attempt in flight, the resume removes them only through
+`Workspace::discard_into_kept_pin`, with that attempt's kept pin (the prepared pin followed
+by `KEPT_PIN_SUFFIX`, message `[upstroke] kept: <task> attempt <n>`) and the run's public
+directory with the stem `kept-<task index>-<attempt>`, where the pin's copies are. It writes
+the pin when there is none, puts a missing pin back from a copy, checks an existing one,
+writes and syncs a fresh copy, and reverts exactly the captured changes; when that refuses,
+the resume refuses, naming the cause, the pin and the directory, and discards nothing else.
+More than one attempt in flight refuses (the legacy coordinator runs one at a time); none
+discards as before. The task's index comes from `replayed.state.index_of`, with no
+`.expect()`. It runs after the orphan prepared pin's removal, so N2d's orphan is gone first,
+and before the lookup. The discard warning and `RunResumed.discarded` list the paths found
+less those G4 left in place.
+
+When the listing itself fails and the log records exactly one attempt in flight, the resume
+refuses before discarding anything (F1 of the owner's full review of #331,
+`FUD-FULL-FILTERPIN`, repaired under the owner's instruction "we fix F1 and record the rest").
+The refusal names the attempt and the listing's error, and says that whatever the attempt left
+stays in the checkout, that `git clean` or `git reset --hard` would lose any of it no kept pin
+holds, what to fix first, and that the resume then discards none of it before the attempt's kept
+pin and a copy of that pin it writes hold it, which is part G4 once the listing passes. The
+listing fails when a path carries a clean or smudge filter attribute: `uncommitted_summary`
+refuses before `git status` could run the filter's configured code, and N1's pin, refused for the
+same reason, left the output in the checkout only. With no attempt in flight, or more than one,
+the listing's error returns as before. `in_flight` is read before the listing so that its refusal
+can name the attempt.
+
+## `if !kept.is_empty() {`
+
+One warning names every kept pin found — of an attempt a worktree-registry refusal, an error
+or an interruption stopped before settlement (parts N and G4 keep those too) — with the commands that take its output
+back as the repository records it: `git restore --source=<pin> --staged --worktree
+-- .` from the checkout's root while `HEAD` is still the pin's parent, and
+`git cherry-pick --no-commit <pin>` on a later `HEAD`, each carrying
+`--no-replace-objects -c core.useReplaceRefs=false`, the replacement controls every
+legacy Git child carries (FUD-D1-REPLACE). Both restore deletions. The restore
+reproduces the pin's index exactly; the working files come back through the
+checkout's own end-of-line and filter conversions, so their bytes are worth
+comparing (FUD-D4-RESTOREBYTES). A configured merge driver can make the cherry-pick
+succeed having applied none of the kept change, so the warning asks for a look at
+what it staged before the pin is removed (FUD-D4-CHERRYPICKMERGE). No resume
+removes a kept pin; `git update-ref -d <pin>` does, and the next resume's lookup
+then finds no ref and stops naming it. A pin whose parent is neither `HEAD` nor one of its
+ancestors was captured while another client had moved the branch (part K writes it
+whatever `HEAD` is); the restore still takes back exactly the tree it holds, and the
+warning says so (A1t).
+
+## `if let Some((task, number, pin_ref, held)) = &guarded {`
+
+The guarded discard's warnings, after the lookup's: when it put a missing pin back, one
+names the copy the pin came back from (`KeptDiscard::restored_from`); one names the fresh
+copy it wrote, with the `git fetch <copy> <pin>:<pin>` from the checkout's root that puts
+the pin back should it ever be removed; and one lists what stayed in the checkout — files no
+capture could take, files an ignore rule covered, files written after the capture, new files
+the pin never held — which nothing removed and the task's next attempt sees. A resume whose
+later step fails returns that error without these warnings, as every legacy warning (R-D5);
+`RunResumed.discarded` still records what was discarded.
 
 ## `let sleeper = harness.sleeper.unwrap_or(&RealSleeper);`
 

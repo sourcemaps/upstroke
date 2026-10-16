@@ -528,9 +528,10 @@ but a [`ReferencedCandidate`] reaches the append.
 
 A missing or mismatched object, a ref already at another sha, or a Git error.
 
-## `verify_object(manager, &candidate, &base, &tree)?;`
+## `verify_object(manager, hooks.effects(), &candidate, &base, &tree)?;`
 
-"verify object".
+"verify object", its registry reads waiting through the settlement's hooks (the
+follow-up B record's §9.13, R1).
 
 ## `match manager.direct_ref_target(candidate.candidate_ref.as_str())? {`
 
@@ -783,7 +784,7 @@ sites is `object_exists` and nothing else. Reusing it rather than asking Git
 again here keeps one answer to "is the candidate commit in this
 repository?".
 
-## `let parent = manager.commit_parent(candidate.commit_sha.as_str())?;`
+## `let parent = manager.commit_parent_pausing(effects, candidate.commit_sha.as_str())?;`
 
 **Existence is not identity.** DESIGN.md §15: `candidate_prepared`
 records the complete attempt/base/commit/tree identity "so resume adopts
@@ -796,7 +797,7 @@ candidate is a commit **on** that base, so an object that is not a commit
 has no parent to read and one that is a different commit has the wrong
 parent. Neither can pass.
 
-## `let found = manager.commit_tree_sha(candidate.commit_sha.as_str())?;`
+## `let found = manager.commit_tree_sha_pausing(effects, candidate.commit_sha.as_str())?;`
 
 **And the tree, which is what was actually judged.** The parent says the
 commit sits where the work started; it says nothing about the content.

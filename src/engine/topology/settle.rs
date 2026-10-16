@@ -271,6 +271,27 @@ pub fn retry(
     hooks: &mut dyn EffectHooks,
     request: &RetryRequest,
 ) -> Result<RetryOutcome, UpstrokeError> {
+    let begun = retry_begin(fold, reservations, request)?;
+    let verified = worktrees.verify(
+        hooks,
+        &request.slot,
+        &Quiescence::HoldsTree(request.retained_tree.clone()),
+    );
+    retry_end(fold, reservations, request, begun, verified)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetryBegun {
+    generation: GenerationId,
+    session: SessionId,
+    attempt: AttemptNumber,
+}
+
+pub fn retry_begin(
+    fold: &TopologyFold,
+    reservations: &mut Reservations,
+    request: &RetryRequest,
+) -> Result<RetryBegun, UpstrokeError> {
     let epoch = fold
         .epoch()
         .ok_or_else(|| refused("the run has not started"))?;
@@ -281,12 +302,26 @@ pub fn retry(
         ReservationKind::Retry,
         &super::select::Entitlements::of(fold),
     )?;
+    Ok(RetryBegun {
+        generation,
+        session,
+        attempt,
+    })
+}
 
-    let verified = match worktrees.verify(
-        hooks,
-        &request.slot,
-        &Quiescence::HoldsTree(request.retained_tree.clone()),
-    ) {
+pub fn retry_end(
+    fold: &TopologyFold,
+    reservations: &mut Reservations,
+    request: &RetryRequest,
+    begun: RetryBegun,
+    verified: Result<Result<(), VerifyFailure>, UpstrokeError>,
+) -> Result<RetryOutcome, UpstrokeError> {
+    let RetryBegun {
+        generation,
+        session,
+        attempt,
+    } = begun;
+    let verified = match verified {
         Ok(verified) => verified,
         Err(error) => {
             reservations.cancel(request.key, ReservationKind::Retry)?;
