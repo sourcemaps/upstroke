@@ -12398,6 +12398,7 @@ mod tests {
         inner: crate::engine::topology::seams::HarnessTopologyHooks,
         harness: std::sync::Arc<std::sync::Mutex<crate::topology::effects::HookHarness>>,
         point: crate::topology::effects::SubEffectPoint,
+        declined: bool,
         armed: bool,
     }
 
@@ -12424,10 +12425,16 @@ mod tests {
 
         fn folded(&mut self, fold: &TopologyFold, events: &[TopologyEvent]) {
             self.inner.folded(fold, events);
+            let Some(last) = events.last() else {
+                return;
+            };
+            if last.body.kind() == "question_answered" {
+                self.declined = true;
+            }
             if !self.armed
-                && events
-                    .last()
-                    .is_some_and(|event| event.body.kind() == "question_answered")
+                && self.declined
+                && matches!(&last.body, TopologyEventBody::MergeVerificationCharged { data }
+                    if data.sequence == SequenceId(1))
             {
                 self.armed = true;
                 self.harness
@@ -12479,19 +12486,24 @@ mod tests {
                 inner: wide.env.hooks(),
                 harness: std::sync::Arc::clone(&wide.env.harness),
                 point,
+                declined: false,
                 armed: false,
             };
             let pipelines = wide.env.pipelines();
-            let error = wide
-                .run
-                .run_concurrently(
-                    &wide.env.seams(),
-                    &pipelines,
-                    &mut hooks,
-                    Some(&mut scheduler),
-                )
-                .expect_err("the terminal's append error ends the command");
+            let result = wide.run.run_concurrently(
+                &wide.env.seams(),
+                &pipelines,
+                &mut hooks,
+                Some(&mut scheduler),
+            );
             drop(scheduler);
+            assert!(
+                hooks.armed,
+                "{shape}: the verification's `merge_verification_charged` was folded after the \
+                 decline, so the fault was armed on the next append, the cancelled verification's \
+                 terminal"
+            );
+            let error = result.expect_err("the terminal's append error ends the command");
             let text = error.to_string();
             assert!(
                 text.contains("merge_verification_interrupted")
@@ -12512,7 +12524,7 @@ mod tests {
                 Some(if present {
                     &"merge_verification_interrupted"
                 } else {
-                    &"question_answered"
+                    &"merge_verification_charged"
                 }),
                 "{shape}: the surviving prefix is the one the report names: {kinds:?}"
             );
@@ -12553,6 +12565,16 @@ mod tests {
                 vec!["merge_verification_interrupted"],
                 "{shape}: one terminal for sequence 1: {:?}",
                 kinds_of(&events)
+            );
+            recorded_before_its_terminal(
+                &events,
+                position(&kinds_of(&events), "question_answered", 0),
+                SequenceId(1),
+                if present {
+                    LINEAGE_CANCELLED
+                } else {
+                    RECOVERY_CANCELLED
+                },
             );
             replay_equals_live(&resumed);
         }
