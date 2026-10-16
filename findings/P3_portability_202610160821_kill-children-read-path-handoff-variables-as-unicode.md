@@ -14,14 +14,27 @@ guard: orch_pr11b routes the distinct test-portability repair or sweep and reass
 ## Failure sequence
 
 **Kill children read a path-valued handoff variable with `std::env::var`, which refuses a value that is not valid
-UTF-8.** Static, per site. The mechanism was executed only on #332's C10, which is not on master and is excluded
+UTF-8.** Static, per site, for rows 1-13. Rows 14 and 15 were run under a non-UTF-8 `TMPDIR` on Linux on 2026-10-16
+(Evidence). Until then the mechanism had been executed only on #332's C10, which is not on master and is excluded
 here.
 
 a test host's temporary directory has a path that is not valid UTF-8, so the fixture root or handoff directory under
 it does too -> the parent passes that path to its kill child losslessly (`as_os_str()`, or `Command::env` with a
 `Path`) -> the child reads it with `std::env::var(..).expect(..)` -> `env::var` returns `Err(NotUnicode)` and the
-child panics before the point where the parent injects its kill -> the parent's assertion about how its child ended
-fails, and the test fails on a valid path.
+child panics before the point where the parent injects its kill, so it ends as a failed test, not by the kill's
+abort -> the test fails on a valid path, at one of two checks:
+
+- **Rows 1-13, static: the parent's assertion about how its child ended**, provided the parent's setup completes and
+  its child is spawned and reaches its path read. Each parent asserts `workspace_manager::fixture::died_by_abort` on
+  the child's exit status. That holds only for the abort the injected kill is (`SIGABRT` on Unix), and a panic does
+  not raise it.
+- **Rows 14 and 15, executed: a later residue or event-log check.** Their termination checks accept any unsuccessful
+  end, so the panic passes them: settlement's `assert_ne!(output.code, Some(0))` and its check that the child did not
+  run past its injection (`src/engine/topology/settle/tests.rs:1586`, `:1593`), and publication's
+  `assert!(!status.success())` (`src/rundir/tests.rs:4899`). The test then fails on what the child never wrote:
+  settlement's read of `public/events.jsonl` (`settle/tests.rs:1602`, which each of the three tests calling row 14's
+  parent reaches next; executed through one of them), and publication's check that the staged file survived
+  (`rundir/tests.rs:4900`).
 
 ## The inventory: 15 children, each paired with a lossless parent setter
 
@@ -70,10 +83,27 @@ which is not on master.
 - The child's panic text is not in either saved output. That `env::var` returned `NotUnicode` is read from the source,
   not observed.
 
-**The 15 sites above are static, by pairing.** None was run under a non-UTF-8 path.
+**Executed on 2026-10-16: rows 14 and 15, Linux**, in #343's regular filing review of `e74b1823` (g6fil1), one test
+each, `TMPDIR` named with byte 0xff, through `upstroke-build`:
+`rundir::tests::a_kill_between_stage_and_rename_leaves_only_the_tmp` and
+`engine::topology::settle::tests::kill_after_failed_settlement_rematerializes_question`.
 
-**Platforms.** Linux is the executed case, and only for C10. No cross-target build or native run of these 15 sites
-under a non-UTF-8 path exists. Other platforms are untested here.
+- Both got past their termination checks and failed after them, `test result: FAILED. 0 passed; 2 failed`:
+  publication at `src/rundir/tests.rs:4900:9`, "`marker`: the staged file survives the kill", and settlement at
+  `src/engine/topology/settle/tests.rs:1602:72`, "the log: Os { code: 2, kind: NotFound, ... }".
+- The children's panic text is not in the saved output. That `env::var` returned `NotUnicode` is read from the
+  source, not observed. Publication's loop stopped at its first site, `marker`; the other two tests that call row
+  14's parent were not run.
+- The log is the review's retained reproduction log, held by orch_pr11b as a present-time copy, sha256 `b4b4faf5…`
+  (`~/orch-pr11/logs/orch-g6-filing/review-evidence/g6fil1-regular-cited/review-t1-nonutf8.log`, beside its note
+  `CITED-LOG-NOTE.md`, sha256 `58525c4c…`): a copy made after the run, not execution-time custody. Its exit code,
+  101, is the review's own record.
+
+**Rows 1-13 are static, by pairing.** None of them was run under a non-UTF-8 path.
+
+**Platforms.** Linux is the executed case: for C10, and for rows 14 and 15 on 2026-10-16. No cross-target build or
+native run of rows 1-13 under a non-UTF-8 path exists, nor of rows 14 and 15 on another platform. Other platforms are
+untested here.
 
 ## Provenance
 
@@ -91,7 +121,11 @@ P3 `portability`: test-only, no product behaviour.
   root handoff. A separate cause, with its own inventory.
 - `G6-PRIVATE-DIR-LOSSY-LOCATOR`: under a non-UTF-8 `TMPDIR`, several of these tests also put their run's private
   directory there. With this read repaired they would meet that finding next, so a full non-UTF-8 sequence depends on
-  its disposition.
+  its disposition. For row 7 not necessarily next: its parent resumes in-process
+  (`src/engine/topology/recover/tests.rs:7833`, through `:7107-7113`) before it spawns its child (`:7842`), on a
+  fixture whose locator is recorded with `private_dir.display().to_string()` (`:194-197`), so that finding's refusal
+  may come first, before the child is spawned. Static and conditional, not executed; no other row's setup was assessed
+  for it (`~/orch-pr11/logs/pr11_g6_filing_fix1/q2/PER-ROW-RECORD-q2.md`, NOTE A).
 - `PR329-THE-GIT-FLOOR-TEST-HELPER-SPLICES-PATHS-INTO-SHELL-TEXT`: the same class, a test helper reading a path-valued
   variable with `env::var`, at a different site.
 - `PR334-RECORD-KILL-CHILD-GITDIR-OVER-THE-WINDOWS-BUDGET`, closed: row 3's child, for a different cause (a Windows
