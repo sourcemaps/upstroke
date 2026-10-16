@@ -5512,73 +5512,6 @@ pub(crate) mod tests {
         out
     }
 
-    fn consumes_a_sequence(candidate: &Candidate, after: SequenceId) -> bool {
-        candidate.event.body.sequence() == Some(SequenceId(after.0 + 1))
-            && matches!(
-                candidate.event.body,
-                TopologyEventBody::MergeVerificationStarted { .. }
-                    | TopologyEventBody::MergePrepared { .. }
-                    | TopologyEventBody::MergeRejected { .. }
-            )
-    }
-
-    fn later_start(fold: &TopologyFold, after: SequenceId) -> Option<(TopologyFold, String)> {
-        use crate::topology::registry::{Lineage, Origin, repair_display_id};
-        let registry = fold.registry()?;
-        let merged = registry.entries().iter().find(|entry| {
-            entry.lineage.is_none() && fold.task_state(entry.key) == Some(TaskState::Merged)
-        })?;
-        let key = TaskKey(u32::try_from(registry.len()).ok()?);
-        let mut entry = merged.clone();
-        entry.key = key;
-        entry.display_id =
-            crate::ir::TaskId::from(repair_display_id(1, &merged.display_id).as_str());
-        entry.origin = Origin::MergeRepair;
-        entry.deps = Vec::new();
-        entry.display_deps = Vec::new();
-        entry.lineage = Some(Lineage {
-            root: merged.key,
-            parent: merged.key,
-            index: 1,
-        });
-        let spawn = ev(TopologyEventBody::TaskSpawned {
-            data: Box::new(crate::topology::events::TaskSpawned {
-                spawn: crate::topology::events::FrozenSpawn {
-                    key,
-                    entry,
-                    admission: crate::topology::events::SpawnAdmission::Runnable,
-                },
-            }),
-        });
-        let mut next = applied(fold, &[spawn])?;
-        for _ in 0..16 {
-            let candidates = classes(&next);
-            if let Some(consuming) = candidates.iter().find(|candidate| {
-                consumes_a_sequence(candidate, after)
-                    && next.plan_transition(&candidate.event).is_ok()
-            }) {
-                let label = consuming.label.clone();
-                return Some((
-                    applied(&next, std::slice::from_ref(&consuming.event))?,
-                    label,
-                ));
-            }
-            let step = candidates.into_iter().find(|candidate| {
-                candidate.event.body.key() == Some(key)
-                    && [
-                        "task_dispatched",
-                        "attempt_started",
-                        "candidate_prepared",
-                        "task_candidate_created",
-                    ]
-                    .contains(&candidate.event.body.kind())
-                    && next.plan_transition(&candidate.event).is_ok()
-            })?;
-            next = applied(&next, &[step.event])?;
-        }
-        None
-    }
-
     #[test]
     fn a_charged_record_is_admitted_for_the_open_verification_and_moves_only_charged() {
         let mut admitted = 0_usize;
@@ -5613,54 +5546,161 @@ pub(crate) mod tests {
         assert!(admitted > 100, "the sweep was not vacuous: {admitted}");
     }
 
+    fn refused_for_the_failed_candidate(
+        error: &crate::topology::fold::FoldError,
+        kind: &str,
+    ) -> bool {
+        matches!(error,
+            crate::topology::fold::FoldError::InconsistentRecord { kind: refused, detail }
+                if *refused == kind
+                    && detail.contains("failed while integration sequence")
+                    && detail.contains("was verifying its candidate"))
+    }
+
+    fn opened_while(fold: &TopologyFold, start: &TopologyEvent, open: SequenceId) -> bool {
+        matches!(fold.plan_transition(start),
+            Err(crate::topology::fold::FoldError::TransactionAlreadyOpen { open: held, .. })
+                if held == open.0)
+    }
+
     #[test]
-    fn a_charged_record_is_admitted_for_the_verification_a_lineage_failure_released_until_a_sequence_is_consumed_or_the_run_resumes()
+    fn a_lineage_failure_keeps_its_verification_open_for_the_record_and_the_interrupted_terminal_and_refuses_the_carrying_ones_with_the_guard_error()
      {
-        let released = released_verifications();
-        assert!(
-            !released.is_empty(),
-            "a declined lineage sibling released an explored verification"
-        );
-        let mut consumed = 0_usize;
-        for case in &released {
-            assert_eq!(case.fold.transaction(), None);
-            assert_eq!(
-                case.fold.next_sequence(),
-                Some(SequenceId(case.sequence.0 + 1))
-            );
-            let record = verification_charged(case.sequence.0, 1);
-            case.fold
-                .plan_transition(&record)
-                .expect("admitted for the released sequence while it is the latest");
-            let resumed = applied(
-                &case.fold,
-                &[run_resumed(run_started_unauthenticated().runner)],
-            )
-            .expect("the run resumes");
-            assert!(
-                matches!(
-                    refusal_of(&resumed, &record),
-                    crate::topology::fold::FoldError::WrongSequence { .. }
-                ),
-                "refused after `run_resumed`"
-            );
-            if let Some((next, label)) = later_start(&case.fold, case.sequence) {
+        let mut covered: BTreeSet<&'static str> = BTreeSet::new();
+        let mut cancelled_cases = 0_usize;
+        for member in family() {
+            for state in member.census.states() {
+                let Some(sequence) = open_verification(&state.fold) else {
+                    continue;
+                };
+                if !unrecorded_state(&state.fold) {
+                    continue;
+                }
+                let Some(planted) = declined_sibling_of(&state.fold) else {
+                    continue;
+                };
+                let Some(cancelled) = applied(&state.fold, &planted) else {
+                    continue;
+                };
+                let open = cancelled.transaction().unwrap_or_else(|| {
+                    panic!("state {}: the decline keeps the transaction", state.id)
+                });
                 assert_eq!(
-                    next.next_sequence(),
-                    Some(SequenceId(case.sequence.0 + 2)),
-                    "`{label}` consumed the next sequence"
+                    Some(open),
+                    state.fold.transaction(),
+                    "state {}: the cancelled verification's transaction is the one it started",
+                    state.id
+                );
+                assert_eq!(
+                    cancelled.task_state(open.candidate.key),
+                    Some(TaskState::Failed),
+                    "state {}: the candidate's task failed with its lineage",
+                    state.id
+                );
+                let start = verification_started(
+                    sequence.0 + 1,
+                    open.candidate.key,
+                    open.candidate.generation.0,
+                    "pins/later",
+                    open.candidate.commit_sha.clone(),
+                    open.candidate.commit_sha.clone(),
                 );
                 assert!(
-                    matches!(
-                        refusal_of(&next, &record),
-                        crate::topology::fold::FoldError::WrongSequence { .. }
-                    ),
-                    "refused once `{label}` consumed a sequence"
+                    opened_while(&cancelled, &start, sequence),
+                    "state {}: a later start is refused while the cancelled verification is open",
+                    state.id
                 );
-                consumed += 1;
+
+                let record = verification_charged(sequence.0, 1);
+                let recorded =
+                    applied(&cancelled, std::slice::from_ref(&record)).unwrap_or_else(|| {
+                        panic!(
+                            "state {}: the record is admitted for the open transaction",
+                            state.id
+                        )
+                    });
+                let mut trace = state.trace.clone();
+                trace.extend(planted);
+                trace.push(record);
+                assert!(
+                    opened_while(&recorded, &start, sequence),
+                    "state {}",
+                    state.id
+                );
+
+                for candidate in classes(&state.fold) {
+                    let carrying = match &candidate.event.body {
+                        TopologyEventBody::MergeVerificationUnavailable { data } => {
+                            data.sequence == sequence
+                        }
+                        TopologyEventBody::MergePrepared { data } => {
+                            data.sequence == sequence
+                                && data.disposition != PreparedDisposition::Fast
+                        }
+                        TopologyEventBody::MergeRejected { data } => {
+                            data.sequence == sequence
+                                && matches!(
+                                    data.disposition,
+                                    crate::topology::events::RejectionDisposition::CodeRejected { .. }
+                                )
+                        }
+                        _ => false,
+                    };
+                    if !carrying || state.fold.plan_transition(&candidate.event).is_err() {
+                        continue;
+                    }
+                    let kind = candidate.event.body.kind();
+                    for (when, fold) in [("before the record", &cancelled), ("after it", &recorded)]
+                    {
+                        let live = refusal_of(fold, &candidate.event);
+                        assert!(
+                            refused_for_the_failed_candidate(&live, kind),
+                            "state {}: `{}` {when}: {live}",
+                            state.id,
+                            candidate.label
+                        );
+                    }
+                    assert_eq!(
+                        replayed_refusal(member.shape, &trace, &candidate.event),
+                        refusal_of(&recorded, &candidate.event)
+                    );
+                    covered.insert(kind);
+                }
+
+                let settled = ev(TopologyEventBody::MergeVerificationInterrupted {
+                    data: crate::topology::events::MergeVerificationInterrupted {
+                        sequence,
+                        detail: "the census settles the cancelled verification".to_owned(),
+                    },
+                });
+                let ended =
+                    applied(&recorded, std::slice::from_ref(&settled)).unwrap_or_else(|| {
+                        panic!(
+                            "state {}: the interrupted terminal is admitted after the record",
+                            state.id
+                        )
+                    });
+                assert_eq!(ended.transaction(), None, "state {}", state.id);
+                assert!(
+                    !opened_while(&ended, &start, sequence),
+                    "state {}: the terminal closed the transaction",
+                    state.id
+                );
+                cancelled_cases += 1;
             }
         }
-        assert!(consumed > 0, "a later start was exercised");
+        assert!(
+            cancelled_cases > 0,
+            "a declined lineage sibling cancelled an explored verification"
+        );
+        assert_eq!(
+            covered.into_iter().collect::<Vec<_>>(),
+            vec![
+                "merge_prepared",
+                "merge_rejected",
+                "merge_verification_unavailable"
+            ]
+        );
     }
 
     #[test]
@@ -5779,15 +5819,15 @@ pub(crate) mod tests {
                 let live = refusal_of(&fold, &second);
                 assert!(
                     spend_already_recorded(&live, "merge_verification_charged"),
-                    "abandoned: {live}"
+                    "cancelled: {live}"
                 );
                 assert_eq!(replayed_refusal(case.shape, &trace, &second), live);
             }
-            cases.insert("abandoned");
+            cases.insert("cancelled");
         }
         assert_eq!(
             cases.into_iter().collect::<Vec<_>>(),
-            vec!["abandoned", "open", "resumed"]
+            vec!["cancelled", "open", "resumed"]
         );
     }
 
