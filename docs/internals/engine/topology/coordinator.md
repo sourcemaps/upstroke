@@ -434,6 +434,14 @@ result had arrived and the gate was draining attempt snapshots. The passes it ke
 for `finish`, which records them past the stop once every transition has returned, so this
 integration appends nothing after the stop (`O14B2-1`).
 
+The settlement of a verification a lineage failure cancelled takes nothing then either, and the
+interrupt guard is what keeps it off a stopped run: `registry_pause` stops a run only once an
+interrupt is recorded, and `verify` returns `Abandoned` only with none recorded, with no registry
+access between that return and the settlement. So a stop in the window after the lineage failure
+ends `verify` as interrupted, `finish` records the passes past the stop, the command ends with no
+terminal appended, and the next resume's recovery step (f) appends the cancelled verification's one
+terminal after the record.
+
 ## `impl Coordinator<'_>` › `fn idle(&mut self) -> Result<Progress, UpstrokeError> {`
 
 The idle-only arms, by the functions `step` runs: the backoff, the hard block, the closure. Any

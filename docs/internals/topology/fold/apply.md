@@ -119,14 +119,6 @@ cancellation: the transaction is `VerificationStarted` and its
 candidate's task is `Failed`, which only a lineage failure makes true,
 and `check_integration.rs` refuses the other three terminals for it.
 
-## `fail_lineage` › `self.abandoned = self`
-
-The released sequence is noted before the release, so that the coordinator, which holds the
-cancelled verification's charged passes only after this, can still record them against it
-(`merge_verification_charged`; `RunState::abandoned`). Nothing else about the release changes, and
-the released sequence still gets no terminal here, as before: that is the INV-07 assessment's
-question, which this change neither causes nor decides.
-
 ## `fail_lineage` › `let members: Vec<TaskKey> = self`
 
 Owned keys let each member's resources be consumed without retaining
@@ -205,12 +197,6 @@ authorizes no binding.
 The stop belongs to the epoch that hit the old ceiling; the next
 epoch starts without one, which is what makes "raise the budget and
 resume" the response to it.
-
-## `apply_resumed` › `self.abandoned = None;`
-
-A resume ends the incarnation that abandoned a verification, so a record for the released sequence is
-not admitted after it. `charged` is not cleared: across the resume the sequence's record still
-refuses a second one and a carrying terminal.
 
 ## `apply_resumed` › `self.wake_backoff();`
 
