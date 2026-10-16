@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- A decline, or a lineage member's failed settlement, that meets an open verification of its lineage now
+  cancels the verification instead of releasing it: the schema-4 fold keeps the transaction, and its
+  pipeline and merge entitlements, until its one terminal, `merge_verification_interrupted`, which the
+  coordinator appends once the verification's processes have ended, after any
+  `merge_verification_charged` record of the review passes it charged, (a halt's closure, or the next
+  resume's recovery, when no live process settles it) before the pin, staging worktree and snapshots are
+  reclaimed; the fold refuses that verification any other terminal, a new integration or the run's end
+  until then (INV-07, L13).
 - A schema-4 integration verification that ends with no terminal carrying the review passes it paid
   for — its own error after a pass was charged, a reviewer whose end the Runner did not establish, a
   halt, a shutdown, another pipeline's error, or a lineage failure that cancels it — now records
