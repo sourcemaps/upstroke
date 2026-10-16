@@ -661,8 +661,8 @@ impl Coordinator<'_> {
         let settled = self.run.integration_settled(key, terminal);
         let abandoned = self.abandoned.take() == Some(request.sequence);
         if settled.is_err() && abandoned && self.interrupt.is_none() {
-            self.run
-                .settle_cancelled_verification(request.sequence, self.seams, self.hooks)?;
+            let seams = self.seams;
+            super::run::settle_cancelled_verification(self, seams, request.sequence)?;
         }
         self.open_gate();
         match settled {
