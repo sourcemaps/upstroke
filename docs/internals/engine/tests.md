@@ -3174,6 +3174,47 @@ the real `git` with none of the engine child's own variables (`GIT_INDEX_FILE`, 
 client's would; without it a foreign `reset` meant for the checkout's index ran against the capture's private one.
 `kill -KILL $PPID` in an action kills the engine at that exact child.
 
+## `const EVIDENCE_HEAD: u16 = 2 * 1024;`
+
+What the shim-fired assertions of T-N1c (`a_branch_moved_during_the_capture_keeps_the_output_pinned`) and T-RD2-2b
+(`a_file_written_after_the_capture_is_never_written_over`) report when they fail. `assert_the_shim_fired` keeps each
+assertion's condition, `shim.fired(0)`, and its words, and appends `unfired_evidence`, which `assert!` evaluates only
+once the condition is false: a passing run reads nothing more. `#[track_caller]` keeps the panic's location at the
+test's own call. The fixture tree is reclaimed as the panic unwinds, so the message is where its files can still be
+seen; the reclaim itself is unchanged.
+
+Each line is a later observation, and none replaces the answer `exists()` gave: the marker and the shim's directory, by
+`lstat` alone; the child's report as `ChildEngine::run` returned it; then `calls.log`, the child's log, the generated
+script and the test's own paths (`.git/HEAD`; `deleted.txt` and the die-inside child's log). Only paths inside the
+fixture's tree, the shim directory's parent, are looked at, and only by their exact names: a path outside it, a
+component that is not a plain name, or a component on the way that `lstat` does not find to be a directory (a link among
+them) is refused unread, and nothing is listed. A file is opened only when `lstat` finds a regular file, and read only
+when the opened file has the same device and inode, so a link is not followed and a FIFO, socket, device or directory is
+not opened. A file of at most 8 KiB is read whole; a larger one only in its first 2 KiB and its last 6 KiB, each into a
+buffer allocated once at that size, the two ranges named. Its size and its modification and change times are compared
+across the read, and a difference is reported. The report, already in memory, is shown in the same windows. Bytes are
+shown escaped by `{:?}`; nothing is redacted; the whole text stops at 64 KiB with a line saying so. The window sizes are
+`u16` so that both `u64` and `usize` take them by `From`.
+
+What is missing, denied, refused, changed or truncated is reported as that, with the error's kind and text, and is not
+read as a cause. An I/O failure becomes text and a formatting failure a marked line, so the assertion's own panic still
+ends the test; an allocation failure aborts the process, as it would anywhere. Not closed: the window between the
+`lstat` and the open, since std names neither `O_NOFOLLOW` nor `O_NONBLOCK` and this module adds no FFI, so a FIFO or
+link put there by another actor at that moment would be opened; equal times do not prove a file unchanged; and what the
+files hold was written by processes that inherited the test's environment, which the evidence does not inspect.
+
+## `fn the_unfired_evidence_reports_missing_and_unreadable_files_as_such() {`
+
+The evidence's controls, each on a private scratch tree with its expected text written out: missing files, and an
+unreadable one (mode `000`, after checking that the mode bit binds); a 1 MiB `calls.log` shown in its two windows, each
+window's buffer of exactly its size, and a text past the cap cut with its line; a link as `calls.log`, a FIFO as the
+child's log (made by `mkfifo`; the evidence is awaited from a thread for at most 60 s, so a regression fails rather than
+hangs), a directory as the script, a link and a file on the way, and a path outside the tree, none of whose bytes
+appear. `the_shim_fired_assertion_fails_as_before_and_its_output_keeps_the_evidence` runs
+`unfired_evidence_child_fails_its_assertion` in a child of this test binary: the child's assertion fails as the two
+tests' would (exit 101), and its output holds the test's words and then the evidence; the same call passes once the
+marker exists.
+
 ## `struct PartWay {`
 
 What stops a first resume's discard part-way: on Unix the leftover's directory read-only, after checking the mode bit
