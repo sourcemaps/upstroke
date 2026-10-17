@@ -116,6 +116,9 @@ RUNNING = re.compile(r'\s*Running (?:unittests )?(\S+) \((.+)\)')
 LISTED = re.compile(r'(\S+): test')
 COUNTED = re.compile(r'([0-9]+) tests?, ([0-9]+) benchmarks?')
 HEADER = re.compile(r'running ([0-9]+) tests?')
+# libtest writes this to stderr, with no newline, when it parses `--logfile`, before its own stdout opens with
+# `\nrunning N tests`: in the run's combined output it is the line before the header, or the header's prefix.
+DEPRECATION = 'warning: `--logfile` is deprecated'
 SUMMARY = re.compile(
     r'test result: (ok|FAILED)\. ([0-9]+) passed; ([0-9]+) failed; ([0-9]+) ignored; '
     r'([0-9]+) measured; ([0-9]+) filtered out; finished in [0-9.]+s'
@@ -715,6 +718,8 @@ def read_leg(path, shard, attempt, table, env, head, blobs):
                 % (at, len(harness), len(wanted), sample(harness - wanted), sample(wanted - harness))
             )
         lines = [line for line in bodies['run'] if line.strip()]
+        if lines and lines[0].startswith(DEPRECATION):
+            lines = ([lines[0][len(DEPRECATION):]] if lines[0][len(DEPRECATION):].strip() else []) + lines[1:]
         header = HEADER.fullmatch(lines[0]) if lines else None
         if not header or int(header.group(1)) != len(wanted):
             raise Refused('%s run: does not open with its own `running %d tests` line' % (at, len(wanted)))

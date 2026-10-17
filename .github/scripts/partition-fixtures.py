@@ -8,7 +8,7 @@ every leg of a lane against a fake `cargo` and `rustc` on PATH, and then
 `partition.py verify` on the records, mutated or not. The fake Cargo answers
 `metadata`, builds fake executables and reports them as JSON artifacts, and
 runs one target per `cargo test <selector>` with libtest's listing, filter,
-skip, ignore, summary and `--logfile` formats over a synthetic suite whose
+skip, ignore, summary and `--logfile` formats (its deprecation warning included) over a synthetic suite whose
 names put the filter substrings in unusual places, with a zero-test target,
 ignored tests (one with a reason), a `should_panic` test and a nested child's
 output in another leg's run. Its hooks omit a target, skip a declared unit in
@@ -168,6 +168,8 @@ if listing:
     out(1, body + ('\n' if chosen else '') + '%s, 0 benchmarks\n' % plural(len(chosen), 'test'))
     sys.exit(101 if fail == step else 0)
 results = []
+if logfile:
+    out(2, 'warning: `--logfile` is deprecated')
 out(1, '\nrunning %s\n' % plural(len(chosen), 'test'))
 for test in chosen:
     mode = ' - should panic' if test in target['panics'] and test not in ignored else ''
@@ -479,6 +481,8 @@ def cases(fixture):
                 and 'ok x::engine::topology::recover::eight\n' in w1_results), 0)
     check(fixture, 'P-IGNORED-REASON: `ignored: <reason> <name>` in the logfile is read as ignored',
           truth('ignored: run only as a nested child engine::topology::recover::tests::four\n' in w1_results), 0)
+    check(fixture, 'P-LOGFILE-WARNING: libtest\'s unterminated `--logfile` deprecation warning precedes the run header',
+          truth('warning: `--logfile` is deprecated\nrunning 3 tests\n' in w1), 0)
     w1_units = json.load(open(os.path.join(leg_dir(base, 'w1'), 'record.json')))['units']
     check(fixture, 'P-INVENTORY: the units are the declared lib, bin and example, each with 9 equal executable observations',
           truth([(u['kind'], u['name']) for u in w1_units] == [('bin', 'upstroke'), ('example', 'probe'), ('lib', 'upstroke')]
@@ -652,6 +656,9 @@ def cases(fixture):
     path = copy('no-summary')
     edit_file(path, 'w2', 'u%d-run.log' % lib_w, lambda text: '\n'.join(l for l in text.split('\n') if not l.startswith('test result:')))
     check(fixture, 'N-NO-SUMMARY: stdout has no top-level summary line at all', repo.verify(path, 'merge_group'), 1, 'no `test result: ok.` line')
+    path = copy('warning-glued')
+    edit_file(path, 'w2', 'u%d-run.log' % lib_w, replace_once('deprecated\nrunning 2 tests', 'deprecatedrunning 2 tests'))
+    check(fixture, 'P-WARNING-GLUED: the warning and the header on one line', repo.verify(path, 'merge_group'), 0)
     path = copy('no-header')
     edit_file(path, 'w2', 'u%d-run.log' % lib_w, replace_once('running 2 tests\n', ''))
     check(fixture, 'N-HEADER: the run does not open with its own `running N tests`', repo.verify(path, 'merge_group'), 1,
