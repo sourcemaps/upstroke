@@ -13349,35 +13349,39 @@ fn the_unfired_evidence_follows_no_link_and_opens_no_special_file() {
 
 #[cfg(unix)]
 #[test]
-fn the_shim_fired_assertion_fails_as_before_and_its_output_keeps_the_evidence() {
-    let tree = temp_engine_scratch("evidence-assert");
-    let mut command = this_test_binary("unfired_evidence_child_fails_its_assertion");
-    command.env("UPSTROKE_UNFIRED_EVIDENCE_CHILD", "1");
-    let (status, log) = bounded_child(
-        "the failing control",
-        command,
-        &tree.path().join("child.log"),
-    );
-    assert_eq!(
-        status.code(),
-        Some(101),
-        "the child's assertion fails: {log}"
+fn the_shim_fired_assertion_fails_as_before_and_its_message_keeps_the_evidence() {
+    let (_tree, shim, child) = evidence_fixture("evidence-assert");
+    fs::create_dir(&shim.dir).expect("the shim's directory");
+    fs::write(&shim.log, "diff --no-textconv HEAD\n").expect("a calls.log");
+    fs::write(&child.log, "the child's own words\n").expect("a child log");
+    let failed = std::panic::catch_unwind(|| {
+        assert_the_shim_fired(
+            &shim,
+            &child,
+            "err\nwhile capturing the candidate",
+            &[],
+            format_args!("ctl: the branch moved during the capture"),
+        );
+    });
+    let payload = failed.expect_err("the assertion fails while the marker is absent");
+    let Some(message) = payload.downcast_ref::<String>() else {
+        panic!("the assertion's message is not a String");
+    };
+    assert!(
+        message.starts_with("ctl: the branch moved during the capture\n"),
+        "{message}"
     );
     for kept in [
-        "panicked at src/engine/tests.rs:",
         "ctl: the branch moved during the capture\n  observed after",
         "rule-0.fired\": not read: its lstat: NotFound: No such file or directory (os error 2)",
         "t-shim\": a directory, not opened",
         "\n  the child's report: 33 B, whole: \"err\\nwhile capturing the candidate\"",
         "calls.log\": a regular file, 24 B, whole: \"diff --no-textconv HEAD\\n\"",
         "t.log\": a regular file, 22 B, whole: \"the child's own words\\n\"",
-        "test engine::tests::unfired_evidence_child_fails_its_assertion ... FAILED",
     ] {
-        assert!(log.contains(kept), "{kept}\nis not in:\n{log}");
+        assert!(message.contains(kept), "{kept}\nis not in:\n{message}");
     }
 
-    let (_fixture, shim, child) = evidence_fixture("evidence-fired");
-    fs::create_dir(&shim.dir).expect("the shim's directory");
     fs::write(shim.dir.join("rule-0.fired"), "").expect("the marker");
     assert_the_shim_fired(
         &shim,
@@ -13385,26 +13389,6 @@ fn the_shim_fired_assertion_fails_as_before_and_its_output_keeps_the_evidence() 
         "ok",
         &[],
         format_args!("ctl: the marker exists"),
-    );
-}
-
-#[cfg(unix)]
-#[test]
-#[ignore = "spawned by the control of the shim-fired assertion's evidence"]
-fn unfired_evidence_child_fails_its_assertion() {
-    if std::env::var_os("UPSTROKE_UNFIRED_EVIDENCE_CHILD").is_none() {
-        return;
-    }
-    let (_tree, shim, child) = evidence_fixture("evidence-child");
-    fs::create_dir(&shim.dir).expect("the shim's directory");
-    fs::write(&shim.log, "diff --no-textconv HEAD\n").expect("a calls.log");
-    fs::write(&child.log, "the child's own words\n").expect("a child log");
-    assert_the_shim_fired(
-        &shim,
-        &child,
-        "err\nwhile capturing the candidate",
-        &[],
-        format_args!("ctl: the branch moved during the capture"),
     );
 }
 

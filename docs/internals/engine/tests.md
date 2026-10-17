@@ -3210,10 +3210,10 @@ unreadable one (mode `000`, after checking that the mode bit binds); a 1 MiB `ca
 window's buffer of exactly its size, and a text past the cap cut with its line; a link as `calls.log`, a FIFO as the
 child's log (made by `mkfifo`; the evidence is awaited from a thread for at most 60 s, so a regression fails rather than
 hangs), a directory as the script, a link and a file on the way, and a path outside the tree, none of whose bytes
-appear. `the_shim_fired_assertion_fails_as_before_and_its_output_keeps_the_evidence` runs
-`unfired_evidence_child_fails_its_assertion` in a child of this test binary: the child's assertion fails as the two
-tests' would (exit 101), and its output holds the test's words and then the evidence; the same call passes once the
-marker exists.
+appear. `the_shim_fired_assertion_fails_as_before_and_its_message_keeps_the_evidence` runs `assert_the_shim_fired` under
+`catch_unwind` while the marker is absent: it fails as the two tests' assertions would, and its panic message, the text
+the harness prints for a failed test, holds the test's words and then the evidence; the same call passes once the marker
+exists. No ignored test is added.
 
 ## `struct PartWay {`
 
