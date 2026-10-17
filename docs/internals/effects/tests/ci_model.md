@@ -79,14 +79,48 @@ would test `master` while the labels, the fields, the shell, the input-free
 checkout and the pinned test command that follows all still matched.
 Measured, `MUT-TEST-WINDOWS-RUN-RETARGETED` and `MUT-TEST-RUN-RETARGETED`.
 
-## `pub(super) const TEST_SCRIPTS: [&str; 2] = [GIT_IDENTITY_SCRIPT, TEST_COMMAND];`
+## `pub(super) const TEST_SCRIPTS: [&str; 3] = [GIT_IDENTITY_SCRIPT, TEST_COMMAND, TEST_SHARD_SCRIPT];`
 
-Every script a test job may run: the identity script and the suite.
+Every script a test job may run: the identity script, the whole suite, and
+one shard of it through the partition runner.
 
-## `pub(super) const TEST_WINDOWS_SCRIPTS: [&str; 2] = [GIT_IDENTITY_SCRIPT, WINDOWS_TEST_WITNESS];`
+## `pub(super) const TEST_WINDOWS_SCRIPTS: [&str; 3] = [`
 
-The scripts the Windows test leg runs, on either lane: the identity script,
-and the suite with the witness that it executed.
+The scripts the Windows test legs run: the identity script, the whole suite
+with the witness that it executed on the guest's leg, and one shard through
+the partition runner on each hosted leg.
+
+## `pub(super) const TEST_SHARD_SCRIPT: &str =`
+
+The macOS shard step's script, character for character: the partition
+runner, `.github/scripts/partition.py run`, for the `macos` group and this
+leg's shard, recording into `test-partition`. The runner runs
+[`TEST_COMMAND`] five times -- build, list, list the ignored tests, list this
+shard's selection, run it -- with only the shard's libtest filters from
+[`PARTITION_TABLE`] after `--`, and records each command's argv, exit status
+and ordered output with the checkout, the run and the compiler. Cargo still
+chooses the targets, their working directory and their environment, so the
+shard is the suite as the other legs run it, narrowed by name and nothing
+else. The shard is interpolated from the matrix rather than passed through
+the environment, because any variable the step adds reaches every test the
+suite runs. Measured, `MUT-TEST-SHARD-STEP-DELETED`.
+
+## `pub(super) const WINDOWS_SHARD_SCRIPT: &str`
+
+The hosted Windows shard step's script, character for character: the same
+two compiler-check lines [`WINDOWS_TEST_WITNESS`] opens with, then the
+partition runner for the `windows` group and this leg's shard. The witness's
+count is not repeated: the `test-coverage` job refuses the run unless the
+shards together ran every listed test, and the Windows group's floor in the
+table is [`WINDOWS_TEST_FLOOR`]. Measured,
+`MUT-TEST-WINDOWS-SHARD-STEP-DELETED`, `MUT-TEST-WINDOWS-SHARD-UNFILTERED` and
+`MUT-TEST-WINDOWS-SHARD-WITHOUT-COMPILER-CHECK`.
+
+## `pub(super) const WINDOWS_COMPILER_CHECK_LINES: usize = 2;`
+
+How many of [`WINDOWS_TEST_WITNESS`]'s leading lines are its compiler check.
+[`WINDOWS_SHARD_SCRIPT`] must open with exactly those lines, so the two
+Windows suite steps cannot come to refuse different compilers.
 
 ## `pub(super) const WINDOWS_TEST_FLOOR: u32 = 1700;`
 
@@ -192,24 +226,36 @@ Measured, `MUT-WINDOWS-WITNESS-FLOOR-DROPPED` and
 
 ## `pub(super) const FMT_GATE: &str = "cargo fmt --check";`
 
-The formatter gate and the six shell gates the `lint` job runs from the
-repository root, character for character.
+The formatter gate and the seven shell gates the `lint` job runs from the
+repository root, character for character. The seventh, `test-partition.sh`,
+is the fixture gate of the partition runner and verifier.
 
-## `pub(super) const GATE_SCRIPTS: [&str; 8] = [`
+## `pub(super) const GATE_SCRIPTS: [&str; 10] = [`
 
 Every script a gate job may run. A union across the three gate jobs rather
 than a set per job: `lint (macos)` running the formatter would be
 redundant, not an escape, and the one command that must sit on exactly one
 job, the Windows build witness, is pinned to its carrier separately.
 
-## `pub(super) const PINNED_ACTIONS: [&str; 3] = [`
+## `pub(super) const UPLOAD_ACTION: &str =`
+
+`actions/upload-artifact` at the commit of its `v7.0.1` tag, which the
+partitioned legs upload their records with.
+
+## `pub(super) const DOWNLOAD_ACTION: &str =`
+
+`actions/download-artifact` at the commit of its `v8.0.1` tag, which the
+`test-coverage` job downloads the records with. From `v8` a digest mismatch
+against the server's record of the artifact fails the step by default.
+
+## `pub(super) const PINNED_ACTIONS: [&str; 5] = [`
 
 The actions a step may `uses:`, each pinned to the commit it was reviewed
 at. An action off this list is code nobody here reviewed running with a
 checkout of its own; a floating tag (`@v4`) is that action at whatever
 commit the tag points to tomorrow. Measured, `MUT-STEP-USES-UNPINNED`.
 
-## `pub(super) const ACTION_INPUTS: [(&str, &[&str]); 3] = [`
+## `pub(super) const ACTION_INPUTS: [(&str, &[&str]); 5] = [`
 
 The inputs each pinned action may be given, by action prefix.
 
@@ -220,7 +266,25 @@ with one input can run `git checkout` against another tree before Clippy and
 the build witness ever see the candidate -- with the action allowlisted, the
 checkout input-free, and every `run:` still exact. An input this contract
 does not model is refused for the same reason an unknown field is.
-Measured, `MUT-CACHE-CMD-FORMAT`.
+Measured, `MUT-CACHE-CMD-FORMAT`. The two artifact actions are admitted the
+inputs their one use needs and no more: an upload's name, path and
+missing-file behaviour, and a download's pattern and path. A download given a
+`run-id` and a token reads another run's artifacts. Measured,
+`MUT-COVERAGE-OTHER-RUN`.
+
+## `pub(super) const UPLOAD_ACTION_PREFIX: &str = "actions/upload-artifact@";`
+
+What marks a step as the upload of a shard's record, pinned or not, so an
+unpinned upload is still read as one and refused as unpinned.
+
+## `pub(super) const SHARD_UPLOAD_INPUTS: [(&str, &str); 3] = [`
+
+The upload's inputs, whole. The name carries the shard and the run attempt:
+artifact names are unique within a run, so a re-run of a leg uploads beside
+the record it supersedes rather than colliding with it, and the verifier can
+tell the two apart. The path is the directory the runner wrote, and an upload
+that finds nothing fails the leg. Measured,
+`MUT-TEST-WINDOWS-UPLOAD-WITHOUT-ATTEMPT`.
 
 ## `pub(super) const TOOLCHAIN_COMPONENTS: [&str; 2] = ["clippy", "rustfmt, clippy"];`
 
@@ -265,16 +329,46 @@ compiler split between Cargo and the fixtures fails the suite rather than
 passing it. None of that closes the gap: the two machines' runtime
 differences remain.
 
+Since #339 the hosted queue lane runs the suite as four shards, each a leg of
+the job's matrix under the same 55-minute ceiling: two queue entries were
+cancelled at 55 minutes with the whole suite on one hosted leg. The machine
+follows the leg -- the whole suite, `all`, on the guest and every shard on
+`windows-latest` -- so `runs-on:`, the ceiling and the install are keyed on
+the shard, and the event decides only which legs the matrix holds.
+
 ## `pub(super) const QUEUE_LANE: &str = "github.event_name == 'merge_group'";`
 
-The lane test, spelled once and pinned in two places: the `runs-on:`
-expression selects the hosted runner where it holds, and the hosted lane's
-toolchain install carries it as its `if:`. The two are held to one string
-because they have to name the same lane: inverted in one place and not the
-other, the hosted lane runs on whatever GitHub's image preinstalled and the
-guest lane installs over its own curated compiler, with every other pin
-matching. Measured, `MUT-TEST-WINDOWS-LANES-SWAPPED` and
+The event test that decides which legs the Windows matrix holds: the
+`windows` shards of [`PARTITION_TABLE`] where it holds, the guest's whole
+suite where it does not. The expression is derived from the table, so a
+shard the table drops or adds is a matrix the contract refuses. Measured,
+`MUT-TEST-WINDOWS-SHARD-DROPPED`, `MUT-TEST-WINDOWS-SHARD-ADDED`,
+`MUT-TEST-WINDOWS-QUEUE-UNSHARDED` and `MUT-TEST-WINDOWS-PR-LANE-SHARDED`.
+
+## `pub(super) const HOSTED_LANE: &str = "matrix.shard != 'all'";`
+
+The hosted-leg condition, spelled once and pinned in five places: the
+`runs-on:` expression selects the hosted runner where it holds, the ceiling
+gives it the hosted lane's minutes, and the toolchain install, the shard step
+and the upload carry it as their `if:`. They are held to one string because
+they have to name the same legs: inverted in one place and not another, a
+shard runs on whatever GitHub's image preinstalled, or the guest installs
+over its own curated compiler, with every other pin matching. Measured,
+`MUT-TEST-WINDOWS-LANES-SWAPPED` and
 `MUT-TEST-WINDOWS-INSTALL-ON-THE-WRONG-LANE`.
+
+## `pub(super) const WHOLE_SUITE_LANE: &str = "matrix.shard == 'all'";`
+
+The whole-suite leg's condition, the complement of [`HOSTED_LANE`], on the
+step that runs the whole suite in both test jobs. The two suite steps carry
+complementary conditions, so every leg runs exactly one of them. Measured,
+`MUT-TEST-WINDOWS-DISABLED`, `MUT-TEST-WINDOWS-SUITE-ON-ONE-LANE` and
+`MUT-TEST-WHOLE-SUITE-ON-EVERY-LEG`.
+
+## `pub(super) const WHOLE_SUITE: &str = "all";`
+
+The matrix value of a leg that runs the whole suite. The partition table may
+not name a shard `all`.
 
 ## `pub(super) const TEST_WINDOWS_LABELS: [&str; 3] = ["self-hosted", "windows", "winguest"];`
 
@@ -284,20 +378,50 @@ windows]` admits any Windows runner the account ever registers, and the
 third label is what names the curated image. Measured,
 `MUT-TEST-WINDOWS-LABEL-DROPPED`.
 
+## `pub(super) const TEST_WINDOWS_NAME: &str = "test (${{ matrix.shard == 'all' && 'winguest' || format('windows-latest, {0}', matrix.shard) }})";`
+
+The job's name, character for character: `test (winguest)` for the guest's
+leg, the name the scheduling guards read, and `test (windows-latest, <shard>)`
+for each hosted shard, so no two legs publish one name. Measured,
+`MUT-TEST-WINDOWS-GUEST-RENAMED` and `MUT-TEST-WINDOWS-SHARD-NAMES-COLLAPSE`.
+
 ## `pub(super) const TEST_WINDOWS_RUNS_ON: &str`
 
-The job's `runs-on:`, character for character: a ternary over the lane test
-that yields the hosted runner's name on the queue and the label set,
-through `fromJSON`, everywhere else. A scalar `windows-latest` sends the
-pull-request lane to the hosted runner and its six minutes become
-twenty-five; a bare label set sends every build to the pull-request guest,
-where a queue entry's install -- conditioned on the event, not the machine
--- runs over the image's compiler. The literal is
-held to [`QUEUE_LANE`], [`TEST_WINDOWS_PLATFORM`] and
+The job's `runs-on:`, character for character: a ternary over the hosted-leg
+condition that yields the hosted runner's name for a shard and the label set,
+through `fromJSON`, for the whole-suite leg. A scalar `windows-latest` sends
+the pull-request lane to the hosted runner and its six minutes become
+twenty-five; a bare label set sends every leg to the pull-request guest,
+where a shard's install -- conditioned on the shard, not the machine -- runs
+over the image's compiler. The literal is
+held to [`HOSTED_LANE`], [`TEST_WINDOWS_PLATFORM`] and
 [`TEST_WINDOWS_LABELS`] by
 `the_windows_leg_routes_each_lane_to_the_runner_its_install_step_is_written_for`,
 so the three cannot drift apart while the pin still reads back. Measured,
 `MUT-TEST-WINDOWS-REHOSTED` and `MUT-TEST-WINDOWS-QUEUE-LANE-REGUESTED`.
+
+## `pub(super) const TEST_WINDOWS_TIMEOUT: &str = "${{ matrix.shard != 'all' && 55 || 20 }}";`
+
+The job's ceilings, unchanged by the partition: the hosted lane's 55 minutes
+for every shard and the guest's 20 for its whole suite. Measured,
+`MUT-TEST-WINDOWS-CEILINGS-SWAPPED`.
+
+## `pub(super) const TEST_NAME: &str = "test (${{ matrix.shard == 'all' && matrix.os || format('{0}, {1}', matrix.os, matrix.shard) }})";`
+
+The `test` job's name: `test (ubuntu-latest)` for the whole-suite leg and
+`test (macos-latest, <shard>)` for each macOS shard. Three legs share the
+macOS runner, so a name without the shard is three checks under one name.
+Measured, `MUT-TEST-NAME-WITHOUT-SHARD`.
+
+## `pub(super) const TEST_WHOLE_SUITE_RUNNER: &str = "ubuntu-latest";`
+
+The one `test` leg that runs the whole suite.
+
+## `pub(super) const TEST_SHARD_RUNNER: &str = "macos-latest";`
+
+The runner of every `macos` shard. Together with
+[`TEST_WHOLE_SUITE_RUNNER`] it must be exactly the platforms that host these
+fixtures in the `test` job, so the partition moves no platform in or out.
 
 ## `pub(super) const GOLDEN_IMAGE_TOOLCHAIN: &str = "1.97.1";`
 
@@ -380,7 +504,10 @@ rename leaves branch protection guarding a context nothing produces.
 
 ## `pub(super) const AGGREGATE_SCRIPT: &str = r#"failed=0`
 
-The aggregate's script, pinned.
+The aggregate's script, pinned. Its loop reads `TEST_COVERAGE` since the
+partition: the coverage job is a gate like any other, and a lane whose shards
+did not run the whole suite fails `upstroke-ci` through it. Measured,
+`MUT-AGGREGATE-COVERAGE-DROPPED` and `MUT-AGGREGATE-COVERAGE-UNREAD`.
 
 A pin rather than a family of substring predicates, which is what the
 standing row forbids growing more of. The enumerated escape is
@@ -446,15 +573,18 @@ the compile. Measured, `MUT-TEST-CASEFOLD-DECLARATION-DROPPED`,
 
 ## `pub(super) const TEST_WINDOWS_STEP_ENV: [(&str, &str); 1] = [(TEMP_FOLDS_CASE_KEY, "1")];`
 
-The same declaration on the Windows step, `1` outright: one job, no
-matrix, and NTFS folds case on the guest and on `windows-latest` alike.
+The same declaration on both Windows suite steps, `1` outright: NTFS folds
+case on the guest and on `windows-latest` alike. The macOS shard step carries
+[`TEST_STEP_ENV`], the whole-suite step's map, for the same reason.
 Measured, `MUT-TEST-WINDOWS-CASEFOLD-DECLARATION-DROPPED`.
 
-## `pub(super) const TEST_STEP_FIELDS: [&str; 6] = ["env", "name", "run", "shell", "uses", "with"];`
+## `pub(super) const TEST_STEP_FIELDS: [&str; 7] =`
 
-The fields the step that runs the suite may declare: [`STEP_FIELDS`] plus the
-`env` whose map [`TEST_STEP_ENV`] and [`TEST_WINDOWS_STEP_ENV`] pin. Every
-other step of both test jobs keeps [`STEP_FIELDS`].
+The fields a step that runs the suite may declare: [`STEP_FIELDS`] plus the
+`env` whose map [`TEST_STEP_ENV`] and [`TEST_WINDOWS_STEP_ENV`] pin, and the
+`if:` that says which legs run it -- pinned, per step, to [`WHOLE_SUITE_LANE`]
+on the whole-suite step and [`HOSTED_LANE`] on the shard step. Every other
+`run:` step of both test jobs keeps [`STEP_FIELDS`].
 
 ## `pub(super) const LANE_STEP_FIELDS: [&str; 4] = ["if", "name", "uses", "with"];`
 
@@ -471,7 +601,18 @@ the other lane, and on a `run:` step it is a script one lane executes and
 the pull-request lane -- the one a reviewer watches -- never shows. No
 `run:` in the set, so a lane-conditional step cannot be a script at all.
 Measured, `MUT-TEST-WINDOWS-SUITE-ON-ONE-LANE` and
-`MUT-TEST-WINDOWS-HOSTED-ONLY-RETARGET`.
+`MUT-TEST-WINDOWS-HOSTED-ONLY-RETARGET`. The partition admits the same set
+on one more `uses:` step, the upload of a shard's record, where the `if:` is
+pinned to [`HOSTED_LANE`]: under `always()` a failed shard would upload a
+record of a run that did not finish. The two suite steps admit `if:` through
+[`TEST_STEP_FIELDS`], each pinned to its own condition.
+
+## `pub(super) const STRATEGY_FIELDS: [&str; 2] = ["fail-fast", "matrix"];`
+
+The fields of the two test jobs' `strategy:`. `max-parallel:` is a limit
+this contract does not model; `fail-fast:` must be `false`, so one leg's
+failure never cancels the others before they report. Measured,
+`MUT-TEST-WINDOWS-FAIL-FAST`.
 
 ## `pub(super) const AGGREGATE_STEP_FIELDS: [&str; 4] = ["env", "name", "run", "shell"];`
 
@@ -489,11 +630,85 @@ leaves the required context missing rather than red.
 
 The fields the job that runs these fixtures declares.
 
-## `pub(super) const TEST_WINDOWS_JOB_FIELDS: [&str; 4] =`
+## `pub(super) const TEST_WINDOWS_JOB_FIELDS: [&str; 5] =`
 
-The fields the Windows test job declares: the `test` job's set without a
-`strategy:`, since one job routed by lane needs no matrix. `if:` and `continue-on-error:`
-are absent by construction, as everywhere in this contract.
+The fields the Windows test job declares: the `test` job's set, `strategy:`
+included since the partition made its legs a matrix. `if:` and
+`continue-on-error:` are absent by construction, as everywhere in this
+contract.
+
+## `pub(super) const COVERAGE_JOB: &str = "test-coverage";`
+
+The job that makes the partition safe. A shard's green says only that the
+tests its filters selected passed; this job runs
+`.github/scripts/partition.py verify` over the records every partitioned leg
+uploaded and refuses the run unless, for each group the event's lane
+partitions, the shards' harnesses listed one universe, each selected exactly
+what the table's predicate selects from it, the selections are disjoint and
+cover it, and every target's run accounts for its selection with no failure.
+The aggregate requires it like any gate. Measured,
+`MUT-COVERAGE-JOB-DELETED`.
+
+## `pub(super) const COVERAGE_JOB_NAME: &str = "partition coverage";`
+
+Its name, which does not begin `test (`: it runs no test, and nothing that
+counts test legs by name should count it.
+
+## `pub(super) const COVERAGE_JOB_FIELDS: [&str; 5] =`
+
+Its fields, as an equality. `if:` is absent so that a failed, cancelled or
+skipped leg skips it and the aggregate reads `skipped`; `continue-on-error:`
+is absent so a refusal cannot report success. Measured,
+`MUT-COVERAGE-RUNS-ALWAYS` and `MUT-COVERAGE-ABSOLVED`.
+
+## `pub(super) const COVERAGE_NEEDS: [&str; 2] = ["test", TEST_WINDOWS_JOB];`
+
+Every job that runs a partitioned leg. Measured,
+`MUT-COVERAGE-NEEDS-NARROWED`.
+
+## `pub(super) const COVERAGE_RUNNER: &str = "ubuntu-latest";`
+
+Where the verifier runs.
+
+## `pub(super) const COVERAGE_DOWNLOAD_INPUTS: [(&str, &str); 2] = [`
+
+The download's inputs, whole: this run's artifacts by the shard records'
+prefix, into the directory the verifier reads. No `run-id` and no token, so
+no other run's records can stand in for this run's legs. Measured,
+`MUT-COVERAGE-OTHER-RUN`.
+
+## `pub(super) const COVERAGE_COMMAND: &str =`
+
+The verifier's command, character for character, run from the checkout: the
+code that judges the legs is the candidate's checked-out
+`.github/scripts/partition.py`, never anything the legs uploaded. Measured,
+`MUT-COVERAGE-VERIFIER-ECHOED` and `MUT-COVERAGE-RUNS-A-DOWNLOADED-SCRIPT`.
+
+## `pub(super) const PARTITION_TABLE: &str = ".github/scripts/partition.table";`
+
+The predicate table the runner and the verifier read.
+
+## `pub(super) const WINDOWS_GROUP: &str = "windows";`
+
+The table's group of hosted Windows shards, which the Windows matrix runs on
+the lanes the table partitions it on.
+
+## `pub(super) const MACOS_GROUP: &str = "macos";`
+
+The table's group of macOS shards, which the `test` matrix runs on every
+lane, so the table must partition it on every lane.
+
+## `pub(super) const PARTITION_EVENTS: [&str; 3] = ["merge_group", "pull_request", "push"];`
+
+The events `ci.yml` triggers on, each of which the table must give a lane.
+
+## `pub(super) const PARTITION_TABLE_LINES: [&str; 12] = [`
+
+Every line of the table that is not blank or a comment, pinned in order. The
+table decides which tests each partitioned leg runs and which legs the
+verifier expects, so a change to it is a change to this contract, made in the
+same commit; the two test matrices are derived from these lines rather than
+written down a second time.
 
 ## `pub(super) const MSRV_JOB_FIELDS: [&str; 5] =`
 

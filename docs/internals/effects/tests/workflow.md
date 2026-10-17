@@ -176,41 +176,55 @@ command runs this?". A parsed document has no comments in it at all, so that
 class is gone by construction rather than by a strip whose bite had to be
 asserted.
 
-## `pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {` › `let runs_the_suite = scalar(step, "run") == Some(TEST_COMMAND);`
+## `pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {` › `if scalar(job, "name") != Some(TEST_NAME) {`
 
-The step that runs the suite is the one step in this job that may carry an
+The job's name, exactly: three macOS shards share one runner, so a name that
+does not carry the shard publishes three checks under one name. Measured,
+`MUT-TEST-NAME-WITHOUT-SHARD`.
+
+## `pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {` › `let runs_the_suite = script == Some(TEST_COMMAND) || script == Some(TEST_SHARD_SCRIPT);`
+
+The two steps that run the suite -- the whole suite on the ubuntu leg, one
+shard on each macOS leg -- are the steps in this job that may carry an
 `env:`, and only the map [`TEST_STEP_ENV`] pins: the declaration that the
 leg's temporary directory folds case, under which
 `the_temporary_object_scan_resolves_case_aliases_as_the_filesystem_does`
-requires its native branch. Every other step keeps [`STEP_FIELDS`], and the
-map is compared whole by [`step_env_complaints`]. Measured,
-`MUT-TEST-CASEFOLD-DECLARATION-DROPPED`,
+requires its native branch. They may carry an `if:` too, which
+[`suite_lane_complaints`] pins per step. The upload of a shard's record keeps
+the `uses:` step's set with its own pinned `if:`; every other step keeps
+[`STEP_FIELDS`], and the map is compared whole by [`step_env_complaints`].
+Measured, `MUT-TEST-CASEFOLD-DECLARATION-DROPPED`,
 `MUT-TEST-CASEFOLD-DECLARED-ON-THE-WRONG-LEG` and
 `MUT-TEST-STEP-RETARGETED-THROUGH-THE-ADMITTED-ENV`.
 
-## `pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {` › `if scalar(step, "run").is_some() {`
+## `pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {` › `if script.is_some() {`
 
 This job is a matrix, so each `run:` step resolves a shell once per
 hosted runner. Each must be the platform default: a workflow-level
 default swaps every one of them at once, which is the mutation the
 step-only reading could not see.
 
-## `pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {` › `let expected_runners: BTreeSet<String> = CI_TARGETS`
+## `pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {` › `for command in [TEST_COMMAND, TEST_SHARD_SCRIPT] {`
 
-The matrix is the platform half of the same claim, and it is compared
-against the same derived runner set the Clippy legs are, less the one
-platform whose suite runs in its own job: a fixture that runs on one
-platform proves nothing about the other.
+Exactly one step runs the whole suite and exactly one runs a shard, each
+under its own condition: the job is one matrix, and its legs differ only in
+which of the two steps they run. Measured, `MUT-CI-CARGO-TEST-STEP-DELETED`,
+`MUT-TEST-SHARD-STEP-DELETED` and `MUT-TEST-WHOLE-SUITE-ON-EVERY-LEG`.
 
-## `pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {` › `match field(job, "strategy") {`
+## `pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {` › `let hosted: BTreeSet<&str> = CI_TARGETS`
 
-The WHOLE strategy mapping, not just `matrix.os`. `exclude:` removes
-combinations that `os:` still lists, so a job that names three platforms
-can run on one while every check that reads `os:` passes; `include:` can
-add a fourth nobody declared, and `max-parallel`/`fail-fast` are the rest
-of what a strategy may say. An equality over the field set refuses all of
-them, including the ones GitHub adds next. Measured,
-`MUT-TEST-MATRIX-EXCLUDED`.
+The matrix is the platform half of the same claim. Its legs are derived, not
+written down a second time: the whole suite on [`TEST_WHOLE_SUITE_RUNNER`]
+and one leg per `macos` shard of the partition table on
+[`TEST_SHARD_RUNNER`], in the table's order -- and the runners of that
+derived list are compared against the same runner set the Clippy legs are,
+less the one platform whose suite runs in its own job: a fixture that runs on
+one platform proves nothing about the other. A leg missing is a shard nobody
+runs, a leg duplicated is a shard run twice and another never, and the
+ubuntu leg turned into a shard is a Linux suite no verifier group covers.
+Measured, `MUT-CI-TEST-MATRIX-NARROWED`, `MUT-TEST-MATRIX-KEEPS-WINDOWS`,
+`MUT-TEST-MACOS-SHARD-DROPPED`, `MUT-TEST-MACOS-SHARD-DUPLICATED` and
+`MUT-TEST-UBUNTU-SHARDED`.
 
 ## `pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {` › `let toolchains: Vec<&Yaml> = steps_of(job)`
 
@@ -227,39 +241,112 @@ matrix -- every platform but the one whose suite runs in its own job.
 
 ## `fn installs_a_toolchain(step: &Yaml) -> bool {`
 
-Whether a step is the pinned toolchain action, by its `uses:` prefix. The
-one kind of step the Windows job may put a lane condition on.
+Whether a step is the pinned toolchain action, by its `uses:` prefix. One of
+the two kinds of `uses:` step the Windows job may put a leg condition on; the
+upload of a shard's record is the other.
+
+## `fn uploads_a_record(step: &Yaml) -> bool {`
+
+Whether a step is an upload, by the action's prefix, pinned or not -- so an
+unpinned upload is still read as the upload and refused as unpinned.
+
+## `fn suite_lane_complaints(`
+
+The condition each suite-running step carries, exactly: the whole-suite step
+under [`WHOLE_SUITE_LANE`] and the shard step under [`HOSTED_LANE`]. The two
+are complements, so every leg runs exactly one of them; any other condition
+is a leg that reports success having run nothing or one that runs the suite
+twice, and a field set that admits `if:` on these steps is only safe because
+the value is pinned per step.
+
+## `fn upload_complaints(job: &Yaml, named: &str, code: &str, after: &str) -> Vec<String> {`
+
+The upload of a shard's record: exactly one, the job's last step, after the
+one shard step, under [`HOSTED_LANE`], through [`UPLOAD_ACTION`], with
+[`SHARD_UPLOAD_INPUTS`] whole. Last, because a step after it could fail the
+leg having uploaded a record; under the plain shard condition, because the
+implicit `success()` skips it after a failed shard. Measured,
+`MUT-TEST-WINDOWS-UPLOAD-DROPPED`, `MUT-TEST-WINDOWS-UPLOAD-ON-FAILURE`,
+`MUT-TEST-WINDOWS-UPLOAD-BEFORE-THE-SUITE` and `MUT-TEST-UPLOAD-DROPPED`.
+
+## `fn strategy_complaints(job: &Yaml, named: &str, code: &str, matrix_field: &str) -> Vec<String> {`
+
+The WHOLE strategy mapping of a test job, not just its one list: exactly
+`fail-fast` and `matrix`, `fail-fast: false`, and a matrix holding only the
+one key the job's legs are read from. `exclude:` removes combinations a list
+still names, a second key multiplies the legs, and `max-parallel` is a limit
+this contract does not model; an equality over the field set refuses all of
+them, including the ones GitHub adds next. Measured,
+`MUT-TEST-MATRIX-EXCLUDED` and `MUT-TEST-WINDOWS-FAIL-FAST`.
+
+## `fn matrix_entries(matrix: &Yaml) -> Option<Vec<(String, String)>> {`
+
+The `test` matrix's `include:` list as `(os, shard)` pairs, in order, or
+nothing if any entry holds another key or a value that is not a string.
+
+## `struct Partition {`
+
+The two facts the workflow takes from the predicate table: each shard's
+group, in the table's order, and the groups each event's lane partitions.
+
+## `fn partition() -> Result<Partition, String> {`
+
+Reads `.github/scripts/partition.table`, requires its non-comment lines to
+be exactly [`PARTITION_TABLE_LINES`], and parses those. A table edited
+without this contract -- a shard's filters, a shard added or dropped, a lane
+changed -- is refused here before the matrices are compared with anything.
+
+## `fn test_matrix() -> Result<Vec<(String, String)>, String> {`
+
+The `test` job's legs as the table determines them: the whole suite on
+ubuntu, then every `macos` shard on macOS. The macOS group must be
+partitioned on every event, because this matrix does not vary by event.
+
+## `fn test_windows_shards() -> Result<String, String> {`
+
+The Windows matrix expression as the table determines it: the `windows`
+shards on the merge-queue lane if the table partitions that group there, and
+the guest's whole suite on the other lanes, with the shards beside it if the
+table partitions them there too. The pull-request and push lanes must agree,
+since the expression tests the queue event alone.
 
 ## `pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {`
 
 Every way the Windows test job fails its contract.
 
-The same shape as [`ci_test_job_complaints`] without the matrix, and with
-the one thing that job cannot say: which machine, and on which lane. The
-job runs on two: the curated guest for a pull request or push, where a
-reviewer waits on it, and `windows-latest` for a merge-queue entry, where
-nobody does. The `runs-on:` is one expression over the lane test, compared
-whole -- a scalar sends every pull request to the slow machine, a bare label
-set sends every build to the pull-request guest where a queue entry's
-event-conditioned install runs over the image's compiler, a subset of the
-labels admits every Windows machine the account registers, and an inverted
-condition routes each lane to the machine the other's setup was written for.
+The same shape as [`ci_test_job_complaints`], with the one thing that job
+cannot say: which machine each leg runs on. The job runs on two: the curated
+guest for the whole suite, on a pull request or push, where a reviewer waits
+on it, and `windows-latest` for each of the four shards a merge-queue entry
+runs, where nobody does. The event decides which legs the matrix holds, and
+the leg decides the machine: the `runs-on:` is one expression over the
+hosted-leg condition, compared whole -- a scalar sends every pull request to
+the slow machine, a bare label set sends every leg to the pull-request guest
+where a shard's leg-conditioned install runs over the image's compiler, a
+subset of the labels admits every Windows machine the account registers, and
+an inverted condition routes each leg to the machine the other's setup was
+written for.
 
 The guest's image carries `clippy-driver` for the fixtures, and re-curation
 is bound to that claim, which a document parser cannot check. The hosted
 runner carries nothing curated, so the job installs the image's compiler
 there -- and the contract pins that install as tightly as it pins the
-labels: one step, right after the checkout, under the lane condition
-exactly, at the image's version exactly, with `clippy` exactly.
+labels: one step, right after the checkout, under the hosted-leg condition
+exactly, at the image's version exactly, with `clippy` exactly. The name,
+the ceiling and the matrix are pinned whole too: the guest's leg keeps the
+name `test (winguest)` the scheduling guards read, each shard keeps the
+hosted lane's ceiling, and the matrix is derived from the partition table.
 
 ## `pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {` › `&LANE_STEP_FIELDS`
 
-The toolchain install is the one step that may carry an `if:`, and it may
-carry nothing this contract does not model. Every other step keeps its
-usual set, so the lane condition on the suite step -- a pull-request lane
-that reports success having run nothing -- and a lane-conditional `run:`
-step -- a script the reviewed lane never executes -- are refused by the
-field set before their values are read. Measured,
+The toolchain install and the upload are the `uses:` steps that may carry an
+`if:`, and they may carry nothing this contract does not model; the two
+suite steps may carry one through [`TEST_STEP_FIELDS`], and each `if:` is
+pinned to its own value. Every other step keeps its usual set, so a
+leg-conditional `run:` step -- a script the reviewed lane never executes --
+is refused by the field set before its value is read, and a suite step's
+condition other than its own -- a pull-request lane that reports success
+having run nothing -- by [`suite_lane_complaints`]. Measured,
 `MUT-TEST-WINDOWS-SUITE-ON-ONE-LANE` and
 `MUT-TEST-WINDOWS-HOSTED-ONLY-RETARGET`.
 
@@ -284,14 +371,14 @@ pass found. Measured,
 `MUT-TEST-WINDOWS-TOOLCHAIN-BEHIND-THE-IMAGE`,
 `MUT-TEST-WINDOWS-SECOND-INSTALL` and `MUT-TEST-WINDOWS-INSTALL-NOT-FIRST`.
 
-## `pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {` › `if scalar(step, "if") != Some(QUEUE_LANE) {`
+## `pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {` › `if scalar(step, "if") != Some(HOSTED_LANE) {`
 
-The install's condition, exactly [`QUEUE_LANE`]. Dropped, the guest lane
+The install's condition, exactly [`HOSTED_LANE`]. Dropped, the guest's leg
 has its compiler selected by the workflow instead of by the image, which is
 the escape this job refused before it had a hosted lane; inverted, the
-hosted lane compiles on whatever GitHub's image preinstalled while the
-guest installs over its own. The condition is the same string `runs-on:`
-routes by, so the step runs on exactly the lane whose machine needs it.
+shards compile on whatever GitHub's image preinstalled while the guest
+installs over its own. The condition is the same string `runs-on:` routes
+by, so the step runs on exactly the legs whose machine needs it.
 Measured, `MUT-TEST-WINDOWS-INSTALL-UNCONDITIONAL` and
 `MUT-TEST-WINDOWS-INSTALL-ON-THE-WRONG-LANE`.
 
@@ -304,19 +391,41 @@ install step carries. Measured, `MUT-TEST-WINDOWS-REHOSTED`,
 `MUT-TEST-WINDOWS-LABEL-DROPPED`, `MUT-TEST-WINDOWS-QUEUE-LANE-REGUESTED`
 and `MUT-TEST-WINDOWS-LANES-SWAPPED`.
 
-## `pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {` › `let runs_the_suite = scalar(step, "run") == Some(WINDOWS_TEST_WITNESS);`
+## `pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {` › `let runs_the_suite =`
 
-The same one-step allowance as the `test` job's, pinned to
+The same allowance as the `test` job's, for its two suite steps, pinned to
 [`TEST_WINDOWS_STEP_ENV`]: NTFS folds case on the guest and on
 `windows-latest` alike, so the declaration is `1` outright. Measured, `MUT-TEST-WINDOWS-CASEFOLD-DECLARATION-DROPPED`.
 
 ## `pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {` › `let running = steps_of(job)`
 
-The whole step, not the command inside it. The command says which suite
-Cargo was asked for; the lines after it are what say the suite ran, and
-an equality over the step is what stops those lines being dropped, or
-their floor lowered to a number an unexecuted suite clears. Measured,
-`MUT-WINDOWS-WITNESS-COUNT-DROPPED` and `MUT-WINDOWS-WITNESS-FLOOR-DROPPED`.
+The whole step, not the command inside it, for each of the two suite steps.
+The command says which suite Cargo was asked for; on the guest's leg the
+lines after it are what say the suite ran, and on a shard the runner's record
+is, so an equality over each step is what stops those lines being dropped,
+their floor lowered to a number an unexecuted suite clears, or the shard's
+compiler check removed. The shard step must open with the witness's compiler
+check, line for line, so the two cannot come to refuse different compilers.
+Measured, `MUT-WINDOWS-WITNESS-COUNT-DROPPED`,
+`MUT-WINDOWS-WITNESS-FLOOR-DROPPED`,
+`MUT-TEST-WINDOWS-SHARD-WITHOUT-COMPILER-CHECK` and
+`MUT-TEST-WINDOWS-SHARD-UNFILTERED`.
+
+## `pub(super) fn ci_test_coverage_job_complaints(doc: &Yaml) -> Vec<String> {`
+
+Every way the coverage job fails its contract: the job that makes a partition
+safe, because a shard's green says only that its own selection passed.
+
+Its fields are an equality, so it has no `if:` -- a failed, cancelled or
+skipped leg skips it, and the aggregate reads `skipped` -- and no
+`continue-on-error:`. It waits on both test jobs, runs on ubuntu, and has
+exactly three steps in order: the input-free checkout of the candidate, the
+pinned download of this run's records by their prefix, and the pinned
+verifier run from the checkout. A step between the download and the
+verifier could rewrite what it reads, a `run-id` or token on the download
+could put another run's records in front of it, and a verifier run from the
+downloaded directory would be code the legs uploaded judging the legs.
+Measured, every row named `MUT-COVERAGE-*`.
 
 ## `fn checkout_complaints(job: &Yaml, named: &str, code: &str) -> Vec<String> {`
 

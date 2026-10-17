@@ -12,11 +12,12 @@ source, documentation, workflows, release machinery and this file.
    Review evidence, Risk and rollback, Review finding ledger — and
    `.github/scripts/validate-pr-body.sh` rejects anything else. Run it against your body before
    pushing.
-3. **Run the ten-command baseline** (`CODING_STANDARDS.md` §2) before every push, then wait for
-   the two required contexts: `upstroke-ci` (formatting, Clippy on three platforms, the Linux and macOS
-   test matrix, the Windows suite in `test-windows` -- on its self-hosted ephemeral runner for a
-   pull request or push, on `windows-latest` for a merge-queue entry -- the MSRV matrix, the six
-   Bash gates) and `upstroke-pr-policy` (title, body sections, ledger). A
+3. **Run the eleven-command baseline** (`CODING_STANDARDS.md` §2) before every push, then wait for
+   the two required contexts: `upstroke-ci` (formatting, Clippy on three platforms, the Linux suite
+   and the macOS suite in three shards, the Windows suite in `test-windows` -- whole on its
+   self-hosted ephemeral runner for a pull request or push, in four shards on `windows-latest` for
+   a merge-queue entry -- the coverage check that the shards ran every listed test exactly once,
+   the MSRV matrix, the seven Bash gates) and `upstroke-pr-policy` (title, body sections, ledger). A
    branch behind `master` is not updated by hand to merge once the ruleset carries the merge
    queue (Repository rules): the queue builds the entry on `master`'s head and runs both
    contexts there (step 7), so update it only when the change needs what `master` gained.

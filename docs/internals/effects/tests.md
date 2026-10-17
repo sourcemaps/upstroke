@@ -2111,29 +2111,35 @@ the job's own comment spelled the needle.
 
 ## `fn the_windows_leg_runs_these_fixtures_on_the_runner_each_lane_pins() {`
 
-The Windows suite's job runs these fixtures on the curated guest for a pull
-request or push and on `windows-latest` for a merge-queue entry, and on
-nothing else the contract can read.
+The Windows suite's job runs these fixtures whole on the curated guest for a
+pull request or push and in four shards on `windows-latest` for a merge-queue
+entry, and on nothing else the contract can read.
 
 The claim the `test` job discharges with an install step -- that
-`clippy-driver` is present for the fixtures -- is discharged on the
-pull-request lane by the golden image the runner boots, which this contract
-cannot read and re-curation is bound to instead, and on the queue lane by
-an install step pinned whole: one, first after the checkout, under the lane
-condition, at the image's version, with `clippy`. What the contract *can*
-read is pinned: the `runs-on:` expression exactly, the suite step exactly --
-the command and the count that says it executed, see
-[`the_windows_leg_counts_the_tests_it_ran`] -- the platform-default shell on
-every `run:` step, and a field set with no `if:` or `continue-on-error:`
-anywhere but on that one install. The refusals are executed in
+`clippy-driver` is present for the fixtures -- is discharged on the guest's
+leg by the golden image the runner boots, which this contract cannot read and
+re-curation is bound to instead, and on every hosted shard by an install step
+pinned whole: one, first after the checkout, under the hosted-leg condition,
+at the image's version, with `clippy`. What the contract *can* read is
+pinned: the job's name, `runs-on:` and ceiling expressions exactly, and its
+matrix as the one `.github/scripts/partition.table` derives; the whole-suite
+step and the shard step exactly, each under its own one of two complementary
+conditions -- the command and either the count that says it executed, see
+[`the_windows_leg_counts_the_tests_it_ran`], or the shard's record -- and the
+upload of that record, last, under the shard condition, with its inputs
+pinned; the platform-default shell on every `run:` step; and a field set that
+admits `if:` only on the install, the two suite steps and the upload, and
+`continue-on-error:` nowhere. The refusals are executed in
 [`WORKFLOW_ESCAPES`], every row named `MUT-TEST-WINDOWS-*` and the three
 `MUT-WINDOWS-WITNESS-*`.
 
 ## `fn the_windows_leg_routes_each_lane_to_the_runner_its_install_step_is_written_for() {`
 
-The pinned `runs-on:` literal is the lane test, the hosted platform and the
-self-hosted labels this contract names, composed -- not a fourth string that
-happens to read back.
+The pinned `runs-on:` literal is the hosted-leg condition, the hosted
+platform and the self-hosted labels this contract names, composed -- not a
+fourth string that happens to read back. Since the partition the machine
+follows the leg: the condition, [`HOSTED_LANE`], names the shard, and the
+event decides only which legs the matrix holds.
 
 The oracle compares `runs-on:` as one string because it cannot evaluate the
 expression. That leaves the literal free to name a different condition

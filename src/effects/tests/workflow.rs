@@ -13,16 +13,21 @@ use yaml_rust2::{Yaml, YamlLoader};
 
 use super::ci_model::{
     ACTION_INPUTS, AGGREGATE_JOB, AGGREGATE_JOB_FIELDS, AGGREGATE_SCRIPT, AGGREGATE_SHELL,
-    AGGREGATE_STEP_FIELDS, CI_TARGETS, CI_WORKFLOW, CLIPPY_GATE, CiTarget, DEFAULTS_FIELDS,
-    DEFAULTS_RUN_FIELDS, ENCODED_RUSTFLAGS_KEY, GATE_JOB_FIELDS, GATE_SCRIPTS,
-    GOLDEN_IMAGE_TOOLCHAIN, KNOWN_SHELLS, LANE_STEP_FIELDS, MSRV_COMMAND, MSRV_JOB,
-    MSRV_JOB_FIELDS, OPTIONAL_DEFAULTS_FIELD, PINNED_ACTIONS, QUEUE_LANE, REQUIRED_CONTEXT,
-    RUSTFLAGS_KEY, RUSTFLAGS_VALUE, STABLE_TOOLCHAIN, STEP_FIELDS, TEST_COMMAND, TEST_JOB_FIELDS,
-    TEST_SCRIPTS, TEST_STEP_ENV, TEST_STEP_FIELDS, TEST_WINDOWS_JOB, TEST_WINDOWS_JOB_FIELDS,
-    TEST_WINDOWS_PLATFORM, TEST_WINDOWS_RUNS_ON, TEST_WINDOWS_SCRIPTS, TEST_WINDOWS_STEP_ENV,
-    TEST_WINDOWS_TOOLCHAIN_COMPONENTS, TOOLCHAIN_ACTION, TOOLCHAIN_COMPONENTS,
-    WINDOWS_BUILD_WITNESS, WINDOWS_TEST_WITNESS, WORKFLOW_ENV, WORKFLOW_FIELDS,
-    WORKFLOW_PERMISSIONS,
+    AGGREGATE_STEP_FIELDS, CI_TARGETS, CI_WORKFLOW, CLIPPY_GATE, COVERAGE_COMMAND,
+    COVERAGE_DOWNLOAD_INPUTS, COVERAGE_JOB, COVERAGE_JOB_FIELDS, COVERAGE_JOB_NAME, COVERAGE_NEEDS,
+    COVERAGE_RUNNER, CiTarget, DEFAULTS_FIELDS, DEFAULTS_RUN_FIELDS, DOWNLOAD_ACTION,
+    ENCODED_RUSTFLAGS_KEY, GATE_JOB_FIELDS, GATE_SCRIPTS, GOLDEN_IMAGE_TOOLCHAIN, HOSTED_LANE,
+    KNOWN_SHELLS, LANE_STEP_FIELDS, MACOS_GROUP, MSRV_COMMAND, MSRV_JOB, MSRV_JOB_FIELDS,
+    OPTIONAL_DEFAULTS_FIELD, PARTITION_EVENTS, PARTITION_TABLE, PARTITION_TABLE_LINES,
+    PINNED_ACTIONS, QUEUE_LANE, REQUIRED_CONTEXT, RUSTFLAGS_KEY, RUSTFLAGS_VALUE,
+    SHARD_UPLOAD_INPUTS, STABLE_TOOLCHAIN, STEP_FIELDS, STRATEGY_FIELDS, TEST_COMMAND,
+    TEST_JOB_FIELDS, TEST_NAME, TEST_SCRIPTS, TEST_SHARD_RUNNER, TEST_SHARD_SCRIPT, TEST_STEP_ENV,
+    TEST_STEP_FIELDS, TEST_WHOLE_SUITE_RUNNER, TEST_WINDOWS_JOB, TEST_WINDOWS_JOB_FIELDS,
+    TEST_WINDOWS_NAME, TEST_WINDOWS_PLATFORM, TEST_WINDOWS_RUNS_ON, TEST_WINDOWS_SCRIPTS,
+    TEST_WINDOWS_STEP_ENV, TEST_WINDOWS_TIMEOUT, TEST_WINDOWS_TOOLCHAIN_COMPONENTS,
+    TOOLCHAIN_ACTION, TOOLCHAIN_COMPONENTS, UPLOAD_ACTION, UPLOAD_ACTION_PREFIX, WHOLE_SUITE,
+    WHOLE_SUITE_LANE, WINDOWS_BUILD_WITNESS, WINDOWS_COMPILER_CHECK_LINES, WINDOWS_GROUP,
+    WINDOWS_SHARD_SCRIPT, WINDOWS_TEST_WITNESS, WORKFLOW_ENV, WORKFLOW_FIELDS, WORKFLOW_PERMISSIONS,
 };
 use super::repo_root;
 
@@ -449,10 +454,22 @@ pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {
     for complaint in field_complaints(job, &TEST_JOB_FIELDS, &OPTIONAL_DEFAULTS_FIELD) {
         out.push(format!("[unexpected-job-field] `test` {complaint}"));
     }
+    if scalar(job, "name") != Some(TEST_NAME) {
+        out.push(format!(
+            "[test-job-name] the `test` job is named {:?}, not `{TEST_NAME}`. Three macOS legs \
+             share one runner label, so a name that does not carry the shard publishes three \
+             checks under one name, and nothing reading the run can tell which shard a result \
+             belongs to.",
+            scalar(job, "name")
+        ));
+    }
     for (index, step) in steps_of(job).iter().enumerate() {
-        let runs_the_suite = scalar(step, "run") == Some(TEST_COMMAND);
+        let script = scalar(step, "run");
+        let runs_the_suite = script == Some(TEST_COMMAND) || script == Some(TEST_SHARD_SCRIPT);
         let allowed: &[&str] = if runs_the_suite {
             &TEST_STEP_FIELDS
+        } else if uploads_a_record(step) {
+            &LANE_STEP_FIELDS
         } else {
             &STEP_FIELDS
         };
@@ -470,7 +487,7 @@ pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {
                 &TEST_STEP_ENV,
             ));
         }
-        if scalar(step, "run").is_some() {
+        if script.is_some() {
             for target in CI_TARGETS.iter().filter(|target| hosts_tests(target)) {
                 out.extend(shell_complaints(
                     doc,
@@ -484,17 +501,35 @@ pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {
         }
     }
 
-    let running = steps_of(job)
-        .iter()
-        .filter(|step| scalar(step, "run") == Some(TEST_COMMAND))
-        .count();
-    if running != 1 {
-        out.push(format!(
-            "[test-job-command] the `test` job has {running} steps whose `run:` is exactly \
-             `{TEST_COMMAND}`, not one. These fixtures are only evidence of anything in a \
-             job that executes them."
-        ));
+    for command in [TEST_COMMAND, TEST_SHARD_SCRIPT] {
+        let running = steps_of(job)
+            .iter()
+            .filter(|step| scalar(step, "run") == Some(command))
+            .count();
+        if running != 1 {
+            out.push(format!(
+                "[test-job-command] the `test` job has {running} steps whose `run:` is exactly \
+                 `{command}`, not one. These fixtures are only evidence of anything in a job \
+                 that executes them: the whole suite on the ubuntu leg, one shard of it on each \
+                 macOS leg."
+            ));
+        }
     }
+    out.extend(suite_lane_complaints(
+        job,
+        "test",
+        "test-suite-lane",
+        &[
+            (TEST_COMMAND, WHOLE_SUITE_LANE),
+            (TEST_SHARD_SCRIPT, HOSTED_LANE),
+        ],
+    ));
+    out.extend(upload_complaints(
+        job,
+        "test",
+        "test-job-upload",
+        TEST_SHARD_SCRIPT,
+    ));
     out.extend(checkout_complaints(job, "test", "test-job-checkout"));
     out.extend(step_pin_complaints(
         job,
@@ -509,49 +544,41 @@ pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {
         Some(STABLE_TOOLCHAIN),
     ));
 
-    let expected_runners: BTreeSet<String> = CI_TARGETS
-        .iter()
-        .filter(|target| hosts_tests(target))
-        .map(|target| target.runner.to_owned())
-        .collect();
-    match field(job, "strategy") {
-        None => out.push(
-            "[test-job-matrix] the `test` job declares no `strategy:`, so it runs on one \
-             platform"
-                .to_owned(),
-        ),
-        Some(strategy) => {
-            for complaint in field_complaints(strategy, &["fail-fast", "matrix"], &[]) {
+    out.extend(strategy_complaints(
+        job,
+        "test",
+        "test-job-matrix",
+        "include",
+    ));
+    let listed = field(job, "strategy")
+        .and_then(|strategy| field(strategy, "matrix"))
+        .and_then(matrix_entries);
+    match test_matrix() {
+        Err(problem) => out.push(format!("[test-job-matrix] {problem}")),
+        Ok(expected) => {
+            let hosted: BTreeSet<&str> = CI_TARGETS
+                .iter()
+                .filter(|target| hosts_tests(target))
+                .map(|target| target.runner)
+                .collect();
+            let modelled: BTreeSet<&str> =
+                expected.iter().map(|(runner, _)| runner.as_str()).collect();
+            if modelled != hosted {
                 out.push(format!(
-                    "[test-job-matrix] the `test` job's `strategy:` {complaint}. `exclude:` \
-                     removes a runner `os:` still lists and `include:` adds one it does not."
+                    "[test-job-matrix] the modelled `test` matrix runs on {modelled:?}, not on \
+                     exactly the platforms that host these fixtures, {hosted:?}"
                 ));
             }
-            if field(strategy, "fail-fast").and_then(Yaml::as_bool) != Some(false) {
-                out.push(
-                    "[test-job-matrix] the `test` job's `fail-fast:` is not `false`, so one \
-                     platform's failure cancels the other before it reports"
-                        .to_owned(),
-                );
-            }
-            if let Some(matrix) = field(strategy, "matrix") {
-                for complaint in field_complaints(matrix, &["os"], &[]) {
-                    out.push(format!(
-                        "[test-job-matrix] the `test` job's `matrix:` {complaint}"
-                    ));
-                }
+            if listed.as_ref() != Some(&expected) {
+                out.push(format!(
+                    "[test-job-matrix] the `test` job's matrix is {listed:?}, not exactly \
+                     {expected:?}: the whole suite on `{TEST_WHOLE_SUITE_RUNNER}` and one leg per \
+                     `{MACOS_GROUP}` shard of `{PARTITION_TABLE}` on `{TEST_SHARD_RUNNER}`, in the \
+                     table's order. A leg missing is a shard nobody runs; a leg added is a shard \
+                     the verifier refuses or a platform the cfg census does not model."
+                ));
             }
         }
-    }
-    let matrix = field(job, "strategy").and_then(|strategy| field(strategy, "matrix"));
-    let listed = matrix
-        .and_then(|matrix| field(matrix, "os"))
-        .and_then(scalar_set);
-    if listed.as_ref() != Some(&expected_runners) {
-        out.push(format!(
-            "[test-job-matrix] the `test` job's matrix runs on {listed:?}, not exactly \
-             {expected_runners:?}"
-        ));
     }
     if scalar(job, "runs-on") != Some("${{ matrix.os }}") {
         out.push(format!(
@@ -597,6 +624,259 @@ pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {
     out
 }
 
+fn uploads_a_record(step: &Yaml) -> bool {
+    scalar(step, "uses").is_some_and(|uses| uses.starts_with(UPLOAD_ACTION_PREFIX))
+}
+
+fn suite_lane_complaints(
+    job: &Yaml,
+    named: &str,
+    code: &str,
+    suites: &[(&str, &str)],
+) -> Vec<String> {
+    let mut out = Vec::new();
+    for (index, step) in steps_of(job).iter().enumerate() {
+        let Some(script) = scalar(step, "run") else {
+            continue;
+        };
+        let Some((_, lane)) = suites.iter().find(|(suite, _)| *suite == script) else {
+            continue;
+        };
+        if scalar(step, "if") != Some(*lane) {
+            out.push(format!(
+                "[{code}] `{named}` step {index} runs the suite under {:?}, not exactly \
+                 `{lane}`. The whole-suite step and the shard step carry complementary \
+                 conditions, so every leg runs exactly one of them: any other condition is a leg \
+                 that reports success having run nothing, or one that runs the suite twice.",
+                scalar(step, "if")
+            ));
+        }
+    }
+    out
+}
+
+fn upload_complaints(job: &Yaml, named: &str, code: &str, after: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let steps = steps_of(job);
+    let uploads: Vec<usize> = steps
+        .iter()
+        .enumerate()
+        .filter(|(_, step)| uploads_a_record(step))
+        .map(|(index, _)| index)
+        .collect();
+    let shards: Vec<usize> = steps
+        .iter()
+        .enumerate()
+        .filter(|(_, step)| scalar(step, "run") == Some(after))
+        .map(|(index, _)| index)
+        .collect();
+    let ([upload], [shard]) = (uploads.as_slice(), shards.as_slice()) else {
+        return vec![format!(
+            "[{code}] `{named}` uploads at steps {uploads:?} and runs a shard at steps \
+             {shards:?}, not once each, so a shard's record is not the one thing its leg uploads"
+        )];
+    };
+    if *upload + 1 != steps.len() || upload < shard {
+        out.push(format!(
+            "[{code}] `{named}` uploads at step {upload} of {}, not as its last step, after the \
+             shard at step {shard}. An upload above the suite records nothing it ran, and one \
+             with steps after it succeeds for a leg that then fails.",
+            steps.len()
+        ));
+    }
+    let Some(step) = steps.get(*upload) else {
+        return out;
+    };
+    if scalar(step, "if") != Some(HOSTED_LANE) {
+        out.push(format!(
+            "[{code}] `{named}` step {upload} uploads under {:?}, not exactly `{HOSTED_LANE}`. \
+             Under `always()` or `failure()` a failed shard uploads a record of a run that did \
+             not finish; without the shard condition the whole-suite leg fails for want of one.",
+            scalar(step, "if")
+        ));
+    }
+    if scalar(step, "uses") != Some(UPLOAD_ACTION) {
+        out.push(format!(
+            "[{code}] `{named}` step {upload} uses {:?}, not `{UPLOAD_ACTION}`",
+            scalar(step, "uses")
+        ));
+    }
+    let expected: BTreeMap<String, String> = SHARD_UPLOAD_INPUTS
+        .iter()
+        .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+        .collect();
+    let with = field(step, "with").and_then(scalar_map);
+    if with.as_ref() != Some(&expected) {
+        out.push(format!(
+            "[{code}] `{named}` step {upload} uploads with {with:#?}, not exactly {expected:#?}. \
+             The name carries the shard and the run attempt, so a re-run never collides with the \
+             record it supersedes and the verifier can tell the two apart; the path is the \
+             directory the runner wrote; and an upload that finds nothing fails the leg."
+        ));
+    }
+    out
+}
+
+fn strategy_complaints(job: &Yaml, named: &str, code: &str, matrix_field: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let Some(strategy) = field(job, "strategy") else {
+        return vec![format!("[{code}] `{named}` declares no `strategy:`, so it runs one leg")];
+    };
+    for complaint in field_complaints(strategy, &STRATEGY_FIELDS, &[]) {
+        out.push(format!(
+            "[{code}] `{named}`'s `strategy:` {complaint}. `max-parallel:` is a limit this \
+             contract does not model."
+        ));
+    }
+    if field(strategy, "fail-fast").and_then(Yaml::as_bool) != Some(false) {
+        out.push(format!(
+            "[{code}] `{named}`'s `fail-fast:` is not `false`, so one leg's failure cancels the \
+             others before they report"
+        ));
+    }
+    if let Some(matrix) = field(strategy, "matrix") {
+        for complaint in field_complaints(matrix, &[matrix_field], &[]) {
+            out.push(format!(
+                "[{code}] `{named}`'s `matrix:` {complaint}. `exclude:` removes a leg the list \
+                 still names, and a second list multiplies the legs."
+            ));
+        }
+    }
+    out
+}
+
+fn matrix_entries(matrix: &Yaml) -> Option<Vec<(String, String)>> {
+    let keys = BTreeSet::from(["os".to_owned(), "shard".to_owned()]);
+    field(matrix, "include")?
+        .as_vec()?
+        .iter()
+        .map(|entry| {
+            if field_names(entry) != keys {
+                return None;
+            }
+            Some((
+                scalar(entry, "os")?.to_owned(),
+                scalar(entry, "shard")?.to_owned(),
+            ))
+        })
+        .collect()
+}
+
+struct Partition {
+    shards: Vec<(String, String)>,
+    lanes: BTreeMap<String, BTreeSet<String>>,
+}
+
+impl Partition {
+    fn shards(&self, group: &str) -> Vec<String> {
+        self.shards
+            .iter()
+            .filter(|(owner, _)| owner == group)
+            .map(|(_, shard)| shard.to_owned())
+            .collect()
+    }
+
+    fn partitions(&self, event: &str, group: &str) -> bool {
+        self.lanes
+            .get(event)
+            .is_some_and(|groups| groups.contains(group))
+    }
+}
+
+fn partition() -> Result<Partition, String> {
+    let text = fs::read_to_string(repo_root().join(PARTITION_TABLE))
+        .map_err(|error| format!("{PARTITION_TABLE} cannot be read: {error}"))?
+        .replace("\r\n", "\n");
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .collect();
+    if lines != PARTITION_TABLE_LINES {
+        return Err(format!(
+            "{PARTITION_TABLE} holds the lines {lines:#?}, not exactly the pinned \
+             {PARTITION_TABLE_LINES:#?}. The table decides which tests each partitioned leg runs \
+             and which legs the verifier expects; a change to it is a change to this contract, \
+             made in the same commit."
+        ));
+    }
+    let mut partition = Partition {
+        shards: Vec::new(),
+        lanes: BTreeMap::new(),
+    };
+    for line in PARTITION_TABLE_LINES {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        match words.as_slice() {
+            ["shard", group, shard, ..] => {
+                partition.shards.push(((*group).to_owned(), (*shard).to_owned()));
+            }
+            ["lane", event, groups @ ..] => {
+                partition.lanes.insert(
+                    (*event).to_owned(),
+                    groups.iter().map(|group| (*group).to_owned()).collect(),
+                );
+            }
+            _ => {}
+        }
+    }
+    for event in PARTITION_EVENTS {
+        if !partition.lanes.contains_key(event) {
+            return Err(format!("{PARTITION_TABLE} has no lane for `{event}`"));
+        }
+    }
+    Ok(partition)
+}
+
+fn test_matrix() -> Result<Vec<(String, String)>, String> {
+    let partition = partition()?;
+    for event in PARTITION_EVENTS {
+        if !partition.partitions(event, MACOS_GROUP) {
+            return Err(format!(
+                "{PARTITION_TABLE} does not partition `{MACOS_GROUP}` on `{event}`, and the \
+                 `test` job's matrix is the same on every event"
+            ));
+        }
+    }
+    let mut legs = vec![(TEST_WHOLE_SUITE_RUNNER.to_owned(), WHOLE_SUITE.to_owned())];
+    legs.extend(
+        partition
+            .shards(MACOS_GROUP)
+            .into_iter()
+            .map(|shard| (TEST_SHARD_RUNNER.to_owned(), shard)),
+    );
+    Ok(legs)
+}
+
+fn json_list(items: &[String]) -> String {
+    let quoted: Vec<String> = items.iter().map(|item| format!("\"{item}\"")).collect();
+    format!("[{}]", quoted.join(", "))
+}
+
+fn test_windows_shards() -> Result<String, String> {
+    let partition = partition()?;
+    let pull_request = partition.partitions("pull_request", WINDOWS_GROUP);
+    if pull_request != partition.partitions("push", WINDOWS_GROUP) {
+        return Err(format!(
+            "{PARTITION_TABLE} partitions `{WINDOWS_GROUP}` on one of `pull_request` and `push` \
+             and not the other, which `{QUEUE_LANE}` cannot tell apart"
+        ));
+    }
+    let queue = if partition.partitions("merge_group", WINDOWS_GROUP) {
+        partition.shards(WINDOWS_GROUP)
+    } else {
+        vec![WHOLE_SUITE.to_owned()]
+    };
+    let mut other = vec![WHOLE_SUITE.to_owned()];
+    if pull_request {
+        other.extend(partition.shards(WINDOWS_GROUP));
+    }
+    Ok(format!(
+        "${{{{ fromJSON({QUEUE_LANE} && '{}' || '{}') }}}}",
+        json_list(&queue),
+        json_list(&other)
+    ))
+}
+
 fn hosts_tests(target: &CiTarget) -> bool {
     target.runner != TEST_WINDOWS_PLATFORM
 }
@@ -632,10 +912,12 @@ pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {
         ));
     }
     for (index, step) in steps_of(job).iter().enumerate() {
-        let runs_the_suite = scalar(step, "run") == Some(WINDOWS_TEST_WITNESS);
+        let script = scalar(step, "run");
+        let runs_the_suite =
+            script == Some(WINDOWS_TEST_WITNESS) || script == Some(WINDOWS_SHARD_SCRIPT);
         let allowed: &[&str] = if runs_the_suite {
             &TEST_STEP_FIELDS
-        } else if installs_a_toolchain(step) {
+        } else if installs_a_toolchain(step) || uploads_a_record(step) {
             &LANE_STEP_FIELDS
         } else {
             &STEP_FIELDS
@@ -644,10 +926,10 @@ pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {
         if !strange.is_empty() {
             out.push(format!(
                 "[unexpected-step-field] `{TEST_WINDOWS_JOB}` step {index} declares {strange:?}. \
-                 `if:` is admitted on the toolchain install alone, where it names the lane \
-                 whose runner needs one; on the step that runs the suite it is a job that \
-                 reports success having run nothing on the other lane, and on a `run:` step \
-                 it is a script one lane executes and the other never shows a reviewer."
+                 `if:` is admitted on the toolchain install, the two steps that run the suite \
+                 and the upload, where each is pinned to the condition naming the legs it is \
+                 written for; on any other `run:` step it is a script one leg executes and \
+                 another never shows a reviewer."
             ));
         }
         if runs_the_suite {
@@ -658,7 +940,7 @@ pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {
                 &TEST_WINDOWS_STEP_ENV,
             ));
         }
-        if scalar(step, "run").is_some() {
+        if script.is_some() {
             out.extend(shell_complaints(
                 doc,
                 job,
@@ -695,15 +977,15 @@ pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {
                  its enqueue ejects the entry through that leg, with or without this pin."
             ));
         }
-        if scalar(step, "if") != Some(QUEUE_LANE) {
+        if scalar(step, "if") != Some(HOSTED_LANE) {
             out.push(format!(
                 "[test-windows-toolchain] `{TEST_WINDOWS_JOB}` step {index} installs its \
-                 toolchain under {:?}, not exactly `{QUEUE_LANE}`. The install is written for \
-                 the hosted lane, whose runner carries no curated compiler; the guest's image \
+                 toolchain under {:?}, not exactly `{HOSTED_LANE}`. The install is written for \
+                 the hosted legs, whose runner carries no curated compiler; the guest's image \
                  carries the compiler this job runs, and re-curation is how it moves. \
                  Unconditional, the step selects the guest's compiler from the workflow \
-                 instead; inverted, the hosted lane runs on whatever GitHub's image \
-                 preinstalled and the guest lane installs over its own.",
+                 instead; inverted, the hosted legs run on whatever GitHub's image \
+                 preinstalled and the guest's leg installs over its own.",
                 scalar(step, "if")
             ));
         }
@@ -722,36 +1004,108 @@ pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {
     if scalar(job, "runs-on") != Some(TEST_WINDOWS_RUNS_ON) {
         out.push(format!(
             "[test-windows-runner] `{TEST_WINDOWS_JOB}` runs on {:?}, not exactly \
-             `{TEST_WINDOWS_RUNS_ON}`. The expression names both machines, by lane: \
-             `{TEST_WINDOWS_PLATFORM}` for a merge-queue entry, which nothing waits on \
-             interactively, and the pinned label set for every other build, whose third \
-             label names the curated image. A bare scalar sends the pull-request lane to the \
-             hosted runner and its six minutes become twenty-five; a bare label set sends \
-             every build to the pull-request guest, where a queue entry's install, conditioned \
-             on the event and not the machine, runs over the image's compiler; a subset of the \
-             labels admits any \
-             self-hosted Windows machine the account registers; and a condition spelled \
-             other than `{QUEUE_LANE}` is one this contract cannot evaluate -- it may route \
-             both lanes as the install step expects or send one to a machine the step was \
-             not written for, and an equality over the text cannot tell which.",
+             `{TEST_WINDOWS_RUNS_ON}`. The expression names both machines, by leg: \
+             `{TEST_WINDOWS_PLATFORM}` for a shard, which only the merge-queue lane runs and \
+             nothing waits on interactively, and the pinned label set for the whole-suite leg \
+             every other build runs, whose third label names the curated image. A bare scalar \
+             sends the pull-request lane to the hosted runner and its six minutes become \
+             twenty-five; a bare label set sends every leg to the pull-request guest, where a \
+             shard's install, conditioned on the shard and not the machine, runs over the \
+             image's compiler; a subset of the labels admits any self-hosted Windows machine \
+             the account registers; and a condition spelled other than `{HOSTED_LANE}` is one \
+             this contract cannot evaluate -- it may route every leg as the install step \
+             expects or send one to a machine the step was not written for, and an equality \
+             over the text cannot tell which.",
             field(job, "runs-on")
         ));
     }
-
-    let running = steps_of(job)
-        .iter()
-        .filter(|step| scalar(step, "run") == Some(WINDOWS_TEST_WITNESS))
-        .count();
-    if running != 1 {
+    if scalar(job, "name") != Some(TEST_WINDOWS_NAME) {
         out.push(format!(
-            "[test-windows-command] `{TEST_WINDOWS_JOB}` has {running} steps whose `run:` is \
-             exactly the pinned suite-and-witness script, not one. Its cargo line is \
-             `{TEST_COMMAND}`; the lines before it refuse to run the suite on any compiler \
-             but the image's `{GOLDEN_IMAGE_TOOLCHAIN}`, and the lines after it are the \
-             count that says the suite executed rather than compiling and being handed to \
-             something that exits zero."
+            "[test-windows-name] `{TEST_WINDOWS_JOB}` is named {:?}, not exactly \
+             `{TEST_WINDOWS_NAME}`. The guest's leg keeps the name `test (winguest)` that the \
+             scheduling guards read, and each hosted shard carries its own, so no two legs \
+             publish one name.",
+            scalar(job, "name")
         ));
     }
+    if scalar(job, "timeout-minutes") != Some(TEST_WINDOWS_TIMEOUT) {
+        out.push(format!(
+            "[test-windows-timeout] `{TEST_WINDOWS_JOB}`'s ceiling is {:?}, not exactly \
+             `{TEST_WINDOWS_TIMEOUT}`: each hosted shard keeps the hosted lane's ceiling and the \
+             guest's leg its own.",
+            field(job, "timeout-minutes")
+        ));
+    }
+    out.extend(strategy_complaints(
+        job,
+        TEST_WINDOWS_JOB,
+        "test-windows-matrix",
+        "shard",
+    ));
+    let shards = field(job, "strategy")
+        .and_then(|strategy| field(strategy, "matrix"))
+        .and_then(|matrix| scalar(matrix, "shard"));
+    match test_windows_shards() {
+        Err(problem) => out.push(format!("[test-windows-matrix] {problem}")),
+        Ok(expected) if shards != Some(expected.as_str()) => out.push(format!(
+            "[test-windows-matrix] `{TEST_WINDOWS_JOB}`'s legs are {shards:?}, not exactly \
+             `{expected}`: the `{WINDOWS_GROUP}` shards of `{PARTITION_TABLE}` on the lanes the \
+             table partitions it on, and the guest's whole suite on the others. A shard dropped \
+             is tests nobody runs, a shard added is one the verifier refuses, and the whole \
+             suite gone from the pull-request lane is the guest's witness gone with it."
+        )),
+        Ok(_) => {}
+    }
+
+    for (command, what) in [
+        (WINDOWS_TEST_WITNESS, "the pinned suite-and-witness script"),
+        (WINDOWS_SHARD_SCRIPT, "the pinned shard script"),
+    ] {
+        let running = steps_of(job)
+            .iter()
+            .filter(|step| scalar(step, "run") == Some(command))
+            .count();
+        if running != 1 {
+            out.push(format!(
+                "[test-windows-command] `{TEST_WINDOWS_JOB}` has {running} steps whose `run:` is \
+                 exactly {what}, not one. Its Cargo line is `{TEST_COMMAND}`, whole or through \
+                 the partition runner; the lines before it refuse to run the suite on any \
+                 compiler but the image's `{GOLDEN_IMAGE_TOOLCHAIN}`, and what follows is the \
+                 count, or the record, that says the suite executed rather than compiling and \
+                 being handed to something that exits zero."
+            ));
+        }
+    }
+    let witness_check: Vec<&str> = WINDOWS_TEST_WITNESS
+        .lines()
+        .take(WINDOWS_COMPILER_CHECK_LINES)
+        .collect();
+    let shard_check: Vec<&str> = WINDOWS_SHARD_SCRIPT
+        .lines()
+        .take(WINDOWS_COMPILER_CHECK_LINES)
+        .collect();
+    if witness_check != shard_check || witness_check.len() != WINDOWS_COMPILER_CHECK_LINES {
+        out.push(format!(
+            "[test-windows-command] the shard script's first {WINDOWS_COMPILER_CHECK_LINES} \
+             lines are {shard_check:?}, not the witness's compiler check {witness_check:?}: \
+             every Windows leg refuses every compiler but the image's"
+        ));
+    }
+    out.extend(suite_lane_complaints(
+        job,
+        TEST_WINDOWS_JOB,
+        "test-windows-suite-lane",
+        &[
+            (WINDOWS_TEST_WITNESS, WHOLE_SUITE_LANE),
+            (WINDOWS_SHARD_SCRIPT, HOSTED_LANE),
+        ],
+    ));
+    out.extend(upload_complaints(
+        job,
+        TEST_WINDOWS_JOB,
+        "test-windows-upload",
+        WINDOWS_SHARD_SCRIPT,
+    ));
     out.extend(checkout_complaints(
         job,
         TEST_WINDOWS_JOB,
@@ -763,6 +1117,132 @@ pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {
         "test-windows-run-script",
         &TEST_WINDOWS_SCRIPTS,
     ));
+    out
+}
+
+pub(super) fn ci_test_coverage_job_complaints(doc: &Yaml) -> Vec<String> {
+    let mut out = Vec::new();
+    let Some(jobs) = field(doc, "jobs") else {
+        return vec!["[jobs] the workflow declares no `jobs:` mapping".to_owned()];
+    };
+    let Some(job) = field(jobs, COVERAGE_JOB) else {
+        return vec![format!(
+            "[test-coverage-missing] no `{COVERAGE_JOB}` job, so nothing checks that the \
+             partitioned legs together ran every test their harnesses listed: each shard's \
+             green says only that its own selection passed"
+        )];
+    };
+    let Some(ubuntu) = CI_TARGETS
+        .iter()
+        .find(|target| target.runner == COVERAGE_RUNNER)
+    else {
+        return vec![format!(
+            "[test-coverage-runner] `{COVERAGE_RUNNER}` is not a runner this contract models"
+        )];
+    };
+
+    for complaint in field_complaints(job, &COVERAGE_JOB_FIELDS, &OPTIONAL_DEFAULTS_FIELD) {
+        out.push(format!(
+            "[unexpected-job-field] `{COVERAGE_JOB}` {complaint}. `if:` would run it after a \
+             failed or cancelled leg, over records that leg never finished, and \
+             `continue-on-error:` reports success over a refusal."
+        ));
+    }
+    if scalar(job, "name") != Some(COVERAGE_JOB_NAME) {
+        out.push(format!(
+            "[test-coverage-name] `{COVERAGE_JOB}` is named {:?}, not `{COVERAGE_JOB_NAME}`",
+            scalar(job, "name")
+        ));
+    }
+    let needs = field(job, "needs").and_then(scalar_set);
+    let expected: BTreeSet<String> = COVERAGE_NEEDS
+        .iter()
+        .map(|need| (*need).to_owned())
+        .collect();
+    if needs.as_ref() != Some(&expected) {
+        out.push(format!(
+            "[test-coverage-needs] `{COVERAGE_JOB}` needs {needs:?}, not exactly {expected:?}: \
+             every job that runs a partitioned leg. A leg it does not wait for can upload after \
+             the verifier has read the records, or never, and without `needs` on a failed leg \
+             the verifier is not skipped."
+        ));
+    }
+    if scalar(job, "runs-on") != Some(COVERAGE_RUNNER) {
+        out.push(format!(
+            "[test-coverage-runner] `{COVERAGE_JOB}` runs on {:?}, not `{COVERAGE_RUNNER}`",
+            field(job, "runs-on")
+        ));
+    }
+    let steps = steps_of(job);
+    for (index, step) in steps.iter().enumerate() {
+        let strange = unexpected(&field_names(step), &STEP_FIELDS);
+        if !strange.is_empty() {
+            out.push(format!(
+                "[unexpected-step-field] `{COVERAGE_JOB}` step {index} declares {strange:?}"
+            ));
+        }
+        if scalar(step, "run").is_some() {
+            out.extend(shell_complaints(
+                doc,
+                job,
+                step,
+                ubuntu,
+                &format!("`{COVERAGE_JOB}` step {index}"),
+                ubuntu.default_shell,
+            ));
+        }
+    }
+    out.extend(checkout_complaints(
+        job,
+        COVERAGE_JOB,
+        "test-coverage-checkout",
+    ));
+    out.extend(step_pin_complaints(
+        job,
+        COVERAGE_JOB,
+        "test-coverage-command",
+        &[COVERAGE_COMMAND],
+    ));
+    let downloads: Vec<usize> = steps
+        .iter()
+        .enumerate()
+        .filter(|(_, step)| scalar(step, "uses") == Some(DOWNLOAD_ACTION))
+        .map(|(index, _)| index)
+        .collect();
+    let verifies: Vec<usize> = steps
+        .iter()
+        .enumerate()
+        .filter(|(_, step)| scalar(step, "run") == Some(COVERAGE_COMMAND))
+        .map(|(index, _)| index)
+        .collect();
+    if steps.len() != 3 || downloads != [1] || verifies != [2] {
+        out.push(format!(
+            "[test-coverage-steps] `{COVERAGE_JOB}` has {} steps, downloads with \
+             `{DOWNLOAD_ACTION}` at {downloads:?} and runs `{COVERAGE_COMMAND}` at {verifies:?}, \
+             not exactly: check out, download, verify. A step between them can rewrite the \
+             records or the script the verifier then reads, and a verifier that never runs \
+             refuses nothing.",
+            steps.len()
+        ));
+    }
+    let inputs: BTreeMap<String, String> = COVERAGE_DOWNLOAD_INPUTS
+        .iter()
+        .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+        .collect();
+    for index in downloads {
+        let with = steps
+            .get(index)
+            .and_then(|step| field(step, "with"))
+            .and_then(scalar_map);
+        if with.as_ref() != Some(&inputs) {
+            out.push(format!(
+                "[test-coverage-download] `{COVERAGE_JOB}` step {index} downloads with {with:#?}, \
+                 not exactly {inputs:#?}. With no `run-id` or token the action reads this run's \
+                 artifacts and no other's; the pattern is the shard records' prefix, and the path \
+                 is the directory the verifier reads."
+            ));
+        }
+    }
     out
 }
 
@@ -1382,6 +1862,7 @@ pub(super) fn workflow_complaints(doc: &Yaml) -> Vec<String> {
     let mut out = ci_gate_complaints(doc);
     out.extend(ci_test_job_complaints(doc));
     out.extend(ci_test_windows_job_complaints(doc));
+    out.extend(ci_test_coverage_job_complaints(doc));
     out.extend(ci_windows_build_witness_complaints(doc));
     out.extend(workflow_env_complaints(doc));
     out.extend(workflow_permissions_complaints(doc));
@@ -1493,14 +1974,16 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     },
     WorkflowEscape {
         name: "MUT-TEST-MATRIX-EXCLUDED",
-        escape: "`exclude:` removes a runner that `os:` still lists. Every check that reads \
-                 `os:` passes while the fixtures never run on that platform -- the matrix \
-                 half of `PR5-MACOS-CLIPPY-NEVER-RUN`.",
+        escape: "`exclude:` beside the matrix's `include:` list. GitHub processes `include:` \
+                 after `exclude:`, so this one removes nothing today, but every check that reads \
+                 `include:` would pass over the leg an `exclude:` drops on the day it applies -- \
+                 the matrix half of `PR5-MACOS-CLIPPY-NEVER-RUN`. The contract models the one \
+                 list it reads and refuses any key beside it.",
         job: Some("test"),
-        anchor: "        os: [ubuntu-latest, macos-latest]\n",
-        replacement: "        os: [ubuntu-latest, macos-latest]\n\
-                      \x20       exclude:\n\
-                      \x20         - os: macos-latest\n",
+        anchor: "\x20       include:\n",
+        replacement: "\x20       exclude:\n\
+                      \x20         - os: macos-latest\n\
+                      \x20       include:\n",
         refused_as: "test-job-matrix",
     },
     WorkflowEscape {
@@ -1533,11 +2016,11 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     },
     WorkflowEscape {
         name: "MUT-AGGREGATE-NEEDS-DROPPED",
-        escape: "a gate the aggregate does not depend on: branch protection settles green \
-                 while the Windows denial gate is red. `PR5D-MSVC-CLIPPY-NEVER-RUN`.",
+        escape: "a gate the aggregate does not depend on: branch protection settles green while \
+                 the Windows denial gate is red. `PR5D-MSVC-CLIPPY-NEVER-RUN`.",
         job: Some("merge-gate"),
-        anchor: "    needs: [lint, lint-windows, lint-macos, msrv, test, test-windows]\n",
-        replacement: "    needs: [lint, lint-macos, msrv, test, test-windows]\n",
+        anchor: "\x20   needs: [lint, lint-windows, lint-macos, msrv, test, test-windows, test-coverage]\n",
+        replacement: "\x20   needs: [lint, lint-macos, msrv, test, test-windows, test-coverage]\n",
         refused_as: "aggregate-needs",
     },
     WorkflowEscape {
@@ -1555,11 +2038,11 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         name: "MUT-AGGREGATE-LOOP-DECOY",
         escape: "the loop omits a gate while the omitted name still appears on the line. The \
                  shape the predecessor's doc enumerated as the escape it could not close: \
-                 `requires.split_whitespace().any(|word| word == looped)` passes on the \
-                 trailing mention.",
+                 `requires.split_whitespace().any(|word| word == looped)` passes on the trailing \
+                 mention.",
         job: Some("merge-gate"),
-        anchor: "          for gate in LINT LINT_WINDOWS LINT_MACOS MSRV TEST TEST_WINDOWS; do\n",
-        replacement: "          for gate in LINT LINT_WINDOWS MSRV TEST TEST_WINDOWS; do : LINT_MACOS\n",
+        anchor: "\x20         for gate in LINT LINT_WINDOWS LINT_MACOS MSRV TEST TEST_WINDOWS TEST_COVERAGE; do\n",
+        replacement: "\x20         for gate in LINT LINT_WINDOWS MSRV TEST TEST_WINDOWS TEST_COVERAGE; do : LINT_MACOS\n",
         refused_as: "aggregate-loop",
     },
     WorkflowEscape {
@@ -1623,69 +2106,75 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     },
     WorkflowEscape {
         name: "MUT-CI-TEST-MATRIX-NARROWED",
-        escape: "the hosted fixtures run on one platform and the other goes unexercised, \
-                 while every check that names the command still passes",
+        escape: "the hosted fixtures run on one platform and the other goes unexercised, while \
+                 every check that names the command still passes: the three macOS shards dropped \
+                 from the matrix",
         job: Some("test"),
-        anchor: "        os: [ubuntu-latest, macos-latest]\n",
-        replacement: "        os: [ubuntu-latest]\n",
+        anchor: "\x20         - os: macos-latest\n\
+                 \x20           shard: m1\n\
+                 \x20         - os: macos-latest\n\
+                 \x20           shard: m2\n\
+                 \x20         - os: macos-latest\n\
+                 \x20           shard: m3\n",
+        replacement: "",
         refused_as: "test-job-matrix",
     },
     WorkflowEscape {
         name: "MUT-TEST-MATRIX-KEEPS-WINDOWS",
         escape: "the hosted matrix quietly re-admits Windows. Two jobs then run the Windows \
-                 suite, and the one whose duration this contract retired is back on the \
-                 critical path with every other check passing.",
+                 suite, and the one whose duration this contract retired is back on the critical \
+                 path with every other check passing.",
         job: Some("test"),
-        anchor: "        os: [ubuntu-latest, macos-latest]\n",
-        replacement: "        os: [windows-latest, ubuntu-latest, macos-latest]\n",
+        anchor: "\x20       include:\n",
+        replacement: "\x20       include:\n\
+                      \x20         - os: windows-latest\n\
+                      \x20           shard: all\n",
         refused_as: "test-job-matrix",
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-REHOSTED",
-        escape: "both lanes on `windows-latest`, as a scalar `runs-on:`. Every step still \
-                 matches character for character and the install step's condition still \
-                 holds on the queue; only the pull-request lane's machine changed, and with \
-                 it the six minutes every pull request waits on became twenty-five. The \
-                 pull-request lane's install is skipped there, so the suite step's compiler \
-                 check throws on every pull request: loud, but a workflow that is red by \
-                 construction is refused here before it is pushed.",
+        escape: "every leg on `windows-latest`, as a scalar `runs-on:`. Every step still matches \
+                 character for character and the install step's condition still holds on the \
+                 shards; only the guest's leg changed machine, and with it the six minutes every \
+                 pull request waits on became twenty-five. The install is skipped on that leg, so \
+                 its compiler check throws on every pull request: loud, but a workflow that is \
+                 red by construction is refused here before it is pushed.",
         job: Some("test-windows"),
-        anchor: "    runs-on: ${{ github.event_name == 'merge_group' && 'windows-latest' || fromJSON('[\"self-hosted\", \"windows\", \"winguest\"]') }}\n",
-        replacement: "    runs-on: windows-latest\n",
+        anchor: "\x20   runs-on: ${{ matrix.shard != 'all' && 'windows-latest' || fromJSON('[\"self-hosted\", \"windows\", \"winguest\"]') }}\n",
+        replacement: "\x20   runs-on: windows-latest\n",
         refused_as: "test-windows-runner",
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-LABEL-DROPPED",
-        escape: "the self-hosted labels loosened to `[self-hosted, windows]`, which any \
-                 Windows runner the account ever registers satisfies; the curated image is \
-                 named by the label this drops",
+        escape: "the self-hosted labels loosened to `[self-hosted, windows]`, which any Windows \
+                 runner the account ever registers satisfies; the curated image is named by the \
+                 label this drops",
         job: Some("test-windows"),
-        anchor: "    runs-on: ${{ github.event_name == 'merge_group' && 'windows-latest' || fromJSON('[\"self-hosted\", \"windows\", \"winguest\"]') }}\n",
-        replacement: "    runs-on: ${{ github.event_name == 'merge_group' && 'windows-latest' || fromJSON('[\"self-hosted\", \"windows\"]') }}\n",
+        anchor: "\x20   runs-on: ${{ matrix.shard != 'all' && 'windows-latest' || fromJSON('[\"self-hosted\", \"windows\", \"winguest\"]') }}\n",
+        replacement: "\x20   runs-on: ${{ matrix.shard != 'all' && 'windows-latest' || fromJSON('[\"self-hosted\", \"windows\"]') }}\n",
         refused_as: "test-windows-runner",
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-QUEUE-LANE-REGUESTED",
-        escape: "the expression replaced by the plain label set. Every build lands on the \
-                 pull-request guest, a merge-queue entry queues behind whatever pull-request \
-                 build holds it, and the queue lane's install step, still conditioned on the \
-                 event rather than on the machine, now runs on the guest and installs over \
-                 the image's compiler, under the hosted lane's ceiling.",
+        escape: "the expression replaced by the plain label set. Every leg lands on the \
+                 pull-request guest, the merge queue's four shards queue behind whatever \
+                 pull-request build holds it, and the shards' install step, conditioned on the \
+                 shard rather than on the machine, now runs on the guest and installs over the \
+                 image's compiler, under the hosted lane's ceiling.",
         job: Some("test-windows"),
-        anchor: "    runs-on: ${{ github.event_name == 'merge_group' && 'windows-latest' || fromJSON('[\"self-hosted\", \"windows\", \"winguest\"]') }}\n",
-        replacement: "    runs-on: [self-hosted, windows, winguest]\n",
+        anchor: "\x20   runs-on: ${{ matrix.shard != 'all' && 'windows-latest' || fromJSON('[\"self-hosted\", \"windows\", \"winguest\"]') }}\n",
+        replacement: "\x20   runs-on: [self-hosted, windows, winguest]\n",
         refused_as: "test-windows-runner",
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-LANES-SWAPPED",
-        escape: "the condition inverted in `runs-on:` alone: the pull-request lane goes to \
-                 `windows-latest`, where no step installs a compiler, and the queue goes to \
-                 the guest, where the install step now runs over the image's own. The \
-                 install's `if:` still matches; it is the runner that no longer agrees with \
-                 it.",
+        escape: "the condition inverted in `runs-on:` alone: the guest's whole-suite leg goes to \
+                 `windows-latest`, where no step installs a compiler, and every shard goes to the \
+                 guest, where the install step now runs over the image's own. The install's `if:` \
+                 still matches; it is the runner that no longer agrees with it.",
         job: Some("test-windows"),
-        anchor: "    runs-on: ${{ github.event_name == 'merge_group' && 'windows-latest' || fromJSON('[\"self-hosted\", \"windows\", \"winguest\"]') }}\n",
-        replacement: "    runs-on: ${{ github.event_name != 'merge_group' && 'windows-latest' || fromJSON('[\"self-hosted\", \"windows\", \"winguest\"]') }}\n",
+        anchor: "\x20   runs-on: ${{ matrix.shard != 'all' && 'windows-latest' || fromJSON('[\"self-hosted\", \"windows\", \"winguest\"]') }}\n",
+        replacement: "\x20   runs-on: ${{ matrix.shard == 'all' && 'windows-latest' || fromJSON('[\"self-hosted\", \"windows\", \"winguest\"]') }}\n",
         refused_as: "test-windows-runner",
     },
     WorkflowEscape {
@@ -1700,14 +2189,19 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-DISABLED",
-        escape: "a step-level `if: false` on the self-hosted job's test step: the job reports \
+        escape: "the whole-suite step's condition becomes `false`: the guest's leg reports \
                  success having run nothing. A job-level `if:` is not this escape -- the job \
                  reports `skipped` and the aggregate, which accepts only `success`, fails.",
         job: Some("test-windows"),
-        anchor: "      - name: Test, and witness that the suite ran\n",
-        replacement: "      - name: Test, and witness that the suite ran\n\
-                      \x20       if: false\n",
-        refused_as: "unexpected-step-field",
+        anchor: "\x20     - name: Test, and witness that the suite ran\n\
+                 \x20       if: matrix.shard == 'all'\n\
+                 \x20       env:\n\
+                 \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: \"1\"\n",
+        replacement: "\x20     - name: Test, and witness that the suite ran\n\
+                      \x20       if: false\n\
+                      \x20       env:\n\
+                      \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: \"1\"\n",
+        refused_as: "test-windows-suite-lane",
     },
     WorkflowEscape {
         name: "MUT-WINDOWS-WITNESS-COUNT-DROPPED",
@@ -1723,17 +2217,18 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     },
     WorkflowEscape {
         name: "MUT-WINDOWS-WITNESS-COMPILER-CHECK-DROPPED",
-        escape: "the two lines that refuse any compiler but the image's are gone and the suite \
-                 runs on whatever Cargo resolves to. The install step still matches whole, \
-                 the toolchain action tolerates a failed `rustup default` and verifies only \
-                 `rustc +1.97.1`, and a `RUSTC` in the guest's service environment is read by \
-                 nothing here, so either lane can run the suite on a compiler the other \
-                 never saw with the install reported green -- the one-compiler claim with \
-                 nothing holding it.",
+        escape: "the two lines that refuse any compiler but the image's are gone from the \
+                 whole-suite step and the suite runs on whatever Cargo resolves to. The install \
+                 step still matches whole, the toolchain action tolerates a failed `rustup \
+                 default` and verifies only `rustc +1.97.1`, and a `RUSTC` in the guest's service \
+                 environment is read by nothing here, so either lane can run the suite on a \
+                 compiler the other never saw with the install reported green -- the one-compiler \
+                 claim with nothing holding it.",
         job: Some("test-windows"),
-        anchor: "          $rustc = ((cargo rustc -q --lib -- --version) | Out-String).Trim(); $path_rustc = ((rustc --version) | Out-String).Trim(); $cargo = ((cargo --version) | Out-String).Trim()\n\
-                 \x20         if ($rustc -notmatch '^rustc 1\\.97\\.1 ' -or $path_rustc -notmatch '^rustc 1\\.97\\.1 ' -or $cargo -notmatch '^cargo 1\\.97\\.1 ') { throw \"the suite would run on '$rustc' (Cargo's compiler), '$path_rustc' (PATH's rustc) and '$cargo', not the image's 1.97.1: a compiler was chosen by something other than this workflow\" }\n",
-        replacement: "",
+        anchor: "\x20         $rustc = ((cargo rustc -q --lib -- --version) | Out-String).Trim(); $path_rustc = ((rustc --version) | Out-String).Trim(); $cargo = ((cargo --version) | Out-String).Trim()\n\
+                 \x20         if ($rustc -notmatch '^rustc 1\\.97\\.1 ' -or $path_rustc -notmatch '^rustc 1\\.97\\.1 ' -or $cargo -notmatch '^cargo 1\\.97\\.1 ') { throw \"the suite would run on '$rustc' (Cargo's compiler), '$path_rustc' (PATH's rustc) and '$cargo', not the image's 1.97.1: a compiler was chosen by something other than this workflow\" }\n\
+                 \x20         cargo test --all-targets --all-features | Tee-Object -Variable log\n",
+        replacement: "\x20         cargo test --all-targets --all-features | Tee-Object -Variable log\n",
         refused_as: "test-windows-command",
     },
     WorkflowEscape {
@@ -1759,30 +2254,30 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  compiler is selected and before the tree exists; only a pin on where the \
                  checkout is, not merely what it is given, refuses it.",
         job: Some("test-windows"),
-        anchor: "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n\n\
+        anchor: "\x20     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n\n\
                  \x20     # The hosted lane's compiler: the image's, exactly. The workflow oracle\n\
                  \x20     # pins this step whole -- one install, right after the checkout, on\n\
-                 \x20     # exactly the lane whose runner needs one, at exactly the image's version\n\
-                 \x20     # -- and refuses an `if:` on any other step of this job. On the guest\n\
-                 \x20     # lane the step is skipped after its archive is downloaded at setup.\n\
+                 \x20     # exactly the legs whose runner needs one, at exactly the image's\n\
+                 \x20     # version. On the guest's leg the step is skipped after its archive is\n\
+                 \x20     # downloaded at setup.\n\
                  \x20     - name: Install the image's toolchain on the hosted lane\n\
-                 \x20       if: github.event_name == 'merge_group'\n\
+                 \x20       if: matrix.shard != 'all'\n\
                  \x20       uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable\n\
                  \x20       with:\n\
                  \x20         toolchain: 1.97.1\n\
                  \x20         components: clippy\n",
-        replacement: "      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2\n\n\
+        replacement: "\x20     - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2\n\n\
                       \x20     # The hosted lane's compiler: the image's, exactly. The workflow oracle\n\
-                 \x20     # pins this step whole -- one install, right after the checkout, on\n\
-                 \x20     # exactly the lane whose runner needs one, at exactly the image's version\n\
-                 \x20     # -- and refuses an `if:` on any other step of this job. On the guest\n\
-                 \x20     # lane the step is skipped after its archive is downloaded at setup.\n\
-                 \x20     - name: Install the image's toolchain on the hosted lane\n\
-                 \x20       if: github.event_name == 'merge_group'\n\
-                 \x20       uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable\n\
-                 \x20       with:\n\
-                 \x20         toolchain: 1.97.1\n\
-                 \x20         components: clippy\n\
+                      \x20     # pins this step whole -- one install, right after the checkout, on\n\
+                      \x20     # exactly the legs whose runner needs one, at exactly the image's\n\
+                      \x20     # version. On the guest's leg the step is skipped after its archive is\n\
+                      \x20     # downloaded at setup.\n\
+                      \x20     - name: Install the image's toolchain on the hosted lane\n\
+                      \x20       if: matrix.shard != 'all'\n\
+                      \x20       uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable\n\
+                      \x20       with:\n\
+                      \x20         toolchain: 1.97.1\n\
+                      \x20         components: clippy\n\
                       \x20     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n",
         refused_as: "test-windows-checkout",
     },
@@ -1845,26 +2340,29 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-INSTALL-UNCONDITIONAL",
-        escape: "the install step's `if:` dropped. The hosted lane is unchanged; the guest \
-                 lane now has its compiler selected by the workflow instead of by the image, \
-                 which is the escape the contract refused before there was a hosted lane -- \
-                 `rustup` on a frozen image, over a curated toolchain, on every pull request.",
+        escape: "the install step's `if:` dropped. The shards are unchanged; the guest's leg now \
+                 has its compiler selected by the workflow instead of by the image, which is the \
+                 escape the contract refused before there was a hosted lane -- `rustup` on a \
+                 frozen image, over a curated toolchain, on every pull request.",
         job: Some("test-windows"),
-        anchor: "        if: github.event_name == 'merge_group'\n",
-        replacement: "",
+        anchor: "\x20     - name: Install the image's toolchain on the hosted lane\n\
+                 \x20       if: matrix.shard != 'all'\n",
+        replacement: "\x20     - name: Install the image's toolchain on the hosted lane\n",
         refused_as: "test-windows-toolchain",
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-INSTALL-ON-THE-WRONG-LANE",
-        escape: "the install step's condition inverted while `runs-on:` keeps its lanes: the \
-                 hosted lane is left with whatever GitHub's image preinstalled -- current \
-                 stable, or the previous one during a rollout -- where the suite step's \
-                 compiler check then throws on every queue entry, and the guest lane installs \
-                 over its own. Both pins are exact; they no longer name the same lane, and a \
-                 workflow whose queue is red by construction is refused before it is pushed.",
+        escape: "the install step's condition inverted while `runs-on:` keeps its legs: the \
+                 shards are left with whatever GitHub's image preinstalled -- current stable, or \
+                 the previous one during a rollout -- where the shard step's compiler check then \
+                 throws on every queue entry, and the guest's leg installs over its own. Both \
+                 pins are exact; they no longer name the same legs, and a workflow whose queue is \
+                 red by construction is refused before it is pushed.",
         job: Some("test-windows"),
-        anchor: "        if: github.event_name == 'merge_group'\n",
-        replacement: "        if: github.event_name != 'merge_group'\n",
+        anchor: "\x20     - name: Install the image's toolchain on the hosted lane\n\
+                 \x20       if: matrix.shard != 'all'\n",
+        replacement: "\x20     - name: Install the image's toolchain on the hosted lane\n\
+                      \x20       if: matrix.shard == 'all'\n",
         refused_as: "test-windows-toolchain",
     },
     WorkflowEscape {
@@ -1897,14 +2395,13 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-INSTALL-NOT-FIRST",
-        escape: "the install step moved below the identity step. Nothing runs Cargo between \
-                 the two today, so this is the shape `MUT-TOOLCHAIN-NOT-FIRST` refuses on the \
-                 gates, held here for the same reason: a Cargo command placed above the \
-                 install would run on GitHub's preinstalled compiler with every other pin \
-                 matching.",
+        escape: "the install step moved below the identity step. Nothing runs Cargo between the \
+                 two today, so this is the shape `MUT-TOOLCHAIN-NOT-FIRST` refuses on the gates, \
+                 held here for the same reason: a Cargo command placed above the install would \
+                 run on GitHub's preinstalled compiler with every other pin matching.",
         job: Some("test-windows"),
-        anchor: "      - name: Install the image's toolchain on the hosted lane\n\
-                 \x20       if: github.event_name == 'merge_group'\n\
+        anchor: "\x20     - name: Install the image's toolchain on the hosted lane\n\
+                 \x20       if: matrix.shard != 'all'\n\
                  \x20       uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable\n\
                  \x20       with:\n\
                  \x20         toolchain: 1.97.1\n\
@@ -1913,30 +2410,35 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  \x20       run: |\n\
                  \x20         git config --global user.email \"ci@upstroke.local\"\n\
                  \x20         git config --global user.name \"upstroke CI\"\n",
-        replacement: "      - name: Configure git identity\n\
-                 \x20       run: |\n\
-                 \x20         git config --global user.email \"ci@upstroke.local\"\n\
-                 \x20         git config --global user.name \"upstroke CI\"\n\n\
-                 \x20     - name: Install the image's toolchain on the hosted lane\n\
-                 \x20       if: github.event_name == 'merge_group'\n\
-                 \x20       uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable\n\
-                 \x20       with:\n\
-                 \x20         toolchain: 1.97.1\n\
-                 \x20         components: clippy\n",
+        replacement: "\x20     - name: Configure git identity\n\
+                      \x20       run: |\n\
+                      \x20         git config --global user.email \"ci@upstroke.local\"\n\
+                      \x20         git config --global user.name \"upstroke CI\"\n\n\
+                      \x20     - name: Install the image's toolchain on the hosted lane\n\
+                      \x20       if: matrix.shard != 'all'\n\
+                      \x20       uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable\n\
+                      \x20       with:\n\
+                      \x20         toolchain: 1.97.1\n\
+                      \x20         components: clippy\n",
         refused_as: "test-windows-toolchain",
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-SUITE-ON-ONE-LANE",
-        escape: "the lane condition, exactly as the install step spells it, on the step that \
-                 runs the suite. The pull-request lane checks out, configures git, and \
-                 reports success having run nothing; the queue still runs the suite, so the \
-                 merge is still guarded, and every pull request is green on Windows for \
-                 free. The allowance is per step, not per value.",
+        escape: "the whole-suite step also conditioned on the merge-queue event, which never runs \
+                 the guest's leg. The pull-request lane checks out, configures git, and reports \
+                 success having run nothing; the queue still runs its shards, so the merge is \
+                 still guarded, and every pull request is green on Windows for free. The \
+                 allowance is per step and per condition, not per value.",
         job: Some("test-windows"),
-        anchor: "      - name: Test, and witness that the suite ran\n",
-        replacement: "      - name: Test, and witness that the suite ran\n\
-                      \x20       if: github.event_name == 'merge_group'\n",
-        refused_as: "unexpected-step-field",
+        anchor: "\x20     - name: Test, and witness that the suite ran\n\
+                 \x20       if: matrix.shard == 'all'\n\
+                 \x20       env:\n\
+                 \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: \"1\"\n",
+        replacement: "\x20     - name: Test, and witness that the suite ran\n\
+                      \x20       if: matrix.shard == 'all' && github.event_name == 'merge_group'\n\
+                      \x20       env:\n\
+                      \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: \"1\"\n",
+        refused_as: "test-windows-suite-lane",
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-ONLY-RETARGET",
@@ -1989,53 +2491,63 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     },
     WorkflowEscape {
         name: "MUT-TEST-CASEFOLD-DECLARATION-DROPPED",
-        escape: "the hosted test step no longer declares that the macOS runner's temporary \
-                 directory folds case, so the alias test observes its native branch there \
+        escape: "the hosted whole-suite step no longer declares the leg's casefold, so on a leg \
+                 whose temporary directory folds case the alias test observes its native branch \
                  instead of requiring it: a folding temporary directory is no longer a \
-                 prerequisite of the leg, and on a temporary directory that does not fold \
-                 case the undeclared test passes with the branch unrun where the declared \
-                 one fails at the declaration (34-r6-casefold-declaration.log, ext4) -- while \
-                 every pin still matches",
+                 prerequisite of the leg, and on a temporary directory that does not fold case \
+                 the undeclared test passes with the branch unrun where the declared one fails at \
+                 the declaration (34-r6-casefold-declaration.log, ext4) -- while every pin still \
+                 matches",
         job: Some("test"),
-        anchor: "        env:\n\
+        anchor: "\x20       if: matrix.shard == 'all'\n\
+                 \x20       env:\n\
                  \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}\n",
-        replacement: "",
+        replacement: "\x20       if: matrix.shard == 'all'\n",
         refused_as: "test-step-env",
     },
     WorkflowEscape {
         name: "MUT-TEST-CASEFOLD-DECLARED-ON-THE-WRONG-LEG",
         escape: "the declaration moves to the ubuntu runner, whose temporary directory does not \
-                 fold case: the macOS leg observes instead of requiring, and the ubuntu leg \
-                 fails its declaration loudly -- a red that reads as a flake rather than as \
-                 the guard having moved",
+                 fold case: the macOS legs observe instead of requiring, and the ubuntu leg fails \
+                 its declaration loudly -- a red that reads as a flake rather than as the guard \
+                 having moved",
         job: Some("test"),
-        anchor: "          UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}\n",
-        replacement: "          UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'ubuntu-latest' && '1' || '' }}\n",
+        anchor: "\x20       if: matrix.shard == 'all'\n\
+                 \x20       env:\n\
+                 \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}\n",
+        replacement: "\x20       if: matrix.shard == 'all'\n\
+                      \x20       env:\n\
+                      \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'ubuntu-latest' && '1' || '' }}\n",
         refused_as: "test-step-env",
     },
     WorkflowEscape {
         name: "MUT-TEST-STEP-RETARGETED-THROUGH-THE-ADMITTED-ENV",
-        escape: "the hosted test step's `env:`, one of the two step-level maps this contract \
-                 admits, gains a second key: \
-                 `CARGO_BUILD_TARGET` retargets the compile the suite performs while the \
-                 `run:` scalar and the declaration both still match -- \
-                 `MUT-GATE-STEP-RETARGETED`'s shape on the step that now carries an \
-                 environment",
+        escape: "the hosted test step's `env:`, one of the step-level maps this contract admits, \
+                 gains a second key: `CARGO_BUILD_TARGET` retargets the compile the suite \
+                 performs while the `run:` scalar and the declaration both still match -- \
+                 `MUT-GATE-STEP-RETARGETED`'s shape on the step that now carries an environment",
         job: Some("test"),
-        anchor: "          UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}\n",
-        replacement: "          UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}\n\
+        anchor: "\x20       if: matrix.shard == 'all'\n\
+                 \x20       env:\n\
+                 \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}\n",
+        replacement: "\x20       if: matrix.shard == 'all'\n\
+                      \x20       env:\n\
+                      \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}\n\
                       \x20         CARGO_BUILD_TARGET: x86_64-unknown-linux-gnu\n",
         refused_as: "test-step-env",
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-CASEFOLD-DECLARATION-DROPPED",
-        escape: "the self-hosted step no longer declares that the guest's NTFS folds case, so \
-                 the alias test observes its native branch on Windows instead of requiring \
-                 it, with the witness script and every label still matching",
+        escape: "the self-hosted step no longer declares that the guest's NTFS folds case, so the \
+                 alias test observes its native branch on Windows instead of requiring it, with \
+                 the witness script and every label still matching",
         job: Some("test-windows"),
-        anchor: "        env:\n\
+        anchor: "\x20     - name: Test, and witness that the suite ran\n\
+                 \x20       if: matrix.shard == 'all'\n\
+                 \x20       env:\n\
                  \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: \"1\"\n",
-        replacement: "",
+        replacement: "\x20     - name: Test, and witness that the suite ran\n\
+                      \x20       if: matrix.shard == 'all'\n",
         refused_as: "test-windows-step-env",
     },
     WorkflowEscape {
@@ -2082,12 +2594,12 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     },
     WorkflowEscape {
         name: "MUT-DEFAULTS-WORKING-DIRECTORY",
-        escape: "a job-level default working directory points every `run:` step at another \
-                 crate: the pinned test command tests an empty `ci-pass/` while the labels, \
-                 shells, checkout and command all still match character for character",
+        escape: "a job-level default working directory points every `run:` step at another crate: \
+                 the pinned test command tests an empty `ci-pass/` while the labels, shells, \
+                 checkout and command all still match character for character",
         job: Some("test-windows"),
-        anchor: "    timeout-minutes: ${{ github.event_name == 'merge_group' && 55 || 20 }}\n",
-        replacement: "    timeout-minutes: ${{ github.event_name == 'merge_group' && 55 || 20 }}\n\
+        anchor: "\x20   timeout-minutes: ${{ matrix.shard != 'all' && 55 || 20 }}\n",
+        replacement: "\x20   timeout-minutes: ${{ matrix.shard != 'all' && 55 || 20 }}\n\
                       \x20   defaults:\n\
                       \x20     run:\n\
                       \x20       working-directory: ci-pass\n",
@@ -2524,6 +3036,462 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                       \x20         toolchain: 1.85.0\n\
                       \x20     - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2\n",
         refused_as: "msrv-job-order",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-SHARD-DROPPED",
+        escape: "the merge-queue lane runs three of the four Windows shards. Each leg that runs \
+                 is green and every pin on its steps holds; the fourth shard's tests run nowhere \
+                 on the lane that lands the merge.",
+        job: Some("test-windows"),
+        anchor: "&& '[\"w1\", \"w2\", \"w3\", \"w4\"]' ||",
+        replacement: "&& '[\"w1\", \"w2\", \"w3\"]' ||",
+        refused_as: "test-windows-matrix",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-SHARD-ADDED",
+        escape: "a fifth Windows shard the table does not hold. Its leg finds no filters for \
+                 itself, and the verifier refuses a record from a shard its table does not name; \
+                 the contract refuses the drift before either runs.",
+        job: Some("test-windows"),
+        anchor: "&& '[\"w1\", \"w2\", \"w3\", \"w4\"]' ||",
+        replacement: "&& '[\"w1\", \"w2\", \"w3\", \"w4\", \"w5\"]' ||",
+        refused_as: "test-windows-matrix",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-QUEUE-UNSHARDED",
+        escape: "the merge-queue lane back on one whole-suite leg. With the shard-keyed routing \
+                 that leg is the guest's, so the queue waits on the build box and its pull \
+                 requests -- the shape the hosted queue lane was made to retire, and on the \
+                 hosted side the whole suite is the leg the timeouts this partition exists for \
+                 came from.",
+        job: Some("test-windows"),
+        anchor: "&& '[\"w1\", \"w2\", \"w3\", \"w4\"]' ||",
+        replacement: "&& '[\"all\"]' ||",
+        refused_as: "test-windows-matrix",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-PR-LANE-WITHOUT-GUEST",
+        escape: "the pull-request lane loses the guest's whole suite, the one Windows suite that \
+                 lane has, for a hosted shard: every pull request waits on a hosted Windows leg \
+                 and runs a part of the suite there.",
+        job: Some("test-windows"),
+        anchor: "|| '[\"all",
+        replacement: "|| '[\"w1",
+        refused_as: "test-windows-matrix",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-FAIL-FAST",
+        escape: "one Windows shard's failure cancels the other three before they report, so a run \
+                 with two broken shards shows one",
+        job: Some("test-windows"),
+        anchor: "\x20   strategy:\n\
+                 \x20     fail-fast: false\n",
+        replacement: "\x20   strategy:\n\
+                      \x20     fail-fast: true\n",
+        refused_as: "test-windows-matrix",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-GUEST-RENAMED",
+        escape: "the guest's leg renamed. Every check still passes, and the scheduling guards \
+                 that look for `test (winguest)` and its three labels find nothing to hold back.",
+        job: Some("test-windows"),
+        anchor: "\x20   name: test (${{ matrix.shard == 'all' && 'winguest' || format('windows-latest, {0}', matrix.shard) }})\n",
+        replacement: "\x20   name: test (${{ matrix.shard == 'all' && 'windows-guest' || format('windows-latest, {0}', matrix.shard) }})\n",
+        refused_as: "test-windows-name",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-SHARD-NAMES-COLLAPSE",
+        escape: "the shard dropped from the hosted legs' name: four legs publish one check name, \
+                 and nothing reading the run can tell which shard passed or timed out",
+        job: Some("test-windows"),
+        anchor: "\x20   name: test (${{ matrix.shard == 'all' && 'winguest' || format('windows-latest, {0}', matrix.shard) }})\n",
+        replacement: "\x20   name: test (${{ matrix.shard == 'all' && 'winguest' || 'windows-latest' }})\n",
+        refused_as: "test-windows-name",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-CEILINGS-SWAPPED",
+        escape: "the two ceilings swapped: the guest's whole suite gets the hosted lane's 55 \
+                 minutes and every hosted shard the guest's 20",
+        job: Some("test-windows"),
+        anchor: "\x20   timeout-minutes: ${{ matrix.shard != 'all' && 55 || 20 }}\n",
+        replacement: "\x20   timeout-minutes: ${{ matrix.shard != 'all' && 20 || 55 }}\n",
+        refused_as: "test-windows-timeout",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-SHARD-STEP-DELETED",
+        escape: "the shard step gone: each hosted leg checks out, installs, uploads nothing and \
+                 fails at the upload -- or, with the upload gone too, reports success having run \
+                 nothing",
+        job: Some("test-windows"),
+        anchor: "\x20     - name: Test one shard, and record what it listed, selected and ran\n\
+                 \x20       if: matrix.shard != 'all'\n\
+                 \x20       env:\n\
+                 \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: \"1\"\n\
+                 \x20       run: |\n\
+                 \x20         $rustc = ((cargo rustc -q --lib -- --version) | Out-String).Trim(); $path_rustc = ((rustc --version) | Out-String).Trim(); $cargo = ((cargo --version) | Out-String).Trim()\n\
+                 \x20         if ($rustc -notmatch '^rustc 1\\.97\\.1 ' -or $path_rustc -notmatch '^rustc 1\\.97\\.1 ' -or $cargo -notmatch '^cargo 1\\.97\\.1 ') { throw \"the suite would run on '$rustc' (Cargo's compiler), '$path_rustc' (PATH's rustc) and '$cargo', not the image's 1.97.1: a compiler was chosen by something other than this workflow\" }\n\
+                 \x20         python .github/scripts/partition.py run windows ${{ matrix.shard }} test-partition\n\
+                 \x20         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n",
+        replacement: "",
+        refused_as: "test-windows-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-SHARD-ON-EVERY-LEG",
+        escape: "the shard step's condition dropped: the guest's leg runs its whole suite and \
+                 then a shard named `all`, which the table does not hold, so the pull-request \
+                 lane fails on a step no pull request needs",
+        job: Some("test-windows"),
+        anchor: "\x20     - name: Test one shard, and record what it listed, selected and ran\n\
+                 \x20       if: matrix.shard != 'all'\n",
+        replacement: "\x20     - name: Test one shard, and record what it listed, selected and ran\n",
+        refused_as: "test-windows-suite-lane",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-SHARD-WITHOUT-COMPILER-CHECK",
+        escape: "the shard step loses the compiler check: the hosted shards run on whatever Cargo \
+                 resolves to while the guest's leg still refuses every compiler but the image's",
+        job: Some("test-windows"),
+        anchor: "\x20         $rustc = ((cargo rustc -q --lib -- --version) | Out-String).Trim(); $path_rustc = ((rustc --version) | Out-String).Trim(); $cargo = ((cargo --version) | Out-String).Trim()\n\
+                 \x20         if ($rustc -notmatch '^rustc 1\\.97\\.1 ' -or $path_rustc -notmatch '^rustc 1\\.97\\.1 ' -or $cargo -notmatch '^cargo 1\\.97\\.1 ') { throw \"the suite would run on '$rustc' (Cargo's compiler), '$path_rustc' (PATH's rustc) and '$cargo', not the image's 1.97.1: a compiler was chosen by something other than this workflow\" }\n\
+                 \x20         python .github/scripts/partition.py run windows ${{ matrix.shard }} test-partition\n",
+        replacement: "\x20         python .github/scripts/partition.py run windows ${{ matrix.shard }} test-partition\n",
+        refused_as: "test-windows-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-SHARD-UNFILTERED",
+        escape: "the shard step runs the whole suite on every hosted leg: each shard is green, \
+                 the record is never written, and four legs each pay for the whole suite under \
+                 the ceiling one whole-suite leg already ran into",
+        job: Some("test-windows"),
+        anchor: "\x20         python .github/scripts/partition.py run windows ${{ matrix.shard }} test-partition\n",
+        replacement: "\x20         cargo test --all-targets --all-features\n",
+        refused_as: "test-windows-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-UPLOAD-DROPPED",
+        escape: "the record is never uploaded: every hosted shard is green and the verifier has \
+                 nothing to read -- it refuses, but only because it fails closed; the contract \
+                 refuses the shape itself",
+        job: Some("test-windows"),
+        anchor: "\x20     - name: Upload the shard's record\n\
+                 \x20       if: matrix.shard != 'all'\n\
+                 \x20       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n\
+                 \x20       with:\n\
+                 \x20         name: test-partition-${{ matrix.shard }}-attempt-${{ github.run_attempt }}\n\
+                 \x20         path: test-partition\n\
+                 \x20         if-no-files-found: error\n",
+        replacement: "",
+        refused_as: "test-windows-upload",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-UPLOAD-WITHOUT-ATTEMPT",
+        escape: "the record's name drops the run attempt: a re-run of a shard collides with the \
+                 record of the attempt it replaces, and the verifier can no longer tell the \
+                 superseded record from the current one",
+        job: Some("test-windows"),
+        anchor: "\x20         name: test-partition-${{ matrix.shard }}-attempt-${{ github.run_attempt }}\n",
+        replacement: "\x20         name: test-partition-${{ matrix.shard }}\n",
+        refused_as: "test-windows-upload",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-UPLOAD-ON-FAILURE",
+        escape: "the upload runs after a failed shard too, so a record of a run that did not \
+                 finish is uploaded beside a red leg",
+        job: Some("test-windows"),
+        anchor: "\x20     - name: Upload the shard's record\n\
+                 \x20       if: matrix.shard != 'all'\n\
+                 \x20       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n\
+                 \x20       with:\n\
+                 \x20         name: test-partition-${{ matrix.shard }}-attempt-${{ github.run_attempt }}\n\
+                 \x20         path: test-partition\n\
+                 \x20         if-no-files-found: error\n",
+        replacement: "\x20     - name: Upload the shard's record\n\
+                      \x20       if: always() && matrix.shard != 'all'\n\
+                      \x20       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n\
+                      \x20       with:\n\
+                      \x20         name: test-partition-${{ matrix.shard }}-attempt-${{ github.run_attempt }}\n\
+                      \x20         path: test-partition\n\
+                      \x20         if-no-files-found: error\n",
+        refused_as: "test-windows-upload",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-UPLOAD-ABSOLVED",
+        escape: "the upload is allowed to fail: the leg is green with no record, and only the \
+                 verifier's missing-leg refusal stands between that and a lane with a shard \
+                 unaccounted for",
+        job: Some("test-windows"),
+        anchor: "\x20     - name: Upload the shard's record\n\
+                 \x20       if: matrix.shard != 'all'\n\
+                 \x20       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n\
+                 \x20       with:\n\
+                 \x20         name: test-partition-${{ matrix.shard }}-attempt-${{ github.run_attempt }}\n\
+                 \x20         path: test-partition\n\
+                 \x20         if-no-files-found: error\n",
+        replacement: "\x20     - name: Upload the shard's record\n\
+                      \x20       if: matrix.shard != 'all'\n\
+                      \x20       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n\
+                      \x20       with:\n\
+                      \x20         name: test-partition-${{ matrix.shard }}-attempt-${{ github.run_attempt }}\n\
+                      \x20         path: test-partition\n\
+                      \x20         if-no-files-found: error\n\
+                      \x20       continue-on-error: true\n",
+        refused_as: "unexpected-step-field",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-UPLOAD-UNPINNED",
+        escape: "the upload action floats to a tag: code nobody here reviewed decides what \
+                 reaches the verifier",
+        job: Some("test-windows"),
+        anchor: "\x20       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n",
+        replacement: "\x20       uses: actions/upload-artifact@v7\n",
+        refused_as: "unpinned-action",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-UPLOAD-BEFORE-THE-SUITE",
+        escape: "the upload moved above the shard step: it uploads nothing the shard ran, and the \
+                 leg is green over a record that does not exist when it is taken",
+        job: Some("test-windows"),
+        anchor: "\x20     - name: Test one shard, and record what it listed, selected and ran\n\
+                 \x20       if: matrix.shard != 'all'\n\
+                 \x20       env:\n\
+                 \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: \"1\"\n\
+                 \x20       run: |\n\
+                 \x20         $rustc = ((cargo rustc -q --lib -- --version) | Out-String).Trim(); $path_rustc = ((rustc --version) | Out-String).Trim(); $cargo = ((cargo --version) | Out-String).Trim()\n\
+                 \x20         if ($rustc -notmatch '^rustc 1\\.97\\.1 ' -or $path_rustc -notmatch '^rustc 1\\.97\\.1 ' -or $cargo -notmatch '^cargo 1\\.97\\.1 ') { throw \"the suite would run on '$rustc' (Cargo's compiler), '$path_rustc' (PATH's rustc) and '$cargo', not the image's 1.97.1: a compiler was chosen by something other than this workflow\" }\n\
+                 \x20         python .github/scripts/partition.py run windows ${{ matrix.shard }} test-partition\n\
+                 \x20         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n\n\
+                 \x20     - name: Upload the shard's record\n\
+                 \x20       if: matrix.shard != 'all'\n\
+                 \x20       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n\
+                 \x20       with:\n\
+                 \x20         name: test-partition-${{ matrix.shard }}-attempt-${{ github.run_attempt }}\n\
+                 \x20         path: test-partition\n\
+                 \x20         if-no-files-found: error\n",
+        replacement: "\x20     - name: Upload the shard's record\n\
+                      \x20       if: matrix.shard != 'all'\n\
+                      \x20       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n\
+                      \x20       with:\n\
+                      \x20         name: test-partition-${{ matrix.shard }}-attempt-${{ github.run_attempt }}\n\
+                      \x20         path: test-partition\n\
+                      \x20         if-no-files-found: error\n\n\
+                      \x20     - name: Test one shard, and record what it listed, selected and ran\n\
+                      \x20       if: matrix.shard != 'all'\n\
+                      \x20       env:\n\
+                      \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: \"1\"\n\
+                      \x20       run: |\n\
+                      \x20         $rustc = ((cargo rustc -q --lib -- --version) | Out-String).Trim(); $path_rustc = ((rustc --version) | Out-String).Trim(); $cargo = ((cargo --version) | Out-String).Trim()\n\
+                      \x20         if ($rustc -notmatch '^rustc 1\\.97\\.1 ' -or $path_rustc -notmatch '^rustc 1\\.97\\.1 ' -or $cargo -notmatch '^cargo 1\\.97\\.1 ') { throw \"the suite would run on '$rustc' (Cargo's compiler), '$path_rustc' (PATH's rustc) and '$cargo', not the image's 1.97.1: a compiler was chosen by something other than this workflow\" }\n\
+                      \x20         python .github/scripts/partition.py run windows ${{ matrix.shard }} test-partition\n\
+                      \x20         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n",
+        refused_as: "test-windows-upload",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-SHARD-STEP-DELETED",
+        escape: "the macOS shard step gone: each macOS leg checks out, builds nothing and fails \
+                 at the upload -- or, with the upload gone too, reports success having run \
+                 nothing",
+        job: Some("test"),
+        anchor: "\x20     - name: Test one shard, and record what it listed, selected and ran\n\
+                 \x20       if: matrix.shard != 'all'\n\
+                 \x20       env:\n\
+                 \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}\n\
+                 \x20       run: python3 .github/scripts/partition.py run macos ${{ matrix.shard }} test-partition\n",
+        replacement: "",
+        refused_as: "test-job-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WHOLE-SUITE-ON-EVERY-LEG",
+        escape: "the whole-suite step's condition dropped: every macOS shard leg runs the whole \
+                 suite before its shard, which is the 30-minute leg this partition exists to \
+                 split, three times",
+        job: Some("test"),
+        anchor: "\x20     - run: cargo test --all-targets --all-features\n\
+                 \x20       if: matrix.shard == 'all'\n\
+                 \x20       env:\n\
+                 \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}\n",
+        replacement: "\x20     - run: cargo test --all-targets --all-features\n\
+                      \x20       env:\n\
+                      \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}\n",
+        refused_as: "test-suite-lane",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-MACOS-SHARD-DROPPED",
+        escape: "the macOS lane runs two of its three shards: each leg is green and the third \
+                 shard's tests run nowhere",
+        job: Some("test"),
+        anchor: "\x20         - os: macos-latest\n\
+                 \x20           shard: m3\n",
+        replacement: "",
+        refused_as: "test-job-matrix",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-MACOS-SHARD-DUPLICATED",
+        escape: "a shard listed twice and another not at all: the matrix still has four legs and \
+                 the macOS group still three, but `m2`'s tests run twice and `m3`'s never",
+        job: Some("test"),
+        anchor: "\x20           shard: m3\n",
+        replacement: "\x20           shard: m2\n",
+        refused_as: "test-job-matrix",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-UBUNTU-SHARDED",
+        escape: "the ubuntu leg runs a shard instead of the whole suite: the Linux suite runs a \
+                 third of itself and no verifier group covers the rest",
+        job: Some("test"),
+        anchor: "\x20         - os: ubuntu-latest\n\
+                 \x20           shard: all\n",
+        replacement: "\x20         - os: ubuntu-latest\n\
+                      \x20           shard: m1\n",
+        refused_as: "test-job-matrix",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-NAME-WITHOUT-SHARD",
+        escape: "the `test` job's name drops the shard: three macOS legs publish one check name",
+        job: Some("test"),
+        anchor: "\x20   name: test (${{ matrix.shard == 'all' && matrix.os || format('{0}, {1}', matrix.os, matrix.shard) }})\n",
+        replacement: "\x20   name: test (${{ matrix.os }})\n",
+        refused_as: "test-job-name",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-UPLOAD-DROPPED",
+        escape: "the macOS records are never uploaded: the shards are green and the verifier \
+                 fails closed for want of them; the contract refuses the shape before that",
+        job: Some("test"),
+        anchor: "\x20     - name: Upload the shard's record\n\
+                 \x20       if: matrix.shard != 'all'\n\
+                 \x20       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n\
+                 \x20       with:\n\
+                 \x20         name: test-partition-${{ matrix.shard }}-attempt-${{ github.run_attempt }}\n\
+                 \x20         path: test-partition\n\
+                 \x20         if-no-files-found: error\n",
+        replacement: "",
+        refused_as: "test-job-upload",
+    },
+    WorkflowEscape {
+        name: "MUT-COVERAGE-JOB-DELETED",
+        escape: "the coverage job gone, with the aggregate's wiring to it: every shard's green \
+                 says only that its own selection passed, and nothing says the shards together \
+                 ran the suite",
+        job: None,
+        anchor: "\n\
+                 \x20 test-coverage:\n\
+                 \x20   name: partition coverage\n\
+                 \x20   needs: [test, test-windows]\n\
+                 \x20   runs-on: ubuntu-latest\n\
+                 \x20   timeout-minutes: 10\n\
+                 \x20   steps:\n\
+                 \x20     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n\
+                 \x20     - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1\n\
+                 \x20       with:\n\
+                 \x20         pattern: test-partition-*\n\
+                 \x20         path: test-partition-records\n\
+                 \x20     - run: python3 .github/scripts/partition.py verify test-partition-records\n",
+        replacement: "\n",
+        refused_as: "test-coverage-missing",
+    },
+    WorkflowEscape {
+        name: "MUT-COVERAGE-RUNS-ALWAYS",
+        escape: "the coverage job runs after a failed or cancelled leg: it reads the records the \
+                 finished legs left and can report on a lane whose shards did not all finish",
+        job: Some("test-coverage"),
+        anchor: "\x20   runs-on: ubuntu-latest\n",
+        replacement: "\x20   runs-on: ubuntu-latest\n\
+                      \x20   if: always()\n",
+        refused_as: "unexpected-job-field",
+    },
+    WorkflowEscape {
+        name: "MUT-COVERAGE-ABSOLVED",
+        escape: "the coverage job may fail and report success: a refusal settles green",
+        job: Some("test-coverage"),
+        anchor: "\x20   runs-on: ubuntu-latest\n",
+        replacement: "\x20   runs-on: ubuntu-latest\n\
+                      \x20   continue-on-error: true\n",
+        refused_as: "unexpected-job-field",
+    },
+    WorkflowEscape {
+        name: "MUT-COVERAGE-NEEDS-NARROWED",
+        escape: "the coverage job waits for the macOS legs only: it can read the records before \
+                 the Windows shards have uploaded theirs, and it is not skipped when one of them \
+                 fails",
+        job: Some("test-coverage"),
+        anchor: "\x20   needs: [test, test-windows]\n",
+        replacement: "\x20   needs: [test]\n",
+        refused_as: "test-coverage-needs",
+    },
+    WorkflowEscape {
+        name: "MUT-COVERAGE-OTHER-RUN",
+        escape: "the download reads another run's artifacts: an earlier green run's records stand \
+                 in for this run's legs",
+        job: Some("test-coverage"),
+        anchor: "\x20         path: test-partition-records\n",
+        replacement: "\x20         path: test-partition-records\n\
+                      \x20         run-id: 1\n\
+                      \x20         github-token: ${{ github.token }}\n",
+        refused_as: "test-coverage-download",
+    },
+    WorkflowEscape {
+        name: "MUT-COVERAGE-DOWNLOAD-UNPINNED",
+        escape: "the download action floats to a tag: code nobody here reviewed decides what the \
+                 verifier reads",
+        job: Some("test-coverage"),
+        anchor: "\x20     - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1\n",
+        replacement: "\x20     - uses: actions/download-artifact@v8\n",
+        refused_as: "unpinned-action",
+    },
+    WorkflowEscape {
+        name: "MUT-COVERAGE-VERIFIER-ECHOED",
+        escape: "the verifier is echoed rather than run: the job succeeds and refuses nothing",
+        job: Some("test-coverage"),
+        anchor: "\x20     - run: python3 .github/scripts/partition.py verify test-partition-records\n",
+        replacement: "\x20     - run: echo python3 .github/scripts/partition.py verify test-partition-records\n",
+        refused_as: "test-coverage-steps",
+    },
+    WorkflowEscape {
+        name: "MUT-COVERAGE-RUNS-A-DOWNLOADED-SCRIPT",
+        escape: "the verifier is run from the downloaded records, so the code that judges the \
+                 legs is code the legs uploaded",
+        job: Some("test-coverage"),
+        anchor: "\x20     - run: python3 .github/scripts/partition.py verify test-partition-records\n",
+        replacement: "\x20     - run: python3 test-partition-records/partition.py verify test-partition-records\n",
+        refused_as: "test-coverage-command",
+    },
+    WorkflowEscape {
+        name: "MUT-COVERAGE-CHECKOUT-REF",
+        escape: "the coverage job checks out `master`: the verifier and its table are master's, \
+                 not the candidate's that the legs ran",
+        job: Some("test-coverage"),
+        anchor: "\x20     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n",
+        replacement: "\x20     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n\
+                      \x20       with:\n\
+                      \x20         ref: master\n",
+        refused_as: "test-coverage-checkout",
+    },
+    WorkflowEscape {
+        name: "MUT-COVERAGE-STEP-BETWEEN",
+        escape: "a step between the download and the verifier rewrites the records it then reads",
+        job: Some("test-coverage"),
+        anchor: "\x20     - run: python3 .github/scripts/partition.py verify test-partition-records\n",
+        replacement: "\x20     - run: rm -rf test-partition-records\n\
+                      \x20     - run: python3 .github/scripts/partition.py verify test-partition-records\n",
+        refused_as: "test-coverage-steps",
+    },
+    WorkflowEscape {
+        name: "MUT-AGGREGATE-COVERAGE-DROPPED",
+        escape: "the aggregate does not wait for the coverage job: `upstroke-ci` settles green \
+                 while the verifier refuses the lane",
+        job: Some("merge-gate"),
+        anchor: "\x20   needs: [lint, lint-windows, lint-macos, msrv, test, test-windows, test-coverage]\n",
+        replacement: "\x20   needs: [lint, lint-windows, lint-macos, msrv, test, test-windows]\n",
+        refused_as: "aggregate-needs",
+    },
+    WorkflowEscape {
+        name: "MUT-AGGREGATE-COVERAGE-UNREAD",
+        escape: "the aggregate waits for the coverage job and never reads its result: the loop \
+                 names every other gate",
+        job: Some("merge-gate"),
+        anchor: "\x20         for gate in LINT LINT_WINDOWS LINT_MACOS MSRV TEST TEST_WINDOWS TEST_COVERAGE; do\n",
+        replacement: "\x20         for gate in LINT LINT_WINDOWS LINT_MACOS MSRV TEST TEST_WINDOWS; do\n",
+        refused_as: "aggregate-loop",
     },
 ];
 
