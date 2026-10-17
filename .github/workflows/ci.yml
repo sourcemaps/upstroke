@@ -408,8 +408,10 @@ jobs:
   # once. It has no `if:`, so a failed, cancelled or skipped leg skips it and
   # `merge-gate` reads `skipped`. It runs only the checked-out
   # `.github/scripts/partition.py` and the table beside it, and reads the
-  # downloaded records as data: this run's artifacts only, by pattern, each
-  # bound by the leg to this checkout, this table, this run and its attempt.
+  # downloaded records as data: this run attempt's artifacts only, by pattern,
+  # each bound by the leg to this checkout, this table, this run and this
+  # attempt. A record from any other attempt is refused, not superseded, so a
+  # re-run of only the failed legs cannot pass; a full re-run can.
   test-coverage:
     name: partition coverage
     needs: [test, test-windows]
@@ -419,7 +421,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          pattern: test-partition-*
+          pattern: test-partition-*-attempt-${{ github.run_attempt }}
           path: test-partition-records
       - run: python3 .github/scripts/partition.py verify test-partition-records
 

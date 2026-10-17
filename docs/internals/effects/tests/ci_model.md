@@ -94,14 +94,18 @@ the partition runner on each hosted leg.
 
 The macOS shard step's script, character for character: the partition
 runner, `.github/scripts/partition.py run`, for the `macos` group and this
-leg's shard, recording into `test-partition`. The runner runs
-[`TEST_COMMAND`] five times -- build, list, list the ignored tests, list this
-shard's selection, run it -- with only the shard's libtest filters from
-[`PARTITION_TABLE`] after `--`, and records each command's argv, exit status
-and ordered output with the checkout, the run and the compiler. Cargo still
-chooses the targets, their working directory and their environment, so the
-shard is the suite as the other legs run it, narrowed by name and nothing
-else. The shard is interpolated from the matrix rather than passed through
+leg's shard, recording into `test-partition`. The runner builds
+[`TEST_COMMAND`]'s targets once with `--no-run` and Cargo's JSON messages,
+takes the leg's test units from that build's own artifact records checked
+against `cargo metadata`, and then, for each unit by Cargo's own target
+selector, lists its tests, lists the ignored ones, lists this shard's
+selection and runs it with libtest's `--logfile`, adding only the shard's
+libtest filters from [`PARTITION_TABLE`] and that file after `--`. It records
+each command's argv, exit status and ordered output, each executable's
+digest, size and modification time from the build to the last command, and
+the checkout, the run and the compiler. Cargo still sets the targets'
+working directory and environment, so the shard is the suite as the other
+legs run it, narrowed by name and nothing else. The shard is interpolated from the matrix rather than passed through
 the environment, because any variable the step adds reaches every test the
 suite runs. Measured, `MUT-TEST-SHARD-STEP-DELETED`.
 
@@ -281,8 +285,8 @@ unpinned upload is still read as one and refused as unpinned.
 
 The upload's inputs, whole. The name carries the shard and the run attempt:
 artifact names are unique within a run, so a re-run of a leg uploads beside
-the record it supersedes rather than colliding with it, and the verifier can
-tell the two apart. The path is the directory the runner wrote, and an upload
+the earlier attempt's record rather than colliding with it, and the verifier
+reads only its own attempt's. The path is the directory the runner wrote, and an upload
 that finds nothing fails the leg. Measured,
 `MUT-TEST-WINDOWS-UPLOAD-WITHOUT-ATTEMPT`.
 
@@ -643,9 +647,11 @@ The job that makes the partition safe. A shard's green says only that the
 tests its filters selected passed; this job runs
 `.github/scripts/partition.py verify` over the records every partitioned leg
 uploaded and refuses the run unless, for each group the event's lane
-partitions, the shards' harnesses listed one universe, each selected exactly
-what the table's predicate selects from it, the selections are disjoint and
-cover it, and every target's run accounts for its selection with no failure.
+partitions, every leg built the test units Cargo's metadata declares, their
+harnesses listed one universe, each selected exactly what the table's
+predicate selects from it, the selections are disjoint and cover it, and each
+harness's own logfile reports exactly one passing or ignored outcome for every
+name it selected.
 The aggregate requires it like any gate. Measured,
 `MUT-COVERAGE-JOB-DELETED`.
 
@@ -672,9 +678,11 @@ Where the verifier runs.
 
 ## `pub(super) const COVERAGE_DOWNLOAD_INPUTS: [(&str, &str); 2] = [`
 
-The download's inputs, whole: this run's artifacts by the shard records'
-prefix, into the directory the verifier reads. No `run-id` and no token, so
-no other run's records can stand in for this run's legs. Measured,
+The download's inputs, whole: this run attempt's shard records, by the
+prefix and the attempt suffix [`SHARD_UPLOAD_INPUTS`] names them with, into
+the directory the verifier reads. No `run-id` and no token, so no other run's
+records can stand in for this run's legs, and the verifier refuses any record
+from another attempt that reaches it. Measured,
 `MUT-COVERAGE-OTHER-RUN`.
 
 ## `pub(super) const COVERAGE_COMMAND: &str =`

@@ -1238,8 +1238,8 @@ pub(super) fn ci_test_coverage_job_complaints(doc: &Yaml) -> Vec<String> {
             out.push(format!(
                 "[test-coverage-download] `{COVERAGE_JOB}` step {index} downloads with {with:#?}, \
                  not exactly {inputs:#?}. With no `run-id` or token the action reads this run's \
-                 artifacts and no other's; the pattern is the shard records' prefix, and the path \
-                 is the directory the verifier reads."
+                 artifacts and no other's; the pattern is this attempt's shard records, and the \
+                 path is the directory the verifier reads."
             ));
         }
     }
@@ -3383,7 +3383,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  \x20     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n\
                  \x20     - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1\n\
                  \x20       with:\n\
-                 \x20         pattern: test-partition-*\n\
+                 \x20         pattern: test-partition-*-attempt-${{ github.run_attempt }}\n\
                  \x20         path: test-partition-records\n\
                  \x20     - run: python3 .github/scripts/partition.py verify test-partition-records\n",
         replacement: "\n",
