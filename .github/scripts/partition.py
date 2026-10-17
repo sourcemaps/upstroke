@@ -48,8 +48,9 @@ the event's lane partitions:
     test target -- matched one for one with the build's own JSON test
     artifacts; a manifest `harness = false`, an integration test with
     `test = false`, a bench target or another target kind is refused rather
-    than guessed at, and every other unit the build compiled is accounted for
-    as compile-only;
+    than guessed at; every other unit of the package the build JSON reports
+    is recorded as compile-only, as observed there, and every build script the
+    metadata declares must be among those observed units;
   * each record's commands are exactly the ones those units and the table
     imply, each exited 0 with its log at the digest the leg recorded; each
     command ran exactly one harness, the unit's own source and executable;
@@ -278,7 +279,12 @@ def relative(paths, path, root):
 
 
 def inventory(metadata_text, build_text, cwd, group_os, where):
-    """The leg's test units and compile-only units, from Cargo's metadata and the build's JSON artifacts alone."""
+    """The leg's test units and compile-only units, from Cargo's metadata and the build's JSON artifacts alone.
+
+    Two claims, kept apart. The test units are the declared lib, bin, example and integration-test targets, each
+    matched one for one with a `profile.test` artifact. The compile-only units are exactly the package's other
+    artifacts the build JSON reports, each observed there; a build script the metadata declares is not entered on
+    the metadata's word, it must be one of those observed artifacts."""
     paths = flavour(group_os)
     manifest = normal(paths, 'Cargo.toml', cwd)
     try:
@@ -290,11 +296,12 @@ def inventory(metadata_text, build_text, cwd, group_os, where):
         raise Refused('%s: the metadata declares %d packages at %s, not one' % (where, len(packages), manifest))
     root = paths.dirname(normal(paths, packages[0]['manifest_path']))
     expected = {}
+    declared_builds = []
     compile_only = []
     for target in packages[0].get('targets', []):
         kinds = target.get('kind')
         if kinds == ['custom-build']:
-            compile_only.append(('custom-build', target.get('name')))
+            declared_builds.append(('custom-build', str(target.get('name'))))
             continue
         kind = 'lib' if kinds in (['lib'], ['rlib']) else (kinds[0] if isinstance(kinds, list) and len(kinds) == 1 else None)
         if kind not in TEST_KINDS:
@@ -330,9 +337,12 @@ def inventory(metadata_text, build_text, cwd, group_os, where):
             units[key] = {'kind': kind, 'name': target.get('name'), 'source': relative(paths, str(target.get('src_path')), root),
                           'executable': message['executable']}
         else:
-            compile_only.append((kind, target.get('name')))
+            compile_only.append((str(kind), str(target.get('name'))))
     if finished is not True:
         raise Refused('%s: the build JSON has no successful `build-finished` message' % where)
+    unbuilt = sorted(set(declared_builds) - set(compile_only))
+    if unbuilt:
+        raise Refused('%s: the metadata declares build scripts %r that the build JSON never reports' % (where, unbuilt))
     if sorted(units) != sorted(expected):
         raise Refused('%s: the build compiled test units %r for the declared targets %r'
                       % (where, sorted(units), sorted(expected)))
@@ -340,7 +350,7 @@ def inventory(metadata_text, build_text, cwd, group_os, where):
         if units[key]['source'] != source:
             raise Refused('%s: test unit %r built %r, not the declared %r' % (where, key, units[key]['source'], source))
     ordered = [units[key] for key in sorted(units)]
-    return ordered, sorted(set((str(k), str(n)) for k, n in compile_only)), root
+    return ordered, sorted(set(compile_only)), root
 
 
 def selector(unit):

@@ -60,7 +60,7 @@ def vv(release, host):
             'commit-date: 2026-01-01\nhost: %s\nrelease: %s\nLLVM version: 21.1.0\n' % (release, host, release))
 
 
-def suite(group, lib=None, ignored=None, children=None, extra=False, bench=False):
+def suite(group, lib=None, ignored=None, children=None, extra=False, bench=False, build_script=False):
     lib = LIB if lib is None else lib
     windows = group == 'windows'
     exe = '.exe' if windows else ''
@@ -81,7 +81,7 @@ def suite(group, lib=None, ignored=None, children=None, extra=False, bench=False
         targets.append({'kind': 'bench', 'name': 'speed', 'source': 'benches/speed.rs', 'exe': 'target/debug/deps/speed-9f8e7d' + exe,
                         'names': ['speed::case'], 'ignored': [], 'children': {}, 'panics': []})
     return {'vv': vv('1.97.1', 'x86_64-pc-windows-msvc') if windows else vv('1.99.0', 'aarch64-apple-darwin'),
-            'windows': windows, 'targets': targets}
+            'windows': windows, 'targets': targets, 'build_script': build_script}
 
 
 FAKE = r'''
@@ -106,6 +106,9 @@ if args in (['rustc', '-q', '--lib', '--', '-vV'], ['-vV']):
 if args == ['metadata', '--format-version', '1', '--no-deps']:
     targets = [{'kind': [t['kind']], 'crate_types': ['lib' if t['kind'] == 'lib' else 'bin'], 'name': t['name'],
                 'src_path': os.path.join(root, t['source']), 'test': t['kind'] != 'example'} for t in spec['targets']]
+    if spec.get('build_script'):
+        targets.append({'kind': ['custom-build'], 'crate_types': ['bin'], 'name': 'build-script-build',
+                        'src_path': os.path.join(root, 'build.rs'), 'test': False})
     out(1, json.dumps({'packages': [{'name': 'upstroke', 'manifest_path': os.path.join(root, 'Cargo.toml'), 'targets': targets}],
                        'version': 1}) + '\n')
     sys.exit(0)
@@ -115,6 +118,10 @@ if args == ['test', '--all-targets', '--all-features', '--no-run', '--message-fo
     manifest = os.path.join(root, 'Cargo.toml')
     out(1, json.dumps({'reason': 'compiler-artifact', 'manifest_path': manifest, 'target': {'kind': ['lib'], 'name': 'upstroke',
         'src_path': os.path.join(root, 'src/lib.rs')}, 'profile': {'test': False}, 'executable': None, 'fresh': False}) + '\n')
+    if spec.get('build_script') and os.environ.get('FAKE_BUILD_SKIP') != 'build-script-build':
+        out(1, json.dumps({'reason': 'compiler-artifact', 'manifest_path': manifest, 'target': {'kind': ['custom-build'],
+            'name': 'build-script-build', 'src_path': os.path.join(root, 'build.rs')}, 'profile': {'test': False},
+            'executable': None, 'fresh': False}) + '\n')
     for t in spec['targets']:
         if t['name'] == os.environ.get('FAKE_BUILD_SKIP'):
             continue
@@ -547,6 +554,17 @@ def cases(fixture):
     redigest_build(path, 'w3')
     check(fixture, 'N-BUILD-JSON: a leg\'s build JSON lost the probe unit after recording, re-digested',
           repo.verify(path, 'merge_group'), 1, 'the build compiled test units')
+    built = {'windows': suite('windows', build_script=True), 'macos': suite('macos', build_script=True)}
+    path = os.path.join(fixture.fresh('build-script'), 'records')
+    repo.lane('merge_group', path, built)
+    w1_record = json.load(open(os.path.join(leg_dir(path, 'w1'), 'record.json')))
+    check(fixture, 'P-BUILD-SCRIPT: a declared build script the build JSON reports is a compile-only unit, observed',
+          truth(['custom-build', 'build-script-build'] in w1_record['compile_only']
+                and repo.verify(path, 'merge_group')[0] == 0), 0)
+    code, out, err, _, _ = repo.leg('merge_group', 'windows', 'w1', 1, built['windows'], scratch(fixture, 'build-script-unbuilt'),
+                                    {'FAKE_BUILD_SKIP': 'build-script-build'})
+    check(fixture, 'N-BUILD-SCRIPT-UNBUILT: the metadata declares a build script the build JSON never reports; the runner refuses',
+          (code, out, err), 1, 'that the build JSON never reports')
     bench = {'windows': suite('windows', bench=True), 'macos': suite('macos', bench=True)}
     code, out, err, _, _ = repo.leg('merge_group', 'windows', 'w1', 1, bench['windows'], scratch(fixture, 'bench'))
     check(fixture, 'N-BENCH: a bench target is declared; the runner refuses a kind it does not model',
