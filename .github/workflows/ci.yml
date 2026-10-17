@@ -106,13 +106,20 @@ jobs:
         env:
           UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}
 
-      # A shard leg runs the same command through `.github/scripts/partition.py`,
-      # which adds only its shard's libtest filters after `--` and records what
-      # the harnesses listed, selected and ran, for `test-coverage` to check.
-      # The two steps' conditions are complements, so every leg runs exactly one
-      # of them, and the oracle pins both conditions and both scripts whole. The
-      # record is uploaded under the run attempt, so a re-run never collides
-      # with the record it supersedes.
+      # A shard leg runs the suite through `.github/scripts/partition.py`, not
+      # with the step above's argv: it asks Cargo for the package's targets
+      # (`cargo metadata`), builds every target once (`cargo test --all-targets
+      # --all-features --no-run`, with JSON artifact messages), then lists,
+      # lists the ignored tests of, lists the selection of and runs each test
+      # unit by its own selector (`--lib` or `--<kind> <name>`), adding after
+      # `--` only this shard's libtest filters and, on the run, a per-unit
+      # `--logfile`. It records what the build reported and what each harness
+      # listed, selected and ran, for `test-coverage` to check. The two steps'
+      # conditions are complements, so every leg runs exactly one of them, and
+      # the oracle pins both conditions and both scripts whole. The record is
+      # uploaded under the run attempt, so a re-run uploads beside an earlier
+      # attempt's record rather than colliding with it; `test-coverage` reads
+      # only its own attempt's.
       - name: Test one shard, and record what it listed, selected and ran
         if: matrix.shard != 'all'
         env:
@@ -281,13 +288,19 @@ jobs:
           if ($passed -lt 1700) { throw "the suite reported $passed passing tests, below the floor of 1700: Cargo compiled the harnesses and executed almost none of them" }
 
       # A hosted shard: the same compiler check, then the suite through
-      # `.github/scripts/partition.py`, which adds only this shard's libtest
-      # filters after `--` and records what the harnesses listed, selected and
-      # ran. The witness's count is not repeated here: `test-coverage` refuses
-      # the run unless the shards together ran every listed test, and the
-      # table's floor for the Windows group is the witness's 1700. The two
-      # steps' conditions are complements, so every leg runs exactly one of
-      # them; the oracle pins both conditions and both scripts whole.
+      # `.github/scripts/partition.py`, not with the step above's argv: it asks
+      # Cargo for the package's targets (`cargo metadata`), builds every target
+      # once (`cargo test --all-targets --all-features --no-run`, with JSON
+      # artifact messages), then lists, lists the ignored tests of, lists the
+      # selection of and runs each test unit by its own selector (`--lib` or
+      # `--<kind> <name>`), adding after `--` only this shard's libtest filters
+      # and, on the run, a per-unit `--logfile`, and records what the build
+      # reported and what each harness listed, selected and ran. The witness's
+      # count is not repeated here: `test-coverage` refuses the run unless the
+      # shards together ran every listed test, and the table's floor for the
+      # Windows group is the witness's 1700. The two steps' conditions are
+      # complements, so every leg runs exactly one of them; the oracle pins
+      # both conditions and both scripts whole.
       - name: Test one shard, and record what it listed, selected and ran
         if: matrix.shard != 'all'
         env:
