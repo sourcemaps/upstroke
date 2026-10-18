@@ -13321,16 +13321,22 @@ const FIFO_WAIT: Duration = Duration::from_secs(60);
 // The protocol of a FIFO control's worker, stated at its site as §10 and §13 require. The calling
 // test owns the worker's `JoinHandle` from the spawn to the join, and the descriptor that releases
 // it; the worker owns what `work` moves into it, and its value or its panic reaches the caller
-// through `join` alone. Each wait observes `is_finished`, and `join` follows only a true answer, so
-// no join here can wait; no early return lies between the spawn and the join, so the handle is not
-// dropped unjoined. A worker finished within `wait` is joined and its value returned. One that is
-// not is waiting, which is what the control exists to catch, and is treated so even if it finishes
-// as the wait ends: with its id kept from the spawn, `fifo` is opened for reading and writing,
-// which does not wait on a FIFO on Linux or macOS and gives an open waiting on it the writer it
-// waits for, and with that descriptor held the worker has `FIFO_WAIT` more; it is then joined and
-// reported as `Err`, with its id, the descriptor and its late value. A panic in the worker is
-// resumed in the caller wherever it is joined. A worker not finished by then cannot be made to
-// finish by anything in this process, and is not left to run unobserved: the process aborts.
+// through `join` alone. No early return lies between the spawn and the join, so the handle is not
+// dropped unjoined. The mechanism is timed polls of `is_finished`, one every 5 ms; a join only
+// once a poll has observed the worker finished; a release opened before the second poll; and an
+// abort if the second poll expires. A worker observed finished within `wait` is joined and its
+// value returned. One not observed finished is taken as waiting, which is what the control exists
+// to catch, even if it finishes as that poll ends: with its id kept from the spawn, `fifo` is
+// opened for reading and writing, which gives an open waiting on the FIFO for a writer the writer
+// it waits for, and with that descriptor held the second poll gives the worker `FIFO_WAIT` more;
+// one observed finished then is joined and reported as `Err`, with its id, the descriptor and its
+// late value. A panic in the worker is resumed in the caller wherever it is joined. If the second
+// poll expires, the worker is neither joined nor detached: the process aborts. What the polls do
+// not bound: `is_finished` can answer true before the thread's teardown is complete, so a join is
+// expected to return quickly but has no deadline of its own, and neither has the release open,
+// which is expected not to wait on a FIFO, on Linux as fifo(7) documents and on macOS as XNU's
+// source reads, though no native macOS run has shown it yet. The polls bound their own waits, not
+// every wall-clock path, and no test here executes the abort.
 #[cfg(unix)]
 fn fifo_bounded<T: std::fmt::Debug + Send + 'static>(
     fifo: &Path,
