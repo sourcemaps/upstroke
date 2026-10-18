@@ -3194,9 +3194,12 @@ anywhere below the tree is refused rather than followed (the kernel answers `ELO
 and on Linux `ENOTDIR` for a link where a directory is opened) and a FIFO is opened without waiting for a writer. Only
 what `fstat` on the opened descriptor calls a regular file is read (`evidence_at`); a FIFO, socket, device or directory
 is closed unread. Each descriptor is an `OwnedFd` inside a `File`, closed when it goes out of scope; the two `unsafe`
-blocks are the `openat` call and the adoption of the descriptor it returns, which nothing else owns. A file of at most 8
-KiB is read whole; a larger one only in its first 2 KiB and its last 6 KiB, each into a buffer allocated once at that
-size. Each range is reported as requested and with the bytes actually read, so a short read shows as one. The bytes are
+blocks are the `openat` call and the adoption of the descriptor it returns, which nothing else owns, and each carries
+its `SAFETY:` comment at its site, which §11 places there and these notes do not replace. `open_at` takes no flags from
+its callers, only whether the component must be a directory, so the call cannot carry `O_CREAT` or `O_TMPFILE`, the
+flags for which `openat` reads a mode argument. A file of at most 8 KiB is read whole; a larger one only in its first 2
+KiB and its last 6 KiB, each into a buffer allocated once at that size. Each range is reported as requested and with
+the bytes actually read, so a short read shows as one. The bytes are
 shown by `<[u8]>::escape_ascii`, which is lossless; nothing is redacted; the whole text, the line that says it stops
 included, is at most 64 KiB: what does not fit is cut at the last character boundary that leaves that line its room, so
 the cut can fall in a line that did fit. The window sizes are `u16` so that both `u64` and `usize` take them by `From`.

@@ -13057,7 +13057,7 @@ fn evidence_parent(
     let mut at = tree.to_path_buf();
     for name in names {
         at.push(name);
-        dir = match open_at(&dir, name, libc::O_DIRECTORY) {
+        dir = match open_at(&dir, name, true) {
             Ok(next) => next,
             Err(error) => {
                 let kind = error.kind();
@@ -13069,16 +13069,30 @@ fn evidence_parent(
 }
 
 #[cfg(unix)]
-fn open_at(dir: &fs::File, name: &std::ffi::OsStr, flags: i32) -> std::io::Result<fs::File> {
+fn open_at(dir: &fs::File, name: &std::ffi::OsStr, directory: bool) -> std::io::Result<fs::File> {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::os::unix::ffi::OsStrExt;
     let name = std::ffi::CString::new(name.as_bytes())?;
-    let flags = flags | libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC;
+    let wanted = if directory { libc::O_DIRECTORY } else { 0 };
+    let flags = wanted | libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC;
+    // SAFETY: `openat` reads `name` and `dir`'s descriptor only during the call. `name` is a
+    // `CString` owned here until this function returns, so the pointer is to a NUL-terminated
+    // string with no interior NUL that outlives the call; `dir` is borrowed for the whole call, so
+    // its descriptor stays open and is the one the caller opened. `flags` is built just above from
+    // `O_RDONLY`, `O_NOFOLLOW`, `O_NONBLOCK`, `O_CLOEXEC` and, for a directory, `O_DIRECTORY`, and
+    // a caller can add nothing to it: it never holds `O_CREAT` or `O_TMPFILE` (which adds its own
+    // bit to `O_DIRECTORY`), the flags for which `openat` reads a third, variadic mode argument,
+    // so passing none is sound.
     let fd = unsafe { libc::openat(dir.as_raw_fd(), name.as_ptr(), flags) };
     if fd < 0 {
         return Err(std::io::Error::last_os_error());
     }
-    Ok(fs::File::from(unsafe { OwnedFd::from_raw_fd(fd) }))
+    // SAFETY: `openat` returns -1 on failure and a new open descriptor on success, so a
+    // non-negative `fd` is a descriptor this call has just created. Nothing else in the process
+    // owns or closes it, and it needs no cleanup but `close`, so the `OwnedFd` becomes its one
+    // owner and closes it once, when the `File` holding it is dropped.
+    let owned = unsafe { OwnedFd::from_raw_fd(fd) };
+    Ok(fs::File::from(owned))
 }
 
 #[cfg(unix)]
@@ -13089,7 +13103,7 @@ fn evidence_at(
     read: bool,
 ) -> Result<String, String> {
     use std::os::unix::fs::MetadataExt;
-    let mut file = open_at(dir, name, 0).map_err(refused("its open"))?;
+    let mut file = open_at(dir, name, false).map_err(refused("its open"))?;
     let opened = file.metadata().map_err(refused("its fstat"))?;
     let kind = kind_of(&opened);
     let len = opened.len();
