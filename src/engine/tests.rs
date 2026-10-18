@@ -13302,6 +13302,69 @@ fn is_regular(path: &Path) -> bool {
 }
 
 #[cfg(unix)]
+const FIFO_WAIT: Duration = Duration::from_secs(60);
+
+// The protocol of a FIFO control's worker, stated at its site as §10 and §13 require. The calling
+// test owns the worker's `JoinHandle` from the spawn to the join, and the descriptor that releases
+// it; the worker owns what `work` moves into it, and its value or its panic reaches the caller
+// through `join` alone. Each wait observes `is_finished`, and `join` follows only a true answer, so
+// no join here can wait; no early return lies between the spawn and the join, so the handle is not
+// dropped unjoined. A worker finished within `wait` is joined and its value returned. One that is
+// not is waiting, which is what the control exists to catch, and is treated so even if it finishes
+// as the wait ends: with its id kept from the spawn, `fifo` is opened for reading and writing,
+// which does not wait on a FIFO on Linux or macOS and gives an open waiting on it the writer it
+// waits for, and with that descriptor held the worker has `FIFO_WAIT` more; it is then joined and
+// reported as `Err`, with its id, the descriptor and its late value. A panic in the worker is
+// resumed in the caller wherever it is joined. A worker not finished by then cannot be made to
+// finish by anything in this process, and is not left to run unobserved: the process aborts.
+#[cfg(unix)]
+fn fifo_bounded<T: std::fmt::Debug + Send + 'static>(
+    fifo: &Path,
+    wait: Duration,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, String> {
+    let worker = std::thread::Builder::new()
+        .name("fifo-control".to_owned())
+        .spawn(work)
+        .map_err(|error| format!("no worker: {error}"))?;
+    let id = worker.thread().id();
+    if finished_within(&worker, wait) {
+        return Ok(joined(worker));
+    }
+    let mut options = fs::OpenOptions::new();
+    let release = options.read(true).write(true).open(fifo);
+    if !finished_within(&worker, FIFO_WAIT) {
+        std::process::abort();
+    }
+    let late = joined(worker);
+    let reported = format!(
+        "the worker {id:?} had not returned in {wait:?}; it returned once {fifo:?} was opened \
+         ({release:?}), and was joined: {late:?}"
+    );
+    Err(reported)
+}
+
+#[cfg(unix)]
+fn finished_within<T>(worker: &std::thread::JoinHandle<T>, wait: Duration) -> bool {
+    let start = std::time::Instant::now();
+    while !worker.is_finished() {
+        if start.elapsed() >= wait {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    true
+}
+
+#[cfg(unix)]
+fn joined<T>(worker: std::thread::JoinHandle<T>) -> T {
+    match worker.join() {
+        Ok(value) => value,
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+#[cfg(unix)]
 #[test]
 fn the_unfired_evidence_reports_missing_and_unreadable_files_as_such() {
     let (_tree, shim, child) = evidence_fixture("evidence-missing");
@@ -13407,12 +13470,8 @@ fn the_unfired_evidence_follows_no_link_and_opens_no_special_file() {
         plain.join("inner"),
         secret.clone(),
     ];
-    let (sender, receiver) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = sender.send(unfired_evidence(&shim, &child, "ok", &extra));
-    });
-    let evidence = receiver
-        .recv_timeout(Duration::from_secs(60))
+    let work = move || unfired_evidence(&shim, &child, "ok", &extra);
+    let evidence = fifo_bounded(&fifo, FIFO_WAIT, work)
         .expect("the evidence returns without waiting on the FIFO");
     assert_observed_starting(&evidence, &calls, "not read: its open: FilesystemLoop: ");
     assert_observed(&evidence, &fifo, "a FIFO, not read");
@@ -13456,12 +13515,9 @@ fn the_unfired_evidence_refuses_what_is_swapped_in_after_its_check() {
         .status()
         .expect("mkfifo");
     assert!(made.success(), "prerequisite not met: mkfifo failed");
-    let (sender, receiver) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = sender.send(evidence_at(&dir, &name, &script, true));
-    });
-    let opened = receiver
-        .recv_timeout(Duration::from_secs(60))
+    let fifo = script.clone();
+    let work = move || evidence_at(&dir, &name, &script, true);
+    let opened = fifo_bounded(&fifo, FIFO_WAIT, work)
         .expect("the open returns without waiting on the FIFO");
     assert_eq!(opened.as_deref(), Ok("a FIFO, not read"));
 
@@ -13501,6 +13557,42 @@ fn the_unfired_evidence_refuses_what_is_swapped_in_after_its_check() {
         "; a later lookup: PermissionDenied: Permission denied (os error 13)"
     );
     assert_eq!(looked.as_deref(), Ok(want));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_fifo_control_releases_and_joins_a_waiting_worker_and_resumes_a_panicking_one() {
+    let tree = temp_engine_scratch("evidence-workers");
+    let waiting = tree.path().join("fifo");
+    let made = Command::new("mkfifo")
+        .arg(&waiting)
+        .status()
+        .expect("mkfifo");
+    assert!(made.success(), "prerequisite not met: mkfifo failed");
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let opening = waiting.clone();
+    let work = move || {
+        let opened = fs::File::open(&opening).is_ok();
+        let id = std::thread::current().id();
+        sender.send(id).map(|()| opened)
+    };
+    let waited = fifo_bounded(&waiting, Duration::from_millis(100), work);
+    let id = receiver
+        .try_recv()
+        .expect("the worker returned before it was reported");
+    let reported = waited.expect_err("a worker that waits on the FIFO is reported");
+    let named = format!("the worker {id:?} had not returned in 100ms; ");
+    assert!(reported.starts_with(&named), "{reported}");
+    let released = format!("it returned once {waiting:?} was opened (Ok(File ");
+    assert!(reported.contains(&released), "{reported}");
+    let tail = ", and was joined: Ok(true)";
+    assert!(reported.ends_with(tail), "{reported}");
+
+    let panics = || -> bool { panic!("the worker's own panic") };
+    let panicked = std::panic::catch_unwind(|| fifo_bounded(&waiting, FIFO_WAIT, panics));
+    let payload = panicked.expect_err("the worker's panic reaches its caller");
+    let message = payload.downcast_ref::<&str>();
+    assert_eq!(message, Some(&"the worker's own panic"));
 }
 
 #[cfg(unix)]

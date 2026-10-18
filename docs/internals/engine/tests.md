@@ -3228,8 +3228,16 @@ refuses the link, opens the FIFO without waiting, and reads the file through the
 lookup reporting another file; and with a directory on the way made unsearchable after the descent (after checking that
 the mode bit binds), the read through the held descriptor succeeds and the later lookup reports its `PermissionDenied`,
 not an absent file. An open by path after the check would fail each: it would follow the link, wait on the FIFO, and
-read through the substituted directory. Each FIFO case is awaited from a thread for at most 60 s, so a regression fails
-rather than hangs. `the_shim_fired_assertion_fails_as_before_and_its_message_keeps_the_evidence` runs
+read through the substituted directory. Each FIFO case runs on a worker that `fifo_bounded` owns from its spawn to its
+join, under the protocol written beside it, which §10 places at its site and these notes do not replace: a worker not
+finished within 60 s is released by opening the FIFO for reading and writing, which gives an open waiting on it its
+writer, and is joined, and the case fails with the worker's id, the releasing descriptor and the worker's late value;
+a worker's panic is resumed in the test; and one still not finished 60 s after its release aborts the process rather
+than run on unobserved. So a regression fails rather than hangs, and leaves no worker running.
+`a_fifo_control_releases_and_joins_a_waiting_worker_and_resumes_a_panicking_one` drives that protocol itself: a
+worker that opens a FIFO by path, which waits for a writer, is reported after 100 ms as waiting, under the id it sends
+the test, and has returned before that report reaches the test; and a worker's panic reaches the test as its own
+payload. `the_shim_fired_assertion_fails_as_before_and_its_message_keeps_the_evidence` runs
 `assert_the_shim_fired` under `catch_unwind` while the marker is absent: it fails as the two tests' assertions would,
 and its panic message, the text the harness prints for a failed test, holds the test's words and then the evidence; the
 same call passes once the marker exists. No ignored test is added.
