@@ -24,8 +24,8 @@ group windows Windows x86_64-pc-windows-msvc 1.97.1 1700
 group macos macOS aarch64-apple-darwin any 1700
 
 lane merge_group windows macos
-lane pull_request macos
-lane push macos
+lane pull_request windows macos
+lane push windows macos
 
 shard windows w1 engine::topology::recover::
 shard windows w2 engine::topology:: --skip engine::topology::recover::

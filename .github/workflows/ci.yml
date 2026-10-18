@@ -215,7 +215,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: ${{ fromJSON(github.event_name == 'merge_group' && '["w1", "w2", "w3", "w4"]' || '["all"]') }}
+        # VALIDATION ROUTING, #339 only: every lane runs the four hosted shards,
+        # and the pull-request and push lanes also keep the guest's whole suite,
+        # so the partition runs natively on windows-latest before a merge-queue
+        # entry relies on it. The next commit restores the final routing.
+        shard: ${{ fromJSON(github.event_name == 'merge_group' && '["w1", "w2", "w3", "w4"]' || '["all", "w1", "w2", "w3", "w4"]') }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
