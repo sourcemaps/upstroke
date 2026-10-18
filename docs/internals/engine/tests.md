@@ -3202,13 +3202,15 @@ saying so. The window sizes are `u16` so that both `u64` and `usize` take them b
 
 What is missing, denied, refused, changed or truncated is reported as that, with the error's kind and text, and is not
 read as a cause. The size and the modification and change times are compared across the read, and a difference is
-reported; after the read the path is looked up again, and a path that now names another file, or none, is said to. Not
-closed: the tree's own path is resolved as the operating system resolves it (on macOS, `/var` is a link above every
-temporary directory); the observations are sequential, so a file renamed or replaced after its open is not seen, and the
-bytes read are those of the file the held descriptors named at that moment; equal times do not prove a file unchanged; a
-device node inside the tree would be opened, though none can be made there without privilege; an I/O failure becomes
-text and a formatting failure a marked line, but an allocation failure aborts the process; and what the files hold was
-written by processes that inherited the test's environment, which the evidence does not inspect.
+reported. After the read the path is looked up again by name: a lookup that finds another file than the one read is
+reported as that, and a lookup that fails is reported with its error's kind and text, an observation of that error and
+not of the path naming no file. Not closed: the tree's own path is resolved as the operating system resolves it (on
+macOS, `/var` is a link above every temporary directory); the observations are sequential, so the bytes read are those
+of the file the held descriptors named at the open, the later lookup sees the path's binding only at its own moment, and
+a change between the observations, or one undone before the later lookup, can escape them both; equal times do not prove
+a file unchanged; a device node inside the tree would be opened, though none can be made there without privilege; an I/O
+failure becomes text and a formatting failure a marked line, but an allocation failure aborts the process; and what the
+files hold was written by processes that inherited the test's environment, which the evidence does not inspect.
 
 ## `fn the_unfired_evidence_reports_missing_and_unreadable_files_as_such() {`
 
@@ -3219,10 +3221,12 @@ child's log (made by `mkfifo`), a directory as the script, a link and a file on 
 none of whose bytes appear. `the_unfired_evidence_refuses_what_is_swapped_in_after_its_check` drives the open boundary
 itself: after the descent and a check that sees a regular file, the file is replaced by a link to a file outside the
 tree, then by a FIFO, and a directory on the way is moved aside and replaced by a link to one outside; `evidence_at`
-refuses the link, opens the FIFO without waiting, and reads the file through the directory it already holds, saying that
-the path now names another file. An open by path after the check would fail each: it would follow the link, wait on the
-FIFO, and read through the substituted directory. Each FIFO case is awaited from a thread for at most 60 s, so a
-regression fails rather than hangs. `the_shim_fired_assertion_fails_as_before_and_its_message_keeps_the_evidence` runs
+refuses the link, opens the FIFO without waiting, and reads the file through the directory it already holds, its later
+lookup reporting another file; and with a directory on the way made unsearchable after the descent (after checking that
+the mode bit binds), the read through the held descriptor succeeds and the later lookup reports its `PermissionDenied`,
+not an absent file. An open by path after the check would fail each: it would follow the link, wait on the FIFO, and
+read through the substituted directory. Each FIFO case is awaited from a thread for at most 60 s, so a regression fails
+rather than hangs. `the_shim_fired_assertion_fails_as_before_and_its_message_keeps_the_evidence` runs
 `assert_the_shim_fired` under `catch_unwind` while the marker is absent: it fails as the two tests' assertions would,
 and its panic message, the text the harness prints for a failed test, holds the test's words and then the evidence; the
 same call passes once the marker exists. No ignored test is added.

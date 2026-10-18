@@ -13106,12 +13106,15 @@ fn evidence_at(
     } else {
         ""
     };
-    let moved = match fs::symlink_metadata(path) {
-        Ok(now) if (now.dev(), now.ino()) == (opened.dev(), opened.ino()) => "",
-        Ok(_) => "; the path now names another file",
-        Err(_) => "; the path now names no file",
+    let later = match fs::symlink_metadata(path) {
+        Ok(now) if (now.dev(), now.ino()) == (opened.dev(), opened.ino()) => String::new(),
+        Ok(_) => "; a later lookup found another file".to_owned(),
+        Err(error) => {
+            let what = error.kind();
+            said(format_args!("; a later lookup: {what:?}: {error}"))
+        }
     };
-    Ok(said(format_args!("{kind}{note}, {text}{moved}")))
+    Ok(said(format_args!("{kind}{note}, {text}{later}")))
 }
 
 #[cfg(unix)]
@@ -13463,9 +13466,29 @@ fn the_unfired_evidence_refuses_what_is_swapped_in_after_its_check() {
     let held = evidence_at(&dir, &name, &inner, true);
     let want = concat!(
         "a regular file, 13 B at its open: 0..13 requested, 13 B read: \"BYTES INSIDE\\n\"",
-        "; the path now names another file"
+        "; a later lookup found another file"
     );
     assert_eq!(held.as_deref(), Ok(want));
+
+    let locked = tree.path().join("locked");
+    let deeper = locked.join("sub");
+    fs::create_dir_all(&deeper).expect("two directories on the way");
+    let hidden = deeper.join("inner.txt");
+    fs::write(&hidden, "BYTES INSIDE\n").expect("a file below them");
+    let (dir, name) = evidence_parent(Some(tree.path()), &hidden).expect("its descent");
+    mode_of(&locked, 0o000).expect("a directory on the way, unsearchable");
+    let binds = fs::symlink_metadata(&hidden).is_err();
+    let looked = evidence_at(&dir, &name, &hidden, true);
+    mode_of(&locked, 0o700).expect("searchable again");
+    assert!(
+        binds,
+        "prerequisite not met: the mode bit did not bind (root, or CAP_DAC_OVERRIDE)"
+    );
+    let want = concat!(
+        "a regular file, 13 B at its open: 0..13 requested, 13 B read: \"BYTES INSIDE\\n\"",
+        "; a later lookup: PermissionDenied: Permission denied (os error 13)"
+    );
+    assert_eq!(looked.as_deref(), Ok(want));
 }
 
 #[cfg(unix)]
