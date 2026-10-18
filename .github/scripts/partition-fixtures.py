@@ -12,7 +12,8 @@ skip, ignore, summary and `--logfile` formats (its deprecation warning included)
 names put the filter substrings in unusual places, with a zero-test target,
 ignored tests (one with a reason), a `should_panic` test and a nested child's
 output in another leg's run. Its hooks omit a target, skip a declared unit in
-the build, replace or re-touch an executable mid-leg, or fail a step. Every
+the build, replace or re-touch an executable mid-leg, fail a step, or make the
+compiler query fail, answer nothing or answer without a release. Every
 refusal is paired with the legitimate shape nearest it, which must pass. The
 child environments are built from scratch here (PATH, HOME, LANG and named
 fixture values); a canary variable is set and must appear in no record. No
@@ -101,7 +102,16 @@ fail = os.environ.get('FAKE_FAIL', '')
 silent = os.environ.get('FAKE_SILENT', '')
 if args == ['-V']:
     out(1, 'cargo 1.97.1 (fake)\n'); sys.exit(0)
-if args in (['rustc', '-q', '--lib', '--', '-vV'], ['-vV']):
+query = os.environ.get('FAKE_QUERY', '')
+if args == ['rustc', '-q', '--lib', '--', '--version', '--verbose']:
+    if query == 'fail':
+        out(2, 'error: could not compile `upstroke` (lib)\n'); sys.exit(101)
+    if query == 'empty':
+        sys.exit(0)
+    if query == 'no-release':
+        out(1, ''.join(line + '\n' for line in spec['vv'].splitlines() if not line.startswith('release: '))); sys.exit(0)
+    out(1, spec['vv']); sys.exit(0)
+if args == ['-vV']:
     out(1, spec['vv']); sys.exit(0)
 if args == ['metadata', '--format-version', '1', '--no-deps']:
     targets = [{'kind': [t['kind']], 'crate_types': ['lib' if t['kind'] == 'lib' else 'bin'], 'name': t['name'],
@@ -474,6 +484,10 @@ def cases(fixture):
         received = [['cargo'] + json.loads(line) for line in handle]
     check(fixture, 'P-ARGV: every recorded argv is an argv the fake cargo received, in order',
           truth([s['argv'] for s in recorded['steps']] == [r for r in received if r[1] in ('metadata', 'test')]), 0)
+    query = [r for r in received if r[1] == 'rustc']
+    check(fixture, 'P-QUERY: the runner asked Cargo `rustc -q --lib -- --version --verbose` once, and recorded its answer',
+          truth(query == [['cargo', 'rustc', '-q', '--lib', '--', '--version', '--verbose']]
+                and recorded['compiler']['argv'] == query[0] and recorded['compiler']['stdout'] == specs['windows']['vv']), 0)
     w2 = open(os.path.join(leg_dir(base, 'w2'), 'u%d-selected.log' % lib_w)).read()
     w3 = open(os.path.join(leg_dir(base, 'w3'), 'u%d-selected.log' % lib_w)).read()
     check(fixture, 'P-UNUSUAL: `recovery::` is not `recover::`, so w2 holds it; `my_engine::` is w3\'s',
@@ -756,6 +770,12 @@ def cases(fixture):
          "the compiler's host"),
         ('N-RELEASE: w1\'s compiler is not 1.97.1', 'w1', lambda r: r['compiler'].__setitem__('stdout', vv('1.98.0', 'x86_64-pc-windows-msvc')),
          "the compiler's release"),
+        ('N-OLD-QUERY: w1 recorded the earlier `-- -vV` compiler query', 'w1',
+         lambda r: r['compiler'].__setitem__('argv', ['cargo', 'rustc', '-q', '--lib', '--', '-vV']), 'the compiler query is'),
+        ('N-NO-RELEASE: m2\'s compiler answer names no release, on a group of any release', 'm2',
+         lambda r: r['compiler'].__setitem__('stdout', ''.join(line + '\n' for line in r['compiler']['stdout'].splitlines()
+                                                              if not line.startswith('release: '))),
+         'printed no rustc version, host and release'),
         ('N-TABLE: w2 ran another table', 'w2', lambda r: r.__setitem__('table', '1' * 40), 'the table blob'),
         ('N-MANIFEST: w2 ran another manifest', 'w2', lambda r: r.__setitem__('manifest', '2' * 40), 'the manifest blob'),
         ('N-SEPARATOR: w2\'s record names no path separator', 'w2', lambda r: r.__setitem__('sep', ':'), 'no path separator'),
@@ -812,6 +832,16 @@ def cases(fixture):
     check(fixture, 'R-FAIL: a failing run stops the runner with its exit status, recorded',
           (code if failed['steps'][-1]['exit'] == 101 else -1, out, err), 101)
     shutil.rmtree(target)
+    for hook, label, needle in (
+            ('fail', 'R-QUERY-FAILS: the runner refuses a compiler query that exits non-zero', 'exited 101'),
+            ('empty', 'R-QUERY-EMPTY: the runner refuses an empty compiler answer', 'printed no rustc version, host and release'),
+            ('no-release', 'R-QUERY-MALFORMED: the runner refuses a compiler answer that names no release',
+             'printed no rustc version, host and release')):
+        code, out, err, target, _ = repo.leg('merge_group', 'windows', 'w1', 1, specs['windows'], scratch(fixture, 'query-' + hook),
+                                             {'FAKE_QUERY': hook})
+        check(fixture, label, (code, out, err), 1, needle)
+        if os.path.isdir(target):
+            shutil.rmtree(target)
     for name in ('.github/scripts/partition.table', 'Cargo.toml'):
         with open(os.path.join(repo.path, name), 'a') as handle:
             handle.write('# a local edit\n')

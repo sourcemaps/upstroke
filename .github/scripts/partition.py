@@ -34,6 +34,20 @@ file, `.github/scripts/partition.table`. Python 3.11 or later (`tomllib`).
      Git blobs), the run and attempt, the runner, the compiler, and the leg's
      working and record directories. It reads exactly the `GITHUB_*` and
      `RUNNER_*` variables named below and enumerates no environment.
+  4. The compiler is Cargo's own answer, asked before the metadata and build
+     steps (it compiles the library's dependencies first, which the build
+     step would compile next anyway):
+     `cargo rustc -q --lib -- --version --verbose` hands rustc's
+     `--version --verbose` to the compiler Cargo selects (`RUSTC`,
+     `build.rustc` or the toolchain's), through whatever compiler wrappers
+     Cargo applies, and the leg is refused unless the answer opens with a
+     `rustc` line and names exactly one host and one release. The two flags
+     are spelled out, as the Windows legs' own compiler check spells
+     `--version`, rather than combined as `-vV`, which a compiler wrapper may
+     read as part of a compilation. The answer is the selected compiler's
+     report of itself, not an observation of the executables the build ran,
+     of a wrapper or of a cache; `rustc -vV` (PATH's rustc) and `cargo -V`
+     are recorded beside it as second questions, not substitutes.
 
 `verify` executes in the `test-coverage` job, on this attempt's uploaded
 records. It refuses -- exit 1, every reason printed -- unless, for every group
@@ -87,7 +101,7 @@ FILTER = re.compile(r'[A-Za-z0-9_][A-Za-z0-9_:]*')
 METADATA = ['cargo', 'metadata', '--format-version', '1', '--no-deps']
 BUILD = ['cargo', 'test', '--all-targets', '--all-features', '--no-run', '--message-format=json-render-diagnostics']
 UNIT_TEST = ['cargo', 'test', '--all-features']
-COMPILER = ['cargo', 'rustc', '-q', '--lib', '--', '-vV']
+COMPILER = ['cargo', 'rustc', '-q', '--lib', '--', '--version', '--verbose']
 STEPS = ('list', 'ignored', 'selected', 'run')
 RECORD = 'record.json'
 FIXED_FILES = ('build.json', 'build.log', 'metadata.json', 'metadata.log', RECORD)
@@ -396,6 +410,22 @@ def identity(path):
         return ['missing: %s' % error.strerror, None, None]
 
 
+def compiler_facts(text, where):
+    """The facts of a compiler query's answer: one `rustc ...` line, then one `key: value` line per fact. An answer
+    with no `rustc` line, or with no host or release, or with either twice, is refused, never read as a compiler."""
+    lines = text.splitlines()
+    facts = {}
+    for line in lines[1:]:
+        if ': ' in line:
+            key, value = line.split(': ', 1)
+            if key in ('host', 'release') and key in facts:
+                raise Refused('%s: the compiler query answered %s twice' % (where, key))
+            facts[key] = value
+    if not lines or not lines[0].startswith('rustc ') or not facts.get('host') or not facts.get('release'):
+        raise Refused('%s: the compiler query printed no rustc version, host and release: %r' % (where, text[:200]))
+    return facts
+
+
 def capture(argv):
     result = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if result.returncode != 0:
@@ -472,6 +502,7 @@ def run(group, shard, directory):
         'cargo': capture(['cargo', '-V']),
         'steps': [],
     }
+    compiler_facts(record['compiler']['stdout'], shard)
 
     def finish(status):
         with open(os.path.join(directory, RECORD), 'w') as handle:
@@ -641,7 +672,7 @@ def read_leg(path, shard, attempt, table, env, head, blobs):
     require(where, 'the compiler query', compiler.get('argv'), COMPILER)
     require(where, 'the compiler query\'s exit', compiler.get('exit'), 0)
     verbose = str(compiler.get('stdout'))
-    facts = dict(line.split(': ', 1) for line in verbose.splitlines() if ': ' in line)
+    facts = compiler_facts(verbose, where)
     require(where, 'the compiler\'s host', facts.get('host'), table.groups[group]['triple'])
     if table.groups[group]['release'] != 'any':
         require(where, 'the compiler\'s release', facts.get('release'), table.groups[group]['release'])
@@ -858,7 +889,7 @@ def verify(records):
             inventory_digest.update(('compile-only\t%s\t%s\n' % (kind, name)).encode('utf-8'))
         print('partition: %s: %d legs, %d test units, compile-only %r, compiler %s, inventory %s' % (
             group, len(members), len(first.units), first.compile_only,
-            dict(line.split(': ', 1) for line in first.compiler.splitlines() if ': ' in line).get('release'),
+            compiler_facts(first.compiler, group)['release'],
             inventory_digest.hexdigest()))
         for leg in members:
             for line in leg.lines:
