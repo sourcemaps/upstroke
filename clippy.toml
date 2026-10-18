@@ -107,6 +107,7 @@ disallowed-methods = [
     { path = "libc::execle", reason = "UPSTROKE-EFFECT R22: Spawn.Exec" },
     { path = "libc::execlp", reason = "UPSTROKE-EFFECT R22: Spawn.Exec" },
     { path = "libc::open", reason = "UPSTROKE-EFFECT: opens and can create a path" },
+    { path = "libc::openat", reason = "UPSTROKE-EFFECT: opens and can create a path, relative to a directory descriptor" },
     { path = "libc::close", reason = "UPSTROKE-EFFECT R17/R28: closing the descriptor releases the hold" },
     { path = "libc::dup2", reason = "UPSTROKE-EFFECT R22/R26: rewrites the process's descriptor table; the Unix reaper puts a pipe on the listing child's stdout with it before exec (os_matrix's 'kills the dead coordinator's labeled containers')" },
     { path = "libc::write", reason = "UPSTROKE-EFFECT: writes bytes to a descriptor" },

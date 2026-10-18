@@ -12963,6 +12963,706 @@ impl GitShim {
     }
 }
 
+#[cfg(unix)]
+const EVIDENCE_HEAD: u16 = 2 * 1024;
+
+#[cfg(unix)]
+const EVIDENCE_TAIL: u16 = 6 * 1024;
+
+#[cfg(unix)]
+const EVIDENCE_TEXT: usize = 64 * 1024;
+
+#[cfg(unix)]
+#[track_caller]
+fn assert_the_shim_fired(
+    shim: &GitShim,
+    child: &ChildEngine,
+    report: &str,
+    extra: &[PathBuf],
+    what: std::fmt::Arguments<'_>,
+) {
+    assert!(
+        shim.fired(0),
+        "{what}{}",
+        unfired_evidence(shim, child, report, extra)
+    );
+}
+
+#[cfg(unix)]
+fn unfired_evidence(
+    shim: &GitShim,
+    child: &ChildEngine,
+    report: &str,
+    extra: &[PathBuf],
+) -> String {
+    let tree = shim.dir.parent();
+    let marker = shim.dir.join("rule-0.fired");
+    let script = shim.dir.join("git");
+    let mut lines = vec![
+        observed(tree, &marker, false),
+        observed(tree, &shim.dir, false),
+        observed_report(report),
+    ];
+    for path in [&shim.log, &child.log, &script].into_iter().chain(extra) {
+        lines.push(observed(tree, path, true));
+    }
+    let mut text = String::from("\n  observed after exists() answered false, not by it:");
+    for line in &lines {
+        if !push_capped(&mut text, line) {
+            break;
+        }
+    }
+    text
+}
+
+#[cfg(unix)]
+fn observed(tree: Option<&Path>, path: &Path, read: bool) -> String {
+    let (Ok(text) | Err(text)) = observe(tree, path, read);
+    said(format_args!("\n  {path:?}: {text}"))
+}
+
+#[cfg(unix)]
+fn observe(tree: Option<&Path>, path: &Path, read: bool) -> Result<String, String> {
+    let (dir, name) = evidence_parent(tree, path)?;
+    evidence_at(&dir, &name, path, read)
+}
+
+#[cfg(unix)]
+fn evidence_parent(
+    tree: Option<&Path>,
+    path: &Path,
+) -> Result<(fs::File, std::ffi::OsString), String> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let Some(tree) = tree else {
+        return Err("not read: no fixture tree bounds it".to_owned());
+    };
+    let Ok(inside) = path.strip_prefix(tree) else {
+        return Err("not read: outside the fixture's tree".to_owned());
+    };
+    let mut names = Vec::new();
+    for part in inside.components() {
+        let std::path::Component::Normal(name) = part else {
+            return Err("not read: not a plain path in the tree".to_owned());
+        };
+        names.push(name);
+    }
+    let Some(leaf) = names.pop() else {
+        return Err("not read: the fixture tree itself".to_owned());
+    };
+    let mut dir = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+        .open(tree)
+        .map_err(refused("the tree's open"))?;
+    let mut at = tree.to_path_buf();
+    for name in names {
+        at.push(name);
+        dir = match open_at(&dir, name, true) {
+            Ok(next) => next,
+            Err(error) => {
+                let kind = error.kind();
+                return Err(said(format_args!("not read: {at:?}: {kind:?}: {error}")));
+            }
+        };
+    }
+    Ok((dir, leaf.to_os_string()))
+}
+
+#[cfg(unix)]
+fn open_at(dir: &fs::File, name: &std::ffi::OsStr, directory: bool) -> std::io::Result<fs::File> {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::ffi::OsStrExt;
+    let name = std::ffi::CString::new(name.as_bytes())?;
+    let wanted = if directory { libc::O_DIRECTORY } else { 0 };
+    let flags = wanted | libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC;
+    // SAFETY: `openat` reads `name` and `dir`'s descriptor only during the call. `name` is a
+    // `CString` owned here until this function returns, so the pointer is to a NUL-terminated
+    // string with no interior NUL that outlives the call; `dir` is borrowed for the whole call, so
+    // its descriptor stays open and is the one the caller opened. `flags` is built just above from
+    // `O_RDONLY`, `O_NOFOLLOW`, `O_NONBLOCK`, `O_CLOEXEC` and, for a directory, `O_DIRECTORY`, and
+    // a caller can add nothing to it: it never holds `O_CREAT` or `O_TMPFILE` (which adds its own
+    // bit to `O_DIRECTORY`), the flags for which `openat` reads a third, variadic mode argument,
+    // so passing none is sound.
+    let fd = unsafe { libc::openat(dir.as_raw_fd(), name.as_ptr(), flags) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: `openat` returns -1 on failure and a new open descriptor on success, so a
+    // non-negative `fd` is a descriptor this call has just created. Nothing else in the process
+    // owns or closes it, and it needs no cleanup but `close`, so the `OwnedFd` becomes its one
+    // owner and closes it once, when the `File` holding it is dropped.
+    let owned = unsafe { OwnedFd::from_raw_fd(fd) };
+    Ok(fs::File::from(owned))
+}
+
+#[cfg(unix)]
+fn evidence_at(
+    dir: &fs::File,
+    name: &std::ffi::OsStr,
+    path: &Path,
+    read: bool,
+) -> Result<String, String> {
+    use std::os::unix::fs::MetadataExt;
+    let mut file = open_at(dir, name, false).map_err(refused("its open"))?;
+    let opened = file.metadata().map_err(refused("its fstat"))?;
+    let kind = kind_of(&opened);
+    let len = opened.len();
+    if !opened.is_file() {
+        return Ok(said(format_args!("{kind}, not read")));
+    }
+    if !read {
+        return Ok(said(format_args!("{kind} of {len} B, not read")));
+    }
+    let text = read_windows(&mut file, len)?;
+    let after = file.metadata().map_err(refused("its second fstat"))?;
+    let note = if changed(&opened, &after) {
+        ", changed during the read"
+    } else {
+        ""
+    };
+    let later = match fs::symlink_metadata(path) {
+        Ok(now) if (now.dev(), now.ino()) == (opened.dev(), opened.ino()) => String::new(),
+        Ok(_) => "; a later lookup found another file".to_owned(),
+        Err(error) => {
+            let what = error.kind();
+            said(format_args!("; a later lookup: {what:?}: {error}"))
+        }
+    };
+    Ok(said(format_args!("{kind}{note}, {text}{later}")))
+}
+
+#[cfg(unix)]
+fn read_windows(file: &mut fs::File, len: u64) -> Result<String, String> {
+    let head = u64::from(EVIDENCE_HEAD);
+    let tail = u64::from(EVIDENCE_TAIL);
+    if len <= head + tail {
+        let whole = read_window(file, 0, len)?;
+        let mut text = said(format_args!("{len} B at its open: "));
+        text.push_str(&shown(0, len, &whole));
+        return Ok(text);
+    }
+    let from = len - tail;
+    let first = read_window(file, 0, head)?;
+    let last = read_window(file, from, tail)?;
+    let mut text = said(format_args!("{len} B at its open, truncated: "));
+    text.push_str(&shown(0, head, &first));
+    text.push_str("; ");
+    text.push_str(&shown(from, len, &last));
+    Ok(text)
+}
+
+#[cfg(unix)]
+fn read_window(file: &mut fs::File, from: u64, want: u64) -> Result<Vec<u8>, String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(size) = usize::try_from(want) else {
+        return Err("not read: its window is too large".to_owned());
+    };
+    let start = SeekFrom::Start(from);
+    file.seek(start).map_err(refused("its seek"))?;
+    let mut bytes = vec![0; size];
+    let mut filled = 0;
+    while filled < size {
+        let Some(spare) = bytes.get_mut(filled..) else {
+            break;
+        };
+        match file.read(spare) {
+            Ok(0) => break,
+            Ok(count) => filled += count,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(refused("its read")(error)),
+        }
+    }
+    bytes.truncate(filled);
+    Ok(bytes)
+}
+
+#[cfg(unix)]
+fn shown(from: u64, to: u64, bytes: &[u8]) -> String {
+    let got = bytes.len();
+    let mut text = said(format_args!("{from}..{to} requested, {got} B read: "));
+    text.push_str(&said(format_args!("\"{}\"", bytes.escape_ascii())));
+    text
+}
+
+#[cfg(unix)]
+fn observed_report(report: &str) -> String {
+    let bytes = report.as_bytes();
+    let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    let head = usize::from(EVIDENCE_HEAD);
+    let tail = usize::from(EVIDENCE_TAIL);
+    let text = if bytes.len() <= head + tail {
+        shown(0, len, bytes)
+    } else {
+        let from = bytes.len() - tail;
+        let first = bytes.get(..head).unwrap_or_default();
+        let last = bytes.get(from..).unwrap_or_default();
+        let mut text = shown(0, u64::from(EVIDENCE_HEAD), first);
+        text.push_str("; ");
+        text.push_str(&shown(len - u64::from(EVIDENCE_TAIL), len, last));
+        text
+    };
+    said(format_args!("\n  the child's report, {len} B: {text}"))
+}
+
+#[cfg(unix)]
+fn changed(before: &fs::Metadata, after: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    before.len() != after.len()
+        || (before.mtime(), before.mtime_nsec()) != (after.mtime(), after.mtime_nsec())
+        || (before.ctime(), before.ctime_nsec()) != (after.ctime(), after.ctime_nsec())
+}
+
+#[cfg(unix)]
+fn kind_of(meta: &fs::Metadata) -> &'static str {
+    use std::os::unix::fs::FileTypeExt;
+    let kind = meta.file_type();
+    if kind.is_file() {
+        "a regular file"
+    } else if kind.is_dir() {
+        "a directory"
+    } else if kind.is_symlink() {
+        "a symbolic link"
+    } else if kind.is_fifo() {
+        "a FIFO"
+    } else if kind.is_socket() {
+        "a socket"
+    } else if kind.is_char_device() {
+        "a character device"
+    } else if kind.is_block_device() {
+        "a block device"
+    } else {
+        "a file of another kind"
+    }
+}
+
+#[cfg(unix)]
+fn refused(what: &'static str) -> impl Fn(std::io::Error) -> String {
+    move |error| {
+        let kind = error.kind();
+        said(format_args!("not read: {what}: {kind:?}: {error}"))
+    }
+}
+
+#[cfg(unix)]
+fn said(args: std::fmt::Arguments<'_>) -> String {
+    use std::fmt::Write as _;
+    let mut text = String::new();
+    if text.write_fmt(args).is_err() {
+        text.push_str("[a formatting error]");
+    }
+    text
+}
+
+#[cfg(unix)]
+fn push_capped(text: &mut String, line: &str) -> bool {
+    let room = EVIDENCE_TEXT.saturating_sub(text.len());
+    if line.len() <= room {
+        text.push_str(line);
+        return true;
+    }
+    let cap = EVIDENCE_TEXT;
+    let mark = said(format_args!("\n  [the evidence stops at its cap, {cap} B]"));
+    let mut end = cap.saturating_sub(mark.len());
+    text.push_str(line);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.truncate(end);
+    text.push_str(&mark);
+    false
+}
+
+#[cfg(unix)]
+fn evidence_fixture(tag: &str) -> (ScratchTree, GitShim, ChildEngine) {
+    let tree = temp_engine_scratch(tag);
+    let dir = tree.path().join("t-shim");
+    let log = dir.join("calls.log");
+    let shim = GitShim { dir, log };
+    let child = ChildEngine {
+        report: tree.path().join("t.report"),
+        log: tree.path().join("t.log"),
+    };
+    (tree, shim, child)
+}
+
+#[cfg(unix)]
+#[track_caller]
+fn assert_observed(evidence: &str, path: &Path, observation: &str) {
+    let line = format!("  {path:?}: {observation}");
+    assert!(
+        evidence.split('\n').any(|seen| seen == line),
+        "{line}\nis not a line of:{evidence}"
+    );
+}
+
+#[cfg(unix)]
+#[track_caller]
+fn assert_observed_starting(evidence: &str, path: &Path, prefix: &str) {
+    let start = format!("  {path:?}: {prefix}");
+    assert!(
+        evidence.split('\n').any(|seen| seen.starts_with(&start)),
+        "{start}\nbegins no line of:{evidence}"
+    );
+}
+
+#[cfg(unix)]
+fn refused_with(result: &Result<String, String>, prefix: &str) -> bool {
+    matches!(result, Err(refusal) if refusal.starts_with(prefix))
+}
+
+#[cfg(unix)]
+fn is_regular(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|meta| meta.is_file())
+}
+
+#[cfg(unix)]
+const FIFO_WAIT: Duration = Duration::from_secs(60);
+
+// The protocol of a FIFO control's worker, stated at its site as §10 and §13 require. The calling
+// test owns the worker's `JoinHandle` from the spawn to the join, and the descriptor that releases
+// it; the worker owns what `work` moves into it, and its value or its panic reaches the caller
+// through `join` alone. No early return lies between the spawn and the join, so the handle is not
+// dropped unjoined. The mechanism is timed polls of `is_finished`, one every 5 ms; a join only
+// once a poll has observed the worker finished; a release opened before the second poll; and an
+// abort if the second poll expires. A worker observed finished within `wait` is joined and its
+// value returned. One not observed finished is taken as waiting, which is what the control exists
+// to catch, even if it finishes as that poll ends: with its id kept from the spawn, `fifo` is
+// opened for reading and writing, which gives an open waiting on the FIFO for a writer the writer
+// it waits for, and with that descriptor held the second poll gives the worker `FIFO_WAIT` more;
+// one observed finished then is joined and reported as `Err`, with its id, the descriptor and its
+// late value. A panic in the worker is resumed in the caller wherever it is joined. If the second
+// poll expires, the worker is neither joined nor detached: the process aborts. What the polls do
+// not bound: `is_finished` can answer true before the thread's teardown is complete, so a join is
+// expected to return quickly but has no deadline of its own, and neither has the release open,
+// which is expected not to wait on a FIFO, on Linux as fifo(7) documents and on macOS as XNU's
+// source reads, though no native macOS run has shown it yet. The polls bound their own waits, not
+// every wall-clock path, and no test here executes the abort.
+#[cfg(unix)]
+fn fifo_bounded<T: std::fmt::Debug + Send + 'static>(
+    fifo: &Path,
+    wait: Duration,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, String> {
+    let worker = std::thread::Builder::new()
+        .name("fifo-control".to_owned())
+        .spawn(work)
+        .map_err(|error| format!("no worker: {error}"))?;
+    let id = worker.thread().id();
+    if finished_within(&worker, wait) {
+        return Ok(joined(worker));
+    }
+    let mut options = fs::OpenOptions::new();
+    let release = options.read(true).write(true).open(fifo);
+    if !finished_within(&worker, FIFO_WAIT) {
+        std::process::abort();
+    }
+    let late = joined(worker);
+    let reported = format!(
+        "the worker {id:?} had not returned in {wait:?}; it returned once {fifo:?} was opened \
+         ({release:?}), and was joined: {late:?}"
+    );
+    Err(reported)
+}
+
+#[cfg(unix)]
+fn finished_within<T>(worker: &std::thread::JoinHandle<T>, wait: Duration) -> bool {
+    let start = std::time::Instant::now();
+    while !worker.is_finished() {
+        if start.elapsed() >= wait {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    true
+}
+
+#[cfg(unix)]
+fn joined<T>(worker: std::thread::JoinHandle<T>) -> T {
+    match worker.join() {
+        Ok(value) => value,
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn the_unfired_evidence_reports_missing_and_unreadable_files_as_such() {
+    let (_tree, shim, child) = evidence_fixture("evidence-missing");
+    let missing = "NotFound: No such file or directory (os error 2)";
+    let gone = format!("not read: {:?}: {missing}", shim.dir);
+    let absent = format!("not read: its open: {missing}");
+    let evidence = unfired_evidence(&shim, &child, "err\nno marker", &[]);
+    assert_observed(&evidence, &shim.dir.join("rule-0.fired"), &gone);
+    assert_observed(&evidence, &shim.dir, &absent);
+    assert_observed(&evidence, &shim.log, &gone);
+    assert_observed(&evidence, &child.log, &absent);
+    assert_observed(&evidence, &shim.dir.join("git"), &gone);
+    let report = "\n  the child's report, 13 B: 0..13 requested, 13 B read: \"err\\nno marker\"";
+    assert!(evidence.contains(report), "{evidence}");
+
+    fs::create_dir(&shim.dir).expect("the shim's directory");
+    fs::write(&child.log, "words nobody may read\n").expect("the child's log");
+    mode_of(&child.log, 0o000).expect("an unreadable log");
+    let binds = fs::File::open(&child.log).is_err();
+    assert!(
+        binds,
+        "prerequisite not met: the mode bit did not bind (root, or CAP_DAC_OVERRIDE)"
+    );
+    let evidence = unfired_evidence(&shim, &child, "err\nno marker", &[]);
+    let denied = "not read: its open: PermissionDenied: Permission denied (os error 13)";
+    assert_observed(&evidence, &child.log, denied);
+    assert_observed(&evidence, &shim.dir, "a directory, not read");
+    assert_observed(&evidence, &shim.dir.join("rule-0.fired"), &absent);
+    assert!(!evidence.contains("nobody may read"), "{evidence}");
+}
+
+#[cfg(unix)]
+#[test]
+fn the_unfired_evidence_reads_a_large_file_only_in_its_two_windows() {
+    let (_tree, shim, child) = evidence_fixture("evidence-large");
+    fs::create_dir(&shim.dir).expect("the shim's directory");
+    let mut large = b"FIRST".to_vec();
+    large.resize((1 << 20) - 4, b'm');
+    large.extend_from_slice(b"LAST");
+    fs::write(&shim.log, large).expect("a large calls.log");
+    let evidence = unfired_evidence(&shim, &child, "ok", &[]);
+    let head = format!("FIRST{}", "m".repeat(2043));
+    let tail = format!("{}LAST", "m".repeat(6140));
+    let read = format!(
+        "a regular file, 1048576 B at its open, truncated: 0..2048 requested, 2048 B read: \
+         \"{head}\"; 1042432..1048576 requested, 6144 B read: \"{tail}\""
+    );
+    assert_observed(&evidence, &shim.log, &read);
+
+    let mut file = fs::File::open(&shim.log).expect("the large calls.log");
+    let first = read_window(&mut file, 0, u64::from(EVIDENCE_HEAD)).expect("its first window");
+    let last = read_window(&mut file, 1042432, u64::from(EVIDENCE_TAIL)).expect("its last one");
+    let (head, tail) = (usize::from(EVIDENCE_HEAD), usize::from(EVIDENCE_TAIL));
+    assert_eq!((first.len(), first.capacity()), (head, head));
+    assert_eq!((last.len(), last.capacity()), (tail, tail));
+
+    let controls = "\u{1}".repeat(1 << 20);
+    fs::write(&shim.log, &controls).expect("calls.log, all control bytes");
+    fs::write(shim.dir.join("git"), &controls).expect("the script, all control bytes");
+    fs::write(&child.log, controls).expect("the child's log, all control bytes");
+    let evidence = unfired_evidence(&shim, &child, "ok", &[]);
+    let mark = format!("\n  [the evidence stops at its cap, {EVIDENCE_TEXT} B]");
+    let size = evidence.len();
+    assert!(evidence.ends_with(&mark), "{size} B");
+    assert!(size <= EVIDENCE_TEXT, "{size} B");
+    assert!(size >= EVIDENCE_TEXT - 3, "{size} B");
+
+    let mut wide = String::new();
+    let line = "\u{e9}".repeat(EVIDENCE_TEXT);
+    assert!(!push_capped(&mut wide, &line));
+    let kept = "\u{e9}".repeat((EVIDENCE_TEXT - mark.len()) / 2);
+    assert_eq!(wide, format!("{kept}{mark}"));
+    let mut full = "x".repeat(EVIDENCE_TEXT - 1);
+    assert!(!push_capped(&mut full, "yz"));
+    let room = "x".repeat(EVIDENCE_TEXT - mark.len());
+    assert_eq!(full, format!("{room}{mark}"));
+}
+
+#[cfg(unix)]
+#[test]
+fn the_unfired_evidence_follows_no_link_and_opens_no_special_file() {
+    let (tree, shim, child) = evidence_fixture("evidence-links");
+    let outside = temp_engine_scratch("evidence-outside");
+    let secret = outside.path().join("outside.txt");
+    fs::write(&secret, "BYTES OUTSIDE THE FIXTURE\n").expect("a file outside the fixture");
+    fs::create_dir(&shim.dir).expect("the shim's directory");
+    std::os::unix::fs::symlink(&secret, &shim.log).expect("a link as calls.log");
+    let made = Command::new("mkfifo")
+        .arg(&child.log)
+        .status()
+        .expect("mkfifo");
+    assert!(made.success(), "prerequisite not met: mkfifo failed");
+    fs::create_dir(shim.dir.join("git")).expect("a directory as the script");
+    let linked = tree.path().join("linked");
+    std::os::unix::fs::symlink(outside.path(), &linked).expect("a link to a directory");
+    let plain = tree.path().join("plain");
+    fs::write(&plain, "a file\n").expect("a file where a directory would be");
+    let calls = shim.log.clone();
+    let fifo = child.log.clone();
+    let script = shim.dir.join("git");
+    let extra = [
+        linked.join("outside.txt"),
+        plain.join("inner"),
+        secret.clone(),
+    ];
+    let work = move || unfired_evidence(&shim, &child, "ok", &extra);
+    let evidence = fifo_bounded(&fifo, FIFO_WAIT, work)
+        .expect("the evidence returns without waiting on the FIFO");
+    assert_observed_starting(&evidence, &calls, "not read: its open: FilesystemLoop: ");
+    assert_observed(&evidence, &fifo, "a FIFO, not read");
+    assert_observed(&evidence, &script, "a directory, not read");
+    let through = format!("not read: {linked:?}: ");
+    assert_observed_starting(&evidence, &linked.join("outside.txt"), &through);
+    let on_a_file = format!("not read: {plain:?}: NotADirectory: ");
+    assert_observed_starting(&evidence, &plain.join("inner"), &on_a_file);
+    let elsewhere = "not read: outside the fixture's tree";
+    assert_observed(&evidence, &secret, elsewhere);
+    assert!(!evidence.contains("BYTES OUTSIDE"), "{evidence}");
+}
+
+#[cfg(unix)]
+#[test]
+fn the_unfired_evidence_refuses_what_is_swapped_in_after_its_check() {
+    let (tree, shim, _child) = evidence_fixture("evidence-swaps");
+    let outside = temp_engine_scratch("evidence-swaps-outside");
+    let secret = outside.path().join("calls.log");
+    fs::write(&secret, "BYTES OUTSIDE THE FIXTURE\n").expect("a file outside the fixture");
+    fs::create_dir(&shim.dir).expect("the shim's directory");
+
+    fs::write(&shim.log, "checked inside\n").expect("a regular calls.log");
+    let (dir, name) = evidence_parent(Some(tree.path()), &shim.log).expect("its descent");
+    assert!(is_regular(&shim.log), "the check sees a regular file");
+    fs::remove_file(&shim.log).expect("the checked file, removed");
+    std::os::unix::fs::symlink(secret, &shim.log).expect("a link in its place");
+    let linked = evidence_at(&dir, &name, &shim.log, true);
+    assert!(
+        refused_with(&linked, "not read: its open: FilesystemLoop: "),
+        "{linked:?}"
+    );
+
+    let script = shim.dir.join("git");
+    fs::write(&script, "checked inside\n").expect("a regular script");
+    let (dir, name) = evidence_parent(Some(tree.path()), &script).expect("its descent");
+    assert!(is_regular(&script), "the check sees a regular file");
+    fs::remove_file(&script).expect("the checked file, removed");
+    let made = Command::new("mkfifo")
+        .arg(&script)
+        .status()
+        .expect("mkfifo");
+    assert!(made.success(), "prerequisite not met: mkfifo failed");
+    let fifo = script.clone();
+    let work = move || evidence_at(&dir, &name, &script, true);
+    let opened =
+        fifo_bounded(&fifo, FIFO_WAIT, work).expect("the open returns without waiting on the FIFO");
+    assert_eq!(opened.as_deref(), Ok("a FIFO, not read"));
+
+    let sub = tree.path().join("sub");
+    let inner = sub.join("inner.txt");
+    fs::create_dir(&sub).expect("a directory on the way");
+    fs::write(&inner, "BYTES INSIDE\n").expect("a file inside it");
+    let elsewhere = outside.path().join("sub");
+    fs::create_dir(&elsewhere).expect("a directory outside");
+    fs::write(elsewhere.join("inner.txt"), "BYTES OUTSIDE\n").expect("a file outside");
+    let (dir, name) = evidence_parent(Some(tree.path()), &inner).expect("its descent");
+    fs::rename(&sub, tree.path().join("sub-moved")).expect("the directory, moved away");
+    std::os::unix::fs::symlink(elsewhere, sub).expect("a link in its place");
+    let held = evidence_at(&dir, &name, &inner, true);
+    let want = concat!(
+        "a regular file, 13 B at its open: 0..13 requested, 13 B read: \"BYTES INSIDE\\n\"",
+        "; a later lookup found another file"
+    );
+    assert_eq!(held.as_deref(), Ok(want));
+
+    let locked = tree.path().join("locked");
+    let deeper = locked.join("sub");
+    fs::create_dir_all(&deeper).expect("two directories on the way");
+    let hidden = deeper.join("inner.txt");
+    fs::write(&hidden, "BYTES INSIDE\n").expect("a file below them");
+    let (dir, name) = evidence_parent(Some(tree.path()), &hidden).expect("its descent");
+    mode_of(&locked, 0o000).expect("a directory on the way, unsearchable");
+    let binds = fs::symlink_metadata(&hidden).is_err();
+    let looked = evidence_at(&dir, &name, &hidden, true);
+    mode_of(&locked, 0o700).expect("searchable again");
+    assert!(
+        binds,
+        "prerequisite not met: the mode bit did not bind (root, or CAP_DAC_OVERRIDE)"
+    );
+    let want = concat!(
+        "a regular file, 13 B at its open: 0..13 requested, 13 B read: \"BYTES INSIDE\\n\"",
+        "; a later lookup: PermissionDenied: Permission denied (os error 13)"
+    );
+    assert_eq!(looked.as_deref(), Ok(want));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_fifo_control_releases_and_joins_a_waiting_worker_and_resumes_a_panicking_one() {
+    let tree = temp_engine_scratch("evidence-workers");
+    let waiting = tree.path().join("fifo");
+    let made = Command::new("mkfifo")
+        .arg(&waiting)
+        .status()
+        .expect("mkfifo");
+    assert!(made.success(), "prerequisite not met: mkfifo failed");
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let opening = waiting.clone();
+    let work = move || {
+        let opened = fs::File::open(&opening).is_ok();
+        let id = std::thread::current().id();
+        sender.send(id).map(|()| opened)
+    };
+    let waited = fifo_bounded(&waiting, Duration::from_millis(100), work);
+    let id = receiver
+        .try_recv()
+        .expect("the worker returned before it was reported");
+    let reported = waited.expect_err("a worker that waits on the FIFO is reported");
+    let named = format!("the worker {id:?} had not returned in 100ms; ");
+    assert!(reported.starts_with(&named), "{reported}");
+    let released = format!("it returned once {waiting:?} was opened (Ok(File ");
+    assert!(reported.contains(&released), "{reported}");
+    let tail = ", and was joined: Ok(true)";
+    assert!(reported.ends_with(tail), "{reported}");
+
+    let panics = || -> bool { panic!("the worker's own panic") };
+    let panicked = std::panic::catch_unwind(|| fifo_bounded(&waiting, FIFO_WAIT, panics));
+    let payload = panicked.expect_err("the worker's panic reaches its caller");
+    let message = payload.downcast_ref::<&str>();
+    assert_eq!(message, Some(&"the worker's own panic"));
+}
+
+#[cfg(unix)]
+#[test]
+fn the_shim_fired_assertion_fails_as_before_and_its_message_keeps_the_evidence() {
+    let (_tree, shim, child) = evidence_fixture("evidence-assert");
+    fs::create_dir(&shim.dir).expect("the shim's directory");
+    fs::write(&shim.log, "diff --no-textconv HEAD\n").expect("a calls.log");
+    fs::write(&child.log, "words of the child\n").expect("a child log");
+    let failed = std::panic::catch_unwind(|| {
+        assert_the_shim_fired(
+            &shim,
+            &child,
+            "err\nwhile capturing the candidate",
+            &[],
+            format_args!("ctl: the branch moved during the capture"),
+        );
+    });
+    let payload = failed.expect_err("the assertion fails while the marker is absent");
+    let Some(message) = payload.downcast_ref::<String>() else {
+        panic!("the assertion's message is not a String");
+    };
+    assert!(
+        message.starts_with("ctl: the branch moved during the capture\n"),
+        "{message}"
+    );
+    for kept in [
+        "ctl: the branch moved during the capture\n  observed after exists() answered false",
+        "rule-0.fired\": not read: its open: NotFound: No such file or directory (os error 2)",
+        "t-shim\": a directory, not read",
+        "\n  the child's report, 33 B: 0..33 requested, 33 B read: ",
+        "\"err\\nwhile capturing the candidate\"",
+        "calls.log\": a regular file, 24 B at its open: 0..24 requested, 24 B read: ",
+        "\"diff --no-textconv HEAD\\n\"",
+        "t.log\": a regular file, 19 B at its open: 0..19 requested, 19 B read: ",
+        "\"words of the child\\n\"",
+    ] {
+        assert!(message.contains(kept), "{kept}\nis not in:\n{message}");
+    }
+
+    fs::write(shim.dir.join("rule-0.fired"), "").expect("the marker");
+    assert_the_shim_fired(
+        &shim,
+        &child,
+        "ok",
+        &[],
+        format_args!("ctl: the marker exists"),
+    );
+}
+
 fn ignore_rule_of_a_new_directory(root: &Path) -> std::io::Result<()> {
     write_into(root, "newdir/.gitignore", b"paid-output.txt\n")?;
     write_into(
@@ -14321,9 +15021,12 @@ fn a_branch_moved_during_the_capture_keeps_the_output_pinned() {
             "kept_engine_child_runs",
             &[("PATH", &shim.path())],
         );
-        assert!(
-            shim.fired(0),
-            "{put_back}: the branch moved during the capture"
+        assert_the_shim_fired(
+            &shim,
+            &child,
+            &report,
+            &[repo.join(".git").join("HEAD")],
+            format_args!("{put_back}: the branch moved during the capture"),
         );
         assert!(
             report.contains("while capturing the candidate")
@@ -15132,7 +15835,16 @@ fn a_file_written_after_the_capture_is_never_written_over() {
         "kept_engine_child_resumes",
         &[("PATH", &shim.path())],
     );
-    assert!(shim.fired(0), "the late write ran before the revert");
+    assert_the_shim_fired(
+        &shim,
+        &child,
+        &report,
+        &[
+            repo.join("deleted.txt"),
+            repo.with_file_name("dies-inside.log"),
+        ],
+        format_args!("the late write ran before the revert"),
+    );
     assert!(
         report.starts_with("err")
             && report.contains("stopped part-way")
