@@ -13537,8 +13537,8 @@ fn the_unfired_evidence_refuses_what_is_swapped_in_after_its_check() {
     assert!(made.success(), "prerequisite not met: mkfifo failed");
     let fifo = script.clone();
     let work = move || evidence_at(&dir, &name, &script, true);
-    let opened = fifo_bounded(&fifo, FIFO_WAIT, work)
-        .expect("the open returns without waiting on the FIFO");
+    let opened =
+        fifo_bounded(&fifo, FIFO_WAIT, work).expect("the open returns without waiting on the FIFO");
     assert_eq!(opened.as_deref(), Ok("a FIFO, not read"));
 
     let sub = tree.path().join("sub");
