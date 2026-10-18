@@ -58,12 +58,14 @@ bash .github/scripts/test-pr-ledger-evidence.sh
 bash .github/scripts/test-docs-consistency.sh
 bash .github/scripts/test-internals-notes.sh
 bash .github/scripts/test-pr-ready-audit.sh
+bash .github/scripts/test-partition.sh
 ```
 
 The crate defines no features today, so `--all-features` is a no-op; use the CI form regardless.
 `1.85.0` is the MSRV and CI pins it; there is **no** `rust-toolchain.toml`, so toolchain selection
-is explicit at call sites. The 6 `test-*.sh` gates in `.github/scripts/` run in CI's `lint` job.
-`test-release-record.sh` needs `jq`. `test-pr-policy.sh` derives its own directory with
+is explicit at call sites. The 7 `test-*.sh` gates in `.github/scripts/` run in CI's `lint` job.
+`test-release-record.sh` needs `jq`, and `test-partition.sh` needs Python 3 and Git.
+`test-pr-policy.sh` derives its own directory with
 `${BASH_SOURCE[0]%/*}`, which works from any directory except one: invoked by bare name from
 inside `.github/scripts/`, the expansion strips nothing and it fails. Invoke it by path, as above.
 These are CI's commands; a shared build machine may wrap `cargo` and assign target directories
@@ -147,7 +149,7 @@ the owner's read of that PR's diff. `MAINTAINING.md` step 7 governs.
 | `MAINTAINING.md` | Change lifecycle, trust boundary, release contract |
 | `CONTRIBUTING.md` | Contributor rules and CLA |
 | `docs/internals/` | Internal module notes, one file per module mirroring `src/`. A module with notes carries a single `Extended notes:` pointer in its header and no other prose (§13), held both ways by `test-internals-notes.sh`. `docs/` is also the GitHub Pages source for upstroke.rs, so anything added there is published |
-| `.github/scripts/` | The 6 `test-*.sh` gates and the `validate-*` helpers they exercise |
+| `.github/scripts/` | The 7 `test-*.sh` gates, the `validate-*` helpers they exercise, and `.github/scripts/partition.py`, which runs one shard of a partitioned test leg and verifies that a lane's shards ran the whole suite |
 | `scripts/pr-ready-audit.sh` | Lane readiness audit: maintains `lane:*` and `ready-to-merge`, enqueues with `--enqueue` |
 | `findings/` | The standing finding ledger, one file per open finding, moved here from under `reviews/` on 2026-09-12; `findings/README.md` names and shapes a finding, `findings/PROCESS.md` is how the ledger is worked |
 | `reviews/` | `reviews/FINDINGS.md`, the same ledger up to 2026-09-04, closed to new sections, and the dated review records still on master; historical review records moved to the private lab repository on 2026-09-04 |

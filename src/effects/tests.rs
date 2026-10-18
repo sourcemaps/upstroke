@@ -5372,8 +5372,8 @@ mod ci_model;
 mod workflow;
 
 use ci_model::{
-    CI_TARGETS, CI_WORKFLOW, GOLDEN_IMAGE_TOOLCHAIN, MSRV_COMMAND, MSRV_JOB, OVERRIDING_REPO_FILES,
-    QUEUE_LANE, RUSTFLAGS_KEY, TEST_COMMAND, TEST_WINDOWS_LABELS, TEST_WINDOWS_PLATFORM,
+    CI_TARGETS, CI_WORKFLOW, GOLDEN_IMAGE_TOOLCHAIN, HOSTED_LANE, MSRV_COMMAND, MSRV_JOB,
+    OVERRIDING_REPO_FILES, RUSTFLAGS_KEY, TEST_COMMAND, TEST_WINDOWS_LABELS, TEST_WINDOWS_PLATFORM,
     TEST_WINDOWS_RUNS_ON, WINDOWS_TEST_FLOOR, WINDOWS_TEST_WITNESS,
 };
 use workflow::{
@@ -5495,7 +5495,7 @@ fn the_windows_leg_routes_each_lane_to_the_runner_its_install_step_is_written_fo
         .join(", ");
     assert_eq!(
         TEST_WINDOWS_RUNS_ON,
-        format!("${{{{ {QUEUE_LANE} && '{TEST_WINDOWS_PLATFORM}' || fromJSON('[{labels}]') }}}}"),
+        format!("${{{{ {HOSTED_LANE} && '{TEST_WINDOWS_PLATFORM}' || fromJSON('[{labels}]') }}}}"),
         "the pinned `runs-on:` is not the lane test, the hosted platform and the self-hosted \
          labels this contract names, so the install step's `if:` and the runner it is written \
          for can disagree while both pins hold"

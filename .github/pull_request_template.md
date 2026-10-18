@@ -18,6 +18,7 @@
 - [ ] `bash .github/scripts/test-docs-consistency.sh`
 - [ ] `bash .github/scripts/test-internals-notes.sh`
 - [ ] `bash .github/scripts/test-pr-ready-audit.sh`
+- [ ] `bash .github/scripts/test-partition.sh`
 
 Exact commands and results:
 

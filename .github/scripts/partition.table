@@ -1,0 +1,37 @@
+# The predicate table of the partitioned test legs in .github/workflows/ci.yml.
+#
+# `.github/scripts/partition.py run` reads its shard's arguments here on every
+# partitioned leg, and `partition.py verify` reads the whole table in the
+# `test-coverage` job. The workflow oracle pins every line below that is not a
+# comment (`PARTITION_TABLE_LINES` in src/effects/tests/ci_model.rs) and derives
+# the two test matrices from them, so the table, the oracle and ci.yml move
+# together. Three kinds of line:
+#
+#   group <group> <RUNNER_OS> <host triple> <rustc release, or any> <floor>
+#   lane  <event> <group>...
+#   shard <group> <shard> <libtest argument>...
+#
+# A group is one platform's partitioned legs, which must list one universe. Its
+# floor is the least number of tests its legs together must report passing.
+# A lane names the groups an event partitions; every other test leg of that
+# event runs the whole suite and is not verified here. A shard's arguments are
+# libtest name filters, each bare or after `--skip`: a test is selected when its
+# full name contains one of the bare filters (or there are none) and none of
+# the skipped ones. `verify` proves, on the names every leg's own harness
+# listed, that a group's shards select each listed test exactly once.
+
+group windows Windows x86_64-pc-windows-msvc 1.97.1 1700
+group macos macOS aarch64-apple-darwin any 1700
+
+lane merge_group windows macos
+lane pull_request windows macos
+lane push windows macos
+
+shard windows w1 engine::topology::recover::
+shard windows w2 engine::topology:: --skip engine::topology::recover::
+shard windows w3 engine:: --skip engine::topology::
+shard windows w4 --skip engine::
+
+shard macos m1 engine::topology::
+shard macos m2 engine:: --skip engine::topology::
+shard macos m3 --skip engine::

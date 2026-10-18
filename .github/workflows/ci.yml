@@ -33,7 +33,7 @@ env:
 
 jobs:
   test:
-    name: test (${{ matrix.os }})
+    name: test (${{ matrix.shard == 'all' && matrix.os || format('{0}, {1}', matrix.os, matrix.shard) }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
@@ -43,9 +43,26 @@ jobs:
         # an afterthought: the subprocess supervisor, the cmd /C quoting and the
         # PATHEXT resolution all behave differently per platform and are covered
         # by tests. It is absent from this matrix because it runs below, in
-        # `test-windows`, on a runner chosen by lane; these two legs stay on
+        # `test-windows`, on a runner chosen by lane; these legs stay on
         # GitHub's runners.
-        os: [ubuntu-latest, macos-latest]
+        #
+        # The ubuntu leg runs the whole suite. The macOS suite runs as three
+        # shards, `m1` to `m3`, on every lane: the macOS leg of pull request
+        # #339's second merge-queue entry was cancelled at this job's 30
+        # minutes, and the ceiling is unchanged. `.github/scripts/partition.table`
+        # holds each shard's libtest name filters, and `test-coverage` fails the
+        # run unless the three shards ran every test the macOS harnesses listed
+        # exactly once. No duration is claimed for a shard before one is
+        # measured. The workflow oracle derives this list from that table.
+        include:
+          - os: ubuntu-latest
+            shard: all
+          - os: macos-latest
+            shard: m1
+          - os: macos-latest
+            shard: m2
+          - os: macos-latest
+            shard: m3
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
@@ -85,8 +102,37 @@ jobs:
       # step-level `env:` as a whole map (`TEST_STEP_ENV`), the way it pins
       # the aggregate's: any other key here is refused.
       - run: cargo test --all-targets --all-features
+        if: matrix.shard == 'all'
         env:
           UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}
+
+      # A shard leg runs the suite through `.github/scripts/partition.py`, not
+      # with the step above's argv: it asks Cargo for the package's targets
+      # (`cargo metadata`), builds every target once (`cargo test --all-targets
+      # --all-features --no-run`, with JSON artifact messages), then lists,
+      # lists the ignored tests of, lists the selection of and runs each test
+      # unit by its own selector (`--lib` or `--<kind> <name>`), adding after
+      # `--` only this shard's libtest filters and, on the run, a per-unit
+      # `--logfile`. It records what the build reported and what each harness
+      # listed, selected and ran, for `test-coverage` to check. The two steps'
+      # conditions are complements, so every leg runs exactly one of them, and
+      # the oracle pins both conditions and both scripts whole. The record is
+      # uploaded under the run attempt, so a re-run uploads beside an earlier
+      # attempt's record rather than colliding with it; `test-coverage` reads
+      # only its own attempt's.
+      - name: Test one shard, and record what it listed, selected and ran
+        if: matrix.shard != 'all'
+        env:
+          UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}
+        run: python3 .github/scripts/partition.py run macos ${{ matrix.shard }} test-partition
+
+      - name: Upload the shard's record
+        if: matrix.shard != 'all'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: test-partition-${{ matrix.shard }}-attempt-${{ github.run_attempt }}
+          path: test-partition
+          if-no-files-found: error
 
   # The Windows suite runs on one of two machines, chosen by lane. A
   # pull-request or push build runs on an ephemeral self-hosted runner: a
@@ -139,23 +185,51 @@ jobs:
   # a queue entry's ref is a fresh `gh-readonly-queue/` branch, and no run on
   # `master` ever saves a hosted `test-windows` cache, so a cache step would
   # upload a cache per entry that no later entry could read. The hosted
-  # timeout is calibrated to the five samples, whose slowest was 28 minutes,
-  # with room for the host lottery windows-latest showed before; the guest
-  # keeps its own. A hung queue entry surfaces in 45 minutes rather than 20.
+  # lane's cancellation ceiling is 55 minutes. Three completed queue samples
+  # took 40.4, 42.0 and 44.5 minutes a job (runs 38185230422, 38191303862 and
+  # 38202717688), and 55 is about 1.24 times the slowest; two other queue runs,
+  # 38199038253 and 38245576405, were cancelled at the earlier 45-minute limit
+  # and are incomplete, their cause unknown. The default branch's ruleset gives
+  # the queue its own `check_response_timeout_minutes` of 60, and this ceiling
+  # leaves a nominal 5-minute interval beneath it, so neither the entry's
+  # completion nor a full 55 minutes for this job is guaranteed. Raised from
+  # 45, the ceiling may hold the job up to 10 minutes longer, and it neither
+  # diagnoses nor cures a hang. The guest keeps its own 20.
+  #
+  # On the merge-queue lane the hosted suite now runs as four shards, `w1` to
+  # `w4`, each a leg of this matrix under that same 55-minute ceiling, and
+  # `test-coverage` fails the run unless the four ran every test the hosted
+  # Windows harnesses listed exactly once (`.github/scripts/partition.table`
+  # holds their libtest name filters). Two queue entries of pull request #339
+  # were cancelled at 55 minutes with the whole suite on one hosted leg. No
+  # shard duration is claimed before one is measured, and nothing here makes
+  # GitHub start the four legs together. The pull-request and push lanes keep
+  # one leg, the guest's whole suite, named `test (winguest)` as before. The
+  # machine follows the leg: `all` runs on the guest and every shard on
+  # windows-latest, so `runs-on:`, the ceiling and the install step are keyed
+  # on the shard, and the lane decides only which legs exist.
   test-windows:
-    name: test (${{ github.event_name == 'merge_group' && 'windows-latest' || 'winguest' }})
-    runs-on: ${{ github.event_name == 'merge_group' && 'windows-latest' || fromJSON('["self-hosted", "windows", "winguest"]') }}
-    timeout-minutes: ${{ github.event_name == 'merge_group' && 45 || 20 }}
+    name: test (${{ matrix.shard == 'all' && 'winguest' || format('windows-latest, {0}', matrix.shard) }})
+    runs-on: ${{ matrix.shard != 'all' && 'windows-latest' || fromJSON('["self-hosted", "windows", "winguest"]') }}
+    timeout-minutes: ${{ matrix.shard != 'all' && 55 || 20 }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # VALIDATION ROUTING, #339 only: every lane runs the four hosted shards,
+        # and the pull-request and push lanes also keep the guest's whole suite,
+        # so the partition runs natively on windows-latest before a merge-queue
+        # entry relies on it. The next commit restores the final routing.
+        shard: ${{ fromJSON(github.event_name == 'merge_group' && '["w1", "w2", "w3", "w4"]' || '["all", "w1", "w2", "w3", "w4"]') }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       # The hosted lane's compiler: the image's, exactly. The workflow oracle
       # pins this step whole -- one install, right after the checkout, on
-      # exactly the lane whose runner needs one, at exactly the image's version
-      # -- and refuses an `if:` on any other step of this job. On the guest
-      # lane the step is skipped after its archive is downloaded at setup.
+      # exactly the legs whose runner needs one, at exactly the image's
+      # version. On the guest's leg the step is skipped after its archive is
+      # downloaded at setup.
       - name: Install the image's toolchain on the hosted lane
-        if: github.event_name == 'merge_group'
+        if: matrix.shard != 'all'
         uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
           toolchain: 1.97.1
@@ -206,6 +280,7 @@ jobs:
       # the hosted lane the first question compiles the dependencies, which
       # the suite would compile next anyway.
       - name: Test, and witness that the suite ran
+        if: matrix.shard == 'all'
         env:
           UPSTROKE_TEST_TEMP_FOLDS_CASE: "1"
         run: |
@@ -215,6 +290,38 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $passed = [int](($log | Select-String -Pattern '^test result: ok\. (\d+) passed' | ForEach-Object { [int]$_.Matches[0].Groups[1].Value } | Measure-Object -Sum).Sum)
           if ($passed -lt 1700) { throw "the suite reported $passed passing tests, below the floor of 1700: Cargo compiled the harnesses and executed almost none of them" }
+
+      # A hosted shard: the same compiler check, then the suite through
+      # `.github/scripts/partition.py`, not with the step above's argv: it asks
+      # Cargo for the package's targets (`cargo metadata`), builds every target
+      # once (`cargo test --all-targets --all-features --no-run`, with JSON
+      # artifact messages), then lists, lists the ignored tests of, lists the
+      # selection of and runs each test unit by its own selector (`--lib` or
+      # `--<kind> <name>`), adding after `--` only this shard's libtest filters
+      # and, on the run, a per-unit `--logfile`, and records what the build
+      # reported and what each harness listed, selected and ran. The witness's
+      # count is not repeated here: `test-coverage` refuses the run unless the
+      # shards together ran every listed test, and the table's floor for the
+      # Windows group is the witness's 1700. The two steps' conditions are
+      # complements, so every leg runs exactly one of them; the oracle pins
+      # both conditions and both scripts whole.
+      - name: Test one shard, and record what it listed, selected and ran
+        if: matrix.shard != 'all'
+        env:
+          UPSTROKE_TEST_TEMP_FOLDS_CASE: "1"
+        run: |
+          $rustc = ((cargo rustc -q --lib -- --version) | Out-String).Trim(); $path_rustc = ((rustc --version) | Out-String).Trim(); $cargo = ((cargo --version) | Out-String).Trim()
+          if ($rustc -notmatch '^rustc 1\.97\.1 ' -or $path_rustc -notmatch '^rustc 1\.97\.1 ' -or $cargo -notmatch '^cargo 1\.97\.1 ') { throw "the suite would run on '$rustc' (Cargo's compiler), '$path_rustc' (PATH's rustc) and '$cargo', not the image's 1.97.1: a compiler was chosen by something other than this workflow" }
+          python .github/scripts/partition.py run windows ${{ matrix.shard }} test-partition
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload the shard's record
+        if: matrix.shard != 'all'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: test-partition-${{ matrix.shard }}-attempt-${{ github.run_attempt }}
+          path: test-partition
+          if-no-files-found: error
 
   msrv:
     name: msrv (Rust 1.85, ${{ matrix.os }})
@@ -310,6 +417,30 @@ jobs:
       - run: bash .github/scripts/test-docs-consistency.sh
       - run: bash .github/scripts/test-internals-notes.sh
       - run: bash .github/scripts/test-pr-ready-audit.sh
+      - run: bash .github/scripts/test-partition.sh
+
+  # The partitioned legs' completeness. A shard's own green says only that the
+  # tests its filters selected passed; this job says the shards of each
+  # partitioned group, together, ran every test their harnesses listed, exactly
+  # once. It has no `if:`, so a failed, cancelled or skipped leg skips it and
+  # `merge-gate` reads `skipped`. It runs only the checked-out
+  # `.github/scripts/partition.py` and the table beside it, and reads the
+  # downloaded records as data: this run attempt's artifacts only, by pattern,
+  # each bound by the leg to this checkout, this table, this run and this
+  # attempt. A record from any other attempt is refused, not superseded, so a
+  # re-run of only the failed legs cannot pass; a full re-run can.
+  test-coverage:
+    name: partition coverage
+    needs: [test, test-windows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: test-partition-*-attempt-${{ github.run_attempt }}
+          path: test-partition-records
+      - run: python3 .github/scripts/partition.py verify test-partition-records
 
   # Branch protection requires this one deliberately stable context. Keeping
   # the external rule pointed at an aggregate means adding a platform or
@@ -319,7 +450,7 @@ jobs:
   merge-gate:
     name: upstroke-ci
     if: always()
-    needs: [lint, lint-windows, lint-macos, msrv, test, test-windows]
+    needs: [lint, lint-windows, lint-macos, msrv, test, test-windows, test-coverage]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -332,9 +463,10 @@ jobs:
           MSRV_RESULT: ${{ needs.msrv.result }}
           TEST_RESULT: ${{ needs.test.result }}
           TEST_WINDOWS_RESULT: ${{ needs.test-windows.result }}
+          TEST_COVERAGE_RESULT: ${{ needs.test-coverage.result }}
         run: |
           failed=0
-          for gate in LINT LINT_WINDOWS LINT_MACOS MSRV TEST TEST_WINDOWS; do
+          for gate in LINT LINT_WINDOWS LINT_MACOS MSRV TEST TEST_WINDOWS TEST_COVERAGE; do
             result_var="${gate}_RESULT"
             result="${!result_var}"
             if [[ "$result" != "success" ]]; then

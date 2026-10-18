@@ -13,14 +13,19 @@ bash .github/scripts/test-pr-ledger-evidence.sh
 bash .github/scripts/test-docs-consistency.sh
 bash .github/scripts/test-internals-notes.sh
 bash .github/scripts/test-pr-ready-audit.sh
+bash .github/scripts/test-partition.sh
 ```
 
-CI splits the ten across jobs: `lint` runs rustfmt, Clippy and the six Bash gates; `test` runs
-the suite on Linux and macOS, and `test-windows` runs it on Windows, on a self-hosted ephemeral
-runner for a pull request or push and on `windows-latest` for a merge-queue entry; `msrv` runs the locked check on all three; `lint (windows)` runs Clippy natively and builds
+CI splits the eleven across jobs: `lint` runs rustfmt, Clippy and the seven Bash gates; `test`
+runs the suite whole on Linux and in three shards on macOS, and `test-windows` runs it on
+Windows, whole on a self-hosted ephemeral runner for a pull request or push and in four shards on
+`windows-latest` for a merge-queue entry; a shard runs `cargo test --all-targets --all-features`
+with its libtest name filters from `.github/scripts/partition.table` after `--`, and
+`test-coverage` refuses the run unless a platform's shards together ran every test its harnesses
+listed exactly once; `msrv` runs the locked check on all three; `lint (windows)` runs Clippy natively and builds
 every target as the hosted Windows compile witness; `lint (macos)` runs Clippy natively;
 `upstroke-ci` aggregates every leg and is the required context. The `--locked` MSRV check is what
-proves the floor against the dependency set a release ships. `test-release-record.sh` needs `jq`, and `test-pr-policy.sh` only works from the root.
+proves the floor against the dependency set a release ships. `test-release-record.sh` needs `jq`, `test-partition.sh` needs Python 3 and Git, and `test-pr-policy.sh` only works from the root.
 
 Edition 2024, MSRV 1.85.0; code and dependencies stay compatible with both the MSRV and current
 stable. A green baseline is necessary, not sufficient: nothing past this section is checked by a
@@ -42,4 +47,4 @@ Lints:
   misspelt control. A per-site `#[expect]` of a governed lint may stand below module level only in
   a file whose `effects/allowlist.toml` row records the lint and the exact annotation count.
 
-Enforced by: the ten commands; `[lints]`; `clippy.toml` with the effects census.
+Enforced by: the eleven commands; `[lints]`; `clippy.toml` with the effects census.

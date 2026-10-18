@@ -14,7 +14,9 @@ candidate-controlled, so a fork's entire diff, workflow edits included, is revie
 
 ## Before you send a PR
 
-CI enforces all ten of these, verbatim, from the repository root:
+CI enforces all eleven of these from the repository root, verbatim but for one difference: its
+partitioned test legs run `cargo test --all-targets --all-features` with a shard's libtest name
+filters after `--`, and a separate check refuses the run unless the shards ran the whole suite.
 
 ```bash
 cargo fmt --check
@@ -27,10 +29,12 @@ bash .github/scripts/test-pr-ledger-evidence.sh
 bash .github/scripts/test-docs-consistency.sh
 bash .github/scripts/test-internals-notes.sh
 bash .github/scripts/test-pr-ready-audit.sh
+bash .github/scripts/test-partition.sh
 ```
 
 `CODING_STANDARDS.md` §2 is the normative statement of this baseline and says how CI splits it
-across jobs. `test-release-record.sh` needs `jq`; `test-pr-policy.sh` only works from the root.
+across jobs. `test-release-record.sh` needs `jq`; `test-partition.sh` needs Python 3 and Git;
+`test-pr-policy.sh` only works from the root.
 
 Use the pull-request template to record the exact commands, implementation provenance, reviewed
 SHA, review model and effort, evidence link, risk and rollback. Resolve every review conversation;
@@ -40,7 +44,7 @@ merge commits are the only accepted merge method.
 sections a change touches before changing Rust. Among the hard requirements: edition 2024 with MSRV
 1.85, no `.unwrap()` or `.expect()` in production, `anyhow` only at the binary edge (libraries
 return typed `thiserror` errors), paths through `std::path` types, and no shared ownership, locks
-or clones without a stated reason. Windows, macOS and Linux are supported targets. The ten
+or clones without a stated reason. Windows, macOS and Linux are supported targets. The eleven
 commands above are the automated baseline, not the whole standard.
 
 ## Contributor Licence Agreement
