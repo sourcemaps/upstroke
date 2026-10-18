@@ -3197,8 +3197,9 @@ is closed unread. Each descriptor is an `OwnedFd` inside a `File`, closed when i
 blocks are the `openat` call and the adoption of the descriptor it returns, which nothing else owns. A file of at most 8
 KiB is read whole; a larger one only in its first 2 KiB and its last 6 KiB, each into a buffer allocated once at that
 size. Each range is reported as requested and with the bytes actually read, so a short read shows as one. The bytes are
-shown by `<[u8]>::escape_ascii`, which is lossless; nothing is redacted; the whole text stops at 64 KiB with a line
-saying so. The window sizes are `u16` so that both `u64` and `usize` take them by `From`.
+shown by `<[u8]>::escape_ascii`, which is lossless; nothing is redacted; the whole text, the line that says it stops
+included, is at most 64 KiB: what does not fit is cut at the last character boundary that leaves that line its room, so
+the cut can fall in a line that did fit. The window sizes are `u16` so that both `u64` and `usize` take them by `From`.
 
 What is missing, denied, refused, changed or truncated is reported as that, with the error's kind and text, and is not
 read as a cause. The size and the modification and change times are compared across the read, and a difference is
@@ -3216,9 +3217,11 @@ files hold was written by processes that inherited the test's environment, which
 
 The evidence's controls, each on a private scratch tree with its expected text written out: missing files, and an
 unreadable one (mode `000`, after checking that the mode bit binds); a 1 MiB `calls.log` shown in its two windows, each
-window's buffer of exactly its size, and a text past the cap cut with its line; a link as `calls.log`, a FIFO as the
-child's log (made by `mkfifo`), a directory as the script, a link and a file on the way, and a path outside the tree,
-none of whose bytes appear. `the_unfired_evidence_refuses_what_is_swapped_in_after_its_check` drives the open boundary
+window's buffer of exactly its size, and a text past the cap cut, its closing line included, to within a character of
+64 KiB, at a character boundary, and into the text before the line that did not fit when it leaves less room than the
+closing line needs; a link as `calls.log`, a FIFO as the child's log (made by `mkfifo`), a directory as the script, a
+link and a file on the way, and a path outside the tree, none of whose bytes appear.
+`the_unfired_evidence_refuses_what_is_swapped_in_after_its_check` drives the open boundary
 itself: after the descent and a check that sees a regular file, the file is replaced by a link to a file outside the
 tree, then by a FIFO, and a directory on the way is moved aside and replaced by a link to one outside; `evidence_at`
 refuses the link, opens the FIFO without waiting, and reads the file through the directory it already holds, its later

@@ -13246,13 +13246,14 @@ fn push_capped(text: &mut String, line: &str) -> bool {
         text.push_str(line);
         return true;
     }
-    let mut end = room;
-    while !line.is_char_boundary(end) {
-        end -= 1;
-    }
-    text.push_str(line.get(..end).unwrap_or_default());
     let cap = EVIDENCE_TEXT;
     let mark = said(format_args!("\n  [the evidence stops at its cap, {cap} B]"));
+    let mut end = cap.saturating_sub(mark.len());
+    text.push_str(line);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.truncate(end);
     text.push_str(&mark);
     false
 }
@@ -13365,7 +13366,18 @@ fn the_unfired_evidence_reads_a_large_file_only_in_its_two_windows() {
     let mark = format!("\n  [the evidence stops at its cap, {EVIDENCE_TEXT} B]");
     let size = evidence.len();
     assert!(evidence.ends_with(&mark), "{size} B");
-    assert!(size <= EVIDENCE_TEXT + mark.len(), "{size} B");
+    assert!(size <= EVIDENCE_TEXT, "{size} B");
+    assert!(size >= EVIDENCE_TEXT - 3, "{size} B");
+
+    let mut wide = String::new();
+    let line = "\u{e9}".repeat(EVIDENCE_TEXT);
+    assert!(!push_capped(&mut wide, &line));
+    let kept = "\u{e9}".repeat((EVIDENCE_TEXT - mark.len()) / 2);
+    assert_eq!(wide, format!("{kept}{mark}"));
+    let mut full = "x".repeat(EVIDENCE_TEXT - 1);
+    assert!(!push_capped(&mut full, "yz"));
+    let room = "x".repeat(EVIDENCE_TEXT - mark.len());
+    assert_eq!(full, format!("{room}{mark}"));
 }
 
 #[cfg(unix)]
