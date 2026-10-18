@@ -174,7 +174,10 @@ pub(super) const COVERAGE_NEEDS: [&str; 2] = ["test", TEST_WINDOWS_JOB];
 pub(super) const COVERAGE_RUNNER: &str = "ubuntu-latest";
 pub(super) const COVERAGE_DOWNLOAD_INPUTS: [(&str, &str); 2] = [
     ("path", "test-partition-records"),
-    ("pattern", "test-partition-*-attempt-${{ github.run_attempt }}"),
+    (
+        "pattern",
+        "test-partition-*-attempt-${{ github.run_attempt }}",
+    ),
 ];
 pub(super) const COVERAGE_COMMAND: &str =
     "python3 .github/scripts/partition.py verify test-partition-records";

@@ -27,7 +27,8 @@ use super::ci_model::{
     TEST_WINDOWS_STEP_ENV, TEST_WINDOWS_TIMEOUT, TEST_WINDOWS_TOOLCHAIN_COMPONENTS,
     TOOLCHAIN_ACTION, TOOLCHAIN_COMPONENTS, UPLOAD_ACTION, UPLOAD_ACTION_PREFIX, WHOLE_SUITE,
     WHOLE_SUITE_LANE, WINDOWS_BUILD_WITNESS, WINDOWS_COMPILER_CHECK_LINES, WINDOWS_GROUP,
-    WINDOWS_SHARD_SCRIPT, WINDOWS_TEST_WITNESS, WORKFLOW_ENV, WORKFLOW_FIELDS, WORKFLOW_PERMISSIONS,
+    WINDOWS_SHARD_SCRIPT, WINDOWS_TEST_WITNESS, WORKFLOW_ENV, WORKFLOW_FIELDS,
+    WORKFLOW_PERMISSIONS,
 };
 use super::repo_root;
 
@@ -720,7 +721,9 @@ fn upload_complaints(job: &Yaml, named: &str, code: &str, after: &str) -> Vec<St
 fn strategy_complaints(job: &Yaml, named: &str, code: &str, matrix_field: &str) -> Vec<String> {
     let mut out = Vec::new();
     let Some(strategy) = field(job, "strategy") else {
-        return vec![format!("[{code}] `{named}` declares no `strategy:`, so it runs one leg")];
+        return vec![format!(
+            "[{code}] `{named}` declares no `strategy:`, so it runs one leg"
+        )];
     };
     for complaint in field_complaints(strategy, &STRATEGY_FIELDS, &[]) {
         out.push(format!(
@@ -808,7 +811,9 @@ fn partition() -> Result<Partition, String> {
         let words: Vec<&str> = line.split_whitespace().collect();
         match words.as_slice() {
             ["shard", group, shard, ..] => {
-                partition.shards.push(((*group).to_owned(), (*shard).to_owned()));
+                partition
+                    .shards
+                    .push(((*group).to_owned(), (*shard).to_owned()));
             }
             ["lane", event, groups @ ..] => {
                 partition.lanes.insert(
