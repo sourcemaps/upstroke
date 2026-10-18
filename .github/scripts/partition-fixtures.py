@@ -18,6 +18,14 @@ refusal is paired with the legitimate shape nearest it, which must pass. The
 child environments are built from scratch here (PATH, HOME, LANG and named
 fixture values); a canary variable is set and must appear in no record. No
 Cargo, compiler or network.
+
+VALIDATION ROUTING (temporary, #339 only): this version runs against the
+validation table, whose pull-request lane also partitions Windows. Each fake-Cargo
+log is keyed by event, shard and attempt, so the two lanes' w2 legs in one
+repository never share a log; the pull-request positive is the two-group lane it
+is; and the out-of-lane refusal is tested on a labelled table whose pull-request
+lane partitions macOS alone, beside the event refusal on the real table. The
+final head reverts this version together with the routing.
 """
 
 import json
@@ -317,7 +325,7 @@ class Repo(object):
         spec_path = os.path.join(self.path, 'suite-%s.json' % group)
         with open(spec_path, 'w') as handle:
             json.dump(spec, handle)
-        log = os.path.join(self.path, 'cargo-argv-%s-%d.jsonl' % (shard, attempt))
+        log = os.path.join(self.path, 'cargo-argv-%s-%s-%d.jsonl' % (event, shard, attempt))
         env = self.fixture.environment(self.github(event, attempt, group))
         env.update({'FAKE_SUITE': spec_path, 'FAKE_LOG': log})
         env.update(hooks or {})
@@ -477,10 +485,14 @@ def cases(fixture):
     # -- the legitimate shapes ------------------------------------------------
     check(fixture, 'P-QUEUE: the merge-queue lane, four Windows and three macOS legs', repo.verify(base, 'merge_group'),
           0, 'every partitioned group ran every listed test exactly once', 'out')
-    check(fixture, 'P-PR: the pull-request lane partitions macOS alone', repo.verify(pr, 'pull_request'),
+    verified_pr = repo.verify(pr, 'pull_request')
+    check(fixture, 'P-PR: the pull-request lane, under the validation routing, partitions Windows and macOS', verified_pr,
           0, 'every partitioned group ran every listed test exactly once', 'out')
+    check(fixture, 'P-PR-GROUPS: that verification read both groups, from four Windows and three macOS legs',
+          truth(verified_pr[0] == 0 and 'attempt 1: verifying windows, macos\n' in verified_pr[1]
+                and sorted(os.listdir(pr)) == sorted('test-partition-%s-attempt-1' % s for s in ('w1', 'w2', 'w3', 'w4', 'm1', 'm2', 'm3'))), 0)
     recorded = json.load(open(os.path.join(leg_dir(base, 'w2'), 'record.json')))
-    with open(os.path.join(repo.path, 'cargo-argv-w2-1.jsonl')) as handle:
+    with open(os.path.join(repo.path, 'cargo-argv-merge_group-w2-1.jsonl')) as handle:
         received = [['cargo'] + json.loads(line) for line in handle]
     check(fixture, 'P-ARGV: every recorded argv is an argv the fake cargo received, in order',
           truth([s['argv'] for s in recorded['steps']] == [r for r in received if r[1] in ('metadata', 'test')]), 0)
@@ -488,6 +500,14 @@ def cases(fixture):
     check(fixture, 'P-QUERY: the runner asked Cargo `rustc -q --lib -- --version --verbose` once, and recorded its answer',
           truth(query == [['cargo', 'rustc', '-q', '--lib', '--', '--version', '--verbose']]
                 and recorded['compiler']['argv'] == query[0] and recorded['compiler']['stdout'] == specs['windows']['vv']), 0)
+    pr_recorded = json.load(open(os.path.join(leg_dir(pr, 'w2'), 'record.json')))
+    with open(os.path.join(repo.path, 'cargo-argv-pull_request-w2-1.jsonl')) as handle:
+        pr_received = [['cargo'] + json.loads(line) for line in handle]
+    check(fixture, 'P-ARGV-PR: the pull-request lane\'s own w2 leg: every recorded argv in order, and one compiler query, from its own log',
+          truth([s['argv'] for s in pr_recorded['steps']] == [r for r in pr_received if r[1] in ('metadata', 'test')]
+                and [r for r in pr_received if r[1] == 'rustc'] == [['cargo', 'rustc', '-q', '--lib', '--', '--version', '--verbose']]
+                and pr_recorded['compiler']['argv'] == ['cargo', 'rustc', '-q', '--lib', '--', '--version', '--verbose']
+                and pr_recorded['compiler']['stdout'] == specs['windows']['vv']), 0)
     w2 = open(os.path.join(leg_dir(base, 'w2'), 'u%d-selected.log' % lib_w)).read()
     w3 = open(os.path.join(leg_dir(base, 'w3'), 'u%d-selected.log' % lib_w)).read()
     check(fixture, 'P-UNUSUAL: `recovery::` is not `recover::`, so w2 holds it; `my_engine::` is w3\'s',
@@ -794,8 +814,24 @@ def cases(fixture):
     path = copy('extra-leg')
     shutil.copytree(leg_dir(path, 'w4'), leg_dir(path, 'w5'))
     check(fixture, 'N-EXTRA: a record from a shard the lane does not run', repo.verify(path, 'merge_group'), 1, 'not a shard')
-    check(fixture, 'N-WRONG-LANE: the queue\'s Windows records read on the pull-request lane', repo.verify(base, 'pull_request'), 1,
-          'not a shard of the pull_request lane')
+    check(fixture, 'N-WRONG-EVENT: the queue\'s records read on the pull-request lane, whose shards are the same: the event refuses',
+          repo.verify(base, 'pull_request'), 1, "the event is 'merge_group', not 'pull_request'")
+    narrow_table = real_table()
+    assert narrow_table.count('\nlane pull_request windows macos\n') == 1, 'the validation table\'s pull-request lane'
+    narrow = Repo(fixture, 'narrow-pr-table', narrow_table.replace('\nlane pull_request windows macos\n', '\nlane pull_request macos\n'))
+    narrow_pr = os.path.join(narrow.path, 'records-pr')
+    narrow.lane('pull_request', narrow_pr, specs)
+    check(fixture, 'P-NARROW-PR: a labelled table whose pull-request lane partitions macOS alone; its own lane verifies',
+          narrow.verify(narrow_pr, 'pull_request'), 0, 'every partitioned group ran every listed test exactly once', 'out')
+    path = copy('narrow-pr-plus-w2', narrow_pr)
+    code, out, err, target, _ = narrow.leg('pull_request', 'windows', 'w2', 1, specs['windows'], path)
+    record_path = os.path.join(target, 'record.json')
+    check(fixture, 'N-WRONG-LANE (control): that table\'s runner records a Windows w2 leg labelled pull_request, run and attempt equal',
+          truth(code == 0 and os.path.isfile(record_path)
+                and json.load(open(record_path))['github']['GITHUB_EVENT_NAME'] == 'pull_request'
+                and json.load(open(record_path))['github']['GITHUB_RUN_ATTEMPT'] == '1'), 0)
+    check(fixture, 'N-WRONG-LANE: a valid w2 record beside that lane\'s own records: w2 is not a shard of the pull-request lane',
+          narrow.verify(path, 'pull_request'), 1, "a record from 'w2', which is not a shard of the pull_request lane")
     path = copy('stray-file')
     with open(os.path.join(path, 'stray.txt'), 'w') as handle:
         handle.write('x')
