@@ -202,14 +202,18 @@ than a set per job: `lint (macos)` running the formatter would be
 redundant, not an escape, and the one command that must sit on exactly one
 job, the Windows build witness, is pinned to its carrier separately.
 
-## `pub(super) const PINNED_ACTIONS: [&str; 3] = [`
+## `pub(super) const PINNED_ACTIONS: [&str; 4] = [`
 
 The actions a step may `uses:`, each pinned to the commit it was reviewed
 at. An action off this list is code nobody here reviewed running with a
 checkout of its own; a floating tag (`@v4`) is that action at whatever
 commit the tag points to tomorrow. Measured, `MUT-STEP-USES-UNPINNED`.
 
-## `pub(super) const ACTION_INPUTS: [(&str, &[&str]); 3] = [`
+`actions/setup-python` is here for one step: `lint` puts CPython 3.12 on
+PATH before `test-pr-ready-audit.sh`, whose decode probe asserts answers
+measured on 3.12 and refuses any other interpreter.
+
+## `pub(super) const ACTION_INPUTS: [(&str, &[&str]); 4] = [`
 
 The inputs each pinned action may be given, by action prefix.
 
@@ -221,6 +225,10 @@ the build witness ever see the candidate -- with the action allowlisted, the
 checkout input-free, and every `run:` still exact. An input this contract
 does not model is refused for the same reason an unknown field is.
 Measured, `MUT-CACHE-CMD-FORMAT`.
+
+`actions/setup-python` is given `python-version` alone, which says which
+interpreter it puts on PATH; whether that one is acceptable is the gate's
+to decide, and it accepts CPython 3.12 only.
 
 ## `pub(super) const TOOLCHAIN_COMPONENTS: [&str; 2] = ["clippy", "rustfmt, clippy"];`
 

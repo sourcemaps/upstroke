@@ -309,6 +309,19 @@ jobs:
       - run: bash .github/scripts/test-pr-ledger-evidence.sh
       - run: bash .github/scripts/test-docs-consistency.sh
       - run: bash .github/scripts/test-internals-notes.sh
+      # The audit gate's decode probe reads CPython's own bytecode, and every
+      # answer the gate asserts of it was measured on CPython 3.12. When this
+      # job's image moved from ubuntu-24.04 to ubuntu-26.04, whose inventories
+      # list Python 3.12.3 and 3.14.4, the unchanged gate printed 45 failures.
+      # The job did not print its interpreter; a private CPython 3.14.4 build
+      # prints the same 45 lines, and 3.12 passes. So the gate runs that probe
+      # on `python3.12`, refusing one that is not CPython 3.12, and this step
+      # puts one on PATH; the rest of the gate runs on the image's `python3`.
+      # Moving the version re-measures the gate's expectations in the same
+      # change. The workflow oracle allows this action one input.
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
       - run: bash .github/scripts/test-pr-ready-audit.sh
 
   # Branch protection requires this one deliberately stable context. Keeping
