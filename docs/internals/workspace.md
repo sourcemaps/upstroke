@@ -271,6 +271,17 @@ keeping it as it is lets it name a directory beside the work tree. The
 variable is set before `NO_REPLACEMENT_OBJECTS`, so the replacement controls are
 set after every name the scope removes or gives.
 
+The two private-hooks builders take their `Command` from `git_command` with the
+workspace's scope, and only then bind `GIT_INDEX_FILE` to the private index file
+of a workspace value that carries one (follow-up D's third amendment). So the
+scope never removes that binding: at the checkout the private file outranks an
+inherited index, and in a work tree the engine made the scope sheds the inherited
+index and the private file is bound after it. With the `GIT_COMMON_DIR` the
+work-tree arm gives, the module's `.env(` are eight, the payload census's row for
+this file (`src/runner/contract.rs`).
+`the_private_index_binding_survives_the_scope_at_the_checkout_and_in_a_snapshot`
+holds the order.
+
 ## `impl Workspace` › `pub fn open(root: &Path) -> Result<Self, UpstrokeError> {`
 
 Open an existing git worktree, normalizing to its top level. Running
@@ -788,7 +799,9 @@ file there, and a crash leaves it inert (R-D7).
 ## `impl Workspace` › `fn with_private_index(&self, index: PathBuf) -> Self {`
 
 A view of this same checkout with only its index file changed: the module's builders read
-the root from the value they are given, so the view owns a copy of it.
+the root from the value they are given, so the view owns a copy of it. It owns a copy of the
+checkout a work tree was made from too, so its Git children take the scope the workspace's
+own take (option (C)), and the private-hooks builders bind its index after that scope.
 
 ## `impl Workspace` › `fn changed_paths(&self, from: &str, to: &str) -> Result<Vec<TreeChange>, UpstrokeError> {`
 
@@ -1569,6 +1582,23 @@ named index; with `add_gate_worktree` passing `Checkout` it does again.
 ## `fn snapshot_index_helper() {`
 
 The child of the test above: a snapshot of `HEAD`'s tree from the checkout.
+
+## `fn the_private_index_binding_survives_the_scope_at_the_checkout_and_in_a_snapshot() {`
+
+Follow-up D's private index under option (C)'s scope, in an isolated child whose
+inherited `GIT_INDEX_FILE` names the checkout's own index, which holds a change the
+user staged. At the started checkout, where the scope keeps the inherited name, and
+in a gate snapshot, where the scope sheds it, a private-index view's `read-tree` and
+`write-tree` write and read the private file the view names: the file exists, holds
+`HEAD`'s tree and is removed with the view; the subject's own index is unchanged; and
+the parent finds the inherited index byte-identical. A removal after the binding, or
+a binding skipped in either arm, writes the inherited index at the checkout or the
+snapshot's own index in the snapshot, and turns it red.
+
+## `fn private_index_scope_helper() {`
+
+The child of the test above: a private-index view of the started checkout, or of a
+snapshot of `HEAD`'s tree from it.
 
 ## `fn paths_with_newlines_and_undecodable_bytes_are_untouched_by_the_scope() {`
 

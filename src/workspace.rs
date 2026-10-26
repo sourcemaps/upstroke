@@ -6813,6 +6813,102 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn the_private_index_binding_survives_the_scope_at_the_checkout_and_in_a_snapshot() {
+        let mut failures: Vec<String> = Vec::new();
+        for mode in ["checkout", "snapshot"] {
+            let tree = scratch("private-index-scope");
+            let root = tree.path();
+            let managed = root.join("managed");
+            selection_repository(
+                &managed,
+                &[("README.md", "readme\n"), ("tracked.txt", "one\n")],
+            );
+            fs::write(managed.join("tracked.txt"), "staged by the user\n")
+                .expect("the user's change");
+            selection_git(&managed, &["add", "tracked.txt"], &[]);
+            let index = managed.join(".git/index");
+            let before = fs::read(&index).expect("the checkout's index");
+            let ended = crate::agent::proc::test_support::run_test_isolated(
+                "workspace::tests::private_index_scope_helper",
+                &[
+                    ("GIT_INDEX_FILE", index.as_os_str()),
+                    (SELECTION_ROOT, managed.as_os_str()),
+                    (SELECTION_MODE, std::ffi::OsStr::new(mode)),
+                ],
+                Duration::from_secs(120),
+            );
+            if !(ended.status.is_some_and(|status| status.success())
+                && ended.stdout.contains("1 passed"))
+            {
+                failures.push(format!("{mode}: {ended}"));
+            }
+            if fs::read(&index).expect("the checkout's index") != before {
+                failures.push(format!(
+                    "{mode}: a private-index view wrote the inherited index {}",
+                    index.display()
+                ));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{} failure(s):\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "subprocess helper"]
+    fn private_index_scope_helper() {
+        let Some(root) = env::var_os(SELECTION_ROOT).map(PathBuf::from) else {
+            return;
+        };
+        let ws = Workspace::open(&root).expect("open the started checkout");
+        let head = ws.head_sha_full().expect("HEAD");
+        let tree = ws
+            .git(&["rev-parse", "HEAD^{tree}"])
+            .expect("HEAD's tree")
+            .trim()
+            .to_owned();
+        let snapshot;
+        let subject = if env::var_os(SELECTION_MODE).is_some_and(|mode| mode == "snapshot") {
+            snapshot = ws
+                .gate_snapshot_for_candidate(&head, &tree)
+                .expect("the gate snapshot");
+            snapshot.workspace()
+        } else {
+            &ws
+        };
+        let own = subject
+            .worktree_git_dir()
+            .expect("the subject's administrative directory")
+            .join("index");
+        let own_before = fs::read(&own).ok();
+        let private = subject
+            .private_index_file("-scope")
+            .expect("a private index name");
+        let view = subject.with_private_index(private.clone());
+        let read = view.git_output_with_private_hooks(&controlled(&["read-tree", &head]));
+        let written = read.and_then(|_| view.private_tree());
+        let created = private.is_file();
+        view.remove_private_index();
+        assert_eq!(
+            written.expect("the private index's tree"),
+            tree,
+            "the private index holds HEAD's tree"
+        );
+        assert!(created, "the view's Git wrote the private index it was given");
+        assert!(!private.exists(), "the view removes its private index");
+        assert_eq!(
+            fs::read(&own).ok(),
+            own_before,
+            "the subject's own index is unchanged"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn paths_with_newlines_and_undecodable_bytes_are_untouched_by_the_scope() {
         use std::os::unix::ffi::OsStringExt;
 

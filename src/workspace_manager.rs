@@ -7007,7 +7007,9 @@ fn read_only_git(at: ReadAt<'_>, cwd: &Path, args: &[&str]) -> Result<Output, Up
 }
 
 /// The command [`read_only_git`] runs, built and not started, so that a test
-/// can read its arguments and environment.
+/// can read its arguments and environment. A read in a work tree the manager
+/// made is given what [`in_work_tree`] gives, before the switch set and the
+/// bindings; a read at the managed base keeps the inherited context.
 fn read_only_command(at: ReadAt<'_>, cwd: &Path, args: &[&str]) -> Command {
     let mut command = Command::new("git");
     if let ReadAt::WorkTree { checkout } = at {
