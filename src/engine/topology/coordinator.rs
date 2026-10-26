@@ -24221,12 +24221,8 @@ mod tests {
                             answer,
                         },
                     });
-                    let (wide, result) = f_drive_costed(
-                        &format!("f-o14b-w{width}-{answer:?}"),
-                        &tasks,
-                        width,
-                        stub,
-                    );
+                    let (wide, result) =
+                        f_drive_costed(&format!("f-o14b-w{width}-{answer:?}"), &tasks, width, stub);
                     f_registry_refused(result, &["the verdict of review pass 1"], &wide);
                     let events = wide.env.durable_events();
                     let records = charged_records(&events);
