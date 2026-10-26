@@ -63,11 +63,8 @@ pub(super) const ACTION_INPUTS: [(&str, &[&str]); 4] = [
 pub(super) const TOOLCHAIN_COMPONENTS: [&str; 2] = ["clippy", "rustfmt, clippy"];
 
 pub(super) const TEST_WINDOWS_JOB: &str = "test-windows";
-pub(super) const QUEUE_LANE: &str = "github.event_name == 'merge_group'";
 pub(super) const TEST_WINDOWS_LABELS: [&str; 3] = ["self-hosted", "windows", "winguest"];
-pub(super) const TEST_WINDOWS_RUNS_ON: &str = "${{ github.event_name == 'merge_group' && 'windows-latest' || fromJSON('[\"self-hosted\", \"windows\", \"winguest\"]') }}";
 pub(super) const GOLDEN_IMAGE_TOOLCHAIN: &str = "1.97.1";
-pub(super) const TEST_WINDOWS_TOOLCHAIN_COMPONENTS: &str = "clippy";
 
 pub(super) const TEST_WINDOWS_PLATFORM: &str = "windows-latest";
 
@@ -107,8 +104,6 @@ pub(super) const TEST_STEP_ENV: [(&str, &str); 1] = [(
 pub(super) const TEST_WINDOWS_STEP_ENV: [(&str, &str); 1] = [(TEMP_FOLDS_CASE_KEY, "1")];
 
 pub(super) const TEST_STEP_FIELDS: [&str; 6] = ["env", "name", "run", "shell", "uses", "with"];
-
-pub(super) const LANE_STEP_FIELDS: [&str; 4] = ["if", "name", "uses", "with"];
 
 pub(super) const AGGREGATE_STEP_FIELDS: [&str; 4] = ["env", "name", "run", "shell"];
 
