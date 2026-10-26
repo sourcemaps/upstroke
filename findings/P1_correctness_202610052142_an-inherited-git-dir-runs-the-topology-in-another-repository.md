@@ -1,7 +1,7 @@
 ---
 id: R-C-SELECTION
 severity: P1
-disposition: deferred
+disposition: accepted-risk
 category: correctness
 pr:
 reviewed_sha: 5c222ff2162da28aa471433773bf4966a883a428
@@ -127,3 +127,34 @@ was not traced. The field names the O3-R finding, of which this is a part.
   unpushed and not adopted.
 - **What filing does not do.** It adopts nothing: not option (C), not this residual's label, not any grade, not any
   acceptance. It is not clearance for merge or G6.
+
+## Accepted by name (2026-10-26, recording the owner's adoption of 2026-10-15)
+
+**The owner's act.** On 2026-10-15 the owner adopted the ENV package, "adopt all three recommended packages" (the
+owner's adoption record `818e7675…`, `adopted.ENV.choices[2]`: "R-C-SELECTION exact acceptance by name, conditional
+on(C) merged and validated."). It is the first of the owner's choices above, made by the owner: a finding that carries
+a reproduction witness is not an author's or a reviewer's to accept (`MAINTAINING.md` step 5). This file records it,
+with disposition `accepted-risk`, in the pull request that merges option (C).
+
+**The acceptance, verbatim** (the ENV decision report `68042083…`, §2.3a):
+
+> **R-C-SELECTION, accepted by name.** A run's repository is the repository Git resolves at the checkout the
+> coordinator was started in, under the coordinator's inherited environment, as `Workspace::open` and
+> `WorkspaceManager::derive` accept it (option (C), rule 1). Where an exported `GIT_DIR`, `GIT_WORK_TREE` or
+> `GIT_COMMON_DIR` selects a repository other than the one discovery alone would find from that directory, a topology
+> run makes its slots, captures, candidate refs, objects and its `upstroke/run-<ulid>` ref in the selected repository,
+> as every Git command in that environment would; under option (C) each role, and each engine Git child in a work tree
+> the engine made, addresses only that work tree there. No refusal is added: Git records nothing that separates an
+> intended selection (D1, V1 to V4, V6, E1 contrived, F4, DOT) from an unintended one (`R dir`). The finding stays filed,
+> at its grade, with this acceptance recorded.
+
+**When it holds.** With option (C) merged and validated, as adopted. Without (C), `R dir` also writes the other
+repository's main index, which this acceptance does not cover.
+
+**What G6 states.** The gate cites this ruling with its narrowed claim: Q6, and the parent's Q2 and Q4, are answered
+for the run's repository as this acceptance defines it (`/home/ubuntu/orch-pr11/g6/PLAN.md:160-168`, as O3-R's file
+cites it).
+
+**Kept as filed.** The grade, P1 and provisional, which the owner classifies, and the text above this section, except
+one fact that moved: O3-R's file, cited above at PR #329's branch, is on master at
+`findings/P1_correctness_202610031242_host-roles-inherit-the-coordinators-git-repository-context.md`.

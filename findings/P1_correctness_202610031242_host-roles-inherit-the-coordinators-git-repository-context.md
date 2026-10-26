@@ -149,3 +149,53 @@ At PR #329's implementation round, as a record only (the orchestrator's brief fo
 package's decision O3-R). Filing it decides nothing about its repair route, which is the owner's (O3 and O3-R). The
 finding is the evidence report's, reviewed PASS (`~/orch-pr11/evidence/o3r/REPORT.md`, `d6dae2e2`); its text above is
 the reviewed draft's, with its identifier and pull request set when filed.
+
+## Implementation status (2026-10-26): option (C), adopted, and where each remaining face is carried
+
+**What this section is.** It is appended under P-R2 of the owner's packaging exception (the ENV decision report
+`68042083…` §2.1, adopted by the owner on 2026-10-15, the owner's adoption record `818e7675…`). Everything above it is
+master's canonical file, unchanged; nothing is imported over it. It records option (C) on the branch
+`fix-P1/correctness_host-roles-inherit-the-coordinators-git-repository-context`, integrated with master by merge (P-R1).
+
+**What the owner adopted on 2026-10-15.** Option (C), round 4, rules 1 to 3 (`owner-package/O3R-OPTION-C-PROPOSAL.md`,
+sha256 `dc94ba82515d265fd98b4aa3c8f1f8b4c699a70733bd19fe245c6fbec023eedc`, :483-510), with its integration adjustments
+A1 to A4; the acceptance of R-C-SELECTION by name; and the labels R-C-PROBE, with design/08's sentence, R-C-CHECKOUT,
+R-C-OVERLAY and R-DELIBERATE as measured.
+
+**What is implemented, in `src/runner/host.rs`.**
+- **A role started in a work tree the engine made** (a slot, or a gate or review snapshot) goes without the inherited
+  `GIT_DIR`, `GIT_WORK_TREE`, `GIT_IMPLICIT_WORK_TREE` and `GIT_INDEX_FILE`. An inherited `GIT_COMMON_DIR` that is not
+  an absolute path reaches it as the run's common directory.
+- **A runner holding no managed repository** refuses such a role before it starts (R-C-NOREPO, an obligation carried to
+  PR12: its topology runner must hold the run's repository).
+- **What keeps the inherited context:** every probe and the legacy worker (rule 1), and a value the role's own overlay
+  sets (R-C-OVERLAY).
+
+**The witnesses.** This file's steps 01-25, cases `index`, `dir`, `dir-index` and `relative-index`, through
+`Runner::run_blocking`:
+- `slot_roles_under_an_inherited_context_address_only_their_own_work_tree`;
+- with it, `a_role_in_a_work_tree_the_engine_made_sheds_only_the_work_tree_context` and
+  `a_hook_started_runs_slot_worker_leaves_the_users_commit_as_the_user_made_it`;
+- on Windows, `windows_a_role_in_a_work_tree_the_engine_made_sheds_the_work_tree_context_in_any_spelling`, which
+  native Windows CI must execute, not only type-check (R-C-WINDOWS);
+- each of the mutations MC1, MC2, MC3, MC5, MC10 and MC20 turns one of them red.
+
+They were red at `5c222ff2` and green at the candidate head `c3efe4c2` on 2026-10-05; those runs are historical.
+Red at master and green at this pull request's exact head is its own validation.
+
+**The remaining faces, each carried by its own record** (the ENV report's §2.2a, step 8):
+- **R-C-SELECTION,** a run whose started checkout's inherited names select another repository: accepted by name by the
+  owner, effective with option (C) merged and validated
+  (`findings/P1_correctness_202610052142_an-inherited-git-dir-runs-the-topology-in-another-repository.md`,
+  `accepted-risk`).
+- **Parity between probes and executions** (the evidence report's §10): R-C-PROBE, adopted by the owner with
+  design/08's sentence. A probe keeps the inherited context, and an execution in a work tree the engine made sheds the
+  four selectors, none of which selects a program, credential or version a probe certifies. Production starts no probe
+  in a work tree the engine made, and the shell probe runs `exit 0`.
+- **The other §10 items are kept:** the configuration roles receive, the replacement policy, the deliberately
+  retained variables (R-DELIBERATE, adopted as measured), reserved keys, Windows' case-insensitive matching, and the
+  composition tests this file pins.
+
+**Closure.** By step 8, this pull request closes this finding, with a `fixed` ledger row, when its exact-head
+validation and its own review agree; the closure deletes this file (`MAINTAINING.md` step 5). G6 then cites the
+R-C-SELECTION acceptance and answers Q6, Q2 and Q4 for the run's repository as that acceptance defines it.

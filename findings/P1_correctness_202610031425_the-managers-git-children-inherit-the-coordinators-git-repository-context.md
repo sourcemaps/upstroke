@@ -179,3 +179,50 @@ selection. So this file, and with it FUC-D5-GITINDEXFILE, is remedied by its own
 - the selection adopts none of O3's options 1 to 3, O3-R (i) or (iii), option (C)'s own adoptions, or ENV-C's packaging
   question, and approves no remedy's code;
 - if the option (C) draft does not land, the route stands and needs another candidate change.
+
+## Implementation status (2026-10-26): option (C), adopted, and where each remaining face is carried
+
+**What this section is.** It is appended under P-R2 of the owner's packaging exception (the ENV decision report
+`68042083…` §2.1, adopted by the owner on 2026-10-15, the owner's adoption record `818e7675…`). Everything above it is
+master's canonical file, C's extension and route sections included, unchanged; nothing is imported over it. It records
+option (C) (`owner-package/O3R-OPTION-C-PROPOSAL.md`, sha256
+`dc94ba82515d265fd98b4aa3c8f1f8b4c699a70733bd19fe245c6fbec023eedc`, round 4, rules 1 to 3, with A1 to A4), which the
+owner adopted on 2026-10-15, on the branch `fix-P1/correctness_host-roles-inherit-the-coordinators-git-repository-context`.
+
+**What is implemented, in both of the manager's builders,** `WorkspaceManager::command` and `read_only_command`, the one
+#330 added (A1):
+- **In a slot,** a Git child goes without the inherited `GIT_DIR`, `GIT_WORK_TREE`, `GIT_IMPLICIT_WORK_TREE` and
+  `GIT_INDEX_FILE`, and an inherited `GIT_COMMON_DIR` that is not absolute reaches it as the absolute path it names at
+  the managed base. That is given before #330's switch set and bindings.
+- **From the base,** the `git worktree` commands, `worktree add` and `worktree list`, go without `GIT_INDEX_FILE`.
+- **At the base,** a child keeps the inherited context (rule 1).
+
+**The witnesses.** This file's alternate-index slot-add sequence is a row of
+`the_managers_slot_add_and_reads_shed_the_work_tree_context_and_its_base_keeps_it`, with
+`a_relative_common_dir_resolves_to_the_runs_common_dir_in_a_slot`. Each of the mutations MC8, MC9, MC11 and MC12
+turns one of them red. They were red at `5c222ff2` and green at the candidate head `c3efe4c2` on 2026-10-05; those runs
+are historical. Red at master and green at this pull request's exact head is its own validation.
+
+**FUC-D5-GITINDEXFILE and CR-1, filed with this finding.** FUC-D5-GITINDEXFILE's sequence, a dead incarnation's late
+add resetting a shared inherited index before the successor's `write-tree`, is the same test's two-incarnation row. The
+combined review's CR-1 executed the class with #330's and #331's switches; those are measured Git operations, and their
+engine consequences are inferred. Both close with this file.
+
+**Corrected to master.**
+- **The protocol route is closed by #330,** as C's section above records: both builders bind `GIT_ALLOW_PROTOCOL` to
+  the empty value. It is not open.
+- **C-4's route** is the one C's section above records, selected on 2026-10-11 by `pr11_decide_c` under the owner's
+  delegation, and option (C) is that route's change.
+- **O8 is adopted:** decision B on 2026-10-11, and its extension for option (C) by the owner on 2026-10-15.
+
+**The remaining faces, each carried by its own record** (the ENV report's §2.2a, step 8):
+- **The relative forms of the repository-wide names:** R-C-RELSTORE
+  (`findings/P2_correctness_202610052142_a-relative-repository-wide-name-misresolves-in-an-engine-made-work-tree.md`).
+  The owner adopted its route, a refusal for schema-4 runs, which is its own change after this one.
+- **The other inherited names** this file lists (the object, configuration, namespace, execution-path and graph
+  overrides): the adopted rule keeps them as the run's, the context the work tree was made under, and R-DELIBERATE is
+  adopted as measured. ENV-1's removal of them was not adopted.
+- **The protocol restriction:** closed by #330.
+
+**Closure.** By step 8, this pull request closes this finding, with FUC-D5-GITINDEXFILE and CR-1, with `fixed` ledger
+rows, when its exact-head validation and its own review agree; the closure deletes this file (`MAINTAINING.md` step 5).

@@ -94,3 +94,59 @@ move with it.
 At PR #331's implementation round (`pr11_fud_impl`), on the PR11 orchestrator's brief, as its own finding because its
 scope is the legacy builder: `FUB-D9-ENV` covers the manager's builders, and O3-R the host runner's roles.
 `reviewed_sha` is the head design review round 4 reviewed.
+
+## Implementation status (2026-10-26): option (C), adopted, and where the remaining face is carried
+
+**What this section is.** It is appended under P-R2 of the owner's packaging exception (the ENV decision report
+`68042083…` §2.1, adopted by the owner on 2026-10-15, the owner's adoption record `818e7675…`). Everything above it is
+master's canonical file, unchanged; nothing is imported over it. It records option (C)
+(`owner-package/O3R-OPTION-C-PROPOSAL.md`, sha256 `dc94ba82515d265fd98b4aa3c8f1f8b4c699a70733bd19fe245c6fbec023eedc`,
+round 4, rules 1 to 3, with A1 to A4), which the owner adopted on 2026-10-15, on the branch
+`fix-P1/correctness_host-roles-inherit-the-coordinators-git-repository-context`.
+
+**What is implemented, in the legacy builder,** under O8's extension for option (C), which the owner adopted on
+2026-10-15: the fourth amendment of `src/workspace.rs`'s `[[legacy]]` text in `effects/allowlist.toml`, apart from
+follow-up D's third. `git_command` takes the scope of the child it builds:
+- **at the checkout** `Workspace::open` opened, a child keeps the process's environment as it is, `GIT_INDEX_FILE`
+  included;
+- **a `git worktree` command** run from that checkout, the snapshot add, its removal and its listing, goes without
+  `GIT_INDEX_FILE`;
+- **in a gate or review snapshot** the module made, or a slot opened with `Workspace::open_work_tree`, a child goes
+  without `GIT_DIR`, `GIT_WORK_TREE`, `GIT_IMPLICIT_WORK_TREE` and `GIT_INDEX_FILE`, and a relative `GIT_COMMON_DIR` is
+  given as the absolute path it names at the checkout;
+- **follow-up D's private index:** its two private-hooks builders bind `GIT_INDEX_FILE` to the private file after the
+  scope, which never removes it (A1).
+
+**The witnesses.**
+- **The snapshot add** under `GIT_INDEX_FILE=<common git dir>/index`, from this file's "other consequences":
+  `a_snapshot_add_never_writes_an_inherited_index`, and the snapshot rows of
+  `a_legacy_workspace_keeps_the_inherited_selection_at_its_checkout_and_its_snapshots_address_themselves`.
+- **Paths and the common directory:** `paths_with_newlines_and_undecodable_bytes_are_untouched_by_the_scope` and
+  `a_work_tree_the_engine_made_reads_the_runs_common_dir_under_a_relative_common_dir`.
+- **D's private index under the scope:**
+  `the_private_index_binding_survives_the_scope_at_the_checkout_and_in_a_snapshot`.
+- **Mutations:** each of MC6, MC7 and MC18 turns one of them red.
+- **The resetting `git worktree add` of step 3:** a `git worktree` command no longer receives the inherited index, so
+  that add does not reset it. This is reasoned from rule 3 and the add rows; the two-process interleaving was not
+  re-executed.
+
+The candidate's runs, red at `5c222ff2` and green at `c3efe4c2` on 2026-10-05, are historical. Red at master and green
+at this pull request's exact head is its own validation.
+
+**The remaining face, carried by its own record** (the ENV report's §2.2a, step 8):
+- **R-C-CHECKOUT, adopted by the owner:** a legacy Git child at the started checkout still receives an inherited
+  `GIT_INDEX_FILE`, because rule 1 keeps the started checkout's context. The appendix §4.6 test this file quotes, a
+  legacy capture under an inherited index addressing the checkout's own, is answered by that adoption rather than by a
+  removal, and it keeps the workflows that export an index. Its reasoned cost: two checkouts at one `HEAD` sharing one
+  explicitly exported index would pass the clean check and alias it.
+- **The other repository-context variables at the checkout** are the run's, as the R-C-SELECTION acceptance defines
+  the run's repository. The guard's ENV-1 route is superseded by the adopted option (C).
+
+**Related, and filed separately: `ENVC-SLOT-REVIEW-INPUT-READS-THE-INHERITED-SELECTION`**
+(`findings/P2_correctness_202610052215_the-slot-review-input-check-reads-the-inherited-selection.md`): the schema-4
+driver's review-input check in a slot, run through `git_command`, failed closed under D1's inherited `GIT_DIR` and
+`GIT_WORK_TREE`. It is an executed consequence of this file's reasoned bullet on the other repository-context variables,
+filed as its own sequence at P2, and it closes with option (C)'s seam method `problem_in_work_tree`.
+
+**Closure.** By step 8, this pull request closes this finding, with a `fixed` ledger row, when its exact-head
+validation and its own review agree; the closure deletes this file (`MAINTAINING.md` step 5).
