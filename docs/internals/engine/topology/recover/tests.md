@@ -3292,7 +3292,8 @@ and a lease held past the bound apart.
 `a_lease_copy_a_sibling_fork_kept_from_the_first_resume_is_waited_out_before_its_death_is_read`,
 `a_lease_copy_that_outlives_the_bound_still_fails_the_first_incarnations_death` and
 `a_lease_observation_that_fails_still_fails_the_first_incarnations_death_at_once` hold the three
-behaviours. Proposed frozen hunk H3 as revised, not adopted.
+behaviours. Frozen hunk H3 as revised, adopted by the owner's ruling B-W, revised, on 2026-10-08
+(`reviews/2026-10-01-pr11-follow-up-b-record.md` §9.22.3 and §9.28).
 
 ## `enum LeaseCopyWait {`
 

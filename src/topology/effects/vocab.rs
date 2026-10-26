@@ -291,6 +291,7 @@ pub enum DurableEvent {
     CapacitySnapshot,
     PoolExhausted,
     DesignDefect,
+    MergeVerificationCharged,
 }
 
 impl DurableEvent {
@@ -320,6 +321,7 @@ impl DurableEvent {
         Self::CapacitySnapshot,
         Self::PoolExhausted,
         Self::DesignDefect,
+        Self::MergeVerificationCharged,
     ];
 
     /// This kind's tag, as the log writes it.
@@ -349,6 +351,7 @@ impl DurableEvent {
             Self::CapacitySnapshot => "capacity_snapshot",
             Self::PoolExhausted => "pool_exhausted",
             Self::DesignDefect => "design_defect",
+            Self::MergeVerificationCharged => "merge_verification_charged",
         }
     }
 }

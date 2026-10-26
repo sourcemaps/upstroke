@@ -2487,14 +2487,19 @@ fn charge_allowance(&mut self) {}
             (
                 "src/workspace.rs",
                 1,
-                5,
+                7,
                 0,
                 "authoritative Git, which DESIGN.md:612 keeps off the boundary \
                  entirely: `std::process::Command` methods on git invocations, \
-                 not a CommandSpec. Of the five `.env(`, four are the fixed \
-                 author and committer identity on `commit-tree` and one is \
+                 not a CommandSpec. Of the seven `.env(`, four are the fixed \
+                 author and committer identity on `commit-tree`, one is \
                  `NO_REPLACEMENT_OBJECTS` on `git_command`, the builder every \
-                 Git child of this module comes from",
+                 Git child of this module comes from, and two are \
+                 `GIT_INDEX_FILE` on the two private-hooks builders, set only \
+                 on a workspace value that carries a private index file: the \
+                 legacy discard's capture and revert, whose index no other Git \
+                 client may touch. Git names an index file only through that \
+                 variable, never by an argument or a configuration key",
             ),
             (
                 "src/workspace_manager.rs",

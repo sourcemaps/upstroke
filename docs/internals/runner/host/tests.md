@@ -2938,7 +2938,8 @@ Written from the two platforms' rules rather than read from
 `Path::is_absolute`, and then checked against it for the platform this
 is running on — the Windows column on the guest, the Unix column here.
 Every entry is free of both `PATH` separators, so one entry stays one
-entry under `std::env::split_paths` on either platform.
+entry under `std::env::split_paths` on either platform. None holds a
+`"` either, so `path_of` hands each back exactly as written.
 
 ## `("", false, false),`
 
@@ -2956,6 +2957,13 @@ Rooted on Unix; on Windows a leading separator is relative to the
 
 A UNC share names a location on Windows and is an ordinary file name
 on Unix.
+
+Which share it would name is never asked: the test's program name
+carries an interior NUL, so the first candidate under this entry is
+refused before any request leaves the process, and no answer from an
+SMB stack — "no such share", `os error 64` or none at all — can reach
+the verdict (`PR262-UNREACHABLE-PATH-ENTRY-ABORTS-PROGRAM-RESOLUTION`,
+below).
 
 ## `fn every_path_entry_this_runner_searches_names_a_location_on_its_own() {`
 
@@ -2975,10 +2983,127 @@ row below is a claim about `resolve_program` and not about `std`. What
 varies is the entry; what is held constant is the program name, the
 candidates and the composed environment.
 
+The table answers one question: **which entries are searched**. It is
+kept apart from the other one, **what a searched entry's candidates
+answer**, because the two were once fused. Each absolute entry used to
+be walked to its end and the count asserted, so whether the UNC row
+passed was the answer of whatever `\\server\share` reached: an answer
+meaning "no such share" maps to `NotFound` and the walk completed;
+`os error 64` ("the specified network name is no longer available")
+does not, so the deliberate stop fired instead and a required leg went
+red on byte-identical source. This repairs
+`PR262-UNREACHABLE-PATH-ENTRY-ABORTS-PROGRAM-RESOLUTION` without moving
+that policy: an unanswerable candidate still stops the search, mere
+absence is still walked past, and both are decided here by construction
+rather than by the machine the suite runs on, on any machine whose
+temporary directory can hold the positive case's own paths (below).
+
+## `fn every_path_entry_this_runner_searches_names_a_location_on_its_own() {` › `fn search_summary(message: &str) -> Option<&str> {`
+
+What a refusal says about the search itself: the parenthesised clause
+after "this runner composes", which gives the number of directories
+searched, the number of entries skipped as not absolute, and the
+candidates. Every assertion this test makes on a refusal's text reads
+that clause and nothing else.
+
+The rest of the message is not the test's to read. It goes on to echo
+the `PATH` it was given, and a `PATH` built from the scratch root
+carries the spelling of the temporary directory, which belongs to the
+machine. Read whole, the message let that spelling decide: under a
+temporary directory named `temp-skipped`, a search that had finished
+without skipping anything read as skipped (`P335-PL-1`), and a spelling
+that holds `1 directory searched,` would have satisfied the count for a
+search that counted nothing. In a refusal the clause is written before
+the echo and holds only text this test constructs — the counts, its own
+program name and the default extensions — so the first opening is the
+resolver's own, and no spelling of the temporary directory can reach
+the clause, add to it or close it early. A refusal without the clause
+fails the assertion that reads it.
+
+That holds of a refusal and of nothing else, so the clause is read from
+a refusal only. Both readers, the relative entries' and the absent
+entry's, first require `UpstrokeError::Refused`, and any other answer
+fails the case, naming its variant, before any of its text is read.
+Another error's message is no summary, and it can carry the machine's
+text: a `Filesystem` error's is "failed to stat" followed by the
+candidate's path, which begins with the temporary directory's spelling,
+and that spelling can hold the clause's own opening. Read as text, such
+an error passed for a finished search: under a temporary directory with
+a component named `this runner composes (1 directory searched,)`, long
+enough that the absent entry's candidate could not be asked, the
+resolver rightly stopped with `Filesystem`, and the test read the clause
+out of the path (`P335-R2-REG-1`).
+
+## `fn every_path_entry_this_runner_searches_names_a_location_on_its_own() {` › `let program = "upstroke\u{0}no-such-program";`
+
+The program every table entry is asked about: a bare name, so the walk
+runs, with an interior NUL, so no candidate under any entry can be
+answered. std refuses such a path before it reaches a system call — the
+property `undeterminable_directory` in `naming.rs`'s tests stands on —
+and the fixture asserts that up front for each entry it searches: the
+refusal is not `NotFound`, and it carries no operating-system error
+code, so nothing on the machine, local disk or network share, was asked.
+A platform that answered otherwise would fail the fixture rather than
+the rule.
+
+So an absolute entry's walk stops at its first candidate, and that stop
+is what "searched" is read from: a `stat` failure whose path is a
+candidate directly under that entry and whose source is the refusal the
+probe met. A relative entry is never stat'ed at all and must report
+itself skipped. Neither outcome depends on what exists at
+`/usr/local/bin` or on what a network share answers, because neither is
+ever asked.
+
+The stop is the policy
+`an_undetermined_candidate_stops_the_search_before_a_later_match` pins;
+this test relies on it rather than restating it, so a change to that
+policy reddens both.
+
 ## `fn every_path_entry_this_runner_searches_names_a_location_on_its_own() {` › `let bin = root.join("bin");`
 
+The count of a finished search, `1 directory searched,`, is asserted
+only for an entry that is absent by construction: the positive case's
+own entry, `bin` under this test's scratch root, asked for the positive
+case's own program, `x`, before anything has created either, and checked
+to be `NotFound` up front. Its search asks exactly the paths the
+positive case's search asks once `program_file` has installed `x` — the
+same entry and the same candidates — while their directory does not
+exist yet, so each answers `NotFound` and the walk runs to its end and
+is counted, whatever a network share or `/usr/local/bin` would say.
+
+The candidates are the positive case's on purpose. A missing directory
+does not by itself make every path beneath it `NotFound`: a path longer
+than the platform allows is refused for its length first, whatever
+exists, as Linux's `ENAMETOOLONG` (os error 36). The directory this
+case once used, `never-created`, had a candidate 33 bytes longer than
+the positive case's file, so a temporary directory long enough for the
+positive case but not for that candidate stopped the search there and
+failed the test on unchanged source (`P335-R2-PL-1`). Asking only the
+positive case's own paths, the case asks nothing the positive case does
+not: under any temporary directory short enough for the positive case
+to install and find its program, this search runs to its end. Under one
+too long even for that, the test cannot pass at all, and this case
+fails openly — at its own absence check, or at the refusal it requires,
+naming the `Filesystem` stop — never on a count read from a path.
+
+Its `PATH` is built by `path_of`, as every `PATH` this test passes is —
+the table's entries and the positive case's — and as both witnesses
+build theirs with `std::env::join_paths`, so the one entry searched is
+the directory whose absence was just checked. Handed over as the raw
+path, a temporary directory spelled with the platform's separator, a
+`;` on Windows or a `:` on Unix, split into two entries, and the search
+ran somewhere this test had never checked (`P335-PL-2`). `join_paths`
+quotes a `;` on Windows and the search unquotes it again. A spelling no
+`PATH` can carry — a `:` on Unix, a `"` on Windows — is refused, never
+searched around: `path_of` refuses it as both witnesses' `join_paths`
+refuse it, and the test fails there rather than search anywhere in its
+place.
+
+## `fn every_path_entry_this_runner_searches_names_a_location_on_its_own() {` › `let found = program_file(&bin, &shim_file_name("x"));`
+
 And "searched" means searched: the one kind of entry that is not
-skipped does find a program in it.
+skipped does find a program in it — the same entry, once the program is
+installed there.
 
 ## `fn an_empty_path_entry_never_reaches_the_workspaces_own_copy_of_a_bare_name() {`
 

@@ -37,3 +37,14 @@ Nothing short of one machine for both lanes closes it: revert #299 (the queue ro
 `winguest-queue` guest again), or move the pull-request lane to `windows-latest` too and
 retire the guest. Until then, a red push-to-`master` run on the guest lane after a green queue
 entry is this finding, and the fix is to the test, not the queue.
+
+## 2026-10-12: a sighting
+
+`PR334-RECORD-KILL-CHILD-GITDIR-OVER-THE-WINDOWS-BUDGET` reached `master` by this route. #334's two charged-record
+kill tests passed on the guest lane at its pull request's tree `4fa98776` (runs `38194036297` and `38197442250`) and on
+the queue's hosted `windows-latest` entry at `697de9c6` (run `38202717688`), then failed on the guest lane in
+`master`'s own push at `697de9c6` (run `38205768792`, job `114668800387`). What decided the outcome was the machine's
+temporary directory: 41 bytes on the guest, under which the kill child's deepest `$GIT_DIR` is 221 bytes and refused,
+against a hosted log that spells its own in 36. One difference from the sequence above: the guest-lane pull-request runs
+passed at a tree without #330, which the merged tree carries, rather than on a more forgiving machine. The repair is to
+the test, in the change that files that row, and not to the queue. This row's disposition is unchanged.

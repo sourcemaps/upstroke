@@ -807,10 +807,24 @@ hooks are `HealsTheStoreAtAWait`'s. The read waits through them, its attempt aft
 passes, and the discard removes the snapshot with its intent and the scrub the task's worktree.
 Nothing sleeps on the calling thread.
 
-With the discard enumerating through `intents()`, the read sleeps on the calling thread until its
-500 ms test deadline and refuses, the hooks see no wait, and the witness fails on its first
-assertion. The witness calls no coordinator, since none reaches this caller; the mutant's wait is
-bounded by the access's deadline.
+With the discard enumerating through `intents()`, the read's waits sleep on the calling thread
+until its deadline, the one held below, and it refuses; the hooks see no wait, and the witness
+fails on its first assertion. The witness calls no coordinator, since none reaches this caller;
+each of the mutant's waits is asked for no longer than the time left before that deadline, and no
+attempt is admitted after the first that begins at or after it (the follow-up B record's §9.32).
+
+**The held deadline** (the follow-up C record's §6.15, the class of the follow-up B record's
+§9.31). The witness holds its repository's registry deadline at the production length through
+`RegistryDeadline`, by `PRODUCTION_REGISTRY_DEADLINE`, a constant of its own: 10 s,
+`REGISTRY_ACCESS_DEADLINE`'s `#[cfg(not(test))]` value, which a test build cannot name. The hooks
+end the contention the discard's read meets, at their first wait, and the read asks for that wait
+after its first failed attempt only if time remains when it reads its clock after that attempt's
+veto and count. If the deadline has passed by then, wherever the time went (the attempt, its veto,
+the count, or its thread descheduled), it asks for no wait: it makes its final attempt, or refuses
+if the failed attempt was already its final one (the follow-up B record's §9.32 and §9.34). Under
+the test build's 500 ms, one first attempt the platform makes slow can leave no time, and the read
+then refuses with the hooks never asked. The deadline is a nominal admission rule, not a bound on
+how long an attempt, a veto or a Git child already running takes.
 
 ## `fn stage_elements() -> Vec<ResidueElement> {`
 

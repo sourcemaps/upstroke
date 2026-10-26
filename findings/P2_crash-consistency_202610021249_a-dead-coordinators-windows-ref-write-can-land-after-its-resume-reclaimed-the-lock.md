@@ -70,3 +70,33 @@ the late rename lands. Then, if it can:
   would report;
 - or have the owner accept the Windows residual, with `design/26`'s sentence corrected to say what kill-on-close does
   not establish.
+
+## Accepted (2026-10-11, PR #330's repair round 9): decision D5(b)
+
+**The decision.** D5(b) is accepted: an agent decision by `pr11_decide_c` under the owner's delegation of 2026-10-11
+(babysit's 0194a1e4…), in its decision report (`~/orch-pr11/logs/pr11_decide_c/DECISION-REPORT.md`, sha256 `19b080be…`,
+section 3, C-3), and not the owner's own selection. Its text, the PR11 decision appendix's §7.2:
+
+> **D5(b).** The owner accepts the Windows residual as master has it: a ref write a terminated engine `update-ref` child
+> had begun publishing may land after the successor reclaimed the lock. `PR330-A-DEAD-COORDINATORS-WINDOWS-REF-WRITE-CAN-LAND-AFTER-ITS-RESUME-RECLAIMED-THE-LOCK`
+> stays filed with this acceptance recorded, and `design/26` is corrected as below. [ACCEPT]
+
+**What it changes.** This file stays filed with that acceptance recorded: it is not closed and not regraded (P2, its
+ceiling not established), and its guard and failure sequence are unchanged. In the same change (#330's repair round 9)
+`design/26_design_merge_queue_protocol.md:398` is corrected: the ambient kill-on-close job "does not establish that a
+terminated child's pending ref rename has not landed", a window accepted as decision D5(b), under the owner's delegation
+of 2026-10-11, and filed as this finding.
+
+**The risk, preserved.**
+- A ref write a terminated engine `update-ref` child had begun publishing may land after the successor reclaimed the
+  lock.
+- If it is reachable it is P1: on Windows, a run can end with one of its refs moved back where nothing writes that ref
+  again.
+- Its reachability is neither shown nor excluded. The filed P2 grades a reasoned window; it is not a ceiling.
+- It applies to Q1, Q6 and ST-18.
+- G6 meets this item by acceptance, not by measurement, and a later topology activation on Windows carries the window.
+
+**What it does not do.** O7(a), the native determination, was stopped by a provider safety classifier at
+2026-10-02T21:04:01Z; no result of it is claimed or implied, and nothing of it is reproduced or rerouted. (c1), a
+Windows hold, is not commissioned. The acceptance becomes effective for G6 once #330's repair round 9 has passed its
+review and #330 has merged: #330's record §5.5 asks for a reviewed acceptance.

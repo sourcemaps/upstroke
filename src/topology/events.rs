@@ -1004,6 +1004,14 @@ pub struct MergeVerificationInterrupted {
     pub detail: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MergeVerificationCharged {
+    pub sequence: SequenceId,
+    #[serde(deserialize_with = "strict::list")]
+    pub reviews: Vec<ReviewRecord>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PreparedDisposition {
@@ -1259,9 +1267,10 @@ pub enum TopologyEventBody {
     CapacitySnapshot { data: CapacitySnapshot },
     PoolExhausted { data: PoolExhausted },
     DesignDefect { data: DesignDefect },
+    MergeVerificationCharged { data: MergeVerificationCharged },
 }
 
-pub const TOPOLOGY_EVENT_KINDS: [&str; 24] = [
+pub const TOPOLOGY_EVENT_KINDS: [&str; 25] = [
     "run_started",
     "run_resumed",
     "task_spawned",
@@ -1286,9 +1295,10 @@ pub const TOPOLOGY_EVENT_KINDS: [&str; 24] = [
     "capacity_snapshot",
     "pool_exhausted",
     "design_defect",
+    "merge_verification_charged",
 ];
 
-pub const TOPOLOGY_TRANSACTION_KINDS: usize = 21;
+pub const TOPOLOGY_TRANSACTION_KINDS: usize = 22;
 
 impl TopologyEventBody {
     pub fn kind(&self) -> &'static str {
@@ -1317,6 +1327,7 @@ impl TopologyEventBody {
             Self::CapacitySnapshot { .. } => "capacity_snapshot",
             Self::PoolExhausted { .. } => "pool_exhausted",
             Self::DesignDefect { .. } => "design_defect",
+            Self::MergeVerificationCharged { .. } => "merge_verification_charged",
         }
     }
 
@@ -1345,6 +1356,7 @@ impl TopologyEventBody {
             Self::BudgetExceeded { data } => data.key,
             Self::MergeVerificationUnavailable { .. }
             | Self::MergeVerificationInterrupted { .. }
+            | Self::MergeVerificationCharged { .. }
             | Self::TaskMerged { .. }
             | Self::RunStarted { .. }
             | Self::RunResumed { .. }
@@ -1364,6 +1376,7 @@ impl TopologyEventBody {
             Self::MergePrepared { data } => Some(data.sequence),
             Self::MergeRejected { data } => Some(data.sequence),
             Self::TaskMerged { data } => Some(data.sequence),
+            Self::MergeVerificationCharged { data } => Some(data.sequence),
             Self::RunStarted { .. }
             | Self::RunResumed { .. }
             | Self::TaskSpawned { .. }
@@ -2080,6 +2093,12 @@ mod tests {
                     citation: None,
                 },
             },
+            TopologyEventBody::MergeVerificationCharged {
+                data: MergeVerificationCharged {
+                    sequence: SequenceId(6),
+                    reviews: unavailable_reviews(),
+                },
+            },
         ]
     }
 
@@ -2327,7 +2346,7 @@ mod tests {
             }
         }
         assert_eq!(
-            visited, 131,
+            visited, 134,
             "the corpus covers a different number of object boundaries than it did"
         );
         assert_eq!(
@@ -2446,7 +2465,7 @@ mod tests {
             }
         }
         assert_eq!(
-            deletions, 377,
+            deletions, 382,
             "the corpus requires a different number of fields than it did"
         );
     }
@@ -2805,7 +2824,7 @@ mod tests {
         }
     }
 
-    const FROZEN_VOCABULARY: [(&str, bool); 24] = [
+    const FROZEN_VOCABULARY: [(&str, bool); 25] = [
         ("run_started", true),
         ("run_resumed", true),
         ("task_spawned", true),
@@ -2830,6 +2849,7 @@ mod tests {
         ("capacity_snapshot", false),
         ("pool_exhausted", false),
         ("design_defect", false),
+        ("merge_verification_charged", true),
     ];
 
     #[test]
@@ -3750,6 +3770,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         ];
         let expected_sequences: Vec<Option<u32>> = vec![
             None,
@@ -3776,6 +3797,7 @@ mod tests {
             None,
             None,
             None,
+            Some(6),
         ];
         assert_eq!(expected_keys.len(), TOPOLOGY_EVENT_KINDS.len());
         assert_eq!(expected_sequences.len(), TOPOLOGY_EVENT_KINDS.len());
@@ -4412,6 +4434,16 @@ mod tests {
                     .expect("legacy design defect"),
                 ),
             ),
+            envelope(
+                "merge_verification_charged",
+                serde_json::json!({
+                    "sequence": 6,
+                    "reviews": legacy(
+                        serde_json::to_value(unavailable_reviews())
+                            .expect("legacy review records"),
+                    ),
+                }),
+            ),
         ]
     }
 
@@ -4486,8 +4518,8 @@ mod tests {
             .find(|(body, _)| body.kind() == "question_answered")
             .map(|(_, canonical)| canonical)
             .expect("the corpus has a question_answered payload");
-        assert_eq!(TOPOLOGY_EVENT_KINDS.len(), 24);
-        assert_eq!(TOPOLOGY_TRANSACTION_KINDS, 21);
+        assert_eq!(TOPOLOGY_EVENT_KINDS.len(), 25);
+        assert_eq!(TOPOLOGY_TRANSACTION_KINDS, 22);
 
         for fixture in attributed_design_defects() {
             let decoded: TopologyEvent = serde_json::from_value(fixture.payload.clone())

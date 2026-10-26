@@ -459,6 +459,21 @@ pub(crate) fn as_git_writes_it(path: &Path) -> String {
     .expect("a fixture's path is UTF-8")
 }
 
+/// [`WorkspaceManager::add_worktree`]'s Windows refusal of a worktree at
+/// `checkout`, asked on any platform by a test outside this module, which
+/// cannot name the private guard: `Ok` where Git for Windows' `$GIT_DIR`
+/// budget admits the path a Windows run would hand Git, and the add's own
+/// refusal where it does not. A test that builds a Windows path is judged by
+/// the refusal itself, not by a length the test computes.
+///
+/// # Errors
+///
+/// [`Refusal::GitDirOverBudget`] where the budget does not admit `checkout`,
+/// or a Git error for a path that is not UTF-8.
+pub(crate) fn refuse_git_dir_over_the_windows_budget(checkout: &Path) -> Result<(), UpstrokeError> {
+    refuse_git_dir_over_budget(checkout, crate::runner::host::GitdirRule::Windows)
+}
+
 /// One state of a checkout's worktree registration that closure 1's two
 /// readers are run over (the external-prune follow-up's T-C1-READERS): the
 /// checkout, and what the check must find there — `Ok` for a whole
