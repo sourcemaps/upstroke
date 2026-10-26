@@ -143,11 +143,7 @@ what a coordinator killed after making an add's destination leaves.
   access's (`PR329-A-RESUME-REBINDS-A-SLOT-ITS-DEAD-COORDINATORS-GIT-CHILD-STILL-WRITES`).
 - An agent's own Git on the host runner and the user's Git in any checkout are attempted past as
   writers, and their own commands are theirs.
-- *Conditional draft: the external-prune follow-up's (F), under O1 option A with RULING X-1,
-  O2(a) and the slot instances below. It is not adopted, and it takes effect only if the owner
-  adopts them; until then the finding stays open and blocks G6.*
-
-  A prune that no engine process starts deletes an add's registration in one of two ways. Such a prune
+- A prune that no engine process starts deletes an add's registration in one of two ways. Such a prune
   is a host agent's, the user's or an IDE's, Git's automatic maintenance after a commit, a fetch or a
   merge in any checkout, Git's scheduled maintenance, or a prune already running.
   - So that the add fails, after Git took its destination over: the access refuses that, resumably.
@@ -183,7 +179,7 @@ what a coordinator killed after making an add's destination leaves.
     and recovery's reclaim removes it with what it holds. Run-end closure, a halt's closure and
     terminal finalization remove it as they remove every other worktree.
   - A removal in a repository whose registration store is gone removes a checkout whose `.git` names
-    an entry of that store, so finalization converges.
+    an entry of that store, with whatever it holds, so finalization converges.
   - What a read after the fact cannot see stays: a removed `index` or `HEAD` that Git wrote again
     before the read — another process's index write in the engine's staging checkout, or the
     capture's own `write-tree` after its read, among them — a file the read does not check (a split
@@ -201,7 +197,7 @@ what a coordinator killed after making an add's destination leaves.
   none of these settings: the user's configuration is not the engine's.
 
   These are the consequences of `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION` that
-  the owner's ruling of <date> accepts: such a prune may end a command resumably or leave a kept
+  the owner's ruling of 2026-10-15 accepts: such a prune may end a command resumably or leave a kept
   worktree for the operator, and the run's claims for it are safety, not liveness.
 - A writer that died mid-write leaves an entry that stays torn, and the access that meets it refuses
   resumably. Its own run's resume repairs it when Git can still list the store. When Git's listing
@@ -245,8 +241,7 @@ creates on disk is an instance of it, named for the incarnation that created it.
   incarnation's instance of a slot, and a name written before instances existed, is residue: it is
   never verified as reusable, never reused, and every reclaim of its slot removes it — except an
   instance that holds anything while its worktree registration is not whole, which a resume keeps
-  for the operator, refusing resumably (the external-prune paragraph above; *the exception is the
-  external-prune follow-up's conditional draft under O2(a), not adopted*). So a fresh
+  for the operator, refusing resumably (the external-prune paragraph above). So a fresh
   process's resume reclaims every earlier incarnation's instance of each open generation, its intent
   included, before it recreates the generation's worktree as its own instance, and a dead writer
   that acts afterwards acts on its own incarnation's paths.
@@ -263,8 +258,7 @@ removed refuses the command resumably, as any removal does, and nothing retains 
 kept rather than removed: recovery's reclaim and recreation, and a live retry or reuse that finds
 the instance not registered, missing or not holding its retained tree, first read every instance
 of the slot, and refuse resumably, removing nothing, while one holds anything and its worktree
-registration is not whole (*the external-prune follow-up's conditional draft under O2(a), not
-adopted*). The repair of a
+registration is not whole. The repair of a
 registration a killed add left torn, which runs when Git's listing dies on it, removes that one
 instance: the tear says nothing of the slot's other instances, a live one among them.
 
@@ -309,8 +303,7 @@ abandoned.
   activation (the record's §5.4 and §6.16).
 - A prune the engine did not start (a host agent's, the user's, an IDE's, or Git's own maintenance
   in another checkout), and the frozen legacy engine's maintenance, are outside it: the
-  external-prune paragraph above, and follow-up D's (*the pointer is the external-prune
-  follow-up's conditional draft under O1 option A, not adopted*).
+  external-prune paragraph above, and follow-up D's.
 
 **When a Unix helper does not start.** The cleanup reaper and the job-control guard are forked before any agent exists, and each acknowledges its own startup within a fixed budget. A launch that does not see that acknowledgement fails, ends the helper with one `SIGKILL` and a **bounded** wait — by number, or through the identity the next paragraph describes — and reports what those two calls answered, alongside how long it waited, that budget, the descriptor ceiling the helper was closing against, and how the wait ended: on the helper's own report of the setup step that refused and the error it left, on the acknowledgement pipe closing with no report, or on the budget elapsing with nothing on the pipe. A helper that cannot finish its setup writes that report on the acknowledgement pipe it already owns before it ends, and the wait ends the moment the helper ends on every supported platform. On macOS the wait is a `select`, because `poll` on the FIFO the channel is built from never reports the writer's close. The point of reporting these is one distinction: a helper that had **already ended itself** before the signal, whose report or exit status names which of its own setup steps refused, against one that was **still running** and had to be killed, which says it was still working when the budget ran out. Nothing else is claimed. **The wait after the signal is bounded, and a helper still there when it runs out is left behind.** The wait asks the kernel for what it can answer without blocking and asks again until the helper is collected or a second budget of its own elapses; a helper that has not become collectable by then is one the kernel is not ready to hand back — in uninterruptible I/O with the signal pending, say — so the launch reports that it was left for this process's exit to collect and returns, rather than waiting on it. It must return: these launches hold the barrier under which the signal monitor refuses to kill or stop any registered group, so a launch that never returns is every running agent outliving a `SIGTERM` for as long as the kernel takes. Of the waits that end a helper, one is **not** bounded, and deliberately: the end of a run's cleanup reaper that has **acknowledged** CLEANUP or CANCEL, whose exit is what releases the run's cleanup lease the caller is about to act on, so releasing that caller early would let it proceed against a lease still held. A reaper that did not acknowledge CLEANUP — its pipe ended with no answer, it refused, or the request could not be written — is ended with the bounded wait instead, because its caller acts on nothing: the supervisor answers that failure by arming fail-closed termination of this process and returning an error, and a reaper the wait leaves behind holds the lease until it exits, as a reaper does after any coordinator death. The parent asks the kernel nothing about the helper beyond those two calls and the pipe it was already reading, and in particular a pid is never treated as evidence of which process it names — a wait that answers *not collectable yet* is reported as that and never as the helper: while an embedding host may reap this process's children with a wildcard wait, no observation the parent can make establishes that, and the message says only what the pipe carried and what `kill` and `waitpid` returned.
 

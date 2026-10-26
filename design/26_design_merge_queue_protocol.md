@@ -687,10 +687,6 @@ owner's rulings on G6's diff proof name by path and merge.
 
 #### A verification in a checkout a prune emptied
 
-*Conditional draft: the external-prune follow-up's (F), under O1 option A, with O14 open. It is
-not adopted, and it takes effect only if the owner adopts it; its last sentence is O14(a)'s or
-O14(b)'s, whichever the owner chooses.*
-
 Added under §13's same-change rule; not part of the verbatim record above. It records which outcome an
 integration reaches when a prune that no engine process starts deletes the registration of a checkout
 it uses (`design/15`, the external-prune paragraph).
@@ -709,6 +705,4 @@ candidate again; a refused verification is settled interrupted by the next resum
 again under a new sequence. A removed `index` or `HEAD` that Git wrote again before the read, or a
 file the read does not check, is not seen, and the read's answer is then used as before.
 
-*Under O14(a):* The review passes such a refusal had charged are forgotten, as the exception in
-"The unavailable terminal's spend" says. *Under O14(b):* The review passes it had charged are
-recorded as "The unavailable terminal's spend" says.
+The review passes it had charged are recorded as "The unavailable terminal's spend" says.
