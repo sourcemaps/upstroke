@@ -3174,6 +3174,81 @@ the real `git` with none of the engine child's own variables (`GIT_INDEX_FILE`, 
 client's would; without it a foreign `reset` meant for the checkout's index ran against the capture's private one.
 `kill -KILL $PPID` in an action kills the engine at that exact child.
 
+## `const EVIDENCE_HEAD: u16 = 2 * 1024;`
+
+What the shim-fired assertions of T-N1c (`a_branch_moved_during_the_capture_keeps_the_output_pinned`) and T-RD2-2b
+(`a_file_written_after_the_capture_is_never_written_over`) report when they fail. `assert_the_shim_fired` keeps each
+assertion's condition, `shim.fired(0)`, and its words, and appends `unfired_evidence`, which `assert!` evaluates only
+once the condition is false: a passing run reads nothing more. `#[track_caller]` keeps the panic's location at the
+test's own call. The message is built before the panic unwinds; `ScratchTree` then attempts to reclaim the fixture tree,
+and neither its `Drop` nor the absence of a warning proves that the files are gone. The retained records of the two
+historical failures do not contain these files. The reclaim itself is unchanged.
+
+Each line is a later observation, made after `exists()` answered false, and none replaces that answer: the marker and
+the shim's directory, by kind alone; the child's report as `ChildEngine::run` returned it; then `calls.log`, the child's
+log, the generated script and the test's own paths (`.git/HEAD`; `deleted.txt` and the die-inside child's log). Only
+paths inside the fixture's tree, the shim directory's parent, are looked at, by their exact names, and nothing is
+listed. The tree is opened by its path with `O_DIRECTORY | O_NOFOLLOW` (`evidence_parent`); every component below it is
+opened by `openat` on the descriptor of the one above, with `O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC` (`open_at`), so a link
+anywhere below the tree is refused rather than followed (the kernel answers `ELOOP` for a link as the last component,
+and on Linux `ENOTDIR` for a link where a directory is opened) and a FIFO is opened without waiting for a writer. Only
+what `fstat` on the opened descriptor calls a regular file is read (`evidence_at`); a FIFO, socket, device or directory
+is closed unread. Each descriptor is an `OwnedFd` inside a `File`, closed when it goes out of scope; the two `unsafe`
+blocks are the `openat` call and the adoption of the descriptor it returns, which nothing else owns, and each carries
+its `SAFETY:` comment at its site, which §11 places there and these notes do not replace. `open_at` takes no flags from
+its callers, only whether the component must be a directory, so the call cannot carry `O_CREAT` or `O_TMPFILE`, the
+flags for which `openat` reads a mode argument. A file of at most 8 KiB is read whole; a larger one only in its first 2
+KiB and its last 6 KiB, each into a buffer allocated once at that size. Each range is reported as requested and with
+the bytes actually read, so a short read shows as one. The bytes are
+shown by `<[u8]>::escape_ascii`, which is lossless; nothing is redacted; the whole text, the line that says it stops
+included, is at most 64 KiB: what does not fit is cut at the last character boundary that leaves that line its room, so
+the cut can fall in a line that did fit. The window sizes are `u16` so that both `u64` and `usize` take them by `From`.
+
+What is missing, denied, refused, changed or truncated is reported as that, with the error's kind and text, and is not
+read as a cause. The size and the modification and change times are compared across the read, and a difference is
+reported. After the read the path is looked up again by name: a lookup that finds another file than the one read is
+reported as that, and a lookup that fails is reported with its error's kind and text, an observation of that error and
+not of the path naming no file. Not closed: the tree's own path is resolved as the operating system resolves it (on
+macOS, `/var` is a link above every temporary directory); the observations are sequential, so the bytes read are those
+of the file the held descriptors named at the open, the later lookup sees the path's binding only at its own moment, and
+a change between the observations, or one undone before the later lookup, can escape them both; equal times do not prove
+a file unchanged; a device node inside the tree would be opened, though none can be made there without privilege; an I/O
+failure becomes text and a formatting failure a marked line, but an allocation failure aborts the process; and what the
+files hold was written by processes that inherited the test's environment, which the evidence does not inspect.
+
+## `fn the_unfired_evidence_reports_missing_and_unreadable_files_as_such() {`
+
+The evidence's controls, each on a private scratch tree with its expected text written out: missing files, and an
+unreadable one (mode `000`, after checking that the mode bit binds); a 1 MiB `calls.log` shown in its two windows, each
+window's buffer of exactly its size, and a text past the cap cut, its closing line included, to within a character of
+64 KiB, at a character boundary, and into the text before the line that did not fit when it leaves less room than the
+closing line needs; a link as `calls.log`, a FIFO as the child's log (made by `mkfifo`), a directory as the script, a
+link and a file on the way, and a path outside the tree, none of whose bytes appear.
+`the_unfired_evidence_refuses_what_is_swapped_in_after_its_check` drives the open boundary
+itself: after the descent and a check that sees a regular file, the file is replaced by a link to a file outside the
+tree, then by a FIFO, and a directory on the way is moved aside and replaced by a link to one outside; `evidence_at`
+refuses the link, opens the FIFO without waiting, and reads the file through the directory it already holds, its later
+lookup reporting another file; and with a directory on the way made unsearchable after the descent (after checking that
+the mode bit binds), the read through the held descriptor succeeds and the later lookup reports its `PermissionDenied`,
+not an absent file. An open by path after the check would fail each: it would follow the link, wait on the FIFO, and
+read through the substituted directory. Each FIFO case runs on a worker that `fifo_bounded` owns from its spawn to its
+join, under the protocol written beside it, which §10 places at its site and these notes do not replace: a worker its
+timed polls have not observed finished within 60 s is released by opening the FIFO for reading and writing, which gives
+an open waiting on it its writer, and once a second poll observes it finished it is joined, and the case fails with the
+worker's id, the releasing descriptor and the worker's late value; a worker's panic is resumed in the test; and if the
+second 60 s poll expires the process aborts rather than leave the worker running unobserved. So a regression that waits
+on the FIFO is expected to fail rather than hang. The polls bound only their own waits: the join after an observed
+finish and the release open have no deadline of their own (the open is expected not to wait on a FIFO, as fifo(7)
+documents for Linux and XNU's source reads for macOS, which no native macOS run has shown yet), and no test executes
+the abort.
+`a_fifo_control_releases_and_joins_a_waiting_worker_and_resumes_a_panicking_one` drives that protocol itself: a
+worker that opens a FIFO by path, which waits for a writer, is reported after 100 ms as waiting, under the id it sends
+the test, and has returned before that report reaches the test; and a worker's panic reaches the test as its own
+payload. `the_shim_fired_assertion_fails_as_before_and_its_message_keeps_the_evidence` runs
+`assert_the_shim_fired` under `catch_unwind` while the marker is absent: it fails as the two tests' assertions would,
+and its panic message, the text the harness prints for a failed test, holds the test's words and then the evidence; the
+same call passes once the marker exists. No ignored test is added.
+
 ## `struct PartWay {`
 
 What stops a first resume's discard part-way: on Unix the leftover's directory read-only, after checking the mode bit
