@@ -52,6 +52,7 @@ pub enum InFlight {
         sequence: SequenceId,
         key: TaskKey,
         pin: Option<(GitRef, CommitSha)>,
+        cancelled: bool,
     },
 }
 
@@ -95,19 +96,30 @@ impl InFlight {
                         .to_owned(),
                 },
             },
-            Self::Verification { sequence, .. } => {
-                TopologyEventBody::MergeVerificationInterrupted {
-                    data: MergeVerificationInterrupted {
-                        sequence: *sequence,
-                        detail: "the run halted while this verification was in flight: its \
-                             pipeline had ended, cancelled by the coordinator or with a result \
-                             the halt discards unprepared, and the Runner had established the end \
-                             of each of its processes before this was appended; nothing was \
-                             published and the candidate stays queued"
-                            .to_owned(),
-                    },
-                }
-            }
+            Self::Verification {
+                sequence,
+                cancelled,
+                ..
+            } => TopologyEventBody::MergeVerificationInterrupted {
+                data: MergeVerificationInterrupted {
+                    sequence: *sequence,
+                    detail: if *cancelled {
+                        "a decline, or a lineage member's failed settlement, failed this \
+                         verification's lineage and cancelled it: its pipeline had ended, \
+                         stopped by the coordinator or with a result the cancellation \
+                         discards, and the Runner had established the end of each of its \
+                         processes before this was appended; nothing was published, and its \
+                         candidate, whose task failed, is not verified again"
+                    } else {
+                        "the run halted while this verification was in flight: its \
+                         pipeline had ended, cancelled by the coordinator or with a result \
+                         the halt discards unprepared, and the Runner had established the end \
+                         of each of its processes before this was appended; nothing was \
+                         published and the candidate stays queued"
+                    }
+                    .to_owned(),
+                },
+            },
         }
     }
 }
@@ -144,10 +156,20 @@ pub fn in_flight(fold: &TopologyFold) -> Vec<InFlight> {
                     }
                     VerificationBasis::AlreadyPresent => None,
                 },
+                cancelled: cancelled_by_lineage(fold, transaction.sequence),
             });
         }
     }
     found
+}
+
+#[must_use]
+pub fn cancelled_by_lineage(fold: &TopologyFold, sequence: SequenceId) -> bool {
+    fold.transaction().is_some_and(|open| {
+        open.sequence == sequence
+            && matches!(open.class, TransactionClass::VerificationStarted { .. })
+            && fold.task_state(open.candidate.key) == Some(TaskState::Failed)
+    })
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

@@ -114,6 +114,7 @@ impl Identity {
                         .fold()
                         .transaction()
                         .is_some_and(|open| open.candidate == *candidate)
+                    && !closure::cancelled_by_lineage(run.fold(), *sequence)
             }
         }
     }
@@ -658,8 +659,12 @@ impl Coordinator<'_> {
             }
         }
         let settled = self.run.integration_settled(key, terminal);
-        self.open_gate();
         let abandoned = self.abandoned.take() == Some(request.sequence);
+        if settled.is_err() && abandoned && self.interrupt.is_none() {
+            let seams = self.seams;
+            super::run::settle_cancelled_verification(self, seams, request.sequence)?;
+        }
+        self.open_gate();
         match settled {
             Ok(_) => Ok(true),
             Err(_) if self.interrupt.is_some() => Ok(false),
@@ -898,11 +903,12 @@ impl Coordinator<'_> {
             (VerifyEnd::Abandoned, _) => {
                 self.abandoned = Some(sequence);
                 let message = format!(
-                    "the verification of sequence {} of task {key} was abandoned: the fold no \
-                     longer holds its transaction open (a decline, or a failed settlement, \
-                     failed its lineage), so its pipeline was cancelled and its late result \
-                     discarded; no terminal is appended for it here, and the coordinator records \
-                     next the review passes it charged, if any (`merge_verification_charged`)",
+                    "the verification of sequence {} of task {key} was cancelled: a decline, or \
+                     a failed settlement, failed its lineage, so the fold holds its transaction \
+                     only until its one terminal, `merge_verification_interrupted`, which is \
+                     appended once its pipeline has ended; the pipeline was stopped and its late \
+                     result discarded, and the coordinator records first the review passes it \
+                     charged, if any (`merge_verification_charged`)",
                     sequence.0
                 );
                 self.run.warn(message.clone());
@@ -10968,23 +10974,7 @@ mod tests {
         let kinds = kinds_of(&events);
         let decline = position(&kinds, "question_answered", 0);
         let first = SequenceId(1);
-        assert!(
-            !events.get(decline..).unwrap_or_default().iter().any(|event| {
-                matches!(&event.body,
-                    TopologyEventBody::MergeVerificationStarted { data } if data.sequence == first)
-                    || matches!(&event.body,
-                        TopologyEventBody::MergeVerificationUnavailable { data } if data.sequence == first)
-                    || matches!(&event.body,
-                        TopologyEventBody::MergeVerificationInterrupted { data } if data.sequence == first)
-                    || matches!(&event.body,
-                        TopologyEventBody::MergePrepared { data } if data.sequence == first)
-                    || matches!(&event.body,
-                        TopologyEventBody::MergeRejected { data } if data.sequence == first)
-                    || matches!(&event.body,
-                        TopologyEventBody::TaskMerged { data } if data.sequence == first)
-            }),
-            "nothing is appended for the cancelled verification after the decline: {kinds:?}"
-        );
+        cancelled_terminal_after(&events, decline, first, LINEAGE_CANCELLED);
         let gate = SequenceIdentities::new(first).gate(0, 0);
         assert!(
             wide.env
@@ -10995,10 +10985,11 @@ mod tests {
             wide.env.runner.endings()
         );
         assert!(
-            wide.run
-                .warnings()
-                .iter()
-                .any(|warning| warning.contains("no longer holds its transaction open")),
+            wide.run.warnings().iter().any(|warning| {
+                warning.contains(
+                    "was cancelled: a decline, or a failed settlement, failed its lineage",
+                )
+            }),
             "{:?}",
             wide.run.warnings()
         );
@@ -11233,6 +11224,13 @@ mod tests {
                 .expect("the decline fails beta's lineage and the run goes on to its end");
             drop(scheduler);
             assert_eq!(outcome_of(&progress), RunOutcome::Complete);
+            let events = wide.env.durable_events();
+            assert_eq!(
+                terminals_of(&events, SequenceId(1)),
+                vec!["merge_verification_interrupted"],
+                "the stopped verification has exactly one terminal: {:?}",
+                kinds_of(&events)
+            );
             assert!(
                 !wide.env.runner.ran().iter().any(
                     |ran| matches!(ran.invocation, InvocationId::Sequence { role, .. }
@@ -11482,23 +11480,7 @@ mod tests {
             "gamma's candidate was queued before the decline: {kinds:?}"
         );
         let after = events.get(decline..).unwrap_or_default();
-        assert!(
-            !after.iter().any(|event| {
-                matches!(&event.body,
-                    TopologyEventBody::MergeVerificationStarted { data } if data.sequence == first)
-                    || matches!(&event.body,
-                        TopologyEventBody::MergeVerificationUnavailable { data } if data.sequence == first)
-                    || matches!(&event.body,
-                        TopologyEventBody::MergeVerificationInterrupted { data } if data.sequence == first)
-                    || matches!(&event.body,
-                        TopologyEventBody::MergePrepared { data } if data.sequence == first)
-                    || matches!(&event.body,
-                        TopologyEventBody::MergeRejected { data } if data.sequence == first)
-                    || matches!(&event.body,
-                        TopologyEventBody::TaskMerged { data } if data.sequence == first)
-            }),
-            "nothing is appended for the cancelled verification after the decline: {kinds:?}"
-        );
+        let terminal = cancelled_terminal_after(&events, decline, first, LINEAGE_CANCELLED);
         let gamma = after
             .iter()
             .find_map(|event| match &event.body {
@@ -11513,6 +11495,17 @@ mod tests {
                 TopologyEventBody::TaskMerged { data } if data.sequence == gamma)),
             "{kinds:?}"
         );
+        let gamma_prepared = events
+            .iter()
+            .position(|event| {
+                matches!(&event.body,
+                TopologyEventBody::MergePrepared { data } if data.sequence == gamma)
+            })
+            .expect("gamma's publication is in the log");
+        assert!(
+            terminal < gamma_prepared,
+            "sequence 1's terminal precedes gamma's `merge_prepared`: {kinds:?}"
+        );
         let gate = SequenceIdentities::new(first).gate(0, 0);
         assert!(
             wide.env
@@ -11523,10 +11516,11 @@ mod tests {
             wide.env.runner.endings()
         );
         assert!(
-            wide.run
-                .warnings()
-                .iter()
-                .any(|warning| warning.contains("no longer holds its transaction open")),
+            wide.run.warnings().iter().any(|warning| {
+                warning.contains(
+                    "was cancelled: a decline, or a failed settlement, failed its lineage",
+                )
+            }),
             "{:?}",
             wide.run.warnings()
         );
@@ -11537,6 +11531,1615 @@ mod tests {
         );
         assert!(wide.run.invocations_balance(), "{:?}", wide.run.warnings());
         replay_equals_live(&wide);
+    }
+
+    const LINEAGE_CANCELLED: &str =
+        "failed this verification's lineage and cancelled it: its pipeline had ended";
+
+    const RECOVERY_CANCELLED: &str = "recovery step (f) settles it interrupted, and its \
+                                      candidate, whose task failed, is not verified again";
+
+    fn sequence_named(event: &TopologyEvent) -> Option<SequenceId> {
+        match &event.body {
+            TopologyEventBody::MergeVerificationStarted { data } => Some(data.sequence),
+            TopologyEventBody::MergeVerificationUnavailable { data } => Some(data.sequence),
+            TopologyEventBody::MergeVerificationInterrupted { data } => Some(data.sequence),
+            TopologyEventBody::MergePrepared { data } => Some(data.sequence),
+            TopologyEventBody::MergeRejected { data } => Some(data.sequence),
+            TopologyEventBody::TaskMerged { data } => Some(data.sequence),
+            _ => None,
+        }
+    }
+
+    fn cancelled_terminal_after(
+        events: &[TopologyEvent],
+        carrier: usize,
+        sequence: SequenceId,
+        detail: &str,
+    ) -> usize {
+        let kinds = kinds_of(events);
+        let naming: Vec<usize> = (carrier..events.len())
+            .filter(|index| events.get(*index).and_then(sequence_named) == Some(sequence))
+            .collect();
+        let [terminal] = naming.as_slice() else {
+            panic!(
+                "after the lineage failure the log holds exactly one event naming sequence {}, \
+                 its terminal: {kinds:?}",
+                sequence.0
+            );
+        };
+        match events.get(*terminal).map(|event| &event.body) {
+            Some(TopologyEventBody::MergeVerificationInterrupted { data }) => assert!(
+                data.detail.contains(detail),
+                "the cancelled verification's terminal says why it was cancelled: {}",
+                data.detail
+            ),
+            other => panic!(
+                "sequence {}'s one event after the lineage failure is its interrupted terminal, \
+                 not {other:?}",
+                sequence.0
+            ),
+        }
+        let opened_later = events
+            .get(carrier..*terminal)
+            .unwrap_or_default()
+            .iter()
+            .any(|event| {
+                matches!(&event.body,
+                    TopologyEventBody::MergeVerificationStarted { data } if data.sequence > sequence)
+                    || matches!(&event.body,
+                        TopologyEventBody::MergePrepared { data } if data.sequence > sequence)
+                    || matches!(&event.body,
+                        TopologyEventBody::MergeRejected { data } if data.sequence > sequence)
+            });
+        assert!(
+            !opened_later,
+            "no later integration opened before the cancelled verification's terminal: {kinds:?}"
+        );
+        *terminal
+    }
+
+    fn recorded_before_its_terminal(
+        events: &[TopologyEvent],
+        carrier: usize,
+        sequence: SequenceId,
+        detail: &str,
+    ) -> (usize, usize) {
+        let kinds = kinds_of(events);
+        let records: Vec<usize> = events
+            .iter()
+            .enumerate()
+            .filter(|(_, event)| {
+                matches!(&event.body,
+                    TopologyEventBody::MergeVerificationCharged { data } if data.sequence == sequence)
+            })
+            .map(|(index, _)| index)
+            .collect();
+        let [record] = records.as_slice() else {
+            panic!(
+                "the log holds exactly one `merge_verification_charged` for sequence {}: \
+                 {kinds:?}",
+                sequence.0
+            );
+        };
+        let terminal = cancelled_terminal_after(events, carrier, sequence, detail);
+        assert!(
+            carrier < *record && *record < terminal,
+            "the record of the passes the cancelled verification charged follows the lineage \
+             failure and precedes its one terminal, `merge_verification_interrupted`: {kinds:?}"
+        );
+        assert_eq!(
+            terminals_of(events, sequence),
+            vec!["merge_verification_interrupted"],
+            "{kinds:?}"
+        );
+        (*record, terminal)
+    }
+
+    fn failing_sibling(
+        run: &TopologyRun,
+        root: TaskKey,
+        source: CandidateRef,
+        halts_run: bool,
+    ) -> Vec<TopologyEventBody> {
+        let mut events = sibling_parked_on(run, root, source);
+        if let Some(TopologyEventBody::AttemptFinished { data }) = events.last_mut() {
+            if let Some(failure) = data.record.failure.as_mut() {
+                failure.kind = crate::ladder::FailureKind::GateFailed;
+                failure.reason = "the sibling's gates failed and its ladder is spent".to_owned();
+            }
+            data.settlement = crate::topology::events::AttemptSettlement::Closed {
+                transition: crate::topology::events::SettlementTransition::Failed {
+                    halts_run,
+                    reason: "the sibling's ladder is spent".to_owned(),
+                },
+                lease: crate::topology::events::LeaseDisposition::LineageHeld,
+            };
+        }
+        events
+    }
+
+    fn sibling_failed_on(
+        run: &TopologyRun,
+        root: TaskKey,
+        source: CandidateRef,
+    ) -> Vec<TopologyEventBody> {
+        failing_sibling(run, root, source, false)
+    }
+
+    fn sibling_failed_halting_on(
+        run: &TopologyRun,
+        root: TaskKey,
+        source: CandidateRef,
+    ) -> Vec<TopologyEventBody> {
+        failing_sibling(run, root, source, true)
+    }
+
+    fn sibling_parked_and_declined_on(
+        run: &TopologyRun,
+        root: TaskKey,
+        source: CandidateRef,
+    ) -> Vec<TopologyEventBody> {
+        let key = TaskKey(
+            u32::try_from(
+                run.fold()
+                    .registry()
+                    .expect("a started run has a registry")
+                    .len(),
+            )
+            .expect("a small registry"),
+        );
+        let mut events = sibling_parked_on(run, root, source);
+        events.push(TopologyEventBody::QuestionAnswered {
+            data: crate::topology::events::QuestionAnswered4 {
+                key,
+                question: crate::ir::QuestionId("sibling".to_owned()),
+                answer: crate::topology::events::Answer4::Declined {
+                    decline_halts_run: false,
+                },
+                via: "the scheduler declines the sibling's question".to_owned(),
+            },
+        });
+        events
+    }
+
+    type Carrier = fn(&TopologyRun, TaskKey, CandidateRef) -> Vec<TopologyEventBody>;
+
+    fn cancelling<'r>(
+        runner: &'r RecordingRunner,
+        plant: Carrier,
+        mut after_planting: impl FnMut(&Quiescent<'_>) -> Option<Release> + 'r,
+    ) -> Scheduler<'r> {
+        let mut planted: Option<Vec<TopologyEventBody>> = None;
+        Scheduler::scripted(
+            runner,
+            Box::new(move |view: &Quiescent<'_>| {
+                if count(view.run.events(), "task_merged") == 0 {
+                    return released(view, |invocation| attempt_key(invocation) == Some(0));
+                }
+                let verifying = view
+                    .live
+                    .iter()
+                    .any(|(_, identity)| matches!(identity, Identity::Verification { .. }));
+                if verifying && planted.is_none() {
+                    let source = view
+                        .run
+                        .fold()
+                        .transaction()
+                        .map(|open| open.candidate.clone())
+                        .expect("beta's candidate is being verified");
+                    planted = Some(plant(view.run, TaskKey(1), source));
+                }
+                if let Some(events) = planted.as_mut() {
+                    if !events.is_empty() {
+                        return Some(Release::Append(Box::new(events.remove(0))));
+                    }
+                    return after_planting(view);
+                }
+                released(view, |invocation| attempt_key(invocation) == Some(1)).or_else(|| {
+                    released(view, |invocation| {
+                        matches!(invocation, InvocationId::Sequence { .. })
+                    })
+                })
+            }),
+        )
+    }
+
+    fn gamma_or_the_verification(view: &Quiescent<'_>) -> Option<Release> {
+        released(view, |invocation| attempt_key(invocation) == Some(2)).or_else(|| {
+            released(view, |invocation| {
+                matches!(invocation, InvocationId::Sequence { .. })
+            })
+        })
+    }
+
+    fn open_generations(fold: &TopologyFold) -> usize {
+        let tasks = fold.registry().map_or(0, |registry| registry.len());
+        (0..tasks)
+            .filter_map(|index| u32::try_from(index).ok())
+            .filter_map(|index| fold.task(TaskKey(index)))
+            .filter(|task| {
+                task.generations.iter().any(|generation| {
+                    matches!(
+                        generation.class,
+                        crate::topology::fold::GenerationClass::OpenNoAttempt
+                            | crate::topology::fold::GenerationClass::InFlight { .. }
+                            | crate::topology::fold::GenerationClass::Promoting
+                    )
+                })
+            })
+            .count()
+    }
+
+    struct CancelSeen {
+        kind: &'static str,
+        sequence: Option<SequenceId>,
+        pinned: bool,
+        staging: bool,
+        snapshots: Vec<String>,
+        merge_held: usize,
+        pipeline_held: usize,
+        open_generations: usize,
+    }
+
+    struct CancelWatch {
+        inner: crate::engine::topology::seams::HarnessTopologyHooks,
+        manager: crate::workspace_manager::WorkspaceManager,
+        pin: String,
+        staging: crate::workspace_manager::Slot,
+        seen: Vec<CancelSeen>,
+    }
+
+    impl CancelWatch {
+        fn over(wide: &Wide, sequence: SequenceId) -> Self {
+            let run_id = wide.run.fold().started().expect("started").run_id.clone();
+            Self {
+                inner: wide.env.hooks(),
+                manager: wide.env.fixture.manager.clone(),
+                pin: crate::engine::topology::integrate::prepared_pin_ref(&run_id, sequence)
+                    .as_str()
+                    .to_owned(),
+                staging: crate::engine::topology::integrate::staging_slot(sequence),
+                seen: Vec::new(),
+            }
+        }
+    }
+
+    impl TopologyHooks for CancelWatch {
+        fn effects(&mut self) -> &mut dyn crate::workspace_manager::EffectHooks {
+            self.inner.effects()
+        }
+
+        fn rundir(&mut self) -> &mut dyn crate::rundir::RunDirHooks {
+            self.inner.rundir()
+        }
+
+        fn events(&mut self) -> &mut dyn crate::events::log::EventHooks {
+            self.inner.events()
+        }
+
+        fn container(&mut self) -> &mut dyn crate::runner::container::ContainerHooks {
+            self.inner.container()
+        }
+
+        fn spawn(&mut self) -> &mut dyn crate::agent::proc::SpawnHooks {
+            self.inner.spawn()
+        }
+
+        fn folded(&mut self, fold: &TopologyFold, events: &[TopologyEvent]) {
+            self.inner.folded(fold, events);
+            let Some(last) = events.last() else {
+                return;
+            };
+            let intents = self.manager.intents().expect("the intents are listable");
+            self.seen.push(CancelSeen {
+                kind: last.body.kind(),
+                sequence: sequence_named(last),
+                pinned: self
+                    .manager
+                    .direct_ref_target(&self.pin)
+                    .expect("the pin is readable")
+                    .is_some(),
+                staging: intents.contains(&self.staging),
+                snapshots: snapshot_names(&intents),
+                merge_held: Entitlements::of(fold).merge_held(),
+                pipeline_held: fold.pipeline_held(),
+                open_generations: open_generations(fold),
+            });
+        }
+    }
+
+    #[test]
+    fn a_cancelled_verification_is_settled_interrupted_before_its_residue_is_reclaimed() {
+        let tasks = three();
+        let armed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut wide = Wide::started_with(
+            "coordinator-cancelled-reclaimed",
+            &tasks,
+            3,
+            WidePlans::default(),
+            holding(&tasks, &[]),
+        );
+        wide.env.answers = std::sync::Arc::new(DecliningOnceArmed(std::sync::Arc::clone(&armed)));
+        let runner = std::sync::Arc::clone(&wide.env.runner);
+        let mut scheduler = cancelling(&runner, sibling_parked_on, move |view| {
+            armed.store(true, std::sync::atomic::Ordering::SeqCst);
+            gamma_or_the_verification(view)
+        });
+        let mut watch = CancelWatch::over(&wide, SequenceId(1));
+        let pipelines = wide.env.pipelines();
+        let progress = wide.run.run_concurrently(
+            &wide.env.seams(),
+            &pipelines,
+            &mut watch,
+            Some(&mut scheduler),
+        );
+        drop(scheduler);
+        let progress =
+            progress.expect("the decline fails beta's lineage and the run goes on to its end");
+        assert_eq!(outcome_of(&progress), RunOutcome::Complete);
+
+        let seen = &watch.seen;
+        let folded: Vec<&str> = seen.iter().map(|state| state.kind).collect();
+        let decline = position(&folded, "question_answered", 0);
+        let terminal = seen
+            .iter()
+            .position(|state| {
+                state.kind == "merge_verification_interrupted"
+                    && state.sequence == Some(SequenceId(1))
+            })
+            .unwrap_or_else(|| panic!("sequence 1 was settled interrupted: {folded:?}"));
+        assert!(decline < terminal, "{folded:?}");
+        for state in &seen[decline..terminal] {
+            assert_eq!(
+                (state.merge_held, state.pipeline_held),
+                (1, state.open_generations + 1),
+                "after `{}`, between the decline and the terminal, the cancelled verification \
+                 holds the merge entitlement and one pipeline entitlement: {folded:?}",
+                state.kind
+            );
+        }
+        let settled = &seen[terminal];
+        assert!(
+            settled.pinned
+                && settled.staging
+                && settled.snapshots.contains(&"s1-integration".to_owned()),
+            "the terminal is appended while the pin, the staging worktree and its intent, and \
+             the snapshots are still present, so before they are reclaimed: {:?}",
+            settled.snapshots
+        );
+        assert_eq!(
+            (settled.merge_held, settled.pipeline_held),
+            (0, settled.open_generations),
+            "the terminal releases both of the transaction's entitlements"
+        );
+        for state in &seen[terminal + 1..] {
+            assert!(
+                !state.pinned
+                    && !state.staging
+                    && !state.snapshots.contains(&"s1-integration".to_owned()),
+                "the pin, the staging worktree and the snapshots are reclaimed right after the \
+                 terminal, before `{}`: {folded:?}",
+                state.kind
+            );
+        }
+        assert!(
+            seen[terminal + 1..]
+                .iter()
+                .any(|state| state.kind == "merge_verification_started")
+                && folded.last() == Some(&"run_finished"),
+            "a later integration and the run's end follow the reclaim: {folded:?}"
+        );
+
+        let events = wide.env.durable_events();
+        let kinds = kinds_of(&events);
+        cancelled_terminal_after(
+            &events,
+            position(&kinds, "question_answered", 0),
+            SequenceId(1),
+            LINEAGE_CANCELLED,
+        );
+        let report: crate::engine::topology::report::TopologyReport = serde_json::from_slice(
+            &std::fs::read(wide.env.paths.public.join("report.json")).expect("the report"),
+        )
+        .expect("the report parses");
+        let row = report
+            .integration_ledger
+            .iter()
+            .find(|row| row.sequence == 1)
+            .expect("sequence 1 has a ledger row");
+        assert_eq!(
+            (row.terminal.as_str(), row.review_cost_usd),
+            ("merge_verification_interrupted", None),
+            "the ledger counts the cancelled verification's one terminal, with unknown spend"
+        );
+        let rendered = report.render();
+        assert!(
+            rendered.lines().any(|line| {
+                line.trim_start().starts_with("s1 ")
+                    && line.contains("merge_verification_interrupted")
+                    && line.ends_with("cost ? (unknown))")
+            }),
+            "{rendered}"
+        );
+        assert!(wide.run.invocations_balance(), "{:?}", wide.run.warnings());
+        replay_equals_live(&wide);
+    }
+
+    #[test]
+    fn a_failed_sibling_settlement_settles_the_verification_its_lineage_had_started_interrupted() {
+        let tasks = three();
+        let mut wide = Wide::started_with(
+            "coordinator-cancelled-by-failure",
+            &tasks,
+            3,
+            WidePlans::default(),
+            holding(&tasks, &[]),
+        );
+        let runner = std::sync::Arc::clone(&wide.env.runner);
+        let mut scheduler = cancelling(&runner, sibling_failed_on, gamma_or_the_verification);
+        let progress = drive(&mut wide, Some(&mut scheduler))
+            .expect("the failed settlement fails beta's lineage and the run goes on to its end");
+        drop(scheduler);
+        assert_eq!(outcome_of(&progress), RunOutcome::Complete);
+        let events = wide.env.durable_events();
+        let kinds = kinds_of(&events);
+        let carrier = events
+            .iter()
+            .position(|event| {
+                matches!(&event.body, TopologyEventBody::AttemptFinished { data }
+                    if data.key == TaskKey(3)
+                        && matches!(data.settlement,
+                            crate::topology::events::AttemptSettlement::Closed {
+                                transition: crate::topology::events::SettlementTransition::Failed { .. },
+                                ..
+                            }))
+            })
+            .unwrap_or_else(|| panic!("the sibling's failed settlement was appended: {kinds:?}"));
+        cancelled_terminal_after(&events, carrier, SequenceId(1), LINEAGE_CANCELLED);
+        assert_eq!(
+            terminals_of(&events, SequenceId(1)),
+            vec!["merge_verification_interrupted"],
+            "{kinds:?}"
+        );
+        for key in [TaskKey(1), TaskKey(3)] {
+            assert_eq!(
+                wide.run.fold().task_state(key),
+                Some(crate::topology::fold::TaskState::Failed)
+            );
+        }
+        assert_eq!(
+            count(&events, "task_merged"),
+            2,
+            "alpha and gamma merge; beta's lineage failed: {kinds:?}"
+        );
+        assert!(wide.run.invocations_balance(), "{:?}", wide.run.warnings());
+        replay_equals_live(&wide);
+    }
+
+    #[test]
+    fn a_halting_decline_settles_the_cancelled_verification_in_closure_before_run_finished() {
+        let plants: [(&str, Carrier, &str); 2] = [
+            ("decline", sibling_parked_on, "question_answered"),
+            (
+                "failed-settlement",
+                sibling_failed_halting_on,
+                "attempt_finished",
+            ),
+        ];
+        for (shape, plant, carrier) in plants {
+            let tasks = three();
+            let armed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let mut wide = Wide::started_with(
+                &format!("coordinator-cancelled-halting-{shape}"),
+                &tasks,
+                3,
+                WidePlans::default(),
+                holding(&tasks, &[]),
+            );
+            wide.env.answers =
+                std::sync::Arc::new(DecliningOnceArmed(std::sync::Arc::clone(&armed)));
+            wide.env.halts_run = true;
+            let runner = std::sync::Arc::clone(&wide.env.runner);
+            let run_id = wide.run.fold().started().expect("started").run_id.clone();
+            let pin = crate::engine::topology::integrate::prepared_pin_ref(&run_id, SequenceId(1));
+            let manager = wide.env.fixture.manager.clone();
+            let mut scheduler = cancelling(&runner, plant, move |view| {
+                armed.store(true, std::sync::atomic::Ordering::SeqCst);
+                released(view, |invocation| worker(invocation) == Some(TaskKey(2)))
+                    .or_else(|| gamma_or_the_verification(view))
+            });
+            let (progress, watching) = drive_watching(&mut wide, &mut scheduler);
+            drop(scheduler);
+            let progress =
+                progress.unwrap_or_else(|error| panic!("{shape}: the halted run ends: {error}"));
+            assert_eq!(outcome_of(&progress), RunOutcome::Halted, "{shape}");
+            let events = wide.env.durable_events();
+            let kinds = kinds_of(&events);
+            let at = events
+                .iter()
+                .rposition(|event| event.body.kind() == carrier)
+                .unwrap_or_else(|| panic!("{shape}: the carrier was appended: {kinds:?}"));
+            assert_eq!(
+                &kinds[at..],
+                &[
+                    carrier,
+                    "attempt_interrupted",
+                    "merge_verification_interrupted",
+                    "run_finished"
+                ],
+                "{shape}: the closure settles gamma's attempt and then the cancelled \
+                 verification, before the run's end: {kinds:?}"
+            );
+            assert!(
+                matches!(&events[at + 1].body,
+                    TopologyEventBody::AttemptInterrupted { data } if data.key == TaskKey(2)),
+                "{shape}: {kinds:?}"
+            );
+            cancelled_terminal_after(&events, at, SequenceId(1), LINEAGE_CANCELLED);
+            assert_eq!(
+                manager
+                    .direct_ref_target(pin.as_str())
+                    .expect("the pin is readable"),
+                None,
+                "{shape}: the prepared pin was deleted expected-old"
+            );
+            let at_end = watching.intents_when("run_finished");
+            assert!(
+                !at_end
+                    .iter()
+                    .any(|slot| matches!(slot, crate::workspace_manager::Slot::Staging { .. }))
+                    && snapshot_names(at_end).is_empty(),
+                "{shape}: before `run_finished` the closure had removed the staging and the \
+                 snapshots: {at_end:?}"
+            );
+            assert!(wide.run.fold().transaction().is_none(), "{shape}");
+            assert!(
+                wide.run.invocations_balance(),
+                "{shape}: {:?}",
+                wide.run.warnings()
+            );
+            replay_equals_live(&wide);
+        }
+    }
+
+    fn resumed_into_the_interrupted_terminal(wide: Wide, shape: &str) {
+        let tasks = three();
+        let run_id = wide.run.fold().started().expect("started").run_id.clone();
+        let pin = crate::engine::topology::integrate::prepared_pin_ref(&run_id, SequenceId(1));
+        let before = wide.env.durable_events();
+        let carried = before.len();
+        assert!(
+            terminals_of(&before, SequenceId(1)).is_empty(),
+            "{shape}: the first process ended with no terminal for the cancelled verification: \
+             {:?}",
+            kinds_of(&before)
+        );
+        let (_, mut resumed) = wide
+            .resume(
+                "inc-2",
+                RecordingRunner::new().answering(wide_responder(&tasks, &[])),
+                crate::engine::topology::select::Ceiling::unlimited(),
+            )
+            .unwrap_or_else(|error| panic!("{shape}: the next process resumes: {error}"));
+        let events = resumed.env.durable_events();
+        let kinds = kinds_of(&events);
+        let resumed_at = position(&kinds, "run_resumed", 0);
+        let terminal =
+            cancelled_terminal_after(&events, carried, SequenceId(1), RECOVERY_CANCELLED);
+        assert!(
+            terminal < resumed_at,
+            "{shape}: recovery settles the cancelled verification before `run_resumed`: {kinds:?}"
+        );
+        assert_eq!(
+            resumed
+                .env
+                .fixture
+                .manager
+                .direct_ref_target(pin.as_str())
+                .expect("the pin is readable"),
+            None,
+            "{shape}: the prepared pin was deleted expected-old"
+        );
+        let intents = resumed
+            .env
+            .fixture
+            .manager
+            .intents()
+            .expect("the intents are listable");
+        assert!(
+            !intents
+                .iter()
+                .any(|slot| matches!(slot, crate::workspace_manager::Slot::Staging { .. }))
+                && !snapshot_names(&intents)
+                    .iter()
+                    .any(|name| name.starts_with("s1-")),
+            "{shape}: the staging worktree and the sequence's snapshots were reclaimed: \
+             {intents:?}"
+        );
+        let progress = drive(&mut resumed, None)
+            .unwrap_or_else(|error| panic!("{shape}: the resumed run completes: {error}"));
+        assert_eq!(outcome_of(&progress), RunOutcome::Complete, "{shape}");
+        let events = resumed.env.durable_events();
+        assert_eq!(
+            terminals_of(&events, SequenceId(1)),
+            vec!["merge_verification_interrupted"],
+            "{shape}: one terminal for sequence 1 across both processes: {:?}",
+            kinds_of(&events)
+        );
+        assert_eq!(count(&events, "task_merged"), 2, "{shape}");
+        replay_equals_live(&resumed);
+    }
+
+    struct ShutdownOnDecline {
+        inner: crate::engine::topology::seams::HarnessTopologyHooks,
+        sender: std::sync::Arc<std::sync::Mutex<Option<mpsc::UnboundedSender<ToCoordinator>>>>,
+    }
+
+    impl TopologyHooks for ShutdownOnDecline {
+        fn effects(&mut self) -> &mut dyn crate::workspace_manager::EffectHooks {
+            self.inner.effects()
+        }
+
+        fn rundir(&mut self) -> &mut dyn crate::rundir::RunDirHooks {
+            self.inner.rundir()
+        }
+
+        fn events(&mut self) -> &mut dyn crate::events::log::EventHooks {
+            self.inner.events()
+        }
+
+        fn container(&mut self) -> &mut dyn crate::runner::container::ContainerHooks {
+            self.inner.container()
+        }
+
+        fn spawn(&mut self) -> &mut dyn crate::agent::proc::SpawnHooks {
+            self.inner.spawn()
+        }
+
+        fn folded(&mut self, fold: &TopologyFold, events: &[TopologyEvent]) {
+            self.inner.folded(fold, events);
+            if events
+                .last()
+                .is_some_and(|event| event.body.kind() == "question_answered")
+            {
+                if let Some(sender) = self
+                    .sender
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take()
+                {
+                    assert!(
+                        sender.send(ToCoordinator::Shutdown).is_ok(),
+                        "the coordinator takes the shutdown"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_shutdown_after_the_decline_leaves_the_cancelled_verification_to_the_resume() {
+        for shape in ["pipeline-running", "pipeline-stopped"] {
+            let tasks = three();
+            let mut wide = Wide::durable(
+                &format!("coordinator-cancelled-shutdown-{shape}"),
+                &tasks,
+                3,
+                WidePlans::default(),
+                holding(&tasks, &[]),
+            );
+            let runner = std::sync::Arc::clone(&wide.env.runner);
+            let gate = SequenceIdentities::new(SequenceId(1)).gate(0, 0);
+            let error = if shape == "pipeline-running" {
+                let mut shut = false;
+                let mut scheduler =
+                    cancelling(&runner, sibling_parked_and_declined_on, move |view| {
+                        if shut {
+                            return None;
+                        }
+                        shut = true;
+                        assert!(
+                            view.invoking.contains(&gate),
+                            "the cancelled verification's gate still runs at the shutdown"
+                        );
+                        assert!(view.injector.inject(ToCoordinator::Shutdown));
+                        Some(Release::Injected)
+                    });
+                let error = drive(&mut wide, Some(&mut scheduler))
+                    .expect_err("a shutdown ends the command");
+                drop(scheduler);
+                error
+            } else {
+                let armed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                wide.env.answers =
+                    std::sync::Arc::new(DecliningOnceArmed(std::sync::Arc::clone(&armed)));
+                let sender = std::sync::Arc::new(std::sync::Mutex::new(None));
+                let handed = std::sync::Arc::clone(&sender);
+                let mut scheduler = cancelling(&runner, sibling_parked_on, move |view| {
+                    *handed
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                        Some(view.injector.0.clone());
+                    armed.store(true, std::sync::atomic::Ordering::SeqCst);
+                    released(view, |invocation| attempt_key(invocation) == Some(2))
+                });
+                let mut hooks = ShutdownOnDecline {
+                    inner: wide.env.hooks(),
+                    sender,
+                };
+                let pipelines = wide.env.pipelines();
+                let error = wide
+                    .run
+                    .run_concurrently(
+                        &wide.env.seams(),
+                        &pipelines,
+                        &mut hooks,
+                        Some(&mut scheduler),
+                    )
+                    .expect_err("a shutdown ends the command");
+                drop(scheduler);
+                assert!(
+                    wide.run.warnings().iter().any(|warning| {
+                        warning.contains("which the fold no longer holds open; it was cancelled")
+                    }),
+                    "{shape}: the coordinator had stopped the cancelled verification's pipeline \
+                     before the shutdown: {:?}",
+                    wide.run.warnings()
+                );
+                error
+            };
+            assert!(error.to_string().contains("shut down"), "{shape}: {error}");
+            let kinds = kinds_of_log(&wide);
+            assert!(
+                kinds.contains(&"question_answered"),
+                "{shape}: the decline is durable: {kinds:?}"
+            );
+            resumed_into_the_interrupted_terminal(wide, shape);
+        }
+    }
+
+    #[test]
+    fn a_synced_append_error_on_the_decline_leaves_the_cancelled_verification_to_the_resume() {
+        let tasks = three();
+        let armed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut wide = Wide::durable(
+            "coordinator-cancelled-decline-append-error",
+            &tasks,
+            3,
+            WidePlans::default(),
+            holding(&tasks, &[]),
+        );
+        wide.env.answers = std::sync::Arc::new(DecliningOnceArmed(std::sync::Arc::clone(&armed)));
+        let runner = std::sync::Arc::clone(&wide.env.runner);
+        let harness = std::sync::Arc::clone(&wide.env.harness);
+        let mut scheduler = cancelling(&runner, sibling_parked_on, move |view| {
+            if !armed.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                harness
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .arm(
+                        crate::topology::effects::EffectSiteId::Event(
+                            crate::topology::effects::EventSite::Append,
+                        ),
+                        crate::topology::effects::SubEffectPoint::Synced,
+                        crate::topology::effects::InjectionMode::ErrorReturn,
+                    )
+                    .expect("the Event append supports an error return after its sync");
+            }
+            released(view, |invocation| attempt_key(invocation) == Some(2))
+        });
+        let error =
+            drive(&mut wide, Some(&mut scheduler)).expect_err("the append error ends the command");
+        drop(scheduler);
+        let text = error.to_string();
+        assert!(
+            text.contains("question_answered") && text.contains("was entered and returned"),
+            "the protocol's report names the decline: {text}"
+        );
+        assert!(
+            text.contains("the proven prefix contains the line"),
+            "the decline's line survives: {text}"
+        );
+        assert!(wide.run.fold().is_poisoned());
+        assert_eq!(
+            kinds_of_log(&wide).last(),
+            Some(&"question_answered"),
+            "nothing was appended after the error"
+        );
+        resumed_into_the_interrupted_terminal(wide, "synced-append-error");
+    }
+
+    #[test]
+    fn an_unresolved_end_in_a_cancelled_verification_ends_the_command_and_the_resume_settles_it() {
+        use crate::engine::topology::scaffold::Ending;
+        let tasks = three();
+        let armed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut wide = Wide::durable(
+            "coordinator-cancelled-unresolved",
+            &tasks,
+            3,
+            WidePlans::default(),
+            holding(&tasks, &[]),
+        );
+        wide.env.answers = std::sync::Arc::new(DecliningOnceArmed(std::sync::Arc::clone(&armed)));
+        let gate = SequenceIdentities::new(SequenceId(1)).gate(0, 0);
+        wide.env.runner.unresolved_when_cancelled(gate.clone());
+        let runner = std::sync::Arc::clone(&wide.env.runner);
+        let mut scheduler = cancelling(&runner, sibling_parked_on, move |view| {
+            armed.store(true, std::sync::atomic::Ordering::SeqCst);
+            released(view, |invocation| attempt_key(invocation) == Some(2))
+        });
+        let error = drive(&mut wide, Some(&mut scheduler))
+            .expect_err("nothing is appended over a process that may still run");
+        drop(scheduler);
+        let message = error.to_string();
+        assert!(
+            message.contains(&gate.render()) && message.contains("unresolved"),
+            "the command ends naming the cancelled gate: {message}"
+        );
+        assert!(
+            wide.env
+                .runner
+                .endings()
+                .contains(&(gate, Ending::CancelledUnresolved)),
+            "{:?}",
+            wide.env.runner.endings()
+        );
+        let kinds = kinds_of_log(&wide);
+        assert!(
+            kinds.contains(&"question_answered"),
+            "the decline is durable: {kinds:?}"
+        );
+        resumed_into_the_interrupted_terminal(wide, "unresolved-end");
+    }
+
+    struct ArmsOnDecline {
+        inner: crate::engine::topology::seams::HarnessTopologyHooks,
+        harness: std::sync::Arc<std::sync::Mutex<crate::topology::effects::HookHarness>>,
+        point: crate::topology::effects::SubEffectPoint,
+        declined: bool,
+        armed: bool,
+    }
+
+    impl TopologyHooks for ArmsOnDecline {
+        fn effects(&mut self) -> &mut dyn crate::workspace_manager::EffectHooks {
+            self.inner.effects()
+        }
+
+        fn rundir(&mut self) -> &mut dyn crate::rundir::RunDirHooks {
+            self.inner.rundir()
+        }
+
+        fn events(&mut self) -> &mut dyn crate::events::log::EventHooks {
+            self.inner.events()
+        }
+
+        fn container(&mut self) -> &mut dyn crate::runner::container::ContainerHooks {
+            self.inner.container()
+        }
+
+        fn spawn(&mut self) -> &mut dyn crate::agent::proc::SpawnHooks {
+            self.inner.spawn()
+        }
+
+        fn folded(&mut self, fold: &TopologyFold, events: &[TopologyEvent]) {
+            self.inner.folded(fold, events);
+            let Some(last) = events.last() else {
+                return;
+            };
+            if last.body.kind() == "question_answered" {
+                self.declined = true;
+            }
+            if !self.armed
+                && self.declined
+                && matches!(&last.body, TopologyEventBody::MergeVerificationCharged { data }
+                    if data.sequence == SequenceId(1))
+            {
+                self.armed = true;
+                self.harness
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .arm(
+                        crate::topology::effects::EffectSiteId::Event(
+                            crate::topology::effects::EventSite::Append,
+                        ),
+                        self.point,
+                        crate::topology::effects::InjectionMode::ErrorReturn,
+                    )
+                    .expect("the Event append supports an error return at the point");
+            }
+        }
+    }
+
+    #[test]
+    fn a_failed_append_of_the_cancelled_verifications_terminal_resumes_from_the_surviving_prefix() {
+        use crate::topology::effects::SubEffectPoint;
+        let tasks = [
+            WideTask::independent("alpha"),
+            WideTask::independent("beta"),
+        ];
+        for (shape, point, present) in [
+            ("sync", SubEffectPoint::Synced, true),
+            ("partial-write", SubEffectPoint::Written, false),
+        ] {
+            let armed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let mut wide = Wide::durable(
+                &format!("coordinator-cancelled-terminal-error-{shape}"),
+                &tasks,
+                3,
+                WidePlans::default(),
+                holding(&tasks, &[]),
+            );
+            wide.env.answers =
+                std::sync::Arc::new(DecliningOnceArmed(std::sync::Arc::clone(&armed)));
+            let run_id = wide.run.fold().started().expect("started").run_id.clone();
+            let pin = crate::engine::topology::integrate::prepared_pin_ref(&run_id, SequenceId(1));
+            let runner = std::sync::Arc::clone(&wide.env.runner);
+            let mut scheduler = cancelling(&runner, sibling_parked_on, move |view| {
+                armed.store(true, std::sync::atomic::Ordering::SeqCst);
+                released(view, |invocation| {
+                    matches!(invocation, InvocationId::Sequence { .. })
+                })
+            });
+            let mut hooks = ArmsOnDecline {
+                inner: wide.env.hooks(),
+                harness: std::sync::Arc::clone(&wide.env.harness),
+                point,
+                declined: false,
+                armed: false,
+            };
+            let pipelines = wide.env.pipelines();
+            let result = wide.run.run_concurrently(
+                &wide.env.seams(),
+                &pipelines,
+                &mut hooks,
+                Some(&mut scheduler),
+            );
+            drop(scheduler);
+            assert!(
+                hooks.armed,
+                "{shape}: the verification's `merge_verification_charged` was folded after the \
+                 decline, so the fault was armed on the next append, the cancelled verification's \
+                 terminal"
+            );
+            let error = result.expect_err("the terminal's append error ends the command");
+            let text = error.to_string();
+            assert!(
+                text.contains("merge_verification_interrupted")
+                    && text.contains("was entered and returned"),
+                "{shape}: the protocol's report names the cancelled verification's terminal: {text}"
+            );
+            assert!(
+                text.contains(if present {
+                    "the proven prefix contains the line"
+                } else {
+                    "the proven prefix does not contain the line"
+                }),
+                "{shape}: {text}"
+            );
+            let kinds = kinds_of_log(&wide);
+            assert_eq!(
+                kinds.last(),
+                Some(if present {
+                    &"merge_verification_interrupted"
+                } else {
+                    &"merge_verification_charged"
+                }),
+                "{shape}: the surviving prefix is the one the report names: {kinds:?}"
+            );
+            let carried = wide.env.durable_events().len();
+            let (_, mut resumed) = wide
+                .resume(
+                    "inc-2",
+                    RecordingRunner::new().answering(wide_responder(&tasks, &[])),
+                    crate::engine::topology::select::Ceiling::unlimited(),
+                )
+                .unwrap_or_else(|error| panic!("{shape}: the next process resumes: {error}"));
+            let events = resumed.env.durable_events();
+            let kinds = kinds_of(&events);
+            let resumed_at = position(&kinds, "run_resumed", 0);
+            let appended: Vec<&str> = kinds.get(carried..resumed_at).unwrap_or_default().to_vec();
+            assert_eq!(
+                appended.contains(&"merge_verification_interrupted"),
+                !present,
+                "{shape}: recovery appends the terminal only when the surviving prefix lacks it: \
+                 {kinds:?}"
+            );
+            assert_eq!(
+                resumed
+                    .env
+                    .fixture
+                    .manager
+                    .direct_ref_target(pin.as_str())
+                    .expect("the pin is readable"),
+                None,
+                "{shape}: the prepared pin is gone after the resume"
+            );
+            let progress = drive(&mut resumed, None)
+                .unwrap_or_else(|error| panic!("{shape}: the resumed run completes: {error}"));
+            assert_eq!(outcome_of(&progress), RunOutcome::Complete, "{shape}");
+            let events = resumed.env.durable_events();
+            assert_eq!(
+                terminals_of(&events, SequenceId(1)),
+                vec!["merge_verification_interrupted"],
+                "{shape}: one terminal for sequence 1: {:?}",
+                kinds_of(&events)
+            );
+            recorded_before_its_terminal(
+                &events,
+                position(&kinds_of(&events), "question_answered", 0),
+                SequenceId(1),
+                if present {
+                    LINEAGE_CANCELLED
+                } else {
+                    RECOVERY_CANCELLED
+                },
+            );
+            replay_equals_live(&resumed);
+        }
+    }
+
+    #[test]
+    fn a_late_passing_result_of_a_cancelled_verification_is_discarded_and_nothing_is_published() {
+        let tasks = three();
+        let mut wide = Wide::started_with(
+            "coordinator-cancelled-late-pass",
+            &tasks,
+            3,
+            WidePlans::default(),
+            holding(&tasks, &[]),
+        );
+        let runner = std::sync::Arc::clone(&wide.env.runner);
+        let mut scheduler = cancelling(&runner, sibling_parked_and_declined_on, |view| {
+            released(view, |invocation| {
+                matches!(invocation, InvocationId::Sequence { .. })
+            })
+            .or_else(|| released(view, |invocation| attempt_key(invocation) == Some(2)))
+        });
+        let progress = drive(&mut wide, Some(&mut scheduler))
+            .expect("the decline fails beta's lineage and the run goes on to its end");
+        drop(scheduler);
+        assert_eq!(outcome_of(&progress), RunOutcome::Complete);
+        let events = wide.env.durable_events();
+        let kinds = kinds_of(&events);
+        let gate = SequenceIdentities::new(SequenceId(1)).gate(0, 0);
+        assert!(
+            wide.env
+                .runner
+                .endings()
+                .contains(&(gate, crate::engine::topology::scaffold::Ending::Completed)),
+            "the verification's gate, held at the decline, was released after it to pass: {:?}",
+            wide.env.runner.endings()
+        );
+        assert!(
+            !events.iter().any(|event| {
+                matches!(&event.body,
+                    TopologyEventBody::MergePrepared { data } if data.sequence == SequenceId(1))
+                    || matches!(&event.body,
+                        TopologyEventBody::TaskMerged { data } if data.sequence == SequenceId(1))
+            }),
+            "nothing is published for the cancelled verification: {kinds:?}"
+        );
+        cancelled_terminal_after(
+            &events,
+            position(&kinds, "question_answered", 0),
+            SequenceId(1),
+            LINEAGE_CANCELLED,
+        );
+        assert!(
+            wide.run.discarded() >= 1
+                && wide
+                    .run
+                    .warnings()
+                    .iter()
+                    .any(|warning| warning.contains("its late result will be discarded")),
+            "the late result was discarded: {:?}",
+            wide.run.warnings()
+        );
+        assert_eq!(count(&events, "task_merged"), 2, "{kinds:?}");
+        assert!(wide.run.invocations_balance(), "{:?}", wide.run.warnings());
+        replay_equals_live(&wide);
+    }
+
+    #[test]
+    fn a_result_that_arrived_before_the_decline_is_dropped_and_its_verification_settles_interrupted()
+     {
+        let tasks = three();
+        let armed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut wide = Wide::started_with(
+            "coordinator-cancelled-after-arrival",
+            &tasks,
+            3,
+            WidePlans::default(),
+            holding(&tasks, &[]),
+        );
+        wide.env.answers = std::sync::Arc::new(DecliningOnceArmed(std::sync::Arc::clone(&armed)));
+        let runner = std::sync::Arc::clone(&wide.env.runner);
+        let mut planted: Option<Vec<TopologyEventBody>> = None;
+        let mut arrived_beside_a_snapshot = false;
+        let mut scheduler = Scheduler::scripted(
+            &runner,
+            Box::new(|view: &Quiescent<'_>| {
+                if count(view.run.events(), "task_merged") == 0 {
+                    return released(view, |invocation| attempt_key(invocation) == Some(0));
+                }
+                let Some(open) = view.run.fold().transaction() else {
+                    return released(view, |invocation| attempt_key(invocation) == Some(1));
+                };
+                let verifying = view
+                    .live
+                    .iter()
+                    .any(|(_, identity)| matches!(identity, Identity::Verification { .. }));
+                let gamma_gating = view.invoking.iter().any(|invocation| {
+                    attempt_key(invocation) == Some(2)
+                        && matches!(role_of(invocation), Some(AttemptRole::Gate(_)))
+                });
+                if verifying {
+                    if !gamma_gating {
+                        return released(view, |invocation| worker(invocation) == Some(TaskKey(2)));
+                    }
+                    return released(view, |invocation| {
+                        matches!(invocation, InvocationId::Sequence { .. })
+                    });
+                }
+                if planted.is_none() {
+                    arrived_beside_a_snapshot = gamma_gating;
+                    planted = Some(sibling_parked_on(
+                        view.run,
+                        TaskKey(1),
+                        open.candidate.clone(),
+                    ));
+                }
+                if let Some(events) = planted.as_mut() {
+                    if !events.is_empty() {
+                        return Some(Release::Append(Box::new(events.remove(0))));
+                    }
+                }
+                armed.store(true, std::sync::atomic::Ordering::SeqCst);
+                released(view, |invocation| attempt_key(invocation) == Some(2))
+            }),
+        );
+        let progress = drive(&mut wide, Some(&mut scheduler))
+            .expect("the decline fails beta's lineage and the run goes on to its end");
+        drop(scheduler);
+        assert!(
+            arrived_beside_a_snapshot,
+            "the verification's result arrived while gamma's gate held its snapshot"
+        );
+        assert_eq!(outcome_of(&progress), RunOutcome::Complete);
+        let events = wide.env.durable_events();
+        let kinds = kinds_of(&events);
+        assert!(
+            !events.iter().any(|event| {
+                matches!(&event.body,
+                    TopologyEventBody::MergePrepared { data } if data.sequence == SequenceId(1))
+            }),
+            "the arrived result is dropped, never prepared: {kinds:?}"
+        );
+        cancelled_terminal_after(
+            &events,
+            position(&kinds, "question_answered", 0),
+            SequenceId(1),
+            LINEAGE_CANCELLED,
+        );
+        assert_eq!(
+            terminals_of(&events, SequenceId(1)),
+            vec!["merge_verification_interrupted"],
+            "{kinds:?}"
+        );
+        recorded_before_its_terminal(
+            &events,
+            position(&kinds, "question_answered", 0),
+            SequenceId(1),
+            LINEAGE_CANCELLED,
+        );
+        assert!(wide.run.invocations_balance(), "{:?}", wide.run.warnings());
+        replay_equals_live(&wide);
+    }
+
+    #[test]
+    fn a_halting_decline_records_the_passes_its_cancelled_verification_charged_before_the_closures_terminal()
+     {
+        let tasks = three();
+        let armed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut wide = Wide::started_with(
+            "coordinator-cancelled-halting-recorded",
+            &tasks,
+            3,
+            reviewing(3),
+            holding(&tasks, &[]),
+        );
+        wide.env.answers = std::sync::Arc::new(DecliningOnceArmed(std::sync::Arc::clone(&armed)));
+        wide.env.halts_run = true;
+        let runner = std::sync::Arc::clone(&wide.env.runner);
+        let arming = std::sync::Arc::clone(&armed);
+        let mut planted: Option<Vec<TopologyEventBody>> = None;
+        let mut scheduler = Scheduler::scripted(
+            &runner,
+            Box::new(move |view: &Quiescent<'_>| {
+                if count(view.run.events(), "task_merged") == 0 {
+                    return released(view, |invocation| attempt_key(invocation) == Some(0));
+                }
+                if let Some(events) = planted.as_mut() {
+                    if !events.is_empty() {
+                        return Some(Release::Append(Box::new(events.remove(0))));
+                    }
+                    arming.store(true, std::sync::atomic::Ordering::SeqCst);
+                    return released(view, |invocation| attempt_key(invocation) == Some(2))
+                        .or_else(|| released(view, sequence_invocation));
+                }
+                let Some(open) = view.run.fold().transaction() else {
+                    return released(view, |invocation| attempt_key(invocation) == Some(1));
+                };
+                if view
+                    .invoking
+                    .iter()
+                    .any(|invocation| review_pass(invocation, 2))
+                {
+                    planted = Some(sibling_parked_on(
+                        view.run,
+                        TaskKey(1),
+                        open.candidate.clone(),
+                    ));
+                    return Some(Release::Append(Box::new(
+                        planted.as_mut().expect("planted").remove(0),
+                    )));
+                }
+                released(view, sequence_invocation)
+            }),
+        );
+        let progress = drive(&mut wide, Some(&mut scheduler))
+            .expect("the halting decline ends the run through its closure");
+        drop(scheduler);
+        assert_eq!(outcome_of(&progress), RunOutcome::Halted);
+        let events = wide.env.durable_events();
+        let kinds = kinds_of(&events);
+        let decline = position(&kinds, "question_answered", 0);
+        let (record, terminal) =
+            recorded_before_its_terminal(&events, decline, SequenceId(1), LINEAGE_CANCELLED);
+        let interrupted: Vec<usize> = kinds
+            .iter()
+            .enumerate()
+            .filter(|(_, kind)| **kind == "attempt_interrupted")
+            .map(|(index, _)| index)
+            .collect();
+        assert!(
+            !interrupted.is_empty()
+                && interrupted
+                    .iter()
+                    .all(|index| record < *index && *index < terminal),
+            "the closure settles the attempts still in flight after the record and before the \
+             cancelled verification's terminal: {kinds:?}"
+        );
+        assert_eq!(
+            kinds.last(),
+            Some(&"run_finished"),
+            "the run's end follows the terminal: {kinds:?}"
+        );
+        records_both_passes(&wide, SequenceId(1));
+        assert!(wide.run.fold().transaction().is_none());
+        assert!(wide.run.invocations_balance(), "{:?}", wide.run.warnings());
+        replay_equals_live(&wide);
+    }
+
+    #[test]
+    fn a_registry_stop_after_a_lineage_failure_records_the_cancelled_verifications_passes_and_leaves_its_terminal_to_the_resume()
+     {
+        let tasks = three();
+        let mut wide = Wide::durable(
+            "coordinator-cancelled-registry-stop",
+            &tasks,
+            3,
+            reviewing(3),
+            holding(&tasks, &[]),
+        );
+        let mut planted: Option<Vec<TopologyEventBody>> = None;
+        let (error, at_shutdown) = stopped_inside_a_retrys_wait(
+            &mut wide,
+            TearAt::Fold(candidate_created_of_gamma),
+            Box::new(move |view: &Quiescent<'_>| {
+                if count(view.run.events(), "task_merged") == 0 {
+                    return released(view, |invocation| attempt_key(invocation) == Some(0));
+                }
+                if let Some(events) = planted.as_mut() {
+                    if !events.is_empty() {
+                        return Some(Release::Append(Box::new(events.remove(0))));
+                    }
+                    return released(view, |invocation| attempt_key(invocation) == Some(2));
+                }
+                let Some(open) = view.run.fold().transaction() else {
+                    return released(view, |invocation| attempt_key(invocation) == Some(1));
+                };
+                let gamma_reviewing = view.invoking.iter().any(|invocation| {
+                    attempt_key(invocation) == Some(2)
+                        && matches!(role_of(invocation), Some(AttemptRole::ReviewPass(_)))
+                });
+                if gamma_reviewing
+                    && view
+                        .invoking
+                        .iter()
+                        .any(|invocation| review_pass(invocation, 2))
+                {
+                    planted = Some(sibling_failed_on(
+                        view.run,
+                        TaskKey(1),
+                        open.candidate.clone(),
+                    ));
+                    return Some(Release::Append(Box::new(
+                        planted.as_mut().expect("planted").remove(0),
+                    )));
+                }
+                released(view, |invocation| {
+                    attempt_key(invocation) == Some(2)
+                        && !matches!(role_of(invocation), Some(AttemptRole::ReviewPass(_)))
+                })
+                .or_else(|| {
+                    released(view, |invocation| {
+                        sequence_invocation(invocation) && !review_pass(invocation, 2)
+                    })
+                })
+            }),
+        );
+        let sequence = SequenceId(1);
+        let events = wide.env.durable_events();
+        let kinds = kinds_of(&events);
+        let carrier = events
+            .iter()
+            .position(|event| {
+                matches!(&event.body, TopologyEventBody::AttemptFinished { data }
+                    if data.key == TaskKey(3)
+                        && matches!(data.settlement,
+                            crate::topology::events::AttemptSettlement::Closed {
+                                transition: crate::topology::events::SettlementTransition::Failed { .. },
+                                ..
+                            }))
+            })
+            .unwrap_or_else(|| panic!("the sibling's failed settlement was appended: {kinds:?}"));
+        let record = position(&kinds, "merge_verification_charged", 0);
+        assert!(
+            carrier < record,
+            "the lineage failure precedes the record: {kinds:?}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("shut down")
+                && message.contains(
+                    "nothing was appended but the record of the review passes a verification \
+                     had charged"
+                ),
+            "the command ends on the shutdown, which says what it appended: {message}"
+        );
+        let warnings = wide.run.warnings().join("\n");
+        assert!(
+            warnings.contains("a registry access's wait inside a transition met a shutdown"),
+            "gamma's settlement's wait answered the shutdown and stopped the run: {warnings}"
+        );
+        assert_eq!(
+            kinds_of(wide.run.events()).get(at_shutdown..),
+            Some(&["merge_verification_charged"][..]),
+            "nothing but the record, made past the stop by `finish`, was appended after the \
+             wait answered the shutdown"
+        );
+        records_both_passes(&wide, sequence);
+        assert!(
+            terminals_of(&events, sequence).is_empty(),
+            "no terminal is appended for the cancelled verification in this process: {kinds:?}"
+        );
+        assert!(
+            verifying(wide.run.fold(), sequence),
+            "the fold still holds the cancelled verification open: {:?}",
+            wide.run.fold().transaction()
+        );
+        assert_eq!(
+            wide.run.fold().task_state(TaskKey(1)),
+            Some(crate::topology::fold::TaskState::Failed)
+        );
+        replay_equals_live(&wide);
+        published_as_the_log_authorizes(&wide);
+        assert!(wide.run.invocations_balance(), "{warnings}");
+        assert!(
+            wide.run.stopped().is_none(),
+            "the run reopens when its coordinator is gone"
+        );
+        resumed_into_the_interrupted_terminal(wide, "registry-stop");
+    }
+
+    #[test]
+    #[ignore = "spawned by a_kill_at_the_declines_synced_append_resumes_into_the_interrupted_terminal"]
+    fn cancelled_verification_kill_child() {
+        let dir = std::path::PathBuf::from(
+            std::env::var_os("UPSTROKE_TEST_KILL_DIR").expect("the parent names the handoff"),
+        );
+        let tasks = three();
+        let armed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut wide = Wide::durable(
+            "coordinator-cancelled-kill",
+            &tasks,
+            3,
+            WidePlans::default(),
+            holding(&tasks, &[]),
+        );
+        wide.env.answers = std::sync::Arc::new(DecliningOnceArmed(std::sync::Arc::clone(&armed)));
+        hand_the_kill_root_off(&dir, &wide.env.fixture.root);
+        let runner = std::sync::Arc::clone(&wide.env.runner);
+        let harness = std::sync::Arc::clone(&wide.env.harness);
+        let mut scheduler = cancelling(&runner, sibling_parked_on, move |view| {
+            if !armed.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                harness
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .arm(
+                        crate::topology::effects::EffectSiteId::Event(
+                            crate::topology::effects::EventSite::Append,
+                        ),
+                        crate::topology::effects::SubEffectPoint::Synced,
+                        crate::topology::effects::InjectionMode::Kill,
+                    )
+                    .expect("the Event append supports a kill after its sync");
+            }
+            released(view, |invocation| attempt_key(invocation) == Some(2))
+        });
+        let _ = drive(&mut wide, Some(&mut scheduler));
+        panic!("the kill at the decline's synced append must have taken this process");
+    }
+
+    fn the_decline_kill_resumes_into_the_interrupted_terminal(
+        handoff: &std::path::Path,
+        temporary: &std::path::Path,
+    ) {
+        let mut environment = vec![("UPSTROKE_TEST_KILL_DIR", handoff.as_os_str())];
+        environment.extend(crate::engine::topology::scaffold::child_temporary_of(
+            temporary,
+        ));
+        let status = crate::workspace_manager::fixture::run_kill_child_within(
+            "engine::topology::coordinator::tests::cancelled_verification_kill_child",
+            &environment,
+            crate::engine::topology::scaffold::KILL_CHILD_BOUND,
+        )
+        .expect("the kill child ended in time");
+        assert!(
+            crate::workspace_manager::fixture::died_by_abort(&status),
+            "the child died at the decline's synced append: {status:?}"
+        );
+        let env = crate::engine::topology::scaffold::WideEnv::adopted(
+            the_handed_off_kill_root(handoff),
+            &three(),
+            3,
+            WidePlans::default(),
+        );
+        let kinds = kinds_of(&env.durable_events());
+        assert_eq!(
+            kinds.last(),
+            Some(&"question_answered"),
+            "the child died with the decline synced and nothing after it: {kinds:?}"
+        );
+        let (_, resumed) = env
+            .resume(
+                "inc-2",
+                RecordingRunner::new().answering(wide_responder(&three(), &[])),
+                crate::engine::topology::select::Ceiling::unlimited(),
+            )
+            .expect("the next process resumes the killed run");
+        let resumed_kinds = kinds_of_log(&resumed);
+        assert!(resumed_kinds.contains(&"run_resumed"), "{resumed_kinds:?}");
+        let carried = kinds.len();
+        let events = resumed.env.durable_events();
+        let resumed_at = position(&resumed_kinds, "run_resumed", 0);
+        let terminal =
+            cancelled_terminal_after(&events, carried, SequenceId(1), RECOVERY_CANCELLED);
+        assert!(terminal < resumed_at, "{resumed_kinds:?}");
+        let mut resumed = resumed;
+        let progress = drive(&mut resumed, None).expect("the resumed run completes");
+        assert_eq!(outcome_of(&progress), RunOutcome::Complete);
+        let events = resumed.env.durable_events();
+        assert_eq!(
+            terminals_of(&events, SequenceId(1)),
+            vec!["merge_verification_interrupted"],
+            "{:?}",
+            kinds_of(&events)
+        );
+        assert_eq!(count(&events, "task_merged"), 2);
+        replay_equals_live(&resumed);
+    }
+
+    #[test]
+    fn a_kill_at_the_declines_synced_append_resumes_into_the_interrupted_terminal() {
+        let handoff = crate::engine::topology::scaffold::kill_dir("coordinator-cancelled-kill");
+        let temporary = crate::engine::topology::scaffold::kill_dir("tmp");
+        the_decline_kill_resumes_into_the_interrupted_terminal(handoff.path(), temporary.path());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_kill_at_the_declines_synced_append_resumes_through_a_non_utf8_handoff_directory() {
+        let tree = crate::workspace_manager::fixture::scratch("coordinator-kill-handoff");
+        let handoff = tree.path().join(a_name_no_string_can_spell());
+        crate::workspace_manager::fixture::create_dir(&handoff);
+        assert!(
+            handoff.to_str().is_none(),
+            "the handoff directory's name is one no string can spell: {}",
+            handoff.display()
+        );
+        let temporary = crate::engine::topology::scaffold::kill_dir("tmp");
+        the_decline_kill_resumes_into_the_interrupted_terminal(&handoff, temporary.path());
+    }
+
+    #[test]
+    fn the_kill_handoff_hands_the_parent_back_a_root_no_string_can_spell() {
+        let handoff = crate::workspace_manager::fixture::scratch("coordinator-kill-root");
+        let root = handoff.path().join(a_name_no_string_can_spell());
+        assert!(
+            root.to_str().is_none(),
+            "the root's name is one no string can spell: {}",
+            root.display()
+        );
+        hand_the_kill_root_off(handoff.path(), &root);
+        assert_eq!(
+            the_handed_off_kill_root(handoff.path()).as_os_str(),
+            root.as_os_str(),
+            "the parent reads back the child's root, byte for byte"
+        );
+    }
+
+    #[cfg(unix)]
+    fn hand_the_kill_root_off(handoff: &std::path::Path, root: &std::path::Path) {
+        use std::os::unix::ffi::OsStrExt as _;
+        crate::workspace_manager::fixture::write_file(
+            &handoff.join(KILL_HANDOFF),
+            root.as_os_str().as_bytes(),
+        );
+    }
+
+    #[cfg(windows)]
+    fn hand_the_kill_root_off(handoff: &std::path::Path, root: &std::path::Path) {
+        use std::os::windows::ffi::OsStrExt as _;
+        let bytes: Vec<u8> = root
+            .as_os_str()
+            .encode_wide()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        crate::workspace_manager::fixture::write_file(&handoff.join(KILL_HANDOFF), &bytes);
+    }
+
+    #[cfg(unix)]
+    fn the_handed_off_kill_root(handoff: &std::path::Path) -> std::path::PathBuf {
+        use std::os::unix::ffi::OsStringExt as _;
+        std::path::PathBuf::from(std::ffi::OsString::from_vec(
+            std::fs::read(handoff.join(KILL_HANDOFF)).expect("the child left its fixture root"),
+        ))
+    }
+
+    #[cfg(windows)]
+    fn the_handed_off_kill_root(handoff: &std::path::Path) -> std::path::PathBuf {
+        use std::os::windows::ffi::OsStringExt as _;
+        let bytes =
+            std::fs::read(handoff.join(KILL_HANDOFF)).expect("the child left its fixture root");
+        let units: Vec<u16> = bytes
+            .chunks(2)
+            .map(|pair| match *pair {
+                [low, high] => u16::from_le_bytes([low, high]),
+                _ => panic!(
+                    "the handoff holds whole UTF-16 code units, and it is {} bytes",
+                    bytes.len()
+                ),
+            })
+            .collect();
+        std::path::PathBuf::from(std::ffi::OsString::from_wide(&units))
+    }
+
+    #[cfg(unix)]
+    fn a_name_no_string_can_spell() -> std::ffi::OsString {
+        use std::os::unix::ffi::OsStrExt as _;
+        std::ffi::OsStr::from_bytes(b"unspellable-\xff").to_os_string()
+    }
+
+    #[cfg(windows)]
+    fn a_name_no_string_can_spell() -> std::ffi::OsString {
+        use std::os::windows::ffi::OsStringExt as _;
+        let mut units: Vec<u16> = "unspellable-".encode_utf16().collect();
+        units.push(0xD800);
+        std::ffi::OsString::from_wide(&units)
     }
 
     #[derive(Default)]
@@ -19272,6 +20875,7 @@ mod tests {
             decline < record,
             "the record follows the decline that released the verification: {kinds:?}"
         );
+        recorded_before_its_terminal(&events, decline, SequenceId(1), LINEAGE_CANCELLED);
         records_both_passes(&wide, SequenceId(1));
         replay_equals_live(&wide);
     }
@@ -19339,6 +20943,7 @@ mod tests {
             "the result was accepted before the decline: {:?}",
             wide.run.warnings()
         );
+        recorded_before_its_terminal(&events, decline, SequenceId(1), LINEAGE_CANCELLED);
         records_both_passes(&wide, SequenceId(1));
         replay_equals_live(&wide);
     }

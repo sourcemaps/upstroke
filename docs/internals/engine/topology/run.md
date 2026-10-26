@@ -1624,6 +1624,23 @@ verification's pin, staging and the snapshots `JudgeNames::Integration` owns for
 its sequence — never another sequence's or an attempt's, which at width > 1 may
 still be another pipeline's (R-W).
 
+## `pub(super) fn settle_cancelled_verification<O: Operator + ?Sized>(`
+
+The live settlement of a verification a lineage failure cancelled, which the
+coordinator makes once `verify` has abandoned it and the passes it charged, if
+any, are recorded: the same [`closure::InFlight`] the halt closure builds for it,
+and the same two steps [`close_run`] takes for each item — its terminal,
+`merge_verification_interrupted` with the cancellation's detail, appended through
+the run's emitter, then [`reclaim_interrupted`] with the operator's registry
+hooks, so its pin is pruned expected-old, its staging worktree and intent removed
+and its sequence's snapshots reclaimed only after the terminal is durable.
+
+### Errors
+
+A refusal, with nothing appended, when the fold holds no verification of that
+sequence that a lineage failure cancelled; the append-error protocol's report
+for the terminal; and the reclaim's own refusals.
+
 ## `fn complete_promotions<O: Operator + ?Sized>(`
 
 Step (3): each promoting generation's candidates ref (created if absent),

@@ -1471,7 +1471,11 @@ closure), never abandoned".
 * A **`VerificationStarted`** transaction is settled
   `merge_verification_interrupted`, its `prepared/<seq>` pin deleted
   expected-old at the proposal the record names and its staging worktree
-  reclaimed, and the candidate re-verifies under a new sequence.
+  reclaimed, and the candidate re-verifies under a new sequence. A
+  verification a lineage failure cancelled — its candidate's task is
+  `Failed`, and the fold keeps its transaction open until this terminal —
+  is settled the same way, with a detail that says so: its candidate,
+  whose task failed, is not verified again.
   `Authorized::from_fold` returns `None` for it — this build no longer
   refuses that `None`, it interrupts. The pin was checked against its record
   by [`reclaim_stale_residue`] before any append; a substituted pin refused
