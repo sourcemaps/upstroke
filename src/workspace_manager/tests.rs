@@ -21579,3 +21579,82 @@ fn a_removal_with_no_store_refuses_every_target_that_names_no_entry_of_its_own_s
     }
     report_cases(&cases);
 }
+
+/// T-C3-SEQ, the witness `PR5-RD-003-A-PRUNE-STRANDS-A-CHECKOUT-WHOSE-GITDIR-IS-GONE`'s
+/// file asks for: its own sequence, run to the state its step 3 refused in. A
+/// healthy `alpha`, and a `charlie` whose registration has lost its `gitdir`.
+/// Since #329 no engine removal prunes, so a prune that no engine process starts
+/// deletes `charlie`'s entry, and `alpha`'s removal, the store's last
+/// registration, takes the emptied store, where #308's prune took both. With
+/// `charlie`'s `.git` naming its deleted entry, both of `charlie`'s removals
+/// converge, through closure 3's arm and then over the absent target. At C both
+/// refuse with the checkout kept, as the file's executed sequence recorded. The
+/// control runs the same sequence with that `.git` naming another repository's
+/// store (case 3): both removals refuse and the checkout's bytes stay as they
+/// were, the same at C and under F.
+#[test]
+fn a_checkout_whose_gitdir_is_gone_converges_twice_once_a_prune_has_emptied_the_store() {
+    let shapes = [
+        ("its own store", "f-closure3-sequence", true),
+        ("another repository's store", "f-closure3-sequence-control", false),
+    ];
+    let mut cases = Vec::new();
+    for (label, tag, own_store) in shapes {
+        let fixture = Fixture::created(tag);
+        let alpha = fixture.add_task(&mut NoHooks, "alpha", 1);
+        let charlie = fixture.add_task(&mut NoHooks, "charlie", 1);
+        let alpha_path = fixture.manager.slot_path(&alpha);
+        let charlie_path = fixture.manager.slot_path(&charlie);
+        let charlie_admin = fixture
+            .manager
+            .revalidate_removal(&charlie_path)
+            .expect("admin dir")
+            .expect("registered");
+        fs::remove_file(charlie_admin.join("gitdir"))
+            .expect("charlie's registration loses its gitdir");
+        let store = fixture.manager.common_git_dir().join("worktrees");
+        git(&fixture.base, &["worktree", "prune", "--expire=now"]);
+        assert!(
+            !charlie_admin.exists() && store.is_dir(),
+            "{label}: a prune that no engine process starts deletes charlie's entry, not alpha's"
+        );
+        fixture
+            .manager
+            .remove_worktree(&mut NoHooks, &alpha)
+            .expect("alpha's removal");
+        assert!(
+            !alpha_path.exists() && !store.exists(),
+            "{label}: alpha's removal, the store's last registration, takes the emptied store"
+        );
+        if !own_store {
+            let name = charlie_admin.file_name().expect("an entry name");
+            let other = fixture.root.join("other-store");
+            let entry = other.join(".git").join("worktrees").join(name);
+            fs::write(
+                charlie_path.join(".git"),
+                format!("gitdir: {}\n", as_git_writes_it(&entry)),
+            )
+            .expect("charlie's .git names another repository's store");
+        }
+        let before = tree_bytes(&charlie_path);
+        for attempt in ["charlie's forced removal", "and its retry"] {
+            let removed = fixture.manager.remove_worktree(&mut NoHooks, &charlie);
+            let after = tree_bytes(&charlie_path);
+            let outcome = match (removed, own_store) {
+                (Ok(()), true) if after.is_empty() => Ok(()),
+                (Err(UpstrokeError::RegistryRefused { message }), false)
+                    if message.contains("failed to read") && after == before =>
+                {
+                    Ok(())
+                }
+                (other, _) => Err(format!(
+                    "{other:?}, the checkout as it was: {}",
+                    after == before
+                )),
+            };
+            cases.push((format!("{label}: {attempt}"), outcome));
+        }
+        assert!(!store.exists(), "{label}: no store is made");
+    }
+    report_cases(&cases);
+}
