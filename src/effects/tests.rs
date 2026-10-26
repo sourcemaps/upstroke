@@ -5373,8 +5373,8 @@ mod workflow;
 
 use ci_model::{
     CI_TARGETS, CI_WORKFLOW, GOLDEN_IMAGE_TOOLCHAIN, MSRV_COMMAND, MSRV_JOB, OVERRIDING_REPO_FILES,
-    QUEUE_LANE, RUSTFLAGS_KEY, TEST_COMMAND, TEST_WINDOWS_LABELS, TEST_WINDOWS_PLATFORM,
-    TEST_WINDOWS_RUNS_ON, WINDOWS_TEST_FLOOR, WINDOWS_TEST_WITNESS,
+    RUSTFLAGS_KEY, TEST_COMMAND, TEST_WINDOWS_LABELS, TEST_WINDOWS_PLATFORM, WINDOWS_TEST_FLOOR,
+    WINDOWS_TEST_WITNESS,
 };
 use workflow::{
     WORKFLOW_ESCAPES, ci_msrv_job_complaints, ci_test_job_complaints,
@@ -5487,25 +5487,25 @@ fn the_windows_leg_runs_these_fixtures_on_the_runner_each_lane_pins() {
 }
 
 #[test]
-fn the_windows_leg_routes_each_lane_to_the_runner_its_install_step_is_written_for() {
-    let labels = TEST_WINDOWS_LABELS
+fn the_windows_leg_runs_every_lane_on_the_self_hosted_guest_its_labels_name() {
+    let hosted: Vec<&str> = CI_TARGETS
         .iter()
-        .map(|label| format!("\"{label}\""))
-        .collect::<Vec<_>>()
-        .join(", ");
-    assert_eq!(
-        TEST_WINDOWS_RUNS_ON,
-        format!("${{{{ {QUEUE_LANE} && '{TEST_WINDOWS_PLATFORM}' || fromJSON('[{labels}]') }}}}"),
-        "the pinned `runs-on:` is not the lane test, the hosted platform and the self-hosted \
-         labels this contract names, so the install step's `if:` and the runner it is written \
-         for can disagree while both pins hold"
+        .map(|target| target.runner)
+        .filter(|runner| TEST_WINDOWS_LABELS.contains(runner))
+        .collect();
+    assert!(
+        TEST_WINDOWS_LABELS.contains(&"self-hosted") && hosted.is_empty(),
+        "the pinned label set {TEST_WINDOWS_LABELS:?} omits `self-hosted` or names the hosted \
+         runners {hosted:?}, so the equality the oracle holds `runs-on:` to can send the Windows \
+         suite to a GitHub-hosted machine on every lane with both sides edited together"
     );
     assert!(
         CI_TARGETS
             .iter()
             .any(|target| target.runner == TEST_WINDOWS_PLATFORM),
-        "the hosted lane's runner `{TEST_WINDOWS_PLATFORM}` is not one the cfg census models, \
-         so what its compilations set is not decided here"
+        "`{TEST_WINDOWS_PLATFORM}`, whose shell and cfg valuations the guest's steps are read \
+         under, is not one the cfg census models, so what its compilations set is not decided \
+         here"
     );
 }
 
@@ -5566,8 +5566,8 @@ fn the_windows_leg_counts_the_tests_it_ran() {
         assert!(
             WINDOWS_TEST_WITNESS.contains(&format!("${variable} -notmatch '^{tool} {version} '")),
             "the Windows leg's step does not refuse {asked} being other than the image's \
-             `{GOLDEN_IMAGE_TOOLCHAIN}` before running the suite, so the toolchain the install \
-             step pins and the one the suite runs on can differ with every pin matching"
+             `{GOLDEN_IMAGE_TOOLCHAIN}` before running the suite, so the guest can run the suite \
+             on a compiler its image does not carry with every pin matching"
         );
     }
     assert!(

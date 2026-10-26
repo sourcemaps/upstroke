@@ -629,6 +629,37 @@ fn reclaim_interrupted<O: Operator + ?Sized>(
     }
 }
 
+pub(super) fn settle_cancelled_verification<O: Operator + ?Sized>(
+    operator: &mut O,
+    seams: &RunSeams<'_>,
+    sequence: SequenceId,
+) -> Result<(), UpstrokeError> {
+    let cancelled = closure::in_flight(operator.driven().fold())
+        .into_iter()
+        .find(|item| {
+            matches!(
+                item,
+                closure::InFlight::Verification {
+                    sequence: held,
+                    cancelled: true,
+                    ..
+                } if *held == sequence
+            )
+        })
+        .ok_or_else(|| UpstrokeError::Refused {
+            message: format!(
+                "the verification of sequence {} was abandoned, and the fold holds no \
+                 verification of it that a lineage failure cancelled; nothing was appended",
+                sequence.0
+            ),
+        })?;
+    {
+        let (run, seams, hooks) = operator.parts();
+        run.emit(cancelled.interrupted(), seams, hooks)?;
+    }
+    reclaim_interrupted(operator, seams.manager, &cancelled)
+}
+
 fn complete_promotions<O: Operator + ?Sized>(
     operator: &mut O,
     manager: &WorkspaceManager,
