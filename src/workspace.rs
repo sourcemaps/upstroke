@@ -6898,7 +6898,10 @@ mod tests {
             tree,
             "the private index holds HEAD's tree"
         );
-        assert!(created, "the view's Git wrote the private index it was given");
+        assert!(
+            created,
+            "the view's Git wrote the private index it was given"
+        );
         assert!(!private.exists(), "the view removes its private index");
         assert_eq!(
             fs::read(&own).ok(),
