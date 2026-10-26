@@ -1512,9 +1512,11 @@ process-count check, and before its snapshot is released.
   deleted while the role ran is refused too; a verification verifies again in
   fresh snapshots at the next resume, and an attempt is settled interrupted
   and runs again in a new generation, its spend possibly repeating.
-- **After the charge.** Under O14(b) the refused pass is charged and recorded,
-  as the process-count refusal's pass already is; under O14(a) the order
-  changes nothing.
+- **After the charge.** A verification's refused pass is charged and recorded
+  with the passes before it (O14(b)'s `merge_verification_charged`), as the
+  process-count refusal's pass already is; T-O14B-F witnesses it, and the
+  check placed before the charge (M-C1e) leaves that pass unrecorded. An
+  attempt's account charges nothing per pass.
 - **After the process-count check.** That refusal is master's: when both
   apply it stays the error returned, and the snapshot is left as it leaves it.
 - **Before the release.** For an attempt the snapshot is released as each role

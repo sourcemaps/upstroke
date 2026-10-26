@@ -24207,43 +24207,92 @@ mod tests {
     }
 
     #[test]
-    fn a_verification_refused_after_its_passes_were_charged_forgets_them_under_o14a() {
-        bounded("f-o14a", || {
-            for answer in [FAnswer::Unavailable, FAnswer::Pass] {
-                let tasks = f_tasks_of(FSubject::Verification, "src/work.txt");
-                let stub = Arc::new(FCostedReviewStub {
-                    target: FReviewStub {
-                        subject: FSubject::Verification,
-                        at_pass: 1,
-                        prune: true,
-                        answer,
-                    },
-                });
-                let (wide, result) = f_drive_costed(&format!("f-o14a-{answer:?}"), &tasks, stub);
-                f_registry_refused(result, &["the verdict of review pass 1"], &wide);
-                let live = wide.run.spend().run_total();
-                let logged =
-                    crate::engine::topology::select::Spend::replay(&wide.env.durable_events())
-                        .run_total();
-                assert!(
-                    (live - logged - 0.5).abs() < 1e-9,
-                    "{answer:?}: the live spend holds both passes and the log neither: live {live}, \
-                     logged {logged}"
-                );
-                let (_, resumed) = wide
-                    .resume(
-                        "inc-2",
-                        holding(&tasks, &[]),
-                        crate::engine::topology::select::Ceiling::unlimited(),
-                    )
-                    .expect("the next process resumes");
-                let replayed =
-                    crate::engine::topology::select::Spend::replay(&resumed.env.durable_events())
-                        .run_total();
-                assert!(
-                    (replayed - logged).abs() < 1e-9,
-                    "{answer:?}: after the resume the replay counts neither pass: {replayed} vs {logged}"
-                );
+    fn a_verification_refused_after_its_passes_were_charged_records_them_under_o14b() {
+        bounded("f-o14b", || {
+            for width in [1, 3] {
+                for answer in [FAnswer::Unavailable, FAnswer::Pass] {
+                    let case = format!("width {width}, pass 1 {answer:?}");
+                    let tasks = f_tasks_of(FSubject::Verification, "src/work.txt");
+                    let stub = Arc::new(FCostedReviewStub {
+                        target: FReviewStub {
+                            subject: FSubject::Verification,
+                            at_pass: 1,
+                            prune: true,
+                            answer,
+                        },
+                    });
+                    let (wide, result) = f_drive_costed(
+                        &format!("f-o14b-w{width}-{answer:?}"),
+                        &tasks,
+                        width,
+                        stub,
+                    );
+                    f_registry_refused(result, &["the verdict of review pass 1"], &wide);
+                    let events = wide.env.durable_events();
+                    let records = charged_records(&events);
+                    let [(refused, reviews)] = records.as_slice() else {
+                        panic!(
+                            "{case}: one merge_verification_charged before the command ends: {:?}",
+                            kinds_of(&events)
+                        );
+                    };
+                    let refused = *refused;
+                    assert_eq!(
+                        reviews
+                            .iter()
+                            .map(|review| review.cost_usd)
+                            .collect::<Vec<_>>(),
+                        vec![Some(PASS_COST), Some(PASS_COST)],
+                        "{case}: the record holds pass 0 and the refused pass 1, as charged"
+                    );
+                    assert!(
+                        terminals_of(&events, refused).is_empty(),
+                        "{case}: the refused verification has no terminal yet: {:?}",
+                        kinds_of(&events)
+                    );
+                    let live = wide.run.spend().run_total();
+                    let logged =
+                        crate::engine::topology::select::Spend::replay(&events).run_total();
+                    let without =
+                        crate::engine::topology::select::Spend::replay(&unrecorded(&events))
+                            .run_total();
+                    assert!(
+                        (live - logged).abs() < 1e-9,
+                        "{case}: the log holds both passes the live spend holds: live {live}, \
+                         logged {logged}"
+                    );
+                    assert!(
+                        (logged - without - 2.0 * PASS_COST).abs() < 1e-9,
+                        "{case}: the record carries both passes: {without} -> {logged}"
+                    );
+                    let next = if width == 1 { "inc-3" } else { "inc-2" };
+                    let (_, resumed) = wide
+                        .resume(
+                            next,
+                            holding(&tasks, &[]),
+                            crate::engine::topology::select::Ceiling::unlimited(),
+                        )
+                        .expect("the next process resumes");
+                    let events = resumed.env.durable_events();
+                    assert_eq!(
+                        terminals_of(&events, refused),
+                        vec!["merge_verification_interrupted"],
+                        "{case}: the next resume settles the refused verification interrupted: {:?}",
+                        kinds_of(&events)
+                    );
+                    assert_eq!(
+                        charged_records(&events).len(),
+                        1,
+                        "{case}: the resume records no second set of passes"
+                    );
+                    let replayed =
+                        crate::engine::topology::select::Spend::replay(&events).run_total();
+                    assert!(
+                        (replayed - logged).abs() < 1e-9,
+                        "{case}: after the resume the replay counts both passes once: {replayed} \
+                         vs {logged}"
+                    );
+                }
             }
         });
     }
@@ -24286,9 +24335,42 @@ mod tests {
     fn f_drive_costed(
         tag: &str,
         tasks: &[WideTask],
+        width: u32,
         stub: Arc<FCostedReviewStub>,
     ) -> (Wide, Result<Progress, UpstrokeError>) {
         let mut wide = Wide::durable(tag, tasks, 3, f_two_reviewers(), holding(tasks, &[]));
+        if width == 1 {
+            let mut first = FHooks::over(&wide);
+            first.effects.fail_at = Some((F_PICK, FPhase::Before));
+            let pipelines = wide.env.pipelines();
+            let held = Arc::clone(&wide.env.runner);
+            let mut scheduler =
+                Scheduler::scripted(&held, Box::new(alpha_waits_for_gammas_integration));
+            let ended = wide.run.run_concurrently(
+                &wide.env.seams(),
+                &pipelines,
+                &mut first,
+                Some(&mut scheduler),
+            );
+            drop(scheduler);
+            drop(first);
+            assert!(ended.is_err(), "the first command ends at gamma's pick");
+            let (_, mut wide) = wide
+                .resume(
+                    "inc-2",
+                    RecordingRunner::new().answering(wide_responder(tasks, &[])),
+                    crate::engine::topology::select::Ceiling::unlimited(),
+                )
+                .expect("the run resumes with gamma queued");
+            let mut hooks = wide.env.hooks();
+            let seams = crate::engine::topology::run::RunSeams {
+                reviews: &*stub,
+                ..wide.env.seams()
+            };
+            let result = f_step_to_error(&mut wide.run, &seams, &mut hooks);
+            drop(hooks);
+            return (wide, result);
+        }
         let mut hooks = wide.env.hooks();
         let mut pipelines = wide.env.pipelines();
         pipelines.reviews = stub;

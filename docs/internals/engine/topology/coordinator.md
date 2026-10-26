@@ -3092,9 +3092,9 @@ The operator removing a kept directory.
 
 The first task's policy waits until beta is blocked, so that an append follows; beta's act as given.
 
-## `mod tests` › `fn a_verification_refused_after_its_passes_were_charged_forgets_them_under_o14a() {`
+## `mod tests` › `fn a_verification_refused_after_its_passes_were_charged_records_them_under_o14b() {`
 
-The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-O14A-F: refused at placement 2 at pass 1 (unavailable, and passing), after both passes were charged: the live spend holds both, the log neither, and the resumed replay counts neither (O14(a)'s accepted loss, pinned).
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12.6 — T-O14B-F, which replaces T-O14A-F now that O14(b) is on the base: refused at placement 2 at pass 1 (unavailable, and passing), after both passes were charged, at width 1 and at width 3. Before the command ends the log holds one `merge_verification_charged`, for the refused sequence, with both passes at their cost, and no terminal for it; the live spend and the replay agree, the record carrying the two passes. The next resume appends that sequence's `merge_verification_interrupted` and no second record, and its replay counts both passes once. Width 1 records in `TopologyRun::integrate`, width 3 in `Coordinator::integrate` or `finish`, the points `design/26` names. Mutation M-C1e (the review's check before `account.charge`) leaves pass 1 uncharged and unrecorded, so the record holds one pass and this test is red.
 
 ## `mod tests` › `struct FCostedReviewStub {`
 
@@ -3102,4 +3102,4 @@ Both verification passes cost 0.25; the target one is `FReviewStub`'s.
 
 ## `mod tests` › `fn f_drive_costed(`
 
-T-O14A-F's run: two verification reviewers, width 3.
+T-O14B-F's run: two verification reviewers. At width 3 the stub reviews every verification of the first command; at width 1 that command ends at gamma's pick, as `f_drive_subject`'s does, and the resumed process steps the run with the stub until the refusal.
