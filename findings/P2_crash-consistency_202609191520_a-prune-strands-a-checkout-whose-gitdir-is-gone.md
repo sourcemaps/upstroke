@@ -87,3 +87,55 @@ attempt. That is the store-gone shape of `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENG
 #329 changed the missing-store branch only to let an empty directory at the target bind nothing (the destination an add
 makes before Git runs), which a standing checkout is not, and took no owner decision, so this file stays open and its
 guard carries to that closure or the next change to the branch.
+
+## The owner's decision, and closure 3 in #333 (2026-10-15)
+
+**The guard is answered: Choice A.** On 2026-10-15 the owner adopted, with the external-prune follow-up (F, #333) that
+carries closure 3 of `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, "Choice A under PR5-RD-003,
+including the specified populated-checkout deletion and contents where the store is absent and the own-store relation
+holds, except recovery task reclaim" (the owner's adoption record, recorded 2026-10-15T22:09:21Z, on the owner's
+message "adopt all three recommended packages"). Its mechanical recording, as the owner's adoption names it:
+
+> The owner adopts Choice A. PR5-RD-003's rule "a missing whole worktrees store refuses while the checkout target exists" gives way
+> for exactly the convergence addendum's §4.1 relation (`6a1d2142` :96-141, :275-306, :310-330). Rule 1 and case 3 are unchanged.
+>
+> The owner accepts, by name, this deletion: with `<common git dir>/worktrees` absent, and a populated real directory whose `.git`
+> names a direct child of this repository's own store, every removal that reaches the scan except recovery's task reclaim deletes
+> that checkout and everything in it, with no prior operator message (F report §5.1, :428-456). A store moved aside, or a dangling
+> link, reads as absent.
+
+The convergence addendum (v2, `6a1d2142…`) and the F decision report (`f460ac26…`) it cites are documents of the
+owner's F package, outside this repository. RULING X-1, adopted the same day, does not answer this guard, and neither
+does this file's label.
+
+**What #333 changes.** `revalidate_removal_proving`'s store-absent branch gains one arm, before its
+`Io { path: worktrees, .. }` answer: a target that is a real directory, not empty, whose `.git` is a regular file
+`gitdir: <path>` naming a direct child of this repository's own `<common git dir>/worktrees`, compared after
+`canonical_prefix` on both sides (`names_an_entry_of`), binds nothing, and `remove_bound` removes the checkout with
+whatever it holds. No store is made, and nothing of an absent or moved-aside store is touched. The arm does not check
+which child of the store the `.git` names. With the store absent, the scan has three cases:
+1. an absent target or an empty directory converges, as #329's arms already made it;
+2. a populated checkout in that relation converges, removed with whatever it holds, at every removal that reaches the
+   scan except recovery's task reclaim, where RULING P-1's guard keeps a populated task slot for the operator first;
+3. every other populated or unrecognized target keeps the refusal on every attempt: no `.git`; a `.git` that is a
+   directory or a link, cannot be read, or has no `gitdir:` prefix; a path that does not decode or canonicalize; a
+   `.git` naming anything but a child of this repository's own store, another repository's store among them.
+
+Rule 1, "a registration whose `gitdir` is already absent is forced-cleanup convergence", is unchanged.
+
+**The witnesses.** The pinned refusal this file names, `a_missing_stored_worktree_directory_refuses_before_checkout_deletion`,
+is renamed in place to `a_missing_stored_worktree_directory_converges_removing_only_the_checkout` (T-C3-1): with the
+store moved aside, the removal removes only the checkout and leaves the moved store's bytes as they were.
+`a_complete_runs_finalization_converges_over_a_populated_slot_with_the_store_gone` and
+`a_halted_runs_finalization_converges_over_a_populated_slot_with_the_store_gone` (T-C3-2) finalize a `Complete` and a
+`Halted` run over a populated slot whose entry, the store's last, was pruned.
+`a_removal_with_no_store_refuses_every_target_that_names_no_entry_of_its_own_store` (T-C3-CONTROLS) keeps case 3's
+refusal for another repository's store and for a populated target with no `.git`, and case 1's convergence; #329's
+`a_removal_with_no_store_takes_an_empty_destination_and_still_refuses_a_checkout` still refuses a `.git` that names
+no entry of this store. Mutation M-C3, the arm binding nothing for any populated directory, turns those two red.
+
+**What it means for this file.** The failure sequence above leaves a checkout whose `.git` still names its deleted
+entry, which is case 2: it now converges at step 3, and the manual recovery is not needed for it. Case 3's shapes
+still refuse on every attempt, and their convergence is not addressed. Whether this file is now deleted as resolved,
+or kept open and re-guarded for case 3, is the ledger process's call (`findings/PROCESS.md`), not this update's; until
+it is made, the frontmatter stands as filed.
