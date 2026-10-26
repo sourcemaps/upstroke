@@ -29,9 +29,8 @@ refs, and the Git-object creation contexts — live behind typed funnels in
 [`crate::workspace_manager`] instead, and nothing here calls them.
 
 The freeze was amended once, to close
-`LEGACY-WORKSPACE-READS-REPLACEMENT-OBJECTS`, and a second time to give the
-coordinator's inherited Git context only to the checkout it was started in
-(option (C)); the allowlist row says what each covers. The Git children are built by `git_command` (its section below),
+`LEGACY-WORKSPACE-READS-REPLACEMENT-OBJECTS`, and the allowlist row says what
+it covers. The Git children are built by `git_command` (its section below),
 which sets `crate::workspace_manager::NO_REPLACEMENT_OBJECTS` and passes
 `-c core.useReplaceRefs=false`, so they read the objects the repository holds
 rather than whatever `refs/replace/*` points at them.
@@ -73,6 +72,18 @@ what the checkout holds (part N's capture), and `discard_into_kept_pin` removes 
 checkout's copy only once a kept pin and a copy of it the same process made durable
 both hold it (part G4). Their sections below say how. Nothing it adds is in force until the pull request
 merges. The module still calls no funnel of the manager: the access takes no site.
+
+A fourth amendment was **adopted by the owner on 2026-10-15, with option (C) and O8's
+extension for it** (the owner's adoption record `818e7675…`), recomposed on decision B's
+landed text and kept apart from the third, which is three things and no more. The row's
+text in `effects/allowlist.toml` gives it exactly. `git_command` takes the scope of the
+Git child it builds (`GitScope`; its section below): a child in the checkout
+`Workspace::open` opened keeps the process's environment as it is, a `git worktree`
+command run from that checkout goes without `GIT_INDEX_FILE`, and a child in a work tree
+the engine made goes without the four work-tree selectors and is given a relative
+`GIT_COMMON_DIR` as the absolute path it names at that checkout. The private index the
+third amendment's two private-hooks builders name is bound after the scope, which never
+removes it.
 
 The section "may only shrink after PR5 (the test compares against the frozen
 list)", so this attribute is a ceiling rather than a licence.

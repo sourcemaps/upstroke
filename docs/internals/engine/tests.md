@@ -3356,7 +3356,9 @@ the path out.
 
 ## `fn a_legacy_run_under_an_inherited_selection_checks_its_review_input_at_the_selected_repository() {`
 
-D1's layout: `A` tracks `work/shared.txt` and its user has staged another
+The first of the three tests appended under option (C) (adopted by the owner on 2026-10-15
+with O8's extension for it, the owner's adoption record `818e7675…`; this file's row in
+`effects/allowlist.toml`, AMENDED TWICE). D1's layout: `A` tracks `work/shared.txt` and its user has staged another
 version; `B.git`, selected by `GIT_DIR` and `GIT_WORK_TREE=A/work`, holds the
 same file. An isolated child whose environment alone carries those two names
 seeds a worker-only plan with review disabled and runs `run_with`, the real
@@ -3382,8 +3384,10 @@ reported, the run branch holds the fake worker's `agent-output.txt`, which is
 still in the checkout, and `other`'s objects and refs are byte-identical. The
 gate snapshot is registered through the link; its Git keeps the absolute value
 and reads the run's common directory. Removing `GIT_COMMON_DIR` in a work tree
-sends its verification to `other`, "bad object HEAD", and the coordinator's
-discard erases the worker's output.
+sends its verification to `other`, "bad object HEAD", and the attempt fails:
+before #331 the coordinator's discard then erased the worker's output, which
+since #331 it keeps and pins instead (reasoned for this layout until the
+mutation runs on the integrated head).
 
 ## `fn absolute_common_dir_run_helper() {`
 

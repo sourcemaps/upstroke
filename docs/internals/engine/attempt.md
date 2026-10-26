@@ -15,6 +15,12 @@ under which the section shrinks. `decisions.effect_site_inventory.mechanism` (2)
 **Adopted on 2026-10-11 with decision O8 (decision B), as an agent decision by `pr11_decide_d` under the owner's delegation of 2026-10-11 (babysit's `0194a1e4…`).** Follow-up D (#331, a draft) amends this module's freeze; the amendment is its row's text in `effects/allowlist.toml`, marked there as adopted, and the record `reviews/2026-10-02-pr11-follow-up-d-record.md` (§1 to §4, and its Implementation section) is why. Nothing it adds is in force until the pull request merges. In this module it is one more argument of `run_attempt`, the type
 that argument holds and the function that fills it, below.
 
+**Adopted by the owner on 2026-10-15, with option (C) and O8's extension for it (the owner's
+adoption record `818e7675…`).** It amends this module's freeze a second time; the amendment
+is its row's text in `effects/allowlist.toml`, marked there as adopted. In this module it is
+`LegacyReviewInputPolicy`'s implementation of the review-input seam's provided method
+`problem_in_work_tree`, below.
+
 ## `const MAX_FEEDBACK_ENTRIES: usize = 6;`
 
 Most recent feedback entries carried into an escalated prompt. Older
