@@ -504,8 +504,9 @@ packages, F's among them, with their stated material consequences (the owner's a
   The removal scan's store-absent branch binds nothing for a populated checkout whose `.git` names a direct child of
   this repository's own absent store (`names_an_entry_of`), so a removal with the store gone converges and so does
   finalization. That removal deletes the checkout with whatever it holds at every caller except recovery's task
-  reclaim, where P-1's guard keeps it: the deletion the owner accepted by name under Choice A, which that file records.
-  X-1 does not answer that file's guard, and it is not read as doing so.
+  reclaim, where P-1's guard keeps it: the deletion the owner accepted by name under Choice A. That finding is
+  resolved in #333 for its own-store case and its file deleted there, its ledger row recording the decision. X-1 did
+  not answer that finding's guard, and it is not read as having done so.
 - **Closure 4, as documentation,** in `design/15`'s external-prune paragraph, with FUB-D9-TASKSEL's qualification:
   `maintenance.auto=false`, `gc.auto=0` and, on Git 2.50.1 and later, `maintenance.worktree-prune.auto=0` reduce the
   automatic starters where they are the effective values, and `maintenance.<task>.enabled=false` drops the task only
