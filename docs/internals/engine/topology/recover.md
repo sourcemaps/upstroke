@@ -1881,10 +1881,10 @@ alike. Task slots only: staging and snapshot residue have their own steps.
 
 ## `fn reclaim_closed_generations(` › `crate::engine::topology::dispatch::refuse_kept_slot(`
 
-**PROPOSED RULING P-1's one statement** (the decision appendix §3.2;
-conditional on the owner's adoption of O2(a), of P-1, and of erratum E-G6-1's
-third bullet under O12(a), which admits this hunk and its appended tests into
-G6's module diff proof, bound to the merge SHA of the change that makes them).
+**RULING P-1's one statement** (the decision appendix §3.2, adopted by the
+owner with O2(a) on 2026-10-15; erratum E-G6-1's third bullet, under O12(a),
+admits this hunk and its appended tests into G6's module diff proof, bound to
+the merge SHA of the change that makes them).
 Immediately before the scrub of a closed generation's slot, the non-frozen
 guard `dispatch::refuse_kept_slot` refuses, removing nothing, while an
 instance of the slot holds anything and its worktree registration is not

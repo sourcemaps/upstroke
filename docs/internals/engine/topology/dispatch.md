@@ -740,9 +740,9 @@ worktree outlives the worktree rather than the other way round.
 
 ## `pub(super) fn refuse_kept_slot(`
 
-**PROPOSED RULING P-1's guard** (the decision appendix §3.2, conditional on the
-owner's adoption of O2(a) and of P-1, whose one statement in the frozen
-`recover.rs` calls it). Recovery's reclaim of a closed generation's slot calls
+**RULING P-1's guard** (the decision appendix §3.2, adopted by the owner with
+O2(a) on 2026-10-15; P-1's one statement in the frozen `recover.rs` calls
+it). Recovery's reclaim of a closed generation's slot calls
 it immediately before its scrub: it refuses, removing nothing, while an
 instance of the slot holds anything and its worktree registration is not whole
 (closure 1's check, files only), naming the slot, each kept instance's path
