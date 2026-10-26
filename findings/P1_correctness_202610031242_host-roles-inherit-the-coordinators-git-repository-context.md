@@ -149,37 +149,3 @@ At PR #329's implementation round, as a record only (the orchestrator's brief fo
 package's decision O3-R). Filing it decides nothing about its repair route, which is the owner's (O3 and O3-R). The
 finding is the evidence report's, reviewed PASS (`~/orch-pr11/evidence/o3r/REPORT.md`, `d6dae2e2`); its text above is
 the reviewed draft's, with its identifier and pull request set when filed.
-
-## Implementation status (2026-10-05T22:15Z; a conditional draft implementation, not adopted)
-
-**Where this section comes from.** It was appended on the branch `pr11-envc-impl1` (unpushed) when this file was
-imported, byte for byte, from PR #329's branch at `492325c4` as O3-R's canonical record. Everything above this section is
-that file's, unchanged: its frontmatter, discovery pin, guard, failure sequence and whole-scope limits.
-
-**What is implemented, conditionally.** The reviewed option (C) (`owner-package/O3R-OPTION-C-PROPOSAL.md`, sha256
-`dc94ba82515d265fd98b4aa3c8f1f8b4c699a70733bd19fe245c6fbec023eedc`), in this branch's commits
-`5c222ff2..6c8ee6b1`, in `src/runner/host.rs`. Option (C) is not adopted.
-- **The four selectors.** A role started in a work tree the engine made (a slot, or a gate or review snapshot) goes
-  without the inherited `GIT_DIR`, `GIT_WORK_TREE`, `GIT_IMPLICIT_WORK_TREE` and `GIT_INDEX_FILE`.
-- **The common directory.** An inherited `GIT_COMMON_DIR` that is not an absolute path reaches it as the managed
-  repository's common directory. A runner holding none refuses such a role before it starts.
-- **What keeps the inherited context:** an overlay's own value, the probes and the legacy worker.
-
-**The witness, red at `5c222ff2` and green with the change.** This file's executed sequence, steps 01-25, cases
-`index`, `dir`, `dir-index` and `relative-index`, run through `Runner::run_blocking`:
-- `slot_roles_under_an_inherited_context_address_only_their_own_work_tree`;
-- with it, `a_role_in_a_work_tree_the_engine_made_sheds_only_the_work_tree_context` and
-  `a_hook_started_runs_slot_worker_leaves_the_users_commit_as_the_user_made_it`;
-- each of the mutations MC1, MC2, MC3, MC5, MC10 and MC20 turns one of them red.
-
-**Why this finding stays open (`deferred`):**
-- **R-C-SELECTION** is part of this finding's damage, and it is open:
-  `findings/P1_correctness_202610052142_an-inherited-git-dir-runs-the-topology-in-another-repository.md`.
-- **§10 of the evidence report.** Parity between probes and executions changes under (C): a probe keeps the inherited
-  context, and a role in a work tree the engine made does not. That needs the owner's disposition. The other §10 items
-  are kept, and the composition tests this file pins are unchanged.
-- **Adoption and G6.** Option (C) is not adopted. The owner's O3 and O3-R decision stands. G6 is cleared only by a fix
-  validated in its range, or by a specific, applicable owner exception.
-
-**Packaging.** This import is a finding record. It does not make the branch's whole implementation a single-finding
-repair. The owner's packaging exception is pending, not granted.

@@ -439,6 +439,12 @@ error whose process fate is unresolved rather than a cancellation, and record it
 [`Ending::CancelledUnresolved`]: the position a coordinator's halt must not close
 over (the working record's R-AF).
 
+## `impl RecordingRunner` › `pub(super) fn ending_unresolved(&self, invocation: InvocationId) {`
+
+When this invocation is released — or, on a runner that does not hold, when it runs — it ends with a
+Runner error whose process fate is unresolved, and its ending is recorded `Failed`: a reviewer whose
+end the Runner did not establish, after earlier passes were charged (the O14(b) change's R3 and R4).
+
 ## `impl RecordingRunner` › `pub(super) fn inside(&self, invocation: &InvocationId) -> bool {`
 
 [`Control::inside`], for a test that checks without waiting.
@@ -1174,6 +1180,13 @@ The pool an agent's pairs name: its `pools` entry when it has one, else `pool`. 
 worker's (`plan`, and `pool_for`, which the retry path asks) and every reviewer's
 (`reviewer_plans`, whose profile carries it) come from here, so one run's attempts,
 retries and verifications agree on each agent's pool.
+
+## `impl WidePlans` › `fn reviewer_plans(&self, count: usize) -> Vec<ReviewerPlan> {`
+
+The first `count` rows of a three-row table: the primary reviewer, the second opinion, and a third
+that reuses the second's agent with its own model and name, so that a verification can charge two
+passes before its third fails, is held or ends unresolved. Until the O14(b) change the table held two
+rows, so a count above two gave two.
 
 ## `pub(super) fn wide_responder(tasks: &[WideTask], failing_gates: &[(u32, u32)]) -> Responder {`
 

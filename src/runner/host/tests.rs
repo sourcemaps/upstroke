@@ -6123,8 +6123,18 @@ const PATH_ENTRY_TABLE: &[(&str, bool, bool)] = &[
 
 #[test]
 fn every_path_entry_this_runner_searches_names_a_location_on_its_own() {
+    fn search_summary(message: &str) -> Option<&str> {
+        let (_, after) = message.split_once("this runner composes (")?;
+        after.split_once(')').map(|(summary, _)| summary)
+    }
+
     let root = scratch("path-entry-rule");
     let naming = ProgramNaming::current();
+    let program = "upstroke\u{0}no-such-program";
+    assert!(
+        naming.is_bare_name(program),
+        "the program must be a bare name for any entry to be searched: {program:?}"
+    );
     let mut located = 0_usize;
     let mut relative = 0_usize;
     for (entry, on_unix, on_windows) in PATH_ENTRY_TABLE {
@@ -6134,31 +6144,69 @@ fn every_path_entry_this_runner_searches_names_a_location_on_its_own() {
             expected,
             "`{entry}`: this platform disagrees with the table"
         );
-        let message = resolve_program(
-            "upstroke-no-such-program",
-            &composed(&[("PATH", OsStr::new(entry))]),
+        let error = resolve_program(
+            program,
+            &composed(&[("PATH", path_of(&[Path::new(entry)]).as_os_str())]),
             KeyCase::current(),
             naming,
         )
-        .expect_err("nothing of that name exists anywhere")
-        .to_string();
+        .expect_err("nothing of that name exists anywhere");
         if expected {
             located += 1;
-            assert!(
-                message.contains("1 directory searched,"),
-                "`{entry}` names a location and was not searched: {message}"
+            let probe = std::fs::metadata(Path::new(entry).join(program))
+                .expect_err("a name with an interior NUL cannot be stat'ed");
+            assert_ne!(
+                probe.kind(),
+                std::io::ErrorKind::NotFound,
+                "`{entry}`: the fixture must fail with something other than not-found to decide \
+                 anything"
             );
-            assert!(
-                !message.contains("skipped"),
-                "`{entry}` names a location and was skipped: {message}"
+            assert_eq!(
+                probe.raw_os_error(),
+                None,
+                "`{entry}`: the fixture must be refused before the platform is asked: {probe}"
             );
+            match error {
+                UpstrokeError::Filesystem {
+                    operation,
+                    path,
+                    source,
+                } => {
+                    assert_eq!(operation, "stat");
+                    assert_eq!(
+                        path.parent(),
+                        Some(Path::new(entry)),
+                        "`{entry}` names a location and the search stopped somewhere else: {path:?}"
+                    );
+                    assert!(
+                        path.file_name()
+                            .and_then(OsStr::to_str)
+                            .is_some_and(|name| name.starts_with(program)),
+                        "`{entry}`: the candidate asked about is not this program's: {path:?}"
+                    );
+                    assert_eq!(
+                        (source.kind(), source.raw_os_error()),
+                        (probe.kind(), None),
+                        "`{entry}`: the source carried must be the refusal the probe met: {source}"
+                    );
+                }
+                other => panic!(
+                    "`{entry}` names a location and its search did not stop at its own candidate: \
+                     {other}"
+                ),
+            }
         } else {
             relative += 1;
-            assert!(
-                message.contains(
-                    "0 directories searched, 1 PATH entry skipped as not \
-                                  absolute"
+            let message = match error {
+                UpstrokeError::Refused { message } => message,
+                other => panic!(
+                    "`{entry}` does not name a location and was searched: expected \
+                     `UpstrokeError::Refused`, got {other:?}"
                 ),
+            };
+            assert!(
+                search_summary(&message).is_some_and(|summary| summary
+                    .contains("0 directories searched, 1 PATH entry skipped as not absolute")),
                 "`{entry}` does not name a location and was searched: {message}"
             );
         }
@@ -6170,6 +6218,36 @@ fn every_path_entry_this_runner_searches_names_a_location_on_its_own() {
     );
 
     let bin = root.join("bin");
+    let probe = std::fs::symlink_metadata(&bin)
+        .expect_err("a directory nothing has created must not exist");
+    assert_eq!(
+        probe.kind(),
+        std::io::ErrorKind::NotFound,
+        "the fixture must be absent, not merely unreadable, to count a finished search"
+    );
+    let error = resolve_program(
+        "x",
+        &composed(&[("PATH", path_of(&[&bin]).as_os_str())]),
+        KeyCase::current(),
+        naming,
+    )
+    .expect_err("nothing of that name is installed there");
+    let message = match error {
+        UpstrokeError::Refused { message } => message,
+        other => panic!(
+            "an absent entry names a location and its search did not finish: expected \
+             `UpstrokeError::Refused`, got {other:?}"
+        ),
+    };
+    assert!(
+        search_summary(&message).is_some_and(|summary| summary.contains("1 directory searched,")),
+        "an absent entry names a location and was not searched to its end: {message}"
+    );
+    assert!(
+        search_summary(&message).is_some_and(|summary| !summary.contains("skipped")),
+        "an absent entry names a location and was skipped: {message}"
+    );
+
     let found = program_file(&bin, &shim_file_name("x"));
     assert_eq!(
         resolve_program(

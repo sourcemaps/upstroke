@@ -46,26 +46,25 @@ pub(super) const GATE_SCRIPTS: [&str; 9] = [
     SHELL_GATES[5],
 ];
 
-pub(super) const PINNED_ACTIONS: [&str; 3] = [
+pub(super) const PINNED_ACTIONS: [&str; 4] = [
     "actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
     "dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c",
     "Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6",
+    "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1",
 ];
 
-pub(super) const ACTION_INPUTS: [(&str, &[&str]); 3] = [
+pub(super) const ACTION_INPUTS: [(&str, &[&str]); 4] = [
     ("actions/checkout@", &[]),
     ("dtolnay/rust-toolchain@", &["components", "toolchain"]),
     ("Swatinem/rust-cache@", &[]),
+    ("actions/setup-python@", &["python-version"]),
 ];
 
 pub(super) const TOOLCHAIN_COMPONENTS: [&str; 2] = ["clippy", "rustfmt, clippy"];
 
 pub(super) const TEST_WINDOWS_JOB: &str = "test-windows";
-pub(super) const QUEUE_LANE: &str = "github.event_name == 'merge_group'";
 pub(super) const TEST_WINDOWS_LABELS: [&str; 3] = ["self-hosted", "windows", "winguest"];
-pub(super) const TEST_WINDOWS_RUNS_ON: &str = "${{ github.event_name == 'merge_group' && 'windows-latest' || fromJSON('[\"self-hosted\", \"windows\", \"winguest\"]') }}";
 pub(super) const GOLDEN_IMAGE_TOOLCHAIN: &str = "1.97.1";
-pub(super) const TEST_WINDOWS_TOOLCHAIN_COMPONENTS: &str = "clippy";
 
 pub(super) const TEST_WINDOWS_PLATFORM: &str = "windows-latest";
 
@@ -105,8 +104,6 @@ pub(super) const TEST_STEP_ENV: [(&str, &str); 1] = [(
 pub(super) const TEST_WINDOWS_STEP_ENV: [(&str, &str); 1] = [(TEMP_FOLDS_CASE_KEY, "1")];
 
 pub(super) const TEST_STEP_FIELDS: [&str; 6] = ["env", "name", "run", "shell", "uses", "with"];
-
-pub(super) const LANE_STEP_FIELDS: [&str; 4] = ["if", "name", "uses", "with"];
 
 pub(super) const AGGREGATE_STEP_FIELDS: [&str; 4] = ["env", "name", "run", "shell"];
 

@@ -15,7 +15,7 @@ source, documentation, workflows, release machinery and this file.
 3. **Run the ten-command baseline** (`CODING_STANDARDS.md` §2) before every push, then wait for
    the two required contexts: `upstroke-ci` (formatting, Clippy on three platforms, the Linux and macOS
    test matrix, the Windows suite in `test-windows` -- on its self-hosted ephemeral runner for a
-   pull request or push, on `windows-latest` for a merge-queue entry -- the MSRV matrix, the six
+   pull request, a push and a merge-queue entry alike -- the MSRV matrix, the six
    Bash gates) and `upstroke-pr-policy` (title, body sections, ledger). A
    branch behind `master` is not updated by hand to merge once the ruleset carries the merge
    queue (Repository rules): the queue builds the entry on `master`'s head and runs both

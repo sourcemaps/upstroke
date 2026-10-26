@@ -8,7 +8,7 @@ reviewed_sha: b3a8dbfe408478aaab3f7d192ad95be46a9a18c0
 location: src/workspace_manager.rs:2821
 provenance: fix_regression
 first_bad: PR5-RD-002
-guard: the change that settles `PR5-RD-003-A-PRUNE-STRANDS-A-CHECKOUT-WHOSE-GITDIR-IS-GONE`, taken up with it: the next change to the empty-`commondir` branch of `remove_worktree_proving` or to the missing-store branch of `revalidate_removal_proving`
+guard: the owner's policy for a registration no run of this process can attribute (`RESIDUE-UNBINDABLE-TASK-REGISTRATION-HAS-NO-DESIGN-SENTENCE`), taken up with it; until then the operator's removal `design/15` documents
 ---
 
 ## Failure sequence
@@ -127,3 +127,18 @@ prune still deletes an entry Git prunes because the checkout its `gitdir` names 
 Commit the scratch sequence as the witness: with run C's interrupted removal in the store, run A's
 verification of `bravo` and its retry both return `Ok(Err(NotRegistered))`, and `bravo`'s forced
 removal leaves Git's enumeration working.
+
+## At #329's implementation (2026-10-03)
+
+**The trade-off is settled the second way.** #329 removed every engine `git worktree prune` (`reviews/2026-10-01-pr11-follow-up-b-record.md` §2.5): no engine
+process deletes another process's registration, so another run's torn registration is no longer deleted by this run's
+removals, by design (`no_removal_prunes_another_processs_registration_and_the_store_goes_only_when_empty`). This file's
+residue stays: the registration lasts until its own run's resume repairs it, or until an operator removes it.
+
+**Its consequence narrowed.** Every manager registry access is now a tolerant registry access. A run that meets the
+other run's torn registration attempts again until its deadline, then refuses resumably as
+`UpstrokeError::RegistryRefused`, never as Git state. A verification spends no deferral on it
+(`a_verification_beside_a_registration_that_stays_torn_ends_resumably_and_its_resume_reverifies`). The operator's
+recovery is documented: `design/15`'s paragraph "A registry another process is writing", now in force, says to remove
+that registration directory and the checkout it names, once no Git process is writing it. The guard above names the
+policy the remaining residue needs.

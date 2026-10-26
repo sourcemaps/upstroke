@@ -695,6 +695,20 @@ pub fn integration_ledger(events: &[TopologyEvent]) -> Vec<LedgerRow> {
                     row.detail = data.detail.clone();
                 }
             }
+            TopologyEventBody::MergeVerificationCharged { data } => {
+                if let Some(candidate) = candidates.get(&data.sequence.0).cloned() {
+                    let row = row_for(&mut rows, data.sequence.0, &candidate);
+                    let (cost, _) = review_cost(&data.reviews);
+                    row.reviews = row
+                        .reviews
+                        .saturating_add(u32::try_from(data.reviews.len()).unwrap_or(u32::MAX));
+                    row.review_cost_usd = match (row.review_cost_usd, cost) {
+                        (Some(seen), Some(added)) => Some(seen + added),
+                        (seen, added) => seen.or(added),
+                    };
+                    row.review_cost_incomplete = true;
+                }
+            }
             _ => {}
         }
     }

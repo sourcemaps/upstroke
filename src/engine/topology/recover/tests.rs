@@ -341,6 +341,7 @@ impl Fixture {
 
     #[cfg(unix)]
     fn holder_observed(&self, observation: u32) {
+        crate::workspace_manager::fixture::a_wait_read_the_lease_held();
         if let Some(parked) = self.release_once_held.borrow_mut().take() {
             let status = parked.release();
             self.holder_released.set(Some((observation, status)));
@@ -7117,11 +7118,103 @@ fn the_runs_first_resume_by_an_incarnation_that_then_dies(fixture: &Fixture, tag
         vec!["run_started", "run_resumed"],
         "{tag}: the first resume recorded itself and nothing else"
     );
-    assert!(
-        !rundir::is_running(&fixture.public()),
-        "{tag}: and no process holds the run"
-    );
+    assert_no_process_holds_the_run(fixture, tag);
     durable_kinds(fixture).len()
+}
+
+/// The first incarnation's death, observed: no process holds the run once
+/// this process's own copies of its cleanup lease are released. The first
+/// resume's integration-ref write held the lease in this process, and a fork
+/// another thread made during it keeps a copy until it execs or exits
+/// (`rundir::hold_cleanup_lease_for_child`). So the copies are waited out
+/// first (`await_own_lease_copies_release`), with the bound every later
+/// resume's wait has, and only a lease an observation finds held is waited
+/// on: an observation that fails fails here at once, as the single
+/// observation before the wait did, and a copy that outlives the bound still
+/// fails. Then `rundir::is_running` is read once, so the run lock, this
+/// process's claim and a lock that cannot be inspected read running at once
+/// too. A failure names what the wait stopped on and what acquiring the run
+/// lock answers.
+fn assert_no_process_holds_the_run(fixture: &Fixture, tag: &str) {
+    let public = fixture.public();
+    let released = await_own_lease_copies_release(fixture);
+    assert!(
+        released.is_ok() && !rundir::is_running(&public),
+        "{tag}: and no process holds the run: the cleanup lease's wait {released:?}, the run \
+         lock's acquisition {:?}",
+        rundir::RunLock::acquire(&public).map(drop)
+    );
+}
+
+/// What [`await_own_lease_copies_release`] stopped on.
+#[derive(Debug)]
+enum LeaseCopyWait {
+    /// An observation answered neither held nor free: the lease file would
+    /// not open, or `flock` failed otherwise. `rundir::observe_cleanup_hold`
+    /// reads that held, fail-closed; it is no holder, and nothing waits on it.
+    Unobservable {
+        observation: u32,
+        error: std::io::Error,
+    },
+    /// A lease the observations found held, every one of them, to the bound.
+    PastBound(CleanupHoldPastBound),
+}
+
+impl std::fmt::Display for LeaseCopyWait {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unobservable { observation, error } => write!(
+                f,
+                "observation {observation} of the run's cleanup.lock answered neither held nor \
+                 free: {error}"
+            ),
+            Self::PastBound(held) => write!(f, "{held}"),
+        }
+    }
+}
+
+/// The wait for this process's own copies of the run's cleanup lease that
+/// comes before the first incarnation's death is read and before a creation
+/// body's first resume. It is #320's wait
+/// (`wait_for_cleanup_hold_release_observing`), with its bound
+/// (`release_bound`), its rest and its acknowledgement of each held reading
+/// (`Fixture::holder_observed`), over observations told apart
+/// (`workspace_manager::fixture::observe_cleanup_lease`). The production
+/// observation reads an inspection error as held, and a wait that trusted it
+/// retried the error until it passed (I5-1); here only a lease an observation
+/// finds held is waited on, and an observation that fails ends the wait at
+/// once with its error.
+fn await_own_lease_copies_release(fixture: &Fixture) -> Result<(), LeaseCopyWait> {
+    let public = fixture.public();
+    let bound = fixture.release_bound.get();
+    let started = std::time::Instant::now();
+    let mut observations = 0_u32;
+    loop {
+        observations += 1;
+        match crate::workspace_manager::fixture::observe_cleanup_lease(&public) {
+            Ok(false) => return Ok(()),
+            Ok(true) => {}
+            Err(error) => {
+                return Err(LeaseCopyWait::Unobservable {
+                    observation: observations,
+                    error,
+                });
+            }
+        }
+        fixture.holder_observed(observations);
+        let waited = started.elapsed();
+        if waited >= bound {
+            return Err(LeaseCopyWait::PastBound(CleanupHoldPastBound {
+                bound,
+                waited,
+                observations,
+            }));
+        }
+        crate::workspace_manager::fixture::rest_within(
+            Duration::from_millis(50),
+            bound.saturating_sub(started.elapsed()),
+        );
+    }
 }
 
 fn assert_the_creation_prefix_is_complete(fixture: &Fixture, tag: &str) {
@@ -17738,6 +17831,7 @@ fn upstroke_refs_on_disk(fixture: &Fixture) -> Vec<String> {
 fn a_resume_over_a_creation_that_stopped_after_its_marker_was_removed_converges(
     ref_created: bool,
     tag: &str,
+    before_the_resume: &dyn Fn(&Fixture),
 ) {
     let fixture = Fixture::healthy(tag);
     crate::workspace_manager::fixture::git(
@@ -17804,8 +17898,23 @@ fn a_resume_over_a_creation_that_stopped_after_its_marker_was_removed_converges(
         "{tag}: the log is the creator's committed prefix"
     );
 
+    before_the_resume(&fixture);
+    // This process wrote the prefix above through the funnels, as the
+    // creator's incarnation, and P8's ref write held the run's cleanup lease
+    // here: the resume is a later incarnation's, and this process's own copies
+    // of the lease are waited out first, as before every later resume, with
+    // its bound and its refusal's note. Only a lease an observation finds held
+    // is waited on: an observation that fails fails here at once.
+    let past_bound = match await_own_lease_copies_release(&fixture) {
+        Ok(()) => None,
+        Err(LeaseCopyWait::PastBound(held)) => Some(held),
+        Err(unobservable) => {
+            panic!("{tag}: the run's cleanup lease, observed before the resume: {unobservable}")
+        }
+    };
     let recovery = harness();
     let (_, handle) = resume_with_real_refs(&fixture, &recovery)
+        .map_err(|error| refusal_after_an_expired_wait(error, past_bound))
         .expect("the resume over the creation's prefix converges");
     drop(handle);
     assert_eq!(
@@ -17853,6 +17962,7 @@ fn a_resume_over_a_creation_that_stopped_after_removing_its_marker_creates_the_i
     a_resume_over_a_creation_that_stopped_after_its_marker_was_removed_converges(
         false,
         "creation-stopped-at-p7",
+        &|_| {},
     );
 }
 
@@ -17861,6 +17971,246 @@ fn a_resume_over_a_creation_that_stopped_after_creating_its_integration_ref_adop
     a_resume_over_a_creation_that_stopped_after_its_marker_was_removed_converges(
         true,
         "creation-stopped-at-p8",
+        &|_| {},
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_resume_over_a_creation_prefix_waits_out_a_lease_copy_a_sibling_fork_kept_from_its_ref_write() {
+    a_resume_over_a_creation_that_stopped_after_its_marker_was_removed_converges(
+        true,
+        "creation-stopped-at-p8-sibling-copy",
+        &|fixture| {
+            let parked = crate::workspace_manager::fixture::ParkedFork::holding_the_lease_of(
+                &fixture.public(),
+            );
+            assert!(
+                rundir::observe_cleanup_hold(&fixture.public(), &mut NoHooks),
+                "the parked fork's copy alone holds the lease the prefix's ref write took"
+            );
+            fixture.release_once_held.replace(Some(parked));
+        },
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_lease_copy_a_sibling_fork_kept_from_the_first_resume_is_waited_out_before_its_death_is_read() {
+    use crate::workspace_manager::fixture::ParkedFork;
+
+    let tag = "first-dies-sibling-copy";
+    let fixture = Fixture::healthy(tag);
+    let (_, handle) = resume_as(
+        &fixture,
+        FIRST_RESUMER,
+        &runtime_holding_the_record(),
+        &mut HarnessTopologyHooks::new(harness()),
+    )
+    .expect("the run's first resume");
+    drop(handle);
+    let parked = ParkedFork::holding_the_lease_of(&fixture.public());
+    let holder = parked.pid();
+    assert!(
+        rundir::is_running(&fixture.public()),
+        "the copy the parked fork {holder} keeps reads the run as held, in one observation"
+    );
+    fixture.release_once_held.replace(Some(parked));
+    assert_no_process_holds_the_run(&fixture, tag);
+    let Some((released_at, status)) = fixture.holder_released.get() else {
+        panic!(
+            "the wait observed the copy held and, from inside that observation, released the \
+             fork {holder}: without the wait there is no observation and no release"
+        );
+    };
+    assert_eq!(
+        released_at, 1,
+        "the wait's first observation read the copy held, and the run was read after the release"
+    );
+    assert!(
+        status.success(),
+        "the released fork exited cleanly: {status:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_lease_copy_that_outlives_the_bound_still_fails_the_first_incarnations_death() {
+    use crate::workspace_manager::fixture::ParkedFork;
+
+    let tag = "first-dies-copy-past-bound";
+    let fixture = Fixture::healthy(tag);
+    let (_, handle) = resume_as(
+        &fixture,
+        FIRST_RESUMER,
+        &runtime_holding_the_record(),
+        &mut HarnessTopologyHooks::new(harness()),
+    )
+    .expect("the run's first resume");
+    drop(handle);
+    fixture.release_bound.set(Duration::from_millis(500));
+    let parked = ParkedFork::holding_the_lease_of(&fixture.public());
+    let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        assert_no_process_holds_the_run(&fixture, tag);
+    }));
+    assert!(
+        parked.is_alive(),
+        "the copy's holder {} lived through the whole bound",
+        parked.pid()
+    );
+    drop(parked);
+    let message = failed
+        .expect_err("a copy that outlives the bound fails the observation")
+        .downcast::<String>()
+        .map(|text| *text)
+        .unwrap_or_default();
+    assert!(
+        message.contains(&format!("{tag}: and no process holds the run"))
+            && message.contains("CleanupHoldPastBound")
+            && message.contains("cleanup.lock"),
+        "the failure names the lease's expired wait and the lease the run lock's acquisition \
+         refused on: {message}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_lease_observation_that_fails_still_fails_the_first_incarnations_death_at_once() {
+    use crate::workspace_manager::fixture::unreadable_until_read_held;
+
+    let tag = "first-dies-lease-unobservable";
+    let fixture = Fixture::healthy(tag);
+    let (_, handle) = resume_as(
+        &fixture,
+        FIRST_RESUMER,
+        &runtime_holding_the_record(),
+        &mut HarnessTopologyHooks::new(harness()),
+    )
+    .expect("the run's first resume");
+    drop(handle);
+    let public = fixture.public();
+    if let Err(held) = wait_for_cleanup_hold_release_within(&public, RELEASE_BOUND) {
+        panic!("this process's own copies of the lease are released first: {held}");
+    }
+    assert!(
+        !rundir::is_running(&public),
+        "no process holds the run, and no observation of it fails, before the lease is made \
+         unreadable"
+    );
+    fixture.release_bound.set(Duration::from_millis(500));
+    let unreadable = unreadable_until_read_held(&public.join("cleanup.lock"));
+    assert!(
+        rundir::is_running(&public),
+        "production reads a lease it cannot inspect as held, fail-closed"
+    );
+    let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        assert_no_process_holds_the_run(&fixture, tag);
+    }));
+    assert!(
+        unreadable.never_read_held(),
+        "no observation read the unreadable lease as a holder: a wait that did put its mode back \
+         and passed on the next"
+    );
+    drop(unreadable);
+    let message = failed
+        .expect_err("an observation that fails fails the first incarnation's death")
+        .downcast::<String>()
+        .map(|text| *text)
+        .unwrap_or_default();
+    assert!(
+        message.contains(&format!("{tag}: and no process holds the run")),
+        "the failure is the observation's, made at once: {message}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_lease_observation_that_fails_still_fails_a_creation_prefixs_first_resume_at_once() {
+    use crate::workspace_manager::fixture::{UnreadableUntilReadHeld, unreadable_until_read_held};
+
+    let armed: RefCell<Option<UnreadableUntilReadHeld>> = RefCell::new(None);
+    let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        a_resume_over_a_creation_that_stopped_after_its_marker_was_removed_converges(
+            true,
+            "creation-stopped-at-p8-lease-unobservable",
+            &|fixture| {
+                let public = fixture.public();
+                if let Err(held) = wait_for_cleanup_hold_release_within(&public, RELEASE_BOUND) {
+                    panic!("this process's own copies of P8's lease are released first: {held}");
+                }
+                assert!(
+                    !rundir::observe_cleanup_hold(&public, &mut NoHooks),
+                    "the lease is free, and its observation does not fail, before it is made \
+                     unreadable"
+                );
+                fixture.release_bound.set(Duration::from_millis(500));
+                armed.replace(Some(unreadable_until_read_held(
+                    &public.join("cleanup.lock"),
+                )));
+                assert!(
+                    rundir::observe_cleanup_hold(&public, &mut NoHooks),
+                    "production reads a lease it cannot inspect as held, fail-closed"
+                );
+            },
+        );
+    }));
+    let message = failed.err().map(|payload| {
+        payload
+            .downcast::<String>()
+            .map(|text| *text)
+            .unwrap_or_default()
+    });
+    let Some(unreadable) = armed.into_inner() else {
+        panic!("the body reached its resume, having made the lease unreadable: {message:?}");
+    };
+    assert!(
+        unreadable.never_read_held(),
+        "no observation read the unreadable lease as a holder: a wait that did put its mode back, \
+         and the resume converged"
+    );
+    drop(unreadable);
+    let message =
+        message.expect("an observation that fails fails the creation prefix's first resume");
+    assert!(
+        message.contains("cleanup lease"),
+        "the failure is the lease observation's, made at once: {message}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_lease_copy_that_outlives_the_bound_still_refuses_a_creation_prefixs_first_resume() {
+    use crate::workspace_manager::fixture::ParkedFork;
+
+    let parked: RefCell<Option<ParkedFork>> = RefCell::new(None);
+    let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        a_resume_over_a_creation_that_stopped_after_its_marker_was_removed_converges(
+            true,
+            "creation-stopped-at-p8-copy-past-bound",
+            &|fixture| {
+                fixture.release_bound.set(Duration::from_millis(500));
+                parked.replace(Some(ParkedFork::holding_the_lease_of(&fixture.public())));
+            },
+        );
+    }));
+    let Some(parked) = parked.into_inner() else {
+        panic!("the body reached its resume, with a copy of P8's lease parked before it");
+    };
+    assert!(
+        parked.is_alive(),
+        "the copy's holder {} lived through the whole bound",
+        parked.pid()
+    );
+    drop(parked);
+    let message = failed
+        .expect_err("a copy that outlives the bound refuses the resume")
+        .downcast::<String>()
+        .map(|text| *text)
+        .unwrap_or_default();
+    assert!(
+        message.contains("still has a process of its own alive")
+            && message.contains("still held after the full 500ms bound"),
+        "the production refusal, with the wait's report that its whole bound ran out: {message}"
     );
 }
 

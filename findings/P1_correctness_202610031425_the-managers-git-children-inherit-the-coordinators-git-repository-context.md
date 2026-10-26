@@ -134,47 +134,48 @@ from the implementation review's executed facts (its regression lens's finding 3
 `/home/ubuntu/orch-pr11/reviews/review-329-i1-regression-54a1ff14.review.md`). The P1, its grade, its guard and its
 discovery pin `reviewed_sha` are unchanged.
 
-## Implementation status (2026-10-05T22:15Z; a conditional draft implementation, not adopted)
+## Extended at PR11 follow-up C's implementation (2026-10-03): FUC-D5-GITINDEXFILE
 
-**Where this section comes from.** It was appended on the branch `pr11-envc-impl1` (unpushed) when this file was
-imported, byte for byte, from PR #329's branch at `492325c4` as FUB-D9-ENV's canonical record. Everything above this
-section is that file's, unchanged: its frontmatter, discovery pin, guard, failure sequence and whole-scope limits.
+**The same class, found against #330's U, filed here rather than duplicated.** #330's design review round 5 found it as
+**FUC-D5-GITINDEXFILE, P1**: the design lens (reasoned, on the executed late add) and the added winiso lens (the path
+override executed on Git 2.43 and 2.55 with #330's round-5 switches; the damage reasoned), triaged in
+`/home/ubuntu/orch-pr11/reviews/review-330-d5-triage.md:22` and `:62`.
 
-**What is implemented, conditionally.** The reviewed option (C) (`owner-package/O3R-OPTION-C-PROPOSAL.md`, sha256
-`dc94ba82515d265fd98b4aa3c8f1f8b4c699a70733bd19fe245c6fbec023eedc`), in this branch's commits
-`5c222ff2..6c8ee6b1`, in both of the manager's builders. Option (C) is not adopted.
-- **In a slot,** the manager's Git children go without the inherited `GIT_DIR`, `GIT_WORK_TREE`,
-  `GIT_IMPLICIT_WORK_TREE` and `GIT_INDEX_FILE`. An inherited `GIT_COMMON_DIR` that is not absolute reaches them as the
-  absolute path it names at the base.
-- **From the base,** the `git worktree` commands go without `GIT_INDEX_FILE`.
-- **At the base,** the children keep the inherited context.
+**Its consequence for #330: it defeats U's instance isolation.** U gives each coordinator incarnation its own slot
+instances, so a dead incarnation's Git writers act only on their own instance's paths and registration
+(`reviews/2026-10-02-pr11-follow-up-c-record.md`, §4 and §5). An inherited `GIT_INDEX_FILE` names one index for every
+engine Git child, whatever instance it runs in: Git honours it over the worktree's own index, and neither builder clears
+or binds it (`WorkspaceManager::command` and `read_only_command` in `src/workspace_manager.rs` at #330's implementation
+bind the switch set and `GIT_NO_REPLACE_OBJECTS` only). So a coordinator launched with it set, a dead incarnation's late
+add whose `reset --hard` writes that shared index, and the successor's `candidate_write_tree` then captures the base tree
+instead of the worker's edits. Its other face, found by the same lens: Q's drain would not stop live commands writing an
+inherited alternate index either, so Q's untouched-user-checkout guarantee fails the same way. The audit list the lens
+gives for both builders, before repository discovery: `GIT_INDEX_FILE`, `GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`,
+`GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES`, `GIT_NAMESPACE`, `GIT_CONFIG_*`, `GIT_SHALLOW_FILE`,
+`GIT_GRAFT_FILE`. #330's common-git-dir census ran under a clean environment (`census_commondir.py:72` in
+`~/orch-pr11/logs/pr11_fuc_design5/census/`), so it could not see this; the appendix's §4.6 asks for the census to be
+repeated under inherited overrides with the remedy.
 
-**The witness, red at `5c222ff2` and green with the change.** This file's alternate-index slot-add sequence, as a row of
-`the_managers_slot_add_and_reads_shed_the_work_tree_context_and_its_base_keeps_it`. Each of the mutations MC8, MC9,
-MC11 and MC12 turns it red.
+**What #330's implementation changes here, and what it does not.**
+- It does not change any Git child's inherited environment: that is O3's (ENV-1) or O3-R's, and the brief puts it out
+  of #330's scope. FUC-D5-GITINDEXFILE stays open, P1, with this file, and blocks G6 with it.
+- **This file's protocol route is closed by #330's binding.** Both manager builders now bind `GIT_ALLOW_PROTOCOL` to the
+  empty value, after the inherited environment (a `Command` binding replaces an inherited value of the same name), so an
+  inherited `GIT_ALLOW_PROTOCOL=file` no longer overrides `protocol.file.allow=never`; the binding is pinned by
+  `both_builders_carry_the_engine_switch_set_and_its_bindings`. That is the appendix's row for it (§4.2, the kept
+  variables' table), reached without ENV-1's removals because the binding alone overrides the value. Every other route of
+  this file stays open.
 
-**FUC-D5-GITINDEXFILE is filed with this finding.**
-- **Where it is filed.** PR #330's primary finding, line 179 at `66e8a393`, reads: "an inherited `GIT_INDEX_FILE`
-  defeating instance isolation: filed with `FUB-D9-ENV` (O3 or O3-R)".
-- **Its sequence,** as the PR11 decision appendix §4.1 records it (lines 397-398): a dead incarnation's late add resets
-  a shared index, and the successor's `write-tree` captures the base.
-- **What was measured, and what is inferred.** The path override was executed on Git 2.43 and 2.55 with #330's
-  switches: that is a measured Git operation. That the engine's successor capture then holds the base is the inferred
-  engine consequence.
-- **The conditionally implemented sub-sequence:** the same test's two-incarnation row, red at `5c222ff2` and green with
-  the change.
+**Owner:** the PR11 owner's decision **O3** (ENV-1 in the manager's two builders), or **O3-R** if the owner folds the
+host runner's role environment into it. #330's ledger maps FUC-D5-GITINDEXFILE's row to this file.
 
-**The combined review's CR-1** (the appendix §4.1, lines 404-406) executed both halves of the class:
-- with #330's switches, `read-tree --reset -u HEAD` in a linked worktree replaced the main checkout's staged contents;
-- with #331's switches, `add -A` in a linked worktree staged into that same main index.
-
-Those are measured Git operations. Their engine consequences are inferred.
-
-**Why this finding stays open (`deferred`):**
-- **What (C) does not change:** this file's other inherited names, its protocol restriction (`GIT_ALLOW_PROTOCOL`), the
-  appendix §4.6 obligations it quotes, and its guard's route (ENV-1, O3), which is not adopted.
-- **Adoption and G6.** Option (C) is not adopted. G6 is cleared only by a fix validated in its range, or by a specific,
-  applicable owner exception.
-
-**Packaging.** This import is a finding record. It does not make the branch's whole implementation a single-finding
-repair. The owner's packaging exception is pending, not granted.
+**The route, selected 2026-10-11 (PR #330's repair round 9).** O3-R (ii)'s form: "its own change before G6, carried by
+the option (C) draft, the only implemented candidate", and "The adoptions that draft names stay the owner's, through its
+own question"; the option is "(ii) File it and fix it by its own change before G6." That selection is an agent decision
+by `pr11_decide_c` under the owner's delegation of 2026-10-11 (babysit's 0194a1e4…), in its decision report
+(`~/orch-pr11/logs/pr11_decide_c/DECISION-REPORT.md`, sha256 `19b080be…`, section 3, C-4), and not the owner's own
+selection. So this file, and with it FUC-D5-GITINDEXFILE, is remedied by its own change before G6, not by #330:
+- it stays open, P1 and `deferred`, and G6 stays blocked through Q4, Q6 and DESC until that change lands;
+- the selection adopts none of O3's options 1 to 3, O3-R (i) or (iii), option (C)'s own adoptions, or ENV-C's packaging
+  question, and approves no remedy's code;
+- if the option (C) draft does not land, the route stands and needs another candidate change.

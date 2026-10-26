@@ -152,6 +152,9 @@ pub enum UpstrokeError {
     #[error("{message}")]
     Refused { message: String },
 
+    #[error("{message}")]
+    RegistryRefused { message: String },
+
     #[error("{0}")]
     Validation(ValidationErrors),
 

@@ -301,7 +301,7 @@ pub fn create_candidates_ref(
         tree,
     } = promoting;
 
-    verify_object(manager, &candidate, &base, &tree)?;
+    verify_object(manager, hooks.effects(), &candidate, &base, &tree)?;
 
     match manager.direct_ref_target(candidate.candidate_ref.as_str())? {
         None => manager.create_ref_zero_old(
@@ -516,6 +516,7 @@ fn is_promoting(fold: &TopologyFold, key: TaskKey, generation: GenerationId) -> 
 
 fn verify_object(
     manager: &WorkspaceManager,
+    effects: &mut dyn crate::workspace_manager::EffectHooks,
     candidate: &CandidateRef,
     base: &CommitSha,
     tree: &CommitSha,
@@ -534,7 +535,7 @@ fn verify_object(
         .into());
     }
 
-    let parent = manager.commit_parent(candidate.commit_sha.as_str())?;
+    let parent = manager.commit_parent_pausing(effects, candidate.commit_sha.as_str())?;
     if parent.as_deref() != Some(base.as_str()) {
         return Err(Refusal::ObjectMissing {
             key: candidate.key.0,
@@ -544,7 +545,7 @@ fn verify_object(
         .into());
     }
 
-    let found = manager.commit_tree_sha(candidate.commit_sha.as_str())?;
+    let found = manager.commit_tree_sha_pausing(effects, candidate.commit_sha.as_str())?;
     if found.as_deref() != Some(tree.as_str()) {
         return Err(Refusal::ObjectMissing {
             key: candidate.key.0,

@@ -43,7 +43,7 @@ jobs:
         # an afterthought: the subprocess supervisor, the cmd /C quoting and the
         # PATHEXT resolution all behave differently per platform and are covered
         # by tests. It is absent from this matrix because it runs below, in
-        # `test-windows`, on a runner chosen by lane; these two legs stay on
+        # `test-windows`, on a self-hosted runner; these two legs stay on
         # GitHub's runners.
         os: [ubuntu-latest, macos-latest]
     steps:
@@ -88,78 +88,46 @@ jobs:
         env:
           UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}
 
-  # The Windows suite runs on one of two machines, chosen by lane. A
-  # pull-request or push build runs on an ephemeral self-hosted runner: a
-  # throwaway overlay of a frozen Server 2025 image on the build box, one job
-  # per boot, registered for that job with a single-use just-in-time config
-  # (MAINTAINING.md step 3). Measured 2026-09-15/16: five hosted samples of
-  # the suite on windows-latest (run 34980597250, at 126b8832) took 1122-1499 s
-  # in the harness, 21m 30s to 28m 03s a job; the guest, on three green runs of
-  # pull request #299, took 346 s in the harness, 6m 47s to 6m 55s a job --
-  # three to four times faster. A pull request waits on this leg
-  # interactively, so it keeps the guest. A merge-queue entry runs on
-  # windows-latest: nothing waits on the queue interactively, six to ten
-  # merges a day are a tenth to a sixth of what a serial lane at 25 minutes
-  # an entry can take in a day (57), bursts queue rather than fail, and moving
-  # it lets the queue's guest be retired from a box where
-  # two guests and the builds contend for the same cores -- one guest leg went
-  # from 6m to 10m 38s under that load. What the hosted queue run does not
-  # prove is behaviour that differs between the two machines -- what the
-  # runner environment reports, what the image carries; a test that passes on
-  # windows-latest in the queue and fails on the guest is seen first by the
-  # push to master, which runs the guest. `lint (windows)` and the Windows MSRV
-  # leg stay on windows-latest, and `lint (windows)` also links every binary
-  # and test harness with `cargo build --all-targets`, so GitHub's runner still
+  # The Windows suite runs on an ephemeral self-hosted runner, on every lane:
+  # a throwaway overlay of a frozen Server 2025 image on the build box, one
+  # job per boot, registered for that job with a single-use just-in-time
+  # config (MAINTAINING.md step 3). A pull request, a push to master and a
+  # merge-queue entry all run it there, on the same three labels. Measured
+  # 2026-09-15/16: five hosted samples of the suite on windows-latest (run
+  # 34980597250, at 126b8832) took 1122-1499 s in the harness, 21m 30s to
+  # 28m 03s a job; the guest, on three green runs of pull request #299, took
+  # 346 s in the harness, 6m 47s to 6m 55s a job -- three to four times
+  # faster. From 2026-09-16 a merge-queue entry ran on windows-latest
+  # instead, under a 45-minute timeout and then a 55-minute one. In October
+  # 2026 three queue entries of one head reached the 45 minutes and two of
+  # the next head reached the 55, each cancelled before its suite reported a
+  # complete result, while the guest ran the full suite of the tree the
+  # second of those two entries tested, as a pull request (run 40263568079),
+  # inside its own 20-minute timeout. So the queue runs on the guest again.
+  # That is a scheduling repair: it names no cause for the hosted runs, and
+  # it repairs no test. One guest serves every lane, so a queue entry's leg
+  # waits for it behind any build that holds it; and the queue now runs the
+  # composed commit on the machine every pull request runs on, where the
+  # hosted queue left a test whose outcome depends on the machine to be seen
+  # first by the push to master. `lint (windows)` and the Windows MSRV leg
+  # stay on windows-latest, and `lint (windows)` also links every binary and
+  # test harness with `cargo build --all-targets`, so GitHub's runner still
   # compiles, code-generates and links every `#[cfg(windows)]` body on current
   # stable on every lane. Every step of every job here is a pinned action or a
   # pinned script: an unpinned step could check out another tree first.
   #
-  # The guest's image carries the toolchain and a pre-warmed target directory,
-  # so its lane skips the install step and there is no cache step. The hosted
-  # lane installs the compiler the image carries, `1.97.1`, not `stable`.
-  # Current stable is ahead of the image (`lint (windows)` installs 1.98.1
-  # today), so `stable` here would run the suite on a compiler the
-  # pull-request lane never ran it on: a test whose outcome depends on the
-  # compiler -- a version-gated test, a std behaviour change, a new lint in
-  # test code under the workflow-wide `-D warnings` -- passes on one lane and
-  # fails on the other. The pin keeps the two test lanes one compiler. It does
-  # not shield the queue from stable moving, and nothing here does:
-  # `lint (windows)` runs at `stable` on both events and is required by
-  # `merge-gate`, so a stable that adds a lint between a pull request's green
-  # and its enqueue ejects the entry through that leg, exactly as before this
-  # change. The pin is re-set when the image is re-curated. `components:
-  # clippy` is a test dependency here, as in `test` above. The skipped step
-  # is not free on the guest: the runner resolves and downloads every `uses:`
-  # archive during job setup, before any `if:` is evaluated, so the guest lane
-  # now depends on GitHub serving two action archives rather than one
-  # (`actions/checkout` was already one), and a download failure fails the job
-  # before the skipped step -- an availability dependency of the kind the lane
-  # already had, taken as the price of one job for both lanes. No cache step on
-  # either lane: a run restores caches from its own ref or the default branch,
-  # a queue entry's ref is a fresh `gh-readonly-queue/` branch, and no run on
-  # `master` ever saves a hosted `test-windows` cache, so a cache step would
-  # upload a cache per entry that no later entry could read. The hosted
-  # timeout is calibrated to the five samples, whose slowest was 28 minutes,
-  # with room for the host lottery windows-latest showed before; the guest
-  # keeps its own. A hung queue entry surfaces in 45 minutes rather than 20.
+  # The guest's image carries the toolchain and a pre-warmed target
+  # directory, so there is no install step and no cache step, and the
+  # workflow oracle refuses a toolchain install in this job: the image
+  # selects the compiler, re-curation moves it, and the suite step below
+  # refuses to run on any other. The timeout is the guest's 20 minutes on
+  # every lane.
   test-windows:
-    name: test (${{ github.event_name == 'merge_group' && 'windows-latest' || 'winguest' }})
-    runs-on: ${{ github.event_name == 'merge_group' && 'windows-latest' || fromJSON('["self-hosted", "windows", "winguest"]') }}
-    timeout-minutes: ${{ github.event_name == 'merge_group' && 45 || 20 }}
+    name: test (winguest)
+    runs-on: [self-hosted, windows, winguest]
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-
-      # The hosted lane's compiler: the image's, exactly. The workflow oracle
-      # pins this step whole -- one install, right after the checkout, on
-      # exactly the lane whose runner needs one, at exactly the image's version
-      # -- and refuses an `if:` on any other step of this job. On the guest
-      # lane the step is skipped after its archive is downloaded at setup.
-      - name: Install the image's toolchain on the hosted lane
-        if: github.event_name == 'merge_group'
-        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
-        with:
-          toolchain: 1.97.1
-          components: clippy
 
       - name: Configure git identity
         run: |
@@ -178,17 +146,15 @@ jobs:
       # will enumerate. Counting what libtest itself reported refuses the
       # effect instead of the causes: a suite that did not execute has no
       # `test result: ok.` line to count. This is the one leg whose execution
-      # leaves GitHub's runners on the pull-request lane, so it is the leg
-      # that has to say so, and the witness runs on both lanes: the count is
-      # the same claim on either machine. The floor is today's count on this
-      # platform less a margin; removing that many tests is a deliberate act,
-      # and it edits this number in the same change.
+      # leaves GitHub's runners, so it is the leg that has to say so. The
+      # floor is today's count on this platform less a margin; removing that
+      # many tests is a deliberate act, and it edits this number in the same
+      # change.
       #
-      # First, though, the compiler. The toolchain action above tolerates a
-      # failed `rustup default` (`continue-on-error` on that step) and then
-      # verifies only `rustc +1.97.1`, so on the hosted lane the install can
-      # report success while bare `cargo` is still the runner's preinstalled
-      # stable. And the `rustc` on PATH is not the question: Cargo picks its
+      # First, though, the compiler. No step in this job installs one: the
+      # guest's image carries it, and what the image carries and the guest's
+      # environment selects is not something a reader of this file can see.
+      # And the `rustc` on PATH is not the question: Cargo picks its
       # compiler through `RUSTC`, `CARGO_BUILD_RUSTC` or a `build.rustc` in
       # any config it reads, none of which this workflow can see. So the
       # script asks Cargo itself -- `cargo rustc --lib -- --version` runs the
@@ -198,13 +164,10 @@ jobs:
       # run-directory tests), and a PATH rustc of another version fails them
       # with an incompatible-rlib error rather than a wrong answer. So the
       # script asks all three -- Cargo's compiler, PATH's rustc, PATH's cargo
-      # -- and refuses to run the suite unless every one is the image's, on
-      # either lane: the guest asserts what its image carries and its
-      # environment selects, the hosted lane asserts what the install
-      # selected, and the workflow oracle holds the number in this script to
-      # the one it pins for the install. Re-curation edits both together. On
-      # the hosted lane the first question compiles the dependencies, which
-      # the suite would compile next anyway.
+      # -- and refuses to run the suite unless every one is the image's: it
+      # asserts what the image carries and the guest's environment selects,
+      # and the workflow oracle holds the number in this script to the one it
+      # pins as the image's. Re-curation edits both together.
       - name: Test, and witness that the suite ran
         env:
           UPSTROKE_TEST_TEMP_FOLDS_CASE: "1"
@@ -249,8 +212,8 @@ jobs:
   # second step, `cargo build --all-targets`, makes it the witness that the
   # tree code-generates and links on current stable too, library, binaries and
   # test harnesses alike -- `cargo check` and Clippy stop before codegen, and
-  # the test leg links with the image's toolchain on both lanes, which moves
-  # only by re-curation. In the dev
+  # the test leg links with the image's toolchain, which moves only by
+  # re-curation. In the dev
   # profile, which is the profile every CI leg here builds; `release.yml` builds
   # the shipped artifact with `--release`. The two steps fail separately and the
   # log names which.
@@ -309,6 +272,19 @@ jobs:
       - run: bash .github/scripts/test-pr-ledger-evidence.sh
       - run: bash .github/scripts/test-docs-consistency.sh
       - run: bash .github/scripts/test-internals-notes.sh
+      # The audit gate's decode probe reads CPython's own bytecode, and every
+      # answer the gate asserts of it was measured on CPython 3.12. When this
+      # job's image moved from ubuntu-24.04 to ubuntu-26.04, whose inventories
+      # list Python 3.12.3 and 3.14.4, the unchanged gate printed 45 failures.
+      # The job did not print its interpreter; a private CPython 3.14.4 build
+      # prints the same 45 lines, and 3.12 passes. So the gate runs that probe
+      # on `python3.12`, refusing one that is not CPython 3.12, and this step
+      # puts one on PATH; the rest of the gate runs on the image's `python3`.
+      # Moving the version re-measures the gate's expectations in the same
+      # change. The workflow oracle allows this action one input.
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
       - run: bash .github/scripts/test-pr-ready-audit.sh
 
   # Branch protection requires this one deliberately stable context. Keeping

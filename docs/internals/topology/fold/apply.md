@@ -113,6 +113,14 @@ undo a recorded publication.
 The answer check refuses decline before append in this
 class. Its already authorized publication must survive.
 
+## `fail_lineage` › `self.abandoned = self`
+
+The released sequence is noted before the release, so that the coordinator, which holds the
+cancelled verification's charged passes only after this, can still record them against it
+(`merge_verification_charged`; `RunState::abandoned`). Nothing else about the release changes, and
+the released sequence still gets no terminal here, as before: that is the INV-07 assessment's
+question, which this change neither causes nor decides.
+
 ## `fail_lineage` › `let members: Vec<TaskKey> = self`
 
 Owned keys let each member's resources be consumed without retaining
@@ -174,6 +182,13 @@ sites; this section is the interruption's, not
 close releases the ordinary generation's own region exactly as
 every other closing settlement does.
 
+## `apply` › `TopologyEventBody::MergeVerificationCharged { data } => {`
+
+The record changes no state but `charged`: the transaction stays open, its entitlements stay derived
+from it, and the next resume's census and recovery step (f) settle it exactly as they would without
+the record. Recording the sequence is what lets the fold refuse a second record, and a terminal that
+carries passes, for it, live and on replay.
+
 ## `apply` › `self.open_question(&data.question, QuestionOrigin::Admission, None);`
 
 A bare `question_raised` carries no admission and so
@@ -184,6 +199,12 @@ authorizes no binding.
 The stop belongs to the epoch that hit the old ceiling; the next
 epoch starts without one, which is what makes "raise the budget and
 resume" the response to it.
+
+## `apply_resumed` › `self.abandoned = None;`
+
+A resume ends the incarnation that abandoned a verification, so a record for the released sequence is
+not admitted after it. `charged` is not cleared: across the resume the sequence's record still
+refuses a second one and a carrying terminal.
 
 ## `apply_resumed` › `self.wake_backoff();`
 

@@ -40,6 +40,40 @@ the include file its role processes read that graph through. And
 `ensure_execution_prerequisites` refuses a Git older than 2.41 by name. This
 module reads that constant and calls none of the manager's funnels.
 
+**A second amendment, adopted:** B-W924-R1, by the owner's ruling of 2026-10-08
+(the follow-up B record, `reviews/2026-10-01-pr11-follow-up-b-record.md`, §9.25
+and §9.28). The snapshot path's three registry commands run again past another
+registration's empty `commondir`, and nothing else in the module changes. It
+governs on master. In this draft it is superseded at those three commands, the
+whole of its scope, by the third amendment below, under ruling B-W924-R1-S, which was
+**adopted with O8 on 2026-10-11, as an agent decision by `pr11_decide_d` under the owner's
+delegation of 2026-10-11 (babysit's `0194a1e4…`), and is in force only from #331's merge**:
+its call-site wrapping, its helper, its predicate, its destination
+check and its two constants are withdrawn by its documented ordered rollback (the
+follow-up B record's §9.25.4), at those commands only, and each of its regression
+tests is mapped to a witness of the third amendment's access (the follow-up D
+record's §5.20). The allowlist row records all three amendments.
+
+A third amendment was **adopted on 2026-10-11, with decision O8 (decision B) and ruling
+B-W924-R1-S, as an agent decision by `pr11_decide_d` under the owner's delegation of
+2026-10-11 (babysit's `0194a1e4…`)**: follow-up D (#331, a draft), to close
+`PR329-LEGACY-RUNS-IN-LINKED-CHECKOUTS-RACE-THE-SHARED-WORKTREE-REGISTRY` and R-G. The
+row's text in `effects/allowlist.toml` gives it exactly, marked there as adopted, and
+the record `reviews/2026-10-02-pr11-follow-up-d-record.md` (§1 to §4, and its
+Implementation section) is why. It is three things. The three Git children that
+enumerate the shared worktree registry — `switch_branch`'s `git switch`,
+`add_gate_worktree`'s `git worktree add`, and `cleanup_gate_workspace`'s
+`git worktree remove` with the `git worktree list` that decides it — each run as one
+attempt of `crate::workspace_manager::tolerant_registry_access`, follow-up B's
+(#329); `git_command` refuses Git's automatic maintenance; and, from R-D1's
+preservation design (`~/orch-pr11/owner-package/RD1-PRESERVATION-PROPOSAL.md`, round 4,
+sha256 `f9e81c07…`, D's implementation round 3, its record §5.17), a legacy attempt's
+output is kept: a kept pin is written whatever `HEAD` is (part K), `pin_checkout` pins
+what the checkout holds (part N's capture), and `discard_into_kept_pin` removes the
+checkout's copy only once a kept pin and a copy of it the same process made durable
+both hold it (part G4). Their sections below say how. Nothing it adds is in force until the pull request
+merges. The module still calls no funnel of the manager: the access takes no site.
+
 The section "may only shrink after PR5 (the test compares against the frozen
 list)", so this attribute is a ceiling rather than a licence.
 
@@ -73,6 +107,46 @@ escape codes; `textconv` substitutes a rendered form for the bytes. Any of
 those corrupts every downstream check that reads the diff — and
 `capture_diff_is_immune_to_user_diff_config` is the test that says so.
 
+## `pub(crate) const KEPT_PIN_SUFFIX: &str = "-kept";`
+
+The kept pin of a legacy attempt is the attempt's prepared-pin name with this appended:
+`refs/upstroke/prepared/<run>/<task index>-<attempt>-kept`. It is unique per run, task and
+attempt, because an attempt number is never reused in a run, and no prepared-commit path
+names it: the resume's orphan removal names `prepared_pin_ref` exactly, the schema-3
+settlement check builds the exact expected pin, and the topology's pins live under
+`refs/upstroke/runs/`. Defined here since R-D1's part K, which `prepare_commit_from_candidate`
+reads; the coordinator and the resume import it. No engine path removes a kept pin; the
+operator does (R-D7).
+
+## `const CAPTURE_CONTROLS: [&str; 2] = ["-c", "core.sparseCheckout=false"];`
+
+Passed ahead of every subcommand of the kept-output capture and revert (`controlled`), so
+that a sparse checkout configured since the resume's own refusal of one
+(`refuse_sparse_checkout`) cannot narrow what the capture takes or what the revert writes.
+
+## `const PRIVATE_INDEX_CONTROLS: [&str; 4] = [`
+
+R-D1 round 4's RD3-1 (the proposal's §4.6): `-c core.splitIndex=false -c
+splitIndex.sharedIndexExpire=never`, passed by the two private-hooks builders with
+`GIT_INDEX_FILE` on a workspace value that carries a private index file, and on no other.
+The private index file sits in the checkout's own Git directory and takes the checkout's
+configuration by design, so under `core.splitIndex=true` Git would write it split — a new
+`sharedindex.*` beside the checkout's own — and every split write that creates a shared
+index file unlinks each other shared index of that directory older than
+`splitIndex.sharedIndexExpire`, the one the checkout's own index names included. Round 3's
+capture did exactly that (RD3-1: `git status` exit 128 afterwards). The first control writes
+the private index whole, so no split write runs for it; the second makes whatever still
+splits it — an inherited `GIT_TEST_SPLIT_INDEX` — unlink nothing, and so leaves orphan
+shared index files in the checkout's Git directory. Git removes an orphan only at a later
+split write of the checkout's own index that creates a shared index file, and only once the
+orphan is older than the checkout's configured `splitIndex.sharedIndexExpire`. With the
+default, `2.weeks.ago`, an orphan stays until it is older than two weeks and such a write
+follows; with `never`, automatic expiry never reclaims it; and repeated captures can
+accumulate them. A disclosed cost, left to the owner's choice and not accepted here; the
+variable is O3's class, with FUD-D4-ENV's. Both are command-scope settings, like
+`core.fsmonitor=false`: they decide how the private file is laid out and what its writes may
+unlink, never what the capture takes.
+
 ## `const REPLACE_REFS_REFUSED: [&str; 2] = ["-c", "core.useReplaceRefs=false"];`
 
 The second half of what `git_command` sets, and the half the floor needs. Git
@@ -95,6 +169,28 @@ their fixtures pin `core.useReplaceRefs = true` in the repository, for the
 reason `pin_replacement_refs_in` gives, and with the variable alone both failed
 on 2.40.0 and 2.41.0 and passed on 2.42.0 and 2.43.0 (`r3/` in the pull
 request's evidence). With this, both pass on all four.
+
+## `const AUTO_MAINTENANCE_REFUSED: [&str; 8] = [`
+
+`-c maintenance.auto=false -c gc.auto=0 -c gc.autoDetach=false -c
+maintenance.autoDetach=false`, which `git_command` passes after `REPLACE_REFS_REFUSED`
+(follow-up D's R-G, adopted with O8 on 2026-10-11 as an agent decision by `pr11_decide_d`
+under the owner's delegation of 2026-10-11 (babysit's `0194a1e4…`), and in force only from
+#331's merge). Git's automatic maintenance can
+start a `git worktree prune` that deletes a registration with no `gitdir` at once,
+whatever the expiry — the state another checkout's add is in before its first
+write (`should_prune_worktree`). Five builtins start it (`am`, `commit`, `fetch`,
+`merge`, `rebase`); the legacy engine runs none of them in production, so its one
+route is a promisor lazy fetch a legacy child starts in a partial clone, and at Git
+2.55.0 the default `geometric` strategy prunes worktrees. A `-c` setting outranks
+every configuration file and reaches every Git process the child starts through
+`GIT_CONFIG_PARAMETERS`, and `maintenance.auto=false` stops `maintenance run --auto`
+before it is built (`prepare_auto_maintenance`), so no Git child of this module, and
+no Git process one of them starts, runs automatic maintenance. On Windows maintenance
+would run attached, and the settings stop it the same way. What this does not reach:
+maintenance or a prune that a role's own Git, or the user's, starts (R-D10).
+`every_git_child_of_this_module_runs_with_automatic_maintenance_off` reads the four
+values back through the builder over a repository configuring the opposite.
 
 ## `enum GitScope<'a> {`
 
@@ -139,6 +235,13 @@ see.
 
 `every_git_child_of_this_module_is_built_where_replacements_are_refused` holds
 the shape; see its section.
+
+Follow-up D (adopted with O8 on 2026-10-11 as an agent decision by `pr11_decide_d` under the
+owner's delegation of 2026-10-11 (babysit's `0194a1e4…`), and in force only from #331's merge)
+adds `AUTO_MAINTENANCE_REFUSED` after
+`REPLACE_REFS_REFUSED`; see its section. The census's assertions about the builder
+still hold: one `Command::new(`, the pair set, `REPLACE_REFS_REFUSED` passed, and the
+fourteen call sites in the same functions in the same order.
 
 **The scope of the child, and the inherited Git context it is given.** The
 builder also takes the child's `GitScope` and gives it the inherited Git context
@@ -256,6 +359,22 @@ Decode one path printed by Git without requiring Unix path bytes to be
 UTF-8. Git appends a platform line ending; remove only that delimiter,
 never legal leading or trailing path bytes.
 
+## `pub struct Workspace` › `private_index: Option<PathBuf>,`
+
+`None` for every workspace the engine opens (`open`'s two values, the gate workspace's, and
+`canonical_common_dir`'s probe). `Some` only on a *view* of the same checkout that
+`with_private_index` makes for the kept-output capture, the revert's second index and the
+post-check: its two private-hooks builders — `run_git_with_private_hooks` (and through it
+`git_with_private_hooks` and `git_output_with_private_hooks`) and `git_output_with_input` —
+then set `GIT_INDEX_FILE` to that file, with `PRIVATE_INDEX_CONTROLS`, ahead of the
+subcommand. Git names an index file only through that variable, never by an argument or a
+configuration key, and another Git directory reads another configuration (the proposal's
+§4.2-§4.3), so this is the one faithful private capture. The plain builder (`git`,
+`git_output`, `git_path`) never sets it. The two `.env(` it adds are the payload census's row
+for this module, five to seven (`src/runner/contract.rs`), a conditional proposal beside O8's
+texts, which were adopted on 2026-10-11 as an agent decision by `pr11_decide_d` under the
+owner's delegation of 2026-10-11 (babysit's `0194a1e4…`).
+
 ## `impl Workspace` › `pub(crate) fn run_git_with_private_hooks(`
 
 Run a Git command with every repository-configured hook and fsmonitor
@@ -342,6 +461,19 @@ A commit's subject — the first line of its message.
 
 Move to an existing branch — how `resume` gets back onto the run's own
 branch when the operator has wandered off it.
+
+`git switch` refuses a branch checked out elsewhere by scanning the worktree
+registry (`die_if_checked_out`) before it changes anything, so it dies on another
+checkout's registration half written. Under follow-up D (adopted with O8 on 2026-10-11 as
+an agent decision by `pr11_decide_d` under the owner's delegation of 2026-10-11 (babysit's
+`0194a1e4…`), and in force only from #331's merge) the switch is one attempt of
+`tolerant_registry_access`, with no hold and a
+veto that always answers `Again::Attempt`: a failed attempt changed nothing, so the
+next attempt is the same attempt. A failure that outlasts the access's deadline —
+contention, residue, or a genuine failure of the switch, which the access cannot
+tell apart — refuses as `UpstrokeError::RegistryRefused` instead of a Git error at
+once (R-D6). The resume calls this only over a clean checkout, so the refusal
+discards nothing. `a_branch_switch_beside_a_tear_its_writer_finishes_switches`.
 
 ## `impl Workspace` › `pub fn branch_exists(&self, name: &str) -> Result<bool, UpstrokeError> {`
 
@@ -453,10 +585,45 @@ The exact path is already known to be the new worktree's top level.
 Avoid round-tripping it through Git's textual path output, which is
 not necessarily UTF-8 on Unix.
 
+## `impl Workspace` › `fn add_gate_worktree(`
+
+The snapshot's add, as one attempt of `tolerant_registry_access` (follow-up D,
+adopted with O8 on 2026-10-11 as an agent decision by `pr11_decide_d` under the owner's
+delegation of 2026-10-11 (babysit's `0194a1e4…`), and in force only from #331's merge): the
+`git worktree add` child and its exit check. It
+holds the registry lock shared, as the manager's adds do, under the canonical common
+git dir `canonical_common_dir` resolves, so a legacy process's lock key and refusal
+text match the manager's for the same repository. Its veto is `legacy_add_veto`.
+Git's add scans its siblings, makes its entry and that entry's `locked`, and only then
+takes the destination over; on any failure after that its junk removal removes the
+entry and the destination. So the add is attempted again only over the empty
+directory `PendingGateWorkspace` made, and anything else refuses at once. The add's
+own failure is never returned as Git state: no arm of the veto answers
+`Again::Return`. What that costs a genuine checkout failure after the takeover (a
+path the snapshot cannot hold, a failing filter, a store that refuses a write, a
+missing object): a resumable refusal with the output pinned, where master discarded
+it; each resume over a cause that persists pays one more worker attempt, as master's
+did, and keeps one more pin.
+
+A deletion that leaves the add successful — a prune that decided in the add's window
+and deletes the registration before or after the add returns — never reaches the
+veto, and the verification below then fails as Git state: that is R-D9, inside
+`PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, not closed here.
+
 ## `impl Workspace` › `pub fn prepare_commit_from_candidate(`
 
 Prepare and pin a commit from the exact candidate identities already
 used by gates and review. This never rereads the mutable index.
+
+R-D1's part K (adopted with O8 on 2026-10-11 as an agent decision by `pr11_decide_d` under the
+owner's delegation of 2026-10-11 (babysit's `0194a1e4…`), and in force only from #331's
+merge): `HEAD` is observed and compared with the
+captured branch and parent only for a pin whose name does not end with `KEPT_PIN_SUFFIX`. A
+kept pin, which nothing publishes, is written from the parent and tree it is given whatever
+`HEAD` is — moved, detached, on another branch, unborn or symbolic — with every other
+check, the create-only write and its verification as before; a publication pin still refuses
+a moved `HEAD` (T-K1). Without K, a branch another client moved and moved back (A1, A1h), or
+moved after the capture (A2, A2h), refused the pin and the output went with the next discard.
 
 ## `impl Workspace` › `pub fn commit(&self, message: &str) -> Result<String, UpstrokeError> {`
 
@@ -481,6 +648,174 @@ failed attempt and the post-commit scrub that keeps gate side-effects
 (build artifacts, lockfile churn) from leaking into the next task's
 captured diff.
 
+## `impl Workspace` › `pub(crate) fn pin_checkout(`
+
+Part N's pin (the coordinator's `kept_on_error`, for an attempt error after the worker ran):
+the checkout captured into a private index (`capture_checkout`, footprint included) and pinned
+at the kept name through `prepare_commit_from_candidate` under K. `Ok(None)` when the capture
+is `HEAD`'s tree: nothing to keep. It discards nothing.
+
+## `impl Workspace` › `pub(crate) fn discard_into_kept_pin(`
+
+Part G4, the resume's guarded exact discard of the attempt in flight (the proposal's §5.2):
+the capture, then `discard_held`, then the private index removed whatever happened, then
+`uncommitted_summary` for what stayed (`KeptDiscard::left_in_place`). It removes nothing a
+kept pin of upstroke's and a copy of it this same process made durable do not both hold, and
+refuses, discarding nothing it does not hold, when any step fails.
+
+## `impl Workspace` › `fn discard_held(`
+
+The order is the guarantee. A capture equal to `HEAD`'s tree resets only the checkout's
+index. Otherwise: the attempt's copies are read before any pin is written (`attempt_copies`);
+copies naming different commits refuse, naming both; then the pin — none and no copy:
+written from the capture under K; none and a copy: put back from the copy (`restore_pin`,
+recorded as `restored_from`) and checked; a pin and a copy: they must name the same commit,
+else refuse naming both (RD2-1m); a pin alone: checked (`held_by_pin`). Submodule paths and
+new paths the pin never held are left in place (`leave_out`). Then a fresh copy, written and
+made durable by this resume whatever copies the attempt already has (`copy_pin`; round 4's
+RD3-2: a copy found is never relied on for durability), the discard's own filter check on
+`HEAD`'s tree, the two-phase revert, the index reset, and the post-check.
+
+## `impl Workspace` › `fn held_by_pin(`
+
+An existing pin must be upstroke's kept commit of the attempt (`prepared_commit_matches`
+with the commit's own parent and tree, and the kept message), else "is not upstroke's kept
+commit of this attempt" (C3). Then containment, not equality (after a part-way discard every
+path is `HEAD`'s or the pin's, so the next resume finishes with no operator step, G-RESET): a
+path the checkout deleted is allowed; a path where the capture and the pin agree is held; a
+path new in the capture and absent from the pin is left in place — unless it is in the
+discard's way (`CheckoutCapture::footprint_holds`), which refuses ("move them out of the
+way", RD2-2p); anything else refuses, naming the paths (X3).
+
+## `impl Workspace` › `fn leave_out(`
+
+The paths left in place take `HEAD`'s entry in the capture's private index (`update-index
+-z --index-info` from `diff-tree`'s old side; a path `HEAD` lacks reads `000000 <zeros>` and
+leaves the index), so neither phase of the revert ever touches them; `write-tree` gives R.
+
+## `impl Workspace` › `fn attempt_copies(`
+
+The run's public directory, read once: names `kept-<task>-<attempt>-` + 26 ULID characters
++ `.bundle` (`is_attempt_copy`), sorted, each kept only if `git bundle list-heads` names
+exactly one head, a full object id at the kept name. A `.partial`, a copy whose `list-heads`
+fails, or any other name is never a copy.
+
+## `impl Workspace` › `fn restore_pin(`
+
+`git bundle unbundle` (whose `index-pack` checks the whole pack, so a copy cut short fails
+here, where `list-heads` and `verify` pass it), the commit checked as upstroke's kept commit
+of the attempt, and a create-only `update-ref --no-deref` with the message "upstroke:
+restore kept pin from its copy", verified.
+
+## `impl Workspace` › `fn copy_pin(`
+
+A new name every time — `<stem>-<ULID>` — so no copy is ever written over and the first
+complete copy survives every later resume. On failure the `.partial` is removed if it is
+still there; a final name whose directory fsync failed stays, never relied on (R-D7 lists it).
+
+## `impl Workspace` › `fn write_copy(`
+
+`git bundle create <partial> <pin> ^<head>` (Git fsyncs no bundle, under any `core.fsync`;
+the proposal's §2.3), its one head checked with `list-heads`, then the module's own
+durability idiom: `File::sync_all` with write access (`fsync`, `F_FULLFSYNC` on macOS,
+`FlushFileBuffers` on Windows), `rename` to the final name, `sync_parent` (the directory's
+`fsync` on Unix, nothing on Windows). Each failure refuses before anything is removed.
+Whether the calls are those system calls, and what a successful fsync means on a disk, is
+reasoned; the order was traced on Linux (record §5.17).
+
+## `impl Workspace` › `fn relative_to_root(`
+
+The copy's path relative to the checkout's root, computed from canonical paths and spelled
+with `/`, so that every Git child names it by an argument relative to `-C <root>`. A copy
+outside the checkout, or under a name that is not UTF-8, refuses.
+
+## `impl Workspace` › `fn revert(`
+
+Phase A, `read-tree -m -u R T` on the capture's index, T being `HEAD`'s tree less the paths R
+lacks (`tree_without`): every path of T is a path of R, so it creates nothing, and rewrites
+or removes only R's own paths, each after Git's up-to-date check; no untracked or ignored
+file is in its way. Phase B, for the paths R lacks: their `HEAD` entries into the capture's
+index and `checkout-index -z --stdin` with no `-f`, which writes only where nothing stands
+(`O_EXCL`) and refuses elsewhere; its refusal is returned, not raised, for the post-check to
+name. The instant between Git's up-to-date check of a file and its unlink is the disclosed
+phase-A window (the proposal's §9.3).
+
+## `impl Workspace` › `fn tree_without(`
+
+T on a second private index file (`-tree`), removed whatever happened; no work tree is
+touched (`tree_of`: `read-tree`, `update-index --force-remove`, `write-tree`).
+
+## `impl Workspace` › `fn check_reverted(`
+
+A second capture, with no footprint, on its own private index: every path R changed from
+`HEAD` must be back at `HEAD` and phase B must have refused nothing, else "stopped part-way",
+naming the paths and phase B's refusal; then `HEAD` must not have moved ("the run branch moved
+… during the discard", X19). The next resume finishes a part-way discard.
+
+## `impl Workspace` › `fn capture_checkout(`
+
+The checkout's own filter refusal first (`refuse_worktree_filters_before("git add")`, as the
+coordinator's capture does), then a view with a fresh private index file
+(`private_index_file`) filled by `fill_capture`; the file is removed on any failure.
+
+## `impl Workspace` › `fn fill_capture(`
+
+`read-tree <head>`, `add -A --ignore-errors` (exit 0 or 1; a path `add` cannot take is left
+out, never fatal), `write-tree`; then the footprint (the proposal's §3.2): the paths `HEAD` has
+and the capture lacks, walked by `in_the_way`; what stands in the revert's way is added again
+with `--literal-pathspecs add -A -f --ignore-errors --pathspec-from-file=-
+--pathspec-file-nul`, NUL-separated on standard input, and the tree written again. Every
+child names the private index, so none reads the checkout's own index, and every `diff-tree`
+it runs reads the capture's (round 4).
+
+## `impl Workspace` › `fn in_the_way(&self, missing: &[Vec<u8>]) -> Vec<Vec<u8>> {`
+
+For each missing path, its first leading component that exists and is not a directory (a
+symbolic link counts as not a directory), or else the path itself if anything is there:
+`symlink_metadata` only, nothing changes. A path this platform cannot name is skipped, and
+phase B then refuses for it.
+
+## `impl Workspace` › `fn checkout_path(&self, path: &[u8]) -> Option<PathBuf> {`
+
+A path Git printed, as bytes, joined to the root: any bytes on Unix, UTF-8 only elsewhere.
+
+## `impl Workspace` › `fn private_index_file(&self, role: &str) -> Result<PathBuf, UpstrokeError> {`
+
+`<git dir>/upstroke-kept-<pid>-<ULID><role>.index` in the checkout's own Git directory (for a
+linked checkout, its entry under the common directory's `worktrees/`): Git reads no unknown
+file there, and a crash leaves it inert (R-D7).
+
+## `impl Workspace` › `fn with_private_index(&self, index: PathBuf) -> Self {`
+
+A view of this same checkout with only its index file changed: the module's builders read
+the root from the value they are given, so the view owns a copy of it.
+
+## `impl Workspace` › `fn changed_paths(&self, from: &str, to: &str) -> Result<Vec<TreeChange>, UpstrokeError> {`
+
+`diff-tree -r -z --no-renames --raw --ignore-submodules=none` through the private-hooks
+builder with `controlled`, on the value it is called on: the capture's view (or the
+post-check's), so it reads that private index and never the checkout's. Round 2's and round
+3's ran it through the plain builder on the checkout's index, which ran the checkout's
+fsmonitor hook and, on Git 2.55.0, started its daemon (RD3-1f). Each record keeps `HEAD`'s
+side's mode and object id (`TreeChange`), which `leave_out` and phase B write back.
+
+## `pub(crate) struct KeptPin<'a> {`
+
+The kept pin's branch ref, message and name, built by the coordinator and the resume from
+the attempt's prepared pin. `KeptCopies` is the run's public directory and the stem
+`kept-<task index>-<attempt>`; `KeptDiscard` what a guarded discard did: the kept commit, the
+copy it wrote, the copy a missing pin was put back from (`restored_from`), and what stayed.
+
+## `impl CheckoutCapture` › `fn footprint_holds(&self, path: &[u8]) -> bool {`
+
+Whether `path` is a footprint path or under one: what the capture took only because it stood
+in the revert's way.
+
+## `fn is_attempt_copy(name: &str, stem: &str) -> bool {`
+
+`<stem>-<26 characters of 0-9 and A-Z>.bundle` exactly: a ULID name, so a `.partial` or a
+name another tool made is never read as a copy.
+
 ## `enum SnapshotStoreMode` › `EphemeralUnderRoot,`
 
 `store_or_root` is a shared parent such as the system temp directory.
@@ -499,11 +834,90 @@ root. The root may be shared (notably `/tmp`) and is never chmodded.
 
 Use the exact stable store whose synced intents resume will reclaim.
 
+## `fn cleanup_gate_workspace(`
+
+A snapshot's removal and the list that decides whether it took the registration are
+**one** attempt of `tolerant_registry_access` (follow-up D, adopted with O8 on 2026-10-11 as
+an agent decision by `pr11_decide_d` under the owner's delegation of 2026-10-11 (babysit's
+`0194a1e4…`), and in force only from #331's merge), with no hold and a veto that always
+answers `Again::Attempt`. The attempt
+succeeds when the list does not register the path, whatever the removal's exit
+status — the existing treatment, which counts an already-unregistered destination
+("is not a working tree") as reclaimed — and fails with the removal's words while the
+list registers it, or with the list's own error when the list fails. Wrapping the
+list apart from the removal (round 4's B1′) let a removal the tear failed be decided
+by a list that ran after the tear finished, which still registered the path
+(FUB-D4-B1REMOVE; `a_snapshot_removal_beside_a_tear_its_writer_finishes_takes_the_registration`).
+Everything after the attempt is as it was. A snapshot's drop now waits up to the
+access's deadline when the store is in the way, where it failed at once and left
+residue for the resume; a refused add costs two such waits, the add's and then this
+cleanup's, each plus its last attempt's runtime.
+
 ## `let _ = fs::remove_dir_all(path);`
 
 `worktree remove` normally removes the directory too. Once Git confirms
 no registration remains, these exact private paths are safe to remove
 even if a partially failed add populated only part of either one.
+
+## `fn canonical_common_dir(root: &Path) -> Result<PathBuf, UpstrokeError> {`
+
+`git rev-parse --path-format=absolute --git-common-dir` through `git_path`, and so
+through `git_command`, then `fs::canonicalize`: the two steps
+`recorded_objects_scope` takes, and the spelling `tolerant_registry_access` requires
+of its key (the manager's `common_git_dir` is the same). The tests read the access's
+`CONTENDED_ATTEMPTS` handshake under the same spelling.
+
+## `fn legacy_registry_pause(pause: std::time::Duration) -> Result<(), UpstrokeError> {`
+
+The pause each of the three legacy registry accesses waits out between its attempts: a
+sleep on the calling thread, always `Ok`. Follow-up B's head `55029628` (#329: its repair
+round 3's R1, `eef97e41`, and round 6's I2-1, `22d70ef6`) takes the wait out of
+`tolerant_registry_access` and has every caller hand it one (`pause_for`, whose error ends
+the access), the manager's own calls passing their hooks'
+`EffectHooks::registry_pause`, whose default is this same sleep. The legacy module has no
+hooks, so it passes this function, and its accesses wait as they did when the access
+slept inside itself. Part of follow-up D's draft (#331), adopted with O8 on 2026-10-11 as an
+agent decision by `pr11_decide_d` under the owner's delegation of 2026-10-11 (babysit's
+`0194a1e4…`), and in force only from #331's merge, adapted to B's provisional head by the
+merge that took it.
+
+## `fn legacy_add_veto(path: &Path) -> Again {`
+
+The snapshot add's veto: the removal predicate, described by what it observes
+(FUD-D3-TAKEOVERWORD), as follow-up B's round 8 dates it for both adds. After a
+failed attempt it reads the destination with `symlink_metadata`, and `read_dir` when
+it is a directory, and starts no Git child:
+
+| The destination after the failed attempt | The answer |
+|---|---|
+| an empty directory this access can remove | it is removed and made again (`remake_destination`), and the answer is `Again::Attempt` |
+| gone | `Again::Undecidable` |
+| an empty directory this access cannot remove | `Again::Undecidable` |
+| a directory that is not empty, anything that is not a directory (a link included), or metadata it cannot read | `Again::Undecidable` |
+
+`Again::Undecidable` makes the access refuse at once as
+`UpstrokeError::RegistryRefused`, naming why, and B-PRESERVE keeps the captured
+candidate (`src/engine/coordinator.rs`). Why attempting again over an empty,
+removable destination is safe needs no history: it holds nothing to lose, because the
+worker's output is the captured candidate in the run's own checkout, and the next
+attempt is bounded — it ends in success, or at the deadline in a refusal that keeps.
+What reaches that arm, none of it told apart: a failure before Git took the
+destination over, the case the arm is for; a takeover whose junk removal emptied the
+destination and could not remove it, since become removable (R-D4); a takeover cut
+short by a signal before Git wrote there (R-D3). A destination gone means the failure
+came after Git took it over — the add's own (a checkout that cannot be made) or a
+prune that deleted the add's registration (FUD-D2-PRUNE) — and nothing outside Git
+tells the two apart, so the output is kept in both. On Windows std exposes no stable
+file identity at the MSRV, and the rule needs none: a delete-pending destination that
+cannot be made again is `Undecidable`, a refusal that keeps.
+`the_snapshot_add_veto_attempts_again_only_over_an_empty_destination_it_can_remove`
+calls it on each shape.
+
+## `fn remake_destination(path: &Path) -> Again {`
+
+Makes the destination again as the private directory `PendingGateWorkspace` made
+(`create_private_dir`, mode 0700 on Unix) and answers `Again::Attempt`; a destination
+it removed and cannot make again is `Again::Undecidable`.
 
 ## `fn sparse_checkout_is_refused_before_worker_spend()` › `run_git(&repo, &["update-index", "--skip-worktree", "README.md"]);`
 
@@ -776,6 +1190,338 @@ type. The production region calls no function of another crate module but
 `crate::ulid::ulid`. What it reads as production and a compiler would not: a
 `#[cfg(test)]` item outside the test module. One that builds a `Command` fails
 the census rather than hiding from it.
+
+## `enum Served {`
+
+*B-W924-R1's witnesses, SYNTHETIC CONTROLS (the follow-up B record's §9.25).* Under ruling
+B-W924-R1-S, which supersedes B-W924-R1 at its three commands and was **adopted** with O8 on
+2026-10-11 as an agent decision by `pr11_decide_d` under the owner's delegation of 2026-10-11
+(babysit's `0194a1e4…`), in force only from #331's merge, they witness the tolerant access
+there instead (the follow-up D record's §5.20).
+What a planted registration's `commondir` gives the next reader:
+`Served::Torn`, zero bytes, or `Served::Whole`, `../..` and a newline.
+
+## `fn make_fifo(path: &Path) -> std::io::Result<()> {`
+
+`mkfifo` the command, so that the witnesses name no `libc` item for it.
+
+## `fn serving_commondir<T>(`
+
+Plants another checkout's registration's `commondir` as a FIFO and serves it:
+each Git that opens it for reading blocks until the server has opened it for
+writing, gets the next reading the script names, and reads end of file when the
+server closes it. Git writes a regular file, never a FIFO; this is how a test
+makes exactly the reads it names empty, and every later read whole, with no
+timing. Each reading goes through a FIFO of its own: before a reader is
+released, a fresh FIFO, or after the last reading a whole regular file, is
+renamed over the path, so a reader that is slow to close its end cannot take
+the next reading too, and no reader is left waiting on a FIFO nobody serves.
+(The first version opened the same FIFO again for each reading, and in a loaded
+suite one `git worktree remove` still holding its end took all three of the
+cleanup witness's readings.) The four commands it serves each open another
+registration's `commondir` once, on Git 2.43.0 and 2.55.0. When the act returns,
+the server is stopped and, if it is still waiting for a reader, released by a
+reader the test opens without blocking. A server that fails, by an error or by
+a panic, releases every reader of its FIFO and puts the whole file in place
+(`release_commondir_readers`) before its failure goes on: its own thread
+catches the unwinding, releases, and resumes it, so the act's next Git reads
+the whole file rather than waiting on a FIFO nobody serves, the act returns,
+and the join carries the server's panic or error out. The act's panic is
+carried out first. (Until the B9 round only an error released: a panic, such as
+an `on_serve` callback's failed `expect`, closed the writer, the act's next
+attempt opened the abandoned FIFO and waited for ever, and the join that would
+carry the panic out was never reached. B-I8-2, the follow-up B record's §9.26.)
+Linux-only, as its tests are: they assert the `Success` line, whose rendering
+was executed only on Linux with glibc.
+
+## `fn release_commondir_readers(commondir: &Path, whole: &Path) {`
+
+The fixture's release, in an order meant to strand no reader: a reader opened
+on the path without blocking, which is what lets the writer opened next without
+blocking succeed; that writer, whose arrival wakes every Git blocked opening the
+FIFO; the whole file renamed over the path, so every later open reads it; then
+both closed, so every reader of the FIFO reads end of file, which Git takes for
+a torn read and attempts again, now of the whole file. Whatever is at the path,
+the FIFO the server was serving or the next one, it is released; if the whole
+file is already in place the rename fails and is ignored. The order is reasoned
+from Linux's FIFO semantics: the tests do not force a reader into the gap
+between a writer's close and the rename, which the earlier order (a writer
+opened without blocking, then the rename) left open.
+
+## `const WEDGED_TEAR_FIXTURE: Duration = Duration::from_secs(30);`
+
+TEST-HARNESS CONTAINMENT, not a bound of the code under test: how long a witness waits for an
+act that a planted tear or a FIFO may have wedged before it releases the fixture itself and fails.
+Thirty seconds, the value B-W924-R1's witnesses waited (three of its ten-second deadlines), kept
+when B-W924-R1-S (adopted with O8 on 2026-10-11 as an agent decision by `pr11_decide_d` under
+the owner's delegation of 2026-10-11 (babysit's `0194a1e4…`), and in force only from #331's
+merge) withdrew that ruling's `REGISTRY_TEAR_DEADLINE` with its helper. A
+healthy act ends long before it.
+
+## `const PRODUCTION_REGISTRY_DEADLINE: Duration = Duration::from_secs(10);`
+
+The production registry deadline: `REGISTRY_ACCESS_DEADLINE`'s `#[cfg(not(test))]` value, which a
+test build cannot name. A witness of the tolerant access whose script needs more than one failed
+attempt of one access holds it for its own repository
+(`crate::workspace_manager::RegistryDeadline::hold`), so that one attempt the platform makes slow
+does not use up the test build's 500 ms before the attempt the script needs (the follow-up D
+record's §5.21). Under B-W924-R1-S (adopted with O8 on 2026-10-11 as an agent decision by
+`pr11_decide_d` under the owner's delegation of 2026-10-11 (babysit's `0194a1e4…`), and in force
+only from #331's merge). It is as NOMINAL as the test build's: an admission
+rule checked after each attempt, with no hard elapsed bound and no bound on a running Git child's
+completion, so a hold never makes a hung child fail within ten seconds. A witness whose oracle is
+the refusal at the deadline keeps the test build's.
+
+## `fn refusal_attempts(message: &str) -> usize {`
+
+The attempt count a registry refusal names, read from its `<count> attempt(s)`. The witnesses of
+the tolerant access at B-W924-R1's three commands compare it with `contended_attempts`, so that a
+refusal is shown to follow attempts the access made again, not a single attempt.
+
+## `fn a_snapshot_add_is_attempted_again_past_another_registrations_empty_commondir() {`
+
+A durable snapshot added while another checkout's registration reads empty
+once: the add's first attempt reads the tear and dies, the attempt after it
+reads the registration whole, and the snapshot is made, registered, and
+reclaimed by its drop. With the repair reverted, the add fails as the CI
+witness did: `git worktree add failed: fatal: failed to read …/commondir:
+Success`. Under B-W924-R1-S (adopted with O8 on 2026-10-11 as an agent decision by
+`pr11_decide_d` under the owner's delegation of 2026-10-11 (babysit's `0194a1e4…`), and in force
+only from #331's merge) the repair it
+witnesses is the tolerant access at the add, and the test is unchanged.
+
+## `fn a_snapshots_removal_and_its_list_are_attempted_again_past_another_registrations_empty_commondir()`
+
+*Under B-W924-R1-S (adopted with O8 on 2026-10-11 as an agent decision by `pr11_decide_d` under
+the owner's delegation of 2026-10-11 (babysit's `0194a1e4…`), and in force only from #331's
+merge): B-W924-R1's witness, its script changed for the tolerant access.* A
+snapshot's drop while another registration reads empty, whole, whole, then empty. The cleanup runs
+the removal and the list that decides it as one attempt of the access: the first attempt's removal
+reads the tear and its list the whole registration, which still lists the snapshot; the next
+attempt's removal reads it whole and removes the snapshot, and its list, after that removal has
+passed, reads the tear; the attempt after that finds the snapshot gone. The registration, the
+directory, its hooks and its intent are all gone. With the cleanup's access returning its first
+failure, the snapshot stays registered; with only the list's failure returned at once, the cleanup
+stops before its intent is removed; with the list run once after the access, the list reads the
+registration whole and the fourth reading is never taken. B-W924-R1's script, empty, whole, empty,
+would show only the removal past a tear here: the list would read the registration whole both
+times. Its repository's accesses wait to `PRODUCTION_REGISTRY_DEADLINE` (the follow-up D record's
+§5.21): the cleanup's second attempt, whose list reads the scripted tear, must not be its access's
+last. Under round D8's stand-in, which ends each access's first `Attempt` answer 600 ms later, the
+test build's 500 ms made it the last, and the cleanup stopped before its hooks and its intent were
+removed; that is shown under the stand-in only, and no natural failure is claimed.
+
+## `fn an_empty_commondir_of_the_snapshots_own_registration_is_attempted_again_until_the_deadline_and_refused()`
+
+*Under B-W924-R1-S (adopted with O8 on 2026-10-11 as an agent decision by `pr11_decide_d` under
+the owner's delegation of 2026-10-11 (babysit's `0194a1e4…`), and in force only from #331's
+merge), in place of B-W924-R1's
+`an_empty_commondir_of_the_snapshots_own_registration_is_returned_at_once`: a change O8 makes,
+not an equivalence.* The snapshot's own registration's `commondir` emptied. The cleanup's access
+classifies nothing, so it attempts the removal and its list again until the access's nominal
+deadline (500 ms in a test build, an admission rule checked after each attempt, with no hard elapsed
+bound), and then refuses as a registry refusal naming the list's Git failure, which names the
+registration. Each failed attempt was answered `Attempt`, and the refusal came no earlier than the
+deadline. Restored, the snapshot is reclaimed. B-W924-R1 returned Git's failure at once: its own
+registration is no other process's write in flight.
+
+## `fn another_registrations_commondir_git_cannot_read_is_attempted_again_until_the_deadline_and_refused()`
+
+*Under B-W924-R1-S (adopted with O8 on 2026-10-11 as an agent decision by `pr11_decide_d` under
+the owner's delegation of 2026-10-11 (babysit's `0194a1e4…`), and in force only from #331's
+merge), in place of B-W924-R1's
+`another_registrations_commondir_git_cannot_read_is_returned_at_once`: a change O8 makes, not an
+equivalence.* Another registration's `commondir` a directory: Git dies reading it, `Is a
+directory`, and the add's access attempts it again, over an empty destination it removes and makes
+again each time, until the nominal deadline, then refuses as a registry refusal naming the add's
+Git failure. The snapshot's cleanup after it meets the same directory and refuses too, which its
+drop ignores. B-W924-R1 waited only on an empty read, and returned this at once.
+
+## `fn another_registrations_empty_commondir_that_outlasts_the_deadline_refuses_naming_the_adds_error()`
+
+*Under B-W924-R1-S (adopted with O8 on 2026-10-11 as an agent decision by `pr11_decide_d` under
+the owner's delegation of 2026-10-11 (babysit's `0194a1e4…`), and in force only from #331's
+merge), in place of B-W924-R1's
+`another_registrations_empty_commondir_that_outlasts_the_deadline_returns_the_adds_error`.* Another
+registration's `commondir` left empty. `add_gate_worktree`, called directly so that the snapshot's
+cleanup after it is not timed with it, is attempted again, each time over the empty destination it
+removes and makes again, and refuses as a registry refusal no earlier than the access's nominal
+deadline (500 ms in a test build). The refusal names two attempts or more, each answered
+`Attempt`, and as the last failure the add's own Git error naming the registration; the destination
+is still an empty directory. Kept from B-W924-R1's test: the add's error named, attempts made again,
+an empty destination, and no silent outcome. Changed by O8: the outcome's kind, from the
+add's Git error to the refusal, and the timing, from B-W924-R1's ten-second deadline with a
+five-second allowance to the access's nominal deadline, an admission rule with no hard elapsed
+bound, of which no upper limit is asserted. Bounded: if the add has not returned at
+`WEDGED_TEAR_FIXTURE`, the test writes the `commondir` whole so that the add ends, and fails.
+
+## `fn a_destination_no_longer_empty_refuses_at_once_naming_the_adds_first_error() {`
+
+*Under B-W924-R1-S (adopted with O8 on 2026-10-11 as an agent decision by `pr11_decide_d` under
+the owner's delegation of 2026-10-11 (babysit's `0194a1e4…`), and in force only from #331's
+merge), in place of B-W924-R1's
+`a_destination_no_longer_empty_returns_the_adds_first_error`.* The add's destination written to
+while Git is blocked reading the tear: the add's veto finds a directory that is not empty and
+refuses at once, after one attempt and with no `Attempt` answer, naming the add's first failure as
+it was. Kept: the first failure, with no further attempt. Changed by O8: the outcome's
+kind, a registry refusal rather than the add's Git error. Run again, the add would fail on the
+destination instead.
+
+## `fn serving_commondir_under_containment(`
+
+TEST-HARNESS CONTAINMENT, not the repair. Runs `serving_commondir` with a
+snapshot as the act, beside a containment thread that waits for the act's end:
+if it has not ended at `WEDGED_TEAR_FIXTURE`, the containment
+releases the fixture's readers itself and puts the whole file in place, so that
+the act's Git can end, every later read is whole and nothing is left waiting,
+and reports that it had to. It carries its own copy of the release rather than
+calling `release_commondir_readers`, so that a defect in the fixture's release
+cannot disable it: a mutation of that function that skips the rename wedged
+the witness for good while the containment called it (the B9 round's matrix).
+The bound bounds a wedged fixture, not a healthy one: a healthy server's act
+ends in milliseconds. It returns what `serving_commondir` carried out, the
+snapshot's own result, and whether the containment released. The containment
+thread is joined.
+
+## `fn a_commondir_server_that_panics_releases_its_reader_and_its_panic_reaches_the_caller() {`
+
+The B-I8-2 witness. The server's `on_serve` callback panics at the first
+reading, after the add's Git has opened the FIFO: the add's first attempt reads
+end of file and dies, and the server's own unwinding releases the FIFO and puts
+the whole file in place, so the add's next attempt reads it and the snapshot is
+made. The containment did not release, the panic that reaches the caller is the
+callback's own, and the add succeeded. Before the repair the add's next Git
+waited on the abandoned FIFO until the containment released it, thirty seconds
+in, and the test fails on that.
+
+## `fn a_commondir_server_that_fails_releases_its_reader_and_its_error_reaches_the_caller() {`
+
+A control: an ordinary error of the server, a file planted where its next FIFO
+would go, so its `mkfifo` fails at the first reading. The add's first attempt
+reads end of file, the release puts the whole file in place, the add's next
+attempt reads it, the containment does not release, and the caller receives the
+server's error through `serving_commondir`'s `expect`, naming `mkfifo`.
+
+## `fn a_commondir_server_that_serves_its_script_ends_without_the_containment() {`
+
+A control: the same harness with a server that serves its one torn reading and
+fails nothing. The containment does not release, the server reports the tear
+it served, and the add goes on past it.
+
+## `fn common_git_dir_of(repo: &Path) -> PathBuf {`
+
+The canonical common git dir the way `canonical_common_dir` computes it, so a test
+keys `crate::workspace_manager::contended_attempts` exactly as the access counts. It
+runs the plain `git` of the test's own repository, not this module's builder, so the
+tests compile and run against the module as master had it (their first-bad shape).
+
+## `fn plant_a_torn_registration(repo: &Path, name: &str) -> PathBuf {`
+
+A foreign registration torn the way a writer killed while it writes `commondir` leaves
+it: `gitdir` written, as Git writes it (`GitdirRule::native().spelling`: `/` on
+Windows, the path's own bytes elsewhere), and `commondir` opened and empty. Every
+enumeration of the store dies on it ("failed to read …/commondir: Success" on glibc):
+`git worktree add`'s sibling scan, `git worktree list`, `git worktree remove`, and
+`git switch`'s `die_if_checked_out`. `finish_the_registration` is what its writer
+writes last: `HEAD`, then `commondir`.
+
+## `struct OnceContended<T> {`
+
+The writer of a tear, on its own thread, gated by the access's handshake rather than
+by time: it waits until `contended_attempts` for the repository exceeds its value
+before the access began — the access failed on the tear and decided to attempt again
+— and only then runs `finish`, returning how many attempts were contended and what
+`finish` saw. A sixty-second watchdog bounds it, and `join` stops it once the access
+has returned, so a mutation that never contends fails at its assertion rather than
+wedging the suite.
+
+## `fn a_snapshot_add_beside_a_tear_its_writer_finishes_is_attempted_past() {`
+
+T-L1. A snapshot add beside a tear its writer finishes after the add's first failed
+attempt succeeds, and the snapshot holds the candidate. The writer looks at the
+destination before it finishes the tear: one destination, the empty directory the
+snapshot made, because the add fails in its sibling scan before Git takes the
+destination over and the veto made it again. Red at master (the add's Git error at
+once) and under the mutation that makes the veto refuse over an empty destination.
+
+## `fn a_snapshot_add_beside_a_tear_that_stays_refuses_as_the_registrys_and_leaves_its_intent() {`
+
+T-L2, as split by FUD-D2-TL2: only what is portable. A tear that stays: the add
+refuses as `UpstrokeError::RegistryRefused`, never Git; it was attempted again at
+least once; the refusal names the store and its deadline; and the snapshot's intent is
+left for the reclaim, which takes it once the operator removes the residue. No attempt
+count is asserted: one attempt slower than the deadline is the only one, correctly.
+The final-attempt rule is follow-up B's to test, apart from real Git.
+
+## `fn a_snapshot_whose_checkout_cannot_be_made_refuses_after_one_attempt_and_leaves_nothing() {`
+
+T-L3. A candidate no checkout can make — a `.git/` path, on every platform, and on Unix
+a 300-byte name — fails after Git took the destination over, and Git's junk removal
+takes the destination. The veto finds it gone and answers `Undecidable`, so the add
+refuses after exactly one attempt (the handshake's count does not move), naming why,
+and nothing is left at the destination or registered. Red under the `Return` mutation
+(Git state, the round-2 veto's answer) and under the always-`Attempt` mutation (the
+checkout attempted again until the deadline).
+
+## `fn a_snapshot_removal_beside_a_tear_its_writer_finishes_takes_the_registration() {`
+
+T-L4. A snapshot's drop beside a tear its writer finishes after the removal's first
+failed attempt: the snapshot's directory, registration and intent are gone. It also
+distinguishes round 4's B1′, which ran the removal once with its status ignored and
+wrapped the list apart: there the first removal fails, the tear finishes, the separate
+list then succeeds and still registers the snapshot, and the drop leaves it.
+
+## `fn a_branch_switch_beside_a_tear_its_writer_finishes_switches() {`
+
+T-L5. `switch_branch` beside a tear its writer finishes after the first failed attempt
+switches, and a failed attempt changes neither `HEAD` nor the checkout. It runs the
+access twice. The first meets the tear unrepaired and refuses as
+`UpstrokeError::RegistryRefused`, having attempted again; `HEAD` and the status are read
+after it returns, with no access running, because the access's deadline would time any
+Git child read between two of its attempts (standards §12: a deadline bounds a wedged
+producer, it does not time a healthy one). The second access's writer finishes the tear
+on the handshake, with two file writes, and the switch succeeds. Red at master, where
+the switch's Git error returns at once, and when the tear is finished before the second
+access, which then never fails on it.
+
+## `fn every_git_child_of_this_module_runs_with_automatic_maintenance_off() {`
+
+T-L7, R-G's regression. A repository configuring `maintenance.auto=true`,
+`gc.auto=6700`, `gc.autoDetach=true` and `maintenance.autoDetach=true`: through the
+builder, `git config --get` of each reads `false`, `0`, `false` and `false`, because a
+command-line setting outranks the repository's. It executes Git, so it holds on every
+Git at or above the 2.41 floor. Red at master and with the four settings dropped from
+the builder.
+
+## `fn the_snapshot_add_veto_attempts_again_only_over_an_empty_destination_it_can_remove() {`
+
+T-L8. The veto called directly, with no Git: an empty destination is `Attempt` and is an
+empty directory again; one gone is `Undecidable` and nothing is made there; one holding
+a file, a file in its place, a link to an empty directory (Unix), and an empty one
+under a parent nothing can write (Unix) are `Undecidable`, and each is left as it was.
+The read-only parent's case refuses to run, rather than passing vacuously, where the
+mode bit does not bind (root, or `CAP_DAC_OVERRIDE`).
+
+## `fn a_kept_pin_is_written_whatever_head_is_and_a_publication_pin_is_not() {`
+
+T-K1 (R-D1's part K): one capture, then `HEAD` moved, detached, on another branch, its branch
+deleted, or its branch ref made symbolic. A pin at a `-kept` name is written on the captured
+parent with the captured tree; a pin at a publication name refuses. Red under `k-headcheck`,
+under `m-k-observe-only` (detached, deleted and symbolic rows) and, for the publication half,
+under `m-k-all`.
+
+## `fn the_private_index_notes_tie_an_orphan_shared_index_to_the_checkouts_expiry() {`
+
+The pin of D-I2-1 (#331's review round i2, regression lens, executed on Git 2.43.0 in ordinary
+and linked checkouts). It reads these notes, finds the `PRIVATE_INDEX_CONTROLS` section by its
+heading, collapses its whitespace, and asserts that it states what removes an orphan shared index
+file — a later split write of the checkout's own index that creates a shared index file, once
+the orphan is older than the checkout's `splitIndex.sharedIndexExpire` — with the default's
+window, `never`'s none, the accumulation and the variable's O3 class, and that the retired claim,
+that Git's next split write of the checkout's own index removes the orphans, is absent. Notes,
+not the record: the package excludes `reviews/` and `findings/`. Git's behaviour is unchanged,
+so no behaviour test can guard the sentence; the reviewer's sequence, executed again on Git
+2.43.0 and 2.55.0, is the evidence. Red on round 4's notes.
 
 ## `struct InheritedSelection {`
 
