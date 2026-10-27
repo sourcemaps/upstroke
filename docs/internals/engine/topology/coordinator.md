@@ -3195,7 +3195,7 @@ T-PROM-2, the positive preservation case with the store kept: the same prefix, t
 
 ## `mod tests` › `fn the_kept_slot_comparison_fails_once_a_kept_file_is_removed_by_hand() {`
 
-T-PROM-6, the liveness control of T-PROM-1's and T-PROM-2's comparison: the same prefix as T-PROM-1 and the same resume, which refuses; then one file the slot kept is removed by hand while the fixture lives. `f_promotion_kept` over that refusal must then fail at its comparison and not at an earlier check, so the comparison reads the live checkout and is not vacuous. At `f1842dcd` the resume finishes the promotion, and this control fails at its first step, the refusal it expects.
+T-PROM-6, the liveness control of T-PROM-1's and T-PROM-2's comparison: the same prefix as T-PROM-1 and the same resume, which refuses; then one file the slot kept, asserted present, is removed by hand through the fixture's `remove_file` while the fixture lives (a direct `std::fs::remove_file` is a denied method in `clippy.toml`). `f_promotion_kept` over that refusal must then fail at its comparison and not at an earlier check, so the comparison reads the live checkout and is not vacuous. At `f1842dcd` the resume finishes the promotion, and this control fails at its first step, the refusal it expects.
 
 ## `mod tests` › `fn a_resume_finishes_the_promotion_once_the_operator_has_removed_its_kept_slot() {`
 

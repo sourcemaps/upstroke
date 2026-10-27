@@ -26420,8 +26420,9 @@ git cat-file -e 'HEAD^{tree}'
             let before = f_files(&checkout);
             let (resumed, events, env) = f_resume_fresh(wide, &tasks);
             let refused = resumed.expect_err("the resume refuses the promotion's completion");
-            std::fs::remove_file(checkout.join("untracked.txt"))
-                .expect("a kept file, removed by hand after the refusal");
+            let kept = checkout.join("untracked.txt");
+            assert!(kept.is_file(), "the refused resume kept {}", kept.display());
+            crate::workspace_manager::fixture::remove_file(&kept);
             let payload = std::panic::catch_unwind(AssertUnwindSafe(|| {
                 f_promotion_kept(Err(refused), &events, &checkout, &before);
             }))
