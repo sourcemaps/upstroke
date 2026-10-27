@@ -595,9 +595,46 @@ phase — is reused, and the re-run pick starts from the restored base tree
 and reports the same observation, for a clean source and for a conflicting
 one.
 
+## `fn closure_one_found(`
+
+What both copies of closure 1's reader find of one checkout for one report of the guarded child's
+`GIT_COMMON_DIR`: the topology twin's answer, with a disagreement of the manager's
+(`fixture::manager_registration_found`), text included, recorded as a failure.
+
 ## `fn closure_one_readers_agree_on_every_registration_construction() {`
 
-The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-READERS: both copies of closure 1's reader — this module's and the manager's (`fixture::manager_registration_found`) — over every construction of `fixture::registration_constructions`, each answering as #329's §8.4 says and the two agreeing, text included.
+The external-prune follow-up (F), `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its
+design's §12. T-C1-READERS runs both copies of closure 1's reader, this module's and the manager's
+(`fixture::manager_registration_found`), over every construction of
+`fixture::registration_constructions`. Each answers as #329's §8.4 says, and the two agree, text
+included.
+
+Since the integration correction (F), it runs every construction under three reports of the guarded
+child's `GIT_COMMON_DIR`:
+
+- **No report (`Unknown`)**, with the original expectations.
+- **A reported absence (`Absent`)**, which must read exactly as no report. That is the correction's
+  reduction to the original rule, witnessed for both readers.
+- **A value naming the run's common directory**, which must read exactly as no report on every
+  construction but one. On "`commondir` naming another repository" the record no longer names the
+  repository whose store holds the entry, and branch (a) refuses it. A value present leaves every other
+  refusal as it was: missing, empty or linked names, the `.git` variants, the entry outside the store
+  and the backpointer.
+
+A value naming another repository on the whole registration is refused by branch (b).
+
+## `fn closure_one_readers_accept_a_linked_store_only_under_a_reported_value_naming_the_run() {`
+
+T-ENV-PRED, the integration correction's predicate over a linked store (F; Unix). The run's
+`worktrees` store is a link into a clone of the repository, and checkouts are added through it with
+Git's own `worktree add`. Both readers must agree on each row:
+
+- **Accepted:** the run's common directory named absolutely (C4's face) or relatively from the checkout
+  (C5's).
+- **Refused by the original rule:** no report, and a reported absence.
+- **Refused by branch (b):** a value naming the other repository, absolutely or relatively.
+- **Refused by branch (a):** a record rewritten to name a third repository.
+- **Refused by condition 1:** an entry of a third repository's own, unlinked store.
 
 ## `fn prune_whole_entry(base: &Path, checkout: &Path) {`
 

@@ -526,7 +526,9 @@ fn relative_between(from: &Path, to: &Path) -> PathBuf {
 /// its own added to `fixture`'s repository at its head: a whole registration;
 /// each of the entry's four names removed, or the first three empty; the
 /// checkout's `.git` removed, made a directory, or not a pointer; an entry
-/// outside this repository's store; `commondir` naming another repository;
+/// outside this repository's store; `commondir` naming another repository,
+/// one with a registration store of its own, so that a reader checking the
+/// record against the store that holds the entry compares two stores;
 /// `gitdir` naming another checkout; the relative pointers Git 2.48 writes;
 /// and, where the platform makes one without privilege, a link in place of
 /// `index`.
@@ -615,6 +617,8 @@ pub(crate) fn registration_constructions(fixture: &Fixture) -> Vec<RegistrationC
     let other = fixture.root.join("other-repository");
     fs::create_dir_all(&other).expect("another repository's directory");
     git(&other, &["init", "-q"]);
+    fs::create_dir_all(other.join(".git").join("worktrees"))
+        .expect("the other repository's registration store");
     let (checkout, entry) = next();
     fs::write(
         entry.join("commondir"),

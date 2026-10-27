@@ -1878,45 +1878,243 @@ fn a_materialization_killed_after_its_index_write_converges_from_both_of_its_sta
     run.replay_twice_equal();
 }
 
+fn closure_one_found(
+    checkout: &Path,
+    common: &Path,
+    composed: &ComposedCommonDir,
+    label: &str,
+    failed: &mut Vec<String>,
+) -> Result<(), String> {
+    let topology = match registration_whole(checkout, common, composed) {
+        Whole::Yes => Ok(()),
+        Whole::No(found) => Err(found),
+    };
+    let manager =
+        crate::workspace_manager::fixture::manager_registration_found(checkout, common, composed);
+    if topology != manager {
+        failed.push(format!(
+            "{label} under {composed:?}: the readers disagree: topology {topology:?}, manager \
+             {manager:?}"
+        ));
+    }
+    topology
+}
+
 #[test]
 fn closure_one_readers_agree_on_every_registration_construction() {
     let fixture = crate::workspace_manager::fixture::Fixture::created("f-readers-topology");
     let common = fixture.manager.common_git_dir().to_path_buf();
     let constructions = crate::workspace_manager::fixture::registration_constructions(&fixture);
+    let present = ComposedCommonDir::Present(common.clone().into_os_string());
     let mut failed = Vec::new();
     for construction in &constructions {
-        let topology = match registration_whole(
-            &construction.checkout,
+        let label = construction.label;
+        let checkout = &construction.checkout;
+        let unknown = closure_one_found(
+            checkout,
             &common,
-            &crate::workspace_manager::ComposedCommonDir::Unknown,
-        ) {
-            Whole::Yes => Ok(()),
-            Whole::No(found) => Err(found),
-        };
-        let manager = crate::workspace_manager::fixture::manager_registration_found(
-            &construction.checkout,
-            &common,
-            &crate::workspace_manager::ComposedCommonDir::Unknown,
+            &ComposedCommonDir::Unknown,
+            label,
+            &mut failed,
         );
-        if topology != manager {
-            failed.push(format!(
-                "{}: the readers disagree: topology {topology:?}, manager {manager:?}",
-                construction.label
-            ));
-        }
-        let as_stated = match (construction.expected, &topology) {
+        let as_stated = match (construction.expected, &unknown) {
             (Ok(()), Ok(())) => true,
             (Err(words), Err(text)) => text.contains(words),
             _ => false,
         };
         if !as_stated {
             failed.push(format!(
-                "{}: expected {:?}, the topology reader found {topology:?}",
-                construction.label, construction.expected
+                "{label}: expected {:?}, the topology reader found {unknown:?}",
+                construction.expected
+            ));
+        }
+        let absent = closure_one_found(
+            checkout,
+            &common,
+            &ComposedCommonDir::Absent,
+            label,
+            &mut failed,
+        );
+        if absent != unknown {
+            failed.push(format!(
+                "{label}: a reported absence reads {absent:?}, no report {unknown:?}"
+            ));
+        }
+        let named = closure_one_found(checkout, &common, &present, label, &mut failed);
+        let as_corrected = if label == "commondir naming another repository" {
+            matches!(&named, Err(text) if text.contains("the store that holds this entry"))
+        } else {
+            named == unknown
+        };
+        if !as_corrected {
+            failed.push(format!(
+                "{label}: a value naming the run's common directory reads {named:?}, no report \
+                 {unknown:?}"
             ));
         }
     }
+    let whole = constructions
+        .first()
+        .filter(|construction| construction.label == "whole")
+        .expect("the whole registration is the first construction");
+    let mismatched = closure_one_found(
+        &whole.checkout,
+        &common,
+        &ComposedCommonDir::Present(
+            fixture
+                .root
+                .join("other-repository")
+                .join(".git")
+                .into_os_string(),
+        ),
+        "whole",
+        &mut failed,
+    );
+    if !matches!(&mismatched, Err(text) if text.contains("the guarded child's `GIT_COMMON_DIR`")) {
+        failed.push(format!(
+            "whole: a value naming another repository reads {mismatched:?}"
+        ));
+    }
     assert!(constructions.len() >= 15, "every construction was made");
+    assert!(failed.is_empty(), "{}", failed.join("\n"));
+}
+
+#[cfg(unix)]
+#[test]
+fn closure_one_readers_accept_a_linked_store_only_under_a_reported_value_naming_the_run() {
+    use crate::workspace_manager::fixture::{create_dir, link_directory, scratch};
+
+    let tree = scratch("f-readers-linked");
+    let root = std::fs::canonicalize(tree.path()).expect("the canonical scratch root");
+    let base = root.join("repo");
+    create_dir(&base);
+    git(&base, &["init", "-q", "-b", "main"]);
+    git(&base, &["config", "user.email", "tests@upstroke.local"]);
+    git(&base, &["config", "user.name", "upstroke tests"]);
+    write_file(&base.join("a.txt"), b"one\n");
+    git(&base, &["add", "-A"]);
+    git(&base, &["commit", "-q", "-m", "seed"]);
+    let clone_of_base = |name: &str| -> PathBuf {
+        let repository = root.join(name);
+        git(
+            &root,
+            &[
+                "clone",
+                "-q",
+                &base.to_string_lossy(),
+                &repository.to_string_lossy(),
+            ],
+        );
+        create_dir(&repository.join(".git").join("worktrees"));
+        repository
+    };
+    let other = clone_of_base("other");
+    let third = clone_of_base("third");
+    link_directory(
+        &other.join(".git").join("worktrees"),
+        &base.join(".git").join("worktrees"),
+    );
+    let add = |from: &Path, name: &str| -> PathBuf {
+        let checkout = root.join(name);
+        git(
+            from,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                &checkout.to_string_lossy(),
+                "HEAD",
+            ],
+        );
+        checkout
+    };
+    let whole = add(base.as_path(), "whole");
+    let recorded_elsewhere = add(base.as_path(), "recorded-elsewhere");
+    let foreign = add(third.as_path(), "foreign");
+    let entry = |checkout: &Path| -> PathBuf {
+        let pointer = std::fs::read_to_string(checkout.join(".git")).expect("a .git pointer");
+        std::fs::canonicalize(
+            pointer
+                .trim()
+                .strip_prefix("gitdir:")
+                .expect("a gitdir pointer")
+                .trim(),
+        )
+        .expect("the checkout's entry")
+    };
+    assert!(
+        entry(whole.as_path()).starts_with(&other),
+        "the run's registration is in the linked store"
+    );
+    write_file(
+        &entry(recorded_elsewhere.as_path()).join("commondir"),
+        format!("{}\n", third.join(".git").display()).as_bytes(),
+    );
+    let common = std::fs::canonicalize(base.join(".git")).expect("the run's common directory");
+    let named = |value: &Path| ComposedCommonDir::Present(value.as_os_str().to_os_string());
+    let rows: [(&str, &Path, ComposedCommonDir, Result<(), &str>); 8] = [
+        (
+            "C4's face, the run's common directory named absolutely",
+            whole.as_path(),
+            named(common.as_path()),
+            Ok(()),
+        ),
+        (
+            "C5's face, the run's common directory named from the checkout",
+            whole.as_path(),
+            named(Path::new("..").join("repo").join(".git").as_path()),
+            Ok(()),
+        ),
+        (
+            "no report",
+            whole.as_path(),
+            ComposedCommonDir::Unknown,
+            Err("which is not this repository's common git dir"),
+        ),
+        (
+            "a reported absence",
+            whole.as_path(),
+            ComposedCommonDir::Absent,
+            Err("which is not this repository's common git dir"),
+        ),
+        (
+            "a value naming another repository",
+            whole.as_path(),
+            named(other.join(".git").as_path()),
+            Err("the guarded child's `GIT_COMMON_DIR`"),
+        ),
+        (
+            "a relative value naming another repository from the checkout",
+            whole.as_path(),
+            named(Path::new("..").join("other").join(".git").as_path()),
+            Err("the guarded child's `GIT_COMMON_DIR`"),
+        ),
+        (
+            "a record naming a third repository",
+            recorded_elsewhere.as_path(),
+            named(common.as_path()),
+            Err("the store that holds this entry"),
+        ),
+        (
+            "an entry of a store the run does not link",
+            foreign.as_path(),
+            named(common.as_path()),
+            Err("not an entry of this repository's registration store"),
+        ),
+    ];
+    let mut failed = Vec::new();
+    for (label, checkout, composed, expected) in &rows {
+        let found = closure_one_found(checkout, &common, composed, label, &mut failed);
+        let as_stated = match (expected, &found) {
+            (Ok(()), Ok(())) => true,
+            (Err(words), Err(text)) => text.contains(words),
+            _ => false,
+        };
+        if !as_stated {
+            failed.push(format!("{label}: expected {expected:?}, found {found:?}"));
+        }
+    }
     assert!(failed.is_empty(), "{}", failed.join("\n"));
 }
 
