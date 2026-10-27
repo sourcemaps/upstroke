@@ -345,6 +345,26 @@ pub(super) fn begin_retry<O: Operator + ?Sized>(
         &request.slot,
         &crate::workspace_manager::Quiescence::HoldsTree(request.retained_tree.clone()),
     );
+    let verified = match verified {
+        Ok(Err(failure)) if super::dispatch::may_follow_a_deletion(&failure) => {
+            match super::dispatch::kept(manager, operator.registry().effects(), &request.slot) {
+                Ok(kept) if kept.is_empty() => Ok(Err(failure)),
+                Ok(kept) => Err(super::dispatch::kept_slot_refusal(
+                    &request.slot,
+                    &format!(
+                        "the retry of retained generation {} of task {key}, whose worktree failed \
+                         verification ({failure})",
+                        generation.0
+                    ),
+                    &kept,
+                    "the retained session's unpinned output",
+                    "the next resume closes the generation and reclaims the slot",
+                )),
+                Err(error) => Err(error),
+            }
+        }
+        other => other,
+    };
     let outcome = {
         let run = operator.parts().0;
         super::settle::retry_end(
@@ -609,6 +629,37 @@ fn reclaim_interrupted<O: Operator + ?Sized>(
     }
 }
 
+pub(super) fn settle_cancelled_verification<O: Operator + ?Sized>(
+    operator: &mut O,
+    seams: &RunSeams<'_>,
+    sequence: SequenceId,
+) -> Result<(), UpstrokeError> {
+    let cancelled = closure::in_flight(operator.driven().fold())
+        .into_iter()
+        .find(|item| {
+            matches!(
+                item,
+                closure::InFlight::Verification {
+                    sequence: held,
+                    cancelled: true,
+                    ..
+                } if *held == sequence
+            )
+        })
+        .ok_or_else(|| UpstrokeError::Refused {
+            message: format!(
+                "the verification of sequence {} was abandoned, and the fold holds no \
+                 verification of it that a lineage failure cancelled; nothing was appended",
+                sequence.0
+            ),
+        })?;
+    {
+        let (run, seams, hooks) = operator.parts();
+        run.emit(cancelled.interrupted(), seams, hooks)?;
+    }
+    reclaim_interrupted(operator, seams.manager, &cancelled)
+}
+
 fn complete_promotions<O: Operator + ?Sized>(
     operator: &mut O,
     manager: &WorkspaceManager,
@@ -619,8 +670,7 @@ fn complete_promotions<O: Operator + ?Sized>(
     };
     for key in promoting {
         let Some(promoting) =
-            super::candidate::recovery_for(manager, &run_id, operator.driven().fold(), key)?
-                .promotion
+            super::candidate::owed_for(manager, &run_id, operator.driven().fold(), key)?.promotion
         else {
             continue;
         };
@@ -879,10 +929,15 @@ pub fn verification_body(
                         })
                     })?;
                 let staging = work.manager.slot_path(&job.staging);
-                work.input_policy
-                    .problem_in_work_tree(&staging, work.manager.base(), &tree)
-                    .map_err(JudgeError::Other)?
-                    .map(crate::engine::classify::review_input_failure)
+                super::dispatch::read_in_whole_checkout(
+                    work.manager,
+                    &staging,
+                    "the verification's review-input read",
+                    work.input_policy
+                        .problem_in_work_tree(&staging, work.manager.base(), &tree),
+                )
+                .map_err(JudgeError::Other)?
+                .map(crate::engine::classify::review_input_failure)
             }
         };
 

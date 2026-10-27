@@ -1470,6 +1470,28 @@ process closes it in recovery", and the fold's
 A verify failure is not an error: the generation closes, the reservation
 is cancelled, and `generation_closed{WorktreeMissing}` is appended.
 
+## `pub(super) fn begin_retry<O: Operator + ?Sized>(` › `let verified = match verified {`
+
+**Closure 2's second boundary** (the external-prune follow-up, F, under O2(a);
+#329's record §8.5). Between the retained worktree's verification and
+`settle::retry_end`: when the verification failed as not registered, missing or
+not holding the retained tree, and an instance of the slot holds anything
+while its worktree registration is not whole, the retry is a registry refusal
+(`super::dispatch::kept_slot_refusal`), so that `retry_end`'s own error arm
+cancels the `Retry` reservation and returns it, and nothing else of the retry
+runs: no `generation_closed{WorktreeMissing}`, no scrub, the generation still
+`RetainedIdle` and the retained session's unpinned output kept. A read error of
+the check takes the same arm. A fresh process never continues a retained
+generation: the next recovery closes it at step (e) as
+`ResumeDiscardsRetainedSession`, and its reclaim meets the kept slot at the
+guard, which keeps it while that check still finds it populated and not whole.
+
+A verification that fails otherwise — administrative residue such as a held
+index lock among it — closes the generation and scrubs the slot as before,
+whatever its registration: #329's rule names three failures, and F does not
+widen it. A genuine `TreeMismatch` in a whole registration is closed and
+scrubbed as before.
+
 ## `impl TopologyRun` › `fn retry_request(`
 
 The run's side of a retry, before its worktree is verified: the request, owned.
@@ -1624,12 +1646,32 @@ verification's pin, staging and the snapshots `JudgeNames::Integration` owns for
 its sequence — never another sequence's or an attempt's, which at width > 1 may
 still be another pipeline's (R-W).
 
+## `pub(super) fn settle_cancelled_verification<O: Operator + ?Sized>(`
+
+The live settlement of a verification a lineage failure cancelled, which the
+coordinator makes once `verify` has abandoned it and the passes it charged, if
+any, are recorded: the same [`closure::InFlight`] the halt closure builds for it,
+and the same two steps [`close_run`] takes for each item — its terminal,
+`merge_verification_interrupted` with the cancellation's detail, appended through
+the run's emitter, then [`reclaim_interrupted`] with the operator's registry
+hooks, so its pin is pruned expected-old, its staging worktree and intent removed
+and its sequence's snapshots reclaimed only after the terminal is durable.
+
+### Errors
+
+A refusal, with nothing appended, when the fold holds no verification of that
+sequence that a lineage failure cancelled; the append-error protocol's report
+for the terminal; and the reclaim's own refusals.
+
 ## `fn complete_promotions<O: Operator + ?Sized>(`
 
 Step (3): each promoting generation's candidates ref (created if absent),
 `task_candidate_created`, then its pin pruned and its worktree reclaimed —
-`candidate::recovery_for` supplies the typestate value recovery's step (f)
-starts from.
+`candidate::owed_for` supplies the typestate value recovery's step (f)
+starts from. It is that classification without recovery's keeping
+(`candidate::recovery_for`), so run-end closure removes a promoting
+generation's worktree whatever its registration, as P-6′ has run-end closure
+do.
 
 ## `fn complete_publication<O: Operator + ?Sized>(`
 
@@ -2134,6 +2176,19 @@ read in the staging worktree. Either stands in for the gates and
 reviewers as the prior failure, and the sequence parks the candidate for
 a person (R4): a Fix task cannot be asked to edit code without code
 evidence, and waiting cannot make the same diff fit.
+
+## `pub fn verification_body(` › `super::dispatch::read_in_whole_checkout(`
+
+**C1-4** (the decision appendix §6.1, with the external-prune follow-up's
+answer arm; F, under O1 option A): the review-input read of the staging
+checkout is passed through `super::dispatch::read_in_whole_checkout`. A Git
+error read while the staging checkout's worktree registration is not whole is
+a registry refusal, which [`verified`] passes on through its last arm rather
+than settling an outage, so the frozen `integrate.rs` receives a resumable
+error and appends no deferral or park; and an answer read while it is not
+whole is refused too, since a deleted `index` reads as an empty one and hides
+an unstaged change. A refused verification is settled interrupted by the next
+resume and verified again under a new sequence.
 
 ## `fn verify(&mut self, request: &VerifyRequest<'_>) -> Result<Verified, UpstrokeError> {` › `self.spend.record_reviews(key, &judgement.reviews);`
 

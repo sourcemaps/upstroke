@@ -594,3 +594,74 @@ from; the merged index with no state file — also the completed after
 phase — is reused, and the re-run pick starts from the restored base tree
 and reports the same observation, for a clean source and for a conflicting
 one.
+
+## `fn closure_one_found(`
+
+What both copies of closure 1's reader find of one checkout for one report of the guarded child's
+`GIT_COMMON_DIR`: the topology twin's answer, with a disagreement of the manager's
+(`fixture::manager_registration_found`), text included, recorded as a failure.
+
+## `fn closure_one_readers_agree_on_every_registration_construction() {`
+
+The external-prune follow-up (F), `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its
+design's §12. T-C1-READERS runs both copies of closure 1's reader, this module's and the manager's
+(`fixture::manager_registration_found`), over every construction of
+`fixture::registration_constructions`. Each answers as #329's §8.4 says, and the two agree, text
+included.
+
+Since the integration correction (F), it runs every construction under three reports of the guarded
+child's `GIT_COMMON_DIR`:
+
+- **No report (`Unknown`)**, with the original expectations.
+- **A reported absence (`Absent`)**, which must read exactly as no report. That is the correction's
+  reduction to the original rule, witnessed for both readers.
+- **A value naming the run's common directory**, which must read exactly as no report on every
+  construction but one. On "`commondir` naming another repository" the record no longer names the
+  repository whose store holds the entry, and branch (a) refuses it. A value present leaves every other
+  refusal as it was: missing, empty or linked names, the `.git` variants, the entry outside the store
+  and the backpointer.
+
+A value naming another repository on the whole registration is refused by branch (b).
+
+## `fn closure_one_readers_accept_a_linked_store_only_under_a_reported_value_naming_the_run() {`
+
+T-ENV-PRED, the integration correction's predicate over a linked store (F; Unix). The run's
+`worktrees` store is a link into a clone of the repository, and checkouts are added through it with
+Git's own `worktree add`. Both readers must agree on each row:
+
+- **Accepted:** the run's common directory named absolutely (C4's face) or relatively from the checkout
+  (C5's).
+- **Refused by the original rule:** no report, and a reported absence.
+- **Refused by branch (b):** a value naming the other repository, absolutely or relatively.
+- **Refused by branch (a):** a record rewritten to name a third repository.
+- **Refused by condition 1:** an entry of a third repository's own, unlinked store.
+
+## `fn prune_whole_entry(base: &Path, checkout: &Path) {`
+
+A whole-entry prune (`.git` set aside, `git worktree prune --expire=now`, put back).
+
+## `fn files_under(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {`
+
+Every file under a directory with its bytes.
+
+## `fn keep_the_store(run: &Run) {`
+
+A linked checkout outside the execution root that keeps the registration store when the slot's
+entry is pruned, so that at C the removal binds nothing for the pruned slot and removes it — the
+design's base state — rather than refusing for an absent store (closure 3's face).
+
+## `fn a_pruned_open_generation_holding_a_file_is_kept_for_the_operator_not_recreated() {`
+
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C2-OPEN (closure 2's first boundary): at C the slot is removed and recreated and the file lost; under F the reuse refuses, the slot and file are kept byte for byte, the intent kept, nothing removed or added.
+
+## `fn a_pruned_open_generation_holding_nothing_is_recreated() {`
+
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C2-OPEN's control: an emptied slot is recreated.
+
+## `fn a_whole_open_generation_whose_head_moved_is_recreated() {`
+
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C2-OPEN's control: a whole registration whose `HEAD` moved is recreated.
+
+## `fn a_residue_failure_in_an_open_generation_whose_registration_is_not_whole_is_recreated() {`
+
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C2-OPEN's control (M-C2a's witness): a residue failure is recreated whatever the registration — #329's rule names three failures.

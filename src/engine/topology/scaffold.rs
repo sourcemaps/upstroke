@@ -2323,6 +2323,7 @@ pub(super) struct WideTask {
     pub(super) hints: Vec<String>,
     pub(super) depends_on: Vec<&'static str>,
     pub(super) writes: String,
+    pub(super) deletes_every_tracked_file: bool,
 }
 
 impl WideTask {
@@ -2332,6 +2333,7 @@ impl WideTask {
             hints: vec![format!("src/{id}/")],
             depends_on: Vec::new(),
             writes: format!("src/{id}/work.txt"),
+            deletes_every_tracked_file: false,
         }
     }
 
@@ -2348,6 +2350,14 @@ impl WideTask {
             hints: hints.iter().map(|hint| (*hint).to_owned()).collect(),
             depends_on: Vec::new(),
             writes: writes.to_owned(),
+            deletes_every_tracked_file: false,
+        }
+    }
+
+    pub(super) fn deleting_every_tracked_file(id: &'static str) -> Self {
+        Self {
+            deletes_every_tracked_file: true,
+            ..Self::independent(id)
         }
     }
 }
@@ -2543,6 +2553,10 @@ pub(super) fn wide_responder_asking(
         .iter()
         .map(|task| (task.writes.clone(), task.id))
         .collect();
+    let deleting: Vec<bool> = tasks
+        .iter()
+        .map(|task| task.deletes_every_tracked_file)
+        .collect();
     let failing = failing_gates.to_vec();
     let asking = asking.to_vec();
     Box::new(move |request: &RunnerRequest| {
@@ -2562,6 +2576,17 @@ pub(super) fn wide_responder_asking(
         match role {
             crate::runner::invocation::AttemptRole::Worker if asking.contains(&key.0) => {
                 Ok(exited(0, WORKER_QUESTION.to_owned()))
+            }
+            crate::runner::invocation::AttemptRole::Worker
+                if deleting.get(key.0 as usize).copied().unwrap_or(false) =>
+            {
+                let id = writes.get(key.0 as usize).map_or("unknown", |(_, id)| *id);
+                let tracked =
+                    crate::workspace_manager::fixture::git(&request.workspace, &["ls-files"]);
+                for path in tracked.lines() {
+                    crate::workspace_manager::fixture::remove_file(&request.workspace.join(path));
+                }
+                Ok(exited(0, format!("{id} worked\n")))
             }
             crate::runner::invocation::AttemptRole::Worker => {
                 let (path, id) = writes
@@ -2905,7 +2930,49 @@ impl Wide {
         ceiling: super::select::Ceiling,
         identity: &DurableIdentity,
     ) -> Self {
-        let mut fixture = Fixture::created(tag);
+        Self::durable_over(
+            Fixture::created(tag),
+            tasks,
+            max_parallel,
+            plans,
+            runner,
+            ceiling,
+            identity,
+        )
+    }
+
+    #[cfg(unix)]
+    pub(super) fn durable_based(
+        tag: &str,
+        below: &Path,
+        tasks: &[WideTask],
+        max_parallel: u32,
+        plans: WidePlans,
+        runner: RecordingRunner,
+    ) -> Self {
+        Self::durable_over(
+            Fixture::created_based(tag, below),
+            tasks,
+            max_parallel,
+            plans,
+            runner,
+            super::select::Ceiling::unlimited(),
+            &DurableIdentity {
+                incarnation: DURABLE_INCARNATION.to_owned(),
+                runner: None,
+            },
+        )
+    }
+
+    fn durable_over(
+        mut fixture: Fixture,
+        tasks: &[WideTask],
+        max_parallel: u32,
+        plans: WidePlans,
+        runner: RecordingRunner,
+        ceiling: super::select::Ceiling,
+        identity: &DurableIdentity,
+    ) -> Self {
         let run_id = crate::workspace_manager::fixture::RUN_ID;
         if identity.incarnation != DURABLE_INCARNATION {
             fixture.manager = WorkspaceManager::derive(
@@ -3051,7 +3118,15 @@ impl WideEnv {
         max_parallel: u32,
         plans: WidePlans,
     ) -> Self {
-        let fixture = Fixture::adopt(root);
+        Self::adopted_over(Fixture::adopt(root), tasks, max_parallel, plans)
+    }
+
+    pub(super) fn adopted_over(
+        fixture: Fixture,
+        tasks: &[WideTask],
+        max_parallel: u32,
+        plans: WidePlans,
+    ) -> Self {
         let paths = durable_paths(&fixture);
         let log = paths.public.join(crate::rundir::EVENT_LOG);
         Self {

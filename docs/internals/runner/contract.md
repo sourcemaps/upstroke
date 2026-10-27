@@ -227,6 +227,33 @@ await points PR11's coordinator introduces. Since PR11, `run` is the boxed
 already held; the two blocking methods below are how a synchronous caller
 meets it.
 
+## `pub trait Runner` › `fn composed_common_dir(&self, request: &RunnerRequest) -> ComposedCommonDir {`
+
+The `GIT_COMMON_DIR` this runner composes for the process it starts for
+`request` (DESIGN §8; the external-prune follow-up's integration correction,
+F): `Present` with the value exactly as composed, `Absent` when the
+composition carries none, and this provided default, `Unknown`, when the
+runner reports nothing. Closure 1's check reads it as the Git context of a
+gate, a reviewer and a worker (`workspace_manager::registration_whole`,
+condition 3).
+
+- **The default is not a claim.** `Unknown` says the runner gives no usable
+  report. It does not say the process has no `GIT_COMMON_DIR`. The check
+  reads it by its original rule, so a runner that keeps the default, as the
+  container runner and every test runner do, is checked exactly as before.
+- **What it describes.** The composition the process is started with, not
+  every Git command the process later runs, since a role's own code can change
+  its environment or its directory.
+- **Who answers.** `HostRunner`, from the one composition that gives its
+  child its environment (`src/runner/host.rs`, `fn child_environment(`).
+  `Registering` forwards it and keeps the reports of the requests it admitted
+  (`src/engine/topology/preflight.rs`).
+- **An instrument-path change.** This file also holds the source censuses
+  below. The method was added beside them under root's disposition
+  `F-RETURN7-RUNNER-EXTENSION-DISPOSITION-20261027`. No census, assertion or
+  enforcement condition changed, and the method adds none of the shapes they
+  count.
+
 ## `pub struct RunnerError {`
 
 A Runner's error together with the [`ProcessFate`] it established for the

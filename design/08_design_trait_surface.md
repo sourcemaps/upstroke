@@ -25,7 +25,9 @@ enum ExecutionRole { Probe, Implement, Gate, Review }
 #[async_trait]
 trait Runner {
     async fn run(&self, request: &RunnerRequest) -> Result<ProcessOutput>;
+    fn composed_common_dir(&self, request: &RunnerRequest) -> ComposedCommonDir { Unknown } // provided
 }
+// ComposedCommonDir: Unknown | Absent | Present(value)
 
 #[async_trait]
 trait Gate {
@@ -66,5 +68,16 @@ given a relative inherited `GIT_COMMON_DIR` as the absolute path it names at the
 started checkout, unless its overlay sets them (§26, "Runner and concurrency
 contracts"), and none of them selects a program, credential or version a probe
 certifies.
+
+`Runner::composed_common_dir` reports the `GIT_COMMON_DIR` a runner composes for
+the process it starts for a request: `Present` with the value exactly as
+composed, `Absent` when the composition carries none, and the provided default,
+`Unknown`, when the runner reports nothing or cannot compose. It is the evidence
+§15's registration check reads for a gate, a reviewer and a worker. It describes
+what the process is started with, not every Git command the process later runs.
+The host runner answers from the one composition that gives its child its
+environment. `Unknown` makes no claim that a runner's processes lack the
+variable; the container runner keeps it, and the check keeps its original rule
+for every runner that does.
 
 Deliberate omissions: no `Router` trait (config-evaluating struct until a second policy exists) and no `Executor` trait beyond `AgentAdapter` (a native agentic loop remains explicitly out of scope; the seam exists if that ever changes).

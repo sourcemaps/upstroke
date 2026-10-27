@@ -411,6 +411,79 @@ fn a_gate_invocation_through_the_boundary_takes_no_slot() {
     assert!(preflight.ledgers_balance());
 }
 
+struct Composing {
+    inner: Recording,
+    composed: ComposedCommonDir,
+}
+
+impl Runner for Composing {
+    fn run<'a>(&'a self, request: &'a RunnerRequest, call: RunnerCall<'a>) -> RunFuture<'a> {
+        self.inner.run(request, call)
+    }
+
+    fn composed_common_dir(&self, request: &RunnerRequest) -> ComposedCommonDir {
+        let _ = request;
+        self.composed.clone()
+    }
+}
+
+#[test]
+fn the_boundary_forwards_its_runners_report_and_keeps_one_per_admitted_request() {
+    let composed = ComposedCommonDir::Present(std::ffi::OsString::from("/the/runs/common"));
+    let runner = Composing {
+        inner: Recording::default(),
+        composed: composed.clone(),
+    };
+    let adapters = Registry;
+    let preflight = preflight(&runner, &adapters, &[]);
+    let registering = preflight.registering();
+
+    let gate = RunnerRequest {
+        command: CommandSpec::new("bash"),
+        workspace: PathBuf::from("."),
+        role: crate::runner::ExecutionRole::Gate,
+        timeout: Duration::from_secs(1),
+        agent: None,
+        invocation: InvocationId::attempt(
+            TaskKey(0),
+            GenerationId(0),
+            AttemptNumber(1),
+            AttemptRole::Gate(0),
+            0,
+        ),
+    };
+    assert_eq!(
+        registering.composed_common_dir(&gate),
+        composed,
+        "the boundary reports what the runner it wraps composes"
+    );
+    registering
+        .run_blocking(&gate)
+        .expect("a gate needs no slot pair");
+    let unbound = RunnerRequest {
+        command: CommandSpec::new("claude"),
+        workspace: PathBuf::from("."),
+        role: crate::runner::ExecutionRole::Probe(ProbeTarget::Agent(AgentId::new(AGENT))),
+        timeout: Duration::from_secs(1),
+        agent: None,
+        invocation: PreflightIdentities::agent(AGENT, 0).expect("a slotted probe identity"),
+    };
+    registering
+        .run_blocking(&unbound)
+        .expect_err("a slotted invocation with no agent binding is refused at admission");
+    assert_eq!(
+        registering.into_composed(),
+        vec![composed],
+        "one report for the admitted request, none for the one refused before its runner"
+    );
+    assert!(preflight.ledgers_balance());
+    assert_eq!(
+        runner.inner.programs(),
+        vec!["bash".to_owned()],
+        "only the admitted request reached the runner"
+    );
+}
+
 #[test]
 fn the_debug_rendering_names_the_boundary_and_not_the_ledgers() {
     let runner = Recording::default();

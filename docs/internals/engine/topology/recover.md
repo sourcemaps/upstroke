@@ -1471,7 +1471,11 @@ closure), never abandoned".
 * A **`VerificationStarted`** transaction is settled
   `merge_verification_interrupted`, its `prepared/<seq>` pin deleted
   expected-old at the proposal the record names and its staging worktree
-  reclaimed, and the candidate re-verifies under a new sequence.
+  reclaimed, and the candidate re-verifies under a new sequence. A
+  verification a lineage failure cancelled — its candidate's task is
+  `Failed`, and the fold keeps its transaction open until this terminal —
+  is settled the same way, with a detail that says so: its candidate,
+  whose task failed, is not verified again.
   `Authorized::from_fold` returns `None` for it — this build no longer
   refuses that `None`, it interrupts. The pin was checked against its record
   by [`reclaim_stale_residue`] before any append; a substituted pin refused
@@ -1624,6 +1628,17 @@ another SHA — or whatever the append returns.
 
 Classified before anything is appended, from the fold as it stands. The
 borrow ends here because the sequence below needs the chain mutably.
+
+**Recovery's keeping is here too.** `candidate::recovery_for` refuses
+resumably for a promotion it reports when an instance of the generation's task
+worktree holds anything and its worktree registration is not whole
+(`dispatch::refuse_kept_promotion`; P-6′, and Choice A's "except recovery task
+reclaim"). This was #333's repair of the fresh regular lens's P1 at `f1842dcd`.
+
+Because every task is classified first, the refusal comes before any candidates
+ref, `task_candidate_created` or removal, for every task. RULING P-1's guard
+(step (e)) keeps only generations recovery has closed. This file is unchanged
+by the repair: its call of `recovery_for` now reaches the keeping.
 **Both products of the classification, not one.**
 
 `CandidateRecovery` carries a `promotion`, an `orphan_pin` and
@@ -1878,6 +1893,21 @@ is not touched, so a resume with nothing to reclaim executes no
 `Worktree.Remove`; a generation closed by a recovery that died before its
 scrub, by the live loop, or by this pass's own (d) and (e) is reclaimed here
 alike. Task slots only: staging and snapshot residue have their own steps.
+
+## `fn reclaim_closed_generations(` › `crate::engine::topology::dispatch::refuse_kept_slot(`
+
+**RULING P-1's one statement** (the decision appendix §3.2, adopted by the
+owner with O2(a) on 2026-10-15; erratum E-G6-1's third bullet, under O12(a),
+admits this hunk and its appended tests into G6's module diff proof, bound to
+the merge SHA of the change that makes them).
+Immediately before the scrub of a closed generation's slot, the non-frozen
+guard `dispatch::refuse_kept_slot` refuses, removing nothing, while an
+instance of the slot holds anything and its worktree registration is not
+whole; its refusal leaves recovery through `?`, before step (f), the
+promotions, step (g) and `run_resumed`, and recovery's earlier appends — steps
+(d) and (e) and every reclaim before it in the loop — stand. `generation` is
+the loop's closed generation, whose recorded base the guard's message names.
+Nothing else in this module changes.
 
 ## `pub fn run_resumed(`
 
