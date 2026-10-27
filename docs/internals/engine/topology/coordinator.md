@@ -2657,34 +2657,35 @@ The test asserts first that this process inherits no `GIT_COMMON_DIR`: with
 one inherited the layout is part 2's, accepted by name, and the refusal would
 rightly not fire.
 
-## `mod tests` › `const RESUME_ROOT: &str = "UPSTROKE_TEST_R5_RESUME_ROOT";`
+## `mod tests` › `const BOUNDARY_ROOT: &str = "UPSTROKE_TEST_R5_BOUNDARY_ROOT";`
 
-The scratch root of the run [`relative_name_resume_child`] resumes. A child
-started without it returns at once.
+The scratch root of the run whose `derive` boundary [`relative_name_derive_boundary_child`]
+checks. A child started without it returns at once.
 
-## `mod tests` › `fn a_clean_run_resumed_under_a_relative_object_directory_is_refused_and_then_resumes() {`
+## `mod tests` › `fn a_relative_object_directory_refuses_derive_with_the_resumes_arguments() {`
 
-R-C-RELSTORE on the resume path, and B-1 for it: red at the bound master, where
-the child's resume is not refused, and green here. A schema-4 run is created
-clean; the next coordinator, an isolated child, inherits
-`GIT_OBJECT_DIRECTORY=../objects` and is refused at the call the resume starts
-with, so the run's log is unchanged and no slot or intent is made. This process,
-whose environment carries no such value, then resumes the run, and it
-completes.
+R-C-RELSTORE at the `derive` boundary, with the arguments a resume gives it: red at the bound
+master, where `derive` does not refuse, and green here. **It is not a full resume witness.** A
+schema-4 run is created clean; an isolated child, which inherits `GIT_OBJECT_DIRECTORY=../objects`,
+calls `WorkspaceManager::derive` with the base, private root, run id and next incarnation that
+`try_resume_over` passes as its first call, and is refused; the run's log is unchanged and no slot
+or intent is made. This process, whose environment carries no such value, then resumes the run,
+and that clean resume completes.
 
-The child calls `WorkspaceManager::derive` with the arguments
-`try_resume_over` gives it, rather than building the scaffold's environment
-over the run: that environment's own fixture derives a manager when it adopts a
-root, and under the inherited value it would be refused there, before the
-resume it exists to drive. The in-process test above exercises
-`try_resume_over`'s own refusal.
+**The full-resume gap.** No witness drives `try_resume_over` itself under an inherited relative
+name. This process's own environment is never set, so the condition can live only in a child; and
+in a child the scaffold's environment cannot be rebuilt over the run without its fixture deriving a
+manager on adoption, which the same condition refuses first. What covers the gap is the census: the
+resume's first call is `derive`, `derive` is the manager's only constructor, and RELSTORE runs in
+it before the manager's first Git child. The in-process
+`a_clean_run_resumed_under_a_linked_registry_is_refused_until_the_link_is_gone` exercises
+`try_resume_over`'s own refusal, for R-C-REGISTRY.
 
-## `mod tests` › `fn relative_name_resume_child() {`
+## `mod tests` › `fn relative_name_derive_boundary_child() {`
 
-The child of
-[`a_clean_run_resumed_under_a_relative_object_directory_is_refused_and_then_resumes`]:
-it passes only when the resume's first call refuses, naming the variable and
-saying to export it as an absolute path.
+The child of [`a_relative_object_directory_refuses_derive_with_the_resumes_arguments`]: it passes
+only when `derive`, called with the resume's arguments, refuses, naming the variable and saying to
+export it as an absolute path.
 
 ## `mod tests` › `const LINKED_ROOT: &str = "UPSTROKE_TEST_R5_LINKED_ROOT";`
 

@@ -21911,7 +21911,7 @@ const DERIVE_ERROR: &str = "UPSTROKE_R5_DERIVE_ERROR: ";
 #[cfg(unix)]
 const DERIVE_DERIVED: &str = "UPSTROKE_R5_DERIVE_DERIVED";
 
-/// R-C-RELSTORE at `derive`, the resume's first call, each case in an isolated
+/// R-C-RELSTORE at the `derive` boundary, each case in an isolated
 /// child whose environment alone carries the name: red at the bound master for
 /// every case that refuses, and green at both for every case that does not.
 /// Each of the six scalar names refuses relative and empty, and is accepted
@@ -22033,8 +22033,8 @@ fn derive_refuses_each_relative_repository_wide_name_before_any_slot_and_accepts
 /// `GIT_OBJECT_DIRECTORY=../objects`, which at the base names the run's store,
 /// and a store copied beside the slot is where the same value lands from the
 /// slot. Red at the bound master, where the slot run's capture writes its
-/// objects into the store beside the slot; green here, where the resume's
-/// `derive` refuses, naming the variable and saying to export it as an
+/// objects into the store beside the slot; green here, where `derive`
+/// refuses, naming the variable and saying to export it as an
 /// absolute path, and no slot or intent is made and the store beside the slot
 /// stays as it was. Removing the check from `derive`, the mutation, makes it
 /// red again.
@@ -22090,7 +22090,7 @@ fn a_relative_object_directory_is_refused_before_the_store_beside_the_slot_is_wr
             && ended
                 .stdout
                 .contains("export `GIT_OBJECT_DIRECTORY` as an absolute path"),
-        "the resume's `derive` refuses, naming the variable: {ended}"
+        "`derive` refuses, naming the variable: {ended}"
     );
     assert_eq!(
         entry_names(&tasks),

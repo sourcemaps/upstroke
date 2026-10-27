@@ -20684,11 +20684,11 @@ mod tests {
     }
 
     #[cfg(unix)]
-    const RESUME_ROOT: &str = "UPSTROKE_TEST_R5_RESUME_ROOT";
+    const BOUNDARY_ROOT: &str = "UPSTROKE_TEST_R5_BOUNDARY_ROOT";
 
     #[cfg(unix)]
     #[test]
-    fn a_clean_run_resumed_under_a_relative_object_directory_is_refused_and_then_resumes() {
+    fn a_relative_object_directory_refuses_derive_with_the_resumes_arguments() {
         let tasks = [WideTask::independent("alpha")];
         let Wide { run, env } = Wide::durable(
             "resume-relative-objects",
@@ -20701,10 +20701,10 @@ mod tests {
         let log = std::fs::read(&env.log).expect("the run's log");
         let execution_root = env.fixture.manager.execution_root().to_path_buf();
         let ended = crate::agent::proc::test_support::run_test_isolated(
-            "engine::topology::coordinator::tests::relative_name_resume_child",
+            "engine::topology::coordinator::tests::relative_name_derive_boundary_child",
             &[
                 ("GIT_OBJECT_DIRECTORY", std::ffi::OsStr::new("../objects")),
-                (RESUME_ROOT, env.fixture.root.as_os_str()),
+                (BOUNDARY_ROOT, env.fixture.root.as_os_str()),
             ],
             BOUND,
         );
@@ -20716,7 +20716,7 @@ mod tests {
         assert_eq!(
             std::fs::read(&env.log).expect("the run's log"),
             log,
-            "the refused resume appended nothing"
+            "the refused `derive` left the run's log as it was"
         );
         for name in ["tasks", "intents"] {
             assert_eq!(
@@ -20724,7 +20724,7 @@ mod tests {
                     .expect("a directory of the run")
                     .count(),
                 0,
-                "the refused resume made nothing in `{name}`"
+                "the refused `derive` made nothing in `{name}`"
             );
         }
         let (_, mut resumed) = env
@@ -20741,8 +20741,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     #[ignore = "subprocess helper"]
-    fn relative_name_resume_child() {
-        let Some(root) = std::env::var_os(RESUME_ROOT).map(std::path::PathBuf::from) else {
+    fn relative_name_derive_boundary_child() {
+        let Some(root) = std::env::var_os(BOUNDARY_ROOT).map(std::path::PathBuf::from) else {
             return;
         };
         let refused = crate::workspace_manager::WorkspaceManager::derive(
@@ -20751,7 +20751,7 @@ mod tests {
             crate::workspace_manager::fixture::RUN_ID,
             "inc-2",
         )
-        .expect_err("the resume's first call refuses under the inherited relative value");
+        .expect_err("`derive` with the resume's arguments refuses the relative value");
         let message = refused.to_string();
         assert!(
             message.contains("the inherited `GIT_OBJECT_DIRECTORY` is `../objects`")
