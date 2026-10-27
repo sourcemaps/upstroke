@@ -1131,24 +1131,33 @@ fn the_host_runner_reports_the_common_dir_its_child_is_started_with() {
     let over = |base: Vec<(OsString, OsString)>, case: KeyCase| {
         HostRunner::new().with_environment(HostEnvironment::with_base(base, case))
     };
+    let (base_common, overlay_common, first_common, second_common) = if cfg!(windows) {
+        (
+            r"C:\base\common",
+            r"C:\overlay\common",
+            r"C:\first\common",
+            r"C:\second\common",
+        )
+    } else {
+        (
+            "/base/common",
+            "/overlay/common",
+            "/first/common",
+            "/second/common",
+        )
+    };
     for (label, base_value, overlay_value, expected) in [
         (
             "a value in the base",
-            Some("/base/common"),
+            Some(base_common),
             None,
-            Some("/base/common"),
+            Some(base_common),
         ),
         (
             "an overlay's value over the base's",
-            Some("/base/common"),
-            Some("/overlay/common"),
-            Some("/overlay/common"),
-        ),
-        (
-            "a relative value",
-            Some("../../common"),
-            None,
-            Some("../../common"),
+            Some(base_common),
+            Some(overlay_common),
+            Some(overlay_common),
         ),
         ("no value anywhere", None, None, None),
     ] {
@@ -1180,19 +1189,58 @@ fn the_host_runner_reports_the_common_dir_its_child_is_started_with() {
         );
     }
 
+    let (_held, repository) = managed_repository();
+    std::fs::write(repository.include(), RECORDED_OBJECTS_INCLUDE)
+        .expect("the include, without which a role of the runner that holds it never starts");
+    let held = repository.common_dir().as_os_str().to_os_string();
+    let relative = || {
+        let mut base = synthetic_base();
+        base.push((os(COMMON_DIR), os("../../common")));
+        base
+    };
+    let runner = HostRunner::new().with_environment(
+        HostEnvironment::with_base(relative(), KeyCase::current())
+            .reading(ObjectGraph::RecordedIn(repository.clone())),
+    );
+    let request = gate(Vec::new());
+    assert_eq!(
+        runner.composed_common_dir(&request),
+        ComposedCommonDir::Present(held.clone()),
+        "a relative value, its repository held: the report"
+    );
+    assert_eq!(
+        received_common_dir(&runner, &request),
+        vec![format!("{COMMON_DIR}={}", held.to_string_lossy())],
+        "a relative value, its repository held: what the child received"
+    );
+    let runner = over(relative(), KeyCase::current());
+    assert_eq!(
+        runner.composed_common_dir(&request),
+        ComposedCommonDir::Unknown,
+        "a relative value, no repository held: the composition refuses and reports nothing"
+    );
+    match runner.run_blocking(&request) {
+        Err(refusal) => assert!(
+            refusal.fate == ProcessFate::NeverStarted
+                && refusal.source.to_string().contains(COMMON_DIR),
+            "a relative value, no repository held: the same composition refuses the run: {refusal}"
+        ),
+        Ok(output) => panic!("a relative value, no repository held: the run started: {output:?}"),
+    }
+
     let mut base = synthetic_base();
-    base.push((os(COMMON_DIR), os("/first/common")));
-    base.push((os(COMMON_DIR), os("/second/common")));
+    base.push((os(COMMON_DIR), os(first_common)));
+    base.push((os(COMMON_DIR), os(second_common)));
     let runner = over(base, KeyCase::current());
     let request = gate(Vec::new());
     assert_eq!(
         runner.composed_common_dir(&request),
-        ComposedCommonDir::Present(os("/second/common")),
+        ComposedCommonDir::Present(os(second_common)),
         "a repeated name: the report reads the entry the child receives"
     );
     assert_eq!(
         received_common_dir(&runner, &request),
-        vec![format!("{COMMON_DIR}=/second/common")],
+        vec![format!("{COMMON_DIR}={second_common}")],
         "a repeated name: the later entry is the child's"
     );
 

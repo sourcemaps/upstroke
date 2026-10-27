@@ -399,10 +399,19 @@ custom `HostEnvironment` with an overlay rather than `HostRunner::new` alone:
 
 - a base value;
 - an overlay's value over the base's;
-- a relative value, reported as composed;
 - none anywhere, `Absent`;
+- a relative value, which a gate does not receive as it is (option (C)'s work-tree context, in
+  `child_environment`). With the run's repository held, by `ObjectGraph::RecordedIn` over
+  `managed_repository`, the report and the child's value are both that repository's common
+  directory. With none held, the report is `Unknown` and the same composition refuses the run
+  `NeverStarted`. Both report assertions turn red if the work-tree step leaves `child_environment`,
+  which would make the report a second composition beside the child's;
 - a repeated name, where the later entry is the one the child receives and the one reported;
 - an overlay naming a reserved key, which reports `Unknown` while the same composition refuses the run.
+
+The base, overlay and repeated values are absolute on the platform that runs the test (`/…` on Unix,
+`C:\…` on Windows), because a gate's inherited value that is not absolute meets the work-tree
+context.
 
 On Unix, two more rows:
 
