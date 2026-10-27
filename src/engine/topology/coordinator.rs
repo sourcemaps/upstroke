@@ -15796,7 +15796,10 @@ git cat-file -e 'HEAD^{tree}'
         let bin = env.fixture.root.join("bin");
         for (name, script) in [
             (crate::engine::topology::scaffold::AGENT, F_HOSTED_AGENT),
-            (crate::engine::topology::scaffold::REVIEW_AGENT, F_HOSTED_AGENT),
+            (
+                crate::engine::topology::scaffold::REVIEW_AGENT,
+                F_HOSTED_AGENT,
+            ),
             ("gate", F_HOSTED_GATE),
         ] {
             let path = bin.join(name);
@@ -15872,7 +15875,12 @@ git cat-file -e 'HEAD^{tree}'
         let mut hooks = resumed.env.hooks();
         let progress = resumed
             .run
-            .run_concurrently(&resumed.env.seams_over(&*host), &pipelines, &mut hooks, None)
+            .run_concurrently(
+                &resumed.env.seams_over(&*host),
+                &pipelines,
+                &mut hooks,
+                None,
+            )
             .expect("the run over the host runner completes");
         assert_eq!(outcome_of(&progress), RunOutcome::Complete);
         assert!(
@@ -15908,9 +15916,15 @@ git cat-file -e 'HEAD^{tree}'
             }
         }
         for (role, what) in [
-            ("--implement", "the worker, once leaving its slot as it was and once working"),
+            (
+                "--implement",
+                "the worker, once leaving its slot as it was and once working",
+            ),
             ("gate", "the attempt's gate and the verification's"),
-            ("--prompt", "the attempt's review pass and the verification's"),
+            (
+                "--prompt",
+                "the attempt's review pass and the verification's",
+            ),
         ] {
             assert!(
                 seen.get(role).copied().unwrap_or(0) >= 2,

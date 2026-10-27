@@ -1132,14 +1132,24 @@ fn the_host_runner_reports_the_common_dir_its_child_is_started_with() {
         HostRunner::new().with_environment(HostEnvironment::with_base(base, case))
     };
     for (label, base_value, overlay_value, expected) in [
-        ("a value in the base", Some("/base/common"), None, Some("/base/common")),
+        (
+            "a value in the base",
+            Some("/base/common"),
+            None,
+            Some("/base/common"),
+        ),
         (
             "an overlay's value over the base's",
             Some("/base/common"),
             Some("/overlay/common"),
             Some("/overlay/common"),
         ),
-        ("a relative value", Some("../../common"), None, Some("../../common")),
+        (
+            "a relative value",
+            Some("../../common"),
+            None,
+            Some("../../common"),
+        ),
         ("no value anywhere", None, None, None),
     ] {
         let mut base = synthetic_base();
@@ -1213,7 +1223,9 @@ fn the_host_runner_reports_the_common_dir_its_child_is_started_with() {
         );
         let dumped = dumped_environment(&runner, &request);
         assert!(
-            dumped.iter().any(|entry| entry == "git_common_dir=/lower/common")
+            dumped
+                .iter()
+                .any(|entry| entry == "git_common_dir=/lower/common")
                 && !dumped
                     .iter()
                     .any(|entry| entry.starts_with(&format!("{COMMON_DIR}="))),
