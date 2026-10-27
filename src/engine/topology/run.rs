@@ -670,8 +670,7 @@ fn complete_promotions<O: Operator + ?Sized>(
     };
     for key in promoting {
         let Some(promoting) =
-            super::candidate::recovery_for(manager, &run_id, operator.driven().fold(), key)?
-                .promotion
+            super::candidate::owed_for(manager, &run_id, operator.driven().fold(), key)?.promotion
         else {
             continue;
         };

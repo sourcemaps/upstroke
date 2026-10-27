@@ -543,3 +543,22 @@ packages, F's among them, with their stated material consequences (the owner's a
 `a_missing_stored_worktree_directory_refuses_before_checkout_deletion` is renamed in place to
 `a_missing_stored_worktree_directory_converges_removing_only_the_checkout`, and it now converges, removing only the
 checkout and touching nothing of the moved store (T-C3-1). The texts above keep the name they were written with.
+
+**A dated precision (2026-10-27): recovery's completion of a promotion.** The fresh regular lens reviewed #333 at
+`f1842dcd` and found a P1 in the sentences above that say P-1's guard keeps a populated checkout at recovery's task
+reclaim. They covered only the reclaim of a generation recovery has closed (step (e)).
+
+- **The gap.** A crash between `candidate_prepared` and `task_candidate_created` leaves a promotion unfinished.
+  Recovery's completion of it (`recover::finish_promotions`, step (f)) removed the task worktree with no check. With
+  the store absent, closure 3's arm made that removal succeed. That contradicts P-6′ and Choice A's "except recovery
+  task reclaim".
+- **The repair, in #333, leaving the frozen file as it is.**
+  - `candidate::recovery_for`, recovery's own reading of the classification, refuses resumably and keeps the worktree
+    while an instance of it holds anything and its registration is not whole (`dispatch::refuse_kept_promotion`).
+  - Run-end closure reads `candidate::owed_for` and removes the worktree as before.
+- **The result.** Both of recovery's task reclaims now keep such a checkout, each for as long as each check finds it
+  so. For a promotion, "P-1's guard keeps a slot at recovery's reclaim only" in item 6 above reads as the same keeping
+  by that check.
+- **The witnesses:** `a_resume_keeps_a_promoting_generations_pruned_populated_slot_with_the_store_gone` and
+  `a_resume_keeps_a_promoting_generations_pruned_populated_slot_while_the_store_stays`. They are implemented; their
+  validation and fresh review are pending.

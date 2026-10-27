@@ -404,6 +404,24 @@ pub(super) fn refuse_kept_slot(
     ))
 }
 
+pub(super) fn refuse_kept_promotion(
+    manager: &WorkspaceManager,
+    slot: &Slot,
+    candidate: &CommitSha,
+) -> Result<(), UpstrokeError> {
+    let kept = kept(manager, &mut crate::workspace_manager::NoHooks, slot)?;
+    if kept.is_empty() {
+        return Ok(());
+    }
+    Err(kept_slot_refusal(
+        slot,
+        &format!("recovery's completion of the promotion of candidate {candidate}"),
+        &kept,
+        "the attempt's output, of which only the candidate commit is pinned",
+        "the next resume finishes the promotion",
+    ))
+}
+
 pub(super) fn kept(
     manager: &WorkspaceManager,
     hooks: &mut dyn crate::workspace_manager::EffectHooks,

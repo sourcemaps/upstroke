@@ -1667,8 +1667,11 @@ for the terminal; and the reclaim's own refusals.
 
 Step (3): each promoting generation's candidates ref (created if absent),
 `task_candidate_created`, then its pin pruned and its worktree reclaimed —
-`candidate::recovery_for` supplies the typestate value recovery's step (f)
-starts from.
+`candidate::owed_for` supplies the typestate value recovery's step (f)
+starts from. It is that classification without recovery's keeping
+(`candidate::recovery_for`), so run-end closure removes a promoting
+generation's worktree whatever its registration, as P-6′ has run-end closure
+do.
 
 ## `fn complete_publication<O: Operator + ?Sized>(`
 

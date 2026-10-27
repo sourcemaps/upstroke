@@ -766,6 +766,28 @@ once a check finds the slot holding nothing, or its registration whole again
 (`git worktree repair` writes a deleted `gitdir` again), the guard answers
 `Ok` and the reclaim removes the slot with what it then holds.
 
+## `pub(super) fn refuse_kept_promotion(`
+
+**The same check as [`refuse_kept_slot`], for the promotion recovery would
+finish.** `candidate::recovery_for` calls it for each generation that
+`candidate::owed_for` reports as an unfinished promotion. Recovery reaches it at
+step (f), before it creates the candidates ref, appends `task_candidate_created`
+or removes anything.
+
+It refuses, removing nothing, while an instance of the slot holds anything and
+its worktree registration is not whole. The refusal names:
+- the slot;
+- each kept instance's path, with what the check found there;
+- the candidate commit, the only part of what the worktree holds that is pinned.
+
+It closes the gap the fresh regular lens found at `f1842dcd` (P1). That
+worktree's removal was reached with no check; with the store absent, closure 3's
+arm made the removal succeed.
+
+It reads with `NoHooks`, as the guard does, because recovery runs before any
+coordinator exists. Each resume checks again, as for the guard. Run-end closure
+does not reach it: `run::complete_promotions` reads `candidate::owed_for`.
+
 ## `pub(super) fn kept(`
 
 The slot's instances that hold anything while their worktree registration is

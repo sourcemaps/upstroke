@@ -1628,6 +1628,17 @@ another SHA — or whatever the append returns.
 
 Classified before anything is appended, from the fold as it stands. The
 borrow ends here because the sequence below needs the chain mutably.
+
+**Recovery's keeping is here too.** `candidate::recovery_for` refuses
+resumably for a promotion it reports when an instance of the generation's task
+worktree holds anything and its worktree registration is not whole
+(`dispatch::refuse_kept_promotion`; P-6′, and Choice A's "except recovery task
+reclaim"). This was #333's repair of the fresh regular lens's P1 at `f1842dcd`.
+
+Because every task is classified first, the refusal comes before any candidates
+ref, `task_candidate_created` or removal, for every task. RULING P-1's guard
+(step (e)) keeps only generations recovery has closed. This file is unchanged
+by the repair: its call of `recovery_for` now reaches the keeping.
 **Both products of the classification, not one.**
 
 `CandidateRecovery` carries a `promotion`, an `orphan_pin` and
