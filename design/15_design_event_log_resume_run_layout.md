@@ -155,8 +155,16 @@ what a coordinator killed after making an add's destination leaves.
   The engine meets the second by reading the checkout's registration, from files alone, wherever a
   checkout's Git state can reach an outcome. The registration is whole when the checkout's `.git`
   names an entry of this repository's own store that holds `gitdir`, `commondir`, `HEAD` and `index`,
-  the first three non-empty, with `commondir` resolving to the repository and `gitdir` back to the
-  checkout.
+  the first three non-empty, with the guarded process's Git taking the repository as its common
+  directory, and `gitdir` back to the checkout. For a process started with no `GIT_COMMON_DIR` that
+  the code composing its environment reports (§8's `composed_common_dir`), that is `commondir`
+  resolving to the repository. For one started with a reported value, `commondir` names the
+  repository whose store holds the entry, and the value, resolved from the checkout, names the
+  repository. That second form is how a run whose `worktrees` store is a link into another
+  repository, under an inherited `GIT_COMMON_DIR` naming the run's common directory (R-C-REGISTRY's
+  part 2), stays whole: Git records `commondir` there as the other repository. A value the
+  coordinator holds is not evidence for a process it starts, so a runner that reports nothing is
+  read by the first form.
   - A Git error from a manager command in a slot; an answer the engine reads from a checkout's index
     (the classification of a failed proposal pick, the capture's reads of conflicts and of the
     resolution manifest, the promotion's changed paths, a materialization's observation, a

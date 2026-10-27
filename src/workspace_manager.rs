@@ -60,7 +60,7 @@
 #![cfg_attr(not(test), forbid(clippy::disallowed_macros))]
 
 use std::collections::HashSet;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::Write as _;
 use std::path::{Component, Path, PathBuf};
@@ -105,6 +105,35 @@ use crate::util::{DurabilityLedger, DurableStep, EntryObserved};
 /// the key and the value cannot be separated and a new spawn site names the
 /// fact rather than restating it.
 pub const NO_REPLACEMENT_OBJECTS: (&str, &str) = ("GIT_NO_REPLACE_OBJECTS", "1");
+
+/// The variable that names the repository's common directory.
+pub(crate) const COMMON_DIR: &str = "GIT_COMMON_DIR";
+
+/// The [`COMMON_DIR`] a Git child is started with, as the code that composes
+/// the child's environment reports it: this manager's builder for its own
+/// children ([`WorkspaceManager::composed_common_dir`]), and a runner for the
+/// process it starts for a request (`Runner::composed_common_dir`). Closure
+/// 1's check reads it as the guarded child's Git context
+/// ([`registration_whole`]).
+///
+/// It reports what the child is started with. It is not a claim about every
+/// Git command a process runs later, whose own code can change its
+/// environment or its directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ComposedCommonDir {
+    /// No usable report: the composer reports nothing (a runner that keeps
+    /// `Runner`'s default, the container runner and the test runners among
+    /// them), or it could not compose the environment. It does not say that
+    /// the child has no [`COMMON_DIR`]. The check keeps its original rule.
+    Unknown,
+    /// The child is started without [`COMMON_DIR`], so its Git takes the
+    /// common directory from the registration's own `commondir`. The check
+    /// keeps its original rule, which is that one.
+    Absent,
+    /// The child is started with [`COMMON_DIR`] set to this value, exactly as
+    /// composed, relative or absolute.
+    Present(OsString),
+}
 
 /// The root of every run's ref namespace: a run's refs live under
 /// `refs/upstroke/runs/<run-id>/`, and the engine writes nothing else there.
@@ -2778,7 +2807,11 @@ impl WorkspaceManager {
         read: &str,
         answer: T,
     ) -> Result<T, UpstrokeError> {
-        match registration_whole(checkout, &self.common_git_dir) {
+        match registration_whole(
+            checkout,
+            &self.common_git_dir,
+            &self.composed_common_dir(checkout),
+        ) {
             Whole::Yes => Ok(answer),
             Whole::No(found) => Err(read_refused(checkout, read, &found)),
         }
@@ -2791,12 +2824,14 @@ impl WorkspaceManager {
     /// the function constructs itself is covered as a child's is.
     fn refused_if_pruned(&self, checkout: &Path, error: UpstrokeError) -> UpstrokeError {
         match error {
-            UpstrokeError::Git { message } => {
-                match registration_whole(checkout, &self.common_git_dir) {
-                    Whole::Yes => UpstrokeError::Git { message },
-                    Whole::No(found) => read_refused(checkout, &message, &found),
-                }
-            }
+            UpstrokeError::Git { message } => match registration_whole(
+                checkout,
+                &self.common_git_dir,
+                &self.composed_common_dir(checkout),
+            ) {
+                Whole::Yes => UpstrokeError::Git { message },
+                Whole::No(found) => read_refused(checkout, &message, &found),
+            },
             other => other,
         }
     }
@@ -4262,7 +4297,11 @@ impl WorkspaceManager {
             if !holds_anything(&path)? {
                 continue;
             }
-            if let Whole::No(found) = registration_whole(&path, &self.common_git_dir) {
+            if let Whole::No(found) = registration_whole(
+                &path,
+                &self.common_git_dir,
+                &self.composed_common_dir(&path),
+            ) {
                 kept.push((path, found));
             }
         }
@@ -6506,6 +6545,29 @@ impl WorkspaceManager {
         command
     }
 
+    /// The [`COMMON_DIR`] the Git child [`Self::command`] builds for `cwd` is
+    /// started with, read from the builder itself: the builder's own setting
+    /// where it makes one, and otherwise the value this process holds, which
+    /// the child inherits, since the builder clears nothing and removes no
+    /// name. A change to what the builder sets is therefore a change to what
+    /// this reports. Closure 1's check reads it as the context of the
+    /// manager's guarded reads and commands and of its kept-instance guard
+    /// ([`registration_whole`]), and the topology's twin reads it for the
+    /// reads it guards.
+    #[must_use]
+    pub fn composed_common_dir(&self, cwd: &Path) -> ComposedCommonDir {
+        let command = self.command(cwd, &[]);
+        let set = command
+            .get_envs()
+            .find(|(name, _)| *name == OsStr::new(COMMON_DIR));
+        match set {
+            Some((_, Some(value))) => ComposedCommonDir::Present(value.to_os_string()),
+            Some((_, None)) => ComposedCommonDir::Absent,
+            None => std::env::var_os(COMMON_DIR)
+                .map_or(ComposedCommonDir::Absent, ComposedCommonDir::Present),
+        }
+    }
+
     fn git_with_identity(&self, cwd: &Path, args: &[OsString]) -> Result<Output, UpstrokeError> {
         self.revalidate_hooks_path()?;
         self.command(cwd, args)
@@ -8128,7 +8190,8 @@ enum Whole {
 /// Closure 1's check of the worktree registration of the checkout at
 /// `checkout`, from files alone (the external-prune finding,
 /// `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`; #329's
-/// record §8.4).
+/// record §8.4), for a guarded child started with the [`COMMON_DIR`] that
+/// `composed` reports.
 ///
 /// The registration is whole when:
 ///
@@ -8138,17 +8201,43 @@ enum Whole {
 ///    relative pointer resolved against the checkout;
 /// 2. that entry holds `gitdir`, `commondir`, `HEAD` and `index`, each a
 ///    regular file read without following a link, the first three non-empty;
-/// 3. `commondir`, a relative one resolved against the entry, canonicalizes to
-///    the repository's common git dir, and `gitdir`, the same way, to the
-///    checkout's `.git`: compared as the same file, not by spelling.
+/// 3. the guarded child's Git takes the repository's common git dir:
+///    - with no [`COMMON_DIR`] reported ([`ComposedCommonDir::Unknown`] or
+///      [`ComposedCommonDir::Absent`]), `commondir`, a relative one resolved
+///      against the entry, canonicalizes to the repository's common git dir.
+///      This is the check's original rule, unchanged;
+///    - with a value reported ([`ComposedCommonDir::Present`]): (a) the store
+///      of the repository `commondir` names, `<commondir>/worktrees`,
+///      canonicalizes to the entry's parent, so the record names the
+///      repository whose store holds the entry; and then (b) the value, a
+///      relative one resolved against the checkout, where the guarded child
+///      starts, canonicalizes to the repository's common git dir;
+/// 4. `gitdir`, a relative one resolved against the entry, canonicalizes to
+///    the checkout's `.git`.
 ///
-/// Anything else is [`Whole::No`], naming the first condition that failed and
-/// what was found there or the read's error; a read that fails, `NotFound` or
-/// not, is one. It calls only [`fs::symlink_metadata`], [`fs::read`] and
-/// [`fs::canonicalize`]: it starts no process, takes no lock and makes no
-/// registry access. It reads each file once and does not retry: a prune only
-/// removes names, so a name absent at the read stays absent, and the entry is
-/// written by no engine operation while it reads.
+/// Paths are compared as the same file, not by spelling. Anything else is
+/// [`Whole::No`], naming the first condition that failed and what was found
+/// there or the read's error; a read that fails, `NotFound` or not, is one. It
+/// calls only [`fs::symlink_metadata`], [`fs::read`] and [`fs::canonicalize`]:
+/// it starts no process, takes no lock and makes no registry access. It reads
+/// each file once and does not retry: a prune only removes names, so a name
+/// absent at the read stays absent, and the entry is written by no engine
+/// operation while it reads.
+///
+/// **Condition 3 with a reported value** is the external-prune follow-up's
+/// integration correction to its original check, which applied the first
+/// branch whatever the child was given. Where the run's `worktrees` store is
+/// a link into another repository and the child is given a `GIT_COMMON_DIR`
+/// naming the run's common directory (R-C-REGISTRY's part 2, C4's and C5's
+/// layouts), Git writes `commondir` as `../..` through the link, so it names
+/// the other repository, while the child's Git takes its object store and
+/// configuration from the directory the value names. Its shared refs stay
+/// those of the repository the record names, as part 2 accepts; this check
+/// neither changes nor relies on that. Branch (a) keeps the record checked:
+/// one that names any other repository refuses whatever the child is given.
+/// The value is the child's own, reported by the code that composes its
+/// environment: a value this process holds says nothing of what a child is
+/// given.
 ///
 /// **Why the engine reads it.** Git reads a deleted `index` as an empty one and
 /// answers without failing, and with `HEAD`, `commondir` or the whole entry
@@ -8162,8 +8251,12 @@ enum Whole {
 /// topology modules that cannot reach this one's private items; the two must
 /// answer the same for every checkout, and one test runs both over every
 /// construction (`fixture::registration_constructions`).
-fn registration_whole(checkout: &Path, common_git_dir: &Path) -> Whole {
-    match registration_found(checkout, common_git_dir) {
+fn registration_whole(
+    checkout: &Path,
+    common_git_dir: &Path,
+    composed: &ComposedCommonDir,
+) -> Whole {
+    match registration_found(checkout, common_git_dir, composed) {
         Ok(()) => Whole::Yes,
         Err(found) => Whole::No(found),
     }
@@ -8171,7 +8264,11 @@ fn registration_whole(checkout: &Path, common_git_dir: &Path) -> Whole {
 
 /// [`registration_whole`]'s conditions in their order, the first that fails as
 /// the text [`Whole::No`] carries.
-fn registration_found(checkout: &Path, common_git_dir: &Path) -> Result<(), String> {
+fn registration_found(
+    checkout: &Path,
+    common_git_dir: &Path,
+    composed: &ComposedCommonDir,
+) -> Result<(), String> {
     let pointer = checkout.join(".git");
     let text = registration_file(&pointer, true)?;
     let Some(named) = text.strip_prefix(b"gitdir:") else {
@@ -8202,13 +8299,43 @@ fn registration_found(checkout: &Path, common_git_dir: &Path) -> Result<(), Stri
     let commondir = entry.join("commondir");
     let named = registration_file(&commondir, false)?;
     let common = registration_path(&entry, named.trim_ascii(), &commondir)?;
-    if registration_canonical(&common)? != registration_canonical(common_git_dir)? {
-        return Err(format!(
-            "{} names {}, which is not this repository's common git dir {}",
-            commondir.display(),
-            common.display(),
-            common_git_dir.display()
-        ));
+    match composed {
+        ComposedCommonDir::Unknown | ComposedCommonDir::Absent => {
+            if registration_canonical(&common)? != registration_canonical(common_git_dir)? {
+                return Err(format!(
+                    "{} names {}, which is not this repository's common git dir {}",
+                    commondir.display(),
+                    common.display(),
+                    common_git_dir.display()
+                ));
+            }
+        }
+        ComposedCommonDir::Present(value) => {
+            let Some(holder) = entry.parent() else {
+                return Err(format!("{} has no parent directory", entry.display()));
+            };
+            let recorded_store = registration_canonical(&common)?.join("worktrees");
+            if registration_canonical(&recorded_store)? != registration_canonical(holder)? {
+                return Err(format!(
+                    "{} names {}, whose registration store {} is not {}, the store that holds \
+                     this entry",
+                    commondir.display(),
+                    common.display(),
+                    recorded_store.display(),
+                    holder.display()
+                ));
+            }
+            let given = checkout.join(value);
+            if registration_canonical(&given)? != registration_canonical(common_git_dir)? {
+                return Err(format!(
+                    "the guarded child's `GIT_COMMON_DIR` {} names {}, which is not this \
+                     repository's common git dir {}",
+                    Path::new(value).display(),
+                    given.display(),
+                    common_git_dir.display()
+                ));
+            }
+        }
     }
     let gitdir = entry.join("gitdir");
     let named = registration_file(&gitdir, false)?;

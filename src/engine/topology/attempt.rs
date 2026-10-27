@@ -21,8 +21,8 @@ use crate::topology::events::{
     TopologyEventBody,
 };
 use crate::workspace_manager::{
-    DeclaredResolution, ObjectId, ResolutionKind, ResolutionManifest, Slot, Snapshot,
-    SnapshotInput, SnapshotName, WorkspaceManager,
+    ComposedCommonDir, DeclaredResolution, ObjectId, ResolutionKind, ResolutionManifest, Slot,
+    Snapshot, SnapshotInput, SnapshotName, WorkspaceManager,
 };
 
 use super::dispatch::{self, Dispatched, EventEmitter};
@@ -148,6 +148,7 @@ pub struct GatePlan {
 pub struct AttemptRun {
     pub identities: AttemptIdentities,
     pub worker: ProcessOutput,
+    pub worker_common_dir: ComposedCommonDir,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -936,7 +937,12 @@ impl Judge<'_> {
             invocation,
         );
         let worker = self.execute(&request, plan.pool.clone())?;
-        Ok(AttemptRun { identities, worker })
+        let worker_common_dir = self.runner.composed_common_dir(&request);
+        Ok(AttemptRun {
+            identities,
+            worker,
+            worker_common_dir,
+        })
     }
 
     pub fn judge_attempt(
@@ -972,9 +978,14 @@ impl Judge<'_> {
             invocations,
         };
         if assessed.failure.is_some() {
-            if let super::dispatch::Whole::No(found) =
-                super::dispatch::registration_whole(site.worktree, self.manager.common_git_dir())
-            {
+            if let super::dispatch::Whole::No(found) = super::dispatch::registration_whole_under(
+                site.worktree,
+                self.manager.common_git_dir(),
+                &[
+                    self.manager.composed_common_dir(site.worktree),
+                    run.worker_common_dir.clone(),
+                ],
+            ) {
                 return Err(super::dispatch::read_refused(
                     site.worktree,
                     "the attempt's assessed failure",
@@ -996,6 +1007,7 @@ impl Judge<'_> {
             let snapshot = self
                 .snapshot(subject.names, subject.names.gates(), &subject.snapshot)
                 .map_err(JudgeError::Other)?;
+            let mut composed = Vec::with_capacity(subject.gates.len());
             for (index, gate) in subject.gates.iter().enumerate() {
                 let invocation = subject
                     .identities
@@ -1006,6 +1018,7 @@ impl Judge<'_> {
                     gate.timeout,
                     invocation,
                 );
+                let reported = self.runner.composed_common_dir(&request);
                 let verdict = match self.verdict(&request, None) {
                     Ok(verdict) => verdict,
                     Err(JudgeError::Runner(error))
@@ -1015,6 +1028,7 @@ impl Judge<'_> {
                             super::dispatch::registration_whole(
                                 snapshot.path(),
                                 self.manager.common_git_dir(),
+                                &reported,
                             )
                         {
                             return Err(JudgeError::Other(super::dispatch::read_refused(
@@ -1054,13 +1068,16 @@ impl Judge<'_> {
                     }));
                 }
                 gates.push(verdict);
+                composed.push(reported);
                 if refused {
                     break;
                 }
             }
-            if let super::dispatch::Whole::No(found) =
-                super::dispatch::registration_whole(snapshot.path(), self.manager.common_git_dir())
-            {
+            if let super::dispatch::Whole::No(found) = super::dispatch::registration_whole_under(
+                snapshot.path(),
+                self.manager.common_git_dir(),
+                &composed,
+            ) {
                 return Err(JudgeError::Other(super::dispatch::read_refused(
                     snapshot.path(),
                     "the gates' verdicts",
@@ -1093,7 +1110,7 @@ impl Judge<'_> {
                 })
             })?;
             let inputs = subject.inputs;
-            let (outcome, through_the_pair) = {
+            let (outcome, through_the_pair, composed) = {
                 let registering = Registering::new(
                     self.runner,
                     self.registrar,
@@ -1125,7 +1142,8 @@ impl Judge<'_> {
                     &registering,
                     &(subject.invocations)(pass),
                 );
-                (outcome, registering.completed())
+                let through_the_pair = registering.completed();
+                (outcome, through_the_pair, registering.into_composed())
             };
             let outcome = outcome.map_err(JudgeError::Other)?;
 
@@ -1161,9 +1179,11 @@ impl Judge<'_> {
                 }));
             }
 
-            if let super::dispatch::Whole::No(found) =
-                super::dispatch::registration_whole(snapshot.path(), self.manager.common_git_dir())
-            {
+            if let super::dispatch::Whole::No(found) = super::dispatch::registration_whole_under(
+                snapshot.path(),
+                self.manager.common_git_dir(),
+                &composed,
+            ) {
                 return Err(JudgeError::Other(super::dispatch::read_refused(
                     snapshot.path(),
                     &format!("the verdict of review pass {pass}"),

@@ -485,14 +485,16 @@ pub(crate) struct RegistrationConstruction {
 }
 
 /// What the manager's own reader, [`super::registration_whole`], finds of the
-/// registration of the checkout at `checkout`: `Ok` when it is whole, or the
-/// first condition that failed. The topology twin's test compares it with its
-/// own reader on every construction.
+/// registration of the checkout at `checkout` for a guarded child started with
+/// the `GIT_COMMON_DIR` `composed` reports: `Ok` when it is whole, or the first
+/// condition that failed. The topology twin's test compares it with its own
+/// reader on every construction.
 pub(crate) fn manager_registration_found(
     checkout: &Path,
     common_git_dir: &Path,
+    composed: &super::ComposedCommonDir,
 ) -> Result<(), String> {
-    match super::registration_whole(checkout, common_git_dir) {
+    match super::registration_whole(checkout, common_git_dir, composed) {
         Whole::Yes => Ok(()),
         Whole::No(found) => Err(found),
     }

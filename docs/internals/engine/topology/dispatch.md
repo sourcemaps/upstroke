@@ -835,6 +835,13 @@ deleted, it fails, which `run::verified` would otherwise settle as an outage.
 A present but corrupt `index` is a regular file and reads whole, so its Git
 error stays the outage it was (option A, not A′).
 
+**The context it reads** (the external-prune follow-up's integration
+correction, F): the manager's own builder for the checkout
+(`WorkspaceManager::composed_common_dir`). The policy reads through
+`src/workspace.rs`'s `git_command`, which sets no `GIT_COMMON_DIR` and clears
+nothing, as the manager's builder does, so the two builders' children are
+started with the same value.
+
 ## `pub(super) fn read_refused(checkout: &Path, what: &str, found: &str) -> UpstrokeError {`
 
 The topology twin of the manager's `read_refused`, with the same words: the
@@ -848,17 +855,46 @@ What closure 1's check found of a checkout's worktree registration: whole, or
 the first condition that failed with the path and what was found there or the
 read's error.
 
-## `pub(super) fn registration_whole(checkout: &Path, common_git_dir: &Path) -> Whole {`
+## `pub(super) fn registration_whole(`
 
 The topology twin of the manager's `registration_whole`, closure 1's check
-(#329's record §8.4): the checkout's `.git` is a regular file that begins
-`gitdir:` and names an entry of this repository's own store, a relative
-pointer resolved against the checkout; the entry holds `gitdir`, `commondir`,
-`HEAD` and `index`, each a regular file read without following a link, the
-first three non-empty; `commondir` canonicalizes to the common git dir and
-`gitdir` to the checkout's `.git`. It calls only `symlink_metadata`, `read` and
-`canonicalize`, starts no process, takes no lock and makes no registry access,
-and reads each file once.
+(#329's record §8.4), for a guarded child started with the `GIT_COMMON_DIR`
+that `composed` reports:
+
+1. the checkout's `.git` is a regular file that begins `gitdir:` and names an
+   entry of this repository's own store, a relative pointer resolved against
+   the checkout;
+2. the entry holds `gitdir`, `commondir`, `HEAD` and `index`, each a regular
+   file read without following a link, the first three non-empty;
+3. the guarded child's Git takes the repository's common git dir:
+   - with no value reported (`Unknown` or `Absent`), `commondir`
+     canonicalizes to the common git dir. That is the original rule, its code
+     unchanged;
+   - with a value reported (`Present`), (a) `<commondir>/worktrees`
+     canonicalizes to the entry's parent, and then (b) the value, resolved
+     against the checkout, canonicalizes to the common git dir;
+4. `gitdir` canonicalizes to the checkout's `.git`.
+
+It calls only `symlink_metadata`, `read` and `canonicalize`, starts no process,
+takes no lock and makes no registry access, and reads each file once.
+
+**The second branch of condition 3 is the external-prune follow-up's
+integration correction to its original check**, which applied the first branch
+whatever the child was given. Under a `worktrees` store linked into another
+repository and a `GIT_COMMON_DIR` naming the run's common directory
+(R-C-REGISTRY's part 2, C4's and C5's layouts), Git writes `commondir` as
+`../..` through the link, naming the other repository. The child's Git takes
+its object store and configuration from the value; its shared refs stay the
+record's, as part 2 accepts, and this check does not change or rely on that.
+The manager's doc comment on `registration_whole` carries the full argument.
+
+## `pub(super) fn registration_whole_under(`
+
+Closure 1's check for a verdict or a failure read by more than one guarded
+child: the registration is whole only if it is whole for each distinct report
+in `composed`, and the first refusal is returned. An empty list, where no
+child was handed on, is checked as the absence of a report (`Unknown`, the
+original rule). Placements 2 and 3 read it (`attempt.rs`).
 
 **Why two copies.** The census classifies the functions of the manager's
 modules, and a crate-visible reader there would need an `effects/wrappers.toml`

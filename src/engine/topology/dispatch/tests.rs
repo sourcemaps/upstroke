@@ -1885,13 +1885,18 @@ fn closure_one_readers_agree_on_every_registration_construction() {
     let constructions = crate::workspace_manager::fixture::registration_constructions(&fixture);
     let mut failed = Vec::new();
     for construction in &constructions {
-        let topology = match registration_whole(&construction.checkout, &common) {
+        let topology = match registration_whole(
+            &construction.checkout,
+            &common,
+            &crate::workspace_manager::ComposedCommonDir::Unknown,
+        ) {
             Whole::Yes => Ok(()),
             Whole::No(found) => Err(found),
         };
         let manager = crate::workspace_manager::fixture::manager_registration_found(
             &construction.checkout,
             &common,
+            &crate::workspace_manager::ComposedCommonDir::Unknown,
         );
         if topology != manager {
             failed.push(format!(

@@ -25364,6 +25364,7 @@ mod tests {
                     not_whole: match crate::engine::topology::dispatch::registration_whole(
                         worktree,
                         &self.common,
+                        &crate::workspace_manager::ComposedCommonDir::Unknown,
                     ) {
                         crate::engine::topology::dispatch::Whole::No(found) => Some(found),
                         crate::engine::topology::dispatch::Whole::Yes => None,

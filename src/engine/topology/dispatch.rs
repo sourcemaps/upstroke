@@ -10,7 +10,9 @@ use crate::topology::events::{
 };
 use crate::topology::paths::PathSet;
 use crate::topology::registry::TaskKey;
-use crate::workspace_manager::{Materialized, Quiescence, Slot, VerifyFailure, WorkspaceManager};
+use crate::workspace_manager::{
+    ComposedCommonDir, Materialized, Quiescence, Slot, VerifyFailure, WorkspaceManager,
+};
 
 use super::seams::TopologyHooks;
 
@@ -469,16 +471,22 @@ pub(super) fn read_in_whole_checkout<T>(
     result: Result<T, UpstrokeError>,
 ) -> Result<T, UpstrokeError> {
     match result {
-        Ok(answer) => match registration_whole(checkout, manager.common_git_dir()) {
+        Ok(answer) => match registration_whole(
+            checkout,
+            manager.common_git_dir(),
+            &manager.composed_common_dir(checkout),
+        ) {
             Whole::Yes => Ok(answer),
             Whole::No(found) => Err(read_refused(checkout, read, &found)),
         },
-        Err(UpstrokeError::Git { message }) => {
-            match registration_whole(checkout, manager.common_git_dir()) {
-                Whole::Yes => Err(UpstrokeError::Git { message }),
-                Whole::No(found) => Err(read_refused(checkout, &message, &found)),
-            }
-        }
+        Err(UpstrokeError::Git { message }) => match registration_whole(
+            checkout,
+            manager.common_git_dir(),
+            &manager.composed_common_dir(checkout),
+        ) {
+            Whole::Yes => Err(UpstrokeError::Git { message }),
+            Whole::No(found) => Err(read_refused(checkout, &message, &found)),
+        },
         Err(other) => Err(other),
     }
 }
@@ -501,14 +509,41 @@ pub(super) enum Whole {
     No(String),
 }
 
-pub(super) fn registration_whole(checkout: &Path, common_git_dir: &Path) -> Whole {
-    match registration_found(checkout, common_git_dir) {
+pub(super) fn registration_whole(
+    checkout: &Path,
+    common_git_dir: &Path,
+    composed: &ComposedCommonDir,
+) -> Whole {
+    match registration_found(checkout, common_git_dir, composed) {
         Ok(()) => Whole::Yes,
         Err(found) => Whole::No(found),
     }
 }
 
-fn registration_found(checkout: &Path, common_git_dir: &Path) -> Result<(), String> {
+pub(super) fn registration_whole_under(
+    checkout: &Path,
+    common_git_dir: &Path,
+    composed: &[ComposedCommonDir],
+) -> Whole {
+    if composed.is_empty() {
+        return registration_whole(checkout, common_git_dir, &ComposedCommonDir::Unknown);
+    }
+    for (at, report) in composed.iter().enumerate() {
+        if composed.iter().take(at).any(|earlier| earlier == report) {
+            continue;
+        }
+        if let Whole::No(found) = registration_whole(checkout, common_git_dir, report) {
+            return Whole::No(found);
+        }
+    }
+    Whole::Yes
+}
+
+fn registration_found(
+    checkout: &Path,
+    common_git_dir: &Path,
+    composed: &ComposedCommonDir,
+) -> Result<(), String> {
     let pointer = checkout.join(".git");
     let text = registration_file(&pointer, true)?;
     let Some(named) = text.strip_prefix(b"gitdir:") else {
@@ -539,13 +574,43 @@ fn registration_found(checkout: &Path, common_git_dir: &Path) -> Result<(), Stri
     let commondir = entry.join("commondir");
     let named = registration_file(&commondir, false)?;
     let common = registration_path(&entry, named.trim_ascii(), &commondir)?;
-    if registration_canonical(&common)? != registration_canonical(common_git_dir)? {
-        return Err(format!(
-            "{} names {}, which is not this repository's common git dir {}",
-            commondir.display(),
-            common.display(),
-            common_git_dir.display()
-        ));
+    match composed {
+        ComposedCommonDir::Unknown | ComposedCommonDir::Absent => {
+            if registration_canonical(&common)? != registration_canonical(common_git_dir)? {
+                return Err(format!(
+                    "{} names {}, which is not this repository's common git dir {}",
+                    commondir.display(),
+                    common.display(),
+                    common_git_dir.display()
+                ));
+            }
+        }
+        ComposedCommonDir::Present(value) => {
+            let Some(holder) = entry.parent() else {
+                return Err(format!("{} has no parent directory", entry.display()));
+            };
+            let recorded_store = registration_canonical(&common)?.join("worktrees");
+            if registration_canonical(&recorded_store)? != registration_canonical(holder)? {
+                return Err(format!(
+                    "{} names {}, whose registration store {} is not {}, the store that holds \
+                     this entry",
+                    commondir.display(),
+                    common.display(),
+                    recorded_store.display(),
+                    holder.display()
+                ));
+            }
+            let given = checkout.join(value);
+            if registration_canonical(&given)? != registration_canonical(common_git_dir)? {
+                return Err(format!(
+                    "the guarded child's `GIT_COMMON_DIR` {} names {}, which is not this \
+                     repository's common git dir {}",
+                    Path::new(value).display(),
+                    given.display(),
+                    common_git_dir.display()
+                ));
+            }
+        }
     }
     let gitdir = entry.join("gitdir");
     let named = registration_file(&gitdir, false)?;

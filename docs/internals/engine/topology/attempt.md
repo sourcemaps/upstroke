@@ -458,6 +458,14 @@ The identities every process of this attempt draws from.
 
 What the worker process did.
 
+## `pub struct AttemptRun` › `pub worker_common_dir: ComposedCommonDir,`
+
+What the Runner composed for the worker's `GIT_COMMON_DIR`
+(`Runner::composed_common_dir` for the worker's request), taken when the worker
+has run. Placement 3 reads it, beside the manager's own builder, as the context
+of an assessed failure that is the worker's own end (the external-prune
+follow-up's integration correction, F).
+
 ## `pub struct Capture {`
 
 The exact tree the capture wrote, and where it came from.
@@ -1527,6 +1535,26 @@ process-count check, and before its snapshot is released.
 A refusal leaves its snapshot unreleased, as the process-count refusal does;
 the next resume reclaims it with the rest of the interrupted command.
 
+**The context it reads** (the external-prune follow-up's integration
+correction, F). Each check reads the registration for the Git context of the
+processes whose verdict it guards, as their Runner composed it
+(`Runner::composed_common_dir`).
+
+- **The gates' check** reads every gate request's report, taken as each gate
+  starts.
+- **A review pass's check** reads the reports its `Registering` boundary kept
+  for the requests it admitted (`into_composed`).
+- **How the reports are read.** Each distinct report is checked, and the
+  first refusal is returned (`dispatch::registration_whole_under`). A pass
+  that handed nothing on is checked as the absence of a report.
+- **A Runner that reports nothing**, the container runner and the test
+  runners among them, is read by the check's original rule. Under a
+  `worktrees` store linked into another repository, its verdicts stay
+  refused.
+- **A host role started with a `GIT_COMMON_DIR` naming the run's common
+  directory** is read by the reported value (R-C-REGISTRY's part 2, C4's and
+  C5's layouts).
+
 ## `impl Judge<'_> {` › `if !error.is_cancelled() && !error.fate.is_unresolved() =>`
 
 **Placement 2 at a gate's failed run** (the external-prune follow-up, F; the
@@ -1674,6 +1702,22 @@ placement 3 is the first check after the capture's last one, and it meets
 every deletion that lands after the capture's last read of the index, an
 `index`-only one included: nothing in that interval reads or writes the slot's
 index.
+
+**The contexts it reads** (the external-prune follow-up's integration
+correction, F). The failure is judged only while the registration is whole for
+both of these:
+
+- **The manager's own builder for the slot**
+  (`WorkspaceManager::composed_common_dir`), for the capture's, the diff's and
+  the policy's reads. The legacy workspace builder the policy reads through,
+  `src/workspace.rs`'s `git_command`, sets no `GIT_COMMON_DIR` and clears
+  nothing, as the manager's builder does. That module's own test refuses
+  `env_remove` and `env_clear` in it, and the payload census counts its
+  `.env(` sites.
+- **The worker's report** (`AttemptRun::worker_common_dir`), for a failure
+  that is the worker's own end.
+
+The gate's failed run (the section above) reads that gate's own report.
 
 ## `fn capture_tree(`
 

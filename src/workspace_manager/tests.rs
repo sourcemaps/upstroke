@@ -20878,8 +20878,11 @@ fn closure_one_reader_answers_every_registration_construction_as_the_check_state
         super::fixture::registration_constructions(&fixture)
             .into_iter()
             .map(|construction| {
-                let found =
-                    super::fixture::manager_registration_found(&construction.checkout, &common);
+                let found = super::fixture::manager_registration_found(
+                    &construction.checkout,
+                    &common,
+                    &super::ComposedCommonDir::Unknown,
+                );
                 let outcome = match (construction.expected, &found) {
                     (Ok(()), Ok(())) => Ok(()),
                     (Err(words), Err(text)) if text.contains(words) => Ok(()),

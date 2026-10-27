@@ -562,3 +562,27 @@ reclaim. They covered only the reclaim of a generation recovery has closed (step
 - **The witnesses:** `a_resume_keeps_a_promoting_generations_pruned_populated_slot_with_the_store_gone` and
   `a_resume_keeps_a_promoting_generations_pruned_populated_slot_while_the_store_stays`. They are implemented; their
   validation and fresh review are pending.
+
+**A dated precision (2026-10-27): closure 1 under a `worktrees` store linked into another repository.**
+env-gate-6's integration map (§2.4) found it. Root's disposition `F-ENV-COMPATIBILITY-DISPOSITION-20261027` bound
+#333 to repair it in this round, and `F-RETURN7-RUNNER-EXTENSION-DISPOSITION-20261027` selected the route.
+
+- **The gap.** Closure 1's check, as stated above ("`commondir` resolves to the common git dir"), read every slot and
+  snapshot of such a run as not whole. Git writes `commondir` as `../..` through the link, so it names the other
+  repository. Under an inherited `GIT_COMMON_DIR` naming the run's common directory (R-C-REGISTRY's part 2, C4's and
+  C5's layouts, adopted as working), every guarded read refused, and such a topology run never completed.
+- **The correction, in #333.** It is an integration correction to F's original implementation, not the same check.
+  - **What condition 3 reads.** The guarded child's own `GIT_COMMON_DIR`, as the code composing that child's
+    environment reports it. For the manager's own commands that is its builder. For a gate, a reviewer or a worker it
+    is `Runner::composed_common_dir`, a provided method DESIGN §8 now names, which `HostRunner` answers from its one
+    composition.
+  - **With nothing reported** the check is the original one.
+  - **With a value reported** the record must name the repository whose store holds the entry, and the value, from
+    the checkout, must name the run's common directory.
+- **What stays.** Store membership, the required files, the backpointer and the record's validation.
+  - A runner that reports nothing, the container runner among them, is checked by the original rule.
+  - Part 2's shared-ref exposure stays as adopted. The correction does not claim that the variable redirects shared
+    refs.
+- **The sentences above that state the check** read as its original rule, which still applies whenever no value is
+  reported. With a reported value, they read as this precision states.
+- **Validation is pending:** the C4 and C5 controls under a genuine host runner, their negatives, and fresh review.
