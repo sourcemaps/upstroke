@@ -452,11 +452,21 @@ fn refuse_linked_registry(
     match fs::symlink_metadata(&entry) {
         Ok(_) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(source) => return Err(UpstrokeError::Io { path: entry, source }),
+        Err(source) => {
+            return Err(UpstrokeError::Io {
+                path: entry,
+                source,
+            });
+        }
     }
     let target = match fs::canonicalize(&entry) {
         Ok(target) => strip_verbatim(target),
-        Err(source) => return Err(UpstrokeError::Io { path: entry, source }),
+        Err(source) => {
+            return Err(UpstrokeError::Io {
+                path: entry,
+                source,
+            });
+        }
     };
     if target.parent() == Some(common_git_dir) {
         return Ok(());

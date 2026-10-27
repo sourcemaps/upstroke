@@ -21706,8 +21706,8 @@ fn a_worktrees_registry_refuses_exactly_when_its_canonical_parent_is_not_the_com
 
     let (common, entry) = layout("linked");
     plant_directory_link(&other, &entry);
-    let refused = refuse_linked_registry(&common, false)
-        .expect_err("a link into another directory refuses");
+    let refused =
+        refuse_linked_registry(&common, false).expect_err("a link into another directory refuses");
     assert_names_entry_and_target(&refused, &entry, &other);
     assert!(
         refuse_linked_registry(&common, true).is_ok(),
@@ -21959,7 +21959,10 @@ fn derive_in_a_child(layout: &RelativeNameLayout, name: &str, value: &OsStr) -> 
     let label = format!("`{name}={}`", Path::new(value).display());
     let ended = crate::agent::proc::test_support::run_test_isolated(
         "workspace_manager::tests::relative_name_derive_helper",
-        &[(name, value), (CONTEXT_ROOT, layout.tree.path().as_os_str())],
+        &[
+            (name, value),
+            (CONTEXT_ROOT, layout.tree.path().as_os_str()),
+        ],
         std::time::Duration::from_secs(180),
     );
     assert!(
