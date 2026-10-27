@@ -15869,8 +15869,32 @@ git cat-file -e 'HEAD^{tree}'
                 crate::engine::topology::select::Ceiling::unlimited(),
             )
             .expect("the run resumes under the linked registry");
-        let host: std::sync::Arc<dyn crate::runner::Runner> =
-            std::sync::Arc::new(crate::runner::host::HostRunner::new());
+        let common = std::fs::canonicalize(root.join(&below).join(".git"))
+            .expect("the run's common directory");
+        let relative = std::env::var_os("GIT_COMMON_DIR")
+            .is_some_and(|value| std::path::Path::new(&value).is_relative());
+        let runner = if relative {
+            let include = root.join("recorded-objects.gitconfig");
+            crate::workspace_manager::fixture::write_file(
+                &include,
+                crate::runner::host::RECORDED_OBJECTS_INCLUDE,
+            );
+            crate::runner::host::HostRunner::new().with_environment(
+                crate::runner::host::HostEnvironment::from_process().reading(
+                    crate::runner::host::ObjectGraph::RecordedIn(
+                        crate::runner::host::ManagedRepository::new(
+                            &common,
+                            &include,
+                            crate::runner::host::GitdirRule::native(),
+                        )
+                        .expect("the run's repository, for the host runner to hold"),
+                    ),
+                ),
+            )
+        } else {
+            crate::runner::host::HostRunner::new()
+        };
+        let host: std::sync::Arc<dyn crate::runner::Runner> = std::sync::Arc::new(runner);
         let pipelines = resumed.env.pipelines_over(std::sync::Arc::clone(&host));
         let mut hooks = resumed.env.hooks();
         let progress = resumed
@@ -15888,15 +15912,11 @@ git cat-file -e 'HEAD^{tree}'
             "the first attempt's worker left its slot as it was, so its failure was assessed"
         );
         let canonical_root = std::fs::canonicalize(&root).expect("the canonical scratch root");
-        let common = std::fs::canonicalize(root.join(&below).join(".git"))
-            .expect("the run's common directory");
         let depth = below.components().count();
         let named = common
             .strip_prefix(&canonical_root)
             .expect("the common directory is below the root")
             .to_path_buf();
-        let relative = std::env::var_os("GIT_COMMON_DIR")
-            .is_some_and(|value| std::path::Path::new(&value).is_relative());
         let log = String::from_utf8(std::fs::read(root.join("roles.log")).expect("the roles' log"))
             .expect("a UTF-8 log");
         let mut seen: BTreeMap<&str, usize> = BTreeMap::new();

@@ -1467,8 +1467,13 @@ T-ENV-TOPO's C5 row.
 ## `mod tests` › `fn hosted_linked_registry_child() {`
 
 T-ENV-TOPO's child. It adopts the fixture (`Fixture::adopt_based`), resumes as `inc-2`, and drives the
-run with `run_concurrently` over `HostRunner::new()` for both the coordinator's seams and the
-pipelines'. The run must complete. Its steps reach each placement:
+run with `run_concurrently` over one host runner for both the coordinator's seams and the
+pipelines'. Under C4's absolute value that runner is `HostRunner::new()`. Under C5's relative value
+it is a host runner that holds the run's repository (`ObjectGraph::RecordedIn` over
+`ManagedRepository::new`, its include written at `<root>/recorded-objects.gitconfig`): under option
+(C) a role in a work tree the engine made is given the common directory its runner holds in place
+of an inherited relative value, and a runner that holds none refuses that role before it starts.
+The run must complete. Its steps reach each placement:
 
 - **Placement 3.** The first attempt's empty diff is a failure that placement 3 judges, so completion
   shows that placement 3 accepted it.
