@@ -267,3 +267,33 @@ processes cannot collide and there is no state to hand over.
 carries its backtrace, and a failure report that buries the one line
 that names the cause — `panic in a destructor during cleanup` — under
 fifty frames of it is a report nobody reads.
+
+## `const RELATIVE_NAME: &str = "UPSTROKE_TEST_R5_PRE_LOCK_NAME";`
+
+The variable that tells [`relative_name_pre_lock_child`] which of the seven
+repository-wide names its environment carries relative, so it can check that the
+refusal names that one. A child started without it returns at once.
+
+## `fn each_relative_repository_wide_name_refuses_the_pre_lock_checks_before_any_inspection() {`
+
+R-C-RELSTORE's fresh face, B-2's fresh half, and RS-1's fresh row: red at the
+bound master, where nothing refuses, and green here. For each of the seven
+names R-C-RELSTORE reads, an isolated child inherits it as `../relative` and
+runs the pre-lock checks with a container selection whose runtime would answer
+every inspection. The refusal is the first statement of `check`, so the child
+finds it before the private root is canonicalized, before the runtime is asked
+anything and before any id is drawn.
+
+The name reaches the child through its environment and nowhere else: this
+process's own environment is never set, because every test in it reads the same
+one, and a child is the only process whose inherited environment a test may
+choose. `run_test_isolated` is Unix only, so the Windows forms of the rule are
+executed by `src/workspace_manager/tests.rs`'s unit tests on the Windows legs.
+
+## `fn relative_name_pre_lock_child() {`
+
+The child of [`each_relative_repository_wide_name_refuses_the_pre_lock_checks_before_any_inspection`].
+It passes only when the pre-lock checks refuse, naming the variable and saying
+to export it as an absolute path, the runtime was asked nothing, and nothing
+was made under the private root, which is B-2's evidence that no runner
+inspection or probe ran after the refusal point.

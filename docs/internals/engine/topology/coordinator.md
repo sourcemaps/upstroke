@@ -2639,3 +2639,79 @@ helper is called, and the stop still holds after it: a dispatch begun next is re
 emitter and nothing is appended. The refusal keeps #329's words, "nothing further is appended in this
 process", then names the one append made past the stop, the record of the review passes a
 verification had charged, and then the stop.
+
+## `mod tests` › `fn a_clean_run_resumed_under_a_linked_registry_is_refused_until_the_link_is_gone() {`
+
+R-C-REGISTRY part 1 on the resume path, and B-1 and B-2 for it: red at the
+bound master, where the resume goes ahead, and green here. A schema-4 run is
+created clean, its `worktrees` registry is then made a link into another
+directory (a junction on Windows), and the next coordinator, which inherits no
+`GIT_COMMON_DIR`, resumes it through `try_resume_over`, whose first call is
+`WorkspaceManager::derive`. The resume refuses, naming the entry and its
+target; its log is byte for byte as it was, the container trace it was handed
+records no inspection or probe, and no slot, intent or registration is made in
+the execution root or in the linked directory. Once the link is removed the same
+environment resumes and the run completes.
+
+The test asserts first that this process inherits no `GIT_COMMON_DIR`: with
+one inherited the layout is part 2's, accepted by name, and the refusal would
+rightly not fire.
+
+## `mod tests` › `const RESUME_ROOT: &str = "UPSTROKE_TEST_R5_RESUME_ROOT";`
+
+The scratch root of the run [`relative_name_resume_child`] resumes. A child
+started without it returns at once.
+
+## `mod tests` › `fn a_clean_run_resumed_under_a_relative_object_directory_is_refused_and_then_resumes() {`
+
+R-C-RELSTORE on the resume path, and B-1 for it: red at the bound master, where
+the child's resume is not refused, and green here. A schema-4 run is created
+clean; the next coordinator, an isolated child, inherits
+`GIT_OBJECT_DIRECTORY=../objects` and is refused at the call the resume starts
+with, so the run's log is unchanged and no slot or intent is made. This process,
+whose environment carries no such value, then resumes the run, and it
+completes.
+
+The child calls `WorkspaceManager::derive` with the arguments
+`try_resume_over` gives it, rather than building the scaffold's environment
+over the run: that environment's own fixture derives a manager when it adopts a
+root, and under the inherited value it would be refused there, before the
+resume it exists to drive. The in-process test above exercises
+`try_resume_over`'s own refusal.
+
+## `mod tests` › `fn relative_name_resume_child() {`
+
+The child of
+[`a_clean_run_resumed_under_a_relative_object_directory_is_refused_and_then_resumes`]:
+it passes only when the resume's first call refuses, naming the variable and
+saying to export it as an absolute path.
+
+## `mod tests` › `const LINKED_ROOT: &str = "UPSTROKE_TEST_R5_LINKED_ROOT";`
+
+The scratch root of the run [`linked_registry_resume_child`] resumes. A child
+started without it returns at once.
+
+## `mod tests` › `fn a_linked_registry_under_an_inherited_absolute_common_dir_still_completes() {`
+
+RG-2, C4's layout as a topology analogue: a `worktrees` registry linked into
+another repository while the coordinator inherits an absolute `GIT_COMMON_DIR`
+naming the run's common directory. That is part 2 of R-C-REGISTRY, accepted by
+name, so it is not refused, and a schema-4 run created clean and resumed by an
+isolated child under that environment completes, at the bound master and here.
+
+C5's layout has no analogue here. It needs a relative `GIT_COMMON_DIR` naming
+the run's common directory from the base and, at equal depth, from a slot,
+which needs a base as deep below the scratch root as the slots are, and the
+scaffold's fixture fixes the base at `<root>/repo`; a deeper base would be a new
+harness. With a relative value that names the common directory from the base
+alone, Git before 2.55 fails the slot add closed, which is R-C-RELSTORE's second
+accepted face rather than part 2. C5 stays covered at the manager by
+`src/workspace_manager/tests.rs`'s
+`the_managers_slot_add_and_reads_shed_the_work_tree_context_and_its_base_keeps_it`.
+
+## `mod tests` › `fn linked_registry_resume_child() {`
+
+The child of
+[`a_linked_registry_under_an_inherited_absolute_common_dir_still_completes`]:
+it adopts the run and resumes and drives it under the environment it inherited,
+and passes only when the run completes.

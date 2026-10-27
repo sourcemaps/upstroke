@@ -21342,3 +21342,791 @@ fn relative_common_dir_slot_helper() {
         "the common directory beside the slot was written"
     );
 }
+
+// -----------------------------------------------------------------------
+// R5: the two schema-4 start refusals (R-C-RELSTORE; R-C-REGISTRY part 1)
+// -----------------------------------------------------------------------
+
+/// What [`refuse_relative_repository_wide_values`] is given when the
+/// coordinator inherits `name` alone of [`REPOSITORY_WIDE_PATHS`], holding
+/// `value`.
+fn only(name: &str, value: &OsStr) -> [(&'static str, Option<OsString>); 6] {
+    REPOSITORY_WIDE_PATHS.map(|each| (each, (each == name).then(|| value.to_os_string())))
+}
+
+/// `rest` below a root the platform's rule calls absolute, spelt with no
+/// backslash so that C-style quoting carries it unchanged: `/rest` on Unix,
+/// `C:/rest` on Windows.
+fn rooted(rest: &str) -> String {
+    if cfg!(windows) {
+        format!("C:/{rest}")
+    } else {
+        format!("/{rest}")
+    }
+}
+
+/// The names in `dir`, sorted; an absent `dir` has none.
+#[cfg(unix)]
+fn entry_names(dir: &Path) -> Vec<String> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+/// R-C-RELSTORE's rule over each scalar name, at the check itself. This is
+/// this head's function, so it is no red/green row: the rows that run red at
+/// the bound master are the `derive` and pre-lock witnesses. A relative value
+/// and an empty one refuse, naming the variable and saying to export it as an
+/// absolute path; an absolute one does not; nothing inherited refuses nothing.
+#[test]
+fn a_relative_or_empty_repository_wide_path_refuses_naming_itself_and_an_absolute_one_does_not() {
+    let absolute = std::env::temp_dir().join("r5-absolute");
+    assert!(
+        absolute.is_absolute(),
+        "the fixture's absolute value: {}",
+        absolute.display()
+    );
+    for name in REPOSITORY_WIDE_PATHS {
+        for relative in ["../objects", "objects", "./config", ""] {
+            let refusal =
+                refuse_relative_repository_wide_values(only(name, OsStr::new(relative)), None)
+                    .expect_err("a value that is not an absolute path refuses");
+            assert_eq!(
+                refusal,
+                Refusal::RelativeRepositoryWideName {
+                    name,
+                    why: NotAbsolute::Value(OsString::from(relative)),
+                },
+                "`{name}={relative}`"
+            );
+            let message = refusal.to_string();
+            assert!(
+                message.contains(&format!("the inherited `{name}`"))
+                    && message.contains(&format!("export `{name}` as an absolute path")),
+                "the refusal names the variable and says to export it as an absolute path: \
+                 {message}"
+            );
+        }
+        assert_eq!(
+            refuse_relative_repository_wide_values(only(name, absolute.as_os_str()), None),
+            Ok(()),
+            "`{name}` holding an absolute path is not refused"
+        );
+    }
+    assert_eq!(
+        refuse_relative_repository_wide_values(
+            REPOSITORY_WIDE_PATHS.map(|name| (name, None)),
+            None,
+        ),
+        Ok(()),
+        "nothing inherited, nothing refused"
+    );
+}
+
+/// The check reads the seven names the owner adopted, and [`COMMON_DIR`] is
+/// not among them: option (C) gives a relative `GIT_COMMON_DIR` its meaning at
+/// the started checkout, so it is not refused.
+#[test]
+fn the_relative_name_check_reads_the_seven_adopted_names_and_not_the_common_directory() {
+    let mut read = REPOSITORY_WIDE_PATHS.to_vec();
+    read.push(ALTERNATE_OBJECT_DIRECTORIES);
+    assert_eq!(
+        read,
+        [
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_SHALLOW_FILE",
+            "GIT_GRAFT_FILE",
+            "GIT_CONFIG",
+            "GIT_CONFIG_GLOBAL",
+            "GIT_CONFIG_SYSTEM",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        ],
+        "R-C-RELSTORE's seven names, as adopted"
+    );
+    assert!(
+        !read.contains(&COMMON_DIR),
+        "`GIT_COMMON_DIR` is not refused"
+    );
+}
+
+/// How a case of [`the_alternates_list_is_split_and_unquoted_exactly_as_git_does`]
+/// ends.
+#[derive(Debug)]
+enum Classified {
+    /// No entry refuses the list.
+    Accepted,
+    /// This decoded entry, which is not an absolute path, refuses it.
+    Relative(String),
+    /// An entry the check cannot classify exactly refuses it.
+    Unclassified,
+}
+
+/// R-C-RELSTORE's list rule at the check itself (this head's function, as
+/// above), against Git's own parser as `alternate_entries` cites it: the
+/// platform's separator, comments, empty entries, C-style quoting across a
+/// separator, the byte Git steps past after a closing quote, broken quoting
+/// read as written, the escapes, and a decoded NUL that cannot be classified
+/// exactly.
+#[test]
+fn the_alternates_list_is_split_and_unquoted_exactly_as_git_does() {
+    let sep = char::from(ALTERNATES_SEPARATOR);
+    let other = if sep == ':' { ';' } else { ':' };
+    let (a, b) = (rooted("a"), rooted("b"));
+    let spanning = rooted(&format!("x{sep}y"));
+    let relative = |entry: &str| Classified::Relative(entry.to_owned());
+    for (list, entries, expected) in [
+        (String::new(), Vec::new(), Classified::Accepted),
+        (a.clone(), vec![a.clone()], Classified::Accepted),
+        (
+            format!("{a}{sep}{b}"),
+            vec![a.clone(), b.clone()],
+            Classified::Accepted,
+        ),
+        (
+            "../pool".to_owned(),
+            vec!["../pool".to_owned()],
+            relative("../pool"),
+        ),
+        (
+            format!("{a}{sep}../pool"),
+            vec![a.clone(), "../pool".to_owned()],
+            relative("../pool"),
+        ),
+        (
+            format!("\"{spanning}\""),
+            vec![spanning.clone()],
+            Classified::Accepted,
+        ),
+        (
+            spanning.clone(),
+            vec![rooted("x"), "y".to_owned()],
+            relative("y"),
+        ),
+        (
+            format!("{a}{other}y"),
+            vec![format!("{a}{other}y")],
+            Classified::Accepted,
+        ),
+        (
+            format!("#../not-a-path{sep}{a}"),
+            vec![a.clone()],
+            Classified::Accepted,
+        ),
+        (
+            format!("{sep}{sep}{a}{sep}{sep}"),
+            vec![a.clone()],
+            Classified::Accepted,
+        ),
+        (
+            format!("\"\"{sep}{a}"),
+            vec![a.clone()],
+            Classified::Accepted,
+        ),
+        (
+            format!("\"{a}\"/b"),
+            vec![a.clone(), "b".to_owned()],
+            relative("b"),
+        ),
+        (
+            format!("\"{a}\"x{sep}{b}"),
+            vec![a.clone(), b.clone()],
+            Classified::Accepted,
+        ),
+        (
+            format!("\"{a}{sep}{b}"),
+            vec![format!("\"{a}"), b.clone()],
+            relative(&format!("\"{a}")),
+        ),
+        (
+            format!("\"\\q{a}\""),
+            vec![format!("\"\\q{a}\"")],
+            relative(&format!("\"\\q{a}\"")),
+        ),
+        (
+            format!("\"\\400{a}\""),
+            vec![format!("\"\\400{a}\"")],
+            relative(&format!("\"\\400{a}\"")),
+        ),
+        (
+            format!("\"{a}\\t\\\\\\\"\""),
+            vec![format!("{a}\t\\\"")],
+            Classified::Accepted,
+        ),
+        (
+            format!("\"{a}\\101\""),
+            vec![format!("{a}A")],
+            Classified::Accepted,
+        ),
+        (
+            format!("\"{a}\\000b\""),
+            vec![format!("{a}\0b")],
+            Classified::Unclassified,
+        ),
+    ] {
+        let wanted: Vec<Vec<u8>> = entries
+            .iter()
+            .map(|entry| entry.as_bytes().to_vec())
+            .collect();
+        assert_eq!(
+            alternate_entries(list.as_bytes(), ALTERNATES_SEPARATOR),
+            wanted,
+            "`{list}` decodes into the entries Git takes"
+        );
+        let outcome = not_absolute_alternates(OsStr::new(&list));
+        match expected {
+            Classified::Accepted => assert_eq!(outcome, None, "`{list}`"),
+            Classified::Relative(entry) => assert_eq!(
+                outcome,
+                Some(NotAbsolute::Entry(OsString::from(entry))),
+                "`{list}`"
+            ),
+            Classified::Unclassified => assert!(
+                matches!(outcome, Some(NotAbsolute::Unclassified(_))),
+                "`{list}`: {outcome:?}"
+            ),
+        }
+    }
+    let refusal = refuse_relative_repository_wide_values(
+        REPOSITORY_WIDE_PATHS.map(|name| (name, None)),
+        Some(OsStr::new("../pool")),
+    )
+    .expect_err("a relative entry refuses the list");
+    let message = refusal.to_string();
+    let list = ALTERNATE_OBJECT_DIRECTORIES;
+    assert!(
+        message.contains(&format!("the inherited `{list}` holds the entry `../pool`"))
+            && message.contains(&format!("export `{list}` as an absolute path")),
+        "the refusal names the variable and the entry: {message}"
+    );
+}
+
+/// On Unix an entry is the bytes Git decodes, whatever they are: `\057` is the
+/// `/` that makes an entry absolute, and an octal escape that decodes to a
+/// byte no UTF-8 spells reaches the platform's rule unchanged.
+#[cfg(unix)]
+#[test]
+fn on_unix_an_alternates_entry_is_classified_over_the_exact_bytes_git_decodes() {
+    use std::os::unix::ffi::OsStringExt as _;
+
+    assert_eq!(
+        not_absolute_alternates(OsStr::new("\"\\057a\"")),
+        None,
+        "`\\057` decodes to `/`"
+    );
+    assert_eq!(
+        not_absolute_alternates(OsStr::new("\"\\377x\"")),
+        Some(NotAbsolute::Entry(OsString::from_vec(vec![0xff, b'x']))),
+        "an entry that is not UTF-8 is still the bytes Git resolves"
+    );
+}
+
+/// B-3, the Windows forms, executed on the Windows legs: a drive-relative
+/// `C:x`, a bare `C:` and a root-relative `\x` or `/x` refuse, as a value and
+/// as an entry of the `;`-separated list, while `C:\x`, `C:/x` and a UNC path
+/// do not. Inside C-style quoting a lone backslash is an escape, so `"C:\a"`
+/// decodes to `C:` and a BEL, which is not absolute, and `"C:\\a"` to `C:\a`;
+/// an entry that is not Unicode once unquoted cannot be classified exactly.
+#[cfg(windows)]
+#[test]
+fn on_windows_a_drive_or_root_relative_value_refuses_and_a_drive_or_unc_path_does_not() {
+    for relative in ["C:x", "C:", "\\x", "/x"] {
+        assert_eq!(
+            refuse_relative_repository_wide_values(
+                only("GIT_OBJECT_DIRECTORY", OsStr::new(relative)),
+                None,
+            ),
+            Err(Refusal::RelativeRepositoryWideName {
+                name: "GIT_OBJECT_DIRECTORY",
+                why: NotAbsolute::Value(OsString::from(relative)),
+            }),
+            "`{relative}` as a value"
+        );
+        assert_eq!(
+            not_absolute_alternates(OsStr::new(&format!("C:\\a;{relative}"))),
+            Some(NotAbsolute::Entry(OsString::from(relative))),
+            "`{relative}` as an entry"
+        );
+    }
+    for absolute in ["C:\\x", "C:/x", "\\\\server\\share\\x"] {
+        assert_eq!(
+            refuse_relative_repository_wide_values(
+                only("GIT_OBJECT_DIRECTORY", OsStr::new(absolute)),
+                None,
+            ),
+            Ok(()),
+            "`{absolute}` as a value"
+        );
+        assert_eq!(
+            not_absolute_alternates(OsStr::new(&format!("C:\\a;{absolute}"))),
+            None,
+            "`{absolute}` as an entry"
+        );
+    }
+    assert_eq!(not_absolute_alternates(OsStr::new("\"C:\\\\a\"")), None);
+    assert_eq!(
+        not_absolute_alternates(OsStr::new("\"C:\\a\"")),
+        Some(NotAbsolute::Entry(OsString::from("C:\u{7}")))
+    );
+    assert!(matches!(
+        not_absolute_alternates(OsStr::new("\"\\377x\"")),
+        Some(NotAbsolute::Unclassified(_))
+    ));
+}
+
+/// Whether `error` names `entry` and the `target` it resolves to.
+fn assert_names_entry_and_target(error: &UpstrokeError, entry: &Path, target: &Path) {
+    let message = refusal_of(error);
+    assert!(
+        message.contains(&entry.display().to_string())
+            && message.contains(&format!("resolves to {}", target.display())),
+        "the refusal names the entry and its target: {message}"
+    );
+}
+
+/// R-C-REGISTRY part 1's rule at the check itself (this head's function; the
+/// red/green rows are the `derive` witnesses below), over real directories,
+/// each layout under a common directory of its own. A link is a symbolic link
+/// on Unix and a junction on Windows ([`plant_directory_link`]), so the
+/// Windows legs execute the junction rows.
+#[test]
+fn a_worktrees_registry_refuses_exactly_when_its_canonical_parent_is_not_the_common_directory() {
+    let tree = scratch("linked-registry-check");
+    let root = strip_verbatim(fs::canonicalize(tree.path()).expect("the canonical scratch root"));
+    let other = root.join("other").join("worktrees");
+    create_dir(&other);
+    let layout = |name: &str| {
+        let common = root.join(name);
+        create_dir(&common);
+        let entry = common.join("worktrees");
+        (common, entry)
+    };
+
+    let (common, _) = layout("absent");
+    assert!(
+        refuse_linked_registry(&common, false).is_ok(),
+        "an absent registry, which Git makes a directory"
+    );
+
+    let (common, entry) = layout("plain");
+    create_dir(&entry);
+    assert!(
+        refuse_linked_registry(&common, false).is_ok(),
+        "a plain directory"
+    );
+
+    let (common, entry) = layout("beside");
+    create_dir(&common.join("registry"));
+    plant_directory_link(&common.join("registry"), &entry);
+    assert!(
+        refuse_linked_registry(&common, false).is_ok(),
+        "a link to a direct child of the common directory, whose record still names it"
+    );
+
+    let (common, entry) = layout("linked");
+    plant_directory_link(&other, &entry);
+    let refused = refuse_linked_registry(&common, false)
+        .expect_err("a link into another directory refuses");
+    assert_names_entry_and_target(&refused, &entry, &other);
+    assert!(
+        refuse_linked_registry(&common, true).is_ok(),
+        "with a `GIT_COMMON_DIR` inherited it is part 2's layout, accepted and not refused"
+    );
+
+    let (common, entry) = layout("chained");
+    let hop = root.join("hop");
+    plant_directory_link(&other, &hop);
+    plant_directory_link(&hop, &entry);
+    let refused = refuse_linked_registry(&common, false).expect_err("a chain of links refuses");
+    assert_names_entry_and_target(&refused, &entry, &other);
+
+    let (common, entry) = layout("nested");
+    let nested = common.join("nested").join("worktrees");
+    create_dir(&nested);
+    plant_directory_link(&nested, &entry);
+    let refused = refuse_linked_registry(&common, false)
+        .expect_err("a link inside the common directory whose parent is elsewhere refuses");
+    assert_names_entry_and_target(&refused, &entry, &nested);
+
+    let (common, entry) = layout("dangling");
+    let gone = root.join("gone");
+    create_dir(&gone);
+    plant_directory_link(&gone, &entry);
+    fs::remove_dir(&gone).expect("remove the link's target");
+    let error = refuse_linked_registry(&common, false)
+        .expect_err("a link whose target is gone is not passed as unlinked");
+    assert!(matches!(error, UpstrokeError::Io { .. }), "{error}");
+}
+
+/// R-C-REGISTRY part 1 at `derive`, red at the bound master and green here: a
+/// `worktrees` registry linked into another repository, linked through a chain
+/// of links, or linked inside the common directory to a parent elsewhere
+/// refuses the manager before its registry access, naming the entry and its
+/// target, while this process inherits no `GIT_COMMON_DIR`. Each link is a
+/// junction on Windows, so B-3's junction row executes there.
+#[test]
+fn derive_refuses_a_linked_worktrees_registry_while_no_common_dir_is_inherited() {
+    assert!(
+        std::env::var_os(COMMON_DIR).is_none(),
+        "the condition under test is that no `GIT_COMMON_DIR` is inherited, and this process \
+         inherits one"
+    );
+    for layout in [
+        "into another repository",
+        "through a chain of links",
+        "inside the common directory",
+    ] {
+        let fixture = Fixture::new("linked-registry-derive");
+        let common = strip_verbatim(
+            fs::canonicalize(fixture.base.join(".git")).expect("the run's common directory"),
+        );
+        let entry = common.join("worktrees");
+        let other = fixture.root.join("other");
+        create_dir(&other);
+        git(&other, &["init", "-q", "-b", "main"]);
+        let registry = other.join(".git").join("worktrees");
+        create_dir(&registry);
+        let target = match layout {
+            "into another repository" => {
+                plant_directory_link(&registry, &entry);
+                registry
+            }
+            "through a chain of links" => {
+                let hop = fixture.root.join("hop");
+                plant_directory_link(&registry, &hop);
+                plant_directory_link(&hop, &entry);
+                registry
+            }
+            _ => {
+                let nested = common.join("nested").join("worktrees");
+                create_dir(&nested);
+                plant_directory_link(&nested, &entry);
+                nested
+            }
+        };
+        let target =
+            strip_verbatim(fs::canonicalize(&target).expect("the link's canonical target"));
+        let error = WorkspaceManager::derive(
+            &fixture.base,
+            &fixture.private,
+            super::fixture::RUN_ID,
+            "inc-linked",
+        )
+        .expect_err("a linked registry refuses while no `GIT_COMMON_DIR` is inherited");
+        assert_names_entry_and_target(&error, &entry, &target);
+        assert!(
+            !fixture.manager.execution_root().exists(),
+            "{layout}: the refusal made nothing"
+        );
+    }
+}
+
+/// A slot run under whatever this process inherited, through the manager's own
+/// API: the slot add, a file the worker writes, the capture, and the commit at
+/// the base. Its errors are returned rather than raised: the witnesses that run
+/// it measure what it wrote, and at the bound master the commit at the base is
+/// where such a run fails closed.
+#[cfg(unix)]
+fn slot_run_writing_a_file(
+    manager: &WorkspaceManager,
+    base: &Path,
+    key: &str,
+) -> Result<(), UpstrokeError> {
+    let head = git(base, &["rev-parse", "HEAD"]);
+    let slot = Slot::Task {
+        key: key.to_owned(),
+        generation: 1,
+    };
+    manager.create_execution_root(&mut NoHooks)?;
+    manager.write_intent(&mut NoHooks, &slot)?;
+    let path = manager.add_worktree(&mut NoHooks, &slot, &head)?;
+    write_file(&path.join("worker-new.txt"), b"a file the worker made\n");
+    manager.candidate_stage(&mut NoHooks, &slot, &[])?;
+    let captured = manager.candidate_write_tree(&mut NoHooks, &slot)?;
+    manager.candidate_commit_tree(&mut NoHooks, &captured, &head, "candidate")?;
+    Ok(())
+}
+
+/// RG-1 and RG-4, the "symlinked registry, nothing inherited" slot run: red at
+/// the bound master, where the slot run's capture writes its objects into the
+/// linked repository, and green here, where `derive` refuses before any slot
+/// and the linked repository's objects and refs stay as they were. Dropping the
+/// check from `derive`, the mutation, makes it red again.
+#[cfg(unix)]
+#[test]
+fn a_registry_linked_into_another_repository_is_refused_before_a_slot_run_writes_there() {
+    assert!(
+        std::env::var_os(COMMON_DIR).is_none(),
+        "the condition under test is that no `GIT_COMMON_DIR` is inherited, and this process \
+         inherits one"
+    );
+    let tree = scratch("linked-registry-slot");
+    let root = tree.path();
+    let base = root.join("base");
+    context_repository(&base, &[("README.md", "base\n"), ("shared.txt", "seed\n")]);
+    let other = root.join("other");
+    context_copy_tree(&base, &other);
+    fs::create_dir(other.join(".git/worktrees")).expect("the other repository's registry");
+    std::os::unix::fs::symlink(other.join(".git/worktrees"), base.join(".git/worktrees"))
+        .expect("the run's registry, a link into the other repository");
+    fs::create_dir(root.join("private")).expect("the private root");
+    let watched = [other.join(".git/objects"), other.join(".git/refs")];
+    let before: Vec<_> = watched
+        .iter()
+        .map(|path| context_tree_bytes(path))
+        .collect();
+    let derived = WorkspaceManager::derive(
+        &base,
+        &root.join("private"),
+        super::fixture::RUN_ID,
+        "inc-linked",
+    );
+    if let Ok(manager) = &derived {
+        let _ = slot_run_writing_a_file(manager, &base, "linked");
+    }
+    for (path, earlier) in watched.iter().zip(&before) {
+        assert!(
+            context_tree_bytes(path) == *earlier,
+            "{} was written: the slot run reached the linked repository",
+            path.display()
+        );
+    }
+    let error = derived.expect_err("the linked registry refuses before any slot");
+    let common = fs::canonicalize(base.join(".git")).expect("the run's common directory");
+    let target = fs::canonicalize(other.join(".git/worktrees")).expect("the link's target");
+    assert_names_entry_and_target(&error, &common.join("worktrees"), &target);
+}
+
+/// What a relative-name child prints, before the error, when `derive` returns
+/// one.
+#[cfg(unix)]
+const DERIVE_ERROR: &str = "UPSTROKE_R5_DERIVE_ERROR: ";
+
+/// What a relative-name child prints when `derive` returns a manager.
+#[cfg(unix)]
+const DERIVE_DERIVED: &str = "UPSTROKE_R5_DERIVE_DERIVED";
+
+/// R-C-RELSTORE at `derive`, the resume's first call, each case in an isolated
+/// child whose environment alone carries the name: red at the bound master for
+/// every case that refuses, and green at both for every case that does not.
+/// Each of the six scalar names refuses relative and empty, and is accepted
+/// absolute; the alternates list refuses a relative entry, the bytes a quoted
+/// absolute entry leaves after its closing quote, and broken quoting, and
+/// accepts an empty list, a quoted absolute entry and a comment. Every refusal
+/// names the variable and says to export it as an absolute path, and none
+/// leaves an intent or a slot in the execution root, which was made clean.
+#[cfg(unix)]
+#[test]
+fn derive_refuses_each_relative_repository_wide_name_before_any_slot_and_accepts_absolute_ones() {
+    let tree = scratch("relative-names-derive");
+    let root = tree.path();
+    let managed = root.join("managed");
+    context_repository(&managed, &[("README.md", "readme\n")]);
+    fs::create_dir(root.join("private")).expect("the private root");
+    let manager = WorkspaceManager::derive(
+        &managed,
+        &root.join("private"),
+        super::fixture::RUN_ID,
+        "inc-clean",
+    )
+    .expect("derive in this process's environment, which sets none of the names");
+    manager
+        .create_execution_root(&mut NoHooks)
+        .expect("the execution root");
+    let store = fs::canonicalize(managed.join(".git/objects")).expect("the run's store");
+    let listed = store.display().to_string();
+    let absent = root.join("absent");
+    let neutral = super::fixture::neutral_git_config().to_path_buf();
+    let mut cases: Vec<(&str, OsString, bool)> = Vec::new();
+    for name in REPOSITORY_WIDE_PATHS {
+        cases.push((name, OsString::from("../elsewhere"), true));
+        cases.push((name, OsString::new(), true));
+    }
+    cases.extend([
+        ("GIT_OBJECT_DIRECTORY", store.into_os_string(), false),
+        (
+            "GIT_SHALLOW_FILE",
+            absent.join("shallow").into_os_string(),
+            false,
+        ),
+        (
+            "GIT_GRAFT_FILE",
+            absent.join("grafts").into_os_string(),
+            false,
+        ),
+        ("GIT_CONFIG", absent.join("config").into_os_string(), false),
+        ("GIT_CONFIG_GLOBAL", neutral.clone().into_os_string(), false),
+        ("GIT_CONFIG_SYSTEM", neutral.into_os_string(), false),
+        (ALTERNATE_OBJECT_DIRECTORIES, OsString::new(), false),
+        (
+            ALTERNATE_OBJECT_DIRECTORIES,
+            OsString::from(format!("\"{listed}\"")),
+            false,
+        ),
+        (
+            ALTERNATE_OBJECT_DIRECTORIES,
+            OsString::from(format!("#../not-a-path:{listed}")),
+            false,
+        ),
+        (
+            ALTERNATE_OBJECT_DIRECTORIES,
+            OsString::from("../pool"),
+            true,
+        ),
+        (
+            ALTERNATE_OBJECT_DIRECTORIES,
+            OsString::from(format!("{listed}:../pool")),
+            true,
+        ),
+        (
+            ALTERNATE_OBJECT_DIRECTORIES,
+            OsString::from(format!("\"{listed}\"/pool")),
+            true,
+        ),
+        (
+            ALTERNATE_OBJECT_DIRECTORIES,
+            OsString::from(format!("\"{listed}:{listed}")),
+            true,
+        ),
+    ]);
+    for (name, value, refused) in cases {
+        let label = format!("`{name}={}`", Path::new(&value).display());
+        let ended = crate::agent::proc::test_support::run_test_isolated(
+            "workspace_manager::tests::relative_name_derive_helper",
+            &[(name, value.as_os_str()), (CONTEXT_ROOT, root.as_os_str())],
+            std::time::Duration::from_secs(180),
+        );
+        assert!(
+            ended.status.is_some_and(|status| status.success())
+                && ended.stdout.contains("1 passed"),
+            "{label}: {ended}"
+        );
+        if refused {
+            assert!(
+                ended.stdout.contains(DERIVE_ERROR)
+                    && ended.stdout.contains(&format!("the inherited `{name}`"))
+                    && ended
+                        .stdout
+                        .contains(&format!("export `{name}` as an absolute path")),
+                "{label} refuses `derive`, naming the variable: {ended}"
+            );
+        } else {
+            assert!(
+                ended.stdout.contains(DERIVE_DERIVED),
+                "{label} is not refused: {ended}"
+            );
+        }
+        assert!(
+            entry_names(&manager.execution_root().join("intents")).is_empty()
+                && entry_names(&manager.execution_root().join("tasks")).is_empty(),
+            "{label}: no intent and no slot"
+        );
+    }
+}
+
+/// RS-6 and RS-7, the "REL objects, sibling" slot run: the coordinator inherits
+/// `GIT_OBJECT_DIRECTORY=../objects`, which at the base names the run's store,
+/// and a store copied beside the slot is where the same value lands from the
+/// slot. Red at the bound master, where the slot run's capture writes its
+/// objects into the store beside the slot; green here, where the resume's
+/// `derive` refuses, naming the variable and saying to export it as an
+/// absolute path, and no slot or intent is made and the store beside the slot
+/// stays as it was. Removing the check from `derive`, the mutation, makes it
+/// red again.
+#[cfg(unix)]
+#[test]
+fn a_relative_object_directory_is_refused_before_the_store_beside_the_slot_is_written() {
+    let tree = scratch("relative-object-directory");
+    let root = tree.path();
+    let managed = root.join("managed");
+    context_repository(
+        &managed,
+        &[("README.md", "readme\n"), ("shared.txt", "base\n")],
+    );
+    context_copy_tree(&managed.join(".git/objects"), &root.join("objects"));
+    fs::create_dir(root.join("private")).expect("the private root");
+    let manager = WorkspaceManager::derive(
+        &managed,
+        &root.join("private"),
+        super::fixture::RUN_ID,
+        "inc-clean",
+    )
+    .expect("derive in this process's environment, which sets none of the names");
+    manager
+        .create_execution_root(&mut NoHooks)
+        .expect("the execution root");
+    let tasks = manager.execution_root().join("tasks");
+    let beside = tasks.join("objects");
+    context_copy_tree(&root.join("objects"), &beside);
+    let before = context_tree_bytes(&beside);
+    let ended = crate::agent::proc::test_support::run_test_isolated(
+        "workspace_manager::tests::relative_name_derive_helper",
+        &[
+            ("GIT_OBJECT_DIRECTORY", OsStr::new("../objects")),
+            (CONTEXT_ROOT, root.as_os_str()),
+            (CONTEXT_SEQUENCE, OsStr::new("slot")),
+        ],
+        std::time::Duration::from_secs(180),
+    );
+    assert!(
+        ended.status.is_some_and(|status| status.success()) && ended.stdout.contains("1 passed"),
+        "{ended}"
+    );
+    assert!(
+        context_tree_bytes(&beside) == before,
+        "the store beside the slot was written: under the inherited relative object directory \
+         the slot run's objects landed there\n{ended}"
+    );
+    assert!(
+        ended.stdout.contains(DERIVE_ERROR)
+            && ended
+                .stdout
+                .contains("the inherited `GIT_OBJECT_DIRECTORY` is `../objects`")
+            && ended
+                .stdout
+                .contains("export `GIT_OBJECT_DIRECTORY` as an absolute path"),
+        "the resume's `derive` refuses, naming the variable: {ended}"
+    );
+    assert_eq!(
+        entry_names(&tasks),
+        ["objects"],
+        "no slot was made beside the store"
+    );
+    assert!(
+        entry_names(&manager.execution_root().join("intents")).is_empty(),
+        "no intent was written"
+    );
+}
+
+/// The child of the two relative-name witnesses above: `derive` over the
+/// managed checkout the parent made, under the names its environment
+/// inherited, and, when the parent asked for it and nothing refused, the slot
+/// run.
+#[cfg(unix)]
+#[test]
+#[ignore = "subprocess helper"]
+fn relative_name_derive_helper() {
+    let Some(root) = std::env::var_os(CONTEXT_ROOT).map(PathBuf::from) else {
+        return;
+    };
+    let base = root.join("managed");
+    match WorkspaceManager::derive(
+        &base,
+        &root.join("private"),
+        super::fixture::RUN_ID,
+        "inc-relative",
+    ) {
+        Err(error) => println!("{DERIVE_ERROR}{error}"),
+        Ok(manager) => {
+            println!("{DERIVE_DERIVED}");
+            if std::env::var_os(CONTEXT_SEQUENCE).is_some() {
+                let _ = slot_run_writing_a_file(&manager, &base, "relative");
+            }
+        }
+    }
+}

@@ -790,6 +790,46 @@ pub(crate) fn remove_dir(path: &Path) {
         .unwrap_or_else(|error| panic!("removing the directory {}: {error}", path.display()));
 }
 
+/// A directory link at `link` naming `target`, the hand-made layout R5's
+/// linked-registry witnesses plant where a run's `worktrees` registry would be:
+/// a symbolic link on Unix, and on Windows a junction (`mklink /J`), which needs
+/// no privilege where a Windows symbolic link does. A topology module's test
+/// can make neither.
+pub(crate) fn link_directory(target: &Path, link: &Path) {
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, link).unwrap_or_else(|error| {
+        panic!(
+            "linking {} to {}: {error}",
+            link.display(),
+            target.display()
+        )
+    });
+    #[cfg(windows)]
+    {
+        let made = Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .output()
+            .expect("run mklink");
+        assert!(
+            made.status.success(),
+            "the fixture must really create a junction: {}",
+            String::from_utf8_lossy(&made.stderr)
+        );
+    }
+}
+
+/// Remove the directory link [`link_directory`] made at `link`, and nothing it
+/// names: a junction is removed as a directory, a symbolic link as a file.
+pub(crate) fn unlink_directory(link: &Path) {
+    #[cfg(windows)]
+    let removed = fs::remove_dir(link);
+    #[cfg(not(windows))]
+    let removed = fs::remove_file(link);
+    removed.unwrap_or_else(|error| panic!("unlinking {}: {error}", link.display()));
+}
+
 /// Run this test binary again, `--exact --ignored`, with `env` set, and
 /// return its exit status.
 ///

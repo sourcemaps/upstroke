@@ -592,3 +592,67 @@ fn a_failed_reclamation_during_an_unwind_does_not_abort_the_process() {
         output.stderr
     );
 }
+
+#[cfg(unix)]
+const RELATIVE_NAME: &str = "UPSTROKE_TEST_R5_PRE_LOCK_NAME";
+
+#[cfg(unix)]
+#[test]
+fn each_relative_repository_wide_name_refuses_the_pre_lock_checks_before_any_inspection() {
+    let mut names: Vec<&str> = crate::workspace_manager::REPOSITORY_WIDE_PATHS.to_vec();
+    names.push(crate::workspace_manager::ALTERNATE_OBJECT_DIRECTORIES);
+    for name in names {
+        let ended = crate::agent::proc::test_support::run_test_isolated(
+            "engine::topology::prelock::tests::relative_name_pre_lock_child",
+            &[
+                (name, std::ffi::OsStr::new("../relative")),
+                (RELATIVE_NAME, std::ffi::OsStr::new(name)),
+            ],
+            std::time::Duration::from_secs(180),
+        );
+        assert!(
+            ended.status.is_some_and(|status| status.success())
+                && ended.stdout.contains("1 passed"),
+            "`{name}`: {ended}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "subprocess helper"]
+fn relative_name_pre_lock_child() {
+    let Some(name) = std::env::var_os(RELATIVE_NAME) else {
+        return;
+    };
+    let name = name.to_string_lossy().into_owned();
+    let root = Scratch::new("relative-name");
+    let before = names_under(root.path());
+    let selection = container_selection(IMAGE_REFERENCE, &[("codex", "upstroke-codex")]);
+    let runtime = Inventory::reachable()
+        .with_image(IMAGE_REFERENCE, IMAGE_ID, Some("sha256:manifest"))
+        .with_volume("upstroke-codex");
+    let refusal = check(&PreLock {
+        selection: &selection,
+        runtime: Some(&runtime),
+        private_root: root.path(),
+        ids: &Ids,
+    })
+    .expect_err("a relative repository-wide name refuses the pre-lock checks");
+    let message = refusal.to_string();
+    assert!(
+        message.contains(&format!("the inherited `{name}`"))
+            && message.contains(&format!("export `{name}` as an absolute path")),
+        "the refusal names the variable and says to export it as an absolute path: {message}"
+    );
+    assert!(
+        runtime.asked().is_empty(),
+        "nothing after the refusal ran: the runtime was asked {:?}",
+        runtime.asked()
+    );
+    assert_eq!(
+        names_under(root.path()),
+        before,
+        "the refused pre-lock checks made nothing"
+    );
+}
