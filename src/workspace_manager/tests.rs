@@ -21365,20 +21365,6 @@ fn rooted(rest: &str) -> String {
     }
 }
 
-/// The names in `dir`, sorted; an absent `dir` has none.
-#[cfg(unix)]
-fn entry_names(dir: &Path) -> Vec<String> {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    let mut names: Vec<String> = entries
-        .flatten()
-        .map(|entry| entry.file_name().to_string_lossy().into_owned())
-        .collect();
-    names.sort();
-    names
-}
-
 /// R-C-RELSTORE's rule over each scalar name, at the check itself. This is
 /// this head's function, so it is no red/green row: the rows that run red at
 /// the bound master are the `derive` and pre-lock witnesses. A relative value
@@ -21679,16 +21665,6 @@ fn on_windows_a_drive_or_root_relative_value_refuses_and_a_drive_or_unc_path_doe
     ));
 }
 
-/// Whether `error` names `entry` and the `target` it resolves to.
-fn assert_names_entry_and_target(error: &UpstrokeError, entry: &Path, target: &Path) {
-    let message = refusal_of(error);
-    assert!(
-        message.contains(&entry.display().to_string())
-            && message.contains(&format!("resolves to {}", target.display())),
-        "the refusal names the entry and its target: {message}"
-    );
-}
-
 /// R-C-REGISTRY part 1's rule at the check itself (this head's function; the
 /// red/green rows are the `derive` witnesses below), over real directories,
 /// each layout under a common directory of its own. A link is a symbolic link
@@ -21761,6 +21737,30 @@ fn a_worktrees_registry_refuses_exactly_when_its_canonical_parent_is_not_the_com
     let error = refuse_linked_registry(&common, false)
         .expect_err("a link whose target is gone is not passed as unlinked");
     assert!(matches!(error, UpstrokeError::Io { .. }), "{error}");
+}
+
+/// The names in `dir`, sorted; an absent `dir` has none.
+#[cfg(unix)]
+fn entry_names(dir: &Path) -> Vec<String> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+/// Whether `error` names `entry` and the `target` it resolves to.
+fn assert_names_entry_and_target(error: &UpstrokeError, entry: &Path, target: &Path) {
+    let message = refusal_of(error);
+    assert!(
+        message.contains(&entry.display().to_string())
+            && message.contains(&format!("resolves to {}", target.display())),
+        "the refusal names the entry and its target: {message}"
+    );
 }
 
 /// R-C-REGISTRY part 1 at `derive`, red at the bound master and green here: a
@@ -21941,9 +21941,17 @@ fn derive_refuses_each_relative_repository_wide_name_before_any_slot_and_accepts
     let store = fs::canonicalize(managed.join(".git/objects")).expect("the run's store");
     let listed = store.display().to_string();
     let absent = root.join("absent");
-    let neutral = super::fixture::neutral_git_config().to_path_buf();
+    let neutral = super::fixture::neutral_git_config().as_os_str().to_owned();
+    let alternates = "GIT_ALTERNATE_OBJECT_DIRECTORIES";
     let mut cases: Vec<(&str, OsString, bool)> = Vec::new();
-    for name in REPOSITORY_WIDE_PATHS {
+    for name in [
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_SHALLOW_FILE",
+        "GIT_GRAFT_FILE",
+        "GIT_CONFIG",
+        "GIT_CONFIG_GLOBAL",
+        "GIT_CONFIG_SYSTEM",
+    ] {
         cases.push((name, OsString::from("../elsewhere"), true));
         cases.push((name, OsString::new(), true));
     }
@@ -21960,36 +21968,28 @@ fn derive_refuses_each_relative_repository_wide_name_before_any_slot_and_accepts
             false,
         ),
         ("GIT_CONFIG", absent.join("config").into_os_string(), false),
-        ("GIT_CONFIG_GLOBAL", neutral.clone().into_os_string(), false),
-        ("GIT_CONFIG_SYSTEM", neutral.into_os_string(), false),
-        (ALTERNATE_OBJECT_DIRECTORIES, OsString::new(), false),
+        ("GIT_CONFIG_GLOBAL", neutral.clone(), false),
+        ("GIT_CONFIG_SYSTEM", neutral, false),
+        (alternates, OsString::new(), false),
+        (alternates, OsString::from(format!("\"{listed}\"")), false),
         (
-            ALTERNATE_OBJECT_DIRECTORIES,
-            OsString::from(format!("\"{listed}\"")),
-            false,
-        ),
-        (
-            ALTERNATE_OBJECT_DIRECTORIES,
+            alternates,
             OsString::from(format!("#../not-a-path:{listed}")),
             false,
         ),
+        (alternates, OsString::from("../pool"), true),
         (
-            ALTERNATE_OBJECT_DIRECTORIES,
-            OsString::from("../pool"),
-            true,
-        ),
-        (
-            ALTERNATE_OBJECT_DIRECTORIES,
+            alternates,
             OsString::from(format!("{listed}:../pool")),
             true,
         ),
         (
-            ALTERNATE_OBJECT_DIRECTORIES,
+            alternates,
             OsString::from(format!("\"{listed}\"/pool")),
             true,
         ),
         (
-            ALTERNATE_OBJECT_DIRECTORIES,
+            alternates,
             OsString::from(format!("\"{listed}:{listed}")),
             true,
         ),

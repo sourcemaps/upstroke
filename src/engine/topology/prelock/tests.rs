@@ -599,9 +599,15 @@ const RELATIVE_NAME: &str = "UPSTROKE_TEST_R5_PRE_LOCK_NAME";
 #[cfg(unix)]
 #[test]
 fn each_relative_repository_wide_name_refuses_the_pre_lock_checks_before_any_inspection() {
-    let mut names: Vec<&str> = crate::workspace_manager::REPOSITORY_WIDE_PATHS.to_vec();
-    names.push(crate::workspace_manager::ALTERNATE_OBJECT_DIRECTORIES);
-    for name in names {
+    for name in [
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_SHALLOW_FILE",
+        "GIT_GRAFT_FILE",
+        "GIT_CONFIG",
+        "GIT_CONFIG_GLOBAL",
+        "GIT_CONFIG_SYSTEM",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    ] {
         let ended = crate::agent::proc::test_support::run_test_isolated(
             "engine::topology::prelock::tests::relative_name_pre_lock_child",
             &[
