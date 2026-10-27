@@ -6622,12 +6622,16 @@ impl WorkspaceManager {
     /// The [`COMMON_DIR`] the Git child [`Self::command`] builds for `cwd` is
     /// started with, read from the builder itself: the builder's own setting
     /// where it makes one, and otherwise the value this process holds, which
-    /// the child inherits, since the builder clears nothing and removes no
-    /// name. A change to what the builder sets is therefore a change to what
-    /// this reports. Closure 1's check reads it as the context of the
-    /// manager's guarded reads and commands and of its kept-instance guard
-    /// ([`registration_whole`]), and the topology's twin reads it for the
-    /// reads it guards.
+    /// the child inherits, since the builder clears nothing and never removes
+    /// [`COMMON_DIR`]. In a work tree the manager made it removes only
+    /// [`WORK_TREE_SELECTORS`], and sets [`COMMON_DIR`] only to give a
+    /// relative inherited value as the absolute path it names at the managed
+    /// base ([`in_work_tree`]); at the base it removes only
+    /// [`INDEX_SELECTOR`], for a `git worktree` command. A change to what the
+    /// builder sets is therefore a change to what this reports. Closure 1's
+    /// check reads it as the context of the manager's guarded reads and
+    /// commands and of its kept-instance guard ([`registration_whole`]), and
+    /// the topology's twin reads it for the reads it guards.
     #[must_use]
     pub fn composed_common_dir(&self, cwd: &Path) -> ComposedCommonDir {
         let command = self.command(cwd, &[]);

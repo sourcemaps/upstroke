@@ -1734,11 +1734,16 @@ both of these:
 
 - **The manager's own builder for the slot**
   (`WorkspaceManager::composed_common_dir`), for the capture's, the diff's and
-  the policy's reads. The legacy workspace builder the policy reads through,
-  `src/workspace.rs`'s `git_command`, sets no `GIT_COMMON_DIR` and clears
-  nothing, as the manager's builder does. That module's own test refuses
-  `env_remove` and `env_clear` in it, and the payload census counts its
-  `.env(` sites.
+  the policy's reads. The policy reads through `src/workspace.rs`'s
+  `git_command` in the slot's work-tree scope (`problem_in_work_tree`, with
+  the manager's base as the checkout), which composes `GIT_COMMON_DIR` by the
+  manager builder's rule from the same checkout: an inherited absolute value
+  as it is, a relative one as the absolute path it names at the base, and
+  none when none is inherited. Neither builder clears the environment or
+  removes `GIT_COMMON_DIR`: that module's own test allows `env_remove` only
+  inside `git_command`, for the work-tree selectors and the registry's index
+  selector, and refuses `env_clear`; the payload census counts its `.env(`
+  sites.
 - **The worker's report** (`AttemptRun::worker_common_dir`), for a failure
   that is the worker's own end.
 
