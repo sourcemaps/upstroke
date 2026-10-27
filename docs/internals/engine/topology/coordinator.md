@@ -3179,11 +3179,11 @@ The promoting task's checkout, given a file its candidate does not pin, and its 
 
 ## `mod tests` › `fn f_resume_fresh(`
 
-A fresh-process resume of the left run, as `try_resume_over` makes it: what step (f) finished, or the resume's refusal, and the durable events either way.
+A fresh-process resume of the left run, as `try_resume_over` makes it: what step (f) finished, or the resume's refusal, and the durable events either way. It also returns the `WideEnv`, which owns the fixture and so the scratch tree the checkout is in. The resumed run is dropped, as the resumed process would end; the env is not. Every caller holds it through its last filesystem and event assertion and drops it after them, so the guard reclaims the tree only once those assertions are done, or as a failing one unwinds. An earlier form dropped the env here, so the tree was reclaimed before the callers' comparison, which then failed listing the checkout (`NotFound`).
 
 ## `mod tests` › `fn f_promotion_kept(`
 
-P-6′ at recovery's completion of a promotion: the resume refuses with the kept-slot refusal naming the completion of the promotion and the kept checkout, before `task_candidate_created` and before `run_resumed`, and the checkout and every byte it holds are kept. A resume that finished the promotion over the pruned populated slot is the failure this states.
+P-6′ at recovery's completion of a promotion: the resume refuses with the kept-slot refusal naming the completion of the promotion and the kept checkout, before `task_candidate_created` and before `run_resumed`, and the checkout and every byte it holds are kept. A resume that finished the promotion over the pruned populated slot is the failure this states. Its callers hold the fixture's owner until it returns, so the comparison reads the live checkout; T-PROM-6 shows that the comparison fails once a kept file is gone.
 
 ## `mod tests` › `fn a_resume_keeps_a_promoting_generations_pruned_populated_slot_with_the_store_gone() {`
 
@@ -3193,9 +3193,13 @@ T-PROM-1, the witness: the fresh regular lens's P1 sequence, the `Promoting` cra
 
 T-PROM-2, the positive preservation case with the store kept: the same prefix, the entry pruned while another registration keeps the store. At `f1842dcd` the forced removal takes the checkout as well; repaired, it is kept and the resume refuses, naming it.
 
+## `mod tests` › `fn the_kept_slot_comparison_fails_once_a_kept_file_is_removed_by_hand() {`
+
+T-PROM-6, the liveness control of T-PROM-1's and T-PROM-2's comparison: the same prefix as T-PROM-1 and the same resume, which refuses; then one file the slot kept is removed by hand while the fixture lives. `f_promotion_kept` over that refusal must then fail at its comparison and not at an earlier check, so the comparison reads the live checkout and is not vacuous. At `f1842dcd` the resume finishes the promotion, and this control fails at its first step, the refusal it expects.
+
 ## `mod tests` › `fn a_resume_finishes_the_promotion_once_the_operator_has_removed_its_kept_slot() {`
 
-T-PROM-3, the release control (G-2): the operator has taken what the slot held and removed the directory, so the check finds nothing held and the resume finishes the promotion (`task_candidate_created`, then `run_resumed`). The same before and after the repair.
+T-PROM-3, the release control (G-2): the operator has taken what the slot held and removed the directory, so the check finds nothing held and the resume finishes the promotion (`task_candidate_created`, then `run_resumed`). The same before and after the repair. Its assertions run while the fixture lives. The last, that nothing is left at the slot, shows that the operator's removal stands and nothing recreated the slot; it is not evidence that the product removed anything.
 
 ## `mod tests` › `fn a_live_promotion_still_removes_its_pruned_populated_slot_with_the_store_gone() {`
 

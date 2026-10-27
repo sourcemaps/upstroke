@@ -26294,7 +26294,11 @@ git cat-file -e 'HEAD^{tree}'
     fn f_resume_fresh(
         wide: Wide,
         tasks: &[WideTask],
-    ) -> (Result<Vec<TaskKey>, UpstrokeError>, Vec<TopologyEvent>) {
+    ) -> (
+        Result<Vec<TaskKey>, UpstrokeError>,
+        Vec<TopologyEvent>,
+        crate::engine::topology::scaffold::WideEnv,
+    ) {
         let Wide { run, env } = wide;
         drop(run);
         let runtime = crate::runner::container::FakeRuntime::new(
@@ -26316,10 +26320,16 @@ git cat-file -e 'HEAD^{tree}'
         );
         drop(hooks);
         match resumed {
-            Ok((recovered, wide)) => (Ok(recovered.finished), wide.env.durable_events()),
+            Ok((recovered, wide)) => {
+                let Wide { run, env } = wide;
+                drop(run);
+                let events = env.durable_events();
+                (Ok(recovered.finished), events, env)
+            }
             Err(failed) => {
                 let (error, env) = *failed;
-                (Err(error), env.durable_events())
+                let events = env.durable_events();
+                (Err(error), events, env)
             }
         }
     }
@@ -26373,8 +26383,9 @@ git cat-file -e 'HEAD^{tree}'
                 "the last entry's prune took the store"
             );
             let before = f_files(&checkout);
-            let (resumed, events) = f_resume_fresh(wide, &tasks);
+            let (resumed, events, env) = f_resume_fresh(wide, &tasks);
             f_promotion_kept(resumed, &events, &checkout, &before);
+            drop(env);
         });
     }
 
@@ -26394,8 +26405,36 @@ git cat-file -e 'HEAD^{tree}'
                 "another registration keeps the store"
             );
             let before = f_files(&checkout);
-            let (resumed, events) = f_resume_fresh(wide, &tasks);
+            let (resumed, events, env) = f_resume_fresh(wide, &tasks);
             f_promotion_kept(resumed, &events, &checkout, &before);
+            drop(env);
+        });
+    }
+
+    #[test]
+    fn the_kept_slot_comparison_fails_once_a_kept_file_is_removed_by_hand() {
+        bounded("f-promoting-kept-control", || {
+            let tasks = f_one_task();
+            let wide = f_promoting_left("f-promoting-kept-control", false);
+            let checkout = f_pruned_promoting_checkout(&wide);
+            let before = f_files(&checkout);
+            let (resumed, events, env) = f_resume_fresh(wide, &tasks);
+            let refused = resumed.expect_err("the resume refuses the promotion's completion");
+            std::fs::remove_file(checkout.join("untracked.txt"))
+                .expect("a kept file, removed by hand after the refusal");
+            let payload = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                f_promotion_kept(Err(refused), &events, &checkout, &before);
+            }))
+            .expect_err("the comparison fails once a kept file is gone");
+            let message = payload
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .unwrap_or_default();
+            assert!(
+                message.contains("the slot and what it holds are kept"),
+                "the comparison, not an earlier check, fails: {message:?}"
+            );
+            drop(env);
         });
     }
 
@@ -26406,7 +26445,7 @@ git cat-file -e 'HEAD^{tree}'
             let wide = f_promoting_left("f-promoting-released", false);
             let checkout = f_pruned_promoting_checkout(&wide);
             f_remove_tree_by_hand(&checkout);
-            let (resumed, events) = f_resume_fresh(wide, &tasks);
+            let (resumed, events, env) = f_resume_fresh(wide, &tasks);
             let finished = resumed
                 .unwrap_or_else(|error| panic!("the resume finishes the promotion: {error}"));
             assert_eq!(
@@ -26420,6 +26459,7 @@ git cat-file -e 'HEAD^{tree}'
                 "{kinds:?}"
             );
             assert!(!checkout.exists(), "nothing is left at the slot");
+            drop(env);
         });
     }
 
