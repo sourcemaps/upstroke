@@ -479,12 +479,28 @@ pub(crate) fn refuse_git_dir_over_the_windows_budget(checkout: &Path) -> Result<
 /// (`DESIGN.md` §15, "run-id = ULID"), spelt to be recognisable in a path.
 pub(crate) const RUN_ID: &str = "01KZSWEEP00000000000000001";
 
+/// Where a fixture's managed base sits below its root unless a layout says
+/// otherwise: `<root>/repo`, beside the private root `<root>/private`.
+const BASE: &str = "repo";
+
+/// Where the managed base sits in R5's C5 layout, the proposal's "C5 equal
+/// depth" (PROP:2129): six directories below the root, as deep as every work
+/// tree the manager makes there, at
+/// `<root>/private/workspaces/<repo-key>/<run-id>/<tasks|merge|snapshots>/<component>`.
+/// One relative `GIT_COMMON_DIR` then names the same directory from the base
+/// and from each work tree, which Git's own checkout child of `git worktree
+/// add` needs before Git 2.55, since it reads the value from the new work
+/// tree. The witness that uses it derives that relationship from the actual
+/// paths and asserts it, so a change to either depth fails there first.
+#[cfg(unix)]
+pub(crate) const EQUAL_DEPTH_BASE: &str = "checkouts/user/x/y/z/repo";
+
 pub(crate) struct Fixture {
-    /// The guard over the root [`Fixture::with_object_format`] acquired,
-    /// kept for the fixture's whole life so the tree is reclaimed when it
-    /// drops -- on a panicking assertion as much as on a normal return.
-    /// `None` for [`Fixture::adopt`], whose root is a dead child's and is
-    /// bound by no token of this process's.
+    /// The guard over the root [`Fixture::with_layout`] acquired, kept for
+    /// the fixture's whole life so the tree is reclaimed when it drops -- on
+    /// a panicking assertion as much as on a normal return. `None` for
+    /// [`Fixture::adopt_based`], whose root is a dead child's and is bound by
+    /// no token of this process's.
     _tree: Option<ScratchTree>,
     pub(crate) root: PathBuf,
     pub(crate) base: PathBuf,
@@ -510,9 +526,16 @@ impl Fixture {
 
     /// A repository of the given object format, `sha1` or `sha256`.
     pub(crate) fn with_object_format(tag: &str, object_format: &str) -> Self {
+        Self::with_layout(tag, object_format, Path::new(BASE))
+    }
+
+    /// [`Self::with_object_format`] with the managed base at `below` the root
+    /// rather than at `<root>/repo`. The private root stays `<root>/private`,
+    /// and every other step, the scratch tree's guard included, is the same.
+    fn with_layout(tag: &str, object_format: &str, below: &Path) -> Self {
         let tree = scratch(tag);
         let root = tree.path().to_path_buf();
-        let base = root.join("repo");
+        let base = root.join(below);
         let private = root.join("private");
         fs::create_dir_all(&base).expect("repo directory");
         fs::create_dir_all(&private).expect("private root");
@@ -593,7 +616,13 @@ impl Fixture {
     /// [`Self::new`], because an intent records both and a reclaim that
     /// derived a different pair would be reclaiming another run's residue.
     pub(crate) fn adopt(root: PathBuf) -> Self {
-        let base = root.join("repo");
+        Self::adopt_based(root, Path::new(BASE))
+    }
+
+    /// [`Self::adopt`] over a fixture whose managed base is `below` its root,
+    /// as [`Self::with_layout`] laid it out.
+    pub(crate) fn adopt_based(root: PathBuf, below: &Path) -> Self {
+        let base = root.join(below);
         let private = root.join("private");
         let head = git(&base, &["rev-parse", "main"]);
         let seed = git(&base, &["rev-parse", "main~1"]);
@@ -617,6 +646,18 @@ impl Fixture {
 
     pub(crate) fn created(tag: &str) -> Self {
         let fixture = Self::new(tag);
+        fixture
+            .manager
+            .create_execution_root(&mut NoHooks)
+            .expect("create the execution root");
+        fixture
+    }
+
+    /// [`Self::created`] with the managed base at `below` the root: R5's C5
+    /// layout, [`EQUAL_DEPTH_BASE`].
+    #[cfg(unix)]
+    pub(crate) fn created_based(tag: &str, below: &Path) -> Self {
+        let fixture = Self::with_layout(tag, "sha1", below);
         fixture
             .manager
             .create_execution_root(&mut NoHooks)

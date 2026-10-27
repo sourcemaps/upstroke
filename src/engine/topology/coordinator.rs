@@ -20799,6 +20799,92 @@ mod tests {
     }
 
     #[cfg(unix)]
+    const LINKED_BASE: &str = "UPSTROKE_TEST_R5_LINKED_BASE";
+
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_registry_under_an_inherited_relative_common_dir_at_equal_depth_still_completes() {
+        let tasks = [WideTask::independent("alpha")];
+        let below = std::path::Path::new(crate::workspace_manager::fixture::EQUAL_DEPTH_BASE);
+        let Wide { run, env } = Wide::durable_based(
+            "linked-registry-c5",
+            below,
+            &tasks,
+            1,
+            WidePlans::default(),
+            RecordingRunner::new().answering(wide_responder(&tasks, &[])),
+        );
+        drop(run);
+        let root = std::fs::canonicalize(&env.fixture.root).expect("the canonical scratch root");
+        let base = std::fs::canonicalize(&env.fixture.base).expect("the canonical managed base");
+        let common = env.fixture.manager.common_git_dir().to_path_buf();
+        assert_eq!(
+            std::fs::canonicalize(base.join(".git")).expect("the base's git directory"),
+            common,
+            "the run's common directory is the base's own"
+        );
+        assert!(
+            root.parent().is_some(),
+            "the scratch root is not the filesystem root"
+        );
+        let depth = base
+            .strip_prefix(&root)
+            .expect("the base is below the root")
+            .components()
+            .count();
+        let work_trees = [
+            crate::workspace_manager::Slot::Task {
+                key: "k0".to_owned(),
+                generation: 1,
+            },
+            crate::workspace_manager::Slot::Staging { sequence: 1 },
+            crate::workspace_manager::Slot::Snapshot {
+                name: crate::workspace_manager::SnapshotName::gates(0, 1, 1),
+            },
+        ]
+        .map(|slot| env.fixture.manager.slot_path(&slot));
+        let named = common
+            .strip_prefix(&root)
+            .expect("the common directory is below the root");
+        let mut relative = std::path::PathBuf::new();
+        for _ in 0..depth {
+            relative.push("..");
+        }
+        relative.push(named);
+        for from in std::iter::once(&base).chain(&work_trees) {
+            assert_eq!(
+                from.ancestors().nth(depth).map(|top| top.join(named)),
+                Some(common.clone()),
+                "`{}` from {} names the run's common directory, climbing to the scratch root and \
+                 no further",
+                relative.display(),
+                from.display()
+            );
+        }
+        let other = env.fixture.root.join("other");
+        crate::workspace_manager::fixture::create_dir(&other);
+        crate::workspace_manager::fixture::git(&other, &["init", "-q", "-b", "main"]);
+        let elsewhere = other.join(".git").join("worktrees");
+        crate::workspace_manager::fixture::create_dir(&elsewhere);
+        let registry = env.fixture.base.join(".git").join("worktrees");
+        crate::workspace_manager::fixture::link_directory(&elsewhere, &registry);
+        let ended = crate::agent::proc::test_support::run_test_isolated(
+            "engine::topology::coordinator::tests::linked_registry_resume_child",
+            &[
+                (crate::workspace_manager::COMMON_DIR, relative.as_os_str()),
+                (LINKED_ROOT, env.fixture.root.as_os_str()),
+                (LINKED_BASE, below.as_os_str()),
+            ],
+            BOUND,
+        );
+        assert!(
+            ended.status.is_some_and(|status| status.success())
+                && ended.stdout.contains("1 passed"),
+            "C5's equal-depth layout under topology: {ended}"
+        );
+    }
+
+    #[cfg(unix)]
     #[test]
     #[ignore = "subprocess helper"]
     fn linked_registry_resume_child() {
@@ -20806,8 +20892,15 @@ mod tests {
             return;
         };
         let tasks = [WideTask::independent("alpha")];
-        let env = crate::engine::topology::scaffold::WideEnv::adopted(
-            root,
+        let fixture = match std::env::var_os(LINKED_BASE) {
+            Some(below) => crate::workspace_manager::fixture::Fixture::adopt_based(
+                root,
+                std::path::Path::new(&below),
+            ),
+            None => crate::workspace_manager::fixture::Fixture::adopt(root),
+        };
+        let env = crate::engine::topology::scaffold::WideEnv::adopted_over(
+            fixture,
             &tasks,
             1,
             WidePlans::default(),

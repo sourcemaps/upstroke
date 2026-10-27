@@ -1273,6 +1273,18 @@ durable incarnation `inc-1` is not — so these runs take a ULID-shaped one.
 
 ## `impl Wide` › `fn durable_with(`
 
+[`Wide::durable_over`] over `Fixture::created(tag)`, the fixture's default layout, `<root>/repo` beside
+`<root>/private`, which every durable run takes but R5's C5 control.
+
+## `impl Wide` › `pub(super) fn durable_based(`
+
+[`Wide::durable`] over a fixture whose managed base is `below` its root (`Fixture::created_based`), under the durable
+incarnation and the recorded host runner. R5's C5 control passes `EQUAL_DEPTH_BASE`, which puts the base as deep below
+the root as every work tree, so that one relative `GIT_COMMON_DIR` names the run's common directory from both. Unix
+only, because its one caller is: that control's child runs under `run_test_isolated`.
+
+## `impl Wide` › `fn durable_over(`
+
 What run creation leaves, without its probes: the log at the public
 directory's `events.jsonl` holding `run_started`, the private half's owner and
 commit records agreeing with it, one run id and incarnation throughout, and the
@@ -1296,7 +1308,13 @@ Drop this process's run — its locks and fold with it — and hand the director
 ## `impl WideEnv` › `pub(super) fn adopted(`
 
 The environment over a durable run a killed child left, rebuilt from its root:
-the parent never trusts what the child believed about its own state.
+the parent never trusts what the child believed about its own state. It is
+[`WideEnv::adopted_over`] over `Fixture::adopt(root)`, the default layout.
+
+## `impl WideEnv` › `pub(super) fn adopted_over(`
+
+[`WideEnv::adopted`] over a fixture already adopted, so that a child can adopt a run whose managed base is not at
+`<root>/repo` (`Fixture::adopt_based`): R5's `linked_registry_resume_child` under the C5 layout.
 
 ## `impl WideEnv` › `pub(super) fn resume(`
 
