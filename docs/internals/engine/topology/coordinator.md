@@ -3121,3 +3121,39 @@ Both verification passes cost 0.25; the target one is `FReviewStub`'s.
 ## `mod tests` › `fn f_drive_costed(`
 
 T-O14B-F's run: two verification reviewers. At width 3 the stub reviews every verification of the first command; at width 1 that command ends at gamma's pick, as `f_drive_subject`'s does, and the resumed process steps the run with the stub until the refusal.
+
+## `mod tests` › `fn f_promoting_left(tag: &str, keep_the_store: bool) -> Wide {`
+
+The crash prefix the fresh regular lens's P1 at `f1842dcd` names (T-PROM-*). One task, at width 1, in a durable run, whose candidates ref's creation fails before it is made, so the command ends with `candidate_prepared` durable and `task_candidate_created` not: a `Promoting` generation whose populated task worktree, intent and pin stand. With `keep_the_store`, a registration the engine did not make (`f_keep_the_store`) keeps the store when the task's entry is pruned.
+
+## `mod tests` › `fn f_pruned_promoting_checkout(wide: &Wide) -> PathBuf {`
+
+The promoting task's checkout, given a file its candidate does not pin, and its whole registration entry pruned by a prune no engine process started (`f_prune_own_entry`). With the store's last entry pruned, Git removes the store too.
+
+## `mod tests` › `fn f_resume_fresh(`
+
+A fresh-process resume of the left run, as `try_resume_over` makes it: what step (f) finished, or the resume's refusal, and the durable events either way.
+
+## `mod tests` › `fn f_promotion_kept(`
+
+P-6′ at recovery's completion of a promotion: the resume refuses with the kept-slot refusal naming the completion of the promotion and the kept checkout, before `task_candidate_created` and before `run_resumed`, and the checkout and every byte it holds are kept. A resume that finished the promotion over the pruned populated slot is the failure this states.
+
+## `mod tests` › `fn a_resume_keeps_a_promoting_generations_pruned_populated_slot_with_the_store_gone() {`
+
+T-PROM-1, the witness: the fresh regular lens's P1 sequence, the `Promoting` crash prefix, the populated slot's entry pruned and the store gone with it. At `f1842dcd` recovery's step (f) finishes the promotion and closure 3's arm removes the checkout with what it holds; repaired, `candidate::recovery_for` keeps it and the resume refuses.
+
+## `mod tests` › `fn a_resume_keeps_a_promoting_generations_pruned_populated_slot_while_the_store_stays() {`
+
+T-PROM-2, the positive preservation case with the store kept: the same prefix, the entry pruned while another registration keeps the store. At `f1842dcd` the forced removal takes the checkout as well; repaired, it is kept and the resume refuses, naming it.
+
+## `mod tests` › `fn a_resume_finishes_the_promotion_once_the_operator_has_removed_its_kept_slot() {`
+
+T-PROM-3, the release control (G-2): the operator has taken what the slot held and removed the directory, so the check finds nothing held and the resume finishes the promotion (`task_candidate_created`, then `run_resumed`). The same before and after the repair.
+
+## `mod tests` › `fn a_live_promotion_still_removes_its_pruned_populated_slot_with_the_store_gone() {`
+
+T-PROM-4, the live-cleanup control: the entry is pruned, the store with it, at the candidates ref's creation of a live promotion; the promotion is completed live and its reclaim removes the checkout with what it holds (Choice A's deletion outside recovery), and the run completes. The same before and after the repair: the live promotion does not read `candidate::recovery_for`.
+
+## `mod tests` › `fn the_run_end_closure_still_removes_a_promoting_generations_pruned_populated_slot() {`
+
+T-PROM-5, the run-end control: `promoting_completed_by_the_closure_at_run_end` with alpha's entry pruned and a file in its checkout after the decline is ingested. The halting closure completes the promotion through `run::complete_promotions`, which reads `candidate::owed_for`, and removes the checkout with what it holds (P-6′'s run-end clause). The same before and after the repair; it would turn red if run-end closure read `candidate::recovery_for`.

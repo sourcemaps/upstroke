@@ -25988,4 +25988,316 @@ mod tests {
         drop(hooks);
         (wide, result)
     }
+
+    fn f_promoting_left(tag: &str, keep_the_store: bool) -> Wide {
+        let tasks = f_one_task();
+        let mut wide = Wide::durable(
+            tag,
+            &tasks,
+            1,
+            WidePlans::default(),
+            RecordingRunner::new().answering(wide_responder(&tasks, &[])),
+        );
+        if keep_the_store {
+            f_keep_the_store(&wide);
+        }
+        let mut first = FHooks::over(&wide);
+        first.effects.fail_at = Some((
+            FSite::Ref(crate::topology::effects::RefSite::CreateCandidates),
+            FPhase::Before,
+        ));
+        let seams = wide.env.seams();
+        let ended = f_step_to_error(&mut wide.run, &seams, &mut first);
+        drop(first);
+        assert!(
+            ended.is_err(),
+            "the candidates ref's creation ends the command after `candidate_prepared`"
+        );
+        assert_eq!(
+            kinds_of(&wide.env.durable_events()).last(),
+            Some(&"candidate_prepared"),
+            "a promoting generation: `candidate_prepared` is durable and \
+             `task_candidate_created` is not"
+        );
+        wide
+    }
+
+    fn f_pruned_promoting_checkout(wide: &Wide) -> PathBuf {
+        let manager = &wide.env.fixture.manager;
+        let checkout = f_only_checkout_under(&manager.execution_root().join("tasks"));
+        crate::workspace_manager::fixture::write_file(
+            &checkout.join("untracked.txt"),
+            b"the attempt's output its candidate does not pin\n",
+        );
+        f_prune_own_entry(&checkout);
+        checkout
+    }
+
+    fn f_resume_fresh(
+        wide: Wide,
+        tasks: &[WideTask],
+    ) -> (Result<Vec<TaskKey>, UpstrokeError>, Vec<TopologyEvent>) {
+        let Wide { run, env } = wide;
+        drop(run);
+        let runtime = crate::runner::container::FakeRuntime::new(
+            crate::runner::container::runtime::ContainerTrace::off(),
+        );
+        let liveness = crate::runner::container::FakeOwnerLiveness::new();
+        let mut hooks = env.hooks();
+        let resumed = env.try_resume_over(
+            "inc-2",
+            RecordingRunner::new().answering(wide_responder(tasks, &[])),
+            crate::engine::topology::select::Ceiling::unlimited(),
+            &crate::engine::topology::scaffold::ResumingOver {
+                runtime: &runtime,
+                liveness: &liveness,
+                preflight: &crate::engine::topology::scaffold::Certifying,
+                awaits_release: true,
+            },
+            &mut hooks,
+        );
+        drop(hooks);
+        match resumed {
+            Ok((recovered, wide)) => (Ok(recovered.finished), wide.env.durable_events()),
+            Err(failed) => {
+                let (error, env) = *failed;
+                (Err(error), env.durable_events())
+            }
+        }
+    }
+
+    fn f_promotion_kept(
+        resumed: Result<Vec<TaskKey>, UpstrokeError>,
+        events: &[TopologyEvent],
+        checkout: &std::path::Path,
+        before: &BTreeMap<PathBuf, Vec<u8>>,
+    ) {
+        match resumed {
+            Ok(finished) => panic!(
+                "the resume finished the promotion of {finished:?} over a populated slot whose \
+                 registration is not whole: {:?}",
+                kinds_of(events)
+            ),
+            Err(UpstrokeError::RegistryRefused { message }) => assert!(
+                message.contains("kept for the operator")
+                    && message.contains("completion of the promotion")
+                    && message.contains(&checkout.display().to_string()),
+                "{message}"
+            ),
+            Err(other) => panic!("the promotion's kept-slot refusal, not {other:?}"),
+        }
+        let kinds = kinds_of(events);
+        assert!(
+            !kinds.contains(&"task_candidate_created") && !kinds.contains(&"run_resumed"),
+            "the resume refuses before the candidate is created and before run_resumed: {kinds:?}"
+        );
+        assert_eq!(
+            &f_files(checkout),
+            before,
+            "the slot and what it holds are kept"
+        );
+    }
+
+    #[test]
+    fn a_resume_keeps_a_promoting_generations_pruned_populated_slot_with_the_store_gone() {
+        bounded("f-promoting-store-gone", || {
+            let tasks = f_one_task();
+            let wide = f_promoting_left("f-promoting-store-gone", false);
+            let checkout = f_pruned_promoting_checkout(&wide);
+            assert!(
+                !wide
+                    .env
+                    .fixture
+                    .manager
+                    .common_git_dir()
+                    .join("worktrees")
+                    .exists(),
+                "the last entry's prune took the store"
+            );
+            let before = f_files(&checkout);
+            let (resumed, events) = f_resume_fresh(wide, &tasks);
+            f_promotion_kept(resumed, &events, &checkout, &before);
+        });
+    }
+
+    #[test]
+    fn a_resume_keeps_a_promoting_generations_pruned_populated_slot_while_the_store_stays() {
+        bounded("f-promoting-store-kept", || {
+            let tasks = f_one_task();
+            let wide = f_promoting_left("f-promoting-store-kept", true);
+            let checkout = f_pruned_promoting_checkout(&wide);
+            assert!(
+                wide.env
+                    .fixture
+                    .manager
+                    .common_git_dir()
+                    .join("worktrees")
+                    .is_dir(),
+                "another registration keeps the store"
+            );
+            let before = f_files(&checkout);
+            let (resumed, events) = f_resume_fresh(wide, &tasks);
+            f_promotion_kept(resumed, &events, &checkout, &before);
+        });
+    }
+
+    #[test]
+    fn a_resume_finishes_the_promotion_once_the_operator_has_removed_its_kept_slot() {
+        bounded("f-promoting-released", || {
+            let tasks = f_one_task();
+            let wide = f_promoting_left("f-promoting-released", false);
+            let checkout = f_pruned_promoting_checkout(&wide);
+            f_remove_tree_by_hand(&checkout);
+            let (resumed, events) = f_resume_fresh(wide, &tasks);
+            let finished = resumed
+                .unwrap_or_else(|error| panic!("the resume finishes the promotion: {error}"));
+            assert_eq!(
+                finished,
+                vec![TaskKey(0)],
+                "step (f) finishes the promotion"
+            );
+            let kinds = kinds_of(&events);
+            assert!(
+                kinds.contains(&"task_candidate_created") && kinds.contains(&"run_resumed"),
+                "{kinds:?}"
+            );
+            assert!(!checkout.exists(), "nothing is left at the slot");
+        });
+    }
+
+    #[test]
+    fn a_live_promotion_still_removes_its_pruned_populated_slot_with_the_store_gone() {
+        bounded("f-promotion-live-cleanup", || {
+            let tasks = f_one_task();
+            let mut wide = Wide::started_with(
+                "f-promotion-live-cleanup",
+                &tasks,
+                1,
+                WidePlans::default(),
+                RecordingRunner::new().answering(wide_responder(&tasks, &[])),
+            );
+            let manager = wide.env.fixture.manager.clone();
+            let planted = Arc::new(std::sync::Mutex::new(None::<PathBuf>));
+            let mut hooks = FHooks::over(&wide);
+            {
+                let planted = Arc::clone(&planted);
+                hooks.effects.at_phase.push((
+                    FSite::Ref(crate::topology::effects::RefSite::CreateCandidates),
+                    FPhase::Before,
+                    Box::new(move || {
+                        let checkout =
+                            f_only_checkout_under(&manager.execution_root().join("tasks"));
+                        crate::workspace_manager::fixture::write_file(
+                            &checkout.join("untracked.txt"),
+                            b"the attempt's output its candidate does not pin\n",
+                        );
+                        f_prune_own_entry(&checkout);
+                        assert!(
+                            !manager.common_git_dir().join("worktrees").exists(),
+                            "the last entry's prune took the store"
+                        );
+                        *planted
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(checkout);
+                    }),
+                ));
+            }
+            let seams = wide.env.seams();
+            let result = f_step_to_error(&mut wide.run, &seams, &mut hooks);
+            drop(hooks);
+            let progress = result.unwrap_or_else(|error| {
+                panic!(
+                    "the run completes: {error}: {:?}",
+                    kinds_of(&wide.env.durable_events())
+                )
+            });
+            assert_eq!(outcome_of(&progress), RunOutcome::Complete);
+            let checkout = planted
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+                .expect("the slot was pruned at the promotion");
+            assert!(
+                !checkout.exists(),
+                "the live promotion's reclaim removed the slot with what it held"
+            );
+            assert!(
+                kinds_of(&wide.env.durable_events()).contains(&"task_candidate_created"),
+                "the promotion was completed live"
+            );
+        });
+    }
+
+    #[test]
+    fn the_run_end_closure_still_removes_a_promoting_generations_pruned_populated_slot() {
+        bounded("f-promoting-at-run-end", || {
+            let tasks = [
+                WideTask::independent("alpha"),
+                WideTask::independent("beta"),
+            ];
+            let mut wide = halted_by_the_last_task("f-promoting-at-run-end", &tasks);
+            let mut hooks = CasFailing::over(&wide);
+            hooks.fail_the_next(crate::topology::effects::RefSite::CreateCandidates);
+            let seams = wide.env.seams();
+            let error = wide
+                .run
+                .step(&seams, &mut hooks)
+                .expect_err("alpha's candidates ref is made to fail once");
+            assert!(error.to_string().contains("CreateCandidates"), "{error}");
+            steps_to(
+                &mut wide,
+                &mut hooks,
+                |progress| {
+                    matches!(
+                        progress,
+                        Progress::Settled {
+                            key: TaskKey(1),
+                            accepted: false,
+                            ..
+                        }
+                    )
+                },
+                "beta parks",
+            );
+            steps_to(
+                &mut wide,
+                &mut hooks,
+                |progress| matches!(progress, Progress::Answered { declined: true, .. }),
+                "the decline is ingested",
+            );
+            let checkout =
+                wide.env
+                    .fixture
+                    .manager
+                    .slot_path(&crate::engine::topology::dispatch::task_slot(
+                        TaskKey(0),
+                        GenerationId(0),
+                    ));
+            crate::workspace_manager::fixture::write_file(
+                &checkout.join("untracked.txt"),
+                b"the attempt's output its candidate does not pin\n",
+            );
+            f_prune_own_entry(&checkout);
+            let end = steps_to(
+                &mut wide,
+                &mut hooks,
+                |progress| matches!(progress, Progress::Finished { .. }),
+                "the closure ends the run",
+            );
+            assert_eq!(outcome_of(&end), RunOutcome::Halted);
+            assert_eq!(
+                after_the_halt(&wide),
+                [
+                    "question_answered",
+                    "task_candidate_created",
+                    "run_finished"
+                ],
+                "the closure completed the promotion before it ended the run"
+            );
+            assert!(
+                !checkout.exists(),
+                "run-end closure removed the slot with what it held"
+            );
+        });
+    }
 }
