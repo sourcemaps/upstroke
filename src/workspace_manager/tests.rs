@@ -21596,7 +21596,11 @@ fn a_removal_with_no_store_refuses_every_target_that_names_no_entry_of_its_own_s
 fn a_checkout_whose_gitdir_is_gone_converges_twice_once_a_prune_has_emptied_the_store() {
     let shapes = [
         ("its own store", "f-closure3-sequence", true),
-        ("another repository's store", "f-closure3-sequence-control", false),
+        (
+            "another repository's store",
+            "f-closure3-sequence-control",
+            false,
+        ),
     ];
     let mut cases = Vec::new();
     for (label, tag, own_store) in shapes {
