@@ -147,6 +147,7 @@ effect_free = [
     "commit_tree_sha",
     "commit_tree_sha_pausing",
     "common_git_dir",
+    "composed_common_dir",
     "derive",
     "direct_ref_target",
     "execution_root",
@@ -803,6 +804,7 @@ effectful = [
 ]
 effectful_unnameable = []
 effect_free = [
+    "composed_common_dir",
     "contain_write_command",
     "containment_establishments",
     "credential_location",
