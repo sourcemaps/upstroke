@@ -404,8 +404,9 @@ custom `HostEnvironment` with an overlay rather than `HostRunner::new` alone:
   `child_environment`). With the run's repository held, by `ObjectGraph::RecordedIn` over
   `managed_repository`, the report and the child's value are both that repository's common
   directory. With none held, the report is `Unknown` and the same composition refuses the run
-  `NeverStarted`. Both report assertions turn red if the work-tree step leaves `child_environment`,
-  which would make the report a second composition beside the child's;
+  `NeverStarted`. One assertion compares both reports, so a work-tree step outside
+  `child_environment`, which would make the report a second composition beside the child's, shows
+  both reports wrong at once: each would be the relative value;
 - a repeated name, where the later entry is the one the child receives and the one reported;
 - an overlay naming a reserved key, which reports `Unknown` while the same composition refuses the run.
 

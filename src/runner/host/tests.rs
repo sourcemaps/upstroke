@@ -1198,28 +1198,29 @@ fn the_host_runner_reports_the_common_dir_its_child_is_started_with() {
         base.push((os(COMMON_DIR), os("../../common")));
         base
     };
-    let runner = HostRunner::new().with_environment(
+    let with_repository = HostRunner::new().with_environment(
         HostEnvironment::with_base(relative(), KeyCase::current())
             .reading(ObjectGraph::RecordedIn(repository.clone())),
     );
+    let without_repository = over(relative(), KeyCase::current());
     let request = gate(Vec::new());
     assert_eq!(
-        runner.composed_common_dir(&request),
-        ComposedCommonDir::Present(held.clone()),
-        "a relative value, its repository held: the report"
+        (
+            with_repository.composed_common_dir(&request),
+            without_repository.composed_common_dir(&request),
+        ),
+        (
+            ComposedCommonDir::Present(held.clone()),
+            ComposedCommonDir::Unknown,
+        ),
+        "a relative value: the reports with its repository held and with none held"
     );
     assert_eq!(
-        received_common_dir(&runner, &request),
+        received_common_dir(&with_repository, &request),
         vec![format!("{COMMON_DIR}={}", held.to_string_lossy())],
         "a relative value, its repository held: what the child received"
     );
-    let runner = over(relative(), KeyCase::current());
-    assert_eq!(
-        runner.composed_common_dir(&request),
-        ComposedCommonDir::Unknown,
-        "a relative value, no repository held: the composition refuses and reports nothing"
-    );
-    match runner.run_blocking(&request) {
+    match without_repository.run_blocking(&request) {
         Err(refusal) => assert!(
             refusal.fate == ProcessFate::NeverStarted
                 && refusal.source.to_string().contains(COMMON_DIR),
