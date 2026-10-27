@@ -21665,3 +21665,222 @@ fn a_checkout_whose_gitdir_is_gone_converges_twice_once_a_prune_has_emptied_the_
     }
     report_cases(&cases);
 }
+
+/// The scratch root of a [`linked_registry_guarded_reads_child`], given to it
+/// alone.
+#[cfg(unix)]
+const F_LINKED_ROOT: &str = "UPSTROKE_TEST_F_LINKED_ROOT";
+
+/// Where the managed base sits below that root.
+#[cfg(unix)]
+const F_LINKED_BASE: &str = "UPSTROKE_TEST_F_LINKED_BASE";
+
+/// Which sequence the child runs: `C4`, `C5`, or `C4 with nothing inherited`.
+#[cfg(unix)]
+const F_LINKED_SEQUENCE: &str = "UPSTROKE_TEST_F_LINKED_SEQUENCE";
+
+/// T-ENV-MGR, the integration correction's manager face (F): a `worktrees`
+/// store linked into another repository, under an inherited
+/// `GIT_COMMON_DIR` naming the run's common directory (R-C-REGISTRY's part 2),
+/// keeps the manager's guarded reads and its kept-instance guard whole. C4's
+/// layout inherits the absolute value. C5's inherits a relative one, derived
+/// here from the actual paths, with the base as deep below the root as the
+/// manager's work trees (PROP:2129), and this test asserts that the value names
+/// the run's common directory from the base and from the slot the child adds.
+/// The same C4 layout with nothing inherited is refused by the guarded read,
+/// the original rule. Each sequence runs in an isolated child whose
+/// environment alone carries the value; the guarded operations are
+/// `candidate_stage` (the manifest's read), `candidate_write_tree` (its
+/// pre-check) and `kept_instances`.
+#[cfg(unix)]
+#[test]
+fn a_linked_registry_keeps_the_managers_guarded_reads_under_the_inherited_common_dir() {
+    let mut cases: Vec<(String, Result<(), String>)> = Vec::new();
+    for sequence in ["C4", "C5", "C4 with nothing inherited"] {
+        let tree = scratch("f-linked-manager");
+        let root = fs::canonicalize(tree.path()).expect("the canonical scratch root");
+        assert!(
+            root.parent().is_some(),
+            "the scratch root is not the filesystem root"
+        );
+        let below = Path::new(if sequence == "C5" {
+            super::fixture::EQUAL_DEPTH_BASE
+        } else {
+            "repo"
+        });
+        let base = root.join(below);
+        create_dir(&base);
+        create_dir(&root.join("private"));
+        git(&base, &["init", "-q", "-b", "main"]);
+        git(&base, &["config", "user.email", "tests@upstroke.local"]);
+        git(&base, &["config", "user.name", "upstroke tests"]);
+        write_file(&base.join("a.txt"), b"one\n");
+        git(&base, &["add", "-A"]);
+        git(&base, &["commit", "-q", "-m", "seed"]);
+        let other = root.join("other");
+        git(
+            &root,
+            &[
+                "clone",
+                "-q",
+                &base.to_string_lossy(),
+                &other.to_string_lossy(),
+            ],
+        );
+        let elsewhere = other.join(".git").join("worktrees");
+        create_dir(&elsewhere);
+        super::fixture::link_directory(&elsewhere, &base.join(".git").join("worktrees"));
+        let common = fs::canonicalize(base.join(".git")).expect("the run's common directory");
+        let depth = below.components().count();
+        let named = common
+            .strip_prefix(&root)
+            .expect("the common directory is below the root");
+        let slot_path = WorkspaceManager::derive(
+            &base,
+            &root.join("private"),
+            super::fixture::RUN_ID,
+            "inc-linked",
+        )
+        .expect("derive the manager the child derives")
+        .slot_path(&Slot::Task {
+            key: "linked".to_owned(),
+            generation: 1,
+        });
+        let mut relative = PathBuf::new();
+        for _ in 0..depth {
+            relative.push("..");
+        }
+        relative.push(named);
+        if sequence == "C5" {
+            for from in [&base, &slot_path] {
+                assert_eq!(
+                    from.ancestors().nth(depth).map(|top| top.join(named)),
+                    Some(common.clone()),
+                    "`{}` from {} names the run's common directory, climbing to the scratch \
+                     root and no further",
+                    relative.display(),
+                    from.display()
+                );
+            }
+        }
+        let value = if sequence == "C5" {
+            relative.into_os_string()
+        } else {
+            common.clone().into_os_string()
+        };
+        let mut vars: Vec<(&str, &OsStr)> = vec![
+            (F_LINKED_ROOT, root.as_os_str()),
+            (F_LINKED_BASE, below.as_os_str()),
+            (F_LINKED_SEQUENCE, OsStr::new(sequence)),
+        ];
+        if sequence != "C4 with nothing inherited" {
+            vars.push(("GIT_COMMON_DIR", value.as_os_str()));
+        }
+        let ended = crate::agent::proc::test_support::run_test_isolated(
+            "workspace_manager::tests::linked_registry_guarded_reads_child",
+            &vars,
+            std::time::Duration::from_secs(180),
+        );
+        let outcome = if ended.status.is_some_and(|status| status.success())
+            && ended.stdout.contains("1 passed")
+        {
+            Ok(())
+        } else {
+            Err(ended.to_string())
+        };
+        cases.push((sequence.to_owned(), outcome));
+        drop(tree);
+    }
+    report_cases(&cases);
+}
+
+/// The child of
+/// [`a_linked_registry_keeps_the_managers_guarded_reads_under_the_inherited_common_dir`]:
+/// one sequence, under the names its environment inherited, through the
+/// manager's own API.
+#[cfg(unix)]
+#[test]
+#[ignore = "subprocess helper"]
+fn linked_registry_guarded_reads_child() {
+    let Some(sequence) = std::env::var_os(F_LINKED_SEQUENCE) else {
+        return;
+    };
+    let sequence = sequence.to_string_lossy().into_owned();
+    let root = PathBuf::from(std::env::var_os(F_LINKED_ROOT).expect("the scratch root"));
+    let below = PathBuf::from(std::env::var_os(F_LINKED_BASE).expect("the base below the root"));
+    let base = root.join(&below);
+    let head = git(&base, &["rev-parse", "HEAD"]);
+    let manager = WorkspaceManager::derive(
+        &base,
+        &root.join("private"),
+        super::fixture::RUN_ID,
+        "inc-linked",
+    )
+    .unwrap_or_else(|error| panic!("{sequence}: derive: {error}"));
+    assert_eq!(
+        manager.common_git_dir(),
+        fs::canonicalize(base.join(".git"))
+            .expect("the run's common directory")
+            .as_path(),
+        "{sequence}: the run's common directory is the base's own"
+    );
+    manager
+        .create_execution_root(&mut NoHooks)
+        .expect("the execution root");
+    let slot = Slot::Task {
+        key: "linked".to_owned(),
+        generation: 1,
+    };
+    manager
+        .write_intent(&mut NoHooks, &slot)
+        .expect("the slot's intent");
+    let path = manager
+        .add_worktree(&mut NoHooks, &slot, &head)
+        .unwrap_or_else(|error| panic!("{sequence}: the slot add: {error}"));
+    let pointer = fs::read_to_string(path.join(".git")).expect("the slot's .git");
+    let entry = fs::canonicalize(
+        pointer
+            .trim()
+            .strip_prefix("gitdir:")
+            .expect("a gitdir pointer")
+            .trim(),
+    )
+    .expect("the slot's registration entry");
+    assert!(
+        entry.starts_with(
+            fs::canonicalize(root.join("other").join(".git").join("worktrees"))
+                .expect("the other repository's store")
+        ),
+        "{sequence}: the slot's registration is in the linked store: {}",
+        entry.display()
+    );
+    write_file(&path.join("worker.txt"), b"a file the worker made\n");
+    let staged = manager.candidate_stage(&mut NoHooks, &slot, &[]);
+    if sequence == "C4 with nothing inherited" {
+        match staged {
+            Err(UpstrokeError::RegistryRefused { message })
+                if message.contains("which is not this repository's common git dir") => {}
+            other => panic!(
+                "{sequence}: with nothing inherited the guarded read refuses by the original \
+                 rule: {other:?}"
+            ),
+        }
+        return;
+    }
+    staged.unwrap_or_else(|error| panic!("{sequence}: the capture stages: {error}"));
+    let captured = manager
+        .candidate_write_tree(&mut NoHooks, &slot)
+        .unwrap_or_else(|error| panic!("{sequence}: the capture writes its tree: {error}"));
+    assert_eq!(
+        git(&base, &["ls-tree", "--name-only", &captured]),
+        "a.txt\nworker.txt",
+        "{sequence}: the capture holds the slot's work"
+    );
+    let kept = manager
+        .kept_instances(&mut NoHooks, &slot)
+        .unwrap_or_else(|error| panic!("{sequence}: the kept-instance read: {error}"));
+    assert!(
+        kept.is_empty(),
+        "{sequence}: the populated slot's registration reads whole: {kept:?}"
+    );
+}

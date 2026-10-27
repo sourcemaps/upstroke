@@ -15677,6 +15677,249 @@ mod tests {
     }
 
     #[cfg(unix)]
+    const F_HOSTED_ROOT: &str = "UPSTROKE_TEST_F_HOSTED_ROOT";
+
+    #[cfg(unix)]
+    const F_HOSTED_BASE: &str = "UPSTROKE_TEST_F_HOSTED_BASE";
+
+    #[cfg(unix)]
+    const F_HOSTED_AGENT: &str = r#"#!/bin/sh
+printf '%s %s\n' "$1" "$(pwd -P)" >> "$UPSTROKE_TEST_F_ROLE_LOG"
+if [ "$1" = --implement ]; then
+  if [ ! -e "$UPSTROKE_TEST_F_WORKER_MARKER" ]; then
+    : > "$UPSTROKE_TEST_F_WORKER_MARKER"
+    exit 0
+  fi
+  mkdir -p src/alpha && printf 'alpha worked\n' > src/alpha/work.txt
+fi
+"#;
+
+    #[cfg(unix)]
+    const F_HOSTED_GATE: &str = r#"#!/bin/sh
+printf 'gate %s\n' "$(pwd -P)" >> "$UPSTROKE_TEST_F_ROLE_LOG"
+common=$(git rev-parse --git-common-dir) || exit 2
+real=$(cd "$common" && pwd -P) || exit 3
+[ "$real" = "$UPSTROKE_TEST_F_RUN_COMMON" ] || exit 4
+git cat-file -e 'HEAD^{tree}'
+"#;
+
+    #[cfg(unix)]
+    fn f_hosted_linked_registry(sequence: &str) {
+        let tasks = [WideTask::independent("alpha")];
+        let below = std::path::Path::new(if sequence == "C5" {
+            crate::workspace_manager::fixture::EQUAL_DEPTH_BASE
+        } else {
+            "repo"
+        });
+        let Wide { run, env } = if sequence == "C5" {
+            Wide::durable_based(
+                "f-hosted-c5",
+                below,
+                &tasks,
+                1,
+                WidePlans::default(),
+                RecordingRunner::new(),
+            )
+        } else {
+            Wide::durable(
+                "f-hosted-c4",
+                &tasks,
+                1,
+                WidePlans::default(),
+                RecordingRunner::new(),
+            )
+        };
+        drop(run);
+        let root = std::fs::canonicalize(&env.fixture.root).expect("the canonical scratch root");
+        let base = std::fs::canonicalize(&env.fixture.base).expect("the canonical managed base");
+        let common = env.fixture.manager.common_git_dir().to_path_buf();
+        assert_eq!(
+            std::fs::canonicalize(base.join(".git")).expect("the base's git directory"),
+            common,
+            "the run's common directory is the base's own"
+        );
+        assert!(
+            root.parent().is_some(),
+            "the scratch root is not the filesystem root"
+        );
+        let other = env.fixture.root.join("other");
+        crate::workspace_manager::fixture::create_dir(&other);
+        crate::workspace_manager::fixture::git(&other, &["init", "-q", "-b", "main"]);
+        let elsewhere = other.join(".git").join("worktrees");
+        crate::workspace_manager::fixture::create_dir(&elsewhere);
+        crate::workspace_manager::fixture::link_directory(
+            &elsewhere,
+            &env.fixture.base.join(".git").join("worktrees"),
+        );
+        let value = if sequence == "C5" {
+            let depth = base
+                .strip_prefix(&root)
+                .expect("the base is below the root")
+                .components()
+                .count();
+            let named = common
+                .strip_prefix(&root)
+                .expect("the common directory is below the root");
+            let mut relative = std::path::PathBuf::new();
+            for _ in 0..depth {
+                relative.push("..");
+            }
+            relative.push(named);
+            let work_trees = [
+                crate::workspace_manager::Slot::Task {
+                    key: "k0".to_owned(),
+                    generation: 1,
+                },
+                crate::workspace_manager::Slot::Staging { sequence: 1 },
+                crate::workspace_manager::Slot::Snapshot {
+                    name: crate::workspace_manager::SnapshotName::gates(0, 1, 1),
+                },
+                crate::workspace_manager::Slot::Snapshot {
+                    name: crate::workspace_manager::SnapshotName::integration(1),
+                },
+            ]
+            .map(|slot| env.fixture.manager.slot_path(&slot));
+            for from in std::iter::once(&base).chain(&work_trees) {
+                assert_eq!(
+                    from.ancestors().nth(depth).map(|top| top.join(named)),
+                    Some(common.clone()),
+                    "`{}` from {} names the run's common directory, climbing to the scratch \
+                     root and no further",
+                    relative.display(),
+                    from.display()
+                );
+            }
+            relative.into_os_string()
+        } else {
+            common.clone().into_os_string()
+        };
+        let bin = env.fixture.root.join("bin");
+        for (name, script) in [
+            (crate::engine::topology::scaffold::AGENT, F_HOSTED_AGENT),
+            (crate::engine::topology::scaffold::REVIEW_AGENT, F_HOSTED_AGENT),
+            ("gate", F_HOSTED_GATE),
+        ] {
+            let path = bin.join(name);
+            crate::workspace_manager::fixture::write_file(&path, script.as_bytes());
+            crate::workspace_manager::fixture::set_mode(&path, 0o755);
+        }
+        let path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        )))
+        .expect("a PATH that holds the scripts' directory");
+        let marker = env.fixture.root.join("worker-wrote-nothing");
+        let log = env.fixture.root.join("roles.log");
+        let ended = crate::agent::proc::test_support::run_test_isolated(
+            "engine::topology::coordinator::tests::hosted_linked_registry_child",
+            &[
+                ("GIT_COMMON_DIR", value.as_os_str()),
+                ("PATH", path.as_os_str()),
+                (F_HOSTED_ROOT, env.fixture.root.as_os_str()),
+                (F_HOSTED_BASE, below.as_os_str()),
+                ("UPSTROKE_TEST_F_RUN_COMMON", common.as_os_str()),
+                ("UPSTROKE_TEST_F_WORKER_MARKER", marker.as_os_str()),
+                ("UPSTROKE_TEST_F_ROLE_LOG", log.as_os_str()),
+            ],
+            Duration::from_secs(300),
+        );
+        assert!(
+            ended.status.is_some_and(|status| status.success())
+                && ended.stdout.contains("1 passed"),
+            "{sequence}'s layout under a run over the host runner: {ended}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hosted_run_under_a_linked_registry_and_an_inherited_absolute_common_dir_completes() {
+        f_hosted_linked_registry("C4");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hosted_run_under_a_linked_registry_and_an_inherited_relative_common_dir_at_equal_depth_completes()
+     {
+        f_hosted_linked_registry("C5");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "subprocess helper"]
+    fn hosted_linked_registry_child() {
+        let Some(root) = std::env::var_os(F_HOSTED_ROOT).map(std::path::PathBuf::from) else {
+            return;
+        };
+        let below = std::path::PathBuf::from(
+            std::env::var_os(F_HOSTED_BASE).expect("the base below the root"),
+        );
+        let tasks = [WideTask::independent("alpha")];
+        let env = crate::engine::topology::scaffold::WideEnv::adopted_over(
+            crate::workspace_manager::fixture::Fixture::adopt_based(root.clone(), &below),
+            &tasks,
+            1,
+            WidePlans::default(),
+        );
+        let (_, mut resumed) = env
+            .resume(
+                "inc-2",
+                RecordingRunner::new(),
+                crate::engine::topology::select::Ceiling::unlimited(),
+            )
+            .expect("the run resumes under the linked registry");
+        let host: std::sync::Arc<dyn crate::runner::Runner> =
+            std::sync::Arc::new(crate::runner::host::HostRunner::new());
+        let pipelines = resumed.env.pipelines_over(std::sync::Arc::clone(&host));
+        let mut hooks = resumed.env.hooks();
+        let progress = resumed
+            .run
+            .run_concurrently(&resumed.env.seams_over(&*host), &pipelines, &mut hooks, None)
+            .expect("the run over the host runner completes");
+        assert_eq!(outcome_of(&progress), RunOutcome::Complete);
+        assert!(
+            root.join("worker-wrote-nothing").exists(),
+            "the first attempt's worker left its slot as it was, so its failure was assessed"
+        );
+        let canonical_root = std::fs::canonicalize(&root).expect("the canonical scratch root");
+        let common = std::fs::canonicalize(root.join(&below).join(".git"))
+            .expect("the run's common directory");
+        let depth = below.components().count();
+        let named = common
+            .strip_prefix(&canonical_root)
+            .expect("the common directory is below the root")
+            .to_path_buf();
+        let relative = std::env::var_os("GIT_COMMON_DIR")
+            .is_some_and(|value| std::path::Path::new(&value).is_relative());
+        let log = String::from_utf8(std::fs::read(root.join("roles.log")).expect("the roles' log"))
+            .expect("a UTF-8 log");
+        let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
+        for line in log.lines() {
+            let (role, cwd) = line.split_once(' ').expect("a role and its directory");
+            *seen.entry(role).or_insert(0) += 1;
+            if relative {
+                assert_eq!(
+                    std::path::Path::new(cwd)
+                        .ancestors()
+                        .nth(depth)
+                        .map(|top| top.join(&named)),
+                    Some(common.clone()),
+                    "the relative `GIT_COMMON_DIR` from {role}'s directory {cwd} names the run's \
+                     common directory"
+                );
+            }
+        }
+        for (role, what) in [
+            ("--implement", "the worker, once leaving its slot as it was and once working"),
+            ("gate", "the attempt's gate and the verification's"),
+            ("--prompt", "the attempt's review pass and the verification's"),
+        ] {
+            assert!(
+                seen.get(role).copied().unwrap_or(0) >= 2,
+                "{what} ran over the host runner: {log}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
     struct HostHeld {
         host: crate::runner::host::HostRunner,
         pids: std::path::PathBuf,

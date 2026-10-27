@@ -1434,6 +1434,53 @@ carried (R-Z). The coordinator is killed; every one of the three processes is go
 settles, the holds are released after them, nothing of the dead coordinator is held, and the next
 coordinator resumes with empty ledgers and completes.
 
+## `mod tests` › `fn f_hosted_linked_registry(sequence: &str) {`
+
+T-ENV-TOPO, the external-prune follow-up's integration correction at the topology, under the
+production host runner (F; Unix). It builds one layout's run, with the run's `worktrees` store a link
+into another repository (R-C-REGISTRY's part 2):
+
+- **C4:** an absolute `GIT_COMMON_DIR`, the base at `<root>/repo`.
+- **C5:** a relative value, the base at `EQUAL_DEPTH_BASE`, the proposal's equal-depth construction.
+
+**The parent:**
+
+- **The run and the link.** It creates the run, drops it and plants the link.
+- **C5's value.** It derives the relative value from the canonical paths. It asserts that the value
+  names the run's common directory, climbing to the scratch root and no further, from each of these
+  directories: the base, a task slot, a merge slot, a gate snapshot and an integration snapshot.
+- **The scripts.** It writes three scripts to a directory it puts first on the child's `PATH`:
+  - the two agents' command-line programs. Each logs its first argument and its directory. As the
+    worker, it leaves the slot as it was on its first run and writes `src/alpha/work.txt` after that;
+  - `gate`. It logs, then requires `git rev-parse --git-common-dir` to be the run's canonical common
+    directory and `HEAD^{tree}` to be readable.
+- **The child.** It starts the child with the value inherited.
+
+## `mod tests` › `fn a_hosted_run_under_a_linked_registry_and_an_inherited_absolute_common_dir_completes() {`
+
+T-ENV-TOPO's C4 row.
+
+## `mod tests` › `fn a_hosted_run_under_a_linked_registry_and_an_inherited_relative_common_dir_at_equal_depth_completes()`
+
+T-ENV-TOPO's C5 row.
+
+## `mod tests` › `fn hosted_linked_registry_child() {`
+
+T-ENV-TOPO's child. It adopts the fixture (`Fixture::adopt_based`), resumes as `inc-2`, and drives the
+run with `run_concurrently` over `HostRunner::new()` for both the coordinator's seams and the
+pipelines'. The run must complete. Its steps reach each placement:
+
+- **Placement 3.** The first attempt's empty diff is a failure that placement 3 judges, so completion
+  shows that placement 3 accepted it.
+- **Placement 2.** The gates' verdicts and the review passes' verdicts.
+- **Placement 1.** The capture's reads.
+- **C1-AP.** The review-input reads.
+
+**The role log** must show the worker twice, two gates and two review passes. Under C5, every logged
+directory must name the run's common directory by the relative value.
+
+**Predicted:** red at `f1842dcd` (the overlay) and under the reversal, at the first guarded read.
+
 ## `mod tests` › `fn the_broker_ledgers_balance_at_every_end_and_start_empty_at_every_next_start_at_width_three()`
 
 ST-09's broker rows over the ends phase 4 built: Complete, Parked, Halted, BudgetExceeded, an append

@@ -2930,7 +2930,49 @@ impl Wide {
         ceiling: super::select::Ceiling,
         identity: &DurableIdentity,
     ) -> Self {
-        let mut fixture = Fixture::created(tag);
+        Self::durable_over(
+            Fixture::created(tag),
+            tasks,
+            max_parallel,
+            plans,
+            runner,
+            ceiling,
+            identity,
+        )
+    }
+
+    #[cfg(unix)]
+    pub(super) fn durable_based(
+        tag: &str,
+        below: &Path,
+        tasks: &[WideTask],
+        max_parallel: u32,
+        plans: WidePlans,
+        runner: RecordingRunner,
+    ) -> Self {
+        Self::durable_over(
+            Fixture::created_based(tag, below),
+            tasks,
+            max_parallel,
+            plans,
+            runner,
+            super::select::Ceiling::unlimited(),
+            &DurableIdentity {
+                incarnation: DURABLE_INCARNATION.to_owned(),
+                runner: None,
+            },
+        )
+    }
+
+    fn durable_over(
+        mut fixture: Fixture,
+        tasks: &[WideTask],
+        max_parallel: u32,
+        plans: WidePlans,
+        runner: RecordingRunner,
+        ceiling: super::select::Ceiling,
+        identity: &DurableIdentity,
+    ) -> Self {
         let run_id = crate::workspace_manager::fixture::RUN_ID;
         if identity.incarnation != DURABLE_INCARNATION {
             fixture.manager = WorkspaceManager::derive(
@@ -3076,7 +3118,15 @@ impl WideEnv {
         max_parallel: u32,
         plans: WidePlans,
     ) -> Self {
-        let fixture = Fixture::adopt(root);
+        Self::adopted_over(Fixture::adopt(root), tasks, max_parallel, plans)
+    }
+
+    pub(super) fn adopted_over(
+        fixture: Fixture,
+        tasks: &[WideTask],
+        max_parallel: u32,
+        plans: WidePlans,
+    ) -> Self {
         let paths = durable_paths(&fixture);
         let log = paths.public.join(crate::rundir::EVENT_LOG);
         Self {
