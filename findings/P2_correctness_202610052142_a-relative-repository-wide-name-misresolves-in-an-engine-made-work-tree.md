@@ -8,7 +8,7 @@ reviewed_sha: 5c222ff2162da28aa471433773bf4966a883a428
 location: src/runner/host/environment.rs:349
 provenance: pre_existing
 first_bad:
-guard: the schema-4 start refusal R5 adds, `refuse_relative_repository_wide_names` in `src/workspace_manager.rs`, run first in `prelock::check` and again in `WorkspaceManager::derive` before the manager's first Git child, keeps the topology face unreachable; the two faces left are accepted by name by the owner (adoption `818e7675…`, `adopted.ENV.choices[3]`, 2026-10-15)
+guard: for the topology face, the adopted schema-4 start refusal R5 adds, `refuse_relative_repository_wide_names` in `src/workspace_manager.rs`, run first in `prelock::check` and again in `WorkspaceManager::derive` before the manager's first Git child: implemented, not yet validated (tests, native CI and fresh review pending); the two faces left are accepted by name by the owner (adoption `818e7675…`, `adopted.ENV.choices[3]`, 2026-10-15)
 ---
 
 ## Narrowed to its two accepted faces
@@ -21,7 +21,8 @@ schema4 refusals and the selected acceptance of legacy/pre2.55GIT_COMMON_DIR fac
 `68042083b13acd3fc7c4500b6ac9c00f1beb3262b09a2ab2f204a2004ff2bf95`, §2.3b. The route has two halves, and this record
 now holds only the second.
 
-**The topology face is refused, not accepted.** R5 implements the adopted refusal (report `:515-521`):
+**The topology face is not accepted; the adopted refusal is its route.** R5 implements that refusal (report
+`:515-521`):
 
 > A schema-4 (topology) run, and its resume, refuses before it makes or reuses any slot when the coordinator's inherited
 > environment holds, for `GIT_OBJECT_DIRECTORY`, `GIT_SHALLOW_FILE`, `GIT_GRAFT_FILE`, `GIT_CONFIG`, `GIT_CONFIG_GLOBAL`
@@ -33,8 +34,23 @@ now holds only the second.
 
 The check is `refuse_relative_repository_wide_names` in `src/workspace_manager.rs`. `prelock::check` runs it as its
 first statement, and `WorkspaceManager::derive`, the manager's only constructor, runs it again before the manager's first
-Git child, so a fresh run and a resume both refuse before any lock, probe or slot. Its witnesses, "REL objects, sibling"
-among them, are the R5 pull request's.
+Git child, so that a fresh run and a resume refuse before they make or reuse any slot. **It is implemented, not yet
+validated:** its tests, native CI and a fresh review are pending, and until they pass this record claims no topology row
+closed. Its witnesses, "REL objects, sibling" among them, are the R5 pull request's.
+
+**Implementation facts and limits.**
+- **Git versions.** The alternates rule was read in Git's own source at v2.41.0 (the oldest version README.md supports),
+  v2.43.0 and v2.55.0, and at Git for Windows v2.53.0.windows.1, and is the same rule in all four; versions between them
+  are inferred from that identity. The Git for Windows version native CI runs is recorded when it runs.
+- **What cannot be classified exactly** is refused: an entry whose unquoting decodes a NUL byte (Git reads the entry only
+  as far as it) and, on Windows, an entry that is not Unicode once unquoted.
+- **Empty values** are not absolute paths and are refused, although Git reads an empty `GIT_SHALLOW_FILE`,
+  `GIT_CONFIG_GLOBAL` or `GIT_CONFIG_SYSTEM` as naming no file; that is a compatibility consequence of the adopted rule.
+  An empty alternates list has no entry and is not refused.
+- **The witness gap.** No witness drives a full resume under an inherited relative name: a test never sets its own
+  process's environment, and the scaffold's adopted environment derives a manager before it resumes. The resume-path
+  witness is a `derive` check with the resume's arguments, and the source census shows that `derive` is a resume's first
+  call and the manager's only constructor.
 
 **The two remaining faces, accepted by name by the owner** (`adopted.ENV.choices[3]`, 2026-10-15; report `:525-530`),
 verbatim:
@@ -151,8 +167,8 @@ not adopted, and the owner classifies (`MAINTAINING.md:189`).
 
 **What clears it.** A lower grade is not clearance (proposal `:3972-3973`). Neither is filing it, nor its `deferred`
 disposition, which meant pending review and the owner's decision, not deferred past G6. Since the adoption, the topology
-face is satisfied by implementation, the start refusal, and the two faces above by an exact documented disposition,
-this record's `accepted-risk` (report §3.2, `:731-732`).
+face is to be satisfied by implementation, the start refusal, which is implemented and not yet validated, and the two
+faces above by an exact documented disposition, this record's `accepted-risk` (report §3.2, `:731-732`).
 
 ## Step 5 and the witness
 
@@ -161,6 +177,10 @@ finding carrying a reproduction witness is fixed whatever its severity. It may b
 witness does not reproduce on the head. Which of two things it is, triage and the owner decide:
 - relevant to a change that implements option (C);
 - a pre-existing finding, logged under `:38-40`.
+
+**Status under that rule.** The executed rows are the topology face's, which R5's refusal is written to close; until its
+tests, native CI and a fresh review pass, this record claims no row fixed. The two faces the owner accepted are accepted,
+not fixed.
 
 **The witness obligation.** A change that takes this up must show, failing at its base and passing after it, that a
 process in a work tree the engine made, under each relative name above, addresses the repository's own store, history

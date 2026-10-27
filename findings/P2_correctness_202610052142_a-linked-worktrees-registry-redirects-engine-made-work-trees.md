@@ -8,7 +8,7 @@ reviewed_sha: 5c222ff2162da28aa471433773bf4966a883a428
 location: src/workspace_manager.rs:2619
 provenance: pre_existing
 first_bad:
-guard: the schema-4 start refusal R5 adds, `refuse_linked_registry` in `src/workspace_manager.rs`, run in `WorkspaceManager::derive` once the canonical common directory is known and before any registry access, refuses part 1; part 2 is accepted by name by the owner (adoption `818e7675…`, `adopted.ENV.choices[4]`, 2026-10-15)
+guard: for part 1, the adopted schema-4 start refusal R5 adds, `refuse_linked_registry` in `src/workspace_manager.rs`, run in `WorkspaceManager::derive` once the canonical common directory is known and before any registry access: implemented, not yet validated (tests, native CI and fresh review pending); part 2 is accepted by name by the owner (adoption `818e7675…`, `adopted.ENV.choices[4]`, 2026-10-15)
 ---
 
 ## Narrowed to part 2
@@ -21,7 +21,7 @@ part1 schema4 refusal; part2 exact acceptance"), from the ENV decision report
 `68042083b13acd3fc7c4500b6ac9c00f1beb3262b09a2ab2f204a2004ff2bf95`, §2.3c. Part 1 is refused; this record now holds
 part 2 only.
 
-**Part 1 is refused, not accepted.** R5 implements the adopted refusal (report `:608-611`):
+**Part 1 is not accepted; the adopted refusal is its route.** R5 implements that refusal (report `:608-611`):
 
 > A schema-4 (topology) run, and its resume, refuses before it makes or reuses any slot when the run's common directory
 > holds a `worktrees` entry whose canonical path's parent is not the canonical common directory, and the coordinator
@@ -30,10 +30,23 @@ part 2 only.
 
 The check is `refuse_linked_registry` in `src/workspace_manager.rs`. `WorkspaceManager::derive`, the manager's only
 constructor, runs it as soon as its one read-only `git rev-parse --git-common-dir` has found the canonical common
-directory, and before any registry access, so a fresh run and a resume both refuse before any slot; the check itself
-starts no process. It refuses a link into another repository, a chain of links, and a link inside the common directory
-whose target's parent is elsewhere, and on Windows a junction. Its witnesses, "symlinked registry, nothing inherited"
-among them, are the R5 pull request's.
+directory, and before any registry access, so that a fresh run and a resume refuse before they make or reuse any slot;
+the check itself starts no process. It is written to refuse a link into another repository, a chain of links, a link
+inside the common directory whose target's parent is elsewhere, and on Windows a junction. **It is implemented, not yet
+validated:** its tests, native CI and a fresh review are pending, and until they pass this record claims no part-1 row
+closed. Its witnesses, "symlinked registry, nothing inherited" among them, are the R5 pull request's.
+
+**Implementation facts and limits.**
+- **An empty inherited `GIT_COMMON_DIR` counts as inherited**, so it is part 2's layout and not refused: Git takes a set
+  variable as set (`get_common_dir` in `setup.c`, at v2.41.0 and v2.55.0).
+- **A `worktrees` entry that cannot be resolved**, a link whose target is gone among them, makes `derive` fail closed with
+  an I/O error before any slot, not with this refusal: its canonical parent cannot be known.
+- **The topology-analogue gap.** C5's layout has no topology analogue: it needs a base as deep below the scratch root as
+  the slots are, and the scaffold's fixture fixes the base, so C5 is covered at the manager. Part 2's acceptance is decided
+  in `derive` from whether a `GIT_COMMON_DIR` is inherited, and nothing else in R5 reads it.
+- **Git versions.** The condition rests on Git resolving the `../..` record through the administrative directory's real
+  path, which the proposal's harness executed on Git 2.43.0, 2.50.1 and 2.55.0 (below); R5 did not re-read it in Git's
+  source. Junctions are executed only by native Windows CI.
 
 **Part 2, accepted by name by the owner** (`adopted.ENV.choices[4]`, 2026-10-15; report `:615-620`), verbatim:
 
@@ -137,8 +150,9 @@ not adopted, and the owner classifies (`MAINTAINING.md:189-190`).
   The proposal counts this finding closed under no reading.
 
 **What clears it.** Neither filing it, nor its `deferred` disposition (which meant pending review and the owner's
-decision, not deferred past G6), nor its proposed grade. Since the adoption, part 1 is satisfied by implementation, the
-start refusal, and part 2 by an exact documented disposition, this record's `accepted-risk` (report §3.2, `:733-734`).
+decision, not deferred past G6), nor its proposed grade. Since the adoption, part 1 is to be satisfied by implementation,
+the start refusal, which is implemented and not yet validated, and part 2 by an exact documented disposition, this
+record's `accepted-risk` (report §3.2, `:733-734`).
 
 ## Step 5 and the witness
 
@@ -148,6 +162,10 @@ only by a row showing the witness does not reproduce on the head. Which of two t
 decide:
 - relevant to a change that implements option (C);
 - a pre-existing finding, logged under `:38-40`.
+
+**Status under that rule.** Part 1's executed rows are the ones R5's refusal is written to close; until its tests,
+native CI and a fresh review pass, this record claims no row fixed. Part 2, which the owner accepted, is accepted, not
+fixed.
 
 **The witness obligation.** A change that takes this up must show, failing at its base and passing after it, that a
 gated run and a slot run under a linked registry keep their objects and shared refs in the run's repository, or are
