@@ -21911,19 +21911,23 @@ const DERIVE_ERROR: &str = "UPSTROKE_R5_DERIVE_ERROR: ";
 #[cfg(unix)]
 const DERIVE_DERIVED: &str = "UPSTROKE_R5_DERIVE_DERIVED";
 
-/// R-C-RELSTORE at the `derive` boundary, each case in an isolated
-/// child whose environment alone carries the name: red at the bound master for
-/// every case that refuses, and green at both for every case that does not.
-/// Each of the six scalar names refuses relative and empty, and is accepted
-/// absolute; the alternates list refuses a relative entry, the bytes a quoted
-/// absolute entry leaves after its closing quote, and broken quoting, and
-/// accepts an empty list, a quoted absolute entry and a comment. Every refusal
-/// names the variable and says to export it as an absolute path, and none
-/// leaves an intent or a slot in the execution root, which was made clean.
+/// The managed checkout, private root and clean execution root of the
+/// relative-name `derive` witnesses, made in this process's own environment,
+/// which sets none of the names.
 #[cfg(unix)]
-#[test]
-fn derive_refuses_each_relative_repository_wide_name_before_any_slot_and_accepts_absolute_ones() {
-    let tree = scratch("relative-names-derive");
+struct RelativeNameLayout {
+    /// The scratch tree that holds them, whose path is the children's root.
+    tree: crate::rundir::scratch_tree::ScratchTree,
+    /// The manager derived over them, whose execution root must stay empty.
+    manager: WorkspaceManager,
+    /// The run's object store, canonical: an absolute value that names it.
+    store: PathBuf,
+}
+
+/// [`RelativeNameLayout`] under a scratch tree tagged `tag`.
+#[cfg(unix)]
+fn relative_name_layout(tag: &str) -> RelativeNameLayout {
+    let tree = scratch(tag);
     let root = tree.path();
     let managed = root.join("managed");
     context_repository(&managed, &[("README.md", "readme\n")]);
@@ -21939,11 +21943,51 @@ fn derive_refuses_each_relative_repository_wide_name_before_any_slot_and_accepts
         .create_execution_root(&mut NoHooks)
         .expect("the execution root");
     let store = fs::canonicalize(managed.join(".git/objects")).expect("the run's store");
-    let listed = store.display().to_string();
-    let absent = root.join("absent");
-    let neutral = super::fixture::neutral_git_config().as_os_str().to_owned();
-    let alternates = "GIT_ALTERNATE_OBJECT_DIRECTORIES";
-    let mut cases: Vec<(&str, OsString, bool)> = Vec::new();
+    RelativeNameLayout {
+        tree,
+        manager,
+        store,
+    }
+}
+
+/// One relative-name case: `derive` over the layout's managed checkout in an
+/// isolated child whose environment carries `name` holding `value`. The child's
+/// report, once it has run and the execution root still holds no intent and no
+/// slot.
+#[cfg(unix)]
+fn derive_in_a_child(layout: &RelativeNameLayout, name: &str, value: &OsStr) -> String {
+    let label = format!("`{name}={}`", Path::new(value).display());
+    let ended = crate::agent::proc::test_support::run_test_isolated(
+        "workspace_manager::tests::relative_name_derive_helper",
+        &[(name, value), (CONTEXT_ROOT, layout.tree.path().as_os_str())],
+        std::time::Duration::from_secs(180),
+    );
+    assert!(
+        ended.status.is_some_and(|status| status.success()) && ended.stdout.contains("1 passed"),
+        "{label}: {ended}"
+    );
+    let root = layout.manager.execution_root();
+    assert!(
+        entry_names(&root.join("intents")).is_empty()
+            && entry_names(&root.join("tasks")).is_empty(),
+        "{label}: no intent and no slot"
+    );
+    ended.stdout
+}
+
+/// R-C-RELSTORE at the `derive` boundary, red at the bound master and green
+/// here, each case in an isolated child whose environment alone carries the
+/// name: each of the six scalar names relative and empty, and an alternates
+/// list with a relative entry, with the bytes a quoted absolute entry leaves
+/// after its closing quote, or with broken quoting. Every case refuses, naming
+/// the variable and saying to export it as an absolute path, and leaves no
+/// intent and no slot in the execution root, which was made clean.
+#[cfg(unix)]
+#[test]
+fn derive_refuses_each_relative_repository_wide_name_before_any_slot() {
+    let layout = relative_name_layout("relative-names-refused");
+    let listed = layout.store.display().to_string();
+    let mut cases: Vec<(&str, String)> = Vec::new();
     for name in [
         "GIT_OBJECT_DIRECTORY",
         "GIT_SHALLOW_FILE",
@@ -21952,79 +21996,60 @@ fn derive_refuses_each_relative_repository_wide_name_before_any_slot_and_accepts
         "GIT_CONFIG_GLOBAL",
         "GIT_CONFIG_SYSTEM",
     ] {
-        cases.push((name, OsString::from("../elsewhere"), true));
-        cases.push((name, OsString::new(), true));
+        cases.push((name, "../elsewhere".to_owned()));
+        cases.push((name, String::new()));
     }
+    let alternates = "GIT_ALTERNATE_OBJECT_DIRECTORIES";
     cases.extend([
-        ("GIT_OBJECT_DIRECTORY", store.into_os_string(), false),
-        (
-            "GIT_SHALLOW_FILE",
-            absent.join("shallow").into_os_string(),
-            false,
-        ),
-        (
-            "GIT_GRAFT_FILE",
-            absent.join("grafts").into_os_string(),
-            false,
-        ),
-        ("GIT_CONFIG", absent.join("config").into_os_string(), false),
-        ("GIT_CONFIG_GLOBAL", neutral.clone(), false),
-        ("GIT_CONFIG_SYSTEM", neutral, false),
-        (alternates, OsString::new(), false),
-        (alternates, OsString::from(format!("\"{listed}\"")), false),
-        (
-            alternates,
-            OsString::from(format!("#../not-a-path:{listed}")),
-            false,
-        ),
-        (alternates, OsString::from("../pool"), true),
-        (
-            alternates,
-            OsString::from(format!("{listed}:../pool")),
-            true,
-        ),
-        (
-            alternates,
-            OsString::from(format!("\"{listed}\"/pool")),
-            true,
-        ),
-        (
-            alternates,
-            OsString::from(format!("\"{listed}:{listed}")),
-            true,
-        ),
+        (alternates, "../pool".to_owned()),
+        (alternates, format!("{listed}:../pool")),
+        (alternates, format!("\"{listed}\"/pool")),
+        (alternates, format!("\"{listed}:{listed}")),
     ]);
-    for (name, value, refused) in cases {
-        let label = format!("`{name}={}`", Path::new(&value).display());
-        let ended = crate::agent::proc::test_support::run_test_isolated(
-            "workspace_manager::tests::relative_name_derive_helper",
-            &[(name, value.as_os_str()), (CONTEXT_ROOT, root.as_os_str())],
-            std::time::Duration::from_secs(180),
-        );
+    for (name, value) in cases {
+        let report = derive_in_a_child(&layout, name, OsStr::new(&value));
         assert!(
-            ended.status.is_some_and(|status| status.success())
-                && ended.stdout.contains("1 passed"),
-            "{label}: {ended}"
+            report.contains(DERIVE_ERROR)
+                && report.contains(&format!("the inherited `{name}`"))
+                && report.contains(&format!("export `{name}` as an absolute path")),
+            "`{name}={value}` refuses `derive`, naming the variable: {report}"
         );
-        if refused {
-            assert!(
-                ended.stdout.contains(DERIVE_ERROR)
-                    && ended.stdout.contains(&format!("the inherited `{name}`"))
-                    && ended
-                        .stdout
-                        .contains(&format!("export `{name}` as an absolute path")),
-                "{label} refuses `derive`, naming the variable: {ended}"
-            );
-        } else {
-            assert!(
-                ended.stdout.contains(DERIVE_DERIVED),
-                "{label} is not refused: {ended}"
-            );
-        }
+    }
+}
+
+/// RS-2, and the accepting halves of RS-3 and RS-4, at the `derive` boundary:
+/// green at the bound master and here, each case in an isolated child whose
+/// environment alone carries the name. Each of the six scalar names holding an
+/// absolute path, and an alternates list that is empty, one quoted absolute
+/// entry, or a comment before an absolute entry, is not refused, and leaves no
+/// intent and no slot in the execution root.
+#[cfg(unix)]
+#[test]
+fn derive_accepts_each_absolute_repository_wide_name() {
+    let layout = relative_name_layout("relative-names-accepted");
+    let listed = layout.store.display().to_string();
+    let store = layout.store.clone().into_os_string();
+    let absent = layout.tree.path().join("absent");
+    let neutral = super::fixture::neutral_git_config().as_os_str().to_owned();
+    let quoted = format!("\"{listed}\"");
+    let commented = format!("#../not-a-path:{listed}");
+    let alternates = "GIT_ALTERNATE_OBJECT_DIRECTORIES";
+    for (name, value) in [
+        ("GIT_OBJECT_DIRECTORY", store),
+        ("GIT_SHALLOW_FILE", absent.join("shallow").into_os_string()),
+        ("GIT_GRAFT_FILE", absent.join("grafts").into_os_string()),
+        ("GIT_CONFIG", absent.join("config").into_os_string()),
+        ("GIT_CONFIG_GLOBAL", neutral.clone()),
+        ("GIT_CONFIG_SYSTEM", neutral),
+        (alternates, OsString::new()),
+        (alternates, OsString::from(quoted)),
+        (alternates, OsString::from(commented)),
+    ] {
+        let report = derive_in_a_child(&layout, name, &value);
         assert!(
-            entry_names(&manager.execution_root().join("intents")).is_empty()
-                && entry_names(&manager.execution_root().join("tasks")).is_empty(),
-            "{label}: no intent and no slot"
+            report.contains(DERIVE_DERIVED),
+            "`{name}={}` is not refused: {report}",
+            Path::new(&value).display()
         );
     }
 }
@@ -22103,7 +22128,7 @@ fn a_relative_object_directory_is_refused_before_the_store_beside_the_slot_is_wr
     );
 }
 
-/// The child of the two relative-name witnesses above: `derive` over the
+/// The child of the three relative-name witnesses above: `derive` over the
 /// managed checkout the parent made, under the names its environment
 /// inherited, and, when the parent asked for it and nothing refused, the slot
 /// run.
