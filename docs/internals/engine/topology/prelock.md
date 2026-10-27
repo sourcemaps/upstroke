@@ -141,8 +141,8 @@ Perform the read-only pre-lock checks, in the packet's order.
 0. R-C-RELSTORE's start refusal, before everything else: the coordinator's
    inherited environment, read for exactly seven repository-wide names, refused
    when one holds a value, or an alternates entry, that is not an absolute path.
-   It is not one of the packet's checks; it comes first because a fresh
-   schema-4 run must refuse it before any lock, inspection or slot.
+   It is not one of the packet's checks; it comes first so that a fresh
+   schema-4 run refuses it before anything this function inspects.
 1. The authorized private root: canonicalized, and refused when it is not an
    existing real directory. `run_creation` records the marker's `private_dir`
    "as a canonical path", and a root that is not there yet cannot be

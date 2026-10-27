@@ -217,7 +217,8 @@ const ALTERNATES_SEPARATOR: u8 = b':';
 ///
 /// `prelock::check` runs it as its first statement, and
 /// [`WorkspaceManager::derive`] runs it again before its first Git child, so a
-/// fresh schema-4 run and a resume both refuse before any lock, probe or slot.
+/// fresh schema-4 run refuses in its pre-lock checks, and every path that makes
+/// or reuses a slot, a resume's included, refuses before it does.
 ///
 /// # Errors
 ///
