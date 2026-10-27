@@ -232,6 +232,19 @@ Windows would be handed is longer than its budget of 220 bytes in UTF-8, the len
 run cannot move its private root, so such a run is finished by a binary whose names fit, or
 abandoned.
 
+**Two inherited layouts refuse a schema-4 run, and its resume, at its start**, before any lock,
+probe or slot (adopted by the owner on 2026-10-15). One is a repository-wide name that a process in a
+work tree the engine made would resolve from that work tree: `GIT_OBJECT_DIRECTORY`,
+`GIT_SHALLOW_FILE`, `GIT_GRAFT_FILE`, `GIT_CONFIG`, `GIT_CONFIG_GLOBAL` or `GIT_CONFIG_SYSTEM`
+holding a value that is not an absolute path by the platform's rule, or a
+`GIT_ALTERNATE_OBJECT_DIRECTORIES` entry that is not one, split and unquoted as Git splits and
+unquotes that list; the refusal names the variable and says to export it as an absolute path, and an
+inherited `GIT_COMMON_DIR` is not refused (§26). The other is a `worktrees` registry whose canonical
+path's parent is not the run's canonical common directory while no `GIT_COMMON_DIR` is inherited,
+because the record Git writes for a new work tree would then name another directory; the refusal
+names the entry and its target. With a `GIT_COMMON_DIR` inherited, a linked registry is accepted,
+and a work tree's shared refs are then the linked repository's. Legacy runs are unchanged.
+
 **What stays outside it.**
 - The run's refs are shared by every incarnation of the run, by design. On Unix the cleanup lease
   orders an engine `update-ref`; on Windows a terminated one's ref write landing after its
