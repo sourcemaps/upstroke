@@ -1,15 +1,60 @@
 ---
 id: R-C-RELSTORE
 severity: P2
-disposition: deferred
+disposition: accepted-risk
 category: correctness
 pr:
 reviewed_sha: 5c222ff2162da28aa471433773bf4966a883a428
 location: src/runner/host/environment.rs:349
 provenance: pre_existing
 first_bad:
-guard: the owner's choice among the proposal's routes, none of them drafted, before G6, which cannot pass while it is applicable and open; the routes are a mechanism that gives a process in a work tree the engine made each relative repository-wide value made absolute against the started checkout, a specific owner exception, or a refusal of relative repository-wide names at the start
+guard: the schema-4 start refusal R5 adds, `refuse_relative_repository_wide_names` in `src/workspace_manager.rs`, run first in `prelock::check` and again in `WorkspaceManager::derive` before the manager's first Git child, keeps the topology face unreachable; the two faces left are accepted by name by the owner (adoption `818e7675…`, `adopted.ENV.choices[3]`, 2026-10-15)
 ---
+
+## Narrowed to its two accepted faces
+
+**What this record covers now.** On 2026-10-15 the owner adopted the route for R-C-RELSTORE
+(`/home/ubuntu/babysit-pr11/evidence/g6-three-package-owner-adoption-20261015.json`, sha256
+`818e76756e2b87f2a4676cae886e09e71f39b6f34ddb0a8a0234bc087dcc29f1`, `adopted.ENV.choices[3]`: "R-C-RELSTORE
+schema4 refusals and the selected acceptance of legacy/pre2.55GIT_COMMON_DIR faces"), from the ENV decision report
+`/home/ubuntu/orch-pr11/logs/pr11_decide_env_g6/DECISION-REPORT.md`, sha256
+`68042083b13acd3fc7c4500b6ac9c00f1beb3262b09a2ab2f204a2004ff2bf95`, §2.3b. The route has two halves, and this record
+now holds only the second.
+
+**The topology face is refused, not accepted.** R5 implements the adopted refusal (report `:515-521`):
+
+> A schema-4 (topology) run, and its resume, refuses before it makes or reuses any slot when the coordinator's inherited
+> environment holds, for `GIT_OBJECT_DIRECTORY`, `GIT_SHALLOW_FILE`, `GIT_GRAFT_FILE`, `GIT_CONFIG`, `GIT_CONFIG_GLOBAL`
+> or `GIT_CONFIG_SYSTEM`, a value that is not an absolute path by the platform's rule, or a
+> `GIT_ALTERNATE_OBJECT_DIRECTORIES` entry that is not, split and unquoted exactly as Git splits and unquotes that list; a
+> value the check cannot classify exactly is refused. The refusal names the variable and says to export it as an
+> absolute path. It starts no process. Legacy runs, probes and the legacy worker are unchanged, and `GIT_COMMON_DIR` is
+> not refused: option (C) gives a relative one its meaning at the started checkout.
+
+The check is `refuse_relative_repository_wide_names` in `src/workspace_manager.rs`. `prelock::check` runs it as its
+first statement, and `WorkspaceManager::derive`, the manager's only constructor, runs it again before the manager's first
+Git child, so a fresh run and a resume both refuse before any lock, probe or slot. Its witnesses, "REL objects, sibling"
+among them, are the R5 pull request's.
+
+**The two remaining faces, accepted by name by the owner** (`adopted.ENV.choices[3]`, 2026-10-15; report `:525-530`),
+verbatim:
+
+> **R-C-RELSTORE's two remaining faces, accepted by name.** (1) A legacy gated run under such a relative value fails
+> closed at its snapshot; on master the coordinator then keeps the worker's output in the checkout and pins it instead of
+> discarding it, so the run fails without losing that output, and fails again on resume until the value is exported as
+> an absolute path. (2) On Git before 2.55, Git's own checkout child of `git worktree add` reads an inherited relative
+> `GIT_COMMON_DIR` from the new work tree, and the add fails closed with nothing outside changed. Neither face writes
+> outside the repository's store or gives a role another repository's view.
+
+**Face (1) is an inference.** That master keeps and pins the worker's output rather than discarding it is read from the
+coordinator's code; no executed legacy test shows it for a gated run under "REL objects, sibling" (report `:594-596`).
+Root's commission for R5 (`/home/ubuntu/babysit-pr11/evidence/g6-active-goal-20261025/R5-IMPLEMENTATION-COMMISSION-AUTHORITY.json`,
+sha256 `2c18fdb7662b87120236d648657d1875ae2bbb1d9c37d10a788f424af6a5d3c8`, `decisions[5]`) keeps that qualification
+rather than adding the evidence.
+
+**Grade.** P2, as filed. The narrowing lowers nothing (report `:580`).
+
+The sections below are the record as filed on 2026-10-05; where the adoption has since answered them, each says so.
 
 ## Failure sequence
 
@@ -105,7 +150,9 @@ not adopted, and the owner classifies (`MAINTAINING.md:189`).
   (proposal `:3964-3971`).
 
 **What clears it.** A lower grade is not clearance (proposal `:3972-3973`). Neither is filing it, nor its `deferred`
-disposition, which means pending review and the owner's decision, not deferred past G6.
+disposition, which meant pending review and the owner's decision, not deferred past G6. Since the adoption, the topology
+face is satisfied by implementation, the start refusal, and the two faces above by an exact documented disposition,
+this record's `accepted-risk` (report §3.2, `:731-732`).
 
 ## Step 5 and the witness
 
@@ -122,6 +169,9 @@ legacy worker-only runs must keep working.
 
 ## The owner's choices (none is made here)
 
+**Made on 2026-10-15**, after filing: the refusal, narrowed to topology runs, with the two faces outside it accepted by
+name (above).
+
 From the proposal's §8.2 (`:3974-3982`):
 - **A fix.** Give a process in a work tree the engine made each relative value, made absolute against the started
   checkout's top level, as (C) now does for `GIT_COMMON_DIR` alone. For the other names that is "OPEN: NEEDS A
@@ -137,6 +187,8 @@ From the proposal's §8.2 (`:3974-3982`):
 ## What the change that takes this up should do
 
 **No remedy is chosen here.** The change follows from the owner's choice, and the witness obligation above binds it.
+R5 is that change: the refusal, with the witness obligation above as its tests, "REL objects, sibling" among them;
+legacy worker-only runs are untouched.
 
 ## Provenance
 
@@ -154,3 +206,15 @@ own processes. `first_bad` was not traced.
   unpushed and not adopted.
 - **What filing does not do.** It adopts nothing: not option (C), not this residual's label, not its proposed grade. It
   is not clearance for merge or G6.
+
+## Narrowed
+
+- **When and by whom:** 2026-10-27, by `env-r5-gate-6` (`claude-opus-5-5`), in the R5 change, the `bulk-fix-P2` pull
+  request for the two adopted schema-4 start refusals.
+- **On whose direction:** root's commission
+  `/home/ubuntu/babysit-pr11/evidence/g6-active-goal-20261025/R5-IMPLEMENTATION-COMMISSION-AUTHORITY.json` (sha256
+  `2c18fdb7662b87120236d648657d1875ae2bbb1d9c37d10a788f424af6a5d3c8`), under the owner's adoption above.
+- **As what:** the record of the owner's acceptance of the two faces the refusal leaves, with the refusal implemented
+  beside it.
+- **What narrowing does not do.** It lowers no grade, accepts no topology face, and is no clearance for G6 by itself:
+  the refusal's executed evidence and the PR's review are what G6 cites, with this acceptance.
