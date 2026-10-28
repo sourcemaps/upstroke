@@ -1501,7 +1501,8 @@ value it is a host runner that holds the run's repository (`ObjectGraph::Recorde
 `ManagedRepository::new`, its include written at `<root>/recorded-objects.gitconfig`): under option
 (C) a role in a work tree the engine made is given the common directory its runner holds in place
 of an inherited relative value, and a runner that holds none refuses that role before it starts.
-The run must complete. Its steps reach each placement:
+`f_hosted_runner` builds that runner, which T-NOREQ's child takes too. The run must complete. Its
+steps reach each placement:
 
 - **Placement 3.** Alpha's first attempt's empty diff is a failure that placement 3 judges, so
   completion shows that placement 3 accepted it.
@@ -1593,10 +1594,12 @@ disagree.
 T-NOREQ's child. Like T-ENV-TOPO's, it adopts the fixture and resumes as `inc-2` at width two.
 
 - **The trigger.** It plants a directory at the run's `settings/integration-s1-review.json`.
-- **The seams.** It drives the run with `run_concurrently` over the host runner, or `FOpaqueReviewer` for
-  `Opaque`. Both the coordinator's seams and the pipelines' take `FPermittedAdapters`, and for `Damaged` both
-  take `FDamagingReviews` as their review passes.
-- **Under C5,** every logged directory must name the run's common directory by the relative value.
+- **The seams.** It drives the run with `run_concurrently` over T-ENV-TOPO's host runner for the layout
+  (`f_hosted_runner`), or `FOpaqueReviewer` over it for `Opaque`. Both the coordinator's seams and the
+  pipelines' take `FPermittedAdapters`, and for `Damaged` both take `FDamagingReviews` as their review passes.
+- **Under C5,** that runner holds the run's repository. Over `HostRunner::new()`, option (C) would refuse
+  every role in a work tree the engine made before it starts, and the run would not reach the pass. Every
+  logged directory must name the run's common directory by the relative value.
 - **At the end** it forgets the adopted fixture, as T-ENV-TOPO's child does.
 
 **The production path the witness reaches:**

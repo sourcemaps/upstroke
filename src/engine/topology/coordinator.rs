@@ -15969,6 +15969,42 @@ git cat-file -e 'HEAD^{tree}'
         f_hosted_linked_registry("C5", "hosted_linked_registry_child", true);
     }
 
+    /// The host runner T-ENV-TOPO's and T-NOREQ's children start their roles
+    /// on. Under C4's absolute value it is `HostRunner::new()`. Under C5's
+    /// relative value it holds the run's repository, its include written at
+    /// `<root>/recorded-objects.gitconfig`: under option (C) a role in a work
+    /// tree the engine made is given the common directory its runner holds in
+    /// place of an inherited relative value, and a runner that holds none
+    /// refuses that role before it starts.
+    #[cfg(unix)]
+    fn f_hosted_runner(
+        root: &std::path::Path,
+        common: &std::path::Path,
+        relative: bool,
+    ) -> crate::runner::host::HostRunner {
+        if relative {
+            let include = root.join("recorded-objects.gitconfig");
+            crate::workspace_manager::fixture::write_file(
+                &include,
+                crate::runner::host::RECORDED_OBJECTS_INCLUDE,
+            );
+            crate::runner::host::HostRunner::new().with_environment(
+                crate::runner::host::HostEnvironment::from_process().reading(
+                    crate::runner::host::ObjectGraph::RecordedIn(
+                        crate::runner::host::ManagedRepository::new(
+                            common,
+                            &include,
+                            crate::runner::host::GitdirRule::native(),
+                        )
+                        .expect("the run's repository, for the host runner to hold"),
+                    ),
+                ),
+            )
+        } else {
+            crate::runner::host::HostRunner::new()
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     #[ignore = "subprocess helper"]
@@ -15997,27 +16033,7 @@ git cat-file -e 'HEAD^{tree}'
             .expect("the run's common directory");
         let relative = std::env::var_os("GIT_COMMON_DIR")
             .is_some_and(|value| std::path::Path::new(&value).is_relative());
-        let runner = if relative {
-            let include = root.join("recorded-objects.gitconfig");
-            crate::workspace_manager::fixture::write_file(
-                &include,
-                crate::runner::host::RECORDED_OBJECTS_INCLUDE,
-            );
-            crate::runner::host::HostRunner::new().with_environment(
-                crate::runner::host::HostEnvironment::from_process().reading(
-                    crate::runner::host::ObjectGraph::RecordedIn(
-                        crate::runner::host::ManagedRepository::new(
-                            &common,
-                            &include,
-                            crate::runner::host::GitdirRule::native(),
-                        )
-                        .expect("the run's repository, for the host runner to hold"),
-                    ),
-                ),
-            )
-        } else {
-            crate::runner::host::HostRunner::new()
-        };
+        let runner = f_hosted_runner(&root, &common, relative);
         let host: std::sync::Arc<dyn crate::runner::Runner> = std::sync::Arc::new(runner);
         let pipelines = resumed.env.pipelines_over(std::sync::Arc::clone(&host));
         let mut hooks = resumed.env.hooks();
@@ -16351,7 +16367,11 @@ git cat-file -e 'HEAD^{tree}'
             .settings()
             .join(format!("integration-s{}-review.json", F_HOSTED_VERIFIED.0));
         crate::workspace_manager::fixture::create_dir(&obstructed);
-        let host = crate::runner::host::HostRunner::new();
+        let common = std::fs::canonicalize(root.join(&below).join(".git"))
+            .expect("the run's common directory");
+        let relative = std::env::var_os("GIT_COMMON_DIR")
+            .is_some_and(|value| std::path::Path::new(&value).is_relative());
+        let host = f_hosted_runner(&root, &common, relative);
         let runner: Arc<dyn crate::runner::Runner> = if case == FNoRequest::Opaque {
             Arc::new(FOpaqueReviewer { host })
         } else {
@@ -16386,15 +16406,11 @@ git cat-file -e 'HEAD^{tree}'
         let events = resumed.env.durable_events();
         let kinds = kinds_of(&events);
         let canonical_root = std::fs::canonicalize(&root).expect("the canonical scratch root");
-        let common = std::fs::canonicalize(root.join(&below).join(".git"))
-            .expect("the run's common directory");
         let depth = below.components().count();
         let named = common
             .strip_prefix(&canonical_root)
             .expect("the common directory is below the root")
             .to_path_buf();
-        let relative = std::env::var_os("GIT_COMMON_DIR")
-            .is_some_and(|value| std::path::Path::new(&value).is_relative());
         let log = String::from_utf8(std::fs::read(root.join("roles.log")).expect("the roles' log"))
             .expect("a UTF-8 log");
         let mut placed: BTreeMap<(&str, std::path::PathBuf), usize> = BTreeMap::new();
