@@ -22971,8 +22971,9 @@ fn derive_refuses_a_linked_worktrees_registry_while_no_common_dir_is_inherited()
 /// A slot run under whatever this process inherited, through the manager's own
 /// API: the slot add, a file the worker writes, the capture, and the commit at
 /// the base. Its errors are returned rather than raised: the witnesses that run
-/// it measure what it wrote, and at the bound master the commit at the base is
-/// where such a run fails closed.
+/// it measure what it wrote before it failed closed, which under a relative
+/// object directory is at the commit at the base, and under a linked registry
+/// at the capture's guarded read.
 #[cfg(unix)]
 fn slot_run_writing_a_file(
     manager: &WorkspaceManager,
@@ -22994,11 +22995,15 @@ fn slot_run_writing_a_file(
     Ok(())
 }
 
-/// RG-1 and RG-4, the "symlinked registry, nothing inherited" slot run: red at
-/// the bound master, where the slot run's capture writes its objects into the
-/// linked repository, and green here, where `derive` refuses before any slot
-/// and the linked repository's objects and refs stay as they were. Dropping the
-/// check from `derive`, the mutation, makes it red again.
+/// RG-1 and RG-4, the "symlinked registry, nothing inherited" slot run: green
+/// here, where `derive` refuses before any slot and the linked repository's
+/// registry, objects and refs stay as they were. Without the check -- at a
+/// master that lacks it, or with it dropped from `derive`, the mutation -- the
+/// slot add registers the run's work tree in the linked repository's
+/// `worktrees`, and the test is red there, at the registry. The capture after
+/// it is refused by the manager's guarded read, by the original registration
+/// rule, before anything is staged, so the objects and refs watched beside the
+/// registry are not where it turns red.
 #[cfg(unix)]
 #[test]
 fn a_registry_linked_into_another_repository_is_refused_before_a_slot_run_writes_there() {
@@ -23017,7 +23022,11 @@ fn a_registry_linked_into_another_repository_is_refused_before_a_slot_run_writes
     std::os::unix::fs::symlink(other.join(".git/worktrees"), base.join(".git/worktrees"))
         .expect("the run's registry, a link into the other repository");
     fs::create_dir(root.join("private")).expect("the private root");
-    let watched = [other.join(".git/objects"), other.join(".git/refs")];
+    let watched = [
+        other.join(".git/worktrees"),
+        other.join(".git/objects"),
+        other.join(".git/refs"),
+    ];
     let before: Vec<_> = watched
         .iter()
         .map(|path| context_tree_bytes(path))
