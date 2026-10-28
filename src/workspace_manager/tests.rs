@@ -22046,7 +22046,9 @@ fn a_store_linked_before_derive_removes_only_its_bound_registrations_and_keeps_l
         });
         let foreign = target.join("foreign");
         fs::create_dir_all(&foreign).expect("a registration no removal binds");
-        fs::write(foreign.join("gitdir"), b"/elsewhere/.git\n").expect("its gitdir");
+        let elsewhere = fixture.root.join("elsewhere").join(".git");
+        fs::write(foreign.join("gitdir"), format!("{}\n", elsewhere.display()))
+            .expect("its gitdir, an absolute path on every platform");
         fs::write(foreign.join("locked"), b"another repository's\n").expect("its locked");
         let foreign_before = snapshot(&foreign);
 
