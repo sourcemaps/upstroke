@@ -974,6 +974,34 @@ pub enum Refusal {
         budget: usize,
     },
 
+    /// The store pin lost (`RegistrationStore`): a removal bound its
+    /// registration while the registration store was the link pinned at
+    /// derivation, and the store is no longer that link resolving to the
+    /// pinned target. It is gone, a plain directory or anything else that is
+    /// not a link, or a link that resolves elsewhere or not at all. The
+    /// removal refuses before its checkout is touched and does not fall back
+    /// to the walk from the common git dir: what stands at the store now is
+    /// not the store the registration was bound in.
+    #[error(
+        "refusing to remove the registration {}: the registration store {} was a link to {} when \
+         this run's manager was derived, and it {}; a removal acts only below the store pinned \
+         then, and nothing of this one has been deleted",
+        .registration.display(),
+        .store.display(),
+        .pinned.display(),
+        .found
+    )]
+    PinnedStoreLost {
+        /// The registration the removal's scan bound, as the scan spelled it.
+        registration: PathBuf,
+        /// The store, `<common git dir>/worktrees`.
+        store: PathBuf,
+        /// The canonical target pinned at derivation.
+        pinned: PathBuf,
+        /// What the store was found to be instead.
+        found: String,
+    },
+
     /// R-C-RELSTORE's start refusal ([`refuse_relative_repository_wide_names`]):
     /// the coordinator inherits a repository-wide name whose value, or one of
     /// whose alternates entries, is not an absolute path. It names the variable
@@ -1195,7 +1223,8 @@ pub(crate) enum ActedThrough {
     SlotCheckoutEntry,
     /// `hooks-none`, every Git command's `core.hooksPath`.
     HooksPath,
-    /// The worktree's registration under the common git dir: its admin
+    /// The worktree's registration under the common git dir, or under the
+    /// store's target pinned at derivation ([`RegistrationStore`]): its admin
     /// directory, and the `gitdir` and `locked` entries inside it.
     Registration,
 }
@@ -1970,6 +1999,68 @@ pub struct WorkspaceManager {
     /// change made for a doc comment.
     private_root: PathBuf,
     execution_root: PathBuf,
+    /// The registration store as [`Self::derive`] found it: where a removal's
+    /// registration walk is anchored ([`RegistrationStore`]).
+    store: RegistrationStore,
+}
+
+/// The repository's registration store, `<common git dir>/worktrees`, as
+/// [`WorkspaceManager::derive`] found it: the anchor of a removal's
+/// [`ActedThrough::Registration`] walk.
+///
+/// **The pin.** When the store is a link, or another reparse point, that
+/// resolves to a real directory as the manager is derived, that directory is
+/// pinned then, by its canonical path, as the common git dir and the
+/// authorized private root are: that one link, at exactly that path, and
+/// whatever real directory it names. The pin is filesystem-based and
+/// unconditional. It reads no `GIT_COMMON_DIR`, and its target may be any
+/// real directory; a link into another repository's store is the layout
+/// R-C-REGISTRY's part 2 adopts (C4's and C5's). Git writes the registration
+/// of every engine add through such a link, so a removal binds its
+/// registration below the target, where a walk from the common git dir would
+/// meet the link and refuse every removal of an engine worktree.
+///
+/// **What it changes.** A removal that bound its registration under a pinned
+/// store re-checks the pin before it touches anything, and refuses when the
+/// store is no longer that link ([`WorkspaceManager::registration_spelled`]).
+/// Otherwise it walks and deletes only its bound registration below the
+/// target, and never removes the link or the target. A link made at the store
+/// after derivation is not pinned and refuses as any link on the chain does.
+/// Nothing else reads the pin: capture, the registry reads and their context
+/// refusals are unchanged, so a configuration they refuse still fails as a
+/// run, while the cleanup of its own bound registrations now completes.
+///
+/// **Its limits.** The pin is a path, not the identity of the directory
+/// there: a plain directory exchanged in at the pinned path is not seen, and
+/// neither is an exchange between the check and the syscall, as for every
+/// walked path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RegistrationStore {
+    /// The store was not a link at derivation, or not one that resolved to a
+    /// real directory: every registration is walked from the common git dir,
+    /// through plain components only.
+    Own,
+    /// The store was a link, or another reparse point, whose canonical target
+    /// was this real directory.
+    Pinned(PathBuf),
+}
+
+impl RegistrationStore {
+    /// The store under `common_git_dir` as it stands now. Every failure to
+    /// read or resolve it is [`Self::Own`], so derivation refuses nothing it
+    /// did not refuse before, and the walk decides as it always has.
+    fn of(common_git_dir: &Path) -> Self {
+        let link = common_git_dir.join("worktrees");
+        let linked = fs::symlink_metadata(&link)
+            .is_ok_and(|metadata| containment::is_reparse_point(&metadata));
+        if !linked {
+            return Self::Own;
+        }
+        match fs::canonicalize(&link) {
+            Ok(target) if target.is_dir() => Self::Pinned(strip_verbatim(target)),
+            _ => Self::Own,
+        }
+    }
 }
 
 /// `fs::remove_dir_all`, tolerating the window in which a just-killed process's
@@ -2703,6 +2794,7 @@ impl WorkspaceManager {
         refuse_relative_repository_wide_names()?;
         let common_git_dir = common_git_dir(ReadAt::Base, base)?;
         refuse_linked_registry(&common_git_dir, std::env::var_os(COMMON_DIR).is_some())?;
+        let store = RegistrationStore::of(&common_git_dir);
         let repo_key = repo_key_v1(&common_git_dir);
         let private_root = canonical_prefix(private_root)?;
         let execution_root = execution_root_of(&private_root, &repo_key, run_id);
@@ -2715,6 +2807,7 @@ impl WorkspaceManager {
             tag: InstanceTag::of_incarnation(incarnation),
             private_root,
             execution_root,
+            store,
         };
         manager.revalidate()?;
         Ok(manager)
@@ -3006,10 +3099,10 @@ impl WorkspaceManager {
                 }
                 ActedThrough::Registration => {
                     if let Some(admin) = registration {
-                        let git_dir = self.common_git_dir.clone();
-                        paths.push((git_dir.clone(), admin.to_path_buf(), Leaf::Directory));
-                        paths.push((git_dir.clone(), admin.join("gitdir"), Leaf::Entry));
-                        paths.push((git_dir, admin.join("locked"), Leaf::Entry));
+                        let anchor = self.registration_anchor(admin);
+                        paths.push((anchor.clone(), admin.to_path_buf(), Leaf::Directory));
+                        paths.push((anchor.clone(), admin.join("gitdir"), Leaf::Entry));
+                        paths.push((anchor, admin.join("locked"), Leaf::Entry));
                     }
                 }
             }
@@ -4531,7 +4624,8 @@ impl WorkspaceManager {
     /// §2.5 and §3.5): the registration the removal's scan bound to this slot's
     /// checkout is removed, `locked` first and then its directory, and then the
     /// store itself when that left it empty, as Git's prune removed an emptied
-    /// store. Git's prune deletes *every* entry with neither `locked` nor
+    /// store: the repository's own store, never one pinned at derivation
+    /// (`RegistrationStore`). Git's prune deletes *every* entry with neither `locked` nor
     /// `gitdir`, and `git worktree add` makes its entry before it writes
     /// `locked`, so an engine prune could delete another process's add in
     /// flight; removal bound to the instance's own registration deletes no
@@ -4812,7 +4906,11 @@ impl WorkspaceManager {
     /// `slot`, the one `tag` names, with `registration` bound by its scan: the
     /// checkout removed and its deletion made durable, then that registration
     /// removed directly — `locked`, then its directory — and then the store,
-    /// when that left it empty. No `git worktree prune` runs, and no entry the
+    /// when that left it empty and it is the repository's own. A registration
+    /// bound under a store pinned at derivation is spelled below the pinned
+    /// target first ([`Self::registration_spelled`]), before anything is
+    /// touched, and refused there if the pin no longer holds; it is walked and
+    /// removed below the target. No `git worktree prune` runs, and no entry the
     /// scan did not bind to this instance is touched.
     fn remove_bound(
         &self,
@@ -4822,10 +4920,13 @@ impl WorkspaceManager {
         registration: Option<&Path>,
         ledger: &DurabilityLedger,
     ) -> Result<(), UpstrokeError> {
+        let registration = registration
+            .map(|admin| self.registration_spelled(admin))
+            .transpose()?;
         self.revalidate_acted_through_instance(
             Primitive::RemoveWorktree,
             Some((slot, tag)),
-            registration,
+            registration.as_deref(),
         )?;
         let present = match fs::symlink_metadata(path) {
             Ok(_) => true,
@@ -4854,7 +4955,7 @@ impl WorkspaceManager {
             message: format!("{} has no parent directory", checkout.display()),
         })?;
         sync_checkout_removed(&checkout, parent, ledger)?;
-        let Some(admin) = registration else {
+        let Some(admin) = registration.as_deref() else {
             // No registration names this slot: nothing of the store is this
             // removal's to touch.
             return Ok(());
@@ -4892,8 +4993,14 @@ impl WorkspaceManager {
         // another registration still holds, and best effort, as Git's is. The
         // frozen `finalize.rs` test
         // `scrub_slots_converges_when_git_has_pruned_the_emptied_registration_store`
-        // pins the store's absence after its slots' removals.
-        let _ = fs::remove_dir(self.common_git_dir.join("worktrees"));
+        // pins the store's absence after its slots' removals. Only the
+        // repository's own store: a store pinned at derivation is a link the
+        // operator made, and neither the link nor its target is this
+        // removal's. On Unix an `rmdir` of the link fails and leaves both, but
+        // on Windows an `rmdir` of a junction removes the junction.
+        if self.store == RegistrationStore::Own {
+            let _ = fs::remove_dir(self.common_git_dir.join("worktrees"));
+        }
         Ok(())
     }
 
@@ -7415,6 +7522,85 @@ impl WorkspaceManager {
             });
         }
         Ok(true)
+    }
+
+    /// The registration `admin` a removal's scan bound, spelled where its walk
+    /// and its removal act ([`RegistrationStore`]).
+    ///
+    /// For the repository's own store, unchanged: walked from the common git
+    /// dir. For a store pinned at derivation, `admin` is the entry the scan read
+    /// through the link, `<common_git_dir>/worktrees/<entry>`, and it is
+    /// re-spelled `<target>/<entry>` once the store is proven still to be a
+    /// link that resolves to the pinned target. The walk then starts at the
+    /// target ([`Self::registration_anchor`]), and the removal reads, unlinks
+    /// and deletes below that directory through no link, so a link re-pointed
+    /// after this check cannot carry the deletion elsewhere.
+    ///
+    /// **No fallback.** A store that is no longer that link — gone, a plain
+    /// directory or anything else that is not a link, or a link that resolves
+    /// elsewhere or not at all — is not the store the registration was bound
+    /// in, and the removal refuses here, before its checkout is touched
+    /// ([`Refusal::PinnedStoreLost`]). Walking from the common git dir instead
+    /// would delete the checkout past a store with nothing there, or remove a
+    /// copy of the entry from a directory planted in its place.
+    ///
+    /// # Errors
+    ///
+    /// [`Refusal::PinnedStoreLost`], or a refusal of a binding that is not one
+    /// entry of the store, which the scan never makes.
+    fn registration_spelled(&self, admin: &Path) -> Result<PathBuf, UpstrokeError> {
+        let RegistrationStore::Pinned(target) = &self.store else {
+            return Ok(admin.to_path_buf());
+        };
+        let store = self.common_git_dir.join("worktrees");
+        let not_an_entry = || UpstrokeError::Refused {
+            message: format!(
+                "internal: the removal bound {}, which is not one entry of the registration store \
+                 {}",
+                admin.display(),
+                store.display()
+            ),
+        };
+        let Ok(rest) = admin.strip_prefix(&store) else {
+            return Err(not_an_entry());
+        };
+        let mut rest = rest.components();
+        let (Some(Component::Normal(entry)), None) = (rest.next(), rest.next()) else {
+            return Err(not_an_entry());
+        };
+        let found = match fs::symlink_metadata(&store) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => "is gone".to_owned(),
+            Err(error) => format!("could not be read ({error})"),
+            Ok(metadata) if !containment::is_reparse_point(&metadata) => {
+                if metadata.is_dir() {
+                    "is now a plain directory, not a link".to_owned()
+                } else {
+                    "is now neither a link nor a directory".to_owned()
+                }
+            }
+            Ok(_) => match fs::canonicalize(&store).map(strip_verbatim) {
+                Ok(resolved) if resolved == *target => return Ok(target.join(entry)),
+                Ok(resolved) => format!("now resolves to {}", resolved.display()),
+                Err(error) => format!("no longer resolves ({error})"),
+            },
+        };
+        Err(Refusal::PinnedStoreLost {
+            registration: admin.to_path_buf(),
+            store,
+            pinned: target.clone(),
+            found,
+        }
+        .into())
+    }
+
+    /// Where `admin`'s registration walk starts: the pinned target, for an
+    /// entry [`Self::registration_spelled`] spelled below it, and the common
+    /// git dir for every other spelling, the original walk.
+    fn registration_anchor(&self, admin: &Path) -> PathBuf {
+        match &self.store {
+            RegistrationStore::Pinned(target) if admin.starts_with(target) => target.clone(),
+            _ => self.common_git_dir.clone(),
+        }
     }
 
     /// The repair [`Self::remove_intent`] and [`Self::verify_worktree`] run

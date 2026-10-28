@@ -137,6 +137,21 @@ itself when that leaves it empty. They never run `git worktree prune`, which del
 process's add in flight. A removal that finds no store at all removes an empty directory at its slot:
 what a coordinator killed after making an add's destination leaves.
 
+**A store that is a link.** Where `<common git dir>/worktrees` is a link, or another reparse point, to
+a real directory when the run's manager is derived, that directory is pinned then, by its canonical
+path, as the common directory itself is. The pin is filesystem-based and unconditional: it reads no
+`GIT_COMMON_DIR`, and the directory may be any real directory. A link into another repository's
+store is the layout R-C-REGISTRY's part 2 adopts. A removal that bound a registration there first
+checks that the store is still that link resolving to that directory. It refuses, before anything is
+deleted, when the link is gone, is a plain directory or anything else that is not a link, or resolves
+elsewhere, and never falls back to walking from the common directory. Otherwise it walks and deletes
+only its own registration below the directory, through plain components, and removes neither the
+link nor the directory. A link at the store made after derivation is not pinned, and refuses the
+removal as any link on its chain does. The pin is a path, not the identity of the directory: a plain
+directory exchanged in at the same path, and an exchange between the check and the syscall, are not
+seen. Capture, the registry reads and their refusals are unchanged, and part 2's shared-ref residual
+stays as adopted.
+
 **What stays outside it.**
 - A coordinator killed inside a Git write leaves that write's processes running on Unix. That they
   can no longer reach the slot its resume uses is the slot instances' doing, below, not this

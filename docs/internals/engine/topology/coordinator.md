@@ -1443,18 +1443,43 @@ into another repository (R-C-REGISTRY's part 2):
 - **C4:** an absolute `GIT_COMMON_DIR`, the base at `<root>/repo`.
 - **C5:** a relative value, the base at `EQUAL_DEPTH_BASE`, the proposal's equal-depth construction.
 
+**The plan** is two tasks, alpha and beta (`f_hosted_tasks`), which write disjoint paths, at width
+two.
+- **Both start from the start head.** The coordinator's first admission dispatches both before it
+  handles any pipeline's message. `admit` selects until nothing more is admitted. Its dispatches
+  record state themselves, but a candidate, without which no integration can advance the head,
+  enters the fold only through a message `receive_one` handles after `admit` returns. A retry keeps
+  its generation's base.
+- **The first merge is fast.** Whichever candidate merges first merges fast, as sequence 0.
+- **The second is stale.** The other's base is then no longer the head, so it integrates stale, as
+  sequence 1 (`F_HOSTED_VERIFIED`). Its staging cherry-pick runs, and so do its verification's gate and
+  review, over the host runner.
+
 **The parent:**
 
-- **The run and the link.** It creates the run, drops it and plants the link.
+- **The run and the link.** It creates the run at width two, drops it and plants the link.
 - **C5's value.** It derives the relative value from the canonical paths. It asserts that the value
-  names the run's common directory, climbing to the scratch root and no further, from each of these
-  directories: the base, a task slot, a merge slot, a gate snapshot and an integration snapshot.
+  names the run's common directory, climbing to the scratch root and no further. It checks this from
+  the base, and from each directory the run places a role in (`f_hosted_placements`), and from
+  sequence 1's merge slot.
 - **The scripts.** It writes three scripts to a directory it puts first on the child's `PATH`:
   - the two agents' command-line programs. Each logs its first argument and its directory. As the
-    worker, it leaves the slot as it was on its first run and writes `src/alpha/work.txt` after that;
+    worker, it writes `src/<task>/work.txt`; alpha's first attempt leaves the slot as it was.
+    As a reviewer, called with `--prompt`, it prints the scaffold's `PASSING_VERDICT`, which the child
+    is handed as `UPSTROKE_TEST_F_VERDICT`. The child's adapters, `ScaffoldAdapters::new()`, answer a
+    review with that verdict themselves and do not read the output;
   - `gate`. It logs, then requires `git rev-parse --git-common-dir` to be the run's canonical common
     directory and `HEAD^{tree}` to be readable.
 - **The child.** It starts the child with the value inherited.
+- **After the child,** what the completed run left, each by its contract:
+  - the store is still the link, naming the same target, and the target is kept and empty. Finalization
+    removed every registration the run made, below the store pinned at derivation, and neither the link
+    nor its target;
+  - nothing is left under `refs/upstroke/runs/`. Finalization deletes a completed run's prepared,
+    candidate and candidates refs, so none is claimed to survive;
+  - the run's one integration branch under `refs/heads/upstroke/` differs from `main` by exactly
+    `src/alpha/work.txt` and `src/beta/work.txt`, each holding its worker's bytes;
+  - the other repository's refs are untouched.
 
 ## `mod tests` › `fn a_hosted_run_under_a_linked_registry_and_an_inherited_absolute_common_dir_completes() {`
 
@@ -1466,25 +1491,68 @@ T-ENV-TOPO's C5 row.
 
 ## `mod tests` › `fn hosted_linked_registry_child() {`
 
-T-ENV-TOPO's child. It adopts the fixture (`Fixture::adopt_based`), resumes as `inc-2`, and drives the
-run with `run_concurrently` over one host runner for both the coordinator's seams and the
-pipelines'. Under C4's absolute value that runner is `HostRunner::new()`. Under C5's relative value
-it is a host runner that holds the run's repository (`ObjectGraph::RecordedIn` over
+T-ENV-TOPO's child. It adopts the fixture (`Fixture::adopt_based`), resumes as `inc-2` at width two,
+and drives the run with `run_concurrently` over one host runner for both the coordinator's seams and
+the pipelines'. Under C4's absolute value that runner is `HostRunner::new()`. Under C5's relative
+value it is a host runner that holds the run's repository (`ObjectGraph::RecordedIn` over
 `ManagedRepository::new`, its include written at `<root>/recorded-objects.gitconfig`): under option
 (C) a role in a work tree the engine made is given the common directory its runner holds in place
 of an inherited relative value, and a runner that holds none refuses that role before it starts.
 The run must complete. Its steps reach each placement:
 
-- **Placement 3.** The first attempt's empty diff is a failure that placement 3 judges, so completion
-  shows that placement 3 accepted it.
-- **Placement 2.** The gates' verdicts and the review passes' verdicts.
+- **Placement 3.** Alpha's first attempt's empty diff is a failure that placement 3 judges, so
+  completion shows that placement 3 accepted it.
+- **Placement 2.** The gates' verdicts and the review passes' verdicts, the verification's included.
 - **Placement 1.** The capture's reads.
-- **C1-AP.** The review-input reads.
+- **C1-AP.** The review-input reads, the verification's in its staging tree included.
 
-**The role log** must show the worker twice, two gates and two review passes. Under C5, every logged
-directory must name the run's common directory by the relative value.
+**The verification, from the events.**
+- **Exactly one `merge_verification_started`:** sequence 1, stale-clean.
+- **The first `merge_prepared`** is sequence 0's: fast, with no verification.
+- **The second** is sequence 1's: stale-clean, for the same candidate, on a passing verification record
+  of one gate set and one review.
+- **Both tasks merged:** one merge of each, and two `task_merged`.
 
-**Predicted:** red at `f1842dcd` (the overlay) and under the reversal, at the first guarded read.
+**The role log** must hold exactly the placements `f_hosted_placements` names, each in this
+incarnation's instance of its slot, and no other line:
+- alpha's worker twice in its generation's slot, and beta's once;
+- each working attempt's gate and review in its own snapshots: alpha's attempt 2's and beta's
+  attempt 1's;
+- sequence 1's verification gate in `s1-integration` and its review in `s1-review0`.
+
+The counts bind each line to its phase, so no attempt's run counts as the verification's. Under C5,
+every logged directory must name the run's common directory by the relative value. **The run's end:**
+finalization, which `run_concurrently` runs before it answers `Finished`, removed the execution root.
+
+**The fixture's lifetime.** The parent owns the scratch tree: its fixture holds the tree's guard, which
+reclaims the root when the parent returns, after its own assertions. The child reaches the same root
+through `Fixture::adopt_based`, which is for a root a dead child left. An adopted fixture's `Drop`
+reclaims its root, so a child that returns normally would remove the parent's tree. After its last
+assertion the child releases the run and every other part of its environment as usual, and forgets
+only the adopted fixture, as P-3's `late_add_child` does.
+
+**Predicted:** red at `f1842dcd` (the overlay) and under the reversal, at the first guarded read. At
+`cbc0070e`, before the store pin, red at the first removal, the gate snapshot's: the removal's walk
+from the common git dir met the store's link (HF-ENV, kept as observed).
+
+**Observed at `af1a3dbd`, with the pin, and corrected since.** The one-task runs completed (HF-PIN,
+kept as observed): `Complete`, with the execution root removed. Their role log held the worker twice
+and one gate and one review pass, both of attempt 2, so the gate count failed.
+- **Why.** One task merges by the fast path. When it merges, the integration head is still its
+  candidate's base (`decide_pausing` in `integrate.rs`), so `prepare_fast` records no verification,
+  and no verification gate or review runs.
+- **The first diagnosis, qualified.** It took the reviewer stub's missing stdout verdict for the
+  cause. The run's adapters answer with their own verdict, so printing one changed nothing.
+- **The correction.** The two-task plan above makes the run verify an integration, and binds the role
+  log to each phase's placements.
+
+**Observed at `d1bfb37a`, and corrected since.** Both children passed (HF-PIN, kept as observed): the
+completion, the verification's events and every placement held. Each parent then failed its first
+end-state assertion, at `coordinator.rs:15888`: "the run's store is still the link it started under".
+- **What the static trace shows.** The child's adopted fixture is dropped on the child's normal return,
+  and reclaims the root the parent goes on to assert on. Whether that is what the parent met was not
+  traced at run time.
+- **The correction.** The lifetime above: the child no longer reclaims the parent's tree.
 
 ## `mod tests` › `fn the_broker_ledgers_balance_at_every_end_and_start_empty_at_every_next_start_at_width_three()`
 
@@ -3184,11 +3252,11 @@ The promoting task's checkout, given a file its candidate does not pin, and its 
 
 ## `mod tests` › `fn f_resume_fresh(`
 
-A fresh-process resume of the left run, as `try_resume_over` makes it: what step (f) finished, or the resume's refusal, and the durable events either way.
+A fresh-process resume of the left run, as `try_resume_over` makes it: what step (f) finished, or the resume's refusal, and the durable events either way. It also returns the `WideEnv`, which owns the fixture and so the scratch tree the checkout is in. The resumed run is dropped, as the resumed process would end; the env is not. Every caller holds it through its last filesystem and event assertion and drops it after them, so the guard reclaims the tree only once those assertions are done, or as a failing one unwinds. An earlier form dropped the env here, so the tree was reclaimed before the callers' comparison, which then failed listing the checkout (`NotFound`).
 
 ## `mod tests` › `fn f_promotion_kept(`
 
-P-6′ at recovery's completion of a promotion: the resume refuses with the kept-slot refusal naming the completion of the promotion and the kept checkout, before `task_candidate_created` and before `run_resumed`, and the checkout and every byte it holds are kept. A resume that finished the promotion over the pruned populated slot is the failure this states.
+P-6′ at recovery's completion of a promotion: the resume refuses with the kept-slot refusal naming the completion of the promotion and the kept checkout, before `task_candidate_created` and before `run_resumed`, and the checkout and every byte it holds are kept. A resume that finished the promotion over the pruned populated slot is the failure this states. Its callers hold the fixture's owner until it returns, so the comparison reads the live checkout; T-PROM-6 shows that the comparison fails once a kept file is gone.
 
 ## `mod tests` › `fn a_resume_keeps_a_promoting_generations_pruned_populated_slot_with_the_store_gone() {`
 
@@ -3198,9 +3266,13 @@ T-PROM-1, the witness: the fresh regular lens's P1 sequence, the `Promoting` cra
 
 T-PROM-2, the positive preservation case with the store kept: the same prefix, the entry pruned while another registration keeps the store. At `f1842dcd` the forced removal takes the checkout as well; repaired, it is kept and the resume refuses, naming it.
 
+## `mod tests` › `fn the_kept_slot_comparison_fails_once_a_kept_file_is_removed_by_hand() {`
+
+T-PROM-6, the liveness control of T-PROM-1's and T-PROM-2's comparison: the same prefix as T-PROM-1 and the same resume, which refuses; then one file the slot kept, asserted present, is removed by hand through the fixture's `remove_file` while the fixture lives (a direct `std::fs::remove_file` is a denied method in `clippy.toml`). `f_promotion_kept` over that refusal must then fail at its comparison and not at an earlier check, so the comparison reads the live checkout and is not vacuous. At `f1842dcd` the resume finishes the promotion, and this control fails at its first step, the refusal it expects.
+
 ## `mod tests` › `fn a_resume_finishes_the_promotion_once_the_operator_has_removed_its_kept_slot() {`
 
-T-PROM-3, the release control (G-2): the operator has taken what the slot held and removed the directory, so the check finds nothing held and the resume finishes the promotion (`task_candidate_created`, then `run_resumed`). The same before and after the repair.
+T-PROM-3, the release control (G-2): the operator has taken what the slot held and removed the directory, so the check finds nothing held and the resume finishes the promotion (`task_candidate_created`, then `run_resumed`). The same before and after the repair. Its assertions run while the fixture lives. The last, that nothing is left at the slot, shows that the operator's removal stands and nothing recreated the slot; it is not evidence that the product removed anything.
 
 ## `mod tests` › `fn a_live_promotion_still_removes_its_pruned_populated_slot_with_the_store_gone() {`
 
