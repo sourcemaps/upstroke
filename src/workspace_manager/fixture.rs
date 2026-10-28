@@ -979,8 +979,9 @@ pub(crate) fn link_directory(target: &Path, link: &Path) {
     }
 }
 
-/// Remove the directory link [`link_directory`] made at `link`, and nothing it
-/// names: a junction is removed as a directory, a symbolic link as a file.
+/// Remove the directory link at `link`, of the kind [`link_directory`] makes,
+/// and nothing it names: a junction is removed as a directory, a symbolic link
+/// as a file.
 pub(crate) fn unlink_directory(link: &Path) {
     #[cfg(windows)]
     let removed = fs::remove_dir(link);

@@ -21954,16 +21954,6 @@ fn assert_pinned_link(store: &Path, target: &Path, tag: &str) {
     );
 }
 
-/// The directory link at `link` removed, never what it names: a symlink is
-/// unlinked on Unix, and a junction is a directory entry `rmdir` removes on
-/// Windows.
-fn remove_directory_link(link: &Path) {
-    #[cfg(unix)]
-    fs::remove_file(link).expect("remove the symlink");
-    #[cfg(windows)]
-    fs::remove_dir(link).expect("remove the junction");
-}
-
 /// A copy of the registration entry `from` at `into`: its files byte for byte
 /// and its subdirectories by name, which is everything [`snapshot`] compares.
 fn copy_entry(from: &Path, into: &Path) {
@@ -21996,7 +21986,7 @@ enum StoreLoss {
 /// under its own name.
 fn lose_store(store: &Path, entry: &Path, loss: StoreLoss, substitute: &Path) {
     let name = entry.file_name().expect("an entry name");
-    remove_directory_link(store);
+    super::fixture::unlink_directory(store);
     match loss {
         StoreLoss::Removed => {}
         StoreLoss::PlainDirectory => copy_entry(entry, &store.join(name)),
