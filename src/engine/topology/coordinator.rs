@@ -16112,6 +16112,14 @@ git cat-file -e 'HEAD^{tree}'
              gate and review, and the gate and review of sequence {}'s verification: {log}",
             F_HOSTED_VERIFIED.0
         );
+        // The parent owns the tree, and asserts on it after this process
+        // exits. The run and every other part of the environment go as usual;
+        // only the adopted fixture is forgotten, whose drop would reclaim the
+        // parent's root.
+        let Wide { run, env } = resumed;
+        drop(run);
+        let crate::engine::topology::scaffold::WideEnv { fixture, .. } = env;
+        std::mem::forget(fixture);
     }
 
     #[cfg(unix)]

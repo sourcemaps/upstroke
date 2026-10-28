@@ -1446,8 +1446,10 @@ into another repository (R-C-REGISTRY's part 2):
 **The plan** is two tasks, alpha and beta (`f_hosted_tasks`), which write disjoint paths, at width
 two.
 - **Both start from the start head.** The coordinator's first admission dispatches both before it
-  reads any message. `admit` selects until nothing more is admitted, and the fold changes only
-  through the messages `receive_one` handles after it returns. A retry keeps its generation's base.
+  handles any pipeline's message. `admit` selects until nothing more is admitted. Its dispatches
+  record state themselves, but a candidate, without which no integration can advance the head,
+  enters the fold only through a message `receive_one` handles after `admit` returns. A retry keeps
+  its generation's base.
 - **The first merge is fast.** Whichever candidate merges first merges fast, as sequence 0.
 - **The second is stale.** The other's base is then no longer the head, so it integrates stale, as
   sequence 1 (`F_HOSTED_VERIFIED`). Its staging cherry-pick runs, and so do its verification's gate and
@@ -1517,6 +1519,13 @@ The counts bind each line to its phase, so no attempt's run counts as the verifi
 every logged directory must name the run's common directory by the relative value. **The run's end:**
 finalization, which `run_concurrently` runs before it answers `Finished`, removed the execution root.
 
+**The fixture's lifetime.** The parent owns the scratch tree: its fixture holds the tree's guard, which
+reclaims the root when the parent returns, after its own assertions. The child reaches the same root
+through `Fixture::adopt_based`, which is for a root a dead child left. An adopted fixture's `Drop`
+reclaims its root, so a child that returns normally would remove the parent's tree. After its last
+assertion the child releases the run and every other part of its environment as usual, and forgets
+only the adopted fixture, as P-3's `late_add_child` does.
+
 **Predicted:** red at `f1842dcd` (the overlay) and under the reversal, at the first guarded read. At
 `cbc0070e`, before the store pin, red at the first removal, the gate snapshot's: the removal's walk
 from the common git dir met the store's link (HF-ENV, kept as observed).
@@ -1531,6 +1540,14 @@ and one gate and one review pass, both of attempt 2, so the gate count failed.
   cause. The run's adapters answer with their own verdict, so printing one changed nothing.
 - **The correction.** The two-task plan above makes the run verify an integration, and binds the role
   log to each phase's placements.
+
+**Observed at `d1bfb37a`, and corrected since.** Both children passed (HF-PIN, kept as observed): the
+completion, the verification's events and every placement held. Each parent then failed its first
+end-state assertion, at `coordinator.rs:15888`: "the run's store is still the link it started under".
+- **What the static trace shows.** The child's adopted fixture is dropped on the child's normal return,
+  and reclaims the root the parent goes on to assert on. Whether that is what the parent met was not
+  traced at run time.
+- **The correction.** The lifetime above: the child no longer reclaims the parent's tree.
 
 ## `mod tests` › `fn the_broker_ledgers_balance_at_every_end_and_start_empty_at_every_next_start_at_width_three()`
 

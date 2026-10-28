@@ -650,3 +650,16 @@ adapters supply their own verdict, so it did not.
 - **Unchanged:** production integration and the pinned store. The linked store and both inherited `GIT_COMMON_DIR`
   forms are kept, as is the equal-depth layout.
 - **Validation at the new head is pending.**
+
+**A dated precision (2026-10-28, last): the hosted test's fixture lifetime.** At `d1bfb37a` both hosted children passed:
+completion, the stale integration's verification by its events and by every placement (HF-PIN, kept as observed). Each
+parent then failed its first end-state assertion, that the run's store is still its link.
+
+- **The static trace.** The parent's fixture owns the scratch tree through its guard. The child adopts the same root with
+  `Fixture::adopt_based`, and an adopted fixture's `Drop` reclaims its root. So the child's normal return removes the tree
+  the parent goes on to assert on. That is a test defect of this change; no runtime cause is claimed.
+- **The correction is test-only.** Root's `F-EXECUTION5-FIXTURE-LIFETIME-DIRECTION-20261028` directed it. After its last
+  assertion the child releases the run and the rest of its environment as usual, and forgets only the adopted fixture,
+  as P-3's `late_add_child` does.
+- **Unchanged:** `Fixture`'s `Drop`, every product teardown and finalization, and every assertion of child and parent.
+- **Validation at the new head is pending.**
