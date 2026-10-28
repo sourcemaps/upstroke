@@ -1471,7 +1471,7 @@ two.
   - `gate`. It logs, then requires `git rev-parse --git-common-dir` to be the run's canonical common
     directory and `HEAD^{tree}` to be readable.
 - **The child.** It starts `child` with the value inherited: T-ENV-TOPO's `hosted_linked_registry_child`,
-  or one of F-R2's (`f_hosted_no_request_child`, below).
+  or one of T-NOREQ's (`f_hosted_no_request_child`, below).
 - **A refused run** (`completes` false) is the child's to assert. After it the parent asserts only that the
   store is still the link, naming the same target, and that the other repository's refs are untouched.
 - **After the child,** what the completed run left, each by its contract:
@@ -1554,9 +1554,9 @@ end-state assertion, at `coordinator.rs:15888`: "the run's store is still the li
 
 ## `mod tests` › `enum FNoRequest {`
 
-F-R2's three runs of a review pass that hands its runner no request, each over T-ENV-TOPO's linked layout
+T-NOREQ's three runs of a review pass that hands its runner no request, each over T-ENV-TOPO's linked layout
 and the host runner. Root's `F-REGULAR2-REPAIR-DISPOSITION-20261028` directs them, under its tracking ID
-`F-R2-NO-REQUEST-REGISTRATION`.
+`F-R2-NO-REQUEST-REGISTRATION`, which is not round 1's F-R2.
 
 - **`Outage`,** the witness. Sequence 1's review pass finds a directory at its permission file's path, and
   ends unavailable before its first request.
@@ -1585,7 +1585,7 @@ disagree.
 
 ## `mod tests` › `fn f_hosted_no_request_child(case: FNoRequest) {`
 
-F-R2's child. Like T-ENV-TOPO's, it adopts the fixture and resumes as `inc-2` at width two.
+T-NOREQ's child. Like T-ENV-TOPO's, it adopts the fixture and resumes as `inc-2` at width two.
 
 - **The trigger.** It plants a directory at the run's `settings/integration-s1-review.json`.
 - **The seams.** It drives the run with `run_concurrently` over the host runner, or `FOpaqueReviewer` for
@@ -1629,15 +1629,15 @@ is found before the rule's comparison, and the opaque request's report is the ru
 
 ## `mod tests` › `fn hosted_no_request_outage_child() {`
 
-F-R2's child, for `Outage`.
+T-NOREQ's child, for `Outage`.
 
 ## `mod tests` › `fn hosted_no_request_damaged_child() {`
 
-F-R2's child, for `Damaged`.
+T-NOREQ's child, for `Damaged`.
 
 ## `mod tests` › `fn hosted_no_request_opaque_child() {`
 
-F-R2's child, for `Opaque`.
+T-NOREQ's child, for `Opaque`.
 
 ## `mod tests` › `fn a_hosted_review_with_no_request_under_c4_is_deferred_and_the_run_completes() {`
 
