@@ -893,9 +893,13 @@ The manager's doc comment on `registration_whole` carries the full argument.
 
 Closure 1's check for a verdict or a failure read by more than one guarded
 child: the registration is whole only if it is whole for each distinct report
-in `composed`, and the first refusal is returned. An empty list, where no
-child was handed on, is checked as the absence of a report (`Unknown`, the
-original rule). Placements 2 and 3 read it (`attempt.rs`).
+in `composed`, and the first refusal is returned. An empty list is checked as
+the absence of a report (`Unknown`, the original rule). Placements 2 and 3
+read it (`attempt.rs`), and neither hands it an empty list:
+- the gates' list holds a report for each gate that ran;
+- placement 3 passes the manager's report and the worker's;
+- a review pass that handed nothing on is checked under the manager's own
+  builder instead.
 
 **Why two copies.** The census classifies the functions of the manager's
 modules, and a crate-visible reader there would need an `effects/wrappers.toml`

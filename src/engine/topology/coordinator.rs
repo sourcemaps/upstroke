@@ -15760,7 +15760,7 @@ git cat-file -e 'HEAD^{tree}'
     }
 
     #[cfg(unix)]
-    fn f_hosted_linked_registry(sequence: &str) {
+    fn f_hosted_linked_registry(sequence: &str, child: &str, completes: bool) {
         let tasks = f_hosted_tasks();
         let below = std::path::Path::new(if sequence == "C5" {
             crate::workspace_manager::fixture::EQUAL_DEPTH_BASE
@@ -15863,7 +15863,7 @@ git cat-file -e 'HEAD^{tree}'
         let marker = env.fixture.root.join("worker-wrote-nothing");
         let log = env.fixture.root.join("roles.log");
         let ended = crate::agent::proc::test_support::run_test_isolated(
-            "engine::topology::coordinator::tests::hosted_linked_registry_child",
+            &format!("engine::topology::coordinator::tests::{child}"),
             &[
                 ("GIT_COMMON_DIR", value.as_os_str()),
                 ("PATH", path.as_os_str()),
@@ -15895,6 +15895,14 @@ git cat-file -e 'HEAD^{tree}'
             std::fs::canonicalize(&elsewhere).expect("the link's target"),
             "{sequence}: and the link still names the same target"
         );
+        if !completes {
+            assert_eq!(
+                crate::workspace_manager::fixture::git(&other, &["for-each-ref"]),
+                "",
+                "{sequence}: the other repository's refs are untouched"
+            );
+            return;
+        }
         let left: Vec<std::path::PathBuf> = std::fs::read_dir(&elsewhere)
             .expect("the link's target is kept")
             .map(|entry| entry.expect("an entry of the target").path())
@@ -15951,14 +15959,14 @@ git cat-file -e 'HEAD^{tree}'
     #[cfg(unix)]
     #[test]
     fn a_hosted_run_under_a_linked_registry_and_an_inherited_absolute_common_dir_completes() {
-        f_hosted_linked_registry("C4");
+        f_hosted_linked_registry("C4", "hosted_linked_registry_child", true);
     }
 
     #[cfg(unix)]
     #[test]
     fn a_hosted_run_under_a_linked_registry_and_an_inherited_relative_common_dir_at_equal_depth_completes()
      {
-        f_hosted_linked_registry("C5");
+        f_hosted_linked_registry("C5", "hosted_linked_registry_child", true);
     }
 
     #[cfg(unix)]
@@ -16140,6 +16148,503 @@ git cat-file -e 'HEAD^{tree}'
         drop(run);
         let crate::engine::topology::scaffold::WideEnv { fixture, .. } = env;
         std::mem::forget(fixture);
+    }
+
+    #[cfg(unix)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum FNoRequest {
+        Outage,
+        Damaged,
+        Opaque,
+    }
+
+    #[cfg(unix)]
+    struct FPermitted {
+        answering: crate::engine::topology::scaffold::AnsweringAdapter,
+        production: &'static dyn crate::agent::AgentAdapter,
+    }
+
+    #[cfg(unix)]
+    impl crate::agent::AgentAdapter for FPermitted {
+        fn id(&self) -> &'static str {
+            crate::agent::AgentAdapter::id(&self.answering)
+        }
+
+        fn probe(
+            &self,
+            runner: &dyn crate::runner::Runner,
+        ) -> Result<crate::agent::Caps, UpstrokeError> {
+            crate::agent::AgentAdapter::probe(&self.answering, runner)
+        }
+
+        fn build(
+            &self,
+            run: &crate::agent::TaskRun,
+        ) -> Result<crate::runner::CommandSpec, UpstrokeError> {
+            crate::agent::AgentAdapter::build(&self.answering, run)
+        }
+
+        fn parse(
+            &self,
+            out: &crate::agent::ProcessOutput,
+        ) -> Result<crate::ir::Outcome, UpstrokeError> {
+            crate::agent::AgentAdapter::parse(&self.answering, out)
+        }
+
+        fn materialize_permissions(
+            &self,
+            profile: &crate::ir::WorkerProfile,
+            gate_cmds: &[String],
+            dir: &std::path::Path,
+            stem: &str,
+        ) -> Result<Option<PathBuf>, UpstrokeError> {
+            crate::agent::AgentAdapter::materialize_permissions(
+                self.production,
+                profile,
+                gate_cmds,
+                dir,
+                stem,
+            )
+        }
+    }
+
+    #[cfg(unix)]
+    struct FPermittedAdapters {
+        primary: FPermitted,
+        second: FPermitted,
+    }
+
+    #[cfg(unix)]
+    impl FPermittedAdapters {
+        fn new() -> Self {
+            Self {
+                primary: FPermitted {
+                    answering: crate::engine::topology::scaffold::AnsweringAdapter::passing(
+                        crate::engine::topology::scaffold::AGENT,
+                    ),
+                    production: &crate::agent::claude::ClaudeCodeAdapter,
+                },
+                second: FPermitted {
+                    answering: crate::engine::topology::scaffold::AnsweringAdapter::passing(
+                        crate::engine::topology::scaffold::REVIEW_AGENT,
+                    ),
+                    production: &crate::agent::copilot::CopilotAdapter,
+                },
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    impl crate::agent::AdapterSource for FPermittedAdapters {
+        fn get(&self, id: &str) -> Option<&dyn crate::agent::AgentAdapter> {
+            if id == crate::engine::topology::scaffold::AGENT {
+                Some(&self.primary)
+            } else if id == crate::engine::topology::scaffold::REVIEW_AGENT {
+                Some(&self.second)
+            } else {
+                None
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    struct FDamagingReviews;
+
+    #[cfg(unix)]
+    impl crate::engine::topology::attempt::ReviewPasses for FDamagingReviews {
+        fn run(
+            &self,
+            cx: &crate::review::ReviewCx<'_>,
+            runner: &dyn crate::runner::Runner,
+            invocations: &crate::review::ReviewInvocations,
+        ) -> Result<crate::review::ReviewOutcome, UpstrokeError> {
+            if matches!(
+                &invocations.pass,
+                InvocationId::Sequence {
+                    sequence,
+                    role: crate::runner::invocation::SequenceRole::ReviewPass(0),
+                    ..
+                } if *sequence == F_HOSTED_VERIFIED
+            ) {
+                crate::workspace_manager::fixture::remove_file(
+                    &f_entry_of(cx.workspace).join("HEAD"),
+                );
+            }
+            crate::engine::topology::attempt::ReviewPasses::run(
+                &crate::engine::attempt::LegacyReviewPasses,
+                cx,
+                runner,
+                invocations,
+            )
+        }
+    }
+
+    #[cfg(unix)]
+    struct FOpaqueReviewer {
+        host: crate::runner::host::HostRunner,
+    }
+
+    #[cfg(unix)]
+    impl crate::runner::Runner for FOpaqueReviewer {
+        fn run<'a>(
+            &'a self,
+            request: &'a crate::runner::RunnerRequest,
+            call: crate::runner::RunnerCall<'a>,
+        ) -> crate::runner::RunFuture<'a> {
+            if !matches!(request.role, crate::runner::ExecutionRole::Review) {
+                return self.host.run(request, call);
+            }
+            let never: Result<crate::agent::ProcessOutput, crate::runner::RunnerError> =
+                Err(crate::runner::RunnerError::never_started(
+                    &request.invocation,
+                    UpstrokeError::Agent {
+                        message: "the opaque reviewer starts no process".to_owned(),
+                    },
+                ));
+            Box::pin(async move { never })
+        }
+
+        fn composed_common_dir(
+            &self,
+            request: &crate::runner::RunnerRequest,
+        ) -> crate::workspace_manager::ComposedCommonDir {
+            if matches!(request.role, crate::runner::ExecutionRole::Review) {
+                crate::workspace_manager::ComposedCommonDir::Unknown
+            } else {
+                self.host.composed_common_dir(request)
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn f_hosted_no_request_child(case: FNoRequest) {
+        use crate::topology::events::{
+            InfrastructureKind, MergePrepared, MergeVerificationStarted,
+            MergeVerificationUnavailable, PreparedDisposition, UnavailableCause,
+            UnavailableOutcome, VerificationBasis,
+        };
+        use crate::workspace_manager::{Slot, SnapshotName};
+
+        let Some(root) = std::env::var_os(F_HOSTED_ROOT).map(std::path::PathBuf::from) else {
+            return;
+        };
+        let below = std::path::PathBuf::from(
+            std::env::var_os(F_HOSTED_BASE).expect("the base below the root"),
+        );
+        let tasks = f_hosted_tasks();
+        let env = crate::engine::topology::scaffold::WideEnv::adopted_over(
+            crate::workspace_manager::fixture::Fixture::adopt_based(root.clone(), &below),
+            &tasks,
+            2,
+            WidePlans::default(),
+        );
+        let (_, mut resumed) = env
+            .resume(
+                "inc-2",
+                RecordingRunner::new(),
+                crate::engine::topology::select::Ceiling::unlimited(),
+            )
+            .expect("the run resumes under the linked registry");
+        let obstructed = resumed
+            .env
+            .paths
+            .settings()
+            .join(format!("integration-s{}-review.json", F_HOSTED_VERIFIED.0));
+        crate::workspace_manager::fixture::create_dir(&obstructed);
+        let host = crate::runner::host::HostRunner::new();
+        let runner: Arc<dyn crate::runner::Runner> = if case == FNoRequest::Opaque {
+            Arc::new(FOpaqueReviewer { host })
+        } else {
+            Arc::new(host)
+        };
+        let adapters = Arc::new(FPermittedAdapters::new());
+        let damaging = case == FNoRequest::Damaged;
+        let mut pipelines = resumed.env.pipelines_over(Arc::clone(&runner));
+        pipelines.adapters =
+            Arc::clone(&adapters) as Arc<dyn crate::agent::AdapterSource + Send + Sync>;
+        if damaging {
+            pipelines.reviews = Arc::new(FDamagingReviews);
+        }
+        let seams = crate::engine::topology::run::RunSeams {
+            adapters: &*adapters,
+            reviews: if damaging {
+                &FDamagingReviews
+            } else {
+                &crate::engine::attempt::LegacyReviewPasses
+            },
+            ..resumed.env.seams_over(&*runner)
+        };
+        let mut hooks = resumed.env.hooks();
+        let result = resumed
+            .run
+            .run_concurrently(&seams, &pipelines, &mut hooks, None);
+        drop(hooks);
+        assert!(
+            obstructed.is_dir(),
+            "the permission file's path is still the directory planted there"
+        );
+        let events = resumed.env.durable_events();
+        let kinds = kinds_of(&events);
+        let canonical_root = std::fs::canonicalize(&root).expect("the canonical scratch root");
+        let common = std::fs::canonicalize(root.join(&below).join(".git"))
+            .expect("the run's common directory");
+        let depth = below.components().count();
+        let named = common
+            .strip_prefix(&canonical_root)
+            .expect("the common directory is below the root")
+            .to_path_buf();
+        let relative = std::env::var_os("GIT_COMMON_DIR")
+            .is_some_and(|value| std::path::Path::new(&value).is_relative());
+        let log = String::from_utf8(std::fs::read(root.join("roles.log")).expect("the roles' log"))
+            .expect("a UTF-8 log");
+        let mut placed: BTreeMap<(&str, std::path::PathBuf), usize> = BTreeMap::new();
+        for line in log.lines() {
+            let (role, cwd) = line.split_once(' ').expect("a role and its directory");
+            let instance = f_hosted_instance(std::path::Path::new(cwd))
+                .unwrap_or_else(|| panic!("{role} ran in a slot instance: {cwd}"));
+            *placed.entry((role, instance)).or_insert(0) += 1;
+            if relative {
+                assert_eq!(
+                    std::path::Path::new(cwd)
+                        .ancestors()
+                        .nth(depth)
+                        .map(|top| top.join(&named)),
+                    Some(common.clone()),
+                    "the relative `GIT_COMMON_DIR` from {role}'s directory {cwd} names the run's \
+                     common directory"
+                );
+            }
+        }
+        let manager = &resumed.env.fixture.manager;
+        let verified = u64::from(F_HOSTED_VERIFIED.0);
+        let snapshot = |name| Slot::Snapshot { name };
+        let instance_of = |slot: &Slot| {
+            f_hosted_instance(&manager.slot_path(slot)).expect("a slot instance's directory")
+        };
+        let unheard = instance_of(&snapshot(SnapshotName::integration_review(verified, 0)));
+        match case {
+            FNoRequest::Outage => {
+                let progress = result.expect("the run over the host runner completes");
+                assert_eq!(outcome_of(&progress), RunOutcome::Complete);
+                assert!(
+                    matches!(
+                        progress,
+                        Progress::Finished {
+                            execution_root_removed: true,
+                            ..
+                        }
+                    ),
+                    "finalization removed every worktree and registration, then the execution root"
+                );
+                let unavailable: Vec<&MergeVerificationUnavailable> = events
+                    .iter()
+                    .filter_map(|event| match &event.body {
+                        TopologyEventBody::MergeVerificationUnavailable { data } => Some(data),
+                        _ => None,
+                    })
+                    .collect();
+                let [deferred] = unavailable.as_slice() else {
+                    panic!("exactly one verification was unavailable: {kinds:?}");
+                };
+                assert!(
+                    deferred.sequence == F_HOSTED_VERIFIED
+                        && matches!(
+                            deferred.cause,
+                            UnavailableCause::Infrastructure {
+                                kind: InfrastructureKind::ReviewUnavailable,
+                            }
+                        )
+                        && matches!(deferred.outcome, UnavailableOutcome::Deferred { defers: 1 }),
+                    "sequence 1's reviewer outage took the ordinary unavailable route, deferred \
+                     once: {deferred:?}"
+                );
+                let [charged] = deferred.reviews.as_slice() else {
+                    panic!("the outage's one review pass was charged: {deferred:?}");
+                };
+                assert!(
+                    matches!(
+                        charged.outcome,
+                        crate::events::ReviewPassOutcome::Unavailable
+                    ) && charged.cost_usd.is_none(),
+                    "charged as unavailable, with no cost: {charged:?}"
+                );
+                let started: Vec<&MergeVerificationStarted> = events
+                    .iter()
+                    .filter_map(|event| match &event.body {
+                        TopologyEventBody::MergeVerificationStarted { data } => Some(data),
+                        _ => None,
+                    })
+                    .collect();
+                let [first, again] = started.as_slice() else {
+                    panic!("the deferred integration was verified again: {kinds:?}");
+                };
+                assert!(
+                    first.sequence == F_HOSTED_VERIFIED
+                        && again.sequence != F_HOSTED_VERIFIED
+                        && again.candidate.key == first.candidate.key
+                        && matches!(first.basis, VerificationBasis::StaleClean { .. })
+                        && matches!(again.basis, VerificationBasis::StaleClean { .. }),
+                    "one candidate's stale integration, verified at sequence 1 and again: \
+                     {started:?}"
+                );
+                let outage = kinds
+                    .iter()
+                    .position(|seen| *seen == "merge_verification_unavailable");
+                let waited = kinds.iter().position(|seen| *seen == "defer_wait_elapsed");
+                let verified_again = kinds
+                    .iter()
+                    .rposition(|seen| *seen == "merge_verification_started");
+                assert!(
+                    outage.is_some() && outage < waited && waited < verified_again,
+                    "the outage, then the backoff's wait, then the verification again: {kinds:?}"
+                );
+                let prepared: Vec<&MergePrepared> = events
+                    .iter()
+                    .filter_map(|event| match &event.body {
+                        TopologyEventBody::MergePrepared { data } => Some(&**data),
+                        _ => None,
+                    })
+                    .collect();
+                let [fast, stale] = prepared.as_slice() else {
+                    panic!("both tasks' merges were prepared: {kinds:?}");
+                };
+                assert!(
+                    fast.sequence == SequenceId(0)
+                        && fast.disposition == PreparedDisposition::Fast
+                        && stale.sequence == again.sequence
+                        && stale.key == first.candidate.key
+                        && stale.disposition == PreparedDisposition::StaleClean
+                        && stale.verification.as_ref().is_some_and(|record| {
+                            record.passed() && record.gates_passed && record.reviews.len() == 1
+                        }),
+                    "the first merge was fast, and the deferred candidate's was prepared on its \
+                     passing verification when verified again: {prepared:?}"
+                );
+                assert_eq!(count(&events, "task_merged"), 2, "{kinds:?}");
+                assert!(
+                    resumed.run.invocations_balance(),
+                    "every request the run admitted was ended"
+                );
+                let retried = u64::from(again.sequence.0);
+                let expected: BTreeMap<(&str, std::path::PathBuf), usize> = f_hosted_placements()
+                    .into_iter()
+                    .filter(|(_, slot, _)| instance_of(slot) != unheard)
+                    .chain([
+                        ("gate", snapshot(SnapshotName::integration(retried)), 1),
+                        (
+                            "--prompt",
+                            snapshot(SnapshotName::integration_review(retried, 0)),
+                            1,
+                        ),
+                    ])
+                    .map(|(role, slot, times)| ((role, instance_of(&slot)), times))
+                    .collect();
+                assert_eq!(
+                    placed, expected,
+                    "each role ran over the host runner in its phase's slot, sequence 1's review \
+                     pass ran no process, and the verification again ran its gate and review: {log}"
+                );
+            }
+            FNoRequest::Damaged => {
+                let message = match result {
+                    Err(UpstrokeError::RegistryRefused { message }) => message,
+                    other => panic!("the damaged registration is refused: {other:?}: {kinds:?}"),
+                };
+                assert!(
+                    message.contains("the verdict of review pass 0")
+                        && message.contains("HEAD cannot be read"),
+                    "the refusal names the pass and the damage: {message}"
+                );
+                assert_eq!(
+                    count(&events, "merge_verification_unavailable"),
+                    0,
+                    "{kinds:?}"
+                );
+                assert!(
+                    events.iter().any(|event| matches!(
+                        &event.body,
+                        TopologyEventBody::MergeVerificationStarted { data }
+                            if data.sequence == F_HOSTED_VERIFIED
+                    )),
+                    "sequence 1's verification began: {kinds:?}"
+                );
+                let gated = instance_of(&snapshot(SnapshotName::integration(verified)));
+                assert_eq!(
+                    placed.get(&("gate", gated)),
+                    Some(&1),
+                    "the verification's gate ran: {log}"
+                );
+                assert!(
+                    !placed.keys().any(|(_, instance)| *instance == unheard),
+                    "the review pass handed its runner no request: {log}"
+                );
+            }
+            FNoRequest::Opaque => {
+                let message = match result {
+                    Err(UpstrokeError::RegistryRefused { message }) => message,
+                    other => panic!("the opaque reviewer's pass is refused: {other:?}: {kinds:?}"),
+                };
+                assert!(
+                    message.contains("the verdict of review pass 0")
+                        && message.contains("which is not this repository's common git dir"),
+                    "an admitted request whose runner reported nothing keeps the original rule: \
+                     {message}"
+                );
+                assert!(
+                    !placed.keys().any(|(role, _)| *role == "--prompt"),
+                    "no review process started: {log}"
+                );
+            }
+        }
+        let Wide { run, env } = resumed;
+        drop(run);
+        let crate::engine::topology::scaffold::WideEnv { fixture, .. } = env;
+        std::mem::forget(fixture);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "subprocess helper"]
+    fn hosted_no_request_outage_child() {
+        f_hosted_no_request_child(FNoRequest::Outage);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "subprocess helper"]
+    fn hosted_no_request_damaged_child() {
+        f_hosted_no_request_child(FNoRequest::Damaged);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "subprocess helper"]
+    fn hosted_no_request_opaque_child() {
+        f_hosted_no_request_child(FNoRequest::Opaque);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hosted_review_with_no_request_under_c4_is_deferred_and_the_run_completes() {
+        f_hosted_linked_registry("C4", "hosted_no_request_outage_child", true);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hosted_review_with_no_request_under_c5_is_deferred_and_the_run_completes() {
+        f_hosted_linked_registry("C5", "hosted_no_request_outage_child", true);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hosted_review_with_no_request_over_a_damaged_registration_is_refused() {
+        f_hosted_linked_registry("C4", "hosted_no_request_damaged_child", false);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hosted_review_request_whose_runner_reports_nothing_is_refused() {
+        f_hosted_linked_registry("C4", "hosted_no_request_opaque_child", false);
     }
 
     #[cfg(unix)]
