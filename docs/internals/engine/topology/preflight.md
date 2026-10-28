@@ -336,8 +336,9 @@ handed on and leaves no report.
 
 The reports of the requests this boundary admitted, read once, after its
 last run, as the boundary is consumed. A judge reads them for a review
-pass's verdict (`attempt.rs`, placement 2); an empty list, a pass that
-handed nothing on, is checked as the absence of a report.
+pass's verdict (`attempt.rs`, placement 2). An empty list is a pass that
+handed nothing on, for which no runner has anything to report, and the
+judge checks it under the manager's own builder instead.
 
 ## `impl<R: Registrar + ?Sized> Runner for Registering<'_, R>` › `fn composed_common_dir(&self, request: &RunnerRequest) -> ComposedCommonDir {`
 

@@ -1434,7 +1434,7 @@ carried (R-Z). The coordinator is killed; every one of the three processes is go
 settles, the holds are released after them, nothing of the dead coordinator is held, and the next
 coordinator resumes with empty ledgers and completes.
 
-## `mod tests` › `fn f_hosted_linked_registry(sequence: &str) {`
+## `mod tests` › `fn f_hosted_linked_registry(sequence: &str, child: &str, completes: bool) {`
 
 T-ENV-TOPO, the external-prune follow-up's integration correction at the topology, under the
 production host runner (F; Unix). It builds one layout's run, with the run's `worktrees` store a link
@@ -1470,7 +1470,10 @@ two.
     review with that verdict themselves and do not read the output;
   - `gate`. It logs, then requires `git rev-parse --git-common-dir` to be the run's canonical common
     directory and `HEAD^{tree}` to be readable.
-- **The child.** It starts the child with the value inherited.
+- **The child.** It starts `child` with the value inherited: T-ENV-TOPO's `hosted_linked_registry_child`,
+  or one of T-NOREQ's (`f_hosted_no_request_child`, below).
+- **A refused run** (`completes` false) is the child's to assert. After it the parent asserts only that the
+  store is still the link, naming the same target, and that the other repository's refs are untouched.
 - **After the child,** what the completed run left, each by its contract:
   - the store is still the link, naming the same target, and the target is kept and empty. Finalization
     removed every registration the run made, below the store pinned at derivation, and neither the link
@@ -1498,7 +1501,8 @@ value it is a host runner that holds the run's repository (`ObjectGraph::Recorde
 `ManagedRepository::new`, its include written at `<root>/recorded-objects.gitconfig`): under option
 (C) a role in a work tree the engine made is given the common directory its runner holds in place
 of an inherited relative value, and a runner that holds none refuses that role before it starts.
-The run must complete. Its steps reach each placement:
+`f_hosted_runner` builds that runner, which T-NOREQ's child takes too. The run must complete. Its
+steps reach each placement:
 
 - **Placement 3.** Alpha's first attempt's empty diff is a failure that placement 3 judges, so
   completion shows that placement 3 accepted it.
@@ -1553,6 +1557,111 @@ end-state assertion, at `coordinator.rs:15888`: "the run's store is still the li
   and reclaims the root the parent goes on to assert on. Whether that is what the parent met was not
   traced at run time.
 - **The correction.** The lifetime above: the child no longer reclaims the parent's tree.
+
+## `mod tests` › `enum FNoRequest {`
+
+T-NOREQ's three runs of a review pass that hands its runner no request, each over T-ENV-TOPO's linked layout
+and the host runner. Root's `F-REGULAR2-REPAIR-DISPOSITION-20261028` directs them, under its tracking ID
+`F-R2-NO-REQUEST-REGISTRATION`, which is not round 1's F-R2.
+
+- **`Outage`,** the witness. Sequence 1's review pass finds a directory at its permission file's path, and
+  ends unavailable before its first request.
+- **`Damaged`,** the negative. The same pass, with its snapshot's registration damaged first.
+- **`Opaque`,** the control. Every review request is admitted, reported `Unknown` by its runner, and never
+  started.
+
+## `mod tests` › `struct FPermitted {`
+
+The scaffold's passing adapter for one id, with the production adapter's `materialize_permissions` for that
+id: `ClaudeCodeAdapter`'s for `AGENT`, `CopilotAdapter`'s for `REVIEW_AGENT`. Each writes
+`<settings>/<stem>.json`, so a directory planted at that path fails the write, as the regression lens's
+trigger does. Everything else is the scaffold adapter's. `FPermittedAdapters` holds one for each id.
+
+## `mod tests` › `struct FDamagingReviews;`
+
+`LegacyReviewPasses`, which first removes `HEAD` from the registration entry of sequence 1's pass 0 snapshot
+(`f_entry_of`). The snapshot is damaged after it is made and before the pass runs.
+
+## `mod tests` › `struct FOpaqueReviewer {`
+
+The host runner for every role but the reviewer. A review request is reported `Unknown`, the trait's default,
+and its run returns a `NeverStarted` error without starting a process. `Registering` admits the request and
+keeps that report, and the pass reports zero processes, so the reported count and the registering history
+disagree.
+
+## `mod tests` › `fn f_hosted_no_request_child(case: FNoRequest) {`
+
+T-NOREQ's child. Like T-ENV-TOPO's, it adopts the fixture and resumes as `inc-2` at width two.
+
+- **The trigger.** It plants a directory at the run's `settings/integration-s1-review.json`.
+- **The seams.** It drives the run with `run_concurrently` over T-ENV-TOPO's host runner for the layout
+  (`f_hosted_runner`), or `FOpaqueReviewer` over it for `Opaque`. Both the coordinator's seams and the
+  pipelines' take `FPermittedAdapters`, and for `Damaged` both take `FDamagingReviews` as their review passes.
+- **Under C5,** that runner holds the run's repository. Over `HostRunner::new()`, option (C) would refuse
+  every role in a work tree the engine made before it starts, and the run would not reach the pass. Every
+  logged directory must name the run's common directory by the relative value.
+- **At the end** it forgets the adopted fixture, as T-ENV-TOPO's child does.
+
+**The production path the witness reaches:**
+1. The pass's permission write fails at `run_review`'s permission step. The pass ends `Unavailable` with no
+   request, so its `Registering` keeps no report.
+2. The process-count check passes, zero against zero. Placement 2 checks the pass under the manager's own
+   builder.
+3. The verification's judgement is the reviewer's outage. `integrate.rs` sends that down its ordinary
+   unavailable route: deferred while `max_defers` allows, and then parked.
+
+**`Outage` must complete,** with the execution root removed.
+- **The outage:** exactly one `merge_verification_unavailable`. It is for sequence 1, an infrastructure outage
+  of kind `review_unavailable`, deferred once. Its one charged review pass is unavailable, with no cost.
+- **What follows:** a `defer_wait_elapsed`, which the scaffold's `NoSleep` waits at once. Then the same
+  candidate's stale integration is verified again, under a new sequence, and its merge is prepared on that
+  verification: one gate set and one review, passing.
+- **The accounting:** two `task_merged`, and every request the run admitted was ended (`invocations_balance`).
+- **The role log:** T-ENV-TOPO's placements, with no line in sequence 1's review snapshot, and the gate and
+  review of the sequence verified again.
+- **The parent** asserts T-ENV-TOPO's end state.
+
+**`Damaged` must be refused,** with `RegistryRefused` naming the verdict of review pass 0 and a `HEAD` that
+cannot be read.
+- There is no `merge_verification_unavailable`.
+- Sequence 1's verification began, and its gate ran.
+- Nothing ran in its review snapshot.
+
+**`Opaque` must be refused,** with `RegistryRefused` naming the verdict of review pass 0 and the original
+rule's text: `commondir` does not name the run's common git dir.
+- No review process started.
+
+**Predicted at `a9d91de7`,** where an empty list reads as `Unknown`. `Outage` is refused there by the original
+rule, so its run fails and the child with it. `Damaged` and `Opaque` hold there as at the repair: the damage
+is found before the rule's comparison, and the opaque request's report is the runner's.
+
+## `mod tests` › `fn hosted_no_request_outage_child() {`
+
+T-NOREQ's child, for `Outage`.
+
+## `mod tests` › `fn hosted_no_request_damaged_child() {`
+
+T-NOREQ's child, for `Damaged`.
+
+## `mod tests` › `fn hosted_no_request_opaque_child() {`
+
+T-NOREQ's child, for `Opaque`.
+
+## `mod tests` › `fn a_hosted_review_with_no_request_under_c4_is_deferred_and_the_run_completes() {`
+
+The witness's C4 row.
+
+## `mod tests` › `fn a_hosted_review_with_no_request_under_c5_is_deferred_and_the_run_completes() {`
+
+The witness's C5 row.
+
+## `mod tests` › `fn a_hosted_review_with_no_request_over_a_damaged_registration_is_refused() {`
+
+The negative, under C4.
+
+## `mod tests` › `fn a_hosted_review_request_whose_runner_reports_nothing_is_refused() {`
+
+The control, under C4: an admitted request whose runner reported nothing keeps the original rule.
 
 ## `mod tests` › `fn the_broker_ledgers_balance_at_every_end_and_start_empty_at_every_next_start_at_width_three()`
 
