@@ -307,7 +307,7 @@ directory, and the coordinator inherits no `GIT_COMMON_DIR`. That is the conditi
 `../..` record Git writes for a new work tree names another directory. The refusal names the entry
 and its target. It starts no process. Legacy runs are unchanged. Where the registry is a symbolic
 link or junction into another repository and the coordinator inherits a `GIT_COMMON_DIR` naming the
-run's common directory, the run is not refused: Git's ref backends take a work tree's shared refs
+run's common directory, this start check does not refuse the run: Git's ref backends take a work tree's shared refs
 from that work tree's own record and never from the variable, so a branch or tag a role writes or
 reads in a work tree the engine made is the linked repository's. No engine sequence writes a shared
 ref there.
