@@ -8,7 +8,7 @@ reviewed_sha: 85f5b09b5fbb2436acd092fa77388d1bea750aef
 location: src/workspace_manager.rs:2649
 provenance: pre_existing
 first_bad: predates PR11: Git's prune decides on an entry before its `locked` exists and deletes it later without looking again, on 2.43.0, 2.50.1 and 2.55.0, so every engine `git worktree add` has both faces; executed at master 5c222ff2's add argv by PR #329's design rounds 7 to 9; prior IDs FUB-D6-PRUNE (face 1) and FUB-D7-R13 (face 2), from PR #329's design reviews 6 and 7, face 2's boundary corrected by FUB-D8-DURINGADD (review 8), and the host-agent subset PR11-HOST-AGENT-PRUNE-RACES-AN-ENGINE-ADD
-guard: accepted by the owner's RULING X-1 of 2026-10-15, verbatim and whole, as an explicit ruling on its scope per face and per starter, with closures 1 (with C1-4), 2 (O2(a), RULING P-1) and 3 (Choice A) implemented and validated in #333, F's merging change, where it takes effect (the acceptance below); G6's report cites it and states where it narrows Q1, Q2, Q4 and Q6; re-triaged at each tech-debt sweep (MAINTAINING.md)
+guard: accepted by the owner's RULING X-1 of 2026-10-15, verbatim and whole, as an explicit ruling on its scope per face and per starter, with closures 1 (with C1-4), 2 (O2(a), RULING P-1) and 3 (Choice A) implemented and validated in #333, F's merging change, where it takes effect (the acceptance below), closure 1's integration correction for a worktrees store linked into another repository, its reads and its removal (2cec7594), included, by the dated precisions of 2026-10-27 and 2026-10-28; G6's report cites it and states where it narrows Q1, Q2, Q4 and Q6; re-triaged at each tech-debt sweep (MAINTAINING.md)
 ---
 
 ## Failure sequence
@@ -586,3 +586,80 @@ env-gate-6's integration map (§2.4) found it. Root's disposition `F-ENV-COMPATI
 - **The sentences above that state the check** read as its original rule, which still applies whenever no value is
   reported. With a reported value, they read as this precision states.
 - **Validation is pending:** the C4 and C5 controls under a genuine host runner, their negatives, and fresh review.
+
+**A dated precision (2026-10-28): the removal under a store linked at derivation.** At `cbc0070e` the C4 and C5 runs
+over the genuine host runner still did not complete. Each refused its first removal, the gate snapshot's: a removal
+walked its registration from the common git dir, and the store's link is on that chain (HF-ENV, 6 passed and 2
+failed, kept as observed). Root's `F-RETURN12-IMPLEMENTATION-DISPOSITION-20261028` selected an explicit amendment of
+that anchor, made in `2cec7594`.
+
+- **The amendment.** When the store is a link, or another reparse point, to a real directory as the run's manager is
+  derived, its target is pinned then, by its canonical path. The pin is unconditional and filesystem-based. Its target
+  may be any real directory; a link into another repository's store is part 2's adopted layout.
+  - A removal that bound its registration there refuses, before its checkout is touched, unless the store is still
+    that link resolving to the target.
+  - Otherwise it deletes only that registration, below the target, and never the link or the target.
+- **What stays.**
+  - The rule against links on the execution root's chain.
+  - Capture, the registry reads and their refusals.
+  - The removal's order: the checkout first, then the identity re-read, which keeps `locked` and the entry.
+
+  The pin is a path, not the directory's identity.
+- **The witnesses.** The C4 and C5 hosted runs, now with the layout, refs and output the run leaves. The manager's
+  `a_store_linked_before_derive_removes_only_its_bound_registrations_and_keeps_link_and_target`, and its negatives for a
+  store lost, exchanged, linked after derivation or rebound.
+- **Validation at the new head is pending**, as is fresh review. Native Windows junction coverage is planned, not
+  executed.
+
+**A dated precision (2026-10-28, later): the witnesses' setup and the hosted runs' role count.** At `af1a3dbd` the
+focused run was red, 21 passed and 8 failed (HF-PIN, kept as observed).
+
+- **Six manager witnesses failed in their setup, before any removal.** Each added its task worktree through the
+  store's link with no `GIT_COMMON_DIR` given. Git's checkout of the new work tree failed: `not a git repository`, or
+  `nonexistent object` where the link named another repository's store.
+- **The repair is test-only.** Root's `F-EXECUTION4-FIXTURE-REPAIR-DIRECTION-20261028` directed it, and it is made
+  with this precision.
+  - The fixture's manager makes the registrations while the store is the repository's own directory.
+  - The store is then moved with them to the target and linked.
+  - The manager under test is derived over that link.
+
+  The production removal is unchanged.
+- **The C4 and C5 runs completed,** with the execution root removed, and failed their role count. The log held the
+  worker twice, one gate and one review pass. The predicate also asks for the verification's gate and review pass.
+- **The hosted reviewer now prints the scaffold's passing verdict,** as directed. The run's adapters supply that verdict
+  themselves, so the count is not met by it.
+- **Why the count stays unmet.** The run's one task merges by the fast path, which runs no verification:
+  `decide_pausing` and `prepare_fast` in `integrate.rs`. That is open and returned on this evidence. The predicate is
+  kept.
+- **Validation at the new head is pending.**
+
+**A dated precision (2026-10-28, later still): the hosted runs verify an integration.** Root's
+`F-HOSTED-VERIFICATION-FIXTURE-PRECISION-20261028` qualified the first diagnosis, and directed a test-only correction.
+The first diagnosis held that the reviewer stub's missing stdout verdict explained the missing verification. The run's
+adapters supply their own verdict, so it did not.
+
+- **The plan.** The C4 and C5 runs now plan two tasks, alpha and beta, at width two. The coordinator's first admission
+  dispatches both before it reads any message, so both take the start head as their base.
+- **The merges.** The first to merge is fast, as sequence 0. The second is stale, as sequence 1: its staging cherry-pick,
+  and its verification's gate and review, run over the genuine host runner.
+- **The evidence is bound to the verification phase.**
+  - From the events: one stale-clean `merge_verification_started`, and a stale-clean `merge_prepared` on a passing
+    verification record.
+  - From the role log: each role's directory, the verification's gate in sequence 1's integration snapshot and its
+    review in sequence 1's review snapshot. The attempts' lines are counted at their own placements.
+- **Unchanged:** production integration and the pinned store. The linked store and both inherited `GIT_COMMON_DIR`
+  forms are kept, as is the equal-depth layout.
+- **Validation at the new head is pending.**
+
+**A dated precision (2026-10-28, last): the hosted test's fixture lifetime.** At `d1bfb37a` both hosted children passed:
+completion, the stale integration's verification by its events and by every placement (HF-PIN, kept as observed). Each
+parent then failed its first end-state assertion, that the run's store is still its link.
+
+- **The static trace.** The parent's fixture owns the scratch tree through its guard. The child adopts the same root with
+  `Fixture::adopt_based`, and an adopted fixture's `Drop` reclaims its root. So the child's normal return removes the tree
+  the parent goes on to assert on. That is a test defect of this change; no runtime cause is claimed.
+- **The correction is test-only.** Root's `F-EXECUTION5-FIXTURE-LIFETIME-DIRECTION-20261028` directed it. After its last
+  assertion the child releases the run and the rest of its environment as usual, and forgets only the adopted fixture,
+  as P-3's `late_add_child` does.
+- **Unchanged:** `Fixture`'s `Drop`, every product teardown and finalization, and every assertion of child and parent.
+- **Validation at the new head is pending.**

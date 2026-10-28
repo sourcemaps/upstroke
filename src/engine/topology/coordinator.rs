@@ -15686,11 +15686,14 @@ mod tests {
     const F_HOSTED_AGENT: &str = r#"#!/bin/sh
 printf '%s %s\n' "$1" "$(pwd -P)" >> "$UPSTROKE_TEST_F_ROLE_LOG"
 if [ "$1" = --implement ]; then
-  if [ ! -e "$UPSTROKE_TEST_F_WORKER_MARKER" ]; then
+  if [ "$2" = alpha ] && [ ! -e "$UPSTROKE_TEST_F_WORKER_MARKER" ]; then
     : > "$UPSTROKE_TEST_F_WORKER_MARKER"
     exit 0
   fi
-  mkdir -p src/alpha && printf 'alpha worked\n' > src/alpha/work.txt
+  mkdir -p "src/$2" && printf '%s worked\n' "$2" > "src/$2/work.txt"
+fi
+if [ "$1" = --prompt ]; then
+  printf '%s\n' "$UPSTROKE_TEST_F_VERDICT"
 fi
 "#;
 
@@ -15703,9 +15706,62 @@ real=$(cd "$common" && pwd -P) || exit 3
 git cat-file -e 'HEAD^{tree}'
 "#;
 
+    /// The integration T-ENV-TOPO's run verifies: its second, whose
+    /// candidate's base is no longer the head once the first has merged.
+    #[cfg(unix)]
+    const F_HOSTED_VERIFIED: SequenceId = SequenceId(1);
+
+    /// T-ENV-TOPO's two tasks, writing disjoint paths. At width two the
+    /// coordinator's first admission dispatches both before it reads any
+    /// message, so both generations take the start head as their base, and
+    /// whichever merges second is stale.
+    #[cfg(unix)]
+    fn f_hosted_tasks() -> [WideTask; 2] {
+        [
+            WideTask::independent("alpha"),
+            WideTask::independent("beta"),
+        ]
+    }
+
+    /// Where T-ENV-TOPO's run places each role, and how many times. Alpha's
+    /// worker runs twice in its generation's slot, its first attempt leaving
+    /// the slot as it was, and beta's once. Each attempt that worked is gated
+    /// and reviewed in its own snapshots. The stale integration's gate and
+    /// review run in its integration snapshot and its review snapshot.
+    #[cfg(unix)]
+    fn f_hosted_placements() -> [(&'static str, crate::workspace_manager::Slot, usize); 8] {
+        use crate::workspace_manager::{Slot, SnapshotName};
+        let task =
+            |key| crate::engine::topology::dispatch::task_slot(TaskKey(key), GenerationId(0));
+        let snapshot = |name| Slot::Snapshot { name };
+        let verified = u64::from(F_HOSTED_VERIFIED.0);
+        [
+            ("--implement", task(0), 2),
+            ("--implement", task(1), 1),
+            ("gate", snapshot(SnapshotName::gates(0, 0, 2)), 1),
+            ("--prompt", snapshot(SnapshotName::review(0, 0, 2, 0)), 1),
+            ("gate", snapshot(SnapshotName::gates(1, 0, 1)), 1),
+            ("--prompt", snapshot(SnapshotName::review(1, 0, 1, 0)), 1),
+            ("gate", snapshot(SnapshotName::integration(verified)), 1),
+            (
+                "--prompt",
+                snapshot(SnapshotName::integration_review(verified, 0)),
+                1,
+            ),
+        ]
+    }
+
+    /// A slot instance's directory as `<namespace>/<component>_<tag>`.
+    #[cfg(unix)]
+    fn f_hosted_instance(path: &std::path::Path) -> Option<std::path::PathBuf> {
+        let instance = path.file_name()?;
+        let namespace = path.parent()?.file_name()?;
+        Some(std::path::Path::new(namespace).join(instance))
+    }
+
     #[cfg(unix)]
     fn f_hosted_linked_registry(sequence: &str) {
-        let tasks = [WideTask::independent("alpha")];
+        let tasks = f_hosted_tasks();
         let below = std::path::Path::new(if sequence == "C5" {
             crate::workspace_manager::fixture::EQUAL_DEPTH_BASE
         } else {
@@ -15716,7 +15772,7 @@ git cat-file -e 'HEAD^{tree}'
                 "f-hosted-c5",
                 below,
                 &tasks,
-                1,
+                2,
                 WidePlans::default(),
                 RecordingRunner::new(),
             )
@@ -15724,7 +15780,7 @@ git cat-file -e 'HEAD^{tree}'
             Wide::durable(
                 "f-hosted-c4",
                 &tasks,
-                1,
+                2,
                 WidePlans::default(),
                 RecordingRunner::new(),
             )
@@ -15765,20 +15821,14 @@ git cat-file -e 'HEAD^{tree}'
                 relative.push("..");
             }
             relative.push(named);
-            let work_trees = [
-                crate::workspace_manager::Slot::Task {
-                    key: "k0".to_owned(),
-                    generation: 1,
-                },
-                crate::workspace_manager::Slot::Staging { sequence: 1 },
-                crate::workspace_manager::Slot::Snapshot {
-                    name: crate::workspace_manager::SnapshotName::gates(0, 1, 1),
-                },
-                crate::workspace_manager::Slot::Snapshot {
-                    name: crate::workspace_manager::SnapshotName::integration(1),
-                },
-            ]
-            .map(|slot| env.fixture.manager.slot_path(&slot));
+            let work_trees: Vec<std::path::PathBuf> = f_hosted_placements()
+                .into_iter()
+                .map(|(_, slot, _)| slot)
+                .chain(std::iter::once(
+                    crate::engine::topology::integrate::staging_slot(F_HOSTED_VERIFIED),
+                ))
+                .map(|slot| env.fixture.manager.slot_path(&slot))
+                .collect();
             for from in std::iter::once(&base).chain(&work_trees) {
                 assert_eq!(
                     from.ancestors().nth(depth).map(|top| top.join(named)),
@@ -15822,6 +15872,10 @@ git cat-file -e 'HEAD^{tree}'
                 ("UPSTROKE_TEST_F_RUN_COMMON", common.as_os_str()),
                 ("UPSTROKE_TEST_F_WORKER_MARKER", marker.as_os_str()),
                 ("UPSTROKE_TEST_F_ROLE_LOG", log.as_os_str()),
+                (
+                    "UPSTROKE_TEST_F_VERDICT",
+                    std::ffi::OsStr::new(crate::engine::topology::scaffold::PASSING_VERDICT),
+                ),
             ],
             Duration::from_secs(300),
         );
@@ -15829,6 +15883,68 @@ git cat-file -e 'HEAD^{tree}'
             ended.status.is_some_and(|status| status.success())
                 && ended.stdout.contains("1 passed"),
             "{sequence}'s layout under a run over the host runner: {ended}"
+        );
+        let store = env.fixture.base.join(".git").join("worktrees");
+        assert!(
+            std::fs::symlink_metadata(&store)
+                .is_ok_and(|metadata| metadata.file_type().is_symlink()),
+            "{sequence}: the run's store is still the link it started under"
+        );
+        assert_eq!(
+            std::fs::canonicalize(&store).expect("the store resolves"),
+            std::fs::canonicalize(&elsewhere).expect("the link's target"),
+            "{sequence}: and the link still names the same target"
+        );
+        let left: Vec<std::path::PathBuf> = std::fs::read_dir(&elsewhere)
+            .expect("the link's target is kept")
+            .map(|entry| entry.expect("an entry of the target").path())
+            .collect();
+        assert!(
+            left.is_empty(),
+            "{sequence}: finalization removed every registration the run made, below the pinned \
+             target, and kept the target: {left:?}"
+        );
+        let base = &env.fixture.base;
+        assert_eq!(
+            crate::workspace_manager::fixture::git(
+                base,
+                &["for-each-ref", "--format=%(refname)", "refs/upstroke/runs/"]
+            ),
+            "",
+            "{sequence}: the completed run's prepared, candidate and candidates refs were deleted \
+             at finalization"
+        );
+        let branches = crate::workspace_manager::fixture::git(
+            base,
+            &[
+                "for-each-ref",
+                "--format=%(refname)",
+                "refs/heads/upstroke/",
+            ],
+        );
+        let mut named = branches.lines();
+        let (Some(branch), None) = (named.next(), named.next()) else {
+            panic!("{sequence}: the run's one integration branch: {branches:?}");
+        };
+        assert_eq!(
+            crate::workspace_manager::fixture::git(base, &["diff", "--name-only", "main", branch]),
+            "src/alpha/work.txt\nsrc/beta/work.txt",
+            "{sequence}: the run's output on {branch} is both tasks' work"
+        );
+        for id in ["alpha", "beta"] {
+            assert_eq!(
+                crate::workspace_manager::fixture::git(
+                    base,
+                    &["show", &format!("{branch}:src/{id}/work.txt")]
+                ),
+                format!("{id} worked"),
+                "{sequence}: with the bytes {id}'s worker wrote"
+            );
+        }
+        assert_eq!(
+            crate::workspace_manager::fixture::git(&other, &["for-each-ref"]),
+            "",
+            "{sequence}: the other repository's refs are untouched"
         );
     }
 
@@ -15855,11 +15971,11 @@ git cat-file -e 'HEAD^{tree}'
         let below = std::path::PathBuf::from(
             std::env::var_os(F_HOSTED_BASE).expect("the base below the root"),
         );
-        let tasks = [WideTask::independent("alpha")];
+        let tasks = f_hosted_tasks();
         let env = crate::engine::topology::scaffold::WideEnv::adopted_over(
             crate::workspace_manager::fixture::Fixture::adopt_based(root.clone(), &below),
             &tasks,
-            1,
+            2,
             WidePlans::default(),
         );
         let (_, mut resumed) = env
@@ -15908,9 +16024,72 @@ git cat-file -e 'HEAD^{tree}'
             .expect("the run over the host runner completes");
         assert_eq!(outcome_of(&progress), RunOutcome::Complete);
         assert!(
-            root.join("worker-wrote-nothing").exists(),
-            "the first attempt's worker left its slot as it was, so its failure was assessed"
+            matches!(
+                progress,
+                Progress::Finished {
+                    execution_root_removed: true,
+                    ..
+                }
+            ),
+            "finalization removed the execution root, every worktree and registration first"
         );
+        assert!(
+            root.join("worker-wrote-nothing").exists(),
+            "alpha's first attempt's worker left its slot as it was, so its failure was assessed"
+        );
+        let events = resumed.env.durable_events();
+        let kinds = kinds_of(&events);
+        let started: Vec<&crate::topology::events::MergeVerificationStarted> = events
+            .iter()
+            .filter_map(|event| match &event.body {
+                TopologyEventBody::MergeVerificationStarted { data } => Some(data),
+                _ => None,
+            })
+            .collect();
+        let [verification] = started.as_slice() else {
+            panic!("exactly one integration opened a verification: {kinds:?}");
+        };
+        assert!(
+            verification.sequence == F_HOSTED_VERIFIED
+                && matches!(
+                    verification.basis,
+                    crate::topology::events::VerificationBasis::StaleClean { .. }
+                ),
+            "the second integration's candidate was stale, and cherry-picked clean: \
+             {verification:?}"
+        );
+        let prepared: Vec<&crate::topology::events::MergePrepared> = events
+            .iter()
+            .filter_map(|event| match &event.body {
+                TopologyEventBody::MergePrepared { data } => Some(&**data),
+                _ => None,
+            })
+            .collect();
+        let [fast, stale] = prepared.as_slice() else {
+            panic!("both tasks' merges were prepared: {kinds:?}");
+        };
+        assert!(
+            fast.sequence == SequenceId(0)
+                && fast.disposition == crate::topology::events::PreparedDisposition::Fast
+                && fast.verification.is_none(),
+            "the first merge was fast, and verified nothing: {fast:?}"
+        );
+        assert!(
+            stale.sequence == F_HOSTED_VERIFIED
+                && stale.key == verification.candidate.key
+                && stale.disposition == crate::topology::events::PreparedDisposition::StaleClean
+                && stale.verification.as_ref().is_some_and(|record| {
+                    record.passed() && record.gates_passed && record.reviews.len() == 1
+                }),
+            "the stale merge was prepared on its passing verification, one gate set and one \
+             review: {stale:?}"
+        );
+        assert_eq!(
+            std::collections::BTreeSet::from([fast.key, stale.key]),
+            std::collections::BTreeSet::from([TaskKey(0), TaskKey(1)]),
+            "one merge of each task: {kinds:?}"
+        );
+        assert_eq!(count(&events, "task_merged"), 2, "{kinds:?}");
         let canonical_root = std::fs::canonicalize(&root).expect("the canonical scratch root");
         let depth = below.components().count();
         let named = common
@@ -15919,10 +16098,12 @@ git cat-file -e 'HEAD^{tree}'
             .to_path_buf();
         let log = String::from_utf8(std::fs::read(root.join("roles.log")).expect("the roles' log"))
             .expect("a UTF-8 log");
-        let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
+        let mut placed: BTreeMap<(&str, std::path::PathBuf), usize> = BTreeMap::new();
         for line in log.lines() {
             let (role, cwd) = line.split_once(' ').expect("a role and its directory");
-            *seen.entry(role).or_insert(0) += 1;
+            let instance = f_hosted_instance(std::path::Path::new(cwd))
+                .unwrap_or_else(|| panic!("{role} ran in a slot instance: {cwd}"));
+            *placed.entry((role, instance)).or_insert(0) += 1;
             if relative {
                 assert_eq!(
                     std::path::Path::new(cwd)
@@ -15935,22 +16116,30 @@ git cat-file -e 'HEAD^{tree}'
                 );
             }
         }
-        for (role, what) in [
-            (
-                "--implement",
-                "the worker, once leaving its slot as it was and once working",
-            ),
-            ("gate", "the attempt's gate and the verification's"),
-            (
-                "--prompt",
-                "the attempt's review pass and the verification's",
-            ),
-        ] {
-            assert!(
-                seen.get(role).copied().unwrap_or(0) >= 2,
-                "{what} ran over the host runner: {log}"
-            );
-        }
+        let manager = &resumed.env.fixture.manager;
+        let expected: BTreeMap<(&str, std::path::PathBuf), usize> = f_hosted_placements()
+            .into_iter()
+            .map(|(role, slot, times)| {
+                let instance = f_hosted_instance(&manager.slot_path(&slot))
+                    .expect("a slot instance's directory");
+                ((role, instance), times)
+            })
+            .collect();
+        assert_eq!(
+            placed, expected,
+            "each role ran over the host runner, in this incarnation's instance of the slot its \
+             phase places it in: alpha's worker twice and beta's once, each working attempt's \
+             gate and review, and the gate and review of sequence {}'s verification: {log}",
+            F_HOSTED_VERIFIED.0
+        );
+        // The parent owns the tree, and asserts on it after this process
+        // exits. The run and every other part of the environment go as usual;
+        // only the adopted fixture is forgotten, whose drop would reclaim the
+        // parent's root.
+        let Wide { run, env } = resumed;
+        drop(run);
+        let crate::engine::topology::scaffold::WideEnv { fixture, .. } = env;
+        std::mem::forget(fixture);
     }
 
     #[cfg(unix)]
@@ -26314,7 +26503,11 @@ git cat-file -e 'HEAD^{tree}'
     fn f_resume_fresh(
         wide: Wide,
         tasks: &[WideTask],
-    ) -> (Result<Vec<TaskKey>, UpstrokeError>, Vec<TopologyEvent>) {
+    ) -> (
+        Result<Vec<TaskKey>, UpstrokeError>,
+        Vec<TopologyEvent>,
+        crate::engine::topology::scaffold::WideEnv,
+    ) {
         let Wide { run, env } = wide;
         drop(run);
         let runtime = crate::runner::container::FakeRuntime::new(
@@ -26336,10 +26529,16 @@ git cat-file -e 'HEAD^{tree}'
         );
         drop(hooks);
         match resumed {
-            Ok((recovered, wide)) => (Ok(recovered.finished), wide.env.durable_events()),
+            Ok((recovered, wide)) => {
+                let Wide { run, env } = wide;
+                drop(run);
+                let events = env.durable_events();
+                (Ok(recovered.finished), events, env)
+            }
             Err(failed) => {
                 let (error, env) = *failed;
-                (Err(error), env.durable_events())
+                let events = env.durable_events();
+                (Err(error), events, env)
             }
         }
     }
@@ -26393,8 +26592,9 @@ git cat-file -e 'HEAD^{tree}'
                 "the last entry's prune took the store"
             );
             let before = f_files(&checkout);
-            let (resumed, events) = f_resume_fresh(wide, &tasks);
+            let (resumed, events, env) = f_resume_fresh(wide, &tasks);
             f_promotion_kept(resumed, &events, &checkout, &before);
+            drop(env);
         });
     }
 
@@ -26414,8 +26614,37 @@ git cat-file -e 'HEAD^{tree}'
                 "another registration keeps the store"
             );
             let before = f_files(&checkout);
-            let (resumed, events) = f_resume_fresh(wide, &tasks);
+            let (resumed, events, env) = f_resume_fresh(wide, &tasks);
             f_promotion_kept(resumed, &events, &checkout, &before);
+            drop(env);
+        });
+    }
+
+    #[test]
+    fn the_kept_slot_comparison_fails_once_a_kept_file_is_removed_by_hand() {
+        bounded("f-promoting-kept-control", || {
+            let tasks = f_one_task();
+            let wide = f_promoting_left("f-promoting-kept-control", false);
+            let checkout = f_pruned_promoting_checkout(&wide);
+            let before = f_files(&checkout);
+            let (resumed, events, env) = f_resume_fresh(wide, &tasks);
+            let refused = resumed.expect_err("the resume refuses the promotion's completion");
+            let kept = checkout.join("untracked.txt");
+            assert!(kept.is_file(), "the refused resume kept {}", kept.display());
+            crate::workspace_manager::fixture::remove_file(&kept);
+            let payload = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                f_promotion_kept(Err(refused), &events, &checkout, &before);
+            }))
+            .expect_err("the comparison fails once a kept file is gone");
+            let message = payload
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .unwrap_or_default();
+            assert!(
+                message.contains("the slot and what it holds are kept"),
+                "the comparison, not an earlier check, fails: {message:?}"
+            );
+            drop(env);
         });
     }
 
@@ -26426,7 +26655,7 @@ git cat-file -e 'HEAD^{tree}'
             let wide = f_promoting_left("f-promoting-released", false);
             let checkout = f_pruned_promoting_checkout(&wide);
             f_remove_tree_by_hand(&checkout);
-            let (resumed, events) = f_resume_fresh(wide, &tasks);
+            let (resumed, events, env) = f_resume_fresh(wide, &tasks);
             let finished = resumed
                 .unwrap_or_else(|error| panic!("the resume finishes the promotion: {error}"));
             assert_eq!(
@@ -26440,6 +26669,7 @@ git cat-file -e 'HEAD^{tree}'
                 "{kinds:?}"
             );
             assert!(!checkout.exists(), "nothing is left at the slot");
+            drop(env);
         });
     }
 
