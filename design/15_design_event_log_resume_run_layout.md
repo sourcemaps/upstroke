@@ -179,7 +179,12 @@ stays as adopted.
   repository, under an inherited `GIT_COMMON_DIR` naming the run's common directory (R-C-REGISTRY's
   part 2), stays whole: Git records `commondir` there as the other repository. A value the
   coordinator holds is not evidence for a process it starts, so a runner that reports nothing is
-  read by the first form.
+  read by the first form. A review pass that hands its runner no request — its permission file, its
+  command or its budget fails before the first, or the first is refused admission — has started no
+  process there: the only Git that has run in its snapshot is the engine's own, which made it, and
+  the pass is read by the form for what the engine's own builder reports, as the engine's own reads
+  are. Having no request is not a runner's report of nothing, and a pass whose request was admitted
+  is read by what its runner reported.
   - A Git error from a manager command in a slot; an answer the engine reads from a checkout's index
     (the classification of a failed proposal pick, the capture's reads of conflicts and of the
     resolution manifest, the promotion's changed paths, a materialization's observation, a

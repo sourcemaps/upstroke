@@ -1179,6 +1179,11 @@ impl Judge<'_> {
                 }));
             }
 
+            let composed = if composed.is_empty() {
+                vec![self.manager.composed_common_dir(snapshot.path())]
+            } else {
+                composed
+            };
             if let super::dispatch::Whole::No(found) = super::dispatch::registration_whole_under(
                 snapshot.path(),
                 self.manager.common_git_dir(),
