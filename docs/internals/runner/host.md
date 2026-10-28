@@ -215,6 +215,32 @@ phase 3, the run's cleanup-lease paths, which it hands on. Why on the polling
 thread is `docs/internals/runner/contract.md`'s ("Where the work happens"): the reaper's cleanup
 lease is thread-scoped, and so is the observation export.
 
+## `impl Runner for HostRunner` › `fn composed_common_dir(`
+
+The `GIT_COMMON_DIR` the child for `request` is started with (DESIGN §8; the external-prune
+follow-up's integration correction), read from `fn child_environment(`, the composition that gives
+the child its environment:
+
+- **The entry the child receives.** `supervise` sets the composed vector with `Command::envs`, where
+  a later entry for a name replaces an earlier one, so the last match is read.
+- **Names matched by the platform's rule** (`KeyCase::current()`). That is how the child's own
+  environment, and so its Git, finds a name, whatever case rule the installed `HostEnvironment`
+  composes by. On Unix, a base built with `KeyCase::Insensitive` that holds `git_common_dir` gives the
+  child a variable its Git does not read, and this reports `Absent`.
+- **The value as composed**, an `OsString`, with no lossy conversion.
+- **`Unknown` when the composition refuses** (an overlay naming a reserved key), so a refusal never
+  becomes a reported value. The run of that request is refused `NeverStarted` by the same composition.
+
+It reports what the child is started with, not what a role's own code does afterwards.
+
+## `impl HostRunner` › `fn child_environment(`
+
+The one composition of a child's environment: `HostEnvironment::compose` over the request's role,
+agent and overlay, from this runner's own `HostEnvironment`, which is `HostRunner::new`'s process base
+or whatever `with_environment` installed. `supervise` gives the child exactly what it returns, after
+`env_clear`, and `composed_common_dir` reads its report from it, so the two cannot disagree. A step a
+later change adds to the child's composition belongs here, and the report follows it.
+
 ## `impl HostRunner` › `fn supervise(`
 
 **Cancellation.** A call cancelled before `supervise` begins is refused before anything else is

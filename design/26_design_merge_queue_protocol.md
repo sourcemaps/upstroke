@@ -700,3 +700,25 @@ refuses a log holding one for the same reason. Each is a Class C wire change und
 `src/topology/**` freeze and the whole subject of the pull request that makes it, which is what the
 classification asks for; the record's also moves files G6 compares with its G5 range, which the
 owner's rulings on G6's diff proof name by path and merge.
+
+#### A verification in a checkout a prune emptied
+
+Added under §13's same-change rule; not part of the verbatim record above. It records which outcome an
+integration reaches when a prune that no engine process starts deletes the registration of a checkout
+it uses (`design/15`, the external-prune paragraph).
+
+The classification of a stale candidate's failed proposal pick is read from its staging checkout; a
+verification's staging diff and review-input read, and its gates and reviews, from its checkouts.
+Each, failure or answer, is read against the worktree registration of the checkout it was read in;
+a gate's run that fails without a verdict, its launch included, is such a failure, and one that was
+cancelled, or whose process may still be running, is handled as before.
+When that registration is not whole, nothing read there is used: a deleted index reads as an empty
+one, so a conflict would read as an empty pick and a review-input problem as none. The read is a
+registry refusal (`UpstrokeError::RegistryRefused`), which ends the command resumably. No terminal
+is appended for it, no deferral is spent and no repair is registered; a refused classification
+opens no verification, and the next resume reclaims its staging checkout and integrates the
+candidate again; a refused verification is settled interrupted by the next resume and verified
+again under a new sequence. A removed `index` or `HEAD` that Git wrote again before the read, or a
+file the read does not check, is not seen, and the read's answer is then used as before.
+
+The review passes it had charged are recorded as "The unavailable terminal's spend" says.

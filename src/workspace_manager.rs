@@ -60,7 +60,7 @@
 #![cfg_attr(not(test), forbid(clippy::disallowed_macros))]
 
 use std::collections::HashSet;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::Write as _;
 use std::path::{Component, Path, PathBuf};
@@ -105,6 +105,35 @@ use crate::util::{DurabilityLedger, DurableStep, EntryObserved};
 /// the key and the value cannot be separated and a new spawn site names the
 /// fact rather than restating it.
 pub const NO_REPLACEMENT_OBJECTS: (&str, &str) = ("GIT_NO_REPLACE_OBJECTS", "1");
+
+/// The variable that names the repository's common directory.
+pub(crate) const COMMON_DIR: &str = "GIT_COMMON_DIR";
+
+/// The [`COMMON_DIR`] a Git child is started with, as the code that composes
+/// the child's environment reports it: this manager's builder for its own
+/// children ([`WorkspaceManager::composed_common_dir`]), and a runner for the
+/// process it starts for a request (`Runner::composed_common_dir`). Closure
+/// 1's check reads it as the guarded child's Git context
+/// ([`registration_whole`]).
+///
+/// It reports what the child is started with. It is not a claim about every
+/// Git command a process runs later, whose own code can change its
+/// environment or its directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ComposedCommonDir {
+    /// No usable report: the composer reports nothing (a runner that keeps
+    /// `Runner`'s default, the container runner and the test runners among
+    /// them), or it could not compose the environment. It does not say that
+    /// the child has no [`COMMON_DIR`]. The check keeps its original rule.
+    Unknown,
+    /// The child is started without [`COMMON_DIR`], so its Git takes the
+    /// common directory from the registration's own `commondir`. The check
+    /// keeps its original rule, which is that one.
+    Absent,
+    /// The child is started with [`COMMON_DIR`] set to this value, exactly as
+    /// composed, relative or absolute.
+    Present(OsString),
+}
 
 /// The root of every run's ref namespace: a run's refs live under
 /// `refs/upstroke/runs/<run-id>/`, and the engine writes nothing else there.
@@ -579,6 +608,34 @@ pub enum Refusal {
         /// Git for Windows' budget.
         budget: usize,
     },
+
+    /// The store pin lost (`RegistrationStore`): a removal bound its
+    /// registration while the registration store was the link pinned at
+    /// derivation, and the store is no longer that link resolving to the
+    /// pinned target. It is gone, a plain directory or anything else that is
+    /// not a link, or a link that resolves elsewhere or not at all. The
+    /// removal refuses before its checkout is touched and does not fall back
+    /// to the walk from the common git dir: what stands at the store now is
+    /// not the store the registration was bound in.
+    #[error(
+        "refusing to remove the registration {}: the registration store {} was a link to {} when \
+         this run's manager was derived, and it {}; a removal acts only below the store pinned \
+         then, and nothing of this one has been deleted",
+        .registration.display(),
+        .store.display(),
+        .pinned.display(),
+        .found
+    )]
+    PinnedStoreLost {
+        /// The registration the removal's scan bound, as the scan spelled it.
+        registration: PathBuf,
+        /// The store, `<common git dir>/worktrees`.
+        store: PathBuf,
+        /// The canonical target pinned at derivation.
+        pinned: PathBuf,
+        /// What the store was found to be instead.
+        found: String,
+    },
 }
 
 impl From<Refusal> for UpstrokeError {
@@ -727,7 +784,8 @@ pub(crate) enum ActedThrough {
     SlotCheckoutEntry,
     /// `hooks-none`, every Git command's `core.hooksPath`.
     HooksPath,
-    /// The worktree's registration under the common git dir: its admin
+    /// The worktree's registration under the common git dir, or under the
+    /// store's target pinned at derivation ([`RegistrationStore`]): its admin
     /// directory, and the `gitdir` and `locked` entries inside it.
     Registration,
 }
@@ -1502,6 +1560,68 @@ pub struct WorkspaceManager {
     /// change made for a doc comment.
     private_root: PathBuf,
     execution_root: PathBuf,
+    /// The registration store as [`Self::derive`] found it: where a removal's
+    /// registration walk is anchored ([`RegistrationStore`]).
+    store: RegistrationStore,
+}
+
+/// The repository's registration store, `<common git dir>/worktrees`, as
+/// [`WorkspaceManager::derive`] found it: the anchor of a removal's
+/// [`ActedThrough::Registration`] walk.
+///
+/// **The pin.** When the store is a link, or another reparse point, that
+/// resolves to a real directory as the manager is derived, that directory is
+/// pinned then, by its canonical path, as the common git dir and the
+/// authorized private root are: that one link, at exactly that path, and
+/// whatever real directory it names. The pin is filesystem-based and
+/// unconditional. It reads no `GIT_COMMON_DIR`, and its target may be any
+/// real directory; a link into another repository's store is the layout
+/// R-C-REGISTRY's part 2 adopts (C4's and C5's). Git writes the registration
+/// of every engine add through such a link, so a removal binds its
+/// registration below the target, where a walk from the common git dir would
+/// meet the link and refuse every removal of an engine worktree.
+///
+/// **What it changes.** A removal that bound its registration under a pinned
+/// store re-checks the pin before it touches anything, and refuses when the
+/// store is no longer that link ([`WorkspaceManager::registration_spelled`]).
+/// Otherwise it walks and deletes only its bound registration below the
+/// target, and never removes the link or the target. A link made at the store
+/// after derivation is not pinned and refuses as any link on the chain does.
+/// Nothing else reads the pin: capture, the registry reads and their context
+/// refusals are unchanged, so a configuration they refuse still fails as a
+/// run, while the cleanup of its own bound registrations now completes.
+///
+/// **Its limits.** The pin is a path, not the identity of the directory
+/// there: a plain directory exchanged in at the pinned path is not seen, and
+/// neither is an exchange between the check and the syscall, as for every
+/// walked path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RegistrationStore {
+    /// The store was not a link at derivation, or not one that resolved to a
+    /// real directory: every registration is walked from the common git dir,
+    /// through plain components only.
+    Own,
+    /// The store was a link, or another reparse point, whose canonical target
+    /// was this real directory.
+    Pinned(PathBuf),
+}
+
+impl RegistrationStore {
+    /// The store under `common_git_dir` as it stands now. Every failure to
+    /// read or resolve it is [`Self::Own`], so derivation refuses nothing it
+    /// did not refuse before, and the walk decides as it always has.
+    fn of(common_git_dir: &Path) -> Self {
+        let link = common_git_dir.join("worktrees");
+        let linked = fs::symlink_metadata(&link)
+            .is_ok_and(|metadata| containment::is_reparse_point(&metadata));
+        if !linked {
+            return Self::Own;
+        }
+        match fs::canonicalize(&link) {
+            Ok(target) if target.is_dir() => Self::Pinned(strip_verbatim(target)),
+            _ => Self::Own,
+        }
+    }
 }
 
 /// `fs::remove_dir_all`, tolerating the window in which a just-killed process's
@@ -2229,6 +2349,7 @@ impl WorkspaceManager {
         refuse_unreal_directory(private_root)?;
 
         let common_git_dir = common_git_dir(base)?;
+        let store = RegistrationStore::of(&common_git_dir);
         let repo_key = repo_key_v1(&common_git_dir);
         let private_root = canonical_prefix(private_root)?;
         let execution_root = execution_root_of(&private_root, &repo_key, run_id);
@@ -2241,6 +2362,7 @@ impl WorkspaceManager {
             tag: InstanceTag::of_incarnation(incarnation),
             private_root,
             execution_root,
+            store,
         };
         manager.revalidate()?;
         Ok(manager)
@@ -2532,10 +2654,10 @@ impl WorkspaceManager {
                 }
                 ActedThrough::Registration => {
                     if let Some(admin) = registration {
-                        let git_dir = self.common_git_dir.clone();
-                        paths.push((git_dir.clone(), admin.to_path_buf(), Leaf::Directory));
-                        paths.push((git_dir.clone(), admin.join("gitdir"), Leaf::Entry));
-                        paths.push((git_dir, admin.join("locked"), Leaf::Entry));
+                        let anchor = self.registration_anchor(admin);
+                        paths.push((anchor.clone(), admin.to_path_buf(), Leaf::Directory));
+                        paths.push((anchor.clone(), admin.join("gitdir"), Leaf::Entry));
+                        paths.push((anchor, admin.join("locked"), Leaf::Entry));
                     }
                 }
             }
@@ -2765,6 +2887,46 @@ impl WorkspaceManager {
             .into());
         }
         Ok(candidate)
+    }
+
+    /// Closure 1's check on an answer read from a slot's index (placement 1's
+    /// answer arm). Git reads a deleted `index` as an empty one and answers
+    /// without failing, so an answer read from the index is used only while the
+    /// slot's worktree registration is whole ([`registration_whole`]). Files
+    /// only: it starts no process, takes no lock and makes no registry access.
+    fn answered_whole<T>(
+        &self,
+        checkout: &Path,
+        read: &str,
+        answer: T,
+    ) -> Result<T, UpstrokeError> {
+        match registration_whole(
+            checkout,
+            &self.common_git_dir,
+            &self.composed_common_dir(checkout),
+        ) {
+            Whole::Yes => Ok(answer),
+            Whole::No(found) => Err(read_refused(checkout, read, &found)),
+        }
+    }
+
+    /// Placement 1's error arm: a Git error of a command run in a slot's
+    /// checkout is a registry refusal while the registration is not whole
+    /// ([`registration_whole`]). Every other error passes through. It is
+    /// applied to a function's error as the function returns, so a Git error
+    /// the function constructs itself is covered as a child's is.
+    fn refused_if_pruned(&self, checkout: &Path, error: UpstrokeError) -> UpstrokeError {
+        match error {
+            UpstrokeError::Git { message } => match registration_whole(
+                checkout,
+                &self.common_git_dir,
+                &self.composed_common_dir(checkout),
+            ) {
+                Whole::Yes => UpstrokeError::Git { message },
+                Whole::No(found) => read_refused(checkout, &message, &found),
+            },
+            other => other,
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -3800,9 +3962,12 @@ impl WorkspaceManager {
     ///
     /// # Errors
     ///
-    /// The containment refusals or a Git error. A worktree that is *not*
-    /// quiescent is `Ok(Err(VerifyFailure))`, not an error: its failure routes
-    /// to forced removal and a fresh add, which is a decision the caller makes.
+    /// The containment refusals or a Git error, which is
+    /// [`UpstrokeError::RegistryRefused`] instead while the slot's worktree
+    /// registration is not whole ([`Self::refused_if_pruned`]). A worktree that
+    /// is *not* quiescent is `Ok(Err(VerifyFailure))`, not an error: its
+    /// failure routes to forced removal and a fresh add, which is a decision the
+    /// caller makes.
     pub fn verify_worktree(
         &self,
         hooks: &mut dyn EffectHooks,
@@ -3824,6 +3989,7 @@ impl WorkspaceManager {
                 self.quiescence_with(&path, expected, &mut |pause| hooks.registry_pause(pause))
             },
         )
+        .map_err(|error| self.refused_if_pruned(&path, error))
     }
 
     /// The body of [`Self::verify_worktree`], so the sampling harness can ask
@@ -3994,7 +4160,8 @@ impl WorkspaceManager {
     /// §2.5 and §3.5): the registration the removal's scan bound to this slot's
     /// checkout is removed, `locked` first and then its directory, and then the
     /// store itself when that left it empty, as Git's prune removed an emptied
-    /// store. Git's prune deletes *every* entry with neither `locked` nor
+    /// store: the repository's own store, never one pinned at derivation
+    /// (`RegistrationStore`). Git's prune deletes *every* entry with neither `locked` nor
     /// `gitdir`, and `git worktree add` makes its entry before it writes
     /// `locked`, so an engine prune could delete another process's add in
     /// flight; removal bound to the instance's own registration deletes no
@@ -4183,6 +4350,58 @@ impl WorkspaceManager {
         })
     }
 
+    /// Every instance of `slot` this manager's removal reaches
+    /// ([`Self::instance_tags_of`], the reach of
+    /// [`Self::remove_worktree_proving`]) that holds anything while its
+    /// worktree registration is not whole (closure 1's check,
+    /// [`registration_whole`], files only), with what the check found. A read:
+    /// it removes, writes and starts nothing. Its read of the store is one
+    /// tolerant registry access, whose waits go through `hooks`.
+    ///
+    /// The external-prune follow-up's guard and closure 2's live boundaries
+    /// read it immediately before the removal they would make, and refuse,
+    /// removing nothing, while it names an instance: what such an instance
+    /// holds may be an attempt's unpinned output, and a prune no engine
+    /// process started can delete the registration of a checkout that holds
+    /// it. Its reach is the removal's by construction, so a later change to
+    /// the one moves the other. A deletion that lands between this read and
+    /// the removal is not seen.
+    ///
+    /// # Errors
+    ///
+    /// [`Refusal::SlotName`], [`UpstrokeError::RegistryRefused`] when the
+    /// store cannot be read by the access's deadline, the error of a wait
+    /// `hooks` ended, or an I/O error reading an instance's directory.
+    pub fn kept_instances(
+        &self,
+        hooks: &mut dyn EffectHooks,
+        slot: &Slot,
+    ) -> Result<Vec<(PathBuf, String)>, UpstrokeError> {
+        slot.validate()?;
+        let tags = tolerant_registry_access(
+            &self.common_git_dir,
+            RegistryHold::Unheld,
+            &mut |pause| hooks.registry_pause(pause),
+            &mut || Again::Attempt,
+            &mut || self.instance_tags_of(slot),
+        )?;
+        let mut kept = Vec::new();
+        for tag in tags {
+            let path = self.instance_path(slot, tag.as_ref());
+            if !holds_anything(&path)? {
+                continue;
+            }
+            if let Whole::No(found) = registration_whole(
+                &path,
+                &self.common_git_dir,
+                &self.composed_common_dir(&path),
+            ) {
+                kept.push((path, found));
+            }
+        }
+        Ok(kept)
+    }
+
     /// The tags of every instance of `slot` the execution root holds, this
     /// incarnation's first and always, whether it exists or not; `None` is
     /// the untagged name. Found the three ways [`Self::intents`] finds an
@@ -4223,7 +4442,11 @@ impl WorkspaceManager {
     /// `slot`, the one `tag` names, with `registration` bound by its scan: the
     /// checkout removed and its deletion made durable, then that registration
     /// removed directly — `locked`, then its directory — and then the store,
-    /// when that left it empty. No `git worktree prune` runs, and no entry the
+    /// when that left it empty and it is the repository's own. A registration
+    /// bound under a store pinned at derivation is spelled below the pinned
+    /// target first ([`Self::registration_spelled`]), before anything is
+    /// touched, and refused there if the pin no longer holds; it is walked and
+    /// removed below the target. No `git worktree prune` runs, and no entry the
     /// scan did not bind to this instance is touched.
     fn remove_bound(
         &self,
@@ -4233,10 +4456,13 @@ impl WorkspaceManager {
         registration: Option<&Path>,
         ledger: &DurabilityLedger,
     ) -> Result<(), UpstrokeError> {
+        let registration = registration
+            .map(|admin| self.registration_spelled(admin))
+            .transpose()?;
         self.revalidate_acted_through_instance(
             Primitive::RemoveWorktree,
             Some((slot, tag)),
-            registration,
+            registration.as_deref(),
         )?;
         let present = match fs::symlink_metadata(path) {
             Ok(_) => true,
@@ -4265,7 +4491,7 @@ impl WorkspaceManager {
             message: format!("{} has no parent directory", checkout.display()),
         })?;
         sync_checkout_removed(&checkout, parent, ledger)?;
-        let Some(admin) = registration else {
+        let Some(admin) = registration.as_deref() else {
             // No registration names this slot: nothing of the store is this
             // removal's to touch.
             return Ok(());
@@ -4303,8 +4529,14 @@ impl WorkspaceManager {
         // another registration still holds, and best effort, as Git's is. The
         // frozen `finalize.rs` test
         // `scrub_slots_converges_when_git_has_pruned_the_emptied_registration_store`
-        // pins the store's absence after its slots' removals.
-        let _ = fs::remove_dir(self.common_git_dir.join("worktrees"));
+        // pins the store's absence after its slots' removals. Only the
+        // repository's own store: a store pinned at derivation is a link the
+        // operator made, and neither the link nor its target is this
+        // removal's. On Unix an `rmdir` of the link fails and leaves both, but
+        // on Windows an `rmdir` of a junction removes the junction.
+        if self.store == RegistrationStore::Own {
+            let _ = fs::remove_dir(self.common_git_dir.join("worktrees"));
+        }
         Ok(())
     }
 
@@ -5008,7 +5240,15 @@ impl WorkspaceManager {
     ///
     /// # Errors
     ///
-    /// The containment refusals or a Git error.
+    /// The containment refusals or a Git error, which is
+    /// [`UpstrokeError::RegistryRefused`] instead while the slot's worktree
+    /// registration is not whole ([`Self::refused_if_pruned`]); and the
+    /// manifest name's own refusal of an answer read while it is not whole
+    /// ([`Self::manifest_name`]).
+    ///
+    /// A declared resolution's `git add` runs before that read, and it writes
+    /// a deleted `index` again, so a deletion that lands before it is not seen
+    /// there (R-REWRITE-index, with the engine's own command as the writer).
     pub fn candidate_stage(
         &self,
         hooks: &mut dyn EffectHooks,
@@ -5068,13 +5308,24 @@ impl WorkspaceManager {
                 Ok(())
             },
         )
+        .map_err(|error| self.refused_if_pruned(&path, error))
     }
 
     /// `Object.CandidateWriteTree` — `git write-tree` in the task worktree.
     ///
+    /// **The registration is read before the tree is written.** With the
+    /// slot's `index` deleted, `write-tree` writes the empty tree and writes the
+    /// index again, so no check after it can see the deletion (executed on Git
+    /// 2.43.0 and 2.55.0). Closure 1's check therefore runs inside the funnel,
+    /// immediately before the `write-tree` child ([`Self::answered_whole`]); a
+    /// deletion that lands after that check and before `write-tree` reads the
+    /// index is not seen (R-REWRITE-index, with this command as the writer).
+    ///
     /// # Errors
     ///
-    /// The containment refusals or a Git error.
+    /// The containment refusals or a Git error, which is
+    /// [`UpstrokeError::RegistryRefused`] instead while the slot's worktree
+    /// registration is not whole, as the check before the write is.
     pub fn candidate_write_tree(
         &self,
         hooks: &mut dyn EffectHooks,
@@ -5087,9 +5338,11 @@ impl WorkspaceManager {
             EffectSiteId::Object(ObjectSite::CandidateWriteTree),
             || {
                 self.revalidate_acted_through(Primitive::CandidateWriteTree, Some(slot), None)?;
+                self.answered_whole(&path, "the capture's write-tree", ())?;
                 self.git_line(&path, &Self::CANDIDATE_WRITE_TREE_ARGV)
             },
         )
+        .map_err(|error| self.refused_if_pruned(&path, error))
     }
 
     /// `Object.SnapshotCommitTree` — the ephemeral commit of a tree-only
@@ -5216,7 +5469,9 @@ impl WorkspaceManager {
     ///
     /// # Errors
     ///
-    /// The containment refusals or a Git error.
+    /// The containment refusals or a Git error, which is
+    /// [`UpstrokeError::RegistryRefused`] instead while the slot's worktree
+    /// registration is not whole ([`Self::refused_if_pruned`]).
     pub fn proposal_cherry_pick(
         &self,
         hooks: &mut dyn EffectHooks,
@@ -5239,6 +5494,7 @@ impl WorkspaceManager {
                 self.git_line(&path, &["rev-parse", "HEAD"])
             },
         )
+        .map_err(|error| self.refused_if_pruned(&path, error))
     }
 
     /// What a failed `Object.ProposalCherryPick` left in its staging worktree,
@@ -5283,11 +5539,22 @@ impl WorkspaceManager {
     ///   and the index equal to `HEAD` is the empty pick — measured on git
     ///   2.43, "The previous cherry-pick is now empty", exit 1;
     /// * anything else is reported as [`ProposalState::Unclassified`] with
-    ///   what was seen, so the caller can surface the pick's own error.
+    ///   what was seen, so the caller can surface the pick's own error;
+    /// * an answer read while the staging checkout's worktree registration is
+    ///   not whole is [`UpstrokeError::RegistryRefused`], not an answer: Git
+    ///   reads a deleted `index` as an empty one without failing, so a
+    ///   modify/delete conflict on an integration head whose tree is empty reads
+    ///   as the empty pick, and a conflict on any other head as unclassified
+    ///   (executed on Git 2.43.0 and 2.55.0). Closure 1's check
+    ///   ([`registration_whole`]) follows the last of the reads, whichever it
+    ///   is, and the refusal leaves the integration through its `?`.
     ///
     /// # Errors
     ///
-    /// The containment refusals or a Git error from the inspections.
+    /// The containment refusals or a Git error from the inspections, which is
+    /// [`UpstrokeError::RegistryRefused`] instead while the staging checkout's
+    /// worktree registration is not whole; and that refusal for an answer read
+    /// while it is not whole.
     pub fn proposal_state(&self, slot: &Slot, head: &str) -> Result<ProposalState, UpstrokeError> {
         self.proposal_state_pausing(&mut NoHooks, slot, head)
     }
@@ -5307,8 +5574,24 @@ impl WorkspaceManager {
     ) -> Result<ProposalState, UpstrokeError> {
         self.revalidate_pausing(hooks)?;
         let path = self.slot_target(slot)?;
-        let unmerged = self.git_ok(
+        let state = self
+            .read_proposal_state(&path, head)
+            .map_err(|error| self.refused_if_pruned(&path, error))?;
+        self.answered_whole(
             &path,
+            "the classification of a failed proposal cherry-pick",
+            state,
+        )
+    }
+
+    /// [`Self::proposal_state`]'s reads, in their order and unchanged:
+    /// unmerged entries, `HEAD`, `CHERRY_PICK_HEAD`, the index against `HEAD`.
+    /// Closure 1's check follows them ([`Self::proposal_state_pausing`]),
+    /// because a deleted index reads as an empty one and a conflict then reads
+    /// as an empty pick.
+    fn read_proposal_state(&self, path: &Path, head: &str) -> Result<ProposalState, UpstrokeError> {
+        let unmerged = self.git_ok(
+            path,
             &[
                 OsString::from("diff-files"),
                 OsString::from("--name-status"),
@@ -5321,7 +5604,7 @@ impl WorkspaceManager {
         if conflicted {
             return Ok(ProposalState::Conflict { paths });
         }
-        let at = self.git_line(&path, &["rev-parse", "HEAD"])?;
+        let at = self.git_line(path, &["rev-parse", "HEAD"])?;
         if at != head {
             return Ok(ProposalState::Unclassified {
                 detail: format!("no unmerged entry, and HEAD is {at} where the head was {head}"),
@@ -5329,7 +5612,7 @@ impl WorkspaceManager {
         }
         let picking = self
             .git(
-                &path,
+                path,
                 &[
                     OsString::from("rev-parse"),
                     OsString::from("--verify"),
@@ -5346,7 +5629,7 @@ impl WorkspaceManager {
         }
         let index_clean = self
             .git(
-                &path,
+                path,
                 &[
                     OsString::from("diff"),
                     OsString::from("--cached"),
@@ -5447,7 +5730,14 @@ impl WorkspaceManager {
     ///
     /// # Errors
     ///
-    /// The containment refusals, or a Git error that is not a conflict.
+    /// The containment refusals, or a Git error that is not a conflict, which
+    /// is [`UpstrokeError::RegistryRefused`] instead while the slot's worktree
+    /// registration is not whole ([`Self::refused_if_pruned`]); and that refusal
+    /// for an observation read while it is not whole: with the `index` deleted
+    /// after the pick, Git reads the already-present change as a clean one and
+    /// an empty head's change as an empty one (executed on Git 2.43.0 and
+    /// 2.55.0), so the observation is checked as it is returned
+    /// ([`Self::answered_whole`]).
     pub fn repair_materialize(
         &self,
         hooks: &mut dyn EffectHooks,
@@ -5456,7 +5746,7 @@ impl WorkspaceManager {
     ) -> Result<Materialized, UpstrokeError> {
         self.revalidate_pausing(hooks)?;
         let path = self.slot_target(slot)?;
-        funnel(
+        let observed = funnel(
             hooks,
             EffectSiteId::Object(ObjectSite::RepairMaterialize),
             || {
@@ -5501,6 +5791,8 @@ impl WorkspaceManager {
                 })
             },
         )
+        .map_err(|error| self.refused_if_pruned(&path, error))?;
+        self.answered_whole(&path, "a repair's materialization observation", observed)
     }
 
     /// The state files `cherry-pick --no-commit` leaves in the worktree's git
@@ -5599,22 +5891,33 @@ impl WorkspaceManager {
     /// the reason, because it cannot be inspected and a capture must not pass
     /// on a list it could not read.
     ///
+    /// **Read only while the registration is whole.** With the slot's `index`
+    /// deleted, Git reads an empty index and answers no unmerged entry, hiding
+    /// an unresolved conflict (executed on Git 2.43.0 and 2.55.0), so the answer
+    /// is checked as it is returned ([`Self::answered_whole`]).
+    ///
     /// # Errors
     ///
-    /// The containment refusals or a Git error from the unmerged read.
+    /// The containment refusals or a Git error from the unmerged read, which is
+    /// [`UpstrokeError::RegistryRefused`] instead while the slot's worktree
+    /// registration is not whole; and that refusal for an answer read while it
+    /// is not whole.
     pub fn unresolved_conflicts(&self, slot: &Slot) -> Result<Vec<String>, UpstrokeError> {
         self.revalidate()?;
         let path = self.slot_target(slot)?;
-        let records = self.unmerged_records(&path)?;
-        match parsers::changed_path_records(&records) {
-            Ok(paths) => Ok(paths
+        let records = self
+            .unmerged_records(&path)
+            .map_err(|error| self.refused_if_pruned(&path, error))?;
+        let answer = match parsers::changed_path_records(&records) {
+            Ok(paths) => paths
                 .into_iter()
                 .map(|entry| entry.as_str().to_owned())
-                .collect()),
-            Err(error) => Ok(vec![format!(
+                .collect(),
+            Err(error) => vec![format!(
                 "(an unmerged entry this process cannot inspect: {error})"
-            )]),
-        }
+            )],
+        };
+        self.answered_whole(&path, "the capture's read of unresolved conflicts", answer)
     }
 
     /// The worker's resolution manifest, read from the root of the slot's
@@ -5642,11 +5945,23 @@ impl WorkspaceManager {
     /// # Errors
     ///
     /// The containment refusals, the taken-name refusal, a Git error from the
-    /// index read, or an I/O error other than the file's absence.
+    /// index read, which is [`UpstrokeError::RegistryRefused`] instead while the
+    /// slot's worktree registration is not whole ([`Self::refused_if_pruned`]),
+    /// the manifest name's own refusal of an answer read while it is not whole
+    /// ([`Self::manifest_name`]), or an I/O error other than the file's absence.
     pub fn resolution_manifest(&self, slot: &Slot) -> Result<ResolutionManifest, UpstrokeError> {
         self.revalidate()?;
         let worktree = self.slot_target(slot)?;
-        let spelling = match self.manifest_name(&worktree)? {
+        self.read_resolution_manifest(&worktree)
+            .map_err(|error| self.refused_if_pruned(&worktree, error))
+    }
+
+    /// [`Self::resolution_manifest`]'s reads in the worktree at `worktree`.
+    fn read_resolution_manifest(
+        &self,
+        worktree: &Path,
+    ) -> Result<ResolutionManifest, UpstrokeError> {
+        let spelling = match self.manifest_name(worktree)? {
             ManifestName::Absent => return Ok(ResolutionManifest::Absent),
             ManifestName::Manifest { spelling, .. } => spelling,
             ManifestName::Tracked { spelling } if spelling == RESOLUTION_MANIFEST => {
@@ -5756,14 +6071,31 @@ impl WorkspaceManager {
     /// the engine itself staged from a list it decoded — rather than an entry
     /// the worker is told about.
     ///
+    /// **Read only while the registration is whole.** With the slot's `index`
+    /// deleted, Git reads an empty index, which holds no resolve-undo record,
+    /// and answers that nothing was resolved (executed on Git 2.43.0 and
+    /// 2.55.0), so the answer is checked as it is returned
+    /// ([`Self::answered_whole`]).
+    ///
     /// # Errors
     ///
-    /// The containment refusals or a Git error.
+    /// The containment refusals or a Git error, which is
+    /// [`UpstrokeError::RegistryRefused`] instead while the slot's worktree
+    /// registration is not whole; and that refusal for an answer read while it
+    /// is not whole.
     pub fn resolved_conflicts(&self, slot: &Slot) -> Result<Vec<String>, UpstrokeError> {
         self.revalidate()?;
         let path = self.slot_target(slot)?;
+        let resolved = self
+            .read_resolved_conflicts(&path)
+            .map_err(|error| self.refused_if_pruned(&path, error))?;
+        self.answered_whole(&path, "the capture's read of resolved conflicts", resolved)
+    }
+
+    /// [`Self::resolved_conflicts`]'s reads in the worktree at `path`.
+    fn read_resolved_conflicts(&self, path: &Path) -> Result<Vec<String>, UpstrokeError> {
         let recorded = self.git_ok(
-            &path,
+            path,
             &[
                 OsString::from("ls-files"),
                 OsString::from("--resolve-undo"),
@@ -5787,7 +6119,7 @@ impl WorkspaceManager {
             return Ok(resolved);
         }
         let held = self.git_ok(
-            &path,
+            path,
             &[
                 OsString::from("ls-files"),
                 OsString::from("--stage"),
@@ -5800,7 +6132,22 @@ impl WorkspaceManager {
     }
 
     /// What holds the root-level name the resolution manifest reserves in the
-    /// worktree at `path` ([`ManifestName`]).
+    /// worktree at `path` ([`ManifestName`]), read only while the worktree's
+    /// registration is whole: [`Self::read_manifest_name`]'s reads, then
+    /// closure 1's check ([`Self::answered_whole`]) after the last of them,
+    /// whichever it is. With the `index` deleted, Git reads an empty index,
+    /// and the repository's own tracked file of this name reads as the
+    /// worker's untracked manifest (executed on Git 2.43.0 and 2.55.0).
+    ///
+    /// A declared resolution's `git add`, which [`Self::candidate_stage`] runs
+    /// before this read, writes a deleted `index` again, so the check cannot
+    /// see a deletion that landed before it (R-REWRITE-index).
+    fn manifest_name(&self, path: &Path) -> Result<ManifestName, UpstrokeError> {
+        let name = self.read_manifest_name(path)?;
+        self.answered_whole(path, "the read of the resolution manifest's name", name)
+    }
+
+    /// [`Self::manifest_name`]'s reads in the worktree at `path`.
     ///
     /// Four reads, in the order the answer depends on them: the index by
     /// name in any case (`ls-files --stage -- :(top,literal,icase)<name>`,
@@ -5832,7 +6179,7 @@ impl WorkspaceManager {
     /// and left it on disk. A regular file at the name that the directory
     /// walk lists under no spelling of it is Git and the filesystem
     /// disagreeing, and is reported as a Git error rather than guessed at.
-    fn manifest_name(&self, path: &Path) -> Result<ManifestName, UpstrokeError> {
+    fn read_manifest_name(&self, path: &Path) -> Result<ManifestName, UpstrokeError> {
         let name = RESOLUTION_MANIFEST.as_bytes();
         let tracked = self.git_ok(
             path,
@@ -5971,9 +6318,18 @@ impl WorkspaceManager {
     /// `-z --name-status` records for the same content — measured — and `-r` is
     /// a `diff-tree` option only, because `git diff` always recurses.
     ///
+    /// **Read only while the registration is whole.** With the slot's `index`
+    /// deleted, Git reads an empty index, and the base's paths read as
+    /// deletions while the additions are lost (executed on Git 2.43.0 and
+    /// 2.55.0); the promotion records the answer as the candidate's lease
+    /// region, so it is checked as it is returned ([`Self::answered_whole`]).
+    ///
     /// # Errors
     ///
-    /// The containment refusals or a Git error.
+    /// The containment refusals or a Git error, which is
+    /// [`UpstrokeError::RegistryRefused`] instead while the slot's worktree
+    /// registration is not whole; and that refusal for an answer read while it
+    /// is not whole.
     pub fn changed_paths(&self, slot: &Slot, base: &str) -> Result<PathSet, UpstrokeError> {
         self.changed_paths_pausing(&mut NoHooks, slot, base)
     }
@@ -5993,18 +6349,24 @@ impl WorkspaceManager {
     ) -> Result<PathSet, UpstrokeError> {
         self.revalidate_pausing(hooks)?;
         let path = self.slot_target(slot)?;
-        let output = self.git_ok(
+        let output = self
+            .git_ok(
+                &path,
+                &[
+                    OsString::from("diff"),
+                    OsString::from("--cached"),
+                    OsString::from("--name-status"),
+                    OsString::from("-M"),
+                    OsString::from("-z"),
+                    OsString::from(base),
+                ],
+            )
+            .map_err(|error| self.refused_if_pruned(&path, error))?;
+        self.answered_whole(
             &path,
-            &[
-                OsString::from("diff"),
-                OsString::from("--cached"),
-                OsString::from("--name-status"),
-                OsString::from("-M"),
-                OsString::from("-z"),
-                OsString::from(base),
-            ],
-        )?;
-        Ok(decode_changed_paths(&output))
+            "the promotion's read of the changed paths",
+            decode_changed_paths(&output),
+        )
     }
 
     /// The diff of a captured candidate tree against the commit it is judged
@@ -6025,10 +6387,16 @@ impl WorkspaceManager {
     /// Run from the task worktree so the object names resolve in the repository
     /// that holds them.
     ///
+    /// It reads two trees and no index, so it answers truly whatever the
+    /// slot's registration; its Git error is closure 1's error arm's
+    /// ([`Self::refused_if_pruned`]).
+    ///
     /// # Errors
     ///
     /// The containment refusals, a Git error, or a diff whose bytes are not
-    /// UTF-8 — which is not a diff any reviewer can be shown.
+    /// UTF-8 — which is not a diff any reviewer can be shown; either Git error
+    /// is [`UpstrokeError::RegistryRefused`] instead while the slot's worktree
+    /// registration is not whole.
     pub fn candidate_diff(
         &self,
         slot: &Slot,
@@ -6046,13 +6414,16 @@ impl WorkspaceManager {
             OsString::from(tree),
             OsString::from("--"),
         ]);
-        let output = self.git_ok(&path, &argv)?;
-        String::from_utf8(output).map_err(|_| UpstrokeError::Git {
-            message: format!(
-                "the diff of {tree} against {parent} is not valid UTF-8; a reviewer cannot be \
-                 shown it and a gate would not agree with what it says"
-            ),
-        })
+        self.git_ok(&path, &argv)
+            .and_then(|output| {
+                String::from_utf8(output).map_err(|_| UpstrokeError::Git {
+                    message: format!(
+                        "the diff of {tree} against {parent} is not valid UTF-8; a reviewer \
+                         cannot be shown it and a gate would not agree with what it says"
+                    ),
+                })
+            })
+            .map_err(|error| self.refused_if_pruned(&path, error))
     }
 
     /// A commit's first parent, or `None` when the object is not a commit.
@@ -6281,6 +6652,29 @@ impl WorkspaceManager {
         command
     }
 
+    /// The [`COMMON_DIR`] the Git child [`Self::command`] builds for `cwd` is
+    /// started with, read from the builder itself: the builder's own setting
+    /// where it makes one, and otherwise the value this process holds, which
+    /// the child inherits, since the builder clears nothing and removes no
+    /// name. A change to what the builder sets is therefore a change to what
+    /// this reports. Closure 1's check reads it as the context of the
+    /// manager's guarded reads and commands and of its kept-instance guard
+    /// ([`registration_whole`]), and the topology's twin reads it for the
+    /// reads it guards.
+    #[must_use]
+    pub fn composed_common_dir(&self, cwd: &Path) -> ComposedCommonDir {
+        let command = self.command(cwd, &[]);
+        let set = command
+            .get_envs()
+            .find(|(name, _)| *name == OsStr::new(COMMON_DIR));
+        match set {
+            Some((_, Some(value))) => ComposedCommonDir::Present(value.to_os_string()),
+            Some((_, None)) => ComposedCommonDir::Absent,
+            None => std::env::var_os(COMMON_DIR)
+                .map_or(ComposedCommonDir::Absent, ComposedCommonDir::Present),
+        }
+    }
+
     fn git_with_identity(&self, cwd: &Path, args: &[OsString]) -> Result<Output, UpstrokeError> {
         self.revalidate_hooks_path()?;
         self.command(cwd, args)
@@ -6501,10 +6895,16 @@ impl WorkspaceManager {
                 // target is absent too, or is an empty directory — the
                 // destination an add makes before Git runs, left by a
                 // coordinator killed before Git's first write, which no
-                // registration can name and which holds nothing to lose. A
-                // target that is anything else there with no registration
-                // directory is the I/O failure it looks like, and a target
-                // that cannot be read is its own.
+                // registration can name and which holds nothing to lose — or
+                // is a checkout whose `.git` names an entry of this
+                // repository's own store, which a prune no engine process
+                // started removed with the last entry in it (closure 3 of the
+                // external-prune finding): no registration is left to bind,
+                // and the checkout is removed with nothing of the store
+                // touched, so finalization converges. A target that is
+                // anything else there with no registration directory is the
+                // I/O failure it looks like, and a target that cannot be read
+                // is its own.
                 return match fs::symlink_metadata(&target) {
                     Err(absent) if absent.kind() == std::io::ErrorKind::NotFound => {
                         Ok(RemovalBinding::unbound())
@@ -6515,6 +6915,9 @@ impl WorkspaceManager {
                             AtDestination::EmptyDirectory
                         ) =>
                     {
+                        Ok(RemovalBinding::unbound())
+                    }
+                    Ok(metadata) if metadata.is_dir() && names_an_entry_of(&target, &worktrees) => {
                         Ok(RemovalBinding::unbound())
                     }
                     Ok(_) => Err(UpstrokeError::Io {
@@ -6638,6 +7041,85 @@ impl WorkspaceManager {
             });
         }
         Ok(true)
+    }
+
+    /// The registration `admin` a removal's scan bound, spelled where its walk
+    /// and its removal act ([`RegistrationStore`]).
+    ///
+    /// For the repository's own store, unchanged: walked from the common git
+    /// dir. For a store pinned at derivation, `admin` is the entry the scan read
+    /// through the link, `<common_git_dir>/worktrees/<entry>`, and it is
+    /// re-spelled `<target>/<entry>` once the store is proven still to be a
+    /// link that resolves to the pinned target. The walk then starts at the
+    /// target ([`Self::registration_anchor`]), and the removal reads, unlinks
+    /// and deletes below that directory through no link, so a link re-pointed
+    /// after this check cannot carry the deletion elsewhere.
+    ///
+    /// **No fallback.** A store that is no longer that link — gone, a plain
+    /// directory or anything else that is not a link, or a link that resolves
+    /// elsewhere or not at all — is not the store the registration was bound
+    /// in, and the removal refuses here, before its checkout is touched
+    /// ([`Refusal::PinnedStoreLost`]). Walking from the common git dir instead
+    /// would delete the checkout past a store with nothing there, or remove a
+    /// copy of the entry from a directory planted in its place.
+    ///
+    /// # Errors
+    ///
+    /// [`Refusal::PinnedStoreLost`], or a refusal of a binding that is not one
+    /// entry of the store, which the scan never makes.
+    fn registration_spelled(&self, admin: &Path) -> Result<PathBuf, UpstrokeError> {
+        let RegistrationStore::Pinned(target) = &self.store else {
+            return Ok(admin.to_path_buf());
+        };
+        let store = self.common_git_dir.join("worktrees");
+        let not_an_entry = || UpstrokeError::Refused {
+            message: format!(
+                "internal: the removal bound {}, which is not one entry of the registration store \
+                 {}",
+                admin.display(),
+                store.display()
+            ),
+        };
+        let Ok(rest) = admin.strip_prefix(&store) else {
+            return Err(not_an_entry());
+        };
+        let mut rest = rest.components();
+        let (Some(Component::Normal(entry)), None) = (rest.next(), rest.next()) else {
+            return Err(not_an_entry());
+        };
+        let found = match fs::symlink_metadata(&store) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => "is gone".to_owned(),
+            Err(error) => format!("could not be read ({error})"),
+            Ok(metadata) if !containment::is_reparse_point(&metadata) => {
+                if metadata.is_dir() {
+                    "is now a plain directory, not a link".to_owned()
+                } else {
+                    "is now neither a link nor a directory".to_owned()
+                }
+            }
+            Ok(_) => match fs::canonicalize(&store).map(strip_verbatim) {
+                Ok(resolved) if resolved == *target => return Ok(target.join(entry)),
+                Ok(resolved) => format!("now resolves to {}", resolved.display()),
+                Err(error) => format!("no longer resolves ({error})"),
+            },
+        };
+        Err(Refusal::PinnedStoreLost {
+            registration: admin.to_path_buf(),
+            store,
+            pinned: target.clone(),
+            found,
+        }
+        .into())
+    }
+
+    /// Where `admin`'s registration walk starts: the pinned target, for an
+    /// entry [`Self::registration_spelled`] spelled below it, and the common
+    /// git dir for every other spelling, the original walk.
+    fn registration_anchor(&self, admin: &Path) -> PathBuf {
+        match &self.store {
+            RegistrationStore::Pinned(target) if admin.starts_with(target) => target.clone(),
+            _ => self.common_git_dir.clone(),
+        }
     }
 
     /// The repair [`Self::remove_intent`] and [`Self::verify_worktree`] run
@@ -6892,6 +7374,39 @@ fn git_dir_of(worktree: &Path) -> Result<Option<PathBuf>, UpstrokeError> {
         .trim()
         .strip_prefix("gitdir:")
         .map(|target| PathBuf::from(target.trim())))
+}
+
+/// Whether the checkout at `target` has a `.git` that is a regular file
+/// `gitdir: <entry>` whose entry, resolved against `target` when relative, is a
+/// child of `store`, compared after [`canonical_prefix`] on both sides: the
+/// store is absent when this is asked, so neither path canonicalizes whole
+/// (closure 3 of the external-prune finding,
+/// [`WorkspaceManager::revalidate_removal_proving`]'s store-absent branch).
+/// Anything that cannot be read, and any other pointer, is `false`, and keeps
+/// that branch's answer.
+fn names_an_entry_of(target: &Path, store: &Path) -> bool {
+    let pointer = target.join(".git");
+    if !fs::symlink_metadata(&pointer).is_ok_and(|metadata| metadata.file_type().is_file()) {
+        return false;
+    }
+    let Ok(text) = fs::read(&pointer) else {
+        return false;
+    };
+    let Some(named) = text.strip_prefix(b"gitdir:") else {
+        return false;
+    };
+    let Ok(entry) = decode_path(named.trim_ascii()) else {
+        return false;
+    };
+    let entry = if entry.is_absolute() {
+        entry
+    } else {
+        target.join(entry)
+    };
+    match (canonical_prefix(&entry), canonical_prefix(store)) {
+        (Ok(entry), Ok(store)) => entry.parent() == Some(store.as_path()),
+        _ => false,
+    }
 }
 
 /// Run one of the manager's reads.
@@ -7845,6 +8360,292 @@ fn common_git_dir(inside: &Path) -> Result<PathBuf, UpstrokeError> {
     fs::canonicalize(&path)
         .map(strip_verbatim)
         .map_err(|source| UpstrokeError::Io { path, source })
+}
+
+/// What closure 1's check found of a checkout's worktree registration
+/// ([`registration_whole`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Whole {
+    /// Every condition of the check held.
+    Yes,
+    /// The first condition that failed, with the path and what was found
+    /// there or the read's error.
+    No(String),
+}
+
+/// Closure 1's check of the worktree registration of the checkout at
+/// `checkout`, from files alone (the external-prune finding,
+/// `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`; #329's
+/// record §8.4), for a guarded child started with the [`COMMON_DIR`] that
+/// `composed` reports.
+///
+/// The registration is whole when:
+///
+/// 1. the checkout's `.git` is a regular file, not a link, that begins
+///    `gitdir:` and names an entry of this repository's own registration store
+///    (the entry's parent canonicalizes to `<common_git_dir>/worktrees`), a
+///    relative pointer resolved against the checkout;
+/// 2. that entry holds `gitdir`, `commondir`, `HEAD` and `index`, each a
+///    regular file read without following a link, the first three non-empty;
+/// 3. the guarded child's Git takes the repository's common git dir:
+///    - with no [`COMMON_DIR`] reported ([`ComposedCommonDir::Unknown`] or
+///      [`ComposedCommonDir::Absent`]), `commondir`, a relative one resolved
+///      against the entry, canonicalizes to the repository's common git dir.
+///      This is the check's original rule, unchanged;
+///    - with a value reported ([`ComposedCommonDir::Present`]): (a) the store
+///      of the repository `commondir` names, `<commondir>/worktrees`,
+///      canonicalizes to the entry's parent, so the record names the
+///      repository whose store holds the entry; and then (b) the value, a
+///      relative one resolved against the checkout, where the guarded child
+///      starts, canonicalizes to the repository's common git dir;
+/// 4. `gitdir`, a relative one resolved against the entry, canonicalizes to
+///    the checkout's `.git`.
+///
+/// Paths are compared as the same file, not by spelling. Anything else is
+/// [`Whole::No`], naming the first condition that failed and what was found
+/// there or the read's error; a read that fails, `NotFound` or not, is one. It
+/// calls only [`fs::symlink_metadata`], [`fs::read`] and [`fs::canonicalize`]:
+/// it starts no process, takes no lock and makes no registry access. It reads
+/// each file once and does not retry: a prune only removes names, so a name
+/// absent at the read stays absent, and the entry is written by no engine
+/// operation while it reads.
+///
+/// **Condition 3 with a reported value** is the external-prune follow-up's
+/// integration correction to its original check, which applied the first
+/// branch whatever the child was given. Where the run's `worktrees` store is
+/// a link into another repository and the child is given a `GIT_COMMON_DIR`
+/// naming the run's common directory (R-C-REGISTRY's part 2, C4's and C5's
+/// layouts), Git writes `commondir` as `../..` through the link, so it names
+/// the other repository, while the child's Git takes its object store and
+/// configuration from the directory the value names. Its shared refs stay
+/// those of the repository the record names, as part 2 accepts; this check
+/// neither changes nor relies on that. Branch (a) keeps the record checked:
+/// one that names any other repository refuses whatever the child is given.
+/// The value is the child's own, reported by the code that composes its
+/// environment: a value this process holds says nothing of what a child is
+/// given.
+///
+/// **Why the engine reads it.** Git reads a deleted `index` as an empty one and
+/// answers without failing, and with `HEAD`, `commondir` or the whole entry
+/// deleted its commands fail; so a failure or an answer read in a checkout whose
+/// registration is not whole is not the checkout's own, and is not judged. It is
+/// a partial mitigation, not a closure: it cannot tell a name written again
+/// before it reads from one never removed (R-REWRITE), nor see a file it does
+/// not read (R-OUTSIDE), and it asserts no cause for what it finds.
+///
+/// `src/engine/topology/dispatch.rs` carries the topology twin, for the
+/// topology modules that cannot reach this one's private items; the two must
+/// answer the same for every checkout, and one test runs both over every
+/// construction (`fixture::registration_constructions`).
+fn registration_whole(
+    checkout: &Path,
+    common_git_dir: &Path,
+    composed: &ComposedCommonDir,
+) -> Whole {
+    match registration_found(checkout, common_git_dir, composed) {
+        Ok(()) => Whole::Yes,
+        Err(found) => Whole::No(found),
+    }
+}
+
+/// [`registration_whole`]'s conditions in their order, the first that fails as
+/// the text [`Whole::No`] carries.
+fn registration_found(
+    checkout: &Path,
+    common_git_dir: &Path,
+    composed: &ComposedCommonDir,
+) -> Result<(), String> {
+    let pointer = checkout.join(".git");
+    let text = registration_file(&pointer, true)?;
+    let Some(named) = text.strip_prefix(b"gitdir:") else {
+        return Err(format!("{} does not begin `gitdir:`", pointer.display()));
+    };
+    let entry = registration_path(checkout, named.trim_ascii(), &pointer)?;
+    let store = common_git_dir.join("worktrees");
+    let in_store = match entry.parent() {
+        Some(parent) => registration_canonical(parent)? == registration_canonical(&store)?,
+        None => false,
+    };
+    if !in_store {
+        return Err(format!(
+            "{} names {}, which is not an entry of this repository's registration store {}",
+            pointer.display(),
+            entry.display(),
+            store.display()
+        ));
+    }
+    for (name, non_empty) in [
+        ("gitdir", true),
+        ("commondir", true),
+        ("HEAD", true),
+        ("index", false),
+    ] {
+        registration_metadata(&entry.join(name), non_empty)?;
+    }
+    let commondir = entry.join("commondir");
+    let named = registration_file(&commondir, false)?;
+    let common = registration_path(&entry, named.trim_ascii(), &commondir)?;
+    match composed {
+        ComposedCommonDir::Unknown | ComposedCommonDir::Absent => {
+            if registration_canonical(&common)? != registration_canonical(common_git_dir)? {
+                return Err(format!(
+                    "{} names {}, which is not this repository's common git dir {}",
+                    commondir.display(),
+                    common.display(),
+                    common_git_dir.display()
+                ));
+            }
+        }
+        ComposedCommonDir::Present(value) => {
+            let Some(holder) = entry.parent() else {
+                return Err(format!("{} has no parent directory", entry.display()));
+            };
+            let recorded_store = registration_canonical(&common)?.join("worktrees");
+            if registration_canonical(&recorded_store)? != registration_canonical(holder)? {
+                return Err(format!(
+                    "{} names {}, whose registration store {} is not {}, the store that holds \
+                     this entry",
+                    commondir.display(),
+                    common.display(),
+                    recorded_store.display(),
+                    holder.display()
+                ));
+            }
+            let given = checkout.join(value);
+            if registration_canonical(&given)? != registration_canonical(common_git_dir)? {
+                return Err(format!(
+                    "the guarded child's `GIT_COMMON_DIR` {} names {}, which is not this \
+                     repository's common git dir {}",
+                    Path::new(value).display(),
+                    given.display(),
+                    common_git_dir.display()
+                ));
+            }
+        }
+    }
+    let gitdir = entry.join("gitdir");
+    let named = registration_file(&gitdir, false)?;
+    let named_checkout = registration_path(&entry, named.trim_ascii(), &gitdir)?;
+    if registration_canonical(&named_checkout)? != registration_canonical(&pointer)? {
+        return Err(format!(
+            "{} names {}, which is not this checkout's {}",
+            gitdir.display(),
+            named_checkout.display(),
+            pointer.display()
+        ));
+    }
+    Ok(())
+}
+
+/// `path`'s metadata, read without following a link: a regular file, and, when
+/// `non_empty`, one longer than zero bytes.
+fn registration_metadata(path: &Path, non_empty: bool) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| format!("{} cannot be read: {error}", path.display()))?;
+    let kind = metadata.file_type();
+    if !kind.is_file() {
+        return Err(format!(
+            "{} is {}, not a regular file",
+            path.display(),
+            if kind.is_dir() {
+                "a directory"
+            } else if kind.is_symlink() {
+                "a symbolic link"
+            } else {
+                "neither a regular file nor a directory"
+            }
+        ));
+    }
+    if non_empty && metadata.len() == 0 {
+        return Err(format!("{} is empty", path.display()));
+    }
+    Ok(())
+}
+
+/// The bytes of the regular file at `path`, checked first as
+/// [`registration_metadata`] checks it when `checked` (the checkout's `.git`,
+/// which nothing has checked yet).
+fn registration_file(path: &Path, checked: bool) -> Result<Vec<u8>, String> {
+    if checked {
+        registration_metadata(path, false)?;
+    }
+    fs::read(path).map_err(|error| format!("{} cannot be read: {error}", path.display()))
+}
+
+/// The path `named` spells, read from `file`, resolved against `base` when it
+/// is relative.
+fn registration_path(base: &Path, named: &[u8], file: &Path) -> Result<PathBuf, String> {
+    let path = decode_path(named).map_err(|error| {
+        format!(
+            "{} names a path that is not UTF-8 from byte {}",
+            file.display(),
+            error.valid_up_to()
+        )
+    })?;
+    Ok(if path.is_absolute() {
+        path
+    } else {
+        base.join(path)
+    })
+}
+
+/// `path`, canonicalized, or why it cannot be.
+fn registration_canonical(path: &Path) -> Result<PathBuf, String> {
+    fs::canonicalize(path)
+        .map_err(|error| format!("{} cannot be resolved: {error}", path.display()))
+}
+
+/// The refusal closure 1 returns for a read or a command in a checkout whose
+/// registration is not whole. It reports the failure the check observed
+/// (`found`: the first condition that failed, and what was found there or the
+/// read's error) and asserts no cause for it.
+fn read_refused(checkout: &Path, what: &str, found: &str) -> UpstrokeError {
+    UpstrokeError::RegistryRefused {
+        message: format!(
+            "{what}, in the checkout {}, is not used: the check of its worktree registration \
+             failed ({found}). Git can answer without failing from a registration that is not \
+             whole (a missing index reads as an empty one), so nothing read there is judged; the \
+             command ends resumably",
+            checkout.display()
+        ),
+    }
+}
+
+/// Whether anything is at `path`: false when nothing is there; for a
+/// directory, true when [`fs::read_dir`] yields an entry; for a file, a link or
+/// a reparse point, true. Closure 2's and the guard's population read
+/// ([`WorkspaceManager::kept_instances`]).
+///
+/// # Errors
+///
+/// [`UpstrokeError::Io`] when `path` or its listing cannot be read, so the
+/// caller refuses resumably rather than guessing.
+fn holds_anything(path: &Path) -> Result<bool, UpstrokeError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(source) => {
+            return Err(UpstrokeError::Io {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    };
+    if !metadata.is_dir() {
+        return Ok(true);
+    }
+    let mut entries = fs::read_dir(path).map_err(|source| UpstrokeError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    match entries.next() {
+        None => Ok(false),
+        Some(Ok(_)) => Ok(true),
+        Some(Err(source)) => Err(UpstrokeError::Io {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
 }
 
 /// The git, worktree and process effects a **test in another module** needs.

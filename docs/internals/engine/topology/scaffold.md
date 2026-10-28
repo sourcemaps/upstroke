@@ -1157,6 +1157,13 @@ A sleeper that returns at once, so a backoff costs a test nothing.
 One task of a width-N plan: its id, its conflict hints, what it depends on and
 the file its worker writes.
 
+## `impl WideTask` › `pub(super) fn deleting_every_tracked_file(id: &'static str) -> Self {`
+
+A task whose worker removes every file the checkout tracks and writes nothing: the
+external-prune follow-up's T-C1-CLS-RUN merges such a task first, so the integration head's
+tree is empty and a later task's change to a tracked file is a modify/delete conflict at its
+stale pick. Plain removal is enough; the capture's `add -A` stages the deletions.
+
 ## `pub(super) fn wide_plan(tasks: &[WideTask]) -> Plan {`
 
 The plan the tasks describe, built directly rather than parsed: each task's
@@ -1199,6 +1206,12 @@ is listed as failing; every other process exits 0.
 
 [`wide_responder`], with the workers of the listed task keys asking a
 question instead of working.
+
+## `pub(super) fn wide_responder_asking(` › `if deleting.get(key.0 as usize).copied().unwrap_or(false) =>`
+
+The deleting worker (`WideTask::deleting_every_tracked_file`): it lists the checkout's tracked
+files through Git and removes each through the fixture's funnel, as every scaffold worker writes
+through `write_file`.
 
 ## `pub(super) struct WideEnv {`
 
@@ -1273,6 +1286,21 @@ durable incarnation `inc-1` is not — so these runs take a ULID-shaped one.
 
 ## `impl Wide` › `fn durable_with(`
 
+[`Wide::durable_over`] over a fresh fixture at the default layout
+(`Fixture::created`, the managed base at `<root>/repo`).
+
+## `impl Wide` › `pub(super) fn durable_based(`
+
+A durable run, under the durable incarnation and the recorded host runner,
+over a fixture whose managed base is `below` its root (`Fixture::created_based`).
+This is the shape C5's equal-depth layout needs (`EQUAL_DEPTH_BASE`, the
+proposal's PROP:2129): one relative `GIT_COMMON_DIR` names the run's common
+directory from the base and from every work tree. Unix only, as the layout's
+tests are. The integration correction's host-runner controls use it (F), and
+R5's later carry reuses it.
+
+## `impl Wide` › `fn durable_over(`
+
 What run creation leaves, without its probes: the log at the public
 directory's `events.jsonl` holding `run_started`, the private half's owner and
 commit records agreeing with it, one run id and incarnation throughout, and the
@@ -1295,8 +1323,15 @@ Drop this process's run — its locks and fold with it — and hand the director
 
 ## `impl WideEnv` › `pub(super) fn adopted(`
 
-The environment over a durable run a killed child left, rebuilt from its root:
-the parent never trusts what the child believed about its own state.
+[`WideEnv::adopted_over`] over the fixture at `root`'s default layout
+(`Fixture::adopt`).
+
+## `impl WideEnv` › `pub(super) fn adopted_over(`
+
+The environment over a durable run another process left, rebuilt from the
+fixture given (`Fixture::adopt`, or `Fixture::adopt_based` for a base below
+its root): the parent never trusts what the child believed about its own
+state.
 
 ## `impl WideEnv` › `pub(super) fn resume(`
 

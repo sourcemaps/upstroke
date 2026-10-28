@@ -27,6 +27,7 @@ use crate::runner::{
 };
 use crate::topology::effects::ProcessSite;
 use crate::topology::events::RunnerPolicy;
+use crate::workspace_manager::{COMMON_DIR, ComposedCommonDir};
 
 mod probe;
 pub use self::probe::{SHELL_PROBE_COMMAND, SHELL_PROBE_TIMEOUT, run_shell_probe};
@@ -213,9 +214,29 @@ impl Runner for HostRunner {
     fn run<'a>(&'a self, request: &'a RunnerRequest, call: RunnerCall<'a>) -> RunFuture<'a> {
         Box::pin(async move { self.supervise(request, call) })
     }
+
+    fn composed_common_dir(&self, request: &RunnerRequest) -> ComposedCommonDir {
+        let Ok(composed) = self.child_environment(request) else {
+            return ComposedCommonDir::Unknown;
+        };
+        composed
+            .into_iter()
+            .rfind(|(name, _)| KeyCase::current().same_key(name, OsStr::new(COMMON_DIR)))
+            .map_or(ComposedCommonDir::Absent, |(_, value)| {
+                ComposedCommonDir::Present(value)
+            })
+    }
 }
 
 impl HostRunner {
+    fn child_environment(
+        &self,
+        request: &RunnerRequest,
+    ) -> Result<Vec<(OsString, OsString)>, UpstrokeError> {
+        self.environment
+            .compose(&request.role, request.agent.as_ref(), &request.command.env)
+    }
+
     fn supervise(
         &self,
         request: &RunnerRequest,
@@ -235,8 +256,7 @@ impl HostRunner {
                 .map_err(|error| RunnerError::never_started(&request.invocation, error))?;
         }
         let composed = self
-            .environment
-            .compose(&request.role, request.agent.as_ref(), &request.command.env)
+            .child_environment(request)
             .map_err(|error| RunnerError::never_started(&request.invocation, error))?;
         let program = self
             .program_for(&request.command.program, &composed)
