@@ -41,9 +41,23 @@ closed. Its witnesses, "symlinked registry, nothing inherited" among them, are t
   variable as set (`get_common_dir` in `setup.c`, at v2.41.0 and v2.55.0).
 - **A `worktrees` entry that cannot be resolved**, a link whose target is gone among them, makes `derive` fail closed with
   an I/O error before any slot, not with this refusal: its canonical parent cannot be known.
-- **The topology-analogue gap.** C5's layout has no topology analogue: it needs a base as deep below the scratch root as
-  the slots are, and the scaffold's fixture fixes the base, so C5 is covered at the manager. Part 2's acceptance is decided
-  in `derive` from whether a `GIT_COMMON_DIR` is inherited, and nothing else in R5 reads it.
+- **What the refusal decides, and what it leaves.** Part 2's acceptance is decided in `derive` from whether a
+  `GIT_COMMON_DIR` is inherited, and nothing else in R5 reads it, so C4's and C5's layouts pass the start. Whether
+  such a run then completes is decided later by the integration correction's registration guard (F), from the Git
+  context the runner reports for each child it starts. A runner that reports none, the container runner and the test
+  runners among them, keeps the original registration rule, under which, read from source, these layouts' guarded
+  verdicts are refused after the start. That is a question staged for the integrated fresh reviews; R5 changes no
+  runner's behaviour.
+- **The completion coverage is reused.** C4 and C5 under topology are F's genuine host-runner rows in
+  `src/engine/topology/coordinator.rs`:
+  `a_hosted_run_under_a_linked_registry_and_an_inherited_absolute_common_dir_completes` and
+  `a_hosted_run_under_a_linked_registry_and_an_inherited_relative_common_dir_at_equal_depth_completes`, the second
+  over a base as deep below the scratch root as the work trees. Each resumes through `derive`, under the inherited
+  value, and completes with a gate, a review and a worker. At the manager they are T-ENV-MGR's C4 and C5 sequences.
+  R5's own controls, which drove a test runner that reports nothing, were withdrawn for them. None of these rows has
+  run at R5's integrated head, and part 2's completion is claimed only once they pass at the final one.
+- **Platform limits.** Those rows are Unix-only. On Windows, W4 and W6 run the start refusal over a junction, through
+  native CI only; no C4 or C5 run is covered there, and none is inferred from the Unix rows or from W6.
 - **Git versions.** The condition rests on Git resolving the `../..` record through the administrative directory's real
   path, which the proposal's harness executed on Git 2.43.0, 2.50.1 and 2.55.0 (below); R5 did not re-read it in Git's
   source. Junctions are executed only by native Windows CI.
