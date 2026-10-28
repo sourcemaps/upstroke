@@ -1443,15 +1443,26 @@ into another repository (R-C-REGISTRY's part 2):
 - **C4:** an absolute `GIT_COMMON_DIR`, the base at `<root>/repo`.
 - **C5:** a relative value, the base at `EQUAL_DEPTH_BASE`, the proposal's equal-depth construction.
 
+**The plan** is two tasks, alpha and beta (`f_hosted_tasks`), which write disjoint paths, at width
+two.
+- **Both start from the start head.** The coordinator's first admission dispatches both before it
+  reads any message. `admit` selects until nothing more is admitted, and the fold changes only
+  through the messages `receive_one` handles after it returns. A retry keeps its generation's base.
+- **The first merge is fast.** Whichever candidate merges first merges fast, as sequence 0.
+- **The second is stale.** The other's base is then no longer the head, so it integrates stale, as
+  sequence 1 (`F_HOSTED_VERIFIED`). Its staging cherry-pick runs, and so do its verification's gate and
+  review, over the host runner.
+
 **The parent:**
 
-- **The run and the link.** It creates the run, drops it and plants the link.
+- **The run and the link.** It creates the run at width two, drops it and plants the link.
 - **C5's value.** It derives the relative value from the canonical paths. It asserts that the value
-  names the run's common directory, climbing to the scratch root and no further, from each of these
-  directories: the base, a task slot, a merge slot, a gate snapshot and an integration snapshot.
+  names the run's common directory, climbing to the scratch root and no further. It checks this from
+  the base, and from each directory the run places a role in (`f_hosted_placements`), and from
+  sequence 1's merge slot.
 - **The scripts.** It writes three scripts to a directory it puts first on the child's `PATH`:
   - the two agents' command-line programs. Each logs its first argument and its directory. As the
-    worker, it leaves the slot as it was on its first run and writes `src/alpha/work.txt` after that.
+    worker, it writes `src/<task>/work.txt`; alpha's first attempt leaves the slot as it was.
     As a reviewer, called with `--prompt`, it prints the scaffold's `PASSING_VERDICT`, which the child
     is handed as `UPSTROKE_TEST_F_VERDICT`. The child's adapters, `ScaffoldAdapters::new()`, answer a
     review with that verdict themselves and do not read the output;
@@ -1465,7 +1476,7 @@ into another repository (R-C-REGISTRY's part 2):
   - nothing is left under `refs/upstroke/runs/`. Finalization deletes a completed run's prepared,
     candidate and candidates refs, so none is claimed to survive;
   - the run's one integration branch under `refs/heads/upstroke/` differs from `main` by exactly
-    `src/alpha/work.txt`, holding the worker's bytes;
+    `src/alpha/work.txt` and `src/beta/work.txt`, each holding its worker's bytes;
   - the other repository's refs are untouched.
 
 ## `mod tests` › `fn a_hosted_run_under_a_linked_registry_and_an_inherited_absolute_common_dir_completes() {`
@@ -1478,31 +1489,48 @@ T-ENV-TOPO's C5 row.
 
 ## `mod tests` › `fn hosted_linked_registry_child() {`
 
-T-ENV-TOPO's child. It adopts the fixture (`Fixture::adopt_based`), resumes as `inc-2`, and drives the
-run with `run_concurrently` over `HostRunner::new()` for both the coordinator's seams and the
-pipelines'. The run must complete. Its steps reach each placement:
+T-ENV-TOPO's child. It adopts the fixture (`Fixture::adopt_based`), resumes as `inc-2` at width two,
+and drives the run with `run_concurrently` over `HostRunner::new()` for both the coordinator's seams
+and the pipelines'. The run must complete. Its steps reach each placement:
 
-- **Placement 3.** The first attempt's empty diff is a failure that placement 3 judges, so completion
-  shows that placement 3 accepted it.
-- **Placement 2.** The gates' verdicts and the review passes' verdicts.
+- **Placement 3.** Alpha's first attempt's empty diff is a failure that placement 3 judges, so
+  completion shows that placement 3 accepted it.
+- **Placement 2.** The gates' verdicts and the review passes' verdicts, the verification's included.
 - **Placement 1.** The capture's reads.
-- **C1-AP.** The review-input reads.
+- **C1-AP.** The review-input reads, the verification's in its staging tree included.
 
-**The role log** must show the worker twice, two gates and two review passes. Under C5, every logged
-directory must name the run's common directory by the relative value. **The run's end:** finalization,
-which `run_concurrently` runs before it answers `Finished`, removed the execution root.
+**The verification, from the events.**
+- **Exactly one `merge_verification_started`:** sequence 1, stale-clean.
+- **The first `merge_prepared`** is sequence 0's: fast, with no verification.
+- **The second** is sequence 1's: stale-clean, for the same candidate, on a passing verification record
+  of one gate set and one review.
+- **Both tasks merged:** one merge of each, and two `task_merged`.
+
+**The role log** must hold exactly the placements `f_hosted_placements` names, each in this
+incarnation's instance of its slot, and no other line:
+- alpha's worker twice in its generation's slot, and beta's once;
+- each working attempt's gate and review in its own snapshots: alpha's attempt 2's and beta's
+  attempt 1's;
+- sequence 1's verification gate in `s1-integration` and its review in `s1-review0`.
+
+The counts bind each line to its phase, so no attempt's run counts as the verification's. Under C5,
+every logged directory must name the run's common directory by the relative value. **The run's end:**
+finalization, which `run_concurrently` runs before it answers `Finished`, removed the execution root.
 
 **Predicted:** red at `f1842dcd` (the overlay) and under the reversal, at the first guarded read. At
 `cbc0070e`, before the store pin, red at the first removal, the gate snapshot's: the removal's walk
 from the common git dir met the store's link (HF-ENV, kept as observed).
 
-**Observed at `af1a3dbd`, with the pin, and open.** Both runs completed (HF-PIN, kept as observed):
-`Complete`, with the execution root removed. The role log held the worker twice and one gate and one
-review pass, both of attempt 2, so the gate count failed. The plan's one task merges by the fast
-path: when it merges, the integration head is still its candidate's base (`decide_pausing` in
-`integrate.rs`), so `prepare_fast` records no verification, and no verification gate or review
-runs. The reviewer's printed verdict does not change that. The predicate stands as written; this
-change does not settle how the run reaches a verification.
+**Observed at `af1a3dbd`, with the pin, and corrected since.** The one-task runs completed (HF-PIN,
+kept as observed): `Complete`, with the execution root removed. Their role log held the worker twice
+and one gate and one review pass, both of attempt 2, so the gate count failed.
+- **Why.** One task merges by the fast path. When it merges, the integration head is still its
+  candidate's base (`decide_pausing` in `integrate.rs`), so `prepare_fast` records no verification,
+  and no verification gate or review runs.
+- **The first diagnosis, qualified.** It took the reviewer stub's missing stdout verdict for the
+  cause. The run's adapters answer with their own verdict, so printing one changed nothing.
+- **The correction.** The two-task plan above makes the run verify an integration, and binds the role
+  log to each phase's placements.
 
 ## `mod tests` › `fn the_broker_ledgers_balance_at_every_end_and_start_empty_at_every_next_start_at_width_three()`
 

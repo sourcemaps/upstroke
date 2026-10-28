@@ -632,3 +632,21 @@ focused run was red, 21 passed and 8 failed (HF-PIN, kept as observed).
   `decide_pausing` and `prepare_fast` in `integrate.rs`. That is open and returned on this evidence. The predicate is
   kept.
 - **Validation at the new head is pending.**
+
+**A dated precision (2026-10-28, later still): the hosted runs verify an integration.** Root's
+`F-HOSTED-VERIFICATION-FIXTURE-PRECISION-20261028` qualified the first diagnosis, and directed a test-only correction.
+The first diagnosis held that the reviewer stub's missing stdout verdict explained the missing verification. The run's
+adapters supply their own verdict, so it did not.
+
+- **The plan.** The C4 and C5 runs now plan two tasks, alpha and beta, at width two. The coordinator's first admission
+  dispatches both before it reads any message, so both take the start head as their base.
+- **The merges.** The first to merge is fast, as sequence 0. The second is stale, as sequence 1: its staging cherry-pick,
+  and its verification's gate and review, run over the genuine host runner.
+- **The evidence is bound to the verification phase.**
+  - From the events: one stale-clean `merge_verification_started`, and a stale-clean `merge_prepared` on a passing
+    verification record.
+  - From the role log: each role's directory, the verification's gate in sequence 1's integration snapshot and its
+    review in sequence 1's review snapshot. The attempts' lines are counted at their own placements.
+- **Unchanged:** production integration and the pinned store. The linked store and both inherited `GIT_COMMON_DIR`
+  forms are kept, as is the equal-depth layout.
+- **Validation at the new head is pending.**

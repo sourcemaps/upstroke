@@ -15686,11 +15686,11 @@ mod tests {
     const F_HOSTED_AGENT: &str = r#"#!/bin/sh
 printf '%s %s\n' "$1" "$(pwd -P)" >> "$UPSTROKE_TEST_F_ROLE_LOG"
 if [ "$1" = --implement ]; then
-  if [ ! -e "$UPSTROKE_TEST_F_WORKER_MARKER" ]; then
+  if [ "$2" = alpha ] && [ ! -e "$UPSTROKE_TEST_F_WORKER_MARKER" ]; then
     : > "$UPSTROKE_TEST_F_WORKER_MARKER"
     exit 0
   fi
-  mkdir -p src/alpha && printf 'alpha worked\n' > src/alpha/work.txt
+  mkdir -p "src/$2" && printf '%s worked\n' "$2" > "src/$2/work.txt"
 fi
 if [ "$1" = --prompt ]; then
   printf '%s\n' "$UPSTROKE_TEST_F_VERDICT"
@@ -15706,9 +15706,62 @@ real=$(cd "$common" && pwd -P) || exit 3
 git cat-file -e 'HEAD^{tree}'
 "#;
 
+    /// The integration T-ENV-TOPO's run verifies: its second, whose
+    /// candidate's base is no longer the head once the first has merged.
+    #[cfg(unix)]
+    const F_HOSTED_VERIFIED: SequenceId = SequenceId(1);
+
+    /// T-ENV-TOPO's two tasks, writing disjoint paths. At width two the
+    /// coordinator's first admission dispatches both before it reads any
+    /// message, so both generations take the start head as their base, and
+    /// whichever merges second is stale.
+    #[cfg(unix)]
+    fn f_hosted_tasks() -> [WideTask; 2] {
+        [
+            WideTask::independent("alpha"),
+            WideTask::independent("beta"),
+        ]
+    }
+
+    /// Where T-ENV-TOPO's run places each role, and how many times. Alpha's
+    /// worker runs twice in its generation's slot, its first attempt leaving
+    /// the slot as it was, and beta's once. Each attempt that worked is gated
+    /// and reviewed in its own snapshots. The stale integration's gate and
+    /// review run in its integration snapshot and its review snapshot.
+    #[cfg(unix)]
+    fn f_hosted_placements() -> [(&'static str, crate::workspace_manager::Slot, usize); 8] {
+        use crate::workspace_manager::{Slot, SnapshotName};
+        let task =
+            |key| crate::engine::topology::dispatch::task_slot(TaskKey(key), GenerationId(0));
+        let snapshot = |name| Slot::Snapshot { name };
+        let verified = u64::from(F_HOSTED_VERIFIED.0);
+        [
+            ("--implement", task(0), 2),
+            ("--implement", task(1), 1),
+            ("gate", snapshot(SnapshotName::gates(0, 0, 2)), 1),
+            ("--prompt", snapshot(SnapshotName::review(0, 0, 2, 0)), 1),
+            ("gate", snapshot(SnapshotName::gates(1, 0, 1)), 1),
+            ("--prompt", snapshot(SnapshotName::review(1, 0, 1, 0)), 1),
+            ("gate", snapshot(SnapshotName::integration(verified)), 1),
+            (
+                "--prompt",
+                snapshot(SnapshotName::integration_review(verified, 0)),
+                1,
+            ),
+        ]
+    }
+
+    /// A slot instance's directory as `<namespace>/<component>_<tag>`.
+    #[cfg(unix)]
+    fn f_hosted_instance(path: &std::path::Path) -> Option<std::path::PathBuf> {
+        let instance = path.file_name()?;
+        let namespace = path.parent()?.file_name()?;
+        Some(std::path::Path::new(namespace).join(instance))
+    }
+
     #[cfg(unix)]
     fn f_hosted_linked_registry(sequence: &str) {
-        let tasks = [WideTask::independent("alpha")];
+        let tasks = f_hosted_tasks();
         let below = std::path::Path::new(if sequence == "C5" {
             crate::workspace_manager::fixture::EQUAL_DEPTH_BASE
         } else {
@@ -15719,7 +15772,7 @@ git cat-file -e 'HEAD^{tree}'
                 "f-hosted-c5",
                 below,
                 &tasks,
-                1,
+                2,
                 WidePlans::default(),
                 RecordingRunner::new(),
             )
@@ -15727,7 +15780,7 @@ git cat-file -e 'HEAD^{tree}'
             Wide::durable(
                 "f-hosted-c4",
                 &tasks,
-                1,
+                2,
                 WidePlans::default(),
                 RecordingRunner::new(),
             )
@@ -15768,20 +15821,14 @@ git cat-file -e 'HEAD^{tree}'
                 relative.push("..");
             }
             relative.push(named);
-            let work_trees = [
-                crate::workspace_manager::Slot::Task {
-                    key: "k0".to_owned(),
-                    generation: 1,
-                },
-                crate::workspace_manager::Slot::Staging { sequence: 1 },
-                crate::workspace_manager::Slot::Snapshot {
-                    name: crate::workspace_manager::SnapshotName::gates(0, 1, 1),
-                },
-                crate::workspace_manager::Slot::Snapshot {
-                    name: crate::workspace_manager::SnapshotName::integration(1),
-                },
-            ]
-            .map(|slot| env.fixture.manager.slot_path(&slot));
+            let work_trees: Vec<std::path::PathBuf> = f_hosted_placements()
+                .into_iter()
+                .map(|(_, slot, _)| slot)
+                .chain(std::iter::once(
+                    crate::engine::topology::integrate::staging_slot(F_HOSTED_VERIFIED),
+                ))
+                .map(|slot| env.fixture.manager.slot_path(&slot))
+                .collect();
             for from in std::iter::once(&base).chain(&work_trees) {
                 assert_eq!(
                     from.ancestors().nth(depth).map(|top| top.join(named)),
@@ -15881,17 +15928,19 @@ git cat-file -e 'HEAD^{tree}'
         };
         assert_eq!(
             crate::workspace_manager::fixture::git(base, &["diff", "--name-only", "main", branch]),
-            "src/alpha/work.txt",
-            "{sequence}: the run's output on {branch} is alpha's work"
+            "src/alpha/work.txt\nsrc/beta/work.txt",
+            "{sequence}: the run's output on {branch} is both tasks' work"
         );
-        assert_eq!(
-            crate::workspace_manager::fixture::git(
-                base,
-                &["show", &format!("{branch}:src/alpha/work.txt")]
-            ),
-            "alpha worked",
-            "{sequence}: with the bytes the worker wrote"
-        );
+        for id in ["alpha", "beta"] {
+            assert_eq!(
+                crate::workspace_manager::fixture::git(
+                    base,
+                    &["show", &format!("{branch}:src/{id}/work.txt")]
+                ),
+                format!("{id} worked"),
+                "{sequence}: with the bytes {id}'s worker wrote"
+            );
+        }
         assert_eq!(
             crate::workspace_manager::fixture::git(&other, &["for-each-ref"]),
             "",
@@ -15922,11 +15971,11 @@ git cat-file -e 'HEAD^{tree}'
         let below = std::path::PathBuf::from(
             std::env::var_os(F_HOSTED_BASE).expect("the base below the root"),
         );
-        let tasks = [WideTask::independent("alpha")];
+        let tasks = f_hosted_tasks();
         let env = crate::engine::topology::scaffold::WideEnv::adopted_over(
             crate::workspace_manager::fixture::Fixture::adopt_based(root.clone(), &below),
             &tasks,
-            1,
+            2,
             WidePlans::default(),
         );
         let (_, mut resumed) = env
@@ -15962,8 +16011,61 @@ git cat-file -e 'HEAD^{tree}'
         );
         assert!(
             root.join("worker-wrote-nothing").exists(),
-            "the first attempt's worker left its slot as it was, so its failure was assessed"
+            "alpha's first attempt's worker left its slot as it was, so its failure was assessed"
         );
+        let events = resumed.env.durable_events();
+        let kinds = kinds_of(&events);
+        let started: Vec<&crate::topology::events::MergeVerificationStarted> = events
+            .iter()
+            .filter_map(|event| match &event.body {
+                TopologyEventBody::MergeVerificationStarted { data } => Some(data),
+                _ => None,
+            })
+            .collect();
+        let [verification] = started.as_slice() else {
+            panic!("exactly one integration opened a verification: {kinds:?}");
+        };
+        assert!(
+            verification.sequence == F_HOSTED_VERIFIED
+                && matches!(
+                    verification.basis,
+                    crate::topology::events::VerificationBasis::StaleClean { .. }
+                ),
+            "the second integration's candidate was stale, and cherry-picked clean: \
+             {verification:?}"
+        );
+        let prepared: Vec<&crate::topology::events::MergePrepared> = events
+            .iter()
+            .filter_map(|event| match &event.body {
+                TopologyEventBody::MergePrepared { data } => Some(&**data),
+                _ => None,
+            })
+            .collect();
+        let [fast, stale] = prepared.as_slice() else {
+            panic!("both tasks' merges were prepared: {kinds:?}");
+        };
+        assert!(
+            fast.sequence == SequenceId(0)
+                && fast.disposition == crate::topology::events::PreparedDisposition::Fast
+                && fast.verification.is_none(),
+            "the first merge was fast, and verified nothing: {fast:?}"
+        );
+        assert!(
+            stale.sequence == F_HOSTED_VERIFIED
+                && stale.key == verification.candidate.key
+                && stale.disposition == crate::topology::events::PreparedDisposition::StaleClean
+                && stale.verification.as_ref().is_some_and(|record| {
+                    record.passed() && record.gates_passed && record.reviews.len() == 1
+                }),
+            "the stale merge was prepared on its passing verification, one gate set and one \
+             review: {stale:?}"
+        );
+        assert_eq!(
+            std::collections::BTreeSet::from([fast.key, stale.key]),
+            std::collections::BTreeSet::from([TaskKey(0), TaskKey(1)]),
+            "one merge of each task: {kinds:?}"
+        );
+        assert_eq!(count(&events, "task_merged"), 2, "{kinds:?}");
         let canonical_root = std::fs::canonicalize(&root).expect("the canonical scratch root");
         let common = std::fs::canonicalize(root.join(&below).join(".git"))
             .expect("the run's common directory");
@@ -15976,10 +16078,12 @@ git cat-file -e 'HEAD^{tree}'
             .is_some_and(|value| std::path::Path::new(&value).is_relative());
         let log = String::from_utf8(std::fs::read(root.join("roles.log")).expect("the roles' log"))
             .expect("a UTF-8 log");
-        let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
+        let mut placed: BTreeMap<(&str, std::path::PathBuf), usize> = BTreeMap::new();
         for line in log.lines() {
             let (role, cwd) = line.split_once(' ').expect("a role and its directory");
-            *seen.entry(role).or_insert(0) += 1;
+            let instance = f_hosted_instance(std::path::Path::new(cwd))
+                .unwrap_or_else(|| panic!("{role} ran in a slot instance: {cwd}"));
+            *placed.entry((role, instance)).or_insert(0) += 1;
             if relative {
                 assert_eq!(
                     std::path::Path::new(cwd)
@@ -15992,22 +16096,22 @@ git cat-file -e 'HEAD^{tree}'
                 );
             }
         }
-        for (role, what) in [
-            (
-                "--implement",
-                "the worker, once leaving its slot as it was and once working",
-            ),
-            ("gate", "the attempt's gate and the verification's"),
-            (
-                "--prompt",
-                "the attempt's review pass and the verification's",
-            ),
-        ] {
-            assert!(
-                seen.get(role).copied().unwrap_or(0) >= 2,
-                "{what} ran over the host runner: {log}"
-            );
-        }
+        let manager = &resumed.env.fixture.manager;
+        let expected: BTreeMap<(&str, std::path::PathBuf), usize> = f_hosted_placements()
+            .into_iter()
+            .map(|(role, slot, times)| {
+                let instance = f_hosted_instance(&manager.slot_path(&slot))
+                    .expect("a slot instance's directory");
+                ((role, instance), times)
+            })
+            .collect();
+        assert_eq!(
+            placed, expected,
+            "each role ran over the host runner, in this incarnation's instance of the slot its \
+             phase places it in: alpha's worker twice and beta's once, each working attempt's \
+             gate and review, and the gate and review of sequence {}'s verification: {log}",
+            F_HOSTED_VERIFIED.0
+        );
     }
 
     #[cfg(unix)]
