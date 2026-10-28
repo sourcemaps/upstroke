@@ -21695,7 +21695,13 @@ const F_LINKED_SEQUENCE: &str = "UPSTROKE_TEST_F_LINKED_SEQUENCE";
 /// manager's work trees (PROP:2129), and this test asserts that the value names
 /// the run's common directory from the base and from the slot the child adds.
 /// The same C4 layout with nothing inherited is refused by the guarded read,
-/// the original rule. Each sequence runs in an isolated child whose
+/// the original rule. With nothing inherited `derive` refuses a link already
+/// in place (R-C-REGISTRY part 1's start refusal, which
+/// [`derive_refuses_a_linked_worktrees_registry_while_no_common_dir_is_inherited`]
+/// witnesses), so in that sequence the child plants the link itself, once its
+/// own `derive` has passed: the link a guarded read meets after the start.
+/// This process inherits nothing either, and derives the slot path before it
+/// plants any link. Each sequence runs in an isolated child whose
 /// environment alone carries the value; the guarded operations are
 /// `candidate_stage` (the manifest's read), `candidate_write_tree` (its
 /// pre-check) and `kept_instances`.
@@ -21736,7 +21742,6 @@ fn a_linked_registry_keeps_the_managers_guarded_reads_under_the_inherited_common
         );
         let elsewhere = other.join(".git").join("worktrees");
         create_dir(&elsewhere);
-        super::fixture::link_directory(&elsewhere, &base.join(".git").join("worktrees"));
         let common = fs::canonicalize(base.join(".git")).expect("the run's common directory");
         let depth = below.components().count();
         let named = common
@@ -21753,6 +21758,9 @@ fn a_linked_registry_keeps_the_managers_guarded_reads_under_the_inherited_common
             key: "linked".to_owned(),
             generation: 1,
         });
+        if sequence != "C4 with nothing inherited" {
+            super::fixture::link_directory(&elsewhere, &base.join(".git").join("worktrees"));
+        }
         let mut relative = PathBuf::new();
         for _ in 0..depth {
             relative.push("..");
@@ -21804,7 +21812,8 @@ fn a_linked_registry_keeps_the_managers_guarded_reads_under_the_inherited_common
 /// The child of
 /// [`a_linked_registry_keeps_the_managers_guarded_reads_under_the_inherited_common_dir`]:
 /// one sequence, under the names its environment inherited, through the
-/// manager's own API.
+/// manager's own API. In the sequence with nothing inherited it plants the
+/// registry's link itself, after `derive` and before the slot is added.
 #[cfg(unix)]
 #[test]
 #[ignore = "subprocess helper"]
@@ -21824,6 +21833,12 @@ fn linked_registry_guarded_reads_child() {
         "inc-linked",
     )
     .unwrap_or_else(|error| panic!("{sequence}: derive: {error}"));
+    if sequence == "C4 with nothing inherited" {
+        super::fixture::link_directory(
+            &root.join("other").join(".git").join("worktrees"),
+            &base.join(".git").join("worktrees"),
+        );
+    }
     assert_eq!(
         manager.common_git_dir(),
         fs::canonicalize(base.join(".git"))
