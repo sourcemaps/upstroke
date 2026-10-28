@@ -663,3 +663,29 @@ parent then failed its first end-state assertion, that the run's store is still 
   as P-3's `late_add_child` does.
 - **Unchanged:** `Fixture`'s `Drop`, every product teardown and finalization, and every assertion of child and parent.
 - **Validation at the new head is pending.**
+
+**A dated precision (2026-10-28, after the second lenses): a review pass that hands its runner no request.** Both
+fresh lenses of `a9d91de7` found it from source, as a P2. Root's `F-REGULAR2-REPAIR-DISPOSITION-20261028` requires its
+repair, under root's own tracking ID, `F-R2-NO-REQUEST-REGISTRATION`; neither review report uses that ID. Root's joint
+triage keeps it one item, with both lenses' triggers.
+
+- **The gap.** A review pass can end before its first request. Its permission file cannot be written, with a directory
+  at its path; its command cannot be built; its wall-clock budget is gone; or its first request is refused admission.
+  - Its `Registering` boundary then keeps no report. The check after the pass read the empty list as a runner reporting
+    nothing, so it applied the original rule.
+  - Under C4's and C5's linked store that rule refuses a whole registration. A reviewer's outage became a registry
+    refusal: the command failed and every pipeline was cancelled, where the integration's bounded deferral and parking
+    should have run.
+- **The repair, in `1fa84b06`.** A pass whose boundary admitted no request is checked under the manager's own builder.
+  That is the context of the only Git that ran in its snapshot: the manager's, which made it.
+  - The predicate is the boundary's history, not the count the pass reports. The count check still runs first.
+  - Every structural check still runs. With no `GIT_COMMON_DIR` inherited, the manager reports `Absent`, which is the
+    original rule.
+  - A request that was admitted keeps its runner's report: `Unknown`, `Absent` and a mismatched value read as before.
+- **The witnesses.**
+  - The C4 and C5 hosted runs of a review pass whose permission file's path is a directory: the outage is deferred,
+    and the run completes.
+  - Under C4, the same pass over a damaged registration is refused.
+  - Under C4, an admitted review request whose runner reports nothing is refused by the original rule.
+- **Validation at the new head is pending,** as is fresh review. Root's tracking item stays open until the repair is
+  accepted fresh.

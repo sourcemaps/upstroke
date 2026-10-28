@@ -1545,8 +1545,21 @@ processes whose verdict it guards, as their Runner composed it
 - **A review pass's check** reads the reports its `Registering` boundary kept
   for the requests it admitted (`into_composed`).
 - **How the reports are read.** Each distinct report is checked, and the
-  first refusal is returned (`dispatch::registration_whole_under`). A pass
-  that handed nothing on is checked as the absence of a report.
+  first refusal is returned (`dispatch::registration_whole_under`).
+- **A pass that handed nothing on** has no report. Its permission file, its
+  command or its budget failed before its first request, or that request
+  was refused admission. No process of the pass ran in its snapshot. The only
+  Git that did is the manager's, which made the snapshot, so the pass is
+  checked under the manager's own builder
+  (`WorkspaceManager::composed_common_dir`), as the manager's guarded reads
+  are. This is the repair of the second review lenses' P2 (F; root's
+  `F-R2-NO-REQUEST-REGISTRATION`).
+  - **What decides it** is `Registering`'s history, not the count the pass
+    reports. An admitted request that never started leaves its runner's
+    report. The count check runs first, and with an empty history it already
+    requires zero processes.
+  - **What still runs:** every structural check. With no `GIT_COMMON_DIR`
+    inherited, the manager reports `Absent`, which is the original rule.
 - **A Runner that reports nothing**, the container runner and the test
   runners among them, is read by the check's original rule. Under a
   `worktrees` store linked into another repository, its verdicts stay
