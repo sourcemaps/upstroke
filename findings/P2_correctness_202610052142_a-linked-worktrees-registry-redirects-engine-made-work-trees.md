@@ -52,6 +52,15 @@ closed. Its witnesses, "symlinked registry, nothing inherited" among them, are t
   refused derivation pins nothing, and the pin relaxes no part of the refusal. A link made after derivation is not
   pinned: T-ENV-MGR's nothing-inherited sequence plants its link after its `derive`, so it witnesses F's guarded-read
   refusal only, and no removal through that link is claimed.
+- **F's store-pin rows derive in children.** Six of F's seven T-PIN rows derive a manager over a store linked out of the
+  common directory, or over a store link whose target is gone. While nothing is inherited, `derive` rejects the first
+  with this refusal and fails closed on the second with an I/O error, as above. With R5 each of them makes its
+  registrations, and any other repository, in its own process, inheriting nothing, and then runs that derivation, its
+  removals and every one of its assertions in a portable `LinkedChild` that inherits the run's canonical common
+  directory as an absolute `GIT_COMMON_DIR`, on every platform it ran on before, Windows junctions included. There the
+  check admits part 2's configuration, and F's pin behaves as at F: it pins each live link, and not one whose target is
+  gone. F's own runs of these rows, with nothing inherited, stay its evidence at F and ENV, and that a removal reads no
+  `GIT_COMMON_DIR` remains a claim of its source.
 - **The completion coverage is reused.** C4 and C5 under topology are F's genuine host-runner rows in
   `src/engine/topology/coordinator.rs`:
   `a_hosted_run_under_a_linked_registry_and_an_inherited_absolute_common_dir_completes` and
