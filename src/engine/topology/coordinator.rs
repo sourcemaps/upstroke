@@ -16300,8 +16300,8 @@ git cat-file -e 'HEAD^{tree}'
     fn f_hosted_no_request_child(case: FNoRequest) {
         use crate::topology::events::{
             InfrastructureKind, MergePrepared, MergeVerificationStarted,
-            MergeVerificationUnavailable, PreparedDisposition, UnavailableCause, UnavailableOutcome,
-            VerificationBasis,
+            MergeVerificationUnavailable, PreparedDisposition, UnavailableCause,
+            UnavailableOutcome, VerificationBasis,
         };
         use crate::workspace_manager::{Slot, SnapshotName};
 
@@ -16442,8 +16442,10 @@ git cat-file -e 'HEAD^{tree}'
                     panic!("the outage's one review pass was charged: {deferred:?}");
                 };
                 assert!(
-                    matches!(charged.outcome, crate::events::ReviewPassOutcome::Unavailable)
-                        && charged.cost_usd.is_none(),
+                    matches!(
+                        charged.outcome,
+                        crate::events::ReviewPassOutcome::Unavailable
+                    ) && charged.cost_usd.is_none(),
                     "charged as unavailable, with no cost: {charged:?}"
                 );
                 let started: Vec<&MergeVerificationStarted> = events
