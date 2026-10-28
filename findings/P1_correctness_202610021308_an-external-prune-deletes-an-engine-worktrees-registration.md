@@ -610,3 +610,25 @@ that anchor, made in `2cec7594`.
   store lost, exchanged, linked after derivation or rebound.
 - **Validation at the new head is pending**, as is fresh review. Native Windows junction coverage is planned, not
   executed.
+
+**A dated precision (2026-10-28, later): the witnesses' setup and the hosted runs' role count.** At `af1a3dbd` the
+focused run was red, 21 passed and 8 failed (HF-PIN, kept as observed).
+
+- **Six manager witnesses failed in their setup, before any removal.** Each added its task worktree through the
+  store's link with no `GIT_COMMON_DIR` given. Git's checkout of the new work tree failed: `not a git repository`, or
+  `nonexistent object` where the link named another repository's store.
+- **The repair is test-only.** Root's `F-EXECUTION4-FIXTURE-REPAIR-DIRECTION-20261028` directed it, and it is made
+  with this precision.
+  - The fixture's manager makes the registrations while the store is the repository's own directory.
+  - The store is then moved with them to the target and linked.
+  - The manager under test is derived over that link.
+
+  The production removal is unchanged.
+- **The C4 and C5 runs completed,** with the execution root removed, and failed their role count. The log held the
+  worker twice, one gate and one review pass. The predicate also asks for the verification's gate and review pass.
+- **The hosted reviewer now prints the scaffold's passing verdict,** as directed. The run's adapters supply that verdict
+  themselves, so the count is not met by it.
+- **Why the count stays unmet.** The run's one task merges by the fast path, which runs no verification:
+  `decide_pausing` and `prepare_fast` in `integrate.rs`. That is open and returned on this evidence. The predicate is
+  kept.
+- **Validation at the new head is pending.**

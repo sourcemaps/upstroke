@@ -1451,7 +1451,10 @@ into another repository (R-C-REGISTRY's part 2):
   directories: the base, a task slot, a merge slot, a gate snapshot and an integration snapshot.
 - **The scripts.** It writes three scripts to a directory it puts first on the child's `PATH`:
   - the two agents' command-line programs. Each logs its first argument and its directory. As the
-    worker, it leaves the slot as it was on its first run and writes `src/alpha/work.txt` after that;
+    worker, it leaves the slot as it was on its first run and writes `src/alpha/work.txt` after that.
+    As a reviewer, called with `--prompt`, it prints the scaffold's `PASSING_VERDICT`, which the child
+    is handed as `UPSTROKE_TEST_F_VERDICT`. The child's adapters, `ScaffoldAdapters::new()`, answer a
+    review with that verdict themselves and do not read the output;
   - `gate`. It logs, then requires `git rev-parse --git-common-dir` to be the run's canonical common
     directory and `HEAD^{tree}` to be readable.
 - **The child.** It starts the child with the value inherited.
@@ -1492,6 +1495,14 @@ which `run_concurrently` runs before it answers `Finished`, removed the executio
 **Predicted:** red at `f1842dcd` (the overlay) and under the reversal, at the first guarded read. At
 `cbc0070e`, before the store pin, red at the first removal, the gate snapshot's: the removal's walk
 from the common git dir met the store's link (HF-ENV, kept as observed).
+
+**Observed at `af1a3dbd`, with the pin, and open.** Both runs completed (HF-PIN, kept as observed):
+`Complete`, with the execution root removed. The role log held the worker twice and one gate and one
+review pass, both of attempt 2, so the gate count failed. The plan's one task merges by the fast
+path: when it merges, the integration head is still its candidate's base (`decide_pausing` in
+`integrate.rs`), so `prepare_fast` records no verification, and no verification gate or review
+runs. The reviewer's printed verdict does not change that. The predicate stands as written; this
+change does not settle how the run reaches a verification.
 
 ## `mod tests` › `fn the_broker_ledgers_balance_at_every_end_and_start_empty_at_every_next_start_at_width_three()`
 

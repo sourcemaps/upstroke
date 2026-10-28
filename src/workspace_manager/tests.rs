@@ -21889,22 +21889,23 @@ fn linked_registry_guarded_reads_child() {
 // A registration store pinned at derivation (F, the integration correction)
 // ---------------------------------------------------------------------------
 
-/// A fixture whose registration store, `<common git dir>/worktrees`, is a
-/// directory link to the directory `target` names: a symlink, or on Windows a
-/// junction, planted before the manager returned here is derived, and that
-/// manager's execution root created. The fixture's own manager was derived
-/// before the link and is not used. Returns the fixture, the manager, the
-/// store and the target as the manager pins it: canonical, with no verbatim
-/// prefix.
-fn pinned_store(
-    tag: &str,
-    target: impl FnOnce(&Fixture) -> PathBuf,
-) -> (Fixture, WorkspaceManager, PathBuf, PathBuf) {
-    let fixture = Fixture::new(tag);
-    let target = target(&fixture);
-    fs::create_dir_all(&target).expect("the store's target");
+/// The fixture's registration store, `<common git dir>/worktrees`, moved with
+/// every registration in it to `target`; a directory link to `target` planted
+/// where it was, a symlink or on Windows a junction; and a manager derived over
+/// that link, so the store is a link when the manager is derived. Returns the
+/// manager, the store and the target as the manager pins it: canonical, with
+/// no verbatim prefix.
+///
+/// The fixture's own manager, derived over the ordinary store, makes the
+/// registrations before this, so each is Git's own. An add through the link
+/// with no `GIT_COMMON_DIR` given makes none: Git's checkout of the new work
+/// tree fails, `not a git repository`, or `nonexistent object` where the link
+/// names another repository's store, before any removal. After this the
+/// fixture's manager names paths and does nothing else.
+fn link_store_to(fixture: &Fixture, target: &Path) -> (WorkspaceManager, PathBuf, PathBuf) {
     let store = fixture.manager.common_git_dir().join("worktrees");
-    plant_directory_link(&target, &store);
+    fs::rename(&store, target).expect("the store moved, with its registrations, to the target");
+    plant_directory_link(target, &store);
     let manager = WorkspaceManager::derive(
         &fixture.base,
         &fixture.private,
@@ -21912,24 +21913,8 @@ fn pinned_store(
         "inc-1",
     )
     .expect("derive the manager over the linked store");
-    manager
-        .create_execution_root(&mut NoHooks)
-        .expect("the execution root");
-    let target = strip_verbatim(fs::canonicalize(&target).expect("the canonical target"));
-    (fixture, manager, store, target)
-}
-
-/// A task worktree at the fixture's `head`, added through `manager`, intent
-/// first, with its checkout.
-fn add_task_through(manager: &WorkspaceManager, fixture: &Fixture, key: &str) -> (Slot, PathBuf) {
-    let slot = fixture.task(key, 1);
-    manager
-        .write_intent(&mut NoHooks, &slot)
-        .expect("the intent");
-    let checkout = manager
-        .add_worktree(&mut NoHooks, &slot, &fixture.head)
-        .expect("the add, through the store's link");
-    (slot, checkout)
+    let target = strip_verbatim(fs::canonicalize(target).expect("the canonical target"));
+    (manager, store, target)
 }
 
 /// The store is still a link, and still resolves to the pinned `target`.
@@ -22029,21 +22014,46 @@ impl EffectHooks for LoseStoreAtBefore {
 /// the target, and every entry no removal bound: another repository's
 /// registration beside them, and then the emptied target itself. The target is
 /// another repository's store, the adopted layout, and then a directory of no
-/// repository, since the pin is unconditional. Nothing is inherited: the adds
-/// write through the link, and the removals read no `GIT_COMMON_DIR`.
+/// repository, since the pin is unconditional. The registrations are Git's
+/// own, made over the ordinary store and moved with it ([`link_store_to`]),
+/// and nothing is inherited: the removals read no `GIT_COMMON_DIR`.
 #[test]
 fn a_store_linked_before_derive_removes_only_its_bound_registrations_and_keeps_link_and_target() {
     for (tag, repository) in [("pinned-repository", true), ("pinned-directory", false)] {
-        let (fixture, manager, store, target) = pinned_store(tag, |fixture| {
-            if repository {
-                let other = fixture.root.join("other");
-                create_dir(&other);
-                git(&other, &["init", "-q", "-b", "main"]);
-                other.join(".git").join("worktrees")
-            } else {
-                fixture.root.join("any-directory")
-            }
-        });
+        let fixture = Fixture::created(tag);
+        let alpha = fixture.add_task(&mut NoHooks, "alpha", 1);
+        let beta = fixture.add_task(&mut NoHooks, "beta", 1);
+        let gate = fixture
+            .manager
+            .add_snapshot(
+                &mut NoHooks,
+                &SnapshotName::gates(0, 1, 1),
+                &SnapshotInput::Commit(oid(&fixture.head)),
+            )
+            .unwrap_or_else(|error| panic!("{tag}: the snapshot's add: {error}"));
+        let target = if repository {
+            let other = fixture.root.join("other");
+            create_dir(&other);
+            git(&other, &["init", "-q", "-b", "main"]);
+            other.join(".git").join("worktrees")
+        } else {
+            fixture.root.join("any-directory")
+        };
+        let (manager, store, target) = link_store_to(&fixture, &target);
+        let alpha_checkout = fixture.manager.slot_path(&alpha);
+        let beta_checkout = fixture.manager.slot_path(&beta);
+        let entry_of =
+            |checkout: &Path| target.join(checkout.file_name().expect("a checkout name"));
+        let alpha_entry = entry_of(alpha_checkout.as_path());
+        let gate_entry = entry_of(gate.path());
+        let beta_entry = entry_of(beta_checkout.as_path());
+        for entry in [&alpha_entry, &gate_entry, &beta_entry] {
+            assert!(
+                entry.join("gitdir").is_file(),
+                "{tag}: the registration moved with its store, below the target: {}",
+                entry.display()
+            );
+        }
         let foreign = target.join("foreign");
         fs::create_dir_all(&foreign).expect("a registration no removal binds");
         let elsewhere = fixture.root.join("elsewhere").join(".git");
@@ -22051,24 +22061,6 @@ fn a_store_linked_before_derive_removes_only_its_bound_registrations_and_keeps_l
             .expect("its gitdir, an absolute path on every platform");
         fs::write(foreign.join("locked"), b"another repository's\n").expect("its locked");
         let foreign_before = snapshot(&foreign);
-
-        let (alpha, alpha_checkout) = add_task_through(&manager, &fixture, "alpha");
-        let alpha_entry = target.join(alpha_checkout.file_name().expect("a checkout name"));
-        let gate = manager
-            .add_snapshot(
-                &mut NoHooks,
-                &SnapshotName::gates(0, 1, 1),
-                &SnapshotInput::Commit(oid(&fixture.head)),
-            )
-            .unwrap_or_else(|error| panic!("{tag}: the snapshot's add: {error}"));
-        let gate_entry = target.join(gate.path().file_name().expect("a snapshot name"));
-        for entry in [&alpha_entry, &gate_entry] {
-            assert!(
-                entry.join("gitdir").is_file(),
-                "{tag}: Git wrote the registration through the link: {}",
-                entry.display()
-            );
-        }
 
         manager
             .remove_snapshot(&mut NoHooks, &gate)
@@ -22094,7 +22086,6 @@ fn a_store_linked_before_derive_removes_only_its_bound_registrations_and_keeps_l
         assert_pinned_link(&store, &target, tag);
 
         fs::remove_dir_all(&foreign).expect("the foreign registration goes by hand");
-        let (beta, beta_checkout) = add_task_through(&manager, &fixture, "beta");
         manager
             .remove_worktree(&mut NoHooks, &beta)
             .unwrap_or_else(|error| panic!("{tag}: beta's removal: {error}"));
@@ -22151,11 +22142,10 @@ fn a_pinned_store_lost_before_its_removal_refuses_before_the_checkout_is_touched
         ),
     ];
     for (index, (case, loss, at_hook, found)) in cases.into_iter().enumerate() {
-        let (fixture, manager, store, target) =
-            pinned_store(&format!("pin-lost-{index}"), |fixture| {
-                fixture.root.join("pinned")
-            });
-        let (slot, checkout) = add_task_through(&manager, &fixture, "alpha");
+        let fixture = Fixture::created(&format!("pin-lost-{index}"));
+        let slot = fixture.add_task(&mut NoHooks, "alpha", 1);
+        let checkout = fixture.manager.slot_path(&slot);
+        let (manager, store, target) = link_store_to(&fixture, &fixture.root.join("pinned"));
         write_file(&checkout.join("work.txt"), b"the attempt's work\n");
         let entry = target.join(checkout.file_name().expect("a checkout name"));
         fs::write(entry.join("locked"), b"held\n").expect("a locked marker");
@@ -22220,11 +22210,10 @@ fn a_link_planted_below_a_pinned_target_at_the_before_hook_refuses_the_removal()
         if file_link && cfg!(windows) {
             continue;
         }
-        let (fixture, manager, _store, target) =
-            pinned_store(&format!("pin-inside-{index}"), |fixture| {
-                fixture.root.join("pinned")
-            });
-        let (slot, checkout) = add_task_through(&manager, &fixture, "alpha");
+        let fixture = Fixture::created(&format!("pin-inside-{index}"));
+        let slot = fixture.add_task(&mut NoHooks, "alpha", 1);
+        let checkout = fixture.manager.slot_path(&slot);
+        let (manager, _store, target) = link_store_to(&fixture, &fixture.root.join("pinned"));
         let entry = target.join(checkout.file_name().expect("a checkout name"));
         fs::write(entry.join("locked"), b"held\n").expect("a locked marker");
         let substituted = if file_link {
@@ -22279,10 +22268,10 @@ fn a_link_planted_below_a_pinned_target_at_the_before_hook_refuses_the_removal()
 /// original target, moved aside, are untouched.
 #[test]
 fn a_pinned_target_exchanged_for_a_link_at_the_before_hook_refuses_the_removal() {
-    let (fixture, manager, _store, target) = pinned_store("pin-target-exchanged", |fixture| {
-        fixture.root.join("pinned")
-    });
-    let (slot, checkout) = add_task_through(&manager, &fixture, "alpha");
+    let fixture = Fixture::created("pin-target-exchanged");
+    let slot = fixture.add_task(&mut NoHooks, "alpha", 1);
+    let checkout = fixture.manager.slot_path(&slot);
+    let (manager, _store, target) = link_store_to(&fixture, &fixture.root.join("pinned"));
     let name = checkout.file_name().expect("a checkout name").to_owned();
     let victim = fixture.root.join("victim");
     copy_entry(&target.join(&name), &victim.join(&name));
@@ -22410,9 +22399,10 @@ fn a_registration_rebound_under_a_pinned_store_keeps_its_admin_state() {
         }
     }
 
-    let (fixture, manager, _store, target) =
-        pinned_store("pin-rebound", |fixture| fixture.root.join("pinned"));
-    let (slot, checkout) = add_task_through(&manager, &fixture, "alpha");
+    let fixture = Fixture::created("pin-rebound");
+    let slot = fixture.add_task(&mut NoHooks, "alpha", 1);
+    let checkout = fixture.manager.slot_path(&slot);
+    let (manager, _store, target) = link_store_to(&fixture, &fixture.root.join("pinned"));
     let entry = target.join(checkout.file_name().expect("a checkout name"));
     let locked = entry.join("locked");
     fs::write(&locked, b"do not remove\n").expect("a locked marker");
@@ -22440,16 +22430,19 @@ fn a_registration_rebound_under_a_pinned_store_keeps_its_admin_state() {
 }
 
 /// T-PIN-7: a store link whose target is absent when the manager is derived is
-/// not pinned, even once its target appears. A registration written through
-/// it afterwards is refused at the link, before the checkout is touched, as
-/// any link on the registration's chain is.
+/// not pinned, even once its target appears. The store's registration, Git's
+/// own, moved with it to the link's target, is refused at the link, before the
+/// checkout is touched, as any link on the registration's chain is.
 #[test]
 fn a_store_link_whose_target_appears_after_derive_is_not_pinned() {
-    let fixture = Fixture::new("store-link-unpinned");
+    let fixture = Fixture::created("store-link-unpinned");
+    let slot = fixture.add_task(&mut NoHooks, "alpha", 1);
+    let checkout = fixture.manager.slot_path(&slot);
     let later = fixture.root.join("later");
     let away = fixture.root.join("later-away");
     let store = fixture.manager.common_git_dir().join("worktrees");
-    fs::create_dir_all(&later).expect("the link's target, for now");
+    fs::rename(&store, &later)
+        .expect("the store moved, with its registration, to the link's target");
     plant_directory_link(&later, &store);
     fs::rename(&later, &away).expect("its target gone at derivation");
     let manager = WorkspaceManager::derive(
@@ -22460,10 +22453,6 @@ fn a_store_link_whose_target_appears_after_derive_is_not_pinned() {
     )
     .expect("derive over a store link whose target is gone");
     fs::rename(&away, &later).expect("the target back");
-    manager
-        .create_execution_root(&mut NoHooks)
-        .expect("the execution root");
-    let (slot, checkout) = add_task_through(&manager, &fixture, "alpha");
     let checkout_before = snapshot(&checkout);
     let error = manager
         .remove_worktree(&mut NoHooks, &slot)

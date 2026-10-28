@@ -15692,6 +15692,9 @@ if [ "$1" = --implement ]; then
   fi
   mkdir -p src/alpha && printf 'alpha worked\n' > src/alpha/work.txt
 fi
+if [ "$1" = --prompt ]; then
+  printf '%s\n' "$UPSTROKE_TEST_F_VERDICT"
+fi
 "#;
 
     #[cfg(unix)]
@@ -15822,6 +15825,10 @@ git cat-file -e 'HEAD^{tree}'
                 ("UPSTROKE_TEST_F_RUN_COMMON", common.as_os_str()),
                 ("UPSTROKE_TEST_F_WORKER_MARKER", marker.as_os_str()),
                 ("UPSTROKE_TEST_F_ROLE_LOG", log.as_os_str()),
+                (
+                    "UPSTROKE_TEST_F_VERDICT",
+                    std::ffi::OsStr::new(crate::engine::topology::scaffold::PASSING_VERDICT),
+                ),
             ],
             Duration::from_secs(300),
         );
