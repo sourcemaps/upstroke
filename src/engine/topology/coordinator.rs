@@ -15830,6 +15830,62 @@ git cat-file -e 'HEAD^{tree}'
                 && ended.stdout.contains("1 passed"),
             "{sequence}'s layout under a run over the host runner: {ended}"
         );
+        let store = env.fixture.base.join(".git").join("worktrees");
+        assert!(
+            std::fs::symlink_metadata(&store)
+                .is_ok_and(|metadata| metadata.file_type().is_symlink()),
+            "{sequence}: the run's store is still the link it started under"
+        );
+        assert_eq!(
+            std::fs::canonicalize(&store).expect("the store resolves"),
+            std::fs::canonicalize(&elsewhere).expect("the link's target"),
+            "{sequence}: and the link still names the same target"
+        );
+        let left: Vec<std::path::PathBuf> = std::fs::read_dir(&elsewhere)
+            .expect("the link's target is kept")
+            .map(|entry| entry.expect("an entry of the target").path())
+            .collect();
+        assert!(
+            left.is_empty(),
+            "{sequence}: finalization removed every registration the run made, below the pinned \
+             target, and kept the target: {left:?}"
+        );
+        let base = &env.fixture.base;
+        assert_eq!(
+            crate::workspace_manager::fixture::git(
+                base,
+                &["for-each-ref", "--format=%(refname)", "refs/upstroke/runs/"]
+            ),
+            "",
+            "{sequence}: the completed run's prepared, candidate and candidates refs were deleted \
+             at finalization"
+        );
+        let branches = crate::workspace_manager::fixture::git(
+            base,
+            &["for-each-ref", "--format=%(refname)", "refs/heads/upstroke/"],
+        );
+        let mut named = branches.lines();
+        let (Some(branch), None) = (named.next(), named.next()) else {
+            panic!("{sequence}: the run's one integration branch: {branches:?}");
+        };
+        assert_eq!(
+            crate::workspace_manager::fixture::git(base, &["diff", "--name-only", "main", branch]),
+            "src/alpha/work.txt",
+            "{sequence}: the run's output on {branch} is alpha's work"
+        );
+        assert_eq!(
+            crate::workspace_manager::fixture::git(
+                base,
+                &["show", &format!("{branch}:src/alpha/work.txt")]
+            ),
+            "alpha worked",
+            "{sequence}: with the bytes the worker wrote"
+        );
+        assert_eq!(
+            crate::workspace_manager::fixture::git(&other, &["for-each-ref"]),
+            "",
+            "{sequence}: the other repository's refs are untouched"
+        );
     }
 
     #[cfg(unix)]
@@ -15883,6 +15939,16 @@ git cat-file -e 'HEAD^{tree}'
             )
             .expect("the run over the host runner completes");
         assert_eq!(outcome_of(&progress), RunOutcome::Complete);
+        assert!(
+            matches!(
+                progress,
+                Progress::Finished {
+                    execution_root_removed: true,
+                    ..
+                }
+            ),
+            "finalization removed the execution root, every worktree and registration first"
+        );
         assert!(
             root.join("worker-wrote-nothing").exists(),
             "the first attempt's worker left its slot as it was, so its failure was assessed"

@@ -1455,6 +1455,15 @@ into another repository (R-C-REGISTRY's part 2):
   - `gate`. It logs, then requires `git rev-parse --git-common-dir` to be the run's canonical common
     directory and `HEAD^{tree}` to be readable.
 - **The child.** It starts the child with the value inherited.
+- **After the child,** what the completed run left, each by its contract:
+  - the store is still the link, naming the same target, and the target is kept and empty. Finalization
+    removed every registration the run made, below the store pinned at derivation, and neither the link
+    nor its target;
+  - nothing is left under `refs/upstroke/runs/`. Finalization deletes a completed run's prepared,
+    candidate and candidates refs, so none is claimed to survive;
+  - the run's one integration branch under `refs/heads/upstroke/` differs from `main` by exactly
+    `src/alpha/work.txt`, holding the worker's bytes;
+  - the other repository's refs are untouched.
 
 ## `mod tests` › `fn a_hosted_run_under_a_linked_registry_and_an_inherited_absolute_common_dir_completes() {`
 
@@ -1477,9 +1486,12 @@ pipelines'. The run must complete. Its steps reach each placement:
 - **C1-AP.** The review-input reads.
 
 **The role log** must show the worker twice, two gates and two review passes. Under C5, every logged
-directory must name the run's common directory by the relative value.
+directory must name the run's common directory by the relative value. **The run's end:** finalization,
+which `run_concurrently` runs before it answers `Finished`, removed the execution root.
 
-**Predicted:** red at `f1842dcd` (the overlay) and under the reversal, at the first guarded read.
+**Predicted:** red at `f1842dcd` (the overlay) and under the reversal, at the first guarded read. At
+`cbc0070e`, before the store pin, red at the first removal, the gate snapshot's: the removal's walk
+from the common git dir met the store's link (HF-ENV, kept as observed).
 
 ## `mod tests` › `fn the_broker_ledgers_balance_at_every_end_and_start_empty_at_every_next_start_at_width_three()`
 

@@ -8,7 +8,7 @@ reviewed_sha: 85f5b09b5fbb2436acd092fa77388d1bea750aef
 location: src/workspace_manager.rs:2649
 provenance: pre_existing
 first_bad: predates PR11: Git's prune decides on an entry before its `locked` exists and deletes it later without looking again, on 2.43.0, 2.50.1 and 2.55.0, so every engine `git worktree add` has both faces; executed at master 5c222ff2's add argv by PR #329's design rounds 7 to 9; prior IDs FUB-D6-PRUNE (face 1) and FUB-D7-R13 (face 2), from PR #329's design reviews 6 and 7, face 2's boundary corrected by FUB-D8-DURINGADD (review 8), and the host-agent subset PR11-HOST-AGENT-PRUNE-RACES-AN-ENGINE-ADD
-guard: accepted by the owner's RULING X-1 of 2026-10-15, verbatim and whole, as an explicit ruling on its scope per face and per starter, with closures 1 (with C1-4), 2 (O2(a), RULING P-1) and 3 (Choice A) implemented and validated in #333, F's merging change, where it takes effect (the acceptance below); G6's report cites it and states where it narrows Q1, Q2, Q4 and Q6; re-triaged at each tech-debt sweep (MAINTAINING.md)
+guard: accepted by the owner's RULING X-1 of 2026-10-15, verbatim and whole, as an explicit ruling on its scope per face and per starter, with closures 1 (with C1-4), 2 (O2(a), RULING P-1) and 3 (Choice A) implemented and validated in #333, F's merging change, where it takes effect (the acceptance below), closure 1's integration correction for a worktrees store linked into another repository, its reads and its removal (2cec7594), included, by the dated precisions of 2026-10-27 and 2026-10-28; G6's report cites it and states where it narrows Q1, Q2, Q4 and Q6; re-triaged at each tech-debt sweep (MAINTAINING.md)
 ---
 
 ## Failure sequence
@@ -586,3 +586,27 @@ env-gate-6's integration map (§2.4) found it. Root's disposition `F-ENV-COMPATI
 - **The sentences above that state the check** read as its original rule, which still applies whenever no value is
   reported. With a reported value, they read as this precision states.
 - **Validation is pending:** the C4 and C5 controls under a genuine host runner, their negatives, and fresh review.
+
+**A dated precision (2026-10-28): the removal under a store linked at derivation.** At `cbc0070e` the C4 and C5 runs
+over the genuine host runner still did not complete. Each refused its first removal, the gate snapshot's: a removal
+walked its registration from the common git dir, and the store's link is on that chain (HF-ENV, 6 passed and 2
+failed, kept as observed). Root's `F-RETURN12-IMPLEMENTATION-DISPOSITION-20261028` selected an explicit amendment of
+that anchor, made in `2cec7594`.
+
+- **The amendment.** When the store is a link, or another reparse point, to a real directory as the run's manager is
+  derived, its target is pinned then, by its canonical path. The pin is unconditional and filesystem-based. Its target
+  may be any real directory; a link into another repository's store is part 2's adopted layout.
+  - A removal that bound its registration there refuses, before its checkout is touched, unless the store is still
+    that link resolving to the target.
+  - Otherwise it deletes only that registration, below the target, and never the link or the target.
+- **What stays.**
+  - The rule against links on the execution root's chain.
+  - Capture, the registry reads and their refusals.
+  - The removal's order: the checkout first, then the identity re-read, which keeps `locked` and the entry.
+
+  The pin is a path, not the directory's identity.
+- **The witnesses.** The C4 and C5 hosted runs, now with the layout, refs and output the run leaves. The manager's
+  `a_store_linked_before_derive_removes_only_its_bound_registrations_and_keeps_link_and_target`, and its negatives for a
+  store lost, exchanged, linked after derivation or rebound.
+- **Validation at the new head is pending**, as is fresh review. Native Windows junction coverage is planned, not
+  executed.
