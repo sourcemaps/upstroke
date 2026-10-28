@@ -314,6 +314,36 @@ How many of this boundary's requests completed. A judge compares it with the
 number of processes a review pass reports, which is how a pass that ran a
 process outside the boundary is caught.
 
+## `pub(super) struct Registering<'a, R: ?Sized>` › `composed: Mutex<Vec<ComposedCommonDir>>,`
+
+What the inner Runner composes for the `GIT_COMMON_DIR` of each request this
+boundary admitted, in admission order (`Runner::composed_common_dir`; the
+external-prune follow-up's integration correction, F). A review pass's
+processes run through the boundary a judge builds for that pass, and their
+requests are built inside the review module. These reports are therefore the
+only route by which closure 1's check after the pass sees the Git context of
+the processes whose verdict it guards.
+
+The lock's protocol, stated at the field as §10 places it: one push per
+admitted request, made before the request is handed to the inner Runner,
+with the lock held for that push alone and never across the inner run's
+`.await`. One read by the owner after the last run has returned, by
+consuming the boundary (`into_composed`). A poisoned lock keeps the reports
+pushed before the panic. A request the boundary refuses at `admit` is never
+handed on and leaves no report.
+
+## `impl<'a, R: ?Sized> Registering<'a, R>` › `pub(super) fn into_composed(self) -> Vec<ComposedCommonDir> {`
+
+The reports of the requests this boundary admitted, read once, after its
+last run, as the boundary is consumed. A judge reads them for a review
+pass's verdict (`attempt.rs`, placement 2); an empty list, a pass that
+handed nothing on, is checked as the absence of a report.
+
+## `impl<R: Registrar + ?Sized> Runner for Registering<'_, R>` › `fn composed_common_dir(&self, request: &RunnerRequest) -> ComposedCommonDir {`
+
+Forwarded to the inner Runner, so a boundary reports what the Runner it
+wraps composes and never a value of its own.
+
 ## `impl<R: Registrar + ?Sized> Runner for Registering<'_, R>` › `fn run<'a>(&'a self, request: &'a RunnerRequest, call: RunnerCall<'a>) -> RunFuture<'a> {`
 
 Register (with the pair when slotted), run, settle — and settle on the

@@ -383,6 +383,43 @@ The worker half comes from production's builder, so the request this
 compares against the probe is the request an attempt sends: the
 bound agent and the worker identity, not a hand-written pair.
 
+## `fn dump_command(overlay: &[(&str, &str)]) -> CommandSpec {`
+
+The environment dump helper as a command, with `overlay` as its request's overlay.
+
+## `fn received_common_dir(runner: &HostRunner, request: &RunnerRequest) -> Vec<String> {`
+
+The `GIT_COMMON_DIR` entries of the environment a real child of `runner` dumped for `request`.
+
+## `fn the_host_runner_reports_the_common_dir_its_child_is_started_with() {`
+
+T-HOST-REPORT, the integration correction's report (F): `HostRunner::composed_common_dir` is the
+value the child is started with. It is checked against a real child's dumped environment, over a
+custom `HostEnvironment` with an overlay rather than `HostRunner::new` alone:
+
+- a base value;
+- an overlay's value over the base's;
+- none anywhere, `Absent`;
+- a relative value, which a gate does not receive as it is (option (C)'s work-tree context, in
+  `child_environment`). With the run's repository held, by `ObjectGraph::RecordedIn` over
+  `managed_repository`, the report and the child's value are both that repository's common
+  directory. With none held, the report is `Unknown` and the same composition refuses the run
+  `NeverStarted`. One assertion compares both reports, so a work-tree step outside
+  `child_environment`, which would make the report a second composition beside the child's, shows
+  both reports wrong at once: each would be the relative value;
+- a repeated name, where the later entry is the one the child receives and the one reported;
+- an overlay naming a reserved key, which reports `Unknown` while the same composition refuses the run.
+
+The base, overlay and repeated values are absolute on the platform that runs the test (`/…` on Unix,
+`C:\…` on Windows), because a gate's inherited value that is not absolute meets the work-tree
+context.
+
+On Unix, two more rows:
+
+- a base built with `KeyCase::Insensitive` that holds `git_common_dir`. This reports `Absent`, and
+  the child receives the lowercase name and not the variable;
+- a value that is not UTF-8, reported byte for byte.
+
 ## `fn every_credential_supplied_role_composes_one_environment_per_binding() {`
 
 The same claim, over **every** role production binds to an agent and

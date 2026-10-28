@@ -1087,6 +1087,213 @@ fn a_probe_child_and_an_execution_child_of_one_adapter_carry_the_same_environmen
     );
 }
 
+fn dump_command(overlay: &[(&str, &str)]) -> CommandSpec {
+    let mut env = vec![("UPSTROKE_ENV_DUMP".to_owned(), "1".to_owned())];
+    env.extend(
+        overlay
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned())),
+    );
+    CommandSpec {
+        program: std::env::current_exe()
+            .expect("test executable")
+            .to_string_lossy()
+            .into_owned(),
+        args: vec![
+            "environment_dump_helper".to_owned(),
+            "--ignored".to_owned(),
+            "--nocapture".to_owned(),
+        ],
+        env,
+        stdin: Vec::new(),
+    }
+}
+
+fn received_common_dir(runner: &HostRunner, request: &RunnerRequest) -> Vec<String> {
+    let prefix = format!("{COMMON_DIR}=");
+    dumped_environment(runner, request)
+        .into_iter()
+        .filter(|entry| entry.starts_with(&prefix))
+        .collect()
+}
+
+#[test]
+fn the_host_runner_reports_the_common_dir_its_child_is_started_with() {
+    let workspace = scratch("composed-common-dir");
+    let gate = |overlay: Vec<(&str, &str)>| {
+        crate::runner::gate_request(
+            dump_command(&overlay),
+            workspace.clone(),
+            Duration::from_secs(120),
+            gate_invocation(),
+        )
+    };
+    let over = |base: Vec<(OsString, OsString)>, case: KeyCase| {
+        HostRunner::new().with_environment(HostEnvironment::with_base(base, case))
+    };
+    let (base_common, overlay_common, first_common, second_common) = if cfg!(windows) {
+        (
+            r"C:\base\common",
+            r"C:\overlay\common",
+            r"C:\first\common",
+            r"C:\second\common",
+        )
+    } else {
+        (
+            "/base/common",
+            "/overlay/common",
+            "/first/common",
+            "/second/common",
+        )
+    };
+    for (label, base_value, overlay_value, expected) in [
+        (
+            "a value in the base",
+            Some(base_common),
+            None,
+            Some(base_common),
+        ),
+        (
+            "an overlay's value over the base's",
+            Some(base_common),
+            Some(overlay_common),
+            Some(overlay_common),
+        ),
+        ("no value anywhere", None, None, None),
+    ] {
+        let mut base = synthetic_base();
+        if let Some(value) = base_value {
+            base.push((os(COMMON_DIR), os(value)));
+        }
+        let runner = over(base, KeyCase::current());
+        let request = gate(
+            overlay_value
+                .map(|value| (COMMON_DIR, value))
+                .into_iter()
+                .collect(),
+        );
+        assert_eq!(
+            runner.composed_common_dir(&request),
+            expected.map_or(ComposedCommonDir::Absent, |value| {
+                ComposedCommonDir::Present(os(value))
+            }),
+            "{label}: the report"
+        );
+        assert_eq!(
+            received_common_dir(&runner, &request),
+            expected
+                .map(|value| format!("{COMMON_DIR}={value}"))
+                .into_iter()
+                .collect::<Vec<_>>(),
+            "{label}: what the child received"
+        );
+    }
+
+    let (_held, repository) = managed_repository();
+    std::fs::write(repository.include(), RECORDED_OBJECTS_INCLUDE)
+        .expect("the include, without which a role of the runner that holds it never starts");
+    let held = repository.common_dir().as_os_str().to_os_string();
+    let relative = || {
+        let mut base = synthetic_base();
+        base.push((os(COMMON_DIR), os("../../common")));
+        base
+    };
+    let with_repository = HostRunner::new().with_environment(
+        HostEnvironment::with_base(relative(), KeyCase::current())
+            .reading(ObjectGraph::RecordedIn(repository.clone())),
+    );
+    let without_repository = over(relative(), KeyCase::current());
+    let request = gate(Vec::new());
+    assert_eq!(
+        (
+            with_repository.composed_common_dir(&request),
+            without_repository.composed_common_dir(&request),
+        ),
+        (
+            ComposedCommonDir::Present(held.clone()),
+            ComposedCommonDir::Unknown,
+        ),
+        "a relative value: the reports with its repository held and with none held"
+    );
+    assert_eq!(
+        received_common_dir(&with_repository, &request),
+        vec![format!("{COMMON_DIR}={}", held.to_string_lossy())],
+        "a relative value, its repository held: what the child received"
+    );
+    match without_repository.run_blocking(&request) {
+        Err(refusal) => assert!(
+            refusal.fate == ProcessFate::NeverStarted
+                && refusal.source.to_string().contains(COMMON_DIR),
+            "a relative value, no repository held: the same composition refuses the run: {refusal}"
+        ),
+        Ok(output) => panic!("a relative value, no repository held: the run started: {output:?}"),
+    }
+
+    let mut base = synthetic_base();
+    base.push((os(COMMON_DIR), os(first_common)));
+    base.push((os(COMMON_DIR), os(second_common)));
+    let runner = over(base, KeyCase::current());
+    let request = gate(Vec::new());
+    assert_eq!(
+        runner.composed_common_dir(&request),
+        ComposedCommonDir::Present(os(second_common)),
+        "a repeated name: the report reads the entry the child receives"
+    );
+    assert_eq!(
+        received_common_dir(&runner, &request),
+        vec![format!("{COMMON_DIR}={second_common}")],
+        "a repeated name: the later entry is the child's"
+    );
+
+    let runner = over(synthetic_base(), KeyCase::current());
+    let refused = gate(vec![("PATH", "/elsewhere")]);
+    assert_eq!(
+        runner.composed_common_dir(&refused),
+        ComposedCommonDir::Unknown,
+        "a composition that refuses reports nothing"
+    );
+    assert!(
+        runner.run_blocking(&refused).is_err(),
+        "and the same composition refuses that request's run"
+    );
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let mut base = synthetic_base();
+        base.push((os("git_common_dir"), os("/lower/common")));
+        let runner = over(base, KeyCase::Insensitive);
+        let request = gate(Vec::new());
+        assert_eq!(
+            runner.composed_common_dir(&request),
+            ComposedCommonDir::Absent,
+            "a name the platform's rule does not match is not the variable the child's Git reads"
+        );
+        let dumped = dumped_environment(&runner, &request);
+        assert!(
+            dumped
+                .iter()
+                .any(|entry| entry == "git_common_dir=/lower/common")
+                && !dumped
+                    .iter()
+                    .any(|entry| entry.starts_with(&format!("{COMMON_DIR}="))),
+            "the child received the lowercase name and not the variable: {dumped:?}"
+        );
+
+        let value = OsString::from_vec(b"/not/utf-8/\xff/common".to_vec());
+        let mut base = synthetic_base();
+        base.push((os(COMMON_DIR), value.clone()));
+        let runner = over(base, KeyCase::current());
+        assert_eq!(
+            runner.composed_common_dir(&request),
+            ComposedCommonDir::Present(value),
+            "the value as composed, byte for byte"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&workspace);
+}
+
 #[test]
 fn every_credential_supplied_role_composes_one_environment_per_binding() {
     let workspace = scratch("binding-parity");

@@ -27,7 +27,9 @@ use crate::runner::{
 };
 use crate::topology::effects::ProcessSite;
 use crate::topology::events::RunnerPolicy;
-use crate::workspace_manager::{COMMON_DIR, WORK_TREE_SELECTORS, keeps_common_dir};
+use crate::workspace_manager::{
+    COMMON_DIR, ComposedCommonDir, WORK_TREE_SELECTORS, keeps_common_dir,
+};
 
 mod probe;
 pub use self::probe::{SHELL_PROBE_COMMAND, SHELL_PROBE_TIMEOUT, run_shell_probe};
@@ -266,9 +268,43 @@ impl Runner for HostRunner {
     fn run<'a>(&'a self, request: &'a RunnerRequest, call: RunnerCall<'a>) -> RunFuture<'a> {
         Box::pin(async move { self.supervise(request, call) })
     }
+
+    fn composed_common_dir(&self, request: &RunnerRequest) -> ComposedCommonDir {
+        let Ok(composed) = self.child_environment(request) else {
+            return ComposedCommonDir::Unknown;
+        };
+        composed
+            .into_iter()
+            .rfind(|(name, _)| KeyCase::current().same_key(name, OsStr::new(COMMON_DIR)))
+            .map_or(ComposedCommonDir::Absent, |(_, value)| {
+                ComposedCommonDir::Present(value)
+            })
+    }
 }
 
 impl HostRunner {
+    fn child_environment(
+        &self,
+        request: &RunnerRequest,
+    ) -> Result<Vec<(OsString, OsString)>, UpstrokeError> {
+        let mut composed =
+            self.environment
+                .compose(&request.role, request.agent.as_ref(), &request.command.env)?;
+        if !starts_in_the_started_checkout(&request.role, self.worker_in_checkout) {
+            let run_common_dir = match self.environment.objects() {
+                ObjectGraph::RecordedIn(repository) => Some(repository.common_dir()),
+                ObjectGraph::Recorded | ObjectGraph::AsReplaced => None,
+            };
+            give_work_tree_context(
+                &mut composed,
+                &request.command.env,
+                self.environment.case(),
+                run_common_dir,
+            )?;
+        }
+        Ok(composed)
+    }
+
     fn supervise(
         &self,
         request: &RunnerRequest,
@@ -287,23 +323,9 @@ impl HostRunner {
                 .verify_include()
                 .map_err(|error| RunnerError::never_started(&request.invocation, error))?;
         }
-        let mut composed = self
-            .environment
-            .compose(&request.role, request.agent.as_ref(), &request.command.env)
+        let composed = self
+            .child_environment(request)
             .map_err(|error| RunnerError::never_started(&request.invocation, error))?;
-        if !starts_in_the_started_checkout(&request.role, self.worker_in_checkout) {
-            let run_common_dir = match self.environment.objects() {
-                ObjectGraph::RecordedIn(repository) => Some(repository.common_dir()),
-                ObjectGraph::Recorded | ObjectGraph::AsReplaced => None,
-            };
-            give_work_tree_context(
-                &mut composed,
-                &request.command.env,
-                self.environment.case(),
-                run_common_dir,
-            )
-            .map_err(|error| RunnerError::never_started(&request.invocation, error))?;
-        }
         let program = self
             .program_for(&request.command.program, &composed)
             .map_err(|error| RunnerError::never_started(&request.invocation, error))?;

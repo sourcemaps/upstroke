@@ -1,14 +1,14 @@
 ---
 id: PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION
 severity: P1
-disposition: deferred
+disposition: accepted-risk
 category: correctness
 pr: 329
 reviewed_sha: 85f5b09b5fbb2436acd092fa77388d1bea750aef
 location: src/workspace_manager.rs:2649
 provenance: pre_existing
 first_bad: predates PR11: Git's prune decides on an entry before its `locked` exists and deletes it later without looking again, on 2.43.0, 2.50.1 and 2.55.0, so every engine `git worktree add` has both faces; executed at master 5c222ff2's add argv by PR #329's design rounds 7 to 9; prior IDs FUB-D6-PRUNE (face 1) and FUB-D7-R13 (face 2), from PR #329's design reviews 6 and 7, face 2's boundary corrected by FUB-D8-DURINGADD (review 8), and the host-agent subset PR11-HOST-AGENT-PRUNE-RACES-AN-ENGINE-ADD
-guard: before G6, which cannot pass with this open: closures implemented and validated for each applicable consequence (the candidates below), or the owner's explicit ruling on its scope per face and starter, asked in the PR11 orchestrator's one consolidated owner question after design reviews B9 (#329), C5 (#330) and D3 (#331); follow-ups C and D refer to this file and file no duplicate
+guard: accepted by the owner's RULING X-1 of 2026-10-15, verbatim and whole, as an explicit ruling on its scope per face and per starter, with closures 1 (with C1-4), 2 (O2(a), RULING P-1) and 3 (Choice A) implemented and validated in #333, F's merging change, where it takes effect (the acceptance below); G6's report cites it and states where it narrows Q1, Q2, Q4 and Q6; re-triaged at each tech-debt sweep (MAINTAINING.md)
 ---
 
 ## Failure sequence
@@ -410,8 +410,9 @@ is in force until that pull request merges after this one.
 - **Face 2, legacy: open, and unchanged by D** (D's R-D9; FUD-D2-RD9 and FUD-D3-DURINGADD in #331's ledger). A deletion
   that leaves the add successful — before the add returns, before the snapshot's verification, or while a gate or a
   review runs — is returned as Git state or judged, and the legacy coordinator discards the paid output. D implements
-  no C-SIDE, so these successful-add discards stay stated in D's record and filed here; nothing accepts them. In a
-  mixed repository they apply to G6 and block it with the class.
+  no C-SIDE, so these successful-add discards stay stated in D's record and filed here; RULING X-1's item 7, in its
+  branch without C-SIDE, accepts them by name (the acceptance below, 2026-10-15). In a mixed repository they apply to
+  G6, accepted as that item says.
 - **C-SIDE, isolated with O1** (the PR11 decision appendix's O8 option (ii)), not implemented. Its open findings, for
   the change that takes it up:
   - **FUD-D3-CSIDEPROOF** (P1 in the concurrency and regression lenses, P2 in design; executed): C-SIDE is a partial
@@ -426,3 +427,162 @@ is in force until that pull request merges after this one.
     D's record now narrows that alternative's claim to the dependencies recorded when the list is taken.
   - **FUD-D4-ENV**'s regression-lens consequence: under an inherited `GIT_INDEX_FILE` a healthy snapshot has no `index`
     of its own, so C-SIDE would false-refuse a genuine gate failure. That finding is filed on its own.
+
+## Accepted by the owner's RULING X-1 (2026-10-15), with closures 1 to 3 in #333
+
+**The disposition is `accepted-risk`, by the owner's ruling, from this change.** On 2026-10-15 the owner adopted RULING
+X-1 verbatim and as a whole, as the explicit ruling on this finding's scope per face and per starter that its guard
+asked for, together with the package of the external-prune follow-up (F) that implements closures 1 to 3. The owner's
+words were "adopt all three recommended packages", answering the request to adopt the three linked recommended
+packages, F's among them, with their stated material consequences (the owner's adoption record, recorded
+2026-10-15T22:09:21Z). The ruling is residual-risk acceptance, not a repair. It takes effect in F's merging change,
+#333, which brings closures 1 to 3 implemented and validated. Its text, whole and with no word changed:
+
+> The owner rules on `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION` as follows. A prune that no
+> engine process starts, during a run, may end the command resumably or leave a kept slot for the operator: G6's claims
+> for it are safety, not liveness. With closures 1 (with C1-4), 2 (with O2's choice) and 3 implemented and validated,
+> these consequences stay, are accepted by name, and are not fixes:
+>
+> **Face 1 — the deletion fails the add (any starter).** The command ends resumably at once, with nothing durable
+> appended (B §7.3). Accepted: the liveness cost.
+>
+> **Face 2 — the add returns Ok and its registration is deleted, wholly or in part, from the prune's decision onward
+> (B §8.3).** Accepted where they occur:
+> 1. **R-REWRITE-index:** a removed `index` written again by an index-writing Git command in the checkout before the
+>    check (executed by #331's review round 3).
+> 2. **R-REWRITE-HEAD:** a removed `HEAD` restored by a ref transaction prepared before the deletion (executed, CR-3).
+> 3. **R-OUTSIDE:** a file the checkout needs that the check does not read — a split index's `sharedindex.<sha>`
+>    (executed), or `config.worktree` or `info/sparse-checkout` where the add copied them (reasoned).
+> 4. **Unchecked later dependencies:** a file the checkout comes to depend on after any recorded inventory, such as a new
+>    `sharedindex.*` a gate's `update-index --split-index` creates (executed, FUD-D4-LATERDEP); D's optional
+>    once-recorded list is one more partial mitigation, not coverage "whatever the configuration" (CR-9).
+> 5. **The verification's review-input policy read**, unless C1-4 is implemented.
+> 6. **Preservation across a resume**, as O2 decides: under O2(a), run-end closure and terminal finalization still remove
+>    a kept slot; under O2(b), recovery removes it (ACCEPTANCE P-B).
+> 7. **A legacy run in a mixed repository (#331's R-D9):** without C-SIDE, every successful-add discard of paid output —
+>    a deletion before the add returns, before the verification, or while a gate or review runs; the budget discard after
+>    an in-session retry (`src/engine/coordinator.rs:460`); the settlement or question write's failure (`:708`, `:719`);
+>    with C-SIDE, items 1 to 4 at those discards (D §4.3; the restore lens's table).
+> 8. **Kept slots and refusals cost liveness:** each resume stops until the operator acts, and Git cannot register a
+>    pruned checkout again.
+> 9. **Windows and macOS** are reasoned, not executed, for every face-2 witness.
+>
+> **Per starter.** Closures 1 to 3 act on consequences, whoever started the prune. What reduces each starter, and what
+> stays:
+>
+> | Starter | What reduces it | What stays (accepted) |
+> |---|---|---|
+> | the user's or an IDE's explicit `git worktree prune` | nothing | both faces |
+> | a host agent's own Git (prune, gc, maintenance) | only an isolated Git view (the container runner's); width one per run does not (B §8.7) | both faces under the host runner |
+> | automatic maintenance after a commit, fetch or merge, or `gc --auto`, in any checkout | closure 4's settings, where they are the effective values; a checkout's `config.worktree` and a process's `-c` or `GIT_CONFIG_*` override them, and a preflight sees only existing checkouts (B §8.6) | both faces wherever the settings are not effective |
+> | an explicit `git maintenance run --task=<task>` | nothing: an explicitly named task runs whatever its `enabled` setting (FUB-D9-TASKSEL, §6.4) | both faces |
+> | scheduled maintenance | `maintenance.<task>.enabled=false` where effective, or a repository not registered for maintenance (B §8.6) | both faces otherwise |
+> | a prune or maintenance already running | nothing: it keeps the configuration it read (B §8.6) | both faces |
+> | the engine's own prunes and maintenance | B removes every manager prune (B §5.5's note for C); D's four switches stop the legacy engine's maintenance (D §2.5) | none, once B and D are implemented |
+>
+> This ruling is reflected in `DESIGN.md` and in G6's assessment, and it repairs nothing.
+
+**The closures in force with it** (F's design, round 3, adopted with it; implemented in #333):
+- **Closure 1, with C1-4,** as option A with round 2's checks and the implementation review's F-R1 repair. The check
+  reads files alone: the checkout's `.git` names an entry of this repository's own store, the entry holds `gitdir`,
+  `commondir`, `HEAD` and `index` as regular files, the first three non-empty, `commondir` resolves to the common git
+  dir and `gitdir` to the checkout's `.git`. It runs at the manager's slot commands' Git errors; at the answers read
+  from a slot's index (the classification of a stale candidate's failed proposal pick, `repair_materialize`,
+  `unresolved_conflicts`, `resolved_conflicts`, `manifest_name` and `changed_paths_pausing`); before the capture's
+  `write-tree`; at every gate and review verdict, pass or fail, and a gate's run that fails without one, its launch
+  included; at an attempt's failure assessed in its own slot; and at both review-input policy reads, on their errors
+  and their answers. A registration it does not find whole ends the command as a resumable `RegistryRefused`, and
+  nothing is judged, published, deferred, parked or rejected for it.
+- **Closure 2, under O2(a) with RULING P-1.** A live reuse (`dispatch::verify_or_recreate`) and a retained
+  generation's retry keep a slot that holds anything and fails verification as not registered, missing or not holding
+  its retained tree while its registration is not whole, and refuse resumably. RULING P-1's one statement in the frozen
+  `reclaim_closed_generations` calls the guard `dispatch::refuse_kept_slot`, which keeps such a slot for the operator
+  where recovery's reclaim would remove it; under U the guard reads every instance the removal reaches
+  (`WorkspaceManager::kept_instances`). Each slot is kept for as long as each check finds it so: a registration made
+  whole again, as `git worktree repair` writes a deleted `gitdir` again, ends the keeping (precisions G-1 and G-2).
+- **Closure 3, under Choice A** for `PR5-RD-003-A-PRUNE-STRANDS-A-CHECKOUT-WHOSE-GITDIR-IS-GONE`, adopted the same day.
+  The removal scan's store-absent branch binds nothing for a populated checkout whose `.git` names a direct child of
+  this repository's own absent store (`names_an_entry_of`), so a removal with the store gone converges and so does
+  finalization. That removal deletes the checkout with whatever it holds at every caller except recovery's task
+  reclaim, where P-1's guard keeps it: the deletion the owner accepted by name under Choice A. That finding is
+  resolved in #333 for its own-store case and its file deleted there, its ledger row recording the decision. X-1 did
+  not answer that finding's guard, and it is not read as having done so.
+- **Closure 4, as documentation,** in `design/15`'s external-prune paragraph, with FUB-D9-TASKSEL's qualification:
+  `maintenance.auto=false`, `gc.auto=0` and, on Git 2.50.1 and later, `maintenance.worktree-prune.auto=0` reduce the
+  automatic starters where they are the effective values, and `maintenance.<task>.enabled=false` drops the task only
+  from runs that name no task: an explicit `git maintenance run --task=<task>` runs the named task whatever its
+  `enabled` value, a starter no setting stops, like an explicit `git worktree prune`. There is no preflight, and the
+  engine writes none of these settings.
+- **Closure 5** is this ruling, reflected in `design/15`'s external-prune paragraph and in `design/26`'s "A
+  verification in a checkout a prune emptied".
+
+**What the ruling knowingly includes.**
+- **Under item 1, two consequences its text does not describe** (F's design §9.2). A false successful integration: a
+  stale candidate published `AlreadyPresent` at the unchanged head, without its change, when after a deletion another
+  process rewrites the engine's private staging index before the classification's check; the same foreign write gives
+  the same answer with no deletion at all. And an empty candidate tree: a deletion that lands between the capture's
+  pre-check and `write-tree`'s read gives the empty tree with the registration whole after it, so the attempt is
+  judged on a diff that deletes every file, a failure spent or, with gates and reviews passing, the candidate promoted.
+- **The faces of 2026-10-05 above** (FUF-R1-1's false-success face and the misread faces): closure 1's round-2 checks
+  refuse each of them resumably wherever the check finds the registration not whole. What stays of them is items 1 to
+  4, the two consequences just named among them.
+- **Item 5 is moot:** C1-4 is implemented.
+- **Item 6, under O2(a):** run-end closure and terminal finalization still remove a kept slot, and so do a halt's
+  closure, an attempt's interruption at width 1, a settlement's close and a live retry that reads its retained slot as
+  administrative residue. P-1's guard keeps a slot at recovery's reclaim only.
+- **Item 7, in its branch without C-SIDE.** #331 merged on 2026-10-14 (`62bbbb43`) without C-SIDE, so the legacy
+  section above is in force, and every successful-add discard of paid output it states for a legacy run in a mixed
+  repository is accepted by this item. Its line citations are `5c222ff2`'s. At #333's merge base `62bbbb43`, and
+  unchanged by #333, they are `src/engine/coordinator.rs:493`, the budget discard after an in-session retry; `:821`,
+  the settlement's failure, now reached only when no commit was prepared, since D keeps and pins a prepared one first
+  (`kept_on_error`, `:812-819`); and `:832`, the question write's failure.
+- **Item 9, as written:** every face-2 witness is reasoned, not executed, on Windows and macOS. F's face-2
+  constructions also run on CI's Windows and macOS legs, which can narrow that in fact without changing the ruling.
+
+**Closure 3's pinned test.** The refusal cited above, in closure 3's candidate, as
+`a_missing_stored_worktree_directory_refuses_before_checkout_deletion` is renamed in place to
+`a_missing_stored_worktree_directory_converges_removing_only_the_checkout`, and it now converges, removing only the
+checkout and touching nothing of the moved store (T-C3-1). The texts above keep the name they were written with.
+
+**A dated precision (2026-10-27): recovery's completion of a promotion.** The fresh regular lens reviewed #333 at
+`f1842dcd` and found a P1 in the sentences above that say P-1's guard keeps a populated checkout at recovery's task
+reclaim. They covered only the reclaim of a generation recovery has closed (step (e)).
+
+- **The gap.** A crash between `candidate_prepared` and `task_candidate_created` leaves a promotion unfinished.
+  Recovery's completion of it (`recover::finish_promotions`, step (f)) removed the task worktree with no check. With
+  the store absent, closure 3's arm made that removal succeed. That contradicts P-6′ and Choice A's "except recovery
+  task reclaim".
+- **The repair, in #333, leaving the frozen file as it is.**
+  - `candidate::recovery_for`, recovery's own reading of the classification, refuses resumably and keeps the worktree
+    while an instance of it holds anything and its registration is not whole (`dispatch::refuse_kept_promotion`).
+  - Run-end closure reads `candidate::owed_for` and removes the worktree as before.
+- **The result.** Both of recovery's task reclaims now keep such a checkout, each for as long as each check finds it
+  so. For a promotion, "P-1's guard keeps a slot at recovery's reclaim only" in item 6 above reads as the same keeping
+  by that check.
+- **The witnesses:** `a_resume_keeps_a_promoting_generations_pruned_populated_slot_with_the_store_gone` and
+  `a_resume_keeps_a_promoting_generations_pruned_populated_slot_while_the_store_stays`. They are implemented; their
+  validation and fresh review are pending.
+
+**A dated precision (2026-10-27): closure 1 under a `worktrees` store linked into another repository.**
+env-gate-6's integration map (§2.4) found it. Root's disposition `F-ENV-COMPATIBILITY-DISPOSITION-20261027` bound
+#333 to repair it in this round, and `F-RETURN7-RUNNER-EXTENSION-DISPOSITION-20261027` selected the route.
+
+- **The gap.** Closure 1's check, as stated above ("`commondir` resolves to the common git dir"), read every slot and
+  snapshot of such a run as not whole. Git writes `commondir` as `../..` through the link, so it names the other
+  repository. Under an inherited `GIT_COMMON_DIR` naming the run's common directory (R-C-REGISTRY's part 2, C4's and
+  C5's layouts, adopted as working), every guarded read refused, and such a topology run never completed.
+- **The correction, in #333.** It is an integration correction to F's original implementation, not the same check.
+  - **What condition 3 reads.** The guarded child's own `GIT_COMMON_DIR`, as the code composing that child's
+    environment reports it. For the manager's own commands that is its builder. For a gate, a reviewer or a worker it
+    is `Runner::composed_common_dir`, a provided method DESIGN §8 now names, which `HostRunner` answers from its one
+    composition.
+  - **With nothing reported** the check is the original one.
+  - **With a value reported** the record must name the repository whose store holds the entry, and the value, from
+    the checkout, must name the run's common directory.
+- **What stays.** Store membership, the required files, the backpointer and the record's validation.
+  - A runner that reports nothing, the container runner among them, is checked by the original rule.
+  - Part 2's shared-ref exposure stays as adopted. The correction does not claim that the variable redirects shared
+    refs.
+- **The sentences above that state the check** read as its original rule, which still applies whenever no value is
+  reported. With a reported value, they read as this precision states.
+- **Validation is pending:** the C4 and C5 controls under a genuine host runner, their negatives, and fresh review.

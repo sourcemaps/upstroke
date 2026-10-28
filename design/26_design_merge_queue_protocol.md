@@ -292,13 +292,25 @@ verification backoff remains a separate fact.
 A decline fails every unmerged lineage member, including the root. It closes
 their generations, removes candidates and questions, clears execution backoff,
 and releases their generation, candidate and lineage holdings. A matching
-`VerificationStarted` transaction is cancelled; late results for closed
-generations or sequences are refused. A `Prepared` transaction has already
-authorized publication, so a decline affecting it is refused before append
-until that publication completes. Already merged ancestors remain merged.
-Unrelated transactions and holdings survive. `decline_halts_run` additionally
-records a run halt; it does not decide whether the lineage fails. New repairs
-must name a coherent root and parent and cannot revive a failed ancestor.
+`VerificationStarted` transaction is cancelled, not released, as is one a
+lineage member's failed settlement meets: it stays unresolved and keeps its
+pipeline and merge entitlements, so no other transaction starts and the run
+does not end before its one terminal record, `merge_verification_interrupted`;
+the fold refuses `merge_prepared`, `merge_rejected` and
+`merge_verification_unavailable` for a verification whose candidate's task has
+failed. The coordinator that stopped the verification appends that terminal
+once the Runner has established the end of each of its processes, a halt's
+closure appends it with the other in-flight work, and a resume's recovery
+appends it for a verification no live process settled; the pin is then deleted
+expected-old and the staging worktree and snapshots are reclaimed, as for any
+interrupted verification, and nothing is verified again, since its candidate
+was removed with its lineage. Late results for closed generations or sequences
+are refused. A `Prepared` transaction has already authorized publication, so a
+decline affecting it is refused before append until that publication completes.
+Already merged ancestors remain merged. Unrelated transactions and holdings
+survive. `decline_halts_run` additionally records a run halt; it does not
+decide whether the lineage fails. New repairs must name a coherent root and
+parent and cannot revive a failed ancestor.
 
 These are durable fold and replay rules. The topology driver ingests human
 answers: before each step it polls every open question without blocking, and
@@ -308,9 +320,13 @@ applied before any further work is selected. The driver runs one attempt at
 a time, so no agent process is running when an answer is ingested and none
 has to be cancelled on a decline. A concurrent driver that ingests answers
 must stop the affected work and discard late results before appending their
-completion. Event shapes are unchanged; schema-4 replay refuses the unsafe
-event orders excluded above, including bare questions during active lineage
-work and questions on terminal tasks.
+completion; a verification it stops because a lineage failed still receives
+its one terminal, `merge_verification_interrupted`, before the driver starts
+another integration or ends the run, as the paragraph above describes. Event
+shapes are unchanged; schema-4 replay refuses the unsafe event orders
+excluded above, including bare questions during active lineage work,
+questions on terminal tasks, and an integration start or `run_finished`
+while a cancelled verification still awaits its terminal.
 
 The live writer checks one event, appends that exact event successfully once,
 and applies its delta once to the same fold with no intervening transition.
@@ -640,7 +656,8 @@ cancelled. A cancellation settles nothing unavailable, and what follows it is it
 concurrent driver cancels a verification. A halt then closes the run `Halted`, its closure settling
 the verification interrupted, and no resume continues the run; if the Runner did not establish that
 every process of the run ended, the closure appends nothing and the command ends resumably instead,
-the halt still recorded. A lineage failure cancels the verification's transaction, and the same
+the halt still recorded. A lineage failure cancels the verification's transaction, which the
+coordinator settles `merge_verification_interrupted` once its pipeline has ended, and the same
 command goes on. A shutdown, another pipeline's error or an invocation left unresolved ends the
 command resumably, as any other error that takes the judgement does, and the next resume settles the
 verification interrupted and verifies the candidate again under a new sequence, unless a cause that
@@ -679,8 +696,7 @@ command or the integration ends, and replay charges its passes by the same addit
 terminal and not a finish event: it records no outcome and settles, releases and authorizes nothing,
 so the transaction stays open, cleanup and readmission keep their conditions — a process the Runner
 did not establish as ended still blocks them — and which terminal settles the verification is not
-changed by it. The fold admits the record only for the open verification of its sequence, or for the
-one a lineage failure cancelled while it is still the latest sequence of the incarnation; never with
+changed by it. The fold admits the record only for the open verification of its sequence; never with
 no pass; and at most once for a sequence. Once a sequence has its record, no terminal that carries a
 verification's passes is admitted for it — `merge_verification_interrupted`, which carries none,
 still is — so its spend is counted once, whatever is appended after it. If the record's own append
@@ -698,3 +714,25 @@ refuses a log holding one for the same reason. Each is a Class C wire change und
 `src/topology/**` freeze and the whole subject of the pull request that makes it, which is what the
 classification asks for; the record's also moves files G6 compares with its G5 range, which the
 owner's rulings on G6's diff proof name by path and merge.
+
+#### A verification in a checkout a prune emptied
+
+Added under §13's same-change rule; not part of the verbatim record above. It records which outcome an
+integration reaches when a prune that no engine process starts deletes the registration of a checkout
+it uses (`design/15`, the external-prune paragraph).
+
+The classification of a stale candidate's failed proposal pick is read from its staging checkout; a
+verification's staging diff and review-input read, and its gates and reviews, from its checkouts.
+Each, failure or answer, is read against the worktree registration of the checkout it was read in;
+a gate's run that fails without a verdict, its launch included, is such a failure, and one that was
+cancelled, or whose process may still be running, is handled as before.
+When that registration is not whole, nothing read there is used: a deleted index reads as an empty
+one, so a conflict would read as an empty pick and a review-input problem as none. The read is a
+registry refusal (`UpstrokeError::RegistryRefused`), which ends the command resumably. No terminal
+is appended for it, no deferral is spent and no repair is registered; a refused classification
+opens no verification, and the next resume reclaims its staging checkout and integrates the
+candidate again; a refused verification is settled interrupted by the next resume and verified
+again under a new sequence. A removed `index` or `HEAD` that Git wrote again before the read, or a
+file the read does not check, is not seen, and the read's answer is then used as before.
+
+The review passes it had charged are recorded as "The unavailable terminal's spend" says.

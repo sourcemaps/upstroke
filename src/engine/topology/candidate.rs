@@ -424,7 +424,7 @@ impl CandidateRecovery {
     }
 }
 
-pub fn recovery_for(
+pub fn owed_for(
     manager: &WorkspaceManager,
     run_id: &str,
     fold: &TopologyFold,
@@ -469,6 +469,23 @@ pub fn recovery_for(
         orphan_pin: None,
         settles_interrupted: false,
     })
+}
+
+pub fn recovery_for(
+    manager: &WorkspaceManager,
+    run_id: &str,
+    fold: &TopologyFold,
+    key: TaskKey,
+) -> Result<CandidateRecovery, UpstrokeError> {
+    let owed = owed_for(manager, run_id, fold, key)?;
+    if let Some(promoting) = &owed.promotion {
+        super::dispatch::refuse_kept_promotion(
+            manager,
+            &super::dispatch::task_slot(key, promoting.candidate.generation),
+            &promoting.candidate.commit_sha,
+        )?;
+    }
+    Ok(owed)
 }
 
 pub fn prune_orphan_pin(

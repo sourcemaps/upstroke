@@ -20,6 +20,7 @@ use crate::error::UpstrokeError;
 use crate::topology::effects::{
     EffectSiteId, HookHarness, HookPhase, Injection, InjectionMode, ProcessSite, SubEffectPoint,
 };
+use crate::workspace_manager::ComposedCommonDir;
 
 use super::container::ContainerHooks;
 use super::invocation::InvocationId;
@@ -289,6 +290,11 @@ pub trait Runner: Send + Sync {
         call: RunnerCall<'a>,
     ) -> Result<ProcessOutput, RunnerError> {
         block_on(self.run(request, call))
+    }
+
+    fn composed_common_dir(&self, request: &RunnerRequest) -> ComposedCommonDir {
+        let _ = request;
+        ComposedCommonDir::Unknown
     }
 }
 

@@ -474,6 +474,210 @@ pub(crate) fn refuse_git_dir_over_the_windows_budget(checkout: &Path) -> Result<
     refuse_git_dir_over_budget(checkout, crate::runner::host::GitdirRule::Windows)
 }
 
+/// One state of a checkout's worktree registration that closure 1's two
+/// readers are run over (the external-prune follow-up's T-C1-READERS): the
+/// checkout, and what the check must find there — `Ok` for a whole
+/// registration, or words the first failed condition's text holds.
+pub(crate) struct RegistrationConstruction {
+    pub(crate) label: &'static str,
+    pub(crate) checkout: PathBuf,
+    pub(crate) expected: Result<(), &'static str>,
+}
+
+/// What the manager's own reader, [`super::registration_whole`], finds of the
+/// registration of the checkout at `checkout` for a guarded child started with
+/// the `GIT_COMMON_DIR` `composed` reports: `Ok` when it is whole, or the first
+/// condition that failed. The topology twin's test compares it with its own
+/// reader on every construction.
+pub(crate) fn manager_registration_found(
+    checkout: &Path,
+    common_git_dir: &Path,
+    composed: &super::ComposedCommonDir,
+) -> Result<(), String> {
+    match super::registration_whole(checkout, common_git_dir, composed) {
+        Whole::Yes => Ok(()),
+        Whole::No(found) => Err(found),
+    }
+}
+
+/// `to`, spelt relative to the directory `from`, both canonicalized first:
+/// the form Git 2.48's `worktree.useRelativePaths` writes.
+fn relative_between(from: &Path, to: &Path) -> PathBuf {
+    let from = fs::canonicalize(from).expect("a fixture path resolves");
+    let to = fs::canonicalize(to).expect("a fixture path resolves");
+    let from: Vec<_> = from.components().collect();
+    let to: Vec<_> = to.components().collect();
+    let shared = from
+        .iter()
+        .zip(&to)
+        .take_while(|(left, right)| left == right)
+        .count();
+    let mut relative = PathBuf::new();
+    for _ in shared..from.len() {
+        relative.push("..");
+    }
+    for component in to.iter().skip(shared) {
+        relative.push(component.as_os_str());
+    }
+    relative
+}
+
+/// Every construction closure 1's readers are run over, each in a task slot of
+/// its own added to `fixture`'s repository at its head: a whole registration;
+/// each of the entry's four names removed, or the first three empty; the
+/// checkout's `.git` removed, made a directory, or not a pointer; an entry
+/// outside this repository's store; `commondir` naming another repository,
+/// one with a registration store of its own, so that a reader checking the
+/// record against the store that holds the entry compares two stores;
+/// `gitdir` naming another checkout; the relative pointers Git 2.48 writes;
+/// and, where the platform makes one without privilege, a link in place of
+/// `index`.
+pub(crate) fn registration_constructions(fixture: &Fixture) -> Vec<RegistrationConstruction> {
+    let manager = &fixture.manager;
+    // Every slot is added before any is damaged: Git's worktree list dies on
+    // some of the damaged entries, and an add lists the registry first.
+    let mut slots: Vec<(PathBuf, PathBuf)> = (1..=16)
+        .map(|generation| {
+            let slot = fixture.add_task(&mut NoHooks, "readers", generation);
+            let checkout = manager.slot_path(&slot);
+            let entry = registration_of(manager, &checkout);
+            (checkout, entry)
+        })
+        .collect();
+    let mut next = move || slots.remove(0);
+    let mut constructions = Vec::new();
+
+    let (whole, _) = next();
+    constructions.push(RegistrationConstruction {
+        label: "whole",
+        checkout: whole.clone(),
+        expected: Ok(()),
+    });
+    for name in ["HEAD", "commondir", "index", "gitdir"] {
+        let (checkout, entry) = next();
+        fs::remove_file(entry.join(name)).expect("remove one name of the entry");
+        constructions.push(RegistrationConstruction {
+            label: name,
+            checkout,
+            expected: Err("cannot be read"),
+        });
+    }
+    for name in ["HEAD", "commondir", "gitdir"] {
+        let (checkout, entry) = next();
+        fs::write(entry.join(name), []).expect("empty one name of the entry");
+        constructions.push(RegistrationConstruction {
+            label: name,
+            checkout,
+            expected: Err("is empty"),
+        });
+    }
+
+    let (checkout, _) = next();
+    fs::remove_file(checkout.join(".git")).expect("remove the checkout's .git");
+    constructions.push(RegistrationConstruction {
+        label: "the checkout's .git removed",
+        checkout,
+        expected: Err(".git cannot be read"),
+    });
+
+    let (checkout, _) = next();
+    fs::remove_file(checkout.join(".git")).expect("remove the checkout's .git");
+    fs::create_dir(checkout.join(".git")).expect("a directory in its place");
+    constructions.push(RegistrationConstruction {
+        label: "the checkout's .git a directory",
+        checkout,
+        expected: Err("is a directory, not a regular file"),
+    });
+
+    let (checkout, _) = next();
+    fs::write(checkout.join(".git"), "not a pointer\n").expect("a .git that names nothing");
+    constructions.push(RegistrationConstruction {
+        label: "the checkout's .git not a gitdir pointer",
+        checkout,
+        expected: Err("does not begin `gitdir:`"),
+    });
+
+    let (checkout, entry) = next();
+    let elsewhere = fixture.root.join("elsewhere").join("readers");
+    fs::create_dir_all(&elsewhere).expect("a directory outside the store");
+    for name in ["gitdir", "commondir", "HEAD", "index"] {
+        fs::copy(entry.join(name), elsewhere.join(name)).expect("copy the entry's names");
+    }
+    fs::write(
+        checkout.join(".git"),
+        format!("gitdir: {}\n", as_git_writes_it(&elsewhere)),
+    )
+    .expect("point the checkout outside the store");
+    constructions.push(RegistrationConstruction {
+        label: "an entry outside this repository's store",
+        checkout,
+        expected: Err("not an entry of this repository's registration store"),
+    });
+
+    let other = fixture.root.join("other-repository");
+    fs::create_dir_all(&other).expect("another repository's directory");
+    git(&other, &["init", "-q"]);
+    fs::create_dir_all(other.join(".git").join("worktrees"))
+        .expect("the other repository's registration store");
+    let (checkout, entry) = next();
+    fs::write(
+        entry.join("commondir"),
+        format!("{}\n", as_git_writes_it(&other.join(".git"))),
+    )
+    .expect("name another repository");
+    constructions.push(RegistrationConstruction {
+        label: "commondir naming another repository",
+        checkout,
+        expected: Err("not this repository's common git dir"),
+    });
+
+    let (checkout, entry) = next();
+    fs::write(
+        entry.join("gitdir"),
+        format!("{}\n", as_git_writes_it(&whole.join(".git"))),
+    )
+    .expect("name another checkout");
+    constructions.push(RegistrationConstruction {
+        label: "gitdir naming another checkout",
+        checkout,
+        expected: Err("not this checkout's"),
+    });
+
+    let (checkout, entry) = next();
+    let to_entry = relative_between(&checkout, &entry);
+    let to_checkout = relative_between(&entry, &checkout.join(".git"));
+    fs::write(
+        checkout.join(".git"),
+        format!("gitdir: {}\n", as_git_writes_it(&to_entry)),
+    )
+    .expect("a relative pointer to the entry");
+    fs::write(
+        entry.join("gitdir"),
+        format!("{}\n", as_git_writes_it(&to_checkout)),
+    )
+    .expect("a relative pointer back to the checkout");
+    constructions.push(RegistrationConstruction {
+        label: "relative pointers",
+        checkout,
+        expected: Ok(()),
+    });
+
+    #[cfg(unix)]
+    {
+        let (checkout, entry) = next();
+        let index = entry.join("index");
+        let real = entry.join("index.real");
+        fs::rename(&index, &real).expect("move the index aside");
+        std::os::unix::fs::symlink(&real, &index).expect("a link in place of index");
+        constructions.push(RegistrationConstruction {
+            label: "a link in place of index",
+            checkout,
+            expected: Err("is a symbolic link, not a regular file"),
+        });
+    }
+    constructions
+}
+
 /// A real repository, a real private root, and a manager over both.
 /// The fixture's run id: a canonical ULID, as `derive` requires
 /// (`DESIGN.md` §15, "run-id = ULID"), spelt to be recognisable in a path.
@@ -483,15 +687,15 @@ pub(crate) const RUN_ID: &str = "01KZSWEEP00000000000000001";
 /// otherwise: `<root>/repo`, beside the private root `<root>/private`.
 const BASE: &str = "repo";
 
-/// Where the managed base sits in R5's C5 layout, the proposal's "C5 equal
+/// Where the managed base sits in C5's layout, the proposal's "C5 equal
 /// depth" (PROP:2129): six directories below the root, as deep as every work
 /// tree the manager makes there, at
 /// `<root>/private/workspaces/<repo-key>/<run-id>/<tasks|merge|snapshots>/<component>`.
 /// One relative `GIT_COMMON_DIR` then names the same directory from the base
 /// and from each work tree, which Git's own checkout child of `git worktree
 /// add` needs before Git 2.55, since it reads the value from the new work
-/// tree. The witness that uses it derives that relationship from the actual
-/// paths and asserts it, so a change to either depth fails there first.
+/// tree. A test that uses it derives that relationship from the actual paths
+/// and asserts it, so a change to either depth fails there first.
 #[cfg(unix)]
 pub(crate) const EQUAL_DEPTH_BASE: &str = "checkouts/user/x/y/z/repo";
 
@@ -653,7 +857,7 @@ impl Fixture {
         fixture
     }
 
-    /// [`Self::created`] with the managed base at `below` the root: R5's C5
+    /// [`Self::created`] with the managed base at `below` the root: C5's
     /// layout, [`EQUAL_DEPTH_BASE`].
     #[cfg(unix)]
     pub(crate) fn created_based(tag: &str, below: &Path) -> Self {
@@ -745,6 +949,46 @@ pub(crate) fn create_dir(path: &Path) {
     fs::create_dir_all(path).expect("create a fixture directory");
 }
 
+/// A directory link at `link` naming `target`: the hand-made layout the
+/// linked-registry tests plant where a run's `worktrees` registry would be
+/// (R-C-REGISTRY). A symbolic link on Unix, and on Windows a junction
+/// (`mklink /J`), which needs no privilege where a Windows symbolic link
+/// does. A topology module's test can make neither.
+pub(crate) fn link_directory(target: &Path, link: &Path) {
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, link).unwrap_or_else(|error| {
+        panic!(
+            "linking {} to {}: {error}",
+            link.display(),
+            target.display()
+        )
+    });
+    #[cfg(windows)]
+    {
+        let made = Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .output()
+            .expect("run mklink");
+        assert!(
+            made.status.success(),
+            "the fixture must really create a junction: {}",
+            String::from_utf8_lossy(&made.stderr)
+        );
+    }
+}
+
+/// Remove the directory link [`link_directory`] made at `link`, and nothing it
+/// names: a junction is removed as a directory, a symbolic link as a file.
+pub(crate) fn unlink_directory(link: &Path) {
+    #[cfg(windows)]
+    let removed = fs::remove_dir(link);
+    #[cfg(not(windows))]
+    let removed = fs::remove_file(link);
+    removed.unwrap_or_else(|error| panic!("unlinking {}: {error}", link.display()));
+}
+
 /// Set the Unix mode of `path`: how a test in a topology module, which cannot
 /// name `set_permissions`, makes a directory one the engine cannot write.
 #[cfg(unix)]
@@ -829,46 +1073,6 @@ pub(crate) fn remove_file(path: &Path) {
 pub(crate) fn remove_dir(path: &Path) {
     fs::remove_dir(path)
         .unwrap_or_else(|error| panic!("removing the directory {}: {error}", path.display()));
-}
-
-/// A directory link at `link` naming `target`, the hand-made layout R5's
-/// linked-registry witnesses plant where a run's `worktrees` registry would be:
-/// a symbolic link on Unix, and on Windows a junction (`mklink /J`), which needs
-/// no privilege where a Windows symbolic link does. A topology module's test
-/// can make neither.
-pub(crate) fn link_directory(target: &Path, link: &Path) {
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(target, link).unwrap_or_else(|error| {
-        panic!(
-            "linking {} to {}: {error}",
-            link.display(),
-            target.display()
-        )
-    });
-    #[cfg(windows)]
-    {
-        let made = Command::new("cmd")
-            .args(["/C", "mklink", "/J"])
-            .arg(link)
-            .arg(target)
-            .output()
-            .expect("run mklink");
-        assert!(
-            made.status.success(),
-            "the fixture must really create a junction: {}",
-            String::from_utf8_lossy(&made.stderr)
-        );
-    }
-}
-
-/// Remove the directory link [`link_directory`] made at `link`, and nothing it
-/// names: a junction is removed as a directory, a symbolic link as a file.
-pub(crate) fn unlink_directory(link: &Path) {
-    #[cfg(windows)]
-    let removed = fs::remove_dir(link);
-    #[cfg(not(windows))]
-    let removed = fs::remove_file(link);
-    removed.unwrap_or_else(|error| panic!("unlinking {}: {error}", link.display()));
 }
 
 /// Run this test binary again, `--exact --ignored`, with `env` set, and

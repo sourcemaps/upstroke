@@ -1580,6 +1580,18 @@ end keeps the registration running and its pair held until this process exits
 (`InvocationLedger::end`). The pin holds the retention, in both of the section's paragraphs that state
 it, and that the two retired sentences do not come back.
 
+## `struct ActAtPhase<'a> {`
+
+The scaffold's hooks, with one act at a site's phase.
+
+## `fn a_capture_over_a_deleted_index_is_refused_at_its_first_read() {`
+
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-ANS-CAPTURE at the attempt: the slot's `index` deleted before the capture; at C the capture stages the worktree through `add -A` (R-REWRITE by its own command); under F its first read refuses.
+
+## `fn a_capture_whose_index_is_deleted_before_its_write_tree_is_refused_at_the_check_before_it() {`
+
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-WT at the attempt: the `index` deleted at the `Before` phase of `Object.CandidateWriteTree`; at C the tree is the empty tree; under F the check before the write refuses.
+
 ## `fn the_review_input_seams_methods_read_a_slot_as_a_slot_and_the_checkout_as_the_checkout() {`
 
 The review-input seam under D1's inherited `GIT_DIR` and `GIT_WORK_TREE`, in

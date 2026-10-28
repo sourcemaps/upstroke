@@ -217,6 +217,68 @@ phase 3, the run's cleanup-lease paths, which it hands on. Why on the polling
 thread is `docs/internals/runner/contract.md`'s ("Where the work happens"): the reaper's cleanup
 lease is thread-scoped, and so is the observation export.
 
+## `impl Runner for HostRunner` › `fn composed_common_dir(`
+
+The `GIT_COMMON_DIR` the child for `request` is started with (DESIGN §8; the external-prune
+follow-up's integration correction), read from `fn child_environment(`, the composition that gives
+the child its environment:
+
+- **The entry the child receives.** `supervise` sets the composed vector with `Command::envs`, where
+  a later entry for a name replaces an earlier one, so the last match is read.
+- **Names matched by the platform's rule** (`KeyCase::current()`). That is how the child's own
+  environment, and so its Git, finds a name, whatever case rule the installed `HostEnvironment`
+  composes by. On Unix, a base built with `KeyCase::Insensitive` that holds `git_common_dir` gives the
+  child a variable its Git does not read, and this reports `Absent`.
+- **The value as composed**, an `OsString`, with no lossy conversion.
+- **The work-tree context included.** For a role in a work tree the engine made, the value is the
+  one the work-tree context leaves (`fn child_environment(`): an inherited absolute value as it is,
+  an inherited relative one as the common directory of the repository this runner holds, and an
+  overlay's value as the overlay set it.
+- **`Unknown` when the composition refuses**: an overlay naming a reserved key, or, for a role in a
+  work tree the engine made, an inherited `GIT_COMMON_DIR` that is not an absolute path while this
+  runner holds no managed repository. A refusal never becomes a reported value. The run of that
+  request is refused `NeverStarted` by the same composition.
+
+It reports what the child is started with, not what a role's own code does afterwards.
+
+## `impl HostRunner` › `fn child_environment(`
+
+The one composition of a child's environment: `HostEnvironment::compose` over the request's role,
+agent and overlay, from this runner's own `HostEnvironment`, which is `HostRunner::new`'s process base
+or whatever `with_environment` installed, and then, for a role that does not start in the checkout
+the coordinator was started in, the work-tree context below. `supervise` gives the child exactly
+what it returns, after `env_clear`, and `composed_common_dir` reads its report from it, so the two
+cannot disagree. A step a later change adds to the child's composition belongs here, and the report
+follows it.
+
+**The work-tree context.** Right after `compose`, and only for a role that does not start in the
+checkout the coordinator was started in (`starts_in_the_started_checkout`), the composed vector
+goes through `give_work_tree_context`: the values the Upstroke process inherited for `GIT_DIR`,
+`GIT_WORK_TREE`, `GIT_IMPLICIT_WORK_TREE` and `GIT_INDEX_FILE` are removed, and an inherited
+`GIT_COMMON_DIR` whose value is not an absolute path is replaced by the common directory of the
+managed repository this runner holds. A gate and a review pass always run in a gate or review
+snapshot, and the topology worker in its slot, each a linked work tree the engine made; there the
+four selectors name the started checkout's administrative directory, index and work tree, not the
+work tree's own, while without them Git takes those from the `.git` file `git worktree add` wrote
+at the work tree's top. An absolute `GIT_COMMON_DIR` names the started checkout's common directory
+from any directory, so it is kept; a relative one names a path from whatever directory reads it,
+which in a work tree is not the checkout, so the role is given the absolute path the value named
+there instead. The common directory `ObjectGraph::RecordedIn` carries is the one the legacy
+constructor asked Git for at the started checkout and canonicalized, the directory the builders'
+joined path names too. A runner that holds no managed repository (`new()`, or any other reading)
+has nothing to give, so the composition refuses: `supervise` refuses such a role as `NeverStarted`
+before it starts, and `composed_common_dir` reports `Unknown` for it. Production builds `new()` only
+for probes, which keep the context. A probe keeps the whole composed vector: it starts
+in the coordinator's directory, or the shell probe in the run's workspace, and runs no Git there.
+The legacy worker keeps it too (`worker_in_checkout`), because it works in the started checkout,
+where the inherited names are the run's.
+
+`compose` itself is unchanged, so probe and execution still compose the same vector, which the
+composition tests pin; this step only edits what the host base inherited from the Upstroke process,
+and a name the request's own overlay sets is kept as the overlay set it. The container runner
+composes from its image and is not changed. The step starts no process and parses nothing: it
+compares names by `KeyCase` and asks of one value only whether it is an absolute path.
+
 ## `impl HostRunner` › `fn supervise(`
 
 **Cancellation.** A call cancelled before `supervise` begins is refused before anything else is
@@ -237,32 +299,8 @@ grandchild hold a fifo open, and the fifo reads end of file once the Runner has 
 **The observer.** The call's own `SpawnHooks` observer when it carries one, with no lock; otherwise
 the runner-level observer under its guard when one is installed; otherwise a local `NoHooks`.
 
-**The work-tree context.** Right after `compose`, and only for a role that does not start in the
-checkout the coordinator was started in (`starts_in_the_started_checkout`), the composed vector
-goes through `give_work_tree_context`: the values the Upstroke process inherited for `GIT_DIR`,
-`GIT_WORK_TREE`, `GIT_IMPLICIT_WORK_TREE` and `GIT_INDEX_FILE` are removed, and an inherited
-`GIT_COMMON_DIR` whose value is not an absolute path is replaced by the common directory of the
-managed repository this runner holds. A gate and a review pass always run in a gate or review
-snapshot, and the topology worker in its slot, each a linked work tree the engine made; there the
-four selectors name the started checkout's administrative directory, index and work tree, not the
-work tree's own, while without them Git takes those from the `.git` file `git worktree add` wrote
-at the work tree's top. An absolute `GIT_COMMON_DIR` names the started checkout's common directory
-from any directory, so it is kept; a relative one names a path from whatever directory reads it,
-which in a work tree is not the checkout, so the role is given the absolute path the value named
-there instead. The common directory `ObjectGraph::RecordedIn` carries is the one the legacy
-constructor asked Git for at the started checkout and canonicalized, the directory the builders'
-joined path names too. A runner that holds no managed repository (`new()`, or any other reading)
-has nothing to give, and refuses such a role as `NeverStarted` before it starts; production builds
-`new()` only for probes, which keep the context. A probe keeps the whole composed vector: it starts
-in the coordinator's directory, or the shell probe in the run's workspace, and runs no Git there.
-The legacy worker keeps it too (`worker_in_checkout`), because it works in the started checkout,
-where the inherited names are the run's.
-
-`compose` itself is unchanged, so probe and execution still compose the same vector, which the
-composition tests pin; this step only edits what the host base inherited from the Upstroke process,
-and a name the request's own overlay sets is kept as the overlay set it. The container runner
-composes from its image and is not changed. The step starts no process and parses nothing: it
-compares names by `KeyCase` and asks of one value only whether it is an absolute path.
+**The composition** is `child_environment`'s, the work-tree context included (see its section), and
+a refusal there is this run's `RunnerError::never_started`.
 
 **The leases.** The call's cleanup-lease paths go to `proc::run_with_timeout_classified`, whose
 Unix reaper holds them together with the ones the supervising thread's scope holds, deduplicated —
@@ -534,13 +572,15 @@ wildcard, as `supplies_credentials` is: a role added later is classified here.
 
 ## `give_work_tree_context`
 
-The work-tree context of a role in a work tree the engine made, applied to the composed vector
-`supervise` installs with `env_clear` and `envs`; see its section. It edits that vector rather than
-setting a `Command` value of its own, so the payload census's row for this file is unchanged. Names
-are matched by the runner's `KeyCase`, so on Windows `git_dir` and `GIT_DIR` are one name, and
+The work-tree context of a role in a work tree the engine made, applied in `child_environment` to
+the composed vector that `supervise` installs with `env_clear` and `envs` and that
+`composed_common_dir` reports from; see `child_environment`'s section. It edits that vector rather
+than setting a `Command` value of its own, so the payload census's row for this file is unchanged.
+Names are matched by the runner's `KeyCase`, so on Windows `git_dir` and `GIT_DIR` are one name, and
 whether a value is absolute is `keeps_common_dir`'s answer, `Path::is_absolute`. A name the request's
 overlay sets is the adapter's own choice and is kept, selector or `GIT_COMMON_DIR`, relative or not.
-The refusal is typed `UpstrokeError::Refused` and reaches the caller as `RunnerError::never_started`.
+The refusal is typed `UpstrokeError::Refused` and reaches the caller as
+`RunnerError::never_started`; `composed_common_dir` reports `Unknown` for it.
 
 ## `HostRunner::worker_in_checkout`
 

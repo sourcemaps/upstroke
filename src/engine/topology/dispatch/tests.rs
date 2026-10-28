@@ -1877,3 +1877,427 @@ fn a_materialization_killed_after_its_index_write_converges_from_both_of_its_sta
     );
     run.replay_twice_equal();
 }
+
+fn closure_one_found(
+    checkout: &Path,
+    common: &Path,
+    composed: &ComposedCommonDir,
+    label: &str,
+    failed: &mut Vec<String>,
+) -> Result<(), String> {
+    let topology = match registration_whole(checkout, common, composed) {
+        Whole::Yes => Ok(()),
+        Whole::No(found) => Err(found),
+    };
+    let manager =
+        crate::workspace_manager::fixture::manager_registration_found(checkout, common, composed);
+    if topology != manager {
+        failed.push(format!(
+            "{label} under {composed:?}: the readers disagree: topology {topology:?}, manager \
+             {manager:?}"
+        ));
+    }
+    topology
+}
+
+#[test]
+fn closure_one_readers_agree_on_every_registration_construction() {
+    let fixture = crate::workspace_manager::fixture::Fixture::created("f-readers-topology");
+    let common = fixture.manager.common_git_dir().to_path_buf();
+    let constructions = crate::workspace_manager::fixture::registration_constructions(&fixture);
+    let present = ComposedCommonDir::Present(common.clone().into_os_string());
+    let mut failed = Vec::new();
+    for construction in &constructions {
+        let label = construction.label;
+        let checkout = &construction.checkout;
+        let unknown = closure_one_found(
+            checkout,
+            &common,
+            &ComposedCommonDir::Unknown,
+            label,
+            &mut failed,
+        );
+        let as_stated = match (construction.expected, &unknown) {
+            (Ok(()), Ok(())) => true,
+            (Err(words), Err(text)) => text.contains(words),
+            _ => false,
+        };
+        if !as_stated {
+            failed.push(format!(
+                "{label}: expected {:?}, the topology reader found {unknown:?}",
+                construction.expected
+            ));
+        }
+        let absent = closure_one_found(
+            checkout,
+            &common,
+            &ComposedCommonDir::Absent,
+            label,
+            &mut failed,
+        );
+        if absent != unknown {
+            failed.push(format!(
+                "{label}: a reported absence reads {absent:?}, no report {unknown:?}"
+            ));
+        }
+        let named = closure_one_found(checkout, &common, &present, label, &mut failed);
+        let as_corrected = if label == "commondir naming another repository" {
+            matches!(&named, Err(text) if text.contains("the store that holds this entry"))
+        } else {
+            named == unknown
+        };
+        if !as_corrected {
+            failed.push(format!(
+                "{label}: a value naming the run's common directory reads {named:?}, no report \
+                 {unknown:?}"
+            ));
+        }
+    }
+    let whole = constructions
+        .first()
+        .filter(|construction| construction.label == "whole")
+        .expect("the whole registration is the first construction");
+    let mismatched = closure_one_found(
+        &whole.checkout,
+        &common,
+        &ComposedCommonDir::Present(
+            fixture
+                .root
+                .join("other-repository")
+                .join(".git")
+                .into_os_string(),
+        ),
+        "whole",
+        &mut failed,
+    );
+    if !matches!(&mismatched, Err(text) if text.contains("the guarded child's `GIT_COMMON_DIR`")) {
+        failed.push(format!(
+            "whole: a value naming another repository reads {mismatched:?}"
+        ));
+    }
+    assert!(constructions.len() >= 15, "every construction was made");
+    assert!(failed.is_empty(), "{}", failed.join("\n"));
+}
+
+#[cfg(unix)]
+#[test]
+fn closure_one_readers_accept_a_linked_store_only_under_a_reported_value_naming_the_run() {
+    use crate::workspace_manager::fixture::{create_dir, link_directory, scratch};
+
+    let tree = scratch("f-readers-linked");
+    let root = std::fs::canonicalize(tree.path()).expect("the canonical scratch root");
+    let base = root.join("repo");
+    create_dir(&base);
+    git(&base, &["init", "-q", "-b", "main"]);
+    git(&base, &["config", "user.email", "tests@upstroke.local"]);
+    git(&base, &["config", "user.name", "upstroke tests"]);
+    write_file(&base.join("a.txt"), b"one\n");
+    git(&base, &["add", "-A"]);
+    git(&base, &["commit", "-q", "-m", "seed"]);
+    let clone_of_base = |name: &str| -> PathBuf {
+        let repository = root.join(name);
+        git(
+            &root,
+            &[
+                "clone",
+                "-q",
+                &base.to_string_lossy(),
+                &repository.to_string_lossy(),
+            ],
+        );
+        create_dir(&repository.join(".git").join("worktrees"));
+        repository
+    };
+    let other = clone_of_base("other");
+    let third = clone_of_base("third");
+    link_directory(
+        &other.join(".git").join("worktrees"),
+        &base.join(".git").join("worktrees"),
+    );
+    let add = |from: &Path, name: &str| -> PathBuf {
+        let checkout = root.join(name);
+        git(
+            from,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                &checkout.to_string_lossy(),
+                "HEAD",
+            ],
+        );
+        checkout
+    };
+    let whole = add(base.as_path(), "whole");
+    let recorded_elsewhere = add(base.as_path(), "recorded-elsewhere");
+    let foreign = add(third.as_path(), "foreign");
+    let entry = |checkout: &Path| -> PathBuf {
+        let pointer = std::fs::read_to_string(checkout.join(".git")).expect("a .git pointer");
+        std::fs::canonicalize(
+            pointer
+                .trim()
+                .strip_prefix("gitdir:")
+                .expect("a gitdir pointer")
+                .trim(),
+        )
+        .expect("the checkout's entry")
+    };
+    assert!(
+        entry(whole.as_path()).starts_with(&other),
+        "the run's registration is in the linked store"
+    );
+    write_file(
+        &entry(recorded_elsewhere.as_path()).join("commondir"),
+        format!("{}\n", third.join(".git").display()).as_bytes(),
+    );
+    let common = std::fs::canonicalize(base.join(".git")).expect("the run's common directory");
+    let named = |value: &Path| ComposedCommonDir::Present(value.as_os_str().to_os_string());
+    let rows: [(&str, &Path, ComposedCommonDir, Result<(), &str>); 8] = [
+        (
+            "C4's face, the run's common directory named absolutely",
+            whole.as_path(),
+            named(common.as_path()),
+            Ok(()),
+        ),
+        (
+            "C5's face, the run's common directory named from the checkout",
+            whole.as_path(),
+            named(Path::new("..").join("repo").join(".git").as_path()),
+            Ok(()),
+        ),
+        (
+            "no report",
+            whole.as_path(),
+            ComposedCommonDir::Unknown,
+            Err("which is not this repository's common git dir"),
+        ),
+        (
+            "a reported absence",
+            whole.as_path(),
+            ComposedCommonDir::Absent,
+            Err("which is not this repository's common git dir"),
+        ),
+        (
+            "a value naming another repository",
+            whole.as_path(),
+            named(other.join(".git").as_path()),
+            Err("the guarded child's `GIT_COMMON_DIR`"),
+        ),
+        (
+            "a relative value naming another repository from the checkout",
+            whole.as_path(),
+            named(Path::new("..").join("other").join(".git").as_path()),
+            Err("the guarded child's `GIT_COMMON_DIR`"),
+        ),
+        (
+            "a record naming a third repository",
+            recorded_elsewhere.as_path(),
+            named(common.as_path()),
+            Err("the store that holds this entry"),
+        ),
+        (
+            "an entry of a store the run does not link",
+            foreign.as_path(),
+            named(common.as_path()),
+            Err("not an entry of this repository's registration store"),
+        ),
+    ];
+    let mut failed = Vec::new();
+    for (label, checkout, composed, expected) in &rows {
+        let found = closure_one_found(checkout, &common, composed, label, &mut failed);
+        let as_stated = match (expected, &found) {
+            (Ok(()), Ok(())) => true,
+            (Err(words), Err(text)) => text.contains(words),
+            _ => false,
+        };
+        if !as_stated {
+            failed.push(format!("{label}: expected {expected:?}, found {found:?}"));
+        }
+    }
+    assert!(failed.is_empty(), "{}", failed.join("\n"));
+}
+
+fn prune_whole_entry(base: &Path, checkout: &Path) {
+    let pointer = checkout.join(".git");
+    let bytes = std::fs::read(&pointer).expect("the checkout's .git");
+    remove_file(&pointer);
+    git(base, &["worktree", "prune", "--expire=now"]);
+    write_file(&pointer, &bytes);
+}
+
+fn files_under(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    let mut files = BTreeMap::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory).expect("list a kept directory") {
+            let path = entry.expect("an entry").path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                let bytes = std::fs::read(&path).expect("a kept file");
+                files.insert(
+                    path.strip_prefix(root)
+                        .expect("under the root")
+                        .to_path_buf(),
+                    bytes,
+                );
+            }
+        }
+    }
+    files
+}
+
+fn keep_the_store(run: &Run) {
+    let keeper = run.fixture.root.join("store-keeper");
+    git(
+        &run.fixture.base,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            keeper.to_str().expect("a fixture path is UTF-8"),
+            &run.fixture.head,
+        ],
+    );
+}
+
+#[test]
+fn a_pruned_open_generation_holding_a_file_is_kept_for_the_operator_not_recreated() {
+    let mut run = Run::started("f-c2-open-kept");
+    let dispatched = run.dispatch(ALPHA, 0);
+    keep_the_store(&run);
+    write_file(
+        &dispatched.worktree.join("untracked.txt"),
+        b"the operator's file\n",
+    );
+    prune_whole_entry(&run.fixture.base, &dispatched.worktree);
+    let before = files_under(&dispatched.worktree);
+    let mark = run.mark();
+    let result = verify_or_recreate(
+        &run.fixture.manager,
+        &mut run.hooks,
+        &dispatched.open_generation(),
+        &dispatched.quiescence(),
+    );
+    let message = match result {
+        Err(UpstrokeError::RegistryRefused { message }) => message,
+        other => panic!("the reuse refuses resumably and keeps the slot: {other:?}"),
+    };
+    assert!(
+        message.contains("kept for the operator")
+            && message.contains(&dispatched.worktree.display().to_string()),
+        "{message}"
+    );
+    assert_eq!(
+        files_under(&dispatched.worktree),
+        before,
+        "the slot and its file are kept, byte for byte"
+    );
+    assert!(
+        run.fixture.manager.intent_path(&dispatched.slot).exists(),
+        "the intent is kept"
+    );
+    assert_eq!(
+        run.count_after(mark, REMOVE, HookPhase::Before),
+        0,
+        "nothing removed"
+    );
+    assert_eq!(
+        run.count_after(mark, ADD, HookPhase::Before),
+        0,
+        "nothing added"
+    );
+}
+
+#[test]
+fn a_pruned_open_generation_holding_nothing_is_recreated() {
+    let mut run = Run::started("f-c2-open-empty");
+    let dispatched = run.dispatch(ALPHA, 0);
+    prune_whole_entry(&run.fixture.base, &dispatched.worktree);
+    let held: Vec<PathBuf> = std::fs::read_dir(&dispatched.worktree)
+        .expect("the slot")
+        .map(|entry| entry.expect("an entry").path())
+        .collect();
+    for path in held {
+        if path.is_dir() {
+            panic!("the base checkout holds only files: {}", path.display());
+        }
+        remove_file(&path);
+    }
+    let reuse = verify_or_recreate(
+        &run.fixture.manager,
+        &mut run.hooks,
+        &dispatched.open_generation(),
+        &dispatched.quiescence(),
+    )
+    .expect("an emptied slot is recreated");
+    assert_eq!(
+        reuse,
+        Reuse::Recreated {
+            failure: VerifyFailure::NotRegistered
+        }
+    );
+    assert!(healthy_at(
+        &run.fixture.manager,
+        &dispatched.worktree,
+        &dispatched.base.0
+    ));
+}
+
+#[test]
+fn a_whole_open_generation_whose_head_moved_is_recreated() {
+    let mut run = Run::started("f-c2-open-head-moved");
+    let dispatched = run.dispatch(ALPHA, 0);
+    let side = run.fixture.side.clone();
+    git(&dispatched.worktree, &["checkout", "-q", "--detach", &side]);
+    let reuse = verify_or_recreate(
+        &run.fixture.manager,
+        &mut run.hooks,
+        &dispatched.open_generation(),
+        &dispatched.quiescence(),
+    )
+    .expect("a whole registration whose HEAD moved is recreated");
+    assert!(
+        matches!(
+            reuse,
+            Reuse::Recreated {
+                failure: VerifyFailure::HeadMismatch { .. }
+            }
+        ),
+        "{reuse:?}"
+    );
+    assert!(healthy_at(
+        &run.fixture.manager,
+        &dispatched.worktree,
+        &dispatched.base.0
+    ));
+}
+
+#[test]
+fn a_residue_failure_in_an_open_generation_whose_registration_is_not_whole_is_recreated() {
+    let mut run = Run::started("f-c2-open-residue");
+    let dispatched = run.dispatch(ALPHA, 0);
+    let entry = git_dir(&dispatched.worktree);
+    plant(&dispatched.worktree, ResidueElement::IndexLock);
+    remove_file(&entry.join("index"));
+    let reuse = verify_or_recreate(
+        &run.fixture.manager,
+        &mut run.hooks,
+        &dispatched.open_generation(),
+        &dispatched.quiescence(),
+    )
+    .expect("a residue failure is recreated whatever the registration");
+    assert_eq!(
+        reuse,
+        Reuse::Recreated {
+            failure: VerifyFailure::Residue(ResidueElement::IndexLock)
+        }
+    );
+    assert!(healthy_at(
+        &run.fixture.manager,
+        &dispatched.worktree,
+        &dispatched.base.0
+    ));
+}
