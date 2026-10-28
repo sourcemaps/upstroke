@@ -1296,8 +1296,7 @@ over a fixture whose managed base is `below` its root (`Fixture::created_based`)
 This is the shape C5's equal-depth layout needs (`EQUAL_DEPTH_BASE`, the
 proposal's PROP:2129): one relative `GIT_COMMON_DIR` names the run's common
 directory from the base and from every work tree. Unix only, as the layout's
-tests are. The integration correction's host-runner controls use it (F), and
-R5's later carry reuses it.
+tests are. The integration correction's host-runner controls use it (F).
 
 ## `impl Wide` › `fn durable_over(`
 
