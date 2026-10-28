@@ -287,9 +287,11 @@ impl HostRunner {
         &self,
         request: &RunnerRequest,
     ) -> Result<Vec<(OsString, OsString)>, UpstrokeError> {
-        let mut composed =
-            self.environment
-                .compose(&request.role, request.agent.as_ref(), &request.command.env)?;
+        let mut composed = self.environment.compose(
+            &request.role,
+            request.agent.as_ref(),
+            &request.command.env,
+        )?;
         if !starts_in_the_started_checkout(&request.role, self.worker_in_checkout) {
             let run_common_dir = match self.environment.objects() {
                 ObjectGraph::RecordedIn(repository) => Some(repository.common_dir()),
