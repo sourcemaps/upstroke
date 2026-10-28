@@ -21936,7 +21936,10 @@ fn add_task_through(manager: &WorkspaceManager, fixture: &Fixture, key: &str) ->
 fn assert_pinned_link(store: &Path, target: &Path, tag: &str) {
     let metadata = fs::symlink_metadata(store)
         .unwrap_or_else(|error| panic!("{tag}: the store's link is kept: {error}"));
-    assert!(is_reparse_point(&metadata), "{tag}: the store is still a link");
+    assert!(
+        is_reparse_point(&metadata),
+        "{tag}: the store is still a link"
+    );
     assert_eq!(
         strip_verbatim(fs::canonicalize(store).expect("the store resolves")),
         target,
@@ -22119,7 +22122,12 @@ fn a_store_linked_before_derive_removes_only_its_bound_registrations_and_keeps_l
 #[test]
 fn a_pinned_store_lost_before_its_removal_refuses_before_the_checkout_is_touched() {
     let cases = [
-        ("re-pointed at the hook", StoreLoss::Repointed, true, "now resolves to"),
+        (
+            "re-pointed at the hook",
+            StoreLoss::Repointed,
+            true,
+            "now resolves to",
+        ),
         (
             "a plain directory at the hook",
             StoreLoss::PlainDirectory,
@@ -22127,7 +22135,12 @@ fn a_pinned_store_lost_before_its_removal_refuses_before_the_checkout_is_touched
             "is now a plain directory, not a link",
         ),
         ("removed at the hook", StoreLoss::Removed, true, "is gone"),
-        ("re-pointed before the scan", StoreLoss::Repointed, false, "now resolves to"),
+        (
+            "re-pointed before the scan",
+            StoreLoss::Repointed,
+            false,
+            "now resolves to",
+        ),
         (
             "a plain directory before the scan",
             StoreLoss::PlainDirectory,
@@ -22137,7 +22150,9 @@ fn a_pinned_store_lost_before_its_removal_refuses_before_the_checkout_is_touched
     ];
     for (index, (case, loss, at_hook, found)) in cases.into_iter().enumerate() {
         let (fixture, manager, store, target) =
-            pinned_store(&format!("pin-lost-{index}"), |fixture| fixture.root.join("pinned"));
+            pinned_store(&format!("pin-lost-{index}"), |fixture| {
+                fixture.root.join("pinned")
+            });
         let (slot, checkout) = add_task_through(&manager, &fixture, "alpha");
         write_file(&checkout.join("work.txt"), b"the attempt's work\n");
         let entry = target.join(checkout.file_name().expect("a checkout name"));
@@ -22204,7 +22219,9 @@ fn a_link_planted_below_a_pinned_target_at_the_before_hook_refuses_the_removal()
             continue;
         }
         let (fixture, manager, _store, target) =
-            pinned_store(&format!("pin-inside-{index}"), |fixture| fixture.root.join("pinned"));
+            pinned_store(&format!("pin-inside-{index}"), |fixture| {
+                fixture.root.join("pinned")
+            });
         let (slot, checkout) = add_task_through(&manager, &fixture, "alpha");
         let entry = target.join(checkout.file_name().expect("a checkout name"));
         fs::write(entry.join("locked"), b"held\n").expect("a locked marker");
@@ -22260,8 +22277,9 @@ fn a_link_planted_below_a_pinned_target_at_the_before_hook_refuses_the_removal()
 /// original target, moved aside, are untouched.
 #[test]
 fn a_pinned_target_exchanged_for_a_link_at_the_before_hook_refuses_the_removal() {
-    let (fixture, manager, _store, target) =
-        pinned_store("pin-target-exchanged", |fixture| fixture.root.join("pinned"));
+    let (fixture, manager, _store, target) = pinned_store("pin-target-exchanged", |fixture| {
+        fixture.root.join("pinned")
+    });
     let (slot, checkout) = add_task_through(&manager, &fixture, "alpha");
     let name = checkout.file_name().expect("a checkout name").to_owned();
     let victim = fixture.root.join("victim");
@@ -22286,13 +22304,21 @@ fn a_pinned_target_exchanged_for_a_link_at_the_before_hook_refuses_the_removal()
             && message.contains("now resolves to"),
         "the refusal names the store's new resolution: {message}"
     );
-    assert_eq!(snapshot(&victim.join(&name)), victim_before, "the victim is untouched");
+    assert_eq!(
+        snapshot(&victim.join(&name)),
+        victim_before,
+        "the victim is untouched"
+    );
     assert_eq!(
         snapshot(&moved.join(&name)),
         original_before,
         "the original entry, moved aside with its target, is untouched"
     );
-    assert_eq!(snapshot(&checkout), checkout_before, "the checkout is untouched");
+    assert_eq!(
+        snapshot(&checkout),
+        checkout_before,
+        "the checkout is untouched"
+    );
 }
 
 /// T-PIN-5: a store that was not a link when the manager was derived is not
@@ -22446,5 +22472,9 @@ fn a_store_link_whose_target_appears_after_derive_is_not_pinned() {
             && message.contains(&store.display().to_string()),
         "the refusal names the link: {message}"
     );
-    assert_eq!(snapshot(&checkout), checkout_before, "the checkout is untouched");
+    assert_eq!(
+        snapshot(&checkout),
+        checkout_before,
+        "the checkout is untouched"
+    );
 }

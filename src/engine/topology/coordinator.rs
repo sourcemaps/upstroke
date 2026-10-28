@@ -15862,7 +15862,11 @@ git cat-file -e 'HEAD^{tree}'
         );
         let branches = crate::workspace_manager::fixture::git(
             base,
-            &["for-each-ref", "--format=%(refname)", "refs/heads/upstroke/"],
+            &[
+                "for-each-ref",
+                "--format=%(refname)",
+                "refs/heads/upstroke/",
+            ],
         );
         let mut named = branches.lines();
         let (Some(branch), None) = (named.next(), named.next()) else {
