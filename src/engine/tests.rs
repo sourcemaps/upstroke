@@ -17207,8 +17207,13 @@ fn copy_tree_for_a_layout(from: &Path, to: &Path) {
         } else if kind.is_symlink() {
             let link = fs::read_link(entry.path()).expect("a link's target");
             std::os::unix::fs::symlink(link, &target).expect("copy a link");
-        } else {
-            fs::copy(entry.path(), &target).expect("copy a file");
+        } else if let Err(error) = fs::copy(entry.path(), &target) {
+            panic!(
+                "copy a file: {} to {}, listed as {kind:?}, now {:?}: {error}",
+                entry.path().display(),
+                target.display(),
+                fs::symlink_metadata(entry.path()).map(|metadata| metadata.file_type())
+            );
         }
     }
 }
@@ -17361,6 +17366,8 @@ fn inherited_selection_run_helper() {
 #[test]
 fn a_gated_legacy_run_under_an_absolute_common_dir_keeps_its_snapshot_in_the_run_repository() {
     let (tree, repo) = temp_engine_repo("absolute-common-registry");
+    // The seed's commit starts no maintenance (detached since Git 2.47) in the copied repository.
+    git_in(&repo, &["config", "maintenance.auto", "false"]);
     seed(&repo, ONE_GATE_PLAN, Some(ONE_GATE_CONFIG));
     let other = tree.path().join("other");
     link_the_registry_into(&repo.join(".git").join("worktrees"), &repo, &other);
@@ -17429,6 +17436,8 @@ fn a_gated_legacy_run_under_a_relative_common_dir_through_a_linked_registry_keep
     git_in(&repo, &["init", "-q", "-b", "main"]);
     git_in(&repo, &["config", "user.email", "test@upstroke.local"]);
     git_in(&repo, &["config", "user.name", "upstroke tests"]);
+    // No commit here starts maintenance (detached since Git 2.47) in the `.git` copied below.
+    git_in(&repo, &["config", "maintenance.auto", "false"]);
     fs::write(repo.join("README.md"), "seed\n").expect("seed");
     git_in(&repo, &["add", "-A"]);
     git_in(&repo, &["commit", "-q", "-m", "seed"]);

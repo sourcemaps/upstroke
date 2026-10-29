@@ -22488,13 +22488,17 @@ const CONTEXT_ROOT: &str = "UPSTROKE_WORK_TREE_CONTEXT_ROOT";
 const CONTEXT_COMMON: &str = "UPSTROKE_WORK_TREE_CONTEXT_COMMON";
 
 /// A committed repository at `path` holding `files`, made in this process's
-/// own environment, which sets none of the names under test.
+/// own environment, which sets none of the names under test. Automatic
+/// maintenance is off, as it is for every Git child the engine runs: a commit
+/// detaches it since Git 2.47, so it can still be running in the `.git` a test
+/// copies next.
 #[cfg(unix)]
 fn context_repository(path: &Path, files: &[(&str, &str)]) {
     fs::create_dir_all(path).expect("a repository's directory");
     git(path, &["init", "-q", "-b", "main"]);
     git(path, &["config", "user.email", "tests@upstroke.local"]);
     git(path, &["config", "user.name", "upstroke tests"]);
+    git(path, &["config", "maintenance.auto", "false"]);
     for (name, content) in files {
         write_file(&path.join(name), content.as_bytes());
     }
@@ -22515,8 +22519,13 @@ fn context_copy_tree(from: &Path, to: &Path) {
         } else if kind.is_symlink() {
             let link = fs::read_link(entry.path()).expect("a link's target");
             std::os::unix::fs::symlink(link, &target).expect("copy a link");
-        } else {
-            fs::copy(entry.path(), &target).expect("copy a file");
+        } else if let Err(error) = fs::copy(entry.path(), &target) {
+            panic!(
+                "copy a file: {} to {}, listed as {kind:?}, now {:?}: {error}",
+                entry.path().display(),
+                target.display(),
+                fs::symlink_metadata(entry.path()).map(|metadata| metadata.file_type())
+            );
         }
     }
 }
