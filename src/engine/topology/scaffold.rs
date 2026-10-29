@@ -2941,7 +2941,6 @@ impl Wide {
         )
     }
 
-    #[cfg(unix)]
     pub(super) fn durable_based(
         tag: &str,
         below: &Path,
