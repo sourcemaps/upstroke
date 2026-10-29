@@ -1621,7 +1621,12 @@ other than as it was. F5's newline name, with either name, is refused by
 `recorded_objects_scope` with the constructor's own refusal, "its path contains a
 newline, which Git cannot read in a configuration key", at `5c222ff2` and under
 the change alike, so no snapshot is made there. At `5c222ff2` the four rows with
-`GIT_DIR` fail at the snapshot's verification; the others pass at both.
+`GIT_DIR` fail at the snapshot's verification; the others pass at both. F5's
+non-UTF-8 name is probed first. A filesystem that keeps names as Unicode refuses
+it, as macOS's APFS does with `EILSEQ` ("Illegal byte sequence", on #345's first
+native run), and no path holding it exists there: its two rows are then reported
+refused, never passed, and the other six run. Any other error fails the test, and
+so does a refusal in one of its two rows alone.
 
 ## `fn undecodable_scope_helper() {`
 

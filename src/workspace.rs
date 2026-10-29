@@ -6936,9 +6936,23 @@ mod tests {
             ("F5 newline, GIT_DIR", b"repo\nname", "GIT_DIR", false),
         ];
         let mut failures: Vec<String> = Vec::new();
+        let mut refused: Vec<&str> = Vec::new();
         for (label, leaf, selector, snapshot) in rows {
             let tree = scratch("undecodable-scope");
+            let undecodable = std::str::from_utf8(leaf).is_err();
             let leaf = PathBuf::from(OsString::from_vec(leaf.to_vec()));
+            // A filesystem that keeps names as Unicode refuses a name that is not UTF-8 (APFS
+            // answers EILSEQ), so no path holding one exists there. The refusal is measured and
+            // reported, and the row is not counted as passed.
+            if undecodable {
+                match fs::create_dir(tree.path().join(&leaf)) {
+                    Err(error) if error.raw_os_error() == Some(libc::EILSEQ) => {
+                        refused.push(label);
+                        continue;
+                    }
+                    created => created.expect("a directory named with a byte no UTF-8 spells"),
+                }
+            }
             let (started, repository) = if label.starts_with("F2") {
                 let enclosing = tree.path().join("A");
                 selection_repository(&enclosing, &[("f", "base\n")]);
@@ -6994,10 +7008,14 @@ mod tests {
         }
         assert!(
             failures.is_empty(),
-            "{} of the {} rows failed:\n{}",
+            "{} of the {} rows failed, and the filesystem refused {refused:?}:\n{}",
             failures.len(),
             rows.len(),
             failures.join("\n")
+        );
+        assert!(
+            refused.is_empty() || refused.len() == 2,
+            "the filesystem refuses the name in both of its rows or in neither: {refused:?}"
         );
     }
 
