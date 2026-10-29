@@ -872,7 +872,10 @@ not only when a slow one happens to widen the window, as CI's did at `aea75a79`.
 
 The packet's `canonical_trace_projection`, for schema-4 events: drop the run's identity and
 environment and the scheduling configuration, keep everything else, and label every commit SHA by
-first appearance (tree OIDs literal).
+first appearance (tree OIDs literal). The labels are numbered over the slice it is handed.
+`attempt_level`, ST-08's independent half, hands it one key's attempt-level trace at a time, so there
+they are that key's; every other caller, the chain comparisons among them, hands it the whole log, so
+there they are the log's.
 
 ## `mod tests` › `fn two_independent_tasks_overlap_merge_through_one_queue_and_the_dependent_starts_on_both() {`
 
@@ -894,6 +897,44 @@ hundred Git processes, nearly all of them the manager's Git effects). So Windows
 configuration, two where a test asserts equality across seeds, and for a claim made of *some* seed
 the seed that makes it (the Linux runs name it). Tests whose behaviour differs on Windows — the kill
 matrices, the two-process tests, the container runner, the scripted shapes — run in full everywhere.
+
+## `mod tests` › `const ONE_SUCCEEDING_ATTEMPT: [&str; 4] = [`
+
+What a key whose one attempt succeeds projects, in order: one `task_dispatched`, one
+`attempt_started`, one `candidate_prepared` and one `task_candidate_created`, and no
+`attempt_finished` (`design/26_design_merge_queue_protocol.md`: `candidate_prepared` is "the
+**sole** successful settlement for an attempt that produces a candidate … `attempt_finished` is not
+also emitted for that attempt"; `settle::settle_failed` builds an `AttemptFinished4` only for the
+other outcomes). `attempt_finished` stays in `ATTEMPT_LEVEL`, so a key that has one projects it
+(`a_keys_attempt_level_projection_depends_on_its_own_trace_alone`).
+
+## `mod tests` › `fn attempt_level(events: &[TopologyEvent], run_id: &str) -> BTreeMap<u64, Vec<String>> {`
+
+ST-08's per-key projection for independent tasks, which compares "only already-defined projection
+fields per key": the events of `ATTEMPT_LEVEL`'s five kinds, selected from the raw log by their typed
+kind, grouped by task key in log order, and each key's whole trace handed to `canonical` on its own.
+A key's commit labels are therefore numbered within its own trace — in these tests its base is
+`commit-0` and its candidate `commit-1` however the other keys and the integrations interleaved with
+it — while every field, literal tree OID and same-or-different commit relationship inside the trace
+is kept: the labels restart per trace, never per event or per field. They say nothing across keys.
+The shared base (`dispatched_bases`) and the integration order (`task_candidate_created` against
+`merge_prepared`) are separate assertions in the tests that claim them, and neither is read from
+these labels.
+
+Labels numbered over the whole log would number each key's candidate by the order every key's
+candidate, and the integrations between them, reached the log, which is the schedule a permutation
+changes: two seeds whose candidates reached the log in different orders project alpha's candidate as
+`commit-4` and as `commit-2`, every other field equal. An earlier selection compared nothing at all
+(G6-ST08-EMPTY-PER-KEY-PROJECTION): it kept serialized events whose top-level `kind` field named one
+of the five kinds, and the body is tagged `event` (`#[serde(tag = "event")]`), so every key projected
+an empty list, every per-key comparison held vacuously, and Gate 6's `projection/independent` export
+at `e0932045` reported 48 digests of empty input as equal.
+
+## `mod tests` › `fn attempt_level_problems(`
+
+The nonvacuity check every `attempt_level` caller asserts empty before it compares seeds: each
+expected key projects exactly `ONE_SUCCEEDING_ATTEMPT`, read from each projected value's `event` tag,
+and no other key is projected. An empty projection fails it for every expected key.
 
 ## `mod tests` › `fn halt_cancels_in_flight_attempt_at_width_three() {`
 
@@ -1080,7 +1121,28 @@ start, and write the same canonical log.
 
 ST-03 and ST-08 under seeded permutations, with
 `independent_tasks_dispatch_together_and_keep_per_key_projections_under_every_seed` and
-`a_chain_plan_projects_identically_at_widths_three_and_one`.
+`a_chain_plan_projects_identically_at_widths_three_and_one`. This test and
+`independent_tasks_dispatch_together_and_keep_per_key_projections_under_every_seed` assert
+`attempt_level_problems` empty for keys 0, 1 and 2 at every seed before comparing that seed's
+`attempt_level` with the first seed's.
+
+## `mod tests` › `fn selecting_attempt_level_events_by_a_kind_field_keeps_nothing_and_is_rejected() {`
+
+The regression for G6-ST08-EMPTY-PER-KEY-PROJECTION: on one run of three independent tasks, the
+former selection — a top-level `kind` field of the serialized event, as it was written — keeps
+nothing for keys 0, 1 and 2, `attempt_level_problems` rejects all three, and `attempt_level` on the
+same log passes it.
+
+## `mod tests` › `fn a_keys_attempt_level_projection_depends_on_its_own_trace_alone() {`
+
+`attempt_level`'s label scope, on one run in which beta's first gate fails. Beta's retry is retained —
+the same generation, no second dispatch — so beta projects its first attempt's `attempt_finished` and
+a second `attempt_started`, while alpha and gamma project `ONE_SUCCEEDING_ATTEMPT`. A copy of the log
+with the keys' attempt-level events in the reverse of the order their candidates were prepared in,
+and every other event after them, projects every key exactly as the log does; labels numbered over
+the whole log differ between the two, which is the control that the reordering renumbers. Alpha's
+projection changes, and only alpha's, when its `task_candidate_created` names its base rather than
+its prepared commit, and when its `candidate_prepared` carries gamma's tree OID.
 
 ## `mod tests` › `fn concurrent_attempts_at_one_generation_and_attempt_use_distinct_snapshot_slots() {`
 
@@ -1819,8 +1881,9 @@ ST-08's chain half under eight seeds, each byte-identical to the width-1 loop's 
 ## `mod interleaving` › `fn independent_tasks_project_identically_per_key_under_every_seed_and_report_it() {`
 
 ST-08's independent half (and ST-03) under sixteen seeds: every task dispatched before any completion
-on one base, integration in `task_candidate_created` order, and each key's attempt-level projection and
-the final tree equal to the first seed's.
+on one base, integration in `task_candidate_created` order, each key's attempt-level projection exactly
+`ONE_SUCCEEDING_ATTEMPT` (`attempt_level_problems`), and each key's projection, its commit labels
+numbered within its own trace, and the final tree equal to the first seed's.
 
 ## `mod interleaving` › `fn reduced_limits_and_adverse_completion_orders_reach_run_finished_within_the_step_bound() {`
 
