@@ -177,6 +177,329 @@ pub(crate) fn keeps_common_dir(value: &OsStr) -> bool {
 /// checkout therefore goes without it.
 pub(crate) const INDEX_SELECTOR: &str = "GIT_INDEX_FILE";
 
+// ---------------------------------------------------------------------------
+// R5: the two schema-4 start refusals
+// ---------------------------------------------------------------------------
+
+/// The six repository-wide names whose value is one path, each of which a
+/// schema-4 run refuses unless it is absolute
+/// ([`refuse_relative_repository_wide_names`]).
+pub(crate) const REPOSITORY_WIDE_PATHS: [&str; 6] = [
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_SHALLOW_FILE",
+    "GIT_GRAFT_FILE",
+    "GIT_CONFIG",
+    "GIT_CONFIG_GLOBAL",
+    "GIT_CONFIG_SYSTEM",
+];
+
+/// The repository-wide name whose value is a list of paths, each entry of
+/// which a schema-4 run refuses unless it is absolute
+/// ([`refuse_relative_repository_wide_names`]).
+pub(crate) const ALTERNATE_OBJECT_DIRECTORIES: &str = "GIT_ALTERNATE_OBJECT_DIRECTORIES";
+
+/// Git's `PATH_SEP`, which separates [`ALTERNATE_OBJECT_DIRECTORIES`]'s
+/// entries: `;` in Git for Windows (`compat/mingw.h:47` at
+/// `v2.53.0.windows.1`), and `:` wherever the platform header defines none
+/// (`git-compat-util.h:207-209`).
+#[cfg(windows)]
+const ALTERNATES_SEPARATOR: u8 = b';';
+
+/// See the Windows half: `:` everywhere else.
+#[cfg(not(windows))]
+const ALTERNATES_SEPARATOR: u8 = b':';
+
+/// R-C-RELSTORE's start refusal: [`Refusal::RelativeRepositoryWideName`] when
+/// the coordinator's own inherited environment holds, for one of
+/// [`REPOSITORY_WIDE_PATHS`], a value that is not an absolute path, or an
+/// [`ALTERNATE_OBJECT_DIRECTORIES`] entry that is not one.
+///
+/// The owner adopted it on 2026-10-15 (`adopted.ENV.choices[3]`): "A schema-4
+/// (topology) run, and its resume, refuses before it makes or reuses any slot
+/// when the coordinator's inherited environment holds, for
+/// `GIT_OBJECT_DIRECTORY`, `GIT_SHALLOW_FILE`, `GIT_GRAFT_FILE`, `GIT_CONFIG`,
+/// `GIT_CONFIG_GLOBAL` or `GIT_CONFIG_SYSTEM`, a value that is not an absolute
+/// path by the platform's rule, or a `GIT_ALTERNATE_OBJECT_DIRECTORIES` entry
+/// that is not, split and unquoted exactly as Git splits and unquotes that list;
+/// a value the check cannot classify exactly is refused." Git resolves each of
+/// them from the directory of the process that reads it, and a Git child the
+/// engine runs in a work tree it made, or a role started in one, keeps them, so
+/// a relative value that is right at the started checkout names something else
+/// there, or nothing.
+///
+/// It reads exactly these seven names, starts no process and writes nothing.
+/// [`COMMON_DIR`] is not among them: a relative one is given its meaning at the
+/// started checkout instead ([`keeps_common_dir`]). Absolute is the rule
+/// `keeps_common_dir` applies, [`Path::is_absolute`], so on Windows a
+/// drive-relative `C:x` and a root-relative `\x` refuse while `C:\x` and a UNC
+/// path do not. An empty value is not an absolute path, and refuses: Git takes
+/// each of the six as set when it is set and empty (`getenv`, then
+/// `getenv_safe`, `xstrdup_or_null` or `if (shallow_file)`, at v2.41.0 and
+/// v2.55.0), though what it then does with the empty value differs -- an empty
+/// `GIT_SHALLOW_FILE` means "no shallow file" (`shallow.c`'s
+/// `is_repository_shallow`), and an empty `GIT_CONFIG_GLOBAL` or
+/// `GIT_CONFIG_SYSTEM` names a file no `access` finds. An empty alternates list
+/// has no entry, and Git links none (`if (!alt || !*alt) return;`).
+///
+/// `prelock::check` runs it as its first statement, and
+/// [`WorkspaceManager::derive`] runs it again before its first Git child, so a
+/// fresh schema-4 run refuses in its pre-lock checks, and every path that makes
+/// or reuses a slot, a resume's included, refuses before it does.
+///
+/// # Errors
+///
+/// [`Refusal::RelativeRepositoryWideName`], naming the first of the seven
+/// whose value refuses.
+pub(crate) fn refuse_relative_repository_wide_names() -> Result<(), Refusal> {
+    refuse_relative_repository_wide_values(
+        REPOSITORY_WIDE_PATHS.map(|name| (name, std::env::var_os(name))),
+        std::env::var_os(ALTERNATE_OBJECT_DIRECTORIES).as_deref(),
+    )
+}
+
+/// [`refuse_relative_repository_wide_names`] over values given rather than
+/// read: each of [`REPOSITORY_WIDE_PATHS`] with what it holds, and what
+/// [`ALTERNATE_OBJECT_DIRECTORIES`] holds.
+fn refuse_relative_repository_wide_values(
+    paths: [(&'static str, Option<OsString>); 6],
+    alternates: Option<&OsStr>,
+) -> Result<(), Refusal> {
+    for (name, value) in paths {
+        if let Some(why) = value.as_deref().and_then(not_an_absolute_path) {
+            return Err(Refusal::RelativeRepositoryWideName { name, why });
+        }
+    }
+    match alternates.and_then(not_absolute_alternates) {
+        Some(why) => Err(Refusal::RelativeRepositoryWideName {
+            name: ALTERNATE_OBJECT_DIRECTORIES,
+            why,
+        }),
+        None => Ok(()),
+    }
+}
+
+/// `value`, unless it is an absolute path by the platform's rule.
+fn not_an_absolute_path(value: &OsStr) -> Option<NotAbsolute> {
+    if Path::new(value).is_absolute() {
+        None
+    } else {
+        Some(NotAbsolute::Value(value.to_owned()))
+    }
+}
+
+/// The first entry of an alternates list that refuses it: one that is not an
+/// absolute path, or one this check cannot classify exactly.
+///
+/// The list is split and unquoted by [`alternate_entries`], over the bytes the
+/// platform holds the value as: on Unix the bytes Git reads, and on Windows
+/// WTF-8, in which every byte that spells a separator, a quote, a backslash or
+/// a comment's `#` is that ASCII character itself.
+fn not_absolute_alternates(list: &OsStr) -> Option<NotAbsolute> {
+    alternate_entries(list.as_encoded_bytes(), ALTERNATES_SEPARATOR)
+        .into_iter()
+        .find_map(not_an_absolute_entry)
+}
+
+/// A decoded alternates entry, unless it is an absolute path.
+///
+/// Two entries cannot be classified exactly, and refuse. One holding a NUL
+/// byte, which only an octal escape decodes to: Git reads the entry as a C
+/// string, as far as that byte (`strbuf_realpath` over `pathbuf.buf`), so the
+/// path it resolves is not the one written. And, on Windows, one that is not
+/// Unicode once decoded: Git for Windows converts the path it holds to UTF-16
+/// in a way this check does not reproduce.
+fn not_an_absolute_entry(entry: Vec<u8>) -> Option<NotAbsolute> {
+    if entry.contains(&0) {
+        return Some(NotAbsolute::Unclassified(
+            "its unquoting decodes a NUL byte, and Git reads the entry only as far as that byte",
+        ));
+    }
+    match entry_path(entry) {
+        Some(path) if Path::new(&path).is_absolute() => None,
+        Some(path) => Some(NotAbsolute::Entry(path)),
+        None => Some(NotAbsolute::Unclassified(
+            "it is not Unicode once unquoted, and Git for Windows converts such a path in a way \
+             this check does not reproduce",
+        )),
+    }
+}
+
+/// A decoded entry's bytes as the path they spell: on Unix, any bytes.
+#[cfg(unix)]
+fn entry_path(bytes: Vec<u8>) -> Option<OsString> {
+    use std::os::unix::ffi::OsStringExt as _;
+
+    Some(OsString::from_vec(bytes))
+}
+
+/// See the Unix half: elsewhere, only bytes that are UTF-8.
+#[cfg(not(unix))]
+fn entry_path(bytes: Vec<u8>) -> Option<OsString> {
+    String::from_utf8(bytes).ok().map(OsString::from)
+}
+
+/// The entries of an alternates list that decode non-empty, decoded exactly as
+/// Git decodes them: `parse_alt_odb_entry` and `link_alt_odb_entries`
+/// (`object-file.c` at v2.41.0 and v2.43.0), and `parse_alternates` (`odb.c`
+/// at v2.55.0 and at Git for Windows' v2.53.0.windows.1), whose loops are one
+/// rule.
+///
+/// At an entry's first byte, `#` starts a comment that runs to the next
+/// separator and contributes no path; `"` starts a C-style quoted path, which
+/// [`unquote_c_style`] decodes, and a quoted path whose quoting is broken is
+/// read as written instead; anything else is a path running to the next
+/// separator, byte for byte. Git then steps past one more byte when one is
+/// left -- the separator, or, after a closing quote, whatever byte follows it
+/// -- and skips an entry that decoded empty. So `"/a":/b` is two absolute
+/// entries, `"/a"/b` is `/a` and the relative `b`, and `"/a:/b` is the relative
+/// `"/a` and then `/b`. An entry Git takes is resolved from the process's
+/// directory when it is not absolute: the list carries no base of its own
+/// (`relative_base` is `NULL` for it).
+fn alternate_entries(list: &[u8], separator: u8) -> Vec<Vec<u8>> {
+    let mut entries = Vec::new();
+    let mut rest = list;
+    while let Some(&first) = rest.first() {
+        let quoted = if first == b'"' {
+            unquote_c_style(rest)
+        } else {
+            None
+        };
+        let (entry, end) = quoted.unwrap_or_else(|| {
+            let end = rest
+                .iter()
+                .position(|&byte| byte == separator)
+                .unwrap_or(rest.len());
+            let entry = if first == b'#' {
+                Vec::new()
+            } else {
+                rest.get(..end).unwrap_or_default().to_vec()
+            };
+            (entry, end)
+        });
+        rest = rest.get(end..).unwrap_or_default();
+        rest = rest.get(1..).unwrap_or_default();
+        if !entry.is_empty() {
+            entries.push(entry);
+        }
+    }
+    entries
+}
+
+/// Git's `unquote_c_style` (`quote.c`, byte-identical at v2.41.0, v2.43.0,
+/// v2.55.0 and Git for Windows' v2.53.0.windows.1) over `quoted`, which starts
+/// with its opening quote: the bytes it decodes and how many bytes it consumed
+/// through the closing quote, or `None` where Git's returns an error.
+///
+/// A quoted path runs to its closing quote across any separator. Its escapes
+/// are `\a`, `\b`, `\f`, `\n`, `\r`, `\t`, `\v`, `\\`, `\"`, and exactly three
+/// octal digits of which the first is `0` to `3`; any other escape, and a quote
+/// the value never closes, is an error.
+fn unquote_c_style(quoted: &[u8]) -> Option<(Vec<u8>, usize)> {
+    let mut decoded = Vec::new();
+    let mut at = 1;
+    loop {
+        let byte = *quoted.get(at)?;
+        at += 1;
+        match byte {
+            b'"' => return Some((decoded, at)),
+            b'\\' => {
+                let escape = *quoted.get(at)?;
+                at += 1;
+                decoded.push(match escape {
+                    b'a' => 0x07,
+                    b'b' => 0x08,
+                    b'f' => 0x0c,
+                    b'n' => b'\n',
+                    b'r' => b'\r',
+                    b't' => b'\t',
+                    b'v' => 0x0b,
+                    b'\\' | b'"' => escape,
+                    b'0'..=b'3' => {
+                        let middle = octal_digit(*quoted.get(at)?)?;
+                        let low = octal_digit(*quoted.get(at + 1)?)?;
+                        at += 2;
+                        ((escape - b'0') << 6) | (middle << 3) | low
+                    }
+                    _ => return None,
+                });
+            }
+            other => decoded.push(other),
+        }
+    }
+}
+
+/// The value of an octal digit, or `None` for any other byte.
+fn octal_digit(byte: u8) -> Option<u8> {
+    byte.checked_sub(b'0').filter(|digit| *digit < 8)
+}
+
+/// R-C-REGISTRY part 1's start refusal: [`Refusal::LinkedWorktreesRegistry`]
+/// when `common_git_dir`, the run's canonical common directory, holds a
+/// `worktrees` entry whose canonical path's parent is not `common_git_dir`, and
+/// `inherits_common_dir` is false.
+///
+/// The owner adopted it on 2026-10-15 (`adopted.ENV.choices[4]`): "A schema-4
+/// (topology) run, and its resume, refuses before it makes or reuses any slot
+/// when the run's common directory holds a `worktrees` entry whose canonical
+/// path's parent is not the canonical common directory, and the coordinator
+/// inherits no `GIT_COMMON_DIR`. That is the condition under which the `../..`
+/// record Git writes for a new work tree names another directory." Git resolves
+/// that record against the real path of the work tree's administrative
+/// directory, as [`keeps_common_dir`] records, so the record names the parent
+/// of the canonical `worktrees`.
+///
+/// An inherited [`COMMON_DIR`] counts whatever its value, an empty one
+/// included: Git takes a set variable as set (`get_common_dir`, `setup.c`) and
+/// prefers it to the record for objects and configuration. That case is part
+/// 2's, accepted by name rather than refused. An absent entry is not refused,
+/// since Git makes it a directory, and neither is a link whose target is
+/// still a direct child of the common directory. A link inside the common
+/// directory whose target's parent is elsewhere is refused, and so is a chain
+/// of links, which `canonicalize` follows to its end.
+///
+/// It starts no process and writes nothing; what precedes it in
+/// [`WorkspaceManager::derive`] is the manager's one read-only
+/// `git rev-parse --git-common-dir`, which finds `common_git_dir`.
+///
+/// # Errors
+///
+/// [`Refusal::LinkedWorktreesRegistry`], naming the entry and its target; and
+/// [`UpstrokeError::Io`] when an entry is there and cannot be read or resolved,
+/// a link whose target is gone among them, because a path the filesystem never
+/// resolved shows nothing about which directory its record names.
+fn refuse_linked_registry(
+    common_git_dir: &Path,
+    inherits_common_dir: bool,
+) -> Result<(), UpstrokeError> {
+    if inherits_common_dir {
+        return Ok(());
+    }
+    let entry = common_git_dir.join("worktrees");
+    match fs::symlink_metadata(&entry) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => {
+            return Err(UpstrokeError::Io {
+                path: entry,
+                source,
+            });
+        }
+    }
+    let target = match fs::canonicalize(&entry) {
+        Ok(target) => strip_verbatim(target),
+        Err(source) => {
+            return Err(UpstrokeError::Io {
+                path: entry,
+                source,
+            });
+        }
+    };
+    if target.parent() == Some(common_git_dir) {
+        return Ok(());
+    }
+    Err(Refusal::LinkedWorktreesRegistry { entry, target }.into())
+}
+
 /// The root of every run's ref namespace: a run's refs live under
 /// `refs/upstroke/runs/<run-id>/`, and the engine writes nothing else there.
 ///
@@ -678,6 +1001,80 @@ pub enum Refusal {
         /// What the store was found to be instead.
         found: String,
     },
+
+    /// R-C-RELSTORE's start refusal ([`refuse_relative_repository_wide_names`]):
+    /// the coordinator inherits a repository-wide name whose value, or one of
+    /// whose alternates entries, is not an absolute path. It names the variable
+    /// and says to export it as an absolute path.
+    #[error(
+        "refusing to start or resume a schema-4 run: the inherited `{name}` {why}. A Git child \
+         the engine runs in a work tree it made, or a role started in one, would resolve it from \
+         that work tree rather than from the checkout the run was started in; export `{name}` as \
+         an absolute path"
+    )]
+    RelativeRepositoryWideName {
+        /// The variable.
+        name: &'static str,
+        /// What in its value is not an absolute path.
+        why: NotAbsolute,
+    },
+
+    /// R-C-REGISTRY part 1's start refusal ([`refuse_linked_registry`]): the
+    /// run's `worktrees` registry resolves outside its common directory and no
+    /// `GIT_COMMON_DIR` is inherited. It names the entry and its target.
+    #[error(
+        "refusing to start or resume a schema-4 run: the worktree registry {} of the run's \
+         common directory resolves to {}, whose parent is not that common directory, and no \
+         `GIT_COMMON_DIR` is inherited, so the `../..` record Git writes for a new work tree \
+         would name another directory. The run stays refused until the link is removed or a \
+         `GIT_COMMON_DIR` is exported",
+        .entry.display(),
+        .target.display()
+    )]
+    LinkedWorktreesRegistry {
+        /// The `worktrees` entry of the run's common directory.
+        entry: PathBuf,
+        /// Its canonical path.
+        target: PathBuf,
+    },
+}
+
+/// What in an inherited value [`Refusal::RelativeRepositoryWideName`] refuses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NotAbsolute {
+    /// The value, which is not an absolute path by the platform's rule.
+    Value(OsString),
+    /// An entry of the alternates list, split and unquoted as Git splits and
+    /// unquotes it, which is not an absolute path by the platform's rule.
+    Entry(OsString),
+    /// An entry of the alternates list this check cannot classify exactly, and
+    /// why.
+    Unclassified(&'static str),
+}
+
+impl std::fmt::Display for NotAbsolute {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Value(value) if value.is_empty() => {
+                formatter.write_str("is empty, and an empty value is not an absolute path")
+            }
+            Self::Value(value) => write!(
+                formatter,
+                "is `{}`, which is not an absolute path",
+                Path::new(value).display()
+            ),
+            Self::Entry(entry) => write!(
+                formatter,
+                "holds the entry `{}`, which is not an absolute path, once the list is split and \
+                 unquoted as Git splits and unquotes it",
+                Path::new(entry).display()
+            ),
+            Self::Unclassified(why) => write!(
+                formatter,
+                "holds an entry this check cannot classify exactly: {why}"
+            ),
+        }
+    }
 }
 
 impl From<Refusal> for UpstrokeError {
@@ -2374,12 +2771,16 @@ impl WorkspaceManager {
     /// [`Refusal::RunId`], [`Refusal::BaseIsNotADirectory`],
     /// [`Refusal::RootOutsidePrivateRoot`], [`Refusal::ReparsePointOnChain`],
     /// [`Refusal::RootInsideRepositoryWorktree`] and
-    /// [`Refusal::WorktreeInsideRoot`]; [`UpstrokeError::Io`] when the base or
-    /// the private root cannot be read or resolved;
-    /// [`UpstrokeError::RegistryRefused`] when the worktree list, or a
-    /// registered worktree's path, cannot be read by the registry access's
-    /// deadline ([`Self::revalidate`]); and a Git error when the base is not a
-    /// repository.
+    /// [`Refusal::WorktreeInsideRoot`]; R5's two schema-4 start refusals,
+    /// [`Refusal::RelativeRepositoryWideName`] before the manager's first Git
+    /// child and [`Refusal::LinkedWorktreesRegistry`] once that child has found
+    /// the common directory, both before any registry access, so a resume
+    /// refuses before it reuses a slot; [`UpstrokeError::Io`] when the base or
+    /// the private root cannot be read or resolved, or when the common
+    /// directory's `worktrees` entry cannot be; [`UpstrokeError::RegistryRefused`]
+    /// when the worktree list, or a registered worktree's path, cannot be read by
+    /// the registry access's deadline ([`Self::revalidate`]); and a Git error
+    /// when the base is not a repository.
     pub fn derive(
         base: &Path,
         private_root: &Path,
@@ -2390,7 +2791,9 @@ impl WorkspaceManager {
         refuse_unreal_directory(base)?;
         refuse_unreal_directory(private_root)?;
 
+        refuse_relative_repository_wide_names()?;
         let common_git_dir = common_git_dir(ReadAt::Base, base)?;
+        refuse_linked_registry(&common_git_dir, std::env::var_os(COMMON_DIR).is_some())?;
         let store = RegistrationStore::of(&common_git_dir);
         let repo_key = repo_key_v1(&common_git_dir);
         let private_root = canonical_prefix(private_root)?;

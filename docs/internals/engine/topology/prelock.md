@@ -138,6 +138,11 @@ Where the run id, the incarnation and the pid come from.
 
 Perform the read-only pre-lock checks, in the packet's order.
 
+0. R-C-RELSTORE's start refusal, before everything else: the coordinator's
+   inherited environment, read for exactly seven repository-wide names, refused
+   when one holds a value, or an alternates entry, that is not an absolute path.
+   It is not one of the packet's checks; it comes first so that a fresh
+   schema-4 run refuses it before anything this function inspects.
 1. The authorized private root: canonicalized, and refused when it is not an
    existing real directory. `run_creation` records the marker's `private_dir`
    "as a canonical path", and a root that is not there yet cannot be
@@ -150,12 +155,35 @@ Perform the read-only pre-lock checks, in the packet's order.
 
 ### Errors
 
-[`UpstrokeError::Refused`] when the private root is not a real directory,
-when a `Container` selection has no runtime seam, or when the container
-inspection refuses — an unreachable runtime, an image reference absent from
-the runtime (there is no implicit pull), or an absent credential volume.
-[`UpstrokeError::Io`] when the root cannot be canonicalized for any other
-reason.
+[`UpstrokeError::Refused`] when the coordinator inherits a repository-wide
+name that is not an absolute path (R-C-RELSTORE), when the private root is not
+a real directory, when a `Container` selection has no runtime seam, or when the
+container inspection refuses — an unreachable runtime, an image reference
+absent from the runtime (there is no implicit pull), or an absent credential
+volume. [`UpstrokeError::Io`] when the root cannot be canonicalized for any
+other reason.
+
+## `pub fn check(inputs: &PreLock<'_>) -> Result<PreLockChecked, UpstrokeError> {` › `crate::workspace_manager::refuse_relative_repository_wide_names()?;`
+
+R-C-RELSTORE's start refusal on the fresh path, adopted by the owner on
+2026-10-15 (`adopted.ENV.choices[3]`): "A schema-4 (topology) run, and its
+resume, refuses before it makes or reuses any slot when the coordinator's
+inherited environment holds, for `GIT_OBJECT_DIRECTORY`, `GIT_SHALLOW_FILE`,
+`GIT_GRAFT_FILE`, `GIT_CONFIG`, `GIT_CONFIG_GLOBAL` or `GIT_CONFIG_SYSTEM`, a
+value that is not an absolute path by the platform's rule, or a
+`GIT_ALTERNATE_OBJECT_DIRECTORIES` entry that is not, split and unquoted exactly
+as Git splits and unquotes that list; a value the check cannot classify exactly
+is refused."
+
+It is the first statement, so it precedes the private root's canonicalization,
+the runner policy's resolution and its container inspections, and every id: a
+refused fresh run has taken no lock, asked the runtime nothing and made
+nothing. The check reads seven environment variables and nothing else, starts
+no process and writes nothing; the rule and the Git sources it reproduces are
+the function's own documentation in `src/workspace_manager.rs`.
+`WorkspaceManager::derive` runs the same check again before the manager's first
+Git child, which is where a resume meets it; on the fresh path that second run
+is an idempotent repeat.
 
 ## `pub fn check(inputs: &PreLock<'_>) -> Result<PreLockChecked, UpstrokeError> {` › `let run_id = inputs.ids.run_id();`
 

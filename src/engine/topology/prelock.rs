@@ -90,6 +90,7 @@ pub struct PreLock<'a> {
 }
 
 pub fn check(inputs: &PreLock<'_>) -> Result<PreLockChecked, UpstrokeError> {
+    crate::workspace_manager::refuse_relative_repository_wide_names()?;
     let private_root = authorized_private_root(inputs.private_root)?;
 
     let policy = match inputs.selection.kind {

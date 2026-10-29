@@ -27610,4 +27610,165 @@ git cat-file -e 'HEAD^{tree}'
             );
         });
     }
+
+    #[test]
+    fn a_clean_run_resumed_under_a_linked_registry_is_refused_until_the_link_is_gone() {
+        assert!(
+            std::env::var_os(crate::workspace_manager::COMMON_DIR).is_none(),
+            "the condition under test is that no `GIT_COMMON_DIR` is inherited, and this process \
+             inherits one"
+        );
+        let tasks = [WideTask::independent("alpha")];
+        let Wide { run, env } = Wide::durable(
+            "resume-linked-registry",
+            &tasks,
+            1,
+            WidePlans::default(),
+            RecordingRunner::new().answering(wide_responder(&tasks, &[])),
+        );
+        drop(run);
+        let registry = env.fixture.base.join(".git").join("worktrees");
+        let elsewhere = env.fixture.root.join("other").join("worktrees");
+        crate::workspace_manager::fixture::create_dir(&elsewhere);
+        crate::workspace_manager::fixture::link_directory(&elsewhere, &registry);
+        let log = std::fs::read(&env.log).expect("the run's log");
+        let execution_root = env.fixture.manager.execution_root().to_path_buf();
+        let trace = crate::runner::container::runtime::ContainerTrace::recording();
+        let runtime = crate::runner::container::FakeRuntime::new(trace.clone());
+        let liveness = crate::runner::container::FakeOwnerLiveness::new();
+        let mut hooks = env.hooks();
+        let (refused, env) = match env.try_resume_over(
+            "inc-2",
+            RecordingRunner::new().answering(wide_responder(&tasks, &[])),
+            crate::engine::topology::select::Ceiling::unlimited(),
+            &crate::engine::topology::scaffold::ResumingOver {
+                runtime: &runtime,
+                liveness: &liveness,
+                preflight: &crate::engine::topology::scaffold::Certifying,
+                awaits_release: false,
+            },
+            &mut hooks,
+        ) {
+            Ok(_) => panic!("the resume went ahead under a registry linked out of the run"),
+            Err(refused) => *refused,
+        };
+        let message = refused.to_string();
+        let target = std::path::Path::new("other").join("worktrees");
+        assert!(
+            message.contains("refusing to start or resume a schema-4 run")
+                && message.contains("no `GIT_COMMON_DIR` is inherited")
+                && message.contains(&target.display().to_string()),
+            "the resume refuses, naming the entry and its target: {message}"
+        );
+        assert_eq!(
+            std::fs::read(&env.log).expect("the run's log"),
+            log,
+            "the refused resume appended nothing"
+        );
+        assert!(
+            trace.entries().is_empty(),
+            "no runtime inspection or probe ran after the refusal: {:?}",
+            trace.rendered()
+        );
+        for (directory, what) in [
+            (execution_root.join("tasks"), "slot"),
+            (execution_root.join("intents"), "intent"),
+            (elsewhere, "registration in the linked directory"),
+        ] {
+            assert_eq!(
+                std::fs::read_dir(&directory)
+                    .expect("a directory of the run")
+                    .count(),
+                0,
+                "the refused resume made no {what}"
+            );
+        }
+        crate::workspace_manager::fixture::unlink_directory(&registry);
+        let (_, mut resumed) = env
+            .resume(
+                "inc-2",
+                RecordingRunner::new().answering(wide_responder(&tasks, &[])),
+                crate::engine::topology::select::Ceiling::unlimited(),
+            )
+            .expect("once the link is gone the run resumes");
+        let progress = drive(&mut resumed, None).expect("the resumed run completes");
+        assert_eq!(outcome_of(&progress), RunOutcome::Complete);
+    }
+
+    #[cfg(unix)]
+    const BOUNDARY_ROOT: &str = "UPSTROKE_TEST_R5_BOUNDARY_ROOT";
+
+    #[cfg(unix)]
+    #[test]
+    fn a_relative_object_directory_refuses_derive_with_the_resumes_arguments() {
+        let tasks = [WideTask::independent("alpha")];
+        let Wide { run, env } = Wide::durable(
+            "resume-relative-objects",
+            &tasks,
+            1,
+            WidePlans::default(),
+            RecordingRunner::new().answering(wide_responder(&tasks, &[])),
+        );
+        drop(run);
+        let log = std::fs::read(&env.log).expect("the run's log");
+        let execution_root = env.fixture.manager.execution_root().to_path_buf();
+        let ended = crate::agent::proc::test_support::run_test_isolated(
+            "engine::topology::coordinator::tests::relative_name_derive_boundary_child",
+            &[
+                ("GIT_OBJECT_DIRECTORY", std::ffi::OsStr::new("../objects")),
+                (BOUNDARY_ROOT, env.fixture.root.as_os_str()),
+            ],
+            BOUND,
+        );
+        assert!(
+            ended.status.is_some_and(|status| status.success())
+                && ended.stdout.contains("1 passed"),
+            "{ended}"
+        );
+        assert_eq!(
+            std::fs::read(&env.log).expect("the run's log"),
+            log,
+            "the refused `derive` left the run's log as it was"
+        );
+        for name in ["tasks", "intents"] {
+            assert_eq!(
+                std::fs::read_dir(execution_root.join(name))
+                    .expect("a directory of the run")
+                    .count(),
+                0,
+                "the refused `derive` made nothing in `{name}`"
+            );
+        }
+        let (_, mut resumed) = env
+            .resume(
+                "inc-2",
+                RecordingRunner::new().answering(wide_responder(&tasks, &[])),
+                crate::engine::topology::select::Ceiling::unlimited(),
+            )
+            .expect("without the relative value the run resumes");
+        let progress = drive(&mut resumed, None).expect("the resumed run completes");
+        assert_eq!(outcome_of(&progress), RunOutcome::Complete);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "subprocess helper"]
+    fn relative_name_derive_boundary_child() {
+        let Some(root) = std::env::var_os(BOUNDARY_ROOT).map(std::path::PathBuf::from) else {
+            return;
+        };
+        let refused = crate::workspace_manager::WorkspaceManager::derive(
+            &root.join("repo"),
+            &root.join("private"),
+            crate::workspace_manager::fixture::RUN_ID,
+            "inc-2",
+        )
+        .expect_err("`derive` with the resume's arguments refuses the relative value");
+        let message = refused.to_string();
+        assert!(
+            message.contains("the inherited `GIT_OBJECT_DIRECTORY` is `../objects`")
+                && message.contains("export `GIT_OBJECT_DIRECTORY` as an absolute path"),
+            "{message}"
+        );
+    }
 }

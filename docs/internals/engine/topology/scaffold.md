@@ -1297,7 +1297,7 @@ This is the shape C5's equal-depth layout needs (`EQUAL_DEPTH_BASE`, the
 proposal's PROP:2129): one relative `GIT_COMMON_DIR` names the run's common
 directory from the base and from every work tree. On every platform: T-ENV-TOPO's
 C5 row runs on Windows too. The integration correction's host-runner controls
-use it (F), and R5's later carry reuses it.
+use it (F).
 
 ## `impl Wide` › `fn durable_over(`
 

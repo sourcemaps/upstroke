@@ -1026,6 +1026,17 @@ pub(crate) fn link_directory(target: &Path, link: &Path) {
     );
 }
 
+/// Remove the directory link at `link`, of the kind [`link_directory`] makes,
+/// and nothing it names: a junction is removed as a directory, a symbolic link
+/// as a file.
+pub(crate) fn unlink_directory(link: &Path) {
+    #[cfg(windows)]
+    let removed = fs::remove_dir(link);
+    #[cfg(not(windows))]
+    let removed = fs::remove_file(link);
+    removed.unwrap_or_else(|error| panic!("unlinking {}: {error}", link.display()));
+}
+
 /// Set the Unix mode of `path`: how a test in a topology module, which cannot
 /// name `set_permissions`, makes a directory one the engine cannot write.
 #[cfg(unix)]

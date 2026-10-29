@@ -21695,7 +21695,13 @@ const F_LINKED_SEQUENCE: &str = "UPSTROKE_TEST_F_LINKED_SEQUENCE";
 /// manager's work trees (PROP:2129), and this test asserts that the value names
 /// the run's common directory from the base and from the slot the child adds.
 /// The same C4 layout with nothing inherited is refused by the guarded read,
-/// the original rule. Each sequence runs in an isolated child whose
+/// the original rule. With nothing inherited `derive` refuses a link already
+/// in place (R-C-REGISTRY part 1's start refusal, which
+/// [`derive_refuses_a_linked_worktrees_registry_while_no_common_dir_is_inherited`]
+/// witnesses), so in that sequence the child plants the link itself, once its
+/// own `derive` has passed: the link a guarded read meets after the start.
+/// This process inherits nothing either, and derives the slot path before it
+/// plants any link. Each sequence runs in an isolated child whose
 /// environment alone carries the value; the guarded operations are
 /// `candidate_stage` (the manifest's read), `candidate_write_tree` (its
 /// pre-check) and `kept_instances`.
@@ -21736,7 +21742,6 @@ fn a_linked_registry_keeps_the_managers_guarded_reads_under_the_inherited_common
         );
         let elsewhere = other.join(".git").join("worktrees");
         create_dir(&elsewhere);
-        super::fixture::link_directory(&elsewhere, &base.join(".git").join("worktrees"));
         let common = fs::canonicalize(base.join(".git")).expect("the run's common directory");
         let depth = below.components().count();
         let named = common
@@ -21753,6 +21758,9 @@ fn a_linked_registry_keeps_the_managers_guarded_reads_under_the_inherited_common
             key: "linked".to_owned(),
             generation: 1,
         });
+        if sequence != "C4 with nothing inherited" {
+            super::fixture::link_directory(&elsewhere, &base.join(".git").join("worktrees"));
+        }
         let mut relative = PathBuf::new();
         for _ in 0..depth {
             relative.push("..");
@@ -21804,7 +21812,8 @@ fn a_linked_registry_keeps_the_managers_guarded_reads_under_the_inherited_common
 /// The child of
 /// [`a_linked_registry_keeps_the_managers_guarded_reads_under_the_inherited_common_dir`]:
 /// one sequence, under the names its environment inherited, through the
-/// manager's own API.
+/// manager's own API. In the sequence with nothing inherited it plants the
+/// registry's link itself, after `derive` and before the slot is added.
 #[cfg(unix)]
 #[test]
 #[ignore = "subprocess helper"]
@@ -21824,6 +21833,12 @@ fn linked_registry_guarded_reads_child() {
         "inc-linked",
     )
     .unwrap_or_else(|error| panic!("{sequence}: derive: {error}"));
+    if sequence == "C4 with nothing inherited" {
+        super::fixture::link_directory(
+            &root.join("other").join(".git").join("worktrees"),
+            &base.join(".git").join("worktrees"),
+        );
+    }
     assert_eq!(
         manager.common_git_dir(),
         fs::canonicalize(base.join(".git"))
@@ -21895,33 +21910,223 @@ fn linked_registry_guarded_reads_child() {
 // ---------------------------------------------------------------------------
 // A registration store pinned at derivation (F, the integration correction)
 // ---------------------------------------------------------------------------
+//
+// R5's start check in `derive` refuses a manager over a store linked out of the
+// common directory while no `GIT_COMMON_DIR` is inherited (R-C-REGISTRY part 1),
+// and fails closed over a store link it cannot resolve. Under an inherited value,
+// part 2's configuration, it admits both without reading the store. Every row
+// here that derives over such a link therefore derives in a pin child: a
+// `LinkedChild` of this binary, on every platform, that inherits the run's
+// canonical common directory as an absolute `GIT_COMMON_DIR` and makes the row's
+// removals and every one of its assertions. This process makes the fixture, its
+// registrations and any other repository first, inheriting nothing, plants the
+// link, and owns the fixture until the child is gone. F's runs of these rows in
+// one process, with nothing inherited, are its evidence at F and ENV.
 
 /// The fixture's registration store, `<common git dir>/worktrees`, moved with
-/// every registration in it to `target`; a directory link to `target` planted
-/// where it was, a symlink or on Windows a junction; and a manager derived over
-/// that link, so the store is a link when the manager is derived. Returns the
-/// manager, the store and the target as the manager pins it: canonical, with
-/// no verbatim prefix.
+/// every registration in it to `target`, and a directory link to `target`
+/// planted where it was, a symlink or on Windows a junction, so the store is a
+/// link when a pin child derives its manager.
 ///
-/// The fixture's own manager, derived over the ordinary store, makes the
-/// registrations before this, so each is Git's own. An add through the link
-/// with no `GIT_COMMON_DIR` given makes none: Git's checkout of the new work
-/// tree fails, `not a git repository`, or `nonexistent object` where the link
-/// names another repository's store, before any removal. After this the
-/// fixture's manager names paths and does nothing else.
-fn link_store_to(fixture: &Fixture, target: &Path) -> (WorkspaceManager, PathBuf, PathBuf) {
+/// The fixture's own manager, derived over the ordinary store in this process,
+/// which inherits no `GIT_COMMON_DIR`, makes the registrations before this, so
+/// each is Git's own. An add through the link with no `GIT_COMMON_DIR` given
+/// makes none: Git's checkout of the new work tree fails, `not a git
+/// repository`, or `nonexistent object` where the link names another
+/// repository's store, before any removal. After this the fixture's manager
+/// names paths and does nothing else.
+fn link_store_to(fixture: &Fixture, target: &Path) {
     let store = fixture.manager.common_git_dir().join("worktrees");
     fs::rename(&store, target).expect("the store moved, with its registrations, to the target");
     plant_directory_link(target, &store);
-    let manager = WorkspaceManager::derive(
-        &fixture.base,
-        &fixture.private,
-        super::fixture::RUN_ID,
-        "inc-1",
-    )
-    .expect("derive the manager over the linked store");
-    let target = strip_verbatim(fs::canonicalize(target).expect("the canonical target"));
-    (manager, store, target)
+}
+
+/// `target`, which [`link_store_to`] moved the store to, as a manager derived
+/// over the link pins it: canonical, with no verbatim prefix.
+fn pinned_target(target: &Path) -> PathBuf {
+    strip_verbatim(fs::canonicalize(target).expect("the canonical target"))
+}
+
+/// The variables a pin child reads, each set by its parent to the `OsStr` it
+/// holds: the scratch root of the parent's fixture, its managed base and
+/// private root, the case the child runs, and the run's canonical common
+/// directory, which the child's `GIT_COMMON_DIR` names.
+const PIN_ROOT: &str = "UPSTROKE_TEST_PIN_ROOT";
+const PIN_BASE: &str = "UPSTROKE_TEST_PIN_BASE";
+const PIN_PRIVATE: &str = "UPSTROKE_TEST_PIN_PRIVATE";
+const PIN_CASE: &str = "UPSTROKE_TEST_PIN_CASE";
+const PIN_COMMON: &str = "UPSTROKE_TEST_PIN_COMMON";
+
+/// The identity of the snapshot T-PIN-1's parent added, handed to its child:
+/// its name, its checkout and the commit its HEAD names, as the handle's own
+/// getters return them, and the handle as `Debug` renders it.
+const PIN_SNAPSHOT_NAME: &str = "UPSTROKE_TEST_PIN_SNAPSHOT_NAME";
+const PIN_SNAPSHOT_PATH: &str = "UPSTROKE_TEST_PIN_SNAPSHOT_PATH";
+const PIN_SNAPSHOT_HEAD: &str = "UPSTROKE_TEST_PIN_SNAPSHOT_HEAD";
+const PIN_SNAPSHOT_DEBUG: &str = "UPSTROKE_TEST_PIN_SNAPSHOT_DEBUG";
+
+/// Run pin child `test` for `case` over `fixture`, whose store
+/// [`link_store_to`] has linked, with `handed` beside the handoff, and say
+/// whether it passed: `Ok` only when libtest reports the child's one test
+/// passed, within [`super::fixture::LINK_BOUND`], and the child then exits with
+/// success, so every assertion it makes held. Otherwise the error says what
+/// the child reported, how it ended and what its stderr holds.
+///
+/// The child is a [`super::fixture::LinkedChild`] of this binary, which runs
+/// on every platform. Its environment is this process's, with `GIT_COMMON_DIR`
+/// set to the run's canonical common directory, an absolute path, and each
+/// handed variable set to the `OsStr` itself. The child adopts no fixture:
+/// this process owns `fixture`, and its tree is reclaimed here once the child
+/// is gone.
+fn run_pin_child(
+    test: &str,
+    fixture: &Fixture,
+    case: &str,
+    handed: &[(&str, &OsStr)],
+) -> Result<(), String> {
+    let common = fixture.manager.common_git_dir();
+    let mut env = vec![
+        (COMMON_DIR, common.as_os_str()),
+        (PIN_ROOT, fixture.root.as_os_str()),
+        (PIN_BASE, fixture.base.as_os_str()),
+        (PIN_PRIVATE, fixture.private.as_os_str()),
+        (PIN_CASE, OsStr::new(case)),
+        (PIN_COMMON, common.as_os_str()),
+    ];
+    env.extend_from_slice(handed);
+    let test = format!("workspace_manager::tests::{test}");
+    let stderr = fixture.root.join("pin-child.stderr");
+    let (child, lines) = super::fixture::LinkedChild::spawn(&test, &env, &stderr);
+    let deadline = std::time::Instant::now() + super::fixture::LINK_BOUND;
+    let mut said = Vec::new();
+    let result = loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        match lines.recv_timeout(left) {
+            Ok(line) if line.contains("test result:") => break Some(line),
+            Ok(line) => said.push(line),
+            Err(_) => break None,
+        }
+    };
+    let ended = result
+        .as_ref()
+        .and_then(|_| child.wait_within(super::fixture::LINK_BOUND));
+    match (&result, ended) {
+        (Some(line), Some(status))
+            if line.contains("test result: ok. 1 passed; 0 failed") && status.success() =>
+        {
+            Ok(())
+        }
+        _ => Err(format!(
+            "{test} did not pass: its result {result:?}, its exit {ended:?}, its other lines \
+             {said:?}; its stderr:\n{}",
+            fs::read_to_string(&stderr).unwrap_or_default()
+        )),
+    }
+}
+
+/// What a pin child is handed ([`PIN_ROOT`] and the rest), each value read as
+/// the `OsString` its parent set, none converted. Every one is required: a pin
+/// child runs only under its parent, and one started without them fails rather
+/// than passing with nothing asserted.
+struct PinChild {
+    root: PathBuf,
+    base: PathBuf,
+    private: PathBuf,
+    case: OsString,
+    common: PathBuf,
+}
+
+impl PinChild {
+    /// The handoff, once this process's `GIT_COMMON_DIR` is found to name the
+    /// handed common directory exactly, as an absolute path: the configuration
+    /// R5's start check admits for a store linked out of it (R-C-REGISTRY part
+    /// 2).
+    fn handed() -> Self {
+        let child = Self {
+            root: PathBuf::from(pin_variable(PIN_ROOT)),
+            base: PathBuf::from(pin_variable(PIN_BASE)),
+            private: PathBuf::from(pin_variable(PIN_PRIVATE)),
+            case: pin_variable(PIN_CASE),
+            common: PathBuf::from(pin_variable(PIN_COMMON)),
+        };
+        assert!(
+            child.common.is_absolute(),
+            "the run's common directory is handed as an absolute path: {}",
+            child.common.display()
+        );
+        assert_eq!(
+            std::env::var_os(COMMON_DIR).as_deref(),
+            Some(child.common.as_os_str()),
+            "the child inherits the run's canonical common directory as its `GIT_COMMON_DIR`"
+        );
+        child
+    }
+
+    /// The entry of `cases` whose label is the case the parent named, matched
+    /// exactly against the `OsString` it set.
+    fn case_of<T: Copy, const N: usize>(&self, cases: [(&'static str, T); N]) -> (&'static str, T) {
+        cases
+            .into_iter()
+            .find(|(label, _)| self.case.as_os_str() == OsStr::new(label))
+            .unwrap_or_else(|| panic!("a case its parent runs, not {:?}", self.case))
+    }
+
+    /// The manager the parent's fixture holds, run `RUN_ID` and incarnation
+    /// `inc-1` over its base and private root, derived here, where the store is
+    /// the link the parent planted. `what` is why it must derive, and its common
+    /// git dir must be the handed one.
+    fn derive(&self, what: &str) -> WorkspaceManager {
+        let manager =
+            WorkspaceManager::derive(&self.base, &self.private, super::fixture::RUN_ID, "inc-1")
+                .expect(what);
+        assert_eq!(
+            manager.common_git_dir(),
+            self.common.as_path(),
+            "the manager is derived over the run's canonical common directory"
+        );
+        manager
+    }
+
+    /// The snapshot T-PIN-1's parent added, rebuilt here from the identity it
+    /// handed over ([`PIN_SNAPSHOT_NAME`] and the rest) through the funnel's own
+    /// `Snapshot::new` and `SnapshotHead::Existing`, and checked against that
+    /// snapshot: `name` is built by the constructor the parent's add was given,
+    /// and the rebuilt handle's getters return the name, checkout and HEAD the
+    /// parent's handle returned, its HEAD the existing commit the add was given.
+    /// The rebuilt handle is also the parent's field for field, as `Debug`
+    /// renders both in this one binary.
+    fn snapshot(&self, name: SnapshotName, tag: &str) -> Snapshot {
+        let path = PathBuf::from(pin_variable(PIN_SNAPSHOT_PATH));
+        let head = pin_variable(PIN_SNAPSHOT_HEAD)
+            .into_string()
+            .unwrap_or_else(|head| panic!("{tag}: an object id is ASCII: {head:?}"));
+        let rebuilt = Snapshot::new(name, path.clone(), SnapshotHead::Existing(oid(&head)));
+        let Slot::Snapshot { name } = rebuilt.slot() else {
+            panic!("{tag}: a snapshot's slot is a snapshot slot: {rebuilt:?}");
+        };
+        assert!(
+            pin_variable(PIN_SNAPSHOT_NAME).as_os_str() == OsStr::new(name.as_str())
+                && rebuilt.path() == path
+                && rebuilt.head().as_str() == head
+                && rebuilt.ephemeral().is_none(),
+            "{tag}: the rebuilt handle names the snapshot the parent's add returned, its checkout \
+             and its HEAD, the existing commit the add was given: {rebuilt:?}"
+        );
+        let rendered = pin_variable(PIN_SNAPSHOT_DEBUG)
+            .into_string()
+            .unwrap_or_else(|rendered| panic!("{tag}: a rendered handle is UTF-8: {rendered:?}"));
+        assert_eq!(
+            format!("{rebuilt:?}"),
+            rendered,
+            "{tag}: the rebuilt handle is the parent's, field for field"
+        );
+        rebuilt
+    }
+}
+
+/// Pin variable `name`, as its parent set it.
+fn pin_variable(name: &str) -> OsString {
+    std::env::var_os(name).unwrap_or_else(|| panic!("{name} is set by the pin child's parent"))
 }
 
 /// The store is still a link, and still resolves to the pinned `target`.
@@ -21937,16 +22142,6 @@ fn assert_pinned_link(store: &Path, target: &Path, tag: &str) {
         target,
         "{tag}: and it still resolves to the pinned target"
     );
-}
-
-/// The directory link at `link` removed, never what it names: a symlink is
-/// unlinked on Unix, and a junction is a directory entry `rmdir` removes on
-/// Windows.
-fn remove_directory_link(link: &Path) {
-    #[cfg(unix)]
-    fs::remove_file(link).expect("remove the symlink");
-    #[cfg(windows)]
-    fs::remove_dir(link).expect("remove the junction");
 }
 
 /// A copy of the registration entry `from` at `into`: its files byte for byte
@@ -21981,7 +22176,7 @@ enum StoreLoss {
 /// under its own name.
 fn lose_store(store: &Path, entry: &Path, loss: StoreLoss, substitute: &Path) {
     let name = entry.file_name().expect("an entry name");
-    remove_directory_link(store);
+    super::fixture::unlink_directory(store);
     match loss {
         StoreLoss::Removed => {}
         StoreLoss::PlainDirectory => copy_entry(entry, &store.join(name)),
@@ -22022,14 +22217,26 @@ impl EffectHooks for LoseStoreAtBefore {
 /// registration beside them, and then the emptied target itself. The target is
 /// another repository's store, the adopted layout, and then a directory of no
 /// repository, since the pin is unconditional. The registrations are Git's
-/// own, made over the ordinary store and moved with it ([`link_store_to`]),
-/// and nothing is inherited: the removals read no `GIT_COMMON_DIR`.
+/// own, made in this process over the ordinary store and moved with it
+/// ([`link_store_to`]), and the other repository is made here too, all before
+/// anything is inherited.
+///
+/// **Admission.** With nothing inherited, R5's start check refuses to derive a
+/// manager over either layout (R-C-REGISTRY part 1). Each layout's manager is
+/// therefore derived, and its removals made, in a [`pinned_store_removals_child`]
+/// that inherits the run's canonical common directory as an absolute
+/// `GIT_COMMON_DIR`, which the check admits (part 2). That the removals read no
+/// `GIT_COMMON_DIR` is a claim of their source, which these runs do not
+/// witness. The snapshot this process's `add_snapshot` returned is handed to
+/// the child by its identity, and the child removes it through
+/// `remove_snapshot`, on the handle it rebuilds from that identity.
 #[test]
 fn a_store_linked_before_derive_removes_only_its_bound_registrations_and_keeps_link_and_target() {
-    for (tag, repository) in [("pinned-repository", true), ("pinned-directory", false)] {
+    let mut cases: Vec<(String, Result<(), String>)> = Vec::new();
+    for (tag, repository) in PINNED_REMOVAL_LAYOUTS {
         let fixture = Fixture::created(tag);
-        let alpha = fixture.add_task(&mut NoHooks, "alpha", 1);
-        let beta = fixture.add_task(&mut NoHooks, "beta", 1);
+        fixture.add_task(&mut NoHooks, "alpha", 1);
+        fixture.add_task(&mut NoHooks, "beta", 1);
         let gate = fixture
             .manager
             .add_snapshot(
@@ -22038,74 +22245,138 @@ fn a_store_linked_before_derive_removes_only_its_bound_registrations_and_keeps_l
                 &SnapshotInput::Commit(oid(&fixture.head)),
             )
             .unwrap_or_else(|error| panic!("{tag}: the snapshot's add: {error}"));
-        let target = if repository {
+        let Slot::Snapshot { name } = gate.slot() else {
+            panic!("{tag}: a snapshot's slot is a snapshot slot: {gate:?}");
+        };
+        assert!(
+            gate.ephemeral().is_none(),
+            "{tag}: the snapshot of a commit names that existing commit: {gate:?}"
+        );
+        if repository {
             let other = fixture.root.join("other");
             create_dir(&other);
             git(&other, &["init", "-q", "-b", "main"]);
-            other.join(".git").join("worktrees")
-        } else {
-            fixture.root.join("any-directory")
-        };
-        let (manager, store, target) = link_store_to(&fixture, &target);
-        let alpha_checkout = fixture.manager.slot_path(&alpha);
-        let beta_checkout = fixture.manager.slot_path(&beta);
-        let entry_of =
-            |checkout: &Path| target.join(checkout.file_name().expect("a checkout name"));
-        let alpha_entry = entry_of(alpha_checkout.as_path());
-        let gate_entry = entry_of(gate.path());
-        let beta_entry = entry_of(beta_checkout.as_path());
-        for entry in [&alpha_entry, &gate_entry, &beta_entry] {
-            assert!(
-                entry.join("gitdir").is_file(),
-                "{tag}: the registration moved with its store, below the target: {}",
-                entry.display()
-            );
         }
-        let foreign = target.join("foreign");
-        fs::create_dir_all(&foreign).expect("a registration no removal binds");
-        let elsewhere = fixture.root.join("elsewhere").join(".git");
-        fs::write(foreign.join("gitdir"), format!("{}\n", elsewhere.display()))
-            .expect("its gitdir, an absolute path on every platform");
-        fs::write(foreign.join("locked"), b"another repository's\n").expect("its locked");
-        let foreign_before = snapshot(&foreign);
-
-        manager
-            .remove_snapshot(&mut NoHooks, &gate)
-            .unwrap_or_else(|error| panic!("{tag}: the snapshot's removal: {error}"));
-        manager
-            .remove_worktree(&mut NoHooks, &alpha)
-            .unwrap_or_else(|error| panic!("{tag}: alpha's removal: {error}"));
-        for (checkout, entry) in [
-            (gate.path(), gate_entry.as_path()),
-            (alpha_checkout.as_path(), alpha_entry.as_path()),
-        ] {
-            assert!(
-                !checkout.exists() && !entry.exists(),
-                "{tag}: {} and its registration are removed",
-                checkout.display()
-            );
-        }
-        assert_eq!(
-            snapshot(&foreign),
-            foreign_before,
-            "{tag}: the registration no removal bound is untouched"
+        link_store_to(&fixture, &pinned_removal_target(&fixture.root, repository));
+        let rendered = format!("{gate:?}");
+        let outcome = run_pin_child(
+            "pinned_store_removals_child",
+            &fixture,
+            tag,
+            &[
+                (PIN_SNAPSHOT_NAME, OsStr::new(name.as_str())),
+                (PIN_SNAPSHOT_PATH, gate.path().as_os_str()),
+                (PIN_SNAPSHOT_HEAD, OsStr::new(gate.head().as_str())),
+                (PIN_SNAPSHOT_DEBUG, OsStr::new(&rendered)),
+            ],
         );
-        assert_pinned_link(&store, &target, tag);
-
-        fs::remove_dir_all(&foreign).expect("the foreign registration goes by hand");
-        manager
-            .remove_worktree(&mut NoHooks, &beta)
-            .unwrap_or_else(|error| panic!("{tag}: beta's removal: {error}"));
-        assert!(!beta_checkout.exists(), "{tag}: beta is removed");
-        assert!(
-            fs::read_dir(&target)
-                .unwrap_or_else(|error| panic!("{tag}: the emptied target is kept: {error}"))
-                .next()
-                .is_none(),
-            "{tag}: the last removal emptied the target and left it"
-        );
-        assert_pinned_link(&store, &target, tag);
+        cases.push((tag.to_owned(), outcome));
     }
+    report_cases(&cases);
+}
+
+/// T-PIN-1's two layouts, each with whether its target is another
+/// repository's store.
+const PINNED_REMOVAL_LAYOUTS: [(&str, bool); 2] =
+    [("pinned-repository", true), ("pinned-directory", false)];
+
+/// Where T-PIN-1 moves the store: the store of the repository at
+/// `<root>/other`, or `<root>/any-directory`.
+fn pinned_removal_target(root: &Path, repository: bool) -> PathBuf {
+    if repository {
+        root.join("other").join(".git").join("worktrees")
+    } else {
+        root.join("any-directory")
+    }
+}
+
+/// The child of
+/// [`a_store_linked_before_derive_removes_only_its_bound_registrations_and_keeps_link_and_target`]:
+/// the layout its parent names, over the store its parent linked. It derives
+/// the manager under the inherited value, then makes everything T-PIN-1 made
+/// after its derivation, in the same order, and every one of its assertions.
+/// The snapshot is the one its parent's `add_snapshot` returned, rebuilt
+/// from the identity the parent handed over and checked against it
+/// ([`PinChild::snapshot`]), and removed through `remove_snapshot`.
+#[test]
+#[ignore = "linked child of the pinned-store tests"]
+fn pinned_store_removals_child() {
+    let handed = PinChild::handed();
+    let (tag, repository) = handed.case_of(PINNED_REMOVAL_LAYOUTS);
+    let manager = handed.derive("derive the manager over the linked store");
+    let store = manager.common_git_dir().join("worktrees");
+    let target = pinned_target(&pinned_removal_target(&handed.root, repository));
+    let gate = handed.snapshot(SnapshotName::gates(0, 1, 1), tag);
+    assert_eq!(
+        gate.path(),
+        manager.slot_path(gate.slot()).as_path(),
+        "{tag}: this manager places the snapshot's slot at the snapshot's checkout"
+    );
+    let alpha = Slot::Task {
+        key: "alpha".to_owned(),
+        generation: 1,
+    };
+    let beta = Slot::Task {
+        key: "beta".to_owned(),
+        generation: 1,
+    };
+    let alpha_checkout = manager.slot_path(&alpha);
+    let beta_checkout = manager.slot_path(&beta);
+    let entry_of = |checkout: &Path| target.join(checkout.file_name().expect("a checkout name"));
+    let alpha_entry = entry_of(alpha_checkout.as_path());
+    let gate_entry = entry_of(gate.path());
+    let beta_entry = entry_of(beta_checkout.as_path());
+    for entry in [&alpha_entry, &gate_entry, &beta_entry] {
+        assert!(
+            entry.join("gitdir").is_file(),
+            "{tag}: the registration moved with its store, below the target: {}",
+            entry.display()
+        );
+    }
+    let foreign = target.join("foreign");
+    fs::create_dir_all(&foreign).expect("a registration no removal binds");
+    let elsewhere = handed.root.join("elsewhere").join(".git");
+    fs::write(foreign.join("gitdir"), format!("{}\n", elsewhere.display()))
+        .expect("its gitdir, an absolute path on every platform");
+    fs::write(foreign.join("locked"), b"another repository's\n").expect("its locked");
+    let foreign_before = snapshot(&foreign);
+
+    manager
+        .remove_snapshot(&mut NoHooks, &gate)
+        .unwrap_or_else(|error| panic!("{tag}: the snapshot's removal: {error}"));
+    manager
+        .remove_worktree(&mut NoHooks, &alpha)
+        .unwrap_or_else(|error| panic!("{tag}: alpha's removal: {error}"));
+    for (checkout, entry) in [
+        (gate.path(), gate_entry.as_path()),
+        (alpha_checkout.as_path(), alpha_entry.as_path()),
+    ] {
+        assert!(
+            !checkout.exists() && !entry.exists(),
+            "{tag}: {} and its registration are removed",
+            checkout.display()
+        );
+    }
+    assert_eq!(
+        snapshot(&foreign),
+        foreign_before,
+        "{tag}: the registration no removal bound is untouched"
+    );
+    assert_pinned_link(&store, &target, tag);
+
+    fs::remove_dir_all(&foreign).expect("the foreign registration goes by hand");
+    manager
+        .remove_worktree(&mut NoHooks, &beta)
+        .unwrap_or_else(|error| panic!("{tag}: beta's removal: {error}"));
+    assert!(!beta_checkout.exists(), "{tag}: beta is removed");
+    assert!(
+        fs::read_dir(&target)
+            .unwrap_or_else(|error| panic!("{tag}: the emptied target is kept: {error}"))
+            .next()
+            .is_none(),
+        "{tag}: the last removal emptied the target and left it"
+    );
+    assert_pinned_link(&store, &target, tag);
 }
 
 /// T-PIN-2 (F-R12-PIN-LOSS-FALLBACK): a removal that bound its registration
@@ -22119,88 +22390,123 @@ fn a_store_linked_before_derive_removes_only_its_bound_registrations_and_keeps_l
 /// untouched, and the refusal names what the store is now. A removed link is
 /// not made before the scan, which then finds no store and keeps its own
 /// refusal, unchanged.
+///
+/// **Admission.** The registration is made in this process, which inherits
+/// nothing. Each case's manager is derived, its loss made and its removal run
+/// in a [`pinned_store_lost_child`] that inherits the run's canonical common
+/// directory as an absolute `GIT_COMMON_DIR`: with nothing inherited R5's
+/// start check refuses the derivation over this store, linked out of the
+/// common directory.
 #[test]
 fn a_pinned_store_lost_before_its_removal_refuses_before_the_checkout_is_touched() {
-    let cases = [
-        (
-            "re-pointed at the hook",
-            StoreLoss::Repointed,
-            true,
-            "now resolves to",
-        ),
-        (
-            "a plain directory at the hook",
-            StoreLoss::PlainDirectory,
-            true,
-            "is now a plain directory, not a link",
-        ),
-        ("removed at the hook", StoreLoss::Removed, true, "is gone"),
-        (
-            "re-pointed before the scan",
-            StoreLoss::Repointed,
-            false,
-            "now resolves to",
-        ),
-        (
-            "a plain directory before the scan",
-            StoreLoss::PlainDirectory,
-            false,
-            "is now a plain directory, not a link",
-        ),
-    ];
-    for (index, (case, loss, at_hook, found)) in cases.into_iter().enumerate() {
+    let mut cases: Vec<(String, Result<(), String>)> = Vec::new();
+    for (index, (case, _)) in PIN_LOSS_CASES.into_iter().enumerate() {
         let fixture = Fixture::created(&format!("pin-lost-{index}"));
-        let slot = fixture.add_task(&mut NoHooks, "alpha", 1);
-        let checkout = fixture.manager.slot_path(&slot);
-        let (manager, store, target) = link_store_to(&fixture, &fixture.root.join("pinned"));
-        write_file(&checkout.join("work.txt"), b"the attempt's work\n");
-        let entry = target.join(checkout.file_name().expect("a checkout name"));
-        fs::write(entry.join("locked"), b"held\n").expect("a locked marker");
-        let entry_before = snapshot(&entry);
-        let checkout_before = snapshot(&checkout);
-        let substitute = fixture.root.join("substitute");
-        let result = if at_hook {
-            let mut hooks = LoseStoreAtBefore {
-                site: slot.remove_site(),
-                store: store.clone(),
-                entry: entry.clone(),
-                loss,
-                substitute: substitute.clone(),
-            };
-            manager.remove_worktree(&mut hooks, &slot)
-        } else {
-            lose_store(&store, &entry, loss, &substitute);
-            manager.remove_worktree(&mut NoHooks, &slot)
+        fixture.add_task(&mut NoHooks, "alpha", 1);
+        link_store_to(&fixture, &fixture.root.join("pinned"));
+        let outcome = run_pin_child("pinned_store_lost_child", &fixture, case, &[]);
+        cases.push((case.to_owned(), outcome));
+    }
+    report_cases(&cases);
+}
+
+/// T-PIN-2's cases: what is made of the pinned store, whether at the removal's
+/// `Before` hook rather than before its scan, and what the refusal must say the
+/// store is now.
+const PIN_LOSS_CASES: [(&str, (StoreLoss, bool, &str)); 5] = [
+    (
+        "re-pointed at the hook",
+        (StoreLoss::Repointed, true, "now resolves to"),
+    ),
+    (
+        "a plain directory at the hook",
+        (
+            StoreLoss::PlainDirectory,
+            true,
+            "is now a plain directory, not a link",
+        ),
+    ),
+    ("removed at the hook", (StoreLoss::Removed, true, "is gone")),
+    (
+        "re-pointed before the scan",
+        (StoreLoss::Repointed, false, "now resolves to"),
+    ),
+    (
+        "a plain directory before the scan",
+        (
+            StoreLoss::PlainDirectory,
+            false,
+            "is now a plain directory, not a link",
+        ),
+    ),
+];
+
+/// The child of
+/// [`a_pinned_store_lost_before_its_removal_refuses_before_the_checkout_is_touched`]:
+/// the case its parent names, over the store its parent linked. It derives the
+/// manager under the inherited value, then makes everything T-PIN-2 made after
+/// its derivation, in the same order, the loss and the removal among them, and
+/// every one of its assertions.
+#[test]
+#[ignore = "linked child of the pinned-store tests"]
+fn pinned_store_lost_child() {
+    let handed = PinChild::handed();
+    let (case, (loss, at_hook, found)) = handed.case_of(PIN_LOSS_CASES);
+    let manager = handed.derive("derive the manager over the linked store");
+    let slot = Slot::Task {
+        key: "alpha".to_owned(),
+        generation: 1,
+    };
+    let checkout = manager.slot_path(&slot);
+    let store = manager.common_git_dir().join("worktrees");
+    let target = pinned_target(&handed.root.join("pinned"));
+    write_file(&checkout.join("work.txt"), b"the attempt's work\n");
+    let entry = target.join(checkout.file_name().expect("a checkout name"));
+    fs::write(entry.join("locked"), b"held\n").expect("a locked marker");
+    let entry_before = snapshot(&entry);
+    let checkout_before = snapshot(&checkout);
+    let substitute = handed.root.join("substitute");
+    let result = if at_hook {
+        let mut hooks = LoseStoreAtBefore {
+            site: slot.remove_site(),
+            store: store.clone(),
+            entry: entry.clone(),
+            loss,
+            substitute: substitute.clone(),
         };
-        let error = result.expect_err(&format!("{case}: the removal refuses"));
-        let message = refusal_of(&error);
-        assert!(
-            message.contains("when this run's manager was derived") && message.contains(found),
-            "{case}: the refusal names the pinned store's loss as `{found}`: {message}"
-        );
+        manager.remove_worktree(&mut hooks, &slot)
+    } else {
+        lose_store(&store, &entry, loss, &substitute);
+        manager.remove_worktree(&mut NoHooks, &slot)
+    };
+    let error = result.expect_err(&format!("{case}: the removal refuses"));
+    let message = refusal_of(&error);
+    assert!(
+        message.contains("when this run's manager was derived") && message.contains(found),
+        "{case}: the refusal names the pinned store's loss as `{found}`: {message}"
+    );
+    assert_eq!(
+        snapshot(&checkout),
+        checkout_before,
+        "{case}: the checkout is untouched"
+    );
+    assert_eq!(
+        snapshot(&entry),
+        entry_before,
+        "{case}: the pinned entry is untouched"
+    );
+    let name = entry.file_name().expect("an entry name");
+    let copy = match loss {
+        StoreLoss::Removed => None,
+        StoreLoss::PlainDirectory => Some(store.join(name)),
+        StoreLoss::Repointed => Some(substitute.join(name)),
+    };
+    if let Some(copy) = copy {
         assert_eq!(
-            snapshot(&checkout),
-            checkout_before,
-            "{case}: the checkout is untouched"
-        );
-        assert_eq!(
-            snapshot(&entry),
+            snapshot(&copy),
             entry_before,
-            "{case}: the pinned entry is untouched"
+            "{case}: the copy of the entry is untouched"
         );
-        let name = entry.file_name().expect("an entry name");
-        let copy = match loss {
-            StoreLoss::Removed => None,
-            StoreLoss::PlainDirectory => Some(store.join(name)),
-            StoreLoss::Repointed => Some(substitute.join(name)),
-        };
-        if let Some(copy) = copy {
-            assert_eq!(
-                snapshot(&copy),
-                entry_before,
-                "{case}: the copy of the entry is untouched"
-            );
-        }
     }
 }
 
@@ -22210,62 +22516,100 @@ fn a_pinned_store_lost_before_its_removal_refuses_before_the_checkout_is_touched
 /// checkout is touched, with the victim untouched. The two file links need a
 /// symlink, which the Windows guest's test user cannot make, so they run on
 /// Unix.
+///
+/// **Admission.** The registration is made in this process, which inherits
+/// nothing. Each case's manager is derived, and its removal run, in a
+/// [`link_below_pinned_target_child`] that inherits the run's canonical common
+/// directory as an absolute `GIT_COMMON_DIR`: with nothing inherited R5's
+/// start check refuses the derivation over this store, linked out of the
+/// common directory.
 #[test]
 fn a_link_planted_below_a_pinned_target_at_the_before_hook_refuses_the_removal() {
-    for (index, name) in ["", "gitdir", "locked"].into_iter().enumerate() {
+    let mut cases: Vec<(String, Result<(), String>)> = Vec::new();
+    for (index, (case, name)) in LINK_BELOW_TARGET_CASES.into_iter().enumerate() {
         let file_link = !name.is_empty();
         if file_link && cfg!(windows) {
             continue;
         }
         let fixture = Fixture::created(&format!("pin-inside-{index}"));
-        let slot = fixture.add_task(&mut NoHooks, "alpha", 1);
-        let checkout = fixture.manager.slot_path(&slot);
-        let (manager, _store, target) = link_store_to(&fixture, &fixture.root.join("pinned"));
-        let entry = target.join(checkout.file_name().expect("a checkout name"));
-        fs::write(entry.join("locked"), b"held\n").expect("a locked marker");
-        let substituted = if file_link {
-            entry.join(name)
-        } else {
-            entry.clone()
-        };
-        let victim = fixture.root.join("victim");
-        if file_link {
-            fs::write(&victim, b"victim bytes\n").expect("the victim file");
-        } else {
-            copy_entry(&entry, &victim);
-        }
-        let victim_before = snapshot(&victim);
-        let checkout_before = snapshot(&checkout);
-        let mut hooks = SubstituteAtBefore {
-            site: slot.remove_site(),
-            target: substituted.clone(),
-            moved: substituted.with_extension("moved-away"),
-            victim: victim.clone(),
-            file_link,
-        };
-        let error = manager
-            .remove_worktree(&mut hooks, &slot)
-            .expect_err("a link below the pinned target refuses");
-        let message = refusal_of(&error);
-        assert!(
-            message.contains("symlink or reparse point")
-                && message.contains(&substituted.display().to_string()),
-            "{}: the refusal names the link: {message}",
-            substituted.display()
-        );
-        assert_eq!(
-            snapshot(&victim),
-            victim_before,
-            "{}: the victim is untouched",
-            substituted.display()
-        );
-        assert_eq!(
-            snapshot(&checkout),
-            checkout_before,
-            "{}: the checkout is untouched",
-            substituted.display()
-        );
+        fixture.add_task(&mut NoHooks, "alpha", 1);
+        link_store_to(&fixture, &fixture.root.join("pinned"));
+        let outcome = run_pin_child("link_below_pinned_target_child", &fixture, case, &[]);
+        cases.push((case.to_owned(), outcome));
     }
+    report_cases(&cases);
+}
+
+/// T-PIN-3's cases: what of the bound entry is exchanged for a link, named for
+/// the record. The empty name is the entry itself.
+const LINK_BELOW_TARGET_CASES: [(&str, &str); 3] = [
+    ("the entry", ""),
+    ("its gitdir", "gitdir"),
+    ("its locked", "locked"),
+];
+
+/// The child of
+/// [`a_link_planted_below_a_pinned_target_at_the_before_hook_refuses_the_removal`]:
+/// the case its parent names, over the store its parent linked. It derives the
+/// manager under the inherited value, then makes everything T-PIN-3 made after
+/// its derivation, in the same order, and every one of its assertions.
+#[test]
+#[ignore = "linked child of the pinned-store tests"]
+fn link_below_pinned_target_child() {
+    let handed = PinChild::handed();
+    let (_, name) = handed.case_of(LINK_BELOW_TARGET_CASES);
+    let file_link = !name.is_empty();
+    let manager = handed.derive("derive the manager over the linked store");
+    let slot = Slot::Task {
+        key: "alpha".to_owned(),
+        generation: 1,
+    };
+    let checkout = manager.slot_path(&slot);
+    let target = pinned_target(&handed.root.join("pinned"));
+    let entry = target.join(checkout.file_name().expect("a checkout name"));
+    fs::write(entry.join("locked"), b"held\n").expect("a locked marker");
+    let substituted = if file_link {
+        entry.join(name)
+    } else {
+        entry.clone()
+    };
+    let victim = handed.root.join("victim");
+    if file_link {
+        fs::write(&victim, b"victim bytes\n").expect("the victim file");
+    } else {
+        copy_entry(&entry, &victim);
+    }
+    let victim_before = snapshot(&victim);
+    let checkout_before = snapshot(&checkout);
+    let mut hooks = SubstituteAtBefore {
+        site: slot.remove_site(),
+        target: substituted.clone(),
+        moved: substituted.with_extension("moved-away"),
+        victim: victim.clone(),
+        file_link,
+    };
+    let error = manager
+        .remove_worktree(&mut hooks, &slot)
+        .expect_err("a link below the pinned target refuses");
+    let message = refusal_of(&error);
+    assert!(
+        message.contains("symlink or reparse point")
+            && message.contains(&substituted.display().to_string()),
+        "{}: the refusal names the link: {message}",
+        substituted.display()
+    );
+    assert_eq!(
+        snapshot(&victim),
+        victim_before,
+        "{}: the victim is untouched",
+        substituted.display()
+    );
+    assert_eq!(
+        snapshot(&checkout),
+        checkout_before,
+        "{}: the checkout is untouched",
+        substituted.display()
+    );
 }
 
 /// T-PIN-4: the pinned target itself exchanged at the `Before` hook, renamed
@@ -22273,14 +22617,46 @@ fn a_link_planted_below_a_pinned_target_at_the_before_hook_refuses_the_removal()
 /// its path, leaves a store that no longer resolves to the pinned target. The
 /// removal refuses before its checkout is touched, and the victim and the
 /// original target, moved aside, are untouched.
+///
+/// **Admission.** The registration is made in this process, which inherits
+/// nothing. The manager is derived, and the removal run, in a
+/// [`pinned_target_exchanged_child`] that inherits the run's canonical common
+/// directory as an absolute `GIT_COMMON_DIR`: with nothing inherited R5's
+/// start check refuses the derivation over this store, linked out of the
+/// common directory.
 #[test]
 fn a_pinned_target_exchanged_for_a_link_at_the_before_hook_refuses_the_removal() {
     let fixture = Fixture::created("pin-target-exchanged");
-    let slot = fixture.add_task(&mut NoHooks, "alpha", 1);
-    let checkout = fixture.manager.slot_path(&slot);
-    let (manager, _store, target) = link_store_to(&fixture, &fixture.root.join("pinned"));
+    fixture.add_task(&mut NoHooks, "alpha", 1);
+    link_store_to(&fixture, &fixture.root.join("pinned"));
+    let outcome = run_pin_child(
+        "pinned_target_exchanged_child",
+        &fixture,
+        "pin-target-exchanged",
+        &[],
+    );
+    report_cases(&[("pin-target-exchanged".to_owned(), outcome)]);
+}
+
+/// The child of
+/// [`a_pinned_target_exchanged_for_a_link_at_the_before_hook_refuses_the_removal`],
+/// over the store its parent linked. It derives the manager under the
+/// inherited value, then makes everything T-PIN-4 made after its derivation, in
+/// the same order, and every one of its assertions.
+#[test]
+#[ignore = "linked child of the pinned-store tests"]
+fn pinned_target_exchanged_child() {
+    let handed = PinChild::handed();
+    handed.case_of([("pin-target-exchanged", ())]);
+    let manager = handed.derive("derive the manager over the linked store");
+    let slot = Slot::Task {
+        key: "alpha".to_owned(),
+        generation: 1,
+    };
+    let checkout = manager.slot_path(&slot);
+    let target = pinned_target(&handed.root.join("pinned"));
     let name = checkout.file_name().expect("a checkout name").to_owned();
-    let victim = fixture.root.join("victim");
+    let victim = handed.root.join("victim");
     copy_entry(&target.join(&name), &victim.join(&name));
     let victim_before = snapshot(&victim.join(&name));
     let original_before = snapshot(&target.join(&name));
@@ -22384,8 +22760,34 @@ fn a_store_linked_after_derive_refuses_the_removal_at_the_link() {
 /// at the destructive boundary. That comes after the checkout's deletion,
 /// which the removal's order makes first, and it keeps `locked` and the
 /// entry.
+///
+/// **Admission.** The registration is made in this process, which inherits
+/// nothing. The manager is derived, and the removal run, in a
+/// [`registration_rebound_under_pin_child`] that inherits the run's canonical
+/// common directory as an absolute `GIT_COMMON_DIR`: with nothing inherited
+/// R5's start check refuses the derivation over this store, linked out of the
+/// common directory.
 #[test]
 fn a_registration_rebound_under_a_pinned_store_keeps_its_admin_state() {
+    let fixture = Fixture::created("pin-rebound");
+    fixture.add_task(&mut NoHooks, "alpha", 1);
+    link_store_to(&fixture, &fixture.root.join("pinned"));
+    let outcome = run_pin_child(
+        "registration_rebound_under_pin_child",
+        &fixture,
+        "pin-rebound",
+        &[],
+    );
+    report_cases(&[("pin-rebound".to_owned(), outcome)]);
+}
+
+/// The child of [`a_registration_rebound_under_a_pinned_store_keeps_its_admin_state`],
+/// over the store its parent linked. It derives the manager under the
+/// inherited value, then makes everything T-PIN-6 made after its derivation, in
+/// the same order, and every one of its assertions.
+#[test]
+#[ignore = "linked child of the pinned-store tests"]
+fn registration_rebound_under_pin_child() {
     struct RewriteGitdirAtBefore {
         site: EffectSiteId,
         gitdir: PathBuf,
@@ -22406,17 +22808,22 @@ fn a_registration_rebound_under_a_pinned_store_keeps_its_admin_state() {
         }
     }
 
-    let fixture = Fixture::created("pin-rebound");
-    let slot = fixture.add_task(&mut NoHooks, "alpha", 1);
-    let checkout = fixture.manager.slot_path(&slot);
-    let (manager, _store, target) = link_store_to(&fixture, &fixture.root.join("pinned"));
+    let handed = PinChild::handed();
+    handed.case_of([("pin-rebound", ())]);
+    let manager = handed.derive("derive the manager over the linked store");
+    let slot = Slot::Task {
+        key: "alpha".to_owned(),
+        generation: 1,
+    };
+    let checkout = manager.slot_path(&slot);
+    let target = pinned_target(&handed.root.join("pinned"));
     let entry = target.join(checkout.file_name().expect("a checkout name"));
     let locked = entry.join("locked");
     fs::write(&locked, b"do not remove\n").expect("a locked marker");
     let mut hooks = RewriteGitdirAtBefore {
         site: slot.remove_site(),
         gitdir: entry.join("gitdir"),
-        replacement: fixture.root.join("other").join(".git"),
+        replacement: handed.root.join("other").join(".git"),
     };
     let error = manager
         .remove_worktree(&mut hooks, &slot)
@@ -22440,11 +22847,18 @@ fn a_registration_rebound_under_a_pinned_store_keeps_its_admin_state() {
 /// not pinned, even once its target appears. The store's registration, Git's
 /// own, moved with it to the link's target, is refused at the link, before the
 /// checkout is touched, as any link on the registration's chain is.
+///
+/// **Admission.** The registration is made, the store moved and linked, and the
+/// link's target taken away in this process, which inherits nothing. The
+/// manager is derived, the target put back and the removal run in a
+/// [`store_link_target_appears_child`] that inherits the run's canonical common
+/// directory as an absolute `GIT_COMMON_DIR`: with nothing inherited R5's start
+/// check fails the derivation closed on a store link it cannot resolve, and
+/// under the inherited value it admits it without resolving the link.
 #[test]
 fn a_store_link_whose_target_appears_after_derive_is_not_pinned() {
     let fixture = Fixture::created("store-link-unpinned");
-    let slot = fixture.add_task(&mut NoHooks, "alpha", 1);
-    let checkout = fixture.manager.slot_path(&slot);
+    fixture.add_task(&mut NoHooks, "alpha", 1);
     let later = fixture.root.join("later");
     let away = fixture.root.join("later-away");
     let store = fixture.manager.common_git_dir().join("worktrees");
@@ -22452,14 +22866,33 @@ fn a_store_link_whose_target_appears_after_derive_is_not_pinned() {
         .expect("the store moved, with its registration, to the link's target");
     plant_directory_link(&later, &store);
     fs::rename(&later, &away).expect("its target gone at derivation");
-    let manager = WorkspaceManager::derive(
-        &fixture.base,
-        &fixture.private,
-        super::fixture::RUN_ID,
-        "inc-1",
-    )
-    .expect("derive over a store link whose target is gone");
-    fs::rename(&away, &later).expect("the target back");
+    let outcome = run_pin_child(
+        "store_link_target_appears_child",
+        &fixture,
+        "store-link-unpinned",
+        &[],
+    );
+    report_cases(&[("store-link-unpinned".to_owned(), outcome)]);
+}
+
+/// The child of [`a_store_link_whose_target_appears_after_derive_is_not_pinned`],
+/// over the store link its parent planted and whose target it took away. It
+/// derives the manager under the inherited value, then makes everything T-PIN-7
+/// made after its derivation, in the same order, and every one of its
+/// assertions.
+#[test]
+#[ignore = "linked child of the pinned-store tests"]
+fn store_link_target_appears_child() {
+    let handed = PinChild::handed();
+    handed.case_of([("store-link-unpinned", ())]);
+    let manager = handed.derive("derive over a store link whose target is gone");
+    let slot = Slot::Task {
+        key: "alpha".to_owned(),
+        generation: 1,
+    };
+    let checkout = manager.slot_path(&slot);
+    let store = manager.common_git_dir().join("worktrees");
+    fs::rename(handed.root.join("later-away"), handed.root.join("later")).expect("the target back");
     let checkout_before = snapshot(&checkout);
     let error = manager
         .remove_worktree(&mut NoHooks, &slot)
@@ -23062,4 +23495,829 @@ fn relative_common_dir_slot_helper() {
         context_tree_bytes(&beside) == before,
         "the common directory beside the slot was written"
     );
+}
+
+// -----------------------------------------------------------------------
+// R5: the two schema-4 start refusals (R-C-RELSTORE; R-C-REGISTRY part 1)
+// -----------------------------------------------------------------------
+
+/// What [`refuse_relative_repository_wide_values`] is given when the
+/// coordinator inherits `name` alone of [`REPOSITORY_WIDE_PATHS`], holding
+/// `value`.
+fn only(name: &str, value: &OsStr) -> [(&'static str, Option<OsString>); 6] {
+    REPOSITORY_WIDE_PATHS.map(|each| (each, (each == name).then(|| value.to_os_string())))
+}
+
+/// `rest` below a root the platform's rule calls absolute, spelt with no
+/// backslash so that C-style quoting carries it unchanged: `/rest` on Unix,
+/// `C:/rest` on Windows.
+fn rooted(rest: &str) -> String {
+    if cfg!(windows) {
+        format!("C:/{rest}")
+    } else {
+        format!("/{rest}")
+    }
+}
+
+/// R-C-RELSTORE's rule over each scalar name, at the check itself. This is
+/// this head's function, so it is no red/green row: the rows that run red at
+/// the bound master are the `derive` and pre-lock witnesses. A relative value
+/// and an empty one refuse, naming the variable and saying to export it as an
+/// absolute path; an absolute one does not; nothing inherited refuses nothing.
+#[test]
+fn a_relative_or_empty_repository_wide_path_refuses_naming_itself_and_an_absolute_one_does_not() {
+    let absolute = std::env::temp_dir().join("r5-absolute");
+    assert!(
+        absolute.is_absolute(),
+        "the fixture's absolute value: {}",
+        absolute.display()
+    );
+    for name in REPOSITORY_WIDE_PATHS {
+        for relative in ["../objects", "objects", "./config", ""] {
+            let refusal =
+                refuse_relative_repository_wide_values(only(name, OsStr::new(relative)), None)
+                    .expect_err("a value that is not an absolute path refuses");
+            assert_eq!(
+                refusal,
+                Refusal::RelativeRepositoryWideName {
+                    name,
+                    why: NotAbsolute::Value(OsString::from(relative)),
+                },
+                "`{name}={relative}`"
+            );
+            let message = refusal.to_string();
+            assert!(
+                message.contains(&format!("the inherited `{name}`"))
+                    && message.contains(&format!("export `{name}` as an absolute path")),
+                "the refusal names the variable and says to export it as an absolute path: \
+                 {message}"
+            );
+        }
+        assert_eq!(
+            refuse_relative_repository_wide_values(only(name, absolute.as_os_str()), None),
+            Ok(()),
+            "`{name}` holding an absolute path is not refused"
+        );
+    }
+    assert_eq!(
+        refuse_relative_repository_wide_values(
+            REPOSITORY_WIDE_PATHS.map(|name| (name, None)),
+            None,
+        ),
+        Ok(()),
+        "nothing inherited, nothing refused"
+    );
+}
+
+/// The check reads the seven names the owner adopted, and [`COMMON_DIR`] is
+/// not among them: option (C) gives a relative `GIT_COMMON_DIR` its meaning at
+/// the started checkout, so it is not refused.
+#[test]
+fn the_relative_name_check_reads_the_seven_adopted_names_and_not_the_common_directory() {
+    let mut read = REPOSITORY_WIDE_PATHS.to_vec();
+    read.push(ALTERNATE_OBJECT_DIRECTORIES);
+    assert_eq!(
+        read,
+        [
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_SHALLOW_FILE",
+            "GIT_GRAFT_FILE",
+            "GIT_CONFIG",
+            "GIT_CONFIG_GLOBAL",
+            "GIT_CONFIG_SYSTEM",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        ],
+        "R-C-RELSTORE's seven names, as adopted"
+    );
+    assert!(
+        !read.contains(&COMMON_DIR),
+        "`GIT_COMMON_DIR` is not refused"
+    );
+}
+
+/// How a case of [`the_alternates_list_is_split_and_unquoted_exactly_as_git_does`]
+/// ends.
+#[derive(Debug)]
+enum Classified {
+    /// No entry refuses the list.
+    Accepted,
+    /// This decoded entry, which is not an absolute path, refuses it.
+    Relative(String),
+    /// An entry the check cannot classify exactly refuses it.
+    Unclassified,
+}
+
+/// R-C-RELSTORE's list rule at the check itself (this head's function, as
+/// above), against Git's own parser as `alternate_entries` cites it: the
+/// platform's separator, comments, empty entries, C-style quoting across a
+/// separator, the byte Git steps past after a closing quote, broken quoting
+/// read as written, the escapes, and a decoded NUL that cannot be classified
+/// exactly.
+#[test]
+fn the_alternates_list_is_split_and_unquoted_exactly_as_git_does() {
+    let sep = char::from(ALTERNATES_SEPARATOR);
+    let other = if sep == ':' { ';' } else { ':' };
+    let (a, b) = (rooted("a"), rooted("b"));
+    let spanning = rooted(&format!("x{sep}y"));
+    let relative = |entry: &str| Classified::Relative(entry.to_owned());
+    for (list, entries, expected) in [
+        (String::new(), Vec::new(), Classified::Accepted),
+        (a.clone(), vec![a.clone()], Classified::Accepted),
+        (
+            format!("{a}{sep}{b}"),
+            vec![a.clone(), b.clone()],
+            Classified::Accepted,
+        ),
+        (
+            "../pool".to_owned(),
+            vec!["../pool".to_owned()],
+            relative("../pool"),
+        ),
+        (
+            format!("{a}{sep}../pool"),
+            vec![a.clone(), "../pool".to_owned()],
+            relative("../pool"),
+        ),
+        (
+            format!("\"{spanning}\""),
+            vec![spanning.clone()],
+            Classified::Accepted,
+        ),
+        (
+            spanning.clone(),
+            vec![rooted("x"), "y".to_owned()],
+            relative("y"),
+        ),
+        (
+            format!("{a}{other}y"),
+            vec![format!("{a}{other}y")],
+            Classified::Accepted,
+        ),
+        (
+            format!("#../not-a-path{sep}{a}"),
+            vec![a.clone()],
+            Classified::Accepted,
+        ),
+        (
+            format!("{sep}{sep}{a}{sep}{sep}"),
+            vec![a.clone()],
+            Classified::Accepted,
+        ),
+        (
+            format!("\"\"{sep}{a}"),
+            vec![a.clone()],
+            Classified::Accepted,
+        ),
+        (
+            format!("\"{a}\"/b"),
+            vec![a.clone(), "b".to_owned()],
+            relative("b"),
+        ),
+        (
+            format!("\"{a}\"x{sep}{b}"),
+            vec![a.clone(), b.clone()],
+            Classified::Accepted,
+        ),
+        (
+            format!("\"{a}{sep}{b}"),
+            vec![format!("\"{a}"), b.clone()],
+            relative(&format!("\"{a}")),
+        ),
+        (
+            format!("\"\\q{a}\""),
+            vec![format!("\"\\q{a}\"")],
+            relative(&format!("\"\\q{a}\"")),
+        ),
+        (
+            format!("\"\\400{a}\""),
+            vec![format!("\"\\400{a}\"")],
+            relative(&format!("\"\\400{a}\"")),
+        ),
+        (
+            format!("\"{a}\\t\\\\\\\"\""),
+            vec![format!("{a}\t\\\"")],
+            Classified::Accepted,
+        ),
+        (
+            format!("\"{a}\\101\""),
+            vec![format!("{a}A")],
+            Classified::Accepted,
+        ),
+        (
+            format!("\"{a}\\000b\""),
+            vec![format!("{a}\0b")],
+            Classified::Unclassified,
+        ),
+    ] {
+        let wanted: Vec<Vec<u8>> = entries
+            .iter()
+            .map(|entry| entry.as_bytes().to_vec())
+            .collect();
+        assert_eq!(
+            alternate_entries(list.as_bytes(), ALTERNATES_SEPARATOR),
+            wanted,
+            "`{list}` decodes into the entries Git takes"
+        );
+        let outcome = not_absolute_alternates(OsStr::new(&list));
+        match expected {
+            Classified::Accepted => assert_eq!(outcome, None, "`{list}`"),
+            Classified::Relative(entry) => assert_eq!(
+                outcome,
+                Some(NotAbsolute::Entry(OsString::from(entry))),
+                "`{list}`"
+            ),
+            Classified::Unclassified => assert!(
+                matches!(outcome, Some(NotAbsolute::Unclassified(_))),
+                "`{list}`: {outcome:?}"
+            ),
+        }
+    }
+    let refusal = refuse_relative_repository_wide_values(
+        REPOSITORY_WIDE_PATHS.map(|name| (name, None)),
+        Some(OsStr::new("../pool")),
+    )
+    .expect_err("a relative entry refuses the list");
+    let message = refusal.to_string();
+    let list = ALTERNATE_OBJECT_DIRECTORIES;
+    assert!(
+        message.contains(&format!("the inherited `{list}` holds the entry `../pool`"))
+            && message.contains(&format!("export `{list}` as an absolute path")),
+        "the refusal names the variable and the entry: {message}"
+    );
+}
+
+/// On Unix an entry is the bytes Git decodes, whatever they are: `\057` is the
+/// `/` that makes an entry absolute, and an octal escape that decodes to a
+/// byte no UTF-8 spells reaches the platform's rule unchanged.
+#[cfg(unix)]
+#[test]
+fn on_unix_an_alternates_entry_is_classified_over_the_exact_bytes_git_decodes() {
+    use std::os::unix::ffi::OsStringExt as _;
+
+    assert_eq!(
+        not_absolute_alternates(OsStr::new("\"\\057a\"")),
+        None,
+        "`\\057` decodes to `/`"
+    );
+    assert_eq!(
+        not_absolute_alternates(OsStr::new("\"\\377x\"")),
+        Some(NotAbsolute::Entry(OsString::from_vec(vec![0xff, b'x']))),
+        "an entry that is not UTF-8 is still the bytes Git resolves"
+    );
+}
+
+/// B-3, the Windows forms, executed on the Windows legs: a drive-relative
+/// `C:x`, a bare `C:` and a root-relative `\x` or `/x` refuse, as a value and
+/// as an entry of the `;`-separated list, while `C:\x`, `C:/x` and a UNC path
+/// do not. Inside C-style quoting a lone backslash is an escape, so `"C:\a"`
+/// decodes to `C:` and a BEL, which is not absolute, and `"C:\\a"` to `C:\a`;
+/// an entry that is not Unicode once unquoted cannot be classified exactly.
+#[cfg(windows)]
+#[test]
+fn on_windows_a_drive_or_root_relative_value_refuses_and_a_drive_or_unc_path_does_not() {
+    for relative in ["C:x", "C:", "\\x", "/x"] {
+        assert_eq!(
+            refuse_relative_repository_wide_values(
+                only("GIT_OBJECT_DIRECTORY", OsStr::new(relative)),
+                None,
+            ),
+            Err(Refusal::RelativeRepositoryWideName {
+                name: "GIT_OBJECT_DIRECTORY",
+                why: NotAbsolute::Value(OsString::from(relative)),
+            }),
+            "`{relative}` as a value"
+        );
+        assert_eq!(
+            not_absolute_alternates(OsStr::new(&format!("C:\\a;{relative}"))),
+            Some(NotAbsolute::Entry(OsString::from(relative))),
+            "`{relative}` as an entry"
+        );
+    }
+    for absolute in ["C:\\x", "C:/x", "\\\\server\\share\\x"] {
+        assert_eq!(
+            refuse_relative_repository_wide_values(
+                only("GIT_OBJECT_DIRECTORY", OsStr::new(absolute)),
+                None,
+            ),
+            Ok(()),
+            "`{absolute}` as a value"
+        );
+        assert_eq!(
+            not_absolute_alternates(OsStr::new(&format!("C:\\a;{absolute}"))),
+            None,
+            "`{absolute}` as an entry"
+        );
+    }
+    assert_eq!(not_absolute_alternates(OsStr::new("\"C:\\\\a\"")), None);
+    assert_eq!(
+        not_absolute_alternates(OsStr::new("\"C:\\a\"")),
+        Some(NotAbsolute::Entry(OsString::from("C:\u{7}")))
+    );
+    assert!(matches!(
+        not_absolute_alternates(OsStr::new("\"\\377x\"")),
+        Some(NotAbsolute::Unclassified(_))
+    ));
+}
+
+/// R-C-REGISTRY part 1's rule at the check itself (this head's function; the
+/// red/green rows are the `derive` witnesses below), over real directories,
+/// each layout under a common directory of its own. A link is a symbolic link
+/// on Unix and a junction on Windows ([`plant_directory_link`]), so the
+/// Windows legs execute the junction rows.
+#[test]
+fn a_worktrees_registry_refuses_exactly_when_its_canonical_parent_is_not_the_common_directory() {
+    let tree = scratch("linked-registry-check");
+    let root = strip_verbatim(fs::canonicalize(tree.path()).expect("the canonical scratch root"));
+    let other = root.join("other").join("worktrees");
+    create_dir(&other);
+    let layout = |name: &str| {
+        let common = root.join(name);
+        create_dir(&common);
+        let entry = common.join("worktrees");
+        (common, entry)
+    };
+
+    let (common, _) = layout("absent");
+    assert!(
+        refuse_linked_registry(&common, false).is_ok(),
+        "an absent registry, which Git makes a directory"
+    );
+
+    let (common, entry) = layout("plain");
+    create_dir(&entry);
+    assert!(
+        refuse_linked_registry(&common, false).is_ok(),
+        "a plain directory"
+    );
+
+    let (common, entry) = layout("beside");
+    create_dir(&common.join("registry"));
+    plant_directory_link(&common.join("registry"), &entry);
+    assert!(
+        refuse_linked_registry(&common, false).is_ok(),
+        "a link to a direct child of the common directory, whose record still names it"
+    );
+
+    let (common, entry) = layout("linked");
+    plant_directory_link(&other, &entry);
+    let refused =
+        refuse_linked_registry(&common, false).expect_err("a link into another directory refuses");
+    assert_names_entry_and_target(&refused, &entry, &other);
+    assert!(
+        refuse_linked_registry(&common, true).is_ok(),
+        "with a `GIT_COMMON_DIR` inherited it is part 2's layout, accepted and not refused"
+    );
+
+    let (common, entry) = layout("chained");
+    let hop = root.join("hop");
+    plant_directory_link(&other, &hop);
+    plant_directory_link(&hop, &entry);
+    let refused = refuse_linked_registry(&common, false).expect_err("a chain of links refuses");
+    assert_names_entry_and_target(&refused, &entry, &other);
+
+    let (common, entry) = layout("nested");
+    let nested = common.join("nested").join("worktrees");
+    create_dir(&nested);
+    plant_directory_link(&nested, &entry);
+    let refused = refuse_linked_registry(&common, false)
+        .expect_err("a link inside the common directory whose parent is elsewhere refuses");
+    assert_names_entry_and_target(&refused, &entry, &nested);
+
+    let (common, entry) = layout("dangling");
+    let gone = root.join("gone");
+    create_dir(&gone);
+    plant_directory_link(&gone, &entry);
+    fs::remove_dir(&gone).expect("remove the link's target");
+    let error = refuse_linked_registry(&common, false)
+        .expect_err("a link whose target is gone is not passed as unlinked");
+    assert!(matches!(error, UpstrokeError::Io { .. }), "{error}");
+}
+
+/// The names in `dir`, sorted; an absent `dir` has none.
+#[cfg(unix)]
+fn entry_names(dir: &Path) -> Vec<String> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+/// Whether `error` names `entry` and the `target` it resolves to.
+fn assert_names_entry_and_target(error: &UpstrokeError, entry: &Path, target: &Path) {
+    let message = refusal_of(error);
+    assert!(
+        message.contains(&entry.display().to_string())
+            && message.contains(&format!("resolves to {}", target.display())),
+        "the refusal names the entry and its target: {message}"
+    );
+}
+
+/// R-C-REGISTRY part 1 at `derive`, red at the bound master and green here: a
+/// `worktrees` registry linked into another repository, linked through a chain
+/// of links, or linked inside the common directory to a parent elsewhere
+/// refuses the manager before its registry access, naming the entry and its
+/// target, while this process inherits no `GIT_COMMON_DIR`. Each link is a
+/// junction on Windows, so B-3's junction row executes there.
+#[test]
+fn derive_refuses_a_linked_worktrees_registry_while_no_common_dir_is_inherited() {
+    assert!(
+        std::env::var_os(COMMON_DIR).is_none(),
+        "the condition under test is that no `GIT_COMMON_DIR` is inherited, and this process \
+         inherits one"
+    );
+    for layout in [
+        "into another repository",
+        "through a chain of links",
+        "inside the common directory",
+    ] {
+        let fixture = Fixture::new("linked-registry-derive");
+        let common = strip_verbatim(
+            fs::canonicalize(fixture.base.join(".git")).expect("the run's common directory"),
+        );
+        let entry = common.join("worktrees");
+        let other = fixture.root.join("other");
+        create_dir(&other);
+        git(&other, &["init", "-q", "-b", "main"]);
+        let registry = other.join(".git").join("worktrees");
+        create_dir(&registry);
+        let target = match layout {
+            "into another repository" => {
+                plant_directory_link(&registry, &entry);
+                registry
+            }
+            "through a chain of links" => {
+                let hop = fixture.root.join("hop");
+                plant_directory_link(&registry, &hop);
+                plant_directory_link(&hop, &entry);
+                registry
+            }
+            _ => {
+                let nested = common.join("nested").join("worktrees");
+                create_dir(&nested);
+                plant_directory_link(&nested, &entry);
+                nested
+            }
+        };
+        let target =
+            strip_verbatim(fs::canonicalize(&target).expect("the link's canonical target"));
+        let error = WorkspaceManager::derive(
+            &fixture.base,
+            &fixture.private,
+            super::fixture::RUN_ID,
+            "inc-linked",
+        )
+        .expect_err("a linked registry refuses while no `GIT_COMMON_DIR` is inherited");
+        assert_names_entry_and_target(&error, &entry, &target);
+        assert!(
+            !fixture.manager.execution_root().exists(),
+            "{layout}: the refusal made nothing"
+        );
+    }
+}
+
+/// A slot run under whatever this process inherited, through the manager's own
+/// API: the slot add, a file the worker writes, the capture, and the commit at
+/// the base. Its errors are returned rather than raised: the witnesses that run
+/// it measure what it wrote before it failed closed, which under a relative
+/// object directory is at the commit at the base, and under a linked registry
+/// at the capture's guarded read.
+#[cfg(unix)]
+fn slot_run_writing_a_file(
+    manager: &WorkspaceManager,
+    base: &Path,
+    key: &str,
+) -> Result<(), UpstrokeError> {
+    let head = git(base, &["rev-parse", "HEAD"]);
+    let slot = Slot::Task {
+        key: key.to_owned(),
+        generation: 1,
+    };
+    manager.create_execution_root(&mut NoHooks)?;
+    manager.write_intent(&mut NoHooks, &slot)?;
+    let path = manager.add_worktree(&mut NoHooks, &slot, &head)?;
+    write_file(&path.join("worker-new.txt"), b"a file the worker made\n");
+    manager.candidate_stage(&mut NoHooks, &slot, &[])?;
+    let captured = manager.candidate_write_tree(&mut NoHooks, &slot)?;
+    manager.candidate_commit_tree(&mut NoHooks, &captured, &head, "candidate")?;
+    Ok(())
+}
+
+/// RG-1 and RG-4, the "symlinked registry, nothing inherited" slot run: green
+/// here, where `derive` refuses before any slot and the linked repository's
+/// registry, objects and refs stay as they were. Without the check -- at a
+/// master that lacks it, or with it dropped from `derive`, the mutation -- the
+/// slot add registers the run's work tree in the linked repository's
+/// `worktrees`, and the test is red there, at the registry. The capture after
+/// it is refused by the manager's guarded read, by the original registration
+/// rule, before anything is staged, so the objects and refs watched beside the
+/// registry are not where it turns red.
+#[cfg(unix)]
+#[test]
+fn a_registry_linked_into_another_repository_is_refused_before_a_slot_run_writes_there() {
+    assert!(
+        std::env::var_os(COMMON_DIR).is_none(),
+        "the condition under test is that no `GIT_COMMON_DIR` is inherited, and this process \
+         inherits one"
+    );
+    let tree = scratch("linked-registry-slot");
+    let root = tree.path();
+    let base = root.join("base");
+    context_repository(&base, &[("README.md", "base\n"), ("shared.txt", "seed\n")]);
+    let other = root.join("other");
+    context_copy_tree(&base, &other);
+    fs::create_dir(other.join(".git/worktrees")).expect("the other repository's registry");
+    std::os::unix::fs::symlink(other.join(".git/worktrees"), base.join(".git/worktrees"))
+        .expect("the run's registry, a link into the other repository");
+    fs::create_dir(root.join("private")).expect("the private root");
+    let watched = [
+        other.join(".git/worktrees"),
+        other.join(".git/objects"),
+        other.join(".git/refs"),
+    ];
+    let before: Vec<_> = watched
+        .iter()
+        .map(|path| context_tree_bytes(path))
+        .collect();
+    let derived = WorkspaceManager::derive(
+        &base,
+        &root.join("private"),
+        super::fixture::RUN_ID,
+        "inc-linked",
+    );
+    if let Ok(manager) = &derived {
+        let _ = slot_run_writing_a_file(manager, &base, "linked");
+    }
+    for (path, earlier) in watched.iter().zip(&before) {
+        assert!(
+            context_tree_bytes(path) == *earlier,
+            "{} was written: the slot run reached the linked repository",
+            path.display()
+        );
+    }
+    let error = derived.expect_err("the linked registry refuses before any slot");
+    let common = fs::canonicalize(base.join(".git")).expect("the run's common directory");
+    let target = fs::canonicalize(other.join(".git/worktrees")).expect("the link's target");
+    assert_names_entry_and_target(&error, &common.join("worktrees"), &target);
+}
+
+/// What a relative-name child prints, before the error, when `derive` returns
+/// one.
+#[cfg(unix)]
+const DERIVE_ERROR: &str = "UPSTROKE_R5_DERIVE_ERROR: ";
+
+/// What a relative-name child prints when `derive` returns a manager.
+#[cfg(unix)]
+const DERIVE_DERIVED: &str = "UPSTROKE_R5_DERIVE_DERIVED";
+
+/// The managed checkout, private root and clean execution root of the
+/// relative-name `derive` witnesses, made in this process's own environment,
+/// which sets none of the names.
+#[cfg(unix)]
+struct RelativeNameLayout {
+    /// The scratch tree that holds them, whose path is the children's root.
+    tree: crate::rundir::scratch_tree::ScratchTree,
+    /// The manager derived over them, whose execution root must stay empty.
+    manager: WorkspaceManager,
+    /// The run's object store, canonical: an absolute value that names it.
+    store: PathBuf,
+}
+
+/// [`RelativeNameLayout`] under a scratch tree tagged `tag`.
+#[cfg(unix)]
+fn relative_name_layout(tag: &str) -> RelativeNameLayout {
+    let tree = scratch(tag);
+    let root = tree.path();
+    let managed = root.join("managed");
+    context_repository(&managed, &[("README.md", "readme\n")]);
+    fs::create_dir(root.join("private")).expect("the private root");
+    let manager = WorkspaceManager::derive(
+        &managed,
+        &root.join("private"),
+        super::fixture::RUN_ID,
+        "inc-clean",
+    )
+    .expect("derive in this process's environment, which sets none of the names");
+    manager
+        .create_execution_root(&mut NoHooks)
+        .expect("the execution root");
+    let store = fs::canonicalize(managed.join(".git/objects")).expect("the run's store");
+    RelativeNameLayout {
+        tree,
+        manager,
+        store,
+    }
+}
+
+/// One relative-name case: `derive` over the layout's managed checkout in an
+/// isolated child whose environment carries `name` holding `value`. The child's
+/// report, once it has run and the execution root still holds no intent and no
+/// slot.
+#[cfg(unix)]
+fn derive_in_a_child(layout: &RelativeNameLayout, name: &str, value: &OsStr) -> String {
+    let label = format!("`{name}={}`", Path::new(value).display());
+    let ended = crate::agent::proc::test_support::run_test_isolated(
+        "workspace_manager::tests::relative_name_derive_helper",
+        &[
+            (name, value),
+            (CONTEXT_ROOT, layout.tree.path().as_os_str()),
+        ],
+        std::time::Duration::from_secs(180),
+    );
+    assert!(
+        ended.status.is_some_and(|status| status.success()) && ended.stdout.contains("1 passed"),
+        "{label}: {ended}"
+    );
+    let root = layout.manager.execution_root();
+    assert!(
+        entry_names(&root.join("intents")).is_empty()
+            && entry_names(&root.join("tasks")).is_empty(),
+        "{label}: no intent and no slot"
+    );
+    ended.stdout
+}
+
+/// R-C-RELSTORE at the `derive` boundary, red at the bound master and green
+/// here, each case in an isolated child whose environment alone carries the
+/// name: each of the six scalar names relative and empty, and an alternates
+/// list with a relative entry, with the bytes a quoted absolute entry leaves
+/// after its closing quote, or with broken quoting. Every case refuses, naming
+/// the variable and saying to export it as an absolute path, and leaves no
+/// intent and no slot in the execution root, which was made clean.
+#[cfg(unix)]
+#[test]
+fn derive_refuses_each_relative_repository_wide_name_before_any_slot() {
+    let layout = relative_name_layout("relative-names-refused");
+    let listed = layout.store.display().to_string();
+    let mut cases: Vec<(&str, String)> = Vec::new();
+    for name in [
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_SHALLOW_FILE",
+        "GIT_GRAFT_FILE",
+        "GIT_CONFIG",
+        "GIT_CONFIG_GLOBAL",
+        "GIT_CONFIG_SYSTEM",
+    ] {
+        cases.push((name, "../elsewhere".to_owned()));
+        cases.push((name, String::new()));
+    }
+    let alternates = "GIT_ALTERNATE_OBJECT_DIRECTORIES";
+    cases.extend([
+        (alternates, "../pool".to_owned()),
+        (alternates, format!("{listed}:../pool")),
+        (alternates, format!("\"{listed}\"/pool")),
+        (alternates, format!("\"{listed}:{listed}")),
+    ]);
+    for (name, value) in cases {
+        let report = derive_in_a_child(&layout, name, OsStr::new(&value));
+        assert!(
+            report.contains(DERIVE_ERROR)
+                && report.contains(&format!("the inherited `{name}`"))
+                && report.contains(&format!("export `{name}` as an absolute path")),
+            "`{name}={value}` refuses `derive`, naming the variable: {report}"
+        );
+    }
+}
+
+/// RS-2, and the accepting halves of RS-3 and RS-4, at the `derive` boundary:
+/// green at the bound master and here, each case in an isolated child whose
+/// environment alone carries the name. Each of the six scalar names holding an
+/// absolute path, and an alternates list that is empty, one quoted absolute
+/// entry, or a comment before an absolute entry, is not refused, and leaves no
+/// intent and no slot in the execution root.
+#[cfg(unix)]
+#[test]
+fn derive_accepts_each_absolute_repository_wide_name() {
+    let layout = relative_name_layout("relative-names-accepted");
+    let listed = layout.store.display().to_string();
+    let store = layout.store.clone().into_os_string();
+    let absent = layout.tree.path().join("absent");
+    let neutral = super::fixture::neutral_git_config().as_os_str().to_owned();
+    let quoted = format!("\"{listed}\"");
+    let commented = format!("#../not-a-path:{listed}");
+    let alternates = "GIT_ALTERNATE_OBJECT_DIRECTORIES";
+    for (name, value) in [
+        ("GIT_OBJECT_DIRECTORY", store),
+        ("GIT_SHALLOW_FILE", absent.join("shallow").into_os_string()),
+        ("GIT_GRAFT_FILE", absent.join("grafts").into_os_string()),
+        ("GIT_CONFIG", absent.join("config").into_os_string()),
+        ("GIT_CONFIG_GLOBAL", neutral.clone()),
+        ("GIT_CONFIG_SYSTEM", neutral),
+        (alternates, OsString::new()),
+        (alternates, OsString::from(quoted)),
+        (alternates, OsString::from(commented)),
+    ] {
+        let report = derive_in_a_child(&layout, name, &value);
+        assert!(
+            report.contains(DERIVE_DERIVED),
+            "`{name}={}` is not refused: {report}",
+            Path::new(&value).display()
+        );
+    }
+}
+
+/// RS-6 and RS-7, the "REL objects, sibling" slot run: the coordinator inherits
+/// `GIT_OBJECT_DIRECTORY=../objects`, which at the base names the run's store,
+/// and a store copied beside the slot is where the same value lands from the
+/// slot. Red at the bound master, where the slot run's capture writes its
+/// objects into the store beside the slot; green here, where `derive`
+/// refuses, naming the variable and saying to export it as an
+/// absolute path, and no slot or intent is made and the store beside the slot
+/// stays as it was. Removing the check from `derive`, the mutation, makes it
+/// red again.
+#[cfg(unix)]
+#[test]
+fn a_relative_object_directory_is_refused_before_the_store_beside_the_slot_is_written() {
+    let tree = scratch("relative-object-directory");
+    let root = tree.path();
+    let managed = root.join("managed");
+    context_repository(
+        &managed,
+        &[("README.md", "readme\n"), ("shared.txt", "base\n")],
+    );
+    context_copy_tree(&managed.join(".git/objects"), &root.join("objects"));
+    fs::create_dir(root.join("private")).expect("the private root");
+    let manager = WorkspaceManager::derive(
+        &managed,
+        &root.join("private"),
+        super::fixture::RUN_ID,
+        "inc-clean",
+    )
+    .expect("derive in this process's environment, which sets none of the names");
+    manager
+        .create_execution_root(&mut NoHooks)
+        .expect("the execution root");
+    let tasks = manager.execution_root().join("tasks");
+    let beside = tasks.join("objects");
+    context_copy_tree(&root.join("objects"), &beside);
+    let before = context_tree_bytes(&beside);
+    let ended = crate::agent::proc::test_support::run_test_isolated(
+        "workspace_manager::tests::relative_name_derive_helper",
+        &[
+            ("GIT_OBJECT_DIRECTORY", OsStr::new("../objects")),
+            (CONTEXT_ROOT, root.as_os_str()),
+            (CONTEXT_SEQUENCE, OsStr::new("slot")),
+        ],
+        std::time::Duration::from_secs(180),
+    );
+    assert!(
+        ended.status.is_some_and(|status| status.success()) && ended.stdout.contains("1 passed"),
+        "{ended}"
+    );
+    assert!(
+        context_tree_bytes(&beside) == before,
+        "the store beside the slot was written: under the inherited relative object directory \
+         the slot run's objects landed there\n{ended}"
+    );
+    assert!(
+        ended.stdout.contains(DERIVE_ERROR)
+            && ended
+                .stdout
+                .contains("the inherited `GIT_OBJECT_DIRECTORY` is `../objects`")
+            && ended
+                .stdout
+                .contains("export `GIT_OBJECT_DIRECTORY` as an absolute path"),
+        "`derive` refuses, naming the variable: {ended}"
+    );
+    assert_eq!(
+        entry_names(&tasks),
+        ["objects"],
+        "no slot was made beside the store"
+    );
+    assert!(
+        entry_names(&manager.execution_root().join("intents")).is_empty(),
+        "no intent was written"
+    );
+}
+
+/// The child of the three relative-name witnesses above: `derive` over the
+/// managed checkout the parent made, under the names its environment
+/// inherited, and, when the parent asked for it and nothing refused, the slot
+/// run.
+#[cfg(unix)]
+#[test]
+#[ignore = "subprocess helper"]
+fn relative_name_derive_helper() {
+    let Some(root) = std::env::var_os(CONTEXT_ROOT).map(PathBuf::from) else {
+        return;
+    };
+    let base = root.join("managed");
+    match WorkspaceManager::derive(
+        &base,
+        &root.join("private"),
+        super::fixture::RUN_ID,
+        "inc-relative",
+    ) {
+        Err(error) => println!("{DERIVE_ERROR}{error}"),
+        Ok(manager) => {
+            println!("{DERIVE_DERIVED}");
+            if std::env::var_os(CONTEXT_SEQUENCE).is_some() {
+                let _ = slot_run_writing_a_file(&manager, &base, "relative");
+            }
+        }
+    }
 }
