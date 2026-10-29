@@ -129,6 +129,19 @@ and they differ only in whether the log was touched, which
 `EmitError::wrote_nothing` answers for a reader that cares. A stopped run's
 refusal is `EmitFailure::Clean`, naming the stop.
 
+## `fn brokered(hooks: &mut dyn TopologyHooks, state: &EmitState<'_>, invocations: &InvocationLedger) {`
+
+Show the hooks the broker after an append that succeeded
+([`TopologyHooks::brokered`]): the fold, the events and the reservations
+`state` holds, and the invocation ledger held beside it. Called by the four
+holders of both halves, each right after its emitter returned `Ok` —
+`TopologyRun::emit_undischarged`, [`RunJournal`]'s two `emit`s,
+[`IntegrationCx`]'s `emit`, and `prepare_attempt` after `announce`'s one
+append — which between them are every append a `TopologyRun` makes. Not in
+[`RunEmitter`], which is the protocol and nothing after it and holds only the
+reservations. Nothing touches either ledger between the append and this call,
+so a reservation the append's caller converts after it is still held.
+
 ## `struct RunJournal<'a, 'h> {`
 
 The run's [`CandidateJournal`], for the candidate sequence's own appends.
@@ -149,7 +162,9 @@ to close for dispatch and attempt.
 ## `fn emit(&mut self, body: TopologyEventBody) -> Result<(), UpstrokeError> {` › `self.emitter`
 
 Three disjoint field borrows, and the discharge of obligation (3)
-happens here because this struct is what holds the ledger.
+happens here because this struct is what holds the ledger. For the same
+reason it is here, after a successful append, that [`brokered`] shows the
+hooks both ledgers.
 
 ## `pub enum LoopBranch {`
 
@@ -1587,6 +1602,9 @@ appends it inside `settle::retry`, after the worktree verified, so a
 second append here would be refused by the fold — and rightly: the
 verify is what makes the claim true.
 
+The context is lent reborrows of the hooks and the ledger, so that after
+`announce`'s one append both are still in hand for [`brokered`].
+
 ## `pub(super) fn close_run<O: Operator + ?Sized>(`
 
 Run-end closure, the acting half of `closure.md`, in `closure_procedure`'s
@@ -2138,6 +2156,8 @@ implementation of this protocol.
 The same append, its failure returned undischarged: a dispatch's
 `task_dispatched` through its `OperatorJournal`, whose failure
 [`TopologyRun::dispatch_settled`] discharges after the reservation is cancelled.
+When the append succeeds, [`brokered`] shows the hooks the reservations the
+emitter holds and the invocation ledger `halves` split off beside them.
 
 ## `impl TopologyRun` › `emitter`
 
