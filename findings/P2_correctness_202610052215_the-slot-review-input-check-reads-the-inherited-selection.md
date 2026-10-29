@@ -98,3 +98,24 @@ context. `first_bad` was not traced.
   `/home/ubuntu/orch-pr11/answers/pr11_envc_impl1-3.md`.
 - **From what:** package 3's draft D3, after comparing it with FUD-D4-ENV's assigned canonical scope.
 - **What filing does not do.** It adopts nothing, and it is not clearance for merge or G6.
+
+## Implementation status (2026-10-29): option (C), adopted; closure pending
+
+**What this section is.** A dated record correction, appended on root's direction to the ENV author (its Part B
+disposition `d28b5823…`, answer 4). Everything above it is this file's history and is unchanged. The 2026-10-05
+section's "option (C) is not adopted" was true when it was written.
+
+**What the owner adopted.** Option (C), on 2026-10-15: the owner's adoption record `818e7675…`, with the ENV decision
+report's §2.4 (`68042083…`).
+
+**What is implemented.**
+- **The remedy** is the review-input seam's provided method `problem_in_work_tree` (`src/engine/attempt.rs`). It opens a
+  slot with `Workspace::open_work_tree` and the checkout the slot was made from.
+- **The schema-4 driver** asks it at its attempt site (`src/engine/topology/attempt.rs`) and at its verification site
+  (`src/engine/topology/run.rs`).
+- **The ladder's `problem`** at the started checkout is unchanged.
+- **The witnesses** are the ones the section above names.
+
+**What stays pending.** The finding stays `deferred` until each of these is evidenced: this pull request's final-head
+validation, its native CI, its fresh reviews, and the closure predicates. Then, by step 8, it closes with a `fixed`
+ledger row, and the closure deletes this file. Adoption alone closes nothing.
