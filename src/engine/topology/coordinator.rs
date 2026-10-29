@@ -2763,6 +2763,13 @@ mod tests {
         "task_candidate_created",
     ];
 
+    const ONE_SUCCEEDING_ATTEMPT: [&str; 4] = [
+        "task_dispatched",
+        "attempt_started",
+        "candidate_prepared",
+        "task_candidate_created",
+    ];
+
     fn attempt_level(events: &[TopologyEvent], run_id: &str) -> BTreeMap<u64, Vec<String>> {
         let selected: Vec<serde_json::Value> = events
             .iter()
@@ -2799,10 +2806,10 @@ mod tests {
                         .to_owned()
                 })
                 .collect();
-            if kinds != ATTEMPT_LEVEL {
+            if kinds != ONE_SUCCEEDING_ATTEMPT {
                 problems.insert(
                     *key,
-                    format!("projects {kinds:?}, not one each of {ATTEMPT_LEVEL:?}"),
+                    format!("projects {kinds:?}, not {ONE_SUCCEEDING_ATTEMPT:?}"),
                 );
             }
         }
