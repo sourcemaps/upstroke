@@ -7797,10 +7797,13 @@ fn windows_a_role_in_a_work_tree_the_engine_made_sheds_the_work_tree_context_in_
     let other_git = std::fs::canonicalize(other.join(".git")).expect("its Git directory");
     let outside = tree.path().join("outside");
     std::fs::create_dir(&outside).expect("a directory no repository holds");
+    // Git for Windows refuses a verbatim (`\\?\`) Git directory as "not a git repository", so
+    // Git is given the spelling the manager gives it; its answer is still compared canonical.
+    let for_git = crate::workspace_manager::fixture::canonical(&other.join(".git"));
     let control = Command::new("git")
         .current_dir(&outside)
-        .env("git_dir", &other_git)
-        .env("Git_Index_File", other_git.join("other-index"))
+        .env("git_dir", &for_git)
+        .env("Git_Index_File", for_git.join("other-index"))
         .args(["rev-parse", "--absolute-git-dir", "--git-path", "index"])
         .output()
         .expect("run git");
