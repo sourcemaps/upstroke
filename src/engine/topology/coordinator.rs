@@ -2764,22 +2764,49 @@ mod tests {
     ];
 
     fn attempt_level(events: &[TopologyEvent], run_id: &str) -> BTreeMap<u64, Vec<String>> {
-        per_key(&canonical(events, run_id))
+        let selected: Vec<serde_json::Value> = events
+            .iter()
+            .zip(canonical(events, run_id))
+            .filter(|(event, _)| ATTEMPT_LEVEL.contains(&event.body.kind()))
+            .map(|(_, value)| value)
+            .collect();
+        per_key(&selected)
             .into_iter()
-            .map(|(key, values)| {
-                let kept = values
-                    .into_iter()
-                    .filter(|value| {
-                        value
-                            .get("kind")
-                            .and_then(serde_json::Value::as_str)
-                            .is_some_and(|kind| ATTEMPT_LEVEL.contains(&kind))
-                    })
-                    .map(|value| value.to_string())
-                    .collect();
-                (key, kept)
-            })
+            .map(|(key, values)| (key, values.iter().map(ToString::to_string).collect()))
             .collect()
+    }
+
+    fn attempt_level_problems(
+        keyed: &BTreeMap<u64, Vec<String>>,
+        keys: &[u64],
+    ) -> BTreeMap<u64, String> {
+        let mut problems: BTreeMap<u64, String> = keyed
+            .keys()
+            .filter(|key| !keys.contains(key))
+            .map(|key| (*key, "projected, and not an expected key".to_owned()))
+            .collect();
+        for key in keys {
+            let kinds: Vec<String> = keyed
+                .get(key)
+                .into_iter()
+                .flatten()
+                .map(|value| {
+                    serde_json::from_str::<serde_json::Value>(value)
+                        .expect("a projected event is JSON")
+                        .get("event")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned()
+                })
+                .collect();
+            if kinds != ATTEMPT_LEVEL {
+                problems.insert(
+                    *key,
+                    format!("projects {kinds:?}, not one each of {ATTEMPT_LEVEL:?}"),
+                );
+            }
+        }
+        problems
     }
 
     fn final_tree(wide: &Wide) -> String {
@@ -10110,6 +10137,8 @@ mod tests {
             let events = wide.env.durable_events();
             let run_id = wide.run.fold().started().expect("started").run_id.clone();
             let keyed = attempt_level(&events, &run_id);
+            let problems = attempt_level_problems(&keyed, &[0, 1, 2]);
+            assert!(problems.is_empty(), "seed {seed}: {problems:#?}");
             match &reference {
                 None => reference = Some(keyed),
                 Some(expected) => assert_eq!(
@@ -10172,7 +10201,10 @@ mod tests {
                 "seed {seed}: the independent tasks share one base: {bases:?}"
             );
             let run_id = wide.run.fold().started().expect("started").run_id.clone();
-            let observed = (attempt_level(&events, &run_id), final_tree(&wide));
+            let keyed = attempt_level(&events, &run_id);
+            let problems = attempt_level_problems(&keyed, &[0, 1, 2]);
+            assert!(problems.is_empty(), "seed {seed}: {problems:#?}");
+            let observed = (keyed, final_tree(&wide));
             match &reference {
                 None => reference = Some(observed),
                 Some(expected) => assert_eq!(
@@ -10181,6 +10213,47 @@ mod tests {
                 ),
             }
         }
+    }
+
+    #[test]
+    fn selecting_attempt_level_events_by_a_kind_field_keeps_nothing_and_is_rejected() {
+        let tasks = three();
+        let mut wide = Wide::started("coordinator-st08-kind-field", &tasks, 3);
+        let progress = drive(&mut wide, None).expect("the run completes");
+        assert_eq!(outcome_of(&progress), RunOutcome::Complete);
+        let events = wide.env.durable_events();
+        let run_id = wide.run.fold().started().expect("started").run_id.clone();
+        let by_kind_field: BTreeMap<u64, Vec<String>> = per_key(&canonical(&events, &run_id))
+            .into_iter()
+            .map(|(key, values)| {
+                let kept = values
+                    .into_iter()
+                    .filter(|value| {
+                        value
+                            .get("kind")
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(|kind| ATTEMPT_LEVEL.contains(&kind))
+                    })
+                    .map(|value| value.to_string())
+                    .collect();
+                (key, kept)
+            })
+            .collect();
+        assert_eq!(
+            by_kind_field,
+            BTreeMap::from([(0, Vec::new()), (1, Vec::new()), (2, Vec::new())]),
+            "a top-level `kind` field selects nothing from events tagged `event`"
+        );
+        let rejected: Vec<u64> = attempt_level_problems(&by_kind_field, &[0, 1, 2])
+            .into_keys()
+            .collect();
+        assert_eq!(
+            rejected,
+            vec![0, 1, 2],
+            "every key's empty projection is rejected"
+        );
+        let problems = attempt_level_problems(&attempt_level(&events, &run_id), &[0, 1, 2]);
+        assert!(problems.is_empty(), "{problems:#?}");
     }
 
     #[test]
@@ -19003,6 +19076,8 @@ git cat-file -e 'HEAD^{tree}'
                 );
                 let run_id = run_id_of(&run.wide);
                 let keyed = attempt_level(&events, &run_id);
+                let problems = attempt_level_problems(&keyed, &[0, 1, 2]);
+                assert!(problems.is_empty(), "seed {seed}: {problems:#?}");
                 let tree = final_tree(&run.wide);
                 let per_key: BTreeMap<String, String> = keyed
                     .iter()
