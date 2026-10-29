@@ -35,7 +35,13 @@ jobs:
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    # 45 minutes on the macOS leg and 30 on ubuntu, on every lane. In two
+    # merge-queue entries of one head on 2026-10-29, runs 40834103792 and
+    # 40838006947, `test (macos-latest)` exceeded the 30 minutes and was
+    # cancelled. The second job log contains every closing test summary,
+    # each ok; printed summaries are not a successful exit. The budget
+    # names no cause for either cancellation and repairs no test.
+    timeout-minutes: ${{ matrix.os == 'macos-latest' && 45 || 30 }}
     strategy:
       fail-fast: false
       matrix:

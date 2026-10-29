@@ -3450,7 +3450,11 @@ relative, drive-relative (`C:x`) or root-relative (`\x`) is replaced by the
 repository's `common_dir`, while a drive-prefixed or UNC value is kept. Its last
 rows measure `Path::join` on the two forms that are not absolute there: a
 root-relative value takes the checkout's drive, and a drive-relative value
-stays as it is, which is the builders' reasoned limit on Windows.
+stays as it is, which is the builders' reasoned limit on Windows. The control
+gives Git the Git directory as the manager spells it, without the verbatim
+prefix `fs::canonicalize` returns there (the fixture's `canonical`), because Git
+for Windows refuses a verbatim Git directory as "not a git repository"; Git's
+answer is compared canonical.
 
 ## `fn slot_roles_under_an_inherited_context_address_only_their_own_work_tree() {`
 

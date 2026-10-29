@@ -696,7 +696,6 @@ const BASE: &str = "repo";
 /// add` needs before Git 2.55, since it reads the value from the new work
 /// tree. A test that uses it derives that relationship from the actual paths
 /// and asserts it, so a change to either depth fails there first.
-#[cfg(unix)]
 pub(crate) const EQUAL_DEPTH_BASE: &str = "checkouts/user/x/y/z/repo";
 
 pub(crate) struct Fixture {
@@ -859,7 +858,6 @@ impl Fixture {
 
     /// [`Self::created`] with the managed base at `below` the root: C5's
     /// layout, [`EQUAL_DEPTH_BASE`].
-    #[cfg(unix)]
     pub(crate) fn created_based(tag: &str, below: &Path) -> Self {
         let fixture = Self::with_layout(tag, "sha1", below);
         fixture
@@ -949,13 +947,44 @@ pub(crate) fn create_dir(path: &Path) {
     fs::create_dir_all(path).expect("create a fixture directory");
 }
 
+/// `fs::canonicalize`, spelt as the manager spells the paths it derives: on
+/// Windows without the verbatim prefix (`strip_verbatim`), and elsewhere
+/// exactly as `fs::canonicalize` returns it. A test that compares a path it
+/// resolved with one the manager derived compares like spellings this way.
+pub(crate) fn canonical(path: &Path) -> PathBuf {
+    super::strip_verbatim(
+        fs::canonicalize(path)
+            .unwrap_or_else(|error| panic!("canonicalizing {}: {error}", path.display())),
+    )
+}
+
+/// Append `line` and a newline to the file at `path`, creating it: one line
+/// of the log a hosted test's Windows role stand-ins share, written as the
+/// Unix role scripts' `>>` writes it.
+#[cfg(windows)]
+pub(crate) fn append_line(path: &Path, line: &str) {
+    use std::io::Write as _;
+
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .unwrap_or_else(|error| panic!("opening {} to append: {error}", path.display()));
+    file.write_all(format!("{line}\n").as_bytes())
+        .unwrap_or_else(|error| panic!("appending to {}: {error}", path.display()));
+}
+
 /// A directory link at `link` naming `target`: the hand-made layout the
 /// linked-registry tests plant where a run's `worktrees` registry would be
-/// (R-C-REGISTRY). A symbolic link on Unix, and on Windows a junction
-/// (`mklink /J`), which needs no privilege where a Windows symbolic link
-/// does. A topology module's test can make neither.
+/// (R-C-REGISTRY). A topology module's test cannot make one.
+///
+/// A symbolic link on Unix. On Windows a junction, which needs no privilege
+/// where a directory symbolic link does. A junction is a name-surrogate
+/// reparse point, so std's `FileType::is_symlink` answers true for it and
+/// `fs::canonicalize` follows it, and the manager pins it as it pins any
+/// reparse point (`RegistrationStore::of`).
+#[cfg(unix)]
 pub(crate) fn link_directory(target: &Path, link: &Path) {
-    #[cfg(unix)]
     std::os::unix::fs::symlink(target, link).unwrap_or_else(|error| {
         panic!(
             "linking {} to {}: {error}",
@@ -963,20 +992,38 @@ pub(crate) fn link_directory(target: &Path, link: &Path) {
             target.display()
         )
     });
-    #[cfg(windows)]
-    {
-        let made = Command::new("cmd")
-            .args(["/C", "mklink", "/J"])
-            .arg(link)
-            .arg(target)
-            .output()
-            .expect("run mklink");
-        assert!(
-            made.status.success(),
-            "the fixture must really create a junction: {}",
-            String::from_utf8_lossy(&made.stderr)
-        );
-    }
+}
+
+/// See the Unix half. `mklink` is `cmd`'s own command, so `cmd /D /C` makes
+/// the junction, its line passed raw: `cmd` reads its command line itself
+/// rather than as a program's runtime splits arguments.
+#[cfg(windows)]
+pub(crate) fn link_directory(target: &Path, link: &Path) {
+    use std::os::windows::process::CommandExt as _;
+
+    let output = Command::new("cmd")
+        .args(["/D", "/C"])
+        .raw_arg(format!(
+            "mklink /J \"{}\" \"{}\"",
+            link.display(),
+            target.display()
+        ))
+        .output()
+        .unwrap_or_else(|error| {
+            panic!(
+                "linking {} to {}: {error}",
+                link.display(),
+                target.display()
+            )
+        });
+    assert!(
+        output.status.success(),
+        "linking {} to {}: {}{}",
+        link.display(),
+        target.display(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 /// Remove the directory link at `link`, of the kind [`link_directory`] makes,

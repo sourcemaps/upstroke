@@ -3387,7 +3387,9 @@ and reads the run's common directory. Removing `GIT_COMMON_DIR` in a work tree
 sends its verification to `other`, "bad object HEAD", and the attempt fails:
 before #331 the coordinator's discard then erased the worker's output, which
 since #331 it keeps and pins instead (reasoned for this layout until the
-mutation runs on the integrated head).
+mutation runs on the integrated head). The seed's commit runs with the
+repository's `maintenance.auto` off, so it starts no automatic maintenance,
+which Git 2.47 and later detach, in the repository the layout copies.
 
 ## `fn absolute_common_dir_run_helper() {`
 
@@ -3403,7 +3405,10 @@ carries `GIT_COMMON_DIR=../../../../../../common`, which names `common` from the
 repository and from the snapshot, and the same assertions hold as for the
 absolute case. Shedding a relative value in the snapshot instead of giving it
 the path it names at the checkout sends the verification through the link to
-`other`.
+`other`. The repository's `maintenance.auto` is off from `git init`, so no
+commit starts automatic maintenance in the Git directory copied next, and the
+copy names any file it cannot copy, the type it was listed as and what is there
+now.
 
 ## `fn relative_common_dir_run_helper() {`
 

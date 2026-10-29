@@ -2114,8 +2114,8 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  not rewritten but ignored. Nothing in this workflow mentions `RUSTFLAGS` in \
                  that job for a reader to notice.",
         job: Some("test"),
-        anchor: "    timeout-minutes: 30\n",
-        replacement: "    timeout-minutes: 30\n\
+        anchor: "    timeout-minutes: ${{ matrix.os == 'macos-latest' && 45 || 30 }}\n",
+        replacement: "    timeout-minutes: ${{ matrix.os == 'macos-latest' && 45 || 30 }}\n\
                       \x20   env:\n\
                       \x20     CARGO_ENCODED_RUSTFLAGS: ''\n",
         refused_as: "rustflags-override",
