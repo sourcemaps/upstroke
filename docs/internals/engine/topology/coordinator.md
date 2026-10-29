@@ -1826,10 +1826,11 @@ identity rather than by the injector's own refusal, which would refuse it anyway
 
 ## `mod interleaving` › `struct Tracing {`
 
-The coordinator's hooks for ST-13, ST-10 and ST-18: the harness adapters, with the effect and
-run-directory families wrapped to record every consultation, in order, into one trace beside every
-append (its kind, the fold-derived pipeline and merge holdings after it, which reservation kind it
-converts, whether it is `merge_prepared(fast)`), and every fold state for the replay check. Only the
+The coordinator's hooks for ST-13, ST-10, ST-09's logical rows and ST-18: the harness adapters, with
+the effect and run-directory families wrapped to record every consultation, in order, into one trace
+beside every append (its kind, the fold-derived pipeline and merge holdings after it, which reservation
+kind it converts, whether it is `merge_prepared(fast)`), every fold state for the replay check, and,
+after every append, what `brokered` showed of the broker (a [`Brokered`] each). Only the
 coordinator thread's effects are traced: each pipeline takes its own hooks from the factory.
 `Killer` counts the consultations after `run_finished` is folded and answers `Kill` at the armed one,
 through the observation export as the harness adapters do, having written the cell it fires at to a
@@ -1844,8 +1845,43 @@ entitlements in one step (the fast and stale integrations' pair from no merge to
 effect (the staging intent and worktree, the prepared pin, the proposal cherry-pick) falls between a
 fast integration's selection and its `merge_prepared`, or before its `task_merged`; the fast CAS's two
 hook phases see the merge held; and `task_merged` releases both holdings at once. The reservation
-ledger itself is read at every quiescent point and at the end, since the append hook does not carry it
-(R-AT).
+ledger itself is read at every quiescent point and at the end (R-AT), and after every append by
+`ledger_problems`: `folded`, the append hook R-AT found carrying no ledger, still carries only the
+fold, and the broker reaches the test through `brokered`.
+
+## `mod interleaving` › `struct Brokered {`
+
+One append's observation of the broker, as `brokered` showed it on the coordinator's thread right
+after the append: the append's prefix length and kind; the reservation its caller converts after it,
+from its body (`converted_by`); every reservation the ledger holds, read by task key over the fold's
+registry, with the outstanding count and the taken, converted and cancelled totals (R13); the slot
+table's granted and released totals and the identities holding a pair and waiting for one (R3); and
+the invocation ledger's registered count, its pending and running identities, and its completed and
+cancelled counts (R4). Everything but `converts` is copied from the run's own ledgers; `converts` is
+the expectation, derived from the event.
+
+## `mod interleaving` › `fn converted_by(body: &TopologyEventBody) -> Option<(TaskKey, ReservationKind)> {`
+
+The appends after which their caller converts a reservation, with its task and kind: `task_dispatched`
+(`dispatch_settled`), a retry's `attempt_started` (`retry_started`), and `merge_verification_started`,
+`merge_prepared(fast)` and a conflict's `merge_rejected` (the frozen `integrate()`'s
+`IntegrationJournal::converted`). `Tracing::folded` classifies the first four for
+`provisional_problems`; a conflict's rejection converts its reservation but moves no holding, so it is
+outside that oracle's one-step check.
+
+## `mod interleaving` › `fn ledger_problems(ledgers: &[Brokered]) -> Vec<String> {`
+
+ST-09's logical rows at every append, from the process's ledgers rather than from the fold, as
+in-flight conservation and identity association — never the endpoint `balances()` or an empty holder
+set, which valid work in flight does not meet. At each append: R13, taken = converted + cancelled +
+outstanding, and the reservations held are exactly the one this append's caller converts after it, or
+none — the provisional phase, in which a first append's reservation is still held while the fold
+already derives its entitlement; R3, granted = released + held, the pairs held by exactly the slotted
+invocations R4 has running, and exactly R4's pending invocations waiting for one; R4, registrations
+partitioned into pending, running, completed and cancelled, pending and running disjoint. Each problem
+names the append, its kind and both values. The partition count is structural in `InvocationLedger`,
+one state per entry; the two equations and the associations are what a ledger defect, or an
+observation taken at the wrong moment, breaks.
 
 ## `mod interleaving` › `fn seeded_runs_alias_no_task_generation_attempt_invocation_snapshot_ref_pin_sequence_or_queue_position()`
 
@@ -1872,7 +1908,12 @@ made of some seed, so on Windows (R-AY) the test runs seed 1, the lowest whose i
 
 ST-13 at every append of eight seeded runs (`provisional_problems`), no reservation outstanding at any
 quiescent point, and at the end one conversion per first append with none cancelled or duplicated;
-ST-10 on the same runs (the live fold equals a replay of its own log after every append).
+ST-10 on the same runs (the live fold equals a replay of its own log after every append); and ST-09's
+logical rows at every append of the same runs (`ledger_problems`). The broker is observed after
+exactly the appends the fold is, the appends that find a reservation held are as many as the first
+appends, and over the seeds some append finds a pair held after another was released, so the slot
+equation is checked with work in flight. Whether a request waits for a pair at these limits is not
+asserted here; the reduced-limits test asserts that one does.
 
 ## `mod interleaving` › `fn a_chain_projects_at_width_three_as_at_width_one_under_every_seed() {`
 
@@ -1892,7 +1933,10 @@ pooled, and one unpooled beside a pooled one; review re-asks taking pairs in two
 under two seeds and three fixed adverse orders — on Windows each configuration under one of them, the
 first seed, newest-granted-first, oldest-granted-first and gates-first in turn (`scheduled_here`), so
 every configuration and every kind of order runs there once. Every run completes within `STEPS`, no point holds a
-pair over a limit, every pair granted is released once, and a verification runs beside attempts. Each
+pair over a limit, every pair granted is released once, and a verification runs beside attempts. Every
+run also carries ST-09's logical rows at every append (`ledger_problems`, its hooks a `Tracing` whose
+kill is never armed), and over the runs some append finds a request waiting for its pair, so the
+waiting association is checked where requests wait. Each
 run executes under the parent module's `bounded` watchdog on its own (`reduced_limit_run`), so a
 regression that hung instead of ending in the stuck error fails the test rather than the suite, and the
 bound is per run, not per test — a test of twenty runs on a slow leg does not approach it.

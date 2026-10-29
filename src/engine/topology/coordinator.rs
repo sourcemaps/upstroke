@@ -17502,7 +17502,8 @@ git cat-file -e 'HEAD^{tree}'
 
         use super::*;
         use crate::engine::topology::identity::{
-            AttemptIdentities, SequenceIdentities, is_slotted,
+            AttemptIdentities, InvocationLedger, ReservationKind, Reservations, SequenceIdentities,
+            is_slotted,
         };
         use crate::engine::topology::scaffold::{AGENT, REVIEW_AGENT, Ran, SlotLimitsOf, exited};
         use crate::engine::topology::select::Entitlements;
@@ -17511,7 +17512,7 @@ git cat-file -e 'HEAD^{tree}'
         use crate::topology::effects::{
             EffectSiteId, HookPhase, Injection, ObjectSite, RefSite, WorktreeSite,
         };
-        use crate::topology::events::PreparedDisposition;
+        use crate::topology::events::{PreparedDisposition, RejectionDisposition};
 
         const STEPS: usize = 256;
 
@@ -18753,6 +18754,7 @@ git cat-file -e 'HEAD^{tree}'
             traced: Traced,
             killer: Killer,
             states: Vec<(usize, Option<RunState>)>,
+            ledgers: Vec<Brokered>,
         }
 
         impl Tracing {
@@ -18783,6 +18785,7 @@ git cat-file -e 'HEAD^{tree}'
                     traced,
                     killer,
                     states: Vec::new(),
+                    ledgers: Vec::new(),
                 }
             }
         }
@@ -18838,6 +18841,182 @@ git cat-file -e 'HEAD^{tree}'
                     self.killer.finished();
                 }
             }
+
+            fn brokered(
+                &mut self,
+                fold: &TopologyFold,
+                events: &[TopologyEvent],
+                reservations: &Reservations,
+                invocations: &InvocationLedger,
+            ) {
+                let body = events.last().map(|event| &event.body);
+                let slots = invocations.slots();
+                self.ledgers.push(Brokered {
+                    appended: events.len(),
+                    kind: body.map_or("", TopologyEventBody::kind),
+                    converts: body.and_then(converted_by),
+                    held: fold
+                        .registry()
+                        .map(|registry| {
+                            registry
+                                .entries()
+                                .iter()
+                                .filter_map(|entry| {
+                                    reservations.held(entry.key).map(|kind| (entry.key, kind))
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    outstanding: reservations.outstanding(),
+                    taken: reservations.taken(),
+                    converted: reservations.converted(),
+                    cancelled: reservations.cancelled(),
+                    granted: slots.granted(),
+                    released: slots.released(),
+                    holders: slots
+                        .holders()
+                        .into_iter()
+                        .map(InvocationId::render)
+                        .collect(),
+                    queued: slots
+                        .pending()
+                        .into_iter()
+                        .map(InvocationId::render)
+                        .collect(),
+                    registered: invocations.registered(),
+                    pending: invocations
+                        .pending()
+                        .into_iter()
+                        .map(str::to_owned)
+                        .collect(),
+                    running: invocations
+                        .running()
+                        .into_iter()
+                        .map(str::to_owned)
+                        .collect(),
+                    completed: invocations.completed(),
+                    ended_cancelled: invocations.cancelled(),
+                });
+            }
+        }
+
+        struct Brokered {
+            appended: usize,
+            kind: &'static str,
+            converts: Option<(TaskKey, ReservationKind)>,
+            held: Vec<(TaskKey, ReservationKind)>,
+            outstanding: usize,
+            taken: u32,
+            converted: u32,
+            cancelled: u32,
+            granted: u32,
+            released: u32,
+            holders: Vec<String>,
+            queued: Vec<String>,
+            registered: usize,
+            pending: Vec<String>,
+            running: Vec<String>,
+            completed: usize,
+            ended_cancelled: usize,
+        }
+
+        fn converted_by(body: &TopologyEventBody) -> Option<(TaskKey, ReservationKind)> {
+            match body {
+                TopologyEventBody::TaskDispatched { data } => {
+                    Some((data.key, ReservationKind::Dispatch))
+                }
+                TopologyEventBody::AttemptStarted { data } if data.attempt.0 > 1 => {
+                    Some((data.key, ReservationKind::Retry))
+                }
+                TopologyEventBody::MergeVerificationStarted { data } => {
+                    Some((data.candidate.key, ReservationKind::Integration))
+                }
+                TopologyEventBody::MergePrepared { data }
+                    if data.disposition == PreparedDisposition::Fast =>
+                {
+                    Some((data.key, ReservationKind::Integration))
+                }
+                TopologyEventBody::MergeRejected { data }
+                    if matches!(data.disposition, RejectionDisposition::Conflict { .. }) =>
+                {
+                    Some((data.candidate.key, ReservationKind::Integration))
+                }
+                _ => None,
+            }
+        }
+
+        fn ledger_problems(ledgers: &[Brokered]) -> Vec<String> {
+            let mut problems = Vec::new();
+            for at in ledgers {
+                let append = format!("append {} (`{}`)", at.appended, at.kind);
+                let outstanding = u32::try_from(at.outstanding).expect("a small count");
+                if at.taken != at.converted + at.cancelled + outstanding {
+                    problems.push(format!(
+                        "{append}: R13 took {} reservation(s), not {} converted + {} cancelled + \
+                         {outstanding} outstanding",
+                        at.taken, at.converted, at.cancelled
+                    ));
+                }
+                let converts: Vec<(TaskKey, ReservationKind)> = at.converts.into_iter().collect();
+                if at.held != converts || at.held.len() != at.outstanding {
+                    problems.push(format!(
+                        "{append}: R13 holds {:?} of {} outstanding, and the reservation this \
+                         append's caller converts after it is {:?}",
+                        at.held, at.outstanding, at.converts
+                    ));
+                }
+                let held = u32::try_from(at.holders.len()).expect("a small count");
+                if at.granted != at.released + held {
+                    problems.push(format!(
+                        "{append}: R3 granted {} pair(s), not {} released + {held} held by {:?}",
+                        at.granted, at.released, at.holders
+                    ));
+                }
+                let mut slotted = BTreeSet::new();
+                for running in &at.running {
+                    match InvocationId::parse(running) {
+                        Ok(invocation) if is_slotted(&invocation) => {
+                            slotted.insert(running.as_str());
+                        }
+                        Ok(_) => {}
+                        Err(error) => problems.push(format!(
+                            "{append}: R4 has `{running}` running, which is not an invocation \
+                             identity: {error}"
+                        )),
+                    }
+                }
+                let holders: BTreeSet<&str> = at.holders.iter().map(String::as_str).collect();
+                if holders != slotted || holders.len() != at.holders.len() {
+                    problems.push(format!(
+                        "{append}: R3 pairs are held by {:?}, and the slotted invocations R4 has \
+                         running are {slotted:?}",
+                        at.holders
+                    ));
+                }
+                let queued: BTreeSet<&str> = at.queued.iter().map(String::as_str).collect();
+                let pending: BTreeSet<&str> = at.pending.iter().map(String::as_str).collect();
+                if queued != pending || queued.len() != at.queued.len() {
+                    problems.push(format!(
+                        "{append}: R3 has {:?} waiting for a pair, and R4 has {:?} pending",
+                        at.queued, at.pending
+                    ));
+                }
+                let running: BTreeSet<&str> = at.running.iter().map(String::as_str).collect();
+                let partitioned =
+                    at.pending.len() + at.running.len() + at.completed + at.ended_cancelled;
+                if !pending.is_disjoint(&running) || at.registered != partitioned {
+                    problems.push(format!(
+                        "{append}: R4 registers {}, not {} pending + {} running + {} completed + \
+                         {} cancelled",
+                        at.registered,
+                        at.pending.len(),
+                        at.running.len(),
+                        at.completed,
+                        at.ended_cancelled
+                    ));
+                }
+            }
+            problems
         }
 
         const STAGING: [EffectSiteId; 4] = [
@@ -18932,6 +19111,7 @@ git cat-file -e 'HEAD^{tree}'
             let mut seeds = Vec::new();
             let mut provisional_rows = Vec::new();
             let mut entitlement_rows = Vec::new();
+            let mut in_flight = 0_usize;
             for seed in scheduled_here(0..8, &[0]) {
                 let mut wide = Wide::started_with(
                     &format!("interleaving-st13-{seed}"),
@@ -19001,6 +19181,28 @@ git cat-file -e 'HEAD^{tree}'
                     "seed {seed}: a stale integration ran"
                 );
                 let appended: usize = converted.values().sum();
+                let ledgers = std::mem::take(&mut hooks.ledgers);
+                assert_eq!(
+                    ledgers.iter().map(|at| at.appended).collect::<Vec<_>>(),
+                    hooks
+                        .states
+                        .iter()
+                        .map(|(length, _)| *length)
+                        .collect::<Vec<_>>(),
+                    "seed {seed}: the broker's ledgers are read after every append the fold is"
+                );
+                let accounting = ledger_problems(&ledgers);
+                assert!(accounting.is_empty(), "seed {seed}: {accounting:#?}");
+                assert_eq!(
+                    ledgers.iter().filter(|at| at.outstanding > 0).count(),
+                    appended,
+                    "seed {seed}: each first append finds its own reservation still held, and no \
+                     other append finds one"
+                );
+                in_flight += ledgers
+                    .iter()
+                    .filter(|at| at.released > 0 && !at.holders.is_empty())
+                    .count();
                 let reservations = wide.run.broker_mut().reservations();
                 assert_eq!(
                     (
@@ -19062,6 +19264,10 @@ git cat-file -e 'HEAD^{tree}'
                     "peak_outstanding": 1,
                 }));
             }
+            assert!(
+                in_flight > 0,
+                "some append found a pair held after another had been released"
+            );
             export(
                 "ledgers/provisional",
                 &serde_json::json!({
@@ -19359,6 +19565,7 @@ git cat-file -e 'HEAD^{tree}'
             );
             let mut runs = Vec::new();
             let mut beside = 0_usize;
+            let mut waited = 0_usize;
             for (limited, windows) in configurations.into_iter().zip(on_windows) {
                 let positions = scheduled_here(0..5, &[windows]);
                 for (position, (order, seed)) in (0_u64..).zip(orders) {
@@ -19376,15 +19583,20 @@ git cat-file -e 'HEAD^{tree}'
                     bounded("a reduced-limit run", move || {
                         let _ = sent.send(reduced_limit_run(index, &limits, order, seed));
                     });
-                    let (row, verifying_beside_attempts) =
+                    let (row, verifying_beside_attempts, waited_at_an_append) =
                         received.recv().expect("the bounded run reported its row");
                     beside += usize::from(verifying_beside_attempts);
+                    waited += usize::from(waited_at_an_append);
                     runs.push(row);
                 }
             }
             assert!(
                 beside > 0,
                 "a verification ran beside attempts in at least one run"
+            );
+            assert!(
+                waited > 0,
+                "a request waited for its pair at some append in at least one run"
             );
             export(
                 "seam/deadlock-freedom",
@@ -19406,7 +19618,7 @@ git cat-file -e 'HEAD^{tree}'
             limited: &Limited,
             order: Adverse,
             seed: u64,
-        ) -> (serde_json::Value, bool) {
+        ) -> (serde_json::Value, bool, bool) {
             let tasks = mixed();
             let tag = format!("interleaving-deadlock-{index}");
             let plans = WidePlans {
@@ -19432,7 +19644,7 @@ git cat-file -e 'HEAD^{tree}'
             }
             let double = std::sync::Arc::clone(&wide.env.runner);
             let mut interleaver = Interleaver::new(&double, seed, order);
-            let mut hooks = wide.env.hooks();
+            let mut hooks = Tracing::over(&wide.env, Killer::default());
             let pipelines = wide.env.pipelines_limited(SlotLimitsOf::Exactly(1, 1));
             let outcome = wide.run.run_concurrently(
                 &wide.env.seams(),
@@ -19443,6 +19655,19 @@ git cat-file -e 'HEAD^{tree}'
             let what = format!("{} / {} {seed:#x}", limited.name, order.name());
             let progress = outcome.unwrap_or_else(|error| panic!("{what}: {error}"));
             assert_eq!(outcome_of(&progress), RunOutcome::Complete, "{what}");
+            let ledgers = std::mem::take(&mut hooks.ledgers);
+            assert_eq!(
+                ledgers.iter().map(|at| at.appended).collect::<Vec<_>>(),
+                hooks
+                    .states
+                    .iter()
+                    .map(|(length, _)| *length)
+                    .collect::<Vec<_>>(),
+                "{what}: the broker's ledgers are read after every append the fold is"
+            );
+            let accounting = ledger_problems(&ledgers);
+            assert!(accounting.is_empty(), "{what}: {accounting:#?}");
+            let waited = ledgers.iter().any(|at| !at.queued.is_empty());
             let points = std::mem::take(&mut interleaver.points);
             drop(interleaver);
             assert!(
@@ -19508,6 +19733,7 @@ git cat-file -e 'HEAD^{tree}'
                     "outcome": "Complete",
                 }),
                 verifying_beside_attempts,
+                waited,
             )
         }
 
