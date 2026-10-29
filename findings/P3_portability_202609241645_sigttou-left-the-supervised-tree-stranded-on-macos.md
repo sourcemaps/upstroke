@@ -75,3 +75,54 @@ could therefore read the diagnostic before panicking. Then, on the next recurren
 the stopped tree received `SIGCONT` and whether the helper saw `finish`. If the test's 10 s wait is
 the defect, the fix is to the test. If the supervisor leaves the group stopped, the fix is
 production code, and severity and category should be reconsidered then.
+
+## A later sighting of this test on native macOS, cause unknown (2026-10-29, PR #345)
+
+This section is evidence only, and the cause of what it records is unknown. It records a later
+`FAILED` line for this test on native macOS. It does not establish that this is a recurrence of
+the failure above. It repairs nothing and closes nothing, and the guard, the disposition and the
+frontmatter are unchanged.
+
+**The run.** CI run 40806319069, attempt 1, job 123226497738 (`test (macos-latest)`), at PR #345's
+head `8d1be26ac6250bac49a99455c92b0081db5ea704`. The job tested the merge
+`1bb4d4383f432bc7ae9b67461553927777faea92` of that head into `master` at `478592e0`, whose tree is
+the head's own. The job ran from 02:27:37Z to 02:58:04Z on 2026-10-29, 30 min 27 s. Its
+annotations read "The job has exceeded the maximum execution time of 30m0s" and then "The
+operation was canceled".
+
+**What its log shows.**
+
+- The library printed `running 3555 tests`. One progress line reads
+  `test agent::proc::tests::terminal_input_and_output_stops_cover_the_isolated_tree ... FAILED`.
+  At that head the test is at `src/agent/proc/tests.rs:3035`.
+- **There is no failure block.** The job was cancelled at the 30-minute limit before libtest
+  printed its `failures:` section, so no panic or assertion from this test was captured. The
+  log's one panic line comes from another test's helper, `sigchld_target_setup_failure_helper`.
+- The library printed no closing summary, and the main and probe test binaries were not reached.
+- Of the required rows PR #345's body names, C1, RPT, PIN1..7, T-C7, T-C11 and T-C5 were not
+  reached on macOS. T-C14, TOPO4 and TOPO5 printed `... ok`.
+- In the same run, the Windows and Ubuntu test jobs and the lint and MSRV jobs succeeded. The
+  aggregate `upstroke-ci` check (job 123235992865) failed because of this job.
+
+**What is known. None of it establishes a cause.**
+
+- PR #345 changes no path under `src/agent`.
+- This test printed `... ok` on macOS in run 40797944126, at `553babfc`, and on Ubuntu in this
+  run.
+- This run's macOS tests ran about three times slower per test than run 40797944126's.
+- The job carried the notice "Due to capacity constraints, jobs targeting macOS arm64 runners may
+  experience longer queue times." The notice is about queue times. It does not establish why the
+  tests ran slower.
+
+**Kept apart from the failure above.** The failure above is the witnessed signal 22 assertion: a
+panic at `src/agent/proc/tests.rs:3005:28`, at `ac1cdfbf`, reading
+`signal 22 left the supervised tree stranded`. This sighting is a `FAILED` progress line with no
+panic and no assertion. It does not show that assertion, which pass failed, a timeout inside the
+test, or any other mechanism. It is not called a flake, and it is not called a regression.
+
+**What was not done.** No selected-job rerun was requested, because a known HTTP 403 from that
+endpoint already rules it out. No production code changed, no timeout was raised, and nothing
+was re-run to try. The owner-authorized retrigger is the commit that adds this section. A later
+pass is one more sample, and it closes nothing.
+
+The raw job log's SHA256 is `03f4bebb93614da3d832f81b1a0758a0f0e0d4ed9b7e19116d24d0c6d92b582f`.
