@@ -8,7 +8,7 @@ reviewed_sha: 5c222ff2162da28aa471433773bf4966a883a428
 location: src/runner/host/environment.rs:349
 provenance: pre_existing
 first_bad:
-guard: for the topology face, the adopted schema-4 start refusal R5 adds, `refuse_relative_repository_wide_names` in `src/workspace_manager.rs`, run first in `prelock::check` and again in `WorkspaceManager::derive` before the manager's first Git child: implemented, not yet validated (tests, native CI and fresh review pending); the two faces left are accepted by name by the owner (adoption `818e7675…`, `adopted.ENV.choices[3]`, 2026-10-15)
+guard: for the topology face, the adopted schema-4 start refusal R5 adds, `refuse_relative_repository_wide_names` in `src/workspace_manager.rs`, run first in `prelock::check` and again in `WorkspaceManager::derive` before the manager's first Git child: implemented; its validation is the R5 pull request's final-head baseline, native CI and fresh review, recorded in that pull request's body, and until they pass no topology row is claimed closed; the two faces left are accepted by name by the owner (adoption `818e7675…`, `adopted.ENV.choices[3]`, 2026-10-15)
 ---
 
 ## Narrowed to its two accepted faces
@@ -34,14 +34,16 @@ now holds only the second.
 
 The check is `refuse_relative_repository_wide_names` in `src/workspace_manager.rs`. `prelock::check` runs it as its
 first statement, and `WorkspaceManager::derive`, the manager's only constructor, runs it again before the manager's first
-Git child, so that a fresh run and a resume refuse before they make or reuse any slot. **It is implemented, not yet
-validated:** its tests, native CI and a fresh review are pending, and until they pass this record claims no topology row
-closed. Its witnesses, "REL objects, sibling" among them, are the R5 pull request's.
+Git child, so that a fresh run and a resume refuse before they make or reuse any slot. **It is implemented; its
+validation is the R5 pull request's:** the baseline at its final head, its native CI on Linux, macOS and Windows, and a
+fresh review, each recorded in that pull request's body. Until they pass, this record claims no topology row closed.
+Its witnesses, "REL objects, sibling" among them, are the R5 pull request's.
 
 **Implementation facts and limits.**
 - **Git versions.** The alternates rule was read in Git's own source at v2.41.0 (the oldest version README.md supports),
   v2.43.0 and v2.55.0, and at Git for Windows v2.53.0.windows.1, and is the same rule in all four; versions between them
-  are inferred from that identity. The Git for Windows version native CI runs is recorded when it runs.
+  are inferred from that identity. The Git for Windows version native CI runs is recorded in the R5 pull request's
+  body when it runs.
 - **What cannot be classified exactly** is refused: an entry whose unquoting decodes a NUL byte (Git reads the entry only
   as far as it) and, on Windows, an entry that is not Unicode once unquoted.
 - **Empty values** are not absolute paths and are refused, although Git reads an empty `GIT_SHALLOW_FILE`,
@@ -167,8 +169,9 @@ not adopted, and the owner classifies (`MAINTAINING.md:189`).
 
 **What clears it.** A lower grade is not clearance (proposal `:3972-3973`). Neither is filing it, nor its `deferred`
 disposition, which meant pending review and the owner's decision, not deferred past G6. Since the adoption, the topology
-face is to be satisfied by implementation, the start refusal, which is implemented and not yet validated, and the two
-faces above by an exact documented disposition, this record's `accepted-risk` (report §3.2, `:731-732`).
+face is to be satisfied by implementation, the start refusal, which is implemented and whose validation is the R5 pull
+request's, and the two faces above by an exact documented disposition, this record's `accepted-risk`
+(report §3.2, `:731-732`).
 
 ## Step 5 and the witness
 

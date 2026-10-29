@@ -8,7 +8,7 @@ reviewed_sha: 5c222ff2162da28aa471433773bf4966a883a428
 location: src/workspace_manager.rs:2619
 provenance: pre_existing
 first_bad:
-guard: for part 1, the adopted schema-4 start refusal R5 adds, `refuse_linked_registry` in `src/workspace_manager.rs`, run in `WorkspaceManager::derive` once the canonical common directory is known and before any registry access: implemented, not yet validated (tests, native CI and fresh review pending); part 2 is accepted by name by the owner (adoption `818e7675…`, `adopted.ENV.choices[4]`, 2026-10-15)
+guard: for part 1, the adopted schema-4 start refusal R5 adds, `refuse_linked_registry` in `src/workspace_manager.rs`, run in `WorkspaceManager::derive` once the canonical common directory is known and before any registry access: implemented; its validation is the R5 pull request's final-head baseline, native CI and fresh review, recorded in that pull request's body, and until they pass no part-1 row is claimed closed; part 2 is accepted by name by the owner (adoption `818e7675…`, `adopted.ENV.choices[4]`, 2026-10-15)
 ---
 
 ## Narrowed to part 2
@@ -32,9 +32,10 @@ The check is `refuse_linked_registry` in `src/workspace_manager.rs`. `WorkspaceM
 constructor, runs it as soon as its one read-only `git rev-parse --git-common-dir` has found the canonical common
 directory, and before any registry access, so that a fresh run and a resume refuse before they make or reuse any slot;
 the check itself starts no process. It is written to refuse a link into another repository, a chain of links, a link
-inside the common directory whose target's parent is elsewhere, and on Windows a junction. **It is implemented, not yet
-validated:** its tests, native CI and a fresh review are pending, and until they pass this record claims no part-1 row
-closed. Its witnesses, "symlinked registry, nothing inherited" among them, are the R5 pull request's.
+inside the common directory whose target's parent is elsewhere, and on Windows a junction. **It is implemented; its
+validation is the R5 pull request's:** the baseline at its final head, its native CI on Linux, macOS and Windows, and a
+fresh review, each recorded in that pull request's body. Until they pass, this record claims no part-1 row closed. Its
+witnesses, "symlinked registry, nothing inherited" among them, are the R5 pull request's.
 
 **Implementation facts and limits.**
 - **An empty inherited `GIT_COMMON_DIR` counts as inherited**, so it is part 2's layout and not refused: Git takes a set
@@ -184,8 +185,8 @@ not adopted, and the owner classifies (`MAINTAINING.md:189-190`).
 
 **What clears it.** Neither filing it, nor its `deferred` disposition (which meant pending review and the owner's
 decision, not deferred past G6), nor its proposed grade. Since the adoption, part 1 is to be satisfied by implementation,
-the start refusal, which is implemented and not yet validated, and part 2 by an exact documented disposition, this
-record's `accepted-risk` (report §3.2, `:733-734`).
+the start refusal, which is implemented and whose validation is the R5 pull request's, and part 2 by an exact
+documented disposition, this record's `accepted-risk` (report §3.2, `:733-734`).
 
 ## Step 5 and the witness
 
