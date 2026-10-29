@@ -8604,7 +8604,10 @@ fn a_full_id_of_the_repositorys_own_format_is_accepted_and_the_head_is_what_git_
 ///
 /// **The work is in a neutralised child** (PR #271, round 4), for the reason
 /// [`quiescence_holds_when_the_recorded_tree_carries_a_replacement`] is: the
-/// manager's own `git` children inherit this process's environment, so an
+/// manager's own `git` children inherit this process's environment, less the
+/// work-tree context they shed in a work tree the engine made, the four
+/// selectors, and with a relative `GIT_COMMON_DIR` given as the absolute path it
+/// names at the started checkout, so an
 /// operator's `GIT_NO_REPLACE_OBJECTS=1` -- which is what this pull request
 /// makes upstroke's own gates supply -- would hand this witness the very
 /// protection it exists to prove the manager installs, and the checkout would
@@ -8740,7 +8743,10 @@ fn base_without_replacement_isolation() -> HostEnvironment {
 /// [`assert_replacement_controls_pinned`] answers for *this* process, and this
 /// process is not where the claim lives: `HostRunner::run` calls `env_clear`
 /// and installs what `compose` returned, so the only environment a role process
-/// has is the composed one. This probe is that exact runner --
+/// has is the composed one, less the work-tree context the runner sheds in a
+/// work tree the engine made, the four selectors, and with a relative
+/// `GIT_COMMON_DIR` given as the absolute path it names at the started
+/// checkout. This probe is that exact runner --
 /// [`base_without_replacement_isolation`], read as [`ObjectGraph::AsReplaced`],
 /// which is the one setting that makes `compose` leave the pair off -- run over
 /// a throwaway repository carrying a replacement. It must read the
@@ -11633,7 +11639,7 @@ fn after_each_object_primitive_the_object_is_referenced_by_the_row_row_names() {
         .expect("materialize");
     assert_eq!(ObjectSite::RepairMaterialize.row(), ResourceRow::R9);
     assert!(
-        index_differs_from_head(&repair_path).expect("index"),
+        index_differs_from_head(fixture.manager.base(), &repair_path).expect("index"),
         "the materialization is staged in the repair worktree's index"
     );
     let materialized = git(&repair_path, &["rev-parse", ":c.txt"]);
@@ -14679,10 +14685,11 @@ fn a_worktree_inspecting_read_writes_no_index() {
 
     age_tracked_file(&path, 1_000_000_100);
     let before = worktree_index(&path);
-    let unstaged = worktree_has_unstaged_changes(&path).expect("inspect the working tree");
+    let unstaged = worktree_has_unstaged_changes(fixture.manager.base(), &path)
+        .expect("inspect the working tree");
     let midpoint = worktree_index(&path);
     age_tracked_file(&path, 1_000_000_200);
-    let staged = index_differs_from_head(&path).expect("inspect the index");
+    let staged = index_differs_from_head(fixture.manager.base(), &path).expect("inspect the index");
     let after = worktree_index(&path);
     assert!(
         before == midpoint,
@@ -19174,7 +19181,7 @@ fn both_builders_carry_the_engine_switch_set_and_its_bindings() {
         ),
         (
             "read_only_git",
-            read_only_command(&fixture.base, &["status"]),
+            read_only_command(ReadAt::Base, &fixture.base, &["status"]),
         ),
     ];
     for (builder, command) in &builders {
@@ -22467,5 +22474,592 @@ fn a_store_link_whose_target_appears_after_derive_is_not_pinned() {
         snapshot(&checkout),
         checkout_before,
         "the checkout is untouched"
+    );
+}
+
+/// The variables an isolated work-tree-context child reads: the sequence it
+/// runs, the scratch root it runs it in, and the canonical common directory the
+/// sequence's `derive` must read.
+#[cfg(unix)]
+const CONTEXT_SEQUENCE: &str = "UPSTROKE_WORK_TREE_CONTEXT_SEQUENCE";
+#[cfg(unix)]
+const CONTEXT_ROOT: &str = "UPSTROKE_WORK_TREE_CONTEXT_ROOT";
+#[cfg(unix)]
+const CONTEXT_COMMON: &str = "UPSTROKE_WORK_TREE_CONTEXT_COMMON";
+
+/// A committed repository at `path` holding `files`, made in this process's
+/// own environment, which sets none of the names under test. Automatic
+/// maintenance is off, as it is for every Git child the engine runs: a commit
+/// detaches it since Git 2.47, so it can still be running in the `.git` a test
+/// copies next.
+#[cfg(unix)]
+fn context_repository(path: &Path, files: &[(&str, &str)]) {
+    fs::create_dir_all(path).expect("a repository's directory");
+    git(path, &["init", "-q", "-b", "main"]);
+    git(path, &["config", "user.email", "tests@upstroke.local"]);
+    git(path, &["config", "user.name", "upstroke tests"]);
+    git(path, &["config", "maintenance.auto", "false"]);
+    for (name, content) in files {
+        write_file(&path.join(name), content.as_bytes());
+    }
+    git(path, &["add", "-A"]);
+    git(path, &["commit", "-q", "-m", "initial"]);
+}
+
+/// `from` copied to `to`, file by file, links as links.
+#[cfg(unix)]
+fn context_copy_tree(from: &Path, to: &Path) {
+    fs::create_dir_all(to).expect("a copy's directory");
+    for entry in fs::read_dir(from).expect("read a directory to copy") {
+        let entry = entry.expect("a directory entry");
+        let target = to.join(entry.file_name());
+        let kind = entry.file_type().expect("an entry's type");
+        if kind.is_dir() {
+            context_copy_tree(&entry.path(), &target);
+        } else if kind.is_symlink() {
+            let link = fs::read_link(entry.path()).expect("a link's target");
+            std::os::unix::fs::symlink(link, &target).expect("copy a link");
+        } else if let Err(error) = fs::copy(entry.path(), &target) {
+            panic!(
+                "copy a file: {} to {}, listed as {kind:?}, now {:?}: {error}",
+                entry.path().display(),
+                target.display(),
+                fs::symlink_metadata(entry.path()).map(|metadata| metadata.file_type())
+            );
+        }
+    }
+}
+
+/// Every path under `at` with its bytes, sorted: two equal results mean
+/// nothing under `at` was written between them. An absent `at` is empty.
+#[cfg(unix)]
+fn context_tree_bytes(at: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    fn walk(at: &Path, into: &mut Vec<(PathBuf, Vec<u8>)>) {
+        let Ok(metadata) = fs::symlink_metadata(at) else {
+            return;
+        };
+        if metadata.is_dir() {
+            into.push((at.to_path_buf(), Vec::new()));
+            let mut entries: Vec<PathBuf> = fs::read_dir(at)
+                .expect("read a watched directory")
+                .map(|entry| entry.expect("a directory entry").path())
+                .collect();
+            entries.sort();
+            for entry in entries {
+                walk(&entry, into);
+            }
+        } else {
+            into.push((at.to_path_buf(), fs::read(at).expect("read a watched file")));
+        }
+    }
+    let mut bytes = Vec::new();
+    walk(at, &mut bytes);
+    bytes
+}
+
+/// A topology worker in `slot`: `git <args>` as an `Implement` role through
+/// `runner`, which composes the role's environment the way a production
+/// runner would.
+#[cfg(unix)]
+fn context_worker(
+    runner: &crate::runner::host::HostRunner,
+    slot: &Path,
+    args: &[&str],
+) -> crate::agent::ProcessOutput {
+    use crate::runner::Runner as _;
+
+    let command = args
+        .iter()
+        .fold(crate::runner::CommandSpec::new("git"), |spec, arg| {
+            spec.arg(*arg)
+        });
+    let request = crate::runner::worker_request(
+        command,
+        slot.to_path_buf(),
+        crate::runner::AgentId::new(crate::agent::claude::ADAPTER_ID),
+        std::time::Duration::from_secs(60),
+        crate::runner::invocation::InvocationId::attempt(
+            crate::topology::registry::TaskKey(0),
+            crate::topology::events::GenerationId(0),
+            crate::topology::events::AttemptNumber(1),
+            crate::runner::invocation::AttemptRole::Worker,
+            0,
+        ),
+    );
+    runner
+        .run_blocking(&request)
+        .unwrap_or_else(|error| panic!("the worker in {}: {args:?}: {error}", slot.display()))
+}
+
+/// The index of the linked work tree at `slot` that `git worktree add` gave
+/// it, read through its own `.git` file and nothing inherited.
+#[cfg(unix)]
+fn context_own_index_lists(slot: &Path) -> String {
+    use std::os::unix::ffi::OsStrExt;
+
+    let gitfile = fs::read(slot.join(".git")).expect("the slot's .git file");
+    let admin = gitfile
+        .strip_prefix(b"gitdir: ")
+        .and_then(|rest| rest.strip_suffix(b"\n"))
+        .expect("a gitfile");
+    let admin = slot.join(std::ffi::OsStr::from_bytes(admin));
+    let mut command = Command::new("git");
+    for name in WORK_TREE_SELECTORS.iter().chain([&COMMON_DIR]) {
+        command.env_remove(name);
+    }
+    let output = command
+        .arg("--git-dir")
+        .arg(&admin)
+        .args(["ls-files", "--cached"])
+        .output()
+        .expect("run git");
+    assert!(
+        output.status.success(),
+        "the slot's own index: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// The seven sequences of
+/// [`the_managers_slot_add_and_reads_shed_the_work_tree_context_and_its_base_keeps_it`],
+/// each run in an isolated child whose environment alone carries the names
+/// it inherits. The parent builds each layout in its own environment, keeps
+/// the bytes the child must leave alone, and compares them afterwards.
+///
+/// FUB-D9-ENV's and CR-1's sequences inherit a `GIT_INDEX_FILE` naming the
+/// user's index, which holds a change of the user's own: the slot add, and two
+/// incarnations' slots, must leave it as it is. D1's layout inherits `GIT_DIR`
+/// and `GIT_WORK_TREE` selecting `B.git` for `A/work` inside `A`: `derive`
+/// and `object_exists` read `B.git` at the base, and the slot's work lands in
+/// `B.git`. The quiescence read happens after the user stages a change in the
+/// index an inherited `GIT_INDEX_FILE` names, and must read the slot's own.
+/// The newline layout's worker add lands in the slot's own index. C4's layout
+/// inherits an absolute `GIT_COMMON_DIR` naming a repository whose `worktrees`
+/// directory is a link into another repository, and C5's the same link under
+/// a relative `GIT_COMMON_DIR` that names the run's common directory from the
+/// base and from the manager's slot, six levels below the scratch root as a
+/// production gate snapshot is: in both, the verification finds no foreign
+/// repository, the commit at the base succeeds, and the other repository's
+/// objects and refs are not written.
+#[cfg(unix)]
+#[test]
+fn the_managers_slot_add_and_reads_shed_the_work_tree_context_and_its_base_keeps_it() {
+    let mut failures: Vec<String> = Vec::new();
+    for sequence in [
+        "FUB-D9-ENV",
+        "CR-1",
+        "D1",
+        "quiescence",
+        "newline",
+        "C4",
+        "C5",
+    ] {
+        let tree = scratch("work-tree-context");
+        let root = tree.path();
+        fs::create_dir(root.join("private")).expect("the private root");
+        let mut names: Vec<(&str, OsString)> = Vec::new();
+        let mut watched: Vec<PathBuf> = Vec::new();
+        let mut common = None;
+        match sequence {
+            "FUB-D9-ENV" | "CR-1" | "quiescence" => {
+                let managed = root.join("managed");
+                context_repository(
+                    &managed,
+                    &[("README.md", "base\n"), ("tracked.txt", "base\n")],
+                );
+                if sequence == "CR-1" {
+                    git(&managed, &["checkout", "-q", "-b", "side"]);
+                    write_file(&managed.join("side.txt"), b"side\n");
+                    git(&managed, &["add", "side.txt"]);
+                    git(&managed, &["commit", "-q", "-m", "side"]);
+                    git(&managed, &["checkout", "-q", "main"]);
+                }
+                if sequence == "FUB-D9-ENV" {
+                    write_file(&managed.join("tracked.txt"), b"user staged\n");
+                    git(&managed, &["add", "tracked.txt"]);
+                }
+                names.push((
+                    "GIT_INDEX_FILE",
+                    managed.join(".git/index").into_os_string(),
+                ));
+                if sequence != "quiescence" {
+                    watched.push(managed.join(".git/index"));
+                }
+            }
+            "D1" => {
+                let enclosing = root.join("A");
+                context_repository(
+                    &enclosing,
+                    &[("README.md", "A\n"), ("work/shared.txt", "base\n")],
+                );
+                let work = enclosing.join("work");
+                write_file(&work.join("shared.txt"), b"user-staged\n");
+                git(&enclosing, &["add", "work/shared.txt"]);
+                write_file(&work.join("shared.txt"), b"base\n");
+                let selected = root.join("B.git");
+                let selection = [
+                    ("GIT_DIR", selected.as_os_str()),
+                    ("GIT_WORK_TREE", work.as_os_str()),
+                ];
+                for args in [
+                    ["init", "-q", "-b", "main"].as_slice(),
+                    ["add", "shared.txt"].as_slice(),
+                    [
+                        "-c",
+                        "user.name=upstroke tests",
+                        "-c",
+                        "user.email=tests@upstroke.local",
+                        "commit",
+                        "-q",
+                        "-m",
+                        "B: initial",
+                    ]
+                    .as_slice(),
+                ] {
+                    let output = Command::new("git")
+                        .current_dir(&work)
+                        .envs(selection)
+                        .args(args)
+                        .output()
+                        .expect("run git");
+                    assert!(output.status.success(), "{args:?}: {output:?}");
+                }
+                names = selection
+                    .iter()
+                    .map(|(name, value)| (*name, value.to_os_string()))
+                    .collect();
+                watched.extend([enclosing.join(".git/index"), enclosing.join(".git/HEAD")]);
+                common = Some(fs::canonicalize(&selected).expect("B.git"));
+            }
+            "newline" => {
+                let repository = root.join("repo\nname");
+                context_repository(&repository, &[("README.md", "readme\n")]);
+                names.push(("GIT_DIR", repository.join(".git").into_os_string()));
+            }
+            _ => {
+                let base = if sequence == "C4" {
+                    root.join("base")
+                } else {
+                    root.join("checkouts/user/x/y/z/base")
+                };
+                context_repository(&base, &[("README.md", "base\n"), ("shared.txt", "seed\n")]);
+                let other = root.join("other");
+                context_copy_tree(&base, &other);
+                fs::create_dir(other.join(".git/worktrees")).expect("the other registry");
+                std::os::unix::fs::symlink(
+                    other.join(".git/worktrees"),
+                    base.join(".git/worktrees"),
+                )
+                .expect("the run's registry, a link into the other repository");
+                let value = if sequence == "C4" {
+                    base.join(".git").into_os_string()
+                } else {
+                    OsString::from("../../../../../../checkouts/user/x/y/z/base/.git")
+                };
+                names.push((COMMON_DIR, value));
+                watched.extend([other.join(".git/objects"), other.join(".git/refs")]);
+                common =
+                    Some(fs::canonicalize(base.join(".git")).expect("the run's common directory"));
+            }
+        }
+        let before: Vec<_> = watched
+            .iter()
+            .map(|path| context_tree_bytes(path))
+            .collect();
+        let common = common.unwrap_or_default();
+        let mut vars: Vec<(&str, &std::ffi::OsStr)> = names
+            .iter()
+            .map(|(name, value)| (*name, value.as_os_str()))
+            .collect();
+        vars.push((CONTEXT_SEQUENCE, std::ffi::OsStr::new(sequence)));
+        vars.push((CONTEXT_ROOT, root.as_os_str()));
+        vars.push((CONTEXT_COMMON, common.as_os_str()));
+        let ended = crate::agent::proc::test_support::run_test_isolated(
+            "workspace_manager::tests::work_tree_context_sequence_helper",
+            &vars,
+            std::time::Duration::from_secs(180),
+        );
+        if !(ended.status.is_some_and(|status| status.success())
+            && ended.stdout.contains("1 passed"))
+        {
+            failures.push(format!("{sequence}: {ended}"));
+            continue;
+        }
+        for (path, earlier) in watched.iter().zip(&before) {
+            if context_tree_bytes(path) != *earlier {
+                failures.push(format!("{sequence}: {} was written", path.display()));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} of the seven sequences failed:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+/// The child of
+/// [`the_managers_slot_add_and_reads_shed_the_work_tree_context_and_its_base_keeps_it`]:
+/// one sequence, under the names its environment inherited, through the
+/// manager's own API and, for the worker, the host runner.
+#[cfg(unix)]
+#[test]
+#[ignore = "subprocess helper"]
+fn work_tree_context_sequence_helper() {
+    let Some(sequence) = std::env::var_os(CONTEXT_SEQUENCE) else {
+        return;
+    };
+    let sequence = sequence.to_string_lossy().into_owned();
+    let root = PathBuf::from(std::env::var_os(CONTEXT_ROOT).expect("the scratch root"));
+    let private = root.join("private");
+    let base = match sequence.as_str() {
+        "D1" => root.join("A/work"),
+        "newline" => root.join("repo\nname"),
+        "C4" => root.join("base"),
+        "C5" => root.join("checkouts/user/x/y/z/base"),
+        _ => root.join("managed"),
+    };
+    let head = git(&base, &["rev-parse", "HEAD"]);
+    let manager = WorkspaceManager::derive(&base, &private, super::fixture::RUN_ID, "inc-context")
+        .unwrap_or_else(|error| panic!("{sequence}: derive: {error}"));
+    if matches!(sequence.as_str(), "D1" | "C4" | "C5") {
+        assert_eq!(
+            manager.common_git_dir(),
+            Path::new(&std::env::var_os(CONTEXT_COMMON).expect("the common directory")),
+            "{sequence}: derive reads the common directory the inherited names select"
+        );
+    }
+    manager
+        .create_execution_root(&mut NoHooks)
+        .expect("the execution root");
+    let slot = Slot::Task {
+        key: "context".to_owned(),
+        generation: 1,
+    };
+    manager
+        .write_intent(&mut NoHooks, &slot)
+        .expect("the slot's intent");
+    let path = manager
+        .add_worktree(&mut NoHooks, &slot, &head)
+        .unwrap_or_else(|error| panic!("{sequence}: the slot add: {error}"));
+    match sequence.as_str() {
+        "FUB-D9-ENV" => {
+            assert!(
+                context_own_index_lists(&path).contains("tracked.txt"),
+                "{sequence}: the slot has an index of its own"
+            );
+        }
+        "CR-1" => {
+            let earlier =
+                WorkspaceManager::derive(&base, &private, super::fixture::RUN_ID, "inc-earlier")
+                    .expect("the earlier incarnation");
+            let early = Slot::Task {
+                key: "earlier".to_owned(),
+                generation: 1,
+            };
+            earlier
+                .write_intent(&mut NoHooks, &early)
+                .expect("the earlier slot's intent");
+            earlier
+                .add_worktree(&mut NoHooks, &early, &head)
+                .expect("the earlier slot");
+            write_file(&path.join("paid.txt"), b"paid output\n");
+            manager
+                .candidate_stage(&mut NoHooks, &slot, &[])
+                .expect("the successor stages its paid output");
+            let side = git(&base, &["rev-parse", "side"]);
+            earlier
+                .repair_materialize(&mut NoHooks, &early, &side)
+                .expect("the earlier incarnation's materialization");
+            let captured = manager
+                .candidate_write_tree(&mut NoHooks, &slot)
+                .expect("the successor's capture");
+            assert_eq!(
+                git(&base, &["ls-tree", "--name-only", &captured]),
+                "README.md\npaid.txt\ntracked.txt",
+                "{sequence}: the successor's capture holds its paid output"
+            );
+        }
+        "quiescence" => {
+            let tree = git(&base, &["rev-parse", "HEAD^{tree}"]);
+            write_file(&base.join("tracked.txt"), b"user staged after the add\n");
+            git(&base, &["add", "tracked.txt"]);
+            let verified = manager
+                .quiescence(&path, &Quiescence::HoldsTree(tree))
+                .expect("the quiescence read");
+            assert!(
+                verified.is_ok(),
+                "{sequence}: the slot's own index holds the tree it was made at: {verified:?}"
+            );
+        }
+        "newline" => {
+            write_file(&path.join("worker-new.txt"), b"a file the worker made\n");
+            let added = context_worker(
+                &crate::runner::host::HostRunner::new(),
+                &path,
+                &["add", "worker-new.txt"],
+            );
+            assert_eq!(added.code, Some(0), "{sequence}: {added:?}");
+            assert!(
+                context_own_index_lists(&path).contains("worker-new.txt"),
+                "{sequence}: the worker's add lands in the slot's own index"
+            );
+        }
+        _ => {
+            let include = private.join("git/recorded-objects.gitconfig");
+            write_file(&include, crate::runner::host::RECORDED_OBJECTS_INCLUDE);
+            let runner = crate::runner::host::HostRunner::new().with_environment(
+                crate::runner::host::HostEnvironment::from_process().reading(
+                    crate::runner::host::ObjectGraph::RecordedIn(
+                        crate::runner::host::ManagedRepository::new(
+                            manager.common_git_dir(),
+                            &include,
+                            crate::runner::host::GitdirRule::native(),
+                        )
+                        .expect("the run's repository"),
+                    ),
+                ),
+            );
+            write_file(&path.join("worker-new.txt"), b"a file the worker made\n");
+            let added = context_worker(&runner, &path, &["add", "worker-new.txt"]);
+            assert_eq!(added.code, Some(0), "{sequence}: {added:?}");
+            manager
+                .candidate_stage(&mut NoHooks, &slot, &[])
+                .expect("the capture stages");
+            let captured = manager
+                .candidate_write_tree(&mut NoHooks, &slot)
+                .expect("the capture writes its tree");
+            let verified = manager
+                .quiescence(&path, &Quiescence::HoldsTree(captured.clone()))
+                .expect("the verification");
+            assert!(
+                verified.is_ok(),
+                "{sequence}: the slot's verification reads the run's common directory: {verified:?}"
+            );
+            let commit = manager
+                .candidate_commit_tree(&mut NoHooks, &captured, &head, "candidate")
+                .unwrap_or_else(|error| panic!("{sequence}: the commit at the base: {error}"));
+            assert!(
+                manager
+                    .object_exists(&commit)
+                    .expect("the base reads its objects"),
+                "{sequence}: the candidate commit is in the run's repository"
+            );
+            assert!(
+                git(&base, &["ls-tree", "-r", "--name-only", &captured])
+                    .lines()
+                    .any(|line| line == "worker-new.txt"),
+                "{sequence}: the capture holds the worker's file"
+            );
+        }
+    }
+}
+
+/// A relative `GIT_COMMON_DIR` inherited right at the base, `../common`, with
+/// a copy of the run's common directory beside the manager's slot, the draft's
+/// design lens's construction. The slot add, a file staged in the slot, the
+/// manager's capture and the commit at the base all address the run's common
+/// directory: the verification in the slot finds the base's, the commit holds
+/// the captured tree, and the copy beside the slot is not written. The copy is
+/// made before the add, because Git's own checkout child of `git worktree add`
+/// reads objects through the relative value from the new work tree on Git 2.43
+/// and 2.50.
+#[cfg(unix)]
+#[test]
+fn a_relative_common_dir_resolves_to_the_runs_common_dir_in_a_slot() {
+    let tree = scratch("relative-common-dir");
+    let root = tree.path();
+    let managed = root.join("managed");
+    context_repository(
+        &managed,
+        &[("README.md", "readme\n"), ("shared.txt", "base\n")],
+    );
+    context_copy_tree(&managed.join(".git"), &root.join("common"));
+    fs::create_dir(root.join("private")).expect("the private root");
+    let common = fs::canonicalize(root.join("common")).expect("the run's common directory");
+    let ended = crate::agent::proc::test_support::run_test_isolated(
+        "workspace_manager::tests::relative_common_dir_slot_helper",
+        &[
+            (COMMON_DIR, std::ffi::OsStr::new("../common")),
+            (CONTEXT_ROOT, root.as_os_str()),
+            (CONTEXT_COMMON, common.as_os_str()),
+        ],
+        std::time::Duration::from_secs(180),
+    );
+    assert!(
+        ended.status.is_some_and(|status| status.success()) && ended.stdout.contains("1 passed"),
+        "{ended}"
+    );
+}
+
+/// The child of [`a_relative_common_dir_resolves_to_the_runs_common_dir_in_a_slot`].
+#[cfg(unix)]
+#[test]
+#[ignore = "subprocess helper"]
+fn relative_common_dir_slot_helper() {
+    let Some(root) = std::env::var_os(CONTEXT_ROOT).map(PathBuf::from) else {
+        return;
+    };
+    let base = root.join("managed");
+    let head = git(&base, &["rev-parse", "HEAD"]);
+    let manager = WorkspaceManager::derive(
+        &base,
+        &root.join("private"),
+        super::fixture::RUN_ID,
+        "inc-relative",
+    )
+    .expect("derive");
+    assert_eq!(
+        manager.common_git_dir(),
+        Path::new(&std::env::var_os(CONTEXT_COMMON).expect("the common directory")),
+        "derive reads the common directory the relative value names at the base"
+    );
+    manager
+        .create_execution_root(&mut NoHooks)
+        .expect("the execution root");
+    let slot = Slot::Task {
+        key: "relative".to_owned(),
+        generation: 1,
+    };
+    let beside = manager
+        .slot_path(&slot)
+        .parent()
+        .expect("the slot's namespace")
+        .join("common");
+    context_copy_tree(&root.join("common"), &beside);
+    manager
+        .write_intent(&mut NoHooks, &slot)
+        .expect("the slot's intent");
+    let path = manager
+        .add_worktree(&mut NoHooks, &slot, &head)
+        .expect("the slot add");
+    let before = context_tree_bytes(&beside);
+    write_file(&path.join("staged.txt"), b"staged in the slot\n");
+    manager
+        .candidate_stage(&mut NoHooks, &slot, &[])
+        .expect("the capture stages");
+    let captured = manager
+        .candidate_write_tree(&mut NoHooks, &slot)
+        .expect("the capture writes its tree");
+    let verified = manager
+        .quiescence(&path, &Quiescence::HoldsTree(captured.clone()))
+        .expect("the verification");
+    assert!(
+        verified.is_ok(),
+        "the common directory the verification reads in the slot is the base's: {verified:?}"
+    );
+    let commit = manager
+        .candidate_commit_tree(&mut NoHooks, &captured, &head, "candidate")
+        .expect("the commit at the base");
+    assert_eq!(
+        git(&base, &["rev-parse", &format!("{commit}^{{tree}}")]),
+        captured,
+        "the commit at the base holds the captured tree"
+    );
+    assert!(
+        context_tree_bytes(&beside) == before,
+        "the common directory beside the slot was written"
     );
 }

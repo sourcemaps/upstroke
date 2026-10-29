@@ -838,9 +838,10 @@ error stays the outage it was (option A, not A′).
 **The context it reads** (the external-prune follow-up's integration
 correction, F): the manager's own builder for the checkout
 (`WorkspaceManager::composed_common_dir`). The policy reads through
-`src/workspace.rs`'s `git_command`, which sets no `GIT_COMMON_DIR` and clears
-nothing, as the manager's builder does, so the two builders' children are
-started with the same value.
+`src/workspace.rs`'s `git_command` in the checkout's work-tree scope
+(`problem_in_work_tree`, with the manager's base as the checkout), which
+composes `GIT_COMMON_DIR` by the manager builder's rule from the same
+checkout, so the two builders' children are started with the same value.
 
 ## `pub(super) fn read_refused(checkout: &Path, what: &str, found: &str) -> UpstrokeError {`
 

@@ -5770,3 +5770,202 @@ fn a_capture_whose_index_is_deleted_before_its_write_tree_is_refused_at_the_chec
         other => panic!("the check before the write refuses: {other:?}"),
     }
 }
+
+#[cfg(unix)]
+const SEAM_ROOT: &str = "UPSTROKE_REVIEW_SEAM_ROOT";
+#[cfg(unix)]
+const SEAM_ROW: &str = "UPSTROKE_REVIEW_SEAM_ROW";
+
+#[cfg(unix)]
+#[test]
+fn the_review_input_seams_methods_read_a_slot_as_a_slot_and_the_checkout_as_the_checkout() {
+    let tree = crate::workspace_manager::fixture::scratch("review-seam-d1");
+    let root = tree.path();
+    let enclosing = root.join("A");
+    let work = enclosing.join("work");
+    let selected = root.join("B.git");
+    let identity = [
+        "-c",
+        "user.name=upstroke tests",
+        "-c",
+        "user.email=tests@upstroke.local",
+    ];
+    write_file(&enclosing.join("README.md"), b"A\n");
+    write_file(&work.join("shared.txt"), b"base\n");
+    git(&enclosing, &["init", "-q", "-b", "main"]);
+    git(&enclosing, &["add", "-A"]);
+    git(
+        &enclosing,
+        &[&identity[..], &["commit", "-q", "-m", "A"]].concat(),
+    );
+    write_file(&work.join("shared.txt"), b"user-staged\n");
+    git(&enclosing, &["add", "work/shared.txt"]);
+    write_file(&work.join("shared.txt"), b"base\n");
+    let selection = |command: &[&str]| {
+        let mut args: Vec<&std::ffi::OsStr> = vec![
+            std::ffi::OsStr::new("--git-dir"),
+            selected.as_os_str(),
+            std::ffi::OsStr::new("--work-tree"),
+            work.as_os_str(),
+        ];
+        args.extend(identity.iter().map(std::ffi::OsStr::new));
+        args.extend(command.iter().map(std::ffi::OsStr::new));
+        crate::workspace_manager::fixture::git_os(&work, &args)
+    };
+    selection(&["init", "-q", "-b", "main"]);
+    selection(&["add", "shared.txt"]);
+    selection(&["commit", "-q", "-m", "B: initial"]);
+    crate::workspace_manager::fixture::create_dir(&root.join("private"));
+    let enclosing_index = std::fs::read(enclosing.join(".git").join("index")).expect("A's index");
+    let ended = crate::agent::proc::test_support::run_test_isolated(
+        "engine::topology::attempt::tests::review_seam_rows_helper",
+        &[
+            ("GIT_DIR", selected.as_os_str()),
+            ("GIT_WORK_TREE", work.as_os_str()),
+            (SEAM_ROOT, root.as_os_str()),
+            (SEAM_ROW, std::ffi::OsStr::new("slot and checkout")),
+        ],
+        std::time::Duration::from_secs(180),
+    );
+    let mut failures: Vec<String> = Vec::new();
+    if !(ended.status.is_some_and(|status| status.success()) && ended.stdout.contains("1 passed")) {
+        failures.push(format!(
+            "the slot and checkout rows under D1's names: {ended}"
+        ));
+    }
+    if std::fs::read(enclosing.join(".git").join("index")).expect("A's index") != enclosing_index {
+        failures.push("the enclosing repository's index was written".to_owned());
+    }
+
+    let run = Run::started("review-seam-driver");
+    let base = run.fixture.base.clone();
+    let base_index = std::fs::read(base.join(".git").join("index")).expect("the run's index");
+    let ended = crate::agent::proc::test_support::run_test_isolated(
+        "engine::topology::attempt::tests::review_seam_rows_helper",
+        &[
+            ("GIT_DIR", base.join(".git").as_os_str()),
+            ("GIT_WORK_TREE", base.as_os_str()),
+            (SEAM_ROOT, run.fixture.root.as_os_str()),
+            (SEAM_ROW, std::ffi::OsStr::new("driver")),
+        ],
+        std::time::Duration::from_secs(180),
+    );
+    if !(ended.status.is_some_and(|status| status.success()) && ended.stdout.contains("1 passed")) {
+        failures.push(format!(
+            "the driver row under the run's own selected names: {ended}"
+        ));
+    }
+    match std::fs::read(base.join(".git").join("index")) {
+        Ok(bytes) if bytes != base_index => {
+            failures.push("the started checkout's index was written".to_owned());
+        }
+        Ok(_) => {}
+        Err(error) => failures.push(format!(
+            "the started checkout's index is unreadable after the driver row: {error}"
+        )),
+    }
+    drop(run);
+    assert!(
+        failures.is_empty(),
+        "{} failure(s):\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "subprocess helper"]
+fn review_seam_rows_helper() {
+    let Some(root) = std::env::var_os(SEAM_ROOT).map(PathBuf::from) else {
+        return;
+    };
+    let row = std::env::var(SEAM_ROW).expect("the row");
+    if row == "driver" {
+        let mut run = Run::adopt(root);
+        let dispatched = run.dispatch(ALPHA, 0);
+        let plan = run.attempt_plan(ALPHA, 1);
+        let mut process = Process::new();
+        let started = context!(run, process)
+            .start(dispatched.site(), &plan)
+            .expect("the attempt starts");
+        agent_edits(&dispatched.worktree);
+        let capture = context!(run, process)
+            .capture(dispatched.site())
+            .expect("capture");
+        let review_inputs = run.review_inputs();
+        let assessed = context!(run, process)
+            .assess(
+                dispatched.site(),
+                &plan,
+                &started,
+                &capture,
+                &review_inputs.diff,
+                crate::ir::TaskKind::Implement,
+            )
+            .expect("the driver's review-input check in the slot runs");
+        assert!(
+            assessed.failure.is_none(),
+            "the driver's assessment finds no review-input failure: {:?}",
+            assessed.failure
+        );
+        std::mem::forget(run);
+        return;
+    }
+    let work = root.join("A").join("work");
+    let selected_index = root.join("B.git").join("index");
+    let head = git(&work, &["rev-parse", "HEAD"]);
+    let manager = crate::workspace_manager::WorkspaceManager::derive(
+        &work,
+        &root.join("private"),
+        crate::workspace_manager::fixture::RUN_ID,
+        "inc-seam",
+    )
+    .expect("derive under D1's names");
+    manager
+        .create_execution_root(&mut NoHooks)
+        .expect("the execution root");
+    let slot = crate::workspace_manager::Slot::Task {
+        key: "seam".to_owned(),
+        generation: 1,
+    };
+    manager
+        .write_intent(&mut NoHooks, &slot)
+        .expect("the slot's intent");
+    let path = manager
+        .add_worktree(&mut NoHooks, &slot, &head)
+        .expect("a slot made from the base");
+    let before = std::fs::read(&selected_index).expect("B.git's index");
+    agent_edits(&path);
+    manager
+        .candidate_stage(&mut NoHooks, &slot, &[])
+        .expect("the capture stages");
+    let tree = manager
+        .candidate_write_tree(&mut NoHooks, &slot)
+        .expect("the capture writes its tree");
+    let policy = crate::engine::attempt::LegacyReviewInputPolicy;
+    let mut failures: Vec<String> = Vec::new();
+    let in_slot = policy.problem_in_work_tree(&path, manager.base(), &tree);
+    if !matches!(in_slot, Ok(None)) {
+        failures.push(format!(
+            "the slot row: the seam reads a slot as {in_slot:?}"
+        ));
+    }
+    if std::fs::read(&selected_index).expect("B.git's index") != before {
+        failures.push("the slot row: the slot's work wrote B.git's index".to_owned());
+    }
+    write_file(
+        &work.join("shared.txt"),
+        b"edited at the started checkout\n",
+    );
+    let captured = crate::workspace::Workspace::open(&work)
+        .and_then(|checkout| checkout.capture_candidate())
+        .expect("a capture at the started checkout");
+    let at_checkout = policy.problem(&work, &captured.tree_oid);
+    if !matches!(at_checkout, Ok(None)) {
+        failures.push(format!(
+            "the checkout row: the seam reads the started checkout as {at_checkout:?}"
+        ));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

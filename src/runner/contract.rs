@@ -2493,41 +2493,48 @@ fn charge_allowance(&mut self) {}
             (
                 "src/workspace.rs",
                 1,
-                7,
+                8,
                 0,
                 "authoritative Git, which DESIGN.md:612 keeps off the boundary \
                  entirely: `std::process::Command` methods on git invocations, \
-                 not a CommandSpec. Of the seven `.env(`, four are the fixed \
-                 author and committer identity on `commit-tree`, one is \
-                 `NO_REPLACEMENT_OBJECTS` on `git_command`, the builder every \
-                 Git child of this module comes from, and two are \
-                 `GIT_INDEX_FILE` on the two private-hooks builders, set only \
-                 on a workspace value that carries a private index file: the \
-                 legacy discard's capture and revert, whose index no other Git \
-                 client may touch. Git names an index file only through that \
-                 variable, never by an argument or a configuration key",
+                 not a CommandSpec. Of the eight `.env(`, four are the fixed \
+                 author and committer identity on `commit-tree`, two are on \
+                 `git_command`, the builder every Git child of this module \
+                 comes from: `NO_REPLACEMENT_OBJECTS` on every child, and, on \
+                 a child in a work tree the engine made, the absolute path an \
+                 inherited `GIT_COMMON_DIR` that is not absolute names at the \
+                 started checkout; and two are `GIT_INDEX_FILE` on the two \
+                 private-hooks builders, set after `git_command`'s scope and \
+                 only on a workspace value that carries a private index file: \
+                 the legacy discard's capture and revert, whose index no other \
+                 Git client may touch. Git names an index file only through \
+                 that variable, never by an argument or a configuration key",
             ),
             (
                 "src/workspace_manager.rs",
                 2,
-                10,
+                11,
                 0,
                 "authoritative Git again, and the same answer: \
                  `std::process::Command` methods on git invocations, never a \
                  CommandSpec. The two `.stdin(` are `Stdio::null()` on the two \
                  builders — these funnels feed no payload to a child — and of \
-                 the ten `.env(`, six are the fixed author/committer identity \
+                 the eleven `.env(`, six are the fixed author/committer identity \
                  and dates that make a commit-tree a function of its inputs \
                  rather than of the machine, two are \
                  `NO_REPLACEMENT_OBJECTS` on the shared builder and on \
                  `read_only_git`'s, so that every command this manager spawns \
                  reads the objects the repository holds rather than whatever \
-                 `git replace` has been pointed at them, and the last two are \
-                 the loop over `ENGINE_GIT_ENVIRONMENT` in each builder, the \
-                 fixed `GIT_NO_LAZY_FETCH`, `GIT_ALLOW_PROTOCOL` (empty) and \
+                 `git replace` has been pointed at them, two are the loop over \
+                 `ENGINE_GIT_ENVIRONMENT` in each builder, the fixed \
+                 `GIT_NO_LAZY_FETCH`, `GIT_ALLOW_PROTOCOL` (empty) and \
                  `GIT_TERMINAL_PROMPT` bindings that keep a manager Git child \
                  from fetching, starting a transport or prompting (PR11 \
-                 follow-up C). A gate or reviewer \
+                 follow-up C), and the last, in `in_work_tree`, which both \
+                 builders call for a Git child in a work tree the manager made, \
+                 gives that child the absolute path an inherited \
+                 `GIT_COMMON_DIR` that is not absolute names at the managed \
+                 base. A gate or reviewer \
                  process gets the environment this runner composes, and \
                  `HostEnvironment::compose` and `ContainerEnvironment::compose` \
                  put the same pair there — a composed vector, not a \

@@ -15,6 +15,12 @@ under which the section shrinks. `decisions.effect_site_inventory.mechanism` (2)
 **Adopted on 2026-10-11 with decision O8 (decision B), as an agent decision by `pr11_decide_d` under the owner's delegation of 2026-10-11 (babysit's `0194a1e4…`).** Follow-up D (#331, a draft) amends this module's freeze; the amendment is its row's text in `effects/allowlist.toml`, marked there as adopted, and the record `reviews/2026-10-02-pr11-follow-up-d-record.md` (§1 to §4, and its Implementation section) is why. Nothing it adds is in force until the pull request merges. In this module it is one more argument of `run_attempt`, the type
 that argument holds and the function that fills it, below.
 
+**Adopted by the owner on 2026-10-15, with option (C) and O8's extension for it (the owner's
+adoption record `818e7675…`).** It amends this module's freeze a second time; the amendment
+is its row's text in `effects/allowlist.toml`, marked there as adopted. In this module it is
+`LegacyReviewInputPolicy`'s implementation of the review-input seam's provided method
+`problem_in_work_tree`, below.
+
 ## `const MAX_FEEDBACK_ENTRIES: usize = 6;`
 
 Most recent feedback entries carried into an escalated prompt. Older
@@ -246,9 +252,25 @@ legacy path below, and the schema-4 driver through
 [`crate::workspace::Workspace`]'s review-input policy, for a caller that
 holds a worktree path instead of a `Workspace`.
 
-The legacy verification ladder is its first caller — through
-`run_attempt`'s own `workspace`, not through this — and the schema-4 driver
-is its second. One policy, two callers.
+The legacy verification ladder is its first caller — through the seam's
+`problem`, which opens the started checkout with `Workspace::open` — and the
+schema-4 driver is its second, through the seam's `problem_in_work_tree`. One
+policy, two callers.
+
+## `impl super::topology::attempt::ReviewInputPolicy for LegacyReviewInputPolicy {` › `fn problem_in_work_tree(`
+
+The slot's review input, read as a work tree the engine made from the
+started checkout the seam carries: the slot is opened with
+`Workspace::open_work_tree(worktree, checkout)`, so every Git child of the
+check goes without the four inherited selectors, and an inherited relative
+`GIT_COMMON_DIR` reaches it as `checkout` joined with the value, the
+absolute path the checkout's own children resolved it to. Opened with
+`Workspace::open`, as `problem` opens the started checkout, an inherited
+`GIT_DIR` or `GIT_WORK_TREE` would select another repository or exclude the
+slot altogether ("not a git worktree"), and a relative `GIT_COMMON_DIR`
+would name a directory beside the slot. `problem` itself is unchanged: the
+ladder asks it about the checkout the run was started in, where the
+inherited context is the run's.
 
 ## `pub(super) fn review_failure(`
 

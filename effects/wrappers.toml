@@ -157,6 +157,7 @@ effect_free = [
     "intent_path",
     "intents",
     "intents_pausing",
+    "keeps_common_dir",
     "kept_instances",
     "names",
     "names_in_another_case",
@@ -1276,6 +1277,7 @@ effect_free = [
     "materialize_prompt",
     "pool_option",
     "problem",
+    "problem_in_work_tree",
     "review_failure",
     "worker_question",
 ]
@@ -1351,6 +1353,7 @@ effect_free = [
     "head_sha_full",
     "is_clean",
     "open",
+    "open_work_tree",
     "prepare_commit_from_candidate",
     "reclaim_gate_workspaces",
     "remove_orphan_prepared_pin",

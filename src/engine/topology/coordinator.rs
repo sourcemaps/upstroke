@@ -15676,10 +15676,8 @@ mod tests {
         assert!(resumed.run.invocations_balance());
     }
 
-    #[cfg(unix)]
     const F_HOSTED_ROOT: &str = "UPSTROKE_TEST_F_HOSTED_ROOT";
 
-    #[cfg(unix)]
     const F_HOSTED_BASE: &str = "UPSTROKE_TEST_F_HOSTED_BASE";
 
     #[cfg(unix)]
@@ -15706,16 +15704,23 @@ real=$(cd "$common" && pwd -P) || exit 3
 git cat-file -e 'HEAD^{tree}'
 "#;
 
+    /// The role a Windows stand-in for the scripts above plays, which its
+    /// shim sets from its first argument, or as `gate`; and the worker's task,
+    /// its second. The scripts read both from their own arguments.
+    #[cfg(windows)]
+    const F_HOSTED_ROLE: &str = "UPSTROKE_TEST_F_ROLE";
+
+    #[cfg(windows)]
+    const F_HOSTED_TASK: &str = "UPSTROKE_TEST_F_TASK";
+
     /// The integration T-ENV-TOPO's run verifies: its second, whose
     /// candidate's base is no longer the head once the first has merged.
-    #[cfg(unix)]
     const F_HOSTED_VERIFIED: SequenceId = SequenceId(1);
 
     /// T-ENV-TOPO's two tasks, writing disjoint paths. At width two the
     /// coordinator's first admission dispatches both before it reads any
     /// message, so both generations take the start head as their base, and
     /// whichever merges second is stale.
-    #[cfg(unix)]
     fn f_hosted_tasks() -> [WideTask; 2] {
         [
             WideTask::independent("alpha"),
@@ -15728,7 +15733,6 @@ git cat-file -e 'HEAD^{tree}'
     /// the slot as it was, and beta's once. Each attempt that worked is gated
     /// and reviewed in its own snapshots. The stale integration's gate and
     /// review run in its integration snapshot and its review snapshot.
-    #[cfg(unix)]
     fn f_hosted_placements() -> [(&'static str, crate::workspace_manager::Slot, usize); 8] {
         use crate::workspace_manager::{Slot, SnapshotName};
         let task =
@@ -15752,14 +15756,12 @@ git cat-file -e 'HEAD^{tree}'
     }
 
     /// A slot instance's directory as `<namespace>/<component>_<tag>`.
-    #[cfg(unix)]
     fn f_hosted_instance(path: &std::path::Path) -> Option<std::path::PathBuf> {
         let instance = path.file_name()?;
         let namespace = path.parent()?.file_name()?;
         Some(std::path::Path::new(namespace).join(instance))
     }
 
-    #[cfg(unix)]
     fn f_hosted_linked_registry(sequence: &str, child: &str, completes: bool) {
         let tasks = f_hosted_tasks();
         let below = std::path::Path::new(if sequence == "C5" {
@@ -15786,11 +15788,14 @@ git cat-file -e 'HEAD^{tree}'
             )
         };
         drop(run);
-        let root = std::fs::canonicalize(&env.fixture.root).expect("the canonical scratch root");
-        let base = std::fs::canonicalize(&env.fixture.base).expect("the canonical managed base");
+        // Canonical as the manager spells paths, so the paths this resolves
+        // compare with those the manager derived: on Windows `fs::canonicalize`
+        // alone adds the verbatim prefix the manager strips.
+        let root = crate::workspace_manager::fixture::canonical(&env.fixture.root);
+        let base = crate::workspace_manager::fixture::canonical(&env.fixture.base);
         let common = env.fixture.manager.common_git_dir().to_path_buf();
         assert_eq!(
-            std::fs::canonicalize(base.join(".git")).expect("the base's git directory"),
+            crate::workspace_manager::fixture::canonical(&base.join(".git")),
             common,
             "the run's common directory is the base's own"
         );
@@ -15844,6 +15849,7 @@ git cat-file -e 'HEAD^{tree}'
             common.clone().into_os_string()
         };
         let bin = env.fixture.root.join("bin");
+        #[cfg(unix)]
         for (name, script) in [
             (crate::engine::topology::scaffold::AGENT, F_HOSTED_AGENT),
             (
@@ -15856,27 +15862,52 @@ git cat-file -e 'HEAD^{tree}'
             crate::workspace_manager::fixture::write_file(&path, script.as_bytes());
             crate::workspace_manager::fixture::set_mode(&path, 0o755);
         }
+        // On Windows each role is a batch shim, as `npm` installs an agent's
+        // command-line program there: the host runner resolves it through
+        // `PATHEXT`, and `cmd` finds the gate's `gate --check` the same way.
+        // Each runs this binary's stand-in for the script (`f_hosted_shim`).
+        #[cfg(windows)]
+        for (name, role) in [
+            (crate::engine::topology::scaffold::AGENT, "%~1"),
+            (crate::engine::topology::scaffold::REVIEW_AGENT, "%~1"),
+            ("gate", "gate"),
+        ] {
+            crate::workspace_manager::fixture::write_file(
+                &bin.join(format!("{name}.cmd")),
+                f_hosted_shim(role).as_bytes(),
+            );
+        }
         let path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(
             &std::env::var_os("PATH").unwrap_or_default(),
         )))
         .expect("a PATH that holds the scripts' directory");
         let marker = env.fixture.root.join("worker-wrote-nothing");
         let log = env.fixture.root.join("roles.log");
+        let test = format!("engine::topology::coordinator::tests::{child}");
+        let vars = [
+            ("GIT_COMMON_DIR", value.as_os_str()),
+            ("PATH", path.as_os_str()),
+            (F_HOSTED_ROOT, env.fixture.root.as_os_str()),
+            (F_HOSTED_BASE, below.as_os_str()),
+            ("UPSTROKE_TEST_F_RUN_COMMON", common.as_os_str()),
+            ("UPSTROKE_TEST_F_WORKER_MARKER", marker.as_os_str()),
+            ("UPSTROKE_TEST_F_ROLE_LOG", log.as_os_str()),
+            (
+                "UPSTROKE_TEST_F_VERDICT",
+                std::ffi::OsStr::new(crate::engine::topology::scaffold::PASSING_VERDICT),
+            ),
+        ];
+        #[cfg(unix)]
         let ended = crate::agent::proc::test_support::run_test_isolated(
-            &format!("engine::topology::coordinator::tests::{child}"),
-            &[
-                ("GIT_COMMON_DIR", value.as_os_str()),
-                ("PATH", path.as_os_str()),
-                (F_HOSTED_ROOT, env.fixture.root.as_os_str()),
-                (F_HOSTED_BASE, below.as_os_str()),
-                ("UPSTROKE_TEST_F_RUN_COMMON", common.as_os_str()),
-                ("UPSTROKE_TEST_F_WORKER_MARKER", marker.as_os_str()),
-                ("UPSTROKE_TEST_F_ROLE_LOG", log.as_os_str()),
-                (
-                    "UPSTROKE_TEST_F_VERDICT",
-                    std::ffi::OsStr::new(crate::engine::topology::scaffold::PASSING_VERDICT),
-                ),
-            ],
+            &test,
+            &vars,
+            Duration::from_secs(300),
+        );
+        #[cfg(windows)]
+        let ended = f_hosted_isolated(
+            &test,
+            &vars,
+            &env.fixture.root.join("child.stderr"),
             Duration::from_secs(300),
         );
         assert!(
@@ -15956,20 +15987,52 @@ git cat-file -e 'HEAD^{tree}'
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn a_hosted_run_under_a_linked_registry_and_an_inherited_absolute_common_dir_completes() {
         f_hosted_linked_registry("C4", "hosted_linked_registry_child", true);
     }
 
-    #[cfg(unix)]
     #[test]
     fn a_hosted_run_under_a_linked_registry_and_an_inherited_relative_common_dir_at_equal_depth_completes()
      {
         f_hosted_linked_registry("C5", "hosted_linked_registry_child", true);
     }
 
-    #[cfg(unix)]
+    /// The host runner T-ENV-TOPO's and T-NOREQ's children start their roles
+    /// on. Under C4's absolute value it is `HostRunner::new()`. Under C5's
+    /// relative value it holds the run's repository, its include written at
+    /// `<root>/recorded-objects.gitconfig`: under option (C) a role in a work
+    /// tree the engine made is given the common directory its runner holds in
+    /// place of an inherited relative value, and a runner that holds none
+    /// refuses that role before it starts.
+    fn f_hosted_runner(
+        root: &std::path::Path,
+        common: &std::path::Path,
+        relative: bool,
+    ) -> crate::runner::host::HostRunner {
+        if relative {
+            let include = root.join("recorded-objects.gitconfig");
+            crate::workspace_manager::fixture::write_file(
+                &include,
+                crate::runner::host::RECORDED_OBJECTS_INCLUDE,
+            );
+            crate::runner::host::HostRunner::new().with_environment(
+                crate::runner::host::HostEnvironment::from_process().reading(
+                    crate::runner::host::ObjectGraph::RecordedIn(
+                        crate::runner::host::ManagedRepository::new(
+                            common,
+                            &include,
+                            crate::runner::host::GitdirRule::native(),
+                        )
+                        .expect("the run's repository, for the host runner to hold"),
+                    ),
+                ),
+            )
+        } else {
+            crate::runner::host::HostRunner::new()
+        }
+    }
+
     #[test]
     #[ignore = "subprocess helper"]
     fn hosted_linked_registry_child() {
@@ -15993,18 +16056,32 @@ git cat-file -e 'HEAD^{tree}'
                 crate::engine::topology::select::Ceiling::unlimited(),
             )
             .expect("the run resumes under the linked registry");
-        let host: std::sync::Arc<dyn crate::runner::Runner> =
-            std::sync::Arc::new(crate::runner::host::HostRunner::new());
+        let common = crate::workspace_manager::fixture::canonical(&root.join(&below).join(".git"));
+        let relative = std::env::var_os("GIT_COMMON_DIR")
+            .is_some_and(|value| std::path::Path::new(&value).is_relative());
+        let runner = f_hosted_runner(&root, &common, relative);
+        let host: std::sync::Arc<dyn crate::runner::Runner> = std::sync::Arc::new(runner);
         let pipelines = resumed.env.pipelines_over(std::sync::Arc::clone(&host));
+        let seams = resumed.env.seams_over(&*host);
+        // On Windows the roles are batch shims, so the agents' adapters leave
+        // a review's prompt to its stdin alone (`FHostedStdinPrompt`).
+        #[cfg(windows)]
+        let adapters = std::sync::Arc::new(FHostedStdinPromptAdapters::new());
+        #[cfg(windows)]
+        let pipelines = PipelineSeams {
+            adapters: std::sync::Arc::clone(&adapters)
+                as std::sync::Arc<dyn crate::agent::AdapterSource + Send + Sync>,
+            ..pipelines
+        };
+        #[cfg(windows)]
+        let seams = crate::engine::topology::run::RunSeams {
+            adapters: &*adapters,
+            ..seams
+        };
         let mut hooks = resumed.env.hooks();
         let progress = resumed
             .run
-            .run_concurrently(
-                &resumed.env.seams_over(&*host),
-                &pipelines,
-                &mut hooks,
-                None,
-            )
+            .run_concurrently(&seams, &pipelines, &mut hooks, None)
             .expect("the run over the host runner completes");
         assert_eq!(outcome_of(&progress), RunOutcome::Complete);
         assert!(
@@ -16074,16 +16151,12 @@ git cat-file -e 'HEAD^{tree}'
             "one merge of each task: {kinds:?}"
         );
         assert_eq!(count(&events, "task_merged"), 2, "{kinds:?}");
-        let canonical_root = std::fs::canonicalize(&root).expect("the canonical scratch root");
-        let common = std::fs::canonicalize(root.join(&below).join(".git"))
-            .expect("the run's common directory");
+        let canonical_root = crate::workspace_manager::fixture::canonical(&root);
         let depth = below.components().count();
         let named = common
             .strip_prefix(&canonical_root)
             .expect("the common directory is below the root")
             .to_path_buf();
-        let relative = std::env::var_os("GIT_COMMON_DIR")
-            .is_some_and(|value| std::path::Path::new(&value).is_relative());
         let log = String::from_utf8(std::fs::read(root.join("roles.log")).expect("the roles' log"))
             .expect("a UTF-8 log");
         let mut placed: BTreeMap<(&str, std::path::PathBuf), usize> = BTreeMap::new();
@@ -16128,6 +16201,250 @@ git cat-file -e 'HEAD^{tree}'
         drop(run);
         let crate::engine::topology::scaffold::WideEnv { fixture, .. } = env;
         std::mem::forget(fixture);
+    }
+
+    /// A Windows stand-in for one of the role scripts above, as a batch shim.
+    /// It sets the role (`%~1`, its first argument, for the agents, or `gate`)
+    /// and the task (`%~2`), runs this test binary's
+    /// `hosted_linked_registry_role_child`, and exits as that child exits.
+    #[cfg(windows)]
+    fn f_hosted_shim(role: &str) -> String {
+        let exe = std::env::current_exe().expect("this test binary");
+        format!(
+            "@echo off\r\n\
+             set \"{F_HOSTED_ROLE}={role}\"\r\n\
+             set \"{F_HOSTED_TASK}=%~2\"\r\n\
+             \"{exe}\" --exact engine::topology::coordinator::tests::hosted_linked_registry_role_child --ignored --nocapture --test-threads=1\r\n\
+             exit /b %ERRORLEVEL%\r\n",
+            exe = exe.display()
+        )
+    }
+
+    /// The Windows stand-in's body: what `F_HOSTED_AGENT` and `F_HOSTED_GATE`
+    /// do, for the role and task its shim set. A topology module's test writes
+    /// and spawns nothing itself, so each step goes through the fixture.
+    /// - **Every role** logs its role and its directory, canonical as `pwd -P`
+    ///   gives it, one line in the shared log.
+    /// - **A worker** writes `src/<task>/work.txt`, except alpha's first
+    ///   attempt, which leaves its slot as it was.
+    /// - **A reviewer** writes no output. The script prints the verdict, but
+    ///   the run's adapters answer a review with their own verdict and read no
+    ///   output, so neither changes what the run sees.
+    /// - **The gate** requires its Git's common directory to be the run's, and
+    ///   `HEAD^{tree}` to be readable. A failed requirement fails this child, so
+    ///   the shim exits nonzero, as the script does.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "subprocess helper"]
+    fn hosted_linked_registry_role_child() {
+        let Some(role) = std::env::var_os(F_HOSTED_ROLE) else {
+            return;
+        };
+        let role = role.to_string_lossy().into_owned();
+        let directory = crate::workspace_manager::fixture::canonical(
+            &std::env::current_dir().expect("the role's directory"),
+        );
+        let log = std::path::PathBuf::from(
+            std::env::var_os("UPSTROKE_TEST_F_ROLE_LOG").expect("the roles' log"),
+        );
+        crate::workspace_manager::fixture::append_line(
+            &log,
+            &format!("{role} {}", directory.display()),
+        );
+        match role.as_str() {
+            "--implement" => {
+                let task = std::env::var(F_HOSTED_TASK).expect("the worker's task");
+                let marker = std::path::PathBuf::from(
+                    std::env::var_os("UPSTROKE_TEST_F_WORKER_MARKER")
+                        .expect("the first attempt's marker"),
+                );
+                if task == "alpha" && !marker.exists() {
+                    crate::workspace_manager::fixture::write_file(&marker, b"");
+                    return;
+                }
+                crate::workspace_manager::fixture::write_file(
+                    &directory.join("src").join(&task).join("work.txt"),
+                    format!("{task} worked\n").as_bytes(),
+                );
+            }
+            "--prompt" => {}
+            "gate" => {
+                let named = crate::workspace_manager::fixture::git(
+                    &directory,
+                    &["rev-parse", "--git-common-dir"],
+                );
+                let run = std::path::PathBuf::from(
+                    std::env::var_os("UPSTROKE_TEST_F_RUN_COMMON")
+                        .expect("the run's common directory"),
+                );
+                assert_eq!(
+                    crate::workspace_manager::fixture::canonical(&directory.join(named)),
+                    crate::workspace_manager::fixture::canonical(&run),
+                    "the gate's Git reads the run's common directory"
+                );
+                crate::workspace_manager::fixture::git(
+                    &directory,
+                    &["cat-file", "-e", "HEAD^{tree}"],
+                );
+            }
+            other => panic!("a role no shim sets: {other}"),
+        }
+    }
+
+    /// The scaffold's answering adapter with a review's prompt on its stdin
+    /// alone, for T-ENV-TOPO's child on Windows. `AnsweringAdapter::build`
+    /// passes the prompt as the argument after `--prompt`, and the review pass
+    /// sends it on stdin too (`stdin_payload`). There the roles are batch
+    /// shims, and std refuses to start a batch file with an argument holding a
+    /// newline, which a prompt holds. Dropping only that argument leaves the
+    /// prompt where every shipped adapter sends it. The stand-in reads neither,
+    /// as the script reads neither, and everything else is the answering
+    /// adapter's own.
+    #[cfg(windows)]
+    struct FHostedStdinPrompt(crate::engine::topology::scaffold::AnsweringAdapter);
+
+    #[cfg(windows)]
+    impl crate::agent::AgentAdapter for FHostedStdinPrompt {
+        fn id(&self) -> &'static str {
+            crate::agent::AgentAdapter::id(&self.0)
+        }
+
+        fn probe(
+            &self,
+            runner: &dyn crate::runner::Runner,
+        ) -> Result<crate::agent::Caps, UpstrokeError> {
+            crate::agent::AgentAdapter::probe(&self.0, runner)
+        }
+
+        fn build(
+            &self,
+            run: &crate::agent::TaskRun,
+        ) -> Result<crate::runner::CommandSpec, UpstrokeError> {
+            let mut spec = crate::agent::AgentAdapter::build(&self.0, run)?;
+            let mut args = std::mem::take(&mut spec.args).into_iter();
+            while let Some(arg) = args.next() {
+                let prompt = arg == "--prompt";
+                spec.args.push(arg);
+                if prompt {
+                    // The prompt itself, which the review pass sends on stdin.
+                    let _on_stdin = args.next();
+                }
+            }
+            Ok(spec)
+        }
+
+        fn parse(
+            &self,
+            out: &crate::agent::ProcessOutput,
+        ) -> Result<crate::ir::Outcome, UpstrokeError> {
+            crate::agent::AgentAdapter::parse(&self.0, out)
+        }
+
+        fn materialize_permissions(
+            &self,
+            profile: &crate::ir::WorkerProfile,
+            gate_cmds: &[String],
+            dir: &std::path::Path,
+            stem: &str,
+        ) -> Result<Option<PathBuf>, UpstrokeError> {
+            crate::agent::AgentAdapter::materialize_permissions(
+                &self.0, profile, gate_cmds, dir, stem,
+            )
+        }
+    }
+
+    /// `ScaffoldAdapters::new()`, each adapter a [`FHostedStdinPrompt`].
+    #[cfg(windows)]
+    struct FHostedStdinPromptAdapters {
+        primary: FHostedStdinPrompt,
+        second: FHostedStdinPrompt,
+    }
+
+    #[cfg(windows)]
+    impl FHostedStdinPromptAdapters {
+        const fn new() -> Self {
+            Self {
+                primary: FHostedStdinPrompt(
+                    crate::engine::topology::scaffold::AnsweringAdapter::passing(
+                        crate::engine::topology::scaffold::AGENT,
+                    ),
+                ),
+                second: FHostedStdinPrompt(
+                    crate::engine::topology::scaffold::AnsweringAdapter::passing(
+                        crate::engine::topology::scaffold::REVIEW_AGENT,
+                    ),
+                ),
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    impl crate::agent::AdapterSource for FHostedStdinPromptAdapters {
+        fn get(&self, id: &str) -> Option<&dyn crate::agent::AgentAdapter> {
+            if id == crate::engine::topology::scaffold::AGENT {
+                Some(&self.primary)
+            } else if id == crate::engine::topology::scaffold::REVIEW_AGENT {
+                Some(&self.second)
+            } else {
+                None
+            }
+        }
+    }
+
+    /// The Windows counterpart of `run_test_isolated`, which is Unix's: it
+    /// starts its child in a process group of its own. T-ENV-TOPO's parent runs
+    /// its child here through the fixture's `LinkedChild`, which starts it as
+    /// `run_test_isolated` does: this test binary, `--exact --ignored
+    /// --nocapture --test-threads=1`, with `vars` set. Its stderr goes to
+    /// `stderr`. A child that ends within `bound` is answered for. One still
+    /// running then is killed and reported with no status, as
+    /// `run_test_isolated` reports a child it killed. Its output is every line
+    /// it wrote, read until its output closes, or until ten seconds pass with
+    /// no line.
+    #[cfg(windows)]
+    fn f_hosted_isolated(
+        test: &str,
+        vars: &[(&str, &std::ffi::OsStr)],
+        stderr: &std::path::Path,
+        bound: Duration,
+    ) -> FHostedEnded {
+        let (child, lines) =
+            crate::workspace_manager::fixture::LinkedChild::spawn(test, vars, stderr);
+        let status = child.wait_within(bound);
+        if status.is_none() {
+            child.kill();
+        }
+        let mut stdout = String::new();
+        while let Ok(line) = lines.recv_timeout(Duration::from_secs(10)) {
+            stdout.push_str(&line);
+            stdout.push('\n');
+        }
+        drop(child);
+        FHostedEnded {
+            status,
+            stdout,
+            stderr: std::fs::read_to_string(stderr).unwrap_or_default(),
+        }
+    }
+
+    /// How [`f_hosted_isolated`]'s child ended, as `run_test_isolated`'s
+    /// `Isolated` reports it.
+    #[cfg(windows)]
+    struct FHostedEnded {
+        status: Option<std::process::ExitStatus>,
+        stdout: String,
+        stderr: String,
+    }
+
+    #[cfg(windows)]
+    impl std::fmt::Display for FHostedEnded {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(
+                f,
+                "status {:?}\nstdout:\n{}\nstderr:\n{}",
+                self.status, self.stdout, self.stderr
+            )
+        }
     }
 
     #[cfg(unix)]
@@ -16331,7 +16648,11 @@ git cat-file -e 'HEAD^{tree}'
             .settings()
             .join(format!("integration-s{}-review.json", F_HOSTED_VERIFIED.0));
         crate::workspace_manager::fixture::create_dir(&obstructed);
-        let host = crate::runner::host::HostRunner::new();
+        let common = std::fs::canonicalize(root.join(&below).join(".git"))
+            .expect("the run's common directory");
+        let relative = std::env::var_os("GIT_COMMON_DIR")
+            .is_some_and(|value| std::path::Path::new(&value).is_relative());
+        let host = f_hosted_runner(&root, &common, relative);
         let runner: Arc<dyn crate::runner::Runner> = if case == FNoRequest::Opaque {
             Arc::new(FOpaqueReviewer { host })
         } else {
@@ -16366,15 +16687,11 @@ git cat-file -e 'HEAD^{tree}'
         let events = resumed.env.durable_events();
         let kinds = kinds_of(&events);
         let canonical_root = std::fs::canonicalize(&root).expect("the canonical scratch root");
-        let common = std::fs::canonicalize(root.join(&below).join(".git"))
-            .expect("the run's common directory");
         let depth = below.components().count();
         let named = common
             .strip_prefix(&canonical_root)
             .expect("the common directory is below the root")
             .to_path_buf();
-        let relative = std::env::var_os("GIT_COMMON_DIR")
-            .is_some_and(|value| std::path::Path::new(&value).is_relative());
         let log = String::from_utf8(std::fs::read(root.join("roles.log")).expect("the roles' log"))
             .expect("a UTF-8 log");
         let mut placed: BTreeMap<(&str, std::path::PathBuf), usize> = BTreeMap::new();

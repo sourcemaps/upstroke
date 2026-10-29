@@ -1437,8 +1437,8 @@ coordinator resumes with empty ledgers and completes.
 ## `mod tests` › `fn f_hosted_linked_registry(sequence: &str, child: &str, completes: bool) {`
 
 T-ENV-TOPO, the external-prune follow-up's integration correction at the topology, under the
-production host runner (F; Unix). It builds one layout's run, with the run's `worktrees` store a link
-into another repository (R-C-REGISTRY's part 2):
+production host runner (F), on Unix and on Windows. It builds one layout's run, with the run's
+`worktrees` store a link into another repository (R-C-REGISTRY's part 2):
 
 - **C4:** an absolute `GIT_COMMON_DIR`, the base at `<root>/repo`.
 - **C5:** a relative value, the base at `EQUAL_DEPTH_BASE`, the proposal's equal-depth construction.
@@ -1484,19 +1484,48 @@ two.
     `src/alpha/work.txt` and `src/beta/work.txt`, each holding its worker's bytes;
   - the other repository's refs are untouched.
 
+**On Windows** the run, every assertion and each role's work are the same. What differs is how the
+layout is made, and why:
+- **The link is a junction** (the fixture's `link_directory`, `mklink /J`). A directory symbolic link
+  needs a privilege a junction does not. A junction is a name-surrogate reparse point, so std calls it
+  a symbolic link, `canonicalize` follows it, and the manager pins it as it pins any reparse point.
+- **The scripts are batch shims** (`f_hosted_shim`), as `npm` installs an agent's command-line program
+  there. The host runner resolves one through `PATHEXT`, and `cmd` finds the gate's the same way.
+  Each runs this test binary's `hosted_linked_registry_role_child`, which does what the script does.
+- **The child runs through `LinkedChild`** (`f_hosted_isolated`). `run_test_isolated` is Unix's,
+  since it starts its child in a process group of its own. The parent asserts the same of the child:
+  that it succeeded, and that its output says `1 passed`.
+- **Paths compare canonical as the manager spells them** (the fixture's `canonical`). On Windows
+  `fs::canonicalize` alone adds the verbatim prefix the manager strips. On Unix the two are the same.
+
+T-NOREQ's rows stay Unix's; this function's Unix arms are unchanged.
+
 ## `mod tests` › `fn a_hosted_run_under_a_linked_registry_and_an_inherited_absolute_common_dir_completes() {`
 
-T-ENV-TOPO's C4 row.
+T-ENV-TOPO's C4 row, on Unix and on Windows.
 
 ## `mod tests` › `fn a_hosted_run_under_a_linked_registry_and_an_inherited_relative_common_dir_at_equal_depth_completes()`
 
-T-ENV-TOPO's C5 row.
+T-ENV-TOPO's C5 row, on Unix and on Windows.
 
 ## `mod tests` › `fn hosted_linked_registry_child() {`
 
 T-ENV-TOPO's child. It adopts the fixture (`Fixture::adopt_based`), resumes as `inc-2` at width two,
-and drives the run with `run_concurrently` over `HostRunner::new()` for both the coordinator's seams
-and the pipelines'. The run must complete. Its steps reach each placement:
+and drives the run with `run_concurrently` over one host runner for both the coordinator's seams and
+the pipelines'. Under C4's absolute value that runner is `HostRunner::new()`. Under C5's relative
+value it is a host runner that holds the run's repository (`ObjectGraph::RecordedIn` over
+`ManagedRepository::new`, its include written at `<root>/recorded-objects.gitconfig`): under option
+(C) a role in a work tree the engine made is given the common directory its runner holds in place
+of an inherited relative value, and a runner that holds none refuses that role before it starts.
+`f_hosted_runner` builds that runner, which T-NOREQ's child takes too.
+
+**On Windows** the seams' and the pipelines' adapters are `FHostedStdinPromptAdapters`: the
+scaffold's answering adapters, with a review's prompt on its stdin alone. `AnsweringAdapter::build`
+also passes the prompt as an argument. There the roles are batch shims, and std refuses to start a
+batch file with an argument holding a newline, which a prompt holds. Every shipped adapter sends the
+prompt on stdin only, and the stand-in reads neither copy, as the script reads neither.
+
+The run must complete. Its steps reach each placement:
 
 - **Placement 3.** Alpha's first attempt's empty diff is a failure that placement 3 judges, so
   completion shows that placement 3 accepted it.
@@ -1588,10 +1617,12 @@ disagree.
 T-NOREQ's child. Like T-ENV-TOPO's, it adopts the fixture and resumes as `inc-2` at width two.
 
 - **The trigger.** It plants a directory at the run's `settings/integration-s1-review.json`.
-- **The seams.** It drives the run with `run_concurrently` over the host runner, or `FOpaqueReviewer` for
-  `Opaque`. Both the coordinator's seams and the pipelines' take `FPermittedAdapters`, and for `Damaged` both
-  take `FDamagingReviews` as their review passes.
-- **Under C5,** every logged directory must name the run's common directory by the relative value.
+- **The seams.** It drives the run with `run_concurrently` over T-ENV-TOPO's host runner for the layout
+  (`f_hosted_runner`), or `FOpaqueReviewer` over it for `Opaque`. Both the coordinator's seams and the
+  pipelines' take `FPermittedAdapters`, and for `Damaged` both take `FDamagingReviews` as their review passes.
+- **Under C5,** that runner holds the run's repository. Over `HostRunner::new()`, option (C) would refuse
+  every role in a work tree the engine made before it starts, and the run would not reach the pass. Every
+  logged directory must name the run's common directory by the relative value.
 - **At the end** it forgets the adopted fixture, as T-ENV-TOPO's child does.
 
 **The production path the witness reaches:**

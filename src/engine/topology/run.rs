@@ -933,7 +933,8 @@ pub fn verification_body(
                     work.manager,
                     &staging,
                     "the verification's review-input read",
-                    work.input_policy.problem(&staging, &tree),
+                    work.input_policy
+                        .problem_in_work_tree(&staging, work.manager.base(), &tree),
                 )
                 .map_err(JudgeError::Other)?
                 .map(crate::engine::classify::review_input_failure)

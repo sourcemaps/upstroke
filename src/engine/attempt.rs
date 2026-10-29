@@ -293,6 +293,16 @@ impl super::topology::attempt::ReviewInputPolicy for LegacyReviewInputPolicy {
     ) -> Result<Option<String>, UpstrokeError> {
         crate::workspace::Workspace::open(worktree)?.review_input_problem_for_tree(tree)
     }
+
+    fn problem_in_work_tree(
+        &self,
+        worktree: &std::path::Path,
+        checkout: &std::path::Path,
+        tree: &str,
+    ) -> Result<Option<String>, UpstrokeError> {
+        crate::workspace::Workspace::open_work_tree(worktree, checkout)?
+            .review_input_problem_for_tree(tree)
+    }
 }
 
 impl super::topology::attempt::ReviewPasses for LegacyReviewPasses {

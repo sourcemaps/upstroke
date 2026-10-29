@@ -934,6 +934,9 @@ shrinks_when = "the schema-4 coordinator asks questions through RunDir.WriteQues
 # under the owner's delegation of 2026-10-11 (babysit's `0194a1e4…`), and in force only
 # from #331's merge: the AMENDED ONCE paragraph at the end of this entry's text is
 # follow-up D's draft (#331).
+# ADOPTED by the owner on 2026-10-15, with option (C) and O8's extension for it (the
+# owner's adoption record `818e7675…`): the AMENDED TWICE paragraph after it, recomposed
+# on decision B's landed text as that adoption directs.
 [[legacy]]
 path = "src/engine/attempt.rs"
 allows = ["clippy::disallowed_methods"]
@@ -953,7 +956,17 @@ through one private function that compares the error's variant and copies the \
 three strings, and the type that holds them is new; the error `run_attempt` \
 returns, and every other step, are as before. It calls nothing of the \
 workspace, the runner or the event log that it did not already call, and \
-nothing else in the module moves."""
+nothing else in the module moves.
+
+AMENDED TWICE, on the owner's decision to give the coordinator's inherited Git \
+context only to the checkout it was started in (option (C)): the review-input \
+seam's implementor, `LegacyReviewInputPolicy`, implements the seam's new \
+provided method, `problem_in_work_tree`, which the schema-4 driver calls for a \
+slot together with the checkout the slot was made from, by opening the slot \
+with `Workspace::open_work_tree`. Its `problem`, which the legacy ladder asks \
+about the started checkout, is unchanged, and opens that checkout with \
+`Workspace::open` as before. It starts no Git child the module did not start, \
+and nothing else in the module moves."""
 shrinks_when = "the inventory gains a transcript site, or transcripts move under RunDir.WriteReport's row."
 
 [[legacy]]
@@ -981,6 +994,10 @@ shrinks_when = "immediately — it can be dropped from this list at any time wit
 # supersession of the second at that amendment's three commands, are follow-up D's draft
 # (#331). Until that pull request merges, the second amendment (B-W924-R1, adopted
 # 2026-10-08) governs on master.
+# ADOPTED by the owner on 2026-10-15, with option (C) and O8's extension for it (the
+# owner's adoption record `818e7675…`): the fourth amendment, in its own paragraph at the
+# end of this entry's text, recomposed on decision B's landed text as that adoption
+# directs, apart from the third, which is three things and no more.
 [[legacy]]
 path = "src/workspace.rs"
 allows = ["clippy::disallowed_methods", "clippy::disallowed_types"]
@@ -989,7 +1006,7 @@ legacy_effect = """
 LEGACY-EFFECT: the schema-1..3 engine's Git operations — branch, checkout, \
 stage, commit, rollback — each a `std::process::Command` on the system git, plus \
 the working-tree writes around them. `invariants_preserved[1]` requires this \
-module's behaviour untouched, AMENDED THREE TIMES. First, to close \
+module's behaviour untouched, AMENDED FOUR TIMES. First, to close \
 `LEGACY-WORKSPACE-READS-REPLACEMENT-OBJECTS`, by the route that finding's guard \
 names ("an owner decision to unfreeze the module for this one change"). That \
 amendment is three things and no more. Every Git child is built by \
@@ -1109,7 +1126,42 @@ B-W924-R1-S were adopted on 2026-10-11, as an agent decision by \
 `0194a1e4…`), and until #331 merges, the second amendment governs. Every other \
 behaviour of the module stays frozen. The schema-4 equivalents live behind \
 funnels in `crate::workspace_manager`, and nothing here calls a funnel: the \
-constant is read, and the tolerant access is called, which takes no site."""
+constant is read, and the tolerant access is called, which takes no site.
+
+The fourth amendment, on the owner's decision to give the coordinator's \
+inherited Git context only to the checkout it was started in (option (C)): \
+`git_command` takes the scope of the Git child it builds, and the module gives \
+each child the inherited Git context of the work tree it runs in. A child in \
+the checkout `Workspace::open` opened keeps the process's environment as it \
+is, so whatever repository, work tree, object store and index the inherited \
+variables select there stay the run's. A `git worktree` command run from that \
+checkout goes without `GIT_INDEX_FILE`, which `git worktree add` would \
+otherwise hand to the checkout it runs in the new work tree. A child in a work \
+tree the engine made, a gate or review snapshot the module made from that \
+checkout or a slot a caller opens with the new `Workspace::open_work_tree` and \
+the checkout it was made from, goes without `GIT_DIR`, `GIT_WORK_TREE`, \
+`GIT_IMPLICIT_WORK_TREE` and `GIT_INDEX_FILE`. It keeps the process's \
+`GIT_COMMON_DIR` where that value is an absolute path, and where it is not, is \
+given instead that checkout's directory joined with the value, the path the \
+checkout's own children resolved it to. So Git takes that work tree's \
+administrative directory and index from the `.git` file `git worktree add` \
+wrote at its top, and its common directory from the `GIT_COMMON_DIR` it is \
+given, the checkout's, before the `commondir` file `git worktree add` wrote in \
+that administrative directory, which decides only where the process has none. \
+No inherited selector can make its Git address the checkout's administrative \
+directory or index, or another repository's, and no relative `GIT_COMMON_DIR` \
+can make it resolve a common directory against the work tree. The workspace \
+records the checkout a work tree was made from, and `open` and \
+`open_work_tree` share one private constructor. The names and the test of a \
+value come from `crate::workspace_manager`, which also gives them to its own \
+builders and the host runner, and the replacement variable `git_command` sets \
+is set after the work tree's names; the `GIT_INDEX_FILE` the module's \
+private-hooks builders set, after the scope, for a workspace that carries a \
+private index, is never removed by it. The test module gains the regression \
+tests for it, and the module's census \
+(`every_git_child_of_this_module_is_built_where_replacements_are_refused`) \
+allows `env_remove(` inside `git_command` for those variables while it still \
+refuses `env_clear(` and any removal of the replacement variable."""
 shrinks_when = "the schema-4 engine replaces the legacy paths that call this module (PR7-PR11); the module goes with them."
 
 [[legacy]]
@@ -1328,6 +1380,9 @@ shrinks_when = "the byte-identity obligation retires with the legacy engine; the
 # under the owner's delegation of 2026-10-11 (babysit's `0194a1e4…`), and in force only
 # from #331's merge: the AMENDED ONCE paragraph at the end of this entry's text is
 # follow-up D's draft (#331).
+# ADOPTED by the owner on 2026-10-15, with option (C) and O8's extension for it (the
+# owner's adoption record `818e7675…`): the AMENDED TWICE paragraph after it, recomposed
+# on decision B's landed text as that adoption directs.
 [[legacy]]
 path = "src/engine/tests.rs"
 allows = ["clippy::disallowed_methods", "clippy::disallowed_types"]
@@ -1355,7 +1410,26 @@ run whose process exits right after its capture, which one of them starts as \
 a child of the test binary, as the existing interrupted-run tests do. One of \
 them makes that registration as a topology slot, through \
 `crate::workspace_manager`'s funnels and its test fixture's torn-registration \
-shape, under the same allow."""
+shape, under the same allow.
+
+AMENDED TWICE, on the owner's decision to give the coordinator's inherited Git \
+context only to the checkout it was started in (option (C)): the file gains \
+three appended regression tests, each with the ignored helper it spawns, and \
+no existing test changes. Each helper drives `run_with`, one of the entry \
+points the file already drives, in a child process whose environment alone \
+carries the inherited names. In the first, `GIT_DIR` and `GIT_WORK_TREE` \
+select the repository; the test asserts that the run completes and commits \
+into the selected repository, and that the enclosing repository's index and \
+`HEAD` are unchanged. In the second, an absolute `GIT_COMMON_DIR` names the \
+repository whose `worktrees` directory is a symbolic link into another \
+repository, and a configured gate makes the run take a gate snapshot; the test \
+asserts that the run completes and commits the worker's file, which stays in \
+the checkout, and that the other repository's objects and refs are unchanged. \
+In the third, a relative `GIT_COMMON_DIR` names a copy of the repository's Git \
+directory, whose `worktrees` directory is a symbolic link into another \
+repository, from the repository and from the store the run's gate snapshot is \
+made in, and a configured gate makes the run take a gate snapshot; the test \
+asserts the same as the second. All three run under the same allow."""
 shrinks_when = "the legacy engine goes; these tests go with it."
 
 [[legacy]]

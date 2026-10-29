@@ -1131,24 +1131,33 @@ fn the_host_runner_reports_the_common_dir_its_child_is_started_with() {
     let over = |base: Vec<(OsString, OsString)>, case: KeyCase| {
         HostRunner::new().with_environment(HostEnvironment::with_base(base, case))
     };
+    let (base_common, overlay_common, first_common, second_common) = if cfg!(windows) {
+        (
+            r"C:\base\common",
+            r"C:\overlay\common",
+            r"C:\first\common",
+            r"C:\second\common",
+        )
+    } else {
+        (
+            "/base/common",
+            "/overlay/common",
+            "/first/common",
+            "/second/common",
+        )
+    };
     for (label, base_value, overlay_value, expected) in [
         (
             "a value in the base",
-            Some("/base/common"),
+            Some(base_common),
             None,
-            Some("/base/common"),
+            Some(base_common),
         ),
         (
             "an overlay's value over the base's",
-            Some("/base/common"),
-            Some("/overlay/common"),
-            Some("/overlay/common"),
-        ),
-        (
-            "a relative value",
-            Some("../../common"),
-            None,
-            Some("../../common"),
+            Some(base_common),
+            Some(overlay_common),
+            Some(overlay_common),
         ),
         ("no value anywhere", None, None, None),
     ] {
@@ -1180,19 +1189,59 @@ fn the_host_runner_reports_the_common_dir_its_child_is_started_with() {
         );
     }
 
+    let (_held, repository) = managed_repository();
+    std::fs::write(repository.include(), RECORDED_OBJECTS_INCLUDE)
+        .expect("the include, without which a role of the runner that holds it never starts");
+    let held = repository.common_dir().as_os_str().to_os_string();
+    let relative = || {
+        let mut base = synthetic_base();
+        base.push((os(COMMON_DIR), os("../../common")));
+        base
+    };
+    let with_repository = HostRunner::new().with_environment(
+        HostEnvironment::with_base(relative(), KeyCase::current())
+            .reading(ObjectGraph::RecordedIn(repository.clone())),
+    );
+    let without_repository = over(relative(), KeyCase::current());
+    let request = gate(Vec::new());
+    assert_eq!(
+        (
+            with_repository.composed_common_dir(&request),
+            without_repository.composed_common_dir(&request),
+        ),
+        (
+            ComposedCommonDir::Present(held.clone()),
+            ComposedCommonDir::Unknown,
+        ),
+        "a relative value: the reports with its repository held and with none held"
+    );
+    assert_eq!(
+        received_common_dir(&with_repository, &request),
+        vec![format!("{COMMON_DIR}={}", held.to_string_lossy())],
+        "a relative value, its repository held: what the child received"
+    );
+    match without_repository.run_blocking(&request) {
+        Err(refusal) => assert!(
+            refusal.fate == ProcessFate::NeverStarted
+                && refusal.source.to_string().contains(COMMON_DIR),
+            "a relative value, no repository held: the same composition refuses the run: {refusal}"
+        ),
+        Ok(output) => panic!("a relative value, no repository held: the run started: {output:?}"),
+    }
+
     let mut base = synthetic_base();
-    base.push((os(COMMON_DIR), os("/first/common")));
-    base.push((os(COMMON_DIR), os("/second/common")));
+    base.push((os(COMMON_DIR), os(first_common)));
+    base.push((os(COMMON_DIR), os(second_common)));
     let runner = over(base, KeyCase::current());
     let request = gate(Vec::new());
     assert_eq!(
         runner.composed_common_dir(&request),
-        ComposedCommonDir::Present(os("/second/common")),
+        ComposedCommonDir::Present(os(second_common)),
         "a repeated name: the report reads the entry the child receives"
     );
     assert_eq!(
         received_common_dir(&runner, &request),
-        vec![format!("{COMMON_DIR}=/second/common")],
+        vec![format!("{COMMON_DIR}={second_common}")],
         "a repeated name: the later entry is the child's"
     );
 
@@ -7301,4 +7350,1258 @@ fn a_call_carrying_the_runs_cleanup_leases_is_reaped_by_a_reaper_that_holds_them
         );
     }
     drop(lock);
+}
+
+const INHERITED_SELECTORS: [(&str, &str); 4] = [
+    ("GIT_DIR", "/inherited/selected.git"),
+    ("GIT_WORK_TREE", "/inherited/work"),
+    ("GIT_IMPLICIT_WORK_TREE", "1"),
+    ("GIT_INDEX_FILE", "/inherited/selected.git/index"),
+];
+
+const KEPT_INHERITED: [(&str, &str); 16] = [
+    ("GIT_OBJECT_DIRECTORY", "/inherited/objects"),
+    ("GIT_ALTERNATE_OBJECT_DIRECTORIES", "/inherited/pool"),
+    ("GIT_NAMESPACE", "tenant"),
+    ("GIT_SHALLOW_FILE", "/inherited/shallow"),
+    ("GIT_GRAFT_FILE", "/inherited/grafts"),
+    ("GIT_REPLACE_REF_BASE", "refs/inherited-replace/"),
+    ("GIT_PREFIX", "sub/"),
+    ("GIT_CONFIG", "/inherited/config"),
+    ("GIT_CONFIG_COUNT", "1"),
+    ("GIT_CONFIG_KEY_0", "o3r.key"),
+    ("GIT_CONFIG_VALUE_0", "value"),
+    ("GIT_LITERAL_PATHSPECS", "1"),
+    ("GIT_GLOB_PATHSPECS", "0"),
+    ("GIT_NOGLOB_PATHSPECS", "0"),
+    ("GIT_ICASE_PATHSPECS", "0"),
+    ("GIT_ATTR_SOURCE", "HEAD"),
+];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CommonDirForm {
+    Absent,
+    Absolute,
+    Relative,
+}
+
+fn role_request(
+    role: &ExecutionRole,
+    workspace: &Path,
+    command: CommandSpec,
+    timeout: Duration,
+) -> RunnerRequest {
+    match role {
+        ExecutionRole::Probe(ProbeTarget::Shell) => RunnerRequest {
+            command,
+            workspace: workspace.to_path_buf(),
+            role: role.clone(),
+            timeout,
+            agent: None,
+            invocation: shell_probe_invocation(),
+        },
+        ExecutionRole::Probe(ProbeTarget::Agent(agent)) => RunnerRequest {
+            command,
+            workspace: workspace.to_path_buf(),
+            role: role.clone(),
+            timeout,
+            agent: Some(agent.clone()),
+            invocation: InvocationId::probe(ProbeTarget::Agent(agent.clone()), 1)
+                .expect("an agent probe's identity"),
+        },
+        ExecutionRole::Implement => crate::runner::worker_request(
+            command,
+            workspace.to_path_buf(),
+            fixture_agent(),
+            timeout,
+            worker_invocation(),
+        ),
+        ExecutionRole::Gate => crate::runner::gate_request(
+            command,
+            workspace.to_path_buf(),
+            timeout,
+            gate_invocation(),
+        ),
+        ExecutionRole::Review => crate::runner::review_request(
+            command,
+            workspace.to_path_buf(),
+            fixture_agent(),
+            timeout,
+            review_invocation(),
+        ),
+    }
+}
+
+fn context_dump_request(
+    role: &ExecutionRole,
+    workspace: &Path,
+    overlay: &[(String, String)],
+) -> RunnerRequest {
+    let mut env = vec![("UPSTROKE_ENV_DUMP".to_owned(), "1".to_owned())];
+    env.extend(overlay.iter().cloned());
+    let command = CommandSpec {
+        program: std::env::current_exe()
+            .expect("test executable")
+            .to_string_lossy()
+            .into_owned(),
+        args: vec![
+            "environment_dump_helper".to_owned(),
+            "--ignored".to_owned(),
+            "--nocapture".to_owned(),
+        ],
+        env,
+        stdin: Vec::new(),
+    };
+    role_request(role, workspace, command, Duration::from_secs(120))
+}
+
+fn dumped_or_refused(
+    runner: &HostRunner,
+    request: &RunnerRequest,
+) -> Result<Vec<String>, RunnerError> {
+    let output = runner.run_blocking(request)?;
+    assert_eq!(output.code, Some(0), "{output:?}");
+    let body = output
+        .stdout
+        .split("<<ENV")
+        .nth(1)
+        .expect("the dump helper never ran")
+        .split("ENV>>")
+        .next()
+        .expect("the dump was never terminated");
+    Ok(body
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect())
+}
+
+fn dumped_value<'a>(environment: &'a [String], name: &str) -> Option<&'a str> {
+    environment.iter().find_map(|line| {
+        line.strip_prefix(name)
+            .and_then(|rest| rest.strip_prefix('='))
+    })
+}
+
+const fn keeps_the_inherited_context(legacy: bool, role: &ExecutionRole) -> bool {
+    match role {
+        ExecutionRole::Probe(_) => true,
+        ExecutionRole::Implement => legacy,
+        ExecutionRole::Gate | ExecutionRole::Review => false,
+    }
+}
+
+#[test]
+fn a_role_in_a_work_tree_the_engine_made_sheds_only_the_work_tree_context() {
+    #[cfg(unix)]
+    let (absolute, relative): (Vec<OsString>, Vec<OsString>) = {
+        use std::os::unix::ffi::OsStringExt;
+        (
+            vec![
+                os("/abs/common"),
+                OsString::from_vec(b"/abs/common-\xff".to_vec()),
+            ],
+            vec![os("../common"), os("common"), os("")],
+        )
+    };
+    #[cfg(windows)]
+    let (absolute, relative): (Vec<OsString>, Vec<OsString>) = (
+        vec![os(r"C:\abs\common"), os(r"\\server\share\common")],
+        vec![
+            os(r"\abs\common"),
+            os(r"C:abs\common"),
+            os(r"..\common"),
+            os("../common"),
+            os("common"),
+            os(""),
+        ],
+    );
+    let mut failures: Vec<String> = Vec::new();
+    for value in &absolute {
+        if !keeps_common_dir(value) {
+            failures.push(format!(
+                "keeps_common_dir({value:?}): an absolute path on this platform is kept as it is"
+            ));
+        }
+    }
+    for value in &relative {
+        if keeps_common_dir(value) {
+            failures.push(format!(
+                "keeps_common_dir({value:?}): a value that is not an absolute path here is not \
+                 kept as it is"
+            ));
+        }
+    }
+
+    let (tree, repository) = managed_repository();
+    std::fs::write(repository.include(), RECORDED_OBJECTS_INCLUDE)
+        .expect("the include, without which a v0.1 role never starts");
+    let workspace = tree.path().join("work");
+    std::fs::create_dir(&workspace).expect("the roles' working directory");
+    let run_common_dir = repository.common_dir().to_string_lossy().into_owned();
+    let runner_for = |legacy: bool, base: Vec<(OsString, OsString)>, case: KeyCase| {
+        if legacy {
+            HostRunner::for_legacy_workspace(repository.clone()).with_environment(
+                HostEnvironment::with_base(base, case)
+                    .reading(ObjectGraph::RecordedIn(repository.clone())),
+            )
+        } else {
+            HostRunner::new().with_environment(HostEnvironment::with_base(base, case))
+        }
+    };
+    let constructor = |legacy: bool| {
+        if legacy {
+            "for_legacy_workspace"
+        } else {
+            "new"
+        }
+    };
+    let inherited = || {
+        let mut base = synthetic_base();
+        base.extend(
+            INHERITED_SELECTORS
+                .iter()
+                .map(|(name, value)| (os(name), os(value))),
+        );
+        base.extend(
+            KEPT_INHERITED
+                .iter()
+                .map(|(name, value)| (os(name), os(value))),
+        );
+        base.push((os(NO_REPLACEMENT_OBJECTS.0), os("the-operators-own")));
+        base
+    };
+    let mut rows: Vec<(Option<OsString>, CommonDirForm)> = vec![(None, CommonDirForm::Absent)];
+    rows.extend(
+        absolute
+            .iter()
+            .filter(|value| value.to_str().is_some())
+            .map(|value| (Some(value.clone()), CommonDirForm::Absolute)),
+    );
+    rows.extend(
+        relative
+            .iter()
+            .map(|value| (Some(value.clone()), CommonDirForm::Relative)),
+    );
+    let mismatch = |label: &str, environment: &[String], name: &str, expected: Option<&str>| {
+        let found = dumped_value(environment, name);
+        (found != expected).then(|| format!("{label}: {name} is {found:?}, expected {expected:?}"))
+    };
+
+    let mut rows_run = 0_usize;
+    let mut refused = 0_usize;
+    for case in KeyCase::ALL {
+        for legacy in [true, false] {
+            for role in ExecutionRole::all() {
+                let keeps = keeps_the_inherited_context(legacy, &role);
+                for (common, form) in &rows {
+                    rows_run += 1;
+                    let mut base = inherited();
+                    if let Some(value) = common {
+                        base.push((os(COMMON_DIR), value.clone()));
+                    }
+                    let runner = runner_for(legacy, base, *case);
+                    let request = context_dump_request(&role, &workspace, &[]);
+                    let label = format!(
+                        "{role} ({case:?}, {}, inherited {COMMON_DIR} {common:?})",
+                        constructor(legacy)
+                    );
+                    let outcome = dumped_or_refused(&runner, &request);
+                    if !keeps && !legacy && *form == CommonDirForm::Relative {
+                        match outcome {
+                            Err(refusal)
+                                if refusal.fate == ProcessFate::NeverStarted
+                                    && refusal.source.to_string().contains(COMMON_DIR) =>
+                            {
+                                refused += 1;
+                            }
+                            Err(refusal) => failures.push(format!(
+                                "{label}: refused, but not as never started for the common \
+                                 directory: {refusal}"
+                            )),
+                            Ok(_) => failures.push(format!(
+                                "{label}: started, where a runner that holds no managed \
+                                 repository has no common directory to give and must refuse"
+                            )),
+                        }
+                        continue;
+                    }
+                    let environment = match outcome {
+                        Ok(environment) => environment,
+                        Err(error) => {
+                            failures.push(format!("{label}: refused: {error}"));
+                            continue;
+                        }
+                    };
+                    let given = common
+                        .as_ref()
+                        .map(|value| value.to_string_lossy().into_owned());
+                    let expected_common = match form {
+                        CommonDirForm::Absent => None,
+                        CommonDirForm::Absolute => given,
+                        CommonDirForm::Relative if keeps => given,
+                        CommonDirForm::Relative => Some(run_common_dir.clone()),
+                    };
+                    let no_replacement = if legacy {
+                        "the-operators-own"
+                    } else {
+                        NO_REPLACEMENT_OBJECTS.1
+                    };
+                    failures.extend(
+                        INHERITED_SELECTORS
+                            .iter()
+                            .map(|(name, value)| (*name, keeps.then_some(*value)))
+                            .chain([(COMMON_DIR, expected_common.as_deref())])
+                            .chain(
+                                KEPT_INHERITED
+                                    .iter()
+                                    .map(|(name, value)| (*name, Some(*value))),
+                            )
+                            .chain([(NO_REPLACEMENT_OBJECTS.0, Some(no_replacement))])
+                            .chain([
+                                ("LANG", Some("C.UTF-8")),
+                                ("UPSTROKE_RUN", Some("01ABCDEF")),
+                            ])
+                            .filter_map(|(name, expected)| {
+                                mismatch(&label, &environment, name, expected)
+                            }),
+                    );
+                }
+            }
+        }
+    }
+
+    let overlay: Vec<(String, String)> = [
+        ("GIT_DIR", "/overlay/selected.git"),
+        ("GIT_WORK_TREE", "/overlay/work"),
+        ("GIT_IMPLICIT_WORK_TREE", "0"),
+        ("GIT_INDEX_FILE", "/overlay/index"),
+        (COMMON_DIR, "../overlay-common"),
+    ]
+    .into_iter()
+    .map(|(name, value)| (name.to_owned(), value.to_owned()))
+    .collect();
+    for case in KeyCase::ALL {
+        for legacy in [true, false] {
+            for role in ExecutionRole::all() {
+                rows_run += 1;
+                let mut base = inherited();
+                base.push((os(COMMON_DIR), os("../common")));
+                let runner = runner_for(legacy, base, *case);
+                let label = format!("{role} ({case:?}, {}, overlaid)", constructor(legacy));
+                match dumped_or_refused(&runner, &context_dump_request(&role, &workspace, &overlay))
+                {
+                    Ok(environment) => {
+                        failures.extend(overlay.iter().filter_map(|(name, value)| {
+                            mismatch(&label, &environment, name, Some(value))
+                        }))
+                    }
+                    Err(error) => failures.push(format!(
+                        "{label}: refused, where the overlay's own values are kept: {error}"
+                    )),
+                }
+            }
+        }
+    }
+
+    let absolute_spelling = absolute
+        .iter()
+        .find_map(|value| value.to_str())
+        .expect("an absolute value a dump can carry")
+        .to_owned();
+    for case in KeyCase::ALL {
+        for legacy in [true, false] {
+            for role in ExecutionRole::all() {
+                for (common, form) in [
+                    ("../lower-common", CommonDirForm::Relative),
+                    (absolute_spelling.as_str(), CommonDirForm::Absolute),
+                ] {
+                    rows_run += 1;
+                    let mut base = synthetic_base();
+                    base.push((os("git_dir"), os("/inherited/lower.git")));
+                    base.push((os("git_common_dir"), os(common)));
+                    let runner = runner_for(legacy, base, *case);
+                    let request = context_dump_request(&role, &workspace, &[]);
+                    let label = format!(
+                        "{role} ({case:?}, {}, git_dir and git_common_dir {common:?})",
+                        constructor(legacy)
+                    );
+                    let matched = *case == KeyCase::Insensitive;
+                    let keeps = keeps_the_inherited_context(legacy, &role) || !matched;
+                    let outcome = dumped_or_refused(&runner, &request);
+                    if !keeps && !legacy && form == CommonDirForm::Relative {
+                        match outcome {
+                            Err(refusal) if refusal.fate == ProcessFate::NeverStarted => {
+                                refused += 1;
+                            }
+                            Err(refusal) => failures.push(format!(
+                                "{label}: refused, but not as never started: {refusal}"
+                            )),
+                            Ok(_) => failures.push(format!(
+                                "{label}: started, where it must be refused before it starts"
+                            )),
+                        }
+                        continue;
+                    }
+                    let environment = match outcome {
+                        Ok(environment) => environment,
+                        Err(error) => {
+                            failures.push(format!("{label}: refused: {error}"));
+                            continue;
+                        }
+                    };
+                    let expected_common = if keeps || form == CommonDirForm::Absolute {
+                        common.to_owned()
+                    } else {
+                        run_common_dir.clone()
+                    };
+                    failures.extend(
+                        [
+                            ("git_dir", keeps.then_some("/inherited/lower.git")),
+                            ("git_common_dir", Some(expected_common.as_str())),
+                        ]
+                        .into_iter()
+                        .filter_map(|(name, expected)| {
+                            mismatch(&label, &environment, name, expected)
+                        }),
+                    );
+                }
+            }
+        }
+    }
+    assert_eq!(
+        rows_run,
+        KeyCase::ALL.len() * 2 * 5 * (rows.len() + 1 + 2),
+        "every row ran"
+    );
+    assert!(
+        failures.is_empty(),
+        "{} mismatch(es) over {rows_run} rows ({refused} refused as expected):\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+    assert!(
+        refused >= KeyCase::ALL.len() * 3 * relative.len(),
+        "the refusal rows ran: {refused}"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_a_role_in_a_work_tree_the_engine_made_sheds_the_work_tree_context_in_any_spelling() {
+    let tree = scratch_tree("windows-spelling");
+    let other = tree.path().join("other");
+    std::fs::create_dir(&other).expect("another repository's directory");
+    case_git(&other, &["init", "-q"]);
+    let other_git = std::fs::canonicalize(other.join(".git")).expect("its Git directory");
+    let outside = tree.path().join("outside");
+    std::fs::create_dir(&outside).expect("a directory no repository holds");
+    // Git for Windows refuses a verbatim (`\\?\`) Git directory as "not a git repository", so
+    // Git is given the spelling the manager gives it; its answer is still compared canonical.
+    let for_git = crate::workspace_manager::fixture::canonical(&other.join(".git"));
+    let control = Command::new("git")
+        .current_dir(&outside)
+        .env("git_dir", &for_git)
+        .env("Git_Index_File", for_git.join("other-index"))
+        .args(["rev-parse", "--absolute-git-dir", "--git-path", "index"])
+        .output()
+        .expect("run git");
+    let answers = String::from_utf8_lossy(&control.stdout).into_owned();
+    let mut lines = answers.lines();
+    let git_dir = lines.next().map(|line| std::fs::canonicalize(line).ok());
+    let index = lines.next().map(str::to_owned);
+    assert!(
+        control.status.success()
+            && git_dir == Some(Some(other_git.clone()))
+            && index.is_some_and(|index| index.to_ascii_lowercase().ends_with("other-index")),
+        "unmeasured: Git for Windows did not read `git_dir` and `Git_Index_File` as \
+         `GIT_DIR` and `GIT_INDEX_FILE` ({:?}, {answers:?}, {:?}), so the rows below \
+         would measure nothing",
+        control.status,
+        String::from_utf8_lossy(&control.stderr)
+    );
+
+    let (scope_tree, repository) = managed_repository();
+    std::fs::write(repository.include(), RECORDED_OBJECTS_INCLUDE)
+        .expect("the include, without which a v0.1 role never starts");
+    let workspace = scope_tree.path().join("work");
+    std::fs::create_dir(&workspace).expect("the roles' working directory");
+    let run_common_dir = repository.common_dir().to_string_lossy().into_owned();
+    for (common, replaced) in [
+        (r"..\common", true),
+        ("C:x", true),
+        (r"\x", true),
+        (r"C:\abs\common", false),
+        (r"\\server\share\common", false),
+    ] {
+        for role in [
+            ExecutionRole::Implement,
+            ExecutionRole::Gate,
+            ExecutionRole::Review,
+        ] {
+            let mut base = synthetic_base();
+            base.push((os("git_dir"), other_git.clone().into_os_string()));
+            base.push((
+                os("Git_Index_File"),
+                other_git.join("index").into_os_string(),
+            ));
+            base.push((os("git_common_dir"), os(common)));
+            let runner = HostRunner::new().with_environment(
+                HostEnvironment::with_base(base, KeyCase::current())
+                    .reading(ObjectGraph::RecordedIn(repository.clone())),
+            );
+            let label = format!("{role}, git_common_dir {common:?}");
+            let environment =
+                dumped_or_refused(&runner, &context_dump_request(&role, &workspace, &[]))
+                    .unwrap_or_else(|error| panic!("{label} was refused: {error}"));
+            for name in ["git_dir", "Git_Index_File"] {
+                assert!(
+                    !environment.iter().any(|line| line
+                        .to_ascii_lowercase()
+                        .starts_with(&format!("{}=", name.to_ascii_lowercase()))),
+                    "{label}: {name} reached the role: {environment:?}"
+                );
+            }
+            let expected = if replaced {
+                run_common_dir.clone()
+            } else {
+                common.to_owned()
+            };
+            assert_eq!(
+                dumped_value(&environment, "git_common_dir"),
+                Some(expected.as_str()),
+                "{label}"
+            );
+        }
+    }
+
+    let checkout = Path::new(r"D:\checkout");
+    for (value, joined, how) in [
+        (
+            r"\x",
+            r"D:\x",
+            "a root-relative value takes the checkout's drive",
+        ),
+        ("C:x", "C:x", "a drive-relative value stays as it is"),
+    ] {
+        assert_eq!(checkout.join(value), PathBuf::from(joined), "{how}");
+    }
+}
+
+#[cfg(unix)]
+const SLOT_ROLES_ROOT: &str = "UPSTROKE_SLOT_ROLES_ROOT";
+#[cfg(unix)]
+const SLOT_ROLES_CASE: &str = "UPSTROKE_SLOT_ROLES_CASE";
+#[cfg(unix)]
+const SLOT_ROLES_COMMON: &str = "UPSTROKE_SLOT_ROLES_COMMON";
+#[cfg(unix)]
+const SLOT_ROLES_SLOT: &str = "UPSTROKE_SLOT_ROLES_SLOT";
+#[cfg(unix)]
+const SLOT_ROLES_REPORT: [&str; 5] = ["control", "index", "dir", "dir-index", "relative-index"];
+#[cfg(unix)]
+const SLOT_ROLES_ROLE_MADE: &str = "made by the implement role\n";
+
+#[cfg(unix)]
+fn fixture_git(dir: &Path, args: &[&OsStr], env: &[(&str, &OsStr)]) -> String {
+    let mut command = Command::new("git");
+    command.arg("-C").arg(dir).args([
+        "-c",
+        "user.name=upstroke tests",
+        "-c",
+        "user.email=tests@upstroke.local",
+        "-c",
+        "maintenance.auto=false",
+        "-c",
+        "gc.auto=0",
+    ]);
+    command.args(args);
+    for (name, value) in env {
+        command.env(name, value);
+    }
+    let output = command.output().expect("run git");
+    assert!(
+        output.status.success(),
+        "git {args:?} in {}: {}",
+        dir.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout)
+        .trim_end_matches('\n')
+        .to_owned()
+}
+
+#[cfg(unix)]
+fn fixture_repository(path: &Path, files: &[(&str, &str)]) -> String {
+    std::fs::create_dir_all(path).expect("a repository's directory");
+    let git = |args: &[&str]| {
+        let args: Vec<&OsStr> = args.iter().map(OsStr::new).collect();
+        fixture_git(path, &args, &[])
+    };
+    git(&["init", "-q", "-b", "main"]);
+    for (name, content) in files {
+        std::fs::write(path.join(name), content).expect("a fixture file");
+    }
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "-m", "initial"]);
+    git(&["rev-parse", "HEAD"])
+}
+
+#[cfg(unix)]
+fn copy_tree(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).expect("a copy's directory");
+    for entry in std::fs::read_dir(from).expect("read a directory to copy") {
+        let entry = entry.expect("a directory entry");
+        let source = entry.path();
+        let target = to.join(entry.file_name());
+        let kind = entry.file_type().expect("an entry's type");
+        if kind.is_dir() {
+            copy_tree(&source, &target);
+        } else if kind.is_symlink() {
+            let link = std::fs::read_link(&source).expect("a link's target");
+            std::os::unix::fs::symlink(link, &target).expect("copy a link");
+        } else {
+            std::fs::copy(&source, &target).expect("copy a file");
+        }
+    }
+}
+
+#[cfg(unix)]
+fn tree_bytes(at: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+    fn walk(at: &Path, into: &mut std::collections::BTreeMap<PathBuf, Vec<u8>>) {
+        let Ok(metadata) = std::fs::symlink_metadata(at) else {
+            return;
+        };
+        if metadata.file_type().is_symlink() {
+            let link = std::fs::read_link(at).expect("a link's target");
+            into.insert(at.to_path_buf(), link.into_os_string().into_encoded_bytes());
+        } else if metadata.is_dir() {
+            into.insert(at.to_path_buf(), Vec::new());
+            for entry in std::fs::read_dir(at).expect("read a watched directory") {
+                walk(&entry.expect("a directory entry").path(), into);
+            }
+        } else {
+            into.insert(
+                at.to_path_buf(),
+                std::fs::read(at).expect("read a watched file"),
+            );
+        }
+    }
+    let mut bytes = std::collections::BTreeMap::new();
+    walk(at, &mut bytes);
+    bytes
+}
+
+#[cfg(unix)]
+fn own_administrative_directory(work_tree: &Path) -> PathBuf {
+    let dotgit =
+        std::fs::read_to_string(work_tree.join(".git")).expect("a linked work tree's .git");
+    let target = dotgit
+        .trim_end_matches('\n')
+        .strip_prefix("gitdir: ")
+        .expect("a gitfile");
+    std::fs::canonicalize(work_tree.join(target)).expect("its administrative directory")
+}
+
+#[cfg(unix)]
+fn printed_path(cwd: &Path, output: &ProcessOutput) -> Option<PathBuf> {
+    let printed = output.stdout.strip_suffix('\n').unwrap_or(&output.stdout);
+    (output.code == Some(0))
+        .then(|| std::fs::canonicalize(cwd.join(printed)).ok())
+        .flatten()
+}
+
+#[cfg(unix)]
+fn git_spec(args: &[&str]) -> CommandSpec {
+    args.iter()
+        .fold(CommandSpec::new("git"), |spec, arg| spec.arg(*arg))
+}
+
+#[cfg(unix)]
+fn slot_role(
+    runner: &HostRunner,
+    role: &ExecutionRole,
+    slot: &Path,
+    args: &[&str],
+) -> ProcessOutput {
+    runner
+        .run_blocking(&role_request(
+            role,
+            slot,
+            git_spec(args),
+            Duration::from_secs(60),
+        ))
+        .unwrap_or_else(|error| panic!("{role} in {}: {args:?}: {error}", slot.display()))
+}
+
+#[cfg(unix)]
+fn loose_object(store: &Path, content: &str, scratch: &Path) -> PathBuf {
+    let file = scratch.join("hashed-content");
+    std::fs::write(&file, content).expect("the content to hash");
+    let oid = fixture_git(
+        scratch,
+        &[
+            OsStr::new("hash-object"),
+            OsStr::new("--no-filters"),
+            file.as_os_str(),
+        ],
+        &[],
+    );
+    let (fan, rest) = oid.split_at(2);
+    store.join("objects").join(fan).join(rest)
+}
+
+#[cfg(unix)]
+#[test]
+fn slot_roles_under_an_inherited_context_address_only_their_own_work_tree() {
+    let mut failures: Vec<String> = Vec::new();
+    for case in SLOT_ROLES_REPORT {
+        let tree = scratch_tree("slot-roles-report");
+        let root = tree.path();
+        let managed = root.join("managed");
+        fixture_repository(&managed, &[("README.md", "readme\n")]);
+        for slot in ["worker-a", "worker-b", "gate", "review"] {
+            let at = root.join("slots").join(slot);
+            fixture_git(
+                &managed,
+                &[
+                    OsStr::new("worktree"),
+                    OsStr::new("add"),
+                    OsStr::new("--detach"),
+                    OsStr::new("--quiet"),
+                    at.as_os_str(),
+                ],
+                &[],
+            );
+        }
+        let other = root.join("other");
+        fixture_repository(&other, &[("OTHER.md", "other\n")]);
+        std::fs::write(other.join("staged-by-user.txt"), "staged\n").expect("the user's file");
+        fixture_git(
+            &other,
+            &[OsStr::new("add"), OsStr::new("staged-by-user.txt")],
+            &[],
+        );
+        std::fs::write(other.join("staged-by-user.txt"), "edited after staging\n")
+            .expect("the user's edit");
+        let alt = root.join("alt");
+        std::fs::create_dir(&alt).expect("the alternate index's directory");
+        std::fs::copy(other.join(".git").join("index"), alt.join("index"))
+            .expect("the alternate index");
+        let include = root
+            .join("private")
+            .join("git")
+            .join("recorded-objects.gitconfig");
+        std::fs::create_dir_all(include.parent().expect("the include's directory"))
+            .expect("the include's directory");
+        std::fs::write(&include, RECORDED_OBJECTS_INCLUDE).expect("the include");
+
+        let other_git = other.join(".git");
+        let alt_index = alt.join("index");
+        let inherited: Vec<(&str, OsString)> = match case {
+            "index" => vec![("GIT_INDEX_FILE", other_git.join("index").into_os_string())],
+            "dir" => vec![("GIT_DIR", other_git.clone().into_os_string())],
+            "dir-index" => vec![
+                ("GIT_DIR", other_git.clone().into_os_string()),
+                ("GIT_INDEX_FILE", alt_index.clone().into_os_string()),
+            ],
+            "relative-index" => vec![("GIT_INDEX_FILE", os(".git/index"))],
+            _ => Vec::new(),
+        };
+        let watched = [
+            other_git.join("index"),
+            other_git.join("objects"),
+            alt_index.clone(),
+        ];
+        let before: Vec<_> = watched.iter().map(|path| tree_bytes(path)).collect();
+
+        let mut vars: Vec<(&str, &OsStr)> = inherited
+            .iter()
+            .map(|(name, value)| (*name, value.as_os_str()))
+            .collect();
+        vars.push((SLOT_ROLES_ROOT, root.as_os_str()));
+        vars.push((SLOT_ROLES_CASE, OsStr::new(case)));
+        let ended = proc::test_support::run_test_isolated(
+            "runner::host::tests::slot_roles_helper",
+            &vars,
+            Duration::from_secs(180),
+        );
+        if !(ended.status.is_some_and(|status| status.success())
+            && ended.stdout.contains("1 passed"))
+        {
+            failures.push(format!(
+                "{case}: a slot role did not address its own work tree: {ended}"
+            ));
+            continue;
+        }
+        for (path, earlier) in watched.iter().zip(&before) {
+            if &tree_bytes(path) != earlier {
+                failures.push(format!(
+                    "{case}: {} changed under the slot roles",
+                    path.display()
+                ));
+            }
+        }
+        for lock in [other_git.join("index.lock"), alt.join("index.lock")] {
+            if lock.exists() {
+                failures.push(format!("{case}: {} was left", lock.display()));
+            }
+        }
+        if !managed
+            .join(".git")
+            .join("worktrees")
+            .join("gate")
+            .join("index.lock")
+            .exists()
+        {
+            failures.push(format!(
+                "{case}: the killed gate's lock is not in its own snapshot's administrative directory"
+            ));
+        }
+    }
+
+    for case in [
+        "relative common, sibling",
+        "linked registry, absolute",
+        "linked registry, relative",
+    ] {
+        let tree = scratch_tree("slot-roles-common");
+        let root = tree.path();
+        let (base, slot, inherited, sibling) = match case {
+            "relative common, sibling" => {
+                let base = root.join("managed");
+                fixture_repository(
+                    &base,
+                    &[("README.md", "readme\n"), ("shared.txt", "base\n")],
+                );
+                copy_tree(&base.join(".git"), &root.join("common"));
+                let sibling = root.join("slots").join("common");
+                copy_tree(&root.join("common"), &sibling);
+                (
+                    base,
+                    root.join("slots").join("worker"),
+                    os("../common"),
+                    Some(sibling),
+                )
+            }
+            _ => {
+                let (base, slot, value) = if case == "linked registry, absolute" {
+                    let base = root.join("base");
+                    let value = base.join(".git").into_os_string();
+                    (base, root.join("slots").join("worker"), value)
+                } else {
+                    (
+                        root.join("checkouts").join("user").join("base"),
+                        root.join("slots").join("c5").join("worker"),
+                        os("../../../checkouts/user/base/.git"),
+                    )
+                };
+                fixture_repository(&base, &[("README.md", "base\n"), ("shared.txt", "seed\n")]);
+                copy_tree(&base, &root.join("other"));
+                std::fs::create_dir(root.join("other").join(".git").join("worktrees"))
+                    .expect("the other repository's registry");
+                std::os::unix::fs::symlink(
+                    root.join("other").join(".git").join("worktrees"),
+                    base.join(".git").join("worktrees"),
+                )
+                .expect("the run's registry, a link into the other repository");
+                (base, slot, value, None)
+            }
+        };
+        let head = fixture_git(&base, &[OsStr::new("rev-parse"), OsStr::new("HEAD")], &[]);
+        std::fs::create_dir_all(slot.parent().expect("the slot's parent"))
+            .expect("the slot's parent");
+        fixture_git(
+            &base,
+            &[
+                OsStr::new("worktree"),
+                OsStr::new("add"),
+                OsStr::new("--detach"),
+                OsStr::new("--quiet"),
+                slot.as_os_str(),
+                OsStr::new(&head),
+            ],
+            &[(COMMON_DIR, inherited.as_os_str())],
+        );
+        let common = std::fs::canonicalize(fixture_git(
+            &base,
+            &[
+                OsStr::new("rev-parse"),
+                OsStr::new("--path-format=absolute"),
+                OsStr::new("--git-common-dir"),
+            ],
+            &[(COMMON_DIR, inherited.as_os_str())],
+        ))
+        .expect("the run's common directory");
+        let include = root
+            .join("private")
+            .join("git")
+            .join("recorded-objects.gitconfig");
+        std::fs::create_dir_all(include.parent().expect("the include's directory"))
+            .expect("the include's directory");
+        std::fs::write(&include, RECORDED_OBJECTS_INCLUDE).expect("the include");
+        let other_git = root.join("other").join(".git");
+        let watched: Vec<PathBuf> = match &sibling {
+            Some(sibling) => vec![sibling.clone()],
+            None => vec![
+                other_git.join("objects"),
+                other_git.join("refs"),
+                other_git.join("packed-refs"),
+            ],
+        };
+        let before: Vec<_> = watched.iter().map(|path| tree_bytes(path)).collect();
+        let ended = proc::test_support::run_test_isolated(
+            "runner::host::tests::slot_roles_helper",
+            &[
+                (COMMON_DIR, inherited.as_os_str()),
+                (SLOT_ROLES_ROOT, root.as_os_str()),
+                (SLOT_ROLES_CASE, OsStr::new(case)),
+                (SLOT_ROLES_COMMON, common.as_os_str()),
+                (SLOT_ROLES_SLOT, slot.as_os_str()),
+            ],
+            Duration::from_secs(180),
+        );
+        if !(ended.status.is_some_and(|status| status.success())
+            && ended.stdout.contains("1 passed"))
+        {
+            failures.push(format!(
+                "{case}: the implement role did not address the run's common directory: {ended}"
+            ));
+            continue;
+        }
+        if !loose_object(&common, SLOT_ROLES_ROLE_MADE, root).exists() {
+            failures.push(format!(
+                "{case}: the implement role's `git add` did not write into the run's object store"
+            ));
+        }
+        for (path, earlier) in watched.iter().zip(&before) {
+            if &tree_bytes(path) != earlier {
+                failures.push(format!(
+                    "{case}: {} changed under the slot role",
+                    path.display()
+                ));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} of the eight cases failed:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "subprocess helper"]
+fn slot_roles_helper() {
+    let Some(root) = std::env::var_os(SLOT_ROLES_ROOT).map(PathBuf::from) else {
+        return;
+    };
+    let case = std::env::var(SLOT_ROLES_CASE).expect("the case");
+    let include = root
+        .join("private")
+        .join("git")
+        .join("recorded-objects.gitconfig");
+    if !SLOT_ROLES_REPORT.contains(&case.as_str()) {
+        let common = PathBuf::from(std::env::var_os(SLOT_ROLES_COMMON).expect("the common dir"));
+        let slot = PathBuf::from(std::env::var_os(SLOT_ROLES_SLOT).expect("the slot"));
+        let repository = ManagedRepository::new(&common, &include, GitdirRule::native())
+            .expect("the run's repository");
+        let runner = HostRunner::new().with_environment(
+            HostEnvironment::from_process().reading(ObjectGraph::RecordedIn(repository)),
+        );
+        let answer = slot_role(
+            &runner,
+            &ExecutionRole::Implement,
+            &slot,
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        );
+        assert_eq!(
+            printed_path(&slot, &answer),
+            Some(common.clone()),
+            "{case}: the implement role's common directory: {answer:?}"
+        );
+        std::fs::write(slot.join("role-made.txt"), SLOT_ROLES_ROLE_MADE).expect("a role's file");
+        let added = slot_role(
+            &runner,
+            &ExecutionRole::Implement,
+            &slot,
+            &["add", "role-made.txt"],
+        );
+        assert_eq!(added.code, Some(0), "{case}: {added:?}");
+        return;
+    }
+
+    let slots = root.join("slots");
+    let common = std::fs::canonicalize(root.join("managed").join(".git"))
+        .expect("the managed repository's common directory");
+    let new = HostRunner::new();
+    let legacy = HostRunner::for_legacy_workspace(
+        ManagedRepository::new(&common, &include, GitdirRule::native())
+            .expect("the managed repository's scope"),
+    );
+    let shell = ExecutionRole::Probe(ProbeTarget::Shell);
+    let agent = ExecutionRole::Probe(ProbeTarget::Agent(fixture_agent()));
+    let implement = ExecutionRole::Implement;
+    let gate = ExecutionRole::Gate;
+    let review = ExecutionRole::Review;
+    let mut step = 0_u32;
+    for (runner, role, slot, own) in [
+        (&new, &shell, "gate", false),
+        (&new, &agent, "review", false),
+        (&new, &implement, "worker-a", true),
+        (&new, &gate, "gate", true),
+        (&new, &review, "review", true),
+        (&legacy, &implement, "worker-a", false),
+        (&legacy, &gate, "gate", true),
+    ] {
+        let at = slots.join(slot);
+        let admin = own_administrative_directory(&at);
+        for (query, expected) in [
+            (
+                ["rev-parse", "--absolute-git-dir"].as_slice(),
+                admin.clone(),
+            ),
+            (
+                ["rev-parse", "--git-path", "index"].as_slice(),
+                admin.join("index"),
+            ),
+        ] {
+            step += 1;
+            let answer = slot_role(runner, role, &at, query);
+            if own {
+                assert_eq!(
+                    printed_path(&at, &answer),
+                    Some(expected),
+                    "{case}, step {step:02}: {role} in {slot}: {query:?}: {answer:?}"
+                );
+            }
+        }
+    }
+    let worker_a = slots.join("worker-a");
+    let worker_b = slots.join("worker-b");
+    let gate_slot = slots.join("gate");
+    let review_slot = slots.join("review");
+    std::fs::write(worker_a.join("role-file-a.txt"), "worker a\n").expect("worker a's file");
+    std::fs::write(worker_b.join("role-file-b.txt"), "worker b\n").expect("worker b's file");
+    let top = slot_role(
+        &new,
+        &implement,
+        &worker_a,
+        &["rev-parse", "--show-toplevel"],
+    );
+    assert_eq!(
+        printed_path(&worker_a, &top),
+        std::fs::canonicalize(&worker_a).ok(),
+        "{case}, step 15: {top:?}"
+    );
+    slot_role(&new, &implement, &worker_a, &["status"]);
+    let added = slot_role(&new, &implement, &worker_a, &["add", "role-file-a.txt"]);
+    assert_eq!(added.code, Some(0), "{case}, step 17: {added:?}");
+    slot_role(&new, &implement, &worker_a, &["status"]);
+    let added = slot_role(&new, &implement, &worker_b, &["add", "role-file-b.txt"]);
+    assert_eq!(added.code, Some(0), "{case}, step 19: {added:?}");
+    slot_role(&new, &gate, &gate_slot, &["ls-files", "--stage"]);
+    slot_role(&new, &review, &review_slot, &["log", "--oneline", "-1"]);
+    slot_role(&new, &review, &review_slot, &["status", "--porcelain=v1"]);
+    let added = slot_role(&new, &implement, &worker_b, &["add", "-A"]);
+    assert_eq!(added.code, Some(0), "{case}, step 23: {added:?}");
+    slot_role(&new, &gate, &gate_slot, &["ls-files", "--stage"]);
+    let killed = new
+        .run_blocking(&role_request(
+            &gate,
+            &gate_slot,
+            native().spec("git --version; sleep 60 | git update-index --add --stdin"),
+            Duration::from_secs(5),
+        ))
+        .unwrap_or_else(|error| panic!("{case}, step 25: {error}"));
+    assert!(killed.timed_out, "{case}, step 25: {killed:?}");
+}
+
+#[cfg(unix)]
+const HOOK_SLOT_ROOT: &str = "UPSTROKE_HOOK_SLOT_ROOT";
+#[cfg(unix)]
+const HOOK_SLOT_HEAD: &str = "UPSTROKE_HOOK_SLOT_HEAD";
+
+#[cfg(unix)]
+fn single_quoted_for_sh(text: &OsStr) -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let mut quoted = vec![b'\''];
+    for byte in text.as_bytes() {
+        if *byte == b'\'' {
+            quoted.extend_from_slice(b"'\\''");
+        } else {
+            quoted.push(*byte);
+        }
+    }
+    quoted.push(b'\'');
+    quoted
+}
+
+#[cfg(unix)]
+#[test]
+fn a_hook_started_runs_slot_worker_leaves_the_users_commit_as_the_user_made_it() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut failures: Vec<String> = Vec::new();
+    for linked in [false, true] {
+        let tree = scratch_tree("hook-slot-worker");
+        let root = tree.path();
+        let main = root.join("M");
+        fixture_repository(&main, &[("README.md", "M\n"), ("tracked.txt", "one\n")]);
+        let checkout = if linked {
+            let checkout = root.join("L");
+            fixture_git(
+                &main,
+                &[
+                    OsStr::new("worktree"),
+                    OsStr::new("add"),
+                    OsStr::new("-q"),
+                    OsStr::new("-b"),
+                    OsStr::new("user"),
+                    checkout.as_os_str(),
+                ],
+                &[],
+            );
+            checkout
+        } else {
+            main.clone()
+        };
+        let head = fixture_git(
+            &checkout,
+            &[OsStr::new("rev-parse"), OsStr::new("HEAD")],
+            &[],
+        );
+        std::fs::write(checkout.join("tracked.txt"), "two\n").expect("the user's change");
+        if linked {
+            fixture_git(
+                &checkout,
+                &[OsStr::new("add"), OsStr::new("tracked.txt")],
+                &[],
+            );
+        }
+        std::fs::create_dir(root.join("private")).expect("the coordinator's private root");
+        let hooks = root.join("hooks");
+        std::fs::create_dir(&hooks).expect("the hooks directory");
+        let hook = hooks.join("pre-commit");
+        let mut script = format!("#!/bin/sh\n{HOOK_SLOT_ROOT}=").into_bytes();
+        script.extend(single_quoted_for_sh(root.as_os_str()));
+        script.extend(format!(" {HOOK_SLOT_HEAD}={head} exec ").into_bytes());
+        script.extend(single_quoted_for_sh(
+            std::env::current_exe()
+                .expect("the test executable")
+                .as_os_str(),
+        ));
+        script.extend(
+            b" runner::host::tests::hook_started_slot_worker_helper --exact --ignored \
+              --nocapture --test-threads=1\n",
+        );
+        std::fs::write(&hook, script).expect("the hook");
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))
+            .expect("make the hook executable");
+        let mut commit = Command::new("git");
+        commit.arg("-C").arg(&checkout).args([
+            "-c",
+            "user.name=upstroke tests",
+            "-c",
+            "user.email=tests@upstroke.local",
+            "-c",
+            "maintenance.auto=false",
+        ]);
+        commit.arg("-c").arg({
+            let mut setting = OsString::from("core.hooksPath=");
+            setting.push(&hooks);
+            setting
+        });
+        commit.args(if linked {
+            ["commit", "-q", "-m", "user"].as_slice()
+        } else {
+            ["commit", "-q", "-a", "-m", "user"].as_slice()
+        });
+        let label = if linked {
+            "a plain commit in a linked checkout"
+        } else {
+            "`git commit -a` in the main checkout"
+        };
+        let output = proc::test_support::run_with_timeout(commit, "", Duration::from_secs(180))
+            .unwrap_or_else(|error| panic!("{label}: the commit ran: {error}"));
+        if output.code != Some(0) {
+            failures.push(format!("{label}: the commit failed: {output:?}"));
+            continue;
+        }
+        let paths = fixture_git(
+            &checkout,
+            &[
+                OsStr::new("ls-tree"),
+                OsStr::new("-r"),
+                OsStr::new("--name-only"),
+                OsStr::new("HEAD"),
+            ],
+            &[],
+        );
+        if paths != "README.md\ntracked.txt" {
+            failures.push(format!(
+                "{label}: the user's commit holds {paths:?}, not exactly the user's paths"
+            ));
+        }
+        let content = fixture_git(
+            &checkout,
+            &[OsStr::new("show"), OsStr::new("HEAD:tracked.txt")],
+            &[],
+        );
+        if content != "two" {
+            failures.push(format!(
+                "{label}: the user's commit holds {content:?}, not the user's change"
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} launcher(s) changed the user's commit:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "subprocess helper"]
+fn hook_started_slot_worker_helper() {
+    let Some(root) = std::env::var_os(HOOK_SLOT_ROOT).map(PathBuf::from) else {
+        return;
+    };
+    let head = std::env::var(HOOK_SLOT_HEAD).expect("the commit the slot is made at");
+    let base = std::env::current_dir().expect("the hook's directory, the started checkout");
+    let manager = crate::workspace_manager::WorkspaceManager::derive(
+        &base,
+        &root.join("private"),
+        crate::workspace_manager::fixture::RUN_ID,
+        "inc-hook",
+    )
+    .expect("the coordinator derives its manager at the started checkout");
+    let mut hooks = crate::workspace_manager::NoHooks;
+    manager
+        .create_execution_root(&mut hooks)
+        .expect("the execution root");
+    let slot = crate::workspace_manager::Slot::Task {
+        key: "hook".to_owned(),
+        generation: 1,
+    };
+    manager
+        .write_intent(&mut hooks, &slot)
+        .expect("the slot's intent");
+    let worktree = manager
+        .add_worktree(&mut hooks, &slot, &head)
+        .expect("the slot");
+    std::fs::write(worktree.join("worker-new.txt"), "a file the worker made\n")
+        .expect("the worker's file");
+    let added = slot_role(
+        &HostRunner::new(),
+        &ExecutionRole::Implement,
+        &worktree,
+        &["add", "worker-new.txt"],
+    );
+    assert_eq!(added.code, Some(0), "{added:?}");
 }

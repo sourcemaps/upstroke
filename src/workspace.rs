@@ -16,12 +16,14 @@ use crate::error::UpstrokeError;
 use crate::events::PreparedCommit;
 use crate::runner::host::{GitdirRule, ManagedRepository, RECORDED_OBJECTS_INCLUDE};
 use crate::workspace_manager::{
-    Again, NO_REPLACEMENT_OBJECTS, RegistryHold, tolerant_registry_access,
+    Again, COMMON_DIR, INDEX_SELECTOR, NO_REPLACEMENT_OBJECTS, RegistryHold, WORK_TREE_SELECTORS,
+    keeps_common_dir, tolerant_registry_access,
 };
 
 pub struct Workspace {
     root: PathBuf,
     private_index: Option<PathBuf>,
+    checkout: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,8 +68,31 @@ const AUTO_MAINTENANCE_REFUSED: [&str; 8] = [
     "maintenance.autoDetach=false",
 ];
 
-fn git_command(directory: &Path) -> Command {
+#[derive(Debug, Clone, Copy)]
+enum GitScope<'a> {
+    Checkout,
+    Registry,
+    WorkTree { checkout: &'a Path },
+}
+
+fn git_command(directory: &Path, scope: GitScope<'_>) -> Command {
     let mut command = Command::new("git");
+    match scope {
+        GitScope::Checkout => {}
+        GitScope::Registry => {
+            command.env_remove(INDEX_SELECTOR);
+        }
+        GitScope::WorkTree { checkout } => {
+            for name in WORK_TREE_SELECTORS {
+                command.env_remove(name);
+            }
+            if let Some(value) =
+                std::env::var_os(COMMON_DIR).filter(|value| !keeps_common_dir(value))
+            {
+                command.env(COMMON_DIR, checkout.join(value));
+            }
+        }
+    }
     command
         .arg("-C")
         .arg(directory)
@@ -79,9 +104,18 @@ fn git_command(directory: &Path) -> Command {
 
 impl Workspace {
     pub fn open(root: &Path) -> Result<Self, UpstrokeError> {
+        Self::open_in(root, None)
+    }
+
+    pub fn open_work_tree(root: &Path, checkout: &Path) -> Result<Self, UpstrokeError> {
+        Self::open_in(root, Some(checkout.to_path_buf()))
+    }
+
+    fn open_in(root: &Path, checkout: Option<PathBuf>) -> Result<Self, UpstrokeError> {
         let probe = Self {
             root: root.to_path_buf(),
             private_index: None,
+            checkout,
         };
         let inside = probe.git(&["rev-parse", "--is-inside-work-tree"])?;
         if inside.trim() != "true" {
@@ -97,7 +131,15 @@ impl Workspace {
                 toplevel
             },
             private_index: None,
+            checkout: probe.checkout,
         })
+    }
+
+    fn scope(&self) -> GitScope<'_> {
+        match &self.checkout {
+            None => GitScope::Checkout,
+            Some(checkout) => GitScope::WorkTree { checkout },
+        }
     }
 
     pub fn root(&self) -> &Path {
@@ -188,13 +230,12 @@ impl Workspace {
     }
 
     fn git_output(&self, args: &[&str]) -> Result<Vec<u8>, UpstrokeError> {
-        let output =
-            git_command(&self.root)
-                .args(args)
-                .output()
-                .map_err(|e| UpstrokeError::Git {
-                    message: format!("failed to run git: {e}"),
-                })?;
+        let output = git_command(&self.root, self.scope())
+            .args(args)
+            .output()
+            .map_err(|e| UpstrokeError::Git {
+                message: format!("failed to run git: {e}"),
+            })?;
         if !output.status.success() {
             return Err(UpstrokeError::Git {
                 message: format!(
@@ -214,7 +255,7 @@ impl Workspace {
         let hooks = PrivateHooksDir::create()?;
         let mut hooks_config = OsString::from("core.hooksPath=");
         hooks_config.push(&hooks.path);
-        let mut command = git_command(&self.root);
+        let mut command = git_command(&self.root, self.scope());
         command
             .arg("-c")
             .arg(hooks_config)
@@ -261,7 +302,7 @@ impl Workspace {
         let hooks = PrivateHooksDir::create()?;
         let mut hooks_config = OsString::from("core.hooksPath=");
         hooks_config.push(&hooks.path);
-        let mut command = git_command(&self.root);
+        let mut command = git_command(&self.root, self.scope());
         command
             .arg("-c")
             .arg(hooks_config)
@@ -325,7 +366,7 @@ impl Workspace {
         message: &str,
     ) -> Result<String, UpstrokeError> {
         let args = ["commit-tree", tree_oid, "-p", parent_oid, "-m", message];
-        let output = git_command(&self.root)
+        let output = git_command(&self.root, self.scope())
             .args(args)
             .env("GIT_AUTHOR_NAME", "upstroke")
             .env("GIT_AUTHOR_EMAIL", "upstroke@upstroke.local")
@@ -416,7 +457,7 @@ impl Workspace {
     }
 
     pub fn current_branch_ref(&self) -> Result<String, UpstrokeError> {
-        let output = git_command(&self.root)
+        let output = git_command(&self.root, self.scope())
             .args(["symbolic-ref", "--quiet", "--no-recurse", "HEAD"])
             .output()
             .map_err(|e| UpstrokeError::Git {
@@ -455,7 +496,7 @@ impl Workspace {
     }
 
     pub fn parent_sha(&self, sha: &str) -> Result<Option<String>, UpstrokeError> {
-        let output = git_command(&self.root)
+        let output = git_command(&self.root, self.scope())
             .args(["rev-parse", "--verify", "--quiet"])
             .arg(format!("{sha}^"))
             .output()
@@ -510,7 +551,7 @@ impl Workspace {
     }
 
     pub fn branch_exists(&self, name: &str) -> Result<bool, UpstrokeError> {
-        let output = git_command(&self.root)
+        let output = git_command(&self.root, self.scope())
             .args(["rev-parse", "--verify", "--quiet"])
             .arg(format!("refs/heads/{name}"))
             .output()
@@ -892,6 +933,7 @@ impl Workspace {
         let workspace = Workspace {
             root: pending.path.clone(),
             private_index: None,
+            checkout: Some(self.root.clone()),
         };
         Ok(pending.finish(workspace))
     }
@@ -936,7 +978,7 @@ impl Workspace {
             &mut legacy_registry_pause,
             &mut || legacy_add_veto(path),
             &mut || {
-                let output = git_command(&self.root)
+                let output = git_command(&self.root, GitScope::Registry)
                     .arg("-c")
                     .arg(&hooks_config)
                     .args([
@@ -970,22 +1012,27 @@ impl Workspace {
     fn verify_gate_worktree(&self, path: &Path, hooks_path: &Path) -> Result<(), UpstrokeError> {
         let mut hooks_config = OsString::from("core.hooksPath=");
         hooks_config.push(hooks_path);
-        let output = git_command(path)
-            .arg("-c")
-            .arg(hooks_config)
-            .args([
-                "-c",
-                "core.fsmonitor=false",
-                "status",
-                "--porcelain=v1",
-                "-z",
-                "--untracked-files=all",
-                "--ignore-submodules=none",
-            ])
-            .output()
-            .map_err(|e| UpstrokeError::Git {
-                message: format!("failed to verify gate worktree: {e}"),
-            })?;
+        let output = git_command(
+            path,
+            GitScope::WorkTree {
+                checkout: &self.root,
+            },
+        )
+        .arg("-c")
+        .arg(hooks_config)
+        .args([
+            "-c",
+            "core.fsmonitor=false",
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+            "--ignore-submodules=none",
+        ])
+        .output()
+        .map_err(|e| UpstrokeError::Git {
+            message: format!("failed to verify gate worktree: {e}"),
+        })?;
         if !output.status.success() {
             return Err(UpstrokeError::Git {
                 message: format!(
@@ -1100,7 +1147,7 @@ impl Workspace {
         if self.validate_prepared_ref(&prepared.pin_ref).is_err() {
             return Ok(false);
         }
-        let output = git_command(&self.root)
+        let output = git_command(&self.root, self.scope())
             .args(["cat-file", "commit", &prepared.commit_sha])
             .output()
             .map_err(|e| UpstrokeError::Git {
@@ -1157,7 +1204,7 @@ impl Workspace {
     }
 
     fn symbolic_ref_target(&self, refname: &str) -> Result<Option<String>, UpstrokeError> {
-        let output = git_command(&self.root)
+        let output = git_command(&self.root, self.scope())
             .args(["symbolic-ref", "--quiet", "--no-recurse", refname])
             .output()
             .map_err(|e| UpstrokeError::Git {
@@ -1192,7 +1239,7 @@ impl Workspace {
                 ),
             });
         }
-        let output = git_command(&self.root)
+        let output = git_command(&self.root, self.scope())
             .args(["rev-parse", "--verify", "--quiet", pin_ref])
             .output()
             .map_err(|e| UpstrokeError::Git {
@@ -1947,6 +1994,7 @@ impl Workspace {
         Self {
             root: self.root.clone(),
             private_index: Some(index),
+            checkout: self.checkout.clone(),
         }
     }
 
@@ -2422,7 +2470,7 @@ fn cleanup_gate_workspace(
         &mut legacy_registry_pause,
         &mut || Again::Attempt,
         &mut || {
-            let removal = git_command(source_root)
+            let removal = git_command(source_root, GitScope::Registry)
                 .arg("-c")
                 .arg(&hooks_config)
                 .args([
@@ -2474,6 +2522,7 @@ fn canonical_common_dir(root: &Path) -> Result<PathBuf, UpstrokeError> {
     let probe = Workspace {
         root: root.to_path_buf(),
         private_index: None,
+        checkout: None,
     };
     let common = probe.git_path(&["rev-parse", "--path-format=absolute", "--git-common-dir"])?;
     fs::canonicalize(&common).map_err(|source| UpstrokeError::Io {
@@ -2538,7 +2587,7 @@ fn worktree_is_registered(
     path: &Path,
     hooks_config: &std::ffi::OsStr,
 ) -> Result<bool, UpstrokeError> {
-    let output = git_command(source_root)
+    let output = git_command(source_root, GitScope::Registry)
         .arg("-c")
         .arg(hooks_config)
         .args([
@@ -4804,11 +4853,58 @@ mod tests {
              whoever adds it names its function here"
         );
 
-        for undo in ["env_remove(", "env_clear("] {
-            assert_eq!(
-                code.matches(undo).count(),
-                0,
-                "`{undo}` can take the pair back off a child `git_command` built"
+        assert_eq!(
+            code.matches("env_clear(").count(),
+            0,
+            "`env_clear(` can take the pair back off a child `git_command` built"
+        );
+        let removals_elsewhere: Vec<usize> = code
+            .match_indices("env_remove(")
+            .map(|(at, _)| at)
+            .filter(|at| !(start..=close).contains(at))
+            .collect();
+        assert!(
+            removals_elsewhere.is_empty(),
+            "`env_remove(` outside `git_command` at byte offsets {removals_elsewhere:?} can take \
+             the pair back off a child it built"
+        );
+        assert_eq!(
+            builder.matches("env_remove(").count(),
+            2,
+            "`git_command` removes the work tree's names and nothing else: {builder}"
+        );
+        assert!(
+            builder.contains("command.env_remove(INDEX_SELECTOR);")
+                && builder.contains("fornameinWORK_TREE_SELECTORS{command.env_remove(name);}"),
+            "the two removals are the index selector, for a `git worktree` command, and each of \
+             the four work-tree selectors, for a child in a work tree the engine made: {builder}"
+        );
+        assert_eq!(
+            WORK_TREE_SELECTORS.as_slice(),
+            [
+                "GIT_DIR",
+                "GIT_WORK_TREE",
+                "GIT_IMPLICIT_WORK_TREE",
+                "GIT_INDEX_FILE"
+            ],
+            "the census blanks string literals, so the names removed are read here"
+        );
+        assert_eq!(INDEX_SELECTOR, "GIT_INDEX_FILE");
+        assert!(
+            WORK_TREE_SELECTORS
+                .iter()
+                .chain([&INDEX_SELECTOR, &COMMON_DIR])
+                .all(|name| *name != NO_REPLACEMENT_OBJECTS.0),
+            "a name `git_command` removes or replaces must never be the replacement variable"
+        );
+        let pair = builder
+            .find(".env(NO_REPLACEMENT_OBJECTS.0,NO_REPLACEMENT_OBJECTS.1)")
+            .expect("the pair, asserted above");
+        for scoped in ["env_remove(", ".env(COMMON_DIR,"] {
+            assert!(
+                builder.rfind(scoped).is_some_and(|at| at < pair),
+                "the replacement variable is set after the work tree's names, `{scoped}` \
+                 included: {builder}"
             );
         }
     }
@@ -5978,6 +6074,1052 @@ mod tests {
             ),
             "the retired claim that Git's next split write of the checkout's own index removes \
              the orphans must not come back:\n{section}"
+        );
+    }
+
+    #[cfg(unix)]
+    const SELECTION_ROOT: &str = "UPSTROKE_LEGACY_SELECTION_ROOT";
+    #[cfg(unix)]
+    const SELECTION_TOP: &str = "UPSTROKE_LEGACY_SELECTION_TOP";
+    #[cfg(unix)]
+    const SELECTION_FILE: &str = "UPSTROKE_LEGACY_SELECTION_FILE";
+    #[cfg(unix)]
+    const SELECTION_MODE: &str = "UPSTROKE_LEGACY_SELECTION_MODE";
+    #[cfg(unix)]
+    const SELECTION_TREE: &str = "UPSTROKE_LEGACY_SELECTION_TREE";
+    #[cfg(unix)]
+    const SELECTION_IDENTITY: [(&str, &str); 4] = [
+        ("GIT_AUTHOR_NAME", "upstroke tests"),
+        ("GIT_AUTHOR_EMAIL", "tests@upstroke.local"),
+        ("GIT_COMMITTER_NAME", "upstroke tests"),
+        ("GIT_COMMITTER_EMAIL", "tests@upstroke.local"),
+    ];
+    #[cfg(unix)]
+    const SELECTION_SHAPES: [&str; 20] = [
+        "D1",
+        "V1",
+        "V2",
+        "V3",
+        "V4",
+        "V6",
+        "E1 contrived",
+        "E3",
+        "E4 linked",
+        "E4 separate",
+        "E4 submodule",
+        "E5",
+        "DOT",
+        "H2",
+        "IDX",
+        "SEL",
+        "SPELL",
+        "F4",
+        "E2 GIT_OBJECT_DIRECTORY",
+        "GIT_OBJECT_DIRECTORY pool",
+    ];
+
+    #[cfg(unix)]
+    struct InheritedSelection {
+        root: PathBuf,
+        names: Vec<(&'static str, OsString)>,
+        worker_file: &'static str,
+        untouched: Vec<PathBuf>,
+    }
+
+    #[cfg(unix)]
+    fn selection_git<S: AsRef<std::ffi::OsStr>>(
+        dir: &Path,
+        args: &[S],
+        names: &[(&str, OsString)],
+    ) -> Vec<u8> {
+        let mut command = Command::new("git");
+        command.arg("-C").arg(dir).args([
+            "-c",
+            "user.name=upstroke tests",
+            "-c",
+            "user.email=tests@upstroke.local",
+            "-c",
+            "maintenance.auto=false",
+            "-c",
+            "gc.auto=0",
+            "-c",
+            "protocol.file.allow=always",
+        ]);
+        command.args(args);
+        for (name, value) in names {
+            command.env(name, value);
+        }
+        let output = command.output().expect("run git");
+        assert!(
+            output.status.success(),
+            "git {:?} in {}: {}",
+            args.iter().map(AsRef::as_ref).collect::<Vec<_>>(),
+            dir.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output.stdout
+    }
+
+    #[cfg(unix)]
+    fn selection_line(output: Vec<u8>) -> String {
+        String::from_utf8(output)
+            .expect("Git printed UTF-8")
+            .trim_end_matches('\n')
+            .to_owned()
+    }
+
+    #[cfg(unix)]
+    fn selection_path(mut output: Vec<u8>) -> PathBuf {
+        use std::os::unix::ffi::OsStringExt;
+        if output.ends_with(b"\n") {
+            output.pop();
+        }
+        PathBuf::from(OsString::from_vec(output))
+    }
+
+    #[cfg(unix)]
+    fn selection_repository(path: &Path, files: &[(&str, &str)]) {
+        fs::create_dir_all(path).expect("a repository's directory");
+        selection_git(path, &["init", "-q", "-b", "main"], &[]);
+        for (name, content) in files {
+            let file = path.join(name);
+            fs::create_dir_all(file.parent().expect("a file's directory"))
+                .expect("a file's directory");
+            fs::write(file, content).expect("a fixture file");
+        }
+        selection_git(path, &["add", "-A"], &[]);
+        selection_git(path, &["commit", "-q", "-m", "initial"], &[]);
+    }
+
+    #[cfg(unix)]
+    fn selection_copy_tree(from: &Path, to: &Path) {
+        fs::create_dir_all(to).expect("a copy's directory");
+        for entry in fs::read_dir(from).expect("read a directory to copy") {
+            let entry = entry.expect("a directory entry");
+            let target = to.join(entry.file_name());
+            let kind = entry.file_type().expect("an entry's type");
+            if kind.is_dir() {
+                selection_copy_tree(&entry.path(), &target);
+            } else if kind.is_symlink() {
+                let link = fs::read_link(entry.path()).expect("a link's target");
+                std::os::unix::fs::symlink(link, &target).expect("copy a link");
+            } else {
+                fs::copy(entry.path(), &target).expect("copy a file");
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn selection_tree_bytes(at: &Path, into: &mut Vec<(PathBuf, Vec<u8>)>) {
+        let Ok(metadata) = fs::symlink_metadata(at) else {
+            return;
+        };
+        if metadata.is_dir() {
+            into.push((at.to_path_buf(), Vec::new()));
+            let mut entries: Vec<PathBuf> = fs::read_dir(at)
+                .expect("read a watched directory")
+                .map(|entry| entry.expect("a directory entry").path())
+                .collect();
+            entries.sort();
+            for entry in entries {
+                selection_tree_bytes(&entry, into);
+            }
+        } else {
+            into.push((at.to_path_buf(), fs::read(at).expect("read a watched file")));
+        }
+    }
+
+    #[cfg(unix)]
+    fn selection_enclosing(root: &Path) -> (PathBuf, PathBuf) {
+        let enclosing = root.join("A");
+        selection_repository(
+            &enclosing,
+            &[("README.md", "A\n"), ("work/shared.txt", "base\n")],
+        );
+        let work = enclosing.join("work");
+        fs::write(work.join("shared.txt"), "user-staged\n").expect("the user's version");
+        selection_git(&enclosing, &["add", "work/shared.txt"], &[]);
+        fs::write(work.join("shared.txt"), "base\n").expect("the file as committed");
+        (enclosing, work)
+    }
+
+    #[cfg(unix)]
+    fn selection_b(root: &Path, work: &Path) -> (PathBuf, Vec<(&'static str, OsString)>) {
+        let selected = root.join("B.git");
+        let names = vec![
+            ("GIT_DIR", selected.clone().into_os_string()),
+            ("GIT_WORK_TREE", work.as_os_str().to_owned()),
+        ];
+        selection_git(work, &["init", "-q", "-b", "main"], &names);
+        selection_git(work, &["add", "shared.txt"], &names);
+        selection_git(work, &["commit", "-q", "-m", "B: initial"], &names);
+        (selected, names)
+    }
+
+    #[cfg(unix)]
+    fn selection_shape(shape: &str, root: &Path) -> InheritedSelection {
+        let enclosing_untouched =
+            |enclosing: &Path| vec![enclosing.join(".git/index"), enclosing.join(".git/HEAD")];
+        match shape {
+            "D1" | "V1" | "V3" | "V4" | "V6" | "E3" => {
+                let (enclosing, work) = selection_enclosing(root);
+                let (selected, mut names) = selection_b(root, &work);
+                let mut untouched = enclosing_untouched(&enclosing);
+                match shape {
+                    "V1" => names = vec![("GIT_DIR", selected.into_os_string())],
+                    "V3" => fs::create_dir(work.join(".git")).expect("an empty .git directory"),
+                    "V4" => {
+                        selection_git(&work, &["init", "-q", "-b", "main"], &[]);
+                        selection_git(&work, &["add", "shared.txt"], &[]);
+                        selection_git(&work, &["commit", "-q", "-m", "C: initial"], &[]);
+                        untouched.extend(enclosing_untouched(&work));
+                    }
+                    "V6" => {
+                        let mut gitfile = b"gitdir: ".to_vec();
+                        gitfile.extend(selected.as_os_str().as_encoded_bytes());
+                        gitfile.push(b'\n');
+                        fs::write(work.join(".git"), gitfile).expect("a gitfile naming B");
+                    }
+                    "E3" => {
+                        fs::create_dir_all(work.join(".git/objects")).expect("objects");
+                        fs::create_dir_all(work.join(".git/refs")).expect("refs");
+                        fs::write(work.join(".git/HEAD"), "not a ref\n").expect("an invalid HEAD");
+                    }
+                    _ => {}
+                }
+                InheritedSelection {
+                    root: work,
+                    names,
+                    worker_file: "shared.txt",
+                    untouched,
+                }
+            }
+            "V2" => {
+                let work = root.join("plain").join("work");
+                fs::create_dir_all(&work).expect("a directory no repository holds");
+                fs::write(work.join("shared.txt"), "base\n").expect("the file");
+                let (_, names) = selection_b(root, &work);
+                InheritedSelection {
+                    root: work,
+                    names,
+                    worker_file: "shared.txt",
+                    untouched: Vec::new(),
+                }
+            }
+            "E1 contrived" => {
+                let enclosing = root.join("A");
+                selection_repository(&enclosing, &[("f", "base\n")]);
+                let sub = enclosing.join("sub");
+                fs::create_dir(&sub).expect("the started directory");
+                fs::write(sub.join("f"), "base\n").expect("a file below it");
+                fs::write(enclosing.join(".git/info/exclude"), "/sub/\n").expect("the exclude");
+                InheritedSelection {
+                    root: sub,
+                    names: vec![("GIT_DIR", enclosing.join(".git").into_os_string())],
+                    worker_file: "g",
+                    untouched: Vec::new(),
+                }
+            }
+            "E4 linked" => {
+                let main = root.join("M");
+                selection_repository(&main, &[("README.md", "M\n")]);
+                let linked = root.join("L");
+                selection_git(
+                    &main,
+                    &[
+                        std::ffi::OsStr::new("worktree"),
+                        std::ffi::OsStr::new("add"),
+                        std::ffi::OsStr::new("-q"),
+                        std::ffi::OsStr::new("-b"),
+                        std::ffi::OsStr::new("l"),
+                        linked.as_os_str(),
+                    ],
+                    &[],
+                );
+                InheritedSelection {
+                    names: vec![("GIT_DIR", linked.join(".git").into_os_string())],
+                    root: linked,
+                    worker_file: "README.md",
+                    untouched: enclosing_untouched(&main),
+                }
+            }
+            "E4 separate" => {
+                let separate = root.join("S");
+                fs::create_dir(&separate).expect("the work tree");
+                let store = root.join("store");
+                selection_git(
+                    &separate,
+                    &[
+                        std::ffi::OsStr::new("init"),
+                        std::ffi::OsStr::new("-q"),
+                        std::ffi::OsStr::new("-b"),
+                        std::ffi::OsStr::new("main"),
+                        std::ffi::OsStr::new("--separate-git-dir"),
+                        store.as_os_str(),
+                    ],
+                    &[],
+                );
+                fs::write(separate.join("README.md"), "S\n").expect("a file");
+                selection_git(&separate, &["add", "README.md"], &[]);
+                selection_git(&separate, &["commit", "-q", "-m", "S"], &[]);
+                InheritedSelection {
+                    names: vec![("GIT_DIR", separate.join(".git").into_os_string())],
+                    root: separate,
+                    worker_file: "README.md",
+                    untouched: Vec::new(),
+                }
+            }
+            "E4 submodule" => {
+                let source = root.join("source");
+                selection_repository(&source, &[("README.md", "source\n")]);
+                let superproject = root.join("super");
+                selection_repository(&superproject, &[("README.md", "super\n")]);
+                selection_git(
+                    &superproject,
+                    &[
+                        std::ffi::OsStr::new("submodule"),
+                        std::ffi::OsStr::new("add"),
+                        std::ffi::OsStr::new("-q"),
+                        source.as_os_str(),
+                        std::ffi::OsStr::new("sub"),
+                    ],
+                    &[],
+                );
+                selection_git(&superproject, &["commit", "-q", "-m", "submodule"], &[]);
+                let sub = superproject.join("sub");
+                InheritedSelection {
+                    names: vec![("GIT_DIR", sub.join(".git").into_os_string())],
+                    root: sub,
+                    worker_file: "README.md",
+                    untouched: enclosing_untouched(&superproject),
+                }
+            }
+            "E5" => {
+                let repository = root.join("repo");
+                selection_repository(&repository, &[("README.md", "readme\n")]);
+                selection_git(
+                    &repository,
+                    &["config", "core.preferSymlinkRefs", "true"],
+                    &[],
+                );
+                selection_git(
+                    &repository,
+                    &[
+                        "switch",
+                        "-q",
+                        "--no-recurse-submodules",
+                        "--create=upstroke/run-e5",
+                        "--",
+                    ],
+                    &[],
+                );
+                selection_git(&repository, &["pack-refs", "--all"], &[]);
+                InheritedSelection {
+                    names: vec![("GIT_DIR", repository.join(".git").into_os_string())],
+                    root: repository,
+                    worker_file: "README.md",
+                    untouched: Vec::new(),
+                }
+            }
+            "DOT" => {
+                let configuration = root.join("cfg.git");
+                selection_git(
+                    root,
+                    &[
+                        std::ffi::OsStr::new("init"),
+                        std::ffi::OsStr::new("-q"),
+                        std::ffi::OsStr::new("--bare"),
+                        std::ffi::OsStr::new("-b"),
+                        std::ffi::OsStr::new("main"),
+                        configuration.as_os_str(),
+                    ],
+                    &[],
+                );
+                let home = root.join("userhome");
+                fs::create_dir(&home).expect("a home directory");
+                fs::write(home.join(".profile"), "profile\n").expect("a dotfile");
+                let names = vec![
+                    ("GIT_DIR", configuration.into_os_string()),
+                    ("GIT_WORK_TREE", home.as_os_str().to_owned()),
+                ];
+                selection_git(&home, &["add", ".profile"], &names);
+                selection_git(&home, &["commit", "-q", "-m", "dotfiles"], &names);
+                InheritedSelection {
+                    root: home,
+                    names,
+                    worker_file: ".profile",
+                    untouched: Vec::new(),
+                }
+            }
+            "H2" => {
+                let main = root.join("M");
+                selection_repository(&main, &[("README.md", "M\n"), ("tracked.txt", "one\n")]);
+                let linked = root.join("L");
+                selection_git(
+                    &main,
+                    &[
+                        std::ffi::OsStr::new("worktree"),
+                        std::ffi::OsStr::new("add"),
+                        std::ffi::OsStr::new("-q"),
+                        std::ffi::OsStr::new("-b"),
+                        std::ffi::OsStr::new("user"),
+                        linked.as_os_str(),
+                    ],
+                    &[],
+                );
+                let admin = main.join(".git/worktrees/L");
+                InheritedSelection {
+                    root: linked,
+                    names: vec![
+                        ("GIT_DIR", admin.clone().into_os_string()),
+                        ("GIT_INDEX_FILE", admin.join("index").into_os_string()),
+                        ("GIT_PREFIX", OsString::new()),
+                    ],
+                    worker_file: "tracked.txt",
+                    untouched: enclosing_untouched(&main),
+                }
+            }
+            "IDX" => {
+                let managed = root.join("managed");
+                selection_repository(
+                    &managed,
+                    &[("README.md", "idx\n"), ("shared.txt", "base\n")],
+                );
+                fs::copy(managed.join(".git/index"), managed.join(".git/index.alt"))
+                    .expect("an alternate index");
+                InheritedSelection {
+                    names: vec![(
+                        "GIT_INDEX_FILE",
+                        managed.join(".git/index.alt").into_os_string(),
+                    )],
+                    untouched: vec![managed.join(".git/index")],
+                    root: managed,
+                    worker_file: "shared.txt",
+                }
+            }
+            "SEL" => {
+                let managed = root.join("managed");
+                selection_repository(&managed, &[("README.md", "readme\n")]);
+                InheritedSelection {
+                    names: vec![("GIT_WORK_TREE", managed.as_os_str().to_owned())],
+                    root: managed,
+                    worker_file: "README.md",
+                    untouched: Vec::new(),
+                }
+            }
+            "SPELL" => {
+                let real = root.join("real");
+                selection_repository(&real.join("repo"), &[("README.md", "readme\n")]);
+                let link = root.join("link");
+                std::os::unix::fs::symlink(&real, &link).expect("a second spelling");
+                let repository = link.join("repo");
+                InheritedSelection {
+                    names: vec![("GIT_DIR", repository.join(".git").into_os_string())],
+                    root: repository,
+                    worker_file: "README.md",
+                    untouched: Vec::new(),
+                }
+            }
+            "F4" | "E2 GIT_OBJECT_DIRECTORY" => {
+                let (enclosing, work) = selection_enclosing(root);
+                selection_git(&work, &["init", "-q", "-b", "main"], &[]);
+                selection_git(&work, &["add", "shared.txt"], &[]);
+                selection_git(&work, &["commit", "-q", "-m", "B: initial"], &[]);
+                let store = root.join("store");
+                fs::create_dir(&store).expect("the store");
+                let names = if shape == "F4" {
+                    for item in ["objects", "refs", "config"] {
+                        fs::rename(work.join(".git").join(item), store.join(item))
+                            .expect("move part of the repository into the store");
+                    }
+                    fs::copy(work.join(".git/HEAD"), store.join("HEAD")).expect("HEAD");
+                    selection_copy_tree(&store.join("refs"), &work.join(".git/refs"));
+                    vec![("GIT_COMMON_DIR", store.into_os_string())]
+                } else {
+                    fs::rename(work.join(".git/objects"), store.join("objects"))
+                        .expect("move the object store");
+                    vec![(
+                        "GIT_OBJECT_DIRECTORY",
+                        store.join("objects").into_os_string(),
+                    )]
+                };
+                InheritedSelection {
+                    root: work,
+                    names,
+                    worker_file: "shared.txt",
+                    untouched: enclosing_untouched(&enclosing),
+                }
+            }
+            "GIT_OBJECT_DIRECTORY pool" => {
+                let managed = root.join("managed");
+                selection_repository(&managed, &[("README.md", "readme\n")]);
+                let pool = root.join("pool");
+                selection_repository(&pool, &[("pool-only.txt", "only in the pool\n")]);
+                InheritedSelection {
+                    names: vec![
+                        (
+                            "GIT_OBJECT_DIRECTORY",
+                            pool.join(".git/objects").into_os_string(),
+                        ),
+                        (
+                            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+                            managed.join(".git/objects").into_os_string(),
+                        ),
+                    ],
+                    root: managed,
+                    worker_file: "README.md",
+                    untouched: enclosing_untouched(&pool),
+                }
+            }
+            other => panic!("no construction for {other}"),
+        }
+    }
+
+    #[cfg(unix)]
+    fn own_admin_of(work_tree: &Path) -> PathBuf {
+        use std::os::unix::ffi::OsStrExt;
+        let gitfile = fs::read(work_tree.join(".git")).expect("a linked work tree's .git file");
+        let target = gitfile
+            .strip_prefix(b"gitdir: ")
+            .expect("a gitfile")
+            .strip_suffix(b"\n")
+            .expect("one line");
+        fs::canonicalize(work_tree.join(std::ffi::OsStr::from_bytes(target)))
+            .expect("its administrative directory")
+    }
+
+    #[cfg(unix)]
+    fn assert_the_snapshot_is_its_own(snapshot: &GateWorkspace, label: &str) {
+        let at = snapshot.workspace().root();
+        let admin = own_admin_of(at);
+        assert!(
+            admin.join("index").is_file(),
+            "{label}: the snapshot has an index of its own"
+        );
+        for (query, expected) in [
+            (
+                ["rev-parse", "--absolute-git-dir"].as_slice(),
+                admin.clone(),
+            ),
+            (
+                ["rev-parse", "--path-format=absolute", "--git-path", "index"].as_slice(),
+                admin.join("index"),
+            ),
+            (
+                ["rev-parse", "--show-toplevel"].as_slice(),
+                fs::canonicalize(at).expect("the snapshot"),
+            ),
+        ] {
+            let printed = snapshot
+                .workspace()
+                .git_path(query)
+                .unwrap_or_else(|error| panic!("{label}: {query:?}: {error}"));
+            assert_eq!(
+                fs::canonicalize(&printed).ok(),
+                Some(expected),
+                "{label}: the snapshot's Git answers {query:?} with {}",
+                printed.display()
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_legacy_workspace_keeps_the_inherited_selection_at_its_checkout_and_its_snapshots_address_themselves()
+     {
+        let mut failures: Vec<String> = Vec::new();
+        for shape in SELECTION_SHAPES {
+            let tree = scratch("legacy-selection");
+            let built = selection_shape(shape, tree.path());
+            let top = selection_path(selection_git(
+                &built.root,
+                &["rev-parse", "--show-toplevel"],
+                &built.names,
+            ));
+            let before: Vec<Vec<u8>> = built
+                .untouched
+                .iter()
+                .map(|path| fs::read(path).expect("a watched file"))
+                .collect();
+            let mut vars: Vec<(&str, &std::ffi::OsStr)> = built
+                .names
+                .iter()
+                .map(|(name, value)| (*name, value.as_os_str()))
+                .collect();
+            vars.extend(
+                SELECTION_IDENTITY
+                    .iter()
+                    .map(|(name, value)| (*name, std::ffi::OsStr::new(value))),
+            );
+            vars.push((SELECTION_ROOT, built.root.as_os_str()));
+            vars.push((SELECTION_TOP, top.as_os_str()));
+            vars.push((SELECTION_FILE, std::ffi::OsStr::new(built.worker_file)));
+            let ended = crate::agent::proc::test_support::run_test_isolated(
+                "workspace::tests::legacy_selection_helper",
+                &vars,
+                Duration::from_secs(120),
+            );
+            if !(ended.status.is_some_and(|status| status.success())
+                && ended.stdout.contains("1 passed"))
+            {
+                failures.push(format!("{shape}: {ended}"));
+                continue;
+            }
+            for (path, earlier) in built.untouched.iter().zip(&before) {
+                if fs::read(path).expect("a watched file") != *earlier {
+                    failures.push(format!("{shape}: {} changed", path.display()));
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{} of the {} shapes failed:\n{}",
+            failures.len(),
+            SELECTION_SHAPES.len(),
+            failures.join("\n")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "subprocess helper"]
+    fn legacy_selection_helper() {
+        let Some(root) = env::var_os(SELECTION_ROOT).map(PathBuf::from) else {
+            return;
+        };
+        let top = PathBuf::from(env::var_os(SELECTION_TOP).expect("today's top level"));
+        let worker_file = env::var(SELECTION_FILE).expect("the worker's file");
+        let ws = Workspace::open(&root).expect("open the started checkout");
+        assert_eq!(
+            ws.root(),
+            top.as_path(),
+            "Workspace::open returns the top level Git reports under the inherited names"
+        );
+        fs::write(ws.root().join(&worker_file), "worker edit\n").expect("the worker's edit");
+        fs::write(ws.root().join("worker-new.txt"), "a file the worker made\n")
+            .expect("the worker's new file");
+        let candidate = ws.capture_candidate().expect("capture");
+        {
+            let snapshot = ws
+                .gate_snapshot_for_candidate(&candidate.parent_oid, &candidate.tree_oid)
+                .expect("the gate snapshot verifies clean");
+            assert_the_snapshot_is_its_own(&snapshot, "the gate snapshot");
+        }
+        ws.commit("the task")
+            .expect("commit into the selected repository");
+        let committed = ws
+            .git(&["ls-tree", "-r", "--name-only", "HEAD"])
+            .expect("the selected repository's HEAD");
+        assert!(
+            committed.lines().any(|line| line == "worker-new.txt"),
+            "the capture committed into the selected repository: {committed}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_snapshot_add_never_writes_an_inherited_index() {
+        let mut failures: Vec<String> = Vec::new();
+        for other_work_tree in [false, true] {
+            let tree = scratch("snapshot-index");
+            let root = tree.path();
+            let managed = root.join("managed");
+            selection_repository(
+                &managed,
+                &[("README.md", "readme\n"), ("tracked.txt", "one\n")],
+            );
+            let index = if other_work_tree {
+                let linked = root.join("other-work-tree");
+                selection_git(
+                    &managed,
+                    &[
+                        std::ffi::OsStr::new("worktree"),
+                        std::ffi::OsStr::new("add"),
+                        std::ffi::OsStr::new("-q"),
+                        std::ffi::OsStr::new("-b"),
+                        std::ffi::OsStr::new("other"),
+                        linked.as_os_str(),
+                    ],
+                    &[],
+                );
+                fs::write(linked.join("tracked.txt"), "staged in another work tree\n")
+                    .expect("another work tree's change");
+                selection_git(&linked, &["add", "tracked.txt"], &[]);
+                managed.join(".git/worktrees/other-work-tree/index")
+            } else {
+                fs::write(managed.join("tracked.txt"), "staged by the user\n")
+                    .expect("the user's change");
+                selection_git(&managed, &["add", "tracked.txt"], &[]);
+                managed.join(".git/index")
+            };
+            let before = fs::read(&index).expect("the named index");
+            let ended = crate::agent::proc::test_support::run_test_isolated(
+                "workspace::tests::snapshot_index_helper",
+                &[
+                    ("GIT_INDEX_FILE", index.as_os_str()),
+                    (SELECTION_ROOT, managed.as_os_str()),
+                ],
+                Duration::from_secs(120),
+            );
+            let label = if other_work_tree {
+                "another work tree's index"
+            } else {
+                "the checkout's own index"
+            };
+            if !(ended.status.is_some_and(|status| status.success())
+                && ended.stdout.contains("1 passed"))
+            {
+                failures.push(format!("{label}: {ended}"));
+            }
+            if fs::read(&index).expect("the named index") != before {
+                failures.push(format!(
+                    "{label}: the snapshot add wrote the inherited index {}",
+                    index.display()
+                ));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{} failure(s):\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "subprocess helper"]
+    fn snapshot_index_helper() {
+        let Some(root) = env::var_os(SELECTION_ROOT).map(PathBuf::from) else {
+            return;
+        };
+        let ws = Workspace::open(&root).expect("open the started checkout");
+        let parent = ws.head_sha_full().expect("HEAD");
+        let tree = ws
+            .git(&["rev-parse", "HEAD^{tree}"])
+            .expect("HEAD's tree")
+            .trim()
+            .to_owned();
+        let snapshot = ws
+            .gate_snapshot_for_candidate(&parent, &tree)
+            .expect("the gate snapshot");
+        assert!(
+            own_admin_of(snapshot.workspace().root())
+                .join("index")
+                .is_file(),
+            "the snapshot has an index of its own"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_private_index_binding_survives_the_scope_at_the_checkout_and_in_a_snapshot() {
+        let mut failures: Vec<String> = Vec::new();
+        for mode in ["checkout", "snapshot"] {
+            let tree = scratch("private-index-scope");
+            let root = tree.path();
+            let managed = root.join("managed");
+            selection_repository(
+                &managed,
+                &[("README.md", "readme\n"), ("tracked.txt", "one\n")],
+            );
+            fs::write(managed.join("tracked.txt"), "staged by the user\n")
+                .expect("the user's change");
+            selection_git(&managed, &["add", "tracked.txt"], &[]);
+            let index = managed.join(".git/index");
+            let before = fs::read(&index).expect("the checkout's index");
+            let ended = crate::agent::proc::test_support::run_test_isolated(
+                "workspace::tests::private_index_scope_helper",
+                &[
+                    ("GIT_INDEX_FILE", index.as_os_str()),
+                    (SELECTION_ROOT, managed.as_os_str()),
+                    (SELECTION_MODE, std::ffi::OsStr::new(mode)),
+                ],
+                Duration::from_secs(120),
+            );
+            if !(ended.status.is_some_and(|status| status.success())
+                && ended.stdout.contains("1 passed"))
+            {
+                failures.push(format!("{mode}: {ended}"));
+            }
+            if fs::read(&index).expect("the checkout's index") != before {
+                failures.push(format!(
+                    "{mode}: a private-index view wrote the inherited index {}",
+                    index.display()
+                ));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{} failure(s):\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "subprocess helper"]
+    fn private_index_scope_helper() {
+        let Some(root) = env::var_os(SELECTION_ROOT).map(PathBuf::from) else {
+            return;
+        };
+        let ws = Workspace::open(&root).expect("open the started checkout");
+        let head = ws.head_sha_full().expect("HEAD");
+        let tree = ws
+            .git(&["rev-parse", "HEAD^{tree}"])
+            .expect("HEAD's tree")
+            .trim()
+            .to_owned();
+        let snapshot;
+        let subject = if env::var_os(SELECTION_MODE).is_some_and(|mode| mode == "snapshot") {
+            snapshot = ws
+                .gate_snapshot_for_candidate(&head, &tree)
+                .expect("the gate snapshot");
+            snapshot.workspace()
+        } else {
+            &ws
+        };
+        let own = subject
+            .worktree_git_dir()
+            .expect("the subject's administrative directory")
+            .join("index");
+        let own_before = fs::read(&own).ok();
+        let private = subject
+            .private_index_file("-scope")
+            .expect("a private index name");
+        let view = subject.with_private_index(private.clone());
+        let read = view.git_output_with_private_hooks(&controlled(&["read-tree", &head]));
+        let written = read.and_then(|_| view.private_tree());
+        let created = private.is_file();
+        view.remove_private_index();
+        assert_eq!(
+            written.expect("the private index's tree"),
+            tree,
+            "the private index holds HEAD's tree"
+        );
+        assert!(
+            created,
+            "the view's Git wrote the private index it was given"
+        );
+        assert!(!private.exists(), "the view removes its private index");
+        assert_eq!(
+            fs::read(&own).ok(),
+            own_before,
+            "the subject's own index is unchanged"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn paths_with_newlines_and_undecodable_bytes_are_untouched_by_the_scope() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let rows: [(&str, &[u8], &str, bool); 8] = [
+            ("F2 CR", b"\r", "GIT_DIR", true),
+            ("F2 LF", b"\n", "GIT_DIR", true),
+            ("F5 non-UTF-8, GIT_PREFIX", b"repo-\xff", "GIT_PREFIX", true),
+            ("F5 non-UTF-8, GIT_DIR", b"repo-\xff", "GIT_DIR", true),
+            (
+                "F5 U+FFFD, GIT_PREFIX",
+                "repo-\u{fffd}".as_bytes(),
+                "GIT_PREFIX",
+                true,
+            ),
+            (
+                "F5 U+FFFD, GIT_DIR",
+                "repo-\u{fffd}".as_bytes(),
+                "GIT_DIR",
+                true,
+            ),
+            ("F5 newline, GIT_PREFIX", b"repo\nname", "GIT_PREFIX", false),
+            ("F5 newline, GIT_DIR", b"repo\nname", "GIT_DIR", false),
+        ];
+        let mut failures: Vec<String> = Vec::new();
+        let mut refused: Vec<&str> = Vec::new();
+        for (label, leaf, selector, snapshot) in rows {
+            let tree = scratch("undecodable-scope");
+            let undecodable = std::str::from_utf8(leaf).is_err();
+            let leaf = PathBuf::from(OsString::from_vec(leaf.to_vec()));
+            // A filesystem that keeps names as Unicode refuses a name that is not UTF-8 (APFS
+            // answers EILSEQ), so no path holding one exists there. The refusal is measured and
+            // reported, and the row is not counted as passed.
+            if undecodable {
+                match fs::create_dir(tree.path().join(&leaf)) {
+                    Err(error) if error.raw_os_error() == Some(libc::EILSEQ) => {
+                        refused.push(label);
+                        continue;
+                    }
+                    created => created.expect("a directory named with a byte no UTF-8 spells"),
+                }
+            }
+            let (started, repository) = if label.starts_with("F2") {
+                let enclosing = tree.path().join("A");
+                selection_repository(&enclosing, &[("f", "base\n")]);
+                let sub = enclosing.join(&leaf);
+                fs::create_dir(&sub).expect("the started directory");
+                fs::write(sub.join("f"), "base\n").expect("a file below it");
+                let mut exclude = b"/".to_vec();
+                exclude.extend(leaf.as_os_str().as_encoded_bytes());
+                exclude.extend(b"/\n");
+                fs::write(enclosing.join(".git/info/exclude"), exclude).expect("the exclude");
+                (sub, enclosing)
+            } else {
+                let repository = tree.path().join(&leaf);
+                selection_repository(&repository, &[("README.md", "readme\n")]);
+                (repository.clone(), repository)
+            };
+            let name = if selector == "GIT_DIR" {
+                repository.join(".git").into_os_string()
+            } else {
+                OsString::from("sub/")
+            };
+            let names = vec![(selector, name)];
+            let top = selection_path(selection_git(
+                &started,
+                &["rev-parse", "--show-toplevel"],
+                &names,
+            ));
+            let mut vars: Vec<(&str, &std::ffi::OsStr)> = names
+                .iter()
+                .map(|(name, value)| (*name, value.as_os_str()))
+                .collect();
+            vars.extend(
+                SELECTION_IDENTITY
+                    .iter()
+                    .map(|(name, value)| (*name, std::ffi::OsStr::new(value))),
+            );
+            vars.push((SELECTION_ROOT, started.as_os_str()));
+            vars.push((SELECTION_TOP, top.as_os_str()));
+            vars.push((
+                SELECTION_MODE,
+                std::ffi::OsStr::new(if snapshot { "snapshot" } else { "refusal" }),
+            ));
+            let ended = crate::agent::proc::test_support::run_test_isolated(
+                "workspace::tests::undecodable_scope_helper",
+                &vars,
+                Duration::from_secs(120),
+            );
+            if !(ended.status.is_some_and(|status| status.success())
+                && ended.stdout.contains("1 passed"))
+            {
+                failures.push(format!("{label}: {ended}"));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{} of the {} rows failed, and the filesystem refused {refused:?}:\n{}",
+            failures.len(),
+            rows.len(),
+            failures.join("\n")
+        );
+        assert!(
+            refused.is_empty() || refused.len() == 2,
+            "the filesystem refuses the name in both of its rows or in neither: {refused:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "subprocess helper"]
+    fn undecodable_scope_helper() {
+        let Some(root) = env::var_os(SELECTION_ROOT).map(PathBuf::from) else {
+            return;
+        };
+        let top = PathBuf::from(env::var_os(SELECTION_TOP).expect("today's top level"));
+        let ws = Workspace::open(&root).expect("open the started checkout");
+        assert_eq!(ws.root(), top.as_path(), "Workspace::open");
+        if env::var_os(SELECTION_MODE).is_some_and(|mode| mode == "refusal") {
+            let private =
+                env::temp_dir().join(format!("upstroke-newline-scope-{}", crate::ulid::ulid()));
+            let refused = ws
+                .recorded_objects_scope(Some(&private))
+                .expect_err("the constructor refuses a common directory Git cannot read in a key");
+            let _ = fs::remove_dir_all(&private);
+            assert!(
+                refused.to_string().contains(
+                    "its path contains a newline, which Git cannot read in a configuration key"
+                ),
+                "{refused}"
+            );
+            return;
+        }
+        fs::write(ws.root().join("worker-new.txt"), "a file the worker made\n")
+            .expect("the worker's new file");
+        let candidate = ws.capture_candidate().expect("capture");
+        let snapshot = ws
+            .gate_snapshot_for_candidate(&candidate.parent_oid, &candidate.tree_oid)
+            .expect("the gate snapshot verifies clean");
+        assert_the_snapshot_is_its_own(&snapshot, "the gate snapshot");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_work_tree_the_engine_made_reads_the_runs_common_dir_under_a_relative_common_dir() {
+        let tree = scratch("relative-common-slot");
+        let root = tree.path();
+        let managed = root.join("managed");
+        selection_repository(&managed, &[("README.md", "readme\n")]);
+        let common = root.join("common");
+        selection_copy_tree(&managed.join(".git"), &common);
+        let sibling = root.join("slots").join("common");
+        selection_copy_tree(&common, &sibling);
+        let slot = root.join("slots").join("one");
+        let head = selection_line(selection_git(&managed, &["rev-parse", "HEAD"], &[]));
+        selection_git(
+            &managed,
+            &[
+                std::ffi::OsStr::new("worktree"),
+                std::ffi::OsStr::new("add"),
+                std::ffi::OsStr::new("--detach"),
+                std::ffi::OsStr::new("--quiet"),
+                slot.as_os_str(),
+                std::ffi::OsStr::new(&head),
+            ],
+            &[("GIT_COMMON_DIR", OsString::from("../common"))],
+        );
+        fs::write(slot.join("slot-new.txt"), "staged in the slot\n").expect("a new file");
+        let absolute = [("GIT_COMMON_DIR", common.clone().into_os_string())];
+        selection_git(&slot, &["add", "slot-new.txt"], &absolute);
+        let staged = selection_line(selection_git(&slot, &["write-tree"], &absolute));
+        let mut before = Vec::new();
+        selection_tree_bytes(&sibling, &mut before);
+        let ended = crate::agent::proc::test_support::run_test_isolated(
+            "workspace::tests::relative_common_work_tree_helper",
+            &[
+                ("GIT_COMMON_DIR", std::ffi::OsStr::new("../common")),
+                (SELECTION_ROOT, root.as_os_str()),
+                (SELECTION_TREE, std::ffi::OsStr::new(&staged)),
+            ],
+            Duration::from_secs(120),
+        );
+        assert!(
+            ended.status.is_some_and(|status| status.success())
+                && ended.stdout.contains("1 passed"),
+            "{ended}"
+        );
+        let mut after = Vec::new();
+        selection_tree_bytes(&sibling, &mut after);
+        assert!(
+            after == before,
+            "the common directory beside the slot is byte-identical"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "subprocess helper"]
+    fn relative_common_work_tree_helper() {
+        let Some(root) = env::var_os(SELECTION_ROOT).map(PathBuf::from) else {
+            return;
+        };
+        let tree = env::var(SELECTION_TREE).expect("the staged tree");
+        let problem =
+            Workspace::open_work_tree(&root.join("slots").join("one"), &root.join("managed"))
+                .and_then(|slot| slot.review_input_problem_for_tree(&tree));
+        assert!(
+            matches!(problem, Ok(None)),
+            "the slot's review input, read against the run's common directory: {problem:?}"
         );
     }
 }
