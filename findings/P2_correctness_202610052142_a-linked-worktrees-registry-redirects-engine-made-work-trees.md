@@ -74,8 +74,9 @@ closed. Its witnesses, "symlinked registry, nothing inherited" among them, are t
   other repository's refs untouched. At the manager they are T-ENV-MGR's C4 and C5 sequences. R5's own controls,
   which drove a test runner that reports nothing, were withdrawn for them. None of these rows has run at R5's
   integrated head, and part 2's completion is claimed only once they pass at the final one.
-- **Platform limits.** Those rows are Unix-only. On Windows, W4 and W6 run the start refusal over a junction, through
-  native CI only; no C4 or C5 run is covered there, and none is inferred from the Unix rows or from W6.
+- **Platform limits.** Those rows run on Windows too, through ENV's Windows arms (`f_hosted_shim`, `f_hosted_isolated`)
+  and over a junction. There they, like W4 and W6, which run the start refusal over a junction, execute through native
+  CI only, and no C4 or C5 result there is inferred from the Unix rows or from W6.
 - **Git versions.** The condition rests on Git resolving the `../..` record through the administrative directory's real
   path, which the proposal's harness executed on Git 2.43.0, 2.50.1 and 2.55.0 (below); R5 did not re-read it in Git's
   source. Junctions are executed only by native Windows CI.
