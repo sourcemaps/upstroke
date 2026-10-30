@@ -81,6 +81,10 @@ impl EventEmitter for RunEmitter<'_> {
     }
 }
 
+fn brokered(hooks: &mut dyn TopologyHooks, state: &EmitState<'_>, invocations: &InvocationLedger) {
+    hooks.brokered(state.fold, state.events, state.reservations, invocations);
+}
+
 struct RunJournal<'a, 'h> {
     emitter: RunEmitter<'a>,
     hooks: &'h mut dyn TopologyHooks,
@@ -91,7 +95,9 @@ impl CandidateJournal for RunJournal<'_, '_> {
     fn emit(&mut self, body: TopologyEventBody) -> Result<(), UpstrokeError> {
         self.emitter
             .emit(body, self.hooks)
-            .map_err(|failure| failure.discharging(self.invocations))
+            .map_err(|failure| failure.discharging(self.invocations))?;
+        brokered(self.hooks, &self.emitter.state, self.invocations);
+        Ok(())
     }
 
     fn fold(&self) -> &TopologyFold {
@@ -103,7 +109,9 @@ impl IntegrationJournal for RunJournal<'_, '_> {
     fn emit(&mut self, body: TopologyEventBody) -> Result<(), UpstrokeError> {
         self.emitter
             .emit(body, self.hooks)
-            .map_err(|failure| failure.discharging(self.invocations))
+            .map_err(|failure| failure.discharging(self.invocations))?;
+        brokered(self.hooks, &self.emitter.state, self.invocations);
+        Ok(())
     }
 
     fn fold(&self) -> &TopologyFold {
@@ -135,7 +143,9 @@ impl IntegrationJournal for IntegrationCx<'_, '_> {
     fn emit(&mut self, body: TopologyEventBody) -> Result<(), UpstrokeError> {
         self.emitter
             .emit(body, self.hooks)
-            .map_err(|failure| failure.discharging(self.invocations))
+            .map_err(|failure| failure.discharging(self.invocations))?;
+        brokered(self.hooks, &self.emitter.state, self.invocations);
+        Ok(())
     }
 
     fn fold(&self) -> &TopologyFold {
@@ -2165,16 +2175,17 @@ impl TopologyRun {
             };
             AttemptContext {
                 manager: seams.manager,
-                hooks,
+                hooks: &mut *hooks,
                 emitter: &mut emitter,
                 runner: seams.runner,
-                ledger: invocations,
+                ledger: &mut *invocations,
                 adapters: seams.adapters,
                 paths: seams.paths,
                 reviews: seams.reviews,
                 input_policy: seams.input_policy,
             }
             .announce(site, &plan)?;
+            brokered(hooks, &emitter.state, invocations);
         }
         Ok(AttemptJob {
             key,
@@ -2513,19 +2524,22 @@ impl TopologyRun {
         seams: &RunSeams<'_>,
         hooks: &mut dyn TopologyHooks,
     ) -> Result<(), EmitFailure> {
+        let (reservations, invocations) = self.broker.halves();
         let mut emitter = RunEmitter {
             identity: &self.identity,
             state: EmitState {
                 fold: &mut self.handle.fold,
                 log: &mut self.handle.log,
                 events: &mut self.handle.events,
-                reservations: self.broker.halves().0,
+                reservations,
                 warnings: &mut self.warnings,
             },
             clock: seams.clock,
             stopped: self.stopped.as_deref(),
         };
-        emitter.emit(body, hooks)
+        emitter.emit(body, hooks)?;
+        brokered(hooks, &emitter.state, invocations);
+        Ok(())
     }
 }
 
