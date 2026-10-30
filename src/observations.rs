@@ -143,10 +143,7 @@ impl Drop for ExportOnDrop {
 }
 
 #[cfg(test)]
-pub(crate) use export::export_into;
-
-#[cfg(test)]
-mod export {
+pub(crate) mod export {
     use std::path::Path;
     use std::sync::{Arc, Mutex, PoisonError};
 

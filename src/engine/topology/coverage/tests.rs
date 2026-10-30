@@ -199,7 +199,7 @@ fn a_cut_short_export_leaves_the_earlier_record_whole() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .hook(site, HookPhase::Before);
-    crate::observations::export_into(dir, &earlier);
+    crate::observations::export::export_into(dir, &earlier);
     let later = shared_harness();
     later
         .lock()
@@ -214,7 +214,7 @@ fn a_cut_short_export_leaves_the_earlier_record_whole() {
             }),
         );
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            crate::observations::export_into(dir, &later);
+            crate::observations::export::export_into(dir, &later);
         }))
     };
     assert!(cut.is_err(), "the act cut the export short");
@@ -241,7 +241,7 @@ fn a_cut_short_export_leaves_the_earlier_record_whole() {
         "the cut emptied a file of its own, under a name the loader passes over"
     );
 
-    crate::observations::export_into(dir, &later);
+    crate::observations::export::export_into(dir, &later);
     let records = load_observations(dir).expect("the export loads after the next export");
     let [record] = records.as_slice() else {
         panic!("one test's exports are one record: {records:?}");
@@ -287,7 +287,9 @@ fn overlapping_exports_of_one_test_take_turns_and_keep_every_observation() {
     let (queued, ended) = std::thread::scope(|scope| {
         let thread = || std::thread::Builder::new().name(name.to_owned());
         thread()
-            .spawn_scoped(scope, || crate::observations::export_into(dir, &earlier))
+            .spawn_scoped(scope, || {
+                crate::observations::export::export_into(dir, &earlier)
+            })
             .expect("a thread starts")
             .join()
             .expect("the earlier export ends");
@@ -302,7 +304,7 @@ fn overlapping_exports_of_one_test_take_turns_and_keep_every_observation() {
                         let _ = released.recv();
                     }),
                 );
-                crate::observations::export_into(dir, &first);
+                crate::observations::export::export_into(dir, &first);
             })
             .expect("a thread starts");
         pausing
@@ -318,7 +320,7 @@ fn overlapping_exports_of_one_test_take_turns_and_keep_every_observation() {
                         let _ = waits.send("queued");
                     }),
                 );
-                crate::observations::export_into(dir, &second);
+                crate::observations::export::export_into(dir, &second);
                 let _ = seen.send("ended");
             })
             .expect("a thread starts");
