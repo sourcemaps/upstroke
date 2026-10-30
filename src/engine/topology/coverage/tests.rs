@@ -181,6 +181,174 @@ fn the_export_loader_passes_over_the_histogram_the_sampler_writes_beside_the_rec
     );
 }
 
+/// `G6-ST07-PARTIAL-OBSERVATION-EXPORT`: an export cut short after its file is
+/// created and before its bytes are written leaves the export loadable and the
+/// record as the last whole export left it, and the next export merges over
+/// it. An exporter that writes the record in place leaves the record itself
+/// empty at this cut, the state L-ST07-1 found, which the loader refuses with
+/// "EOF while parsing a value at line 1 column 0".
+#[test]
+fn a_cut_short_export_leaves_the_earlier_record_whole() {
+    use crate::workspace_manager::fixture::{self, WriteMoment};
+
+    let tree = fixture::scratch("export-cut-short");
+    let dir = tree.path();
+    let site = EffectSiteId::Worktree(WorktreeSite::Remove);
+    let earlier = shared_harness();
+    earlier
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .hook(site, HookPhase::Before);
+    crate::observations::export::export_into(dir, &earlier);
+    let later = shared_harness();
+    later
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .hook(site, HookPhase::After);
+
+    let cut = {
+        let _cut = fixture::at_next_write(
+            WriteMoment::Created,
+            Box::new(|_: &Path| {
+                panic!("the export is cut short with its file created and empty");
+            }),
+        );
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            crate::observations::export::export_into(dir, &later);
+        }))
+    };
+    assert!(cut.is_err(), "the act cut the export short");
+    let records = load_observations(dir).expect("the export loads after the cut");
+    let [record] = records.as_slice() else {
+        panic!("one test's exports are one record: {records:?}");
+    };
+    assert!(
+        record.observed(site, HookPhase::Before) && !record.observed(site, HookPhase::After),
+        "the record is the earlier export's, whole: {record:?}"
+    );
+    let empty: Vec<PathBuf> = std::fs::read_dir(dir)
+        .expect("the export directory lists")
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| std::fs::metadata(path).is_ok_and(|meta| meta.len() == 0))
+        .collect();
+    let [part] = empty.as_slice() else {
+        panic!("the cut left one empty file, its own: {empty:?}");
+    };
+    assert_ne!(
+        part.extension(),
+        Some(std::ffi::OsStr::new("json")),
+        "the cut emptied a file of its own, under a name the loader passes over"
+    );
+
+    crate::observations::export::export_into(dir, &later);
+    let records = load_observations(dir).expect("the export loads after the next export");
+    let [record] = records.as_slice() else {
+        panic!("one test's exports are one record: {records:?}");
+    };
+    assert!(
+        record.observed(site, HookPhase::Before) && record.observed(site, HookPhase::After),
+        "the next export merges over the earlier record: {record:?}"
+    );
+}
+
+/// `G6-ST07-PARTIAL-OBSERVATION-EXPORT`: exports of one test in one process take
+/// turns over its record, and the record keeps every export's observations.
+/// The coordinator names its runtime's threads after the test that started
+/// it, so a test's pipelines export to one record from several threads. Here
+/// a second export starts while the first, paused in its write, holds its
+/// turn: the second must wait for the turn, and the record must end with all
+/// three exports' observations. Without the turns the second reads the record
+/// the first is rewriting, and one export's publication drops the other's
+/// observations. The one bound is a wedge's: a healthy second export reports
+/// at once.
+#[test]
+fn overlapping_exports_of_one_test_take_turns_and_keep_every_observation() {
+    use crate::workspace_manager::fixture::{self, WriteMoment};
+    use std::sync::mpsc;
+
+    let tree = fixture::scratch("export-overlapping");
+    let dir = tree.path();
+    let remove = EffectSiteId::Worktree(WorktreeSite::Remove);
+    let coordinates = [
+        (remove, HookPhase::Before),
+        (remove, HookPhase::After),
+        (EffectSiteId::Event(EventSite::Append), HookPhase::Before),
+    ];
+    let [earlier, first, second] = coordinates.map(|(site, phase)| {
+        let harness = shared_harness();
+        harness
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .hook(site, phase);
+        harness
+    });
+    let name = "an::overlapping::export";
+    let (queued, ended) = std::thread::scope(|scope| {
+        let thread = || std::thread::Builder::new().name(name.to_owned());
+        thread()
+            .spawn_scoped(scope, || {
+                crate::observations::export::export_into(dir, &earlier)
+            })
+            .expect("a thread starts")
+            .join()
+            .expect("the earlier export ends");
+        let (paused, pausing) = mpsc::channel();
+        let (release, released) = mpsc::channel::<()>();
+        let first_export = thread()
+            .spawn_scoped(scope, || {
+                let _pause = fixture::at_next_write(
+                    WriteMoment::Created,
+                    Box::new(move |_: &Path| {
+                        let _ = paused.send(());
+                        let _ = released.recv();
+                    }),
+                );
+                crate::observations::export::export_into(dir, &first);
+            })
+            .expect("a thread starts");
+        pausing
+            .recv()
+            .expect("the first export pauses in its write, holding its turn");
+        let (seen, seeing) = mpsc::channel();
+        let second_export = thread()
+            .spawn_scoped(scope, move || {
+                let waits = seen.clone();
+                let _queue = fixture::at_next_write(
+                    WriteMoment::Queued,
+                    Box::new(move |_: &Path| {
+                        let _ = waits.send("queued");
+                    }),
+                );
+                crate::observations::export::export_into(dir, &second);
+                let _ = seen.send("ended");
+            })
+            .expect("a thread starts");
+        let queued = seeing.recv_timeout(std::time::Duration::from_secs(60)) == Ok("queued");
+        drop(release);
+        let ended = [first_export.join().is_ok(), second_export.join().is_ok()];
+        (queued, ended)
+    });
+    assert!(
+        queued,
+        "the second export waited for the first's turn rather than read the record the first was \
+         rewriting"
+    );
+    assert_eq!(ended, [true, true], "both exports ended");
+    let records = load_observations(dir).expect("the export loads after overlapping exports");
+    let [record] = records.as_slice() else {
+        panic!("one test's exports are one record: {records:?}");
+    };
+    let unrecorded: Vec<&(EffectSiteId, HookPhase)> = coordinates
+        .iter()
+        .filter(|(site, phase)| !record.observed(*site, *phase))
+        .collect();
+    assert!(
+        unrecorded.is_empty(),
+        "every export's observations are in the record: {unrecorded:?}"
+    );
+}
+
 /// The histogram's home is the export's or the build's, never `effects/`:
 /// the path that made two build slots share one file.
 #[test]

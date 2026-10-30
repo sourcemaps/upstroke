@@ -64,6 +64,7 @@ thread_local! {
     static MARKER_READ_ATTEMPT_OBSERVER: RefCell<Option<AttemptObserver>> =
         const { RefCell::new(None) };
     static ACCESS_PLANT: RefCell<Option<AccessPlant>> = const { RefCell::new(None) };
+    static WRITE_ACT: RefCell<Option<(WriteMoment, WriteAct)>> = const { RefCell::new(None) };
 }
 
 /// A live observation of this thread's removal attempts, ended by dropping it.
@@ -935,11 +936,75 @@ impl Drop for Fixture {
 /// writes what the agent would have written — and it does it here, where
 /// the write is inside the reviewed funnel module, rather than in the
 /// topology module whose whole point is that it cannot.
+///
+/// The file is created and then written, the two steps of `fs::write`, so a
+/// test can act between them ([`WriteMoment::Created`]).
 pub(crate) fn write_file(path: &Path, bytes: &[u8]) {
+    use std::io::Write as _;
+
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).expect("the parent directory of a fixture file");
     }
-    fs::write(path, bytes).expect("write a fixture file");
+    let mut file = fs::File::create(path).expect("write a fixture file");
+    act_at(WriteMoment::Created, path);
+    file.write_all(bytes).expect("write a fixture file");
+}
+
+/// Each path [`update_file`] has updated in this process, and the lock its
+/// updates take turns on. Never pruned, one entry per path; shared ownership
+/// is the lifecycle, as in `REGISTRY_LOCKS`: an update holds the `Arc` only
+/// while it holds or waits for the lock. A poisoned lock is taken anyway: it
+/// orders the updates and guards no value.
+static UPDATES: std::sync::Mutex<
+    std::collections::BTreeMap<PathBuf, std::sync::Arc<std::sync::Mutex<()>>>,
+> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// Replace the file at `path` with the bytes `update` makes of the ones it
+/// holds now, or leave it as it is when `update` answers `None`. `update` is
+/// given `None` when there is no file or it cannot be read.
+///
+/// Nothing is written into `path` itself. The replacement is written beside
+/// it, under its name with this process's id and `.tmp` appended, and renamed
+/// over it, so a reader of `path` meets the file it held or its replacement
+/// and never a part of either. An update cut short after its write began --
+/// the process killed from another thread, or a panic -- leaves `path` as it
+/// was and its part under the temporary name. Nothing is synced: the cut this
+/// guards against is the process's, not the machine's.
+///
+/// Updates of one path in this process take turns, each holding the path's
+/// lock from its read to its rename, so none reads a file another is about to
+/// replace and none replaces one published since its own read. An update that
+/// finds the turn taken acts at [`WriteMoment::Queued`] and then waits for it.
+/// The lock is the last one taken: `update` runs inside the turn and takes no
+/// lock and updates no fixture file. Another process is not kept out, so
+/// `path` must be one this process alone updates.
+pub(crate) fn update_file(path: &Path, update: impl FnOnce(Option<&[u8]>) -> Option<Vec<u8>>) {
+    use std::sync::{Arc, PoisonError, TryLockError};
+
+    let lock = {
+        let mut table = UPDATES.lock().unwrap_or_else(PoisonError::into_inner);
+        Arc::clone(table.entry(path.to_path_buf()).or_default())
+    };
+    let _turn = match lock.try_lock() {
+        Ok(turn) => turn,
+        Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(TryLockError::WouldBlock) => {
+            act_at(WriteMoment::Queued, path);
+            lock.lock().unwrap_or_else(PoisonError::into_inner)
+        }
+    };
+    let held = fs::read(path).ok();
+    let Some(bytes) = update(held.as_deref()) else {
+        return;
+    };
+    let mut name = path
+        .file_name()
+        .expect("a fixture file has a name")
+        .to_os_string();
+    name.push(format!(".{}.tmp", std::process::id()));
+    let temporary = path.with_file_name(name);
+    write_file(&temporary, &bytes);
+    fs::rename(temporary, path).expect("publish a fixture file");
 }
 
 /// Create `path` and every missing parent.
@@ -1216,6 +1281,75 @@ pub(crate) fn spawn_ready_helper(
     crate::agent::proc::test_support::readiness::Producer::adopt(
         command.spawn().expect("spawn the ready helper"),
     )
+}
+
+// -----------------------------------------------------------------------
+// Acting at one moment of a fixture write
+// -----------------------------------------------------------------------
+
+/// A moment of [`write_file`] or [`update_file`] at which a test can act.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WriteMoment {
+    /// `write_file` has created its file, and so emptied it, and has not
+    /// written its bytes: where a write cut short leaves its file empty.
+    Created,
+    /// `update_file` has found its path's turn taken by another update of
+    /// this process, and is about to wait for it.
+    Queued,
+}
+
+/// What a test does at that moment, given the path written or updated.
+pub(crate) type WriteAct = Box<dyn FnOnce(&Path)>;
+
+/// An act armed at the next moment of its kind on this thread, disarmed by
+/// dropping it, so a test that unwinds leaves nothing for whatever runs next
+/// on this thread.
+pub(crate) struct WritePlanting {
+    /// Not `Send`: the armed act is this thread's.
+    _not_send: PhantomData<*const ()>,
+}
+
+impl Drop for WritePlanting {
+    fn drop(&mut self) {
+        WRITE_ACT.with(|slot| {
+            if let Ok(mut slot) = slot.try_borrow_mut() {
+                *slot = None;
+            }
+        });
+    }
+}
+
+/// Run `act` once, on this thread, at the next `moment` that comes on it. An
+/// act that panics cuts the write short there.
+///
+/// Thread-local for the reason the removal observer is: the suite runs tests
+/// in parallel, so only the thread that armed it is watched.
+pub(crate) fn at_next_write(moment: WriteMoment, act: WriteAct) -> WritePlanting {
+    WRITE_ACT.with(|slot| {
+        if let Ok(mut slot) = slot.try_borrow_mut() {
+            *slot = Some((moment, act));
+        }
+    });
+    WritePlanting {
+        _not_send: PhantomData,
+    }
+}
+
+/// Take this thread's act if it is armed at `moment`, and run it on `path`.
+/// Taken before it runs, so it runs once, and a fixture write it makes itself
+/// runs unwatched.
+fn act_at(moment: WriteMoment, path: &Path) {
+    let mut armed = None;
+    WRITE_ACT.with(|slot| {
+        if let Ok(mut slot) = slot.try_borrow_mut() {
+            if slot.as_ref().is_some_and(|(at, _)| *at == moment) {
+                armed = slot.take();
+            }
+        }
+    });
+    if let Some((_, act)) = armed {
+        act(path);
+    }
 }
 
 // -----------------------------------------------------------------------
