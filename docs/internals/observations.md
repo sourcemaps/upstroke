@@ -135,5 +135,5 @@ names; nothing when the variable is unset or nothing was observed.
 
 The export into `dir` rather than the directory the variable names, so a test can export into a
 scratch directory of its own: the variable is the process's, and setting it would send every
-running test's export there too. Re-exported to the crate under `cfg(test)` for those tests.
+running test's export there too. The crate reaches it through the test-only `export` module.
 
