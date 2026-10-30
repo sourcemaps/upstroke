@@ -143,6 +143,9 @@ impl Drop for ExportOnDrop {
 }
 
 #[cfg(test)]
+pub(crate) use export::export_into;
+
+#[cfg(test)]
 mod export {
     use std::path::Path;
     use std::sync::{Arc, Mutex, PoisonError};
@@ -188,6 +191,3 @@ mod export {
 
     pub(super) fn export(_harness: &Arc<Mutex<HookHarness>>) {}
 }
-
-#[cfg(test)]
-pub(crate) use export::export_into;
