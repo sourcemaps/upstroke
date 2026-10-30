@@ -144,6 +144,7 @@ impl Drop for ExportOnDrop {
 
 #[cfg(test)]
 mod export {
+    use std::path::Path;
     use std::sync::{Arc, Mutex, PoisonError};
 
     use super::{OBSERVATIONS_ENV, ObservationRecord};
@@ -153,6 +154,10 @@ mod export {
         let Ok(dir) = std::env::var(OBSERVATIONS_ENV) else {
             return;
         };
+        export_into(Path::new(&dir), harness);
+    }
+
+    pub(crate) fn export_into(dir: &Path, harness: &Arc<Mutex<HookHarness>>) {
         let thread = std::thread::current();
         let test = thread.name().unwrap_or("unnamed");
         let mut record = {
@@ -162,19 +167,16 @@ mod export {
         if record.is_empty() {
             return;
         }
-        let path = std::path::PathBuf::from(dir).join(ObservationRecord::file_name(&format!(
-            "{test}.{}",
-            std::process::id()
-        )));
-        if let Ok(bytes) = std::fs::read(&path) {
-            if let Ok(earlier) = serde_json::from_slice::<ObservationRecord>(&bytes) {
-                record.merge(earlier);
+        let name = format!("{test}.{}", std::process::id());
+        let path = dir.join(ObservationRecord::file_name(&name));
+        crate::workspace_manager::fixture::update_file(&path, |held| {
+            if let Some(bytes) = held {
+                if let Ok(earlier) = serde_json::from_slice::<ObservationRecord>(bytes) {
+                    record.merge(earlier);
+                }
             }
-        }
-        let Ok(json) = serde_json::to_vec_pretty(&record) else {
-            return;
-        };
-        crate::workspace_manager::fixture::write_file(&path, &json);
+            serde_json::to_vec_pretty(&record).ok()
+        });
     }
 }
 
@@ -186,3 +188,6 @@ mod export {
 
     pub(super) fn export(_harness: &Arc<Mutex<HookHarness>>) {}
 }
+
+#[cfg(test)]
+pub(crate) use export::export_into;

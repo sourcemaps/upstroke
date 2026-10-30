@@ -85,9 +85,10 @@ for a kill-mode point. Call it with the harness's lock released: the export take
 Compiled two ways, cut at a module so the effects census's production region ends where every
 other module's does. Under `cfg(test)` the export reads the variable, names the record after the
 current thread — which `cargo test` names after the test — and its file after the test and this
-process, merges with the record an earlier export of the same test in this process wrote, and
-writes through the fixture's `write_file`, the one write a module outside the funnels may make in
-a test build. Outside tests it does nothing.
+process, and hands the file to the fixture's `update_file`, the one publication a module outside
+the funnels may make in a test build: in this process's turn for the file it merges with the
+record an earlier export of the same test in this process published, writes the result beside the
+record and renames it over. Outside tests it does nothing.
 
 The process is in the file name because a file several processes share loses records. Until
 #292's first repair round every export of a test read `<test>.json`, merged and wrote it back
@@ -95,14 +96,44 @@ unlocked, and two kill children of one test, spawned by two parents running at o
 interleave: a child that read the file before the other's writes and wrote after them replaced
 them. #292's round-1 regression lens found it, and bounded barriers placed around that read and
 write reproduced it: `candidate_sequence_kill_child`'s record lost `Ref.CreateCandidates/after`
-and the merge check refused. Within one process the exports named after a test are made by the
-thread `cargo test` named after it, one after another, so the read-merge-write over the process's
-own file cannot interleave; the
-loader merges the processes' records by the larger count per coordinate, the union a serial run's
-single file held.
+and the merge check refused. The loader merges the processes' records by the larger count per
+coordinate, the union a serial run's single file held.
+
+Within one process, too, the exports named after a test are not one thread's. `run_concurrently`
+names its runtime's threads after the thread that called it (`1e0cd0fe`), so that a pipeline's
+records are its test's (`engine/topology/coordinator.md`). Each pipeline's `HarnessTopologyHooks`,
+made for it and dropped on its thread, carries five exporting adapters, and the coordinator's
+thread exports before a `Kill` it then dies of. Until `G6-ST07-PARTIAL-OBSERVATION-EXPORT` these
+notes said the exports of one process were one thread's, one after another, and could not
+interleave, and the export rewrote the record in place through `write_file`, which creates the
+file, emptying it, before it writes the bytes. An export cut short in that window, by a `Kill`
+on another thread or by a panic, left the record empty or partial, and an export that read the
+record while another rewrote it could find it so and publish without the observations it should
+have merged. L-ST07-1, the ST-07 row of the r2 remainder at `adf4f91d`, found the record
+`closure_kill_child_at_width_three` exported from process 2411595 empty in a full run's export,
+and the loader, which refuses what it cannot parse, refused the export: "EOF while parsing a value
+at line 1 column 0". Which writer, thread and cut left it empty was not established.
+
+`update_file` closes both windows. It publishes as `CODING_STANDARDS.md` §12's readiness rule
+asks, staged elsewhere and renamed into place, never created in place and written afterwards; and
+the exports of one record take turns from read to rename, so none merges over a record another is
+replacing. Nothing is written into the record itself, so a cut leaves the record as the last whole
+export published it, and its part under `<record>.<pid>.tmp`, which the loader passes over by its
+extension.
+`a_cut_short_export_leaves_the_earlier_record_whole` and
+`overlapping_exports_of_one_test_take_turns_and_keep_every_observation`, in
+`engine::topology::coverage::tests`, hold the two.
+
 ## `mod export` › `pub(super) fn export(harness: &Arc<Mutex<HookHarness>>) {`
 
 Merge what `harness` observed into the record named after the current
 thread (the test) under the directory `UPSTROKE_HOOK_OBSERVATIONS`
 names; nothing when the variable is unset or nothing was observed.
+`export_into` does the work.
+
+## `mod export` › `pub(crate) fn export_into(dir: &Path, harness: &Arc<Mutex<HookHarness>>) {`
+
+The export into `dir` rather than the directory the variable names, so a test can export into a
+scratch directory of its own: the variable is the process's, and setting it would send every
+running test's export there too. Re-exported to the crate under `cfg(test)` for those tests.
 
