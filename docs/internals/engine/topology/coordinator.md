@@ -3245,9 +3245,13 @@ Drives the four of `F_MATRIX`: an attempt at width 1 and 3, a verification at wi
 
 A case's registry refusal naming the given words, or why not.
 
+## `mod tests` › `fn f_bounded_case(`
+
+One case of the three not-whole matrices below under `bounded()`: its setup, its run, the read of its outcome and the drop of its run all happen inside one `BOUND`, named by the case, and its outcome comes back for `f_report`. The bound is the case's because the cases are independent and run one after another: one `BOUND` around a whole 12- or 16-case matrix measured how many cases a test chains and how loaded the runner was, not whether any one case was wedged, and it fired on the Windows guest's full suite while every case was progressing (`G6-F-MATRIX-AGGREGATE-BOUND`). A case that never ends still fails its test within `BOUND`, naming the case; the cases stay sequential, and `f_report` still reads every outcome.
+
 ## `mod tests` › `fn a_gate_verdict_read_in_a_snapshot_whose_registration_is_not_whole_is_refused() {`
 
-The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-P2-GATE: pruned whole, `HEAD`, `commondir`, and the index gate's `index`. At C a verification is rejected and an attempt spent; under F placement 2 refuses.
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-P2-GATE: pruned whole, `HEAD`, `commondir`, and the index gate's `index`. At C a verification is rejected and an attempt spent; under F placement 2 refuses. Each of its 16 cases runs under its own `BOUND` (`f_bounded_case`).
 
 ## `mod tests` › `fn a_genuinely_failing_gate_in_a_whole_snapshot_is_judged() {`
 
@@ -3319,7 +3323,7 @@ F-R1's premise, checked on exact strings: it accepts each recorded Windows and L
 
 ## `mod tests` › `fn a_gate_run_failing_in_a_snapshot_whose_registration_is_not_whole_is_refused() {`
 
-The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION` — the regression test of the review's F-R1 (#333 at `157c9cab`), placement 2 at a gate's failed run, at `F_MATRIX`'s four cells: the container gate's launch with `HEAD` removed, and with the entry pruned whole, just before it; and a stub run lost after it started. At `157c9cab` a verification settles `merge_verification_unavailable`, and, repeated, parks (`Finished { outcome: Parked }`), and an attempt ends with the Runner's error; under the repair each is the registry refusal naming the gate's run.
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION` — the regression test of the review's F-R1 (#333 at `157c9cab`), placement 2 at a gate's failed run, at `F_MATRIX`'s four cells: the container gate's launch with `HEAD` removed, and with the entry pruned whole, just before it; and a stub run lost after it started. At `157c9cab` a verification settles `merge_verification_unavailable`, and, repeated, parks (`Finished { outcome: Parked }`), and an attempt ends with the Runner's error; under the repair each is the registry refusal naming the gate's run. Each of its 12 cases runs under its own `BOUND` (`f_bounded_case`).
 
 ## `mod tests` › `fn a_container_gate_launched_in_a_whole_snapshot_is_judged() {`
 
@@ -3335,7 +3339,7 @@ F-R1's control: with `HEAD` removed, a cancelled gate run ends the command with 
 
 ## `mod tests` › `fn a_review_verdict_read_in_a_snapshot_whose_registration_is_not_whole_is_refused() {`
 
-The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-P2-REVIEW: pass 0 unavailable, pass 1 unavailable after pass 0 passed, and pass 0 passing, each after its snapshot's entry was pruned. Under F refused after the pass's charge.
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-P2-REVIEW: pass 0 unavailable, pass 1 unavailable after pass 0 passed, and pass 0 passing, each after its snapshot's entry was pruned. Under F refused after the pass's charge. Each of its 12 cases runs under its own `BOUND` (`f_bounded_case`).
 
 ## `mod tests` › `fn a_review_verdict_read_in_a_whole_snapshot_is_judged() {`
 

@@ -25574,6 +25574,19 @@ git cat-file -e 'HEAD^{tree}'
         (label, outcome)
     }
 
+    fn f_bounded_case(
+        what: String,
+        case: impl FnOnce() -> (String, Result<(), String>) + Send + 'static,
+    ) -> (String, Result<(), String>) {
+        let (sent, outcome) = std::sync::mpsc::channel();
+        bounded(&what, move || {
+            let _ = sent.send(case());
+        });
+        outcome
+            .recv()
+            .expect("a case that ended within its bound sent its outcome")
+    }
+
     const F_MATRIX: [(FSubject, u32); 4] = [
         (FSubject::Attempt, 1),
         (FSubject::Attempt, 3),
@@ -25583,15 +25596,16 @@ git cat-file -e 'HEAD^{tree}'
 
     #[test]
     fn a_gate_verdict_read_in_a_snapshot_whose_registration_is_not_whole_is_refused() {
-        bounded("f-c1-p2-gate", || {
-            let mut cases = Vec::new();
-            for (subject, width) in F_MATRIX {
-                for (label, gate) in [
-                    ("pruned whole", f_rev_parse_gate(None)),
-                    ("HEAD removed", f_rev_parse_gate(Some("HEAD"))),
-                    ("commondir removed", f_rev_parse_gate(Some("commondir"))),
-                    ("index removed, an index gate", f_index_gate()),
-                ] {
+        let mut cases = Vec::new();
+        for (subject, width) in F_MATRIX {
+            for (label, gate) in [
+                ("pruned whole", f_rev_parse_gate(None)),
+                ("HEAD removed", f_rev_parse_gate(Some("HEAD"))),
+                ("commondir removed", f_rev_parse_gate(Some("commondir"))),
+                ("index removed, an index gate", f_index_gate()),
+            ] {
+                let case = format!("{subject:?} width {width}: {label}");
+                cases.push(f_bounded_case(format!("f-c1-p2-gate {case}"), move || {
                     let tasks = f_tasks_of(subject, "src/work.txt");
                     let tag = format!("f-p2-gate-{subject:?}-w{width}-{}", label.len());
                     let responder = f_gate_responder(&tasks, subject, gate);
@@ -25604,16 +25618,11 @@ git cat-file -e 'HEAD^{tree}'
                         WidePlans::default(),
                         None,
                     );
-                    cases.push(f_refused_case(
-                        format!("{subject:?} width {width}: {label}"),
-                        &wide,
-                        result,
-                        &["the gates' verdicts"],
-                    ));
-                }
+                    f_refused_case(case, &wide, result, &["the gates' verdicts"])
+                }));
             }
-            f_report(&cases);
-        });
+        }
+        f_report(&cases);
     }
 
     #[test]
@@ -26118,34 +26127,44 @@ git cat-file -e 'HEAD^{tree}'
 
     #[test]
     fn a_gate_run_failing_in_a_snapshot_whose_registration_is_not_whole_is_refused() {
-        bounded("f-c1-p2-launch", || {
-            let mut cases = Vec::new();
-            for (subject, width) in F_MATRIX {
-                for launch in [FLaunch::HeadRemoved, FLaunch::PrunedWhole, FLaunch::Lost] {
-                    let tasks = f_tasks_of(subject, "src/work.txt");
-                    let launched = FLaunches::default();
-                    let responder =
-                        f_launching_gate_responder(&tasks, subject, launch, Arc::clone(&launched));
-                    let (wide, result) = f_drive_subject(
-                        &format!("f-p2-launch-{subject:?}-w{width}-{launch:?}"),
-                        &tasks,
-                        subject,
-                        width,
-                        responder,
-                        WidePlans::default(),
-                        None,
-                    );
-                    let label = format!("{subject:?} width {width}: {launch:?}");
-                    cases.push(match f_launch_witnessed(&launched, launch) {
-                        Ok(()) => {
-                            f_refused_case(label, &wide, result, &["'s run, which failed", "HEAD"])
+        let mut cases = Vec::new();
+        for (subject, width) in F_MATRIX {
+            for launch in [FLaunch::HeadRemoved, FLaunch::PrunedWhole, FLaunch::Lost] {
+                let label = format!("{subject:?} width {width}: {launch:?}");
+                cases.push(f_bounded_case(
+                    format!("f-c1-p2-launch {label}"),
+                    move || {
+                        let tasks = f_tasks_of(subject, "src/work.txt");
+                        let launched = FLaunches::default();
+                        let responder = f_launching_gate_responder(
+                            &tasks,
+                            subject,
+                            launch,
+                            Arc::clone(&launched),
+                        );
+                        let (wide, result) = f_drive_subject(
+                            &format!("f-p2-launch-{subject:?}-w{width}-{launch:?}"),
+                            &tasks,
+                            subject,
+                            width,
+                            responder,
+                            WidePlans::default(),
+                            None,
+                        );
+                        match f_launch_witnessed(&launched, launch) {
+                            Ok(()) => f_refused_case(
+                                label,
+                                &wide,
+                                result,
+                                &["'s run, which failed", "HEAD"],
+                            ),
+                            Err(why) => (label, Err(why)),
                         }
-                        Err(why) => (label, Err(why)),
-                    });
-                }
+                    },
+                ));
             }
-            f_report(&cases);
-        });
+        }
+        f_report(&cases);
     }
 
     #[test]
@@ -26312,44 +26331,48 @@ git cat-file -e 'HEAD^{tree}'
 
     #[test]
     fn a_review_verdict_read_in_a_snapshot_whose_registration_is_not_whole_is_refused() {
-        bounded("f-c1-p2-review", || {
-            let mut cases = Vec::new();
-            for (subject, width) in F_MATRIX {
-                for (label, at_pass, answer) in [
-                    ("pass 0 unavailable", 0, FAnswer::Unavailable),
-                    (
-                        "pass 1 unavailable after pass 0 passed",
-                        1,
-                        FAnswer::Unavailable,
-                    ),
-                    ("pass 0 passing", 0, FAnswer::Pass),
-                ] {
-                    let tasks = f_tasks_of(subject, "src/work.txt");
-                    let stub = Arc::new(FReviewStub {
-                        subject,
-                        at_pass,
-                        prune: true,
-                        answer,
-                    });
-                    let (wide, result) = f_drive_subject(
-                        &format!("f-p2-review-{subject:?}-w{width}-{at_pass}-{answer:?}"),
-                        &tasks,
-                        subject,
-                        width,
-                        wide_responder(&tasks, &[]),
-                        f_two_reviewers(),
-                        Some(stub),
-                    );
-                    cases.push(f_refused_case(
-                        format!("{subject:?} width {width}: {label}"),
-                        &wide,
-                        result,
-                        &[&format!("the verdict of review pass {at_pass}")],
-                    ));
-                }
+        let mut cases = Vec::new();
+        for (subject, width) in F_MATRIX {
+            for (label, at_pass, answer) in [
+                ("pass 0 unavailable", 0, FAnswer::Unavailable),
+                (
+                    "pass 1 unavailable after pass 0 passed",
+                    1,
+                    FAnswer::Unavailable,
+                ),
+                ("pass 0 passing", 0, FAnswer::Pass),
+            ] {
+                let case = format!("{subject:?} width {width}: {label}");
+                cases.push(f_bounded_case(
+                    format!("f-c1-p2-review {case}"),
+                    move || {
+                        let tasks = f_tasks_of(subject, "src/work.txt");
+                        let stub = Arc::new(FReviewStub {
+                            subject,
+                            at_pass,
+                            prune: true,
+                            answer,
+                        });
+                        let (wide, result) = f_drive_subject(
+                            &format!("f-p2-review-{subject:?}-w{width}-{at_pass}-{answer:?}"),
+                            &tasks,
+                            subject,
+                            width,
+                            wide_responder(&tasks, &[]),
+                            f_two_reviewers(),
+                            Some(stub),
+                        );
+                        f_refused_case(
+                            case,
+                            &wide,
+                            result,
+                            &[&format!("the verdict of review pass {at_pass}")],
+                        )
+                    },
+                ));
             }
-            f_report(&cases);
-        });
+        }
+        f_report(&cases);
     }
 
     #[test]
