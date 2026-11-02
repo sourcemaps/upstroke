@@ -965,7 +965,8 @@ fn recorded_image_environment(
             RuntimeError::Unreachable { operation, detail } => {
                 InspectionRefusal::RuntimeUnavailable { operation, detail }
             }
-            RuntimeError::Failed { operation, detail } => {
+            RuntimeError::Failed { operation, detail }
+            | RuntimeError::Unresolved { operation, detail } => {
                 InspectionRefusal::RuntimeFailed { operation, detail }
             }
         })?

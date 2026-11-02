@@ -2110,6 +2110,15 @@ is cancelled while its container is still `created`: the invocation reports
 `RunnerError::cancelled`, with the fate the reclaim established, and leaves
 no container and no intent.
 
+## `fn an_invocation_whose_removal_leaves_a_process_unresolved_is_never_reported_gone() {`
+
+Root's DELIVERY-OWNERSHIP follow-through, at the runner. A removal that
+leaves a process unresolved, as an attached client whose supervision ended
+`Unresolved` does, yields an invocation whose fate is `Unresolved` with that
+fact as its error: on the cancellation path, not a plain cancellation, and on
+the completed path, not a success, even though the container was observed
+exited.
+
 ## `fn a_container_call_cancelled_before_it_starts_writes_no_intent() {`
 
 A call cancelled before it starts reaches nothing: no intent, no view, no container, an empty trace,

@@ -71,7 +71,10 @@ impl InspectionRefusal {
             RuntimeError::Unreachable { operation, detail } => {
                 Self::RuntimeUnavailable { operation, detail }
             }
-            RuntimeError::Failed { operation, detail } => Self::RuntimeFailed { operation, detail },
+            RuntimeError::Failed { operation, detail }
+            | RuntimeError::Unresolved { operation, detail } => {
+                Self::RuntimeFailed { operation, detail }
+            }
         }
     }
 }

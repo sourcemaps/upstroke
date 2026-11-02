@@ -782,6 +782,16 @@ process, so the two-process witnesses do not use it; they observe the reaper's c
 
 What `observing_covers` recorded, in start order.
 
+## `struct State` › `unresolved_removals: BTreeSet<String>,`
+
+Containers whose removal the fake answers with `RuntimeError::Unresolved`,
+after it removed them: the shape a `DockerCli` removal takes when its
+attached client could not be established gone.
+
+## `impl FakeRuntime` › `pub(crate) fn leave_a_process_unresolved_at_removal(&self, name: &str) {`
+
+Arm that answer for `name`.
+
 ## `impl FakeRuntime` › `pub(crate) fn stdin_received(&self, name: &str) -> Option<Vec<u8>> {`
 
 What `name`'s start was fed, or `None` when it was given no input.

@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 
 use crate::agent::ProcessOutput;
 use crate::agent::proc::{self, ProcessFailure};
-use crate::error::UpstrokeError;
+use crate::error::{ProcessFate, UpstrokeError};
 use crate::topology::effects::{
     ContainerSite, EffectSiteId, HookHarness, HookPhase, Injection, ProcessSite,
 };
@@ -481,6 +481,7 @@ pub fn cancel_reached(
 ) -> CancelResidue {
     let mut residue = Vec::new();
     let mut container_gone = container != ContainerToRelease::MayBeRunning;
+    let mut process_unresolved = false;
     if container != ContainerToRelease::Absent {
         match stop_container(
             hooks,
@@ -500,8 +501,29 @@ pub fn cancel_reached(
             Ok(Settled::RemovalInProgress) => {
                 residue.push(removal_in_progress_establishes_nothing("the removal", name))
             }
+            Err(
+                error @ UpstrokeError::Runner {
+                    fate: ProcessFate::Unresolved,
+                    ..
+                },
+            ) => {
+                process_unresolved = true;
+                residue.push(error.to_string());
+            }
             Err(error) => residue.push(format!("the container could not be removed: {error}")),
         }
+    }
+    if process_unresolved {
+        residue.push(format!(
+            "the R19 Git view and the R26 intent record of `{name}` are deliberately retained: a \
+             process the runtime started for it could not be established gone, so this \
+             invocation's processes are unresolved, and the intent is what the next census \
+             reclaims both through (decisions.resource_accounting.rows[R19].at_run_end.NoRunFinished)"
+        ));
+        return CancelResidue {
+            messages: residue,
+            container_gone: false,
+        };
     }
     if !container_gone {
         residue.push(format!(
@@ -802,8 +824,17 @@ pub fn remove_staged_intent(
 }
 
 fn refused(error: RuntimeError) -> UpstrokeError {
-    UpstrokeError::Refused {
-        message: error.to_string(),
+    match error {
+        RuntimeError::Unresolved { operation, .. } => UpstrokeError::Runner {
+            invocation: format!("the container runtime's `{operation}`"),
+            fate: ProcessFate::Unresolved,
+            source: Box::new(UpstrokeError::Refused {
+                message: error.to_string(),
+            }),
+        },
+        other => UpstrokeError::Refused {
+            message: other.to_string(),
+        },
     }
 }
 
@@ -885,7 +916,7 @@ pub const DOCKER_PROGRAM: &str = "docker";
 #[derive(Debug, Clone, Default)]
 pub struct DockerCli {
     trace: ContainerTrace,
-    deliveries: Arc<Mutex<BTreeMap<String, AttachedClient>>>,
+    deliveries: Arc<Mutex<BTreeMap<String, ClientRecord>>>,
 }
 
 impl DockerCli {
@@ -1059,109 +1090,130 @@ impl DockerCli {
                 format!("the invocation was cancelled while `{name}` was still created")
             }
         };
-        if settle_client(
-            || client.has_ended(),
-            || client.ask_to_stop(),
-            CLIENT_GRACE,
-            ATTACHED_START_POLL,
-        ) {
-            return Err(RuntimeError::Failed {
-                operation: op,
-                detail: format!(
-                    "{reason}; its attached client {}",
-                    client.into_end().describe()
-                ),
-            });
-        }
         self.own_client(name, client);
-        Err(RuntimeError::Failed {
-            operation: op,
-            detail: format!(
-                "{reason}; its attached client had not ended {}s after it was asked to stop, and \
-                 stays owned, unresolved, until the container is removed",
-                CLIENT_GRACE.as_secs()
-            ),
-        })
+        match self.settle_client_of(name) {
+            ClientSettlement::Unresolved(fact) => Err(RuntimeError::Unresolved {
+                operation: op,
+                detail: format!("{reason}; {fact}"),
+            }),
+            ClientSettlement::Ended(end) => Err(RuntimeError::Failed {
+                operation: op,
+                detail: format!("{reason}; its attached client {}", end.describe()),
+            }),
+            ClientSettlement::Absent => Err(RuntimeError::Failed {
+                operation: op,
+                detail: reason,
+            }),
+        }
     }
 
     fn own_client(&self, name: &str, client: AttachedClient) {
         self.deliveries
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(name.to_owned(), client);
+            .insert(name.to_owned(), ClientRecord::Owned(client));
     }
 
-    fn take_client(&self, name: &str) -> Option<AttachedClient> {
+    fn client_record(&self, name: &str) -> Option<ClientRecord> {
         self.deliveries
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .remove(name)
     }
 
-    fn settle_delivery(&self, name: &str, exit_code: Option<i32>) -> Result<(), RuntimeError> {
-        let Some(client) = self.take_client(name) else {
-            return Ok(());
-        };
-        let still_running = match self.observe(name) {
-            Ok(liveness) => liveness == Liveness::Running,
-            Err(error) => {
-                self.own_client(name, client);
-                return Err(error);
+    fn keep_client_record(&self, name: &str, record: ClientRecord) {
+        self.deliveries
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(name.to_owned(), record);
+    }
+
+    fn settle_client_of(&self, name: &str) -> ClientSettlement {
+        let client = match self.client_record(name) {
+            None => return ClientSettlement::Absent,
+            Some(ClientRecord::Unresolved(fact)) => {
+                self.keep_client_record(name, ClientRecord::Unresolved(fact.clone()));
+                return ClientSettlement::Unresolved(fact);
             }
+            Some(ClientRecord::Owned(client)) => client,
         };
-        if still_running {
-            self.own_client(name, client);
-            return Ok(());
-        }
         if !settle_client(
             || client.has_ended(),
             || client.ask_to_stop(),
             CLIENT_GRACE,
             ATTACHED_START_POLL,
         ) {
-            self.own_client(name, client);
-            return Err(RuntimeError::Failed {
-                operation: RuntimeOp::Collect,
-                detail: format!(
-                    "the attached client that fed `{name}` its stdin had not ended {}s after the \
-                     container exited, nor {}s after it was asked to stop; it stays owned, \
-                     unresolved, until the container is removed",
-                    CLIENT_GRACE.as_secs(),
-                    CLIENT_GRACE.as_secs()
-                ),
-            });
+            self.keep_client_record(name, ClientRecord::Owned(client));
+            return ClientSettlement::Unresolved(format!(
+                "the attached client that fed `{name}` its stdin had not ended {}s after it was \
+                 asked to stop, so a process of this container may still be running; it stays \
+                 owned",
+                CLIENT_GRACE.as_secs()
+            ));
         }
-        delivery_verdict(name, &client.into_end(), exit_code)
+        match client.into_end() {
+            ClientEnd::Failed {
+                fate: ProcessFate::Unresolved,
+                error,
+            } => {
+                let fact = format!(
+                    "the attached client that fed `{name}` its stdin ended its supervision \
+                     without establishing its process gone, so a process of this container may \
+                     still be running: {error}"
+                );
+                self.keep_client_record(name, ClientRecord::Unresolved(fact.clone()));
+                ClientSettlement::Unresolved(fact)
+            }
+            end => ClientSettlement::Ended(end),
+        }
+    }
+
+    fn settle_delivery(&self, name: &str, exit_code: Option<i32>) -> Result<(), RuntimeError> {
+        let Some(record) = self.client_record(name) else {
+            return Ok(());
+        };
+        let owned = matches!(record, ClientRecord::Owned(_));
+        self.keep_client_record(name, record);
+        if owned && self.observe(name)? == Liveness::Running {
+            return Ok(());
+        }
+        match self.settle_client_of(name) {
+            ClientSettlement::Absent => Ok(()),
+            ClientSettlement::Ended(end) => delivery_verdict(name, &end, exit_code),
+            ClientSettlement::Unresolved(fact) => Err(RuntimeError::Unresolved {
+                operation: RuntimeOp::Collect,
+                detail: fact,
+            }),
+        }
     }
 
     fn settle_removed_client(&self, name: &str) -> Result<(), RuntimeError> {
-        let Some(client) = self.take_client(name) else {
-            return Ok(());
-        };
-        if settle_client(
-            || client.has_ended(),
-            || client.ask_to_stop(),
-            CLIENT_GRACE,
-            ATTACHED_START_POLL,
-        ) {
-            let _ = client.into_end();
-            return Ok(());
+        match self.settle_client_of(name) {
+            ClientSettlement::Absent | ClientSettlement::Ended(_) => Ok(()),
+            ClientSettlement::Unresolved(fact) => Err(RuntimeError::Unresolved {
+                operation: RuntimeOp::Remove,
+                detail: fact,
+            }),
         }
-        self.own_client(name, client);
-        Err(RuntimeError::Failed {
-            operation: RuntimeOp::Remove,
-            detail: format!(
-                "the attached client that fed `{name}` its stdin had not ended {}s after it was \
-                 asked to stop; it stays owned, unresolved",
-                CLIENT_GRACE.as_secs()
-            ),
-        })
     }
 }
 
 const ATTACHED_START_POLL: Duration = Duration::from_millis(25);
 
 const CLIENT_GRACE: Duration = Duration::from_secs(5);
+
+#[derive(Debug)]
+enum ClientRecord {
+    Owned(AttachedClient),
+    Unresolved(String),
+}
+
+#[derive(Debug)]
+enum ClientSettlement {
+    Absent,
+    Ended(ClientEnd),
+    Unresolved(String),
+}
 
 #[derive(Debug)]
 struct AttachedClient {
@@ -1187,12 +1239,18 @@ impl AttachedClient {
                 ClientEnd::Stopped
             }
             Some(Ok(Ok(output))) => ClientEnd::Exited(output.code),
-            Some(Ok(Err(failure))) => ClientEnd::Failed(format!(
-                "{} (process fate: {:?})",
-                failure.error, failure.fate
-            )),
-            Some(Err(_)) => ClientEnd::Failed("the thread supervising it panicked".to_owned()),
-            None => ClientEnd::Failed("its end was already taken".to_owned()),
+            Some(Ok(Err(failure))) => ClientEnd::Failed {
+                fate: failure.fate,
+                error: failure.error.to_string(),
+            },
+            Some(Err(_)) => ClientEnd::Failed {
+                fate: ProcessFate::Unresolved,
+                error: "the thread supervising it panicked".to_owned(),
+            },
+            None => ClientEnd::Failed {
+                fate: ProcessFate::Unresolved,
+                error: "its end was already taken".to_owned(),
+            },
         }
     }
 }
@@ -1201,7 +1259,7 @@ impl AttachedClient {
 enum ClientEnd {
     Exited(Option<i32>),
     Stopped,
-    Failed(String),
+    Failed { fate: ProcessFate, error: String },
 }
 
 impl ClientEnd {
@@ -1209,7 +1267,7 @@ impl ClientEnd {
         match self {
             Self::Exited(code) => format!("ended ({})", exit_text(*code)),
             Self::Stopped => "was stopped and reaped".to_owned(),
-            Self::Failed(why) => format!("failed: {why}"),
+            Self::Failed { fate, error } => format!("failed ({}): {error}", fate.describe()),
         }
     }
 }
@@ -1322,8 +1380,9 @@ fn delivery_verdict(
             "the attached client that fed `{name}` its stdin did not end with the container and \
              was stopped: the input may not have been delivered"
         )),
-        ClientEnd::Failed(why) => failed(format!(
-            "the attached client that fed `{name}` its stdin failed: {why}"
+        ClientEnd::Failed { fate, error } => failed(format!(
+            "the attached client that fed `{name}` its stdin failed ({}): {error}",
+            fate.describe()
         )),
     }
 }

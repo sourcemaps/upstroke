@@ -540,6 +540,191 @@ fn a_reference_can_be_moved_to_another_id_and_the_old_id_stays() {
 }
 
 #[test]
+fn an_unresolved_attached_client_stays_unresolved_through_every_settlement() {
+    use super::{AttachedClient, ClientEnd, ClientRecord, ClientSettlement, refused};
+    use crate::agent::ProcessOutput;
+    use crate::agent::proc::ProcessFailure;
+    use crate::error::ProcessFate;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    fn ended(
+        stop: Arc<AtomicBool>,
+        result: Result<ProcessOutput, ProcessFailure>,
+    ) -> AttachedClient {
+        let handle = std::thread::spawn(move || result);
+        while !handle.is_finished() {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        AttachedClient {
+            stop,
+            supervisor: Some(handle),
+        }
+    }
+    let output = |code| ProcessOutput {
+        code,
+        stdout: String::new(),
+        stderr: String::new(),
+        duration: Duration::ZERO,
+        timed_out: false,
+        output_limited: false,
+    };
+    let docker = DockerCli::default();
+
+    docker.own_client(
+        "unresolved",
+        ended(
+            Arc::new(AtomicBool::new(false)),
+            Err(ProcessFailure {
+                fate: ProcessFate::Unresolved,
+                error: UpstrokeError::Agent {
+                    message: "the client's process group could not be established gone"
+                        .to_owned(),
+                },
+            }),
+        ),
+    );
+    assert!(
+        matches!(
+            docker.settle_client_of("unresolved"),
+            ClientSettlement::Unresolved(fact) if fact.contains("may still be running")
+        ),
+        "a supervision that ended Unresolved is unresolved at collection, not an end"
+    );
+    for removal in 0..2 {
+        let removed = docker.settle_removed_client("unresolved");
+        assert!(
+            matches!(
+                removed,
+                Err(RuntimeError::Unresolved {
+                    operation: RuntimeOp::Remove,
+                    ..
+                })
+            ),
+            "removal {removal}: the unresolved fact survives, never an Ok: {removed:?}"
+        );
+    }
+    assert!(
+        matches!(
+            docker.client_record("unresolved"),
+            Some(ClientRecord::Unresolved(_))
+        ),
+        "what is kept is the fact, not a finished thread's handle"
+    );
+    assert!(
+        matches!(
+            refused(RuntimeError::Unresolved {
+                operation: RuntimeOp::Remove,
+                detail: "unresolved".to_owned(),
+            }),
+            UpstrokeError::Runner {
+                fate: ProcessFate::Unresolved,
+                ..
+            }
+        ),
+        "the funnel's mapping keeps the fate the release reads"
+    );
+
+    docker.own_client(
+        "exited",
+        ended(Arc::new(AtomicBool::new(false)), Ok(output(Some(0)))),
+    );
+    assert!(
+        docker.settle_removed_client("exited").is_ok(),
+        "the control: a client that exited is settled"
+    );
+    assert!(docker.client_record("exited").is_none());
+
+    docker.own_client(
+        "stopped",
+        ended(Arc::new(AtomicBool::new(true)), Ok(output(None))),
+    );
+    assert!(
+        matches!(
+            docker.settle_client_of("stopped"),
+            ClientSettlement::Ended(ClientEnd::Stopped)
+        ),
+        "the control: a verified requested stop is cleanup"
+    );
+
+    docker.own_client(
+        "gone",
+        ended(
+            Arc::new(AtomicBool::new(false)),
+            Err(ProcessFailure {
+                fate: ProcessFate::Gone,
+                error: UpstrokeError::Agent {
+                    message: "supervising agent input: broken".to_owned(),
+                },
+            }),
+        ),
+    );
+    assert!(
+        matches!(
+            docker.settle_client_of("gone"),
+            ClientSettlement::Ended(ClientEnd::Failed {
+                fate: ProcessFate::Gone,
+                ..
+            })
+        ),
+        "a supervision failure whose process is established gone is an end, judged by the \
+         verdict where a result is reported"
+    );
+}
+
+#[test]
+fn a_removal_that_leaves_a_process_unresolved_releases_nothing_as_gone() {
+    use super::{ContainerToRelease, release_classified};
+
+    for unresolved in [true, false] {
+        let fixture = Fixture::new(
+            &format!("release-unresolved-{unresolved}"),
+            RUN_A,
+            INCARNATION_1,
+            &shell_probe(),
+        );
+        let mut hooks = fixture.hooks();
+        let launched =
+            launch(&mut hooks, &fixture.runtime, &fixture.view, &fixture.plan).expect("launched");
+        if unresolved {
+            fixture
+                .runtime
+                .leave_a_process_unresolved_at_removal(launched.name.as_str());
+        }
+        let released = release_classified(
+            &mut hooks,
+            &fixture.runtime,
+            &fixture.view,
+            &fixture.root,
+            &launched,
+            ContainerToRelease::ObservedExited,
+        );
+        if !unresolved {
+            assert!(
+                released.is_ok(),
+                "the control: a removal that establishes everything gone releases"
+            );
+            continue;
+        }
+        let failure = released.expect_err("an unresolved process is not a release");
+        assert!(
+            !failure.container_gone,
+            "even with the container observed exited, an unresolved process means the \
+             invocation's processes are not established gone"
+        );
+        let message = failure.error.to_string();
+        assert!(
+            message.contains("could not establish every process"),
+            "{message}"
+        );
+        assert!(
+            launched.view_path.exists() && launched.intent_path.exists(),
+            "the view and the intent are kept for the next census"
+        );
+    }
+}
+
+#[test]
 fn the_docker_create_arguments_carry_a_user_and_an_open_stdin_only_when_the_spec_does() {
     let mut spec = CreateSpec {
         name: "upstroke-a-b-c-d".to_owned(),

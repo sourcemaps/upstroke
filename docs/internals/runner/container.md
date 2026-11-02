@@ -819,6 +819,14 @@ when the runtime answered [`Settled::ProcessGone`]; a
 [`Settled::RemovalInProgress`] answer is named in the residue as
 establishing nothing, and a failure is named as a failure.
 
+A removal the runtime answers with `RuntimeError::Unresolved`, which `refused`
+turns into `UpstrokeError::Runner` with `ProcessFate::Unresolved`, means a
+process it started for the container, its attached client, could not be
+established gone (root's DELIVERY-OWNERSHIP follow-through). Then nothing
+counts as established: `container_gone` is false even for a container the
+supervisor observed exited, so the invocation's fate is `Unresolved` and
+never `Gone`, and the view and the intent are kept for the next census.
+
 #### Why the view and the intent outlive an unconfirmed container (`PR8-R3-CONTAINER-RETAIN`)
 
 When the stop and the removal both fail and the caller did not observe
@@ -1158,7 +1166,10 @@ Primitives
 
 ## `fn refused(error: RuntimeError) -> UpstrokeError {`
 
-A runtime failure, as the engine's error type.
+A runtime failure, as the engine's error type. An `Unresolved` one keeps its
+meaning: it becomes `UpstrokeError::Runner` with `ProcessFate::Unresolved`,
+which `cancel_reached` reads, so a removal that left a process unresolved
+cannot be counted as a removal.
 
 ## `fn staged_path(path: &Path) -> PathBuf {`
 
@@ -1295,10 +1306,10 @@ The path, given that `create` passed `--interactive`:
   proof carries. It never waits for the workload or for the write;
 - if the container never leaves `created` — the client ended, the deadline
   passed, the invocation was cancelled, the state could not be read or the
-  container is gone — the client is settled (`settle_client`) and the start
-  fails, saying how the client ended. A client that cannot be settled is
-  kept, owned and unresolved, for the removal the failed launch's cancel
-  then performs, and the failure says so;
+  container is gone — the client is settled (`settle_client_of`) and the
+  start fails, saying how the client ended. A client that cannot be
+  established gone fails the start as `RuntimeError::Unresolved`, and its
+  record stays for the removal the failed launch's cancel then performs;
 - once the container has started, the client is kept, owned, by name, until
   its collection or its removal settles it.
 
@@ -1317,32 +1328,53 @@ census sees that name in `start` alone.
 
 Keep `name`'s client, owned, until something settles it.
 
-## `impl DockerCli` › `fn take_client(&self, name: &str) -> Option<AttachedClient> {`
+## `impl DockerCli` › `fn client_record(&self, name: &str) -> Option<ClientRecord> {`
 
-Take `name`'s client to settle it. Whoever takes it settles it or puts it
-back.
+Take `name`'s record to settle it. Whoever takes it settles it or keeps it
+again.
+
+## `impl DockerCli` › `fn keep_client_record(&self, name: &str, record: ClientRecord) {`
+
+Keep a record: an owned client, or an unresolved fact.
+
+## `impl DockerCli` › `fn settle_client_of(&self, name: &str) -> ClientSettlement {`
+
+The one settlement of `name`'s client, for the start's failure, the
+collection and the removal alike (root's DELIVERY-OWNERSHIP follow-through):
+- no record: `Absent`;
+- an unresolved fact: `Unresolved`, and the fact stays, so repeated
+  settlement keeps reporting it;
+- an owned client: `settle_client` gives it `CLIENT_GRACE`, asks it to stop
+  and gives it another. One that still has not ended stays owned, live, and
+  is `Unresolved`. One that ended is classified by its typed end: a
+  supervision that ended with `ProcessFate::Unresolved` becomes an
+  unresolved fact, kept in place of the finished thread's handle, which is
+  dropped; any other end, an exit, a verified stop, or a failure whose
+  process was established gone, is `Ended`.
+
+A finished supervising thread alone never counts as a settled client: only
+its typed result does.
 
 ## `impl DockerCli` › `fn settle_delivery(&self, name: &str, exit_code: Option<i32>) -> Result<(), RuntimeError> {`
 
 How a container's input went, settled when its output is collected.
 
-Nothing to settle without an attached client. A container that still runs
-was collected because it timed out: its client stays owned, and the removal
-that follows settles it. Otherwise the client ends with the container, and
-`settle_client` gives it `CLIENT_GRACE`, then asks it to stop and gives it
-another. A client that still has not ended is put back, owned and
-unresolved, and the collection fails saying so. A settled client's end is
-judged by `delivery_verdict`.
+Nothing to settle without a record. An owned client whose container still
+runs was collected because it timed out: it stays owned, and the removal that
+follows settles it. Otherwise the client is settled: an `Ended` client is
+judged by `delivery_verdict`, and an `Unresolved` one fails the collection as
+`RuntimeError::Unresolved`, its fact kept for the removal, which reports it
+again.
 
 ## `impl DockerCli` › `fn settle_removed_client(&self, name: &str) -> Result<(), RuntimeError> {`
 
 The removal's settlement of `name`'s client, whatever path reached it: the
 timeout's, the cancellation's, the failed launch's or the completed
-invocation's. The container is gone, so its client ends; it is settled as
-in `settle_delivery`, and its delivery is not judged, since the
-invocation's result is already decided. A client that cannot be settled is
-put back, owned, and the removal reports it unresolved, which the release
-reads as a process it could not establish gone.
+invocation's. `Absent` and `Ended` settle the removal: the client's process
+is established gone, and its delivery is judged only where a result is
+reported, at collection. `Unresolved`, a live client or a kept fact, fails
+the removal as `RuntimeError::Unresolved`, so the release cannot count it, and
+the invocation's fate is `Unresolved`.
 
 ## `const ATTACHED_START_POLL: Duration = Duration::from_millis(25);`
 
@@ -1353,6 +1385,18 @@ at its client.
 
 How long a client is given to end on its own, and then again after it is
 asked to stop.
+
+## `enum ClientRecord {`
+
+What the runtime keeps for a container's client: the owned client while its
+end is unknown, or, once its supervision ended without establishing its
+process gone, only that fact. A fact is never resolved by this runtime: it
+has no process left to observe.
+
+## `enum ClientSettlement {`
+
+What one settlement established: no client, a client's end, or an
+unresolved client.
 
 ## `struct AttachedClient {`
 
@@ -1380,8 +1424,10 @@ and reaps it on its next poll.
 
 The client's terminal state, from the funnel's own result: exited with a
 code, stopped (asked to, or at its backstop), or failed, which carries the
-funnel's error and the process fate it established. A wait, a write or an
-attach that failed is a failure here, never an exit with no code.
+funnel's error and, typed, the process fate it established. A wait, a write
+or an attach that failed is a failure here, never an exit with no code. A
+supervising thread that panicked, or an end already taken, is a failure
+whose fate is `Unresolved`: nothing established the process gone.
 
 ## `enum ClientEnd {`
 

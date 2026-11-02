@@ -93,13 +93,19 @@ pub enum RuntimeError {
         operation: RuntimeOp,
         detail: String,
     },
+    Unresolved {
+        operation: RuntimeOp,
+        detail: String,
+    },
 }
 
 impl RuntimeError {
     #[must_use]
     pub const fn operation(&self) -> RuntimeOp {
         match self {
-            Self::Unreachable { operation, .. } | Self::Failed { operation, .. } => *operation,
+            Self::Unreachable { operation, .. }
+            | Self::Failed { operation, .. }
+            | Self::Unresolved { operation, .. } => *operation,
         }
     }
 
@@ -119,6 +125,11 @@ impl fmt::Display for RuntimeError {
             Self::Failed { operation, detail } => {
                 write!(f, "the container runtime refused `{operation}`: {detail}")
             }
+            Self::Unresolved { operation, detail } => write!(
+                f,
+                "the container runtime's `{operation}` could not establish every process of the \
+                 container gone: {detail}"
+            ),
         }
     }
 }

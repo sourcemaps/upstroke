@@ -241,6 +241,24 @@ program's own result, an early exit included. Ending with another code, or
 with none, is a broken attach; a client that had to be stopped, and one whose
 wait or write failed, are errors too, each naming why.
 
+## `fn an_unresolved_attached_client_stays_unresolved_through_every_settlement() {`
+
+Root's DELIVERY-OWNERSHIP follow-through, at the settlement seam. A client
+whose supervising thread finished with `ProcessFailure { fate: Unresolved }`
+is unresolved at collection, and its removal fails as
+`RuntimeError::Unresolved`, twice: the fact survives repeated settlement, and
+what is kept is the fact, not the finished thread's handle. The funnel's
+`refused` keeps the fate. The controls: a client that exited, and one whose
+requested stop was verified, settle; and a supervision failure whose process
+was established gone is an end, for the verdict.
+
+## `fn a_removal_that_leaves_a_process_unresolved_releases_nothing_as_gone() {`
+
+The release seam. With a removal that leaves a process unresolved, a release
+of a container observed exited is a failure with `container_gone` false,
+naming the unresolved process, and the view and the intent stay for the next
+census. The control: the same release without it releases.
+
 ## `fn the_docker_create_arguments_carry_a_user_and_an_open_stdin_only_when_the_spec_does() {`
 
 The `docker create` argv, read with no daemon (`docker_create_arguments`). A

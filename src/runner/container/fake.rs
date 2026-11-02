@@ -104,6 +104,7 @@ struct State {
     reaper_program: Option<PathBuf>,
     covers: Option<Vec<(String, bool)>>,
     stdin_received: BTreeMap<String, Vec<u8>>,
+    unresolved_removals: BTreeSet<String>,
 }
 
 impl Drop for State {
@@ -407,6 +408,10 @@ impl FakeRuntime {
     pub(crate) fn stdin_received(&self, name: &str) -> Option<Vec<u8>> {
         self.state().stdin_received.get(name).cloned()
     }
+
+    pub(crate) fn leave_a_process_unresolved_at_removal(&self, name: &str) {
+        self.state().unresolved_removals.insert(name.to_owned());
+    }
 }
 
 pub(crate) const NO_OP_REAPER_PROGRAM: &str = "/usr/bin/true";
@@ -661,6 +666,15 @@ impl FakeRuntime {
         let settled = super::settle_remove(name, entered, |target| self.observe(target))?;
         if settled.process_gone() {
             self.state().containers.remove(name);
+        }
+        if self.state().unresolved_removals.contains(name) {
+            return Err(RuntimeError::Unresolved {
+                operation: RuntimeOp::Remove,
+                detail: format!(
+                    "the fake left a process of `{name}` unresolved at its removal, as an \
+                     attached client whose supervision could not establish it gone would"
+                ),
+            });
         }
         Ok(settled)
     }
@@ -1166,6 +1180,7 @@ fn error_json(error: &RuntimeError) -> Value {
     let (kind, operation, detail) = match error {
         RuntimeError::Unreachable { operation, detail } => ("unreachable", operation, detail),
         RuntimeError::Failed { operation, detail } => ("failed", operation, detail),
+        RuntimeError::Unresolved { operation, detail } => ("unresolved", operation, detail),
     };
     json!({"kind": kind, "operation": operation.name(), "detail": detail})
 }
@@ -1181,10 +1196,10 @@ fn error_of(value: &Value, asked: RuntimeOp) -> RuntimeError {
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_owned();
-    if value.get("kind").and_then(Value::as_str) == Some("unreachable") {
-        RuntimeError::Unreachable { operation, detail }
-    } else {
-        RuntimeError::Failed { operation, detail }
+    match value.get("kind").and_then(Value::as_str) {
+        Some("unreachable") => RuntimeError::Unreachable { operation, detail },
+        Some("unresolved") => RuntimeError::Unresolved { operation, detail },
+        _ => RuntimeError::Failed { operation, detail },
     }
 }
 

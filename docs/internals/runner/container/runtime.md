@@ -170,6 +170,15 @@ which is not the same as an operation that reached the runtime and failed.
 
 The runtime could not be reached for this operation.
 
+## `pub enum RuntimeError` › `Unresolved {`
+
+The operation's own effect completed, and a process the runtime started for
+the container could not be established gone (PR12's attached client, root's
+DELIVERY-OWNERSHIP follow-through). `DockerCli`'s collection and removal
+answer it, and the start when it fails; the funnel's `refused` keeps it
+typed, as `ProcessFate::Unresolved`, for the release. Inspection never
+answers it, so a pre-flight that meets one reads it as a runtime failure.
+
 ## `pub enum RuntimeError` › `Failed {`
 
 The runtime answered, and the answer was a failure.

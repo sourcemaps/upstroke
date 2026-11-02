@@ -5926,6 +5926,61 @@ fn a_launch_that_fails_after_a_cancellation_reports_the_cancellation() {
 }
 
 #[test]
+fn an_invocation_whose_removal_leaves_a_process_unresolved_is_never_reported_gone() {
+    for cancelled in [true, false] {
+        let fixture = Fixture::new(
+            &format!("unresolved-removal-{cancelled}"),
+            !cancelled,
+        );
+        let runner = fixture.runner();
+        let request = worker_request(
+            ShellKind::Sh
+                .spec("cat")
+                .stdin(prompt("unresolved", 4 * 1024)),
+            fixture.task_a.clone(),
+            AgentId::new("claude-code"),
+            Duration::from_secs(600),
+            worker_id(0),
+        );
+        let name = ContainerName::new(repo_key(), RUN_ID, INCARNATION_1, &request.invocation)
+            .expect("a name");
+        fixture
+            .runtime
+            .fake()
+            .leave_a_process_unresolved_at_removal(name.as_str());
+        let cancellation = crate::runner::Cancellation::new();
+        let mut observer = CancelAfter {
+            inner: RecordingHooks::new(fixture.trace.clone()),
+            cancellation: cancellation.clone(),
+            at: crate::topology::effects::EffectSiteId::Container(if cancelled {
+                ContainerSite::Start
+            } else {
+                ContainerSite::RemoveIntent
+            }),
+        };
+        let error = runner
+            .run_blocking_with(
+                &request,
+                RunnerCall::new(cancellation).observed_in_container_by(&mut observer),
+            )
+            .expect_err("an invocation with a process left unresolved is not a success");
+        assert!(
+            !error.is_cancelled(),
+            "cancelled {cancelled}: not a plain cancellation: {error}"
+        );
+        assert_eq!(
+            error.fate,
+            ProcessFate::Unresolved,
+            "cancelled {cancelled}: never Gone while a process may still run: {error}"
+        );
+        assert!(
+            error.to_string().contains("could not establish every process"),
+            "cancelled {cancelled}: the unresolved fact is the error: {error}"
+        );
+    }
+}
+
+#[test]
 fn a_container_call_cancelled_before_it_starts_writes_no_intent() {
     let fixture = Fixture::new("cancel-before", true);
     let runner = fixture.runner();
