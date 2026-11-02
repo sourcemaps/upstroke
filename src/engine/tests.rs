@@ -4668,7 +4668,7 @@ impl Scenario {
 fn assert_live_equals_replay(repo: &Path, live: &RunState, report: &RunReport) {
     let replayed = replay_of(repo, &report.run_id);
     assert_eq!(
-        &replayed.state, live,
+        &legacy_status(&replayed).state, live,
         "replaying the log produced different state than the run that wrote it"
     );
 
@@ -4680,7 +4680,7 @@ fn assert_live_equals_replay(repo: &Path, live: &RunState, report: &RunReport) {
         value
     };
     assert_eq!(
-        strip(&replayed.report()),
+        strip(&legacy_status(&replayed).report()),
         strip(report),
         "the report derived from the log differs from the one the run wrote"
     );
@@ -4845,12 +4845,12 @@ fn an_aborting_error_still_leaves_a_replayable_log() {
     fs::write(paths.events(), format!("{}\n", lines[..cut].join("\n"))).expect("truncate");
 
     let replayed = replay_of(&repo, &report.run_id);
-    assert_eq!(replayed.interrupted, 1, "the dangling attempt is settled");
+    assert_eq!(legacy_status(&replayed).interrupted, 1, "the dangling attempt is settled");
     assert!(
-        replayed.interrupted_run(),
+        legacy_status(&replayed).interrupted_run(),
         "and the run reads as interrupted rather than finished"
     );
-    assert_eq!(replayed.state.states[0], TaskState::Pending);
+    assert_eq!(legacy_status(&replayed).state.states[0], TaskState::Pending);
 }
 
 #[test]
@@ -4920,9 +4920,9 @@ fn a_live_run_reads_as_running_rather_than_halted() {
     let lock = RunLock::acquire(&paths.public).expect("simulate a live engine");
 
     let live = replay_of(&repo, &report.run_id);
-    assert!(live.running, "a held lock means an engine is driving this");
+    assert!(legacy_status(&live).running, "a held lock means an engine is driving this");
     assert_eq!(
-        live.interrupted, 0,
+        legacy_status(&live).interrupted, 0,
         "an attempt in flight has not been interrupted"
     );
     let out = crate::status::render(&live);
@@ -6081,7 +6081,7 @@ fn the_report_labels_gates_from_the_record_not_todays_config() {
         "and is labelled as the record has it, not as today's config would"
     );
 
-    let replayed = replay_of(&repo, &run_id).report();
+    let replayed = legacy_status(&replay_of(&repo, &run_id)).report();
     assert_eq!(replayed.gates, resumed.gates);
     assert_eq!(replayed.gates_from_config, resumed.gates_from_config);
 }
@@ -6374,9 +6374,9 @@ fn status_reports_a_live_run_and_the_ledger_reads_from_the_log() {
     );
 
     assert!(
-        (loaded.report().total_cost_usd - report.total_cost_usd).abs() < 1e-9,
+        (legacy_status(&loaded).report().total_cost_usd - report.total_cost_usd).abs() < 1e-9,
         "{} vs {}",
-        loaded.report().total_cost_usd,
+        legacy_status(&loaded).report().total_cost_usd,
         report.total_cost_usd
     );
 
@@ -9430,10 +9430,10 @@ fn question_payload_kill_child() {
     );
     let run_id = rundir::latest_run(&repo).expect("the parent's run");
     let replayed = replay_of(&repo, &run_id);
-    let [record] = replayed.state.questions.as_slice() else {
+    let [record] = legacy_status(&replayed).state.questions.as_slice() else {
         panic!(
             "the parking settlement records one question: {:?}",
-            replayed.state.questions
+            legacy_status(&replayed).state.questions
         );
     };
     let mut hooks = QuestionPayloadKilledAt {
@@ -9500,10 +9500,10 @@ fn a_run_killed_once_its_parking_settlement_is_durable(
         "{tag}: the log ends at the parking settlement: {last}"
     );
     let replayed = replay_of(&repo, &run_id);
-    let [record] = replayed.state.questions.as_slice() else {
+    let [record] = legacy_status(&replayed).state.questions.as_slice() else {
         panic!(
             "{tag}: the settlement parks one question: {:?}",
-            replayed.state.questions
+            legacy_status(&replayed).state.questions
         );
     };
     assert!(record.is_open(), "{tag}: nothing answered it");

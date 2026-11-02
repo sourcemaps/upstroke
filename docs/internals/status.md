@@ -76,9 +76,8 @@ legacy view is untouched.
 
 A schema-4 run as `status` sees it: its view rendered at load time (so a
 report that cannot be derived refuses the command rather than printing
-half of one), the repository it was read from (for `follow`), and the
-observation itself, crate-private
-(`engine::topology::observe::Observed`).
+half of one), and the repository it was read from, which `follow` observes
+again on every poll.
 
 ## `pub fn load(repo_root: &Path, run_id: Option<&str>) -> Result<Status, UpstrokeError> {`
 

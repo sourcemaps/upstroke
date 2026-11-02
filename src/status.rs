@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::engine::RunReport;
-use crate::engine::topology::observe::{self, Observed};
+use crate::engine::topology::observe;
 use crate::error::UpstrokeError;
 use crate::events::{self, Event, EventBody, LogTail, RunStarted, RunState};
 use crate::interaction::Sleeper;
@@ -38,7 +38,6 @@ pub struct TopologyStatus {
     pub run_id: String,
     pub repo_root: PathBuf,
     pub rendered: String,
-    pub(crate) observed: Observed,
 }
 
 impl RunStatus {
@@ -100,7 +99,6 @@ pub fn load(repo_root: &Path, run_id: Option<&str>) -> Result<Status, UpstrokeEr
             run_id,
             repo_root: repo_root.to_path_buf(),
             rendered,
-            observed,
         }));
     }
     let public = rundir::public_dir(repo_root, &run_id);
