@@ -229,6 +229,7 @@ fn a_host_selection_resolves_host_v1_and_carries_its_digest() {
         runtime: None,
         private_root: root.path(),
         ids: &Ids,
+        mounts: &crate::runner::container::resolve::MountContext::unbound(),
     })
     .expect("the host runner resolves with nothing to inspect");
 
@@ -264,6 +265,7 @@ fn the_pre_lock_checks_leave_no_residue() {
         runtime: Some(&runtime),
         private_root: root.path(),
         ids: &Ids,
+        mounts: &crate::runner::container::resolve::MountContext::unbound(),
     })
     .expect("a reachable runtime holding the image and the volume resolves");
 
@@ -310,6 +312,7 @@ fn the_container_inspections_run_in_order_and_the_first_failure_ends_them() {
         runtime: Some(&runtime),
         private_root: root.path(),
         ids: &Ids,
+        mounts: &crate::runner::container::resolve::MountContext::unbound(),
     })
     .expect("resolves");
     assert_eq!(
@@ -328,6 +331,7 @@ fn the_container_inspections_run_in_order_and_the_first_failure_ends_them() {
         runtime: Some(&unreachable),
         private_root: root.path(),
         ids: &Ids,
+        mounts: &crate::runner::container::resolve::MountContext::unbound(),
     })
     .expect_err("an unreachable runtime refuses");
     assert!(
@@ -351,6 +355,7 @@ fn an_absent_credential_volume_refuses() {
         runtime: Some(&runtime),
         private_root: root.path(),
         ids: &Ids,
+        mounts: &crate::runner::container::resolve::MountContext::unbound(),
     })
     .expect_err("an absent volume refuses");
     assert!(
@@ -368,6 +373,7 @@ fn a_container_selection_without_a_runtime_refuses() {
         runtime: None,
         private_root: root.path(),
         ids: &Ids,
+        mounts: &crate::runner::container::resolve::MountContext::unbound(),
     })
     .expect_err("no runtime to inspect");
     assert!(
@@ -383,20 +389,21 @@ fn a_default_root_is_resolved_before_it_exists_and_authorized_only_once_it_does(
     let selection = container_selection(IMAGE_REFERENCE, &[("codex", "upstroke-codex")]);
 
     let without_image = Inventory::reachable().with_volume("upstroke-codex");
-    let refusal = resolve_runner(&selection, Some(&without_image))
+    let refusal = resolve_runner(&selection, Some(&without_image), &MountContext::unbound())
         .expect_err("an image the runtime does not hold refuses");
     assert!(
         refusal.to_string().contains(IMAGE_REFERENCE),
         "the refusal names the image: {refusal}"
     );
     let unreachable = Inventory::default();
-    resolve_runner(&selection, Some(&unreachable)).expect_err("an unreachable runtime refuses");
+    resolve_runner(&selection, Some(&unreachable), &MountContext::unbound())
+        .expect_err("an unreachable runtime refuses");
     assert_eq!(
         unreachable.asked(),
         vec!["probe".to_owned()],
         "nothing past reachability was asked of an unreachable runtime"
     );
-    resolve_runner(&selection, None).expect_err("no runtime to inspect");
+    resolve_runner(&selection, None, &MountContext::unbound()).expect_err("no runtime to inspect");
     assert!(
         !root.exists(),
         "a refused resolution created the default root"
@@ -408,7 +415,7 @@ fn a_default_root_is_resolved_before_it_exists_and_authorized_only_once_it_does(
             .with_volume("upstroke-codex")
     };
     let runtime = ready();
-    let resolved = resolve_runner(&selection, Some(&runtime))
+    let resolved = resolve_runner(&selection, Some(&runtime), &MountContext::unbound())
         .expect("a serviceable selection resolves with no root at all");
     assert_eq!(resolved.runner_policy().kind, RunnerKind::Container);
     assert!(!root.exists(), "resolution created the default root");
@@ -420,7 +427,7 @@ fn a_default_root_is_resolved_before_it_exists_and_authorized_only_once_it_does(
     create_private_dir(&root, &mut NoHooks)
         .expect("the root, created as production's include does");
     let runtime = ready();
-    let checked = resolve_runner(&selection, Some(&runtime))
+    let checked = resolve_runner(&selection, Some(&runtime), &MountContext::unbound())
         .expect("resolves")
         .authorize(&root, &Ids)
         .expect("an existing root is authorized");
@@ -444,6 +451,7 @@ fn a_private_root_that_is_not_a_real_directory_refuses_before_any_inspection() {
         runtime: Some(&runtime),
         private_root: &absent,
         ids: &Ids,
+        mounts: &crate::runner::container::resolve::MountContext::unbound(),
     })
     .expect_err("an absent private root refuses");
     assert!(
@@ -472,6 +480,7 @@ fn the_authorized_private_root_is_canonical() {
         runtime: None,
         private_root: &indirect,
         ids: &Ids,
+        mounts: &crate::runner::container::resolve::MountContext::unbound(),
     })
     .expect("a root reachable through `.`/`..` is the same root");
     assert_eq!(
@@ -701,6 +710,7 @@ fn relative_name_pre_lock_child() {
         runtime: Some(&runtime),
         private_root: root.path(),
         ids: &Ids,
+        mounts: &crate::runner::container::resolve::MountContext::unbound(),
     })
     .expect_err("a relative repository-wide name refuses the pre-lock checks");
     let message = refusal.to_string();

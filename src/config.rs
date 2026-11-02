@@ -2543,7 +2543,7 @@ mounts = [
     #[test]
     fn a_container_section_parses_into_the_selection_resolution_consumes() {
         use crate::runner::container::FakeRuntime;
-        use crate::runner::container::resolve::resolve_container;
+        use crate::runner::container::resolve::{MountContext, resolve_container};
         use crate::runner::container::runtime::ContainerTrace;
 
         let raw: toml::Value = toml::from_str(
@@ -2561,7 +2561,8 @@ credential_volumes = { claude-code = "creds-cc" }
         runtime.tag("upstroke/ci:3.2", "sha256:abc");
         runtime.add_volume("creds-cc");
 
-        let policy = resolve_container(&runtime, &selection).expect("resolves");
+        let policy =
+            resolve_container(&runtime, &selection, &MountContext::unbound()).expect("resolves");
         let image = policy.image.as_ref().expect("image");
         assert_eq!(image.reference, "upstroke/ci:3.2", "from the TOML");
         assert_eq!(image.id, "sha256:abc", "from the runtime");
@@ -2574,7 +2575,7 @@ credential_volumes = { claude-code = "creds-cc" }
         policy.completeness().expect("a complete record");
 
         let empty = FakeRuntime::new(ContainerTrace::off());
-        resolve_container(&empty, &selection)
+        resolve_container(&empty, &selection, &MountContext::unbound())
             .expect_err("a runtime holding nothing cannot resolve it");
     }
 

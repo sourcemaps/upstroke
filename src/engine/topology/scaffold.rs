@@ -129,6 +129,7 @@ fn run_started_of(
             policy: RunnerContract::HostV1,
             image: None,
             credential_volumes: None,
+            mounts: Vec::new(),
         },
         probed_agents: probed_agents(),
         branch: "upstroke/run-01SCAFFOLD00000000000000AA".to_owned(),
@@ -3296,6 +3297,7 @@ pub(super) fn container_policy() -> RunnerPolicy {
                 .map(|(agent, volume)| (agent.to_owned(), volume.to_owned()))
                 .collect(),
         ),
+        mounts: Vec::new(),
     }
 }
 

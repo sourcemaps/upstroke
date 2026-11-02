@@ -232,6 +232,30 @@ pub struct ImageIdentity {
     pub digest: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MountSourceKind {
+    Directory,
+    File,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MountSourceIdentity {
+    pub kind: MountSourceKind,
+    pub device: u64,
+    pub object: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecordedMount {
+    pub source: String,
+    pub target: String,
+    pub read_only: bool,
+    pub source_identity: MountSourceIdentity,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunnerPolicy {
@@ -241,6 +265,8 @@ pub struct RunnerPolicy {
     pub image: Option<ImageIdentity>,
     #[serde(deserialize_with = "strict::required")]
     pub credential_volumes: Option<BTreeMap<String, String>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mounts: Vec<RecordedMount>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -252,6 +278,7 @@ pub enum RunnerField {
     ImageId,
     ImageDigest,
     CredentialVolumes,
+    Mounts,
 }
 
 impl fmt::Display for RunnerField {
@@ -264,6 +291,7 @@ impl fmt::Display for RunnerField {
             Self::ImageId => "image id",
             Self::ImageDigest => "image digest",
             Self::CredentialVolumes => "credential volume set",
+            Self::Mounts => "configured mount set",
         })
     }
 }
@@ -275,6 +303,7 @@ pub enum RunnerRecordDefect {
     ImageNotIdentified,
     ContainerWithoutCredentialVolumes,
     HostWithContainerFields,
+    MountRecordMalformed,
 }
 
 impl fmt::Display for RunnerRecordDefect {
@@ -293,7 +322,13 @@ impl fmt::Display for RunnerRecordDefect {
                 "a container runner without a credential-volume record (an empty set is a record)"
             }
             Self::HostWithContainerFields => {
-                "a host runner carrying an image or credential volumes it could not have used"
+                "a host runner carrying an image, credential volumes or mounts it could not have \
+                 used"
+            }
+            Self::MountRecordMalformed => {
+                "a recorded mount whose source or target is not an absolute path, or a mount \
+                 list whose targets are not strictly ordered, so the boundary it names cannot \
+                 be rebuilt as recorded"
             }
         })
     }
@@ -306,7 +341,10 @@ impl RunnerPolicy {
         }
         match self.kind {
             RunnerKind::Host => {
-                if self.image.is_some() || self.credential_volumes.is_some() {
+                if self.image.is_some()
+                    || self.credential_volumes.is_some()
+                    || !self.mounts.is_empty()
+                {
                     return Err(RunnerRecordDefect::HostWithContainerFields);
                 }
             }
@@ -320,6 +358,17 @@ impl RunnerPolicy {
                 }
                 if self.credential_volumes.is_none() {
                     return Err(RunnerRecordDefect::ContainerWithoutCredentialVolumes);
+                }
+                let ordered = self
+                    .mounts
+                    .windows(2)
+                    .all(|pair| pair[0].target < pair[1].target);
+                let absolute = self
+                    .mounts
+                    .iter()
+                    .all(|mount| mount.source.starts_with('/') && mount.target.starts_with('/'));
+                if !ordered || !absolute {
+                    return Err(RunnerRecordDefect::MountRecordMalformed);
                 }
             }
         }
@@ -350,6 +399,9 @@ impl RunnerPolicy {
         }
         if self.credential_volumes != other.credential_volumes {
             return Some(RunnerField::CredentialVolumes);
+        }
+        if self.mounts != other.mounts {
+            return Some(RunnerField::Mounts);
         }
         None
     }
@@ -1511,6 +1563,7 @@ mod tests {
                 ("zeta-agent", "upstroke-creds-Zeta"),
                 ("alpha-agent", "upstroke-creds-ALPHA  "),
             ])),
+            mounts: Vec::new(),
         }
     }
 
@@ -1520,6 +1573,7 @@ mod tests {
             policy: RunnerContract::HostV1,
             image: None,
             credential_volumes: None,
+            mounts: Vec::new(),
         }
     }
 
@@ -2510,6 +2564,9 @@ mod tests {
                     ("mid-agent", "upstroke-creds-Mid"),
                 ]));
             }),
+            (RunnerField::Mounts, |policy| {
+                policy.mounts = mounted_runner().mounts;
+            }),
         ];
 
         let base = container_runner();
@@ -2635,6 +2692,7 @@ mod tests {
                             policy: contract,
                             image: image.clone(),
                             credential_volumes: creds.clone(),
+                            mounts: Vec::new(),
                         };
                         let expected = if frozen_kind_of(contract) != kind {
                             Err(RunnerRecordDefect::ContractDoesNotMatchKind)
@@ -2686,6 +2744,7 @@ mod tests {
                     digest: Some("sha256:ffee".to_owned()),
                 }),
                 credential_volumes: Some(volumes(&[("a", "v")])),
+                mounts: Vec::new(),
             }
             .completeness(),
             Ok(()),
@@ -2822,6 +2881,354 @@ mod tests {
                 Some(RunnerField::CredentialVolumes)
             );
         }
+    }
+
+    fn recorded_mount(
+        source: &str,
+        target: &str,
+        read_only: bool,
+        identity: (MountSourceKind, u64, u64),
+    ) -> RecordedMount {
+        RecordedMount {
+            source: source.to_owned(),
+            target: target.to_owned(),
+            read_only,
+            source_identity: MountSourceIdentity {
+                kind: identity.0,
+                device: identity.1,
+                object: identity.2,
+            },
+        }
+    }
+
+    fn mounted_runner() -> RunnerPolicy {
+        let mut policy = container_runner();
+        policy.mounts = vec![
+            recorded_mount(
+                "/srv/Shared Cache/Ünicode",
+                "/cache",
+                true,
+                (MountSourceKind::Directory, 2049, 1_311_768_467_294_899_695),
+            ),
+            recorded_mount(
+                "/opt/toolchain/bin/cc",
+                "/opt/cc",
+                false,
+                (MountSourceKind::File, u64::MAX, 7),
+            ),
+        ];
+        policy
+    }
+
+    #[test]
+    fn an_empty_mount_list_is_omitted_and_an_absent_one_reads_as_empty() {
+        for policy in [
+            host_runner(),
+            container_runner(),
+            no_digest_runner(),
+            empty_credentials_runner(),
+        ] {
+            let value = serde_json::to_value(&policy).expect("serialize");
+            let object = value.as_object().expect("a record is an object");
+            assert!(
+                !object.contains_key("mounts"),
+                "an empty mount list was written: {value}"
+            );
+            assert_eq!(
+                object.keys().map(String::as_str).collect::<Vec<_>>(),
+                vec!["credential_volumes", "image", "kind", "policy"],
+                "a record without mounts carries exactly the four fields it always did"
+            );
+            let absent: RunnerPolicy =
+                serde_json::from_value(value.clone()).expect("an absent list reads");
+            assert_eq!(absent, policy);
+            assert!(absent.mounts.is_empty(), "absence did not read as empty");
+
+            let mut explicit = value.clone();
+            explicit
+                .as_object_mut()
+                .expect("object")
+                .insert("mounts".to_owned(), serde_json::json!([]));
+            let explicit: RunnerPolicy =
+                serde_json::from_value(explicit).expect("an explicit empty list reads");
+            assert_eq!(explicit, absent, "an empty list and an absent one differ");
+            assert_eq!(
+                serde_json::to_value(&explicit).expect("serialize"),
+                value,
+                "an explicit empty list was written back with its key"
+            );
+        }
+    }
+
+    #[test]
+    fn a_mount_list_round_trips_with_every_field_and_refuses_anything_else() {
+        let policy = mounted_runner();
+        let value = serde_json::to_value(&policy).expect("serialize");
+        assert_eq!(
+            value["mounts"],
+            serde_json::json!([
+                {
+                    "source": "/srv/Shared Cache/Ünicode",
+                    "target": "/cache",
+                    "read_only": true,
+                    "source_identity": {
+                        "kind": "directory",
+                        "device": 2049_u64,
+                        "object": 1_311_768_467_294_899_695_u64
+                    }
+                },
+                {
+                    "source": "/opt/toolchain/bin/cc",
+                    "target": "/opt/cc",
+                    "read_only": false,
+                    "source_identity": {"kind": "file", "device": u64::MAX, "object": 7_u64}
+                }
+            ])
+        );
+        let read: RunnerPolicy = serde_json::from_value(value.clone()).expect("reads back");
+        assert_eq!(read, policy);
+        assert_eq!(read.difference(&policy), None);
+
+        let mut refusals = 0_usize;
+        for key in ["source", "target", "read_only", "source_identity"] {
+            let mut missing = value.clone();
+            missing["mounts"][1]
+                .as_object_mut()
+                .expect("a mount")
+                .remove(key)
+                .expect("present");
+            assert!(
+                serde_json::from_value::<RunnerPolicy>(missing).is_err(),
+                "a mount without `{key}` was read"
+            );
+            refusals += 1;
+        }
+        for key in ["kind", "device", "object"] {
+            let mut missing = value.clone();
+            missing["mounts"][0]["source_identity"]
+                .as_object_mut()
+                .expect("an identity")
+                .remove(key)
+                .expect("present");
+            assert!(
+                serde_json::from_value::<RunnerPolicy>(missing).is_err(),
+                "an identity without `{key}` was read"
+            );
+            refusals += 1;
+        }
+        let wrong: [(&str, serde_json::Value); 8] = [
+            ("/mounts/0/future", serde_json::json!(true)),
+            ("/mounts/0/source_identity/future", serde_json::json!(1)),
+            ("/mounts/0/source_identity/kind", serde_json::json!("symlink")),
+            ("/mounts/0/source_identity/device", serde_json::json!(-1)),
+            ("/mounts/0/source_identity/object", serde_json::json!("7")),
+            ("/mounts/0/read_only", serde_json::json!("true")),
+            ("/mounts/0/source", serde_json::Value::Null),
+            ("/mounts", serde_json::json!({"/cache": "/srv"})),
+        ];
+        for (pointer, replacement) in wrong {
+            let mut moved = value.clone();
+            let (parent, leaf) = pointer.rsplit_once('/').expect("a pointer");
+            let parent = if parent.is_empty() {
+                &mut moved
+            } else {
+                moved.pointer_mut(parent).expect("the parent exists")
+            };
+            parent
+                .as_object_mut()
+                .expect("an object")
+                .insert(leaf.to_owned(), replacement);
+            assert!(
+                serde_json::from_value::<RunnerPolicy>(moved).is_err(),
+                "`{pointer}` was read with a value the record does not allow"
+            );
+            refusals += 1;
+        }
+        assert_eq!(refusals, 15);
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct PreMountRunnerPolicy {
+        kind: RunnerKind,
+        policy: RunnerContract,
+        #[serde(deserialize_with = "strict::required")]
+        image: Option<ImageIdentity>,
+        #[serde(deserialize_with = "strict::required")]
+        credential_volumes: Option<BTreeMap<String, String>>,
+    }
+
+    #[test]
+    fn a_reader_from_before_mounts_refuses_a_mount_list_and_reads_every_record_without_one() {
+        for policy in [
+            host_runner(),
+            container_runner(),
+            no_digest_runner(),
+            empty_credentials_runner(),
+        ] {
+            let bytes = serde_json::to_vec(&policy).expect("serialize");
+            let earlier: PreMountRunnerPolicy =
+                serde_json::from_slice(&bytes).expect("the earlier reader reads it");
+            let written = serde_json::to_vec(&earlier).expect("serialize");
+            assert_eq!(
+                written, bytes,
+                "the earlier writer and this one write different bytes for the same record"
+            );
+            let read: RunnerPolicy =
+                serde_json::from_slice(&written).expect("this reader reads the earlier bytes");
+            assert_eq!(read, policy);
+        }
+
+        let mounted = serde_json::to_vec(&mounted_runner()).expect("serialize");
+        let refused = serde_json::from_slice::<PreMountRunnerPolicy>(&mounted)
+            .expect_err("the earlier reader cannot honour a mount, so it must not read one");
+        assert!(
+            refused.to_string().contains("unknown field `mounts`"),
+            "refused for another reason: {refused}"
+        );
+
+        let plan = sample_plan();
+        let mut started = run_started(&plan);
+        started.runner = mounted_runner();
+        let resumed = RunResumed4 {
+            incarnation: IncarnationId("01J8ZQKC3N8PD6QRS1UVWXYZ34".to_owned()),
+            runner: mounted_runner(),
+            probed_agents: vec!["codex".to_owned()],
+            upstroke_version: "0.2.1".to_owned(),
+        };
+        for body in [
+            TopologyEventBody::RunStarted {
+                data: Box::new(started),
+            },
+            TopologyEventBody::RunResumed {
+                data: Box::new(resumed),
+            },
+        ] {
+            let kind = body.kind();
+            let value = payload_of(&body);
+            let event: TopologyEvent =
+                serde_json::from_value(value.clone()).expect("this reader reads the event");
+            assert_eq!(event.body, body, "{kind}");
+            assert!(
+                serde_json::from_value::<PreMountRunnerPolicy>(value["data"]["runner"].clone())
+                    .is_err(),
+                "{kind}: the earlier reader read the runner it embeds"
+            );
+        }
+    }
+
+    #[test]
+    fn a_mount_list_differs_in_any_field_of_any_mount_and_in_its_length() {
+        let base = mounted_runner();
+        assert_eq!(base.completeness(), Ok(()));
+        assert_eq!(base.difference(&mounted_runner()), None);
+        let movers: [(&str, MoveRunner); 10] = [
+            ("a source", |policy| policy.mounts[0].source.push('x')),
+            ("a target", |policy| policy.mounts[1].target.push('x')),
+            ("read-only", |policy| policy.mounts[0].read_only = false),
+            ("read-write", |policy| policy.mounts[1].read_only = true),
+            ("an identity's kind", |policy| {
+                policy.mounts[0].source_identity.kind = MountSourceKind::File;
+            }),
+            ("an identity's device", |policy| {
+                policy.mounts[1].source_identity.device = 0;
+            }),
+            ("an identity's object", |policy| {
+                policy.mounts[0].source_identity.object += 1;
+            }),
+            ("a mount fewer", |policy| {
+                policy.mounts.pop();
+            }),
+            ("a mount more", |policy| {
+                policy.mounts.push(recorded_mount(
+                    "/srv/data",
+                    "/srv/data",
+                    true,
+                    (MountSourceKind::Directory, 1, 2),
+                ));
+            }),
+            ("no mounts", |policy| policy.mounts.clear()),
+        ];
+        for (name, moved) in movers {
+            let mut other = mounted_runner();
+            moved(&mut other);
+            assert_ne!(other, base, "moving {name} left the record equal");
+            assert_eq!(
+                base.difference(&other),
+                Some(RunnerField::Mounts),
+                "moving {name} was reported as something else"
+            );
+            assert_eq!(other.difference(&base), Some(RunnerField::Mounts));
+        }
+        let mut volumes_too = mounted_runner();
+        volumes_too.mounts.clear();
+        volumes_too.credential_volumes = Some(BTreeMap::new());
+        assert_eq!(
+            base.difference(&volumes_too),
+            Some(RunnerField::CredentialVolumes),
+            "the mount set is compared after every field that was there before it"
+        );
+        assert_eq!(RunnerField::Mounts.to_string(), "configured mount set");
+    }
+
+    #[test]
+    fn a_mount_record_is_complete_only_when_its_paths_are_absolute_and_its_targets_ordered() {
+        let mount = |source: &str, target: &str| {
+            recorded_mount(source, target, true, (MountSourceKind::Directory, 1, 1))
+        };
+        let cells: [(&str, Vec<RecordedMount>, Result<(), RunnerRecordDefect>); 8] = [
+            ("none", Vec::new(), Ok(())),
+            ("one", vec![mount("/srv/a", "/a")], Ok(())),
+            (
+                "ordered",
+                vec![mount("/srv/b", "/a"), mount("/srv/a", "/b")],
+                Ok(()),
+            ),
+            (
+                "unordered",
+                vec![mount("/srv/a", "/b"), mount("/srv/b", "/a")],
+                Err(RunnerRecordDefect::MountRecordMalformed),
+            ),
+            (
+                "a repeated target",
+                vec![mount("/srv/a", "/a"), mount("/srv/b", "/a")],
+                Err(RunnerRecordDefect::MountRecordMalformed),
+            ),
+            (
+                "a relative source",
+                vec![mount("srv/a", "/a")],
+                Err(RunnerRecordDefect::MountRecordMalformed),
+            ),
+            (
+                "a relative target",
+                vec![mount("/srv/a", "a")],
+                Err(RunnerRecordDefect::MountRecordMalformed),
+            ),
+            (
+                "an empty target",
+                vec![mount("/srv/a", "")],
+                Err(RunnerRecordDefect::MountRecordMalformed),
+            ),
+        ];
+        for (name, mounts, expected) in cells {
+            let mut policy = container_runner();
+            policy.mounts.clone_from(&mounts);
+            assert_eq!(policy.completeness(), expected, "a container with {name}");
+            let mut host = host_runner();
+            host.mounts = mounts;
+            let host_expected = if host.mounts.is_empty() {
+                Ok(())
+            } else {
+                Err(RunnerRecordDefect::HostWithContainerFields)
+            };
+            assert_eq!(host.completeness(), host_expected, "a host with {name}");
+        }
+        assert!(
+            RunnerRecordDefect::MountRecordMalformed
+                .to_string()
+                .contains("recorded mount"),
+            "the defect does not say what it is about"
+        );
     }
 
     const FROZEN_VOCABULARY: [(&str, bool); 25] = [

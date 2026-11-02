@@ -1420,7 +1420,7 @@ fn exit_text(exit: Option<i32>) -> String {
     )
 }
 
-fn docker_create_arguments(spec: &CreateSpec) -> Vec<String> {
+fn docker_create_arguments(spec: &CreateSpec) -> Result<Vec<String>, String> {
     let mut args: Vec<String> = vec!["create".to_owned(), "--name".to_owned(), spec.name.clone()];
     if spec.read_only_root {
         args.push("--read-only".to_owned());
@@ -1438,7 +1438,7 @@ fn docker_create_arguments(spec: &CreateSpec) -> Vec<String> {
     }
     for mount in &spec.mounts {
         args.push("--mount".to_owned());
-        args.push(mount_argument(mount));
+        args.push(mount_argument(mount)?);
     }
     for (key, value) in &spec.env {
         args.push("--env".to_owned());
@@ -1450,7 +1450,7 @@ fn docker_create_arguments(spec: &CreateSpec) -> Vec<String> {
     }
     args.push(spec.image_id.clone());
     args.extend(spec.command.iter().cloned());
-    args
+    Ok(args)
 }
 
 struct ImageInspectionRaw {
@@ -1789,7 +1789,10 @@ impl ContainerRuntime for DockerCli {
 
     fn create(&self, covered: exec::CoveredCreate<'_>) -> Result<CreatedContainer, RuntimeError> {
         let spec = covered.spec();
-        let args = docker_create_arguments(spec);
+        let args = docker_create_arguments(spec).map_err(|detail| RuntimeError::Failed {
+            operation: RuntimeOp::Create,
+            detail,
+        })?;
         let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
         self.exec(RuntimeOp::Create, &spec.name, &borrowed)?;
         let reported = self
@@ -1864,31 +1867,65 @@ fn settle_stop(
     settle(target, outcome, stop_answer, observe)
 }
 
-fn mount_argument(mount: &runtime::Mount) -> String {
+fn mount_option_refusal(value: &str) -> Option<&'static str> {
+    if value.is_empty() {
+        Some("is empty")
+    } else if value.trim() != value {
+        Some("begins or ends with whitespace, which the runtime's option parser may trim")
+    } else if value.contains(',') {
+        Some("contains `,`, which separates the fields of the runtime's mount option")
+    } else if value.contains('"') {
+        Some("contains `\"`, which quotes a field of the runtime's mount option")
+    } else if value.chars().any(char::is_control) {
+        Some("contains a control character, which the runtime's mount option cannot carry")
+    } else {
+        None
+    }
+}
+
+fn mount_argument(mount: &runtime::Mount) -> Result<String, String> {
+    let checked = |what: &str, value: &str| match mount_option_refusal(value) {
+        Some(reason) => Err(format!("the mount's {what} `{value}` {reason}")),
+        None => Ok(format!("{what}={value}")),
+    };
     let mut parts = Vec::new();
     match mount {
         runtime::Mount::Path { source, target, .. } => {
+            let Some(spelled) = source.to_str() else {
+                return Err(format!(
+                    "the mount's source `{}` is not valid UTF-8, so the runtime's mount option \
+                     cannot carry it exactly",
+                    source.display()
+                ));
+            };
             parts.push("type=bind".to_owned());
-            parts.push(format!(
-                "source={}",
-                source.to_string_lossy().replace('\\', "/")
-            ));
-            parts.push(format!("target={target}"));
+            parts.push(checked("source", &host_spelling(spelled))?);
+            parts.push(checked("target", target)?);
         }
         runtime::Mount::Volume { name, target, .. } => {
             parts.push("type=volume".to_owned());
-            parts.push(format!("source={name}"));
-            parts.push(format!("target={target}"));
+            parts.push(checked("source", name)?);
+            parts.push(checked("target", target)?);
         }
         runtime::Mount::Tmpfs { target } => {
             parts.push("type=tmpfs".to_owned());
-            parts.push(format!("target={target}"));
+            parts.push(checked("target", target)?);
         }
     }
     if mount.read_only() {
         parts.push("readonly".to_owned());
     }
-    parts.join(",")
+    Ok(parts.join(","))
+}
+
+#[cfg(windows)]
+fn host_spelling(path: &str) -> String {
+    path.replace('\\', "/")
+}
+
+#[cfg(not(windows))]
+fn host_spelling(path: &str) -> String {
+    path.to_owned()
 }
 
 #[cfg(test)]

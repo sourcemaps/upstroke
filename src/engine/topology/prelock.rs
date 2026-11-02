@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use crate::config::RunnerSelection;
 use crate::error::UpstrokeError;
-use crate::runner::container::resolve::resolve_container;
+use crate::runner::container::resolve::{MountContext, resolve_container};
 use crate::runner::container::runtime::ContainerRuntime;
 use crate::runner::policy::{resolve_host, runner_policy_sha256};
 use crate::topology::events::{IncarnationId, RunnerKind, RunnerPolicy};
@@ -87,21 +87,23 @@ pub struct PreLock<'a> {
     pub runtime: Option<&'a dyn ContainerRuntime>,
     pub private_root: &'a Path,
     pub ids: &'a dyn IdSource,
+    pub mounts: &'a MountContext,
 }
 
 pub fn check(inputs: &PreLock<'_>) -> Result<PreLockChecked, UpstrokeError> {
     crate::workspace_manager::refuse_relative_repository_wide_names()?;
     let private_root = authorized_private_root(inputs.private_root)?;
-    let resolved = resolve_policy(inputs.selection, inputs.runtime)?;
+    let resolved = resolve_policy(inputs.selection, inputs.runtime, inputs.mounts)?;
     Ok(resolved.checked(private_root, inputs.ids))
 }
 
 pub fn resolve_runner(
     selection: &RunnerSelection,
     runtime: Option<&dyn ContainerRuntime>,
+    mounts: &MountContext,
 ) -> Result<RunnerResolved, UpstrokeError> {
     crate::workspace_manager::refuse_relative_repository_wide_names()?;
-    resolve_policy(selection, runtime)
+    resolve_policy(selection, runtime, mounts)
 }
 
 #[derive(Debug)]
@@ -144,6 +146,7 @@ impl RunnerResolved {
 fn resolve_policy(
     selection: &RunnerSelection,
     runtime: Option<&dyn ContainerRuntime>,
+    mounts: &MountContext,
 ) -> Result<RunnerResolved, UpstrokeError> {
     let policy = match selection.kind {
         RunnerKind::Host => resolve_host()?,
@@ -159,7 +162,7 @@ fn resolve_policy(
                     selection.image.as_deref().unwrap_or("<unset>")
                 ),
             })?;
-            resolve_container(runtime, selection)?
+            resolve_container(runtime, selection, mounts)?
         }
     };
     let policy_sha256 = runner_policy_sha256(&policy);

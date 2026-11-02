@@ -30,6 +30,7 @@ fn container_policy(image: Option<&str>) -> RunnerPolicy {
             digest: None,
         }),
         credential_volumes: Some(BTreeMap::new()),
+        mounts: Vec::new(),
     }
 }
 

@@ -68,6 +68,7 @@ fn recorded() -> RunnerPolicy {
             digest: Some(MANIFEST.to_owned()),
         }),
         credential_volumes: Some(volumes()),
+        mounts: Vec::new(),
     }
 }
 
@@ -121,7 +122,8 @@ impl RunnerPreflight for RecordingPreflight {
 #[test]
 fn the_resolved_container_policy_is_the_record_inv23_describes() {
     let (runtime, _trace) = ready_runtime();
-    let policy = resolve_container(&runtime, &selection()).expect("a ready runtime resolves");
+    let policy = resolve_container(&runtime, &selection(), &MountContext::unbound())
+        .expect("a ready runtime resolves");
 
     assert_eq!(policy.kind, RunnerKind::Container);
     assert_eq!(policy.policy, RunnerContract::ContainerV1);
@@ -171,7 +173,8 @@ fn the_recorded_reference_is_the_operators_and_never_the_runtimes() {
         "the configured reference sorts first, so `references[0]` would accidentally be right"
     );
 
-    let policy = resolve_container(&runtime, &selection()).expect("resolves");
+    let policy = resolve_container(&runtime, &selection(), &MountContext::unbound())
+        .expect("resolves");
     assert_eq!(
         policy.image.expect("image").reference,
         REFERENCE,
@@ -182,7 +185,7 @@ fn the_recorded_reference_is_the_operators_and_never_the_runtimes() {
 #[test]
 fn resolution_issues_only_read_only_operations_in_the_scopes_order() {
     let (runtime, trace) = ready_runtime();
-    resolve_container(&runtime, &selection()).expect("resolves");
+    resolve_container(&runtime, &selection(), &MountContext::unbound()).expect("resolves");
 
     assert_eq!(
         trace.ops(),
@@ -224,7 +227,8 @@ fn a_runtime_reporting_no_digest_and_one_reporting_an_empty_string_both_resolve_
         runtime.add_volume(CLAUDE_VOLUME);
         runtime.add_volume(CODEX_VOLUME);
 
-        let policy = resolve_container(&runtime, &selection()).expect("resolves");
+        let policy = resolve_container(&runtime, &selection(), &MountContext::unbound())
+            .expect("resolves");
         assert_eq!(
             policy.image.as_ref().expect("image").digest,
             None,
@@ -289,7 +293,7 @@ fn resolution_refuses_each_of_its_faults_before_any_lock_or_effect() {
             Fault::VolumeAbsent => runtime.remove_volume(CODEX_VOLUME),
         }
 
-        let outcome = resolve_container(&runtime, &selection());
+        let outcome = resolve_container(&runtime, &selection(), &MountContext::unbound());
 
         assert!(
             trace.ops().iter().all(|op| !op.is_effect()),
@@ -392,7 +396,7 @@ fn the_pre_lock_sequence_reaches_no_lock_no_marker_and_no_probe_when_resolution_
             log: log.clone(),
         };
 
-        let resolved = resolve_container(&runtime, &selection());
+        let resolved = resolve_container(&runtime, &selection(), &MountContext::unbound());
         if resolved.is_ok() {
             log.push("lock:worktree");
             log.push("effect:public-dir");
@@ -461,7 +465,7 @@ fn resolution_and_rebuild_ask_different_questions_of_the_runtime() {
             }
 
             let cell = format!("reference={reference_present} id={id_present}");
-            let resolved = resolve_container(&runtime, &selection());
+            let resolved = resolve_container(&runtime, &selection(), &MountContext::unbound());
             let mut warnings = Vec::new();
             let rebuilt = rebuild_by_inspection(&runtime, &recorded(), &selection(), &mut warnings);
 
@@ -506,7 +510,8 @@ fn the_resolved_records_digest_moves_with_the_id_the_runtime_reported() {
         runtime.tag(REFERENCE, id);
         runtime.add_volume(CLAUDE_VOLUME);
         runtime.add_volume(CODEX_VOLUME);
-        let policy = resolve_container(&runtime, &selection()).expect("resolves");
+        let policy = resolve_container(&runtime, &selection(), &MountContext::unbound())
+            .expect("resolves");
         ids.insert(policy.image.as_ref().expect("image").id.clone());
         digests.insert(runner_policy_sha256(&policy));
     }
@@ -533,7 +538,7 @@ fn the_only_volume_operation_the_seam_has_is_a_read_only_presence_question() {
     assert!(!RuntimeOp::InspectVolume.is_effect());
 
     let (runtime, trace) = ready_runtime();
-    resolve_container(&runtime, &selection()).expect("resolves");
+    resolve_container(&runtime, &selection(), &MountContext::unbound()).expect("resolves");
     let mut warnings = Vec::new();
     rebuild_by_inspection(&runtime, &recorded(), &selection(), &mut warnings).expect("rebuilds");
     assert_eq!(
@@ -550,37 +555,429 @@ fn the_only_volume_operation_the_seam_has_is_a_read_only_presence_question() {
     assert!(runtime.volume_present(CODEX_VOLUME).expect("inspects"));
 }
 
-#[test]
-fn a_configured_mount_does_not_reach_the_recorded_execution_identity() {
-    let bare = selection();
-    let mounted = RunnerSelection {
-        mounts: vec![RunnerMount {
-            source: PathBuf::from("/opt/toolchain"),
-            target: "/opt/toolchain".to_owned(),
-            read_only: false,
-        }],
+#[cfg(unix)]
+struct MountWorld {
+    _tree: ScratchTree,
+    root: PathBuf,
+    repo: PathBuf,
+    private: PathBuf,
+    credentials: PathBuf,
+    shared: PathBuf,
+    tool: PathBuf,
+}
+
+#[cfg(unix)]
+fn mount_world(tag: &str) -> MountWorld {
+    let tree = scratch(tag);
+    let root = fs::canonicalize(tree.path()).expect("the scratch root canonicalizes");
+    let repo = root.join("repo");
+    fs::create_dir_all(repo.join(".git")).expect("the repository's .git");
+    let private = root.join("state").join("private");
+    fs::create_dir_all(&private).expect("the private root");
+    let credentials = root.join("home").join(".codex");
+    fs::create_dir_all(&credentials).expect("a credential location");
+    let shared = root.join("shared");
+    fs::create_dir_all(&shared).expect("a shared directory");
+    let tool = root.join("tool.bin");
+    fs::write(&tool, "tool\n").expect("a tool file");
+    MountWorld {
+        _tree: tree,
+        root,
+        repo,
+        private,
+        credentials,
+        shared,
+        tool,
+    }
+}
+
+#[cfg(unix)]
+impl MountWorld {
+    fn context(&self) -> MountContext {
+        MountContext::bind_with(
+            &self.repo,
+            &self.private,
+            std::slice::from_ref(&self.credentials),
+        )
+        .expect("the world binds a mount context")
+    }
+}
+
+#[cfg(unix)]
+fn configured(source: &Path, target: &str, read_only: bool) -> RunnerMount {
+    RunnerMount {
+        source: source.to_path_buf(),
+        target: target.to_owned(),
+        read_only,
+    }
+}
+
+#[cfg(unix)]
+fn mounted_selection(mounts: Vec<RunnerMount>) -> RunnerSelection {
+    RunnerSelection {
+        mounts,
         ..selection()
-    };
-    assert_ne!(bare, mounted, "the two selections are the same value");
+    }
+}
+
+#[cfg(unix)]
+fn identity_of(path: &Path) -> MountSourceIdentity {
+    use std::os::unix::fs::MetadataExt as _;
+    let metadata = fs::symlink_metadata(path).expect("the source exists");
+    MountSourceIdentity {
+        kind: if metadata.is_dir() {
+            crate::topology::events::MountSourceKind::Directory
+        } else {
+            crate::topology::events::MountSourceKind::File
+        },
+        device: metadata.dev(),
+        object: metadata.ino(),
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_configured_mount_is_recorded_and_rebuilt_from_the_record() {
+    let world = mount_world("mount-recorded");
+    let link = world.root.join("link-to-shared");
+    std::os::unix::fs::symlink(&world.shared, &link).expect("a link to the shared directory");
+    let mounted = mounted_selection(vec![
+        configured(&world.tool, "/opt/tool", false),
+        configured(&link, "/data", true),
+    ]);
 
     let (runtime, _trace) = ready_runtime();
-    let without = resolve_container(&runtime, &bare).expect("resolves");
-    let with = resolve_container(&runtime, &mounted).expect("resolves");
+    let bare = resolve_container(&runtime, &selection(), &world.context()).expect("resolves");
+    let with = resolve_container(&runtime, &mounted, &world.context()).expect("resolves");
+    assert!(bare.mounts.is_empty());
     assert_eq!(
-        without, with,
-        "a mount reached the record; if that is intended, INV-23's four fields moved"
+        with.mounts,
+        vec![
+            RecordedMount {
+                source: world.shared.to_str().expect("utf-8").to_owned(),
+                target: "/data".to_owned(),
+                read_only: true,
+                source_identity: identity_of(&world.shared),
+            },
+            RecordedMount {
+                source: world.tool.to_str().expect("utf-8").to_owned(),
+                target: "/opt/tool".to_owned(),
+                read_only: false,
+                source_identity: identity_of(&world.tool),
+            },
+        ],
+        "the record is the canonical source, the target, the disposition and the identity of \
+         each mount, ordered by target"
+    );
+    assert_eq!(with.completeness(), Ok(()));
+    assert_eq!(bare.difference(&with), Some(RunnerField::Mounts));
+    assert_ne!(runner_policy_sha256(&bare), runner_policy_sha256(&with));
+    assert!(canonical_bytes(&bare).starts_with(b"25:upstroke.runner-policy.v1;"));
+    assert!(canonical_bytes(&with).starts_with(b"25:upstroke.runner-policy.v2;"));
+
+    let canonical_spelling = mounted_selection(vec![
+        configured(&world.shared, "/data", true),
+        configured(&world.tool, "/opt/tool", false),
+    ]);
+    for (label, today) in [
+        ("the configuration it was resolved from", &mounted),
+        ("the same mounts spelled canonically", &canonical_spelling),
+    ] {
+        let mut warnings = Vec::new();
+        let rebuilt =
+            rebuild_by_inspection(&runtime, &with, today, &mut warnings).expect("rebuilds");
+        assert_eq!(rebuilt, with, "`{label}`");
+        assert!(
+            warnings.is_empty(),
+            "`{label}` is the recorded configuration and warned: {warnings:?}"
+        );
+    }
+
+    let changed: [(&str, RunnerSelection); 5] = [
+        (
+            "a target moved",
+            mounted_selection(vec![
+                configured(&link, "/shared", true),
+                configured(&world.tool, "/opt/tool", false),
+            ]),
+        ),
+        (
+            "made writable",
+            mounted_selection(vec![
+                configured(&link, "/data", false),
+                configured(&world.tool, "/opt/tool", false),
+            ]),
+        ),
+        (
+            "another source",
+            mounted_selection(vec![
+                configured(&world.private, "/data", true),
+                configured(&world.tool, "/opt/tool", false),
+            ]),
+        ),
+        (
+            "a source that does not exist today",
+            mounted_selection(vec![
+                configured(&world.root.join("absent"), "/data", true),
+                configured(&world.tool, "/opt/tool", false),
+            ]),
+        ),
+        ("no mounts", selection()),
+    ];
+    for (label, today) in changed {
+        let mut warnings = Vec::new();
+        let rebuilt =
+            rebuild_by_inspection(&runtime, &with, &today, &mut warnings).expect("rebuilds");
+        assert_eq!(rebuilt, with, "`{label}`: today's config reached the rebuilt runner");
+        assert_eq!(
+            runner_policy_sha256(&rebuilt),
+            runner_policy_sha256(&with),
+            "`{label}`"
+        );
+        assert_eq!(warnings.len(), 1, "`{label}`: {warnings:?}");
+        assert!(
+            warnings[0].contains("configured mount set") && warnings[0].contains("is ignored"),
+            "`{label}`: the warning does not name the mount set as ignored: {}",
+            warnings[0]
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn every_configured_mount_that_could_reach_a_withheld_path_is_refused_before_the_runtime_is_asked()
+{
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let world = mount_world("mount-refusals");
+    let linked = world.root.join("linked");
+    let main_git = world.root.join("main").join(".git");
+    let admin = main_git.join("worktrees").join("linked");
+    fs::create_dir_all(&admin).expect("a linked worktree's admin directory");
+    fs::create_dir_all(main_git.join("objects")).expect("the common objects");
+    fs::write(admin.join("commondir"), "../..\n").expect("commondir");
+    fs::create_dir_all(&linked).expect("the linked worktree");
+    fs::write(linked.join(".git"), format!("gitdir: {}\n", admin.display())).expect("gitfile");
+    let linked_context = MountContext::bind_with(
+        &linked,
+        &world.private,
+        std::slice::from_ref(&world.credentials),
+    )
+    .expect("a linked worktree binds");
+
+    fs::create_dir_all(world.repo.join("src")).expect("a directory inside the repository");
+    fs::create_dir_all(world.private.join("runs")).expect("a directory inside the private root");
+    fs::write(world.credentials.join("config.toml"), "x\n").expect("a credential file");
+    let socket = world.root.join("socket");
+    let _listener = std::os::unix::net::UnixListener::bind(&socket).expect("a socket");
+    let spelled = |name: &[u8]| {
+        let path = world.root.join(std::ffi::OsStr::from_bytes(name));
+        fs::create_dir_all(&path).expect("an awkwardly named directory");
+        path
+    };
+
+    let context = world.context();
+    let unbound = MountContext::unbound();
+    let source_cells: Vec<(&str, PathBuf, &MountContext, &str)> = vec![
+        ("relative", PathBuf::from("shared"), &context, "not an absolute host path"),
+        ("absent", world.root.join("absent"), &context, "does not exist"),
+        ("a socket", socket.clone(), &context, "neither a directory nor a regular file"),
+        ("the repository", world.repo.clone(), &context, "its source is `"),
+        ("inside the repository", world.repo.join("src"), &context, "lies inside"),
+        ("the repository's .git", world.repo.join(".git"), &context, "lies inside"),
+        ("above everything", world.root.clone(), &context, "contains"),
+        ("the private root", world.private.clone(), &context, "the private root"),
+        ("inside the private root", world.private.join("runs"), &context, "lies inside"),
+        ("above the private root", world.root.join("state"), &context, "contains"),
+        ("a credential location", world.credentials.clone(), &context, "credential"),
+        ("above a credential location", world.root.join("home"), &context, "credential"),
+        (
+            "inside a credential location",
+            world.credentials.join("config.toml"),
+            &context,
+            "credential",
+        ),
+        ("the common Git directory", main_git.clone(), &linked_context, "authoritative Git"),
+        ("inside common Git", main_git.join("objects"), &linked_context, "authoritative Git"),
+        ("above common Git", world.root.join("main"), &linked_context, "authoritative Git"),
+        ("a linked admin directory", admin.clone(), &linked_context, "authoritative Git"),
+        ("a comma", spelled(b"a,b"), &context, "contains `,`"),
+        ("a quote", spelled(b"q\"uote"), &context, "contains `\"`"),
+        ("a newline", spelled(b"new\nline"), &context, "control character"),
+        ("a trailing space", spelled(b"trailing "), &context, "whitespace"),
+        ("not UTF-8", spelled(b"bad\xff"), &context, "not valid UTF-8"),
+        ("unbound", world.shared.clone(), &unbound, "no repository context"),
+    ];
+    let target_cells: [(&str, &str); 13] = [
+        ("data", "not an absolute path"),
+        ("/", "the container's root"),
+        ("/data/", "normal form"),
+        ("/data//x", "normal form"),
+        ("/./data", "normal form"),
+        ("/data/../etc", "normal form"),
+        ("/upstroke", "reserves"),
+        ("/upstroke/cache", "reserves"),
+        ("/tmp", "reserves"),
+        ("/tmp/cache", "reserves"),
+        ("/data,readonly=false", "contains `,`"),
+        (" /data", "whitespace"),
+        ("", "is empty"),
+    ];
+
+    let mut refused = 0_usize;
+    let mut expect_refused =
+        |label: &str, selection: RunnerSelection, context: &MountContext, needle: &str| {
+            let (runtime, trace) = ready_runtime();
+            match resolve_container(&runtime, &selection, context) {
+                Err(InspectionRefusal::MountRefused { reason, .. }) => assert!(
+                    reason.contains(needle),
+                    "`{label}` was refused for another reason: {reason}"
+                ),
+                Err(other) => panic!("`{label}` was refused as {other}"),
+                Ok(policy) => panic!("`{label}` was recorded: {:?}", policy.mounts),
+            }
+            assert!(
+                trace.ops().is_empty(),
+                "`{label}`: the runtime was asked before the mount was refused: {:?}",
+                trace.rendered()
+            );
+            refused += 1;
+        };
+    for (label, source, context, needle) in source_cells.iter().cloned() {
+        expect_refused(
+            label,
+            mounted_selection(vec![configured(&source, "/data", true)]),
+            context,
+            needle,
+        );
+    }
+    for (target, needle) in target_cells {
+        expect_refused(
+            target,
+            mounted_selection(vec![configured(&world.shared, target, true)]),
+            &context,
+            needle,
+        );
+    }
+    for (label, first, second) in [
+        ("a repeated target", "/data", "/data"),
+        ("a nested target", "/data", "/data/inner"),
+        ("an enclosing target", "/srv/data/inner", "/srv/data"),
+    ] {
+        expect_refused(
+            label,
+            mounted_selection(vec![
+                configured(&world.shared, first, true),
+                configured(&world.tool, second, true),
+            ]),
+            &context,
+            "one holds the other",
+        );
+    }
+    assert_eq!(refused, source_cells.len() + 13 + 3);
+
+    for reserved in [
+        BoundaryLayout::DEFAULT_WORKSPACE,
+        BoundaryLayout::DEFAULT_CREDENTIALS,
+        BoundaryLayout::DEFAULT_GIT_VIEW,
+        BoundaryLayout::DEFAULT_GIT_OBJECTS,
+        BoundaryLayout::DEFAULT_SETTINGS,
+    ] {
+        assert!(
+            reserved.starts_with(&format!("{BOUNDARY_ROOT}/")),
+            "`{reserved}` is a path the runner composes outside the reserved `{BOUNDARY_ROOT}`"
+        );
+    }
+
+    let (runtime, _trace) = ready_runtime();
+    let accepted = resolve_container(
+        &runtime,
+        &mounted_selection(vec![
+            configured(&world.shared, "/upstroked", true),
+            configured(&world.tool, "/tmpfile", false),
+            configured(&world.repo.join("src"), "/database", true),
+        ]),
+        &linked_context,
+    )
+    .expect(
+        "a prefix of a reserved target that is not under it, and a directory of another \
+         repository's checkout, are accepted",
     );
     assert_eq!(
-        runner_policy_sha256(&without),
-        runner_policy_sha256(&with),
-        "the digest the marker and every container intent carry does not separate them"
+        accepted
+            .mounts
+            .iter()
+            .map(|mount| mount.target.as_str())
+            .collect::<Vec<_>>(),
+        vec!["/database", "/tmpfile", "/upstroked"]
     );
-    let mut warnings = Vec::new();
-    rebuild_by_inspection(&runtime, &recorded(), &mounted, &mut warnings).expect("rebuilds");
-    assert!(
-        warnings.is_empty(),
-        "a mount difference produced a warning the record cannot carry: {warnings:?}"
+}
+
+#[cfg(unix)]
+#[test]
+fn the_rebuild_refuses_a_missing_or_rebound_source_before_any_spawn_and_resumes_once_it_is_back()
+{
+    let world = mount_world("mount-rebuild");
+    let today = mounted_selection(vec![configured(&world.shared, "/data", false)]);
+    let (runtime, _trace) = ready_runtime();
+    let record = resolve_container(&runtime, &today, &world.context()).expect("resolves");
+    let away = world.root.join("shared.away");
+    let other = world.root.join("other");
+    fs::create_dir_all(&other).expect("another directory");
+
+    struct Attempt {
+        label: &'static str,
+        outcome: Result<RunnerPolicy, RebuildRefusal>,
+        spawns: usize,
+        asked: usize,
+    }
+    fn assert_moved(attempt: Attempt, needle: &str) {
+        let label = attempt.label;
+        let refusal = attempt.outcome.expect_err(label);
+        assert!(refusal.before_any_spawn(), "`{label}`");
+        assert_eq!(attempt.spawns, 0, "`{label}`: the preflight spawned");
+        assert_eq!(
+            attempt.asked, 0,
+            "`{label}`: the runtime was asked before the source was checked"
+        );
+        match refusal {
+            RebuildRefusal::Inspection(InspectionRefusal::MountSourceMoved { reason, .. }) => {
+                assert!(reason.contains(needle), "`{label}`: {reason}");
+            }
+            other => panic!("`{label}` was refused as {other}"),
+        }
+    }
+    let rebuild = |label: &'static str| {
+        let (runtime, trace) = ready_runtime();
+        let preflight = RecordingPreflight::accepting(trace.clone());
+        let mut warnings = Vec::new();
+        let outcome = rebuild_from_record(&runtime, &record, &today, &preflight, &mut warnings);
+        Attempt {
+            label,
+            outcome,
+            spawns: preflight.spawns(),
+            asked: trace.ops().len(),
+        }
+    };
+
+    fs::rename(&world.shared, &away).expect("move the source away");
+    assert_moved(rebuild("moved away"), "is gone");
+    fs::rename(&other, &world.shared).expect("put another directory at the recorded path");
+    assert_moved(rebuild("another directory"), "names another object");
+    fs::rename(&world.shared, &other).expect("take it back out");
+    std::os::unix::fs::symlink(&away, &world.shared).expect("a link to the moved source");
+    assert_moved(rebuild("a link to the source"), "rebound it");
+    fs::remove_file(&world.shared).expect("remove the link");
+
+    fs::rename(&away, &world.shared).expect("put the recorded source back");
+    let restored = rebuild("restored");
+    assert_eq!(
+        restored
+            .outcome
+            .expect("the restored source re-establishes the record"),
+        record
     );
+    assert_eq!(restored.spawns, 1, "the restored run reaches its preflight");
 }
 
 #[test]
@@ -588,7 +985,7 @@ fn resolution_refuses_a_selection_that_does_not_ask_for_a_container() {
     let (runtime, trace) = ready_runtime();
     let host = RunnerSelection::host_default();
     assert_eq!(
-        resolve_container(&runtime, &host)
+        resolve_container(&runtime, &host, &MountContext::unbound())
             .expect_err("a host selection is not a container selection"),
         InspectionRefusal::NotAContainerSelection {
             kind: RunnerKind::Host
@@ -597,7 +994,8 @@ fn resolution_refuses_a_selection_that_does_not_ask_for_a_container() {
     let mut imageless = selection();
     imageless.image = None;
     assert_eq!(
-        resolve_container(&runtime, &imageless).expect_err("a selection without an image refuses"),
+        resolve_container(&runtime, &imageless, &MountContext::unbound())
+            .expect_err("a selection without an image refuses"),
         InspectionRefusal::SelectionWithoutImage
     );
     assert!(
@@ -616,12 +1014,19 @@ fn the_rebuild_returns_the_recorded_runner_exactly_however_the_config_differs() 
     let mut host_now = RunnerSelection::host_default();
     host_now.from_config = true;
 
+    let mut unavailable_mount = selection();
+    unavailable_mount.mounts = vec![RunnerMount {
+        source: PathBuf::from("/nonexistent/upstroke-resolve-test/mount"),
+        target: "/data".to_owned(),
+        read_only: true,
+    }];
     let configs = [
         ("identical", selection()),
         ("moved reference", moved_reference),
         ("fewer volumes", fewer_volumes),
         ("host now", host_now),
         ("absent section", RunnerSelection::host_default()),
+        ("a newly configured mount that does not exist", unavailable_mount),
     ];
     for (label, today) in configs {
         let (runtime, _trace) = ready_runtime();
@@ -663,6 +1068,12 @@ fn a_config_that_differs_warns_naming_the_field_that_moved() {
     only_reference.image = Some("someone/else:9".to_owned());
     let mut only_volumes = selection();
     only_volumes.credential_volumes.remove("codex");
+    let mut mounted = selection();
+    mounted.mounts = vec![RunnerMount {
+        source: PathBuf::from("/opt/toolchain"),
+        target: "/opt/toolchain".to_owned(),
+        read_only: false,
+    }];
     assert_eq!(
         configured_difference(&recorded(), &only_reference),
         Some(RunnerField::ImageReference)
@@ -695,6 +1106,7 @@ fn a_config_that_differs_warns_naming_the_field_that_moved() {
             reference_and_volumes,
             Some(RunnerField::ImageReference),
         ),
+        ("a mount configured today", mounted, Some(RunnerField::Mounts)),
     ];
 
     let mut named = BTreeSet::new();
@@ -736,6 +1148,7 @@ fn a_config_that_differs_warns_naming_the_field_that_moved() {
             RunnerField::Kind,
             RunnerField::ImageReference,
             RunnerField::CredentialVolumes,
+            RunnerField::Mounts,
         ]
         .into_iter()
         .map(|field| field.to_string())
@@ -774,6 +1187,7 @@ fn an_absent_runner_section_warns_only_when_the_record_is_not_the_default() {
         policy: RunnerContract::HostV1,
         image: None,
         credential_volumes: None,
+        mounts: Vec::new(),
     };
 
     let cells: Vec<(&str, RunnerPolicy, RunnerSelection, Option<RunnerField>)> = vec![
@@ -1552,7 +1966,6 @@ fn the_resolution_module_names_no_lock_no_write_and_no_spawn() {
     const FORBIDDEN: &[&str] = &[
         "WorktreeLock",
         "RunLock",
-        "fs::",
         "File::",
         "Command::",
         ".spawn(",
@@ -1577,6 +1990,25 @@ fn the_resolution_module_names_no_lock_no_write_and_no_spawn() {
     assert!(
         named.is_empty(),
         "resolution reaches {named:?}, so it is no longer read-only by construction"
+    );
+    const READ_ONLY_FS: &[&str] = &[
+        "fs::canonicalize(",
+        "fs::symlink_metadata(",
+        "fs::MetadataExt",
+    ];
+    let observations: usize = READ_ONLY_FS
+        .iter()
+        .map(|call| production.matches(call).count())
+        .sum();
+    assert_eq!(
+        production.matches("fs::").count(),
+        observations,
+        "resolution names an `fs::` item other than the read-only observations \
+         {READ_ONLY_FS:?} that mount resolution and its recheck need"
+    );
+    assert!(
+        observations > 0,
+        "the read-only observations are gone, so the allowance above names nothing"
     );
     assert!(
         production.contains("fn resolve_container"),

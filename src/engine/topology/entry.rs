@@ -23,7 +23,7 @@ use crate::runner::Runner;
 use crate::runner::container::DockerCli;
 use crate::runner::container::env::ContainerEnvironment;
 use crate::runner::container::exec::{ContainerRunner, RunIdentity};
-use crate::runner::container::resolve::InspectionRefusal;
+use crate::runner::container::resolve::{InspectionRefusal, MountContext};
 use crate::runner::container::runtime::{
     ContainerRuntime, ContainerTrace, LockProbe, RuntimeError,
 };
@@ -102,15 +102,24 @@ pub fn prepare_fresh(
     let mut warnings = analysis.warnings.clone();
 
     let runtime = DockerCli::default();
+    let mounts = MountContext::for_selection(
+        &analysis.config.runner,
+        &opts.repo_root,
+        &opts
+            .private_root
+            .clone()
+            .unwrap_or_else(rundir::default_private_root),
+    )?;
     let authorization = match &opts.private_root {
         Some(root) => Authorization::Checked(prelock::check(&PreLock {
             selection: &analysis.config.runner,
             runtime: Some(&runtime),
             private_root: root,
             ids: &RealIds,
+            mounts: &mounts,
         })?),
         None => Authorization::Pending {
-            resolved: prelock::resolve_runner(&analysis.config.runner, Some(&runtime))?,
+            resolved: prelock::resolve_runner(&analysis.config.runner, Some(&runtime), &mounts)?,
             root: rundir::default_private_root(),
         },
     };

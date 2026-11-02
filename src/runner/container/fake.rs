@@ -1504,6 +1504,9 @@ pub(crate) const DOCKER_GATED_TESTS: &[&str] = &[
     "real_docker_a_containerized_agent_reads_its_own_settings_and_cannot_write_them",
     "real_docker_a_container_runs_as_the_coordinators_user_and_leaves_what_it_can_reclaim",
     "real_docker_a_containerized_program_reads_its_exact_stdin_then_eof",
+    "real_docker_a_read_only_configured_mount_is_readable_and_not_writable",
+    "real_docker_a_read_write_configured_mount_is_writable_as_the_coordinators_user",
+    "real_docker_a_resume_with_changed_mount_config_keeps_the_recorded_mounts",
 ];
 
 pub(crate) fn absent_reason() -> String {

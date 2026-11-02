@@ -144,6 +144,7 @@ fn runner_policy() -> RunnerPolicy {
         policy: RunnerContract::HostV1,
         image: None,
         credential_volumes: None,
+        mounts: Vec::new(),
     }
 }
 
@@ -158,6 +159,7 @@ fn container_runner_policy() -> RunnerPolicy {
             digest: None,
         }),
         credential_volumes: None,
+        mounts: Vec::new(),
     }
 }
 

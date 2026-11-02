@@ -416,6 +416,30 @@ impl TopologyReport {
                 runner_policy(&self.runner)
             )),
         }
+        if !self.runner.mounts.is_empty() {
+            out.push(format_args!(
+                "runner mounts: {}",
+                self.runner.mounts.len()
+            ));
+            for mount in &self.runner.mounts {
+                out.push(format_args!(
+                    "  {} <- {} ({}, {} device {} object {})",
+                    mount.target,
+                    mount.source,
+                    if mount.read_only {
+                        "read-only"
+                    } else {
+                        "read-write"
+                    },
+                    match mount.source_identity.kind {
+                        crate::topology::events::MountSourceKind::Directory => "directory",
+                        crate::topology::events::MountSourceKind::File => "file",
+                    },
+                    mount.source_identity.device,
+                    mount.source_identity.object
+                ));
+            }
+        }
         if let Some(key) = self.halted_at {
             out.push(format_args!("halted at task {key}"));
         }

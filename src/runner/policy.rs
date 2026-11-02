@@ -9,9 +9,11 @@
 use sha2::{Digest, Sha256};
 
 use crate::error::UpstrokeError;
-use crate::topology::events::{RunnerContract, RunnerKind, RunnerPolicy};
+use crate::topology::events::{MountSourceKind, RunnerContract, RunnerKind, RunnerPolicy};
 
 pub const CANONICAL_VERSION: &str = "upstroke.runner-policy.v1";
+
+pub const CANONICAL_VERSION_WITH_MOUNTS: &str = "upstroke.runner-policy.v2";
 
 #[must_use]
 pub fn host_policy() -> RunnerPolicy {
@@ -20,6 +22,7 @@ pub fn host_policy() -> RunnerPolicy {
         policy: RunnerContract::HostV1,
         image: None,
         credential_volumes: None,
+        mounts: Vec::new(),
     }
 }
 
@@ -36,7 +39,14 @@ pub fn resolve_host() -> Result<RunnerPolicy, UpstrokeError> {
 #[must_use]
 pub fn canonical_bytes(policy: &RunnerPolicy) -> Vec<u8> {
     let mut out = Vec::new();
-    field(&mut out, CANONICAL_VERSION);
+    field(
+        &mut out,
+        if policy.mounts.is_empty() {
+            CANONICAL_VERSION
+        } else {
+            CANONICAL_VERSION_WITH_MOUNTS
+        },
+    );
     field(&mut out, kind_tag(policy.kind));
     field(&mut out, contract_tag(policy.policy));
     match &policy.image {
@@ -65,6 +75,17 @@ pub fn canonical_bytes(policy: &RunnerPolicy) -> Vec<u8> {
         }
         None => flag(&mut out, false),
     }
+    if !policy.mounts.is_empty() {
+        field(&mut out, &policy.mounts.len().to_string());
+        for mount in &policy.mounts {
+            field(&mut out, &mount.source);
+            field(&mut out, &mount.target);
+            flag(&mut out, mount.read_only);
+            field(&mut out, source_kind_tag(mount.source_identity.kind));
+            field(&mut out, &mount.source_identity.device.to_string());
+            field(&mut out, &mount.source_identity.object.to_string());
+        }
+    }
     out
 }
 
@@ -77,6 +98,13 @@ const fn kind_tag(kind: RunnerKind) -> &'static str {
     match kind {
         RunnerKind::Host => "host",
         RunnerKind::Container => "container",
+    }
+}
+
+const fn source_kind_tag(kind: MountSourceKind) -> &'static str {
+    match kind {
+        MountSourceKind::Directory => "directory",
+        MountSourceKind::File => "file",
     }
 }
 
@@ -139,6 +167,7 @@ mod tests {
                 digest: Some("sha256:b".to_owned()),
             }),
             credential_volumes: Some(volumes),
+            mounts: Vec::new(),
         }
     }
 
@@ -197,6 +226,112 @@ mod tests {
             CONTAINER_CANONICAL,
             "container encoding drifted from the documented field list"
         );
+    }
+
+    fn mounted_fixture() -> RunnerPolicy {
+        let mut policy = container_fixture();
+        policy.mounts = vec![
+            crate::topology::events::RecordedMount {
+                source: "/srv/cache".to_owned(),
+                target: "/cache".to_owned(),
+                read_only: true,
+                source_identity: crate::topology::events::MountSourceIdentity {
+                    kind: MountSourceKind::Directory,
+                    device: 2049,
+                    object: 131_074,
+                },
+            },
+            crate::topology::events::RecordedMount {
+                source: "/opt/cc".to_owned(),
+                target: "/opt/cc".to_owned(),
+                read_only: false,
+                source_identity: crate::topology::events::MountSourceIdentity {
+                    kind: MountSourceKind::File,
+                    device: 2049,
+                    object: 7,
+                },
+            },
+        ];
+        policy
+    }
+
+    const MOUNTED_CANONICAL: &[u8] = b"25:upstroke.runner-policy.v2;9:container;12:container-v1;\
+                                       1:1;15:upstroke/ci:3.2;8:sha256:a;1:1;8:sha256:b;1:1;1:2;\
+                                       11:claude-code;8:creds-cc;5:codex;8:creds-cx;1:2;\
+                                       10:/srv/cache;6:/cache;1:1;9:directory;4:2049;6:131074;\
+                                       7:/opt/cc;7:/opt/cc;1:0;4:file;4:2049;1:7;";
+
+    #[test]
+    fn an_empty_mount_list_keeps_the_v1_bytes_and_a_mounted_record_hashes_in_v2() {
+        let mut unmounted = mounted_fixture();
+        unmounted.mounts.clear();
+        assert_eq!(
+            canonical_bytes(&unmounted),
+            CONTAINER_CANONICAL,
+            "a record without mounts left the v1 encoding"
+        );
+        assert_eq!(canonical_bytes(&host_policy()), HOST_CANONICAL);
+        assert_eq!(
+            canonical_bytes(&mounted_fixture()),
+            MOUNTED_CANONICAL,
+            "the v2 encoding drifted from the documented field list"
+        );
+        assert_eq!(
+            runner_policy_sha256(&mounted_fixture()),
+            format!("sha256:{:x}", Sha256::digest(MOUNTED_CANONICAL))
+        );
+        assert!(
+            MOUNTED_CANONICAL.starts_with(b"25:upstroke.runner-policy.v2;"),
+            "a mounted record is not in its own hash domain"
+        );
+        assert_eq!(
+            &MOUNTED_CANONICAL[b"25:upstroke.runner-policy.v2;".len()..CONTAINER_CANONICAL.len()],
+            &CONTAINER_CANONICAL[b"25:upstroke.runner-policy.v1;".len()..],
+            "the v2 encoding does not carry the v1 fields unchanged before its mounts"
+        );
+    }
+
+    #[test]
+    fn the_digest_separates_every_field_of_every_mount() {
+        let base = mounted_fixture();
+        let movers: [(&str, fn(&mut RunnerPolicy)); 11] = [
+            ("a source byte", |p| p.mounts[0].source.push('x')),
+            ("a target byte", |p| p.mounts[1].target.push('x')),
+            ("read-only", |p| p.mounts[0].read_only = false),
+            ("read-write", |p| p.mounts[1].read_only = true),
+            ("the kind", |p| {
+                p.mounts[0].source_identity.kind = MountSourceKind::File;
+            }),
+            ("the device", |p| p.mounts[1].source_identity.device += 1),
+            ("the object", |p| p.mounts[0].source_identity.object += 1),
+            ("the order", |p| p.mounts.swap(0, 1)),
+            ("one mount fewer", |p| {
+                p.mounts.pop();
+            }),
+            ("a boundary moved between source and target", |p| {
+                p.mounts[0].source = "/srv/cache/".to_owned();
+                p.mounts[0].target = "cache".to_owned();
+            }),
+            ("a boundary moved between device and object", |p| {
+                p.mounts[0].source_identity.device = 20_491;
+                p.mounts[0].source_identity.object = 31_074;
+            }),
+        ];
+        let mut seen = std::collections::BTreeSet::new();
+        seen.insert(runner_policy_sha256(&base));
+        let mut unmounted = base.clone();
+        unmounted.mounts.clear();
+        seen.insert(runner_policy_sha256(&unmounted));
+        for (name, moved) in movers {
+            let mut other = base.clone();
+            moved(&mut other);
+            assert_ne!(other, base, "moving {name} moved nothing");
+            assert!(
+                seen.insert(runner_policy_sha256(&other)),
+                "moving {name} gave a digest another record already has"
+            );
+        }
+        assert_eq!(seen.len(), 13);
     }
 
     #[test]
@@ -401,6 +536,7 @@ mod tests {
                 digest: None,
             }),
             credential_volumes: None,
+            mounts: Vec::new(),
         };
         assert_eq!(
             canonical_bytes(&upper_host),
@@ -696,6 +832,7 @@ mod tests {
                         policy: contract,
                         image: has_image.then(image).flatten(),
                         credential_volumes: has_volumes.then(BTreeMap::new),
+                        mounts: Vec::new(),
                     };
                     outcomes.insert(
                         format!("{kind:?}/image={has_image}/volumes={has_volumes}"),
@@ -754,6 +891,7 @@ mod tests {
                 digest: None,
             }),
             credential_volumes: Some(BTreeMap::new()),
+            mounts: Vec::new(),
         };
         let plain = RunnerPolicy {
             image: Some(ImageIdentity {

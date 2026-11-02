@@ -592,6 +592,7 @@ impl Fixture {
             runtime: None,
             private_root: &self.private_root,
             ids: &Fixed::default(),
+            mounts: &crate::runner::container::resolve::MountContext::unbound(),
         })
         .expect("the host runner resolves")
     }
@@ -1017,6 +1018,106 @@ fn run_started_records_runner_policy_resolved_before_worktree_lock() {
         data.private_dir,
         fixture.private().to_string_lossy(),
         "the recorded locator is the authorized one, not the caller's"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_run_with_configured_mounts_records_one_runner_in_its_marker_owner_record_and_run_started() {
+    use crate::runner::container::resolve::MountContext;
+    use crate::runner::policy::{canonical_bytes, runner_policy_sha256};
+
+    let fixture = Fixture::new("mounted-record");
+    std::fs::create_dir_all(fixture.repo.join(".git")).expect("the repository's .git");
+    let shared = fixture.root.join("operator-shared");
+    std::fs::create_dir_all(&shared).expect("an operator directory");
+    let selection = crate::config::RunnerSelection {
+        mounts: vec![crate::config::RunnerMount {
+            source: shared.clone(),
+            target: "/data".to_owned(),
+            read_only: true,
+        }],
+        ..container_selection()
+    };
+    let runtime = container_runtime();
+    let context = MountContext::bind_with(&fixture.repo, &fixture.private_root, &[])
+        .expect("the fixture binds a mount context");
+    let checked = super::super::prelock::check(&super::super::prelock::PreLock {
+        selection: &selection,
+        runtime: Some(&runtime),
+        private_root: &fixture.private_root,
+        ids: &Fixed::default(),
+        mounts: &context,
+    })
+    .expect("the mounted container policy resolves before the lock");
+    let policy = checked.runner_policy().clone();
+    assert_eq!(
+        policy
+            .mounts
+            .iter()
+            .map(|mount| (mount.source.clone(), mount.target.as_str(), mount.read_only))
+            .collect::<Vec<_>>(),
+        vec![(
+            std::fs::canonicalize(&shared)
+                .expect("canonical")
+                .to_str()
+                .expect("utf-8")
+                .to_owned(),
+            "/data",
+            true
+        )]
+    );
+    let digest = runner_policy_sha256(&policy);
+    assert_eq!(checked.runner_policy_sha256(), digest);
+    assert!(canonical_bytes(&policy).starts_with(b"25:upstroke.runner-policy.v2;"));
+
+    let probes = RecordingProbes::new(&digest);
+    let refs = FakeRefs::empty();
+    let mut hooks = TestHooks::new();
+    hooks.faults().arm_phase(
+        EffectSiteId::RunDir(RunDirSite::RemoveMarker),
+        HookPhase::Before,
+        Injection::Error,
+    );
+    let execution = RecordingRunner::default();
+    let ledger = std::sync::Mutex::new(InvocationLedger::new());
+    let plan_bytes = normalized_plan();
+    let clock = Fixed::default();
+    let agents = agents();
+    let request = Request {
+        repo_root: &fixture.repo,
+        repo_key: fixture.repo_key.clone(),
+        normalized_plan: &plan_bytes,
+        inputs: inputs(),
+        record: record(&agents, policy.clone()),
+        agents: &agents,
+        probes: &probes,
+        refs: &refs,
+        clock: &clock,
+        runner: &execution,
+        pair: ProbePair::grant(&ledger),
+    };
+    let mut warnings = Vec::new();
+    let refused = create_run(checked, request, &mut hooks, &mut warnings)
+        .expect_err("P7 was made to fail");
+    assert_eq!(refused.reached, Prefix::P6);
+
+    let marker = marker_of(&fixture.public());
+    assert_eq!(
+        marker.runner_policy_sha256, digest,
+        "the marker carries the v2 digest of the mounted record"
+    );
+    let owner = owner_of(&fixture.private());
+    assert_eq!(owner.runner, policy, "owner.json records the mounts");
+    let event = committed_first_line(&fixture.public()).expect("run_started is committed");
+    let TopologyEventBody::RunStarted { data } = event.body else {
+        panic!("the first line is not `run_started`");
+    };
+    assert_eq!(data.runner, policy, "run_started records the same mounts");
+    assert_eq!(
+        runner_policy_sha256(&data.runner),
+        marker.runner_policy_sha256,
+        "and the marker's digest is that record's"
     );
 }
 
@@ -2714,6 +2815,7 @@ fn write_command_start(
         runtime: Some(runtime),
         private_root: &fixture.private_root,
         ids: &Fixed::default(),
+        mounts: &crate::runner::container::resolve::MountContext::unbound(),
     })?;
     crate::rundir::WorktreeLock::acquire_in(&fixture.repo, git_dir)
 }
@@ -3010,6 +3112,7 @@ fn container_probe_kill_child() {
         runtime: Some(&runtime),
         private_root: &fixture.private_root,
         ids: &Fixed::default(),
+        mounts: &crate::runner::container::resolve::MountContext::unbound(),
     })
     .expect("the container policy resolves by inspection");
     let refs = FakeRefs::empty();
@@ -3245,6 +3348,7 @@ fn container_policy() -> RunnerPolicy {
                 .into_iter()
                 .collect(),
         ),
+        mounts: Vec::new(),
     }
 }
 
@@ -4712,6 +4816,7 @@ fn create_over_containers(
         runtime: Some(runtime),
         private_root: &fixture.private_root,
         ids: &Fixed::default(),
+        mounts: &crate::runner::container::resolve::MountContext::unbound(),
     })
     .expect("the container policy resolves by inspection");
     let execution = p4_execution(fixture, &checked, execution_runtime);

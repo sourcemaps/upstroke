@@ -1205,6 +1205,7 @@ mod scaffold_runner {
                 digest: None,
             }),
             credential_volumes: None,
+            mounts: Vec::new(),
         };
         let container = RecordingRunner::new().declaring(declared.clone());
         container.run_blocking(&gate(1)).expect("runs");

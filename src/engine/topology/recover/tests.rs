@@ -594,6 +594,7 @@ fn container_runner() -> RunnerPolicy {
                 .into_iter()
                 .collect(),
         ),
+        mounts: Vec::new(),
     }
 }
 
@@ -603,6 +604,7 @@ fn host_runner() -> RunnerPolicy {
         policy: RunnerContract::HostV1,
         image: None,
         credential_volumes: None,
+        mounts: Vec::new(),
     }
 }
 

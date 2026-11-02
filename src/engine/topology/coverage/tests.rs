@@ -961,6 +961,7 @@ fn witness_run_started() -> crate::topology::events::RunStarted4 {
             policy: RunnerContract::HostV1,
             image: None,
             credential_volumes: None,
+            mounts: Vec::new(),
         },
         probed_agents: vec!["claude-code".to_owned()],
         branch: "upstroke/run-st07".to_owned(),

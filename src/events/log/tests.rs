@@ -198,6 +198,7 @@ fn run_started_event() -> TopologyEvent {
                     policy: RunnerContract::HostV1,
                     image: None,
                     credential_volumes: None,
+                    mounts: Vec::new(),
                 },
                 probed_agents: vec!["claude-code".to_owned()],
                 branch: "upstroke/run-01J8ZQKB2M7NC5PQR0TVWXYZ12".to_owned(),

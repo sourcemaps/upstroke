@@ -119,6 +119,7 @@ fn container_policy() -> RunnerPolicy {
                 .map(|(agent, volume)| ((*agent).to_owned(), (*volume).to_owned()))
                 .collect(),
         ),
+        mounts: Vec::new(),
     }
 }
 
@@ -361,6 +362,59 @@ impl Fixture {
 
     fn runner(&self) -> ContainerRunner {
         self.runner_with(self.identity.clone())
+    }
+
+    #[cfg(unix)]
+    fn runner_over(&self, policy: RunnerPolicy) -> ContainerRunner {
+        ContainerRunner::new(
+            policy,
+            self.identity.clone(),
+            &self.repo,
+            image_environment(),
+            Box::new(self.runtime.clone()),
+        )
+        .expect("a container policy")
+        .with_hooks(Box::new(RecordingHooks::new(self.trace.clone())))
+        .with_poll(Duration::ZERO)
+    }
+
+    #[cfg(unix)]
+    fn mounted_policy(&self) -> (RunnerPolicy, PathBuf, PathBuf) {
+        let shared = self.root.join("operator-shared");
+        let tools = self.root.join("operator-tools");
+        std::fs::create_dir_all(&shared).expect("an operator directory");
+        std::fs::create_dir_all(&tools).expect("another operator directory");
+        let selection = crate::config::RunnerSelection {
+            kind: RunnerKind::Container,
+            image: Some(IMAGE_REFERENCE.to_owned()),
+            credential_volumes: recorded_volumes(&container_policy()),
+            mounts: vec![
+                crate::config::RunnerMount {
+                    source: shared.clone(),
+                    target: "/data".to_owned(),
+                    read_only: true,
+                },
+                crate::config::RunnerMount {
+                    source: tools.clone(),
+                    target: "/opt/tools".to_owned(),
+                    read_only: false,
+                },
+            ],
+            from_config: true,
+        };
+        let context = MountContext::bind_with(&self.repo, &self.private_root, &[])
+            .expect("the fixture binds a mount context");
+        let policy = crate::runner::container::resolve::resolve_container(
+            self.runtime.fake(),
+            &selection,
+            &context,
+        )
+        .expect("the configured mounts resolve");
+        (
+            policy,
+            std::fs::canonicalize(&shared).expect("canonical"),
+            std::fs::canonicalize(&tools).expect("canonical"),
+        )
     }
 
     fn runner_with(&self, identity: RunIdentity) -> ContainerRunner {
@@ -1375,7 +1429,8 @@ fn every_container_is_created_as_the_coordinators_user() {
             "{:?} is not created as the coordinator's effective uid and gid",
             request.role
         );
-        let args = crate::runner::container::docker_create_arguments(&plan.launch.spec);
+        let args = crate::runner::container::docker_create_arguments(&plan.launch.spec)
+            .expect("the planned mounts are carried exactly");
         let at = args
             .iter()
             .position(|arg| arg == "--user")
@@ -1413,6 +1468,7 @@ fn every_container_keeps_the_images_user_off_unix() {
         assert_eq!(plan.launch.spec.user, None, "{:?}", request.role);
         assert!(
             !crate::runner::container::docker_create_arguments(&plan.launch.spec)
+                .expect("the planned mounts are carried exactly")
                 .contains(&"--user".to_owned()),
             "{:?}",
             request.role
@@ -1476,7 +1532,10 @@ fn a_commands_stdin_reaches_its_own_container_exactly_and_through_nothing_else()
                     .map(|(key, value)| format!("{key}={value}")),
             )
             .chain(spec.mounts.iter().map(|mount| format!("{mount:?}")))
-            .chain(crate::runner::container::docker_create_arguments(spec))
+            .chain(
+                crate::runner::container::docker_create_arguments(spec)
+                    .expect("the planned mounts are carried exactly"),
+            )
             .collect();
         assert!(
             !carried.iter().any(|text| text.contains(PROMPT_MARKER)),
@@ -1598,6 +1657,202 @@ fn only_the_reviewer_receives_a_read_only_worktree() {
         "{without:?}"
     );
     assert_eq!(read_only.len() + writable.len() + without.len(), 5);
+}
+
+#[cfg(unix)]
+#[test]
+fn every_role_and_probe_gets_the_recorded_mounts_and_review_and_probes_get_them_read_only() {
+    let fixture = Fixture::new("configured-mounts", true);
+    let (policy, shared, tools) = fixture.mounted_policy();
+    let mounted = fixture.runner_over(policy);
+    let plain = fixture.runner();
+    let mut forced = Vec::new();
+    let mut as_recorded = Vec::new();
+    for request in requests(&fixture.task_a) {
+        let role = request.role.label();
+        let plan = mounted.plan(&request).expect("plans");
+        assert_eq!(
+            target_of(plan.mounts(), "/data"),
+            Some(&Mount::Path {
+                source: shared.clone(),
+                target: "/data".to_owned(),
+                read_only: true,
+            }),
+            "{role}: the recorded read-only mount"
+        );
+        let tools_mount = target_of(plan.mounts(), "/opt/tools").expect("the read-write mount");
+        assert_eq!(
+            tools_mount,
+            &Mount::Path {
+                source: tools.clone(),
+                target: "/opt/tools".to_owned(),
+                read_only: forces_configured_mounts_read_only(&request.role),
+            },
+            "{role}: the recorded read-write mount"
+        );
+        if tools_mount.read_only() {
+            forced.push(role.clone());
+        } else {
+            as_recorded.push(role.clone());
+        }
+        let own: Vec<&Mount> = plan
+            .mounts()
+            .iter()
+            .filter(|mount| !matches!(mount.target(), "/data" | "/opt/tools"))
+            .collect();
+        let unmounted = plain.plan(&request).expect("plans");
+        assert_eq!(
+            own,
+            unmounted.mounts().iter().collect::<Vec<_>>(),
+            "{role}: a configured mount changed the role's own mounts"
+        );
+        assert!(
+            fixture.confinement().violations(plan.mounts()).is_empty(),
+            "{role}: {:?}",
+            fixture.confinement().violations(plan.mounts())
+        );
+    }
+    assert_eq!(
+        forced,
+        vec![
+            "probe(claude-code)".to_owned(),
+            "probe(shell)".to_owned(),
+            "review".to_owned()
+        ]
+    );
+    assert_eq!(
+        as_recorded,
+        vec!["implement".to_owned(), "gate".to_owned()],
+        "a gate is given an explicitly read-write mount as the operator recorded it"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn the_docker_argument_names_exactly_the_recorded_mount() {
+    let fixture = Fixture::new("mount-argument", true);
+    let (policy, shared, tools) = fixture.mounted_policy();
+    let runner = fixture.runner_over(policy);
+    for request in requests(&fixture.task_a) {
+        let plan = runner.plan(&request).expect("plans");
+        let args = crate::runner::container::docker_create_arguments(&plan.launch.spec)
+            .expect("every planned mount is carried exactly");
+        let options: Vec<&str> = args
+            .windows(2)
+            .filter(|pair| pair[0] == "--mount")
+            .map(|pair| pair[1].as_str())
+            .collect();
+        let read_only = forces_configured_mounts_read_only(&request.role);
+        for (source, target, readonly) in [
+            (&shared, "/data", true),
+            (&tools, "/opt/tools", read_only),
+        ] {
+            let expected = format!(
+                "type=bind,source={},target={target}{}",
+                source.to_str().expect("utf-8"),
+                if readonly { ",readonly" } else { "" }
+            );
+            assert_eq!(
+                options
+                    .iter()
+                    .filter(|option| option.contains(&format!("target={target}")))
+                    .copied()
+                    .collect::<Vec<_>>(),
+                vec![expected.as_str()],
+                "{}: the argument does not denote the recorded mount",
+                request.role.label()
+            );
+        }
+        assert_eq!(
+            options.len(),
+            plan.mounts().len(),
+            "an argument for every mount and no other"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_recorded_mount_that_moved_or_reaches_a_withheld_path_refuses_the_plan_before_any_effect() {
+    let fixture = Fixture::new("mount-recheck", true);
+    let (policy, shared, _tools) = fixture.mounted_policy();
+    let runner = fixture.runner_over(policy.clone());
+    let request = gate_request(
+        ShellKind::Sh.spec("exit 0"),
+        fixture.task_a.clone(),
+        Duration::from_secs(10),
+        gate_id(0),
+    );
+    runner.plan(&request).expect("the control plans");
+
+    let away = fixture.root.join("operator-shared.away");
+    std::fs::rename(&shared, &away).expect("move the recorded source");
+    let refusal = runner
+        .plan(&request)
+        .expect_err("a recorded source that is gone refuses the plan");
+    assert!(refusal.to_string().contains("is gone"), "{refusal}");
+    let outcome = runner.run_blocking(&request);
+    assert!(outcome.is_err(), "the invocation ran without its recorded mount");
+    std::fs::rename(&away, &shared).expect("put it back");
+    runner.plan(&request).expect("the restored source plans again");
+
+    let mut reaching = policy;
+    reaching.mounts[0].source = fixture.private_root.to_str().expect("utf-8").to_owned();
+    reaching.mounts[0].source_identity = {
+        use std::os::unix::fs::MetadataExt as _;
+        let metadata = std::fs::metadata(&fixture.private_root).expect("the private root");
+        crate::topology::events::MountSourceIdentity {
+            kind: crate::topology::events::MountSourceKind::Directory,
+            device: metadata.dev(),
+            object: metadata.ino(),
+        }
+    };
+    let refusal = fixture
+        .runner_over(reaching)
+        .plan(&request)
+        .expect_err("a recorded mount of the private root refuses the plan");
+    assert!(
+        refusal.to_string().contains("the private root"),
+        "{refusal}"
+    );
+
+    assert!(
+        list_intents(&fixture.private_root)
+            .expect("scan")
+            .is_empty(),
+        "a refused plan wrote an intent"
+    );
+    assert!(fixture.runtime.fake().container_names().is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_mount_the_runtimes_option_cannot_carry_exactly_refuses_the_plan_before_any_effect() {
+    let fixture = Fixture::new("mount-spelling", true);
+    let runner = fixture.runner();
+    for name in ["comma,in-name", "quote\"in-name", "trailing-space "] {
+        let workspace = fixture.root.join(name);
+        std::fs::create_dir_all(&workspace).expect("an awkwardly named workspace");
+        let request = gate_request(
+            ShellKind::Sh.spec("exit 0"),
+            workspace,
+            Duration::from_secs(10),
+            gate_id(0),
+        );
+        let refusal = runner
+            .plan(&request)
+            .expect_err("a workspace the mount option cannot spell is refused");
+        assert!(
+            refusal.to_string().contains("/upstroke/workspace"),
+            "{name}: the refusal does not name the mount: {refusal}"
+        );
+    }
+    assert!(
+        list_intents(&fixture.private_root)
+            .expect("scan")
+            .is_empty()
+    );
+    assert!(fixture.runtime.fake().container_names().is_empty());
 }
 
 #[test]
@@ -4158,6 +4413,7 @@ fn real_policy(image_id: &str) -> RunnerPolicy {
             digest: None,
         }),
         credential_volumes: None,
+        mounts: Vec::new(),
     }
 }
 
@@ -4231,6 +4487,9 @@ const GATED_RUNS: &[(&str, &str)] = &[
     ("settings", "01KZP12GATED00000000000001"),
     ("user", "01KZP12GATED00000000000002"),
     ("stdin", "01KZP12GATED00000000000003"),
+    ("mountro", "01KZP12GATED00000000000004"),
+    ("mountrw", "01KZP12GATED00000000000005"),
+    ("mountresume", "01KZP12GATED00000000000006"),
 ];
 
 fn gated_run(tag: &str) -> &'static str {
@@ -5735,6 +5994,360 @@ fn real_docker_a_container_contains_a_daemonised_descendant() {
     );
 }
 
+#[cfg(unix)]
+struct MountedReal {
+    _tree: ScratchTree,
+    root: PathBuf,
+    repo: PathBuf,
+    identity: RunIdentity,
+    reference: String,
+    image_id: String,
+}
+
+#[cfg(unix)]
+impl MountedReal {
+    fn new(
+        docker: &crate::runner::container::DockerCli,
+        tag: &str,
+        run: &str,
+    ) -> Result<Self, String> {
+        let (reference, image_id) = discover(docker, PREFERRED_IMAGES)?;
+        let tree = repo::scratch(tag);
+        let root = std::fs::canonicalize(tree.path()).expect("the scratch root canonicalizes");
+        let repo_dir = root.join("repo");
+        repo::repository(&repo_dir);
+        let identity = real_identity(&root, &repo_dir, gated_run(run));
+        Ok(Self {
+            _tree: tree,
+            root,
+            repo: repo_dir,
+            identity,
+            reference,
+            image_id,
+        })
+    }
+
+    fn selection(&self, mounts: Vec<crate::config::RunnerMount>) -> crate::config::RunnerSelection {
+        crate::config::RunnerSelection {
+            kind: RunnerKind::Container,
+            image: Some(self.reference.clone()),
+            credential_volumes: BTreeMap::new(),
+            mounts,
+            from_config: true,
+        }
+    }
+
+    fn resolve(
+        &self,
+        docker: &crate::runner::container::DockerCli,
+        mounts: Vec<crate::config::RunnerMount>,
+    ) -> RunnerPolicy {
+        let context = MountContext::bind(&self.repo, &self.identity.private_root)
+            .expect("the real fixture binds a mount context");
+        crate::runner::container::resolve::resolve_container(
+            docker,
+            &self.selection(mounts),
+            &context,
+        )
+        .expect("the configured mounts resolve against the real runtime")
+    }
+
+    fn runner(
+        &self,
+        docker: &crate::runner::container::DockerCli,
+        policy: RunnerPolicy,
+    ) -> ContainerRunner {
+        ContainerRunner::new(
+            policy,
+            self.identity.clone(),
+            &self.repo,
+            image_environment_of(docker, &self.image_id),
+            Box::new(docker.clone()),
+        )
+        .expect("a container policy")
+        .with_poll(Duration::from_millis(10))
+    }
+
+    fn workspace(&self, name: &str) -> PathBuf {
+        let workspace = self.root.join(name);
+        std::fs::create_dir_all(&workspace).expect("a workspace");
+        workspace
+    }
+}
+
+#[cfg(unix)]
+fn mount(source: &Path, target: &str, read_only: bool) -> crate::config::RunnerMount {
+    crate::config::RunnerMount {
+        source: source.to_path_buf(),
+        target: target.to_owned(),
+        read_only,
+    }
+}
+
+#[cfg(unix)]
+fn stdout_value(output: &ProcessOutput, key: &str) -> String {
+    output
+        .stdout
+        .lines()
+        .find_map(|line| line.strip_prefix(key))
+        .unwrap_or_else(|| {
+            panic!(
+                "`{key}` is not in stdout {:?} / stderr {:?}",
+                output.stdout, output.stderr
+            )
+        })
+        .trim()
+        .to_owned()
+}
+
+#[cfg(unix)]
+#[test]
+fn real_docker_a_read_only_configured_mount_is_readable_and_not_writable() {
+    let trace = ContainerTrace::recording();
+    let docker = match docker_gate(
+        "real_docker_a_read_only_configured_mount_is_readable_and_not_writable",
+        trace.clone(),
+    ) {
+        Ok(docker) => docker,
+        Err(reason) => return skipped(&reason),
+    };
+    let world = match MountedReal::new(docker.as_ref(), "real-mount-ro", "mountro") {
+        Ok(world) => world,
+        Err(reason) => return no_image(&reason),
+    };
+    let _residue = LeaveNoResidue {
+        docker: (*docker).clone(),
+        private_root: world.identity.private_root.clone(),
+    };
+    let shared = world.root.join("operator-shared");
+    std::fs::create_dir_all(&shared).expect("an operator directory");
+    std::fs::write(shared.join("marker.txt"), "MOUNTED-READ-ONLY-7c1e\n").expect("a marker");
+    let policy = world.resolve(
+        docker.as_ref(),
+        vec![mount(&shared, "/operator/shared", true)],
+    );
+    let runner = world.runner(docker.as_ref(), policy);
+
+    let request = gate_request(
+        ShellKind::Sh.spec(
+            "printf 'READ=%s\\n' \"$(cat /operator/shared/marker.txt)\"; \
+             ( echo written > /operator/shared/written.txt ) 2>&1; echo WRITE=$?",
+        ),
+        world.workspace("ws-gate"),
+        Duration::from_secs(60),
+        gate_id(0),
+    );
+    let plan = runner.plan(&request).expect("plans");
+    assert_eq!(
+        target_of(plan.mounts(), "/operator/shared").map(Mount::read_only),
+        Some(true),
+        "the recorded disposition"
+    );
+    let output = runner.run_blocking(&request).expect("runs");
+    assert_eq!(output.code, Some(0), "{}{}", output.stdout, output.stderr);
+    assert_eq!(stdout_value(&output, "READ="), "MOUNTED-READ-ONLY-7c1e");
+    assert_ne!(
+        stdout_value(&output, "WRITE="),
+        "0",
+        "a write through the read-only mount succeeded"
+    );
+    assert!(
+        output.stdout.to_ascii_lowercase().contains("read-only"),
+        "the write failed for another reason: {}",
+        output.stdout
+    );
+    assert!(
+        !shared.join("written.txt").exists(),
+        "the container wrote into the host directory through a read-only mount"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn real_docker_a_read_write_configured_mount_is_writable_as_the_coordinators_user() {
+    use std::os::unix::fs::MetadataExt as _;
+    let trace = ContainerTrace::recording();
+    let docker = match docker_gate(
+        "real_docker_a_read_write_configured_mount_is_writable_as_the_coordinators_user",
+        trace.clone(),
+    ) {
+        Ok(docker) => docker,
+        Err(reason) => return skipped(&reason),
+    };
+    let world = match MountedReal::new(docker.as_ref(), "real-mount-rw", "mountrw") {
+        Ok(world) => world,
+        Err(reason) => return no_image(&reason),
+    };
+    let _residue = LeaveNoResidue {
+        docker: (*docker).clone(),
+        private_root: world.identity.private_root.clone(),
+    };
+    let cache = world.root.join("operator-cache");
+    std::fs::create_dir_all(&cache).expect("an operator directory");
+    let policy = world.resolve(docker.as_ref(), vec![mount(&cache, "/operator/cache", false)]);
+    let runner = world.runner(docker.as_ref(), policy);
+    let expected = effective_ids();
+
+    let worker = worker_request(
+        ShellKind::Sh.spec(
+            "mkdir -p /operator/cache/made && echo MOUNTED-READ-WRITE-7c1e \
+             > /operator/cache/made/file && echo MADE=yes",
+        ),
+        world.workspace("ws-implement"),
+        AgentId::new("claude-code"),
+        Duration::from_secs(60),
+        worker_id(0),
+    );
+    let output = runner.run_blocking(&worker).expect("runs");
+    assert_eq!(output.code, Some(0), "{}{}", output.stdout, output.stderr);
+    assert_eq!(stdout_value(&output, "MADE="), "yes");
+    let made = cache.join("made").join("file");
+    assert_eq!(
+        std::fs::read_to_string(&made).expect("the host sees the write"),
+        "MOUNTED-READ-WRITE-7c1e\n"
+    );
+    for path in [cache.join("made"), made] {
+        let metadata = std::fs::metadata(&path).expect("what the container made");
+        assert_eq!(
+            (metadata.uid(), metadata.gid()),
+            (expected.uid, expected.gid),
+            "the host sees {} as the coordinator's",
+            path.display()
+        );
+    }
+
+    let review = review_request(
+        ShellKind::Sh.spec("( echo nope > /operator/cache/review.txt ) 2>&1; echo WRITE=$?"),
+        world.workspace("ws-review"),
+        AgentId::new("claude-code"),
+        Duration::from_secs(60),
+        InvocationId::attempt(
+            TaskKey(0),
+            GenerationId(0),
+            AttemptNumber(1),
+            AttemptRole::ReviewPass(0),
+            0,
+        ),
+    );
+    let output = runner.run_blocking(&review).expect("runs");
+    assert_ne!(
+        stdout_value(&output, "WRITE="),
+        "0",
+        "a reviewer wrote through a read-write configured mount"
+    );
+    assert!(!cache.join("review.txt").exists());
+    std::fs::remove_dir_all(cache.join("made"))
+        .expect("the coordinator reclaims what the container made");
+}
+
+#[cfg(unix)]
+#[test]
+fn real_docker_a_resume_with_changed_mount_config_keeps_the_recorded_mounts() {
+    let trace = ContainerTrace::recording();
+    let docker = match docker_gate(
+        "real_docker_a_resume_with_changed_mount_config_keeps_the_recorded_mounts",
+        trace.clone(),
+    ) {
+        Ok(docker) => docker,
+        Err(reason) => return skipped(&reason),
+    };
+    let world = match MountedReal::new(docker.as_ref(), "real-mount-resume", "mountresume") {
+        Ok(world) => world,
+        Err(reason) => return no_image(&reason),
+    };
+    let _residue = LeaveNoResidue {
+        docker: (*docker).clone(),
+        private_root: world.identity.private_root.clone(),
+    };
+    let recorded_source = world.root.join("recorded-source");
+    let today_source = world.root.join("today-source");
+    for (dir, marker) in [
+        (&recorded_source, "RECORDED-SOURCE-7c1e"),
+        (&today_source, "TODAY-SOURCE-7c1e"),
+    ] {
+        std::fs::create_dir_all(dir).expect("an operator directory");
+        std::fs::write(dir.join("marker.txt"), format!("{marker}\n")).expect("a marker");
+    }
+    let record = world.resolve(
+        docker.as_ref(),
+        vec![mount(&recorded_source, "/operator/data", true)],
+    );
+    let today = world.selection(vec![
+        mount(&today_source, "/operator/data", false),
+        mount(&today_source, "/operator/extra", false),
+    ]);
+
+    let mut warnings = Vec::new();
+    let rebuilt = crate::runner::container::resolve::rebuild_by_inspection(
+        docker.as_ref(),
+        &record,
+        &today,
+        &mut warnings,
+    )
+    .expect("the recorded runner is re-established");
+    assert_eq!(rebuilt, record, "today's config reached the rebuilt runner");
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.contains("configured mount set") && warning.contains("is ignored")),
+        "{warnings:?}"
+    );
+
+    let runner = world.runner(docker.as_ref(), rebuilt);
+    let request = gate_request(
+        ShellKind::Sh.spec(
+            "printf 'DATA=%s\\n' \"$(cat /operator/data/marker.txt)\"; \
+             if [ -e /operator/extra ]; then echo EXTRA=present; else echo EXTRA=absent; fi; \
+             ( echo x > /operator/data/written.txt ) 2>&1; echo WRITE=$?",
+        ),
+        world.workspace("ws-resumed"),
+        Duration::from_secs(60),
+        gate_id(0),
+    );
+    let output = runner.run_blocking(&request).expect("runs");
+    assert_eq!(output.code, Some(0), "{}{}", output.stdout, output.stderr);
+    assert_eq!(
+        stdout_value(&output, "DATA="),
+        "RECORDED-SOURCE-7c1e",
+        "the resumed container did not see the recorded source"
+    );
+    assert_eq!(stdout_value(&output, "EXTRA="), "absent");
+    assert_ne!(stdout_value(&output, "WRITE="), "0", "the recorded mount is read-only");
+    assert!(!recorded_source.join("written.txt").exists());
+    assert!(!today_source.join("written.txt").exists());
+
+    let away = world.root.join("recorded-source.away");
+    std::fs::rename(&recorded_source, &away).expect("move the recorded source");
+    let mut warnings = Vec::new();
+    let refusal = crate::runner::container::resolve::rebuild_by_inspection(
+        docker.as_ref(),
+        &record,
+        &today,
+        &mut warnings,
+    )
+    .expect_err("a resume whose recorded source is gone refuses");
+    assert!(
+        matches!(
+            refusal,
+            crate::runner::container::resolve::InspectionRefusal::MountSourceMoved { .. }
+        ),
+        "{refusal}"
+    );
+    assert!(
+        docker
+            .containers_with_label(
+                LABEL_PRIVATE_ROOT,
+                &crate::runner::container::intent::private_root_label(
+                    &world.identity.private_root
+                ),
+            )
+            .expect("reachable")
+            .is_empty(),
+        "a container exists for the refused resume"
+    );
+    std::fs::rename(&away, &recorded_source).expect("put it back");
+}
+
 #[test]
 fn every_gated_test_of_this_lane_is_counted() {
     const MINE: &[&str] = &[
@@ -5751,8 +6364,11 @@ fn every_gated_test_of_this_lane_is_counted() {
         "real_docker_a_containerized_agent_reads_its_own_settings_and_cannot_write_them",
         "real_docker_a_container_runs_as_the_coordinators_user_and_leaves_what_it_can_reclaim",
         "real_docker_a_containerized_program_reads_its_exact_stdin_then_eof",
+        "real_docker_a_read_only_configured_mount_is_readable_and_not_writable",
+        "real_docker_a_read_write_configured_mount_is_writable_as_the_coordinators_user",
+        "real_docker_a_resume_with_changed_mount_config_keeps_the_recorded_mounts",
     ];
-    assert_eq!(MINE.len(), 13);
+    assert_eq!(MINE.len(), 16);
     assert_eq!(GATED_RUNS.len(), MINE.len(), "one run id per gated test");
     let ids: BTreeSet<&str> = GATED_RUNS.iter().map(|(_, run)| *run).collect();
     assert_eq!(

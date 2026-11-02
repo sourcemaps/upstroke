@@ -846,7 +846,7 @@ fn the_docker_create_arguments_carry_a_user_and_an_open_stdin_only_when_the_spec
         open_stdin: false,
     };
     assert_eq!(
-        super::docker_create_arguments(&spec),
+        super::docker_create_arguments(&spec).expect("nothing to refuse"),
         [
             "create",
             "--name",
@@ -863,7 +863,7 @@ fn the_docker_create_arguments_carry_a_user_and_an_open_stdin_only_when_the_spec
     });
     spec.open_stdin = true;
     assert_eq!(
-        super::docker_create_arguments(&spec),
+        super::docker_create_arguments(&spec).expect("nothing to refuse"),
         [
             "create",
             "--name",
@@ -876,6 +876,105 @@ fn the_docker_create_arguments_carry_a_user_and_an_open_stdin_only_when_the_spec
             "cat"
         ],
         "the numeric user and the open stdin are options of the create, before the image"
+    );
+}
+
+#[test]
+fn a_mount_argument_carries_each_value_exactly_or_refuses_it() {
+    let bind = |source: &str, target: &str| Mount::Path {
+        source: PathBuf::from(source),
+        target: target.to_owned(),
+        read_only: true,
+    };
+    for (source, expected) in [
+        (
+            "/srv/Shared Cache/Ünicode",
+            "type=bind,source=/srv/Shared Cache/Ünicode,target=/data,readonly",
+        ),
+        ("/srv/a=b", "type=bind,source=/srv/a=b,target=/data,readonly"),
+        ("/srv/semi;colon:x", "type=bind,source=/srv/semi;colon:x,target=/data,readonly"),
+    ] {
+        assert_eq!(
+            super::mount_argument(&bind(source, "/data")),
+            Ok(expected.to_owned()),
+            "`{source}` was not carried as written"
+        );
+    }
+    #[cfg(not(windows))]
+    assert_eq!(
+        super::mount_argument(&bind("/srv/back\\slash", "/data")),
+        Ok("type=bind,source=/srv/back\\slash,target=/data,readonly".to_owned()),
+        "a backslash is a byte of a Unix name and is carried as written, not turned into `/`"
+    );
+    assert_eq!(
+        super::mount_argument(&Mount::Volume {
+            name: "upstroke-creds-codex".to_owned(),
+            target: "/upstroke/credentials/codex".to_owned(),
+            read_only: false,
+        }),
+        Ok("type=volume,source=upstroke-creds-codex,target=/upstroke/credentials/codex".to_owned())
+    );
+    assert_eq!(
+        super::mount_argument(&Mount::Tmpfs {
+            target: "/tmp".to_owned()
+        }),
+        Ok("type=tmpfs,target=/tmp".to_owned())
+    );
+
+    let refusals: [(&str, &str); 7] = [
+        ("/srv/a,readonly=false", "contains `,`"),
+        ("/srv/q\"uote", "contains `\"`"),
+        ("/srv/new\nline", "control character"),
+        ("/srv/tab\tbed", "control character"),
+        ("/srv/trailing ", "whitespace"),
+        (" /srv/leading", "whitespace"),
+        ("", "is empty"),
+    ];
+    for (value, needle) in refusals {
+        for mount in [
+            bind(value, "/data"),
+            bind("/srv/plain", value),
+            Mount::Volume {
+                name: value.to_owned(),
+                target: "/data".to_owned(),
+                read_only: false,
+            },
+            Mount::Tmpfs {
+                target: value.to_owned(),
+            },
+        ] {
+            let refused = super::mount_argument(&mount)
+                .expect_err("a value the option cannot carry is refused, never altered");
+            assert!(refused.contains(needle), "{mount:?}: {refused}");
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt as _;
+        let refused = super::mount_argument(&Mount::Path {
+            source: PathBuf::from(std::ffi::OsStr::from_bytes(b"/srv/bad\xff")),
+            target: "/data".to_owned(),
+            read_only: false,
+        })
+        .expect_err("a source that is not UTF-8 is refused, never converted lossily");
+        assert!(refused.contains("not valid UTF-8"), "{refused}");
+    }
+
+    let spec = CreateSpec {
+        name: "upstroke-a-b-c-d".to_owned(),
+        image_id: IMAGE_ID.to_owned(),
+        labels: BTreeMap::new(),
+        mounts: vec![bind("/srv/a,b", "/data")],
+        env: Vec::new(),
+        command: vec!["cat".to_owned()],
+        workdir: None,
+        read_only_root: true,
+        user: None,
+        open_stdin: false,
+    };
+    assert!(
+        super::docker_create_arguments(&spec).is_err(),
+        "a create whose mount cannot be carried exactly is refused before `docker` runs"
     );
 }
 

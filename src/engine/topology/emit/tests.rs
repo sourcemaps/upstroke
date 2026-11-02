@@ -520,6 +520,7 @@ fn run_started_unauthenticated() -> RunStarted4 {
             policy: RunnerContract::HostV1,
             image: None,
             credential_volumes: None,
+            mounts: Vec::new(),
         },
         probed_agents: vec!["claude-code".to_owned(), "copilot".to_owned()],
         branch: format!("upstroke/run-{RUN_ID}"),

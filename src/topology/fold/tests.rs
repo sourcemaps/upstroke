@@ -219,6 +219,7 @@ fn container_runner() -> RunnerPolicy {
             .into_iter()
             .collect(),
         ),
+        mounts: Vec::new(),
     }
 }
 
