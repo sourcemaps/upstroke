@@ -118,17 +118,21 @@ b(credential_volumes.is_some)
     n(len) [ f(agent) f(volume) ]*     in the map's own (sorted) order
 v2 only:
 n(mounts.len) [ f(source) f(target) b(read_only)
-                f(kind) n(device) n(object) ]*   in record order
+                f("unix")    f(kind) n(device) n(inode)
+              | f("windows") f(kind) n(volume_serial) f(file_id) ]*   in record order
 ```
 
 where `f(s)` is `<byte-length>:<bytes>;`, `b(x)` is `f("1")` or `f("0")`,
 and `n(x)` is `f(<decimal>)`. The same encoding
 [`crate::topology::registry`] uses, for the same reason: a length prefix is
 injective over values that may contain the delimiter. `kind` is
-`"directory"` or `"file"`. Record order is strictly by target:
-resolution sorts the list and `completeness` refuses any other order, so
-one mount set has one encoding. Every field of every mount is digested,
-the source identity included.
+`"directory"` or `"file"`. The platform tag comes first in each identity,
+so the same numbers under the other platform are a different record.
+`file_id` is the 32 lowercase hex digits the record holds, the full
+128-bit Windows file id. Record order is strictly by target: resolution
+sorts the list and `completeness` refuses any other order, so one mount
+set has one encoding. Every field of every mount is digested, the source
+identity included.
 
 ## `pub fn runner_policy_sha256(policy: &RunnerPolicy) -> String {`
 
@@ -214,22 +218,30 @@ first recorded, which is the whole of INV-23's equality check.
 ## `mod tests` › `const MOUNTED_CANONICAL: &[u8] = b"25:upstroke.runner-policy.v2;9:container;12:container-v1;\`
 
 The hand-written v2 bytes of `mounted_fixture()`: the container fixture
-with a read-only directory and a read-write file mounted.
+with a read-only directory and a read-write file mounted, both `unix`.
+`WINDOWS_CANONICAL` is the same for `windows_fixture()`, one read-only
+directory on a drive letter with its volume serial and full file id: the
+platform-independent encoding of a Windows record, checked on every
+platform.
 
 ## `mod tests` › `fn an_empty_mount_list_keeps_the_v1_bytes_and_a_mounted_record_hashes_in_v2() {`
 
 Both halves of the compatibility rule: the container fixture with its
-mounts cleared and the host policy are still their v1 goldens; the
-mounted record is its v2 golden and digest; and the v2 bytes carry the v1
-fields unchanged between the version tag and the mounts.
+mounts cleared and the host policy are still their v1 goldens; each
+mounted record, Unix and Windows, is its v2 golden and digest; and the v2
+bytes carry the v1 fields unchanged between the version tag and the
+mounts.
 
 ## `mod tests` › `fn the_digest_separates_every_field_of_every_mount() {`
 
-Eleven movers over the mounted record, each changing one thing: a source
-or target byte, either disposition, the kind, the device, the object,
-the order, one mount fewer, and two that move a boundary without changing
-the concatenated characters (source/target and device/object). Each must
-give a digest no other record here has.
+Seventeen movers, each changing one thing. Twelve on the Unix record: a
+source or target byte, either disposition, the kind, the device, the
+inode, the order, one mount fewer, two that move a boundary without
+changing the concatenated characters (source/target and device/inode),
+and the same numbers under the Windows tag. Five on the Windows record:
+the spelling's case, the kind, the volume, one byte of the file id, and a
+boundary moved between the volume and the file id. Each must give a
+digest no other record here has.
 
 ## `mod tests` › `fn the_digest_separates_every_field_of_the_record() {`
 

@@ -239,12 +239,19 @@ pub enum MountSourceKind {
     File,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct MountSourceIdentity {
-    pub kind: MountSourceKind,
-    pub device: u64,
-    pub object: u64,
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "platform", rename_all = "snake_case", deny_unknown_fields)]
+pub enum MountSourceIdentity {
+    Unix {
+        kind: MountSourceKind,
+        device: u64,
+        inode: u64,
+    },
+    Windows {
+        kind: MountSourceKind,
+        volume_serial: u64,
+        file_id: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -326,12 +333,30 @@ impl fmt::Display for RunnerRecordDefect {
                  used"
             }
             Self::MountRecordMalformed => {
-                "a recorded mount whose source or target is not an absolute path, or a mount \
-                 list whose targets are not strictly ordered, so the boundary it names cannot \
-                 be rebuilt as recorded"
+                "a recorded mount whose target is not an absolute container path, whose source \
+                 is not absolute in its identity's platform syntax, or whose file id is not 32 \
+                 lowercase hex digits, or a mount list whose targets are not strictly ordered, \
+                 so the boundary it names cannot be rebuilt as recorded"
             }
         })
     }
+}
+
+fn recorded_mount_is_well_formed(mount: &RecordedMount) -> bool {
+    mount.target.starts_with('/')
+        && match &mount.source_identity {
+            MountSourceIdentity::Unix { .. } => mount.source.starts_with('/'),
+            MountSourceIdentity::Windows { file_id, .. } => {
+                matches!(
+                    mount.source.as_bytes(),
+                    [letter, b':', b'\\', ..] if letter.is_ascii_alphabetic()
+                ) && !mount.source.contains('/')
+                    && file_id.len() == 32
+                    && file_id
+                        .bytes()
+                        .all(|digit| matches!(digit, b'0'..=b'9' | b'a'..=b'f'))
+            }
+        }
 }
 
 impl RunnerPolicy {
@@ -363,11 +388,7 @@ impl RunnerPolicy {
                     .mounts
                     .windows(2)
                     .all(|pair| pair[0].target < pair[1].target);
-                let absolute = self
-                    .mounts
-                    .iter()
-                    .all(|mount| mount.source.starts_with('/') && mount.target.starts_with('/'));
-                if !ordered || !absolute {
+                if !ordered || !self.mounts.iter().all(recorded_mount_is_well_formed) {
                     return Err(RunnerRecordDefect::MountRecordMalformed);
                 }
             }
@@ -2883,23 +2904,43 @@ mod tests {
         }
     }
 
+    fn unix_identity(kind: MountSourceKind, device: u64, inode: u64) -> MountSourceIdentity {
+        MountSourceIdentity::Unix {
+            kind,
+            device,
+            inode,
+        }
+    }
+
+    fn windows_identity(
+        kind: MountSourceKind,
+        volume_serial: u64,
+        file_id: &str,
+    ) -> MountSourceIdentity {
+        MountSourceIdentity::Windows {
+            kind,
+            volume_serial,
+            file_id: file_id.to_owned(),
+        }
+    }
+
     fn recorded_mount(
         source: &str,
         target: &str,
         read_only: bool,
-        identity: (MountSourceKind, u64, u64),
+        source_identity: MountSourceIdentity,
     ) -> RecordedMount {
         RecordedMount {
             source: source.to_owned(),
             target: target.to_owned(),
             read_only,
-            source_identity: MountSourceIdentity {
-                kind: identity.0,
-                device: identity.1,
-                object: identity.2,
-            },
+            source_identity,
         }
     }
+
+    const FILE_ID: &str = "00112233445566778899aabbccddeeff";
+
+    const OTHER_FILE_ID: &str = "ffeeddccbbaa99887766554433221100";
 
     fn mounted_runner() -> RunnerPolicy {
         let mut policy = container_runner();
@@ -2908,13 +2949,32 @@ mod tests {
                 "/srv/Shared Cache/Ünicode",
                 "/cache",
                 true,
-                (MountSourceKind::Directory, 2049, 1_311_768_467_294_899_695),
+                unix_identity(MountSourceKind::Directory, 2049, 1_311_768_467_294_899_695),
             ),
             recorded_mount(
                 "/opt/toolchain/bin/cc",
                 "/opt/cc",
                 false,
-                (MountSourceKind::File, u64::MAX, 7),
+                unix_identity(MountSourceKind::File, u64::MAX, 7),
+            ),
+        ];
+        policy
+    }
+
+    fn windows_mounted_runner() -> RunnerPolicy {
+        let mut policy = container_runner();
+        policy.mounts = vec![
+            recorded_mount(
+                r"C:\Users\Operator\Shared Cache\Ünicode",
+                "/cache",
+                true,
+                windows_identity(MountSourceKind::Directory, 0x1234_5678_9abc_def0, FILE_ID),
+            ),
+            recorded_mount(
+                r"D:\tools\cc.exe",
+                "/opt/cc",
+                false,
+                windows_identity(MountSourceKind::File, u64::MAX, OTHER_FILE_ID),
             ),
         ];
         policy
@@ -2962,36 +3022,74 @@ mod tests {
 
     #[test]
     fn a_mount_list_round_trips_with_every_field_and_refuses_anything_else() {
-        let policy = mounted_runner();
-        let value = serde_json::to_value(&policy).expect("serialize");
+        let unix = mounted_runner();
+        let windows = windows_mounted_runner();
+        let unix_value = serde_json::to_value(&unix).expect("serialize");
+        let windows_value = serde_json::to_value(&windows).expect("serialize");
         assert_eq!(
-            value["mounts"],
+            unix_value["mounts"],
             serde_json::json!([
                 {
                     "source": "/srv/Shared Cache/Ünicode",
                     "target": "/cache",
                     "read_only": true,
                     "source_identity": {
+                        "platform": "unix",
                         "kind": "directory",
                         "device": 2049_u64,
-                        "object": 1_311_768_467_294_899_695_u64
+                        "inode": 1_311_768_467_294_899_695_u64
                     }
                 },
                 {
                     "source": "/opt/toolchain/bin/cc",
                     "target": "/opt/cc",
                     "read_only": false,
-                    "source_identity": {"kind": "file", "device": u64::MAX, "object": 7_u64}
+                    "source_identity": {
+                        "platform": "unix",
+                        "kind": "file",
+                        "device": u64::MAX,
+                        "inode": 7_u64
+                    }
                 }
             ])
         );
-        let read: RunnerPolicy = serde_json::from_value(value.clone()).expect("reads back");
-        assert_eq!(read, policy);
-        assert_eq!(read.difference(&policy), None);
+        assert_eq!(
+            windows_value["mounts"],
+            serde_json::json!([
+                {
+                    "source": "C:\\Users\\Operator\\Shared Cache\\Ünicode",
+                    "target": "/cache",
+                    "read_only": true,
+                    "source_identity": {
+                        "platform": "windows",
+                        "kind": "directory",
+                        "volume_serial": 0x1234_5678_9abc_def0_u64,
+                        "file_id": FILE_ID
+                    }
+                },
+                {
+                    "source": "D:\\tools\\cc.exe",
+                    "target": "/opt/cc",
+                    "read_only": false,
+                    "source_identity": {
+                        "platform": "windows",
+                        "kind": "file",
+                        "volume_serial": u64::MAX,
+                        "file_id": OTHER_FILE_ID
+                    }
+                }
+            ])
+        );
+        for (policy, value) in [(&unix, &unix_value), (&windows, &windows_value)] {
+            let read: RunnerPolicy = serde_json::from_value(value.clone()).expect("reads back");
+            assert_eq!(&read, policy);
+            assert_eq!(read.difference(policy), None);
+            assert_eq!(read.completeness(), Ok(()));
+        }
 
         let mut refusals = 0_usize;
         for key in ["source", "target", "read_only", "source_identity"] {
-            let mut missing = value.clone();
+            let mut missing = unix_value.clone();
             missing["mounts"][1]
                 .as_object_mut()
                 .expect("a mount")
@@ -3003,33 +3101,40 @@ mod tests {
             );
             refusals += 1;
         }
-        for key in ["kind", "device", "object"] {
-            let mut missing = value.clone();
-            missing["mounts"][0]["source_identity"]
-                .as_object_mut()
-                .expect("an identity")
-                .remove(key)
-                .expect("present");
-            assert!(
-                serde_json::from_value::<RunnerPolicy>(missing).is_err(),
-                "an identity without `{key}` was read"
-            );
-            refusals += 1;
+        for (value, keys) in [
+            (&unix_value, ["platform", "kind", "device", "inode"]),
+            (&windows_value, ["platform", "kind", "volume_serial", "file_id"]),
+        ] {
+            for key in keys {
+                let mut missing = value.clone();
+                missing["mounts"][0]["source_identity"]
+                    .as_object_mut()
+                    .expect("an identity")
+                    .remove(key)
+                    .expect("present");
+                assert!(
+                    serde_json::from_value::<RunnerPolicy>(missing).is_err(),
+                    "an identity without `{key}` was read"
+                );
+                refusals += 1;
+            }
         }
-        let wrong: [(&str, serde_json::Value); 8] = [
-            ("/mounts/0/future", serde_json::json!(true)),
-            ("/mounts/0/source_identity/future", serde_json::json!(1)),
-            (
-                "/mounts/0/source_identity/kind",
-                serde_json::json!("symlink"),
-            ),
-            ("/mounts/0/source_identity/device", serde_json::json!(-1)),
-            ("/mounts/0/source_identity/object", serde_json::json!("7")),
-            ("/mounts/0/read_only", serde_json::json!("true")),
-            ("/mounts/0/source", serde_json::Value::Null),
-            ("/mounts", serde_json::json!({"/cache": "/srv"})),
+        let wrong: [(&serde_json::Value, &str, serde_json::Value); 13] = [
+            (&unix_value, "/mounts/0/future", serde_json::json!(true)),
+            (&unix_value, "/mounts/0/source_identity/future", serde_json::json!(1)),
+            (&unix_value, "/mounts/0/source_identity/kind", serde_json::json!("symlink")),
+            (&unix_value, "/mounts/0/source_identity/platform", serde_json::json!("macos")),
+            (&unix_value, "/mounts/0/source_identity/device", serde_json::json!(-1)),
+            (&unix_value, "/mounts/0/source_identity/inode", serde_json::json!("7")),
+            (&unix_value, "/mounts/0/source_identity/volume_serial", serde_json::json!(1)),
+            (&unix_value, "/mounts/0/read_only", serde_json::json!("true")),
+            (&unix_value, "/mounts/0/source", serde_json::Value::Null),
+            (&unix_value, "/mounts", serde_json::json!({"/cache": "/srv"})),
+            (&windows_value, "/mounts/0/source_identity/file_id", serde_json::json!(7)),
+            (&windows_value, "/mounts/0/source_identity/volume_serial", serde_json::json!("1")),
+            (&windows_value, "/mounts/0/source_identity/inode", serde_json::json!(1)),
         ];
-        for (pointer, replacement) in wrong {
+        for (value, pointer, replacement) in wrong {
             let mut moved = value.clone();
             let (parent, leaf) = pointer.rsplit_once('/').expect("a pointer");
             let parent = if parent.is_empty() {
@@ -3047,7 +3152,7 @@ mod tests {
             );
             refusals += 1;
         }
-        assert_eq!(refusals, 15);
+        assert_eq!(refusals, 4 + 8 + 13);
     }
 
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3122,22 +3227,35 @@ mod tests {
 
     #[test]
     fn a_mount_list_differs_in_any_field_of_any_mount_and_in_its_length() {
-        let base = mounted_runner();
-        assert_eq!(base.completeness(), Ok(()));
-        assert_eq!(base.difference(&mounted_runner()), None);
-        let movers: [(&str, MoveRunner); 10] = [
+        let unix_movers: [(&str, MoveRunner); 11] = [
             ("a source", |policy| policy.mounts[0].source.push('x')),
             ("a target", |policy| policy.mounts[1].target.push('x')),
             ("read-only", |policy| policy.mounts[0].read_only = false),
             ("read-write", |policy| policy.mounts[1].read_only = true),
             ("an identity's kind", |policy| {
-                policy.mounts[0].source_identity.kind = MountSourceKind::File;
+                if let MountSourceIdentity::Unix { kind, .. } =
+                    &mut policy.mounts[0].source_identity
+                {
+                    *kind = MountSourceKind::File;
+                }
             }),
             ("an identity's device", |policy| {
-                policy.mounts[1].source_identity.device = 0;
+                if let MountSourceIdentity::Unix { device, .. } =
+                    &mut policy.mounts[1].source_identity
+                {
+                    *device = 0;
+                }
             }),
-            ("an identity's object", |policy| {
-                policy.mounts[0].source_identity.object += 1;
+            ("an identity's inode", |policy| {
+                if let MountSourceIdentity::Unix { inode, .. } =
+                    &mut policy.mounts[0].source_identity
+                {
+                    *inode += 1;
+                }
+            }),
+            ("an identity's platform", |policy| {
+                policy.mounts[0].source_identity =
+                    windows_identity(MountSourceKind::Directory, 2049, FILE_ID);
             }),
             ("a mount fewer", |policy| {
                 policy.mounts.pop();
@@ -3147,27 +3265,64 @@ mod tests {
                     "/srv/data",
                     "/srv/data",
                     true,
-                    (MountSourceKind::Directory, 1, 2),
+                    unix_identity(MountSourceKind::Directory, 1, 2),
                 ));
             }),
             ("no mounts", |policy| policy.mounts.clear()),
         ];
-        for (name, moved) in movers {
-            let mut other = mounted_runner();
-            moved(&mut other);
-            assert_ne!(other, base, "moving {name} left the record equal");
-            assert_eq!(
-                base.difference(&other),
-                Some(RunnerField::Mounts),
-                "moving {name} was reported as something else"
-            );
-            assert_eq!(other.difference(&base), Some(RunnerField::Mounts));
+        let windows_movers: [(&str, MoveRunner); 4] = [
+            ("a source's case", |policy| {
+                policy.mounts[0].source = policy.mounts[0].source.replace("Operator", "operator");
+            }),
+            ("an identity's kind", |policy| {
+                if let MountSourceIdentity::Windows { kind, .. } =
+                    &mut policy.mounts[1].source_identity
+                {
+                    *kind = MountSourceKind::Directory;
+                }
+            }),
+            ("an identity's volume", |policy| {
+                if let MountSourceIdentity::Windows { volume_serial, .. } =
+                    &mut policy.mounts[0].source_identity
+                {
+                    *volume_serial += 1;
+                }
+            }),
+            ("one byte of a file id", |policy| {
+                if let MountSourceIdentity::Windows { file_id, .. } =
+                    &mut policy.mounts[0].source_identity
+                {
+                    file_id.replace_range(30.., "fe");
+                }
+            }),
+        ];
+        let mut moved = 0_usize;
+        for (fixture, movers) in [
+            (mounted_runner as fn() -> RunnerPolicy, &unix_movers[..]),
+            (windows_mounted_runner, &windows_movers[..]),
+        ] {
+            let base = fixture();
+            assert_eq!(base.completeness(), Ok(()));
+            assert_eq!(base.difference(&fixture()), None);
+            for (name, mover) in movers {
+                let mut other = fixture();
+                mover(&mut other);
+                assert_ne!(other, base, "moving {name} left the record equal");
+                assert_eq!(
+                    base.difference(&other),
+                    Some(RunnerField::Mounts),
+                    "moving {name} was reported as something else"
+                );
+                assert_eq!(other.difference(&base), Some(RunnerField::Mounts));
+                moved += 1;
+            }
         }
+        assert_eq!(moved, 15);
         let mut volumes_too = mounted_runner();
         volumes_too.mounts.clear();
         volumes_too.credential_volumes = Some(BTreeMap::new());
         assert_eq!(
-            base.difference(&volumes_too),
+            mounted_runner().difference(&volumes_too),
             Some(RunnerField::CredentialVolumes),
             "the mount set is compared after every field that was there before it"
         );
@@ -3175,42 +3330,70 @@ mod tests {
     }
 
     #[test]
-    fn a_mount_record_is_complete_only_when_its_paths_are_absolute_and_its_targets_ordered() {
-        let mount = |source: &str, target: &str| {
-            recorded_mount(source, target, true, (MountSourceKind::Directory, 1, 1))
+    fn a_mount_record_is_complete_only_when_its_paths_and_identity_are_spelled_exactly() {
+        let unix = |source: &str, target: &str| {
+            recorded_mount(
+                source,
+                target,
+                true,
+                unix_identity(MountSourceKind::Directory, 1, 1),
+            )
         };
-        let cells: [(&str, Vec<RecordedMount>, Result<(), RunnerRecordDefect>); 8] = [
+        let windows = |source: &str, file_id: &str| {
+            recorded_mount(
+                source,
+                "/w",
+                true,
+                windows_identity(MountSourceKind::Directory, 1, file_id),
+            )
+        };
+        let malformed = Err(RunnerRecordDefect::MountRecordMalformed);
+        let cells: Vec<(&str, Vec<RecordedMount>, Result<(), RunnerRecordDefect>)> = vec![
             ("none", Vec::new(), Ok(())),
-            ("one", vec![mount("/srv/a", "/a")], Ok(())),
+            ("one", vec![unix("/srv/a", "/a")], Ok(())),
             (
                 "ordered",
-                vec![mount("/srv/b", "/a"), mount("/srv/a", "/b")],
+                vec![unix("/srv/b", "/a"), unix("/srv/a", "/b")],
                 Ok(()),
             ),
             (
                 "unordered",
-                vec![mount("/srv/a", "/b"), mount("/srv/b", "/a")],
-                Err(RunnerRecordDefect::MountRecordMalformed),
+                vec![unix("/srv/a", "/b"), unix("/srv/b", "/a")],
+                malformed,
             ),
             (
                 "a repeated target",
-                vec![mount("/srv/a", "/a"), mount("/srv/b", "/a")],
-                Err(RunnerRecordDefect::MountRecordMalformed),
+                vec![unix("/srv/a", "/a"), unix("/srv/b", "/a")],
+                malformed,
+            ),
+            ("a relative source", vec![unix("srv/a", "/a")], malformed),
+            ("a relative target", vec![unix("/srv/a", "a")], malformed),
+            ("an empty target", vec![unix("/srv/a", "")], malformed),
+            ("a drive path under a Unix identity", vec![unix(r"C:\srv\a", "/a")], malformed),
+            ("a drive path", vec![windows(r"C:\srv\a", FILE_ID)], Ok(())),
+            ("a lowercase drive", vec![windows(r"d:\srv", FILE_ID)], Ok(())),
+            ("a Unix path under a Windows identity", vec![windows("/srv/a", FILE_ID)], malformed),
+            ("forward slashes", vec![windows("C:/srv/a", FILE_ID)], malformed),
+            ("a mixed separator", vec![windows(r"C:\srv/a", FILE_ID)], malformed),
+            ("a verbatim prefix", vec![windows(r"\\?\C:\srv\a", FILE_ID)], malformed),
+            ("a network share", vec![windows(r"\\server\share\a", FILE_ID)], malformed),
+            ("a drive-relative path", vec![windows("C:srv", FILE_ID)], malformed),
+            ("a relative Windows path", vec![windows(r"srv\a", FILE_ID)], malformed),
+            ("a short file id", vec![windows(r"C:\a", &FILE_ID[2..])], malformed),
+            (
+                "a long file id",
+                vec![windows(r"C:\a", &format!("{FILE_ID}00"))],
+                malformed,
             ),
             (
-                "a relative source",
-                vec![mount("srv/a", "/a")],
-                Err(RunnerRecordDefect::MountRecordMalformed),
+                "an uppercase file id",
+                vec![windows(r"C:\a", &FILE_ID.to_ascii_uppercase())],
+                malformed,
             ),
             (
-                "a relative target",
-                vec![mount("/srv/a", "a")],
-                Err(RunnerRecordDefect::MountRecordMalformed),
-            ),
-            (
-                "an empty target",
-                vec![mount("/srv/a", "")],
-                Err(RunnerRecordDefect::MountRecordMalformed),
+                "a file id that is not hex",
+                vec![windows(r"C:\a", &FILE_ID.replace('0', "g"))],
+                malformed,
             ),
         ];
         for (name, mounts, expected) in cells {

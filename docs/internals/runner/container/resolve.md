@@ -39,7 +39,15 @@ could write. Configured mounts (root's recorded-mounts disposition,
 primitive on the clippy denylist; they are recorded here as read-only API
 use, not as an effect exemption, and
 `tests::the_resolution_module_names_no_lock_no_write_and_no_spawn` admits
-exactly those three `fs::` spellings and no other. `ContainerSite` — the frozen effect inventory's eight container
+exactly those three `fs::` spellings and no other. On Windows the identity
+is read through `windows_sys`, also read-only: `CreateFileW` with
+`FILE_READ_ATTRIBUTES` access, the `OPEN_EXISTING` disposition and
+`FILE_FLAG_OPEN_REPARSE_POINT`, then `GetFileInformationByHandle` and
+`GetFileInformationByHandleEx(FileIdInfo)`, the handle closed by
+`OwnedHandle`. None of these is on the clippy denylist either; the same
+census admits each call exactly once, requires those three flags, and
+refuses every write, create, truncate and delete-on-close constant, so this
+classification is recorded where it is enforced. `ContainerSite` — the frozen effect inventory's eight container
 sites — has **no inspection variant** and this slice may not add one, so an
 inspection is not a funnel call and a funnel call is not an inspection. That
 is why `probe`, `image_by_reference`, `image_by_id` and `volume_present` are
@@ -294,6 +302,17 @@ A path as the filesystem resolves it, for comparison: the longest
 existing ancestor canonicalized, the rest appended as written. A private
 root or credential location need not exist yet to be withheld.
 
+## `pub fn canonical(path: &Path) -> io::Result<PathBuf> {`
+
+`fs::canonicalize`, with one Windows rewrite: a verbatim drive path
+(`\\?\C:\...`), which is what canonicalization returns there, loses its
+`\\?\` prefix, so every canonical path this module compares or records is
+the drive-letter spelling. The two name the same path; keeping one of them
+everywhere is what makes `Path` comparisons (component by component, the
+prefix included) and the recorded string exact. A verbatim path that is
+not a drive path (a network share, a volume GUID) keeps its prefix and is
+then refused as a mount source. Elsewhere this is `fs::canonicalize`.
+
 ## `pub fn overlap(source: &Path, excluded: &Path) -> Option<&'static str> {`
 
 `is`, `contains` or `lies inside`, by component (`Path::starts_with`), so
@@ -319,8 +338,10 @@ also against the role's own targets.
 
 The source as recorded: absolute (a relative one would depend on the
 directory `upstroke` was started from), existing, canonicalized
-(symlinks resolved at selection), spellable exactly in the runtime's
-mount option, and a directory or regular file with its identity.
+(symlinks resolved at selection), on Windows a drive-letter path (a
+network share or device path is refused), spellable exactly in the
+runtime's mount option, and a directory or regular file with its
+identity.
 
 Canonicalizing does not make later replacement impossible, and nothing
 here claims an atomic bind. The rebuild and every plan recheck the
@@ -332,9 +353,30 @@ for any path the runtime is handed.
 
 Unix: `symlink_metadata` of the canonical path, so a path that turned into
 a link since it was resolved is refused rather than followed; directory or
-regular file; device and inode from `MetadataExt`. Non-Unix builds have
-no portable identity in std, so they refuse configured mounts rather than
-record a guessed one.
+regular file; device and inode from `MetadataExt`.
+
+Windows (root's `PR12-MOUNT-WINDOWS-IDENTITY` follow-through, adapting
+`rundir::scratch_tree`'s read-only directory-identity precedent, which is
+left unchanged): one handle opened on the object itself with
+`FILE_READ_ATTRIBUTES` access, `OPEN_EXISTING`, `FILE_FLAG_BACKUP_SEMANTICS`
+(so a directory opens) and `FILE_FLAG_OPEN_REPARSE_POINT` (so a reparse
+point is opened as itself and refused, never followed). Its attributes
+refuse a reparse point (a link, a junction, or a path that became one
+since it was resolved) and a device; the kind is directory or file.
+`GetFileInformationByHandleEx(FileIdInfo)` then gives the volume serial
+number and the full 128-bit file id, recorded as 32 lowercase hex digits,
+never truncated. Unreadable attributes or id refuse. The handle is an
+`OwnedHandle`, closed once on every path. std has no stable API for this,
+and `fs::OpenOptions` is a denied type here, hence the direct calls, each
+with its `SAFETY:` obligation in the source.
+
+Other targets, neither Unix nor Windows, refuse configured mounts rather
+than record a guessed identity.
+
+## `pub fn described(identity: &MountSourceIdentity) -> String {`
+
+An identity as a refusal names it: the kind, then device and inode, or
+volume and file id.
 
 ## `pub fn resolve_mounts(`
 

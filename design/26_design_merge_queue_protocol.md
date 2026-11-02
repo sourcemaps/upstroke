@@ -494,16 +494,18 @@ argv, the environment, a mount or a log.
 
 Operator-configured `[runner]` mounts are execution identity, like the image. A
 fresh run resolves them before any lock or probe: each source must be an absolute
-path to an existing directory or regular file, and is recorded canonicalized (links
-resolved), with its device and inode on Unix, as the `mounts` of the run's
-`RunnerPolicy`; each target is a container path in normal form, never `/`, never at
+path to an existing directory or regular file (on Windows, on a drive letter), and is
+recorded canonicalized (links resolved), with its identity (the device and inode on
+Unix; on Windows the volume serial number and the full 128-bit file id, read from the
+object itself, a reparse point refused), as the `mounts` of the run's `RunnerPolicy`; each target is a container path in normal form, never `/`, never at
 or under `/upstroke` or `/tmp`, and no two targets are the same or nested. A source
 that is, contains or lies inside the repository root, its Git or common directory,
 the private root (and so every run's worktrees and private artifacts) or a host
 credential location (`CLAUDE_CONFIG_DIR`, `COPILOT_HOME`, `CODEX_HOME`, and
 `~/.claude`, `~/.claude.json`, `~/.codex`, `~/.copilot`, compared as paths, never
 opened) is refused, as is a path the runtime's `--mount` option cannot carry exactly.
-Non-Unix builds refuse configured mounts. The record is digested (a separate v2
+A build for a platform that is neither Unix nor Windows refuses configured mounts.
+The record is digested (a separate v2
 domain, so a record without mounts keeps its v1 digest and its exact bytes), written
 to the owner record and `run_started`, and every role and probe gets the recorded
 list: read-only for review and probes, as recorded for implement and gate, so a gate

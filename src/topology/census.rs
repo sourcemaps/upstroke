@@ -5912,10 +5912,10 @@ pub(crate) mod tests {
             source: format!("/srv/census{target}"),
             target: target.to_owned(),
             read_only,
-            source_identity: MountSourceIdentity {
+            source_identity: MountSourceIdentity::Unix {
                 kind: MountSourceKind::Directory,
                 device: 64_769,
-                object,
+                inode: object,
             },
         }
     }
@@ -5941,7 +5941,7 @@ pub(crate) mod tests {
         let movers: [(&str, Mover); 5] = [
             ("dropped", |runner| runner.mounts.clear()),
             ("a source rebound", |runner| {
-                runner.mounts[0].source_identity.object += 1;
+                runner.mounts[0] = census_mount("/cache", true, 21);
             }),
             ("read-write now", |runner| {
                 runner.mounts[0].read_only = false
@@ -6011,8 +6011,8 @@ pub(crate) mod tests {
                 );
                 for line in [
                     "runner mounts: 2",
-                    "  /cache <- /srv/census/cache (read-only, directory device 64769 object 11)",
-                    "  /tools <- /srv/census/tools (read-write, directory device 64769 object 12)",
+                    "  /cache <- /srv/census/cache (read-only, directory device 64769 inode 11)",
+                    "  /tools <- /srv/census/tools (read-write, directory device 64769 inode 12)",
                 ] {
                     assert!(
                         rendered.contains(line),
@@ -6042,5 +6042,31 @@ pub(crate) mod tests {
                 "the stored report does not read back as fresh"
             );
         }
+
+        let mut windows = run_started();
+        windows.runner.mounts = vec![RecordedMount {
+            source: r"C:\srv\census".to_owned(),
+            target: "/census".to_owned(),
+            read_only: false,
+            source_identity: MountSourceIdentity::Windows {
+                kind: MountSourceKind::File,
+                volume_serial: 0x1234,
+                file_id: "00112233445566778899aabbccddeeff".to_owned(),
+            },
+        }];
+        let events = vec![ev(TopologyEventBody::RunStarted {
+            data: Box::new(windows.clone()),
+        })];
+        let fold = TopologyFold::replay(inputs(), &events).expect("the record replays");
+        let report = TopologyReport::derive(RUN_ID, &fold, &events).expect("the report derives");
+        assert_eq!(report.runner, windows.runner);
+        let rendered = report.render();
+        assert!(
+            rendered.contains(
+                "  /census <- C:\\srv\\census (read-write, file volume 0x0000000000001234 file \
+                 00112233445566778899aabbccddeeff)"
+            ),
+            "{rendered}"
+        );
     }
 }

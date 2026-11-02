@@ -420,7 +420,7 @@ impl TopologyReport {
             out.push(format_args!("runner mounts: {}", self.runner.mounts.len()));
             for mount in &self.runner.mounts {
                 out.push(format_args!(
-                    "  {} <- {} ({}, {} device {} object {})",
+                    "  {} <- {} ({}, {})",
                     mount.target,
                     mount.source,
                     if mount.read_only {
@@ -428,12 +428,7 @@ impl TopologyReport {
                     } else {
                         "read-write"
                     },
-                    match mount.source_identity.kind {
-                        crate::topology::events::MountSourceKind::Directory => "directory",
-                        crate::topology::events::MountSourceKind::File => "file",
-                    },
-                    mount.source_identity.device,
-                    mount.source_identity.object
+                    identity_text(&mount.source_identity)
                 ));
             }
         }
@@ -543,6 +538,29 @@ pub fn outcome_label(outcome: &RunOutcome) -> String {
         RunOutcome::BudgetExceeded => "budget exceeded",
     }
     .to_owned()
+}
+
+fn identity_text(identity: &crate::topology::events::MountSourceIdentity) -> String {
+    use crate::topology::events::{MountSourceIdentity, MountSourceKind};
+    let kind = |kind: &MountSourceKind| match kind {
+        MountSourceKind::Directory => "directory",
+        MountSourceKind::File => "file",
+    };
+    match identity {
+        MountSourceIdentity::Unix {
+            kind: object,
+            device,
+            inode,
+        } => format!("{} device {device} inode {inode}", kind(object)),
+        MountSourceIdentity::Windows {
+            kind: object,
+            volume_serial,
+            file_id,
+        } => format!(
+            "{} volume {volume_serial:#018x} file {file_id}",
+            kind(object)
+        ),
+    }
 }
 
 fn runner_kind(runner: &RunnerPolicy) -> &'static str {

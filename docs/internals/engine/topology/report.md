@@ -49,7 +49,8 @@ runner under a matching digest are stale, never an error: finalization then rewr
 The status text a person reads: outcome, runner identity, tasks, queue, questions, the
 retained candidates refs and the ledger. A runner with recorded mounts adds `runner mounts:
 <count>` and one line per mount, `<target> <- <source> (<read-only|read-write>, <kind> device
-<device> object <object>)`, from the record; a runner without them renders as before.
+<device> inode <inode>)` for a Unix identity or `(..., <kind> volume <0x serial> file <file id>)`
+for a Windows one, from the record; a runner without them renders as before.
 `report.json` needs no second schema for them: its `runner` is the recorded `RunnerPolicy`,
 whose serialization carries `mounts` when there are any and omits it otherwise, so a historical
 report keeps its bytes and its digest (`topology::census::tests::the_report_projects_the_recorded_mounts_and_an_unmounted_record_projects_as_before`).

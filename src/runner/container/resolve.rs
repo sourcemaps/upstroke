@@ -188,7 +188,7 @@ impl MountContext {
         private_root: &Path,
         credential_locations: &[PathBuf],
     ) -> Result<Self, UpstrokeError> {
-        let root = std::fs::canonicalize(repo_root).map_err(|source| UpstrokeError::Io {
+        let root = canonical(repo_root).map_err(|source| UpstrokeError::Io {
             path: repo_root.to_path_buf(),
             source,
         })?;
@@ -261,9 +261,9 @@ pub fn canonical_spelling(path: &Path) -> PathBuf {
     let mut existing = absolute.as_path();
     let mut below = Vec::new();
     loop {
-        if let Ok(mut canonical) = std::fs::canonicalize(existing) {
-            canonical.extend(below.iter().rev());
-            return canonical;
+        if let Ok(mut resolved) = canonical(existing) {
+            resolved.extend(below.iter().rev());
+            return resolved;
         }
         match (existing.parent(), existing.file_name()) {
             (Some(parent), Some(name)) => {
@@ -273,6 +273,32 @@ pub fn canonical_spelling(path: &Path) -> PathBuf {
             _ => return absolute,
         }
     }
+}
+
+pub fn canonical(path: &Path) -> io::Result<PathBuf> {
+    std::fs::canonicalize(path).map(without_verbatim_disk_prefix)
+}
+
+#[cfg(windows)]
+fn without_verbatim_disk_prefix(path: PathBuf) -> PathBuf {
+    let plain = path
+        .to_str()
+        .and_then(|spelled| spelled.strip_prefix(r"\\?\"))
+        .filter(|rest| is_drive_absolute(rest))
+        .map(PathBuf::from);
+    plain.unwrap_or(path)
+}
+
+#[cfg(not(windows))]
+const fn without_verbatim_disk_prefix(path: PathBuf) -> PathBuf {
+    path
+}
+
+fn is_drive_absolute(spelled: &str) -> bool {
+    matches!(
+        spelled.as_bytes(),
+        [letter, b':', b'\\', ..] if letter.is_ascii_alphabetic()
+    )
 }
 
 #[must_use]
@@ -366,26 +392,32 @@ fn resolve_source(source: &Path) -> Result<(String, MountSourceIdentity), String
             source.display()
         ));
     }
-    let canonical = std::fs::canonicalize(source).map_err(|error| {
+    let resolved = canonical(source).map_err(|error| {
         if error.kind() == io::ErrorKind::NotFound {
             "its source does not exist".to_owned()
         } else {
             format!("its source cannot be resolved: {error}")
         }
     })?;
-    let Some(spelled) = canonical.to_str() else {
+    let Some(spelled) = resolved.to_str() else {
         return Err(format!(
             "its source resolves to `{}`, which is not valid UTF-8, so the runtime's mount \
              option cannot carry it exactly",
-            canonical.display()
+            resolved.display()
         ));
     };
+    if cfg!(windows) && !is_drive_absolute(spelled) {
+        return Err(format!(
+            "its source resolves to `{spelled}`, which is not a path on a drive letter; a \
+             network share or a device path is not mounted"
+        ));
+    }
     if let Some(reason) = super::mount_option_refusal(spelled) {
         return Err(format!(
             "its source resolves to `{spelled}`, and that spelling {reason}"
         ));
     }
-    let identity = source_identity(&canonical)?;
+    let identity = source_identity(&resolved)?;
     Ok((spelled.to_owned(), identity))
 }
 
@@ -409,20 +441,141 @@ fn source_identity(canonical: &Path) -> Result<MountSourceIdentity, String> {
                 .to_owned(),
         );
     };
-    Ok(MountSourceIdentity {
+    Ok(MountSourceIdentity::Unix {
         kind,
         device: metadata.dev(),
-        object: metadata.ino(),
+        inode: metadata.ino(),
     })
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn source_identity(canonical: &Path) -> Result<MountSourceIdentity, String> {
+    use std::os::windows::ffi::OsStrExt as _;
+    use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
+
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_ATTRIBUTE_DEVICE, FILE_ATTRIBUTE_DIRECTORY,
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        FILE_ID_INFO, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        FileIdInfo, GetFileInformationByHandle, GetFileInformationByHandleEx, OPEN_EXISTING,
+    };
+
+    use crate::topology::events::MountSourceKind;
+
+    let mut wide: Vec<u16> = canonical.as_os_str().encode_wide().collect();
+    if wide.contains(&0) {
+        return Err("its source path holds a NUL, so it cannot be opened".to_owned());
+    }
+    wide.push(0);
+    // SAFETY: `wide` is a live NUL-terminated UTF-16 path that outlives the call, and the two
+    // pointer arguments are the documented "no security attributes" and "no template" nulls.
+    // The access is FILE_READ_ATTRIBUTES and the disposition OPEN_EXISTING, so nothing is
+    // created, written or truncated; FILE_FLAG_OPEN_REPARSE_POINT opens a reparse point itself
+    // rather than what it names, and FILE_FLAG_BACKUP_SEMANTICS lets a directory be opened.
+    let raw = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            std::ptr::null_mut(),
+        )
+    };
+    if raw == INVALID_HANDLE_VALUE {
+        return Err(format!(
+            "its source cannot be opened to read its identity: {}",
+            io::Error::last_os_error()
+        ));
+    }
+    // SAFETY: `raw` is the valid handle CreateFileW just returned and nothing else owns it; the
+    // OwnedHandle closes it exactly once, when it drops at the end of this function.
+    let handle = unsafe { OwnedHandle::from_raw_handle(raw) };
+
+    let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: the handle is live for the whole call, and `information` is an initialized,
+    // writable BY_HANDLE_FILE_INFORMATION that only this call writes.
+    if unsafe { GetFileInformationByHandle(handle.as_raw_handle(), &mut information) } == 0 {
+        return Err(format!(
+            "its source's attributes cannot be read: {}",
+            io::Error::last_os_error()
+        ));
+    }
+    let attributes = information.dwFileAttributes;
+    if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(
+            "its source is a link, junction or other reparse point, or became one while it was \
+             being resolved"
+                .to_owned(),
+        );
+    }
+    if attributes & FILE_ATTRIBUTE_DEVICE != 0 {
+        return Err("its source is a device, neither a directory nor a regular file".to_owned());
+    }
+    let kind = if attributes & FILE_ATTRIBUTE_DIRECTORY == 0 {
+        MountSourceKind::File
+    } else {
+        MountSourceKind::Directory
+    };
+
+    let mut id = FILE_ID_INFO::default();
+    let length = u32::try_from(std::mem::size_of::<FILE_ID_INFO>())
+        .map_err(|_| "FILE_ID_INFO exceeds the Windows buffer-size field".to_owned())?;
+    // SAFETY: the handle is live for the whole call. The writable, initialized buffer is exactly
+    // one FILE_ID_INFO, with the FileIdInfo class and that struct's byte length; no pointer
+    // escapes and no ownership is transferred.
+    let read = unsafe {
+        GetFileInformationByHandleEx(
+            handle.as_raw_handle(),
+            FileIdInfo,
+            std::ptr::from_mut(&mut id).cast(),
+            length,
+        )
+    };
+    if read == 0 {
+        return Err(format!(
+            "its source's file id cannot be read: {}",
+            io::Error::last_os_error()
+        ));
+    }
+    Ok(MountSourceIdentity::Windows {
+        kind,
+        volume_serial: id.VolumeSerialNumber,
+        file_id: id
+            .FileId
+            .Identifier
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect(),
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
 fn source_identity(_canonical: &Path) -> Result<MountSourceIdentity, String> {
     Err(
-        "this platform's build records no file identity for a mount source, and a mount is \
-         recorded with one, so `[runner] mounts` is refused here"
+        "this platform's build records no file identity for a mount source (Unix records the \
+         device and inode, Windows the volume and the 128-bit file id), and a mount is recorded \
+         with one, so `[runner] mounts` is refused here"
             .to_owned(),
     )
+}
+
+#[must_use]
+pub fn described(identity: &MountSourceIdentity) -> String {
+    match identity {
+        MountSourceIdentity::Unix {
+            kind,
+            device,
+            inode,
+        } => format!("{kind:?}, device {device}, inode {inode}"),
+        MountSourceIdentity::Windows {
+            kind,
+            volume_serial,
+            file_id,
+        } => format!("{kind:?}, volume {volume_serial:#018x}, file id {file_id}"),
+    }
 }
 
 pub fn resolve_mounts(
@@ -475,30 +628,25 @@ pub fn resolve_mounts(
 
 pub fn recheck_recorded_source(mount: &RecordedMount) -> Result<(), String> {
     let recorded = Path::new(&mount.source);
-    let canonical = std::fs::canonicalize(recorded).map_err(|error| {
+    let resolved = canonical(recorded).map_err(|error| {
         if error.kind() == io::ErrorKind::NotFound {
             "its source is gone".to_owned()
         } else {
             format!("its source cannot be resolved: {error}")
         }
     })?;
-    if canonical != recorded {
+    if resolved != recorded {
         return Err(format!(
             "its source path now resolves to `{}`, so a link or a move rebound it",
-            canonical.display()
+            resolved.display()
         ));
     }
-    let now = source_identity(&canonical)?;
+    let now = source_identity(&resolved)?;
     if now != mount.source_identity {
         return Err(format!(
-            "its source path now names another object ({:?}, device {}, object {}; the run \
-             recorded {:?}, device {}, object {})",
-            now.kind,
-            now.device,
-            now.object,
-            mount.source_identity.kind,
-            mount.source_identity.device,
-            mount.source_identity.object
+            "its source path now names another object ({}; the run recorded {})",
+            described(&now),
+            described(&mount.source_identity)
         ));
     }
     Ok(())
@@ -672,7 +820,7 @@ fn same_configured_mounts(recorded: &[RecordedMount], configured: &[RunnerMount]
     }
     let mut today: Vec<(String, &str, bool)> = Vec::with_capacity(configured.len());
     for mount in configured {
-        let spelled = std::fs::canonicalize(&mount.source)
+        let spelled = canonical(&mount.source)
             .ok()
             .and_then(|canonical| canonical.to_str().map(str::to_owned))
             .or_else(|| mount.source.to_str().map(str::to_owned));

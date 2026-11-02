@@ -297,7 +297,9 @@ actually about.
 A real directory tree for the mount tests: a repository root with a
 `.git`, a private root under `state/`, a credential location under
 `home/`, a shared directory and a tool file, all under one canonicalized
-scratch root. Unix only, like every test that records an identity.
+scratch root. Built on Unix and Windows, the two platforms that record an
+identity; the Unix tests use symlinks, sockets and non-UTF-8 names, the
+Windows test only renames.
 
 ## `fn a_configured_mount_is_recorded_and_rebuilt_from_the_record() {`
 
@@ -334,6 +336,18 @@ for its own reason, with the runtime never asked. Every `BoundaryLayout`
 default except the scratch lies under `BOUNDARY_ROOT`. The positive control
 accepts `/upstroked`, `/tmpfile` and `/database` (a prefix of a reserved
 name is not under it) and a directory of another repository's checkout.
+
+## `fn a_windows_configured_mount_is_recorded_with_its_volume_and_full_file_id_and_rebuilt_from_it()`
+
+The Windows half, run only by the native Windows legs (`cfg(windows)`):
+a directory and a file resolve to `windows` identities with their kinds
+and full 32-digit file ids, under drive-letter sources with no verbatim
+prefix; the record is complete and in the v2 domain; resolving again
+records the same objects identically; and the rebuild refuses a source
+moved away (`is gone`) and another directory renamed into its path
+(`names another object`), then re-establishes the record once the source
+is back. A Linux run compiles none of it; `cargo check --target
+x86_64-pc-windows-msvc` compiles it without running it.
 
 ## `fn the_rebuild_refuses_a_missing_or_rebound_source_before_any_spawn_and_resumes_once_it_is_back()`
 
@@ -783,9 +797,16 @@ filesystem, so `fs::` is now admitted only as the three read-only
 observations it needs, `fs::canonicalize(`, `fs::symlink_metadata(` and
 `fs::MetadataExt`: the count of `fs::` in the production region must equal
 the count of those, and must not be zero. Any other `fs::` item, a write
-above all, fails as before. This is a read-only API classification,
-recorded as one, and not an exemption: the clippy denylist still governs
-the module unchanged.
+above all, fails as before. The Windows identity's three calls,
+`CreateFileW(`, `GetFileInformationByHandle(` and
+`GetFileInformationByHandleEx(`, must each appear exactly once, with
+`FILE_READ_ATTRIBUTES`, `OPEN_EXISTING` and `FILE_FLAG_OPEN_REPARSE_POINT`
+named, and none of `GENERIC_WRITE`, `GENERIC_ALL`, `FILE_GENERIC_WRITE`,
+`FILE_WRITE_`, `FILE_APPEND_DATA`, `CREATE_NEW`, `CREATE_ALWAYS`,
+`OPEN_ALWAYS`, `TRUNCATE_EXISTING`, `DELETE_ON_CLOSE`, `WRITE_DAC` or
+`WRITE_OWNER` anywhere. This is a read-only API classification, recorded
+as one, and not an exemption: the clippy denylist still governs the module
+unchanged.
 
 The structural half of "before any lock or effect": the argument that
 `resolve_container` cannot take a worktree lock is an argument about what it

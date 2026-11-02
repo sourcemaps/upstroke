@@ -2005,4 +2005,5 @@ covers them, the rendering names their count and each mount, and a stored
 report that lost them under the same digest is not fresh. For the
 unmounted record the runner projects exactly the four historical keys and
 the rendering has no mount line, so a historical report keeps its bytes.
-Both read back fresh.
+Both read back fresh. A record with a Windows identity renders its drive
+path, its volume serial and its full file id.

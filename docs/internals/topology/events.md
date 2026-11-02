@@ -261,26 +261,46 @@ What a recorded mount source was when it was resolved: a directory or a
 regular file. Nothing else is ever recorded; a socket, device or FIFO is
 refused at resolution (`runner/container/resolve.rs`).
 
-## `pub struct MountSourceIdentity {`
+## `pub enum MountSourceIdentity {`
 
-The resolved source object a mount names: its kind, its device and its
-object number (the inode on Unix). It identifies the *object*, not its
-contents. A read-write mount's contents change normally; what may not
-change is which object the recorded path names. A resume that finds the
-path gone, rebound through a link or a move, or naming another object
-refuses before any spawn. Only Unix builds record one; a non-Unix build
-refuses configured mounts instead of guessing an identity.
+The resolved source object a mount names, tagged with the platform whose
+identity it is and whose path syntax the mount's `source` is spelled in
+(`"platform"`):
+
+- `unix`: the kind, the device and the inode (`st_dev`, `st_ino`);
+- `windows`: the kind, the volume serial number and the **full 128-bit
+  file id** of `FILE_ID_INFO`, as 32 lowercase hex digits of its bytes in
+  order (root's `PR12-MOUNT-WINDOWS-IDENTITY` follow-through, 2026-11-02).
+  The id is never truncated to 64 bits, and no identity is guessed:
+  resolution reads it through a read-attributes handle on the object
+  itself, which refuses a reparse point.
+
+It identifies the *object*, not its contents. A read-write mount's
+contents change normally; what may not change is which object the
+recorded path names. A resume that finds the path gone, rebound through a
+link or a move, or naming another object refuses before any spawn.
+Builds for a platform that is neither (no supported target today) refuse
+configured mounts rather than record a guessed identity.
+
+The tag makes the comparison exact across platforms too: a record made on
+one platform never equals an identity read on the other, so a run is
+never resumed onto a different platform's object.
 
 ## `pub struct RecordedMount {`
 
 One operator-configured mount as it is part of the run's execution
 identity (root's recorded-mounts disposition, 2026-11-02):
 
-- `source`: the canonical absolute host path, resolved once at selection.
-  It is stored as the exact UTF-8 string the runtime's `--mount` option
-  receives. A source whose canonical spelling is not UTF-8, or carries
-  what that option cannot (`,`, `"`, control characters, edge whitespace),
-  is refused rather than converted;
+- `source`: the canonical absolute host path, resolved once at selection,
+  in its identity's platform syntax: an absolute POSIX path for `unix`,
+  and for `windows` a drive-letter path (`C:\...`, backslashes only), the
+  canonical path with its verbatim `\\?\` prefix removed; a network share or
+  device path is refused. It is stored as the exact UTF-8 string the
+  runtime's `--mount` option receives (a Windows build writes its
+  separators as `/` there, which names the same path). A source whose
+  canonical spelling is not UTF-8, or carries what that option cannot
+  (`,`, `"`, control characters, edge whitespace), is refused rather than
+  converted;
 - `target`: the container path, in normal form (absolute, no empty, `.` or
   `..` component, no trailing `/`), never `/` and never at or under
   `/upstroke` or `/tmp`;
@@ -381,11 +401,16 @@ A host runner carrying an image, volumes or mounts it cannot have used.
 
 ## `pub enum RunnerRecordDefect` › `MountRecordMalformed,`
 
-A container runner whose recorded mounts cannot be rebuilt as recorded:
-a source or target that is not absolute, or targets that are not
-strictly increasing (which also refuses a repeated target). The full
-target and source rules are resolution's; this is the shape the fold can
-check from the record alone, at `run_started`.
+A container runner whose recorded mounts cannot be rebuilt as recorded: a
+target that is not an absolute container path; a source that is not
+absolute in its identity's platform syntax (a `unix` source that does not
+start with `/`; a `windows` source that is not a drive-letter path with
+backslashes only, so a verbatim, network-share, drive-relative or
+forward-slash spelling); a `windows` file id that is not exactly 32
+lowercase hex digits; or targets that are not strictly increasing (which
+also refuses a repeated target). The full target and source rules are
+resolution's; this is the shape the fold can check from the record alone,
+at `run_started`.
 
 ## `impl RunnerPolicy` › `pub fn completeness(&self) -> Result<(), RunnerRecordDefect> {`
 
@@ -1940,9 +1965,11 @@ compared lengths fails on exactly the mover that isolates it.
 
 ## `mod tests` › `fn mounted_runner() -> RunnerPolicy {`
 
-`container_runner()` with two recorded mounts that differ in every field:
-a directory read-only and a file read-write, a non-ASCII source with a
-space, and identities at both ends of `u64` so a lossy number path shows.
+`container_runner()` with two recorded `unix` mounts that differ in every
+field: a directory read-only and a file read-write, a non-ASCII source
+with a space, and identities at both ends of `u64` so a lossy number path
+shows. `windows_mounted_runner()` is its Windows counterpart: drive-letter
+sources, volume serials at both ends, and two full file ids.
 
 ## `fn an_empty_mount_list_is_omitted_and_an_absent_one_reads_as_empty() {`
 
@@ -1953,11 +1980,13 @@ without its key.
 
 ## `fn a_mount_list_round_trips_with_every_field_and_refuses_anything_else() {`
 
-The exact JSON a mount is written as, and fifteen refusals: each of the
-four mount fields and three identity fields missing, an unknown key at
-either level, a kind that is not `directory` or `file`, a negative or
-quoted number, a quoted boolean, a null source, and a map in place of the
-list.
+The exact JSON a mount is written as, for both platforms, and twenty-five
+refusals: each of the four mount fields missing, each of the four fields
+of either identity missing (the `platform` tag included), an unknown key
+at either level, a kind that is not `directory` or `file`, a platform
+that is neither, a negative or quoted number, a quoted boolean, a null
+source, a map in place of the list, and either platform's field inside
+the other's identity.
 
 ## `mod tests` › `struct PreMountRunnerPolicy {`
 
@@ -1977,17 +2006,22 @@ they carry.
 
 ## `fn a_mount_list_differs_in_any_field_of_any_mount_and_in_its_length() {`
 
-Ten movers, each changing one thing (a source byte, a target byte, either
-disposition, each identity field, one mount fewer or more, none), all
-reported as `Mounts` in both directions; a record that also lost its
-volumes reports the volumes first.
+Fifteen movers, each changing one thing: on the `unix` record a source
+byte, a target byte, either disposition, each identity field, the platform
+tag, one mount fewer or more, none; on the `windows` record the source's
+case, the kind, the volume and one byte of the file id. All are reported
+as `Mounts` in both directions; a record that also lost its volumes
+reports the volumes first.
 
-## `fn a_mount_record_is_complete_only_when_its_paths_are_absolute_and_its_targets_ordered() {`
+## `fn a_mount_record_is_complete_only_when_its_paths_and_identity_are_spelled_exactly() {`
 
 The completeness rules for mounts, for a container and for a host: any
 mount on a host is `HostWithContainerFields`; on a container an
-unordered or repeated target, a relative source or target, and an empty
-target are `MountRecordMalformed`.
+unordered or repeated target, a relative source or target, an empty
+target, a source in the other platform's syntax, a Windows source that is
+forward-slashed, mixed, verbatim, a network share, drive-relative or
+relative, and a file id that is short, long, uppercase or not hex are
+`MountRecordMalformed`; drive paths with either letter case are complete.
 
 ## `mod tests` › `const FROZEN_VOCABULARY: [(&str, bool); 24] = [`
 

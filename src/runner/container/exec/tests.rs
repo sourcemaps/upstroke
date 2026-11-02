@@ -1805,10 +1805,10 @@ fn a_recorded_mount_that_moved_or_reaches_a_withheld_path_refuses_the_plan_befor
     reaching.mounts[0].source_identity = {
         use std::os::unix::fs::MetadataExt as _;
         let metadata = std::fs::metadata(&fixture.private_root).expect("the private root");
-        crate::topology::events::MountSourceIdentity {
+        crate::topology::events::MountSourceIdentity::Unix {
             kind: crate::topology::events::MountSourceKind::Directory,
             device: metadata.dev(),
-            object: metadata.ino(),
+            inode: metadata.ino(),
         }
     };
     let refusal = fixture

@@ -555,7 +555,7 @@ fn the_only_volume_operation_the_seam_has_is_a_read_only_presence_question() {
     assert!(runtime.volume_present(CODEX_VOLUME).expect("inspects"));
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 struct MountWorld {
     _tree: ScratchTree,
     root: PathBuf,
@@ -566,7 +566,7 @@ struct MountWorld {
     tool: PathBuf,
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn mount_world(tag: &str) -> MountWorld {
     let tree = scratch(tag);
     let root = fs::canonicalize(tree.path()).expect("the scratch root canonicalizes");
@@ -591,7 +591,7 @@ fn mount_world(tag: &str) -> MountWorld {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 impl MountWorld {
     fn context(&self) -> MountContext {
         MountContext::bind_with(
@@ -603,7 +603,7 @@ impl MountWorld {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn configured(source: &Path, target: &str, read_only: bool) -> RunnerMount {
     RunnerMount {
         source: source.to_path_buf(),
@@ -612,7 +612,7 @@ fn configured(source: &Path, target: &str, read_only: bool) -> RunnerMount {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn mounted_selection(mounts: Vec<RunnerMount>) -> RunnerSelection {
     RunnerSelection {
         mounts,
@@ -624,15 +624,91 @@ fn mounted_selection(mounts: Vec<RunnerMount>) -> RunnerSelection {
 fn identity_of(path: &Path) -> MountSourceIdentity {
     use std::os::unix::fs::MetadataExt as _;
     let metadata = fs::symlink_metadata(path).expect("the source exists");
-    MountSourceIdentity {
+    MountSourceIdentity::Unix {
         kind: if metadata.is_dir() {
             crate::topology::events::MountSourceKind::Directory
         } else {
             crate::topology::events::MountSourceKind::File
         },
         device: metadata.dev(),
-        object: metadata.ino(),
+        inode: metadata.ino(),
     }
+}
+
+#[cfg(windows)]
+#[test]
+fn a_windows_configured_mount_is_recorded_with_its_volume_and_full_file_id_and_rebuilt_from_it() {
+    use crate::topology::events::MountSourceKind;
+
+    let world = mount_world("mount-windows");
+    let mounted = mounted_selection(vec![
+        configured(&world.shared, "/data", true),
+        configured(&world.tool, "/opt/tool", false),
+    ]);
+    let (runtime, _trace) = ready_runtime();
+    let record = resolve_container(&runtime, &mounted, &world.context()).expect("resolves");
+    assert_eq!(record.completeness(), Ok(()));
+    let plain = |path: &Path| {
+        let spelled = path.to_str().expect("utf-8");
+        spelled.strip_prefix(r"\\?\").unwrap_or(spelled).to_owned()
+    };
+    assert_eq!(
+        record
+            .mounts
+            .iter()
+            .map(|mount| (mount.source.clone(), mount.target.as_str(), mount.read_only))
+            .collect::<Vec<_>>(),
+        vec![
+            (plain(&world.shared), "/data", true),
+            (plain(&world.tool), "/opt/tool", false),
+        ],
+        "the record is the drive-letter spelling, never the verbatim one"
+    );
+    for (mount, expected) in record
+        .mounts
+        .iter()
+        .zip([MountSourceKind::Directory, MountSourceKind::File])
+    {
+        match &mount.source_identity {
+            MountSourceIdentity::Windows { kind, file_id, .. } => {
+                assert_eq!(*kind, expected);
+                assert_eq!(file_id.len(), 32, "the full 128-bit file id: {file_id}");
+            }
+            other => panic!("a Windows build recorded {other:?}"),
+        }
+    }
+    assert!(canonical_bytes(&record).starts_with(b"25:upstroke.runner-policy.v2;"));
+    assert_eq!(
+        resolve_container(&runtime, &mounted, &world.context()).expect("resolves"),
+        record,
+        "the same objects are recorded the same way twice"
+    );
+
+    let rebuild = || rebuild_by_inspection(&runtime, &record, &mounted, &mut Vec::new());
+    assert_eq!(rebuild().expect("rebuilds"), record);
+    let away = world.root.join("shared.away");
+    let other = world.root.join("other");
+    fs::create_dir_all(&other).expect("another directory");
+    fs::rename(&world.shared, &away).expect("move the source away");
+    match rebuild() {
+        Err(InspectionRefusal::MountSourceMoved { reason, .. }) => {
+            assert!(reason.contains("is gone"), "{reason}");
+        }
+        other => panic!("a moved source rebuilt as {other:?}"),
+    }
+    fs::rename(&other, &world.shared).expect("put another directory at the recorded path");
+    match rebuild() {
+        Err(InspectionRefusal::MountSourceMoved { reason, .. }) => {
+            assert!(reason.contains("names another object"), "{reason}");
+        }
+        other => panic!("another directory rebuilt as {other:?}"),
+    }
+    fs::rename(&world.shared, &other).expect("take it back out");
+    fs::rename(&away, &world.shared).expect("put the recorded source back");
+    assert_eq!(
+        rebuild().expect("the restored source re-establishes the record"),
+        record
+    );
 }
 
 #[cfg(unix)]
@@ -2083,6 +2159,18 @@ fn the_resolution_module_names_no_lock_no_write_and_no_spawn() {
         "runtime.remove(",
         "create_dir",
         "write(",
+        "GENERIC_WRITE",
+        "GENERIC_ALL",
+        "FILE_GENERIC_WRITE",
+        "FILE_WRITE_",
+        "FILE_APPEND_DATA",
+        "CREATE_NEW",
+        "CREATE_ALWAYS",
+        "OPEN_ALWAYS",
+        "TRUNCATE_EXISTING",
+        "DELETE_ON_CLOSE",
+        "WRITE_DAC",
+        "WRITE_OWNER",
     ];
     let source = fs::read_to_string(
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/runner/container/resolve.rs"),
@@ -2118,6 +2206,29 @@ fn the_resolution_module_names_no_lock_no_write_and_no_spawn() {
         observations > 0,
         "the read-only observations are gone, so the allowance above names nothing"
     );
+    for call in [
+        "CreateFileW(",
+        "GetFileInformationByHandle(",
+        "GetFileInformationByHandleEx(",
+    ] {
+        assert_eq!(
+            production.matches(call).count(),
+            1,
+            "the Windows mount identity is one read-attributes open and two reads; `{call}` \
+             is not named exactly once"
+        );
+    }
+    for flag in [
+        "FILE_READ_ATTRIBUTES",
+        "OPEN_EXISTING",
+        "FILE_FLAG_OPEN_REPARSE_POINT",
+    ] {
+        assert!(
+            production.contains(flag),
+            "the Windows open does not name `{flag}`, so it is not the read-only, \
+             existing-object, link-refusing open this census admits"
+        );
+    }
     assert!(
         production.contains("fn resolve_container"),
         "the production region is empty, so the census above proves nothing"
