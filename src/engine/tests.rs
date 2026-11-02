@@ -17666,19 +17666,19 @@ fn the_topology_stubs_edit_appends_one_line_per_run_under_the_native_shell() {
     let workspace = tree.path().to_path_buf();
     let runner = crate::runner::host::HostRunner::new();
     for runs in 1..=2 {
-        let output = runner
-            .run_blocking(&crate::runner::gate_request(
-                shell_spec(TOPOLOGY_STUB_EDIT),
-                workspace.clone(),
-                Duration::from_secs(60),
-                crate::runner::InvocationId::attempt(
-                    crate::topology::registry::TaskKey(0),
-                    crate::topology::events::GenerationId(0),
-                    crate::topology::events::AttemptNumber(1),
-                    crate::runner::invocation::AttemptRole::Gate(0),
-                    0,
-                ),
-            ))
+        let request = crate::runner::gate_request(
+            shell_spec(TOPOLOGY_STUB_EDIT),
+            workspace.clone(),
+            Duration::from_secs(60),
+            crate::runner::InvocationId::attempt(
+                crate::topology::registry::TaskKey(0),
+                crate::topology::events::GenerationId(0),
+                crate::topology::events::AttemptNumber(1),
+                crate::runner::invocation::AttemptRole::Gate(0),
+                0,
+            ),
+        );
+        let output = crate::runner::Runner::run_blocking(&runner, &request)
             .expect("the native shell runs the stub's edit");
         assert_eq!(output.code, Some(0), "run {runs}: {output:?}");
         let text = fs::read_to_string(workspace.join("agent-output.txt")).expect("the edit's file");
