@@ -1879,7 +1879,7 @@ fn host_and_container_compose_the_same_environment_for_every_role() {
             volumes: &volumes,
             layout: &layout,
         };
-        let host_composed: BTreeMap<String, String> = host_env
+        let mut host_composed: BTreeMap<String, String> = host_env
             .compose(&role, agent.as_ref(), &overlay)
             .expect("the host composes")
             .into_iter()
@@ -1890,11 +1890,27 @@ fn host_and_container_compose_the_same_environment_for_every_role() {
                 )
             })
             .collect();
+        // The one key the two boundaries compose by different mechanisms since PR12's Q2:
+        // this host environment's default object graph (`Recorded`) disables replacements
+        // with the process-wide variable, and the container states the same policy in the
+        // role's projected view config instead, so that other repositories keep theirs.
+        // Named and checked here rather than compared.
+        assert_eq!(
+            host_composed
+                .remove(crate::workspace_manager::NO_REPLACEMENT_OBJECTS.0)
+                .as_deref(),
+            Some(crate::workspace_manager::NO_REPLACEMENT_OBJECTS.1),
+            "{role}: the host's default object graph composes the process-wide variable"
+        );
         let container_composed: BTreeMap<String, String> = container_env
             .compose(&scope, &overlay)
             .expect("the container composes")
             .into_iter()
             .collect();
+        assert!(
+            !container_composed.contains_key(crate::workspace_manager::NO_REPLACEMENT_OBJECTS.0),
+            "{role}: the container composed a process-wide replacement setting"
+        );
 
         let withheld: BTreeMap<String, String> = container_env
             .withheld_credential_locations(&scope)

@@ -440,10 +440,7 @@ mod tests {
             for declared in [None, Some("1"), Some("")] {
                 let mut base = image_base();
                 if let Some(value) = declared {
-                    base.push((
-                        NO_REPLACEMENT_OBJECTS.0.to_ascii_lowercase(),
-                        value.to_owned(),
-                    ));
+                    base.push((NO_REPLACEMENT_OBJECTS.0.to_owned(), value.to_owned()));
                 }
                 let environment = ContainerEnvironment::with_base(base, *case);
                 for role in ExecutionRole::all() {
