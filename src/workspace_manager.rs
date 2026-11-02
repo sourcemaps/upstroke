@@ -5372,6 +5372,56 @@ impl WorkspaceManager {
             .map(std::borrow::ToOwned::to_owned))
     }
 
+    /// Git's effective `core.ignorecase` for the managed repository: `git
+    /// config --type=bool --get core.ignorecase`, run at the managed base
+    /// through this manager's builder ([`Self::git`]). So every scope Git
+    /// itself reads answers, in Git's own precedence and with Git's own
+    /// boolean spellings:
+    /// - the system and global files;
+    /// - the repository's file and the files it includes;
+    /// - the per-worktree file;
+    /// - `GIT_CONFIG_*` and `-c`.
+    ///
+    /// `Some` with the value when a scope sets it. `None` when none does,
+    /// which Git reads as false.
+    ///
+    /// Read-only: `git config --get` writes nothing, and the builder adds no
+    /// effect of its own. Its one caller is the schema-4 case-fold resolver
+    /// (`engine::topology::entry`, D7). That caller treats an error here as an
+    /// unreadable record, which folds and says so.
+    ///
+    /// # Errors
+    ///
+    /// Anything but a clean answer, with Git's own words:
+    /// - a value Git does not read as a boolean;
+    /// - a configuration file Git cannot parse;
+    /// - any message on the way, since then the read was not whole.
+    pub fn core_ignorecase(&self) -> Result<Option<bool>, UpstrokeError> {
+        let output = self.git(
+            &self.base,
+            &[
+                OsString::from("config"),
+                OsString::from("--type=bool"),
+                OsString::from("--get"),
+                OsString::from("core.ignorecase"),
+            ],
+        )?;
+        let printed = String::from_utf8_lossy(&output.stdout);
+        let said = String::from_utf8_lossy(&output.stderr);
+        match (output.status.code(), printed.trim(), said.trim()) {
+            (Some(0), "true", "") => Ok(Some(true)),
+            (Some(0), "false", "") => Ok(Some(false)),
+            (Some(1), "", "") => Ok(None),
+            (code, printed, said) => Err(UpstrokeError::Git {
+                message: format!(
+                    "`git config --type=bool --get core.ignorecase` in {} ended {code:?}, \
+                     printing `{printed}` and saying `{said}`",
+                    self.base.display()
+                ),
+            }),
+        }
+    }
+
     /// Every ref under `namespace`, as `(refname, object id)`.
     ///
     /// # Errors

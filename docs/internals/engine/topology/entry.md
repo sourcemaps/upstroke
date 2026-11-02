@@ -260,40 +260,35 @@ Before PR12's brief 3 the fresh path took the observation alone: an unknown
 answer folded without a word, and `core.ignorecase` was not read. The witness
 found that, and this function is the repair.
 
-## `fn recorded_ignorecase(common_git_dir: &Path) -> IgnoreCase {`
+## `fn recorded_ignorecase(manager: &WorkspaceManager) -> IgnoreCase {`
 
-`core.ignorecase` from the managed repository's config file,
-`<common dir>/config`, read as text. The plan said `git config --type=bool
---get` through the manager's no-replacement Git builder, but no classified
-read surface runs an arbitrary `git config` query. Adding one is an
-`effects/wrappers.toml` row, an instrument this round may not touch. So the
-file Git writes the record into is read directly, the way
-`runner::container::view` already reads `repositoryformatversion` from the
-same file.
+Git's effective `core.ignorecase` for the managed repository, as
+`WorkspaceManager::core_ignorecase` reads it: `git config --type=bool --get
+core.ignorecase` at the managed base, through the manager's builder. The
+builder keeps `GIT_NO_REPLACE_OBJECTS`, the hooks path and the engine's
+switches, and so the plan's no-replacement and object-selection rules.
 
-What this reading does not see, by construction:
-- system and global configuration;
+Every scope Git reads answers, in Git's own precedence and with Git's own
+boolean spellings:
+- system and global files;
+- the repository's file and the files it includes;
+- the per-worktree file;
 - `GIT_CONFIG_*` and `-c`.
 
-`git init` writes the key into the repository's own file when it finds the
-filesystem folding, so the repository file is where Git keeps this record.
+A clean answer is `Set` or, when no scope sets the key, `Absent`. Anything
+else is `Unreadable`, with Git's own words: a value Git does not read as a
+boolean, a file Git cannot parse, or any message on the way.
 
-A missing file is Git's default (unset). A file that cannot be read, or that
-includes other files or turns on per-worktree configuration, is `Unreadable`.
-Those are files this reading does not follow.
-
-## `fn ignorecase_in(text: &str) -> Result<Option<bool>, String> {`
-
-The last `core.ignorecase` assignment in a `[core]` section (no subsection),
-with keys compared without case. Values are spelled the way Git spells a
-boolean:
-- `true`, `yes`, `on`, a bare key, or a non-zero integer is true;
-- `false`, `no`, `off`, an empty value, or zero is false;
-- a value may be quoted and followed by a `#` or `;` comment.
-
-Anything else is an error, as it is to Git. So are an `[include]` or
-`[includeIf]` section and `extensions.worktreeConfig` set true: the value
-could live in a file this reading does not open.
+Root's checkpoint-3 disposition (D7_CONFIG_REPAIR) replaced the handwritten
+reader brief 3 had put here. That reader read `<common dir>/config` alone, so
+a `true` set globally, by an include or in the environment read as `Absent` on
+a case-sensitive filesystem. The manager's read, and its `effects/wrappers.toml`
+row, are the one instrument change root authorized for it. The witness is
+`workspace_manager::tests::core_ignorecase_is_gits_effective_answer_at_every_scope`:
+- local, global, include and environment precedence;
+- unset, true and false;
+- a value that is not a boolean, and a file Git cannot parse;
+- each with its control.
 
 ## `fn observe_case_at(directory: &Path, name: &str) -> CaseObservation {`
 

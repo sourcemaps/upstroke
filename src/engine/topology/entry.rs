@@ -259,7 +259,7 @@ impl FreshPrepared {
         let case_fold = resolve_case_fold(
             manager.execution_root(),
             &observe_case_at(manager.execution_root(), "tasks"),
-            &recorded_ignorecase(manager.common_git_dir()),
+            &recorded_ignorecase(&manager),
             &mut warnings,
         );
         let base_sha = workspace.head_sha_full()?;
@@ -1107,91 +1107,11 @@ fn resolve_case_fold(
     }
 }
 
-fn recorded_ignorecase(common_git_dir: &Path) -> IgnoreCase {
-    let path = common_git_dir.join("config");
-    match std::fs::read_to_string(&path) {
-        Ok(text) => match ignorecase_in(&text) {
-            Ok(Some(set)) => IgnoreCase::Set(set),
-            Ok(None) => IgnoreCase::Absent,
-            Err(why) => IgnoreCase::Unreadable(format!("{}: {why}", path.display())),
-        },
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => IgnoreCase::Absent,
-        Err(error) => IgnoreCase::Unreadable(format!("{}: {error}", path.display())),
-    }
-}
-
-fn ignorecase_in(text: &str) -> Result<Option<bool>, String> {
-    let mut section = String::new();
-    let mut found = None;
-    for raw in text.lines() {
-        let mut line = raw.trim();
-        if line.starts_with('[') {
-            let end = line
-                .find(']')
-                .ok_or_else(|| format!("the section header `{line}` is not closed"))?;
-            section = line[1..end].trim().to_ascii_lowercase();
-            if section.starts_with("include") {
-                return Err(format!(
-                    "it has an `[{}]` section, and this reading does not follow included files",
-                    &line[1..end]
-                ));
-            }
-            line = line[end + 1..].trim();
-        }
-        let line = without_comment(line);
-        if line.is_empty() {
-            continue;
-        }
-        let (key, value) = match line.split_once('=') {
-            Some((key, value)) => (key.trim(), Some(value.trim())),
-            None => (line, None),
-        };
-        match section.as_str() {
-            "core" if key.eq_ignore_ascii_case("ignorecase") => {
-                found = Some(config_bool(value).ok_or_else(|| {
-                    format!(
-                        "`core.ignorecase = {}` is not a boolean",
-                        value.unwrap_or("")
-                    )
-                })?);
-            }
-            "extensions"
-                if key.eq_ignore_ascii_case("worktreeconfig")
-                    && config_bool(value) != Some(false) =>
-            {
-                return Err(
-                    "`extensions.worktreeConfig` is on, and this reading does not \
-                            follow per-worktree configuration"
-                        .to_owned(),
-                );
-            }
-            _ => {}
-        }
-    }
-    Ok(found)
-}
-
-fn without_comment(line: &str) -> &str {
-    let mut quoted = false;
-    for (at, character) in line.char_indices() {
-        match character {
-            '"' => quoted = !quoted,
-            '#' | ';' if !quoted => return line[..at].trim(),
-            _ => {}
-        }
-    }
-    line
-}
-
-fn config_bool(value: Option<&str>) -> Option<bool> {
-    let Some(value) = value else {
-        return Some(true);
-    };
-    let value = value.trim_matches('"').trim();
-    match value.to_ascii_lowercase().as_str() {
-        "true" | "yes" | "on" => Some(true),
-        "false" | "no" | "off" | "" => Some(false),
-        number => number.parse::<i64>().ok().map(|number| number != 0),
+fn recorded_ignorecase(manager: &WorkspaceManager) -> IgnoreCase {
+    match manager.core_ignorecase() {
+        Ok(Some(set)) => IgnoreCase::Set(set),
+        Ok(None) => IgnoreCase::Absent,
+        Err(error) => IgnoreCase::Unreadable(error.to_string()),
     }
 }
 

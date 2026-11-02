@@ -148,6 +148,7 @@ effect_free = [
     "commit_tree_sha_pausing",
     "common_git_dir",
     "composed_common_dir",
+    "core_ignorecase",
     "derive",
     "direct_ref_target",
     "execution_root",
