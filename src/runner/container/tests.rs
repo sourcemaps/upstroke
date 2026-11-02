@@ -578,8 +578,7 @@ fn an_unresolved_attached_client_stays_unresolved_through_every_settlement() {
             Err(ProcessFailure {
                 fate: ProcessFate::Unresolved,
                 error: UpstrokeError::Agent {
-                    message: "the client's process group could not be established gone"
-                        .to_owned(),
+                    message: "the client's process group could not be established gone".to_owned(),
                 },
             }),
         ),

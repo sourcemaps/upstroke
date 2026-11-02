@@ -5928,10 +5928,7 @@ fn a_launch_that_fails_after_a_cancellation_reports_the_cancellation() {
 #[test]
 fn an_invocation_whose_removal_leaves_a_process_unresolved_is_never_reported_gone() {
     for cancelled in [true, false] {
-        let fixture = Fixture::new(
-            &format!("unresolved-removal-{cancelled}"),
-            !cancelled,
-        );
+        let fixture = Fixture::new(&format!("unresolved-removal-{cancelled}"), !cancelled);
         let runner = fixture.runner();
         let request = worker_request(
             ShellKind::Sh
@@ -5974,7 +5971,9 @@ fn an_invocation_whose_removal_leaves_a_process_unresolved_is_never_reported_gon
             "cancelled {cancelled}: never Gone while a process may still run: {error}"
         );
         assert!(
-            error.to_string().contains("could not establish every process"),
+            error
+                .to_string()
+                .contains("could not establish every process"),
             "cancelled {cancelled}: the unresolved fact is the error: {error}"
         );
     }
