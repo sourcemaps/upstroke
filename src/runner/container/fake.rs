@@ -1352,7 +1352,11 @@ fn spec_of(value: &Value) -> Option<CreateSpec> {
             .get("read_only_root")
             .and_then(Value::as_bool)
             .unwrap_or(true),
-        user: match value.get("user").and_then(Value::as_array).map(Vec::as_slice) {
+        user: match value
+            .get("user")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+        {
             Some([uid, gid]) => Some(ContainerUser {
                 uid: u32::try_from(uid.as_u64()?).ok()?,
                 gid: u32::try_from(gid.as_u64()?).ok()?,

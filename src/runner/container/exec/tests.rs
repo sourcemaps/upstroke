@@ -1259,13 +1259,8 @@ fn only_the_invocations_own_settings_file_is_bound_and_no_argument_grants_anothe
         ),
         (
             "an agent probe carrying metadata and the argument",
-            crate::agent::probe_request(
-                "claude-code",
-                naming_its_settings(&worker_own),
-                0,
-                ten,
-            )
-            .expect("an agent probe request"),
+            crate::agent::probe_request("claude-code", naming_its_settings(&worker_own), 0, ten)
+                .expect("an agent probe request"),
         ),
     ] {
         let plan = runner.plan(&request).expect("plans");
@@ -1467,7 +1462,11 @@ fn a_commands_stdin_reaches_its_own_container_exactly_and_through_nothing_else()
             .iter()
             .cloned()
             .chain(spec.env.iter().map(|(key, value)| format!("{key}={value}")))
-            .chain(spec.labels.iter().map(|(key, value)| format!("{key}={value}")))
+            .chain(
+                spec.labels
+                    .iter()
+                    .map(|(key, value)| format!("{key}={value}")),
+            )
             .chain(spec.mounts.iter().map(|mount| format!("{mount:?}")))
             .chain(crate::runner::container::docker_create_arguments(spec))
             .collect();
@@ -4660,7 +4659,11 @@ fn real_docker_a_container_runs_as_the_coordinators_user_and_leaves_what_it_can_
     );
     assert_eq!(line(&output, "MADE="), "yes");
     let made = workspace.join("nested").join("deeper").join("file");
-    for path in [workspace.join("nested"), workspace.join("nested").join("deeper"), made] {
+    for path in [
+        workspace.join("nested"),
+        workspace.join("nested").join("deeper"),
+        made,
+    ] {
         let metadata = std::fs::metadata(&path).expect("what the container made");
         assert_eq!(
             (metadata.uid(), metadata.gid()),

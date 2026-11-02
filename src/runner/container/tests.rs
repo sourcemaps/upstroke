@@ -19,8 +19,7 @@ use super::intent::{
 };
 use super::runtime::{
     ContainerExecution, ContainerRuntime, ContainerTrace, ContainerUser, CreateSpec,
-    ImageInspection, Liveness, Mount, OwnerLiveness, RuntimeError, RuntimeOp, StopMode,
-    TracePhase,
+    ImageInspection, Liveness, Mount, OwnerLiveness, RuntimeError, RuntimeOp, StopMode, TracePhase,
 };
 use super::{
     CoveredCreate, CoveredStart, DOCKER_GATED_TESTS, DisposableDirView, DockerCli,
@@ -556,7 +555,14 @@ fn the_docker_create_arguments_carry_a_user_and_an_open_stdin_only_when_the_spec
     };
     assert_eq!(
         super::docker_create_arguments(&spec),
-        ["create", "--name", "upstroke-a-b-c-d", "--read-only", IMAGE_ID, "cat"],
+        [
+            "create",
+            "--name",
+            "upstroke-a-b-c-d",
+            "--read-only",
+            IMAGE_ID,
+            "cat"
+        ],
         "a spec with no user and no input asks for neither"
     );
     spec.user = Some(ContainerUser {

@@ -1241,7 +1241,10 @@ fn feed_attached(mut child: std::process::Child, payload: &[u8], record: &Mutex<
 }
 
 fn exit_text(exit: Option<i32>) -> String {
-    exit.map_or_else(|| "no exit code".to_owned(), |code| format!("exit code {code}"))
+    exit.map_or_else(
+        || "no exit code".to_owned(),
+        |code| format!("exit code {code}"),
+    )
 }
 
 fn docker_create_arguments(spec: &CreateSpec) -> Vec<String> {
