@@ -1413,7 +1413,7 @@ Settle a client: wait up to `grace` for it to end, then ask it to stop and
 wait up to `grace` again. True once it has ended; false when it still has
 not, which is an unresolved client and never a success.
 
-## `fn delivery_verdict(name: &str, end: &ClientEnd, exit_code: Option<i32>) -> Result<(), RuntimeError> {`
+## `fn delivery_verdict(`
 
 Judge a settled client against its container's exit:
 - a client that exited with the container's own code ended with it. The
