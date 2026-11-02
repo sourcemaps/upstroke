@@ -19351,7 +19351,11 @@ fn a_halted_schema_4_run_projects_where_it_halted_and_its_outcome() {
         "{report:#?}"
     );
     assert_eq!(
-        report.tasks.iter().map(|task| task.attempts.len()).sum::<usize>(),
+        report
+            .tasks
+            .iter()
+            .map(|task| task.attempts.len())
+            .sum::<usize>(),
         settled_attempts(&events),
         "every attempt the log settles is in the report: {report:#?}"
     );
@@ -19432,7 +19436,11 @@ fn a_schema_4_run_stopped_at_its_budget_projects_the_stop_and_its_outcome() {
     );
     assert!(report.halted_at.is_none(), "{report:#?}");
     assert_eq!(
-        report.tasks.iter().map(|task| task.attempts.len()).sum::<usize>(),
+        report
+            .tasks
+            .iter()
+            .map(|task| task.attempts.len())
+            .sum::<usize>(),
         settled_attempts(&events),
         "every attempt the log settles is in the report, successful ones included: \
          {report:#?}"
