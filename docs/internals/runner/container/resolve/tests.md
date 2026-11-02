@@ -533,20 +533,26 @@ only one reading.
 
 -- phase B: nothing was created ------------------------------------
 
-## `fn every_engine_limits_reading_refuses_a_container_selection() {`
+## `fn every_engine_limits_reading_is_classified_for_a_container_selection() {`
 
-Every reading of `[engine]`'s limits refuses a container selection.
+Every reading of `[engine]`'s limits is classified for a container
+selection: the three sequential readings refuse it, and the two schema-4
+readings (PR12) select it.
 
-`EngineLimits` is what distinguishes "a run being created now" from "a
-sequential run's resume", and `expected_failures_refusals[0]` names both. The
-grid is written out with an exhaustive `match` beside it, so an additional variant
-is a compile error here rather than a reading that quietly escapes.
+`EngineLimits` is what distinguishes "a sequential run being created now"
+from "a sequential run's resume", and `expected_failures_refusals[0]` names
+both; since PR12 it also names a schema-4 run being created and its resume.
+The classification is written as an exhaustive `match` (`selects`), so an
+additional variant is a compile error here rather than a reading that
+quietly escapes. Until PR12 this test was
+`every_engine_limits_reading_refuses_a_container_selection`, when every
+reading refused.
 
-## `fn every_engine_limits_reading_refuses_a_container_selection()` › `EngineLimits::SequentialResumeWithRecordedGates => {}`
+## `fn every_engine_limits_reading_is_classified_for_a_container_selection()` › `| EngineLimits::SequentialResumeWithRecordedGates => false,`
 
 Exhaustive on purpose: a new variant must be classified here.
 
-## `fn every_engine_limits_reading_refuses_a_container_selectio…` › `fs::write(dir.join("upstroke.toml"), "[runner]\nkind = \"host\"\n").expect("config");`
+## `fn every_engine_limits_reading_is_classified_for_a_container_sel…` › `fs::write(dir.join("upstroke.toml"), "[runner]\nkind = \"host\"\n").expect("config");`
 
 The control, byte-identical apart from the kind: the same reading
 accepts a host selection, so the refusal is about the value.

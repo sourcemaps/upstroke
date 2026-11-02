@@ -218,7 +218,7 @@ fn validate_options(plan: PathBuf, config: Option<PathBuf>) -> anyhow::Result<Va
         config_path: config,
         config_root: std::env::current_dir().context("resolving current directory")?,
         pools_path: None,
-        engine_limits: upstroke::config::EngineLimits::Fresh,
+        engine_limits: upstroke::config::EngineLimits::Topology,
     })
 }
 

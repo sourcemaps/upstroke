@@ -1243,23 +1243,25 @@ fn legacy_container_selection_refused_before_effects() {
 }
 
 #[test]
-fn every_engine_limits_reading_refuses_a_container_selection() {
+fn every_engine_limits_reading_is_classified_for_a_container_selection() {
     let all = [
         EngineLimits::Fresh,
+        EngineLimits::Topology,
+        EngineLimits::TopologyResume,
         EngineLimits::SequentialResume,
         EngineLimits::SequentialResumeWithRecordedGates,
     ];
-    for limits in all {
-        match limits {
-            EngineLimits::Fresh
-            | EngineLimits::SequentialResume
-            | EngineLimits::SequentialResumeWithRecordedGates => {}
-        }
-    }
+    let selects = |limits: EngineLimits| match limits {
+        EngineLimits::Topology | EngineLimits::TopologyResume => true,
+        EngineLimits::Fresh
+        | EngineLimits::SequentialResume
+        | EngineLimits::SequentialResumeWithRecordedGates => false,
+    };
 
     let tree = scratch("engine-limits");
     let dir = tree.path();
     let mut refused = 0;
+    let mut selected = 0;
     for limits in all {
         fs::write(
             dir.join("upstroke.toml"),
@@ -1267,20 +1269,26 @@ fn every_engine_limits_reading_refuses_a_container_selection() {
         )
         .expect("config");
         let mut warnings = Vec::new();
-        let error = crate::config::load_limits(
+        let loaded = crate::config::load_limits(
             Some(&dir.join("upstroke.toml")),
             dir,
             Some(&empty_pools(dir)),
             limits,
             &mut warnings,
-        )
-        .expect_err("a container selection is refused");
-        assert!(
-            matches!(&error, UpstrokeError::Config { message, .. }
-                if message.contains("[runner] `kind = \"container\"` is refused")),
-            "{limits:?}: {error}"
         );
-        refused += 1;
+        if selects(limits) {
+            let config = loaded.expect("a schema-4 reading selects the container boundary");
+            assert_eq!(config.runner.kind, RunnerKind::Container, "{limits:?}");
+            selected += 1;
+        } else {
+            let error = loaded.expect_err("a sequential reading refuses a container selection");
+            assert!(
+                matches!(&error, UpstrokeError::Config { message, .. }
+                    if message.contains("[runner] `kind = \"container\"` is refused")),
+                "{limits:?}: {error}"
+            );
+            refused += 1;
+        }
 
         fs::write(dir.join("upstroke.toml"), "[runner]\nkind = \"host\"\n").expect("config");
         let config = crate::config::load_limits(
@@ -1294,7 +1302,8 @@ fn every_engine_limits_reading_refuses_a_container_selection() {
         assert_eq!(config.runner.kind, RunnerKind::Host);
         assert!(config.runner.from_config);
     }
-    assert_eq!(refused, all.len(), "every reading was driven");
+    assert_eq!(refused, 3, "every sequential reading was driven");
+    assert_eq!(selected, 2, "both schema-4 readings were driven");
 }
 
 #[test]

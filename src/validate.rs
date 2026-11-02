@@ -330,7 +330,7 @@ mod tests {
                 plan_path: PathBuf::from(plan),
                 config_path: None,
                 config_root,
-                engine_limits: config::EngineLimits::Fresh,
+                engine_limits: config::EngineLimits::Topology,
                 pools_path: Some(pools),
             },
             _scratch: scratch,

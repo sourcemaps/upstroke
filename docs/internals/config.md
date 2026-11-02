@@ -333,8 +333,33 @@ recorded sequential ceiling, and continues.
 
 ## `Fresh,`
 
-A run about to be created, or a preview of one (`upstroke validate`).
-Today's config is the whole truth: every section governs.
+A sequential (schema 1–3) run about to be created. Today's config is the
+whole truth: every section governs, and what the sequential engine cannot
+perform — `max_parallel` above 1, a container selection — refuses. Since
+PR12 no production command creates such a run (`upstroke run` creates a
+schema-4 one), so only the legacy writer the test configuration keeps
+reaches this reading.
+
+## `Topology,`
+
+A schema-4 run about to be created, or a preview of one (`upstroke
+validate`, `upstroke run --dry-run`, `upstroke capacity`, and
+[`load`]'s default). Today's config is the whole truth and every section
+governs, as under [`EngineLimits::Fresh`] — the gate shapes refuse alike —
+but the parallel keys are what this engine performs: `max_parallel` above 1
+is accepted, `max_merge_repairs`, `max_per_agent` and `max_per_pool` are
+acted on without the "not acted on" warning, and `[runner] kind =
+"container"` is a selection rather than a refusal.
+
+## `TopologyResume,`
+
+A resume of a schema-4 run. The run's own record governs what it
+recorded — the runner, the gates, `max_parallel` and `max_merge_repairs` —
+so today's `[runner]` and `[[gates]]` are read to be compared and are never
+refused over (the gates take the compare-only reading
+[`EngineLimits::SequentialResumeWithRecordedGates`] has, because a schema-4
+log always records its gates), and the parallel keys parse as under
+[`EngineLimits::Topology`]. Chosen only by [`EngineLimits::for_resume`].
 
 ## `SequentialResume,`
 
@@ -368,10 +393,8 @@ whose log does (`gates_recorded`) or does not record its gates —
 any earlier resume that established them.
 
 Anything past [`LAST_SEQUENTIAL_SCHEMA`] is not a sequential run's
-resume, so it gets the ordinary reading rather than the legacy one.
-Today that path is unreachable — no schema above it exists — and what it
-should do once one does is the activation question, which is not this
-slice's to answer.
+resume: it is a schema-4 run's, and gets [`EngineLimits::TopologyResume`]
+(PR12's answer to what had been the activation question).
 
 ## `#[derive(Debug, Clone, PartialEq, Eq)]`
 
