@@ -294,7 +294,8 @@ mod tests {
     #[test]
     fn the_digest_separates_every_field_of_every_mount() {
         let base = mounted_fixture();
-        let movers: [(&str, fn(&mut RunnerPolicy)); 11] = [
+        type Mover = fn(&mut RunnerPolicy);
+        let movers: [(&str, Mover); 11] = [
             ("a source byte", |p| p.mounts[0].source.push('x')),
             ("a target byte", |p| p.mounts[1].target.push('x')),
             ("read-only", |p| p.mounts[0].read_only = false),

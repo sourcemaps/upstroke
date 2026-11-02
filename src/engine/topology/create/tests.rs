@@ -1028,9 +1028,10 @@ fn a_run_with_configured_mounts_records_one_runner_in_its_marker_owner_record_an
     use crate::runner::policy::{canonical_bytes, runner_policy_sha256};
 
     let fixture = Fixture::new("mounted-record");
-    std::fs::create_dir_all(fixture.repo.join(".git")).expect("the repository's .git");
+    create_private_dir(&fixture.repo.join(".git"), &mut NoRunDirHooks)
+        .expect("the repository's .git");
     let shared = fixture.root.join("operator-shared");
-    std::fs::create_dir_all(&shared).expect("an operator directory");
+    create_private_dir(&shared, &mut NoRunDirHooks).expect("an operator directory");
     let selection = crate::config::RunnerSelection {
         mounts: vec![crate::config::RunnerMount {
             source: shared.clone(),

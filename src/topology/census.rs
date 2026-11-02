@@ -5937,7 +5937,8 @@ pub(crate) mod tests {
         fold.plan_transition(&run_resumed(mounted.runner.clone()))
             .expect("a resume that re-established the recorded mounts is admitted");
 
-        let movers: [(&str, fn(&mut RunnerPolicy)); 5] = [
+        type Mover = fn(&mut RunnerPolicy);
+        let movers: [(&str, Mover); 5] = [
             ("dropped", |runner| runner.mounts.clear()),
             ("a source rebound", |runner| {
                 runner.mounts[0].source_identity.object += 1;
