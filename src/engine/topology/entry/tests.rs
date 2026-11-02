@@ -1,11 +1,11 @@
 use std::collections::BTreeMap;
-use std::fs;
 
 use super::*;
 use crate::rundir::scratch_tree::{ScratchTree, acquire};
 use crate::runner::container::FakeRuntime;
 use crate::runner::container::runtime::RuntimeOp;
 use crate::topology::events::{ImageIdentity, RunnerContract};
+use crate::workspace_manager::fixture::write_file;
 
 const IMAGE_ID: &str = "sha256:1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff";
 
@@ -106,9 +106,9 @@ fn resumed_with(engine: &str, recorded_width: u32) -> SlotLimits {
     let tree = scratch("entry-resumed-slots");
     let dir = tree.path();
     let config_path = dir.join("upstroke.toml");
-    fs::write(&config_path, engine).expect("the config");
+    write_file(&config_path, engine.as_bytes());
     let pools = dir.join("pools.toml");
-    fs::write(&pools, "# no pools\n").expect("the pools file");
+    write_file(&pools, b"# no pools\n");
     let mut warnings = Vec::new();
     let config = config::load_limits(
         Some(&config_path),
