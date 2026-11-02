@@ -18055,7 +18055,7 @@ fn a_schema_4_run_publishes_its_records_in_order_and_records_one_runner() {
             (event["event"] == "task_merged")
                 .then(|| event["data"]["merged_sha"].as_str().unwrap_or_default().to_owned())
         })
-        .last()
+        .next_back()
         .expect("a task merged");
     assert_eq!(
         git_in(&repo, &["rev-parse", &format!("refs/heads/upstroke/run-{}", report.run_id)])
