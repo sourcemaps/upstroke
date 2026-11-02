@@ -79,7 +79,9 @@ Repo-level `upstroke.toml` — overrides only; everything below has a derived de
 ```toml
 [engine]
 on_task_failure = "halt"            # halt | continue
-max_parallel    = 1                 # >1 requires v0.2
+max_parallel    = 1                 # >1 runs that many task pipelines at once (schema 4)
+max_per_agent   = 1                 # concurrent invocations of one agent; default max_parallel
+max_per_pool    = 1                 # concurrent invocations drawing on one pool; default max_parallel
 max_merge_repairs = 2               # autonomous generations per original task; then HUMAN
 shell           = "powershell"      # gate shell; default = platform native
 

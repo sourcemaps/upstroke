@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- `upstroke run` now creates schema-4 runs on the execution topology: a worktree per task, the
+  compare-and-swap merge queue, `max_parallel` above 1 bounded by `max_per_agent` and
+  `max_per_pool` slots, and the optional container runner. `upstroke resume` continues one from
+  its record, and `status` (with `--follow`), `answer` and `export-decisions` read one. A log of
+  schemas 1-3 still resumes, reports and exports on the sequential path, and a binary that reads
+  only up to schema 3 refuses a schema-4 log before any lock. A schema-4 run probes every agent
+  its chains and its review plan name before anything is committed, and a configured reviewer
+  whose CLI is missing fails its creation where the sequential engine dropped that reviewer. This
+  supersedes the entries below that call schema 4 "unreleased and inert by default": it is still
+  unreleased, and no longer inert.
 - A decline, or a lineage member's failed settlement, that meets an open verification of its lineage now
   cancels the verification instead of releasing it: the schema-4 fold keeps the transaction, and its
   pipeline and merge entitlements, until its one terminal, `merge_verification_interrupted`, which the

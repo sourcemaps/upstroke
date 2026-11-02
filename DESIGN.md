@@ -88,7 +88,7 @@ some records by path; this table says where each one's substance now lives.
 | 2026-08-17 review effort and fan-out | `MAINTAINING.md` (one frontier pass at `max`; `ultra` is delegation, not depth) |
 | 2026-08-20 automated review gate; 2026-08-20 review invalidation scope; 2026-08-21 stacked slice PRs; 2026-08-23 retire App attestation; 2026-08-25 checkpoint merges; 2026-08-31 panel seats; 2026-09-01 review effort re-scoped; 2026-09-01 clean base merge keeps review | `MAINTAINING.md` (the whole review and merge lifecycle, restated in its current form; the workflow trigger contract under Repository rules) |
 | 2026-08-22 strategy record private; 2026-08-27 proposals private; 2026-09-01 proposals relocated; 2026-09-01 infra private | This section (strategy, proposals and operator tooling live in the private companion repository) |
-| 2026-08-24 PR3-layer freeze charter; 2026-08-31 G2 checkpoint promotion; 2026-08-31 inertness premise behavioural | §21 (the G2 pass ran; the schema-4 machinery is on master, inert by default) |
+| 2026-08-24 PR3-layer freeze charter; 2026-08-31 G2 checkpoint promotion; 2026-08-31 inertness premise behavioural | §21 (the G2 pass ran; the schema-4 machinery reached master inert by default, and PR12 activates it) |
 | 2026-08-25 `CommandSpec.program` stays `String` | §8 (the field carries a bare CLI name; `CODING_STANDARDS.md` §8 governs it the moment a path-valued input exists) |
 | 2026-08-26 durable retry feedback | §15 (`FailureRecord.detail` carries the retry brief onto the durable record) |
 | 2026-08-30 readiness lint placement | `CODING_STANDARDS.md` §2 (lints) and §12 (a per-site `#[expect]` recorded in `effects/allowlist.toml` may stand where a module-level allow did) |

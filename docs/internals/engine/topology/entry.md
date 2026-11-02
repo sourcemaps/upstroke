@@ -81,6 +81,15 @@ role, by the role's own Git view (`core.useReplaceRefs = false` in the view's
 `GIT_NO_REPLACE_OBJECTS` (Q2's paired candidate; the real-container
 acceptance is owed, and its limits are in `runner/container/env.md`).
 
+### The probe set
+
+Schema 4 probes the shell and every agent the run's chains and review plan
+name, at P4, and fails the run's creation on any failure, before anything is
+committed: a configured reviewer whose CLI is missing fails the run where the
+sequential engine dropped an unprobeable alternative (root's D9, "the recorded
+probe set is binding"). A resume probes the recorded set, through
+`RunnerPreflight`, the same way.
+
 ### Slot limits
 
 `permits.agent_pool_slots`: "per-agent slots (max_per_agent, default
