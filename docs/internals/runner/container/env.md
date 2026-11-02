@@ -465,10 +465,15 @@ replacement only of its own making, in its own view, for its own process tree; n
 other role's view, and nothing the engine captures (the engine's Git reads the
 recorded graph itself), sees it.
 `view::tests::the_view_config_refuses_replacements_and_an_unrelated_repository_keeps_them`
-is the bounded witness: a replacement installed in the view, read through two
-spellings of the view under an environment with no replacement setting, reads the
-recorded object; an unrelated repository's own replacement, read under the same
-environment, is honoured; the source repository's config is unchanged.
+is the bounded witness, with real Git reads under a gate's **composed** container
+environment (a controlled image base: this host's `PATH`, a scratch `HOME`, an empty
+global config, no system config; `GIT_NO_REPLACE_OBJECTS`, `GIT_REPLACE_REF_BASE`,
+`GIT_CONFIG_PARAMETERS` and `GIT_CONFIG_COUNT` checked absent by name): a
+replacement installed in the view and read through two spellings of the view
+reads the recorded object exactly; an unrelated repository's own blob replacement
+is read positively (`replaced`), beside its recorded control under
+`--no-replace-objects` (`two`); the source repository's config is unchanged. It
+runs on the host, so it is not the real-container acceptance, which remains owed.
 
 ### Errors
 
