@@ -255,6 +255,45 @@ The runtime's immutable image id.
 
 The manifest digest, when the runtime reported one.
 
+## `pub enum MountSourceKind {`
+
+What a recorded mount source was when it was resolved: a directory or a
+regular file. Nothing else is ever recorded; a socket, device or FIFO is
+refused at resolution (`runner/container/resolve.rs`).
+
+## `pub struct MountSourceIdentity {`
+
+The resolved source object a mount names: its kind, its device and its
+object number (the inode on Unix). It identifies the *object*, not its
+contents. A read-write mount's contents change normally; what may not
+change is which object the recorded path names. A resume that finds the
+path gone, rebound through a link or a move, or naming another object
+refuses before any spawn. Only Unix builds record one; a non-Unix build
+refuses configured mounts instead of guessing an identity.
+
+## `pub struct RecordedMount {`
+
+One operator-configured mount as it is part of the run's execution
+identity (root's recorded-mounts disposition, 2026-11-02):
+
+- `source`: the canonical absolute host path, resolved once at selection.
+  It is stored as the exact UTF-8 string the runtime's `--mount` option
+  receives. A source whose canonical spelling is not UTF-8, or carries
+  what that option cannot (`,`, `"`, control characters, edge whitespace),
+  is refused rather than converted;
+- `target`: the container path, in normal form (absolute, no empty, `.` or
+  `..` component, no trailing `/`), never `/` and never at or under
+  `/upstroke` or `/tmp`;
+- `read_only`: what the operator configured (`true` unless they wrote
+  `false`). Review and probe containers get every recorded mount
+  read-only whatever this says; implement and gate containers get it as
+  recorded;
+- `source_identity`: see `MountSourceIdentity`.
+
+These are only the configured mounts. The role's own mounts (worktree,
+Git view, objects, credential volume, settings, scratch) are composed by
+the runner and are not recorded here.
+
 ## `pub struct RunnerPolicy {`
 
 The execution identity of a schema-4 run.
@@ -279,13 +318,41 @@ two incarnations that enumerated the same volumes in different orders
 established the same runner, and refusing that would make a resume
 depend on iteration order.
 
+## `pub struct RunnerPolicy` › `pub mounts: Vec<RecordedMount>,`
+
+The configured mounts, ordered strictly by target (resolution sorts them
+and `completeness` refuses any other order), so the list has exactly one
+spelling for one set.
+
+**A deliberate exception to the strict-required convention** of the
+other fields. `#[serde(default, skip_serializing_if = "Vec::is_empty")]`:
+
+- an empty list is not written, so every `run_started`, `run_resumed`,
+  `owner.json` and `report.json` of a run without mounts keeps exactly the
+  bytes it had before the field existed, and its policy digest stays the
+  v1 one (`runner/policy.rs`);
+- an absent field reads as the empty list it always meant;
+- a reader from before the field refuses a record that has mounts,
+  through `deny_unknown_fields`. That is the right failure: it could not
+  honour them. The test
+  `a_reader_from_before_mounts_refuses_a_mount_list_and_reads_every_record_without_one`
+  holds this with a verbatim copy of the e34b6d1b `RunnerPolicy` decoder,
+  a fixture bounded to that decoder. The three documents embed the record
+  by value under `deny_unknown_fields`, so its refusal is theirs; the
+  test does not run an older binary.
+
+An explicit `"mounts": []` reads as empty too, and is written back
+without the key.
+
 ## `pub enum RunnerField {`
 
 Which part of a runner record two incarnations disagree about.
 
 Ordered as the record is read, so the first difference reported is the
 most structural one: a run that changed kind has not merely moved its
-image.
+image. `Mounts` ("configured mount set") comes last, after the
+credential volumes: any change of a source, target, disposition or
+identity, or of the list's length.
 
 ## `pub enum RunnerRecordDefect {`
 
@@ -310,7 +377,15 @@ a real answer — no agent needs credentials — and is not this.
 
 ## `pub enum RunnerRecordDefect` › `HostWithContainerFields,`
 
-A host runner carrying an image or volumes it cannot have used.
+A host runner carrying an image, volumes or mounts it cannot have used.
+
+## `pub enum RunnerRecordDefect` › `MountRecordMalformed,`
+
+A container runner whose recorded mounts cannot be rebuilt as recorded:
+a source or target that is not absolute, or targets that are not
+strictly increasing (which also refuses a repeated target). The full
+target and source rules are resolution's; this is the shape the fold can
+check from the record alone, at `run_started`.
 
 ## `impl RunnerPolicy` › `pub fn completeness(&self) -> Result<(), RunnerRecordDefect> {`
 
@@ -331,6 +406,13 @@ The first [`RunnerRecordDefect`] the record exhibits.
 
 The first field in which `self` and `other` are not the same runner, or
 `None` when they are identical.
+
+The mount list is compared whole, identity included, after every field
+that was there before it. The fold's `check_run_resumed` therefore
+refuses, as `RunnerMoved { field: "configured mount set" }`, a
+`run_resumed` whose mounts are not the recorded ones; no fold code
+changed for it (`topology/census.rs`,
+`a_run_resumed_whose_mounts_moved_is_refused_by_the_existing_runner_equality`).
 
 This is the whole of the resume check: a run's boundary and image are
 fixed for its life, so any difference at all refuses. It names the
@@ -1855,6 +1937,57 @@ INV-23 again, on the other side of the map. Every mover below keeps
 the keys, the cardinality and the pairing identical and changes one
 property of one value, so a comparison that lower-cased, trimmed, or
 compared lengths fails on exactly the mover that isolates it.
+
+## `mod tests` › `fn mounted_runner() -> RunnerPolicy {`
+
+`container_runner()` with two recorded mounts that differ in every field:
+a directory read-only and a file read-write, a non-ASCII source with a
+space, and identities at both ends of `u64` so a lossy number path shows.
+
+## `fn an_empty_mount_list_is_omitted_and_an_absent_one_reads_as_empty() {`
+
+The compatibility half of the field's serde exception: every fixture
+without mounts writes exactly the four historical keys, reads back equal,
+and an explicit empty list is the same record and is written back
+without its key.
+
+## `fn a_mount_list_round_trips_with_every_field_and_refuses_anything_else() {`
+
+The exact JSON a mount is written as, and fifteen refusals: each of the
+four mount fields and three identity fields missing, an unknown key at
+either level, a kind that is not `directory` or `file`, a negative or
+quoted number, a quoted boolean, a null source, and a map in place of the
+list.
+
+## `mod tests` › `struct PreMountRunnerPolicy {`
+
+A verbatim copy of `RunnerPolicy` as e34b6d1b declared it, before the
+mount field: the bounded stand-in for an older strict reader. It is
+bounded to that decoder. It does not run an older binary, and it does not
+model the other fields of the documents that embed the record.
+
+## `fn a_reader_from_before_mounts_refuses_a_mount_list_and_reads_every_record_without_one() {`
+
+Both directions over that stand-in. Records without mounts are written
+byte-identically by both writers and read by both readers. A record with
+mounts is refused by the earlier reader for exactly the unknown field
+`mounts`. The `run_started` and `run_resumed` that embed a mounted
+record are read by this reader, and the earlier one refuses the runner
+they carry.
+
+## `fn a_mount_list_differs_in_any_field_of_any_mount_and_in_its_length() {`
+
+Ten movers, each changing one thing (a source byte, a target byte, either
+disposition, each identity field, one mount fewer or more, none), all
+reported as `Mounts` in both directions; a record that also lost its
+volumes reports the volumes first.
+
+## `fn a_mount_record_is_complete_only_when_its_paths_are_absolute_and_its_targets_ordered() {`
+
+The completeness rules for mounts, for a container and for a host: any
+mount on a host is `HostWithContainerFields`; on a container an
+unordered or repeated target, a relative source or target, and an empty
+target are `MountRecordMalformed`.
 
 ## `mod tests` › `const FROZEN_VOCABULARY: [(&str, bool); 24] = [`
 

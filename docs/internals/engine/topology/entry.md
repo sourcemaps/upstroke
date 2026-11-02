@@ -26,7 +26,11 @@ either command.
 
 1. `run_harness` establishes containment.
 2. [`prepare_fresh`], read-only: the plan, the config and the pools are
-   captured and analysed under [`EngineLimits::Topology`]; the runner policy
+   captured and analysed under [`EngineLimits::Topology`]; when `[runner]`
+   configures mounts, a `MountContext` is bound to the repository root, its
+   Git directories, the private root (explicit, else the default, which
+   need not exist yet) and the coordinator's credential locations, read
+   only; the runner policy, its configured mounts included,
    is resolved by read-only inspection ([`prelock::check`] for an explicit
    private root, which must already exist, or [`prelock::resolve_runner`]
    for the default one, which may not); then the review plan, the probed
@@ -114,6 +118,11 @@ something else, or nothing, in a Git child's directory, and P12-W8 measured
 the public path's first Git child failing on one with Git's own "not a git
 repository" before `prelock::check` could name the variable. `prelock::check`
 keeps its own first-statement check.
+
+The mount context is bound only when mounts are configured, so a run without
+them reads nothing it did not read before; it reads `.git` and `commondir`
+(`view::resolve`), canonicalizes paths and reads three environment variables
+and `HOME`, and writes nothing.
 
 ## `impl FreshPrepared` › `pub fn private_root(&self) -> &Path {`
 

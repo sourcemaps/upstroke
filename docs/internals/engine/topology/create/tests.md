@@ -354,6 +354,18 @@ What the caller claims, and what pre-flight actually resolved, differ.
 
 The marker is read before P7 removes it, so the run is stopped at P6.
 
+## `fn a_run_with_configured_mounts_records_one_runner_in_its_marker_owner_record_and_run_started() {`
+
+The same agreement for a container record with a configured mount (root's
+recorded-mounts disposition): the pre-lock check resolves the mount
+against a bound `MountContext` into the policy (canonical source, target,
+read-only), its digest is the v2 one, and the marker's digest,
+`owner.json.runner` and `run_started(4).runner` are that one record. The
+container intents carry the same digest because the runner computes it
+from the same record (`ContainerRunner::new`), which
+`probe_intent_carries_runner_policy_digest_matching_owner_record` already
+holds for the unmounted record.
+
 ## `fn creator_error_at_p3a_retains_both_halves_and_reports_them() {`
 
 =======================================================================

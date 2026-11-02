@@ -61,10 +61,18 @@ The version tag the canonical encoding opens with.
 Part of the digested bytes, so a future encoding change is a different
 digest rather than the same digest over different bytes.
 
+## `pub const CANONICAL_VERSION_WITH_MOUNTS: &str = "upstroke.runner-policy.v2";`
+
+The tag a record with configured mounts opens with instead (root's
+recorded-mounts disposition, 2026-11-02). A record without mounts keeps
+`v1` and its exact bytes, so every existing marker, owner record and
+container intent keeps its digest; a mounted record hashes in its own
+domain, and "v1" keeps its meaning exactly.
+
 ## `pub fn host_policy() -> RunnerPolicy {`
 
 The host runner's resolved policy: `RunnerPolicy{kind: Host, policy:
-host-v1, image: None, credential_volumes: None}`.
+host-v1, image: None, credential_volumes: None}`, with no mounts.
 
 INV-23 requires resolution "by read-only inspection before the worktree
 lock (… the runtime must already hold the image and the volumes must
@@ -100,19 +108,27 @@ Field order and shape, written out because a test has to be able to
 reproduce them by hand:
 
 ```text
-f("upstroke.runner-policy.v1")
+f("upstroke.runner-policy.v1")   when mounts is empty
+f("upstroke.runner-policy.v2")   when it is not
 f(kind)                  "host" | "container"
 f(policy)                "host-v1" | "container-v1"
 b(image.is_some)
     f(image.reference) f(image.id) b(image.digest.is_some) [f(image.digest)]
 b(credential_volumes.is_some)
     n(len) [ f(agent) f(volume) ]*     in the map's own (sorted) order
+v2 only:
+n(mounts.len) [ f(source) f(target) b(read_only)
+                f(kind) n(device) n(object) ]*   in record order
 ```
 
 where `f(s)` is `<byte-length>:<bytes>;`, `b(x)` is `f("1")` or `f("0")`,
 and `n(x)` is `f(<decimal>)`. The same encoding
 [`crate::topology::registry`] uses, for the same reason: a length prefix is
-injective over values that may contain the delimiter.
+injective over values that may contain the delimiter. `kind` is
+`"directory"` or `"file"`. Record order is strictly by target:
+resolution sorts the list and `completeness` refuses any other order, so
+one mount set has one encoding. Every field of every mount is digested,
+the source identity included.
 
 ## `pub fn runner_policy_sha256(policy: &RunnerPolicy) -> String {`
 
@@ -129,6 +145,11 @@ The wire tag of a kind.
 Written out rather than taken from serde, so the canonical encoding does
 not move when a serde attribute does. That is exactly the drift the digest
 exists to detect, and it must not be able to detect it by moving with it.
+
+## `const fn source_kind_tag(kind: MountSourceKind) -> &'static str {`
+
+The wire tag of a recorded mount source's kind, written out for the same
+reason as `kind_tag`.
 
 ## `const fn contract_tag(contract: RunnerContract) -> &'static str {`
 
@@ -189,6 +210,26 @@ oracle is the payload rather than the function under test.
 
 Stable: the value a second incarnation resolves is the value the
 first recorded, which is the whole of INV-23's equality check.
+
+## `mod tests` › `const MOUNTED_CANONICAL: &[u8] = b"25:upstroke.runner-policy.v2;9:container;12:container-v1;\`
+
+The hand-written v2 bytes of `mounted_fixture()`: the container fixture
+with a read-only directory and a read-write file mounted.
+
+## `mod tests` › `fn an_empty_mount_list_keeps_the_v1_bytes_and_a_mounted_record_hashes_in_v2() {`
+
+Both halves of the compatibility rule: the container fixture with its
+mounts cleared and the host policy are still their v1 goldens; the
+mounted record is its v2 golden and digest; and the v2 bytes carry the v1
+fields unchanged between the version tag and the mounts.
+
+## `mod tests` › `fn the_digest_separates_every_field_of_every_mount() {`
+
+Eleven movers over the mounted record, each changing one thing: a source
+or target byte, either disposition, the kind, the device, the object,
+the order, one mount fewer, and two that move a boundary without changing
+the concatenated characters (source/target and device/object). Each must
+give a digest no other record here has.
 
 ## `mod tests` › `fn the_digest_separates_every_field_of_the_record() {`
 

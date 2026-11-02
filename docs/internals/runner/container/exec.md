@@ -171,6 +171,15 @@ lock file.
 
 The repo key.
 
+## `pub const fn forces_configured_mounts_read_only(role: &ExecutionRole) -> bool {`
+
+Whether this role gets every recorded operator mount read-only, whatever
+the record says: review and both probes. A reviewer writes nothing, and a
+probe certifies a CLI rather than doing work. Implement and gate get each
+recorded mount as recorded, so **a gate can write through an explicitly
+read-write configured mount**: a gate is repository-controlled code, and
+an operator who writes `read_only = false` gives that code the directory.
+
 ## `pub const fn receives_a_worktree(role: &ExecutionRole) -> bool {`
 
 Whether this role receives its role's worktree.
@@ -494,6 +503,16 @@ end, and a caller that builds a second runner for the same incarnation gets a se
 over the same scope, each covering its own launches. `ContainerRunner` is not `Clone`, so a
 reaper cannot be duplicated with it.
 
+## `pub struct ContainerRunner` › `mount_exclusions: Vec<(MountExclusion, PathBuf)>,`
+
+The configured-mount exclusions bound when the runner is built (repository
+root, its Git and common directories, the private root, the coordinator's
+credential locations; `resolve::MountContext::bind`), and only when the
+record has mounts: a runner without them binds nothing and reads nothing.
+`configured_mounts` refuses a recorded source that is, contains or lies
+inside any of them. This is the configured-mount rule, in both directions;
+the role's own mounts keep `Confinement`'s one-directional check.
+
 ## `pub struct ContainerRunner` › `settings_directory: PathBuf,`
 
 The run's private `settings` directory, from `RunPaths::settings` when the
@@ -791,13 +810,22 @@ command with a non-empty `CommandSpec::stdin` is created with stdin open,
 and its payload travels to the start in the cover's start proof, never into
 argv, the environment, a label or a mount (PR12's D-C).
 
+Every mount is also passed through `container.rs`'s `mount_argument`, the
+function `docker create` uses, before the plan exists. A mount whose
+source or target the runtime's `--mount` option cannot carry exactly (not
+UTF-8, a `,`, a `"`, a control character, edge whitespace) refuses here,
+before any intent, view or container. The recorded mount and the argument
+therefore name the same path, target and disposition by construction.
+
 ### Errors
 
 [`UpstrokeError::Refused`] when the overlay names a reserved key, when the
 container name cannot be built from the request's identity, when the
-mount plan would hand the container a withheld path, or when the settings
+mount plan would hand the container a withheld path, when the settings
 file the command records is not a regular file of the run's settings
-directory. [`UpstrokeError::Io`] when that file cannot be read.
+directory, when a recorded mount fails its recheck or its exclusions or
+meets the role's own targets, or when a mount cannot be carried exactly.
+[`UpstrokeError::Io`] when the settings file cannot be read.
 
 ## `pub fn plan(&self, request: &RunnerRequest) -> Result<Invoc…` › `let intent = ContainerIntent::new(`
 
@@ -848,6 +876,24 @@ it has nothing to project. `GitViewRequest` has no
 that is not a worktree, which is what the projection
 already treats as "no repository here". Recorded as a
 seam note rather than worked around silently.
+
+## `impl ContainerRunner` › `fn configured_mounts(`
+
+The run's recorded operator mounts, as this role receives them, after its
+own. Every role and probe gets the recorded list, the same list probe and
+execution compose; review and probes get it read-only
+(`forces_configured_mounts_read_only`). Before each is given:
+
+- `resolve::recheck_recorded_source`: the recorded path still canonicalizes
+  to itself and names the recorded object;
+- the bound exclusions, in both directions;
+- its target against every target the role is given, so a configured
+  mount can never shadow or be shadowed by the worktree, the Git view, the
+  objects, the credential volume, the settings file or the scratch, under
+  any layout.
+
+The window between this recheck and the runtime's own bind remains, as for
+every path the runtime is handed; nothing here claims an atomic bind.
 
 ## `impl ContainerRunner` › `fn settings_for(`
 
@@ -925,9 +971,11 @@ here:
 
 (2) and (3) are absent when the workspace is not a worktree — a probe's
 scratch directory — and (4) is absent for a role
-[`supplies_credential_location`] refuses. Nothing else is ever added,
-which is the positive half of the confinement claim; the negative half
-is [`Confinement::violations`].
+[`supplies_credential_location`] refuses. Nothing else of the role's own
+is ever added, which is the positive half of the confinement claim; the
+negative half is [`Confinement::violations`]. The operator's recorded
+mounts are added after these by `configured_mounts`, which is the only
+other source of a mount.
 
 ## `impl ContainerRunner` › `let source = if layout.dot_git_is_file {`
 

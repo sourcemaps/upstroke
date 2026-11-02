@@ -393,6 +393,39 @@ binding each role takes in production; what varies is the role.
 
 The two probe roles receive no worktree at all — a probe has none.
 
+## `fn every_role_and_probe_gets_the_recorded_mounts_and_review_and_probes_get_them_read_only() {`
+
+The per-role census for configured mounts, over all five roles of
+`requests()`. Each gets both recorded mounts with the recorded source and
+target. The read-write one is read-only for exactly `probe(claude-code)`,
+`probe(shell)` and `review`, and as recorded for `implement` and `gate`:
+a gate is given an explicitly read-write mount. Each role's own mounts are
+exactly what the same request plans without configured mounts, and the
+confinement finds nothing.
+
+## `fn the_docker_argument_names_exactly_the_recorded_mount() {`
+
+For every role, the `--mount` arguments `docker create` receives contain
+exactly one per planned mount. For each configured mount the argument is
+`type=bind,source=<the recorded source>,target=<the recorded
+target>[,readonly]`, character for character, so the record and the
+runtime's argument cannot name different things.
+
+## `fn a_recorded_mount_that_moved_or_reaches_a_withheld_path_refuses_the_plan_before_any_effect() {`
+
+The plan-time recheck. The recorded source moved away refuses the plan
+(`is gone`) and the invocation; moved back, the plan succeeds again. A
+record whose mount names the private root, with that root's true
+identity, refuses against the bound exclusions. No intent and no
+container exists afterwards.
+
+## `fn a_mount_the_runtimes_option_cannot_carry_exactly_refuses_the_plan_before_any_effect() {`
+
+Generated mounts too: a workspace whose path holds a comma, a quote or a
+trailing space cannot be spelled in a `--mount` option exactly, and the
+plan refuses naming the mount, where the earlier code would have bound a
+different path or failed inside `docker create`. No intent, no container.
+
 ## `fn the_credential_volume_is_mounted_exactly_when_its_location_is_supplied() {`
 
 The credential volume is mounted **exactly** when its location is
@@ -1733,6 +1766,45 @@ Root's D-C on a real runtime, three containers:
   timeout: the timeout path stops and removes it, with the write still
   pending, within a bound.
 
+## `struct MountedReal {`
+
+The real-runtime fixture for the three mount witnesses: a canonical
+scratch root, a real repository, the run identity of the witness's own
+gated run id, and the image discovered without a pull. `resolve` binds the
+production mount context (`MountContext::bind`, the coordinator's
+credential locations included) and resolves the configured mounts against
+the real runtime, so each witness exercises resolution, the record and the
+runner end to end, not a hand-built policy.
+
+## `fn real_docker_a_read_only_configured_mount_is_readable_and_not_writable() {`
+
+A read-only operator mount, given to a gate (a role that is *not* forced
+read-only, so the disposition is the record's): the container reads the
+host marker through it, a write through it fails with the runtime's
+read-only error, and the host directory holds no new file.
+
+## `fn real_docker_a_read_write_configured_mount_is_writable_as_the_coordinators_user() {`
+
+A read-write operator mount, given to an implementer: the container
+creates a directory and a file through it, the host sees the content, and
+both are owned by the coordinator's effective uid and gid (D-B's `--user`),
+so the coordinator can reclaim them, which it does. The same recorded
+mount given to a reviewer is forced read-only and its write fails. Linux
+only, like the D-B witness it extends.
+
+## `fn real_docker_a_resume_with_changed_mount_config_keeps_the_recorded_mounts() {`
+
+Record-wins on a real runtime. A record with one read-only mount is
+rebuilt by `rebuild_by_inspection`, the resume's own rebuild, under a
+config that moves the mount to another source, makes it writable and adds
+a second. The rebuild returns the record and warns that the configured
+mount set is ignored. The resumed container sees the recorded source at
+the recorded target, not today's source and not the extra target, and its
+write is refused read-only. With the recorded source moved away, the
+rebuild refuses as `MountSourceMoved` and no container of the run exists.
+This is the runner-level resume path (the rebuild and the runner it
+feeds), not a whole `upstroke resume` of a parked run.
+
 ## `fn real_docker_confines_a_gate_to_its_mount() {`
 
 `expected_failures_refusals`: "**gate write outside mount fails**", and
@@ -2073,6 +2145,12 @@ PR12's D-B.
 ## `fn every_gated_test_of_this_lane_is_counted()` › `"real_docker_a_containerized_program_reads_its_exact_stdin_then_eof",`
 
 PR12's D-C.
+
+## `fn every_gated_test_of_this_lane_is_counted()` › `"real_docker_a_read_only_configured_mount_is_readable_and_not_writable",`
+
+Root's recorded-mounts disposition (2026-11-02): the three mount witnesses
+it requires, registered here, in `GATED_RUNS` (`mountro`, `mountrw`,
+`mountresume`) and in `DOCKER_GATED_TESTS`. Sixteen in all.
 
 ## `fn removal_in_progress_diagnostic(name: &str) -> String {`
 

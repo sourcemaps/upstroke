@@ -93,7 +93,9 @@ the event log, and private artifacts are not mounted. The single exception is a
 worker's or reviewer's own permission-settings file: the one the engine
 materialized for that invocation, which its command records and its arguments
 name. That one file is bound read-only; the directory holding it, and every other
-attempt's settings, are not.
+attempt's settings, are not. Beyond these, a container receives the operator's
+configured `[runner]` mounts as the run recorded them (§6), none of which may reach
+the repository, its Git, the private root or a host credential location.
 
 A task branches from the integration SHA observed at **dispatch**, after all of
 its declared dependencies are `Merged`. Independent tasks may therefore begin
@@ -489,6 +491,27 @@ for the container to start no longer than the invocation's deadline and stops at
 its cancellation; the attached client is kept until its end is established, and
 one that cannot be settled is reported unresolved. The prompt never enters
 argv, the environment, a mount or a log.
+
+Operator-configured `[runner]` mounts are execution identity, like the image. A
+fresh run resolves them before any lock or probe: each source must be an absolute
+path to an existing directory or regular file, and is recorded canonicalized (links
+resolved), with its device and inode on Unix, as the `mounts` of the run's
+`RunnerPolicy`; each target is a container path in normal form, never `/`, never at
+or under `/upstroke` or `/tmp`, and no two targets are the same or nested. A source
+that is, contains or lies inside the repository root, its Git or common directory,
+the private root (and so every run's worktrees and private artifacts) or a host
+credential location (`CLAUDE_CONFIG_DIR`, `COPILOT_HOME`, `CODEX_HOME`, and
+`~/.claude`, `~/.claude.json`, `~/.codex`, `~/.copilot`, compared as paths, never
+opened) is refused, as is a path the runtime's `--mount` option cannot carry exactly.
+Non-Unix builds refuse configured mounts. The record is digested (a separate v2
+domain, so a record without mounts keeps its v1 digest and its exact bytes), written
+to the owner record and `run_started`, and every role and probe gets the recorded
+list: read-only for review and probes, as recorded for implement and gate, so a gate
+can write through a mount the operator made read-write. Each use, and every resume,
+re-checks that the recorded path still names the recorded object; a missing or
+rebound source refuses before any recovery or work spawn and the run stays
+resumable. Today's differing `mounts` only warn and are ignored, and `report.json`'s
+`runner`, read from the record, names them.
 
 A linked worktree's `.git` file points back into the authoritative repository,
 which must not simply be mounted into an agent container: that would expose all

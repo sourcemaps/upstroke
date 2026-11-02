@@ -559,7 +559,8 @@ the Windows guest have no container runtime and run without it.
 Every Docker-gated test in this slice, by name.
 
 Written out rather than counted, because *which* gated test disappeared is
-the finding. `runner::container::tests::every_docker_gated_test_is_named_and_present`
+the finding. Thirty since root's recorded-mounts disposition added the
+three configured-mount witnesses in `exec::tests`. `runner::container::tests::every_docker_gated_test_is_named_and_present`
 asserts each name is a `fn` in the container sources, so a gated test that is
 deleted or renamed fails rather than silently leaving the list shorter.
 

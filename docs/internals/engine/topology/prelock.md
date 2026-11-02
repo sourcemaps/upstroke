@@ -134,6 +134,17 @@ The private root this command is configured with — explicit
 
 Where the run id, the incarnation and the pid come from.
 
+## `pub struct PreLock<'a>` › `pub mounts: &'a MountContext,`
+
+The read-only context configured mounts are resolved against
+(`runner::container::resolve::MountContext`): the repository root, its Git
+and common directories, the private root and the coordinator's credential
+locations. The entry binds it before any lock, and only when mounts are
+configured; `MountContext::unbound()` otherwise, which accepts no
+configured mount. Resolution then records each mount (canonical source,
+target, disposition, identity) in the `RunnerPolicy` this function
+digests, so the marker, the owner record and `run_started` carry it.
+
 ## `pub fn check(inputs: &PreLock<'_>) -> Result<PreLockChecked, UpstrokeError> {`
 
 Perform the read-only pre-lock checks, in the packet's order.
@@ -150,7 +161,9 @@ Perform the read-only pre-lock checks, in the packet's order.
    discovered at P3a where the answer would already have cost a lock.
    [`crate::workspace_manager::WorkspaceManager::derive`] requires the same
    thing of the same directory.
-2. The `RunnerPolicy`, by read-only inspection, and its digest.
+2. The `RunnerPolicy`, by read-only inspection, and its digest. Configured
+   mounts resolve first, against `PreLock::mounts`, before the runtime is
+   asked anything.
 3. The run id and the incarnation, which perform no effect at all.
 
 [`resolve_runner`] and [`RunnerResolved::authorize`] are the same checks in
@@ -163,8 +176,8 @@ runner has been inspected.
 name that is not an absolute path (R-C-RELSTORE), when the private root is not
 a real directory, when a `Container` selection has no runtime seam, or when the
 container inspection refuses — an unreachable runtime, an image reference
-absent from the runtime (there is no implicit pull), or an absent credential
-volume. [`UpstrokeError::Io`] when the root cannot be canonicalized for any
+absent from the runtime (there is no implicit pull), an absent credential
+volume, or a configured mount it refuses. [`UpstrokeError::Io`] when the root cannot be canonicalized for any
 other reason.
 
 ## `pub fn check(inputs: &PreLock<'_>) -> Result<PreLockChecked, UpstrokeError> {` › `crate::workspace_manager::refuse_relative_repository_wide_names()?;`

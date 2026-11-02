@@ -21,6 +21,21 @@
   usable by that user; nothing changes their ownership. And a command's stdin now reaches its
   container, which had read none: the prompt is written once, then EOF, by an attached start the
   process funnel owns, and that start waits no longer than the invocation's deadline.
+- `[runner] mounts` now takes effect, as part of the run's recorded execution identity. A fresh
+  container run resolves each mount before any lock or probe and records its canonical source,
+  target, `read_only` and source identity (device and inode) in the run's `RunnerPolicy`, so the
+  marker, `owner.json`, `run_started` and `report.json` carry it; a run without mounts keeps its
+  exact bytes and its policy digest. Every role and probe gets the recorded mounts, read-only for
+  review and probes and as written for implement and gate, so a gate can write through a mount
+  configured `read_only = false`. Refused before any lock: a relative or missing source, one that
+  is not a directory or regular file, one that is, contains or lies inside the repository, its
+  Git, the private root or a host credential location, a path the `--mount` option cannot carry
+  exactly (a `,`, a `"`, a control character, edge whitespace, or not UTF-8), and a target that is
+  `/`, not in normal form, at or under `/upstroke` or `/tmp`, or the same as or nested in another.
+  A config that wrote any of these was accepted while mounts were inert and is now refused. On a
+  resume the recorded mounts win: a recorded source that is gone or rebound refuses before any
+  spawn and the run stays resumable, and a different `mounts` today warns and is ignored. Windows
+  and other non-Unix builds refuse configured mounts.
 - A decline, or a lineage member's failed settlement, that meets an open verification of its lineage now
   cancels the verification instead of releasing it: the schema-4 fold keeps the transaction, and its
   pipeline and merge entitlements, until its one terminal, `merge_verification_interrupted`, which the

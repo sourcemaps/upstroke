@@ -72,7 +72,9 @@ Per-agent credential volume names (R20, operator-owned).
 
 ## `mounts: Option<Vec<RawRunnerMount>>,`
 
-Extra mounts the boundary receives beyond the ones the runner composes.
+Extra mounts the boundary receives beyond the ones the runner composes,
+recorded as part of the run's execution identity (see `RunnerSelection`'s
+`mounts`).
 
 ## `#[serde(flatten)]`
 
@@ -445,10 +447,21 @@ Per-agent credential volume names (R20).
 
 ## `pub mounts: Vec<RunnerMount>,`
 
-Extra mounts, parsed and carried. Nothing in this slice acts on them —
-`production_effect` is "none" — and, more durably, they are **not part of
-the recorded execution identity**: INV-23's `RunnerPolicy` has four
-fields and none of them is a mount list.
+Extra mounts, parsed and carried here, and since root's recorded-mounts
+disposition (2026-11-02) acted on: a fresh container run resolves them
+before any lock (`runner::container::resolve`) into the recorded
+`RunnerPolicy.mounts`, which is part of the execution identity, digested
+into the marker, recorded in the owner record and `run_started`, and given
+to every role and probe. The parse below still accepts any non-empty
+source and target, relative ones included; resolution is what refuses a
+relative source, a target outside the container's normal form, a reserved
+or nested target, and a source that reaches the repository, its Git, the
+private root or a credential location. On a resume today's mounts are only
+compared, by meaning, and warned about: the record wins.
+
+Earlier this section said they were not part of the recorded execution
+identity, because INV-23's `RunnerPolicy` had four fields and no mount list
+(`PR6B-MOUNTS-ARE-NOT-EXECUTION-IDENTITY`). That gap is closed.
 
 ## `pub from_config: bool,`
 

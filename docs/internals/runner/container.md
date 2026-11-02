@@ -1498,13 +1498,18 @@ attached client the process funnel runs, the two things
 
 An exit status for a diagnostic.
 
-## `fn docker_create_arguments(spec: &CreateSpec) -> Vec<String> {`
+## `fn docker_create_arguments(spec: &CreateSpec) -> Result<Vec<String>, String> {`
 
 The `docker create` argument vector for `spec`, a pure function so the
 argv is assertable with no daemon
 (`tests::the_docker_create_arguments_carry_a_user_and_an_open_stdin_only_when_the_spec_does`).
 `--user <uid>:<gid>` when the spec names a user, and `--interactive` when
-its command has input, both options before the image id.
+its command has input, both options before the image id. It refuses, with
+`mount_argument`'s reason, a spec holding a mount the `--mount` option
+cannot carry exactly; `DockerCli::create` turns that into
+`RuntimeError::Failed { operation: Create }` before `docker` runs. The plan
+already refused such a mount before any effect, so this is the backstop,
+not the first check.
 
 ## `struct ImageInspectionRaw {`
 
@@ -1785,7 +1790,7 @@ After the container is removed, its attached client, if one is still owned,
 is settled, and the two outcomes are combined (`combined_removal`). A
 removal that could not settle the client is not a success.
 
-## `fn docker_create_arguments(spec: &CreateSpec) -> Vec<String> {` › `args.push("--read-only".to_owned());`
+## `fn docker_create_arguments(spec: &CreateSpec) -> Result<Vec<String>, String> {` › `args.push("--read-only".to_owned());`
 
 `expected_failures_refusals[5]`. Measured against `docker`
 29.7.2: without it `sh -c 'printf owned >/outside-role-mount'`
@@ -1794,7 +1799,7 @@ so a gate's write outside every declared mount succeeds and only
 the weaker "the host is unharmed" holds. With it the same command
 answers `Read-only file system` and exits non-zero.
 
-## `fn docker_create_arguments(spec: &CreateSpec) -> Vec<String> {` › `args.push(spec.image_id.clone());`
+## `fn docker_create_arguments(spec: &CreateSpec) -> Result<Vec<String>, String> {` › `args.push(spec.image_id.clone());`
 
 The **image id**, never a reference (INV-23).
 
@@ -1999,11 +2004,38 @@ Absence is read out of a listing that had to succeed, never out of a failed
 environment shapes, and this is the observation every other settlement in the
 runtime is established against (round six, finding 1).
 
-## `fn mount_argument(mount: &runtime::Mount) -> String {`
+## `fn mount_option_refusal(value: &str) -> Option<&'static str> {`
 
-One `--mount` argument.
+Why `value` cannot be carried exactly as one field of a `--mount` option,
+or `None`. The CLI splits the option as CSV: `,` separates fields and `"`
+quotes one, so either in a path would let the path rewrite the mount's
+options; a control character (a newline above all) cannot ride a CSV
+field intact; edge whitespace is what an option parser may trim; and an
+empty value names nothing. Each is refused rather than escaped or
+rewritten. `exec.rs`'s plan and `resolve.rs`'s resolution and target
+check use this same predicate, so a value that resolves and plans is one
+this function will carry.
 
-## `fn mount_argument(mount: &runtime::Mount) -> String` › `parts.push("type=tmpfs".to_owned());`
+## `fn mount_argument(mount: &runtime::Mount) -> Result<String, String> {`
+
+One `--mount` argument, carrying each value exactly or refusing it
+(root's recorded-mounts disposition: the earlier
+`to_string_lossy().replace('\\', "/")` silently altered a non-UTF-8 path
+and a Unix path holding a backslash, and joined fields with commas a path
+could carry). A bind source must be UTF-8 (`to_str`, never lossy) and pass
+`mount_option_refusal`; so must every target and volume name. A backslash
+is an ordinary byte of a Unix name and is carried as written; only a
+Windows build rewrites it to `/` (`host_spelling`), for the generated
+paths it mounts, since configured mounts are refused off Unix.
+`tests::a_mount_argument_carries_each_value_exactly_or_refuses_it` holds
+both halves.
+
+## `fn host_spelling(path: &str) -> String {`
+
+The host path as `docker` on this platform takes it: unchanged on Unix,
+`\` as `/` on Windows (the generated paths only).
+
+## `fn mount_argument(mount: &runtime::Mount) -> Result<String, String>` › `parts.push("type=tmpfs".to_owned());`
 
 No source and no name: the surface exists only inside this
 container and dies with it.

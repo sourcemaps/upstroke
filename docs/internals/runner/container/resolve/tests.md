@@ -292,25 +292,57 @@ And this module reaches nothing else: resolution and rebuild both.
 The volume is still there afterwards, which is the thing the row is
 actually about.
 
-## `fn a_configured_mount_does_not_reach_the_recorded_execution_identity() {`
+## `struct MountWorld {`
 
-A `[runner] mounts` entry changes the boundary and **does not** move the
-recorded execution identity.
+A real directory tree for the mount tests: a repository root with a
+`.git`, a private root under `state/`, a credential location under
+`home/`, a shared directory and a tool file, all under one canonicalized
+scratch root. Unix only, like every test that records an identity.
 
-Stated as an assertion rather than left implicit, because it is a real gap
-and a reviewer should find it named rather than derive it. INV-23's
-`RunnerPolicy` has four fields — kind, policy, image, credential volumes —
-and none of them is a mount list, so two runs whose `[runner]` sections
-differ only in `mounts` record the same runner and carry the same
-`runner_policy_sha256`. Filed as `PR6B-MOUNTS-ARE-NOT-EXECUTION-IDENTITY`.
+## `fn a_configured_mount_is_recorded_and_rebuilt_from_the_record() {`
 
-Second field held constant: everything but `mounts`, so the equality below
-is about that field alone.
+The gap test this replaces, `a_configured_mount_does_not_reach_the_recorded_execution_identity`,
+pinned `PR6B-MOUNTS-ARE-NOT-EXECUTION-IDENTITY`: a mount changed the
+boundary and moved neither the record nor its digest. Root's
+recorded-mounts disposition (2026-11-02) closes that gap, and the test now
+holds the closed form.
 
-## `fn a_configured_mount_does_not_reach_the_recorded_execution…` › `let mut warnings = Vec::new();`
+- The record carries each mount's canonical source (a link resolved at
+  selection), target, disposition and identity, ordered by target; it is
+  complete, it differs from the bare record in `Mounts`, and its digest
+  moves into the v2 domain while the bare record's stays v1.
+- A rebuild under the configuration it was resolved from, or under the
+  same mounts spelled canonically instead of through the link, returns the
+  record and does not warn.
+- A rebuild under a moved target, a writable disposition, another source,
+  a source that does not exist today, or no mounts returns the record,
+  digest unchanged, and warns once, naming the configured mount set as
+  ignored.
 
-And a rebuild therefore cannot warn about a mount that changed: the
-comparison has no field for it.
+## `fn every_configured_mount_that_could_reach_a_withheld_path_is_refused_before_the_runtime_is_asked()`
+
+The refusal table. Twenty-three source cells: relative, absent, a socket,
+the repository, inside and above it and its `.git`, the private root,
+inside and above it, a credential location, inside and above it, the
+common Git directory of a linked worktree, inside and above it, the
+linked worktree's admin directory, a comma, a quote, a newline, edge
+whitespace, a name that is not UTF-8, and an unbound context. Thirteen
+target cells: relative, `/`, four non-normal spellings, `/upstroke` and
+`/tmp` at and under, a comma, edge whitespace and empty. Three pairs:
+repeated, nested and enclosing targets. Each refuses as `MountRefused`,
+for its own reason, with the runtime never asked. Every `BoundaryLayout`
+default except the scratch lies under `BOUNDARY_ROOT`. The positive control
+accepts `/upstroked`, `/tmpfile` and `/database` (a prefix of a reserved
+name is not under it) and a directory of another repository's checkout.
+
+## `fn the_rebuild_refuses_a_missing_or_rebound_source_before_any_spawn_and_resumes_once_it_is_back()`
+
+The rebuild against the recorded identity: a source moved away (`is
+gone`), another directory renamed into its path (`names another object`),
+and a link to the moved source at its path (`rebound it`) each refuse as
+`MountSourceMoved` before any spawn and before the runtime is asked. Moved
+back, the same object re-establishes the record and the run reaches its
+preflight. That is "refuses before any spawn while staying resumable".
 
 ## `fn resolution_refuses_a_selection_that_does_not_ask_for_a_container() {`
 
@@ -334,6 +366,11 @@ exactly, so anything today's config reaches is a `FoldError` later.
 
 Second field held constant: the runtime, ready in every cell, so no cell can
 succeed or fail for an inspection reason.
+
+The last cell configures a mount whose source does not exist. Today's
+config is never resolved on a resume, so an unavailable newly configured
+source cannot refuse, replace or invalidate an otherwise re-establishable
+record; it is only compared, and warned about.
 
 ## `fn a_config_that_differs_warns_naming_the_field_that_moved() {`
 
@@ -366,7 +403,10 @@ no-op beside it.
 ## `fn a_config_that_differs_warns_naming_the_field_that_moved()` › `assert_eq!(`
 
 ST-20: "a `[runner]` config that differs (kind, image reference, or
-credential volumes)". Three, and only three, are reachable.
+credential volumes)". Those three, and since root's recorded-mounts
+disposition the configured mount set, are reachable. `a mount configured
+today` is the cell for the fourth: the record has none, so any configured
+mount differs, whatever today's sources are.
 
 ## `fn an_absent_runner_section_warns_only_when_the_record_is_not_the_default() {`
 
@@ -735,7 +775,17 @@ set, and this census stayed green.
 
 ## `fn the_resolution_module_names_no_lock_no_write_and_no_spawn() {`
 
-This module reaches no lock, no filesystem and no spawn.
+This module reaches no lock, no filesystem write and no spawn.
+
+Until root's recorded-mounts disposition the census forbade any `fs::`
+spelling at all. Mount resolution and its recheck must observe the
+filesystem, so `fs::` is now admitted only as the three read-only
+observations it needs, `fs::canonicalize(`, `fs::symlink_metadata(` and
+`fs::MetadataExt`: the count of `fs::` in the production region must equal
+the count of those, and must not be zero. Any other `fs::` item, a write
+above all, fails as before. This is a read-only API classification,
+recorded as one, and not an exemption: the clippy denylist still governs
+the module unchanged.
 
 The structural half of "before any lock or effect": the argument that
 `resolve_container` cannot take a worktree lock is an argument about what it

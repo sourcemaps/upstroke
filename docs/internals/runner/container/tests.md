@@ -283,6 +283,18 @@ PR12's D-B and D-C. With both, `--user <uid>:<gid>` and `--interactive` are
 options of the create, before the image id, and the command after it is
 unchanged.
 
+## `fn a_mount_argument_carries_each_value_exactly_or_refuses_it() {`
+
+`mount_argument`, lossless or refusing. A source with spaces and
+non-ASCII, one with `=` and one with `;` and `:` are carried exactly; on
+Unix a backslash is carried as written; a volume and the scratch tmpfs
+render as before. Seven spellings (a `,` that would add a `readonly=false`
+field, a `"`, a newline, a tab, trailing and leading whitespace, empty) are
+refused in every position: bind source, bind target, volume name, tmpfs
+target. A non-UTF-8 source is refused on Unix, never converted lossily.
+And `docker_create_arguments` refuses a spec holding such a mount, so
+`docker` never runs with it.
+
 ## `fn the_fake_can_report_an_image_id_that_differs_from_the_one_create_asked_for() {`
 
 (3) per-container **reported image ids with substitution injection**.
