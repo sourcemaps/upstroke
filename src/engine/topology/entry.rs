@@ -16,7 +16,7 @@ use crate::error::UpstrokeError;
 use crate::events::{self, GateSummary, RunOutcome};
 use crate::gates::{self, ShellGate, ShellKind};
 use crate::interaction::{self, AnswerSource, InteractionMode, RealSleeper, Sleeper};
-use crate::ir::Plan;
+use crate::ir::{Answer, Plan, Question};
 use crate::review::{self, ReviewPlan};
 use crate::rundir::{self, RepoKey, RunPaths, WorktreeLock};
 use crate::runner::Runner;
@@ -89,6 +89,7 @@ pub fn prepare_fresh(
     opts: &RunOptions,
     harness: &Harness<'_>,
 ) -> Result<FreshPrepared, UpstrokeError> {
+    crate::workspace_manager::refuse_relative_repository_wide_names()?;
     let validate_opts = ValidateOptions {
         plan_path: opts.plan_path.clone(),
         config_path: opts.config_path.clone(),
@@ -391,6 +392,7 @@ pub fn prepare_resume(
     harness: &Harness<'_>,
     root: RootDerived,
 ) -> Result<ResumePrepared, UpstrokeError> {
+    crate::workspace_manager::refuse_relative_repository_wide_names()?;
     let run_id = root.run_id().to_owned();
     let started = root.started().clone();
     match std::fs::symlink_metadata(root.private_dir()) {
@@ -693,13 +695,17 @@ fn drive(
     harness: &Harness<'_>,
 ) -> Result<RunOutcome, UpstrokeError> {
     let sleeper: &dyn Sleeper = harness.sleeper.unwrap_or(&RealSleeper);
-    let default_answers = interaction::answers_for(
-        driving.mode,
+    let default_answers = DeliveredFirst::new(
         driving.paths.answers(),
-        driving.wait_on_block,
+        interaction::answers_for(
+            driving.mode,
+            driving.paths.answers(),
+            driving.wait_on_block,
+            sleeper,
+        ),
         sleeper,
     );
-    let answers: &dyn AnswerSource = harness.answers.unwrap_or(default_answers.as_ref());
+    let answers: &dyn AnswerSource = harness.answers.unwrap_or(&default_answers);
     let plans = FrozenPlans {
         adapters: harness.adapters,
         paths: &driving.paths,
@@ -756,6 +762,60 @@ fn drive(
             return Ok(outcome);
         }
         progress = run.step(&seams, &mut hooks)?;
+    }
+}
+
+struct DeliveredFirst<'a> {
+    delivered: interaction::EventLogAnswers<'a>,
+    attended: Box<dyn AnswerSource + 'a>,
+    answered_by: Mutex<&'static str>,
+}
+
+impl<'a> DeliveredFirst<'a> {
+    fn new(
+        answers: PathBuf,
+        attended: Box<dyn AnswerSource + 'a>,
+        sleeper: &'a dyn Sleeper,
+    ) -> Self {
+        let answered_by = Mutex::new(attended.id());
+        Self {
+            delivered: interaction::EventLogAnswers::new(answers, Duration::ZERO, sleeper),
+            attended,
+            answered_by,
+        }
+    }
+
+    fn answered(&self, by: &'static str, answer: Answer) -> Answer {
+        if let Ok(mut answered_by) = self.answered_by.lock() {
+            *answered_by = by;
+        }
+        answer
+    }
+}
+
+impl AnswerSource for DeliveredFirst<'_> {
+    fn id(&self) -> &'static str {
+        self.answered_by
+            .lock()
+            .map_or_else(|_| self.attended.id(), |answered_by| *answered_by)
+    }
+
+    fn poll(&self, question: &Question) -> Result<Answer, UpstrokeError> {
+        let delivered = self.delivered.poll(question)?;
+        if delivered != Answer::Unanswered {
+            return Ok(self.answered(self.delivered.id(), delivered));
+        }
+        let attended = self.attended.poll(question)?;
+        Ok(self.answered(self.attended.id(), attended))
+    }
+
+    fn resolve(&self, question: &Question) -> Result<Answer, UpstrokeError> {
+        let delivered = self.delivered.poll(question)?;
+        if delivered != Answer::Unanswered {
+            return Ok(self.answered(self.delivered.id(), delivered));
+        }
+        let attended = self.attended.resolve(question)?;
+        Ok(self.answered(self.attended.id(), attended))
     }
 }
 

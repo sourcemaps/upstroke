@@ -98,6 +98,14 @@ The read-only half of a fresh schema-4 run. Every refusal it can raise
 precedes every effect of the command: nothing is published, locked or
 created when it returns an error.
 
+Its first statement is R5's check of the seven repository-wide names
+(`workspace_manager::refuse_relative_repository_wide_names`), before the
+capture and the analysis start any Git child: a relative value names
+something else, or nothing, in a Git child's directory, and P12-W8 measured
+the public path's first Git child failing on one with Git's own "not a git
+repository" before `prelock::check` could name the variable. `prelock::check`
+keeps its own first-statement check.
+
 ## `impl FreshPrepared` › `pub fn private_root(&self) -> &Path {`
 
 Where the include is published: the authorized (canonical) explicit root,
@@ -118,7 +126,9 @@ containment establishment.
 
 ## `pub fn prepare_resume(`
 
-The read-only half of a topology resume.
+The read-only half of a topology resume. It begins with R5's check of the
+repository-wide names, as `prepare_fresh` does, before the include's
+publication starts a Git child.
 
 ## `impl ResumePrepared` › `pub fn run(`
 
@@ -132,6 +142,19 @@ witnesses (`run_id`, `incarnation`, `runner`, `private_dir`,
 `probed_agents`) are filled here with the same values, so that
 `registry_digest` — computed over `registry_record()` and the probed agents —
 is the digest of the record that is appended.
+
+## `struct DeliveredFirst<'a> {`
+
+The run's answer source: an answer already delivered to the run's answers
+directory (by `upstroke answer`) is taken first, whatever the interaction
+mode, and only then is the mode's own source asked. The legacy coordinator
+does the same with its `sweep_answers`. Without it, `interaction = never`
+(`UnattendedAnswers`) and a resume from a terminal (`TerminalAnswers`) never
+read the answer file, so an answered question stayed open and the run parked
+again (measured by P12-W6's resume, under `interaction = never`). The
+delivered half is `EventLogAnswers` with no wait budget, so it reads and never
+waits. `id` names the source that gave the last answer, so
+`question_answered.via` says where an answer came from.
 
 ## `fn drive(`
 
