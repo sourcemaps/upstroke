@@ -20056,7 +20056,8 @@ const CONFLICTING_WORKER: &str = "case \"$(basename \"$PWD\")\" in k2-*) f=own.t
 /// P12-W18. `export-decisions` over a schema-4 run with a merge-repair task:
 /// one row per attempt, in today's columns, the repair task's attempts joined to
 /// the frozen registry by its display id, and no verification or merge event as
-/// a row.
+/// a row. Each row is settled as the log settles its attempt: one that
+/// succeeded, by `candidate_prepared`, is `passed`, with its finish and cost.
 #[cfg(unix)]
 #[test]
 fn a_schema_4_export_keeps_todays_rows_and_joins_a_repair_task_to_the_registry() {
@@ -20121,6 +20122,30 @@ fn a_schema_4_export_keeps_todays_rows_and_joins_a_repair_task_to_the_registry()
             .any(|id| *id != "t1" && *id != "t2" && *id != "t3"),
         "a repair task's attempts are rows, joined by its display id: {task_ids:?}"
     );
+    let passed = kinds
+        .iter()
+        .filter(|kind| *kind == "candidate_prepared")
+        .count();
+    let settled_as = |outcome: &str| {
+        rows.iter()
+            .filter(|row| row["outcome"] == outcome)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        settled_as("passed").len(),
+        passed,
+        "every attempt the log settles by `candidate_prepared` is exported as passed: {rows:#?}"
+    );
+    assert!(
+        settled_as("interrupted").is_empty(),
+        "the log interrupts no attempt, and a finished run leaves none dangling: {rows:#?}"
+    );
+    for row in settled_as("passed") {
+        assert!(
+            row["attempt_finished_at"].is_string() && row["cost_usd"].is_number(),
+            "a passed row carries its settlement's finish and cost: {row}"
+        );
+    }
     let keys: Vec<String> = rows[0]
         .as_object()
         .expect("a row is an object")

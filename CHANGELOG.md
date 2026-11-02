@@ -9,7 +9,9 @@
   schemas 1-3 still resumes, reports and exports on the sequential path, and a binary that reads
   only up to schema 3 refuses a schema-4 log before any lock. A schema-4 run probes every agent
   its chains and its review plan name before anything is committed, and a configured reviewer
-  whose CLI is missing fails its creation where the sequential engine dropped that reviewer. This
+  whose CLI is missing fails its creation where the sequential engine dropped that reviewer. With
+  no pins, the review plan names GitHub Copilot's CLI beside Claude Code's, so both must be
+  installed (`design/17`, "Which CLIs a schema-4 run needs"). This
   supersedes the entries below that call schema 4 "unreleased and inert by default": it is still
   unreleased, and no longer inert.
 - A decline, or a lineage member's failed settlement, that meets an open verification of its lineage now

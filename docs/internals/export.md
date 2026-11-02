@@ -85,9 +85,23 @@ other integration-ledger event becomes a row; that ledger stays in `status`
 and `report.json`. The snapshot rule is legacy's: a live run refuses, and the
 closing stability check runs whatever the projection returned.
 
+A row's `attempt_started_at` is the attempt's admission, which precedes its
+slot permit. So a row's interval can include waiting for a slot, and
+overlapping rows are not worker concurrency (design/25, "What an attempt's
+interval is not").
+
 ## `fn build_row_4(`
 
 `build_row`'s projection over a schema-4 attempt. An `attempt_interrupted`
-settlement, or none, is an interrupted attempt with no record; otherwise the
-record of `attempt_finished` supplies duration, cost, usage, failure and
-reviews, validated as legacy validates them.
+settlement, or none, is an interrupted attempt with no record. Otherwise the
+settlement's record supplies duration, cost, usage, failure and reviews,
+validated as legacy validates them. That record is `attempt_finished`'s for an
+attempt that did not succeed, and `candidate_prepared`'s for one that did:
+`candidate_prepared` is the fold's only successful settlement.
+
+Until brief 4's D4 documentation pass, `schema_4_rows` keyed settlements on
+`attempt_finished` and `attempt_interrupted` alone. Every successful schema-4
+attempt was then exported as a dangling, interrupted start, with no finish
+time or cost. This is the same omission S9's projection had (`engine::report`,
+`from_topology`). The export witness, P12-W18, now holds every row to its own
+settlement.

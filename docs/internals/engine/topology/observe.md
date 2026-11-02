@@ -76,6 +76,9 @@ One line per event for `--follow`: its timestamp, its kind, and for the
 attempt, question, merge and finish events the task (by display id) and the
 detail an operator watches for.
 
+An `attempt_started` line is the attempt's admission. Its slot permit is
+acquired after it, so two attempts both started are not two workers running.
+
 ## `pub fn open_question_candidates(repo_root: &Path, runs: &[String], wanted: &str) -> OpenCandidates {`
 
 D3: what the schema-4 runs among the caller's runs hold for a typed id, as

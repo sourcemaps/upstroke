@@ -356,6 +356,9 @@ fn schema_4_rows(
             TopologyEventBody::AttemptInterrupted { data } => {
                 (data.key.0, data.generation.0, data.attempt.0)
             }
+            TopologyEventBody::CandidatePrepared { data } => {
+                (data.key.0, data.generation.0, data.attempt.attempt)
+            }
             _ => continue,
         };
         if settled.insert(id, event).is_some() {
@@ -461,6 +464,9 @@ fn build_row_4(
     let (finished_at, record, interrupted) = match settlement.map(|done| (&done.ts, &done.body)) {
         Some((ts, TopologyEventBody::AttemptFinished { data })) => {
             (Some(ts.clone()), Some(&*data.record), false)
+        }
+        Some((ts, TopologyEventBody::CandidatePrepared { data })) => {
+            (Some(ts.clone()), Some(&*data.attempt), false)
         }
         Some((ts, _)) => (Some(ts.clone()), None, true),
         None => (None, None, true),
