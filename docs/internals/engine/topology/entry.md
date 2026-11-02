@@ -140,7 +140,7 @@ A run keeps the limits it started with. Today's `max_parallel` and
 `max_merge_repairs` are compared with the record and a difference warns.
 The slot limits are not recorded and are acted on (`resumed_slot_limits`).
 
-## `fn resumed_slot_limits(config: &config::Config, recorded_width: u32) -> Result<SlotLimits, UpstrokeError> {`
+## `fn resumed_slot_limits(`
 
 A resume's slot limits: each written value governs, and an absent one is
 the recorded `max_parallel`, which is what the run's own
