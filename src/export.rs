@@ -451,7 +451,7 @@ fn key_4((key, generation, attempt): Attempt4) -> String {
 
 fn build_row_4(
     context: &RunContext<'_>,
-    start: &TopologyEvent,
+    begun: &TopologyEvent,
     data: &AttemptStarted4,
     task: &Task,
     ladder: &FrozenLadder,
@@ -500,7 +500,7 @@ fn build_row_4(
         run_id: context.run_id.to_owned(),
         upstroke_version: context.upstroke_version.to_owned(),
         run_started_at: context.started_at.to_owned(),
-        attempt_started_at: start.ts.clone(),
+        attempt_started_at: begun.ts.clone(),
         attempt_finished_at: finished_at,
         task_id: task.id.to_string(),
         task_title: task.title.clone(),
