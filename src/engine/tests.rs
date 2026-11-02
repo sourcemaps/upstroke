@@ -14549,23 +14549,17 @@ fn a_run_that_dies_between_its_pins_commit_and_its_ref_loses_nothing_on_resume()
         .env("UPSTROKE_KEPT_ENGINE_REPORT", &child.report)
         .env("PATH", shim.path());
     let (status, log) = bounded_child("the run killed at its pin's ref", command, &child.log);
-    let report = fs::read_to_string(&child.report);
-    let report_note = match &report {
-        Ok(text) => format!("held {} B, shown below as the child's report", text.len()),
-        Err(error) => format!(
-            "could not be read ({error}), so the child's report below is empty and the file's \
-             own observation follows it"
-        ),
-    };
     assert_the_shim_fired(
         &shim,
         &child,
-        report.as_deref().unwrap_or_default(),
+        "a sentinel, not the child's report: this test reads no report bytes of its own, and \
+         the report's actual bytes are in the bounded observation of the report file's path below",
         std::slice::from_ref(&child.report),
         format_args!(
             "the shim killed the run at the pin's update-ref. The child ended {status:?}; its \
-             report file {report_note}; its stdout and stderr, {} B when it ended, are the \
-             child's log, observed below by its path, not the engine's report",
+             stdout and stderr, {} B when it ended, are the child's log, observed below by its \
+             path, not the engine's report; the report file is observed below by its path, and \
+             the child's report line holds a sentinel, not report bytes",
             log.len()
         ),
     );
