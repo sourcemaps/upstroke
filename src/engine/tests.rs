@@ -17783,8 +17783,10 @@ fn a_schema_4_run_runs_two_workers_at_once_and_the_configured_slot_limits_bound_
 }
 
 /// A schema-4 run whose two tasks both park on a question, resumed with both
-/// answered under today's `[engine]` `extra`: whether the resumed workers
-/// overlapped.
+/// answers delivered under today's `[engine]` `extra`: whether the resumed
+/// workers overlapped. The answers are written where the run's own answer
+/// source polls for them before every selection, so both tasks are ready
+/// together when the resumed loop starts.
 #[cfg(unix)]
 fn resumed_overlap(tag: &str, extra: &str) -> usize {
     let (tree, repo) = temp_engine_repo(tag);
@@ -17805,28 +17807,26 @@ fn resumed_overlap(tag: &str, extra: &str) -> usize {
         fs::remove_file(entry.expect("a marker").path()).expect("a clean marker directory");
     }
 
+    assert_eq!(parked.questions.len(), 2, "{tag}: both tasks asked: {parked:#?}");
+    let answers = rundir::public_dir(&repo, &parked.run_id).join("answers");
+    fs::create_dir_all(&answers).expect("the run's answers directory");
+    for asked in &parked.questions {
+        interaction::write_answer(
+            &answers,
+            &asked.question.id,
+            &interaction::AnswerRecord::unattributed(Answer::Answered {
+                text: "the first".to_owned(),
+            }),
+        )
+        .expect("the answer is delivered");
+    }
+
     let today = tree.path().join("today.toml");
     fs::write(&today, format!("[engine]\nmax_parallel = 2\n{extra}")).expect("today's config");
     let mut resume = resume_options(&repo, &parked.run_id);
     resume.private_root = None;
     resume.config_path = Some(today);
-    let answers = ScriptedAnswers::new(vec![
-        Answer::Answered {
-            text: "the first".to_owned(),
-        },
-        Answer::Answered {
-            text: "the first".to_owned(),
-        },
-    ]);
-    let report = resume_harness(
-        &resume,
-        &Harness {
-            adapters: &source,
-            answers: Some(&answers),
-            sleeper: None,
-        },
-    )
-    .expect("the resume completes the run");
+    let report = resume_with(&resume, &source).expect("the resume completes the run");
     assert_eq!(report.outcome(), RunOutcome::Complete, "{tag}: {report:#?}");
     assert!(committed(&report, "t1") && committed(&report, "t2"), "{tag}: {report:#?}");
     overlaps_in(&markers)
