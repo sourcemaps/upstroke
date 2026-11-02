@@ -24392,6 +24392,31 @@ fn core_ignorecase_helper() {
     write_file(&marker, b"ran\n");
     let read = |configure: &dyn Fn(&Fixture)| {
         let fixture = Fixture::new("d7-ignorecase");
+        // The fixture-local unset baseline (root's
+        // PR12-D7-UNSET-FIXTURE-PRECONDITION). `git init` writes
+        // `core.ignorecase = true` into a repository it creates on a folding
+        // filesystem, and neither the neutral environment nor the pinned
+        // global file reaches that. So the key is taken out of this fixture's
+        // own file, and its absence there is checked, before the case applies
+        // its configuration. Only the new fixture's file is written, and the
+        // child's global or environment challenge is left as it was.
+        let unset = git_out(
+            &fixture.base,
+            &["config", "--local", "--unset-all", "core.ignorecase"],
+        );
+        assert!(
+            matches!(unset.status.code(), Some(0 | 5)),
+            "clearing the fixture's own core.ignorecase: {unset:?}"
+        );
+        let left = git_out(
+            &fixture.base,
+            &["config", "--local", "--get-all", "core.ignorecase"],
+        );
+        assert_eq!(
+            left.status.code(),
+            Some(1),
+            "the baseline: the fixture's own file sets no core.ignorecase: {left:?}"
+        );
         configure(&fixture);
         fixture.manager.core_ignorecase()
     };
