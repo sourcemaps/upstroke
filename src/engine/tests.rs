@@ -19496,6 +19496,98 @@ fn a_schema_4_run_stopped_at_its_budget_projects_the_stop_and_its_outcome() {
     assert_eq!(finalized["budget_stop"]["budget"], "run", "{finalized}");
 }
 
+/// S9, a task-budget stop. `[budgets] task_usd` refuses a task's retry once the
+/// task's own spend reaches it, and the log's `budget_exceeded` names that
+/// task's key. The `RunReport` projects the stop to the task's display id. The
+/// run-wide stop above, refused at integration, names no task and projects to
+/// an empty one; both semantics stand side by side.
+///
+/// The gate fails the first candidate that carries the stub's output, once,
+/// so the task's first attempt is spent and its retry is what the task budget
+/// refuses.
+#[cfg(unix)]
+#[test]
+fn a_task_budget_stop_projects_the_task_it_names() {
+    let (tree, repo) = temp_engine_repo("topology-task-budget");
+    let failed_once = tree.path().join("gate-failed-once");
+    seed(
+        &repo,
+        "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\nMake it.\n",
+        Some(
+            format!(
+                "[routing]\nimplement = {{ chain = [\"small\"], attempts_per = 2 }}\n\n\
+                 [budgets]\ntask_usd = 0.01\n\n\
+                 [[gates]]\nname = \"fails-once\"\n\
+                 cmd = \"if [ -e agent-output.txt ] && [ ! -e '{}' ]; then : > '{}'; exit 1; fi\"\n",
+                failed_once.display(),
+                failed_once.display()
+            )
+            .as_str(),
+        ),
+    );
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        0,
+    )));
+    let report = run_with(&topology_options(&repo), &source).expect("the run ends");
+    until_released(&repo, &report.run_id);
+    assert!(
+        failed_once.exists(),
+        "the fixture's premise: the gate failed the first attempt"
+    );
+
+    let events = log_events(&repo, &report.run_id);
+    let stops: Vec<&serde_json::Value> = events
+        .iter()
+        .filter(|event| event["event"] == "budget_exceeded")
+        .collect();
+    let [exceeded] = stops.as_slice() else {
+        panic!("one budget_exceeded event: {events:#?}");
+    };
+    let data = &exceeded["data"];
+    assert_eq!(data["budget"], "task", "{data}");
+    let key = data["key"]
+        .as_u64()
+        .expect("a task-budget stop names the task it refused");
+    let projected = crate::engine::topology::observe::observe(&repo, &report.run_id)
+        .expect("observes")
+        .expect("a schema-4 log")
+        .report()
+        .expect("projects");
+    let task = display_of(&projected, key);
+    assert_eq!(task, "t1", "the fixture's premise: the one task's retry was refused");
+
+    assert_eq!(report.outcome(), RunOutcome::BudgetExceeded, "{report:#?}");
+    assert_eq!(
+        report.budget_stop,
+        Some(crate::events::BudgetExceeded {
+            budget: crate::events::BudgetKind::Task,
+            limit_usd: data["limit_usd"].as_f64().expect("a limit"),
+            spent_usd: data["spent_usd"].as_f64().expect("a spend"),
+            task: task.clone(),
+        }),
+        "{data}"
+    );
+    assert!(
+        report.render().contains(&format!("before `{task}`")),
+        "the summary names the task the stop was for: {}",
+        report.render()
+    );
+    assert_eq!(
+        projected.budget_stop.map(|stop| stop.budget),
+        Some(crate::events::BudgetKind::Task)
+    );
+    assert_eq!(
+        report
+            .tasks
+            .iter()
+            .map(|task| task.attempts.len())
+            .sum::<usize>(),
+        settled_attempts(&events),
+        "every attempt the log settles is in the report: {report:#?}"
+    );
+}
+
 fn recorded_case_fold(repo: &Path, run_id: &str) -> (String, bool) {
     let line = fs::read_to_string(rundir::public_dir(repo, run_id).join("events.jsonl"))
         .expect("the run's event log")
@@ -19519,6 +19611,10 @@ fn recorded_case_fold(repo: &Path, run_id: &str) -> (String, bool) {
 /// The namespace is observed the way the resolver observes it (one name, looked
 /// up in the other case, beside the private root). Where it folds, every answer
 /// is `true`, so only "a resume never changes it" can be shown there.
+///
+/// On a case-sensitive namespace, the run that recorded `true` resumes over a
+/// root that does not fold. The resume continues on the record and warns (D7's
+/// resume side), while the run that recorded `false` resumes without a word.
 #[test]
 fn a_fresh_run_records_the_case_policy_and_a_resume_never_changes_it() {
     let (tree, repo) = temp_engine_repo("topology-case-record");
@@ -19542,6 +19638,12 @@ fn a_fresh_run_records_the_case_policy_and_a_resume_never_changes_it() {
         let report = resume_with(&resume, &BorrowedTopologyStub(stub)).expect("the resume");
         assert_eq!(report.outcome(), RunOutcome::Complete, "{report:#?}");
         until_released(&repo, &run.run_id);
+        report
+    };
+    let warns_of_a_sensitive_root = |report: &RunReport| {
+        report.warnings.iter().any(|warning| {
+            warning.contains("recorded `case_fold = true`") && warning.contains("case-sensitive now")
+        })
     };
     let parked = |stub: &TopologyStub| {
         let run =
@@ -19573,7 +19675,12 @@ fn a_fresh_run_records_the_case_policy_and_a_resume_never_changes_it() {
     }
 
     answer(&recorded_off);
-    resumed(&recorded_off, &sensitive_stub);
+    let resumed_off = resumed(&recorded_off, &sensitive_stub);
+    assert!(
+        !warns_of_a_sensitive_root(&resumed_off),
+        "a record of `false` that the root agrees with says nothing: {:?}",
+        resumed_off.warnings
+    );
     assert_eq!(
         recorded_case_fold(&repo, &recorded_off.run_id).0,
         off_line,
@@ -19603,7 +19710,13 @@ fn a_fresh_run_records_the_case_policy_and_a_resume_never_changes_it() {
         "with `core.ignorecase = false` again, a fresh run records the namespace's answer"
     );
     answer(&recorded_on);
-    resumed(&recorded_on, &union_stub);
+    let resumed_on = resumed(&recorded_on, &union_stub);
+    assert_eq!(
+        warns_of_a_sensitive_root(&resumed_on),
+        !folds_here,
+        "a record of `true` over a root that does not fold continues and warns: {:?}",
+        resumed_on.warnings
+    );
     assert_eq!(
         recorded_case_fold(&repo, &recorded_on.run_id).0,
         on_line,
@@ -19814,6 +19927,108 @@ fn a_configured_reviewer_whose_cli_is_absent_fails_creation_before_p5b_and_commi
         "{first}"
     );
     until_released(&repo, &report.run_id);
+}
+
+/// Where `no_committer_identity_helper` records that it ran.
+#[cfg(unix)]
+const NO_IDENTITY_MARKER: &str = "UPSTROKE_FINDINGS2_NO_IDENTITY_MARKER";
+
+/// FINDINGS2_3, the committer-identity parity check (root's checkpoint-3
+/// disposition). At `b9d15bdb` the legacy engine asked the operator for no
+/// identity: every commit it put on a run's branch was `commit-tree` with
+/// `upstroke`'s (`Workspace::commit_tree_with_upstroke_identity`). The schema-4
+/// integration's proposal cherry-pick took the committer from the operator's
+/// configuration, so a repository without one stopped there (the CLI
+/// scenario's case C at `ad513bdf`). That was an activation regression, and the
+/// cherry-pick now carries the engine's committer identity.
+///
+/// The child runs with every ambient Git control taken away. In it, the
+/// repository's own identity is removed and `user.useConfigOnly` is set, so Git
+/// can find no committer identity at all, which is checked first. Two
+/// independent tasks at width 2 make the second merge a stale candidate's
+/// cherry-pick, which is checked too.
+#[cfg(unix)]
+#[test]
+fn a_schema_4_run_integrates_where_git_has_no_committer_identity() {
+    let tree = temp_engine_scratch("no-committer-identity");
+    let marker = tree.path().join("ran");
+    let status = crate::workspace_manager::fixture::run_challenged_replacement_witness_child(
+        "engine::tests::no_committer_identity_helper",
+        &[(NO_IDENTITY_MARKER, marker.clone().into_os_string())],
+    );
+    assert!(
+        status.success(),
+        "a schema-4 run in a repository and environment without a committer identity, \
+         ended {status:?}"
+    );
+    assert!(
+        marker.exists(),
+        "the child never reached the helper, so it measured nothing"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "subprocess helper"]
+fn no_committer_identity_helper() {
+    if std::env::var_os(crate::workspace_manager::fixture::REPLACEMENT_WITNESS).is_none() {
+        return;
+    }
+    let marker = PathBuf::from(std::env::var_os(NO_IDENTITY_MARKER).expect("the marker"));
+    fs::write(&marker, b"ran\n").expect("the marker");
+    let (_tree, repo) = temp_engine_repo("no-identity");
+    seed(
+        &repo,
+        TWO_INDEPENDENT_TASKS,
+        Some("[engine]\nmax_parallel = 2\n\n[routing]\nreview = { enabled = false }\n"),
+    );
+    git_in(&repo, &["config", "--unset", "user.name"]);
+    git_in(&repo, &["config", "--unset", "user.email"]);
+    git_in(&repo, &["config", "user.useConfigOnly", "true"]);
+    let ident = Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["var", "GIT_COMMITTER_IDENT"])
+        .output()
+        .expect("run git var");
+    assert!(
+        !ident.status.success(),
+        "the premise: Git finds no committer identity in this repository and environment"
+    );
+
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        "printf 'edited by the topology stub\\n' > \"out.$$.txt\"",
+        0,
+    )));
+    let report = run_with(&topology_options(&repo), &source)
+        .expect("the run integrates without an operator identity");
+    until_released(&repo, &report.run_id);
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:#?}");
+    assert!(
+        committed(&report, "t1") && committed(&report, "t2"),
+        "{report:#?}"
+    );
+    let projected = crate::engine::topology::observe::observe(&repo, &report.run_id)
+        .expect("observes")
+        .expect("a schema-4 log")
+        .report()
+        .expect("projects");
+    let picked = projected
+        .integration_ledger
+        .iter()
+        .find(|row| row.basis == "stale_clean")
+        .and_then(|row| row.proposed_sha.clone())
+        .unwrap_or_else(|| {
+            panic!(
+                "the premise: one merge was a stale candidate's cherry-pick: {:#?}",
+                projected.integration_ledger
+            )
+        });
+    assert_eq!(
+        git_in(&repo, &["log", "-1", "--format=%cn <%ce>", &picked]).trim(),
+        "upstroke <upstroke@upstroke.local>",
+        "the cherry-picked proposal carries the engine's committer identity"
+    );
 }
 
 /// Three tasks in flight from one base. The two in slots `k0` and `k1` both

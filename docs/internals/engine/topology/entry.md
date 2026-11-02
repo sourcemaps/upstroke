@@ -215,20 +215,37 @@ two are compared, after the manager is derived and before its first effect or
 any role. A difference is returned as an error naming both: a defect signal,
 not a refusal of the layout.
 
-## `fn refuse_unsafe_case_policy(started: &RunStarted4) -> Result<(), UpstrokeError> {`
+## `fn hold_recorded_case_policy(`
 
-Root's Q3: a recorded case-sensitive policy (`case_fold = false`) that an
-observation of the execution namespace contradicts refuses before effectful
-recovery, and the record is never rewritten. A conservative record
-(`case_fold = true`) is never refused, and an observation that cannot answer
-is not evidence of sensitivity.
+The resume side of D7, at a0, read-only. The recorded `path_policy` is
+execution identity: the fold uses it alone, it is never re-resolved, and
+nothing here rewrites it.
+
+What this does is re-observe the namespace the record was made for. Where
+there is no execution root, because a finished run's root was pruned, the
+lookup is of the private root's `workspaces` entry, whose tree the root is
+created in. `case_policy_holds` then decides.
 
 ## `fn case_policy_holds(`
 
-The decision of `refuse_unsafe_case_policy`, apart from its observation, so
-that every combination is tested on any filesystem: only a recorded
-`case_fold = false` with an observation that the namespace folds refuses.
-(This box's filesystems cannot produce a folding observation natively.)
+The decision, apart from its observation, so every combination is tested on
+any filesystem. It applies root's Q3 and the plan addendum's three outcomes
+(lines 129–132):
+- a recorded `case_fold = false` with a root that now folds refuses before any
+  lock or recovery, and the record is never rewritten;
+- a recorded `case_fold = true` with a root that is case-sensitive continues
+  on the record and warns, since it costs only parallelism;
+- an observation that cannot answer warns, naming its reason, and the run
+  continues on its record;
+- a record the observation agrees with says nothing.
+
+Before root's checkpoint-4 follow-through, the resume observed only behind a
+recorded `false` and never warned. This box's filesystems cannot produce a
+folding observation natively, so the refusal is witnessed with injected
+observations
+(`entry::tests::a_recorded_case_sensitive_policy_the_namespace_contradicts_refuses_and_nothing_else_does`).
+The warning on a case-sensitive root is witnessed on a public resume as well
+(P12-W11).
 
 ## `enum CaseObservation {`
 

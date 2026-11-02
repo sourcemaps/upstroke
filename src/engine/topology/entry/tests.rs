@@ -151,25 +151,69 @@ fn a_resume_acts_on_the_slot_limits_written_today_and_defaults_the_rest_to_the_r
     assert_eq!((none.per_agent(), none.per_pool()), (3, 3));
 }
 
+/// Root's Q3, and the resume side of D7 (plan addendum, the re-observation at
+/// a0): a recorded `case_fold = false` over a namespace that now folds refuses,
+/// and nothing else does. A recorded `true` over a case-sensitive root continues
+/// on the record and warns, and an observation that cannot answer warns, naming
+/// its reason. The record is the answer in every case: nothing here re-resolves
+/// it.
 #[test]
 fn a_recorded_case_sensitive_policy_the_namespace_contradicts_refuses_and_nothing_else_does() {
-    let refused = case_policy_holds("01RUN", "/r/workspaces/k/01RUN", false, Some(true))
-        .expect_err("a recorded `case_fold = false` over a namespace that now folds refuses");
+    let mut warnings = Vec::new();
+    let refused = case_policy_holds(
+        "01RUN",
+        "/r/workspaces/k/01RUN",
+        false,
+        &CaseObservation::Folds,
+        &mut warnings,
+    )
+    .expect_err("a recorded `case_fold = false` over a namespace that now folds refuses");
     let said = refused.to_string();
     assert!(
         said.contains("case_fold = false") && said.contains("01RUN"),
         "{said}"
     );
-    for (recorded_fold, observed) in [
-        (false, Some(false)),
-        (false, None),
-        (true, Some(true)),
-        (true, Some(false)),
-        (true, None),
-    ] {
-        case_policy_holds("01RUN", "/r", recorded_fold, observed).unwrap_or_else(|error| {
-            panic!("recorded {recorded_fold}, observed {observed:?} refused: {error}")
-        });
+    assert!(warnings.is_empty(), "a refusal is not a warning: {warnings:?}");
+
+    let unknown = CaseObservation::Unknown("TASKS could not be looked up: denied".to_owned());
+    let table: [(bool, &CaseObservation, &[&str]); 5] = [
+        (false, &CaseObservation::Sensitive, &[]),
+        (true, &CaseObservation::Folds, &[]),
+        (
+            true,
+            &CaseObservation::Sensitive,
+            &["recorded `case_fold = true`", "case-sensitive now", "keeps its record"],
+        ),
+        (
+            false,
+            &unknown,
+            &["could not", "TASKS could not be looked up: denied", "`case_fold = false`"],
+        ),
+        (
+            true,
+            &unknown,
+            &["could not", "TASKS could not be looked up: denied", "`case_fold = true`"],
+        ),
+    ];
+    for (recorded_fold, observed, named) in table {
+        let mut warnings = Vec::new();
+        case_policy_holds("01RUN", "/r", recorded_fold, observed, &mut warnings).unwrap_or_else(
+            |error| panic!("recorded {recorded_fold}, observed {observed:?} refused: {error}"),
+        );
+        if named.is_empty() {
+            assert!(
+                warnings.is_empty(),
+                "recorded {recorded_fold} agrees with {observed:?}: {warnings:?}"
+            );
+            continue;
+        }
+        let [warning] = warnings.as_slice() else {
+            panic!("recorded {recorded_fold}, observed {observed:?} warns once: {warnings:?}");
+        };
+        for part in named {
+            assert!(warning.contains(part), "{part}: {warning}");
+        }
+        assert!(warning.contains("01RUN"), "{warning}");
     }
 }
 

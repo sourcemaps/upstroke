@@ -434,7 +434,7 @@ pub fn prepare_resume(
     compare_recorded_limits(&config, &started, &mut warnings);
 
     refuse_unshareable_width(started.limits.max_parallel, harness)?;
-    refuse_unsafe_case_policy(&started)?;
+    hold_recorded_case_policy(&started, &mut warnings)?;
     let image_environment = match started.runner.kind {
         RunnerKind::Host => None,
         RunnerKind::Container => Some(recorded_image_environment(
@@ -1005,30 +1005,38 @@ fn refuse_unshareable_width(width: u32, harness: &Harness<'_>) -> Result<(), Ups
     })
 }
 
-fn refuse_unsafe_case_policy(started: &RunStarted4) -> Result<(), UpstrokeError> {
-    if started.path_policy.case_fold {
-        return Ok(());
-    }
+fn hold_recorded_case_policy(
+    started: &RunStarted4,
+    warnings: &mut Vec<String>,
+) -> Result<(), UpstrokeError> {
     let execution_root = PathBuf::from(&started.execution_root);
     let observed = if execution_root.is_dir() {
-        observe_case_at(&execution_root, "tasks").folds()
+        observe_case_at(&execution_root, "tasks")
     } else {
-        execution_root
+        match execution_root
             .parent()
             .and_then(Path::parent)
             .and_then(|workspaces| workspaces.parent().map(|root| (root, workspaces)))
-            .and_then(|(root, workspaces)| {
-                workspaces
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .and_then(|name| observe_case_at(root, name).folds())
-            })
+        {
+            Some((root, workspaces)) => match workspaces.file_name().and_then(|name| name.to_str()) {
+                Some(name) => observe_case_at(root, name),
+                None => CaseObservation::Unknown(format!(
+                    "{} names no directory whose case can be looked up",
+                    workspaces.display()
+                )),
+            },
+            None => CaseObservation::Unknown(format!(
+                "{} has no private root above it to observe",
+                execution_root.display()
+            )),
+        }
     };
     case_policy_holds(
         &started.run_id,
         &started.execution_root,
         started.path_policy.case_fold,
-        observed,
+        &observed,
+        warnings,
     )
 }
 
@@ -1036,20 +1044,36 @@ fn case_policy_holds(
     run_id: &str,
     execution_root: &str,
     recorded_fold: bool,
-    observed: Option<bool>,
+    observed: &CaseObservation,
+    warnings: &mut Vec<String>,
 ) -> Result<(), UpstrokeError> {
-    if recorded_fold || observed != Some(true) {
-        return Ok(());
+    match (recorded_fold, observed) {
+        (false, CaseObservation::Folds) => Err(UpstrokeError::Refused {
+            message: format!(
+                "run `{run_id}` recorded a case-sensitive path policy (`case_fold = false`), and \
+                 the filesystem its execution root {execution_root} is on now folds case: two \
+                 task paths that differ only in case would be leased as disjoint while naming one \
+                 file. The record is never rewritten, so nothing was locked or recovered; resume \
+                 where the execution root is case-sensitive, or start a new run here"
+            ),
+        }),
+        (true, CaseObservation::Sensitive) => {
+            warnings.push(format!(
+                "run `{run_id}` recorded `case_fold = true`, and its execution root \
+                 {execution_root} is case-sensitive now. The run keeps its record: task paths \
+                 that differ only in case stay leased as one path, which costs only parallelism"
+            ));
+            Ok(())
+        }
+        (_, CaseObservation::Unknown(reason)) => {
+            warnings.push(format!(
+                "whether run `{run_id}`'s execution root {execution_root} folds case could not \
+                 be observed ({reason}). The run keeps its record, `case_fold = {recorded_fold}`"
+            ));
+            Ok(())
+        }
+        (false, CaseObservation::Sensitive) | (true, CaseObservation::Folds) => Ok(()),
     }
-    Err(UpstrokeError::Refused {
-        message: format!(
-            "run `{run_id}` recorded a case-sensitive path policy (`case_fold = false`), and the \
-             filesystem its execution root {execution_root} is on now folds case: two task paths \
-             that differ only in case would be leased as disjoint while naming one file. The \
-             record is never rewritten, so nothing was locked or recovered; resume where the \
-             execution root is case-sensitive, or start a new run here"
-        ),
-    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
