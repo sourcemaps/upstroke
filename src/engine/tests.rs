@@ -17693,20 +17693,27 @@ fn a_schema_4_run_wider_than_one_refuses_an_unshareable_source_before_any_lock()
     );
 }
 
+/// Two tasks whose path hints are disjoint. Without hints each would take the
+/// global dispatch lease (design 26: "an absent or repo-wide hint takes a global
+/// lease"), and the two would never be admitted together.
 #[cfg(unix)]
-const TWO_INDEPENDENT_TASKS: &str = "## Implement the widget\n<!-- upstroke: id=t1 depends= -->\n\
+const TWO_INDEPENDENT_TASKS: &str = "## Implement the widget\n\
+                                     <!-- upstroke: id=t1 depends= paths=widget/** -->\n\
                                      Make it.\n\n## Implement the gadget\n\
-                                     <!-- upstroke: id=t2 depends= -->\nMake that.\n";
+                                     <!-- upstroke: id=t2 depends= paths=gadget/** -->\n\
+                                     Make that.\n";
 
 /// A worker that notes, for about a second, whether another stub worker is
-/// running beside it, then edits and leaves. `overlap.*` in `markers` is the
-/// evidence two workers ran at once.
+/// running beside it, then writes a file of its own and leaves. `overlap.*` in
+/// `markers` is the evidence two workers ran at once. Each attempt writes a
+/// different file, so two candidates never conflict at the merge.
 #[cfg(unix)]
 fn overlap_observing_worker(markers: &Path) -> String {
     format!(
         "d='{}'; me=$$; : > \"$d/run.$me\"; i=0; while [ $i -lt 10 ]; do \
          n=$(ls \"$d\" | grep -c '^run\\.'); if [ \"$n\" -gt 1 ]; then : > \"$d/overlap.$me\"; fi; \
-         i=$((i+1)); sleep 0.1; done; {TOPOLOGY_STUB_EDIT}; rm -f \"$d/run.$me\"",
+         i=$((i+1)); sleep 0.1; done; printf 'edited by the topology stub\\n' > \"out.$me.txt\"; \
+         rm -f \"$d/run.$me\"",
         markers.display()
     )
 }
