@@ -1804,17 +1804,16 @@ fn a_recorded_mount_that_moved_or_reaches_a_withheld_path_refuses_the_plan_befor
         .plan(&request)
         .expect("the restored source plans again");
 
+    // Recorded as selection records a source (`resolve_source`): canonically.
+    // The fixture's own spelling of the private root can run through a link,
+    // macOS's `/var` (CI run 41529099549), and the plan's recheck refuses such
+    // a record as rebound before any exclusion is consulted, which
+    // `a_record_spelled_through_a_link_is_refused_as_rebound_before_any_exclusion`
+    // holds on every Unix host.
     let mut reaching = policy;
-    reaching.mounts[0].source = fixture.private_root.to_str().expect("utf-8").to_owned();
-    reaching.mounts[0].source_identity = {
-        use std::os::unix::fs::MetadataExt as _;
-        let metadata = std::fs::metadata(&fixture.private_root).expect("the private root");
-        crate::topology::events::MountSourceIdentity::Unix {
-            kind: crate::topology::events::MountSourceKind::Directory,
-            device: metadata.dev(),
-            inode: metadata.ino(),
-        }
-    };
+    let (source, source_identity) = recorded_directory(&fixture.private_root);
+    reaching.mounts[0].source = source;
+    reaching.mounts[0].source_identity = source_identity;
     let refusal = fixture
         .runner_over(reaching)
         .plan(&request)
@@ -1824,6 +1823,68 @@ fn a_recorded_mount_that_moved_or_reaches_a_withheld_path_refuses_the_plan_befor
         "{refusal}"
     );
 
+    assert!(
+        list_intents(&fixture.private_root)
+            .expect("scan")
+            .is_empty(),
+        "a refused plan wrote an intent"
+    );
+    assert!(fixture.runtime.fake().container_names().is_empty());
+}
+
+/// A directory as selection records a mount source (`resolve_source`): its
+/// canonical spelling, and the identity of the object that spelling names.
+#[cfg(unix)]
+fn recorded_directory(path: &Path) -> (String, crate::topology::events::MountSourceIdentity) {
+    use std::os::unix::fs::MetadataExt as _;
+    let canonical = std::fs::canonicalize(path).expect("the directory resolves");
+    let metadata = std::fs::metadata(&canonical).expect("the directory");
+    (
+        canonical.to_str().expect("utf-8").to_owned(),
+        crate::topology::events::MountSourceIdentity::Unix {
+            kind: crate::topology::events::MountSourceKind::Directory,
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        },
+    )
+}
+
+/// The order of the plan's two guards on a recorded mount: a record whose
+/// source is spelled through a link is refused by the recheck as rebound before
+/// any exclusion is consulted, and the canonical record of the same directory
+/// reaches the exclusion. macOS's `/var` link gave the private-root case above
+/// such a spelling; a link reproduces it on every Unix host.
+#[cfg(unix)]
+#[test]
+fn a_record_spelled_through_a_link_is_refused_as_rebound_before_any_exclusion() {
+    let fixture = Fixture::new("mount-link-order", true);
+    let (policy, _shared, _tools) = fixture.mounted_policy();
+    let request = gate_request(
+        ShellKind::Sh.spec("exit 0"),
+        fixture.task_a.clone(),
+        Duration::from_secs(10),
+        gate_id(0),
+    );
+    let (canonical, identity) = recorded_directory(&fixture.private_root);
+    let link = fixture.root.join("private-link");
+    std::os::unix::fs::symlink(&canonical, &link).expect("a link to the private root");
+    let through_link = link.to_str().expect("utf-8").to_owned();
+    for (spelling, expected) in [
+        (through_link, "so a link or a move rebound it"),
+        (canonical, "the private root"),
+    ] {
+        let mut reaching = policy.clone();
+        reaching.mounts[0].source = spelling.clone();
+        reaching.mounts[0].source_identity = identity.clone();
+        let refusal = fixture
+            .runner_over(reaching)
+            .plan(&request)
+            .expect_err("a recorded mount of the private root refuses the plan");
+        assert!(
+            refusal.to_string().contains(expected),
+            "`{spelling}` is refused for another reason than `{expected}`: {refusal}"
+        );
+    }
     assert!(
         list_intents(&fixture.private_root)
             .expect("scan")
