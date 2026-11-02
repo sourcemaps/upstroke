@@ -858,22 +858,31 @@ fn every_configured_mount_that_could_reach_a_withheld_path_is_refused_before_the
         fs::create_dir_all(&path).expect("an awkwardly named directory");
         path
     };
-    // A name that is not valid UTF-8 is the one cell a host filesystem may refuse
-    // to hold: APFS on macOS answers `EILSEQ` (CI run 41529099549). Where the name
-    // exists, the source resolves and the late UTF-8 refusal is asserted exactly.
-    // Where it cannot exist, the cell still asserts a refusal before the runtime
-    // is asked: the one `resolve_source` gives first, from the same resolution.
-    // Its label says the late UTF-8 guard was not reached.
+    // A name that is not valid UTF-8 is the one cell a host may refuse to hold:
+    // the macOS leg of CI run 41529099549 refused it with OS error 92, "Illegal
+    // byte sequence" (`EILSEQ`). Where the name exists, the source resolves and
+    // the late UTF-8 refusal is asserted exactly. Where creating it fails with
+    // `EILSEQ`, no such source can exist, and the cell asserts the refusal
+    // `resolve_source` gives first, from the same resolution: "does not exist"
+    // for a lookup answering `NotFound`, "cannot be resolved" for one answering
+    // `EILSEQ`. Any other outcome fails with its kind and code. The label says
+    // the late UTF-8 guard was not reached.
     let not_utf8 = world.root.join(std::ffi::OsStr::from_bytes(b"bad\xff"));
     let (not_utf8_label, not_utf8_needle) = match fs::create_dir_all(&not_utf8) {
         Ok(()) => ("not UTF-8", "not valid UTF-8"),
         Err(error) if error.raw_os_error() == Some(libc::EILSEQ) => (
-            "not UTF-8, unspellable here: refused before the UTF-8 guard",
+            "not UTF-8, refused by this host with EILSEQ: refused before the UTF-8 guard",
             match fs::canonicalize(&not_utf8) {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => "does not exist",
-                Err(_) => "cannot be resolved",
+                Err(error) if error.raw_os_error() == Some(libc::EILSEQ) => "cannot be resolved",
+                Err(error) => panic!(
+                    "the host refused the name with EILSEQ and its lookup failed otherwise: \
+                     {:?}, os error {:?}: {error}",
+                    error.kind(),
+                    error.raw_os_error()
+                ),
                 Ok(found) => panic!(
-                    "the filesystem refused the name and yet it resolves to {}",
+                    "the host refused the name with EILSEQ and yet it resolves to {}",
                     found.display()
                 ),
             },
