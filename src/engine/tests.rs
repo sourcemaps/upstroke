@@ -17619,7 +17619,10 @@ fn first_line_of_the_log(repo: &Path, run_id: &str) -> serde_json::Value {
 fn assert_merged_on_the_integration_branch(repo: &Path, report: &RunReport) {
     let merged = git_in(
         repo,
-        &["show", &format!("refs/heads/{}:agent-output.txt", report.branch)],
+        &[
+            "show",
+            &format!("refs/heads/{}:agent-output.txt", report.branch),
+        ],
     );
     assert!(
         merged.contains("edited by the topology stub"),
@@ -17637,7 +17640,10 @@ fn a_schema_4_run_is_created_driven_and_merged_through_the_public_entry_point() 
     let report = run_with(&topology_options(&repo), &source).expect("the schema-4 run completes");
 
     assert_eq!(report.outcome(), RunOutcome::Complete, "{report:#?}");
-    assert!(committed(&report, "t1") && committed(&report, "t2"), "{report:#?}");
+    assert!(
+        committed(&report, "t1") && committed(&report, "t2"),
+        "{report:#?}"
+    );
     let first = first_line_of_the_log(&repo, &report.run_id);
     assert_eq!(first["event"], "run_started");
     assert_eq!(first["data"]["schema"], 4, "`upstroke run` wrote schema 4");
@@ -17647,8 +17653,8 @@ fn a_schema_4_run_is_created_driven_and_merged_through_the_public_entry_point() 
 
     let mut resume = resume_options(&repo, &report.run_id);
     resume.private_root = None;
-    let refused = resume_with(&resume, &source)
-        .expect_err("a finished run has nothing to continue");
+    let refused =
+        resume_with(&resume, &source).expect_err("a finished run has nothing to continue");
     assert!(
         refused.to_string().contains("already finished"),
         "the topology recovery order refused continuation: {refused}"
@@ -17663,8 +17669,14 @@ fn a_schema_4_run_on_an_unshareable_source_is_driven_by_the_step_loop() {
         .expect("the schema-4 run completes at width 1");
 
     assert_eq!(report.outcome(), RunOutcome::Complete, "{report:#?}");
-    assert!(committed(&report, "t1") && committed(&report, "t2"), "{report:#?}");
-    assert_eq!(first_line_of_the_log(&repo, &report.run_id)["data"]["schema"], 4);
+    assert!(
+        committed(&report, "t1") && committed(&report, "t2"),
+        "{report:#?}"
+    );
+    assert_eq!(
+        first_line_of_the_log(&repo, &report.run_id)["data"]["schema"],
+        4
+    );
     assert_merged_on_the_integration_branch(&repo, &report);
 }
 
@@ -17754,7 +17766,10 @@ fn fresh_overlap(tag: &str, extra: &str, pools: Option<&str>) -> usize {
     )));
     let report = run_with(&opts, &source).expect("the run completes");
     assert_eq!(report.outcome(), RunOutcome::Complete, "{tag}: {report:#?}");
-    assert!(committed(&report, "t1") && committed(&report, "t2"), "{tag}: {report:#?}");
+    assert!(
+        committed(&report, "t1") && committed(&report, "t2"),
+        "{tag}: {report:#?}"
+    );
     overlaps_in(&markers)
 }
 
@@ -17807,7 +17822,11 @@ fn resumed_overlap(tag: &str, extra: &str) -> usize {
         fs::remove_file(entry.expect("a marker").path()).expect("a clean marker directory");
     }
 
-    assert_eq!(parked.questions.len(), 2, "{tag}: both tasks asked: {parked:#?}");
+    assert_eq!(
+        parked.questions.len(),
+        2,
+        "{tag}: both tasks asked: {parked:#?}"
+    );
     let answers = rundir::public_dir(&repo, &parked.run_id).join("answers");
     fs::create_dir_all(&answers).expect("the run's answers directory");
     for asked in &parked.questions {
@@ -17828,7 +17847,10 @@ fn resumed_overlap(tag: &str, extra: &str) -> usize {
     resume.config_path = Some(today);
     let report = resume_with(&resume, &source).expect("the resume completes the run");
     assert_eq!(report.outcome(), RunOutcome::Complete, "{tag}: {report:#?}");
-    assert!(committed(&report, "t1") && committed(&report, "t2"), "{tag}: {report:#?}");
+    assert!(
+        committed(&report, "t1") && committed(&report, "t2"),
+        "{tag}: {report:#?}"
+    );
     overlaps_in(&markers)
 }
 
@@ -17846,4 +17868,3 @@ fn a_resumed_schema_4_run_acts_on_todays_slot_limits() {
         "the resume dropped today's `max_per_agent = 1`"
     );
 }
-
