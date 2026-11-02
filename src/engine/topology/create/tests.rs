@@ -1782,6 +1782,7 @@ fn the_append_error_balance_reads_the_ledger_the_probes_used() {
         workspace: fixture.repo.clone(),
         adapters: &source,
         policy_digest: host_digest(),
+        probed: Default::default(),
     };
     let refs = FakeRefs::empty();
     let mut hooks = TestHooks::new();
@@ -3383,6 +3384,7 @@ fn the_creation_ledger_accounts_every_probe_process() {
         workspace: std::env::temp_dir(),
         adapters: &source,
         policy_digest: host_digest(),
+        probed: Default::default(),
     };
 
     probes
@@ -3490,6 +3492,7 @@ fn the_production_probes_run_both_halves_through_the_runs_runner() {
         workspace: std::env::temp_dir(),
         adapters: &source,
         policy_digest: host_digest(),
+        probed: Default::default(),
     };
     assert_eq!(probes.policy_digest(), host_digest());
 
@@ -4717,6 +4720,7 @@ fn create_over_containers(
         workspace: fixture.repo.clone(),
         adapters: &source,
         policy_digest: execution.policy_digest().to_owned(),
+        probed: Default::default(),
     };
     let refs = FakeRefs::empty();
     let mut hooks = TestHooks::new();

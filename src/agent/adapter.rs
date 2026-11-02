@@ -7,6 +7,7 @@
 )]
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -133,6 +134,10 @@ pub trait AgentAdapter: Send + Sync {
 
 pub trait AdapterSource {
     fn get(&self, id: &str) -> Option<&dyn AgentAdapter>;
+
+    fn shared(&self) -> Option<Arc<dyn AdapterSource + Send + Sync>> {
+        None
+    }
 }
 
 pub struct BuiltinAdapters;
@@ -140,6 +145,10 @@ pub struct BuiltinAdapters;
 impl AdapterSource for BuiltinAdapters {
     fn get(&self, id: &str) -> Option<&dyn AgentAdapter> {
         by_id(id).map(|a| a as &dyn AgentAdapter)
+    }
+
+    fn shared(&self) -> Option<Arc<dyn AdapterSource + Send + Sync>> {
+        Some(Arc::new(Self))
     }
 }
 

@@ -544,6 +544,11 @@ mod witness {
             pub const fn lock(&self) -> &WorktreeLock {
                 &self.lock
             }
+
+            #[must_use]
+            pub fn into_lock(self) -> WorktreeLock {
+                self.lock
+            }
         }
     }
 

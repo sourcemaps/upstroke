@@ -8,6 +8,7 @@
 )]
 
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::agent::{AdapterSource, AgentAdapter, TaskRun};
@@ -289,5 +290,50 @@ impl AttemptPlans for FrozenPlans<'_> {
             gates,
             reviewers,
         })
+    }
+}
+
+pub struct SharedPlans {
+    pub adapters: Arc<dyn AdapterSource + Send + Sync>,
+    pub paths: RunPaths,
+    pub gates: Vec<crate::gates::ShellGate>,
+    pub pools: Vec<crate::capacity::Pool>,
+    pub caps: Vec<(String, crate::agent::Caps)>,
+    pub worker_timeout: Duration,
+    pub decisions: Vec<String>,
+}
+
+impl SharedPlans {
+    fn frozen(&self) -> FrozenPlans<'_> {
+        FrozenPlans {
+            adapters: &*self.adapters,
+            paths: &self.paths,
+            gates: &self.gates,
+            pools: &self.pools,
+            caps: &self.caps,
+            worker_timeout: self.worker_timeout,
+            decisions: &self.decisions,
+        }
+    }
+}
+
+impl AttemptPlans for SharedPlans {
+    fn pool_for(&self, agent: &str) -> Option<String> {
+        self.frozen().pool_for(agent)
+    }
+
+    fn inputs(&self, request: &InputsRequest<'_>) -> Result<ReviewInputs, UpstrokeError> {
+        self.frozen().inputs(request)
+    }
+
+    fn verification(
+        &self,
+        request: &super::topology::attempt::VerificationRequest<'_>,
+    ) -> Result<super::topology::attempt::VerificationPlan, UpstrokeError> {
+        self.frozen().verification(request)
+    }
+
+    fn plan(&self, request: &PlanRequest<'_>) -> Result<AttemptPlan, UpstrokeError> {
+        self.frozen().plan(request)
     }
 }

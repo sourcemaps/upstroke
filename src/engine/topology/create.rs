@@ -108,7 +108,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use crate::agent::AdapterSource;
+use crate::agent::{AdapterSource, Caps};
 use crate::error::UpstrokeError;
 use crate::events::log::{
     BarrierStep, EventLog, TopologyLine, establish_stable_prefix, first_line_digest,
@@ -396,6 +396,43 @@ pub struct RunnerProbes<'a> {
     pub adapters: &'a dyn AdapterSource,
     /// The digest of the policy `runner` executes under.
     pub policy_digest: String,
+    /// What each agent's probe reported, in probe order.
+    ///
+    /// P4's probe *is* the capability read: `AgentAdapter::probe` returns the
+    /// agent's `Caps`, and a run that discarded them would have to probe
+    /// again — another set of processes P4's ledger never accounted — to learn
+    /// whether the CLI can resume a session or report its cost. They are kept
+    /// here, beside the probe, so the loop's attempt plans read what P4
+    /// certified. A value, not a boundary: nothing here can run anything.
+    probed: Mutex<Vec<(String, Caps)>>,
+}
+
+impl<'a> RunnerProbes<'a> {
+    /// The production probes over `adapters`, with nothing probed yet.
+    #[must_use]
+    pub fn new(
+        shell: ShellKind,
+        workspace: PathBuf,
+        adapters: &'a dyn AdapterSource,
+        policy_digest: String,
+    ) -> Self {
+        Self {
+            shell,
+            workspace,
+            adapters,
+            policy_digest,
+            probed: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Each probed agent's capabilities, in the order P4 probed them.
+    #[must_use]
+    pub fn probed_caps(&self) -> Vec<(String, Caps)> {
+        self.probed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
 }
 
 impl sealed::Sealed for RunnerProbes<'_> {}
@@ -431,7 +468,12 @@ impl Probes for RunnerProbes<'_> {
         // Handing a raw runner here is what made the creation ledger account one
         // logical probe instead of the processes it ran — and there is no raw
         // runner here to hand.
-        adapter.probe(through).map(|_caps| ())
+        let caps = adapter.probe(through)?;
+        self.probed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((agent.to_owned(), caps));
+        Ok(())
     }
 }
 

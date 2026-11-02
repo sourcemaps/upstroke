@@ -812,6 +812,15 @@ The lock this witness is holding.
 
 never called at 610106b; see `PR7-NARROWED-SURFACE-19-UNCALLED` (§2)
 
+## `impl WorktreeLocked` › `pub fn into_lock(self) -> WorktreeLock {`
+
+Hands the lock back, consuming the witness. The production creation chain
+(`engine::topology::entry`, PR12) takes the lock "across the startup census
+and the whole run": the census consumes the witness, `FreshCensused::into_parts`
+returns it, and this gives the lock itself to `Started::into_handle`, which
+holds it in the `RunHandle` until the run ends. There is no point between
+the acquisition and the handle at which the lock is released.
+
 ## `mod witness` › `mod fresh {`
 
 A fresh run's completed startup census.

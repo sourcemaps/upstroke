@@ -311,6 +311,24 @@ How long one worker invocation may take.
 The operator decisions a judge must honour, as the worker was given
 them.
 
+## `pub struct SharedPlans {`
+
+[`FrozenPlans`] with every borrow owned, for the schema-4 coordinator.
+
+`engine::topology::coordinator::PipelineSeams` hands each pipeline thread
+an `Arc<dyn AttemptPlans + Send + Sync>`, and a `FrozenPlans<'a>` borrows
+the adapters, the run paths and four slices, so it cannot be one. This owns
+the same seven values (the adapters as the `Arc` that
+`AdapterSource::shared` returns) and answers every [`AttemptPlans`] method
+by building a `FrozenPlans` over them and asking it, so there is one plan
+builder, one gate rule, one reviewer rule and one pool resolution — the
+`run::tests::the_frozen_pool_table_is_read_through_one_seam` count stays
+one, because this file still resolves a pool in one place.
+
+## `impl SharedPlans` › `fn frozen(&self) -> FrozenPlans<'_> {`
+
+The borrowed view every answer is delegated to.
+
 ## `impl FrozenPlans<'_>` › `fn cli_version(&self, agent: &str) -> Option<String> {`
 
 What pre-flight certified this agent's CLI as, where it certified one.
