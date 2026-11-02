@@ -147,23 +147,18 @@ impl Confinement {
     }
 }
 
-#[cfg(target_os = "linux")]
-fn coordinator_user() -> Result<Option<ContainerUser>, UpstrokeError> {
-    use std::os::unix::fs::MetadataExt as _;
-    let path = Path::new("/proc/self");
-    let metadata = std::fs::metadata(path).map_err(|source| UpstrokeError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    Ok(Some(ContainerUser {
-        uid: metadata.uid(),
-        gid: metadata.gid(),
-    }))
+#[cfg(unix)]
+fn coordinator_user() -> Option<ContainerUser> {
+    // SAFETY: `geteuid` and `getegid` take no arguments, read no memory of
+    // this process's, and always succeed (POSIX.1-2008); they only report the
+    // calling process's effective credentials.
+    let (uid, gid) = unsafe { (libc::geteuid(), libc::getegid()) };
+    Some(ContainerUser { uid, gid })
 }
 
-#[cfg(not(target_os = "linux"))]
-fn coordinator_user() -> Result<Option<ContainerUser>, UpstrokeError> {
-    Ok(None)
+#[cfg(not(unix))]
+const fn coordinator_user() -> Option<ContainerUser> {
+    None
 }
 
 fn worktree_namespaces(execution_root: &Path) -> Vec<PathBuf> {
@@ -376,7 +371,7 @@ impl ContainerRunner {
         let settings_directory =
             RunPaths::with_private_root(repo_root, &identity.run_id, &identity.private_root)
                 .settings();
-        let user = coordinator_user()?;
+        let user = coordinator_user();
         Ok(Self {
             policy,
             image_id,
@@ -1002,6 +997,8 @@ impl ContainerRunner {
         }
         let never_started = |error| RunnerError::never_started(&request.invocation, error);
         let plan = self.plan(request).map_err(never_started)?;
+        let started = Instant::now();
+        let deadline = started + request.timeout;
         let (covered, to_create, to_start) = self
             .reaping
             .cover(
@@ -1009,15 +1006,18 @@ impl ContainerRunner {
                 &self.identity,
                 &plan.launch.spec,
                 &request.command.stdin,
+                deadline,
+                cancellation,
             )
             .map_err(never_started)?;
-        let started = Instant::now();
-        let deadline = started + request.timeout;
 
         let launched: Launched = match self.launch(hooks, &plan.launch, to_create, to_start) {
             Ok(launched) => launched,
             Err(error) => {
                 covered.settle(error.fate);
+                if cancellation.is_cancelled() {
+                    return Err(RunnerError::cancelled(&request.invocation, error.fate));
+                }
                 return Err(error);
             }
         };
@@ -1106,8 +1106,10 @@ fn bounded(bytes: &[u8], limit: usize) -> (String, bool) {
 
 pub(super) mod cover {
     use std::sync::PoisonError;
+    use std::time::Instant;
 
     use crate::error::{ProcessFate, UpstrokeError};
+    use crate::runner::Cancellation;
     use crate::runner::container::census::ReaperContainerScope;
     use crate::runner::container::runtime::{ContainerRuntime, CreateSpec};
 
@@ -1125,6 +1127,8 @@ pub(super) mod cover {
     pub struct CoveredStart<'a> {
         name: &'a str,
         stdin: &'a [u8],
+        deadline: Instant,
+        cancellation: Cancellation,
     }
 
     impl Reaping {
@@ -1134,6 +1138,8 @@ pub(super) mod cover {
             identity: &RunIdentity,
             spec: &'a CreateSpec,
             stdin: &'a [u8],
+            deadline: Instant,
+            cancellation: &Cancellation,
         ) -> Result<(Covered<'a>, CoveredCreate<'a>, CoveredStart<'a>), UpstrokeError> {
             let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
             if let Some(armed) = &state.armed {
@@ -1164,6 +1170,8 @@ pub(super) mod cover {
                 CoveredStart {
                     name: &spec.name,
                     stdin,
+                    deadline,
+                    cancellation: cancellation.clone(),
                 },
             ))
         }
@@ -1209,11 +1217,23 @@ pub(super) mod cover {
         pub fn stdin(&self) -> &'a [u8] {
             self.stdin
         }
+
+        #[must_use]
+        pub const fn deadline(&self) -> Instant {
+            self.deadline
+        }
+
+        #[must_use]
+        pub const fn cancellation(&self) -> &Cancellation {
+            &self.cancellation
+        }
     }
 
     #[cfg(test)]
     mod without_a_reaper {
-        use super::{CoveredCreate, CoveredStart, CreateSpec};
+        use std::time::{Duration, Instant};
+
+        use super::{Cancellation, CoveredCreate, CoveredStart, CreateSpec};
 
         impl<'a> CoveredCreate<'a> {
             pub(crate) fn without_a_reaper(spec: &'a CreateSpec) -> Self {
@@ -1223,7 +1243,12 @@ pub(super) mod cover {
 
         impl<'a> CoveredStart<'a> {
             pub(crate) fn without_a_reaper(name: &'a str) -> Self {
-                Self { name, stdin: &[] }
+                Self {
+                    name,
+                    stdin: &[],
+                    deadline: Instant::now() + Duration::from_secs(24 * 60 * 60),
+                    cancellation: Cancellation::new(),
+                }
             }
         }
     }

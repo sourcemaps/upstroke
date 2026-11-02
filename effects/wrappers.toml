@@ -2176,6 +2176,11 @@ not_an_effect = [
     "c_long",
     "c_short",
     "c_void",
+    # The process's own effective uid and gid, read and nothing else: the
+    # numeric user every container is created as on a Unix host (PR12's D-B,
+    # `runner::container::exec`'s `coordinator_user`).
+    "getegid",
+    "geteuid",
     # Reads the process's own supplementary groups and writes nothing outside
     # the buffer it is handed; the report-group test picks a second group with it.
     "getgroups",

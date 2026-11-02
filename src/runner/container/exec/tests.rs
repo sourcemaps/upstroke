@@ -1352,7 +1352,15 @@ fn effective_ids() -> ContainerUser {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(unix, not(target_os = "linux")))]
+fn effective_ids() -> ContainerUser {
+    // SAFETY: `geteuid` and `getegid` take no arguments, read no memory of
+    // this process's, and always succeed (POSIX.1-2008).
+    let (uid, gid) = unsafe { (libc::geteuid(), libc::getegid()) };
+    ContainerUser { uid, gid }
+}
+
+#[cfg(unix)]
 #[test]
 fn every_container_is_created_as_the_coordinators_user() {
     let expected = effective_ids();
@@ -1395,9 +1403,9 @@ fn every_container_is_created_as_the_coordinators_user() {
     );
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(unix))]
 #[test]
-fn every_container_keeps_the_images_user_off_linux() {
+fn every_container_keeps_the_images_user_off_unix() {
     let fixture = Fixture::new("container-user", true);
     let runner = fixture.runner();
     for request in requests(&fixture.task_a) {
@@ -5874,6 +5882,50 @@ fn a_cancelled_container_invocation_is_released_through_the_reclaim_steps_before
 }
 
 #[test]
+fn a_launch_that_fails_after_a_cancellation_reports_the_cancellation() {
+    let fixture = Fixture::new("cancel-failed-start", false);
+    fixture.runtime.fake().set_failing(RuntimeOp::Start);
+    let runner = fixture.runner();
+    let request = worker_request(
+        ShellKind::Sh
+            .spec("cat")
+            .stdin(prompt("cancelled-start", 4 * 1024)),
+        fixture.task_a.clone(),
+        AgentId::new("claude-code"),
+        Duration::from_secs(600),
+        worker_id(0),
+    );
+    let cancellation = crate::runner::Cancellation::new();
+    let mut observer = CancelAfter {
+        inner: RecordingHooks::new(fixture.trace.clone()),
+        cancellation: cancellation.clone(),
+        at: crate::topology::effects::EffectSiteId::Container(ContainerSite::Create),
+    };
+
+    let error = runner
+        .run_blocking_with(
+            &request,
+            RunnerCall::new(cancellation).observed_in_container_by(&mut observer),
+        )
+        .expect_err("a start that fails reports an error");
+    assert!(
+        error.is_cancelled(),
+        "a launch that fails once a cancellation is requested reports the cancellation: {error}"
+    );
+    assert_eq!(
+        error.fate,
+        ProcessFate::Gone,
+        "with the fate the reclaim established: {error}"
+    );
+    assert!(fixture.runtime.fake().container_names().is_empty());
+    assert!(
+        list_intents(&fixture.private_root)
+            .expect("scan")
+            .is_empty()
+    );
+}
+
+#[test]
 fn a_container_call_cancelled_before_it_starts_writes_no_intent() {
     let fixture = Fixture::new("cancel-before", true);
     let runner = fixture.runner();
@@ -6803,7 +6855,7 @@ fn a_scope_that_does_not_select_its_containers_labels_is_refused_with_no_reaper_
     let foreign = reaper_spec(&fixture.private_root, INCARNATION_2);
 
     let refused = reaping
-        .cover(&fixture.runtime, &fixture.identity, &foreign, &[])
+        .cover(&fixture.runtime, &fixture.identity, &foreign, &[], Instant::now() + Duration::from_secs(60), &crate::runner::Cancellation::new())
         .err()
         .expect("a container its runner's scope does not select is refused");
     assert!(
@@ -6825,7 +6877,7 @@ fn a_scope_that_does_not_select_its_containers_labels_is_refused_with_no_reaper_
 
     let own = reaper_spec(&fixture.private_root, INCARNATION_1);
     let (covered, _, _) = reaping
-        .cover(&fixture.runtime, &fixture.identity, &own, &[])
+        .cover(&fixture.runtime, &fixture.identity, &own, &[], Instant::now() + Duration::from_secs(60), &crate::runner::Cancellation::new())
         .expect("the runner's own container is covered");
     assert!(
         armed_for(&fixture.private_root, INCARNATION_1),
@@ -6851,7 +6903,7 @@ fn a_container_whose_labels_differ_from_the_armed_scope_is_refused_before_its_in
     let armed_for_another = reaper_spec(&fixture.private_root, INCARNATION_2);
     let (covered, _, _) = runner
         .reaping
-        .cover(&fixture.runtime, &foreign, &armed_for_another, &[])
+        .cover(&fixture.runtime, &foreign, &armed_for_another, &[], Instant::now() + Duration::from_secs(60), &crate::runner::Cancellation::new())
         .expect("a reaper armed for another incarnation, as a caller-built one would have been");
     covered.settle(ProcessFate::NeverStarted);
     assert!(armed_for(&fixture.private_root, INCARNATION_2));

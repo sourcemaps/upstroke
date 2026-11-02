@@ -588,6 +588,181 @@ fn the_docker_create_arguments_carry_a_user_and_an_open_stdin_only_when_the_spec
 }
 
 #[test]
+fn an_attached_start_held_at_created_ends_at_its_deadline_or_its_cancellation() {
+    use super::{NotStarted, await_started};
+    use crate::runner::Cancellation;
+    use std::cell::Cell;
+
+    let poll = Duration::from_millis(5);
+    let created = || Ok(Some("created".to_owned()));
+    let alive = || false;
+
+    let declared = Duration::from_millis(200);
+    let began = Instant::now();
+    let waited = await_started(began + declared, &Cancellation::new(), poll, created, alive);
+    let took = began.elapsed();
+    assert!(
+        matches!(waited, Err(NotStarted::DeadlinePassed)),
+        "held at created, the wait ends at the invocation's deadline: {waited:?}"
+    );
+    assert!(
+        took >= declared && took < declared + Duration::from_secs(2),
+        "within the declared bound: {took:?}"
+    );
+
+    let cancellation = Cancellation::new();
+    let polls = Cell::new(0_u32);
+    let cancelling = || {
+        polls.set(polls.get() + 1);
+        if polls.get() == 3 {
+            cancellation.cancel();
+        }
+        Ok(Some("created".to_owned()))
+    };
+    let began = Instant::now();
+    let waited = await_started(
+        began + Duration::from_secs(600),
+        &cancellation,
+        poll,
+        cancelling,
+        alive,
+    );
+    assert!(
+        matches!(waited, Err(NotStarted::Cancelled)),
+        "a cancellation ends the wait on the poll that sees it: {waited:?}"
+    );
+    assert_eq!(polls.get(), 3);
+    assert!(began.elapsed() < Duration::from_secs(2), "{:?}", began.elapsed());
+
+    let far = Instant::now() + Duration::from_secs(600);
+    let never = Cancellation::new();
+    assert!(
+        matches!(
+            await_started(far, &never, poll, created, || true),
+            Err(NotStarted::ClientEnded)
+        ),
+        "a client that ended while the container is still created is a start that failed"
+    );
+    assert!(
+        matches!(
+            await_started(far, &never, poll, || Ok(None), alive),
+            Err(NotStarted::Gone)
+        ),
+        "a container that disappeared while starting"
+    );
+    assert!(
+        matches!(
+            await_started(
+                far,
+                &never,
+                poll,
+                || Err(RuntimeError::Unreachable {
+                    operation: RuntimeOp::Observe,
+                    detail: "down".to_owned(),
+                }),
+                alive,
+            ),
+            Err(NotStarted::Unobserved(_))
+        ),
+        "a state that cannot be read is not a start"
+    );
+    for (state, client_ended) in [("running", false), ("exited", false), ("exited", true)] {
+        assert!(
+            matches!(
+                await_started(far, &never, poll, || Ok(Some(state.to_owned())), || client_ended),
+                Ok(())
+            ),
+            "the control: a container that left `created` started ({state}, client ended: \
+             {client_ended})"
+        );
+    }
+}
+
+#[test]
+fn an_attached_client_is_settled_or_reported_unresolved_within_its_bound() {
+    use super::settle_client;
+    use std::cell::Cell;
+
+    let grace = Duration::from_millis(100);
+    let poll = Duration::from_millis(5);
+
+    let asked = Cell::new(false);
+    assert!(
+        settle_client(|| true, || asked.set(true), grace, poll),
+        "a client that ended with its container is settled"
+    );
+    assert!(!asked.get(), "and is never asked to stop");
+
+    let delayed = Instant::now() + Duration::from_millis(40);
+    let asked = Cell::new(false);
+    assert!(
+        settle_client(|| Instant::now() >= delayed, || asked.set(true), grace, poll),
+        "a client whose feeding and exit end a little later, within the grace, is settled"
+    );
+    assert!(!asked.get(), "without being stopped");
+
+    let asked = Cell::new(false);
+    let began = Instant::now();
+    assert!(
+        settle_client(|| asked.get(), || asked.set(true), grace, poll),
+        "a client that outlives its container ends when it is asked to stop, and is settled"
+    );
+    assert!(asked.get());
+    assert!(began.elapsed() < grace * 2 + Duration::from_secs(1));
+
+    let asked = Cell::new(false);
+    let began = Instant::now();
+    assert!(
+        !settle_client(|| false, || asked.set(true), grace, poll),
+        "a client that does not end even when asked is reported unresolved, not settled"
+    );
+    assert!(asked.get(), "it was asked to stop first");
+    let took = began.elapsed();
+    assert!(
+        took >= grace * 2 && took < grace * 2 + Duration::from_secs(1),
+        "within the declared bound of two graces: {took:?}"
+    );
+}
+
+#[test]
+fn the_delivery_verdict_tells_an_early_exit_from_a_broken_attach() {
+    use super::{ClientEnd, delivery_verdict};
+
+    assert!(
+        delivery_verdict("c", &ClientEnd::Exited(Some(0)), Some(0)).is_ok(),
+        "the attach ended with the container: the input was delivered"
+    );
+    assert!(
+        delivery_verdict("c", &ClientEnd::Exited(Some(7)), Some(7)).is_ok(),
+        "a program that stopped reading early and exited 7: its own result, as on the host"
+    );
+    for (end, exited, why) in [
+        (ClientEnd::Exited(Some(1)), Some(0), "the attach broke"),
+        (ClientEnd::Exited(None), Some(0), "the attach broke"),
+        (ClientEnd::Stopped, Some(0), "was stopped"),
+        (
+            ClientEnd::Failed("writing its input: Input/output error".to_owned()),
+            Some(0),
+            "failed: writing its input",
+        ),
+        (
+            ClientEnd::Failed("waiting on agent process: interrupted".to_owned()),
+            Some(0),
+            "failed: waiting",
+        ),
+    ] {
+        let verdict = delivery_verdict("c", &end, exited);
+        assert!(
+            verdict
+                .as_ref()
+                .is_err_and(|error| error.to_string().contains(why)),
+            "{end:?} with the container exiting {exited:?} is an error naming `{why}`: \
+             {verdict:?}"
+        );
+    }
+}
+
+#[test]
 fn the_fake_can_report_an_image_id_that_differs_from_the_one_create_asked_for() {
     let trace = ContainerTrace::recording();
     let runtime = FakeRuntime::new(trace);

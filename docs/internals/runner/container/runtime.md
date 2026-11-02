@@ -563,7 +563,8 @@ the spec from it; there is no other spec to create from.
 Start `covered.name()`, and deliver `covered.stdin()` to it exactly once, then
 EOF, when that payload is not empty (PR12's D-C). The start returns once the
 container has started: it waits neither for the workload nor for the whole
-payload to be written.
+payload to be written, and any wait it does make ends at `covered.deadline()`
+or at `covered.cancellation()`.
 
 ### Errors
 

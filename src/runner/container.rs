@@ -17,15 +17,20 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
+use crate::agent::ProcessOutput;
+use crate::agent::proc::{self, ProcessFailure};
 use crate::error::UpstrokeError;
-use crate::topology::effects::{ContainerSite, EffectSiteId, HookHarness, HookPhase, Injection};
+use crate::topology::effects::{
+    ContainerSite, EffectSiteId, HookHarness, HookPhase, Injection, ProcessSite,
+};
 use crate::util;
 
-use crate::runner::InvocationId;
+use crate::runner::{Cancellation, InvocationId};
 use intent::{ContainerIntent, ContainerName, INTENT_STAGED_SUFFIX, IntentWritten, containers_dir};
 use runtime::{
     ContainerExecution, ContainerRuntime, ContainerTrace, CreateSpec, CreatedContainer,
@@ -880,7 +885,7 @@ pub const DOCKER_PROGRAM: &str = "docker";
 #[derive(Debug, Clone, Default)]
 pub struct DockerCli {
     trace: ContainerTrace,
-    deliveries: Arc<Mutex<BTreeMap<String, StdinDelivery>>>,
+    deliveries: Arc<Mutex<BTreeMap<String, AttachedClient>>>,
 }
 
 impl DockerCli {
@@ -1003,241 +1008,328 @@ impl DockerCli {
     fn start_attached(
         &self,
         op: RuntimeOp,
-        name: &str,
+        covered: &exec::CoveredStart<'_>,
         payload: &[u8],
     ) -> Result<(), RuntimeError> {
+        let name = covered.name();
         self.trace.runtime(op, name);
-        let mut command = docker_command(&["start", "--attach", "--interactive", name]);
-        command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        apart_from_terminal_signals(&mut command);
-        let record = Arc::new(Mutex::new(DeliveryRecord {
-            total: payload.len(),
-            ..DeliveryRecord::default()
-        }));
-        let (spawned, outcome) = std::sync::mpsc::channel();
-        let feeder = {
-            let record = Arc::clone(&record);
-            let payload = payload.to_vec();
-            std::thread::Builder::new()
-                .name("upstroke-container-stdin".to_owned())
-                .spawn(move || match command.spawn() {
-                    Ok(child) => {
-                        let _ = spawned.send(Ok(()));
-                        feed_attached(child, &payload, &record);
-                    }
-                    Err(error) => {
-                        let _ = spawned.send(Err(error));
-                    }
-                })
-                .map_err(|error| RuntimeError::Failed {
-                    operation: op,
-                    detail: format!(
-                        "the thread that would feed `{name}` its stdin could not be started: \
-                         {error}"
-                    ),
-                })?
+        let client =
+            attach_client(name, payload, covered.deadline()).map_err(|detail| RuntimeError::Failed {
+                operation: op,
+                detail,
+            })?;
+        let waited = await_started(
+            covered.deadline(),
+            covered.cancellation(),
+            ATTACHED_START_POLL,
+            || {
+                self.listing(RuntimeOp::Observe, name)
+                    .map(|listing| listed_state(&listing, name).map(str::to_owned))
+            },
+            || client.has_ended(),
+        );
+        let reason = match waited {
+            Ok(()) => {
+                self.own_client(name, client);
+                return Ok(());
+            }
+            Err(NotStarted::Unobserved(error)) => error.to_string(),
+            Err(NotStarted::Gone) => format!("`{name}` was not found while it was being started"),
+            Err(NotStarted::ClientEnded) => format!(
+                "`{DOCKER_PROGRAM} start --attach --interactive {name}` ended while the container \
+                 was still created, so it never started{}",
+                self.inspect(
+                    op,
+                    name,
+                    &["container", "inspect", name, "--format", "{{.State.Error}}"],
+                )
+                .ok()
+                .flatten()
+                .map(|text| text.trim().to_owned())
+                .filter(|text| !text.is_empty())
+                .map(|text| format!(": {text}"))
+                .unwrap_or_default()
+            ),
+            Err(NotStarted::DeadlinePassed) => format!(
+                "`{name}` was still created when the invocation's deadline passed, so it never \
+                 started"
+            ),
+            Err(NotStarted::Cancelled) => {
+                format!("the invocation was cancelled while `{name}` was still created")
+            }
         };
-        match outcome.recv() {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                return Err(RuntimeError::Unreachable {
-                    operation: op,
-                    detail: format!("{DOCKER_PROGRAM} could not be started: {error}"),
-                });
-            }
-            Err(_) => {
-                return Err(RuntimeError::Failed {
-                    operation: op,
-                    detail: format!(
-                        "the thread that feeds `{name}` its stdin ended before it reported \
-                         whether `{DOCKER_PROGRAM}` started"
-                    ),
-                });
-            }
+        if settle_client(
+            || client.has_ended(),
+            || client.ask_to_stop(),
+            CLIENT_GRACE,
+            ATTACHED_START_POLL,
+        ) {
+            return Err(RuntimeError::Failed {
+                operation: op,
+                detail: format!("{reason}; its attached client {}", client.into_end().describe()),
+            });
         }
+        self.own_client(name, client);
+        Err(RuntimeError::Failed {
+            operation: op,
+            detail: format!(
+                "{reason}; its attached client had not ended {}s after it was asked to stop, and \
+                 stays owned, unresolved, until the container is removed",
+                CLIENT_GRACE.as_secs()
+            ),
+        })
+    }
+
+    fn own_client(&self, name: &str, client: AttachedClient) {
         self.deliveries
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(
-                name.to_owned(),
-                StdinDelivery {
-                    record: Arc::clone(&record),
-                    feeder,
-                },
-            );
-        loop {
-            let ended = record
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .attach_exit;
-            let listing = self.listing(RuntimeOp::Observe, name)?;
-            match listed_state(&listing, name) {
-                Some("created") => {}
-                Some(_) => return Ok(()),
-                None => {
-                    return Err(RuntimeError::Failed {
-                        operation: op,
-                        detail: format!("`{name}` was not found while it was being started"),
-                    });
-                }
-            }
-            if let Some(exit) = ended {
-                let reason = self
-                    .inspect(
-                        op,
-                        name,
-                        &["container", "inspect", name, "--format", "{{.State.Error}}"],
-                    )
-                    .ok()
-                    .flatten()
-                    .map(|text| text.trim().to_owned())
-                    .filter(|text| !text.is_empty())
-                    .map(|text| format!(": {text}"))
-                    .unwrap_or_default();
-                return Err(RuntimeError::Failed {
-                    operation: op,
-                    detail: format!(
-                        "`{DOCKER_PROGRAM} start --attach --interactive {name}` ended ({}) and \
-                         the container never started{reason}",
-                        exit_text(exit)
-                    ),
-                });
-            }
-            std::thread::sleep(ATTACHED_START_POLL);
-        }
+            .insert(name.to_owned(), client);
     }
 
-    fn settle_delivery(&self, name: &str, exit_code: Option<i32>) -> Result<(), RuntimeError> {
-        let Some(delivery) = self
-            .deliveries
+    fn take_client(&self, name: &str) -> Option<AttachedClient> {
+        self.deliveries
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .remove(name)
-        else {
+    }
+
+    fn settle_delivery(&self, name: &str, exit_code: Option<i32>) -> Result<(), RuntimeError> {
+        let Some(client) = self.take_client(name) else {
             return Ok(());
         };
-        if self.observe(name)? == Liveness::Running {
+        let still_running = match self.observe(name) {
+            Ok(liveness) => liveness == Liveness::Running,
+            Err(error) => {
+                self.own_client(name, client);
+                return Err(error);
+            }
+        };
+        if still_running {
+            self.own_client(name, client);
             return Ok(());
         }
-        let deadline = Instant::now() + DELIVERY_GRACE;
-        while !delivery.feeder.is_finished() && Instant::now() < deadline {
-            std::thread::sleep(ATTACHED_START_POLL);
-        }
-        let record = delivery
-            .record
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
-        if let Some(failure) = record.failure {
+        if !settle_client(
+            || client.has_ended(),
+            || client.ask_to_stop(),
+            CLIENT_GRACE,
+            ATTACHED_START_POLL,
+        ) {
+            self.own_client(name, client);
             return Err(RuntimeError::Failed {
                 operation: RuntimeOp::Collect,
                 detail: format!(
-                    "`{name}`'s stdin was not delivered: {failure}, after {} of {} bytes",
-                    record.written, record.total
+                    "the attached client that fed `{name}` its stdin had not ended {}s after the \
+                     container exited, nor {}s after it was asked to stop; it stays owned, \
+                     unresolved, until the container is removed",
+                    CLIENT_GRACE.as_secs(),
+                    CLIENT_GRACE.as_secs()
                 ),
             });
         }
-        match record.attach_exit {
-            Some(exit) if record.written < record.total && exit != exit_code => {
-                Err(RuntimeError::Failed {
-                    operation: RuntimeOp::Collect,
-                    detail: format!(
-                        "the attached `{DOCKER_PROGRAM} start` that fed `{name}` its stdin ended \
-                         ({}) after {} of {} bytes, and the container exited ({})",
-                        exit_text(exit),
-                        record.written,
-                        record.total,
-                        exit_text(exit_code)
-                    ),
-                })
-            }
-            _ => Ok(()),
+        delivery_verdict(name, &client.into_end(), exit_code)
+    }
+
+    fn settle_removed_client(&self, name: &str) -> Result<(), RuntimeError> {
+        let Some(client) = self.take_client(name) else {
+            return Ok(());
+        };
+        if settle_client(
+            || client.has_ended(),
+            || client.ask_to_stop(),
+            CLIENT_GRACE,
+            ATTACHED_START_POLL,
+        ) {
+            let _ = client.into_end();
+            return Ok(());
         }
+        self.own_client(name, client);
+        Err(RuntimeError::Failed {
+            operation: RuntimeOp::Remove,
+            detail: format!(
+                "the attached client that fed `{name}` its stdin had not ended {}s after it was \
+                 asked to stop; it stays owned, unresolved",
+                CLIENT_GRACE.as_secs()
+            ),
+        })
     }
 }
 
 const ATTACHED_START_POLL: Duration = Duration::from_millis(25);
 
-const DELIVERY_GRACE: Duration = Duration::from_secs(2);
+const CLIENT_GRACE: Duration = Duration::from_secs(5);
 
 #[derive(Debug)]
-struct StdinDelivery {
-    record: Arc<Mutex<DeliveryRecord>>,
-    feeder: std::thread::JoinHandle<()>,
+struct AttachedClient {
+    stop: Arc<AtomicBool>,
+    supervisor: Option<std::thread::JoinHandle<Result<ProcessOutput, ProcessFailure>>>,
 }
 
-#[derive(Debug, Clone, Default)]
-struct DeliveryRecord {
-    total: usize,
-    written: usize,
-    failure: Option<String>,
-    attach_exit: Option<Option<i32>>,
+impl AttachedClient {
+    fn has_ended(&self) -> bool {
+        self.supervisor
+            .as_ref()
+            .is_none_or(std::thread::JoinHandle::is_finished)
+    }
+
+    fn ask_to_stop(&self) {
+        self.stop.store(true, Ordering::SeqCst);
+    }
+
+    fn into_end(mut self) -> ClientEnd {
+        let stopped = self.stop.load(Ordering::SeqCst);
+        match self.supervisor.take().map(std::thread::JoinHandle::join) {
+            Some(Ok(Ok(output))) if output.timed_out || (stopped && output.code.is_none()) => {
+                ClientEnd::Stopped
+            }
+            Some(Ok(Ok(output))) => ClientEnd::Exited(output.code),
+            Some(Ok(Err(failure))) => ClientEnd::Failed(format!(
+                "{} (process fate: {:?})",
+                failure.error, failure.fate
+            )),
+            Some(Err(_)) => ClientEnd::Failed("the thread supervising it panicked".to_owned()),
+            None => ClientEnd::Failed("its end was already taken".to_owned()),
+        }
+    }
+}
+
+impl Drop for AttachedClient {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ClientEnd {
+    Exited(Option<i32>),
+    Stopped,
+    Failed(String),
+}
+
+impl ClientEnd {
+    fn describe(&self) -> String {
+        match self {
+            Self::Exited(code) => format!("ended ({})", exit_text(*code)),
+            Self::Stopped => "was stopped and reaped".to_owned(),
+            Self::Failed(why) => format!("failed: {why}"),
+        }
+    }
+}
+
+#[derive(Debug)]
+enum NotStarted {
+    Unobserved(RuntimeError),
+    Gone,
+    ClientEnded,
+    DeadlinePassed,
+    Cancelled,
+}
+
+fn attach_client(name: &str, payload: &[u8], deadline: Instant) -> Result<AttachedClient, String> {
+    let command = docker_command(&["start", "--attach", "--interactive", name]);
+    let stop = Arc::new(AtomicBool::new(false));
+    let stopping = Arc::clone(&stop);
+    let backstop = deadline.saturating_duration_since(Instant::now()) + CLIENT_GRACE * 2;
+    let payload = payload.to_vec();
+    let supervisor = std::thread::Builder::new()
+        .name("upstroke-attached-start".to_owned())
+        .spawn(move || {
+            proc::run_with_timeout_classified(
+                ProcessSite::Spawn,
+                ProcessSite::Terminate,
+                command,
+                &payload,
+                backstop,
+                &[],
+                &|| stopping.load(Ordering::SeqCst),
+                &mut proc::NoHooks,
+            )
+        })
+        .map_err(|error| {
+            format!("the thread that would supervise `{name}`'s attached client could not start: {error}")
+        })?;
+    Ok(AttachedClient {
+        stop,
+        supervisor: Some(supervisor),
+    })
+}
+
+fn await_started(
+    deadline: Instant,
+    cancellation: &Cancellation,
+    poll: Duration,
+    mut state: impl FnMut() -> Result<Option<String>, RuntimeError>,
+    client_ended: impl Fn() -> bool,
+) -> Result<(), NotStarted> {
+    loop {
+        let ended = client_ended();
+        match state().map_err(NotStarted::Unobserved)?.as_deref() {
+            Some("created") => {}
+            Some(_) => return Ok(()),
+            None => return Err(NotStarted::Gone),
+        }
+        if ended {
+            return Err(NotStarted::ClientEnded);
+        }
+        if cancellation.is_cancelled() {
+            return Err(NotStarted::Cancelled);
+        }
+        if Instant::now() >= deadline {
+            return Err(NotStarted::DeadlinePassed);
+        }
+        std::thread::sleep(poll);
+    }
+}
+
+fn settle_client(
+    has_ended: impl Fn() -> bool,
+    ask_to_stop: impl Fn(),
+    grace: Duration,
+    poll: Duration,
+) -> bool {
+    let ended_within = |limit: Duration| {
+        let until = Instant::now() + limit;
+        while !has_ended() && Instant::now() < until {
+            std::thread::sleep(poll);
+        }
+        has_ended()
+    };
+    if ended_within(grace) {
+        return true;
+    }
+    ask_to_stop();
+    ended_within(grace)
+}
+
+fn delivery_verdict(name: &str, end: &ClientEnd, exit_code: Option<i32>) -> Result<(), RuntimeError> {
+    let failed = |detail: String| -> Result<(), RuntimeError> {
+        Err(RuntimeError::Failed {
+            operation: RuntimeOp::Collect,
+            detail,
+        })
+    };
+    match end {
+        ClientEnd::Exited(code) if *code == exit_code => Ok(()),
+        ClientEnd::Exited(code) => failed(format!(
+            "the attached client that fed `{name}` its stdin ended ({}) while the container \
+             exited ({}): the attach broke, and the input may not have been delivered",
+            exit_text(*code),
+            exit_text(exit_code)
+        )),
+        ClientEnd::Stopped => failed(format!(
+            "the attached client that fed `{name}` its stdin did not end with the container and \
+             was stopped: the input may not have been delivered"
+        )),
+        ClientEnd::Failed(why) => failed(format!(
+            "the attached client that fed `{name}` its stdin failed: {why}"
+        )),
+    }
 }
 
 fn docker_command(args: &[&str]) -> Command {
     let mut command = Command::new(DOCKER_PROGRAM);
     command.args(args);
     command
-}
-
-fn apart_from_terminal_signals(command: &mut Command) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt as _;
-        command.process_group(0);
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt as _;
-        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-        command.creation_flags(CREATE_NEW_PROCESS_GROUP);
-    }
-}
-
-fn feed_attached(mut child: std::process::Child, payload: &[u8], record: &Mutex<DeliveryRecord>) {
-    if let Some(mut stdin) = child.stdin.take() {
-        let mut written = 0;
-        let mut failure = None;
-        while let Some(rest) = payload.get(written..).filter(|rest| !rest.is_empty()) {
-            match stdin.write(rest) {
-                Ok(0) => {
-                    failure = Some("the attached client accepted no more input".to_owned());
-                    break;
-                }
-                Ok(count) => {
-                    written += count;
-                    record
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .written = written;
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => break,
-                Err(error) => {
-                    failure = Some(error.to_string());
-                    break;
-                }
-            }
-        }
-        drop(stdin);
-        record
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .failure = failure;
-    } else {
-        record
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .failure = Some("the attached client was started without a stdin pipe".to_owned());
-    }
-    let exit = child.wait().ok().map(|status| status.code());
-    record
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .attach_exit = Some(exit.flatten());
 }
 
 fn exit_text(exit: Option<i32>) -> String {
@@ -1637,11 +1729,11 @@ impl ContainerRuntime for DockerCli {
 
     fn start(&self, covered: exec::CoveredStart<'_>) -> Result<(), RuntimeError> {
         let op = RuntimeOp::Start;
-        let name = covered.name();
         let payload = covered.stdin();
         if !payload.is_empty() {
-            return self.start_attached(op, name, payload);
+            return self.start_attached(op, &covered, payload);
         }
+        let name = covered.name();
         self.exec(op, name, &["start", name]).map(|_| ())
     }
 
@@ -1667,11 +1759,8 @@ impl ContainerRuntime for DockerCli {
             ),
             |target| self.observe(target),
         );
-        self.deliveries
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(name);
-        removed
+        let settled = self.settle_removed_client(name);
+        removed.and_then(|removed| settled.map(|()| removed))
     }
 }
 

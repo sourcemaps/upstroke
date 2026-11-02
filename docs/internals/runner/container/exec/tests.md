@@ -309,20 +309,28 @@ materialized, which plans.
 
 ## `#[cfg(target_os = "linux")]` › `fn effective_ids() -> ContainerUser {`
 
-The oracle for the coordinator's user, read another way than production
-reads it: the effective field of `/proc/self/status`' `Uid:` and `Gid:`
-lines, where `coordinator_user` reads the owner of `/proc/self`.
+The oracle for the coordinator's user on Linux, read another way than
+production reads it: the effective field of `/proc/self/status`' `Uid:` and
+`Gid:` lines, where `coordinator_user` asks `geteuid` and `getegid`.
 
-## `#[cfg(target_os = "linux")]` › `fn every_container_is_created_as_the_coordinators_user() {`
+## `#[cfg(all(unix, not(target_os = "linux")))]` › `fn effective_ids() -> ContainerUser {`
+
+On the other Unix targets the oracle is the same two queries production
+makes, so there the test shows that every role and probe carries the
+effective ids and that the argv says so, not that the queries are right. It
+runs only where those targets build, in native CI: a Linux run is no macOS
+result.
+
+## `#[cfg(unix)]` › `fn every_container_is_created_as_the_coordinators_user() {`
 
 Root's D-B, focused. Both probes, the worker, the gate and the reviewer are
 each created as the coordinator's effective uid and gid, in the spec and in
 the `docker create` argv, where `--user` comes before the image. The mount
 census and the confinement above hold with the user set.
 
-## `#[cfg(not(target_os = "linux"))]` › `fn every_container_keeps_the_images_user_off_linux() {`
+## `#[cfg(not(unix))]` › `fn every_container_keeps_the_images_user_off_unix() {`
 
-Off Linux nothing is mapped, and no container is given `--user`.
+On Windows nothing is mapped, and no container is given `--user`.
 
 ## `fn prompt(tag: &str, bytes: usize) -> Vec<u8> {`
 
@@ -2093,6 +2101,14 @@ cause.
 
 Since PR12's D-C the cancelled command carries input, and the cancellation path is the same: the
 payload went to the container at its start, and the release follows in its order.
+
+## `fn a_launch_that_fails_after_a_cancellation_reports_the_cancellation() {`
+
+Root's START-DEADLINE finding, at the runner. A cancellation requested after
+the create, and a start that then fails, as an attached start fails when it
+is cancelled while its container is still `created`: the invocation reports
+`RunnerError::cancelled`, with the fate the reclaim established, and leaves
+no container and no intent.
 
 ## `fn a_container_call_cancelled_before_it_starts_writes_no_intent() {`
 

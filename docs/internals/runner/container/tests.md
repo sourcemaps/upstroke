@@ -216,6 +216,31 @@ Two distinct answers to two distinct questions about one reference: the
 intersection {image id recorded} x {reference moved} rather than either
 alone.
 
+## `fn an_attached_start_held_at_created_ends_at_its_deadline_or_its_cancellation() {`
+
+Root's START-DEADLINE finding, with no daemon. A start held at `created`, its
+client alive, ends at the invocation's deadline, within the declared bound;
+a cancellation ends it on the poll that sees it. A client that ended while
+the container is still `created`, a container that is gone, and a state that
+cannot be read each end it too. The controls: a container that left
+`created` started, whether or not its client has ended.
+
+## `fn an_attached_client_is_settled_or_reported_unresolved_within_its_bound() {`
+
+Root's DELIVERY-OWNERSHIP finding, the settlement, with local doubles. A
+client that ended with its container is settled and never asked to stop; one
+whose end comes later, within the grace, is settled without being stopped;
+one that outlives its container ends when asked and is settled; one that
+does not end even when asked is reported unresolved, after exactly two
+graces, never settled.
+
+## `fn the_delivery_verdict_tells_an_early_exit_from_a_broken_attach() {`
+
+The verdict on a settled client. Ending with the container's own code is the
+program's own result, an early exit included. Ending with another code, or
+with none, is a broken attach; a client that had to be stopped, and one whose
+wait or write failed, are errors too, each naming why.
+
 ## `fn the_docker_create_arguments_carry_a_user_and_an_open_stdin_only_when_the_spec_does() {`
 
 The `docker create` argv, read with no daemon (`docker_create_arguments`). A

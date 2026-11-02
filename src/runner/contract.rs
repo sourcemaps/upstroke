@@ -1685,16 +1685,19 @@ pub(crate) mod tests {
             (
                 "src/runner/container.rs",
                 1,
-                1,
                 0,
+                1,
                 "the Container funnel's `docker` CLI: one `Command::new(`, in \
                  `docker_command`, the builder every container operation \
-                 converges on, and one `.spawn()`: the attached `docker start \
-                 --attach --interactive` that delivers a command's stdin payload \
-                 (PR12's D-C). Every other operation is an `.output()` the funnel \
-                 waits on; the attached client runs in its own process group, \
-                 is fed and reaped by a thread of its own, and so never makes a \
-                 start wait on the workload. Deliberately NOT routed through the Runner, \
+                 converges on, and no `.spawn()`: every operation is an \
+                 `.output()` the funnel waits on, except the attached `docker \
+                 start --attach --interactive` that delivers a command's stdin \
+                 payload (PR12's D-C), which is the one `run_with_timeout` \
+                 mention. That client runs under the process funnel, on a \
+                 thread of its own: the funnel spawns it in its own process \
+                 group, feeds it, bounds its output, stops, terminates and \
+                 reaps it, so a start never waits on the workload and the client \
+                 is never left unowned. Deliberately NOT routed through the Runner, \
                  and for the same reason as the two Git rows below — \
                  DESIGN.md:612's \"authoritative Git and the event log never \
                  do\" is about the things that BUILD the boundary rather than \
@@ -2503,15 +2506,15 @@ fn charge_allowance(&mut self) {}
             ),
             (
                 "src/runner/container.rs",
-                2,
+                1,
                 0,
                 0,
                 "the Container funnel delivering `CommandSpec::stdin` (PR12's \
                  D-C): `DockerCli::start` reads the payload off its \
-                 `CoveredStart` once (`covered.stdin()`), and the one `.stdin(` \
-                 on a `std::process::Command` is `Stdio::piped()` on the attached \
-                 `docker start` that carries it. The payload reaches that pipe \
-                 and nothing else: not argv, the environment, a mount or a log",
+                 `CoveredStart` once (`covered.stdin()`) and hands it to the \
+                 process funnel as the attached client's input. The payload \
+                 reaches that client's stdin and nothing else: not argv, the \
+                 environment, a mount or a log",
             ),
             (
                 "src/runner/container/exec.rs",

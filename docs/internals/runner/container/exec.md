@@ -326,12 +326,12 @@ list" — passes on both.
 
 A named volume has no host path, so it can carry none of these.
 
-## `#[cfg(target_os = "linux")]` › `fn coordinator_user() -> Result<Option<ContainerUser>, UpstrokeError> {`
+## `#[cfg(unix)]` › `fn coordinator_user() -> Option<ContainerUser> {`
 
-The coordinator's effective numeric uid and gid. Every container this runner
-creates runs as them: work, review, gate and probe alike, through
-`CreateSpec::user` and `docker create --user <uid>:<gid>` (PR12's D-B, root's
-option u1).
+The coordinator's effective numeric uid and gid. On a Unix host every
+container this runner creates runs as them: work, review, gate and probe
+alike, through `CreateSpec::user` and `docker create --user <uid>:<gid>`
+(PR12's D-B, root's option u1, and its UID-scope follow-through).
 
 Why: a container ran as its image's user, uid 0 in the real-Docker
 preparation (`debug-2`), and what it wrote into the role's worktree was then
@@ -343,12 +343,10 @@ that runs as the coordinator's numeric identity writes files the coordinator
 can manage and reclaim, and Git inside it reads a worktree and a view its own
 user owns, with no wildcard `safe.directory`.
 
-Read from the owner and group of `/proc/self`, which Linux gives as the
-process's effective uid and gid. The standard library has no other way to
-ask. `libc::geteuid` and `libc::getegid` would be another, but they are
-items `effects/wrappers.toml`'s `[libc]` section does not classify. The file
-is read once, when the runner is built, and a failure to read it refuses the
-runner.
+Read with `geteuid` and `getegid`, the effective-ID queries every Unix target
+has, once, when the runner is built. They cannot fail. The two are
+classified as reads, not effects, in `effects/wrappers.toml`'s `[libc]`
+section. The `SAFETY:` comment stays beside the call (CODING_STANDARDS §11).
 
 What this does not cover, and does not claim:
 - rootless Docker and user-namespace remapping, where a numeric id inside the
@@ -362,12 +360,10 @@ here changes their ownership. There is no `chown` of a volume, no global
 writability before a run: an executed `--version` or `--help` shows only
 that the CLI started.
 
-## `#[cfg(not(target_os = "linux"))]` › `fn coordinator_user() -> Result<Option<ContainerUser>, UpstrokeError> {`
+## `#[cfg(not(unix))]` › `const fn coordinator_user() -> Option<ContainerUser> {`
 
-Every other platform keeps the image's user, as before. On Windows no SID is
-mapped to a uid. On macOS the standard library has no read of the effective
-ids, and Docker Desktop maps bind-mount ownership itself. That is a limit,
-not coverage.
+Windows keeps the image's user, as before: no SID is mapped to a uid, pending
+native evidence. That is a limit, not coverage.
 
 ## `fn worktree_namespaces(execution_root: &Path) -> Vec<PathBuf> {`
 
@@ -507,7 +503,7 @@ at a time.
 ## `pub struct ContainerRunner` › `user: Option<ContainerUser>,`
 
 The numeric identity every container is created as (`coordinator_user`):
-`Some` on Linux, `None` elsewhere.
+`Some` on a Unix host, `None` on Windows.
 
 ## `pub struct ContainerRunner` › `view_is_explicit: bool,`
 
@@ -598,11 +594,16 @@ It also carries the invocation's stdin payload, borrowed from the request's `Com
 (PR12's D-C). The runtime's `start` delivers exactly `covered.stdin()` to the container it
 starts, then EOF; an empty payload starts the container as before.
 
+And it carries the invocation's deadline and a handle on its cancellation (root's
+START-DEADLINE finding): a start that has to wait, as the attached start waits for its
+container to leave `created`, waits no longer than the invocation may, and stops waiting
+when the invocation is cancelled.
+
 ## `mod cover` › `pub(in crate::runner::container::exec) fn cover<'a>(`
 
 Validates, arms on the first cover, counts the invocation, and mints the three values:
-`Covered`, and the two proofs over `spec`, the start's carrying `stdin`, which `contain`
-passes as `request.command.stdin`. The order is the point (`FUA-D1-DES-2`, the design review's correction): the scope this
+`Covered`, and the two proofs over `spec`. The start's also carries `stdin`, which `contain`
+passes as `request.command.stdin`, and the invocation's `deadline` and `cancellation`. The order is the point (`FUA-D1-DES-2`, the design review's correction): the scope this
 runner would hold — the armed one, or, on the arming cover, the one it is about to arm,
 built from the runtime's `reaper_program` and the runner's own `RunIdentity` — is compared
 with the container's two label values **first**, and a difference refuses the launch before
@@ -642,6 +643,14 @@ funnel can read it and still move the proof into the runtime's `create`.
 ## `mod cover` › `impl<'a> CoveredStart<'a>` › `pub fn stdin(&self) -> &'a [u8] {`
 
 The payload the start delivers.
+
+## `mod cover` › `impl<'a> CoveredStart<'a>` › `pub const fn deadline(&self) -> Instant {`
+
+When the invocation's time runs out: `contain` fixes it before the cover.
+
+## `mod cover` › `impl<'a> CoveredStart<'a>` › `pub const fn cancellation(&self) -> &Cancellation {`
+
+The invocation's cancellation, which a waiting start checks on every poll.
 
 ## `mod cover` › `mod without_a_reaper {`
 
@@ -706,8 +715,7 @@ numeric identity (`coordinator_user`), once.
 ### Errors
 
 [`UpstrokeError::Refused`] when `policy` is not a usable container policy
-— see [`recorded_image_id`]. [`UpstrokeError::Io`] when, on Linux, the
-coordinator's effective uid and gid cannot be read from `/proc/self`.
+— see [`recorded_image_id`].
 
 ## `impl ContainerRunner` › `pub fn with_layout(mut self, layout: BoundaryLayout) -> Self {`
 
@@ -1282,6 +1290,17 @@ cover, counts the invocation, and mints the two proofs over `plan.launch.spec`. 
 WriteIntent -> MountGitView -> Create (+ verify the reported image
 id) -> Start, in that order and in one place. A launch that fails settles the cover with
 the fate its cancel established.
+
+A launch that fails once a cancellation was requested reports the cancellation,
+`RunnerError::cancelled` with that same fate. Since PR12's D-C a start can see the
+cancellation itself: an attached start whose container is still `created` stops waiting and
+fails, and the invocation was cancelled, not broken
+(`a_launch_that_fails_after_a_cancellation_reports_the_cancellation`).
+
+## `fn contain(` › `let started = Instant::now();`
+
+The invocation's clock starts before the cover, so the deadline the start proof carries is
+the one supervision later enforces.
 
 ## `fn contain(` › `covered.settle(fate);`
 

@@ -1217,10 +1217,10 @@ how the boundary is *built*, so it cannot execute inside it.
 `runner::contract::tests::every_production_process_start_is_classified` carries the
 row that says so.
 
-`deliveries` holds, by container name, each stdin delivery an attached start
-began and its collection has not settled yet (`start_attached`,
-`settle_delivery`). Shared by every clone, so the CLI that started a
-container is the one that settles its input, whichever clone collects.
+`deliveries` holds, by container name, each attached client a start
+began and nothing has settled yet (`start_attached`, `settle_delivery`,
+`settle_removed_client`). Shared by every clone, so the client a start
+began is the one its collection or removal settles, whichever clone does it.
 
 ## `impl DockerCli` › `pub fn new(trace: ContainerTrace) -> Self {`
 
@@ -1270,8 +1270,9 @@ An image inspection from `docker image inspect`'s Go-template output.
 ## `impl DockerCli` › `fn start_attached(`
 
 Start a container whose command has input, and deliver that input exactly
-once, then EOF (PR12's D-C, carried by the coordinator and authorized in
-root's prompt follow-through).
+once, then EOF (PR12's D-C, carried by the coordinator, authorized in
+root's prompt follow-through, and reworked by root's START-DEADLINE and
+DELIVERY-OWNERSHIP findings).
 
 The host runner writes a worker's prompt to the child's stdin
 (`CommandSpec::stdin`). A container created without stdin read none:
@@ -1280,95 +1281,160 @@ measured with a stub on real Docker, a containerized process read 0 bytes
 not executed.
 
 The path, given that `create` passed `--interactive`:
-- `docker start --attach --interactive <name>` is spawned with a stdin pipe,
-  in a process group of its own (Unix) or a new process group (Windows), so
-  a terminal's interrupt never reaches it and is never forwarded to the
-  container. Cancellation stays the runner's: stop and remove, in their order;
-- its stdout and stderr go to the null device, so the client's copy of the
-  container's streams never applies back-pressure to the container. The
-  output the run uses is `docker logs`', collected as before;
-- one thread of its own spawns it, writes the payload, closes the pipe,
-  which is the EOF, and reaps it. That thread is the client's owner: no write,
-  however large, and no workload, however long, holds the caller;
-- the call returns once the container has left `created`. If the client ends
-  while the container is still `created`, the start failed: that is reported
-  with the client's exit and the daemon's `State.Error`.
+- the client, `docker start --attach --interactive <name>`, runs under the
+  process funnel (`agent::proc::run_with_timeout_classified`) on a thread of
+  its own (`attach_client`). The funnel is the owner: it spawns the client in
+  a process group of its own, so a terminal's interrupt never reaches it and
+  is never forwarded to the container; it writes the payload and closes the
+  pipe, which is the EOF, with its own broken-pipe rule; it bounds the
+  client's output, which nothing reads, since the run's output is `docker
+  logs`'; and it stops, terminates and reaps the client when asked to stop
+  or at its backstop, the invocation's deadline plus two `CLIENT_GRACE`s;
+- the call waits for the container to leave `created` (`await_started`),
+  bounded by the invocation's deadline and its cancellation, which the start
+  proof carries. It never waits for the workload or for the write;
+- if the container never leaves `created` — the client ended, the deadline
+  passed, the invocation was cancelled, the state could not be read or the
+  container is gone — the client is settled (`settle_client`) and the start
+  fails, saying how the client ended. A client that cannot be settled is
+  kept, owned and unresolved, for the removal the failed launch's cancel
+  then performs, and the failure says so;
+- once the container has started, the client is kept, owned, by name, until
+  its collection or its removal settles it.
 
-So a start never waits for the workload or for an unbounded write, and the
-runner's supervision, timeout and cancellation proceed as before while the
-input is still being written.
+So a start never waits for the workload or for an unbounded write; the
+runner's supervision, timeout and cancellation proceed as before; and no
+client is ever detached while something reports success.
 
-The prompt reaches that pipe and nothing else: not argv, not the
+The prompt reaches the client's stdin and nothing else: not argv, not the
 environment, not a mount, not a log. The trace records the operation and the
 container's name only.
 
-The thread that would feed the input is started before the client, so a
-failure to start the thread leaves no client to reach EOF with an empty
-input and start the container anyway.
+`RuntimeOp::Start` is the operation `start` hands it, so the domination
+census sees that name in `start` alone.
+
+## `impl DockerCli` › `fn own_client(&self, name: &str, client: AttachedClient) {`
+
+Keep `name`'s client, owned, until something settles it.
+
+## `impl DockerCli` › `fn take_client(&self, name: &str) -> Option<AttachedClient> {`
+
+Take `name`'s client to settle it. Whoever takes it settles it or puts it
+back.
 
 ## `impl DockerCli` › `fn settle_delivery(&self, name: &str, exit_code: Option<i32>) -> Result<(), RuntimeError> {`
 
 How a container's input went, settled when its output is collected.
 
-Nothing to settle without an attached start, or while the container still
-runs: a timed-out container is collected before it is stopped, and its
-input settles nothing. Otherwise the client ends with the container, and its
-thread is given `DELIVERY_GRACE` to report. Then:
-- a write that failed, other than on a broken pipe, is the collection's
-  error: the program may have read a truncated input, and saying so is the
-  honest report;
-- a pipe that broke before the whole payload went, with the client ending on
-  a code other than the container's, is an attach that broke while the
-  container ran, and is an error too;
-- a pipe that broke while the client ended with the container's own code is
-  a program that stopped reading early. The program's own exit and output
-  are its result, as the host funnel's broken pipe is (`agent::proc::input`).
+Nothing to settle without an attached client. A container that still runs
+was collected because it timed out: its client stays owned, and the removal
+that follows settles it. Otherwise the client ends with the container, and
+`settle_client` gives it `CLIENT_GRACE`, then asks it to stop and gives it
+another. A client that still has not ended is put back, owned and
+unresolved, and the collection fails saying so. A settled client's end is
+judged by `delivery_verdict`.
 
-A client whose end cannot be told within the grace is reported as nothing:
-the delivery is not claimed either way. A client that died with the
-container's own code would read as an early exit; that residue is accepted
-and named here.
+## `impl DockerCli` › `fn settle_removed_client(&self, name: &str) -> Result<(), RuntimeError> {`
+
+The removal's settlement of `name`'s client, whatever path reached it: the
+timeout's, the cancellation's, the failed launch's or the completed
+invocation's. The container is gone, so its client ends; it is settled as
+in `settle_delivery`, and its delivery is not judged, since the
+invocation's result is already decided. A client that cannot be settled is
+put back, owned, and the removal reports it unresolved, which the release
+reads as a process it could not establish gone.
 
 ## `const ATTACHED_START_POLL: Duration = Duration::from_millis(25);`
 
-How often an attached start looks at the container's state, and its
-settlement at the client's thread.
+How often a waiting start looks at the container's state, and a settlement
+at its client.
 
-## `const DELIVERY_GRACE: Duration = Duration::from_secs(2);`
+## `const CLIENT_GRACE: Duration = Duration::from_secs(5);`
 
-How long a collection waits for a finished container's attached client to
-report, as long as `agent::proc`'s `DRAIN_GRACE_EXIT`.
+How long a client is given to end on its own, and then again after it is
+asked to stop.
 
-## `struct StdinDelivery {`
+## `struct AttachedClient {`
 
-One attached start's record and the thread that owns its client.
+One attached start's client: the funnel's stop flag, and the thread that
+runs the funnel, whose result is the client's terminal state. Kept until
+that result is taken (`into_end`).
 
-## `struct DeliveryRecord {`
+## `impl AttachedClient` › `fn has_ended(&self) -> bool {`
 
-What the thread knows: the payload's size, the bytes written, a write
-failure other than a broken pipe, and the client's exit once it ended.
+Whether the funnel has returned: the client has ended and been reaped.
+
+## `impl AttachedClient` › `fn ask_to_stop(&self) {`
+
+Ask the funnel to stop the client: it terminates the client's process group
+and reaps it on its next poll.
+
+## `impl AttachedClient` › `fn into_end(mut self) -> ClientEnd {`
+
+The client's terminal state, from the funnel's own result: exited with a
+code, stopped (asked to, or at its backstop), or failed, which carries the
+funnel's error and the process fate it established. A wait, a write or an
+attach that failed is a failure here, never an exit with no code.
+
+## `impl Drop for AttachedClient {`
+
+A client dropped before its end was taken, as when the runtime is dropped,
+is asked to stop. Its funnel then terminates and reaps it on its own thread:
+nothing is left running, and nothing reports success.
+
+## `enum ClientEnd {`
+
+How an attached client ended.
+
+## `enum NotStarted {`
+
+Why an attached start's container never left `created`.
+
+## `fn attach_client(name: &str, payload: &[u8], deadline: Instant) -> Result<AttachedClient, String> {`
+
+Start the client under the process funnel, on a thread of its own. The
+funnel is called with `ProcessSite::Spawn` and `ProcessSite::Terminate` and
+no hooks, like the host runner's, and with the cleanup reaper it arms for
+every supervised child. If the thread cannot start, no client was spawned,
+so none can reach EOF with an empty input.
+
+## `fn await_started(`
+
+Wait for the container to leave `created`, polling its listed state: started
+when it is anything else, gone when it is not listed. Not started when the
+client ended while it was still `created`, when the invocation was
+cancelled, or when the deadline passed. A state that cannot be read ends
+the wait too. Each is checked on every poll, so the wait is bounded by the
+deadline plus one poll and one listing.
+
+## `fn settle_client(`
+
+Settle a client: wait up to `grace` for it to end, then ask it to stop and
+wait up to `grace` again. True once it has ended; false when it still has
+not, which is an unresolved client and never a success.
+
+## `fn delivery_verdict(name: &str, end: &ClientEnd, exit_code: Option<i32>) -> Result<(), RuntimeError> {`
+
+Judge a settled client against its container's exit:
+- a client that exited with the container's own code ended with it. The
+  input was delivered, or the program stopped reading early; either way the
+  program's own exit and output are its result, as the host funnel's broken
+  pipe is (`agent::proc::input`);
+- a client that exited with another code: the attach broke while the
+  container ran, and the input may not have been delivered. An error;
+- a client that had to be stopped did not end with the container: an error;
+- a client whose funnel failed — a wait, a write other than to a broken
+  pipe, or the attach — is an error that carries the failure.
+
+A client that died with the container's own code would read as the first
+case; that residue is accepted and named here.
 
 ## `fn docker_command(args: &[&str]) -> Command {`
 
 The one builder of a `docker` child. Every container operation's
-`Command` comes from here: `exec_streams`' `.output()` calls and the
-attached start's one `.spawn()`, the two
+`Command` comes from here: `exec_streams`' `.output()` calls, and the
+attached client the process funnel runs, the two things
 `every_production_process_start_is_classified` counts.
-
-## `fn apart_from_terminal_signals(command: &mut Command) {`
-
-The attached client's process group. `docker start --attach` forwards every
-signal it receives to the container. In the coordinator's own group, a
-terminal's interrupt would reach the container directly, ahead of the
-runner's stop and remove. In a group of its own, nothing but the end of
-the container ends it.
-
-## `fn feed_attached(mut child: std::process::Child, payload: &[u8], record: &Mutex<DeliveryRecord>) {`
-
-The client's owner. It writes the payload, closes the pipe, which is the
-EOF, and waits for the client, recording each step for `settle_delivery`. A
-broken pipe ends the write without being a failure: the program, or the
-attach, has gone, and `settle_delivery` tells which by the client's exit.
 
 ## `fn exit_text(exit: Option<i32>) -> String {`
 
@@ -1654,6 +1720,11 @@ input, the attached start delivers it (`start_attached`).
 domination census in `exec::tests` pins every `RuntimeOp::Start` in
 production to this method, and this keeps that true while the attached
 path lives in a function of its own.
+
+## `fn remove(&self, name: &str) -> Result<Settled, RuntimeError> {` › `let settled = self.settle_removed_client(name);`
+
+After the container is removed, its attached client, if one is still owned,
+is settled. A removal that could not settle it is not a success.
 
 ## `fn docker_create_arguments(spec: &CreateSpec) -> Vec<String> {` › `args.push("--read-only".to_owned());`
 
