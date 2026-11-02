@@ -3019,7 +3019,10 @@ mod tests {
         let wrong: [(&str, serde_json::Value); 8] = [
             ("/mounts/0/future", serde_json::json!(true)),
             ("/mounts/0/source_identity/future", serde_json::json!(1)),
-            ("/mounts/0/source_identity/kind", serde_json::json!("symlink")),
+            (
+                "/mounts/0/source_identity/kind",
+                serde_json::json!("symlink"),
+            ),
             ("/mounts/0/source_identity/device", serde_json::json!(-1)),
             ("/mounts/0/source_identity/object", serde_json::json!("7")),
             ("/mounts/0/read_only", serde_json::json!("true")),

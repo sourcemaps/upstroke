@@ -211,7 +211,10 @@ impl MountContext {
                 MountExclusion::AuthoritativeGit,
                 canonical_spelling(&layout.common_dir),
             ),
-            (MountExclusion::PrivateRoot, canonical_spelling(private_root)),
+            (
+                MountExclusion::PrivateRoot,
+                canonical_spelling(private_root),
+            ),
         ];
         for location in credential_locations {
             excluded.push((

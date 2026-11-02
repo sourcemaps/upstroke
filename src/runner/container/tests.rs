@@ -891,8 +891,14 @@ fn a_mount_argument_carries_each_value_exactly_or_refuses_it() {
             "/srv/Shared Cache/Ünicode",
             "type=bind,source=/srv/Shared Cache/Ünicode,target=/data,readonly",
         ),
-        ("/srv/a=b", "type=bind,source=/srv/a=b,target=/data,readonly"),
-        ("/srv/semi;colon:x", "type=bind,source=/srv/semi;colon:x,target=/data,readonly"),
+        (
+            "/srv/a=b",
+            "type=bind,source=/srv/a=b,target=/data,readonly",
+        ),
+        (
+            "/srv/semi;colon:x",
+            "type=bind,source=/srv/semi;colon:x,target=/data,readonly",
+        ),
     ] {
         assert_eq!(
             super::mount_argument(&bind(source, "/data")),

@@ -417,10 +417,7 @@ impl TopologyReport {
             )),
         }
         if !self.runner.mounts.is_empty() {
-            out.push(format_args!(
-                "runner mounts: {}",
-                self.runner.mounts.len()
-            ));
+            out.push(format_args!("runner mounts: {}", self.runner.mounts.len()));
             for mount in &self.runner.mounts {
                 out.push(format_args!(
                     "  {} <- {} ({}, {} device {} object {})",

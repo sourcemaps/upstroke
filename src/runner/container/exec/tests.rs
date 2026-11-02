@@ -1743,10 +1743,9 @@ fn the_docker_argument_names_exactly_the_recorded_mount() {
             .map(|pair| pair[1].as_str())
             .collect();
         let read_only = forces_configured_mounts_read_only(&request.role);
-        for (source, target, readonly) in [
-            (&shared, "/data", true),
-            (&tools, "/opt/tools", read_only),
-        ] {
+        for (source, target, readonly) in
+            [(&shared, "/data", true), (&tools, "/opt/tools", read_only)]
+        {
             let expected = format!(
                 "type=bind,source={},target={target}{}",
                 source.to_str().expect("utf-8"),
@@ -1792,9 +1791,14 @@ fn a_recorded_mount_that_moved_or_reaches_a_withheld_path_refuses_the_plan_befor
         .expect_err("a recorded source that is gone refuses the plan");
     assert!(refusal.to_string().contains("is gone"), "{refusal}");
     let outcome = runner.run_blocking(&request);
-    assert!(outcome.is_err(), "the invocation ran without its recorded mount");
+    assert!(
+        outcome.is_err(),
+        "the invocation ran without its recorded mount"
+    );
     std::fs::rename(&away, &shared).expect("put it back");
-    runner.plan(&request).expect("the restored source plans again");
+    runner
+        .plan(&request)
+        .expect("the restored source plans again");
 
     let mut reaching = policy;
     reaching.mounts[0].source = fixture.private_root.to_str().expect("utf-8").to_owned();
@@ -6184,7 +6188,10 @@ fn real_docker_a_read_write_configured_mount_is_writable_as_the_coordinators_use
     };
     let cache = world.root.join("operator-cache");
     std::fs::create_dir_all(&cache).expect("an operator directory");
-    let policy = world.resolve(docker.as_ref(), vec![mount(&cache, "/operator/cache", false)]);
+    let policy = world.resolve(
+        docker.as_ref(),
+        vec![mount(&cache, "/operator/cache", false)],
+    );
     let runner = world.runner(docker.as_ref(), policy);
     let expected = effective_ids();
 
@@ -6289,7 +6296,8 @@ fn real_docker_a_resume_with_changed_mount_config_keeps_the_recorded_mounts() {
     assert!(
         warnings
             .iter()
-            .any(|warning| warning.contains("configured mount set") && warning.contains("is ignored")),
+            .any(|warning| warning.contains("configured mount set")
+                && warning.contains("is ignored")),
         "{warnings:?}"
     );
 
@@ -6312,7 +6320,11 @@ fn real_docker_a_resume_with_changed_mount_config_keeps_the_recorded_mounts() {
         "the resumed container did not see the recorded source"
     );
     assert_eq!(stdout_value(&output, "EXTRA="), "absent");
-    assert_ne!(stdout_value(&output, "WRITE="), "0", "the recorded mount is read-only");
+    assert_ne!(
+        stdout_value(&output, "WRITE="),
+        "0",
+        "the recorded mount is read-only"
+    );
     assert!(!recorded_source.join("written.txt").exists());
     assert!(!today_source.join("written.txt").exists());
 
@@ -6337,9 +6349,7 @@ fn real_docker_a_resume_with_changed_mount_config_keeps_the_recorded_mounts() {
         docker
             .containers_with_label(
                 LABEL_PRIVATE_ROOT,
-                &crate::runner::container::intent::private_root_label(
-                    &world.identity.private_root
-                ),
+                &crate::runner::container::intent::private_root_label(&world.identity.private_root),
             )
             .expect("reachable")
             .is_empty(),

@@ -367,11 +367,11 @@ pub(crate) mod tests {
         CandidateLeaseEffect, CandidatePrepared, CandidateRef, CommitSha, DeferWaitElapsed4,
         GenerationCloseReason, GenerationClosed, GenerationId, GitRef, ImageIdentity,
         IncarnationId, InfrastructureKind, LeaseDisposition, LeaseGrant, MergeLeaseRelease,
-        MergePrepared, MergeVerificationStarted, MergeVerificationUnavailable, PreparedDisposition,
-        MountSourceIdentity, MountSourceKind, RecordedMount, RunStarted4, RungBinding,
-        RunnerContract, RunnerKind, RunnerPolicy, SequenceId,
-        SettlementTransition, TaskCandidateCreated, TaskDispatched, TaskMerged, TopologyEvent,
-        TopologyEventBody, TopologyLimits, UnavailableCause, UnavailableOutcome, VerificationBasis,
+        MergePrepared, MergeVerificationStarted, MergeVerificationUnavailable, MountSourceIdentity,
+        MountSourceKind, PreparedDisposition, RecordedMount, RunStarted4, RungBinding,
+        RunnerContract, RunnerKind, RunnerPolicy, SequenceId, SettlementTransition,
+        TaskCandidateCreated, TaskDispatched, TaskMerged, TopologyEvent, TopologyEventBody,
+        TopologyLimits, UnavailableCause, UnavailableOutcome, VerificationBasis,
         VerificationRecord, VerificationSource, VerificationVerdict,
     };
     use crate::topology::fold::{
@@ -5942,7 +5942,9 @@ pub(crate) mod tests {
             ("a source rebound", |runner| {
                 runner.mounts[0].source_identity.object += 1;
             }),
-            ("read-write now", |runner| runner.mounts[0].read_only = false),
+            ("read-write now", |runner| {
+                runner.mounts[0].read_only = false
+            }),
             ("a target moved", |runner| {
                 runner.mounts[1] = census_mount("/toolchain", false, 12);
             }),
@@ -5986,7 +5988,8 @@ pub(crate) mod tests {
                 data: Box::new(started.clone()),
             })];
             let fold = TopologyFold::replay(inputs(), &events).expect("the record replays");
-            let report = TopologyReport::derive(RUN_ID, &fold, &events).expect("the report derives");
+            let report =
+                TopologyReport::derive(RUN_ID, &fold, &events).expect("the report derives");
             assert_eq!(
                 report.runner, started.runner,
                 "report.json's runner is the recorded one"

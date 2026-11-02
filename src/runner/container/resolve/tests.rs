@@ -173,8 +173,8 @@ fn the_recorded_reference_is_the_operators_and_never_the_runtimes() {
         "the configured reference sorts first, so `references[0]` would accidentally be right"
     );
 
-    let policy = resolve_container(&runtime, &selection(), &MountContext::unbound())
-        .expect("resolves");
+    let policy =
+        resolve_container(&runtime, &selection(), &MountContext::unbound()).expect("resolves");
     assert_eq!(
         policy.image.expect("image").reference,
         REFERENCE,
@@ -227,8 +227,8 @@ fn a_runtime_reporting_no_digest_and_one_reporting_an_empty_string_both_resolve_
         runtime.add_volume(CLAUDE_VOLUME);
         runtime.add_volume(CODEX_VOLUME);
 
-        let policy = resolve_container(&runtime, &selection(), &MountContext::unbound())
-            .expect("resolves");
+        let policy =
+            resolve_container(&runtime, &selection(), &MountContext::unbound()).expect("resolves");
         assert_eq!(
             policy.image.as_ref().expect("image").digest,
             None,
@@ -510,8 +510,8 @@ fn the_resolved_records_digest_moves_with_the_id_the_runtime_reported() {
         runtime.tag(REFERENCE, id);
         runtime.add_volume(CLAUDE_VOLUME);
         runtime.add_volume(CODEX_VOLUME);
-        let policy = resolve_container(&runtime, &selection(), &MountContext::unbound())
-            .expect("resolves");
+        let policy =
+            resolve_container(&runtime, &selection(), &MountContext::unbound()).expect("resolves");
         ids.insert(policy.image.as_ref().expect("image").id.clone());
         digests.insert(runner_policy_sha256(&policy));
     }
@@ -728,7 +728,10 @@ fn a_configured_mount_is_recorded_and_rebuilt_from_the_record() {
         let mut warnings = Vec::new();
         let rebuilt =
             rebuild_by_inspection(&runtime, &with, &today, &mut warnings).expect("rebuilds");
-        assert_eq!(rebuilt, with, "`{label}`: today's config reached the rebuilt runner");
+        assert_eq!(
+            rebuilt, with,
+            "`{label}`: today's config reached the rebuilt runner"
+        );
         assert_eq!(
             runner_policy_sha256(&rebuilt),
             runner_policy_sha256(&with),
@@ -757,7 +760,11 @@ fn every_configured_mount_that_could_reach_a_withheld_path_is_refused_before_the
     fs::create_dir_all(main_git.join("objects")).expect("the common objects");
     fs::write(admin.join("commondir"), "../..\n").expect("commondir");
     fs::create_dir_all(&linked).expect("the linked worktree");
-    fs::write(linked.join(".git"), format!("gitdir: {}\n", admin.display())).expect("gitfile");
+    fs::write(
+        linked.join(".git"),
+        format!("gitdir: {}\n", admin.display()),
+    )
+    .expect("gitfile");
     let linked_context = MountContext::bind_with(
         &linked,
         &world.private,
@@ -779,34 +786,129 @@ fn every_configured_mount_that_could_reach_a_withheld_path_is_refused_before_the
     let context = world.context();
     let unbound = MountContext::unbound();
     let source_cells: Vec<(&str, PathBuf, &MountContext, &str)> = vec![
-        ("relative", PathBuf::from("shared"), &context, "not an absolute host path"),
-        ("absent", world.root.join("absent"), &context, "does not exist"),
-        ("a socket", socket.clone(), &context, "neither a directory nor a regular file"),
-        ("the repository", world.repo.clone(), &context, "its source is `"),
-        ("inside the repository", world.repo.join("src"), &context, "lies inside"),
-        ("the repository's .git", world.repo.join(".git"), &context, "lies inside"),
+        (
+            "relative",
+            PathBuf::from("shared"),
+            &context,
+            "not an absolute host path",
+        ),
+        (
+            "absent",
+            world.root.join("absent"),
+            &context,
+            "does not exist",
+        ),
+        (
+            "a socket",
+            socket.clone(),
+            &context,
+            "neither a directory nor a regular file",
+        ),
+        (
+            "the repository",
+            world.repo.clone(),
+            &context,
+            "its source is `",
+        ),
+        (
+            "inside the repository",
+            world.repo.join("src"),
+            &context,
+            "lies inside",
+        ),
+        (
+            "the repository's .git",
+            world.repo.join(".git"),
+            &context,
+            "lies inside",
+        ),
         ("above everything", world.root.clone(), &context, "contains"),
-        ("the private root", world.private.clone(), &context, "the private root"),
-        ("inside the private root", world.private.join("runs"), &context, "lies inside"),
-        ("above the private root", world.root.join("state"), &context, "contains"),
-        ("a credential location", world.credentials.clone(), &context, "credential"),
-        ("above a credential location", world.root.join("home"), &context, "credential"),
+        (
+            "the private root",
+            world.private.clone(),
+            &context,
+            "the private root",
+        ),
+        (
+            "inside the private root",
+            world.private.join("runs"),
+            &context,
+            "lies inside",
+        ),
+        (
+            "above the private root",
+            world.root.join("state"),
+            &context,
+            "contains",
+        ),
+        (
+            "a credential location",
+            world.credentials.clone(),
+            &context,
+            "credential",
+        ),
+        (
+            "above a credential location",
+            world.root.join("home"),
+            &context,
+            "credential",
+        ),
         (
             "inside a credential location",
             world.credentials.join("config.toml"),
             &context,
             "credential",
         ),
-        ("the common Git directory", main_git.clone(), &linked_context, "authoritative Git"),
-        ("inside common Git", main_git.join("objects"), &linked_context, "authoritative Git"),
-        ("above common Git", world.root.join("main"), &linked_context, "authoritative Git"),
-        ("a linked admin directory", admin.clone(), &linked_context, "authoritative Git"),
+        (
+            "the common Git directory",
+            main_git.clone(),
+            &linked_context,
+            "authoritative Git",
+        ),
+        (
+            "inside common Git",
+            main_git.join("objects"),
+            &linked_context,
+            "authoritative Git",
+        ),
+        (
+            "above common Git",
+            world.root.join("main"),
+            &linked_context,
+            "authoritative Git",
+        ),
+        (
+            "a linked admin directory",
+            admin.clone(),
+            &linked_context,
+            "authoritative Git",
+        ),
         ("a comma", spelled(b"a,b"), &context, "contains `,`"),
         ("a quote", spelled(b"q\"uote"), &context, "contains `\"`"),
-        ("a newline", spelled(b"new\nline"), &context, "control character"),
-        ("a trailing space", spelled(b"trailing "), &context, "whitespace"),
-        ("not UTF-8", spelled(b"bad\xff"), &context, "not valid UTF-8"),
-        ("unbound", world.shared.clone(), &unbound, "no repository context"),
+        (
+            "a newline",
+            spelled(b"new\nline"),
+            &context,
+            "control character",
+        ),
+        (
+            "a trailing space",
+            spelled(b"trailing "),
+            &context,
+            "whitespace",
+        ),
+        (
+            "not UTF-8",
+            spelled(b"bad\xff"),
+            &context,
+            "not valid UTF-8",
+        ),
+        (
+            "unbound",
+            world.shared.clone(),
+            &unbound,
+            "no repository context",
+        ),
     ];
     let target_cells: [(&str, &str); 13] = [
         ("data", "not an absolute path"),
@@ -915,8 +1017,7 @@ fn every_configured_mount_that_could_reach_a_withheld_path_is_refused_before_the
 
 #[cfg(unix)]
 #[test]
-fn the_rebuild_refuses_a_missing_or_rebound_source_before_any_spawn_and_resumes_once_it_is_back()
-{
+fn the_rebuild_refuses_a_missing_or_rebound_source_before_any_spawn_and_resumes_once_it_is_back() {
     let world = mount_world("mount-rebuild");
     let today = mounted_selection(vec![configured(&world.shared, "/data", false)]);
     let (runtime, _trace) = ready_runtime();
@@ -1026,7 +1127,10 @@ fn the_rebuild_returns_the_recorded_runner_exactly_however_the_config_differs() 
         ("fewer volumes", fewer_volumes),
         ("host now", host_now),
         ("absent section", RunnerSelection::host_default()),
-        ("a newly configured mount that does not exist", unavailable_mount),
+        (
+            "a newly configured mount that does not exist",
+            unavailable_mount,
+        ),
     ];
     for (label, today) in configs {
         let (runtime, _trace) = ready_runtime();
@@ -1106,7 +1210,11 @@ fn a_config_that_differs_warns_naming_the_field_that_moved() {
             reference_and_volumes,
             Some(RunnerField::ImageReference),
         ),
-        ("a mount configured today", mounted, Some(RunnerField::Mounts)),
+        (
+            "a mount configured today",
+            mounted,
+            Some(RunnerField::Mounts),
+        ),
     ];
 
     let mut named = BTreeSet::new();

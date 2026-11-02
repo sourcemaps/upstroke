@@ -1098,8 +1098,8 @@ fn a_run_with_configured_mounts_records_one_runner_in_its_marker_owner_record_an
         pair: ProbePair::grant(&ledger),
     };
     let mut warnings = Vec::new();
-    let refused = create_run(checked, request, &mut hooks, &mut warnings)
-        .expect_err("P7 was made to fail");
+    let refused =
+        create_run(checked, request, &mut hooks, &mut warnings).expect_err("P7 was made to fail");
     assert_eq!(refused.reached, Prefix::P6);
 
     let marker = marker_of(&fixture.public());
