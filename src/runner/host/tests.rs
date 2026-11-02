@@ -6240,9 +6240,11 @@ fn production_control() {
     // Each conductor's body, to the first `}` that closes an item at column 0: since
     // PR12 the legacy construction follows the schema-4 dispatch in the same body,
     // and the schema-4 run's one construction is `engine/topology/entry.rs`'s, which
-    // the table above counts.
+    // the table above counts. `include_str!` holds the bytes the checkout wrote, and
+    // a checkout with `core.autocrlf` on ends every line with CRLF, so the lines are
+    // made LF first and the cut finds the same closing `}` under either ending.
     for (conductor, facade) in conductors {
-        let engine = crate::effects::production_code(conductor);
+        let engine = crate::effects::production_code(conductor).replace("\r\n", "\n");
         let after = engine
             .split_once(facade)
             .and_then(|(_, rest)| rest.split_once("\n}\n"))
