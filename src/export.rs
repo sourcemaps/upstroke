@@ -2076,7 +2076,7 @@ mod tests {
     #[test]
     fn a_future_event_schema_is_rejected_before_projection() {
         let mut started = run_started(&["task"]);
-        started["data"]["schema"] = json!(events::SCHEMA_VERSION + 1);
+        started["data"]["schema"] = json!(crate::topology::schema::MAX_READABLE_SCHEMA + 1);
         let fixture = Fixture::new("future-schema", vec![started], vec![task("task", "task")]);
         let error = load_error(&fixture);
         assert!(error.contains("written by a newer upstroke"), "{error}");

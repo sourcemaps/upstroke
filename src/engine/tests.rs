@@ -17639,6 +17639,22 @@ fn topology_options(repo: &Path) -> RunOptions {
     opts
 }
 
+/// Waits, bounded, until nothing holds the run: neither its lock nor its cleanup
+/// lease. A run's agent-cleanup reapers keep its cleanup lease until every agent
+/// process is gone (`rundir::WorktreeLock`'s acquisition says so where it refuses),
+/// so a resume issued the instant `run_with` returns can meet a reaper still
+/// settling and refuse overlapping ownership, as it should.
+fn until_released(repo: &Path, run_id: &str) {
+    let public = rundir::public_dir(repo, run_id);
+    for _ in 0..1000 {
+        if !rundir::is_running(&public) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("run `{run_id}` was still held ten seconds after its command returned");
+}
+
 fn first_line_of_the_log(repo: &Path, run_id: &str) -> serde_json::Value {
     let log = fs::read_to_string(rundir::public_dir(repo, run_id).join("events.jsonl"))
         .expect("the run's event log");
@@ -17681,6 +17697,7 @@ fn a_schema_4_run_is_created_driven_and_merged_through_the_public_entry_point() 
     assert_eq!(report.branch, format!("upstroke/run-{}", report.run_id));
     assert_merged_on_the_integration_branch(&repo, &report);
 
+    until_released(&repo, &report.run_id);
     let mut resume = resume_options(&repo, &report.run_id);
     resume.private_root = None;
     let refused =
@@ -17872,6 +17889,7 @@ fn resumed_overlap(tag: &str, extra: &str) -> usize {
 
     let today = tree.path().join("today.toml");
     fs::write(&today, format!("[engine]\nmax_parallel = 2\n{extra}")).expect("today's config");
+    until_released(&repo, &parked.run_id);
     let mut resume = resume_options(&repo, &parked.run_id);
     resume.private_root = None;
     resume.config_path = Some(today);
