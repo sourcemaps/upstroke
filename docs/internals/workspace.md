@@ -1106,6 +1106,14 @@ under the given private root with its exact bytes and verifies, an altered
 include is replaced by the next scope, a linked worktree of the same repository
 yields the same entries, and no staged copy is left in the include's directory.
 
+## `fn the_recorded_objects_scope_spells_the_common_directory_as_the_workspace_manager_does() {`
+
+`engine::topology::entry::one_spelling`'s condition, held from the include's
+side: over one real repository, the scope's common directory equals
+`WorkspaceManager::common_git_dir`. CI run 41520547341 found the two apart on
+Windows by the verbatim prefix alone. Only a Windows host produces that prefix,
+so only there does the test discriminate.
+
 ## `fn a_git_older_than_the_floor_is_refused_by_name() {`
 
 The floor's parser over what `git version` prints: 2.40.x, Apple's 2.39.5 and

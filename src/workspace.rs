@@ -2994,6 +2994,27 @@ mod tests {
         assert_eq!(staged.len(), 1, "no staged copy is left behind: {staged:?}");
     }
 
+    /// Root's D2 (b) from the include's side, over a real repository: the scope
+    /// spells the common directory exactly as `WorkspaceManager::common_git_dir`
+    /// does, which `engine::topology::entry::one_spelling` requires of every
+    /// schema-4 run and resume before any role. On Windows the scope kept the
+    /// verbatim prefix the manager strips, and that check refused them all (CI
+    /// run 41520547341). Only a Windows host produces the prefix, so elsewhere
+    /// this holds without discriminating.
+    #[test]
+    fn the_recorded_objects_scope_spells_the_common_directory_as_the_workspace_manager_does() {
+        let fixture = crate::workspace_manager::fixture::Fixture::new("scope-spelling");
+        let scope = Workspace::open(&fixture.base)
+            .expect("open the managed base")
+            .recorded_objects_scope(Some(&fixture.private))
+            .expect("the include's repository");
+        assert_eq!(
+            scope.common_dir(),
+            fixture.manager.common_git_dir(),
+            "the include and the workspace manager spell one common directory two ways"
+        );
+    }
+
     #[test]
     fn clean_detection_and_rollback() {
         let (_tree, repo) = temp_repo("clean");

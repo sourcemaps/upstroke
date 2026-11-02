@@ -228,9 +228,10 @@ That signal fired on Windows for every schema-4 run and resume (CI run
 41520547341): the include's spelling kept the verbatim prefix `\\?\` that the
 manager strips. The repair is at the spelling's source, not here:
 `recorded_objects_scope` now strips it with the manager's own `strip_verbatim`,
-and this comparison is unchanged.
-`the_include_and_the_workspace_manager_spell_the_common_directory_alike`
-holds the two spellings equal over a real repository on every platform. Only a
+and this comparison is unchanged. `workspace`'s
+`the_recorded_objects_scope_spells_the_common_directory_as_the_workspace_manager_does`
+holds the two spellings equal over a real repository on every platform; it sits
+there because this module's tests are denied `recorded_objects_scope`. Only a
 Windows host produces the prefix, so only there does the test discriminate.
 
 ## `fn hold_recorded_case_policy(`
