@@ -18204,17 +18204,20 @@ fn a_resume_selects_its_reader_by_the_logs_header_and_refuses_before_any_lock() 
         serde_json::to_string(&header).expect("a header")
     );
     fs::write(&log, &newer).expect("a newer header");
+    let held = WorktreeLock::acquire(&repo).expect("the held-lock control");
     let refused = resume_with(&resume, &source).expect_err("a newer schema refuses");
+    drop(held);
     assert!(
-        refused.to_string().contains("written by a newer upstroke"),
-        "{refused}"
+        refused.to_string().contains("written by a newer upstroke")
+            && !refused.to_string().contains("already driving worktree"),
+        "with the worktree lock held, the newer-schema refusal came before any lock: {refused}"
     );
     assert_eq!(
         fs::read_to_string(&log).expect("the log"),
         newer,
         "the refused resume wrote nothing"
     );
-    drop(WorktreeLock::acquire(&repo).expect("the refusal left no worktree lock held"));
+    drop(WorktreeLock::acquire(&repo).expect("no-leak check: no worktree lock is left held"));
     fs::write(&log, &bytes).expect("the schema-4 log restored");
 
     let torn_id = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
@@ -18225,18 +18228,25 @@ fn a_resume_selects_its_reader_by_the_logs_header_and_refuses_before_any_lock() 
         "{\"ts\":\"2026-11-02T00:00:00Z\",\"ev",
     )
     .expect("a header that never committed");
+    let held = WorktreeLock::acquire(&repo).expect("the held-lock control");
     let refused = resume_with(&resume_options(&repo, torn_id), &source)
         .expect_err("a log whose header did not commit is no run");
+    drop(held);
     assert!(
-        refused.to_string().contains(torn_id),
-        "the refusal names what it was asked for: {refused}"
+        refused
+            .to_string()
+            .contains("never recorded a committed run_started")
+            && refused.to_string().contains(torn_id)
+            && !refused.to_string().contains("already driving worktree"),
+        "with the worktree lock held, the uncommitted-header refusal came before any lock: \
+         {refused}"
     );
     assert_eq!(
         fs::read_to_string(torn.join("events.jsonl")).expect("the torn log"),
         "{\"ts\":\"2026-11-02T00:00:00Z\",\"ev",
         "the refused resume changed the torn log"
     );
-    drop(WorktreeLock::acquire(&repo).expect("the refusal left no worktree lock held"));
+    drop(WorktreeLock::acquire(&repo).expect("no-leak check: no worktree lock is left held"));
 }
 
 /// The resume refusals `prepare_resume` owns, and its recorded-limits warning,
@@ -18406,10 +18416,9 @@ fn a_schema_4_run_ended_by_a_signal_mid_attempt_resumes_and_settles_the_attempt(
 #[test]
 #[ignore = "subprocess helper"]
 fn topology_signalled_child() {
-    let Ok(repo) = std::env::var("UPSTROKE_TOPOLOGY_SIGNAL_REPO") else {
+    let Some(repo) = std::env::var_os("UPSTROKE_TOPOLOGY_SIGNAL_REPO").map(PathBuf::from) else {
         return;
     };
-    let repo = PathBuf::from(repo);
     let stub = TopologyStub::new("sleep 30", 0);
     let _ = run_with(&topology_options(&repo), &BorrowedTopologyStub(&stub));
 }
