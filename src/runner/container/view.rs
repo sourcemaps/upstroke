@@ -877,7 +877,8 @@ mod tests {
 
         let other = root.join("other");
         let (other_head, other_previous) = repository(&other);
-        let installed = git_reading_replacements(&other, &["replace", &other_head, &other_previous]);
+        let installed =
+            git_reading_replacements(&other, &["replace", &other_head, &other_previous]);
         assert_eq!(installed.code, Some(0), "{installed:?}");
         let replaced = git_reading_replacements(&other, &["show", "HEAD:second.txt"]);
         assert_ne!(
