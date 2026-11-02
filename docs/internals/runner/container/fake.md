@@ -785,8 +785,9 @@ What `observing_covers` recorded, in start order.
 ## `struct State` › `unresolved_removals: BTreeSet<String>,`
 
 Containers whose removal the fake answers with `RuntimeError::Unresolved`,
-after it removed them: the shape a `DockerCli` removal takes when its
-attached client could not be established gone.
+combined with the removal's own outcome by the same `combined_removal` as
+`DockerCli`'s: the shape a `DockerCli` removal takes when its attached client
+could not be established gone.
 
 ## `impl FakeRuntime` › `pub(crate) fn leave_a_process_unresolved_at_removal(&self, name: &str) {`
 

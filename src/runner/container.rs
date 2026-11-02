@@ -1387,6 +1387,26 @@ fn delivery_verdict(
     }
 }
 
+fn combined_removal(
+    removed: Result<Settled, RuntimeError>,
+    client: Result<(), RuntimeError>,
+) -> Result<Settled, RuntimeError> {
+    match (removed, client) {
+        (removed, Ok(())) => removed,
+        (Ok(_), Err(client)) => Err(client),
+        (Err(removal), Err(RuntimeError::Unresolved { operation, detail })) => {
+            Err(RuntimeError::Unresolved {
+                operation,
+                detail: format!("{detail}; and the container's own removal failed: {removal}"),
+            })
+        }
+        (Err(removal), Err(client)) => Err(RuntimeError::Failed {
+            operation: removal.operation(),
+            detail: format!("{removal}; and its attached client: {client}"),
+        }),
+    }
+}
+
 fn docker_command(args: &[&str]) -> Command {
     let mut command = Command::new(DOCKER_PROGRAM);
     command.args(args);
@@ -1820,8 +1840,7 @@ impl ContainerRuntime for DockerCli {
             ),
             |target| self.observe(target),
         );
-        let settled = self.settle_removed_client(name);
-        removed.and_then(|removed| settled.map(|()| removed))
+        combined_removal(removed, self.settle_removed_client(name))
     }
 }
 

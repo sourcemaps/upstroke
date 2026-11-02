@@ -259,6 +259,22 @@ of a container observed exited is a failure with `container_gone` false,
 naming the unresolved process, and the view and the intent stay for the next
 census. The control: the same release without it releases.
 
+## `fn a_removal_keeps_an_unresolved_client_over_an_ordinary_removal_failure() {`
+
+Root's combined-removal follow-through, the combination itself. A failed
+removal and an unresolved client make an `Unresolved` answer carrying both
+diagnostics; a successful removal does not settle an unresolved client. The
+controls: a settled client keeps the ordinary removal error, and success
+stays success.
+
+## `fn an_ordinary_removal_failure_never_masks_an_unresolved_client() {`
+
+The same at the release seam. With the removal failing and the client
+unresolved, after an observed exit and after a stop alike, the release does
+not count the container gone, names both failures, and keeps the view and
+the intent. The control: with the client settled, the ordinary removal error
+is the release's, and the observed exit keeps its fate.
+
 ## `fn the_docker_create_arguments_carry_a_user_and_an_open_stdin_only_when_the_spec_does() {`
 
 The `docker create` argv, read with no daemon (`docker_create_arguments`). A

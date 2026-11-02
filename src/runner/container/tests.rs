@@ -724,6 +724,114 @@ fn a_removal_that_leaves_a_process_unresolved_releases_nothing_as_gone() {
 }
 
 #[test]
+fn a_removal_keeps_an_unresolved_client_over_an_ordinary_removal_failure() {
+    use super::combined_removal;
+
+    let removal_failed = || {
+        Err(RuntimeError::Failed {
+            operation: RuntimeOp::Remove,
+            detail: "the daemon refused the removal".to_owned(),
+        })
+    };
+    let client_unresolved = || {
+        Err(RuntimeError::Unresolved {
+            operation: RuntimeOp::Remove,
+            detail: "the attached client may still be running".to_owned(),
+        })
+    };
+
+    let both = combined_removal(removal_failed(), client_unresolved());
+    assert!(
+        matches!(
+            &both,
+            Err(RuntimeError::Unresolved { detail, .. })
+                if detail.contains("may still be running")
+                    && detail.contains("the daemon refused the removal")
+        ),
+        "the stronger unresolved fact survives, and both diagnostics stay: {both:?}"
+    );
+    assert!(
+        matches!(
+            combined_removal(Ok(Settled::ProcessGone), client_unresolved()),
+            Err(RuntimeError::Unresolved { .. })
+        ),
+        "a removal that succeeded does not settle an unresolved client"
+    );
+    assert_eq!(
+        combined_removal(removal_failed(), Ok(())),
+        removal_failed(),
+        "the control: a settled client keeps the ordinary removal error"
+    );
+    assert_eq!(
+        combined_removal(Ok(Settled::ProcessGone), Ok(())),
+        Ok(Settled::ProcessGone)
+    );
+}
+
+#[test]
+fn an_ordinary_removal_failure_never_masks_an_unresolved_client() {
+    use super::{ContainerToRelease, release_classified};
+
+    for (case, released_from, unresolved) in [
+        ("observed exited", ContainerToRelease::ObservedExited, true),
+        ("after a stop", ContainerToRelease::MayBeRunning, true),
+        ("control", ContainerToRelease::ObservedExited, false),
+    ] {
+        let fixture = Fixture::new(
+            &format!("removal-masks-{}", case.replace(' ', "-")),
+            RUN_A,
+            INCARNATION_1,
+            &shell_probe(),
+        );
+        let mut hooks = fixture.hooks();
+        let launched =
+            launch(&mut hooks, &fixture.runtime, &fixture.view, &fixture.plan).expect("launched");
+        fixture.runtime.set_failing(RuntimeOp::Remove);
+        if unresolved {
+            fixture
+                .runtime
+                .leave_a_process_unresolved_at_removal(launched.name.as_str());
+        }
+        let failure = release_classified(
+            &mut hooks,
+            &fixture.runtime,
+            &fixture.view,
+            &fixture.root,
+            &launched,
+            released_from,
+        )
+        .expect_err("a removal that failed is not a release");
+        let message = failure.error.to_string();
+        if unresolved {
+            assert!(
+                !failure.container_gone,
+                "{case}: the unresolved client is not masked by the removal's own failure"
+            );
+            assert!(
+                message.contains("could not establish every process")
+                    && message.contains("the container's own removal failed"),
+                "{case}: both diagnostics: {message}"
+            );
+            assert!(
+                launched.view_path.exists() && launched.intent_path.exists(),
+                "{case}: the view and the intent stay for the next census"
+            );
+        } else {
+            assert!(
+                failure.container_gone,
+                "{case}: with the exit observed and no client unresolved, the release keeps \
+                 its established fate"
+            );
+            assert!(
+                message.contains("the container could not be removed")
+                    && !message.contains("could not establish every process"),
+                "{case}: the ordinary removal error: {message}"
+            );
+        }
+    }
+}
+
+#[test]
 fn the_docker_create_arguments_carry_a_user_and_an_open_stdin_only_when_the_spec_does() {
     let mut spec = CreateSpec {
         name: "upstroke-a-b-c-d".to_owned(),

@@ -663,20 +663,22 @@ impl FakeRuntime {
         if entered.is_ok() {
             self.kill_process(name);
         }
-        let settled = super::settle_remove(name, entered, |target| self.observe(target))?;
-        if settled.process_gone() {
+        let removed = super::settle_remove(name, entered, |target| self.observe(target));
+        if removed.as_ref().is_ok_and(|settled| settled.process_gone()) {
             self.state().containers.remove(name);
         }
-        if self.state().unresolved_removals.contains(name) {
-            return Err(RuntimeError::Unresolved {
+        let client = if self.state().unresolved_removals.contains(name) {
+            Err(RuntimeError::Unresolved {
                 operation: RuntimeOp::Remove,
                 detail: format!(
                     "the fake left a process of `{name}` unresolved at its removal, as an \
                      attached client whose supervision could not establish it gone would"
                 ),
-            });
-        }
-        Ok(settled)
+            })
+        } else {
+            Ok(())
+        };
+        super::combined_removal(removed, client)
     }
 
     fn observe_cover(&self, name: &str, labels: &BTreeMap<String, String>) {

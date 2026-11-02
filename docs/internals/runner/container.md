@@ -1476,6 +1476,17 @@ Judge a settled client against its container's exit:
 A client that died with the container's own code would read as the first
 case; that residue is accepted and named here.
 
+## `fn combined_removal(`
+
+One removal's answer from its two outcomes, the container's and its attached
+client's (root's combined-removal follow-through). A settled client leaves
+the container's answer as it was, success or ordinary failure. An unresolved
+client is never masked: after a successful removal it is the answer, and
+after a failed one it is still `RuntimeError::Unresolved`, carrying both
+diagnostics. So `cancel_reached` sees an unresolved process even when the
+container's own removal failed after a stop or an observed exit, and keeps
+the view and the intent.
+
 ## `fn docker_command(args: &[&str]) -> Command {`
 
 The one builder of a `docker` child. Every container operation's
@@ -1768,10 +1779,11 @@ domination census in `exec::tests` pins every `RuntimeOp::Start` in
 production to this method, and this keeps that true while the attached
 path lives in a function of its own.
 
-## `fn remove(&self, name: &str) -> Result<Settled, RuntimeError> {` › `let settled = self.settle_removed_client(name);`
+## `fn remove(&self, name: &str) -> Result<Settled, RuntimeError> {` › `combined_removal(removed, self.settle_removed_client(name))`
 
 After the container is removed, its attached client, if one is still owned,
-is settled. A removal that could not settle it is not a success.
+is settled, and the two outcomes are combined (`combined_removal`). A
+removal that could not settle the client is not a success.
 
 ## `fn docker_create_arguments(spec: &CreateSpec) -> Vec<String> {` › `args.push("--read-only".to_owned());`
 
