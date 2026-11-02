@@ -17681,8 +17681,7 @@ fn the_topology_stubs_edit_appends_one_line_per_run_under_the_native_shell() {
             ))
             .expect("the native shell runs the stub's edit");
         assert_eq!(output.code, Some(0), "run {runs}: {output:?}");
-        let text = fs::read_to_string(workspace.join("agent-output.txt"))
-            .expect("the edit's file");
+        let text = fs::read_to_string(workspace.join("agent-output.txt")).expect("the edit's file");
         assert_eq!(
             text.lines().collect::<Vec<_>>(),
             vec!["edited by the topology stub"; runs],
