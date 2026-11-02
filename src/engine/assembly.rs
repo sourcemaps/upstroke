@@ -1,6 +1,5 @@
 //! Extended notes: `docs/internals/engine/assembly.md`
 
-#![cfg_attr(not(test), allow(dead_code))]
 #![forbid(
     clippy::disallowed_methods,
     clippy::disallowed_types,
