@@ -1197,12 +1197,6 @@ impl AttachedClient {
     }
 }
 
-impl Drop for AttachedClient {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::SeqCst);
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ClientEnd {
     Exited(Option<i32>),

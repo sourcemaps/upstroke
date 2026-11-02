@@ -1360,6 +1360,13 @@ One attached start's client: the funnel's stop flag, and the thread that
 runs the funnel, whose result is the client's terminal state. Kept until
 that result is taken (`into_end`).
 
+It has no `Drop` of its own: `src/runner/container.rs` is a classified
+module, a `drop` would be one more externally reachable name for
+`effects/wrappers.toml`, and the funnel already bounds the client without
+one. A client whose runtime is dropped before anything settles it is
+stopped by its funnel at its backstop, the invocation's deadline plus two
+`CLIENT_GRACE`s, and reaped there; nothing reports success meanwhile.
+
 ## `impl AttachedClient` › `fn has_ended(&self) -> bool {`
 
 Whether the funnel has returned: the client has ended and been reaped.
@@ -1375,12 +1382,6 @@ The client's terminal state, from the funnel's own result: exited with a
 code, stopped (asked to, or at its backstop), or failed, which carries the
 funnel's error and the process fate it established. A wait, a write or an
 attach that failed is a failure here, never an exit with no code.
-
-## `impl Drop for AttachedClient {`
-
-A client dropped before its end was taken, as when the runtime is dropped,
-is asked to stop. Its funnel then terminates and reaps it on its own thread:
-nothing is left running, and nothing reports success.
 
 ## `enum ClientEnd {`
 
