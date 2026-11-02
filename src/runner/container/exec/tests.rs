@@ -7415,6 +7415,11 @@ fn every_container_start_in_production_is_reached_only_through_a_covered_launch(
             ),
             (
                 "src/runner/container.rs".to_owned(),
+                "RuntimeOp::Create".to_owned(),
+                Some("create".to_owned())
+            ),
+            (
+                "src/runner/container.rs".to_owned(),
                 "RuntimeOp::Start".to_owned(),
                 Some("start".to_owned())
             ),
