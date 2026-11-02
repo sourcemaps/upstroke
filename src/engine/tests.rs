@@ -18423,6 +18423,245 @@ fn topology_signalled_child() {
     let _ = run_with(&topology_options(&repo), &BorrowedTopologyStub(&stub));
 }
 
+/// A gate that builds a repository of its own in a temporary directory, installs
+/// a blob replacement there, and passes only if Git honours it. Under a
+/// process-wide replacement setting (`ObjectGraph::Recorded`, the old schema-4
+/// host composition) it fails; under the managed repository's conditional
+/// include (`ObjectGraph::RecordedIn`) it passes.
+const UNRELATED_REPOSITORY_GATE: &str = "\n[[gates]]\nname = \"unrelated-replacement\"\n\
+     cmd = 'd=$(mktemp -d) && git -C \"$d\" init -q && printf \"one\\n\" > \"$d/f\" && \
+     git -C \"$d\" add f && git -C \"$d\" -c user.name=gate -c user.email=gate@upstroke.local \
+     commit -qm one && a=$(git -C \"$d\" rev-parse HEAD:f) && \
+     b=$(printf \"replaced\\n\" | git -C \"$d\" hash-object -w --stdin) && \
+     git -C \"$d\" replace \"$a\" \"$b\" && test \"$(git -C \"$d\" show HEAD:f)\" = replaced; \
+     s=$?; rm -rf \"$d\"; exit $s'\n";
+
+/// P12-W6 (with P12-W19's composition half): both public paths run their roles
+/// on the managed repository's recorded graph and leave every other repository's
+/// replacements alone. The managed repository pins `core.useReplaceRefs = true`
+/// and replaces the committed probe blob; one gate reads the snapshot's bytes,
+/// one reads through the object graph, and one builds an unrelated repository
+/// whose replacement must hold, which a process-wide setting would defeat.
+#[test]
+fn a_schema_4_run_and_resume_read_the_recorded_graph_and_leave_other_repositories_theirs() {
+    let status = crate::workspace_manager::fixture::run_replacement_witness_child(
+        "engine::tests::topology_object_graph_helper",
+    );
+    assert!(
+        status.success(),
+        "the child drives a schema-4 `engine::run_with` and `engine::resume_with` over a \
+         repository whose committed probe blob carries a replacement, and ended {status:?}"
+    );
+}
+
+#[test]
+#[ignore = "subprocess helper"]
+fn topology_object_graph_helper() {
+    if std::env::var_os(crate::workspace_manager::fixture::REPLACEMENT_WITNESS).is_none() {
+        return;
+    }
+    crate::workspace_manager::fixture::assert_replacement_controls_pinned("topology-object-graph");
+    let config = format!(
+        "[interaction]\nmode = \"never\"\n\n{V1_OBJECT_GRAPH_GATES}{UNRELATED_REPOSITORY_GATE}"
+    );
+
+    let (_tree, repo) = replaced_probe_repo("topographrun", WORKER_ONLY_PLAN, &config);
+    let mut opts = topology_options(&repo);
+    opts.config_path = Some(repo.join("upstroke.toml"));
+    let stub = TopologyStub::new(TOPOLOGY_STUB_EDIT, 0);
+    let report = run_with(&opts, &BorrowedTopologyStub(&stub)).expect("the fresh run");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:?}");
+    assert!(committed(&report, "t1"), "{report:?}");
+
+    let (_tree, repo) = replaced_probe_repo("topographresume", WORKER_ONLY_PLAN, &config);
+    let mut opts = topology_options(&repo);
+    opts.config_path = Some(repo.join("upstroke.toml"));
+    let stub = TopologyStub::new(TOPOLOGY_STUB_EDIT, 1);
+    let parked = run_with(&opts, &BorrowedTopologyStub(&stub)).expect("the first run");
+    assert_eq!(parked.outcome(), RunOutcome::Parked, "{parked:?}");
+    until_released(&repo, &parked.run_id);
+    let question = parked
+        .questions
+        .first()
+        .expect("a question was raised")
+        .question
+        .id
+        .to_string();
+    crate::answer::answer(
+        &repo,
+        &question,
+        crate::answer::Reply::Text("the first".to_owned()),
+    )
+    .expect("the answer");
+    let mut resume = resume_options(&repo, &parked.run_id);
+    resume.private_root = None;
+    resume.config_path = Some(repo.join("upstroke.toml"));
+    let resumed = resume_with(&resume, &BorrowedTopologyStub(&stub)).expect("the resume");
+    assert_eq!(resumed.outcome(), RunOutcome::Complete, "{resumed:?}");
+    assert!(committed(&resumed, "t1"), "{resumed:?}");
+}
+
+const INHERITED_RUN_ID: &str = "UPSTROKE_INHERITED_RUN_ID";
+
+/// P12-W7: a schema-4 run in a checkout whose environment carries a relative
+/// `GIT_COMMON_DIR`, through a linked registry, completes, and its gate sees the
+/// run's common directory as the absolute path it names.
+#[cfg(unix)]
+#[test]
+fn a_schema_4_run_under_a_relative_common_dir_completes_and_its_roles_see_the_absolute_one() {
+    let tree = temp_engine_scratch("topology-relative-common");
+    let root = tree.path();
+    let repo = root.join("source/a/b/c/d/repo");
+    fs::create_dir_all(&repo).expect("the repository, six levels below the scratch root");
+    git_in(&repo, &["init", "-q", "-b", "main"]);
+    git_in(&repo, &["config", "user.email", "test@upstroke.local"]);
+    git_in(&repo, &["config", "user.name", "upstroke tests"]);
+    git_in(&repo, &["config", "maintenance.auto", "false"]);
+    fs::write(repo.join("README.md"), "seed\n").expect("seed");
+    git_in(&repo, &["add", "-A"]);
+    git_in(&repo, &["commit", "-q", "-m", "seed"]);
+    let common = root.join("common");
+    let expected = fs::canonicalize(root)
+        .expect("the scratch root canonicalizes")
+        .join("common");
+    seed(
+        &repo,
+        WORKER_ONLY_PLAN,
+        Some(&format!(
+            "[[gates]]\nname = \"common-dir\"\n\
+             cmd = 'case \"$GIT_COMMON_DIR\" in /*) ;; *) exit 1 ;; esac; \
+             test \"$(cd \"$GIT_COMMON_DIR\" && pwd -P)\" = \"{}\"'\n",
+            expected.display()
+        )),
+    );
+    copy_tree_for_a_layout(&repo.join(".git"), &common);
+    let other = root.join("other");
+    link_the_registry_into(&common.join("worktrees"), &repo, &other);
+    let private = root.join("private");
+    fs::create_dir(&private).expect("the private root, one level below the scratch root");
+    let before = other_repository_bytes(&other);
+    let ended = crate::agent::proc::test_support::run_test_isolated(
+        "engine::tests::relative_common_dir_topology_helper",
+        &[
+            (
+                "GIT_COMMON_DIR",
+                std::ffi::OsStr::new("../../../../../../common"),
+            ),
+            (INHERITED_RUN_ROOT, repo.as_os_str()),
+            (INHERITED_RUN_PRIVATE, private.as_os_str()),
+        ],
+        Duration::from_secs(300),
+    );
+    assert!(
+        ended.status.is_some_and(|status| status.success()) && ended.stdout.contains("1 passed"),
+        "the schema-4 run under a relative GIT_COMMON_DIR completed: {ended}"
+    );
+    assert!(
+        other_repository_bytes(&other) == before,
+        "the other repository's objects and refs are byte-identical"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "subprocess helper"]
+fn relative_common_dir_topology_helper() {
+    let Some(repo) = std::env::var_os(INHERITED_RUN_ROOT).map(PathBuf::from) else {
+        return;
+    };
+    let private = PathBuf::from(std::env::var_os(INHERITED_RUN_PRIVATE).expect("the private root"));
+    let mut opts = options(&repo);
+    opts.legacy_writer = false;
+    opts.config_path = Some(repo.join("upstroke.toml"));
+    opts.private_root = Some(private);
+    let stub = TopologyStub::new(TOPOLOGY_STUB_EDIT, 0);
+    let report = run_with(&opts, &BorrowedTopologyStub(&stub)).expect("the run");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:?}");
+    assert!(committed(&report, "t1"), "{report:?}");
+    assert_eq!(
+        first_line_of_the_log(&repo, &report.run_id)["data"]["schema"],
+        4,
+        "a schema-4 run"
+    );
+}
+
+/// P12-W8: a relative `GIT_OBJECT_DIRECTORY` refuses a schema-4 run and the
+/// resume of a schema-4 run before any lock. The parent holds the worktree lock
+/// across the child, so a command that reached the lock would refuse as the
+/// lock's, not as the relative name's.
+#[cfg(unix)]
+#[test]
+fn a_relative_object_directory_refuses_a_schema_4_run_and_its_resume_before_any_lock() {
+    let (_tree, repo) = temp_engine_repo("topology-relative-objects");
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        1,
+    )));
+    let parked = run_with(&topology_options(&repo), &source).expect("the run parks");
+    until_released(&repo, &parked.run_id);
+    let held = WorktreeLock::acquire(&repo).expect("the held-lock control");
+    let ended = crate::agent::proc::test_support::run_test_isolated(
+        "engine::tests::relative_object_directory_topology_helper",
+        &[
+            ("GIT_OBJECT_DIRECTORY", std::ffi::OsStr::new("relative/objects")),
+            (INHERITED_RUN_ROOT, repo.as_os_str()),
+            (INHERITED_RUN_ID, std::ffi::OsStr::new(&parked.run_id)),
+        ],
+        Duration::from_secs(300),
+    );
+    drop(held);
+    assert!(
+        ended.status.is_some_and(|status| status.success()) && ended.stdout.contains("1 passed"),
+        "both public paths refused the relative GIT_OBJECT_DIRECTORY before the lock: {ended}"
+    );
+    drop(WorktreeLock::acquire(&repo).expect("no-leak check: no worktree lock is left held"));
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "subprocess helper"]
+fn relative_object_directory_topology_helper() {
+    let Some(repo) = std::env::var_os(INHERITED_RUN_ROOT).map(PathBuf::from) else {
+        return;
+    };
+    let run_id = std::env::var_os(INHERITED_RUN_ID)
+        .and_then(|id| id.into_string().ok())
+        .expect("the parked run's id");
+    let names = |repo: &Path| {
+        let mut names: Vec<String> = fs::read_dir(rundir::runs_root(repo))
+            .expect("the runs root")
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    };
+    let runs = names(&repo);
+    let log = rundir::public_dir(&repo, &run_id).join("events.jsonl");
+    let before = fs::read(&log).expect("the parked run's log");
+    let stub = TopologyStub::new(TOPOLOGY_STUB_EDIT, 0);
+
+    let refused = run_with(&topology_options(&repo), &BorrowedTopologyStub(&stub))
+        .expect_err("a relative GIT_OBJECT_DIRECTORY refuses a fresh schema-4 run");
+    let said = refused.to_string();
+    assert!(
+        said.contains("GIT_OBJECT_DIRECTORY") && !said.contains("already driving worktree"),
+        "{said}"
+    );
+    assert_eq!(names(&repo), runs, "the refused run created a run directory");
+
+    let mut resume = resume_options(&repo, &run_id);
+    resume.private_root = None;
+    let refused = resume_with(&resume, &BorrowedTopologyStub(&stub))
+        .expect_err("a relative GIT_OBJECT_DIRECTORY refuses the schema-4 resume");
+    let said = refused.to_string();
+    assert!(
+        said.contains("GIT_OBJECT_DIRECTORY") && !said.contains("already driving worktree"),
+        "{said}"
+    );
+    assert_eq!(fs::read(&log).expect("the log"), before, "the refused resume wrote");
+}
+
 // ---------------------------------------------------------------------------
 // PR12 S10: the read commands over a schema-4 log (D1, D3, D10)
 // ---------------------------------------------------------------------------
