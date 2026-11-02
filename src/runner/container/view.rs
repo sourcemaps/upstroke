@@ -349,7 +349,9 @@ fn copy_shared_indexes(git_dir: &Path, view: &Path) -> Result<Vec<String>, Upstr
 }
 
 fn config_for(layout: &GitLayout) -> Result<String, UpstrokeError> {
-    let mut config = String::from("[core]\n\tbare = false\n\tlogallrefupdates = false\n");
+    let mut config = String::from(
+        "[core]\n\tbare = false\n\tlogallrefupdates = false\n\tuseReplaceRefs = false\n",
+    );
     let source = match fs::read_to_string(layout.common_dir.join("config")) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
@@ -483,6 +485,34 @@ pub(crate) mod fixtures {
             .expect("git runs through the host runner")
     }
 
+    /// `git` under a role environment that carries no process-wide replacement
+    /// setting at all: what a container role's environment composes since PR12's
+    /// Q2 remedy, and what Git reads with nothing deciding for it.
+    pub(crate) fn git_reading_replacements(cwd: &Path, args: &[&str]) -> ProcessOutput {
+        let mut spec = CommandSpec::new("git");
+        for arg in args {
+            spec = spec.arg(*arg);
+        }
+        HostRunner::new()
+            .with_environment(
+                crate::runner::host::HostEnvironment::from_process()
+                    .reading(crate::runner::host::ObjectGraph::AsReplaced),
+            )
+            .run_blocking(&gate_request(
+                spec,
+                cwd.to_path_buf(),
+                Duration::from_secs(60),
+                InvocationId::attempt(
+                    TaskKey(0),
+                    GenerationId(0),
+                    AttemptNumber(1),
+                    AttemptRole::Gate(0),
+                    0,
+                ),
+            ))
+            .expect("git runs through the host runner")
+    }
+
     pub(crate) fn git_ok(cwd: &Path, args: &[&str]) -> String {
         let output = git(cwd, args);
         assert_eq!(
@@ -540,7 +570,9 @@ pub(crate) mod fixtures {
 
 #[cfg(test)]
 mod tests {
-    use super::fixtures::{engine_refs, git, git_ok, repository, scratch, worktree};
+    use super::fixtures::{
+        engine_refs, git, git_ok, git_reading_replacements, repository, scratch, worktree,
+    };
     use super::*;
     use crate::runner::container::runtime::TraceEntry;
 
@@ -786,6 +818,80 @@ mod tests {
                 "the projection is missing `{entry}`"
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_view_config_refuses_replacements_and_an_unrelated_repository_keeps_them() {
+        let tree = scratch("view-replacements");
+        let root = tree.path();
+        let repo = root.join("repo");
+        let (head, previous) = repository(&repo);
+        let config_before =
+            std::fs::read(repo.join(".git").join("config")).expect("the repository's config");
+        let workspace = root.join("tasks").join("k0-g0");
+        worktree(&repo, &workspace, &head);
+
+        let view_path = root.join("view");
+        RoleGitView::new(ContainerTrace::off())
+            .materialize(&GitViewRequest {
+                path: view_path.clone(),
+                workspace: workspace.clone(),
+                head: None,
+            })
+            .expect("materializes");
+        let config = std::fs::read_to_string(view_path.join("config")).expect("the view's config");
+        assert!(
+            config.contains("useReplaceRefs = false"),
+            "the generated view config: {config}"
+        );
+
+        let work = workspace.to_string_lossy().into_owned();
+        let in_view = |git_dir: &Path, args: &[&str]| -> crate::agent::ProcessOutput {
+            let dir = git_dir.to_string_lossy().into_owned();
+            let mut all = vec!["--git-dir", dir.as_str(), "--work-tree", work.as_str()];
+            all.extend_from_slice(args);
+            git_reading_replacements(&workspace, &all)
+        };
+        // The view is writable, so a role can install a replacement inside it.
+        let planted = in_view(&view_path, &["replace", &head, &previous]);
+        assert_eq!(planted.code, Some(0), "the role's replacement: {planted:?}");
+        assert!(
+            in_view(&view_path, &["for-each-ref", "--format=%(refname)"])
+                .stdout
+                .contains("refs/replace/"),
+            "the control: the replacement is in the view"
+        );
+
+        let alias = root.join("view-alias");
+        std::os::unix::fs::symlink(&view_path, &alias).expect("another spelling of the view");
+        for spelling in [&view_path, &alias] {
+            let read = in_view(spelling, &["show", "HEAD:second.txt"]);
+            assert_eq!(
+                (read.code, read.stdout.as_str()),
+                (Some(0), "two\n"),
+                "{}: the managed repository's view read the replacement: {read:?}",
+                spelling.display()
+            );
+        }
+
+        let other = root.join("other");
+        let (other_head, other_previous) = repository(&other);
+        let installed = git_reading_replacements(&other, &["replace", &other_head, &other_previous]);
+        assert_eq!(installed.code, Some(0), "{installed:?}");
+        let replaced = git_reading_replacements(&other, &["show", "HEAD:second.txt"]);
+        assert_ne!(
+            replaced.code,
+            Some(0),
+            "an unrelated repository's own replacement was not honoured under the same \
+             environment: {replaced:?}"
+        );
+
+        assert_eq!(
+            std::fs::read(repo.join(".git").join("config")).expect("the repository's config"),
+            config_before,
+            "the user's repository configuration changed"
+        );
     }
 
     #[test]

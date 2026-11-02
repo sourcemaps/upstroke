@@ -422,6 +422,15 @@ borrows: a `sha256` repository read as `sha1` is a repository read wrong,
 and an unknown extension declared is a Git that refuses loudly instead of
 one that misreads.
 
+**`useReplaceRefs = false`** (PR12, Q2): the view states the recorded-object
+policy for the managed repository itself. A role reads the objects the
+repository records through its view, under any spelling of the view's path,
+without a process-wide `GIT_NO_REPLACE_OBJECTS` that would also take every
+other repository's replacements away (`env.md`, `compose`). The view is
+writable and repository configuration is outranked by command-line and
+environment configuration, so this is the policy for the view, not a
+tamper-proof boundary; see `env.md` for the scope limit.
+
 ## `pub(crate) mod fixtures {`
 
 -- test-only declarations ----------------------------------------------
