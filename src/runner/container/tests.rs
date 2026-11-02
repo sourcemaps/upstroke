@@ -546,7 +546,7 @@ fn an_unresolved_attached_client_stays_unresolved_through_every_settlement() {
     use crate::agent::proc::ProcessFailure;
     use crate::error::ProcessFate;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::AtomicBool;
 
     fn ended(
         stop: Arc<AtomicBool>,
@@ -940,14 +940,20 @@ fn the_delivery_verdict_tells_an_early_exit_from_a_broken_attach() {
         (ClientEnd::Exited(None), Some(0), "the attach broke"),
         (ClientEnd::Stopped, Some(0), "was stopped"),
         (
-            ClientEnd::Failed("writing its input: Input/output error".to_owned()),
+            ClientEnd::Failed {
+                fate: crate::error::ProcessFate::Gone,
+                error: "writing its input: Input/output error".to_owned(),
+            },
             Some(0),
-            "failed: writing its input",
+            "failed (its process is gone): writing its input",
         ),
         (
-            ClientEnd::Failed("waiting on agent process: interrupted".to_owned()),
+            ClientEnd::Failed {
+                fate: crate::error::ProcessFate::Unresolved,
+                error: "waiting on agent process: interrupted".to_owned(),
+            },
             Some(0),
-            "failed: waiting",
+            "failed (a process of it may still be running): waiting",
         ),
     ] {
         let verdict = delivery_verdict("c", &end, exited);
