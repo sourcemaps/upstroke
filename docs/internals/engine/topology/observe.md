@@ -76,15 +76,27 @@ One line per event for `--follow`: its timestamp, its kind, and for the
 attempt, question, merge and finish events the task (by display id) and the
 detail an operator watches for.
 
-## `pub fn find_open_question(repo_root: &Path, wanted: &str) -> QuestionLookup {`
+## `pub fn open_question_candidates(repo_root: &Path, runs: &[String], wanted: &str) -> OpenCandidates {`
 
-D3: the open questions of every schema-4 run, from the fold, by full id or
-unambiguous prefix, ASCII case-insensitive as the legacy finder is. A run
-whose log cannot be observed is carried as unread rather than dropped, so a
-lone prefix match is unambiguous only where every run was read; a full id
-still answers. A question the log records as raised and no longer open is
-`Closed`, so `answer` can say so instead of "not found". There is no
-question-payload file: root withdrew that option.
+D3: what the schema-4 runs among the caller's runs hold for a typed id, as
+structure rather than as a verdict or a sentence (root's correction
+PR12-ANSWER-CROSS-SCHEMA-PREFIX, 7021b42d): the open question whose full id it
+is; the open questions whose id begins with it; the questions a log records as
+raised and no longer open whose id is it or begins with it; and the runs whose
+log could not be observed, carried rather than dropped. ASCII
+case-insensitive, as the legacy finder is. A legacy log observes as `None` and
+contributes nothing here. There is no question-payload file: root withdrew
+that option.
+
+**Nothing here decides.** `answer::decide` weighs these candidates together
+with the legacy question files of the same runs, so neither finder's lone match
+stands for the other's. The runs come from the caller: `answer` passes the
+committed directories of its one census, so both finders walk the same set.
+
+**A settled question stays a candidate for a prefix**, as a legacy question's
+file stays one once it is answered: a prefix it shares with an open question of
+either schema is ambiguous rather than that open question's, so an id typed
+for a question that has since settled cannot land an answer on another.
 
 ## `pub fn check_reply(asked: &OpenAsked, answer: &crate::ir::Answer) -> Result<(), UpstrokeError> {`
 

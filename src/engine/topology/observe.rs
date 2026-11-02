@@ -202,14 +202,6 @@ impl Observed {
             .unwrap_or_default()
     }
 
-    #[must_use]
-    pub fn raised(&self, id: &str) -> bool {
-        self.events
-            .iter()
-            .filter_map(question_opened_by)
-            .any(|question| question.id.0.eq_ignore_ascii_case(id))
-    }
-
     fn asked(&self, open: &OpenQuestion) -> OpenAsked {
         let frozen = &open.question;
         OpenAsked {
@@ -375,68 +367,76 @@ pub struct FoundOpen {
     pub asked: OpenAsked,
 }
 
-pub enum QuestionLookup {
-    Found(FoundOpen),
-    Closed { run_id: String, question_id: String },
-    Ambiguous(Vec<String>),
-    Absent { unread: Vec<String> },
+pub struct OpenCandidates {
+    pub exact: Option<FoundOpen>,
+    pub prefixed: Vec<FoundOpen>,
+    pub settled: Vec<SettledQuestion>,
+    pub unread: Vec<String>,
 }
 
-pub fn find_open_question(repo_root: &Path, wanted: &str) -> QuestionLookup {
+pub struct SettledQuestion {
+    pub run_id: String,
+    pub question_id: String,
+}
+
+impl OpenCandidates {
+    #[must_use]
+    pub fn is_silent(&self) -> bool {
+        self.exact.is_none()
+            && self.prefixed.is_empty()
+            && self.settled.is_empty()
+            && self.unread.is_empty()
+    }
+}
+
+pub fn open_question_candidates(repo_root: &Path, runs: &[String], wanted: &str) -> OpenCandidates {
     let wanted_upper = wanted.to_ascii_uppercase();
-    let mut exact: Option<FoundOpen> = None;
-    let mut by_prefix: Vec<FoundOpen> = Vec::new();
-    let mut closed: Option<(String, String)> = None;
-    let mut unread: Vec<String> = Vec::new();
-    for run_id in rundir::list_runs(repo_root) {
-        let observed = match observe(repo_root, &run_id) {
+    let answers_to = |id: &str| id.to_ascii_uppercase().starts_with(&wanted_upper);
+    let mut candidates = OpenCandidates {
+        exact: None,
+        prefixed: Vec::new(),
+        settled: Vec::new(),
+        unread: Vec::new(),
+    };
+    for run_id in runs {
+        let observed = match observe(repo_root, run_id) {
             Ok(Some(observed)) => observed,
             Ok(None) => continue,
             Err(_) => {
-                unread.push(run_id);
+                candidates.unread.push(run_id.clone());
                 continue;
             }
         };
-        for asked in observed.open_questions() {
-            let id = asked.question.id.0.clone();
+        let open = observed.open_questions();
+        for raised in observed.events.iter().filter_map(question_opened_by) {
+            let id = raised.id.as_str();
+            let still_open = open.iter().any(|asked| asked.question.id == raised.id);
+            let listed = candidates
+                .settled
+                .iter()
+                .any(|settled| settled.run_id == *run_id && settled.question_id == id);
+            if answers_to(id) && !still_open && !listed {
+                candidates.settled.push(SettledQuestion {
+                    run_id: run_id.clone(),
+                    question_id: id.to_owned(),
+                });
+            }
+        }
+        for asked in open {
+            let id = asked.question.id.as_str().to_owned();
             let found = FoundOpen {
                 run_id: run_id.clone(),
                 paths: observed.paths().clone(),
                 asked,
             };
             if id.eq_ignore_ascii_case(wanted) {
-                exact = Some(found);
-            } else if id.to_ascii_uppercase().starts_with(&wanted_upper) {
-                by_prefix.push(found);
+                candidates.exact = Some(found);
+            } else if answers_to(&id) {
+                candidates.prefixed.push(found);
             }
         }
-        if closed.is_none() && observed.raised(wanted) {
-            closed = Some((run_id.clone(), wanted.to_owned()));
-        }
     }
-    if let Some(found) = exact {
-        return QuestionLookup::Found(found);
-    }
-    if by_prefix.len() == 1 && unread.is_empty() {
-        if let Some(found) = by_prefix.pop() {
-            return QuestionLookup::Found(found);
-        }
-    }
-    if by_prefix.len() > 1 {
-        return QuestionLookup::Ambiguous(
-            by_prefix
-                .iter()
-                .map(|found| found.asked.question.id.0.clone())
-                .collect(),
-        );
-    }
-    if let Some((run_id, question_id)) = closed {
-        return QuestionLookup::Closed {
-            run_id,
-            question_id,
-        };
-    }
-    QuestionLookup::Absent { unread }
+    candidates
 }
 
 pub fn check_reply(asked: &OpenAsked, answer: &crate::ir::Answer) -> Result<(), UpstrokeError> {

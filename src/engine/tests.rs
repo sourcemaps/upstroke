@@ -18848,6 +18848,364 @@ fn a_parked_schema_4_question_is_shown_answered_once_and_ingested_on_resume() {
     assert!(late.to_string().contains("no longer open"), "{late}");
 }
 
+/// A committed legacy (schema-3) run whose public half holds one open question
+/// file, as `answer`'s own suite seeds one: the first line is written by hand, so
+/// the fixture pins the wire rather than agreeing with the writer.
+fn legacy_question_run(repo: &Path, run_id: &str, question_id: &str) {
+    let public = rundir::public_dir(repo, run_id);
+    let questions = public.join("questions");
+    fs::create_dir_all(&questions).expect("the legacy run's questions directory");
+    fs::write(
+        public.join("events.jsonl"),
+        format!(
+            "{{\"ts\":\"2026-08-20T00:00:00Z\",\"event\":\"run_started\",\
+             \"data\":{{\"schema\":3,\"run_id\":\"{run_id}\"}}}}\n"
+        ),
+    )
+    .expect("the legacy run's committed first line");
+    let record = QuestionRecord::open(Question {
+        id: QuestionId::from(question_id),
+        kind: QuestionKind::Unblock,
+        affected_tasks: vec![TaskId::from("t1")],
+        context: format!("the legacy question {question_id}"),
+        options: vec!["retry".to_owned(), interaction::GIVE_UP_OPTION.to_owned()],
+    });
+    interaction::write_question(&questions, &record).expect("the legacy question file");
+}
+
+/// Every answer file under every run directory of `repo`.
+fn answer_files(repo: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    for run_id in rundir::run_dir_names(repo) {
+        let Ok(entries) = fs::read_dir(rundir::public_dir(repo, &run_id).join("answers")) else {
+            continue;
+        };
+        files.extend(entries.flatten().map(|entry| entry.path()));
+    }
+    files
+}
+
+/// `answer` and `show` for one typed id, as the one result both refuse with.
+fn answer_and_show(repo: &Path, wanted: &str) -> [Result<String, UpstrokeError>; 2] {
+    [
+        crate::answer::answer(
+            repo,
+            wanted,
+            crate::answer::Reply::Text("the first".to_owned()),
+        )
+        .map(|answered| answered.question_id),
+        crate::answer::show(repo, wanted),
+    ]
+}
+
+/// PR12-ANSWER-CROSS-SCHEMA-PREFIX (root, 7021b42d). A prefix two legacy
+/// questions share with a parked schema-4 question selects none of them:
+/// `answer` and `show` refuse it, naming all three, and write nothing; so does a
+/// prefix one legacy question shares with it. Each full id still answers, and a
+/// prefix only one question carries is still that question's.
+///
+/// `L` is not a Crockford base32 digit, so no question id a run mints continues
+/// a prefix with it: each legacy id below leaves the schema-4 id exactly where
+/// its `LEGACY` begins.
+#[test]
+fn a_prefix_two_legacy_questions_share_with_a_schema_4_question_selects_none_of_them() {
+    let (_tree, repo) = temp_engine_repo("topology-answer-cross-prefix");
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        1,
+    )));
+    let parked = run_with(&topology_options(&repo), &source).expect("the run parks");
+    assert_eq!(parked.outcome(), RunOutcome::Parked, "{parked:#?}");
+    until_released(&repo, &parked.run_id);
+    let [asked] = parked.questions.as_slice() else {
+        panic!("one question: {parked:#?}");
+    };
+    let id = asked.question.id.to_string();
+    let prefix = &id[..id.len() - 6];
+    let first = format!("{prefix}LEGACY-A");
+    let second = format!("{prefix}LEGACY-B");
+    let near = &id[..id.len() - 2];
+    let third = format!("{near}LEGACY-C");
+    legacy_question_run(&repo, "00LEGACYA", &first);
+    legacy_question_run(&repo, "00LEGACYB", &second);
+
+    for refused in answer_and_show(&repo, prefix) {
+        let message = refused
+            .expect_err("a prefix three questions share selects none")
+            .to_string();
+        assert!(message.contains("matches 3 questions"), "{message}");
+        for named in [&id, &first, &second] {
+            assert!(message.contains(named.as_str()), "{named}: {message}");
+        }
+    }
+    legacy_question_run(&repo, "00LEGACYC", &third);
+    for refused in answer_and_show(&repo, near) {
+        let message = refused
+            .expect_err("a prefix a legacy and a schema-4 question share selects neither")
+            .to_string();
+        assert!(message.contains("matches 2 questions"), "{message}");
+        for named in [&id, &third] {
+            assert!(message.contains(named.as_str()), "{named}: {message}");
+        }
+    }
+    for refused in answer_and_show(&repo, &format!("{prefix}LEGACY-")) {
+        let message = refused
+            .expect_err("two legacy questions, as today")
+            .to_string();
+        assert!(message.contains("matches 2 questions"), "{message}");
+    }
+    assert_eq!(
+        answer_files(&repo),
+        Vec::<PathBuf>::new(),
+        "a refused id wrote an answer"
+    );
+
+    let shown = crate::answer::show(&repo, &id[..id.len() - 1])
+        .expect("a prefix only the schema-4 question carries");
+    assert!(shown.contains("widget formats"), "{shown}");
+    let shown = crate::answer::show(&repo, &id).expect("the schema-4 question by its full id");
+    assert!(shown.contains("widget formats"), "{shown}");
+    for legacy in [&first, &second, &third] {
+        let shown = crate::answer::show(&repo, legacy).expect("a legacy question by its full id");
+        assert!(
+            shown.contains(&format!("the legacy question {legacy}")),
+            "{shown}"
+        );
+    }
+    let recorded = crate::answer::answer(
+        &repo,
+        &first,
+        crate::answer::Reply::Text("the first".to_owned()),
+    )
+    .expect("a legacy question answered by its full id");
+    assert_eq!(
+        (recorded.run_id.as_str(), recorded.question_id.as_str()),
+        ("00LEGACYA", first.as_str())
+    );
+    let recorded = crate::answer::answer(
+        &repo,
+        &id,
+        crate::answer::Reply::Text("the first".to_owned()),
+    )
+    .expect("the schema-4 question answered by its full id");
+    assert_eq!(
+        (recorded.run_id.as_str(), recorded.question_id.as_str()),
+        (parked.run_id.as_str(), id.as_str())
+    );
+    let message = crate::answer::show(&repo, prefix)
+        .expect_err("an answered question is still a candidate")
+        .to_string();
+    assert!(message.contains("matches 4 questions"), "{message}");
+    for named in [&id, &first, &second, &third] {
+        assert!(message.contains(named.as_str()), "{named}: {message}");
+    }
+}
+
+/// PR12-ANSWER-CROSS-SCHEMA-PREFIX, the inverse: a prefix two parked schema-4
+/// questions share selects neither, and once a legacy question shares it too it
+/// selects none of the three. Each full id still answers.
+#[cfg(unix)]
+#[test]
+fn a_prefix_one_legacy_question_shares_with_two_schema_4_questions_selects_none_of_them() {
+    let (_tree, repo) = temp_engine_repo("topology-answer-cross-inverse");
+    seed(
+        &repo,
+        TWO_INDEPENDENT_TASKS,
+        Some("[engine]\nmax_parallel = 2\n"),
+    );
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        2,
+    )));
+    let parked = run_with(&topology_options(&repo), &source).expect("the run parks");
+    assert_eq!(parked.outcome(), RunOutcome::Parked, "{parked:#?}");
+    until_released(&repo, &parked.run_id);
+    let [one, two] = parked.questions.as_slice() else {
+        panic!("both tasks asked: {parked:#?}");
+    };
+    let (one, two) = (one.question.id.to_string(), two.question.id.to_string());
+    let shared: String = one
+        .chars()
+        .zip(two.chars())
+        .take_while(|(left, right)| left == right)
+        .map(|(left, _)| left)
+        .collect();
+    assert!(
+        shared.starts_with("q-") && shared.len() < one.len().min(two.len()),
+        "the fixture's premise: two ids that share a proper prefix ({one}, {two})"
+    );
+
+    for refused in answer_and_show(&repo, &shared) {
+        let message = refused
+            .expect_err("a prefix two schema-4 questions share selects neither")
+            .to_string();
+        assert!(message.contains("matches 2 questions"), "{message}");
+    }
+    let legacy = format!("{shared}LEGACY");
+    legacy_question_run(&repo, "00LEGACY", &legacy);
+    for refused in answer_and_show(&repo, &shared) {
+        let message = refused
+            .expect_err("a prefix three questions share selects none")
+            .to_string();
+        assert!(message.contains("matches 3 questions"), "{message}");
+        for named in [&one, &two, &legacy] {
+            assert!(message.contains(named.as_str()), "{named}: {message}");
+        }
+    }
+    assert_eq!(
+        answer_files(&repo),
+        Vec::<PathBuf>::new(),
+        "a refused id wrote an answer"
+    );
+    for full in [&one, &two] {
+        let shown = crate::answer::show(&repo, full).expect("a schema-4 question by its full id");
+        assert!(shown.contains("widget formats"), "{shown}");
+    }
+    let shown = crate::answer::show(&repo, &legacy).expect("the legacy question by its full id");
+    assert!(
+        shown.contains(&format!("the legacy question {legacy}")),
+        "{shown}"
+    );
+}
+
+/// PR12-ANSWER-CROSS-SCHEMA-PREFIX, the unread census: a schema-4 run whose log
+/// cannot be observed is carried into the decision rather than dropped from it,
+/// so a prefix that only a legacy question carries among the runs that could be
+/// read is refused, naming the run that could not, and nothing is written. The
+/// legacy question's full id still answers. The log is made unobservable the way
+/// a resume's refusal witness makes it unresumable: the frozen plan no longer
+/// digests to what the record says.
+#[test]
+fn a_schema_4_run_that_cannot_be_read_keeps_a_lone_legacy_prefix_from_answering() {
+    let (_tree, repo) = temp_engine_repo("topology-answer-cross-unread");
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        1,
+    )));
+    let parked = run_with(&topology_options(&repo), &source).expect("the run parks");
+    assert_eq!(parked.outcome(), RunOutcome::Parked, "{parked:#?}");
+    until_released(&repo, &parked.run_id);
+    let [asked] = parked.questions.as_slice() else {
+        panic!("one question: {parked:#?}");
+    };
+    let id = asked.question.id.to_string();
+    let legacy = "q-LEGACY-ONLY";
+    legacy_question_run(&repo, "00LEGACY", legacy);
+    let shown =
+        crate::answer::show(&repo, "q-LEGACY").expect("a lone legacy prefix, every run read");
+    assert!(shown.contains("the legacy question q-LEGACY-ONLY"), "{shown}");
+
+    let plan = rundir::public_dir(&repo, &parked.run_id).join("plan.normalized.json");
+    let frozen = fs::read(&plan).expect("the frozen plan");
+    let mut altered = frozen.clone();
+    altered.extend_from_slice(b" ");
+    fs::write(&plan, &altered).expect("an altered frozen plan");
+    assert!(
+        crate::engine::topology::observe::observe(&repo, &parked.run_id).is_err(),
+        "the premise: the schema-4 log cannot be observed"
+    );
+    for refused in answer_and_show(&repo, "q-LEGACY") {
+        let message = refused
+            .expect_err("a lone legacy prefix beside a run that could not be read")
+            .to_string();
+        assert!(
+            message.contains(
+                "matches one question (q-LEGACY-ONLY) among the runs that could be read"
+            ),
+            "{message}"
+        );
+        assert!(
+            message.contains(&format!("the log of run `{}` could not be read", parked.run_id)),
+            "{message}"
+        );
+    }
+    let message = crate::answer::show(&repo, &id)
+        .expect_err("a question in a run that could not be read is not found")
+        .to_string();
+    assert!(message.contains("no question with that id"), "{message}");
+    assert!(message.contains(&parked.run_id), "{message}");
+    assert_eq!(
+        answer_files(&repo),
+        Vec::<PathBuf>::new(),
+        "a refused id wrote an answer"
+    );
+    let recorded = crate::answer::answer(
+        &repo,
+        legacy,
+        crate::answer::Reply::Text("the first".to_owned()),
+    )
+    .expect("the legacy question's full id still answers");
+    assert_eq!(recorded.run_id, "00LEGACY");
+
+    fs::write(&plan, &frozen).expect("the frozen plan restored");
+    let shown = crate::answer::show(&repo, &id[..id.len() - 6])
+        .expect("read again, the schema-4 question answers to its prefix");
+    assert!(shown.contains("widget formats"), "{shown}");
+}
+
+/// PR12-ANSWER-CROSS-SCHEMA-PREFIX, settled questions: a schema-4 question its
+/// log has settled stays a candidate for a prefix, as a legacy question's file
+/// stays one once answered, so a prefix it shares with a legacy question selects
+/// neither; alone, or by its full id, it refuses as no longer open.
+#[test]
+fn a_settled_schema_4_question_still_counts_against_a_prefix_and_takes_no_answer() {
+    let (_tree, repo) = temp_engine_repo("topology-answer-cross-settled");
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        1,
+    )));
+    let parked = run_with(&topology_options(&repo), &source).expect("the run parks");
+    assert_eq!(parked.outcome(), RunOutcome::Parked, "{parked:#?}");
+    until_released(&repo, &parked.run_id);
+    let [asked] = parked.questions.as_slice() else {
+        panic!("one question: {parked:#?}");
+    };
+    let id = asked.question.id.to_string();
+    crate::answer::answer(
+        &repo,
+        &id,
+        crate::answer::Reply::Text("the first".to_owned()),
+    )
+    .expect("the answer is recorded");
+    let mut resume = resume_options(&repo, &parked.run_id);
+    resume.private_root = None;
+    let report = resume_with(&resume, &source).expect("the resume completes the run");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:#?}");
+    until_released(&repo, &parked.run_id);
+
+    let prefix = &id[..id.len() - 6];
+    let legacy = format!("{prefix}LEGACY");
+    legacy_question_run(&repo, "00LEGACY", &legacy);
+    for refused in answer_and_show(&repo, prefix) {
+        let message = refused
+            .expect_err("a prefix a settled question shares selects neither")
+            .to_string();
+        assert!(message.contains("matches 2 questions"), "{message}");
+        for named in [&id, &legacy] {
+            assert!(message.contains(named.as_str()), "{named}: {message}");
+        }
+    }
+    for wanted in [&id[..id.len() - 1], id.as_str()] {
+        for refused in answer_and_show(&repo, wanted) {
+            let message = refused
+                .expect_err("the settled question takes no answer")
+                .to_string();
+            assert!(message.contains("no longer open"), "{wanted}: {message}");
+        }
+    }
+    assert!(
+        !rundir::public_dir(&repo, "00LEGACY")
+            .join("answers")
+            .exists(),
+        "a refused id wrote an answer"
+    );
+    let shown = crate::answer::show(&repo, &legacy).expect("the legacy question by its full id");
+    assert!(
+        shown.contains(&format!("the legacy question {legacy}")),
+        "{shown}"
+    );
+}
+
 /// Three tasks in flight from one base. The two in slots `k0` and `k1` both
 /// create `shared.txt` with different contents, and the one in `k2` writes a file
 /// of its own: whichever merges first, a later candidate is stale and clean (a
