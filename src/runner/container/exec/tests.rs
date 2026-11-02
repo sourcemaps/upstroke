@@ -1341,7 +1341,19 @@ fn an_own_settings_file_that_is_not_a_regular_file_of_the_runs_settings_director
     let a_directory = settings.join("t1-2.json");
     std::fs::create_dir(&a_directory).expect("a directory where a settings file would be");
     let elsewhere = fixture.paths.transcripts().join("k0-a1.md");
-    let mut cases = vec![
+    #[cfg(unix)]
+    let a_link = {
+        let a_link = settings.join("t1-3.json");
+        std::os::unix::fs::symlink(&elsewhere, &a_link).expect("a link to a private artifact");
+        Some((
+            "a link in the settings directory to a private artifact",
+            a_link,
+            "not a regular file",
+        ))
+    };
+    #[cfg(not(unix))]
+    let a_link = None;
+    let cases = [
         (
             "a directory in the settings directory",
             a_directory,
@@ -1352,17 +1364,9 @@ fn an_own_settings_file_that_is_not_a_regular_file_of_the_runs_settings_director
             elsewhere.clone(),
             "not a file of the run's settings directory",
         ),
-    ];
-    #[cfg(unix)]
-    {
-        let a_link = settings.join("t1-3.json");
-        std::os::unix::fs::symlink(&elsewhere, &a_link).expect("a link to a private artifact");
-        cases.push((
-            "a link in the settings directory to a private artifact",
-            a_link,
-            "not a regular file",
-        ));
-    }
+    ]
+    .into_iter()
+    .chain(a_link);
     for (case, own, why) in cases {
         let request = worker_request(
             naming_its_settings(&own),

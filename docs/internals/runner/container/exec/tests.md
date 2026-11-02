@@ -305,7 +305,9 @@ The file identity root's D-A keeps. Recorded metadata naming a directory in
 the settings directory, a link there to a private transcript (Unix), or a
 file elsewhere in the private half refuses the plan, each for its reason, and
 before any effect. The control is the regular file the invocation
-materialized, which plans.
+materialized, which plans. The link case is built on Unix only and chained in
+as an `Option`, so a Windows build compiles the list without a mutable binding
+it never mutates (V225 found the `unused_mut` the earlier spelling left there).
 
 ## `#[cfg(target_os = "linux")]` › `fn effective_ids() -> ContainerUser {`
 

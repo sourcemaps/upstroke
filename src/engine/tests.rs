@@ -18437,6 +18437,7 @@ fn topology_signalled_child() {
 /// process-wide replacement setting (`ObjectGraph::Recorded`, the old schema-4
 /// host composition) it fails; under the managed repository's conditional
 /// include (`ObjectGraph::RecordedIn`) it passes.
+#[cfg(unix)]
 const UNRELATED_REPOSITORY_GATE: &str = "\n[[gates]]\nname = \"unrelated-replacement\"\n\
      cmd = 'd=$(mktemp -d) && git -C \"$d\" init -q && printf \"one\\n\" > \"$d/f\" && \
      git -C \"$d\" add f && git -C \"$d\" -c user.name=gate -c user.email=gate@upstroke.local \
@@ -18451,6 +18452,7 @@ const UNRELATED_REPOSITORY_GATE: &str = "\n[[gates]]\nname = \"unrelated-replace
 /// and replaces the committed probe blob; one gate reads the snapshot's bytes,
 /// one reads through the object graph, and one builds an unrelated repository
 /// whose replacement must hold, which a process-wide setting would defeat.
+#[cfg(unix)]
 #[test]
 fn a_schema_4_run_and_resume_read_the_recorded_graph_and_leave_other_repositories_theirs() {
     let status = crate::workspace_manager::fixture::run_replacement_witness_child(
@@ -18463,6 +18465,7 @@ fn a_schema_4_run_and_resume_read_the_recorded_graph_and_leave_other_repositorie
     );
 }
 
+#[cfg(unix)]
 #[test]
 #[ignore = "subprocess helper"]
 fn topology_object_graph_helper() {
