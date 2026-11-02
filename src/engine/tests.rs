@@ -18028,11 +18028,11 @@ fn a_schema_4_run_publishes_its_records_in_order_and_records_one_runner() {
 
     let public = rundir::public_dir(&repo, &report.run_id);
     let log = fs::read(public.join("events.jsonl")).expect("the log");
-    let first_line = &log[..log.iter().position(|byte| *byte == b'\n').expect("a first line")];
-    let digest = format!(
-        "{:x}",
-        <sha2::Sha256 as sha2::Digest>::digest(first_line)
-    );
+    let first_line = &log[..log
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .expect("a first line")];
+    let digest = format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(first_line));
     let committed: serde_json::Value =
         serde_json::from_slice(&fs::read(private.join("committed.json")).expect("committed.json"))
             .expect("committed.json parses");
@@ -18052,14 +18052,24 @@ fn a_schema_4_run_publishes_its_records_in_order_and_records_one_runner() {
         .lines()
         .filter_map(|line| {
             let event: serde_json::Value = serde_json::from_str(line).expect("an event");
-            (event["event"] == "task_merged")
-                .then(|| event["data"]["merged_sha"].as_str().unwrap_or_default().to_owned())
+            (event["event"] == "task_merged").then(|| {
+                event["data"]["merged_sha"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned()
+            })
         })
         .next_back()
         .expect("a task merged");
     assert_eq!(
-        git_in(&repo, &["rev-parse", &format!("refs/heads/upstroke/run-{}", report.run_id)])
-            .trim(),
+        git_in(
+            &repo,
+            &[
+                "rev-parse",
+                &format!("refs/heads/upstroke/run-{}", report.run_id)
+            ]
+        )
+        .trim(),
         last_merge,
         "the integration ref holds the last merge the log records"
     );
@@ -18142,7 +18152,10 @@ fn a_resume_selects_its_reader_by_the_logs_header_and_refuses_before_any_lock() 
     let legacy_log = rundir::public_dir(&repo, &legacy.run_id).join("events.jsonl");
     let original = fs::read_to_string(&legacy_log).expect("the legacy log");
     assert!(
-        original.lines().next().is_some_and(|line| line.contains("\"schema\":3")),
+        original
+            .lines()
+            .next()
+            .is_some_and(|line| line.contains("\"schema\":3")),
         "the legacy writer wrote schema 3"
     );
     for schema in [1, 2, 3] {
@@ -18151,7 +18164,10 @@ fn a_resume_selects_its_reader_by_the_logs_header_and_refuses_before_any_lock() 
         header["data"]["schema"] = serde_json::json!(schema);
         fs::write(
             &legacy_log,
-            format!("{}\n{rest}", serde_json::to_string(&header).expect("a header")),
+            format!(
+                "{}\n{rest}",
+                serde_json::to_string(&header).expect("a header")
+            ),
         )
         .expect("a schema-{schema} header");
         assert!(
@@ -18172,7 +18188,9 @@ fn a_resume_selects_its_reader_by_the_logs_header_and_refuses_before_any_lock() 
     let mut resume = resume_options(&repo, &topology.run_id);
     resume.private_root = None;
     assert!(
-        route_resume(&resume).expect("a schema-4 header routes").is_some(),
+        route_resume(&resume)
+            .expect("a schema-4 header routes")
+            .is_some(),
         "schema 4 resumes on the topology's lines"
     );
 
@@ -18180,9 +18198,11 @@ fn a_resume_selects_its_reader_by_the_logs_header_and_refuses_before_any_lock() 
     let bytes = fs::read_to_string(&log).expect("the schema-4 log");
     let (first, rest) = bytes.split_once('\n').expect("a first line");
     let mut header: serde_json::Value = serde_json::from_str(first).expect("the header");
-    header["data"]["schema"] =
-        serde_json::json!(crate::topology::schema::MAX_READABLE_SCHEMA + 1);
-    let newer = format!("{}\n{rest}", serde_json::to_string(&header).expect("a header"));
+    header["data"]["schema"] = serde_json::json!(crate::topology::schema::MAX_READABLE_SCHEMA + 1);
+    let newer = format!(
+        "{}\n{rest}",
+        serde_json::to_string(&header).expect("a header")
+    );
     fs::write(&log, &newer).expect("a newer header");
     let refused = resume_with(&resume, &source).expect_err("a newer schema refuses");
     assert!(
@@ -18200,8 +18220,11 @@ fn a_resume_selects_its_reader_by_the_logs_header_and_refuses_before_any_lock() 
     let torn_id = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
     let torn = rundir::public_dir(&repo, torn_id);
     fs::create_dir_all(&torn).expect("a run directory");
-    fs::write(torn.join("events.jsonl"), "{\"ts\":\"2026-11-02T00:00:00Z\",\"ev")
-        .expect("a header that never committed");
+    fs::write(
+        torn.join("events.jsonl"),
+        "{\"ts\":\"2026-11-02T00:00:00Z\",\"ev",
+    )
+    .expect("a header that never committed");
     let refused = resume_with(&resume_options(&repo, torn_id), &source)
         .expect_err("a log whose header did not commit is no run");
     assert!(
@@ -18242,11 +18265,20 @@ fn a_schema_4_resume_refuses_a_missing_private_half_or_a_changed_plan_and_warns_
     fs::rename(&private, &away).expect("the private half moved away");
     let refused = resume_with(&resume, &source).expect_err("no private half");
     assert!(
-        refused.to_string().contains("which is not a directory here"),
+        refused
+            .to_string()
+            .contains("which is not a directory here"),
         "{refused}"
     );
-    assert!(!private.exists(), "the resume created the missing private half");
-    assert_eq!(fs::read(&log).expect("the log"), before, "the refused resume wrote");
+    assert!(
+        !private.exists(),
+        "the resume created the missing private half"
+    );
+    assert_eq!(
+        fs::read(&log).expect("the log"),
+        before,
+        "the refused resume wrote"
+    );
     fs::rename(&away, &private).expect("the private half restored");
 
     let plan = public.join("plan.normalized.json");
@@ -18256,7 +18288,11 @@ fn a_schema_4_resume_refuses_a_missing_private_half_or_a_changed_plan_and_warns_
     fs::write(&plan, &altered).expect("an altered frozen plan");
     let refused = resume_with(&resume, &source).expect_err("an altered frozen plan");
     assert!(refused.to_string().contains("digests to"), "{refused}");
-    assert_eq!(fs::read(&log).expect("the log"), before, "the refused resume wrote");
+    assert_eq!(
+        fs::read(&log).expect("the log"),
+        before,
+        "the refused resume wrote"
+    );
     fs::write(&plan, &frozen).expect("the frozen plan restored");
 
     let today = tree.path().join("today.toml");
@@ -18264,8 +18300,11 @@ fn a_schema_4_resume_refuses_a_missing_private_half_or_a_changed_plan_and_warns_
     resume.config_path = Some(today);
     let resumed = resume_with(&resume, &source).expect("the resume runs");
     assert!(
-        resumed.warnings.iter().any(|warning| warning
-            .contains("`max_parallel = 3` differs from the `max_parallel = 1`")),
+        resumed
+            .warnings
+            .iter()
+            .any(|warning| warning
+                .contains("`max_parallel = 3` differs from the `max_parallel = 1`")),
         "{:?}",
         resumed.warnings
     );
@@ -18328,7 +18367,11 @@ fn a_schema_4_run_ended_by_a_signal_mid_attempt_resumes_and_settles_the_attempt(
         let mut resume = resume_options(&repo, &run_id);
         resume.private_root = None;
         let report = resume_with(&resume, &source).expect("the resume continues the run");
-        assert_eq!(report.outcome(), RunOutcome::Complete, "SIG{signal}: {report:#?}");
+        assert_eq!(
+            report.outcome(),
+            RunOutcome::Complete,
+            "SIG{signal}: {report:#?}"
+        );
         let resumed = fs::read_to_string(&log).expect("the log");
         assert!(
             resumed.starts_with(&killed),
@@ -18445,7 +18488,11 @@ fn a_schema_4_status_reads_the_committed_prefix_and_leaves_the_log_as_it_found_i
     ] {
         assert!(rendered.contains(&expected), "`{expected}` in:\n{rendered}");
     }
-    assert_eq!(fs::read(&log).expect("the log"), torn, "status changed the log's bytes");
+    assert_eq!(
+        fs::read(&log).expect("the log"),
+        torn,
+        "status changed the log's bytes"
+    );
     assert_eq!(
         fs::metadata(&log)
             .and_then(|metadata| metadata.modified())
@@ -18595,10 +18642,15 @@ fn a_schema_4_export_keeps_todays_rows_and_joins_a_repair_task_to_the_registry()
         "the fixture's premise: a candidate's merge was rejected ({kinds:?})"
     );
     assert!(
-        kinds.iter().any(|kind| kind == "merge_verification_started"),
+        kinds
+            .iter()
+            .any(|kind| kind == "merge_verification_started"),
         "and verifications ran ({kinds:?})"
     );
-    let starts = kinds.iter().filter(|kind| *kind == "attempt_started").count();
+    let starts = kinds
+        .iter()
+        .filter(|kind| *kind == "attempt_started")
+        .count();
 
     let loaded = crate::export::load(&repo, &report.run_id).expect("the schema-4 export loads");
     assert_eq!(
@@ -18645,5 +18697,9 @@ fn a_schema_4_export_keeps_todays_rows_and_joins_a_repair_task_to_the_registry()
         csv.starts_with("schema_version,run_id,upstroke_version,run_started_at,"),
         "{csv}"
     );
-    assert_eq!(csv.lines().count(), starts + 1, "a header and one line per attempt");
+    assert_eq!(
+        csv.lines().count(),
+        starts + 1,
+        "a header and one line per attempt"
+    );
 }
