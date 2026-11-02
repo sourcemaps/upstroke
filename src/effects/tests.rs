@@ -3279,10 +3279,19 @@ fn the_denylist_names_every_primitive_the_packet_enumerates() {
              DECLARATION and not in the file",
         ),
         (
+            "src/engine/topology/entry.rs",
+            "the schema-4 production entry (PR12): it composes the existing \
+             `DockerCli`/`ContainerRuntime` and `ContainerRunner` -- the production \
+             runtime handed to the pre-lock resolution, the startup census, recovery \
+             and the container runner. It starts no process itself; every runtime \
+             call still runs through `src/runner/container.rs`, the subprocess funnel",
+        ),
+        (
             "src/runner/container.rs",
             "the Container funnel: `FunnelGroup::Container.module()`, the one \
-             production file that may reach a container runtime, and the one \
-             `Command::new(` row in `every_production_process_start_is_classified`",
+             production file that runs a container runtime (the schema-4 entry \
+             composes one and runs nothing), and the one `Command::new(` row in \
+             `every_production_process_start_is_classified`",
         ),
         (
             "src/runner/container/exec/tests.rs",
