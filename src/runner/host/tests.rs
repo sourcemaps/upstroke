@@ -6119,13 +6119,14 @@ fn a_refused_name_is_refused_identically_without_asking_the_filesystem_again() {
 
 #[test]
 fn production_reaches_a_spawn_through_one_host_runner_per_run() {
-    const SITES: [(&str, usize); 6] = [
+    const SITES: [(&str, usize); 7] = [
         ("src/engine/mod.rs", 0),
         ("src/engine/coordinator.rs", 1),
         ("src/engine/resume.rs", 1),
         ("src/engine/attempt.rs", 0),
         ("src/engine/preflight.rs", 0),
         ("src/engine/options.rs", 0),
+        ("src/engine/topology/entry.rs", 1),
     ];
     let sources = [
         ("src/engine/mod.rs", include_str!("../../engine/mod.rs")),
@@ -6148,6 +6149,10 @@ fn production_reaches_a_spawn_through_one_host_runner_per_run() {
         (
             "src/engine/options.rs",
             include_str!("../../engine/options.rs"),
+        ),
+        (
+            "src/engine/topology/entry.rs",
+            include_str!("../../engine/topology/entry.rs"),
         ),
     ];
     assert_eq!(
@@ -6215,11 +6220,16 @@ fn production_control() {
         ),
         (include_str!("../../engine/resume.rs"), "fn resume_harness("),
     ];
+    // Each conductor's body, to the first `}` that closes an item at column 0: since
+    // PR12 the legacy construction follows the schema-4 dispatch in the same body,
+    // and the schema-4 run's one construction is `engine/topology/entry.rs`'s, which
+    // the table above counts.
     for (conductor, facade) in conductors {
         let engine = crate::effects::production_code(conductor);
         let after = engine
             .split_once(facade)
-            .map(|(_, rest)| rest.lines().take(8).collect::<Vec<_>>().join("\n"))
+            .and_then(|(_, rest)| rest.split_once("\n}\n"))
+            .map(|(body, _)| body.to_owned())
             .unwrap_or_default();
         assert!(
             CONSTRUCTORS

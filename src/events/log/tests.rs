@@ -2797,6 +2797,7 @@ fn the_stable_prefix_barrier_is_the_only_way_a_log_becomes_a_topology_fold() {
     const FOLD_ENTRIES: &[&str] = &["TopologyFold::replay(", "TopologyFold::parse_log("];
 
     const FOLD_MENTIONS: &[&str] = &[
+        "src/engine/report.rs",
         "src/engine/topology/candidate.rs",
         "src/engine/topology/closure.rs",
         "src/engine/topology/create.rs",
