@@ -359,7 +359,10 @@ fn schema_4_rows(
             _ => continue,
         };
         if settled.insert(id, event).is_some() {
-            return invalid(events_path, format!("duplicate settlement for {}", key_4(id)));
+            return invalid(
+                events_path,
+                format!("duplicate settlement for {}", key_4(id)),
+            );
         }
     }
 
@@ -380,21 +383,26 @@ fn schema_4_rows(
             TopologyEventBody::AttemptStarted { data } => {
                 let id = (data.key.0, data.generation.0, data.attempt.0);
                 if !seen.insert(id) {
-                    return invalid(events_path, format!("duplicate attempt start {}", key_4(id)));
+                    return invalid(
+                        events_path,
+                        format!("duplicate attempt start {}", key_4(id)),
+                    );
                 }
                 validate_timestamp(
                     events_path,
                     &format!("run `{run_id}`, {} start", key_4(id)),
                     &event.ts,
                 )?;
-                let entry = registry.get(data.key).ok_or_else(|| UpstrokeError::EventLog {
-                    path: events_path.to_path_buf(),
-                    message: format!(
-                        "attempt {} names task key {}, which the frozen registry does not hold",
-                        key_4(id),
-                        data.key.0
-                    ),
-                })?;
+                let entry = registry
+                    .get(data.key)
+                    .ok_or_else(|| UpstrokeError::EventLog {
+                        path: events_path.to_path_buf(),
+                        message: format!(
+                            "attempt {} names task key {}, which the frozen registry does not hold",
+                            key_4(id),
+                            data.key.0
+                        ),
+                    })?;
                 let origin = match overrides.get(&data.key.0) {
                     Some(binding)
                         if binding.agent == data.binding.agent

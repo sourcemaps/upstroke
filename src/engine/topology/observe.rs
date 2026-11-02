@@ -7,9 +7,7 @@ use crate::error::UpstrokeError;
 use crate::interaction::Sleeper;
 use crate::ir::{Question, TaskId};
 use crate::rundir::{self, RunPaths};
-use crate::topology::events::{
-    RunStarted4, RunnerKind, TopologyEvent, TopologyEventBody,
-};
+use crate::topology::events::{RunStarted4, RunnerKind, TopologyEvent, TopologyEventBody};
 use crate::topology::fold::{OpenQuestion, QuestionOrigin, TopologyFold};
 use crate::topology::registry::{TaskKey, TaskRegistry};
 use crate::topology::schema::{
@@ -123,8 +121,7 @@ fn checked_replay(
         path: log.to_path_buf(),
         message,
     };
-    let events =
-        TopologyFold::parse_log(committed).map_err(|error| refused(error.to_string()))?;
+    let events = TopologyFold::parse_log(committed).map_err(|error| refused(error.to_string()))?;
     let Some(TopologyEventBody::RunStarted { data: started }) =
         events.first().map(|event| &event.body)
     else {
@@ -140,8 +137,7 @@ fn checked_replay(
     }
     let paths = RunPaths::from_parts(public.to_path_buf(), PathBuf::from(&started.private_dir));
     let inputs = super::entry::frozen_inputs(&paths, started)?;
-    let fold =
-        TopologyFold::replay(inputs, &events).map_err(|error| refused(error.to_string()))?;
+    let fold = TopologyFold::replay(inputs, &events).map_err(|error| refused(error.to_string()))?;
     Ok((paths, events, fold))
 }
 
@@ -189,7 +185,10 @@ impl Observed {
     pub fn display_id(&self, key: TaskKey) -> String {
         self.registry()
             .and_then(|registry| registry.get(key))
-            .map_or_else(|| format!("k{}", key.0), |entry| entry.display_id.to_string())
+            .map_or_else(
+                || format!("k{}", key.0),
+                |entry| entry.display_id.to_string(),
+            )
     }
 
     #[must_use]

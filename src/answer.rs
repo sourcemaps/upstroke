@@ -97,18 +97,20 @@ fn reply_answer(question: &Question, reply: Reply) -> Result<Answer, UpstrokeErr
     let answer = match reply {
         Reply::Decline => Answer::Declined,
         Reply::Text(text) => interaction::interpret(question, &text),
-        Reply::Option(choice) => interaction::answer_for_option(question, choice).ok_or_else(
-            || UpstrokeError::Refused {
-                message: format!(
-                    "there is no option {choice} on this question; it offers {}",
-                    if question.options.is_empty() {
-                        "none (answer it in your own words instead)".to_owned()
-                    } else {
-                        format!("1-{}", question.options.len())
-                    }
-                ),
-            },
-        )?,
+        Reply::Option(choice) => {
+            interaction::answer_for_option(question, choice).ok_or_else(|| {
+                UpstrokeError::Refused {
+                    message: format!(
+                        "there is no option {choice} on this question; it offers {}",
+                        if question.options.is_empty() {
+                            "none (answer it in your own words instead)".to_owned()
+                        } else {
+                            format!("1-{}", question.options.len())
+                        }
+                    ),
+                }
+            })?
+        }
     };
     if answer == Answer::Unanswered {
         return Err(UpstrokeError::Refused {
@@ -162,10 +164,13 @@ fn locate(repo_root: &Path, wanted: &str) -> Result<Located, UpstrokeError> {
             ids.len(),
             ids.join(", ")
         ))),
-        (Err(_), QuestionLookup::Closed {
-            run_id,
-            question_id,
-        }) => Err(refused(format!(
+        (
+            Err(_),
+            QuestionLookup::Closed {
+                run_id,
+                question_id,
+            },
+        ) => Err(refused(format!(
             "question {question_id} of run {run_id} is no longer open: the run's log has \
              settled it, so an answer now would be applied to nothing. Nothing was written"
         ))),

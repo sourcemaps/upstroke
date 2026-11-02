@@ -4618,7 +4618,10 @@ fn legacy_status(status: &crate::status::Status) -> &crate::status::RunStatus {
     match status {
         crate::status::Status::Legacy(run) => run,
         crate::status::Status::Topology(run) => {
-            panic!("run `{}` read back as schema 4, not as a legacy run", run.run_id)
+            panic!(
+                "run `{}` read back as schema 4, not as a legacy run",
+                run.run_id
+            )
         }
     }
 }
@@ -4668,7 +4671,8 @@ impl Scenario {
 fn assert_live_equals_replay(repo: &Path, live: &RunState, report: &RunReport) {
     let replayed = replay_of(repo, &report.run_id);
     assert_eq!(
-        &legacy_status(&replayed).state, live,
+        &legacy_status(&replayed).state,
+        live,
         "replaying the log produced different state than the run that wrote it"
     );
 
@@ -4845,7 +4849,11 @@ fn an_aborting_error_still_leaves_a_replayable_log() {
     fs::write(paths.events(), format!("{}\n", lines[..cut].join("\n"))).expect("truncate");
 
     let replayed = replay_of(&repo, &report.run_id);
-    assert_eq!(legacy_status(&replayed).interrupted, 1, "the dangling attempt is settled");
+    assert_eq!(
+        legacy_status(&replayed).interrupted,
+        1,
+        "the dangling attempt is settled"
+    );
     assert!(
         legacy_status(&replayed).interrupted_run(),
         "and the run reads as interrupted rather than finished"
@@ -4920,9 +4928,13 @@ fn a_live_run_reads_as_running_rather_than_halted() {
     let lock = RunLock::acquire(&paths.public).expect("simulate a live engine");
 
     let live = replay_of(&repo, &report.run_id);
-    assert!(legacy_status(&live).running, "a held lock means an engine is driving this");
+    assert!(
+        legacy_status(&live).running,
+        "a held lock means an engine is driving this"
+    );
     assert_eq!(
-        legacy_status(&live).interrupted, 0,
+        legacy_status(&live).interrupted,
+        0,
         "an attempt in flight has not been interrupted"
     );
     let out = crate::status::render(&live);
@@ -6358,7 +6370,10 @@ fn status_reports_a_live_run_and_the_ledger_reads_from_the_log() {
     let report = run_with(&options(&repo), &source).expect("run");
 
     let loaded = replay_of(&repo, &report.run_id);
-    assert!(!legacy_status(&loaded).running, "nothing holds a finished run");
+    assert!(
+        !legacy_status(&loaded).running,
+        "nothing holds a finished run"
+    );
     assert!(!legacy_status(&loaded).interrupted_run());
 
     let rendered = crate::status::render(&loaded);
