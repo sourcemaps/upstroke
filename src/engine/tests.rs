@@ -19572,9 +19572,7 @@ fn a_task_budget_stop_projects_the_task_it_names() {
         "{data}"
     );
     assert!(
-        report
-            .render_ledger()
-            .contains(&format!("before `{task}`")),
+        report.render_ledger().contains(&format!("before `{task}`")),
         "the ledger names the task the stop was for: {}",
         report.render_ledger()
     );
