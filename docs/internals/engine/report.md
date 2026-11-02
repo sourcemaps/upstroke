@@ -238,9 +238,19 @@ stays the authority; this is the command's summary of the same run.
   satisfied it; a failed one carries its last attempt's failure; a task an
   open question names is parked on it; anything else is queued, or skipped
   when the run halted or stopped at a budget.
-- Each task's attempts are the `attempt_finished` records the log holds for
-  it, so the trail, the costs, the review models and the session are the
-  legacy report's derivations over the same record type.
+- Each task's attempts are the records the log holds for it, in log order:
+  `attempt_finished` for an attempt that did not succeed, and
+  `candidate_prepared` for one that did. The fold allows no other successful
+  settlement (`check_attempt`), and `select::Spend::replay` counts the same two
+  events. So the trail, the costs, the review models and the session are the
+  legacy report's derivations over the same record type, and the total is the
+  attempts' spend.
+
+  Until brief 3's S9 witness this read `attempt_finished` alone. A committed
+  task then showed no model, duration or cost, and the total left out every
+  successful attempt: the CLI's case F printed `total: $0.0000` beside a
+  budget stop that recorded $0.02. Merge-verification reviews are charged to
+  the run's spend but belong to no attempt, so they are not in this total.
 - `halted_at` and `budget_stop` are set only as the fold's own outcome says,
   so [`RunReport::outcome`] agrees with it; the entry compares the two and
   warns if they ever disagree.

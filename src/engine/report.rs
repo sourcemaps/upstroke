@@ -227,6 +227,12 @@ impl RunReport {
                         .or_default()
                         .push(data.record.as_ref().clone());
                 }
+                TopologyEventBody::CandidatePrepared { data } => {
+                    records
+                        .entry(data.key)
+                        .or_default()
+                        .push(data.attempt.as_ref().clone());
+                }
                 TopologyEventBody::BudgetExceeded { data } => exceeded = Some(data),
                 _ => {}
             }

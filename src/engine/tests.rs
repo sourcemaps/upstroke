@@ -19230,6 +19230,17 @@ fn log_events(repo: &Path, run_id: &str) -> Vec<serde_json::Value> {
         .collect()
 }
 
+/// How many attempts the log settles: `attempt_finished` for each one that did
+/// not succeed, `candidate_prepared` for each one that did.
+fn settled_attempts(events: &[serde_json::Value]) -> usize {
+    events
+        .iter()
+        .filter(|event| {
+            event["event"] == "attempt_finished" || event["event"] == "candidate_prepared"
+        })
+        .count()
+}
+
 /// The display id finalize's projection gives a task key.
 fn display_of(projected: &crate::engine::topology::report::TopologyReport, key: u64) -> String {
     projected
@@ -19339,6 +19350,11 @@ fn a_halted_schema_4_run_projects_where_it_halted_and_its_outcome() {
         matches!(status("t2"), TaskRunStatus::Skipped),
         "{report:#?}"
     );
+    assert_eq!(
+        report.tasks.iter().map(|task| task.attempts.len()).sum::<usize>(),
+        settled_attempts(&events),
+        "every attempt the log settles is in the report: {report:#?}"
+    );
 
     assert_eq!(projected.outcome, Some(crate::events::RunOutcome::Halted));
     assert_eq!(projected.halted_at.map(u64::from), Some(halted_key));
@@ -19415,6 +19431,27 @@ fn a_schema_4_run_stopped_at_its_budget_projects_the_stop_and_its_outcome() {
         "the fixture's premise: the first task spent before the stop: {data}"
     );
     assert!(report.halted_at.is_none(), "{report:#?}");
+    assert_eq!(
+        report.tasks.iter().map(|task| task.attempts.len()).sum::<usize>(),
+        settled_attempts(&events),
+        "every attempt the log settles is in the report, successful ones included: \
+         {report:#?}"
+    );
+    assert!(
+        (report.total_cost_usd - data["spent_usd"].as_f64().expect("a spend")).abs() < 1e-9,
+        "the report's total is the spend the stop records: {} against {data}",
+        report.total_cost_usd
+    );
+    for task in report
+        .tasks
+        .iter()
+        .filter(|task| matches!(task.status, TaskRunStatus::Committed { .. }))
+    {
+        assert!(
+            !task.model.is_empty() && task.cost_usd.is_some(),
+            "a committed task carries its successful attempt: {task:#?}"
+        );
+    }
     assert_eq!(
         projected.outcome,
         Some(crate::events::RunOutcome::BudgetExceeded)
