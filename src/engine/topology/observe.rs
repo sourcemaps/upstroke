@@ -329,12 +329,15 @@ impl Observed {
     }
 }
 
-fn question_opened_by(event: &TopologyEvent) -> Option<&FrozenQuestion> {
-    let spawned = |spawn: &FrozenSpawn| match &spawn.admission {
+fn spawn_question(spawn: &FrozenSpawn) -> Option<&FrozenQuestion> {
+    match &spawn.admission {
         SpawnAdmission::Runnable => None,
         SpawnAdmission::HumanRequired { question, .. }
         | SpawnAdmission::HumanBinding { question, .. } => Some(question),
-    };
+    }
+}
+
+fn question_opened_by(event: &TopologyEvent) -> Option<&FrozenQuestion> {
     match &event.body {
         TopologyEventBody::QuestionRaised { data } => Some(&data.question),
         TopologyEventBody::AttemptFinished { data } => match &data.settlement {
@@ -348,8 +351,8 @@ fn question_opened_by(event: &TopologyEvent) -> Option<&FrozenQuestion> {
             UnavailableOutcome::Parked { question } => Some(question),
             UnavailableOutcome::Deferred { .. } => None,
         },
-        TopologyEventBody::TaskSpawned { data } => spawned(&data.spawn),
-        TopologyEventBody::MergeRejected { data } => spawned(&data.repair),
+        TopologyEventBody::TaskSpawned { data } => spawn_question(&data.spawn),
+        TopologyEventBody::MergeRejected { data } => spawn_question(&data.repair),
         _ => None,
     }
 }
