@@ -129,6 +129,8 @@ pub struct RunReport {
     pub running: bool,
     #[serde(default)]
     pub interrupted: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub questions_in_log: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -386,6 +388,7 @@ impl RunReport {
             pool_drain,
             running: false,
             interrupted: outcome.is_none(),
+            questions_in_log: true,
         }
     }
 }
@@ -449,6 +452,7 @@ pub(super) fn build_report(header: ReportHeader<'_>, plan: &Plan, state: &RunSta
         pool_drain,
         running,
         interrupted,
+        questions_in_log: false,
     }
 }
 
@@ -727,14 +731,21 @@ impl RunReport {
                     )
                 ));
             }
-            out.push(format_args!(
-                "  payloads: {}",
-                std::path::Path::new(".upstroke")
-                    .join("runs")
-                    .join(&self.run_id)
-                    .join("questions")
-                    .display()
-            ));
+            if self.questions_in_log {
+                out.push(format_args!(
+                    "  each is in the run's log: `upstroke answer <question id>` shows and \
+                     answers it"
+                ));
+            } else {
+                out.push(format_args!(
+                    "  payloads: {}",
+                    std::path::Path::new(".upstroke")
+                        .join("runs")
+                        .join(&self.run_id)
+                        .join("questions")
+                        .display()
+                ));
+            }
         }
         out.push(format_args!(
             "total: ${:.4}{} (api-equivalent)",

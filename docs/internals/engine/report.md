@@ -173,6 +173,19 @@ rather than derived, exactly as `running` is.
 Not to be confused with `RunStatus::interrupted`, which is a `u32`
 counting the attempts that were cut off mid-flight. This is the yes/no.
 
+## `#[serde(default, skip_serializing_if = "std::ops::Not::not")]`
+
+`questions_in_log`: whether this run keeps its questions in its log rather
+than in payload files. A schema-1..3 run writes one file per question under
+`.upstroke/runs/<id>/questions`, and `render` points at that directory. A
+schema-4 run writes none, so its summary says to use `upstroke answer <question
+id>` instead (`from_topology` sets it). Until brief 3's S9 witness, `upstroke
+run` and `resume` on a schema-4 run named a directory that is not there
+(V129, case E).
+
+False, the legacy value, is the default and is never serialized, so a
+legacy report's JSON is byte-for-byte what it was.
+
 ## `#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]`
 
 One pool's line in the ledger: what this run drew from which subscription.

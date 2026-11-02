@@ -53,6 +53,7 @@ fn report() -> RunReport {
         }],
         running: false,
         interrupted: false,
+        questions_in_log: false,
     }
 }
 
@@ -191,4 +192,40 @@ fn report_layout_keeps_the_budget_resume_command_on_its_own_line() {
         "{rendered:?}"
     );
     assert!(rendered.starts_with("run: run-1\nbranch: upstroke/run-1 (return with: git switch -)\ngates: check [from config]\n"), "{rendered:?}");
+}
+
+/// A schema-1..3 run writes a payload file for each question and its summary
+/// points at the directory; a schema-4 run keeps its questions in its log and
+/// writes no such file, so its summary says how to reach one instead of naming
+/// a directory that is not there (found by brief 3's S9 witness, V129 case E).
+#[test]
+fn open_questions_are_pointed_at_where_their_run_keeps_them() {
+    let asked = QuestionRecord::open(Question {
+        id: QuestionId::from("q-1"),
+        kind: QuestionKind::Unblock,
+        affected_tasks: vec![TaskId::from("t1")],
+        context: "which widget format".to_owned(),
+        options: Vec::new(),
+    });
+    let legacy = RunReport {
+        questions: vec![asked.clone()],
+        ..report()
+    }
+    .render();
+    assert!(legacy.contains("open questions (1):"), "{legacy}");
+    assert!(legacy.contains("  payloads: "), "{legacy}");
+    assert!(!legacy.contains("upstroke answer <question id>"), "{legacy}");
+
+    let in_log = RunReport {
+        questions: vec![asked],
+        questions_in_log: true,
+        ..report()
+    }
+    .render();
+    assert!(in_log.contains("open questions (1):"), "{in_log}");
+    assert!(!in_log.contains("payloads:"), "{in_log}");
+    assert!(
+        in_log.contains("`upstroke answer <question id>` shows and answers it"),
+        "{in_log}"
+    );
 }

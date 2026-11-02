@@ -8312,6 +8312,7 @@ fn empty_report() -> RunReport {
         pool_drain: Vec::new(),
         running: false,
         interrupted: false,
+        questions_in_log: false,
     }
 }
 
@@ -18807,6 +18808,12 @@ fn a_parked_schema_4_question_is_shown_answered_once_and_ingested_on_resume() {
         !public.join("questions").exists(),
         "a schema-4 run writes no question payload file"
     );
+    let summary = parked.render();
+    assert!(
+        !summary.contains("payloads:"),
+        "and its summary names no payload directory: {summary}"
+    );
+    assert!(summary.contains("upstroke answer <question id>"), "{summary}");
 
     let rendered = crate::status::render(
         &crate::status::load(&repo, Some(&parked.run_id)).expect("status reads the parked run"),

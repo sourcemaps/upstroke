@@ -595,6 +595,7 @@ mod tests {
             budget_stop: None,
             running: false,
             interrupted: false,
+            questions_in_log: false,
             total_cost_usd: 0.06,
             pool_drain: vec![crate::engine::PoolDrainRow {
                 pool: "claude-max".to_owned(),
@@ -641,6 +642,7 @@ mod tests {
             budget_stop: None,
             running: false,
             interrupted: false,
+            questions_in_log: false,
             total_cost_usd: 0.0,
             pool_drain: Vec::new(),
         };
