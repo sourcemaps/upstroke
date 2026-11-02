@@ -17763,14 +17763,22 @@ const TWO_INDEPENDENT_TASKS: &str = "## Implement the widget\n\
                                      <!-- upstroke: id=t2 depends= paths=gadget/** -->\n\
                                      Make that.\n";
 
-/// A worker that notes, for about a second, whether another stub worker is
+/// A worker that notes, for about five seconds, whether another stub worker is
 /// running beside it, then writes a file of its own and leaves. `overlap.*` in
 /// `markers` is the evidence two workers ran at once. Each attempt writes a
 /// different file, so two candidates never conflict at the merge.
+///
+/// Five seconds, not one: in V139's full suite, beside a guest VM, two
+/// dispatches at `max_parallel = 2` started more than a second apart, and the
+/// premise that two workers ran at once failed, while the test alone passed
+/// (V140). A longer look makes the premise robust to load, and it gives the
+/// bounded arms (`max_per_agent = 1`, a one-slot pool) longer in which a
+/// forbidden overlap would be seen, so their zero-overlap assertions are only
+/// stronger for it.
 #[cfg(unix)]
 fn overlap_observing_worker(markers: &Path) -> String {
     format!(
-        "d='{}'; me=$$; : > \"$d/run.$me\"; i=0; while [ $i -lt 10 ]; do \
+        "d='{}'; me=$$; : > \"$d/run.$me\"; i=0; while [ $i -lt 50 ]; do \
          n=$(ls \"$d\" | grep -c '^run\\.'); if [ \"$n\" -gt 1 ]; then : > \"$d/overlap.$me\"; fi; \
          i=$((i+1)); sleep 0.1; done; printf 'edited by the topology stub\\n' > \"out.$me.txt\"; \
          rm -f \"$d/run.$me\"",
