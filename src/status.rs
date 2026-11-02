@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::engine::RunReport;
+use crate::engine::topology::observe::{self, Observed};
 use crate::error::UpstrokeError;
 use crate::events::{self, Event, EventBody, LogTail, RunStarted, RunState};
 use crate::interaction::Sleeper;
@@ -26,6 +27,18 @@ pub struct RunStatus {
     pub held: bool,
     pub interrupted: u32,
     pub warnings: Vec<String>,
+}
+
+pub enum Status {
+    Legacy(RunStatus),
+    Topology(TopologyStatus),
+}
+
+pub struct TopologyStatus {
+    pub run_id: String,
+    pub repo_root: PathBuf,
+    pub rendered: String,
+    pub(crate) observed: Observed,
 }
 
 impl RunStatus {
@@ -68,7 +81,7 @@ fn husk_answer(repo_root: &Path, wanted: &str) -> Option<UpstrokeError> {
     })
 }
 
-pub fn load(repo_root: &Path, run_id: Option<&str>) -> Result<RunStatus, UpstrokeError> {
+pub fn load(repo_root: &Path, run_id: Option<&str>) -> Result<Status, UpstrokeError> {
     let run_id = match run_id {
         Some(wanted) => match rundir::resolve_run_id(repo_root, wanted) {
             Ok(resolved) => resolved,
@@ -81,6 +94,15 @@ pub fn load(repo_root: &Path, run_id: Option<&str>) -> Result<RunStatus, Upstrok
             ),
         })?,
     };
+    if let Some(observed) = observe::observe(repo_root, &run_id)? {
+        let rendered = observed.render()?;
+        return Ok(Status::Topology(TopologyStatus {
+            run_id,
+            repo_root: repo_root.to_path_buf(),
+            rendered,
+            observed,
+        }));
+    }
     let public = rundir::public_dir(repo_root, &run_id);
     let events_path = public.join("events.jsonl");
 
@@ -151,7 +173,7 @@ pub fn load(repo_root: &Path, run_id: Option<&str>) -> Result<RunStatus, Upstrok
         replayed.state.settle_interrupted()
     };
 
-    Ok(RunStatus {
+    Ok(Status::Legacy(RunStatus {
         run_id,
         paths,
         started: replayed.started,
@@ -161,11 +183,14 @@ pub fn load(repo_root: &Path, run_id: Option<&str>) -> Result<RunStatus, Upstrok
         held,
         interrupted,
         warnings,
-    })
+    }))
 }
 
-pub fn render(status: &RunStatus) -> String {
-    render::render(status)
+pub fn render(status: &Status) -> String {
+    match status {
+        Status::Legacy(run) => render::render(run),
+        Status::Topology(run) => run.rendered.clone(),
+    }
 }
 
 pub fn describe(event: &Event) -> String {
@@ -173,12 +198,25 @@ pub fn describe(event: &Event) -> String {
 }
 
 pub fn follow(
-    status: &RunStatus,
+    status: &Status,
     sleeper: &dyn Sleeper,
     poll: Duration,
     max_idle_polls: u32,
     out: &mut dyn std::io::Write,
 ) -> Result<(), UpstrokeError> {
+    let status = match status {
+        Status::Legacy(run) => run,
+        Status::Topology(run) => {
+            return observe::follow(
+                &run.repo_root,
+                &run.run_id,
+                sleeper,
+                poll,
+                max_idle_polls,
+                out,
+            );
+        }
+    };
     let mut tail = LogTail::new(status.paths.events());
     let mut warnings = Vec::new();
     let mut idle = 0;
@@ -892,7 +930,7 @@ mod tests {
             interrupted: 0,
             warnings: vec![hostile.to_owned()],
         };
-        let rendered = render(&status);
+        let rendered = render(&Status::Legacy(status));
         assert!(
             rendered.chars().all(|c| c == '\n' || !c.is_control()),
             "{rendered:?}"

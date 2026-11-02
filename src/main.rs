@@ -335,7 +335,11 @@ fn execute(command: Command, _contained: Contained) -> anyhow::Result<ExitCode> 
                     IDLE_POLLS_BEFORE_GIVING_UP,
                     &mut std::io::stdout(),
                 )?;
-                let settled = status::load(&repo_root, Some(&run.run_id))?;
+                let followed = match &run {
+                    status::Status::Legacy(legacy) => legacy.run_id.clone(),
+                    status::Status::Topology(topology) => topology.run_id.clone(),
+                };
+                let settled = status::load(&repo_root, Some(&followed))?;
                 print!("{}", status::render(&settled));
             } else {
                 print!("{}", status::render(&run));

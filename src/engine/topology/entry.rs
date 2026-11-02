@@ -800,7 +800,10 @@ fn confirm_unchanged(
     })
 }
 
-fn frozen_inputs(paths: &RunPaths, started: &RunStarted4) -> Result<FrozenInputs, UpstrokeError> {
+pub(super) fn frozen_inputs(
+    paths: &RunPaths,
+    started: &RunStarted4,
+) -> Result<FrozenInputs, UpstrokeError> {
     let plan_path = paths.plan_json();
     let bytes = crate::util::read_file_bounded(&plan_path).map_err(|source| UpstrokeError::Io {
         path: plan_path.clone(),

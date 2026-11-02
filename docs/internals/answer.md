@@ -64,7 +64,9 @@ Whether a live engine is expected to pick this up on its own.
 
 ## `pub fn answer(repo_root: &Path, wanted: &str, reply: Reply) -> Result<Answered, UpstrokeError> {`
 
-Record an answer to a question, found by id or unambiguous prefix.
+Record an answer to a question, found by id or unambiguous prefix. Since
+PR12 the question is found in a legacy run's question file or in a schema-4
+run's fold (`locate`); a schema-4 question is answered by `answer_open`.
 
 ## `pub fn answer(repo_root: &Path, wanted: &str, reply: Reply) -> Result<Answered, UpstrokeError> {` › `if let Some(existing) = &record.answer {`
 
@@ -72,12 +74,12 @@ Answering twice is a mistake worth catching rather than a last-write-
 wins race: the first answer may already have driven a retry, and the
 second would look like it had an effect it cannot have.
 
-## `pub fn answer(repo_root: &Path, wanted: &str, reply: Reply) -> Result<Answered, UpstrokeError> {` › `format!("1-{}", record.question.options.len())`
+## `fn reply_answer(question: &Question, reply: Reply) -> Result<Answer, UpstrokeError> {` › `format!("1-{}", question.options.len())`
 
 Not `1..N`: every operator of this tool reads
 Rust, where that is the range that excludes N.
 
-## `pub fn answer(repo_root: &Path, wanted: &str, reply: Reply) -> Result<Answered, UpstrokeError> {` › `if answer == Answer::Unanswered {`
+## `fn reply_answer(question: &Question, reply: Reply) -> Result<Answer, UpstrokeError> {` › `if answer == Answer::Unanswered {`
 
 An empty reply means "leave it parked" at a prompt (§12), and typing
 nothing into this command almost certainly means the same — but here it
@@ -118,3 +120,26 @@ would instead be ingested as an answer that changes nothing.
 
 Simulate the engine having ingested the first answer and rewritten
 the payload with it.
+
+## `fn reply_answer(question: &Question, reply: Reply) -> Result<Answer, UpstrokeError> {`
+
+Today's reply validation, shared by both kinds of run: an option number
+names an option, free text is interpreted, an empty answer refuses.
+
+## `fn locate(repo_root: &Path, wanted: &str) -> Result<Located, UpstrokeError> {`
+
+D3 (PR12): both finders, then one answer. A full id names one question
+whichever kind of run holds it; a prefix that matches questions of both kinds
+refuses as ambiguous; a schema-4 question the log has settled refuses as no
+longer open; and a schema-4 run that could not be read is named in a refusal
+rather than dropped from it.
+
+## `fn answer_open(open: FoundOpen, reply: Reply) -> Result<Answered, UpstrokeError> {`
+
+A schema-4 question has no question file: it is the fold's open question,
+frozen in `question_raised`. The answer is single-use through the file the run
+polls (`<public>/answers/<id>.json`, through the `Answer.StageWrite` and
+`Answer.PublishRename` funnels that `interaction::write_answer` reaches): one
+already there refuses, whether or not the run has ingested it yet. A
+question that binds an agent accepts only one of its options
+(`observe::check_reply`).

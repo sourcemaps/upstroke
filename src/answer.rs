@@ -6,10 +6,11 @@
 
 use std::path::Path;
 
+use crate::engine::topology::observe::{self, FoundOpen, QuestionLookup};
 use crate::error::UpstrokeError;
 use crate::interaction::{self, QuestionRecord};
-use crate::ir::{Answer, QuestionId};
-use crate::rundir;
+use crate::ir::{Answer, Question, QuestionId};
+use crate::rundir::{self, FoundQuestion};
 
 #[derive(Debug, Clone)]
 pub enum Reply {
@@ -27,7 +28,10 @@ pub struct Answered {
 }
 
 pub fn answer(repo_root: &Path, wanted: &str, reply: Reply) -> Result<Answered, UpstrokeError> {
-    let found = rundir::find_question(repo_root, wanted)?;
+    let found = match locate(repo_root, wanted)? {
+        Located::Legacy(found) => found,
+        Located::Topology(open) => return answer_open(open, reply),
+    };
     let id = QuestionId(found.question_id.clone());
     let questions = found.public.join("questions");
 
@@ -51,29 +55,7 @@ pub fn answer(repo_root: &Path, wanted: &str, reply: Reply) -> Result<Answered, 
         });
     }
 
-    let answer = match reply {
-        Reply::Decline => Answer::Declined,
-        Reply::Text(text) => interaction::interpret(&record.question, &text),
-        Reply::Option(choice) => interaction::answer_for_option(&record.question, choice)
-            .ok_or_else(|| UpstrokeError::Refused {
-                message: format!(
-                    "there is no option {choice} on this question; it offers {}",
-                    if record.question.options.is_empty() {
-                        "none (answer it in your own words instead)".to_owned()
-                    } else {
-                        format!("1-{}", record.question.options.len())
-                    }
-                ),
-            })?,
-    };
-
-    if answer == Answer::Unanswered {
-        return Err(UpstrokeError::Refused {
-            message: "an empty answer would leave the task exactly as it is; pass --text with \
-                      the guidance, --option N, or --decline to give up on the task"
-                .to_owned(),
-        });
-    }
+    let answer = reply_answer(&record.question, reply)?;
 
     let answers = found.public.join("answers");
     std::fs::create_dir_all(&answers).map_err(|source| UpstrokeError::Io {
@@ -93,7 +75,10 @@ pub fn answer(repo_root: &Path, wanted: &str, reply: Reply) -> Result<Answered, 
 }
 
 pub fn show(repo_root: &Path, wanted: &str) -> Result<String, UpstrokeError> {
-    let found = rundir::find_question(repo_root, wanted)?;
+    let found = match locate(repo_root, wanted)? {
+        Located::Legacy(found) => found,
+        Located::Topology(open) => return Ok(interaction::render_question(&open.asked.question)),
+    };
     let path = found
         .public
         .join("questions")
@@ -106,6 +91,121 @@ pub fn show(repo_root: &Path, wanted: &str) -> Result<String, UpstrokeError> {
         message: format!("{}: {e}", path.display()),
     })?;
     Ok(interaction::render_question(&record.question))
+}
+
+fn reply_answer(question: &Question, reply: Reply) -> Result<Answer, UpstrokeError> {
+    let answer = match reply {
+        Reply::Decline => Answer::Declined,
+        Reply::Text(text) => interaction::interpret(question, &text),
+        Reply::Option(choice) => interaction::answer_for_option(question, choice).ok_or_else(
+            || UpstrokeError::Refused {
+                message: format!(
+                    "there is no option {choice} on this question; it offers {}",
+                    if question.options.is_empty() {
+                        "none (answer it in your own words instead)".to_owned()
+                    } else {
+                        format!("1-{}", question.options.len())
+                    }
+                ),
+            },
+        )?,
+    };
+    if answer == Answer::Unanswered {
+        return Err(UpstrokeError::Refused {
+            message: "an empty answer would leave the task exactly as it is; pass --text with \
+                      the guidance, --option N, or --decline to give up on the task"
+                .to_owned(),
+        });
+    }
+    Ok(answer)
+}
+
+enum Located {
+    Legacy(FoundQuestion),
+    Topology(FoundOpen),
+}
+
+fn locate(repo_root: &Path, wanted: &str) -> Result<Located, UpstrokeError> {
+    let legacy = rundir::find_question(repo_root, wanted);
+    let refused = |message: String| UpstrokeError::Refused { message };
+    match (legacy, observe::find_open_question(repo_root, wanted)) {
+        (Ok(found), QuestionLookup::Found(open)) => {
+            if found.question_id.eq_ignore_ascii_case(wanted) {
+                Ok(Located::Legacy(found))
+            } else if open.asked.question.id.as_str().eq_ignore_ascii_case(wanted) {
+                Ok(Located::Topology(open))
+            } else {
+                Err(refused(format!(
+                    "that prefix matches {} and {}; use more characters",
+                    found.question_id, open.asked.question.id
+                )))
+            }
+        }
+        (Ok(found), QuestionLookup::Ambiguous(ids)) => {
+            if found.question_id.eq_ignore_ascii_case(wanted) {
+                Ok(Located::Legacy(found))
+            } else {
+                Err(refused(format!(
+                    "that prefix matches {} questions ({}, {}); use more characters",
+                    ids.len() + 1,
+                    found.question_id,
+                    ids.join(", ")
+                )))
+            }
+        }
+        (Ok(found), QuestionLookup::Closed { .. } | QuestionLookup::Absent { .. }) => {
+            Ok(Located::Legacy(found))
+        }
+        (Err(_), QuestionLookup::Found(open)) => Ok(Located::Topology(open)),
+        (Err(_), QuestionLookup::Ambiguous(ids)) => Err(refused(format!(
+            "that prefix matches {} open questions ({}); use more characters",
+            ids.len(),
+            ids.join(", ")
+        ))),
+        (Err(_), QuestionLookup::Closed {
+            run_id,
+            question_id,
+        }) => Err(refused(format!(
+            "question {question_id} of run {run_id} is no longer open: the run's log has \
+             settled it, so an answer now would be applied to nothing. Nothing was written"
+        ))),
+        (Err(error), QuestionLookup::Absent { unread }) if unread.is_empty() => Err(error),
+        (Err(error), QuestionLookup::Absent { unread }) => Err(refused(format!(
+            "{error}; and the schema-4 run(s) {} could not be read, so whether one of them \
+             holds that question is unknown",
+            unread.join(", ")
+        ))),
+    }
+}
+
+fn answer_open(open: FoundOpen, reply: Reply) -> Result<Answered, UpstrokeError> {
+    let question = &open.asked.question;
+    let answers = open.paths.answers();
+    if let Some(existing) = interaction::read_answer(&answers, &question.id)? {
+        return Err(UpstrokeError::Refused {
+            message: format!(
+                "question {} was already answered ({}). Answers are applied once; if the task \
+                 needs different guidance it will raise a new question.",
+                question.id,
+                describe(&existing)
+            ),
+        });
+    }
+    let answer = reply_answer(question, reply)?;
+    observe::check_reply(&open.asked, &answer)?;
+    std::fs::create_dir_all(&answers).map_err(|source| UpstrokeError::Io {
+        path: answers.clone(),
+        source,
+    })?;
+    let record = interaction::AnswerRecord::unattributed(answer);
+    interaction::write_answer(&answers, &question.id, &record)?;
+    let run_is_live = rundir::is_running(&open.paths.public);
+    Ok(Answered {
+        run_id: open.run_id.clone(),
+        question_id: question.id.as_str().to_owned(),
+        answer: record.answer,
+        run_is_live,
+    })
 }
 
 fn describe(answer: &Answer) -> String {

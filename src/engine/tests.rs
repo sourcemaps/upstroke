@@ -4610,8 +4610,17 @@ fn unreported_cost_stays_unreported_rather_than_zero() {
     );
 }
 
-fn replay_of(repo: &Path, run_id: &str) -> crate::status::RunStatus {
+fn replay_of(repo: &Path, run_id: &str) -> crate::status::Status {
     crate::status::load(repo, Some(run_id)).expect("the run reads back")
+}
+
+fn legacy_status(status: &crate::status::Status) -> &crate::status::RunStatus {
+    match status {
+        crate::status::Status::Legacy(run) => run,
+        crate::status::Status::Topology(run) => {
+            panic!("run `{}` read back as schema 4, not as a legacy run", run.run_id)
+        }
+    }
 }
 
 struct Scenario {
@@ -4903,7 +4912,7 @@ fn a_live_run_reads_as_running_rather_than_halted() {
     fs::write(paths.events(), format!("{}\n", lines[..cut].join("\n"))).expect("truncate");
 
     let stopped = replay_of(&repo, &report.run_id);
-    assert!(stopped.interrupted_run());
+    assert!(legacy_status(&stopped).interrupted_run());
     let out = crate::status::render(&stopped);
     assert!(out.contains("skipped (run interrupted)"), "{out}");
     assert!(out.contains("t2: blocked by `t1`"), "{out}");
@@ -5062,8 +5071,11 @@ fn killing_a_run_mid_attempt_leaves_a_resumable_record() {
     );
 
     let before = replay_of(&repo, &run_id);
-    assert!(before.interrupted_run(), "status calls it interrupted");
-    assert_eq!(before.interrupted, 1);
+    assert!(
+        legacy_status(&before).interrupted_run(),
+        "status calls it interrupted"
+    );
+    assert_eq!(legacy_status(&before).interrupted, 1);
     assert!(
         crate::status::render(&before).contains(&format!("upstroke resume {run_id}")),
         "and tells the operator how to continue it"
@@ -6346,8 +6358,8 @@ fn status_reports_a_live_run_and_the_ledger_reads_from_the_log() {
     let report = run_with(&options(&repo), &source).expect("run");
 
     let loaded = replay_of(&repo, &report.run_id);
-    assert!(!loaded.running, "nothing holds a finished run");
-    assert!(!loaded.interrupted_run());
+    assert!(!legacy_status(&loaded).running, "nothing holds a finished run");
+    assert!(!legacy_status(&loaded).interrupted_run());
 
     let rendered = crate::status::render(&loaded);
     assert!(rendered.contains("ledger:"), "{rendered}");
@@ -6357,7 +6369,7 @@ fn status_reports_a_live_run_and_the_ledger_reads_from_the_log() {
         "{rendered}"
     );
     assert!(
-        rendered.contains(&loaded.paths.private.display().to_string()),
+        rendered.contains(&legacy_status(&loaded).paths.private.display().to_string()),
         "and points at where the transcripts actually are"
     );
 
@@ -6371,8 +6383,11 @@ fn status_reports_a_live_run_and_the_ledger_reads_from_the_log() {
     let paths = paths_of(&repo, &report.run_id);
     let _held = RunLock::acquire(&paths.public).expect("claim the finished run");
     let claimed = replay_of(&repo, &report.run_id);
-    assert!(!claimed.running, "a finished run is not running");
-    assert!(claimed.held, "but something does hold it");
+    assert!(
+        !legacy_status(&claimed).running,
+        "a finished run is not running"
+    );
+    assert!(legacy_status(&claimed).held, "but something does hold it");
     let rendered = crate::status::render(&claimed);
     assert!(
         rendered.contains("another process holds this run"),
@@ -8450,10 +8465,10 @@ fn a_budget_stop_keeps_its_outcome_while_a_resume_holds_the_lock() {
 
     let seen = replay_of(&repo, &stopped.run_id);
     assert!(
-        !seen.running,
+        !legacy_status(&seen).running,
         "a run that recorded its finish is not running"
     );
-    assert!(seen.held, "though a resume does hold it");
+    assert!(legacy_status(&seen).held, "though a resume does hold it");
     let out = crate::status::render(&seen);
     assert!(out.contains("run stopped at its budget"), "{out}");
     assert!(out.contains("upstroke resume"), "{out}");

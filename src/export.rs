@@ -10,11 +10,16 @@ use std::path::Path;
 
 use serde::Serialize;
 
+use crate::engine::topology::observe;
 use crate::error::UpstrokeError;
 use crate::events::{self, AttemptRecord, Event, EventBody, ReviewPassOutcome, SelectionOrigin};
 use crate::ir::{Effort, Plan, Task, TaskKind, Tier, Usage};
 use crate::ladder::{FailureKind, FailureOrigin};
 use crate::rundir;
+use crate::topology::events::{
+    Answer4, AttemptStarted4, BindingOverride, TopologyEvent, TopologyEventBody,
+};
+use crate::topology::registry::FrozenLadder;
 
 const EXPORT_SCHEMA_VERSION: u32 = 2;
 
@@ -134,7 +139,7 @@ pub fn load(repo_root: &Path, wanted: &str) -> Result<Loaded, UpstrokeError> {
     let events_path = public.join("events.jsonl");
     let snapshot_bytes = begin_snapshot(&public, &run_id, &events_path)?;
 
-    let projected = (|| {
+    let legacy = || {
         let events::ParsedLines {
             events: log,
             torn_tail_warning,
@@ -289,10 +294,257 @@ pub fn load(repo_root: &Path, wanted: &str) -> Result<Loaded, UpstrokeError> {
             }
         }
         Ok(Loaded { rows, warnings })
-    })();
+    };
+    let projected = match observe::is_topology_log(&snapshot_bytes, &events_path) {
+        Ok(true) => schema_4_rows(&run_id, &public, &events_path, &snapshot_bytes),
+        Ok(false) => legacy(),
+        Err(error) => Err(error),
+    };
 
     finish_snapshot(&public, &run_id, &events_path, &snapshot_bytes)?;
     projected
+}
+
+type Attempt4 = (u32, u32, u32);
+
+fn schema_4_rows(
+    run_id: &str,
+    public: &Path,
+    events_path: &Path,
+    bytes: &[u8],
+) -> Result<Loaded, UpstrokeError> {
+    let observed = observe::observe_bytes(run_id, public, bytes, false)?;
+    let mut warnings = Vec::new();
+    if observed.torn_tail() > 0 {
+        warnings.push(format!(
+            "{}: {} byte(s) after the last commit marker are not an event, so nothing from them \
+             is exported",
+            events_path.display(),
+            observed.torn_tail()
+        ));
+    }
+    let started = observed.started().ok_or_else(|| UpstrokeError::EventLog {
+        path: events_path.to_path_buf(),
+        message: "no run_started event".to_owned(),
+    })?;
+    let registry = observed.registry().ok_or_else(|| UpstrokeError::EventLog {
+        path: events_path.to_path_buf(),
+        message: "the run records no task registry".to_owned(),
+    })?;
+    let started_at = observed
+        .events()
+        .first()
+        .map_or("", |event| event.ts.as_str());
+    validate_timestamp(
+        events_path,
+        &format!("run `{run_id}` run_started"),
+        started_at,
+    )?;
+    let context = RunContext {
+        events_path,
+        run_id,
+        upstroke_version: &started.upstroke_version,
+        started_at,
+    };
+
+    let mut settled: BTreeMap<Attempt4, &TopologyEvent> = BTreeMap::new();
+    for event in observed.events() {
+        let id = match &event.body {
+            TopologyEventBody::AttemptFinished { data } => {
+                (data.key.0, data.generation.0, data.attempt.0)
+            }
+            TopologyEventBody::AttemptInterrupted { data } => {
+                (data.key.0, data.generation.0, data.attempt.0)
+            }
+            _ => continue,
+        };
+        if settled.insert(id, event).is_some() {
+            return invalid(events_path, format!("duplicate settlement for {}", key_4(id)));
+        }
+    }
+
+    let mut overrides: BTreeMap<u32, &BindingOverride> = BTreeMap::new();
+    let mut seen = BTreeSet::new();
+    let mut rows = Vec::new();
+    for event in observed.events() {
+        match &event.body {
+            TopologyEventBody::QuestionAnswered { data } => {
+                if let Answer4::Answered {
+                    binding_override: Some(binding),
+                    ..
+                } = &data.answer
+                {
+                    overrides.insert(data.key.0, binding);
+                }
+            }
+            TopologyEventBody::AttemptStarted { data } => {
+                let id = (data.key.0, data.generation.0, data.attempt.0);
+                if !seen.insert(id) {
+                    return invalid(events_path, format!("duplicate attempt start {}", key_4(id)));
+                }
+                validate_timestamp(
+                    events_path,
+                    &format!("run `{run_id}`, {} start", key_4(id)),
+                    &event.ts,
+                )?;
+                let entry = registry.get(data.key).ok_or_else(|| UpstrokeError::EventLog {
+                    path: events_path.to_path_buf(),
+                    message: format!(
+                        "attempt {} names task key {}, which the frozen registry does not hold",
+                        key_4(id),
+                        data.key.0
+                    ),
+                })?;
+                let origin = match overrides.get(&data.key.0) {
+                    Some(binding)
+                        if binding.agent == data.binding.agent
+                            && binding.model == data.binding.model =>
+                    {
+                        "user_override"
+                    }
+                    _ if data.binding.pinned => "pin",
+                    _ => "auto",
+                };
+                let settlement = settled.get(&id).copied();
+                if let Some(done) = settlement {
+                    validate_timestamp(
+                        events_path,
+                        &format!("run `{run_id}`, {} settlement", key_4(id)),
+                        &done.ts,
+                    )?;
+                }
+                rows.push(build_row_4(
+                    &context,
+                    event,
+                    data,
+                    &entry.legacy_task(),
+                    &entry.ladder,
+                    origin,
+                    settlement,
+                )?);
+            }
+            _ => {}
+        }
+    }
+    for id in settled.keys() {
+        if !seen.contains(id) {
+            return invalid(
+                events_path,
+                format!("settlement without a start for {}", key_4(*id)),
+            );
+        }
+    }
+    Ok(Loaded { rows, warnings })
+}
+
+fn key_4((key, generation, attempt): Attempt4) -> String {
+    format!("task key {key}, generation {generation}, attempt {attempt}")
+}
+
+fn build_row_4(
+    context: &RunContext<'_>,
+    start: &TopologyEvent,
+    data: &AttemptStarted4,
+    task: &Task,
+    ladder: &FrozenLadder,
+    origin: &'static str,
+    settlement: Option<&TopologyEvent>,
+) -> Result<Row, UpstrokeError> {
+    let (finished_at, record, interrupted) = match settlement.map(|done| (&done.ts, &done.body)) {
+        Some((ts, TopologyEventBody::AttemptFinished { data })) => {
+            (Some(ts.clone()), Some(&*data.record), false)
+        }
+        Some((ts, _)) => (Some(ts.clone()), None, true),
+        None => (None, None, true),
+    };
+    let failure = record.and_then(|record| record.failure.as_ref());
+    let kind = failure
+        .map(|f| f.kind)
+        .or_else(|| interrupted.then_some(FailureKind::Interrupted));
+    let origin_of_failure = failure
+        .map(|f| f.origin)
+        .or_else(|| interrupted.then_some(FailureOrigin::Worker));
+    let (category, evidence) = kind.map(failure_projection).unzip();
+    let identity = format!(
+        "run `{}`, {}",
+        context.run_id,
+        key_4((data.key.0, data.generation.0, data.attempt.0))
+    );
+    let duration_ms = record
+        .map(|record| duration_ms(context.events_path, &identity, record.duration))
+        .transpose()?;
+    validate_cost(
+        context.events_path,
+        &format!("{identity}, worker"),
+        record.and_then(|record| record.cost_usd),
+    )?;
+    if let Some(record) = record {
+        for (index, review) in record.reviews.iter().enumerate() {
+            validate_cost(
+                context.events_path,
+                &format!("{identity}, review pass {index}"),
+                review.cost_usd,
+            )?;
+        }
+    }
+    Ok(Row {
+        schema_version: EXPORT_SCHEMA_VERSION,
+        run_id: context.run_id.to_owned(),
+        upstroke_version: context.upstroke_version.to_owned(),
+        run_started_at: context.started_at.to_owned(),
+        attempt_started_at: start.ts.clone(),
+        attempt_finished_at: finished_at,
+        task_id: task.id.to_string(),
+        task_title: task.title.clone(),
+        attempt: data.attempt.0,
+        rung: data.rung,
+        task_features: TaskFeatures {
+            kind: task_kind(task.kind).to_owned(),
+            suggested_tier: task.suggested_tier.map(|value| tier(value).to_owned()),
+            minimum_tier: task.min_tier.map(|value| tier(value).to_owned()),
+            dependency_count: task.depends_on.len(),
+            acceptance_count: task.acceptance.len(),
+            path_hints: task.path_hints.clone(),
+            artifact_input_count: task.artifacts_in.len(),
+            artifact_output_count: task.artifacts_out.len(),
+        },
+        chain: Chain {
+            tiers: ladder
+                .tiers
+                .iter()
+                .map(|value| tier(*value).to_owned())
+                .collect(),
+            attempts_per: ladder.attempts_per,
+        },
+        selected_tier: tier(data.binding.tier).to_owned(),
+        selection_origin: origin,
+        adapter_id: data.binding.agent.clone(),
+        adapter_cli_version: None,
+        model: data.binding.model.clone(),
+        effort: Some(effort(data.binding.effort)),
+        pool: data.pool.clone(),
+        session_resumed: data.resume_session.is_some(),
+        duration_ms,
+        cost_usd: record.and_then(|record| record.cost_usd),
+        usage: record
+            .and_then(|record| record.usage.as_ref())
+            .map(export_usage),
+        outcome: if interrupted {
+            "interrupted"
+        } else if kind.is_some() {
+            "failed"
+        } else {
+            "passed"
+        },
+        failure_kind: kind.map(failure_kind),
+        failure_origin: origin_of_failure.map(failure_origin),
+        failure_category: category,
+        work_evidence: evidence,
+        failure_reason: failure.map(|f| f.reason.clone()),
+        reviews: record
+            .map(|record| record.reviews.iter().map(review).collect())
+            .unwrap_or_default(),
+    })
 }
 
 fn unique_tasks<'a>(
