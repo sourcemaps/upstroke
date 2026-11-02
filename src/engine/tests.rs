@@ -17916,3 +17916,266 @@ fn a_resumed_schema_4_run_acts_on_todays_slot_limits() {
         "the resume dropped today's `max_per_agent = 1`"
     );
 }
+
+// ---------------------------------------------------------------------------
+// PR12 S10: the read commands over a schema-4 log (D1, D3, D10)
+// ---------------------------------------------------------------------------
+
+/// P12-W12. `status` on a schema-4 run reads the committed prefix only: its
+/// projection equals the barrier's replay and the run's own `report.json`; with
+/// a writer holding the run and a torn tail at the end of the log, it reports
+/// both, names the runner identity, and leaves the log's bytes and mtime as it
+/// found them; `--follow` prints the run's events and stops once it finished.
+#[test]
+fn a_schema_4_status_reads_the_committed_prefix_and_leaves_the_log_as_it_found_it() {
+    let (_tree, repo) = temp_engine_repo("topology-status");
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        0,
+    )));
+    let report = run_with(&topology_options(&repo), &source).expect("the schema-4 run completes");
+    until_released(&repo, &report.run_id);
+    let public = rundir::public_dir(&repo, &report.run_id);
+    let log = public.join("events.jsonl");
+
+    let projected = crate::engine::topology::observe::observe(&repo, &report.run_id)
+        .expect("the observer reads the run")
+        .expect("a schema-4 log")
+        .report()
+        .expect("the projection derives");
+    let written: crate::engine::topology::report::TopologyReport =
+        serde_json::from_slice(&fs::read(public.join("report.json")).expect("report.json"))
+            .expect("report.json is a topology report");
+    assert_eq!(
+        projected, written,
+        "status's projection is the one the live run wrote at its finish"
+    );
+    let plan_bytes = fs::read(public.join("plan.normalized.json")).expect("the frozen plan");
+    let inputs = crate::topology::fold::FrozenInputs {
+        plan: serde_json::from_slice(&plan_bytes).expect("the frozen plan parses"),
+        normalized_plan_digest: events::normalized_plan_digest(&plan_bytes),
+    };
+    let mut warnings = Vec::new();
+    let barrier = crate::events::log::establish_stable_prefix(
+        &log,
+        inputs,
+        None,
+        &mut warnings,
+        &mut crate::events::log::NoEventHooks,
+    )
+    .expect("the barrier proves the finished run's prefix");
+    assert_eq!(
+        crate::engine::topology::report::topology_status(&report.run_id, &barrier)
+            .expect("the barrier's replay projects"),
+        projected,
+        "and the one the barrier's replay derives"
+    );
+    drop(barrier);
+
+    let mut torn = fs::read(&log).expect("the log");
+    torn.extend_from_slice(b"{\"ts\":\"2026-11-02T09:00:00Z\",\"event\":\"capacity_snap");
+    fs::write(&log, &torn).expect("a writer interrupted mid-line");
+    let mtime = fs::metadata(&log)
+        .and_then(|metadata| metadata.modified())
+        .expect("the log's mtime");
+    let held = RunLock::acquire(&public).expect("a live writer's lock");
+    let status = crate::status::load(&repo, Some(&report.run_id)).expect("status reads a held run");
+    let rendered = crate::status::render(&status);
+    drop(held);
+    for expected in [
+        format!("run {}: complete", report.run_id),
+        "runner: host (host-v1)".to_owned(),
+        "log: schema 4".to_owned(),
+        "state: running now".to_owned(),
+        "byte(s) after its last commit marker".to_owned(),
+    ] {
+        assert!(rendered.contains(&expected), "`{expected}` in:\n{rendered}");
+    }
+    assert_eq!(fs::read(&log).expect("the log"), torn, "status changed the log's bytes");
+    assert_eq!(
+        fs::metadata(&log)
+            .and_then(|metadata| metadata.modified())
+            .expect("the log's mtime"),
+        mtime,
+        "status changed the log's mtime"
+    );
+    assert_eq!(
+        crate::engine::topology::observe::observe(&repo, &report.run_id)
+            .expect("observes")
+            .expect("a schema-4 log")
+            .report()
+            .expect("projects"),
+        projected,
+        "a torn tail is not part of the projection"
+    );
+
+    let sleeper = RecordingSleeper::default();
+    let mut out: Vec<u8> = Vec::new();
+    crate::status::follow(&status, &sleeper, Duration::ZERO, 2, &mut out).expect("follow");
+    let followed = String::from_utf8(out).expect("utf8");
+    let first = followed.lines().next().unwrap_or_default();
+    assert!(first.contains("run_started"), "{followed}");
+    assert!(
+        followed
+            .lines()
+            .last()
+            .is_some_and(|last| last.contains("run_finished complete")),
+        "{followed}"
+    );
+}
+
+/// P12-W13. A parked schema-4 question has no payload file: `status` names it,
+/// `show` renders it from the fold by an id prefix, `answer` records it once and
+/// refuses a second, the resume ingests it from the file the run polls, and an
+/// answer after that refuses the settled question as no longer open.
+#[test]
+fn a_parked_schema_4_question_is_shown_answered_once_and_ingested_on_resume() {
+    let (_tree, repo) = temp_engine_repo("topology-answer");
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        1,
+    )));
+    let parked = run_with(&topology_options(&repo), &source).expect("the run parks");
+    assert_eq!(parked.outcome(), RunOutcome::Parked, "{parked:#?}");
+    until_released(&repo, &parked.run_id);
+    let [asked] = parked.questions.as_slice() else {
+        panic!("one question: {parked:#?}");
+    };
+    let id = asked.question.id.to_string();
+    let public = rundir::public_dir(&repo, &parked.run_id);
+    assert!(
+        !public.join("questions").exists(),
+        "a schema-4 run writes no question payload file"
+    );
+
+    let rendered = crate::status::render(
+        &crate::status::load(&repo, Some(&parked.run_id)).expect("status reads the parked run"),
+    );
+    assert!(
+        rendered.contains(&format!("upstroke answer {id}")),
+        "{rendered}"
+    );
+    let prefix = &id[..id.len() - 6];
+    let shown = crate::answer::show(&repo, prefix).expect("show finds it by prefix");
+    assert!(shown.contains("widget formats"), "{shown}");
+
+    let recorded = crate::answer::answer(
+        &repo,
+        &id,
+        crate::answer::Reply::Text("the first".to_owned()),
+    )
+    .expect("the answer is recorded");
+    assert_eq!(recorded.run_id, parked.run_id);
+    assert_eq!(recorded.question_id, id);
+    assert!(!recorded.run_is_live, "nothing drives the parked run");
+    let again = crate::answer::answer(&repo, &id, crate::answer::Reply::Text("again".to_owned()))
+        .expect_err("a question is answered once");
+    assert!(again.to_string().contains("already answered"), "{again}");
+
+    let mut resume = resume_options(&repo, &parked.run_id);
+    resume.private_root = None;
+    let report = resume_with(&resume, &source).expect("the resume completes the run");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:#?}");
+    let log = fs::read_to_string(public.join("events.jsonl")).expect("the log");
+    assert!(
+        log.lines()
+            .any(|line| line.contains("\"question_answered\"") && line.contains(&id)),
+        "the resume ingested the answer"
+    );
+    until_released(&repo, &parked.run_id);
+    let late = crate::answer::answer(&repo, &id, crate::answer::Reply::Text("late".to_owned()))
+        .expect_err("the settled question takes no answer");
+    assert!(late.to_string().contains("no longer open"), "{late}");
+}
+
+/// Two tasks in flight from one base that both create `shared.txt` with
+/// different contents, so the second candidate's merge conflicts and the queue
+/// spawns a merge-repair task.
+#[cfg(unix)]
+const CONFLICTING_WORKER: &str = "sleep 1; printf 'written by %s\\n' \"$$\" > shared.txt";
+
+/// P12-W18. `export-decisions` over a schema-4 run with a merge-repair task:
+/// one row per attempt, in today's columns, the repair task's attempts joined to
+/// the frozen registry by its display id, and no verification or merge event as
+/// a row.
+#[cfg(unix)]
+#[test]
+fn a_schema_4_export_keeps_todays_rows_and_joins_a_repair_task_to_the_registry() {
+    let (_tree, repo) = temp_engine_repo("topology-export");
+    seed(
+        &repo,
+        TWO_INDEPENDENT_TASKS,
+        Some("[engine]\nmax_parallel = 2\nmax_merge_repairs = 2\n"),
+    );
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        CONFLICTING_WORKER,
+        0,
+    )));
+    let report = run_with(&topology_options(&repo), &source).expect("the run ends");
+    until_released(&repo, &report.run_id);
+    let log = fs::read_to_string(rundir::public_dir(&repo, &report.run_id).join("events.jsonl"))
+        .expect("the log");
+    let kinds: Vec<String> = log
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<serde_json::Value>(line).expect("an event")["event"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned()
+        })
+        .collect();
+    assert!(
+        kinds.iter().any(|kind| kind == "merge_rejected"),
+        "the fixture's premise: a candidate's merge was rejected ({kinds:?})"
+    );
+    assert!(
+        kinds.iter().any(|kind| kind == "merge_verification_started"),
+        "and verifications ran ({kinds:?})"
+    );
+    let starts = kinds.iter().filter(|kind| *kind == "attempt_started").count();
+
+    let loaded = crate::export::load(&repo, &report.run_id).expect("the schema-4 export loads");
+    assert_eq!(
+        loaded.rows.len(),
+        starts,
+        "one row per attempt, and nothing else becomes a row"
+    );
+    let mut jsonl = Vec::new();
+    crate::export::write(&loaded.rows, crate::export::Format::Jsonl, &mut jsonl).expect("jsonl");
+    let rows: Vec<serde_json::Value> = String::from_utf8(jsonl)
+        .expect("utf8")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("a row"))
+        .collect();
+    let task_ids: Vec<&str> = rows
+        .iter()
+        .map(|row| row["task_id"].as_str().unwrap_or_default())
+        .collect();
+    assert!(
+        task_ids.iter().any(|id| *id != "t1" && *id != "t2"),
+        "a repair task's attempts are rows, joined by its display id: {task_ids:?}"
+    );
+    let keys: Vec<String> = rows[0]
+        .as_object()
+        .expect("a row is an object")
+        .keys()
+        .cloned()
+        .collect();
+    for row in &rows {
+        let these: Vec<String> = row
+            .as_object()
+            .expect("a row is an object")
+            .keys()
+            .cloned()
+            .collect();
+        assert_eq!(these, keys, "every row has today's columns");
+    }
+    let mut csv = Vec::new();
+    crate::export::write(&loaded.rows, crate::export::Format::Csv, &mut csv).expect("csv");
+    let csv = String::from_utf8(csv).expect("utf8");
+    assert!(
+        csv.starts_with("schema_version,run_id,upstroke_version,run_started_at,"),
+        "{csv}"
+    );
+    assert_eq!(csv.lines().count(), starts + 1, "a header and one line per attempt");
+}
