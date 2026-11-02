@@ -75,8 +75,11 @@ residual that shape leaves (Q1) is open. A container policy runs on one
 `ContainerRunner` per incarnation, over the resolved (fresh) or recorded
 (resume) policy, whose base environment is the image's own, read by
 `recorded_image_environment` from the recorded image id in the read-only
-half; the container's unconditional `GIT_NO_REPLACE_OBJECTS` is unchanged
-(Q2 open).
+half. The managed repository's recorded graph is stated, for a container
+role, by the role's own Git view (`core.useReplaceRefs = false` in the view's
+`config`, `runner::container::view`), and composition adds no process-wide
+`GIT_NO_REPLACE_OBJECTS` (Q2's paired candidate; the real-container
+acceptance is owed, and its limits are in `runner/container/env.md`).
 
 ### Slot limits
 
