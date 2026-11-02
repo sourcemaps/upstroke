@@ -1177,7 +1177,10 @@ fn an_agents_own_settings_file_is_bound_read_only_and_named_by_its_container_pat
         target_of(plan.mounts(), inside).is_none(),
         "a gate is given no settings"
     );
-    assert!(plan.launch.spec.command.contains(&host), "and its argv is its own");
+    assert!(
+        plan.launch.spec.command.contains(&host),
+        "and its argv is its own"
+    );
 
     let elsewhere = fixture.paths.private.join("transcripts").join("t1-1.json");
     let not_settings = worker_request(
@@ -4203,7 +4206,8 @@ fn real_docker_a_containerized_agent_reads_its_own_settings_and_cannot_write_the
     .expect("a container policy")
     .with_poll(Duration::from_millis(10));
 
-    let settings = RunPaths::with_private_root(&repo_dir, run_id, &identity.private_root).settings();
+    let settings =
+        RunPaths::with_private_root(&repo_dir, run_id, &identity.private_root).settings();
     std::fs::create_dir_all(&settings).expect("the settings directory");
     let file = settings.join("k0-1.json");
     let written = "{\"permissions\":{\"allow\":[\"Edit\"],\"deny\":[\"Read(.upstroke/**)\"]}}\n";
@@ -4225,13 +4229,7 @@ fn real_docker_a_containerized_agent_reads_its_own_settings_and_cannot_write_the
         worker_id(0),
     );
     let output = runner.run_blocking(&request).expect("runs");
-    assert_eq!(
-        output.code,
-        Some(0),
-        "{}{}",
-        output.stdout,
-        output.stderr
-    );
+    assert_eq!(output.code, Some(0), "{}{}", output.stdout, output.stderr);
     assert!(
         output.stdout.contains(written.trim()),
         "the agent read its settings: {}",
