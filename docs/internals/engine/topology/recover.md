@@ -147,12 +147,14 @@ It is **not** a recovery event. It appends nothing and needs no terminal of
 its own — the effect either happened or did not, and the next resume decides
 which by looking at the ref.
 
-### Nothing here is a production path
+### The production path
 
-`MAX_READABLE_SCHEMA` is 3 and `TOPOLOGY_ACTIVATION` is `Inactive`, so
-[`RootDerived::derive`] refuses every schema-4 log in a released binary.
-The reader ceiling is the seam a test raises — see [`RootDerived::derive`]
-and [`RootDerived::derive_with`] beside it.
+Since PR12 `MAX_READABLE_SCHEMA` is 4 and `TOPOLOGY_ACTIVATION` is `Active`,
+so [`RootDerived::derive`] admits a schema-4 log, and `upstroke resume`
+reaches this order through `engine::topology::entry::prepare_resume` and
+`ResumePrepared::run`. Until PR12 the ceiling was 3 and this order was
+reached by tests alone, through [`RootDerived::derive_with`] at a raised
+ceiling.
 
 (That sentence deliberately does not spell the test-configuration attribute
 out. Two source censuses in this tree cut a file at its first occurrence of
@@ -225,11 +227,12 @@ never called at 610106b; see `PR7-NARROWED-SURFACE-19-UNCALLED` (§2)
 
 Step (a0) against this binary's reader ceiling.
 
-Production's ceiling is 3 (`TOPOLOGY_ACTIVATION` is `Inactive`),
-so a released binary refuses every schema-4 log here and no
-production path reaches the rest of this file. That is
-`pr_sequence[8].production_effect: none` expressed as a
-refusal rather than as a promise.
+Production's ceiling is 4 since PR12 (`TOPOLOGY_ACTIVATION` is
+`Active`), so a released binary admits a schema-4 log here and refuses a
+legacy one, which `engine::resume` drives instead. Until PR12 the
+ceiling was 3, and this refusal of every schema-4 log was
+`pr_sequence[8].production_effect: none` expressed as a refusal rather
+than as a promise.
 
 ### Errors
 

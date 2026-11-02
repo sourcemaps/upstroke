@@ -785,6 +785,7 @@ fn options(repo: &Path) -> RunOptions {
     opts.defer_backoff = Duration::ZERO;
     opts.wait_on_block = Some(Duration::ZERO);
     opts.private_root = Some(private_root_for(repo));
+    opts.legacy_writer = true;
     opts
 }
 

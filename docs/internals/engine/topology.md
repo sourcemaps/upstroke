@@ -133,7 +133,15 @@ holds that of every module this subtree descends from.
 PR11 phase 3's Tokio coordinator: [`TopologyRun::run_concurrently`], additive
 beside [`TopologyRun::step`], which stays the width-1 path. Both run every transition through the same functions in `run`;
 the coordinator runs an attempt's and a verification's bodies on pipeline
-threads. Neither is a production path yet (PR12).
+threads. Both are production paths since PR12, through `entry`: a shareable
+adapter source runs concurrently at any width, and an unshareable one at
+width 1 steps.
+
+## `pub mod entry;`
+
+PR12's production entry: the fresh and resume compositions `upstroke run` and
+`upstroke resume` reach through `engine::coordinator::run_harness` and
+`engine::resume::resume_harness`.
 
 ## `pub mod preflight;`
 

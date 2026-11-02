@@ -15,6 +15,7 @@ pub mod coverage;
 pub mod create;
 pub mod dispatch;
 pub mod emit;
+pub mod entry;
 pub mod finalize;
 pub mod identity;
 pub mod integrate;

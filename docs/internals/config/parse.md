@@ -388,8 +388,9 @@ readings ([`EngineLimits::Topology`], [`EngineLimits::TopologyResume`])
 all four are what the engine performs: `max_parallel` is accepted at any
 width of at least 1, and the other three are kept without a warning
 (`max_merge_repairs` and `max_parallel` are recorded in `run_started`, and a
-resume runs on the recorded pair; the slot limits are not recorded and
-bound each incarnation's scheduler).
+resume runs on the recorded pair; the slot limits are not recorded, bound a
+fresh run's scheduler as configured, and on a resume default to the recorded
+width, `engine::topology::entry` warning that today's values are not acted on).
 
 `limits` is what keeps that refusal from reaching a run it cannot help. See
 [`EngineLimits`]: on a sequential run's resume every one of these keys is

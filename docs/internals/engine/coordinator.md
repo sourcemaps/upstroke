@@ -36,6 +36,19 @@ leaving this file) and denied by path in `clippy.toml` like the conductors
 below. The bodies are what they were; the call in `run_contained` lost its
 `coordinator::` prefix and the two seams became `pub(super)`.
 
+## `if opts.writes_topology() {`
+
+PR12's dispatch: since the topology is active, `upstroke run` creates a
+schema-4 run, and this branch is it. The order is the read-only half
+([`crate::engine::topology::entry::prepare_fresh`], after containment), then
+the include publication — the first effect, written here because
+`recorded_objects_scope` is denied to every topology module — then the
+effectful half (`FreshPrepared::run`). The include goes under the root the
+read-only half authorized, or under the default root, which it creates when
+missing (root's Q4: only after the runtime, image and credential-volume
+refusals). The legacy body below runs only for the test configuration's
+legacy writer ([`RunOptions::writes_topology`](options.md)).
+
 ## `run_harness_on(opts, harness, &HostRunner::for_legacy_workspace(repository))`
 
 The v0.1 conductor's runner, and the same call in [`resume_harness`](resume.md).

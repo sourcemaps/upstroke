@@ -1115,12 +1115,13 @@ fn legacy_container_selection_refused_before_effects() {
             })
             .collect();
 
-        let run_opts = || {
+        let run_opts = |legacy_writer: bool| {
             let mut opts = RunOptions::new(repo.join("plan.md"), repo.clone());
             opts.pools_path = Some(empty_pools(&repo));
             opts.private_root = Some(private.clone());
             opts.wait_on_block = Some(Duration::ZERO);
             opts.defer_backoff = Duration::ZERO;
+            opts.legacy_writer = legacy_writer;
             opts
         };
         let resume_opts = |run_id: &str| {
@@ -1136,8 +1137,8 @@ fn legacy_container_selection_refused_before_effects() {
             let _lease = crate::rundir::WorktreeLock::acquire(&repo).expect("the test's lease");
             let adapters = RecordingAdapters::default();
             let mut outcomes = vec![(
-                "run".to_owned(),
-                crate::engine::run_with(&run_opts(), &adapters),
+                "a run by the schema-1..3 writer".to_owned(),
+                crate::engine::run_with(&run_opts(true), &adapters),
             )];
             for (schema, run_id) in &seeded {
                 outcomes.push((
@@ -1172,11 +1173,39 @@ fn legacy_container_selection_refused_before_effects() {
                     );
                 }
             }
+
+            // The production writer creates a schema-4 run, which resolves a container
+            // selection by read-only inspection before any lock: under the held lease its
+            // container cell refuses on the runtime, the image or a credential volume rather
+            // than at the lock, and never as the sequential engine's config refusal.
+            let fresh = crate::engine::run_with(&run_opts(false), &adapters)
+                .expect_err("the lease is held, so nothing can proceed");
+            let UpstrokeError::Refused { message } = &fresh else {
+                panic!("a schema-4 run refused as {fresh:?}, not by its pre-lock checks");
+            };
+            if kind == HOST_TOML {
+                assert!(
+                    message.contains("already driving worktree"),
+                    "the schema-4 control did not reach the worktree lock: {message}"
+                );
+            } else {
+                assert!(
+                    !message.contains("already driving worktree"),
+                    "a schema-4 run reached the worktree lock before resolving its runner: \
+                     {message}"
+                );
+                assert!(
+                    message.contains("container runtime") || message.contains("credential volume"),
+                    "the refusal names what the read-only resolution found: {message}"
+                );
+            }
         }
 
         let adapters = RecordingAdapters::default();
-        let run = crate::engine::run_with(&run_opts(), &adapters);
-        assert!(run.is_err(), "the fixture has no agents");
+        for legacy_writer in [true, false] {
+            let run = crate::engine::run_with(&run_opts(legacy_writer), &adapters);
+            assert!(run.is_err(), "the fixture has no agents");
+        }
         for (_, run_id) in &seeded {
             assert!(
                 crate::engine::resume_with(&resume_opts(run_id), &adapters).is_err(),

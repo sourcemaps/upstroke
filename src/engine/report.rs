@@ -6,6 +6,7 @@
     clippy::disallowed_macros
 )]
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::time::Duration;
 
@@ -14,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::capacity;
 use crate::events::{self, AttemptRecord, Progress, RunState, TaskState};
 use crate::interaction::QuestionRecord;
-use crate::ir::{Plan, Task};
+use crate::ir::{Plan, Question, Task, TaskId};
 use crate::ladder::FailureKind;
 use crate::util;
 
@@ -195,6 +196,191 @@ impl RunReport {
             plan,
             state,
         )
+    }
+}
+
+impl RunReport {
+    #[must_use]
+    pub(crate) fn from_topology(
+        fold: &crate::topology::fold::TopologyFold,
+        events: &[crate::topology::events::TopologyEvent],
+        warnings: Vec<String>,
+    ) -> Self {
+        use crate::events::RunOutcome as Finished;
+        use crate::topology::events::TopologyEventBody;
+        use crate::topology::fold::TaskState as Topology;
+        use crate::topology::registry::TaskKey;
+
+        let mut merged: BTreeMap<TaskKey, String> = BTreeMap::new();
+        let mut records: BTreeMap<TaskKey, Vec<AttemptRecord>> = BTreeMap::new();
+        let mut exceeded = None;
+        for event in events {
+            match &event.body {
+                TopologyEventBody::TaskMerged { data } => {
+                    for key in &data.satisfies {
+                        merged.insert(*key, data.merged_sha.0.clone());
+                    }
+                }
+                TopologyEventBody::AttemptFinished { data } => {
+                    records
+                        .entry(data.key)
+                        .or_default()
+                        .push(data.record.as_ref().clone());
+                }
+                TopologyEventBody::BudgetExceeded { data } => exceeded = Some(data),
+                _ => {}
+            }
+        }
+
+        let outcome = fold.finished().cloned();
+        let display = |key: TaskKey| {
+            fold.registry()
+                .and_then(|registry| registry.get(key))
+                .map_or_else(
+                    || format!("k{}", key.0),
+                    |entry| entry.display_id.as_str().to_owned(),
+                )
+        };
+        let open: Vec<&crate::topology::fold::OpenQuestion> = fold
+            .open_questions()
+            .map(|questions| questions.values().collect())
+            .unwrap_or_default();
+
+        let mut tasks = Vec::new();
+        let entries = fold.registry().map_or(&[][..], |registry| registry.entries());
+        for entry in entries {
+            let Some(task) = fold.task(entry.key) else {
+                continue;
+            };
+            let attempts = records.remove(&entry.key).unwrap_or_default();
+            let asked = open.iter().find(|asked| asked.question.key == entry.key);
+            let status = match (task.state, asked) {
+                (Topology::Merged, _) => TaskRunStatus::Committed {
+                    sha: merged.get(&entry.key).cloned().unwrap_or_default(),
+                },
+                (Topology::Failed, _) => {
+                    let failure = attempts.last().and_then(|record| record.failure.as_ref());
+                    TaskRunStatus::Failed {
+                        kind: failure.map_or(FailureKind::AgentError, |failure| failure.kind),
+                        reason: failure.map_or_else(
+                            || "the run's log records no failed attempt for this task".to_owned(),
+                            |failure| failure.reason.clone(),
+                        ),
+                    }
+                }
+                (_, Some(asked)) => TaskRunStatus::Parked {
+                    question: asked.question.id.to_string(),
+                    reason: asked.question.context.clone(),
+                },
+                (Topology::AwaitingInput, None) => TaskRunStatus::Parked {
+                    question: String::new(),
+                    reason: "awaiting input".to_owned(),
+                },
+                (
+                    Topology::Pending
+                    | Topology::AwaitingMerge
+                    | Topology::AwaitingRepair
+                    | Topology::Deferred,
+                    None,
+                ) => match outcome {
+                    Some(Finished::Halted | Finished::BudgetExceeded) => TaskRunStatus::Skipped,
+                    Some(Finished::Complete | Finished::Parked) | None => TaskRunStatus::Queued,
+                },
+            };
+            let model = attempts
+                .last()
+                .map(|record| record.model.clone())
+                .unwrap_or_default();
+            let session_id = attempts
+                .last()
+                .and_then(|record| record.session_id.clone());
+            let mut review_models: Vec<String> = Vec::new();
+            for model in attempts.iter().flat_map(AttemptRecord::review_models) {
+                if !review_models.contains(&model) {
+                    review_models.push(model);
+                }
+            }
+            let duration = attempts.iter().map(|record| record.duration).sum();
+            let cost_usd = sum_opt(attempts.iter().map(|record| record.cost_usd));
+            let review_cost_usd = sum_opt(attempts.iter().map(AttemptRecord::review_cost_usd));
+            let review_cost_incomplete = attempts.iter().any(AttemptRecord::review_cost_incomplete);
+            tasks.push(TaskReport {
+                id: entry.display_id.as_str().to_owned(),
+                title: entry.spec.title.clone(),
+                model,
+                status,
+                duration,
+                cost_usd,
+                review_models,
+                review_cost_usd,
+                review_cost_incomplete,
+                session_id,
+                attempts,
+            });
+        }
+
+        let questions = open
+            .iter()
+            .map(|asked| {
+                QuestionRecord::open(Question {
+                    id: asked.question.id.clone(),
+                    kind: asked.question.kind,
+                    affected_tasks: vec![TaskId(display(asked.question.key))],
+                    context: asked.question.context.clone(),
+                    options: asked.question.options.clone(),
+                })
+            })
+            .collect();
+
+        let halted_at = match outcome {
+            Some(Finished::Halted) => Some(
+                fold.halted_at()
+                    .map_or_else(|| "the run".to_owned(), display),
+            ),
+            None => fold.halted_at().map(display),
+            Some(Finished::Complete | Finished::Parked | Finished::BudgetExceeded) => None,
+        };
+        let budget_stop = match outcome {
+            Some(Finished::BudgetExceeded) | None => {
+                fold.budget_stop().map(|stop| events::BudgetExceeded {
+                    budget: stop.budget,
+                    limit_usd: exceeded.map_or(0.0, |data| data.limit_usd),
+                    spent_usd: exceeded.map_or(0.0, |data| data.spent_usd),
+                    task: exceeded
+                        .and_then(|data| data.key)
+                        .map(display)
+                        .unwrap_or_default(),
+                })
+            }
+            Some(Finished::Complete | Finished::Parked | Finished::Halted) => None,
+        };
+
+        let total_cost_usd = total_of(&tasks);
+        let pool_drain = capacity::drain_of(tasks.iter().flat_map(|task| task.attempts.iter()))
+            .into_iter()
+            .map(|(pool, spend)| PoolDrainRow {
+                pool,
+                attempts: spend.attempts,
+                cost_usd: spend.usd,
+                unpriced: spend.unpriced,
+            })
+            .collect();
+        let started = fold.started();
+        Self {
+            run_id: started.map(|run| run.run_id.clone()).unwrap_or_default(),
+            branch: started.map(|run| run.branch.clone()).unwrap_or_default(),
+            gates: started.map(|run| run.gates.clone()).unwrap_or_default(),
+            gates_from_config: started.is_some_and(|run| run.gates_from_config),
+            warnings,
+            tasks,
+            halted_at,
+            questions,
+            budget_stop,
+            total_cost_usd,
+            pool_drain,
+            running: false,
+            interrupted: outcome.is_none(),
+        }
     }
 }
 

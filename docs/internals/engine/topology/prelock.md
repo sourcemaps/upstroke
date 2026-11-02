@@ -153,6 +153,10 @@ Perform the read-only pre-lock checks, in the packet's order.
 2. The `RunnerPolicy`, by read-only inspection, and its digest.
 3. The run id and the incarnation, which perform no effect at all.
 
+[`resolve_runner`] and [`RunnerResolved::authorize`] are the same checks in
+the order 0, 2, 1, 3, for a default root that may not exist before the
+runner has been inspected.
+
 ### Errors
 
 [`UpstrokeError::Refused`] when the coordinator inherits a repository-wide
@@ -185,10 +189,53 @@ the function's own documentation in `src/workspace_manager.rs`.
 Git child, which is where a resume meets it; on the fresh path that second run
 is an idempotent repeat.
 
-## `pub fn check(inputs: &PreLock<'_>) -> Result<PreLockChecked, UpstrokeError> {` › `let run_id = inputs.ids.run_id();`
+## `pub fn resolve_runner(`
+
+The read-only half of [`check`] without the private root: R-C-RELSTORE's
+start refusal, then the `RunnerPolicy` by read-only inspection and its
+digest. No root is read and no id is drawn.
+
+It exists for PR12's default private root (root's Q4 disposition: "Separate
+read-only runner/root derivation from materialization so absent
+runtime/image/credential volume refuses before creating the default root,
+include, lock or run artifacts"). The production entry
+(`engine::topology::entry`) calls this when the operator named no root; the
+default root may not exist yet, and [`check`] would refuse it at step 1
+before the runner was inspected. After this returns, the caller publishes
+the recorded-objects include under the default root — which is also how the
+missing root comes to exist, through the include's existing private-directory
+creation — and only then calls [`RunnerResolved::authorize`]. An explicit
+root keeps [`check`]'s order: it must already exist, and it is authorized
+before anything is published under it.
+
+## `pub struct RunnerResolved {`
+
+The runner policy resolved and digested, with no root and no ids yet.
+Private fields and no `Clone`: the only way to a [`PreLockChecked`] from
+here is [`RunnerResolved::authorize`], which authorizes a root first.
+
+## `impl RunnerResolved` › `pub fn authorize(`
+
+Step 1 of [`check`] (the authorized private root, canonical, refused when it
+is not a real directory) and step 3 (the ids), over a policy already
+resolved. The same refusals as [`check`]'s for the same root.
+
+## `impl RunnerResolved` › `fn checked(self, private_root: PathBuf, ids: &dyn IdSource) -> PreLockChecked {`
+
+The witness, minted once every refusal has passed.
+
+## `impl RunnerResolved` › `let run_id = ids.run_id();`
 
 Last, and only once every refusal above has passed: `run_creation` puts
-id generation after resolution and annotates it "(no effect)".
+id generation after resolution and annotates it "(no effect)". Both
+[`check`] and [`RunnerResolved::authorize`] end here.
+
+## `fn resolve_policy(`
+
+Step 2: the `RunnerPolicy` by read-only inspection, and its digest — the
+host contract, or the container policy [`resolve_container`] reads off the
+runtime (an unreachable runtime, an absent image reference or an absent
+credential volume refuses; there is no implicit pull).
 
 ## `fn authorized_private_root(configured: &Path) -> Result<PathBuf, UpstrokeError> {`
 

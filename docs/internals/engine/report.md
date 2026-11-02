@@ -225,6 +225,26 @@ Build a report from a replayed log.
 function, so what an operator sees mid-run and what the file says
 afterwards cannot drift into disagreeing.
 
+## `pub(crate) fn from_topology(`
+
+The schema-4 run's [`RunReport`], projected from the finished fold and the
+run's events (PR12's S9), so that `upstroke run` and `upstroke resume` print
+and exit as they always have. The run's own `report.json`
+(`engine::topology::finalize`, a `TopologyReport`) is written by the loop and
+stays the authority; this is the command's summary of the same run.
+
+- Tasks are the registry's entries, original and repair alike, in key order.
+  A merged task is committed at the `merged_sha` of the `task_merged` that
+  satisfied it; a failed one carries its last attempt's failure; a task an
+  open question names is parked on it; anything else is queued, or skipped
+  when the run halted or stopped at a budget.
+- Each task's attempts are the `attempt_finished` records the log holds for
+  it, so the trail, the costs, the review models and the session are the
+  legacy report's derivations over the same record type.
+- `halted_at` and `budget_stop` are set only as the fold's own outcome says,
+  so [`RunReport::outcome`] agrees with it; the entry compares the two and
+  warns if they ever disagree.
+
 ## `pub(super) struct ReportHeader<'a> {`
 
 Everything a report needs that is not the plan or the state, kept together

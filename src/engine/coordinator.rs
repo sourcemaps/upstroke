@@ -55,6 +55,13 @@ pub fn run_with(
 }
 
 pub fn run_harness(opts: &RunOptions, harness: &Harness<'_>) -> Result<RunReport, UpstrokeError> {
+    if opts.writes_topology() {
+        let _contained = contain_write_command(&mut NoHooks)?;
+        let prepared = super::topology::entry::prepare_fresh(opts, harness)?;
+        let repository = Workspace::open(&opts.repo_root)?
+            .recorded_objects_scope(Some(prepared.private_root()))?;
+        return prepared.run(opts, harness, repository);
+    }
     let repository =
         Workspace::open(&opts.repo_root)?.recorded_objects_scope(opts.private_root.as_deref())?;
     run_harness_on(opts, harness, &HostRunner::for_legacy_workspace(repository))

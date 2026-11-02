@@ -92,11 +92,63 @@ pub struct PreLock<'a> {
 pub fn check(inputs: &PreLock<'_>) -> Result<PreLockChecked, UpstrokeError> {
     crate::workspace_manager::refuse_relative_repository_wide_names()?;
     let private_root = authorized_private_root(inputs.private_root)?;
+    let resolved = resolve_policy(inputs.selection, inputs.runtime)?;
+    Ok(resolved.checked(private_root, inputs.ids))
+}
 
-    let policy = match inputs.selection.kind {
+pub fn resolve_runner(
+    selection: &RunnerSelection,
+    runtime: Option<&dyn ContainerRuntime>,
+) -> Result<RunnerResolved, UpstrokeError> {
+    crate::workspace_manager::refuse_relative_repository_wide_names()?;
+    resolve_policy(selection, runtime)
+}
+
+#[derive(Debug)]
+pub struct RunnerResolved {
+    policy: RunnerPolicy,
+    policy_sha256: String,
+}
+
+impl RunnerResolved {
+    #[must_use]
+    pub const fn runner_policy(&self) -> &RunnerPolicy {
+        &self.policy
+    }
+
+    pub fn authorize(
+        self,
+        private_root: &Path,
+        ids: &dyn IdSource,
+    ) -> Result<PreLockChecked, UpstrokeError> {
+        let private_root = authorized_private_root(private_root)?;
+        Ok(self.checked(private_root, ids))
+    }
+
+    fn checked(self, private_root: PathBuf, ids: &dyn IdSource) -> PreLockChecked {
+        let run_id = ids.run_id();
+        let incarnation = ids.incarnation();
+        let pid = ids.pid();
+
+        PreLockChecked::new(
+            run_id,
+            incarnation,
+            pid,
+            self.policy,
+            self.policy_sha256,
+            private_root,
+        )
+    }
+}
+
+fn resolve_policy(
+    selection: &RunnerSelection,
+    runtime: Option<&dyn ContainerRuntime>,
+) -> Result<RunnerResolved, UpstrokeError> {
+    let policy = match selection.kind {
         RunnerKind::Host => resolve_host()?,
         RunnerKind::Container => {
-            let runtime = inputs.runtime.ok_or_else(|| UpstrokeError::Refused {
+            let runtime = runtime.ok_or_else(|| UpstrokeError::Refused {
                 message: format!(
                     "`[runner] kind = \"container\"` selects the container boundary, and this \
                      command was given no container runtime to inspect. INV-23 resolves the \
@@ -104,26 +156,17 @@ pub fn check(inputs: &PreLock<'_>) -> Result<PreLockChecked, UpstrokeError> {
                      reachable, the image reference `{}` must already be present in it, and each \
                      credential volume must exist — so a missing runtime refuses here rather \
                      than being assumed available later",
-                    inputs.selection.image.as_deref().unwrap_or("<unset>")
+                    selection.image.as_deref().unwrap_or("<unset>")
                 ),
             })?;
-            resolve_container(runtime, inputs.selection)?
+            resolve_container(runtime, selection)?
         }
     };
     let policy_sha256 = runner_policy_sha256(&policy);
-
-    let run_id = inputs.ids.run_id();
-    let incarnation = inputs.ids.incarnation();
-    let pid = inputs.ids.pid();
-
-    Ok(PreLockChecked::new(
-        run_id,
-        incarnation,
-        pid,
+    Ok(RunnerResolved {
         policy,
         policy_sha256,
-        private_root,
-    ))
+    })
 }
 
 fn authorized_private_root(configured: &Path) -> Result<PathBuf, UpstrokeError> {
