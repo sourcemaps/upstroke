@@ -1155,14 +1155,13 @@ fn ignorecase_in(text: &str) -> Result<Option<bool>, String> {
                     )
                 })?);
             }
-            "extensions" if key.eq_ignore_ascii_case("worktreeconfig") => {
-                if config_bool(value) != Some(false) {
-                    return Err(
-                        "`extensions.worktreeConfig` is on, and this reading does not \
-                                follow per-worktree configuration"
-                            .to_owned(),
-                    );
-                }
+            "extensions"
+                if key.eq_ignore_ascii_case("worktreeconfig")
+                    && config_bool(value) != Some(false) =>
+            {
+                return Err("`extensions.worktreeConfig` is on, and this reading does not \
+                            follow per-worktree configuration"
+                    .to_owned());
             }
             _ => {}
         }
