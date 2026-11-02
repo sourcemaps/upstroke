@@ -47,19 +47,22 @@ either command.
 
 ### The resume order
 
-1. [`prepare_resume`], read-only: the header of the committed first line
-   selects the reader. A legacy log, or one whose header cannot be read,
-   returns `None` and `resume_harness` runs today's sequential lines
-   unchanged; a schema above the ceiling refuses with the probe's own
-   refusal. For a topology log: `RootDerived::derive` (a0); the recorded
-   private half must already be a directory (a resume never creates it);
-   the frozen plan is read from the run directory and its digest checked
-   against the record; today's config is read under
-   [`EngineLimits::TopologyResume`] and compared with the recorded limits;
-   the D4 width check against the recorded width; the Q3 case observation.
-2. `resume_harness` establishes containment and publishes the include under
-   the recorded root.
-3. [`ResumePrepared::run`]: the runner from the record, the manager, the
+1. [`route_resume`], read-only and starting no process: the header of the
+   committed first line selects the reader. A legacy log, or one whose
+   header cannot be read, returns `None` and `resume_harness` runs today's
+   sequential lines unchanged; a schema above the ceiling refuses with the
+   probe's own refusal. For a topology log it returns `RootDerived::derive`
+   (a0).
+2. `resume_harness` establishes containment.
+3. [`prepare_resume`], read-only: the recorded private half must already be
+   a directory (a resume never creates it); the frozen plan is read from
+   the run directory and its digest checked against the record; today's
+   config is read under [`EngineLimits::TopologyResume`] and compared with
+   the recorded limits; the D4 width check against the recorded width; the
+   Q3 case observation; a recorded container image's environment; the slot
+   limits.
+4. `resume_harness` publishes the include under the recorded root.
+5. [`ResumePrepared::run`]: the runner from the record, the manager, the
    `RunnerPreflight` over the recorded probe set, `run_recovery_order`, the
    loop, the report.
 
@@ -103,10 +106,16 @@ The effectful half. The order is the module section's; the lock is held from
 its acquisition through the census and the whole run, and handed to the
 `RunHandle` by `WorktreeLocked::into_lock` with no release in between.
 
+## `pub fn route_resume(opts: &ResumeOptions) -> Result<Option<RootDerived>, UpstrokeError> {`
+
+Which engine resumes this run: `None` for a legacy log (or one whose header
+the legacy path should diagnose), `RootDerived` for a topology log. It reads
+files and starts no process, so the legacy path keeps its single
+containment establishment.
+
 ## `pub fn prepare_resume(`
 
-The read-only half of a resume, or `None` when the log is not a topology
-log this binary should drive.
+The read-only half of a topology resume.
 
 ## `impl ResumePrepared` › `pub fn run(`
 

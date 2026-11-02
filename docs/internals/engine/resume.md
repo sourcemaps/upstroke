@@ -23,17 +23,19 @@ than the facade, whose allow covered whatever else was written in it
 (`PR306-FACADE-INLINE-ESCAPE`). All five are `effectful` rows of
 `effects/wrappers.toml` and denied by path in `clippy.toml`.
 
-## `if let Some(prepared) = super::topology::entry::prepare_resume(opts, harness)? {`
+## `if let Some(root) = super::topology::entry::route_resume(opts)? {`
 
 PR12's dispatch: the run's committed first line decides the engine
 (`selection`: "schemas 1-3 always run the legacy engine; schema 4 always runs
-TopologyRun"). [`crate::engine::topology::entry::prepare_resume`] reads it,
-read-only, and answers `None` for a legacy log or one whose header it cannot
-read, so every sequential resume, and every refusal it raises, runs the
-lines below exactly as before. A topology log is resumed by the topology
-order: containment, then the include under the **recorded** root (never
-today's default, and never a fabricated private half), then
-`ResumePrepared::run`.
+TopologyRun"). [`crate::engine::topology::entry::route_resume`] reads it,
+read-only and without starting a process, and answers `None` for a legacy
+log or one whose header it cannot read, so every sequential resume, and
+every refusal it raises, runs the lines below exactly as before — with one
+containment establishment, as every public entry point has. A topology log
+is resumed by the topology order: containment, the read-only half
+(`prepare_resume`, which may read a recorded container image's environment,
+a `docker` child), the include under the **recorded** root (never today's
+default, and never a fabricated private half), then `ResumePrepared::run`.
 
 ## `pub fn resume_harness(`
 

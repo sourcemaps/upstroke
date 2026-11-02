@@ -360,10 +360,7 @@ pub struct ResumePrepared {
     warnings: Vec<String>,
 }
 
-pub fn prepare_resume(
-    opts: &ResumeOptions,
-    harness: &Harness<'_>,
-) -> Result<Option<ResumePrepared>, UpstrokeError> {
+pub fn route_resume(opts: &ResumeOptions) -> Result<Option<RootDerived>, UpstrokeError> {
     let Ok(run_id) = rundir::resolve_run_id(&opts.repo_root, &opts.run_id) else {
         return Ok(None);
     };
@@ -384,7 +381,15 @@ pub fn prepare_resume(
         }
     }
 
-    let root = RootDerived::derive(&opts.repo_root, &run_id, opts.private_root.as_deref())?;
+    RootDerived::derive(&opts.repo_root, &run_id, opts.private_root.as_deref()).map(Some)
+}
+
+pub fn prepare_resume(
+    opts: &ResumeOptions,
+    harness: &Harness<'_>,
+    root: RootDerived,
+) -> Result<ResumePrepared, UpstrokeError> {
+    let run_id = root.run_id().to_owned();
     let started = root.started().clone();
     match std::fs::symlink_metadata(root.private_dir()) {
         Ok(metadata) if metadata.is_dir() => {}
@@ -439,7 +444,7 @@ pub fn prepare_resume(
         .map_or(config.shell, |gate| gate.shell);
     let mode = opts.interaction.unwrap_or(config.interaction_mode);
 
-    Ok(Some(ResumePrepared {
+    Ok(ResumePrepared {
         root,
         started,
         inputs,
@@ -450,7 +455,7 @@ pub fn prepare_resume(
         slots,
         image_environment,
         warnings,
-    }))
+    })
 }
 
 impl ResumePrepared {

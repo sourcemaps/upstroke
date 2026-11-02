@@ -35,7 +35,7 @@ fn container_policy(image: Option<&str>) -> RunnerPolicy {
 
 #[test]
 fn the_container_runner_reads_its_base_environment_from_the_recorded_image_id() {
-    let runtime = FakeRuntime::new(ContainerTrace::off());
+    let runtime = FakeRuntime::new(ContainerTrace::recording());
     runtime.add_image(IMAGE_ID, None);
     runtime.set_image_environment(IMAGE_ID, &[("PATH", "/usr/local/bin:/usr/bin:/bin")]);
     assert_eq!(
@@ -66,7 +66,7 @@ fn an_image_environment_that_cannot_run_a_bare_program_refuses_before_any_lock()
 
 #[test]
 fn an_absent_recorded_image_or_a_failing_runtime_refuses_and_nothing_else_is_asked() {
-    let runtime = FakeRuntime::new(ContainerTrace::off());
+    let runtime = FakeRuntime::new(ContainerTrace::recording());
     let error = recorded_image_environment(&runtime, &container_policy(Some(IMAGE_ID)))
         .expect_err("the runtime holds no image with the recorded id");
     assert!(

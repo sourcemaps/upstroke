@@ -47,8 +47,9 @@ pub fn resume_harness(
     opts: &ResumeOptions,
     harness: &Harness<'_>,
 ) -> Result<RunReport, UpstrokeError> {
-    let _contained = contain_write_command(&mut NoHooks)?;
-    if let Some(prepared) = super::topology::entry::prepare_resume(opts, harness)? {
+    if let Some(root) = super::topology::entry::route_resume(opts)? {
+        let _contained = contain_write_command(&mut NoHooks)?;
+        let prepared = super::topology::entry::prepare_resume(opts, harness, root)?;
         let repository = Workspace::open(&opts.repo_root)?
             .recorded_objects_scope(Some(prepared.private_root()))?;
         return prepared.run(opts, harness, repository);
