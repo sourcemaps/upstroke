@@ -357,7 +357,10 @@ mod tests {
     #[test]
     fn the_digest_separates_every_field_of_every_mount() {
         type Mover = fn(&mut RunnerPolicy);
-        fn unix_fields(p: &mut RunnerPolicy, index: usize) -> (&mut MountSourceKind, &mut u64, &mut u64) {
+        fn unix_fields(
+            p: &mut RunnerPolicy,
+            index: usize,
+        ) -> (&mut MountSourceKind, &mut u64, &mut u64) {
             match &mut p.mounts[index].source_identity {
                 MountSourceIdentity::Unix {
                     kind,

@@ -3103,7 +3103,10 @@ mod tests {
         }
         for (value, keys) in [
             (&unix_value, ["platform", "kind", "device", "inode"]),
-            (&windows_value, ["platform", "kind", "volume_serial", "file_id"]),
+            (
+                &windows_value,
+                ["platform", "kind", "volume_serial", "file_id"],
+            ),
         ] {
             for key in keys {
                 let mut missing = value.clone();
@@ -3121,18 +3124,62 @@ mod tests {
         }
         let wrong: [(&serde_json::Value, &str, serde_json::Value); 13] = [
             (&unix_value, "/mounts/0/future", serde_json::json!(true)),
-            (&unix_value, "/mounts/0/source_identity/future", serde_json::json!(1)),
-            (&unix_value, "/mounts/0/source_identity/kind", serde_json::json!("symlink")),
-            (&unix_value, "/mounts/0/source_identity/platform", serde_json::json!("macos")),
-            (&unix_value, "/mounts/0/source_identity/device", serde_json::json!(-1)),
-            (&unix_value, "/mounts/0/source_identity/inode", serde_json::json!("7")),
-            (&unix_value, "/mounts/0/source_identity/volume_serial", serde_json::json!(1)),
-            (&unix_value, "/mounts/0/read_only", serde_json::json!("true")),
+            (
+                &unix_value,
+                "/mounts/0/source_identity/future",
+                serde_json::json!(1),
+            ),
+            (
+                &unix_value,
+                "/mounts/0/source_identity/kind",
+                serde_json::json!("symlink"),
+            ),
+            (
+                &unix_value,
+                "/mounts/0/source_identity/platform",
+                serde_json::json!("macos"),
+            ),
+            (
+                &unix_value,
+                "/mounts/0/source_identity/device",
+                serde_json::json!(-1),
+            ),
+            (
+                &unix_value,
+                "/mounts/0/source_identity/inode",
+                serde_json::json!("7"),
+            ),
+            (
+                &unix_value,
+                "/mounts/0/source_identity/volume_serial",
+                serde_json::json!(1),
+            ),
+            (
+                &unix_value,
+                "/mounts/0/read_only",
+                serde_json::json!("true"),
+            ),
             (&unix_value, "/mounts/0/source", serde_json::Value::Null),
-            (&unix_value, "/mounts", serde_json::json!({"/cache": "/srv"})),
-            (&windows_value, "/mounts/0/source_identity/file_id", serde_json::json!(7)),
-            (&windows_value, "/mounts/0/source_identity/volume_serial", serde_json::json!("1")),
-            (&windows_value, "/mounts/0/source_identity/inode", serde_json::json!(1)),
+            (
+                &unix_value,
+                "/mounts",
+                serde_json::json!({"/cache": "/srv"}),
+            ),
+            (
+                &windows_value,
+                "/mounts/0/source_identity/file_id",
+                serde_json::json!(7),
+            ),
+            (
+                &windows_value,
+                "/mounts/0/source_identity/volume_serial",
+                serde_json::json!("1"),
+            ),
+            (
+                &windows_value,
+                "/mounts/0/source_identity/inode",
+                serde_json::json!(1),
+            ),
         ];
         for (value, pointer, replacement) in wrong {
             let mut moved = value.clone();
@@ -3369,17 +3416,57 @@ mod tests {
             ("a relative source", vec![unix("srv/a", "/a")], malformed),
             ("a relative target", vec![unix("/srv/a", "a")], malformed),
             ("an empty target", vec![unix("/srv/a", "")], malformed),
-            ("a drive path under a Unix identity", vec![unix(r"C:\srv\a", "/a")], malformed),
+            (
+                "a drive path under a Unix identity",
+                vec![unix(r"C:\srv\a", "/a")],
+                malformed,
+            ),
             ("a drive path", vec![windows(r"C:\srv\a", FILE_ID)], Ok(())),
-            ("a lowercase drive", vec![windows(r"d:\srv", FILE_ID)], Ok(())),
-            ("a Unix path under a Windows identity", vec![windows("/srv/a", FILE_ID)], malformed),
-            ("forward slashes", vec![windows("C:/srv/a", FILE_ID)], malformed),
-            ("a mixed separator", vec![windows(r"C:\srv/a", FILE_ID)], malformed),
-            ("a verbatim prefix", vec![windows(r"\\?\C:\srv\a", FILE_ID)], malformed),
-            ("a network share", vec![windows(r"\\server\share\a", FILE_ID)], malformed),
-            ("a drive-relative path", vec![windows("C:srv", FILE_ID)], malformed),
-            ("a relative Windows path", vec![windows(r"srv\a", FILE_ID)], malformed),
-            ("a short file id", vec![windows(r"C:\a", &FILE_ID[2..])], malformed),
+            (
+                "a lowercase drive",
+                vec![windows(r"d:\srv", FILE_ID)],
+                Ok(()),
+            ),
+            (
+                "a Unix path under a Windows identity",
+                vec![windows("/srv/a", FILE_ID)],
+                malformed,
+            ),
+            (
+                "forward slashes",
+                vec![windows("C:/srv/a", FILE_ID)],
+                malformed,
+            ),
+            (
+                "a mixed separator",
+                vec![windows(r"C:\srv/a", FILE_ID)],
+                malformed,
+            ),
+            (
+                "a verbatim prefix",
+                vec![windows(r"\\?\C:\srv\a", FILE_ID)],
+                malformed,
+            ),
+            (
+                "a network share",
+                vec![windows(r"\\server\share\a", FILE_ID)],
+                malformed,
+            ),
+            (
+                "a drive-relative path",
+                vec![windows("C:srv", FILE_ID)],
+                malformed,
+            ),
+            (
+                "a relative Windows path",
+                vec![windows(r"srv\a", FILE_ID)],
+                malformed,
+            ),
+            (
+                "a short file id",
+                vec![windows(r"C:\a", &FILE_ID[2..])],
+                malformed,
+            ),
             (
                 "a long file id",
                 vec![windows(r"C:\a", &format!("{FILE_ID}00"))],
