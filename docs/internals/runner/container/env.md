@@ -136,6 +136,14 @@ a `Mount::Tmpfs` and therefore has **no host source**, so "gate write
 outside mount fails" stays a statement about a mount list every entry of
 which is either the role's own or unreachable from the coordinator.
 
+## `impl BoundaryLayout` › `pub const DEFAULT_SETTINGS: &'static str = "/upstroke/settings";`
+
+Where an agent's own per-attempt settings file is bound, read-only. It is
+the one file of the run's private half a container receives, and only the
+one its own invocation names (`exec::ContainerRunner`'s `settings_for`,
+PR12-CONTAINER-CLAUDE-SETTINGS-HOST-PATH). `with_roots` keeps the default,
+since nothing has needed to move it.
+
 ## `impl BoundaryLayout` › `pub fn new() -> Self {`
 
 The default layout.
@@ -177,6 +185,12 @@ Where this agent's credential volume is mounted.
 ## `impl BoundaryLayout` › `pub fn credential_root(&self) -> &str {`
 
 The credential root itself.
+
+## `impl BoundaryLayout` › `pub fn settings(&self, file_name: &str) -> String {`
+
+The container path of the settings file `file_name`, under
+[`Self::DEFAULT_SETTINGS`]: the mount target and the argument the agent
+receives come from this one place.
 
 ## `pub const fn supplies_credential_location(role: &ExecutionRole) -> bool {`
 

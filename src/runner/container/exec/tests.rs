@@ -1046,15 +1046,6 @@ fn the_mount_set_is_the_roles_own_and_reaches_nothing_of_the_coordinators() {
     assert_eq!(Withheld::ALL.len(), 4);
 }
 
-/// PR12-CONTAINER-CLAUDE-SETTINGS-HOST-PATH (the coordinator's real-Docker
-/// finding). An agent invocation that names its own per-attempt settings file,
-/// a file directly in the run's `settings` directory, receives exactly that
-/// file, bound read-only at `/upstroke/settings/<name>`, and its argument names
-/// that container path instead of the host's. Nothing else changes: the
-/// role's own mounts are those of the census above, every withheld path stays
-/// withheld (the run's private half, the settings directory included, is
-/// mounted nowhere), a gate is given no settings, and a file elsewhere in the
-/// private half is not a settings file.
 #[test]
 fn an_agents_own_settings_file_is_bound_read_only_and_named_by_its_container_path() {
     let fixture = Fixture::new("settings-bind", true);
@@ -4168,9 +4159,6 @@ fn real_docker_refuses_a_reviewer_write_to_its_read_only_mount() {
     );
 }
 
-/// PR12-CONTAINER-CLAUDE-SETTINGS-HOST-PATH on a real runtime: a containerized
-/// agent reads its own per-attempt settings at the container path it is given,
-/// byte for byte, and cannot write them; the host file is unchanged.
 #[test]
 fn real_docker_a_containerized_agent_reads_its_own_settings_and_cannot_write_them() {
     let trace = ContainerTrace::recording();

@@ -89,7 +89,9 @@ Task and merge worktrees are detached checkouts under a stable execution root
 recorded by `run_started` (default `~/.upstroke/workspaces/<repo-key>/<run-id>`).
 They are separate from private transcripts and from the user's checkout. A
 container sees only the one workspace mounted for its role; sibling worktrees,
-the event log, and private artifacts are not mounted.
+the event log, and private artifacts are not mounted. The single exception is a
+worker's or reviewer's own permission-settings file, which its invocation names:
+that one file is bound read-only, and the directory holding it is not.
 
 A task branches from the integration SHA observed at **dispatch**, after all of
 its declared dependencies are `Merged`. Independent tasks may therefore begin
@@ -463,7 +465,8 @@ before spend.
 Every process capable of executing repository-controlled code goes through the
 runner. In particular, gates do not remain a host-side escape hatch while agents
 move into containers. Reviewer workspaces mount read-only; implementation/gate
-workspaces mount read-write; private run artifacts and the event log are absent.
+workspaces mount read-write; private run artifacts and the event log are absent,
+apart from that one read-only settings file for a worker or reviewer.
 Persistent per-agent credential volumes survive token rotation. Codex retains
 the already-decided `external-sandbox` exception only inside a standard-hardened
 container. Host runner behavior remains available and honestly provides no OS

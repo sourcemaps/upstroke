@@ -273,6 +273,21 @@ The control: the same check over a mount set that *does* reach the
 coordinator finds every category. Without it a `violations` that
 always returned an empty vector would pass the assertion above.
 
+## `fn an_agents_own_settings_file_is_bound_read_only_and_named_by_its_container_path() {`
+
+PR12-CONTAINER-CLAUDE-SETTINGS-HOST-PATH, the coordinator's real-Docker
+finding. An agent invocation that names its own per-attempt settings
+file, a file directly in the run's `settings` directory, receives exactly
+that file, bound read-only at `/upstroke/settings/<name>`. Its argument
+names that container path instead of the host's.
+
+Nothing else changes:
+- the role's own mounts are those of the census above;
+- every withheld path stays withheld: the run's private half, the settings
+  directory included, is mounted nowhere;
+- a gate is given no settings;
+- a file elsewhere in the private half is not a settings file.
+
 ## `fn a_workspace_that_contains_a_withheld_path_is_refused_before_any_effect() {`
 
 A workspace that contains a withheld path is refused, by name, before
@@ -1618,6 +1633,13 @@ stderr into its stdout — `docker logs` interleaves them on a
 container without a TTY. Recorded as
 `PR6A-DOCKERCLI-MERGES-STDERR-INTO-STDOUT`; the assertion is
 written so it holds either way rather than pinning the residual.
+
+## `fn real_docker_a_containerized_agent_reads_its_own_settings_and_cannot_write_them() {`
+
+PR12-CONTAINER-CLAUDE-SETTINGS-HOST-PATH on a real runtime. A
+containerized agent reads its own per-attempt settings, byte for byte, at
+the container path it is given, and cannot write them. The host file is
+unchanged. It is registered in `DOCKER_GATED_TESTS`.
 
 ## `fn real_docker_confines_a_gate_to_its_mount() {`
 

@@ -231,6 +231,11 @@ worktree.
 logs — and `<R>/containers`, which is every container's ownership
 evidence.
 
+One file of it reaches one container: the per-attempt settings file an
+agent invocation names in its own arguments, bound read-only at its
+container path (`settings_for`). The directory around it, and every other
+file, stays withheld.
+
 ## `pub enum Withheld` › `AuthoritativeGit,`
 
 The repository's shared Git directory: every engine ref, and the
@@ -759,6 +764,45 @@ it has nothing to project. `GitViewRequest` has no
 that is not a worktree, which is what the projection
 already treats as "no repository here". Recorded as a
 seam note rather than worked around silently.
+
+## `impl ContainerRunner` › `fn settings_for(&self, role: &ExecutionRole, args: &[String]) -> (Vec<String>, Vec<Mount>) {`
+
+An agent's own settings file, given to its container
+(PR12-CONTAINER-CLAUDE-SETTINGS-HOST-PATH, the coordinator's real-Docker
+finding `CONTAINER-SETTINGS-FINDING-1`).
+
+`materialize_permissions` writes each worker's and reviewer's permission
+settings to a file in the run's private `settings` directory
+(`RunPaths::settings`): `engine::assembly` for a worker, `review` for a
+reviewer. `ClaudeCodeAdapter` then passes `--settings <that host path>`.
+The container withholds the run's private half (`Withheld::PrivateArtifacts`),
+so a containerized agent was handed a path it could not open. With a real
+CLI, every containerized claude worker and reviewer would fail on it or run
+without its allow list and deny rules.
+
+So, for an implement or review request only, each argument that names a
+file directly in `<R>/runs/<run-id>/settings` is given to the container:
+- exactly that file is bound read-only at `BoundaryLayout::settings(<name>)`,
+  that is `/upstroke/settings/<name>`;
+- and the argument names that container path instead of the host's.
+
+This is the coordinator's option (a), the smallest change:
+- the adapter, the host runner and every host path are unchanged;
+- a gate gets no settings, since no agent permission surface bounds a gate;
+- a probe passes none;
+- an argument naming any other file, in the private half or elsewhere, is
+  left as it was.
+
+The confinement check is unchanged and still passes. It refuses a mount
+whose source holds a withheld path, and a file below the withheld directory
+holds none. So the settings directory, the private half around it, and
+every other settings file stay mounted nowhere.
+
+The mount census for an agent with settings is
+`exec::tests::an_agents_own_settings_file_is_bound_read_only_and_named_by_its_container_path`.
+The real-runtime witness is the gated
+`exec::tests::real_docker_a_containerized_agent_reads_its_own_settings_and_cannot_write_them`,
+registered in `DOCKER_GATED_TESTS`.
 
 ## `impl ContainerRunner` › `fn mounts(`
 
