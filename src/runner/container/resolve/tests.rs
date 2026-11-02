@@ -995,12 +995,7 @@ fn every_configured_mount_that_could_reach_a_withheld_path_is_refused_before_the
             &context,
             "whitespace",
         ),
-        (
-            not_utf8_label,
-            not_utf8.clone(),
-            &context,
-            not_utf8_needle,
-        ),
+        (not_utf8_label, not_utf8.clone(), &context, not_utf8_needle),
         (
             "unbound",
             world.shared.clone(),
