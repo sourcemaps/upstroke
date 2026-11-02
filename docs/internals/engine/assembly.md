@@ -45,11 +45,12 @@ below the engine — depend upward on the engine.
 
 Until PR12 this file carried `#![cfg_attr(not(test), allow(dead_code))]`,
 for the reason `engine::topology`'s notes give: no non-`#[cfg(test)]`
-caller. The entry's dispatch now reaches every item here: with the allow
-removed, the lib build reports nothing in this file as unused (validation
-run V045 at `d1c0a7de`), so it is removed (root's checkpoint-2
-disposition, S11). That shows no item here is unused; it is not, by
-itself, evidence of activation.
+caller. With it removed, the compiler reported no dead-code diagnostic in
+this file in that build (validation run V045, `cargo check` at
+`d1c0a7de`), so it stays removed (root's checkpoint-2 disposition, S11, and
+its S11 diagnostic disposition). That observation is compiler evidence
+only: it does not show that every item here has a runtime production
+caller, and it is not evidence of activation.
 
 ## `#![forbid(`
 

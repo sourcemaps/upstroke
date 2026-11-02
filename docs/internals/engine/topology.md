@@ -60,27 +60,30 @@ writer, and a legacy log still resumes on [`super::coordinator`]'s lines.
 
 ## `#![cfg_attr(not(test), allow(dead_code))]`
 
-**Kept at PR12, with the measurement that keeps it.** The allow was written
+**Kept at PR12, by root's measured S11 disposition.** The allow was written
 for a subsystem with no non-`#[cfg(test)]` caller: narrowing
 `engine::topology` to `pub(crate)` made rustc report 328 items across the
 module tree as never used, and the `cfg_attr` form keeps the test build
 without an allow, so anything not reached even by a test is still an error
 at `-D warnings`.
 
-PR12's dispatch gives the subsystem its production callers, and root's
-checkpoint-2 disposition (S11) asked for this allow to be removed. With it
-removed, the lib build reports **171 items** as never used (validation run
-V045 at `d1c0a7de`): 42 in eleven S0-protected modules (`dispatch` 7,
-`candidate` 6, `coordinator` 5, `recover` 5, `settle` 5, `attempt` 4,
-`emit` 4, `permits` 2, `select` 2, `closure` 1, `integrate` 1) and 129 in
-ten others (`ledger` 46, `coverage` 31, `reachability` 22, `startup` 6,
-`create` 5, `identity` 5, `report` 4, `run` 4, `seams` 4, `preflight` 2).
-Removing it without editing the protected modules would fail `clippy -D
-warnings`, so it stays until root decides how those items are answered.
-`src/engine/assembly.rs`'s own module allow had nothing left to cover and is
-removed. A lib build without warnings would show only that no item lacking
-an allow is unused, not that every item has a production caller, and not
-activation.
+Root's checkpoint-2 disposition asked for it to be removed. With it removed,
+`cargo check --all-targets --all-features` (validation run V045 at
+`d1c0a7de`, exit 0) reported 171 dead-code diagnostics in the lib build; a
+diagnostic can name several items or fields. By file: `ledger` 46,
+`coverage` 31, `reachability` 22, `dispatch` 7, `candidate` 6, `startup` 6,
+`coordinator` 5, `create` 5, `identity` 5, `recover` 5, `settle` 5,
+`attempt` 4, `emit` 4, `report` 4, `run` 4, `seams` 4, `permits` 2,
+`preflight` 2, `select` 2, `closure` 1, `integrate` 1. That run was a check,
+not clippy. Root's S11 diagnostic disposition (`6a92b57a`) then kept this
+conditional allow as a limited hygiene deferral: it is not a finding repair,
+not evidence of activation, and no permission to suppress a new lint or
+error failure. The diagnostics are neither evidence that all of them are
+harmless nor, by themselves, evidence that required behaviour is absent
+(root's reading: `ledger` is a fixture-driven accounting observation
+module, and the run path dispatches through `dispatch_through`, not the
+unused helper a diagnostic names). Public-path acceptance and the formal
+reviews decide whether the required activation behaviour is wired.
 
 ## `#![forbid(`
 
