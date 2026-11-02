@@ -147,11 +147,6 @@ fn checked_replay(
 
 impl Observed {
     #[must_use]
-    pub fn run_id(&self) -> &str {
-        &self.run_id
-    }
-
-    #[must_use]
     pub fn paths(&self) -> &RunPaths {
         &self.paths
     }
