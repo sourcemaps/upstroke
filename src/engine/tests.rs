@@ -18603,7 +18603,10 @@ fn a_relative_object_directory_refuses_a_schema_4_run_and_its_resume_before_any_
     let ended = crate::agent::proc::test_support::run_test_isolated(
         "engine::tests::relative_object_directory_topology_helper",
         &[
-            ("GIT_OBJECT_DIRECTORY", std::ffi::OsStr::new("relative/objects")),
+            (
+                "GIT_OBJECT_DIRECTORY",
+                std::ffi::OsStr::new("relative/objects"),
+            ),
             (INHERITED_RUN_ROOT, repo.as_os_str()),
             (INHERITED_RUN_ID, std::ffi::OsStr::new(&parked.run_id)),
         ],
@@ -18648,7 +18651,11 @@ fn relative_object_directory_topology_helper() {
         said.contains("GIT_OBJECT_DIRECTORY") && !said.contains("already driving worktree"),
         "{said}"
     );
-    assert_eq!(names(&repo), runs, "the refused run created a run directory");
+    assert_eq!(
+        names(&repo),
+        runs,
+        "the refused run created a run directory"
+    );
 
     let mut resume = resume_options(&repo, &run_id);
     resume.private_root = None;
@@ -18659,7 +18666,11 @@ fn relative_object_directory_topology_helper() {
         said.contains("GIT_OBJECT_DIRECTORY") && !said.contains("already driving worktree"),
         "{said}"
     );
-    assert_eq!(fs::read(&log).expect("the log"), before, "the refused resume wrote");
+    assert_eq!(
+        fs::read(&log).expect("the log"),
+        before,
+        "the refused resume wrote"
+    );
 }
 
 // ---------------------------------------------------------------------------
