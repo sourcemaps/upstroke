@@ -177,18 +177,18 @@ fn a_recorded_case_sensitive_policy_the_namespace_contradicts_refuses_and_nothin
 fn the_case_observation_answers_only_what_one_directory_shows() {
     let tree = scratch("entry-case-observation");
     let dir = tree.path();
-    assert_eq!(
-        folds_case_at(dir, "tasks"),
-        None,
-        "an entry that is not there says nothing"
+    let absent = observe_case_at(dir, "tasks");
+    assert!(
+        matches!(&absent, CaseObservation::Unknown(reason) if reason.contains("tasks")),
+        "an entry that is not there says nothing, and says why: {absent:?}"
     );
-    assert_eq!(
-        folds_case_at(dir, "0123"),
-        None,
-        "a name without an ASCII letter has no other case to look up"
+    let unlettered = observe_case_at(dir, "0123");
+    assert!(
+        matches!(&unlettered, CaseObservation::Unknown(reason) if reason.contains("`0123`")),
+        "a name without an ASCII letter has no other case to look up: {unlettered:?}"
     );
     write_file(&dir.join("tasks"), b"an entry\n");
-    let observed = folds_case_at(dir, "tasks");
+    let observed = observe_case_at(dir, "tasks").folds();
     let upper = dir.join("TASKS");
     let expected = match std::fs::symlink_metadata(&upper) {
         Ok(_) => Some(true),
@@ -198,5 +198,129 @@ fn the_case_observation_answers_only_what_one_directory_shows() {
     assert_eq!(
         observed, expected,
         "the observation agrees with a lookup of the other case in the same directory"
+    );
+}
+
+/// P12-W9 (D7). The whole table from observations to `case_fold`, with injected
+/// observations and `core.ignorecase` records: `case_fold = folds OR unknown OR
+/// core.ignorecase == true`. An unknown observation folds and warns, naming the
+/// directory and the reason; a known-sensitive namespace with `core.ignorecase`
+/// false or unset never folds; `core.ignorecase = true` joins the union; a record
+/// that could not be read folds and warns only where it decides the answer.
+#[test]
+fn every_case_observation_and_ignorecase_record_resolves_to_the_planned_case_fold() {
+    let root = Path::new("/r/workspaces/k/01RUN");
+    let unknown = CaseObservation::Unknown("TASKS could not be looked up: denied".to_owned());
+    let unreadable = IgnoreCase::Unreadable("/r/.git/config: denied".to_owned());
+    let table: [(&CaseObservation, &IgnoreCase, bool, &[&str]); 12] = [
+        (&CaseObservation::Folds, &IgnoreCase::Set(false), true, &[]),
+        (&CaseObservation::Folds, &IgnoreCase::Absent, true, &[]),
+        (&CaseObservation::Folds, &IgnoreCase::Set(true), true, &[]),
+        (&CaseObservation::Folds, &unreadable, true, &[]),
+        (&CaseObservation::Sensitive, &IgnoreCase::Set(false), false, &[]),
+        (&CaseObservation::Sensitive, &IgnoreCase::Absent, false, &[]),
+        (&CaseObservation::Sensitive, &IgnoreCase::Set(true), true, &[]),
+        (
+            &CaseObservation::Sensitive,
+            &unreadable,
+            true,
+            &["`core.ignorecase` could not be read", "/r/.git/config: denied"],
+        ),
+        (
+            &unknown,
+            &IgnoreCase::Set(false),
+            true,
+            &["/r/workspaces/k/01RUN", "TASKS could not be looked up: denied"],
+        ),
+        (
+            &unknown,
+            &IgnoreCase::Absent,
+            true,
+            &["/r/workspaces/k/01RUN", "TASKS could not be looked up: denied"],
+        ),
+        (
+            &unknown,
+            &IgnoreCase::Set(true),
+            true,
+            &["/r/workspaces/k/01RUN", "TASKS could not be looked up: denied"],
+        ),
+        (
+            &unknown,
+            &unreadable,
+            true,
+            &["/r/workspaces/k/01RUN", "TASKS could not be looked up: denied"],
+        ),
+    ];
+    for (observed, ignorecase, expected, named) in table {
+        let mut warnings = Vec::new();
+        let resolved = resolve_case_fold(root, observed, ignorecase, &mut warnings);
+        assert_eq!(
+            resolved, expected,
+            "{observed:?} with {ignorecase:?} resolves to `case_fold = {expected}`"
+        );
+        if named.is_empty() {
+            assert!(
+                warnings.is_empty(),
+                "{observed:?} with {ignorecase:?} is a known answer, and says nothing: \
+                 {warnings:?}"
+            );
+            continue;
+        }
+        let [warning] = warnings.as_slice() else {
+            panic!("{observed:?} with {ignorecase:?} warns exactly once: {warnings:?}");
+        };
+        for part in named {
+            assert!(warning.contains(part), "{part}: {warning}");
+        }
+        assert!(warning.contains("`case_fold = true`"), "{warning}");
+    }
+}
+
+/// `core.ignorecase` as the managed repository's config file records it, read
+/// the way Git spells a boolean: the last assignment in `[core]` wins, a bare key
+/// is true, and anything this reading cannot vouch for is said rather than
+/// guessed.
+#[test]
+fn the_repository_config_says_whether_git_ignores_case() {
+    for (text, expected) in [
+        ("", None),
+        ("[core]\n\trepositoryformatversion = 0\n", None),
+        ("[core]\n\tignorecase = true\n", Some(true)),
+        ("[core]\n\tignoreCase = false\n", Some(false)),
+        ("[Core]\n\tIGNORECASE = Yes\n", Some(true)),
+        ("[core]\n\tignorecase\n", Some(true)),
+        ("[core]\n\tignorecase =\n", Some(false)),
+        ("[core]\n\tignorecase = \"on\" # set by git init\n", Some(true)),
+        ("[core]\n\tignorecase = 0\n", Some(false)),
+        ("[core]\n\tignorecase = true\n\tignorecase = false\n", Some(false)),
+        ("[core] ignorecase = true\n", Some(true)),
+        ("[core \"x\"]\n\tignorecase = true\n", None),
+        ("[branch]\n\tignorecase = true\n", None),
+        ("; [core] ignorecase = true\n# ignorecase = true\n", None),
+        ("[extensions]\n\tworktreeConfig = false\n[core]\n\tignorecase = true\n", Some(true)),
+    ] {
+        assert_eq!(ignorecase_in(text), Ok(expected), "{text:?}");
+    }
+    for (text, said) in [
+        ("[core]\n\tignorecase = maybe\n", "is not a boolean"),
+        ("[include]\n\tpath = more.config\n", "included files"),
+        ("[includeIf \"gitdir:/x/\"]\n\tpath = more.config\n", "included files"),
+        ("[extensions]\n\tworktreeConfig = true\n", "per-worktree configuration"),
+        ("[core\n\tignorecase = true\n", "is not closed"),
+    ] {
+        let refused = ignorecase_in(text).expect_err(text);
+        assert!(refused.contains(said), "{text:?}: {refused}");
+    }
+
+    let tree = scratch("entry-ignorecase");
+    let common = tree.path();
+    assert_eq!(recorded_ignorecase(common), IgnoreCase::Absent);
+    write_file(&common.join("config"), b"[core]\n\tignorecase = true\n");
+    assert_eq!(recorded_ignorecase(common), IgnoreCase::Set(true));
+    write_file(&common.join("config"), b"[core]\n\tignorecase = sometimes\n");
+    let unreadable = recorded_ignorecase(common);
+    assert!(
+        matches!(&unreadable, IgnoreCase::Unreadable(reason) if reason.contains("config")),
+        "an unreadable record names the file: {unreadable:?}"
     );
 }

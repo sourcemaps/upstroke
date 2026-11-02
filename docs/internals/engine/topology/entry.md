@@ -230,11 +230,81 @@ that every combination is tested on any filesystem: only a recorded
 `case_fold = false` with an observation that the namespace folds refuses.
 (This box's filesystems cannot produce a folding observation natively.)
 
-## `fn folds_case_at(directory: &Path, name: &str) -> Option<bool> {`
+## `enum CaseObservation {`
+
+What one lookup in the execution root says about case: the namespace folds,
+it is case-sensitive, or the lookup could not say, with the reason it could
+not. The reason is what the resolver's warning names.
+
+## `enum IgnoreCase {`
+
+Git's own record for the managed repository: `core.ignorecase` set true or
+false, not set (Git's default, false), or not readable here, with the reason.
+
+## `fn resolve_case_fold(`
+
+D7's rule, as the plan states it: `case_fold = folds OR unknown OR
+core.ignorecase == true`.
+- An observation that could not answer folds, with a run warning naming the
+  execution root and the reason. It is never silent, and it costs only
+  parallelism: paths that differ only in case are leased as one.
+- A known-sensitive namespace with `core.ignorecase` false or unset records
+  `false`. Folding is never forced on it.
+- `core.ignorecase = true` joins the union.
+- A `core.ignorecase` record that could not be read folds and warns only where
+  it decides the answer, over a known-sensitive namespace.
+
+P12-W9 is the whole table
+(`entry::tests::every_case_observation_and_ignorecase_record_resolves_to_the_planned_case_fold`).
+Before PR12's brief 3 the fresh path took the observation alone: an unknown
+answer folded without a word, and `core.ignorecase` was not read. The witness
+found that, and this function is the repair.
+
+## `fn recorded_ignorecase(common_git_dir: &Path) -> IgnoreCase {`
+
+`core.ignorecase` from the managed repository's config file,
+`<common dir>/config`, read as text. The plan said `git config --type=bool
+--get` through the manager's no-replacement Git builder, but no classified
+read surface runs an arbitrary `git config` query. Adding one is an
+`effects/wrappers.toml` row, an instrument this round may not touch. So the
+file Git writes the record into is read directly, the way
+`runner::container::view` already reads `repositoryformatversion` from the
+same file.
+
+What this reading does not see, by construction:
+- system and global configuration;
+- `GIT_CONFIG_*` and `-c`.
+
+`git init` writes the key into the repository's own file when it finds the
+filesystem folding, so the repository file is where Git keeps this record.
+
+A missing file is Git's default (unset). A file that cannot be read, or that
+includes other files or turns on per-worktree configuration, is `Unreadable`.
+Those are files this reading does not follow.
+
+## `fn ignorecase_in(text: &str) -> Result<Option<bool>, String> {`
+
+The last `core.ignorecase` assignment in a `[core]` section (no subsection),
+with keys compared without case. Values are spelled the way Git spells a
+boolean:
+- `true`, `yes`, `on`, a bare key, or a non-zero integer is true;
+- `false`, `no`, `off`, an empty value, or zero is false;
+- a value may be quoted and followed by a `#` or `;` comment.
+
+Anything else is an error, as it is to Git. So are an `[include]` or
+`[includeIf]` section and `extensions.worktreeConfig` set true: the value
+could live in a file this reading does not open.
+
+## `fn observe_case_at(directory: &Path, name: &str) -> CaseObservation {`
 
 Whether `directory` resolves `name` and its ASCII upper-case spelling to the
-same entry: `Some(true)` folds, `Some(false)` does not, `None` could not say.
-Read-only (`symlink_metadata`, and `canonicalize` off Unix). Its observation
-is of one directory; it does not establish how a filesystem's descendants
-inherit case behaviour, nor anything about links or reparse points
-(validation open).
+same entry, read-only (`symlink_metadata`, and `canonicalize` off Unix).
+
+When it cannot say, it says why:
+- the name has no lowercase ASCII letter;
+- the entry could not be read;
+- the other spelling could not be looked up.
+
+Its observation is of one directory. It does not establish how a
+filesystem's descendants inherit case behaviour, nor anything about links or
+reparse points (validation open).

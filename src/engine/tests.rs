@@ -19211,6 +19211,508 @@ fn a_settled_schema_4_question_still_counts_against_a_prefix_and_takes_no_answer
     );
 }
 
+/// Two implementation tasks, the second on top of the first, each held to one
+/// attempt on one rung.
+const ONE_ATTEMPT_PLAN: &str = "## Implement the widget\n\
+                                <!-- upstroke: id=t1 kind=implement depends= -->\n\
+                                Make it.\n\n## Implement the gadget\n\
+                                <!-- upstroke: id=t2 kind=implement depends=t1 -->\n\
+                                Make that, on top of the widget.\n";
+
+const ONE_ATTEMPT_ROUTING: &str =
+    "[routing]\nimplement = { chain = [\"small\"], attempts_per = 1 }\n";
+
+fn log_events(repo: &Path, run_id: &str) -> Vec<serde_json::Value> {
+    fs::read_to_string(rundir::public_dir(repo, run_id).join("events.jsonl"))
+        .expect("the run's event log")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("a committed event"))
+        .collect()
+}
+
+/// The display id finalize's projection gives a task key.
+fn display_of(projected: &crate::engine::topology::report::TopologyReport, key: u64) -> String {
+    projected
+        .tasks
+        .iter()
+        .find(|task| u64::from(task.key) == key)
+        .map(|task| task.display_id.clone())
+        .unwrap_or_else(|| panic!("no task k{key} in the projection"))
+}
+
+/// S9, a halted run. Under the default `on_task_failure = halt`, a task whose
+/// gate fails on its one attempt halts the run. The `RunReport` that
+/// `engine::run_with` returns projects what the fold says: `outcome()` is
+/// `Halted`, `halted_at` names the task the log's `run_finished` names, the task
+/// behind it is skipped, and nothing claims a budget stop. A fresh observation of
+/// the log and finalize's `report.json` say the same. `main.rs` turns this
+/// outcome into its exit status; the command-line scenario's case E runs that.
+#[cfg(unix)]
+#[test]
+fn a_halted_schema_4_run_projects_where_it_halted_and_its_outcome() {
+    let (_tree, repo) = temp_engine_repo("topology-halted");
+    seed(
+        &repo,
+        ONE_ATTEMPT_PLAN,
+        Some(
+            format!(
+                "{ONE_ATTEMPT_ROUTING}\n[[gates]]\nname = \"refuses-the-edit\"\n\
+                 cmd = \"test ! -e agent-output.txt\"\n"
+            )
+            .as_str(),
+        ),
+    );
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        0,
+    )));
+    let report = run_with(&topology_options(&repo), &source).expect("the run ends");
+    until_released(&repo, &report.run_id);
+
+    let events = log_events(&repo, &report.run_id);
+    let finished = events.last().expect("a log");
+    assert_eq!(finished["event"], "run_finished", "{finished}");
+    assert_eq!(finished["data"]["outcome"], "halted", "{finished}");
+    let halted_key = finished["data"]["halted_at"]
+        .as_u64()
+        .expect("a halted run names the task it halted at");
+    let projected = crate::engine::topology::observe::observe(&repo, &report.run_id)
+        .expect("observes")
+        .expect("a schema-4 log")
+        .report()
+        .expect("projects");
+    let halted_task = display_of(&projected, halted_key);
+    assert_eq!(halted_task, "t1", "the fixture's premise: the first task halts the run");
+
+    assert_eq!(report.outcome(), RunOutcome::Halted, "{report:#?}");
+    assert_eq!(report.halted_at.as_deref(), Some(halted_task.as_str()));
+    assert!(report.budget_stop.is_none(), "{report:#?}");
+    let status = |id: &str| {
+        &report
+            .tasks
+            .iter()
+            .find(|task| task.id == id)
+            .unwrap_or_else(|| panic!("task {id} in {report:#?}"))
+            .status
+    };
+    assert!(
+        matches!(
+            status("t1"),
+            TaskRunStatus::Failed {
+                kind: FailureKind::GateFailed,
+                ..
+            }
+        ),
+        "{report:#?}"
+    );
+    assert!(
+        matches!(status("t2"), TaskRunStatus::Skipped),
+        "{report:#?}"
+    );
+
+    assert_eq!(projected.outcome, Some(crate::events::RunOutcome::Halted));
+    assert_eq!(projected.halted_at.map(u64::from), Some(halted_key));
+    assert!(projected.budget_stop.is_none());
+    let finalized: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(rundir::public_dir(&repo, &report.run_id).join("report.json"))
+            .expect("finalize's report"),
+    )
+    .expect("json");
+    assert_eq!(finalized["outcome"], "halted", "{finalized}");
+    assert_eq!(finalized["halted_at"], halted_key, "{finalized}");
+}
+
+/// S9, a budget stop. A run budget the first task's spend crosses stops the run
+/// before the next attempt. The `RunReport` projects the stop the log records:
+/// `outcome()` is `BudgetExceeded`, and `budget_stop` carries the log's
+/// `budget_exceeded` budget, limit and spend, and the task it stopped at, by its
+/// display id. Nothing claims a halt, and a fresh observation of the log and
+/// finalize's `report.json` say the same. `main.rs`'s exit status 3 is the
+/// command-line scenario's case F.
+#[test]
+fn a_schema_4_run_stopped_at_its_budget_projects_the_stop_and_its_outcome() {
+    let (_tree, repo) = temp_engine_repo("topology-budget");
+    seed(&repo, ONE_ATTEMPT_PLAN, Some(ONE_ATTEMPT_ROUTING));
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        0,
+    )));
+    let mut opts = topology_options(&repo);
+    opts.budget_usd = Some(0.015);
+    let report = run_with(&opts, &source).expect("the run ends");
+    until_released(&repo, &report.run_id);
+
+    let events = log_events(&repo, &report.run_id);
+    let finished = events.last().expect("a log");
+    assert_eq!(finished["event"], "run_finished", "{finished}");
+    assert_eq!(finished["data"]["outcome"], "budget_exceeded", "{finished}");
+    let stops: Vec<&serde_json::Value> = events
+        .iter()
+        .filter(|event| event["event"] == "budget_exceeded")
+        .collect();
+    let [exceeded] = stops.as_slice() else {
+        panic!("one budget_exceeded event: {events:#?}");
+    };
+    let data = &exceeded["data"];
+    assert_eq!(data["budget"], "run", "{data}");
+    let projected = crate::engine::topology::observe::observe(&repo, &report.run_id)
+        .expect("observes")
+        .expect("a schema-4 log")
+        .report()
+        .expect("projects");
+    let stopped_at = data["key"]
+        .as_u64()
+        .map(|key| display_of(&projected, key))
+        .unwrap_or_default();
+
+    assert_eq!(report.outcome(), RunOutcome::BudgetExceeded, "{report:#?}");
+    assert_eq!(
+        report.budget_stop,
+        Some(crate::events::BudgetExceeded {
+            budget: crate::events::BudgetKind::Run,
+            limit_usd: data["limit_usd"].as_f64().expect("a limit"),
+            spent_usd: data["spent_usd"].as_f64().expect("a spend"),
+            task: stopped_at,
+        }),
+        "{data}"
+    );
+    assert!(
+        (data["limit_usd"].as_f64().expect("a limit") - 0.015).abs() < 1e-9,
+        "the limit is the one the run was given: {data}"
+    );
+    assert!(
+        data["spent_usd"].as_f64().expect("a spend") > 0.0,
+        "the fixture's premise: the first task spent before the stop: {data}"
+    );
+    assert!(report.halted_at.is_none(), "{report:#?}");
+    assert_eq!(
+        projected.outcome,
+        Some(crate::events::RunOutcome::BudgetExceeded)
+    );
+    assert_eq!(
+        projected.budget_stop.map(|stop| stop.budget),
+        Some(crate::events::BudgetKind::Run)
+    );
+    assert!(projected.halted_at.is_none());
+    let finalized: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(rundir::public_dir(&repo, &report.run_id).join("report.json"))
+            .expect("finalize's report"),
+    )
+    .expect("json");
+    assert_eq!(finalized["outcome"], "budget_exceeded", "{finalized}");
+    assert_eq!(finalized["budget_stop"]["budget"], "run", "{finalized}");
+}
+
+fn recorded_case_fold(repo: &Path, run_id: &str) -> (String, bool) {
+    let line = fs::read_to_string(rundir::public_dir(repo, run_id).join("events.jsonl"))
+        .expect("the run's event log")
+        .lines()
+        .next()
+        .expect("a committed first line")
+        .to_owned();
+    let first: serde_json::Value = serde_json::from_str(&line).expect("an event");
+    let fold = first["data"]["path_policy"]["case_fold"]
+        .as_bool()
+        .expect("run_started(4) records a case policy");
+    (line, fold)
+}
+
+/// P12-W11 (D7). A public fresh run records the case-fold resolver's answer in
+/// `run_started(4)`'s `path_policy`, and a resume never changes it, even where
+/// the resolver would now answer differently. The managed repository's
+/// `core.ignorecase` changes between each run's creation and its resume, and a
+/// fresh run made after each change shows what the resolver answers then.
+///
+/// The namespace is observed the way the resolver observes it (one name, looked
+/// up in the other case, beside the private root). Where it folds, every answer
+/// is `true`, so only "a resume never changes it" can be shown there.
+#[test]
+fn a_fresh_run_records_the_case_policy_and_a_resume_never_changes_it() {
+    let (tree, repo) = temp_engine_repo("topology-case-record");
+    let probe = tree.path().join("case-probe");
+    fs::write(&probe, b"lower case\n").expect("the case probe");
+    let folds_here = tree.path().join("CASE-PROBE").exists();
+    let answer = |run: &RunReport| {
+        let [asked] = run.questions.as_slice() else {
+            panic!("one question: {run:#?}");
+        };
+        crate::answer::answer(
+            &repo,
+            &asked.question.id.to_string(),
+            crate::answer::Reply::Text("the first".to_owned()),
+        )
+        .expect("the answer is recorded");
+    };
+    let resumed = |run: &RunReport, stub: &TopologyStub| {
+        let mut resume = resume_options(&repo, &run.run_id);
+        resume.private_root = None;
+        let report = resume_with(&resume, &BorrowedTopologyStub(stub)).expect("the resume");
+        assert_eq!(report.outcome(), RunOutcome::Complete, "{report:#?}");
+        until_released(&repo, &run.run_id);
+    };
+    let parked = |stub: &TopologyStub| {
+        let run =
+            run_with(&topology_options(&repo), &BorrowedTopologyStub(stub)).expect("the run parks");
+        assert_eq!(run.outcome(), RunOutcome::Parked, "{run:#?}");
+        until_released(&repo, &run.run_id);
+        run
+    };
+
+    git_in(&repo, &["config", "core.ignorecase", "false"]);
+    let sensitive_stub = TopologyStub::new(TOPOLOGY_STUB_EDIT, 1);
+    let recorded_off = parked(&sensitive_stub);
+    let (off_line, off_fold) = recorded_case_fold(&repo, &recorded_off.run_id);
+    assert_eq!(
+        off_fold, folds_here,
+        "with `core.ignorecase = false` the record is the namespace's own answer"
+    );
+
+    git_in(&repo, &["config", "core.ignorecase", "true"]);
+    let union_stub = TopologyStub::new(TOPOLOGY_STUB_EDIT, 1);
+    let recorded_on = parked(&union_stub);
+    let (on_line, on_fold) = recorded_case_fold(&repo, &recorded_on.run_id);
+    assert!(on_fold, "`core.ignorecase = true` joins the union");
+    if !folds_here {
+        assert_ne!(
+            off_fold, on_fold,
+            "the premise on a case-sensitive namespace: the resolver now answers differently"
+        );
+    }
+
+    answer(&recorded_off);
+    resumed(&recorded_off, &sensitive_stub);
+    assert_eq!(
+        recorded_case_fold(&repo, &recorded_off.run_id).0,
+        off_line,
+        "the resume under `core.ignorecase = true` left the record byte for byte"
+    );
+    let observed = crate::engine::topology::observe::observe(&repo, &recorded_off.run_id)
+        .expect("observes")
+        .expect("a schema-4 log");
+    assert_eq!(
+        observed
+            .started()
+            .expect("a started run")
+            .path_policy
+            .case_fold,
+        off_fold,
+        "the resumed run's fold reads the recorded policy"
+    );
+
+    git_in(&repo, &["config", "core.ignorecase", "false"]);
+    let today_stub = TopologyStub::new(TOPOLOGY_STUB_EDIT, 0);
+    let today = run_with(
+        &topology_options(&repo),
+        &BorrowedTopologyStub(&today_stub),
+    )
+    .expect("a fresh run today");
+    until_released(&repo, &today.run_id);
+    assert_eq!(
+        recorded_case_fold(&repo, &today.run_id).1,
+        folds_here,
+        "with `core.ignorecase = false` again, a fresh run records the namespace's answer"
+    );
+    answer(&recorded_on);
+    resumed(&recorded_on, &union_stub);
+    assert_eq!(
+        recorded_case_fold(&repo, &recorded_on.run_id).0,
+        on_line,
+        "the resume under `core.ignorecase = false` left the record byte for byte"
+    );
+}
+
+/// The program a configured reviewer's adapter asks the runner for in P12-W17.
+/// Nothing installs it.
+const ABSENT_REVIEWER_CLI: &str = "upstroke-p12-w17-absent-reviewer-cli";
+
+/// A `copilot` adapter whose CLI is not installed: its probe asks the run's own
+/// runner to start a program that is not on `PATH`, and refuses the way
+/// `CopilotAdapter` does when its CLI is absent (`agent::bin::boundary_refused`).
+struct AbsentReviewerCli;
+
+impl AgentAdapter for AbsentReviewerCli {
+    fn id(&self) -> &'static str {
+        crate::agent::copilot::ADAPTER_ID
+    }
+
+    fn probe(&self, runner: &dyn crate::runner::Runner) -> Result<Caps, UpstrokeError> {
+        let request = crate::agent::probe_request(
+            crate::agent::copilot::ADAPTER_ID,
+            CommandSpec::new(ABSENT_REVIEWER_CLI).arg("--version"),
+            0,
+            Duration::from_secs(60),
+        )?;
+        let output = runner.run_blocking(&request).map_err(|cause| {
+            crate::agent::bin::boundary_refused(
+                ABSENT_REVIEWER_CLI,
+                "nothing installs it",
+                &UpstrokeError::from(cause),
+            )
+        })?;
+        Err(UpstrokeError::Agent {
+            message: format!(
+                "`{ABSENT_REVIEWER_CLI}` answered with {:?}, so the witness's premise, an absent \
+                 CLI, does not hold",
+                output.code
+            ),
+        })
+    }
+
+    fn build(&self, _run: &TaskRun) -> Result<CommandSpec, UpstrokeError> {
+        Err(UpstrokeError::Agent {
+            message: "an absent CLI is never built".to_owned(),
+        })
+    }
+
+    fn parse(&self, _out: &ProcessOutput) -> Result<Outcome, UpstrokeError> {
+        Err(UpstrokeError::Agent {
+            message: "an absent CLI is never parsed".to_owned(),
+        })
+    }
+}
+
+/// The same `copilot` reviewer with its CLI present: it probes the shell and
+/// reviews as the topology stub does.
+struct PresentReviewerCli<'a>(&'a TopologyStub);
+
+impl AgentAdapter for PresentReviewerCli<'_> {
+    fn id(&self) -> &'static str {
+        crate::agent::copilot::ADAPTER_ID
+    }
+
+    fn probe(&self, runner: &dyn crate::runner::Runner) -> Result<Caps, UpstrokeError> {
+        let request = crate::agent::probe_request(
+            crate::agent::copilot::ADAPTER_ID,
+            shell_spec("exit 0"),
+            0,
+            Duration::from_secs(60),
+        )?;
+        let output = runner.run_blocking(&request)?;
+        if output.code != Some(0) {
+            return Err(UpstrokeError::Agent {
+                message: format!("the present reviewer's probe exited {:?}", output.code),
+            });
+        }
+        Ok(Caps {
+            version: "0.0.0-present-reviewer".to_owned(),
+            json_output: true,
+            session_resume: false,
+            cost_reporting: true,
+            read_only_mode: true,
+            acp: false,
+            model_list: false,
+        })
+    }
+
+    fn build(&self, run: &TaskRun) -> Result<CommandSpec, UpstrokeError> {
+        self.0.build(run)
+    }
+
+    fn parse(&self, out: &ProcessOutput) -> Result<Outcome, UpstrokeError> {
+        self.0.parse(out)
+    }
+}
+
+/// The topology stub for the chain, and one reviewer adapter beside it.
+struct StubAndReviewer<'a> {
+    stub: &'a TopologyStub,
+    reviewer: &'a dyn AgentAdapter,
+}
+
+impl AdapterSource for StubAndReviewer<'_> {
+    fn get(&self, id: &str) -> Option<&dyn AgentAdapter> {
+        if id == TOPOLOGY_STUB {
+            Some(self.stub as &dyn AgentAdapter)
+        } else {
+            (id == self.reviewer.id()).then_some(self.reviewer)
+        }
+    }
+}
+
+/// The review tier pinned to `copilot`, and the chain held to a rung the stub
+/// serves, so `copilot` is a configured reviewer and nothing else.
+const COPILOT_REVIEWER_CONFIG: &str = "[routing]\n\
+                                       implement = { chain = [\"small\"], attempts_per = 1 }\n\
+                                       review = { tier = \"frontier\" }\n\n\
+                                       [[pins]]\ntier = \"frontier\"\nagent = \"copilot\"\n\
+                                       model = \"gpt-5.3-codex\"\n";
+
+/// P12-W17 (D9). A configured reviewer whose CLI is absent fails creation before
+/// P5b, and nothing is committed. Every recorded reviewer is probed at P4, so
+/// `run_with` refuses there, naming the reviewer's program, after P3b. The
+/// creator's cleanup leaves no run directory, no private half holding
+/// `committed.json`, and no integration ref, and no run was made without the
+/// reviewer. The control: the same configuration, with the reviewer's CLI
+/// present, creates the run, records both agents as probed, and completes it.
+#[test]
+fn a_configured_reviewer_whose_cli_is_absent_fails_creation_before_p5b_and_commits_nothing() {
+    let (_tree, repo) = temp_engine_repo("topology-absent-reviewer");
+    seed(&repo, ONE_ATTEMPT_PLAN, Some(COPILOT_REVIEWER_CONFIG));
+    let stub = TopologyStub::new(TOPOLOGY_STUB_EDIT, 0);
+    let refused = run_with(
+        &topology_options(&repo),
+        &StubAndReviewer {
+            stub: &stub,
+            reviewer: &AbsentReviewerCli,
+        },
+    )
+    .expect_err("an absent reviewer CLI refuses creation");
+    let said = refused.to_string();
+    assert!(said.contains("stopped at P3b"), "before P4 certified: {said}");
+    assert!(said.contains(ABSENT_REVIEWER_CLI), "{said}");
+    assert!(said.contains("could not be executed"), "{said}");
+
+    assert_eq!(
+        rundir::run_dir_names(&repo),
+        Vec::<String>::new(),
+        "no run directory is left behind"
+    );
+    let private_runs = private_root_for(&repo).join("runs");
+    let mut committed_records = Vec::new();
+    let mut stack = vec![private_runs];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.file_name().is_some_and(|name| name == "committed.json") {
+                committed_records.push(path);
+            }
+        }
+    }
+    assert_eq!(
+        committed_records,
+        Vec::<PathBuf>::new(),
+        "no private half carries a commit record"
+    );
+    assert_eq!(
+        git_in(&repo, &["for-each-ref", "--format=%(refname)", "refs/heads/upstroke/"]),
+        "",
+        "no integration ref"
+    );
+
+    let present = PresentReviewerCli(&stub);
+    let report = run_with(
+        &topology_options(&repo),
+        &StubAndReviewer {
+            stub: &stub,
+            reviewer: &present,
+        },
+    )
+    .expect("with its CLI present, the same configuration creates the run");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:#?}");
+    let first = first_line_of_the_log(&repo, &report.run_id);
+    assert_eq!(
+        first["data"]["probed_agents"],
+        serde_json::json!(["claude-code", "copilot"]),
+        "{first}"
+    );
+    until_released(&repo, &report.run_id);
+}
+
 /// Three tasks in flight from one base. The two in slots `k0` and `k1` both
 /// create `shared.txt` with different contents, and the one in `k2` writes a file
 /// of its own: whichever merges first, a later candidate is stale and clean (a

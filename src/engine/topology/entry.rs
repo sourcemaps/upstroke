@@ -256,9 +256,11 @@ impl FreshPrepared {
         )?;
         one_spelling(&include_spelling, &manager)?;
         manager.create_execution_root(hooks.effects())?;
-        let case_fold = !matches!(
-            folds_case_at(manager.execution_root(), "tasks"),
-            Some(false)
+        let case_fold = resolve_case_fold(
+            manager.execution_root(),
+            &observe_case_at(manager.execution_root(), "tasks"),
+            &recorded_ignorecase(manager.common_git_dir()),
+            &mut warnings,
         );
         let base_sha = workspace.head_sha_full()?;
 
@@ -1009,7 +1011,7 @@ fn refuse_unsafe_case_policy(started: &RunStarted4) -> Result<(), UpstrokeError>
     }
     let execution_root = PathBuf::from(&started.execution_root);
     let observed = if execution_root.is_dir() {
-        folds_case_at(&execution_root, "tasks")
+        observe_case_at(&execution_root, "tasks").folds()
     } else {
         execution_root
             .parent()
@@ -1019,7 +1021,7 @@ fn refuse_unsafe_case_policy(started: &RunStarted4) -> Result<(), UpstrokeError>
                 workspaces
                     .file_name()
                     .and_then(|name| name.to_str())
-                    .and_then(|name| folds_case_at(root, name))
+                    .and_then(|name| observe_case_at(root, name).folds())
             })
     };
     case_policy_holds(
@@ -1050,18 +1052,167 @@ fn case_policy_holds(
     })
 }
 
-fn folds_case_at(directory: &Path, name: &str) -> Option<bool> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CaseObservation {
+    Folds,
+    Sensitive,
+    Unknown(String),
+}
+
+impl CaseObservation {
+    const fn folds(&self) -> Option<bool> {
+        match self {
+            Self::Folds => Some(true),
+            Self::Sensitive => Some(false),
+            Self::Unknown(_) => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum IgnoreCase {
+    Set(bool),
+    Absent,
+    Unreadable(String),
+}
+
+fn resolve_case_fold(
+    directory: &Path,
+    observed: &CaseObservation,
+    ignorecase: &IgnoreCase,
+    warnings: &mut Vec<String>,
+) -> bool {
+    let fold = |why: String| {
+        format!(
+            "{why}, so this run records `case_fold = true`: task paths that differ only in case \
+             are leased as one path, which costs only parallelism"
+        )
+    };
+    match (observed, ignorecase) {
+        (CaseObservation::Unknown(reason), _) => {
+            warnings.push(fold(format!(
+                "whether the execution root {} folds case could not be observed ({reason})",
+                directory.display()
+            )));
+            true
+        }
+        (CaseObservation::Folds, _) | (CaseObservation::Sensitive, IgnoreCase::Set(true)) => true,
+        (CaseObservation::Sensitive, IgnoreCase::Set(false) | IgnoreCase::Absent) => false,
+        (CaseObservation::Sensitive, IgnoreCase::Unreadable(reason)) => {
+            warnings.push(fold(format!(
+                "the managed repository's `core.ignorecase` could not be read ({reason})"
+            )));
+            true
+        }
+    }
+}
+
+fn recorded_ignorecase(common_git_dir: &Path) -> IgnoreCase {
+    let path = common_git_dir.join("config");
+    match std::fs::read_to_string(&path) {
+        Ok(text) => match ignorecase_in(&text) {
+            Ok(Some(set)) => IgnoreCase::Set(set),
+            Ok(None) => IgnoreCase::Absent,
+            Err(why) => IgnoreCase::Unreadable(format!("{}: {why}", path.display())),
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => IgnoreCase::Absent,
+        Err(error) => IgnoreCase::Unreadable(format!("{}: {error}", path.display())),
+    }
+}
+
+fn ignorecase_in(text: &str) -> Result<Option<bool>, String> {
+    let mut section = String::new();
+    let mut found = None;
+    for raw in text.lines() {
+        let mut line = raw.trim();
+        if line.starts_with('[') {
+            let end = line
+                .find(']')
+                .ok_or_else(|| format!("the section header `{line}` is not closed"))?;
+            section = line[1..end].trim().to_ascii_lowercase();
+            if section.starts_with("include") {
+                return Err(format!(
+                    "it has an `[{}]` section, and this reading does not follow included files",
+                    &line[1..end]
+                ));
+            }
+            line = line[end + 1..].trim();
+        }
+        let line = without_comment(line);
+        if line.is_empty() {
+            continue;
+        }
+        let (key, value) = match line.split_once('=') {
+            Some((key, value)) => (key.trim(), Some(value.trim())),
+            None => (line, None),
+        };
+        match section.as_str() {
+            "core" if key.eq_ignore_ascii_case("ignorecase") => {
+                found = Some(config_bool(value).ok_or_else(|| {
+                    format!("`core.ignorecase = {}` is not a boolean", value.unwrap_or(""))
+                })?);
+            }
+            "extensions" if key.eq_ignore_ascii_case("worktreeconfig") => {
+                if config_bool(value) != Some(false) {
+                    return Err("`extensions.worktreeConfig` is on, and this reading does not \
+                                follow per-worktree configuration"
+                        .to_owned());
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(found)
+}
+
+fn without_comment(line: &str) -> &str {
+    let mut quoted = false;
+    for (at, character) in line.char_indices() {
+        match character {
+            '"' => quoted = !quoted,
+            '#' | ';' if !quoted => return line[..at].trim(),
+            _ => {}
+        }
+    }
+    line
+}
+
+fn config_bool(value: Option<&str>) -> Option<bool> {
+    let Some(value) = value else {
+        return Some(true);
+    };
+    let value = value.trim_matches('"').trim();
+    match value.to_ascii_lowercase().as_str() {
+        "true" | "yes" | "on" => Some(true),
+        "false" | "no" | "off" | "" => Some(false),
+        number => number.parse::<i64>().ok().map(|number| number != 0),
+    }
+}
+
+fn observe_case_at(directory: &Path, name: &str) -> CaseObservation {
     let other_name = name.to_ascii_uppercase();
     if other_name == name {
-        return None;
+        return CaseObservation::Unknown(format!(
+            "`{name}` has no lowercase ASCII letter to look up in the other case"
+        ));
     }
     let spelled = directory.join(name);
     let other = directory.join(&other_name);
-    let found = std::fs::symlink_metadata(&spelled).ok()?;
+    let found = match std::fs::symlink_metadata(&spelled) {
+        Ok(found) => found,
+        Err(error) => {
+            return CaseObservation::Unknown(format!(
+                "{} could not be read: {error}",
+                spelled.display()
+            ));
+        }
+    };
     match std::fs::symlink_metadata(&other) {
         Ok(other_found) => same_entry(&spelled, &found, &other, &other_found),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(false),
-        Err(_) => None,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => CaseObservation::Sensitive,
+        Err(error) => {
+            CaseObservation::Unknown(format!("{} could not be looked up: {error}", other.display()))
+        }
     }
 }
 
@@ -1071,9 +1222,13 @@ fn same_entry(
     found: &std::fs::Metadata,
     _other: &Path,
     other_found: &std::fs::Metadata,
-) -> Option<bool> {
+) -> CaseObservation {
     use std::os::unix::fs::MetadataExt as _;
-    Some(found.dev() == other_found.dev() && found.ino() == other_found.ino())
+    if found.dev() == other_found.dev() && found.ino() == other_found.ino() {
+        CaseObservation::Folds
+    } else {
+        CaseObservation::Sensitive
+    }
 }
 
 #[cfg(not(unix))]
@@ -1082,10 +1237,16 @@ fn same_entry(
     _found: &std::fs::Metadata,
     other: &Path,
     _other_found: &std::fs::Metadata,
-) -> Option<bool> {
-    let spelled = std::fs::canonicalize(spelled).ok()?;
-    let other = std::fs::canonicalize(other).ok()?;
-    Some(spelled == other)
+) -> CaseObservation {
+    match (std::fs::canonicalize(spelled), std::fs::canonicalize(other)) {
+        (Ok(spelled), Ok(other)) if spelled == other => CaseObservation::Folds,
+        (Ok(_), Ok(_)) => CaseObservation::Sensitive,
+        (Err(error), _) | (_, Err(error)) => CaseObservation::Unknown(format!(
+            "{} and {} could not both be resolved: {error}",
+            spelled.display(),
+            other.display()
+        )),
+    }
 }
 
 fn ceiling_of(flag: Option<f64>, configured: &Budgets) -> Result<Ceiling, UpstrokeError> {
