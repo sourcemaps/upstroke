@@ -99,4 +99,7 @@ the run.
 Each poll is a fresh observation, and the events past the count already
 printed are described; it stops when the run has finished and nothing holds
 it, or after the idle budget when nothing holds an unfinished one, as legacy
-`follow` does.
+`follow` does. It writes nothing itself: each line goes to the caller's
+`emit`, because a topology module may not write to a stream
+(`std::io::Write::write_fmt` is a disallowed method here), and
+`status::follow` is what prints them.

@@ -4616,7 +4616,7 @@ fn replay_of(repo: &Path, run_id: &str) -> crate::status::Status {
 
 fn legacy_status(status: &crate::status::Status) -> &crate::status::RunStatus {
     match status {
-        crate::status::Status::Legacy(run) => run,
+        crate::status::Status::Legacy(run) => run.as_ref(),
         crate::status::Status::Topology(run) => {
             panic!(
                 "run `{}` read back as schema 4, not as a legacy run",

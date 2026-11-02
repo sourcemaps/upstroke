@@ -30,7 +30,7 @@ pub struct RunStatus {
 }
 
 pub enum Status {
-    Legacy(RunStatus),
+    Legacy(Box<RunStatus>),
     Topology(TopologyStatus),
 }
 
@@ -171,7 +171,7 @@ pub fn load(repo_root: &Path, run_id: Option<&str>) -> Result<Status, UpstrokeEr
         replayed.state.settle_interrupted()
     };
 
-    Ok(Status::Legacy(RunStatus {
+    Ok(Status::Legacy(Box::new(RunStatus {
         run_id,
         paths,
         started: replayed.started,
@@ -181,7 +181,7 @@ pub fn load(repo_root: &Path, run_id: Option<&str>) -> Result<Status, UpstrokeEr
         held,
         interrupted,
         warnings,
-    }))
+    })))
 }
 
 pub fn render(status: &Status) -> String {
@@ -211,7 +211,9 @@ pub fn follow(
                 sleeper,
                 poll,
                 max_idle_polls,
-                out,
+                &mut |line| {
+                    let _ = writeln!(out, "{line}");
+                },
             );
         }
     };
@@ -928,7 +930,7 @@ mod tests {
             interrupted: 0,
             warnings: vec![hostile.to_owned()],
         };
-        let rendered = render(&Status::Legacy(status));
+        let rendered = render(&Status::Legacy(Box::new(status)));
         assert!(
             rendered.chars().all(|c| c == '\n' || !c.is_control()),
             "{rendered:?}"

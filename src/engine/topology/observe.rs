@@ -437,7 +437,7 @@ pub fn follow(
     sleeper: &dyn Sleeper,
     poll: Duration,
     max_idle_polls: u32,
-    out: &mut dyn std::io::Write,
+    emit: &mut dyn FnMut(&str),
 ) -> Result<(), UpstrokeError> {
     let mut printed = 0_usize;
     let mut idle = 0_u32;
@@ -468,7 +468,7 @@ pub fn follow(
         }
         idle = 0;
         for event in fresh {
-            let _ = writeln!(out, "{}", observed.describe(event));
+            emit(&observed.describe(event));
         }
         printed = observed.events().len();
         if observed.finished() && !observed.running() {
