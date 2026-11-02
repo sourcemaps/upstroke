@@ -7224,31 +7224,25 @@ impl WorkspaceManager {
             })
     }
 
-    /// [`Self::git_ok`] with the engine's committer identity, for the one
-    /// commit the manager makes by replaying rather than by `commit-tree`:
-    /// the proposal cherry-pick ([`Self::proposal_cherry_pick`]).
+    /// [`Self::git_ok`] through [`Self::git_with_identity`], for the one commit
+    /// the manager makes by replaying rather than by `commit-tree`: the
+    /// proposal cherry-pick ([`Self::proposal_cherry_pick`]).
     ///
-    /// Git takes a commit's committer from `GIT_COMMITTER_NAME` and
-    /// `GIT_COMMITTER_EMAIL` before any configuration. Without them, a
-    /// repository with no `user.name`/`user.email` fails the cherry-pick ("unable to
-    /// auto-detect email address", the CLI scenario's case C at `ad513bdf`).
-    /// The legacy engine never asked the operator for an identity: every
-    /// commit it put on a run's branch was `commit-tree` with `upstroke`'s
-    /// (`Workspace::commit_tree_with_upstroke_identity` at `b9d15bdb`), as
-    /// [`Self::git_with_identity`] gives this manager's own `commit-tree`.
-    /// So the committer here is `upstroke` too. The author stays the picked
-    /// candidate's, which is already `upstroke`'s, and dates are Git's, as
-    /// they were.
+    /// Git takes a commit's committer from the environment before any
+    /// configuration. Without it, a repository with no `user.name`/`user.email`
+    /// fails the cherry-pick ("unable to auto-detect email address", the CLI
+    /// scenario's case C at `ad513bdf`). The legacy engine never asked the
+    /// operator for an identity: every commit it put on a run's branch was
+    /// `commit-tree` with `upstroke`'s (`Workspace::commit_tree_with_upstroke_identity`
+    /// at `b9d15bdb`). This manager's own `commit-tree` already takes its
+    /// identity and dates from [`Self::git_with_identity`], so a candidate is a
+    /// function of its inputs and not of the machine. The proposal takes the
+    /// same, and its committer is `upstroke` at `@0`, like the candidate it
+    /// replays. A fast-path merge already put such commits on the integration
+    /// branch, and now a stale one does too. A replay of the same candidate
+    /// onto the same tip is then the same commit.
     fn git_ok_as_engine(&self, cwd: &Path, args: &[OsString]) -> Result<Vec<u8>, UpstrokeError> {
-        self.revalidate_hooks_path()?;
-        let output = self
-            .command(cwd, args)
-            .env("GIT_COMMITTER_NAME", "upstroke")
-            .env("GIT_COMMITTER_EMAIL", "upstroke@upstroke.local")
-            .output()
-            .map_err(|error| UpstrokeError::Git {
-                message: format!("failed to run git: {error}"),
-            })?;
+        let output = self.git_with_identity(cwd, args)?;
         if !output.status.success() {
             return Err(git_failure(cwd, args, &output));
         }
