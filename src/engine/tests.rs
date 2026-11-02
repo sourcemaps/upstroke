@@ -18513,6 +18513,7 @@ fn topology_object_graph_helper() {
     assert!(committed(&resumed, "t1"), "{resumed:?}");
 }
 
+#[cfg(unix)]
 const INHERITED_RUN_ID: &str = "UPSTROKE_INHERITED_RUN_ID";
 
 /// P12-W7: a schema-4 run in a checkout whose environment carries a relative
