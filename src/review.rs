@@ -534,7 +534,9 @@ pub fn run_review(
             });
         }
         let request = crate::runner::review_request(
-            command.stdin(cx.adapter.stdin_payload(&task_run).as_bytes().to_vec()),
+            command
+                .stdin(cx.adapter.stdin_payload(&task_run).as_bytes().to_vec())
+                .settings_file(task_run.settings_path.clone()),
             task_run.workspace.clone(),
             AgentId::new(cx.adapter.id()),
             remaining,

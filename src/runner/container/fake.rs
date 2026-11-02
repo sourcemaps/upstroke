@@ -15,9 +15,9 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use super::runtime::{
-    ContainerExecution, ContainerRuntime, ContainerTrace, CreateSpec, CreatedContainer,
-    DiscoveredContainer, ImageInspection, Liveness, Mount, OwnerLiveness, RuntimeError, RuntimeOp,
-    Settled, StopMode,
+    ContainerExecution, ContainerRuntime, ContainerTrace, ContainerUser, CreateSpec,
+    CreatedContainer, DiscoveredContainer, ImageInspection, Liveness, Mount, OwnerLiveness,
+    RuntimeError, RuntimeOp, Settled, StopMode,
 };
 use super::{ContainerHooks, CoveredCreate, CoveredStart, DockerCli};
 use crate::runner::Cancellation;
@@ -103,6 +103,7 @@ struct State {
     pace: Option<Pace>,
     reaper_program: Option<PathBuf>,
     covers: Option<Vec<(String, bool)>>,
+    stdin_received: BTreeMap<String, Vec<u8>>,
 }
 
 impl Drop for State {
@@ -402,6 +403,10 @@ impl FakeRuntime {
     pub(crate) fn starts_observed(&self) -> Vec<(String, bool)> {
         self.state().covers.clone().unwrap_or_default()
     }
+
+    pub(crate) fn stdin_received(&self, name: &str) -> Option<Vec<u8>> {
+        self.state().stdin_received.get(name).cloned()
+    }
 }
 
 pub(crate) const NO_OP_REAPER_PROGRAM: &str = "/usr/bin/true";
@@ -503,6 +508,11 @@ impl ContainerRuntime for FakeRuntime {
     }
 
     fn start(&self, covered: CoveredStart<'_>) -> Result<(), RuntimeError> {
+        if !covered.stdin().is_empty() {
+            self.state()
+                .stdin_received
+                .insert(covered.name().to_owned(), covered.stdin().to_vec());
+        }
         self.daemon_start(covered.name())
     }
 
@@ -1289,6 +1299,8 @@ fn spec_json(spec: &CreateSpec) -> Value {
         "command": spec.command,
         "workdir": spec.workdir,
         "read_only_root": spec.read_only_root,
+        "user": spec.user.map(|user| [user.uid, user.gid]),
+        "open_stdin": spec.open_stdin,
     })
 }
 
@@ -1340,6 +1352,17 @@ fn spec_of(value: &Value) -> Option<CreateSpec> {
             .get("read_only_root")
             .and_then(Value::as_bool)
             .unwrap_or(true),
+        user: match value.get("user").and_then(Value::as_array).map(Vec::as_slice) {
+            Some([uid, gid]) => Some(ContainerUser {
+                uid: u32::try_from(uid.as_u64()?).ok()?,
+                gid: u32::try_from(gid.as_u64()?).ok()?,
+            }),
+            _ => None,
+        },
+        open_stdin: value
+            .get("open_stdin")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
     })
 }
 
@@ -1458,6 +1481,8 @@ pub(crate) const DOCKER_GATED_TESTS: &[&str] = &[
     "real_docker_lists_the_state_the_settlement_observation_reads",
     "real_docker_a_schema_4_run_refuses_an_absent_image_before_the_worktree_lock",
     "real_docker_a_containerized_agent_reads_its_own_settings_and_cannot_write_them",
+    "real_docker_a_container_runs_as_the_coordinators_user_and_leaves_what_it_can_reclaim",
+    "real_docker_a_containerized_program_reads_its_exact_stdin_then_eof",
 ];
 
 pub(crate) fn absent_reason() -> String {

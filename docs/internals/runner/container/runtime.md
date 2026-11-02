@@ -263,6 +263,13 @@ Whether the mount is read-only.
 A tmpfs that could not be written would be a mount with no purpose, so
 this variant has no flag rather than a flag that is always `false`.
 
+## `pub struct ContainerUser {`
+
+A numeric uid and gid a container runs as: `docker create --user <uid>:<gid>`
+(PR12's D-B). Numbers and not names, because the image's `/etc/passwd`
+need not know the coordinator's user, and a name would resolve inside the
+image to whoever it means there.
+
 ## `pub struct CreateSpec {`
 
 Everything `docker create` is given.
@@ -322,6 +329,22 @@ needs to write.
 A field rather than an unconditional argv flag so the obligation is
 assertable from a [`CreateSpec`] on a machine with no container runtime
 — including the Windows guest, which has none.
+
+## `pub struct CreateSpec` › `pub user: Option<ContainerUser>,`
+
+Who the container's process runs as. `Some` is the coordinator's effective
+numeric identity, which `exec::ContainerRunner::plan` gives every container
+on Linux (`coordinator_user`); `None` keeps the image's user, as every
+container did before PR12's D-B.
+
+## `pub struct CreateSpec` › `pub open_stdin: bool,`
+
+Whether the container is created with stdin open (`docker create
+--interactive`), true exactly when its command carries a non-empty
+`CommandSpec::stdin` (PR12's D-C). The payload itself is not here: it
+travels in the cover's start proof, so a spec that is logged, hashed or
+compared never holds a prompt. A closed stdin is the EOF a command with no
+input reads at once, as before.
 
 ## `pub struct CreatedContainer {`
 
@@ -537,7 +560,10 @@ the spec from it; there is no other spec to create from.
 
 ## `pub trait ContainerRuntime: Send + Sync` › `fn start(&self, covered: CoveredStart<'_>) -> Result<(), RuntimeError>;`
 
-Start `covered.name()`.
+Start `covered.name()`, and deliver `covered.stdin()` to it exactly once, then
+EOF, when that payload is not empty (PR12's D-C). The start returns once the
+container has started: it waits neither for the workload nor for the whole
+payload to be written.
 
 ### Errors
 

@@ -14,6 +14,12 @@
   installed (`design/17`, "Which CLIs a schema-4 run needs"). This
   supersedes the entries below that call schema 4 "unreleased and inert by default": it is still
   unreleased, and no longer inert.
+- The container runner now gives a worker or reviewer its own permission-settings file, read-only,
+  where its CLI was handed a host path the container withholds; that one file, the one the engine
+  materialized for the invocation, and no other. On Linux every container runs as the
+  coordinator's numeric uid and gid, so the image and any credential volume must be usable by that
+  user; nothing changes their ownership. And a command's stdin now reaches its container, which
+  had read none: the prompt is written once to an attached start, then EOF.
 - A decline, or a lineage member's failed settlement, that meets an open verification of its lineage now
   cancels the verification instead of releasing it: the schema-4 fold keeps the transaction, and its
   pipeline and merge entitlements, until its one terminal, `merge_verification_interrupted`, which the

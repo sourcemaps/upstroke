@@ -216,6 +216,14 @@ Two distinct answers to two distinct questions about one reference: the
 intersection {image id recorded} x {reference moved} rather than either
 alone.
 
+## `fn the_docker_create_arguments_carry_a_user_and_an_open_stdin_only_when_the_spec_does() {`
+
+The `docker create` argv, read with no daemon (`docker_create_arguments`). A
+spec with no user and no input asks for neither, as every create did before
+PR12's D-B and D-C. With both, `--user <uid>:<gid>` and `--interactive` are
+options of the create, before the image id, and the command after it is
+unchanged.
+
 ## `fn the_fake_can_report_an_image_id_that_differs_from_the_one_create_asked_for() {`
 
 (3) per-container **reported image ids with substitution injection**.

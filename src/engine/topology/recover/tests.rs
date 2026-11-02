@@ -3989,6 +3989,8 @@ impl crate::runner::contract::tests::InlineRunner for ProbeContainerRunner<'_> {
                     .collect(),
                 workdir: Some("/".to_owned()),
                 read_only_root: true,
+                user: None,
+                open_stdin: false,
             },
             view: GitViewRequest {
                 path: crate::runner::container::exec::view_dir(&self.private_root, &name),
@@ -4463,6 +4465,7 @@ fn kill_during_recovery_repeats_recovery() {
             .chain(observation_export_env())
             .collect(),
             stdin: Vec::new(),
+            settings_file: None,
         },
         workspace: fixture.repo_root.clone(),
         role: crate::runner::ExecutionRole::Gate,
@@ -20824,6 +20827,7 @@ fn kill_inside_closure_recovers() {
                 .chain(observation_export_env())
                 .collect(),
                 stdin: Vec::new(),
+                settings_file: None,
             },
             workspace: fixture.repo_root.clone(),
             role: crate::runner::ExecutionRole::Gate,

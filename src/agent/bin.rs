@@ -42,6 +42,7 @@ impl Invocation {
             args: args.to_vec(),
             env: Vec::new(),
             stdin: Vec::new(),
+            settings_file: None,
         })
     }
 

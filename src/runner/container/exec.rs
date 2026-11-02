@@ -14,15 +14,17 @@ use crate::error::UpstrokeError;
 use crate::rundir::RunPaths;
 use crate::runner::policy::runner_policy_sha256;
 use crate::runner::{
-    AgentId, Cancellation, ExecutionRole, InvocationId, RunFuture, Runner, RunnerCall, RunnerError,
-    RunnerRequest,
+    AgentId, Cancellation, CommandSpec, ExecutionRole, InvocationId, RunFuture, Runner, RunnerCall,
+    RunnerError, RunnerRequest,
 };
 use crate::topology::events::{RunnerContract, RunnerKind, RunnerPolicy};
 
 use super::census::ReaperContainerScope;
 use super::env::{BoundaryLayout, ContainerEnvironment, RoleScope, supplies_credential_location};
 use super::intent::{ContainerIntent, ContainerName, LABEL_INCARNATION, LABEL_PRIVATE_ROOT};
-use super::runtime::{ContainerRuntime, ContainerTrace, CreateSpec, Mount, RuntimeError};
+use super::runtime::{
+    ContainerRuntime, ContainerTrace, ContainerUser, CreateSpec, Mount, RuntimeError,
+};
 use super::view::{self, RoleGitView};
 use super::{
     CancelResidue, ContainerHooks, ContainerToRelease, GitView, GitViewRequest, LaunchPlan,
@@ -145,6 +147,25 @@ impl Confinement {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn coordinator_user() -> Result<Option<ContainerUser>, UpstrokeError> {
+    use std::os::unix::fs::MetadataExt as _;
+    let path = Path::new("/proc/self");
+    let metadata = std::fs::metadata(path).map_err(|source| UpstrokeError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    Ok(Some(ContainerUser {
+        uid: metadata.uid(),
+        gid: metadata.gid(),
+    }))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn coordinator_user() -> Result<Option<ContainerUser>, UpstrokeError> {
+    Ok(None)
+}
+
 fn worktree_namespaces(execution_root: &Path) -> Vec<PathBuf> {
     use crate::workspace_manager::{Slot, SnapshotName};
     let representatives = [
@@ -256,6 +277,8 @@ pub struct ContainerRunner {
     environment: ContainerEnvironment,
     layout: BoundaryLayout,
     confinement: Confinement,
+    settings_directory: PathBuf,
+    user: Option<ContainerUser>,
     runtime: Box<dyn ContainerRuntime>,
     view: Box<dyn GitView>,
     view_is_explicit: bool,
@@ -350,6 +373,10 @@ impl ContainerRunner {
         let view = RoleGitView::new(ContainerTrace::off())
             .for_reader(layout.git_view(), layout.git_objects());
         let confinement = Confinement::of_run(&identity, repo_root);
+        let settings_directory =
+            RunPaths::with_private_root(repo_root, &identity.run_id, &identity.private_root)
+                .settings();
+        let user = coordinator_user()?;
         Ok(Self {
             policy,
             image_id,
@@ -359,6 +386,8 @@ impl ContainerRunner {
             environment,
             layout,
             confinement,
+            settings_directory,
+            user,
             runtime,
             view: Box::new(view),
             view_is_explicit: false,
@@ -471,7 +500,7 @@ impl ContainerRunner {
         } else {
             None
         };
-        let (args, settings) = self.settings_for(&request.role, &request.command.args);
+        let (args, settings) = self.settings_for(&request.role, &request.command)?;
         let mut mounts = self.mounts(request, git.as_ref(), &name);
         mounts.extend(settings);
         let mut confinement = self.confinement.clone();
@@ -519,6 +548,8 @@ impl ContainerRunner {
                         self.layout.scratch().to_owned()
                     }),
                     read_only_root: true,
+                    user: self.user,
+                    open_stdin: !request.command.stdin.is_empty(),
                 },
                 view: GitViewRequest {
                     path: view_path.clone(),
@@ -536,37 +567,71 @@ impl ContainerRunner {
         })
     }
 
-    fn settings_for(&self, role: &ExecutionRole, args: &[String]) -> (Vec<String>, Vec<Mount>) {
-        let directory = self
-            .identity
-            .private_root
-            .join("runs")
-            .join(&self.identity.run_id)
-            .join("settings");
-        let mut mounts = Vec::new();
-        let args = args
+    fn settings_for(
+        &self,
+        role: &ExecutionRole,
+        command: &CommandSpec,
+    ) -> Result<(Vec<String>, Vec<Mount>), UpstrokeError> {
+        let unchanged = || Ok((command.args.clone(), Vec::new()));
+        if !matches!(role, ExecutionRole::Implement | ExecutionRole::Review) {
+            return unchanged();
+        }
+        let Some(own) = command.settings_file.as_deref() else {
+            return unchanged();
+        };
+        let Some(host) = own
+            .to_str()
+            .filter(|host| command.args.iter().any(|arg| arg == host))
+        else {
+            return unchanged();
+        };
+        let file_name = own
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| *own == self.settings_directory.join(name));
+        let Some(file_name) = file_name else {
+            return Err(UpstrokeError::Refused {
+                message: format!(
+                    "the settings file `{}` this invocation names is not a file of the run's \
+                     settings directory `{}`, so no container receives it",
+                    own.display(),
+                    self.settings_directory.display()
+                ),
+            });
+        };
+        let metadata = std::fs::symlink_metadata(own).map_err(|source| UpstrokeError::Io {
+            path: own.to_path_buf(),
+            source,
+        })?;
+        if !metadata.file_type().is_file() {
+            return Err(UpstrokeError::Refused {
+                message: format!(
+                    "the settings file `{}` this invocation names is not a regular file; a \
+                     directory or a link is never bound into a container",
+                    own.display()
+                ),
+            });
+        }
+        let target = self.layout.settings(file_name);
+        let args = command
+            .args
             .iter()
             .map(|arg| {
-                let path = Path::new(arg);
-                let file_name = path.file_name().and_then(|name| name.to_str());
-                match file_name {
-                    Some(file_name)
-                        if matches!(role, ExecutionRole::Implement | ExecutionRole::Review)
-                            && path.parent() == Some(directory.as_path()) =>
-                    {
-                        let target = self.layout.settings(file_name);
-                        mounts.push(Mount::Path {
-                            source: path.to_path_buf(),
-                            target: target.clone(),
-                            read_only: true,
-                        });
-                        target
-                    }
-                    _ => arg.clone(),
+                if arg == host {
+                    target.clone()
+                } else {
+                    arg.clone()
                 }
             })
             .collect();
-        (args, mounts)
+        Ok((
+            args,
+            vec![Mount::Path {
+                source: own.to_path_buf(),
+                target,
+                read_only: true,
+            }],
+        ))
     }
 
     fn mounts(
@@ -939,7 +1004,12 @@ impl ContainerRunner {
         let plan = self.plan(request).map_err(never_started)?;
         let (covered, to_create, to_start) = self
             .reaping
-            .cover(self.runtime.as_ref(), &self.identity, &plan.launch.spec)
+            .cover(
+                self.runtime.as_ref(),
+                &self.identity,
+                &plan.launch.spec,
+                &request.command.stdin,
+            )
             .map_err(never_started)?;
         let started = Instant::now();
         let deadline = started + request.timeout;
@@ -1054,6 +1124,7 @@ pub(super) mod cover {
 
     pub struct CoveredStart<'a> {
         name: &'a str,
+        stdin: &'a [u8],
     }
 
     impl Reaping {
@@ -1062,6 +1133,7 @@ pub(super) mod cover {
             runtime: &dyn ContainerRuntime,
             identity: &RunIdentity,
             spec: &'a CreateSpec,
+            stdin: &'a [u8],
         ) -> Result<(Covered<'a>, CoveredCreate<'a>, CoveredStart<'a>), UpstrokeError> {
             let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
             if let Some(armed) = &state.armed {
@@ -1089,7 +1161,10 @@ pub(super) mod cover {
                     fate: None,
                 },
                 CoveredCreate { spec },
-                CoveredStart { name: &spec.name },
+                CoveredStart {
+                    name: &spec.name,
+                    stdin,
+                },
             ))
         }
     }
@@ -1129,6 +1204,11 @@ pub(super) mod cover {
         pub fn name(&self) -> &'a str {
             self.name
         }
+
+        #[must_use]
+        pub fn stdin(&self) -> &'a [u8] {
+            self.stdin
+        }
     }
 
     #[cfg(test)]
@@ -1143,7 +1223,7 @@ pub(super) mod cover {
 
         impl<'a> CoveredStart<'a> {
             pub(crate) fn without_a_reaper(name: &'a str) -> Self {
-                Self { name }
+                Self { name, stdin: &[] }
             }
         }
     }

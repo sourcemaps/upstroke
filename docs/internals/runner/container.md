@@ -1217,9 +1217,15 @@ how the boundary is *built*, so it cannot execute inside it.
 `runner::contract::tests::every_production_process_start_is_classified` carries the
 row that says so.
 
+`deliveries` holds, by container name, each stdin delivery an attached start
+began and its collection has not settled yet (`start_attached`,
+`settle_delivery`). Shared by every clone, so the CLI that started a
+container is the one that settles its input, whichever clone collects.
+
 ## `impl DockerCli` › `pub fn new(trace: ContainerTrace) -> Self {`
 
-A CLI whose operations are recorded in `trace`.
+A CLI whose operations are recorded in `trace`, with no stdin delivery in
+flight.
 
 ## `impl DockerCli` › `pub fn available() -> bool {`
 
@@ -1260,6 +1266,121 @@ well as its consequence.
 ## `impl DockerCli` › `fn image(`
 
 An image inspection from `docker image inspect`'s Go-template output.
+
+## `impl DockerCli` › `fn start_attached(`
+
+Start a container whose command has input, and deliver that input exactly
+once, then EOF (PR12's D-C, carried by the coordinator and authorized in
+root's prompt follow-through).
+
+The host runner writes a worker's prompt to the child's stdin
+(`CommandSpec::stdin`). A container created without stdin read none:
+measured with a stub on real Docker, a containerized process read 0 bytes
+(the coordinator's `debug-3`). What a real CLI does with an empty stdin was
+not executed.
+
+The path, given that `create` passed `--interactive`:
+- `docker start --attach --interactive <name>` is spawned with a stdin pipe,
+  in a process group of its own (Unix) or a new process group (Windows), so
+  a terminal's interrupt never reaches it and is never forwarded to the
+  container. Cancellation stays the runner's: stop and remove, in their order;
+- its stdout and stderr go to the null device, so the client's copy of the
+  container's streams never applies back-pressure to the container. The
+  output the run uses is `docker logs`', collected as before;
+- one thread of its own spawns it, writes the payload, closes the pipe,
+  which is the EOF, and reaps it. That thread is the client's owner: no write,
+  however large, and no workload, however long, holds the caller;
+- the call returns once the container has left `created`. If the client ends
+  while the container is still `created`, the start failed: that is reported
+  with the client's exit and the daemon's `State.Error`.
+
+So a start never waits for the workload or for an unbounded write, and the
+runner's supervision, timeout and cancellation proceed as before while the
+input is still being written.
+
+The prompt reaches that pipe and nothing else: not argv, not the
+environment, not a mount, not a log. The trace records the operation and the
+container's name only.
+
+The thread that would feed the input is started before the client, so a
+failure to start the thread leaves no client to reach EOF with an empty
+input and start the container anyway.
+
+## `impl DockerCli` › `fn settle_delivery(&self, name: &str, exit_code: Option<i32>) -> Result<(), RuntimeError> {`
+
+How a container's input went, settled when its output is collected.
+
+Nothing to settle without an attached start, or while the container still
+runs: a timed-out container is collected before it is stopped, and its
+input settles nothing. Otherwise the client ends with the container, and its
+thread is given `DELIVERY_GRACE` to report. Then:
+- a write that failed, other than on a broken pipe, is the collection's
+  error: the program may have read a truncated input, and saying so is the
+  honest report;
+- a pipe that broke before the whole payload went, with the client ending on
+  a code other than the container's, is an attach that broke while the
+  container ran, and is an error too;
+- a pipe that broke while the client ended with the container's own code is
+  a program that stopped reading early. The program's own exit and output
+  are its result, as the host funnel's broken pipe is (`agent::proc::input`).
+
+A client whose end cannot be told within the grace is reported as nothing:
+the delivery is not claimed either way. A client that died with the
+container's own code would read as an early exit; that residue is accepted
+and named here.
+
+## `const ATTACHED_START_POLL: Duration = Duration::from_millis(25);`
+
+How often an attached start looks at the container's state, and its
+settlement at the client's thread.
+
+## `const DELIVERY_GRACE: Duration = Duration::from_secs(2);`
+
+How long a collection waits for a finished container's attached client to
+report, as long as `agent::proc`'s `DRAIN_GRACE_EXIT`.
+
+## `struct StdinDelivery {`
+
+One attached start's record and the thread that owns its client.
+
+## `struct DeliveryRecord {`
+
+What the thread knows: the payload's size, the bytes written, a write
+failure other than a broken pipe, and the client's exit once it ended.
+
+## `fn docker_command(args: &[&str]) -> Command {`
+
+The one builder of a `docker` child. Every container operation's
+`Command` comes from here: `exec_streams`' `.output()` calls and the
+attached start's one `.spawn()`, the two
+`every_production_process_start_is_classified` counts.
+
+## `fn apart_from_terminal_signals(command: &mut Command) {`
+
+The attached client's process group. `docker start --attach` forwards every
+signal it receives to the container. In the coordinator's own group, a
+terminal's interrupt would reach the container directly, ahead of the
+runner's stop and remove. In a group of its own, nothing but the end of
+the container ends it.
+
+## `fn feed_attached(mut child: std::process::Child, payload: &[u8], record: &Mutex<DeliveryRecord>) {`
+
+The client's owner. It writes the payload, closes the pipe, which is the
+EOF, and waits for the client, recording each step for `settle_delivery`. A
+broken pipe ends the write without being a failure: the program, or the
+attach, has gone, and `settle_delivery` tells which by the client's exit.
+
+## `fn exit_text(exit: Option<i32>) -> String {`
+
+An exit status for a diagnostic.
+
+## `fn docker_create_arguments(spec: &CreateSpec) -> Vec<String> {`
+
+The `docker create` argument vector for `spec`, a pure function so the
+argv is assertable with no daemon
+(`tests::the_docker_create_arguments_carry_a_user_and_an_open_stdin_only_when_the_spec_does`).
+`--user <uid>:<gid>` when the spec names a user, and `--interactive` when
+its command has input, both options before the image id.
 
 ## `struct ImageInspectionRaw {`
 
@@ -1517,7 +1638,24 @@ Both streams, separately. `docker logs` writes the container's stdout
 to its own stdout and the container's stderr to its own stderr
 (measured, docker 29.7.2) — see [`Self::exec_streams`].
 
-## `fn create(&self, covered: exec::CoveredCreate<'_>) -> Result<CreatedContainer, RuntimeError> {` › `args.push("--read-only".to_owned());`
+## `fn collect(&self, name: &str) -> Result<ContainerExecution, RuntimeError> {` › `self.settle_delivery(name, exit_code)?;`
+
+A container that was given input reports how the input went before its
+output is returned (`settle_delivery`). The streams are the ones `docker
+logs` gave, still separate and still bounded by the runner as before: the
+attached client's own output went nowhere.
+
+## `fn start(&self, covered: exec::CoveredStart<'_>) -> Result<(), RuntimeError> {`
+
+A plain `docker start` when the command has no input, as before. With
+input, the attached start delivers it (`start_attached`).
+
+`RuntimeOp::Start` is named here once, and handed to the helper: the
+domination census in `exec::tests` pins every `RuntimeOp::Start` in
+production to this method, and this keeps that true while the attached
+path lives in a function of its own.
+
+## `fn docker_create_arguments(spec: &CreateSpec) -> Vec<String> {` › `args.push("--read-only".to_owned());`
 
 `expected_failures_refusals[5]`. Measured against `docker`
 29.7.2: without it `sh -c 'printf owned >/outside-role-mount'`
@@ -1526,7 +1664,7 @@ so a gate's write outside every declared mount succeeds and only
 the weaker "the host is unharmed" holds. With it the same command
 answers `Read-only file system` and exits non-zero.
 
-## `fn create(&self, covered: exec::CoveredCreate<'_>) -> Result<CreatedContainer, RuntimeError> {` › `args.push(spec.image_id.clone());`
+## `fn docker_create_arguments(spec: &CreateSpec) -> Vec<String> {` › `args.push(spec.image_id.clone());`
 
 The **image id**, never a reference (INV-23).
 
@@ -1541,7 +1679,7 @@ The id the runtime says it used, read back from the created
 container. Never `spec.image_id`: the whole point of the check the
 caller then performs is that these two can differ.
 
-## `fn remove(&self, name: &str) -> Result<Settled, RuntimeError>` › `settle_remove(`
+## `fn remove(&self, name: &str) -> Result<Settled, RuntimeError>` › `let removed = settle_remove(`
 
 `--volumes` (`PR6A-ANONYMOUS-VOLUMES-LEAK`). An image declaring
 `VOLUME` gets an **anonymous** volume per container, and `docker rm`

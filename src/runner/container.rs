@@ -17,9 +17,9 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use crate::error::UpstrokeError;
 use crate::topology::effects::{ContainerSite, EffectSiteId, HookHarness, HookPhase, Injection};
@@ -880,12 +880,16 @@ pub const DOCKER_PROGRAM: &str = "docker";
 #[derive(Debug, Clone, Default)]
 pub struct DockerCli {
     trace: ContainerTrace,
+    deliveries: Arc<Mutex<BTreeMap<String, StdinDelivery>>>,
 }
 
 impl DockerCli {
     #[must_use]
     pub fn new(trace: ContainerTrace) -> Self {
-        Self { trace }
+        Self {
+            trace,
+            deliveries: Arc::default(),
+        }
     }
 
     #[must_use]
@@ -912,8 +916,7 @@ impl DockerCli {
         args: &[&str],
     ) -> Result<(Vec<u8>, Vec<u8>), RuntimeError> {
         self.trace.runtime(op, target);
-        let output = Command::new(DOCKER_PROGRAM)
-            .args(args)
+        let output = docker_command(args)
             .output()
             .map_err(|error| RuntimeError::Unreachable {
                 operation: op,
@@ -994,6 +997,284 @@ impl DockerCli {
             tags: split_list(fields.get(2).copied().unwrap_or_default()),
         }))
     }
+}
+
+impl DockerCli {
+    fn start_attached(
+        &self,
+        op: RuntimeOp,
+        name: &str,
+        payload: &[u8],
+    ) -> Result<(), RuntimeError> {
+        self.trace.runtime(op, name);
+        let mut command = docker_command(&["start", "--attach", "--interactive", name]);
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        apart_from_terminal_signals(&mut command);
+        let record = Arc::new(Mutex::new(DeliveryRecord {
+            total: payload.len(),
+            ..DeliveryRecord::default()
+        }));
+        let (spawned, outcome) = std::sync::mpsc::channel();
+        let feeder = {
+            let record = Arc::clone(&record);
+            let payload = payload.to_vec();
+            std::thread::Builder::new()
+                .name("upstroke-container-stdin".to_owned())
+                .spawn(move || match command.spawn() {
+                    Ok(child) => {
+                        let _ = spawned.send(Ok(()));
+                        feed_attached(child, &payload, &record);
+                    }
+                    Err(error) => {
+                        let _ = spawned.send(Err(error));
+                    }
+                })
+                .map_err(|error| RuntimeError::Failed {
+                    operation: op,
+                    detail: format!(
+                        "the thread that would feed `{name}` its stdin could not be started: \
+                         {error}"
+                    ),
+                })?
+        };
+        match outcome.recv() {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                return Err(RuntimeError::Unreachable {
+                    operation: op,
+                    detail: format!("{DOCKER_PROGRAM} could not be started: {error}"),
+                });
+            }
+            Err(_) => {
+                return Err(RuntimeError::Failed {
+                    operation: op,
+                    detail: format!(
+                        "the thread that feeds `{name}` its stdin ended before it reported \
+                         whether `{DOCKER_PROGRAM}` started"
+                    ),
+                });
+            }
+        }
+        self.deliveries
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(
+                name.to_owned(),
+                StdinDelivery {
+                    record: Arc::clone(&record),
+                    feeder,
+                },
+            );
+        loop {
+            let ended = record
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .attach_exit;
+            let listing = self.listing(RuntimeOp::Observe, name)?;
+            match listed_state(&listing, name) {
+                Some("created") => {}
+                Some(_) => return Ok(()),
+                None => {
+                    return Err(RuntimeError::Failed {
+                        operation: op,
+                        detail: format!("`{name}` was not found while it was being started"),
+                    });
+                }
+            }
+            if let Some(exit) = ended {
+                let reason = self
+                    .inspect(
+                        op,
+                        name,
+                        &["container", "inspect", name, "--format", "{{.State.Error}}"],
+                    )
+                    .ok()
+                    .flatten()
+                    .map(|text| text.trim().to_owned())
+                    .filter(|text| !text.is_empty())
+                    .map(|text| format!(": {text}"))
+                    .unwrap_or_default();
+                return Err(RuntimeError::Failed {
+                    operation: op,
+                    detail: format!(
+                        "`{DOCKER_PROGRAM} start --attach --interactive {name}` ended ({}) and \
+                         the container never started{reason}",
+                        exit_text(exit)
+                    ),
+                });
+            }
+            std::thread::sleep(ATTACHED_START_POLL);
+        }
+    }
+
+    fn settle_delivery(&self, name: &str, exit_code: Option<i32>) -> Result<(), RuntimeError> {
+        let Some(delivery) = self
+            .deliveries
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(name)
+        else {
+            return Ok(());
+        };
+        if self.observe(name)? == Liveness::Running {
+            return Ok(());
+        }
+        let deadline = Instant::now() + DELIVERY_GRACE;
+        while !delivery.feeder.is_finished() && Instant::now() < deadline {
+            std::thread::sleep(ATTACHED_START_POLL);
+        }
+        let record = delivery
+            .record
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        if let Some(failure) = record.failure {
+            return Err(RuntimeError::Failed {
+                operation: RuntimeOp::Collect,
+                detail: format!(
+                    "`{name}`'s stdin was not delivered: {failure}, after {} of {} bytes",
+                    record.written, record.total
+                ),
+            });
+        }
+        match record.attach_exit {
+            Some(exit) if record.written < record.total && exit != exit_code => {
+                Err(RuntimeError::Failed {
+                    operation: RuntimeOp::Collect,
+                    detail: format!(
+                        "the attached `{DOCKER_PROGRAM} start` that fed `{name}` its stdin ended \
+                         ({}) after {} of {} bytes, and the container exited ({})",
+                        exit_text(exit),
+                        record.written,
+                        record.total,
+                        exit_text(exit_code)
+                    ),
+                })
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+const ATTACHED_START_POLL: Duration = Duration::from_millis(25);
+
+const DELIVERY_GRACE: Duration = Duration::from_secs(2);
+
+#[derive(Debug)]
+struct StdinDelivery {
+    record: Arc<Mutex<DeliveryRecord>>,
+    feeder: std::thread::JoinHandle<()>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct DeliveryRecord {
+    total: usize,
+    written: usize,
+    failure: Option<String>,
+    attach_exit: Option<Option<i32>>,
+}
+
+fn docker_command(args: &[&str]) -> Command {
+    let mut command = Command::new(DOCKER_PROGRAM);
+    command.args(args);
+    command
+}
+
+fn apart_from_terminal_signals(command: &mut Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        command.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        command.creation_flags(CREATE_NEW_PROCESS_GROUP);
+    }
+}
+
+fn feed_attached(mut child: std::process::Child, payload: &[u8], record: &Mutex<DeliveryRecord>) {
+    if let Some(mut stdin) = child.stdin.take() {
+        let mut written = 0;
+        let mut failure = None;
+        while let Some(rest) = payload.get(written..).filter(|rest| !rest.is_empty()) {
+            match stdin.write(rest) {
+                Ok(0) => {
+                    failure = Some("the attached client accepted no more input".to_owned());
+                    break;
+                }
+                Ok(count) => {
+                    written += count;
+                    record
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .written = written;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => break,
+                Err(error) => {
+                    failure = Some(error.to_string());
+                    break;
+                }
+            }
+        }
+        drop(stdin);
+        record
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .failure = failure;
+    } else {
+        record
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .failure = Some("the attached client was started without a stdin pipe".to_owned());
+    }
+    let exit = child.wait().ok().map(|status| status.code());
+    record
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .attach_exit = Some(exit.flatten());
+}
+
+fn exit_text(exit: Option<i32>) -> String {
+    exit.map_or_else(|| "no exit code".to_owned(), |code| format!("exit code {code}"))
+}
+
+fn docker_create_arguments(spec: &CreateSpec) -> Vec<String> {
+    let mut args: Vec<String> = vec!["create".to_owned(), "--name".to_owned(), spec.name.clone()];
+    if spec.read_only_root {
+        args.push("--read-only".to_owned());
+    }
+    if let Some(user) = spec.user {
+        args.push("--user".to_owned());
+        args.push(format!("{}:{}", user.uid, user.gid));
+    }
+    if spec.open_stdin {
+        args.push("--interactive".to_owned());
+    }
+    for (key, value) in &spec.labels {
+        args.push("--label".to_owned());
+        args.push(format!("{key}={value}"));
+    }
+    for mount in &spec.mounts {
+        args.push("--mount".to_owned());
+        args.push(mount_argument(mount));
+    }
+    for (key, value) in &spec.env {
+        args.push("--env".to_owned());
+        args.push(format!("{key}={value}"));
+    }
+    if let Some(workdir) = &spec.workdir {
+        args.push("--workdir".to_owned());
+        args.push(workdir.clone());
+    }
+    args.push(spec.image_id.clone());
+    args.extend(spec.command.iter().cloned());
+    args
 }
 
 struct ImageInspectionRaw {
@@ -1322,6 +1603,7 @@ impl ContainerRuntime for DockerCli {
             })?;
         let exit_code = status.trim().parse::<i32>().ok();
         let (stdout, stderr) = self.exec_streams(RuntimeOp::Collect, name, &["logs", name])?;
+        self.settle_delivery(name, exit_code)?;
         Ok(ContainerExecution {
             exit_code,
             stdout,
@@ -1331,29 +1613,7 @@ impl ContainerRuntime for DockerCli {
 
     fn create(&self, covered: exec::CoveredCreate<'_>) -> Result<CreatedContainer, RuntimeError> {
         let spec = covered.spec();
-        let mut args: Vec<String> =
-            vec!["create".to_owned(), "--name".to_owned(), spec.name.clone()];
-        if spec.read_only_root {
-            args.push("--read-only".to_owned());
-        }
-        for (key, value) in &spec.labels {
-            args.push("--label".to_owned());
-            args.push(format!("{key}={value}"));
-        }
-        for mount in &spec.mounts {
-            args.push("--mount".to_owned());
-            args.push(mount_argument(mount));
-        }
-        for (key, value) in &spec.env {
-            args.push("--env".to_owned());
-            args.push(format!("{key}={value}"));
-        }
-        if let Some(workdir) = &spec.workdir {
-            args.push("--workdir".to_owned());
-            args.push(workdir.clone());
-        }
-        args.push(spec.image_id.clone());
-        args.extend(spec.command.iter().cloned());
+        let args = docker_create_arguments(spec);
         let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
         self.exec(RuntimeOp::Create, &spec.name, &borrowed)?;
         let reported = self
@@ -1373,9 +1633,13 @@ impl ContainerRuntime for DockerCli {
     }
 
     fn start(&self, covered: exec::CoveredStart<'_>) -> Result<(), RuntimeError> {
+        let op = RuntimeOp::Start;
         let name = covered.name();
-        self.exec(RuntimeOp::Start, name, &["start", name])
-            .map(|_| ())
+        let payload = covered.stdin();
+        if !payload.is_empty() {
+            return self.start_attached(op, name, payload);
+        }
+        self.exec(op, name, &["start", name]).map(|_| ())
     }
 
     fn stop(&self, name: &str, mode: StopMode) -> Result<Settled, RuntimeError> {
@@ -1391,7 +1655,7 @@ impl ContainerRuntime for DockerCli {
     }
 
     fn remove(&self, name: &str) -> Result<Settled, RuntimeError> {
-        settle_remove(
+        let removed = settle_remove(
             name,
             self.exec(
                 RuntimeOp::Remove,
@@ -1399,7 +1663,12 @@ impl ContainerRuntime for DockerCli {
                 &["rm", "--force", "--volumes", name],
             ),
             |target| self.observe(target),
-        )
+        );
+        self.deliveries
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(name);
+        removed
     }
 }
 

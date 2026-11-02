@@ -231,10 +231,11 @@ worktree.
 logs — and `<R>/containers`, which is every container's ownership
 evidence.
 
-One file of it reaches one container: the per-attempt settings file an
-agent invocation names in its own arguments, bound read-only at its
-container path (`settings_for`). The directory around it, and every other
-file, stays withheld.
+One file of it reaches one container: the permission-settings file the
+engine materialized for that invocation, which its command carries as
+`CommandSpec::settings_file` and one of its arguments names. It is bound
+read-only at its container path (`settings_for`). The directory around it,
+every other attempt's settings and every other file stay withheld.
 
 ## `pub enum Withheld` › `AuthoritativeGit,`
 
@@ -324,6 +325,49 @@ list" — passes on both.
 ## `pub fn violations(&self, mounts: &[Mount]) -> Vec<String>` › `let Mount::Path { source, target, .. } = mount else {`
 
 A named volume has no host path, so it can carry none of these.
+
+## `#[cfg(target_os = "linux")]` › `fn coordinator_user() -> Result<Option<ContainerUser>, UpstrokeError> {`
+
+The coordinator's effective numeric uid and gid. Every container this runner
+creates runs as them: work, review, gate and probe alike, through
+`CreateSpec::user` and `docker create --user <uid>:<gid>` (PR12's D-B, root's
+option u1).
+
+Why: a container ran as its image's user, uid 0 in the real-Docker
+preparation (`debug-2`), and what it wrote into the role's worktree was then
+owned by a user the coordinator is not. That preparation's self-tests
+reported task-workspace removals failing with `EACCES`. Those observations
+support this repair; they do not establish it as the cause of every failure
+there. The coordinator owns every host path a role receives. A container
+that runs as the coordinator's numeric identity writes files the coordinator
+can manage and reclaim, and Git inside it reads a worktree and a view its own
+user owns, with no wildcard `safe.directory`.
+
+Read from the owner and group of `/proc/self`, which Linux gives as the
+process's effective uid and gid. The standard library has no other way to
+ask. `libc::geteuid` and `libc::getegid` would be another, but they are
+items `effects/wrappers.toml`'s `[libc]` section does not classify. The file
+is read once, when the runner is built, and a failure to read it refuses the
+runner.
+
+What this does not cover, and does not claim:
+- rootless Docker and user-namespace remapping, where a numeric id inside the
+  container is not the same id on the host;
+- Docker Desktop, whose file sharing maps ownership itself.
+
+The image and the credential volumes must be usable by this uid and gid:
+`HOME`, the CLI's own directories, a credential volume's files. Nothing
+here changes their ownership. There is no `chown` of a volume, no global
+`safe.directory` and no privileged cleanup. Nor does any probe establish
+writability before a run: an executed `--version` or `--help` shows only
+that the CLI started.
+
+## `#[cfg(not(target_os = "linux"))]` › `fn coordinator_user() -> Result<Option<ContainerUser>, UpstrokeError> {`
+
+Every other platform keeps the image's user, as before. On Windows no SID is
+mapped to a uid. On macOS the standard library has no read of the effective
+ids, and Docker Desktop maps bind-mount ownership itself. That is a limit,
+not coverage.
 
 ## `fn worktree_namespaces(execution_root: &Path) -> Vec<PathBuf> {`
 
@@ -454,6 +498,17 @@ end, and a caller that builds a second runner for the same incarnation gets a se
 over the same scope, each covering its own launches. `ContainerRunner` is not `Clone`, so a
 reaper cannot be duplicated with it.
 
+## `pub struct ContainerRunner` › `settings_directory: PathBuf,`
+
+The run's private `settings` directory, from `RunPaths::settings` when the
+runner is built: the one directory whose files `settings_for` may bind, one
+at a time.
+
+## `pub struct ContainerRunner` › `user: Option<ContainerUser>,`
+
+The numeric identity every container is created as (`coordinator_user`):
+`Some` on Linux, `None` elsewhere.
+
 ## `pub struct ContainerRunner` › `view_is_explicit: bool,`
 
 Whether [`ContainerRunner::with_view`] replaced the default projection.
@@ -539,10 +594,15 @@ for any other name before the runtime is asked (`expect_intent_for`, attempted `
 `tests::a_start_cover_starts_only_the_container_it_was_minted_for`), and the runtime's
 `start` starts `covered.name()`.
 
+It also carries the invocation's stdin payload, borrowed from the request's `CommandSpec`
+(PR12's D-C). The runtime's `start` delivers exactly `covered.stdin()` to the container it
+starts, then EOF; an empty payload starts the container as before.
+
 ## `mod cover` › `pub(in crate::runner::container::exec) fn cover<'a>(`
 
 Validates, arms on the first cover, counts the invocation, and mints the three values:
-`Covered`, and the two proofs over `spec`. The order is the point (`FUA-D1-DES-2`, the design review's correction): the scope this
+`Covered`, and the two proofs over `spec`, the start's carrying `stdin`, which `contain`
+passes as `request.command.stdin`. The order is the point (`FUA-D1-DES-2`, the design review's correction): the scope this
 runner would hold — the armed one, or, on the arming cover, the one it is about to arm,
 built from the runtime's `reaper_program` and the runner's own `RunIdentity` — is compared
 with the container's two label values **first**, and a difference refuses the launch before
@@ -578,6 +638,10 @@ marks the runner unsettled. A cover dropped without a settle is an invocation th
 
 The validated spec, with the proof's own lifetime rather than the borrow of the proof, so a
 funnel can read it and still move the proof into the runtime's `create`.
+
+## `mod cover` › `impl<'a> CoveredStart<'a>` › `pub fn stdin(&self) -> &'a [u8] {`
+
+The payload the start delivers.
 
 ## `mod cover` › `mod without_a_reaper {`
 
@@ -636,10 +700,14 @@ bare program name resolved to (`PR6-CORRECTNESS-006`). DESIGN.md:260
 says the runner "supplies role-scoped `HOME`, `PATH`, and credential
 locations"; a runner that read no base could supply none of them.
 
+It also fixes the run's settings directory and reads the coordinator's
+numeric identity (`coordinator_user`), once.
+
 ### Errors
 
 [`UpstrokeError::Refused`] when `policy` is not a usable container policy
-— see [`recorded_image_id`].
+— see [`recorded_image_id`]. [`UpstrokeError::Io`] when, on Linux, the
+coordinator's effective uid and gid cannot be read from `/proc/self`.
 
 ## `impl ContainerRunner` › `pub fn with_layout(mut self, layout: BoundaryLayout) -> Self {`
 
@@ -709,11 +777,19 @@ it and so does every test that inspects a mount set, so a mount or an
 environment key that pre-flight sees and the spending invocation does
 not is not expressible.
 
+The spec also carries who the container runs as (`user`, from
+`coordinator_user`) and whether its command has input (`open_stdin`). A
+command with a non-empty `CommandSpec::stdin` is created with stdin open,
+and its payload travels to the start in the cover's start proof, never into
+argv, the environment, a label or a mount (PR12's D-C).
+
 ### Errors
 
 [`UpstrokeError::Refused`] when the overlay names a reserved key, when the
-container name cannot be built from the request's identity, or when the
-mount plan would hand the container a withheld path.
+container name cannot be built from the request's identity, when the
+mount plan would hand the container a withheld path, or when the settings
+file the command records is not a regular file of the run's settings
+directory. [`UpstrokeError::Io`] when that file cannot be read.
 
 ## `pub fn plan(&self, request: &RunnerRequest) -> Result<Invoc…` › `let intent = ContainerIntent::new(`
 
@@ -765,44 +841,59 @@ that is not a worktree, which is what the projection
 already treats as "no repository here". Recorded as a
 seam note rather than worked around silently.
 
-## `impl ContainerRunner` › `fn settings_for(&self, role: &ExecutionRole, args: &[String]) -> (Vec<String>, Vec<Mount>) {`
+## `impl ContainerRunner` › `fn settings_for(`
 
-An agent's own settings file, given to its container
+An agent's own settings file, given to its container and nothing else
 (PR12-CONTAINER-CLAUDE-SETTINGS-HOST-PATH, the coordinator's real-Docker
-finding `CONTAINER-SETTINGS-FINDING-1`).
+finding `CONTAINER-SETTINGS-FINDING-1`; root's option (a), narrowed by its
+D-A).
 
 `materialize_permissions` writes each worker's and reviewer's permission
 settings to a file in the run's private `settings` directory
 (`RunPaths::settings`): `engine::assembly` for a worker, `review` for a
 reviewer. `ClaudeCodeAdapter` then passes `--settings <that host path>`.
 The container withholds the run's private half (`Withheld::PrivateArtifacts`),
-so a containerized agent was handed a path it could not open. With a real
-CLI, every containerized claude worker and reviewer would fail on it or run
-without its allow list and deny rules.
+so a containerized agent was given a path it could not open (observed: the
+real-Docker preparation's `debug-2` recorded the host-path argument). What a
+real CLI does then was not executed; that it fails, or runs without its allow
+list and deny rules, is untested.
 
-So, for an implement or review request only, each argument that names a
-file directly in `<R>/runs/<run-id>/settings` is given to the container:
+The invocation's own file is the one its command records as
+`CommandSpec::settings_file`, set by the engine from the path it
+materialized. For an implement or review request whose command records one,
+and when an argument is that path exactly:
+- the file must be a file of this run's settings directory, by its exact
+  path, and a regular file: a directory or a link is refused, so a name in
+  the directory cannot redirect the bind to another private artifact;
 - exactly that file is bound read-only at `BoundaryLayout::settings(<name>)`,
   that is `/upstroke/settings/<name>`;
-- and the argument names that container path instead of the host's.
+- only the argument that is that path is rewritten to the container path.
 
-This is the coordinator's option (a), the smallest change:
-- the adapter, the host runner and every host path are unchanged;
-- a gate gets no settings, since no agent permission surface bounds a gate;
-- a probe passes none;
-- an argument naming any other file, in the private half or elsewhere, is
-  left as it was.
+Nothing else is given or changed:
+- an argument naming any other file, another attempt's settings included, is
+  left as the host path it was, and gets no mount;
+- a gate or a probe gets no settings, whatever its command records, since no
+  agent permission surface bounds a gate and a probe passes none;
+- a command that records no settings file, or records one no argument names
+  (`codex` and `copilot` write one and do not pass it), is unchanged;
+- the adapter, the host runner and every host path are unchanged.
 
 The confinement check is unchanged and still passes. It refuses a mount
 whose source holds a withheld path, and a file below the withheld directory
-holds none. So the settings directory, the private half around it, and
-every other settings file stay mounted nowhere.
+holds none. So the settings directory, the private half around it and every
+other settings file stay mounted nowhere.
 
-The mount census for an agent with settings is
-`exec::tests::an_agents_own_settings_file_is_bound_read_only_and_named_by_its_container_path`.
-The real-runtime witness is the gated
-`exec::tests::real_docker_a_containerized_agent_reads_its_own_settings_and_cannot_write_them`,
-registered in `DOCKER_GATED_TESTS`.
+The witnesses:
+- the mount census for a worker's and a reviewer's own files is
+  `exec::tests::an_agents_own_settings_file_is_bound_read_only_and_named_by_its_container_path`;
+- the negative cases are
+  `exec::tests::only_the_invocations_own_settings_file_is_bound_and_no_argument_grants_another`;
+- the identity checks are
+  `exec::tests::an_own_settings_file_that_is_not_a_regular_file_of_the_runs_settings_directory_is_refused`;
+- the real-runtime witness is the gated
+  `exec::tests::real_docker_a_containerized_agent_reads_its_own_settings_and_cannot_write_them`,
+  registered in `DOCKER_GATED_TESTS`. It is a filesystem witness, not an
+  acceptance of a real CLI's policy.
 
 ## `impl ContainerRunner` › `fn mounts(`
 

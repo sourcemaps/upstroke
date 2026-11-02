@@ -138,9 +138,10 @@ which is either the role's own or unreachable from the coordinator.
 
 ## `impl BoundaryLayout` › `pub const DEFAULT_SETTINGS: &'static str = "/upstroke/settings";`
 
-Where an agent's own per-attempt settings file is bound, read-only. It is
-the one file of the run's private half a container receives, and only the
-one its own invocation names (`exec::ContainerRunner`'s `settings_for`,
+Where an agent's own settings file is bound, read-only. It is the one file
+of the run's private half a container receives: the file the engine
+materialized for that invocation, which its `CommandSpec::settings_file`
+records and an argument names (`exec::ContainerRunner`'s `settings_for`,
 PR12-CONTAINER-CLAUDE-SETTINGS-HOST-PATH). `with_roots` keeps the default,
 since nothing has needed to move it.
 

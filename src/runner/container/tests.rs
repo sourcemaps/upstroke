@@ -18,8 +18,9 @@ use super::intent::{
     invocation_hash, private_root_label,
 };
 use super::runtime::{
-    ContainerExecution, ContainerRuntime, ContainerTrace, CreateSpec, ImageInspection, Liveness,
-    Mount, OwnerLiveness, RuntimeError, RuntimeOp, StopMode, TracePhase,
+    ContainerExecution, ContainerRuntime, ContainerTrace, ContainerUser, CreateSpec,
+    ImageInspection, Liveness, Mount, OwnerLiveness, RuntimeError, RuntimeOp, StopMode,
+    TracePhase,
 };
 use super::{
     CoveredCreate, CoveredStart, DOCKER_GATED_TESTS, DisposableDirView, DockerCli,
@@ -302,6 +303,8 @@ fn spec_for(
         command: vec!["/bin/sh".to_owned(), "-c".to_owned(), "exit 0".to_owned()],
         workdir: Some("/work".to_owned()),
         read_only_root: true,
+        user: None,
+        open_stdin: false,
     }
 }
 
@@ -538,6 +541,47 @@ fn a_reference_can_be_moved_to_another_id_and_the_old_id_stays() {
 }
 
 #[test]
+fn the_docker_create_arguments_carry_a_user_and_an_open_stdin_only_when_the_spec_does() {
+    let mut spec = CreateSpec {
+        name: "upstroke-a-b-c-d".to_owned(),
+        image_id: IMAGE_ID.to_owned(),
+        labels: BTreeMap::new(),
+        mounts: Vec::new(),
+        env: Vec::new(),
+        command: vec!["cat".to_owned()],
+        workdir: None,
+        read_only_root: true,
+        user: None,
+        open_stdin: false,
+    };
+    assert_eq!(
+        super::docker_create_arguments(&spec),
+        ["create", "--name", "upstroke-a-b-c-d", "--read-only", IMAGE_ID, "cat"],
+        "a spec with no user and no input asks for neither"
+    );
+    spec.user = Some(ContainerUser {
+        uid: 1000,
+        gid: 1001,
+    });
+    spec.open_stdin = true;
+    assert_eq!(
+        super::docker_create_arguments(&spec),
+        [
+            "create",
+            "--name",
+            "upstroke-a-b-c-d",
+            "--read-only",
+            "--user",
+            "1000:1001",
+            "--interactive",
+            IMAGE_ID,
+            "cat"
+        ],
+        "the numeric user and the open stdin are options of the create, before the image"
+    );
+}
+
+#[test]
 fn the_fake_can_report_an_image_id_that_differs_from_the_one_create_asked_for() {
     let trace = ContainerTrace::recording();
     let runtime = FakeRuntime::new(trace);
@@ -551,6 +595,8 @@ fn the_fake_can_report_an_image_id_that_differs_from_the_one_create_asked_for() 
         command: Vec::new(),
         workdir: None,
         read_only_root: true,
+        user: None,
+        open_stdin: false,
     };
 
     let honest = runtime
@@ -611,6 +657,8 @@ fn volume_presence_is_a_toggle_and_absence_refuses_a_create() {
         command: Vec::new(),
         workdir: None,
         read_only_root: true,
+        user: None,
+        open_stdin: false,
     };
     let refused = runtime
         .create(CoveredCreate::without_a_reaper(&spec))
@@ -664,6 +712,8 @@ fn the_availability_toggle_is_per_operation_so_ps_can_answer_while_inspect_canno
                     command: Vec::new(),
                     workdir: None,
                     read_only_root: true,
+                    user: None,
+                    open_stdin: false,
                 }))
                 .is_err(),
             RuntimeOp::Start => runtime.start(CoveredStart::without_a_reaper("x")).is_err(),
@@ -761,6 +811,8 @@ fn the_call_log_is_ordered_and_holds_every_operation() {
         command: Vec::new(),
         workdir: None,
         read_only_root: true,
+        user: None,
+        open_stdin: false,
     };
     runtime.probe().expect("reachable");
     runtime
@@ -3862,6 +3914,8 @@ fn real_docker_creates_from_an_id_reports_it_and_reclaims_idempotently() {
             command: vec!["/bin/sh".to_owned(), "-c".to_owned(), "exit 0".to_owned()],
             workdir: None,
             read_only_root: true,
+            user: None,
+            open_stdin: false,
         },
         view: GitViewRequest {
             path: view_path.clone(),
@@ -3946,6 +4000,8 @@ fn real_docker_kill_on_an_already_exited_container_is_tolerated() {
         command: vec!["/bin/sh".to_owned(), "-c".to_owned(), "exit 0".to_owned()],
         workdir: None,
         read_only_root: true,
+        user: None,
+        open_stdin: false,
     };
     let _ = docker.remove(name);
     docker
@@ -4013,6 +4069,8 @@ fn real_docker_returns_both_streams_of_a_container_separately() {
         ],
         workdir: None,
         read_only_root: true,
+        user: None,
+        open_stdin: false,
     };
     let _ = docker.remove(name);
     docker
@@ -4403,6 +4461,8 @@ fn real_docker_renders_a_comma_bearing_label_value_whole() {
         command: vec!["/bin/sh".to_owned(), "-c".to_owned(), "exit 0".to_owned()],
         workdir: None,
         read_only_root: true,
+        user: None,
+        open_stdin: false,
     };
     docker
         .create(CoveredCreate::without_a_reaper(&spec))
@@ -4665,6 +4725,8 @@ fn real_docker_lists_the_state_the_settlement_observation_reads() {
         command: vec!["/bin/sh".to_owned(), "-c".to_owned(), "sleep 30".to_owned()],
         workdir: None,
         read_only_root: true,
+        user: None,
+        open_stdin: false,
     };
     for existing in [&name, &longer] {
         let _ = docker.remove(existing);

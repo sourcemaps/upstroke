@@ -275,18 +275,69 @@ always returned an empty vector would pass the assertion above.
 
 ## `fn an_agents_own_settings_file_is_bound_read_only_and_named_by_its_container_path() {`
 
-PR12-CONTAINER-CLAUDE-SETTINGS-HOST-PATH, the coordinator's real-Docker
-finding. An agent invocation that names its own per-attempt settings
-file, a file directly in the run's `settings` directory, receives exactly
-that file, bound read-only at `/upstroke/settings/<name>`. Its argument
-names that container path instead of the host's.
+PR12-CONTAINER-CLAUDE-SETTINGS-HOST-PATH, narrowed by root's D-A. A worker
+and a reviewer each record their own materialized settings file as
+`CommandSpec::settings_file`, and name it in their arguments. Each receives
+exactly that file, bound read-only at `/upstroke/settings/<name>`, and its
+argument names that container path instead of the host's. The two files stay
+distinct: each container has one settings mount, its own.
 
 Nothing else changes:
-- the role's own mounts are those of the census above;
+- the role's own mounts are those of the census above, with the
+  coordinator's user set on every one of these containers;
 - every withheld path stays withheld: the run's private half, the settings
-  directory included, is mounted nowhere;
-- a gate is given no settings;
-- a file elsewhere in the private half is not a settings file.
+  directory included, is mounted nowhere.
+
+## `fn only_the_invocations_own_settings_file_is_bound_and_no_argument_grants_another() {`
+
+Root's D-A negative cases. Another invocation's settings file named in a
+worker's argv gets no mount, and its argument stays the host path it was:
+only the intended argument is rewritten. Nor does any of these get a
+settings mount, and each keeps its own argv:
+- an argument naming a settings file with no metadata, the shape the first
+  version of the bind (`b87af4f6`) mounted;
+- metadata that no argument names, as a `codex` or `copilot` command has;
+- a gate, and an agent probe, carrying both.
+
+## `fn an_own_settings_file_that_is_not_a_regular_file_of_the_runs_settings_directory_is_refused() {`
+
+The file identity root's D-A keeps. Recorded metadata naming a directory in
+the settings directory, a link there to a private transcript (Unix), or a
+file elsewhere in the private half refuses the plan, each for its reason, and
+before any effect. The control is the regular file the invocation
+materialized, which plans.
+
+## `#[cfg(target_os = "linux")]` › `fn effective_ids() -> ContainerUser {`
+
+The oracle for the coordinator's user, read another way than production
+reads it: the effective field of `/proc/self/status`' `Uid:` and `Gid:`
+lines, where `coordinator_user` reads the owner of `/proc/self`.
+
+## `#[cfg(target_os = "linux")]` › `fn every_container_is_created_as_the_coordinators_user() {`
+
+Root's D-B, focused. Both probes, the worker, the gate and the reviewer are
+each created as the coordinator's effective uid and gid, in the spec and in
+the `docker create` argv, where `--user` comes before the image. The mount
+census and the confinement above hold with the user set.
+
+## `#[cfg(not(target_os = "linux"))]` › `fn every_container_keeps_the_images_user_off_linux() {`
+
+Off Linux nothing is mapped, and no container is given `--user`.
+
+## `fn prompt(tag: &str, bytes: usize) -> Vec<u8> {`
+
+A payload of `bytes` bytes that starts with a marker and its tag and goes on
+with xorshift bytes, so two prompts differ and a payload larger than a pipe
+buffer is not a run of one byte.
+
+## `fn a_commands_stdin_reaches_its_own_container_exactly_and_through_nothing_else() {`
+
+Root's D-C on the fake. A worker's 200 KiB payload, larger than a pipe
+buffer, and a reviewer's own reach their containers byte for byte, each its
+own. Each container is created with stdin open, and the marker the prompts
+carry is in no argv, environment entry, label, mount or `docker create`
+argument. A gate and both probes, which carry no input, keep a closed stdin,
+and their starts are fed nothing.
 
 ## `fn a_workspace_that_contains_a_withheld_path_is_refused_before_any_effect() {`
 
@@ -744,6 +795,12 @@ loop with a real timeout would be one.
 Second field held constant: everything except whether the container
 terminates — the same image, the same role, the same workspace as the
 completing case above.
+
+## `fn a_container_that_outlives_its_timeout_is_stopped_and_rem…` › `let payload = prompt("timeout", 128 * 1024);`
+
+Since PR12's D-C the timed-out command carries input, more than a pipe
+buffer of it, and the timeout path is the same: the payload went to the
+container at its start, and the stop and removal follow in their order.
 
 ## `fn a_container_that_outlives_its_timeout_is_stopped_and_rem…` › `let rendered = fixture.trace.rendered();`
 
@@ -1636,10 +1693,37 @@ written so it holds either way rather than pinning the residual.
 
 ## `fn real_docker_a_containerized_agent_reads_its_own_settings_and_cannot_write_them() {`
 
-PR12-CONTAINER-CLAUDE-SETTINGS-HOST-PATH on a real runtime. A
-containerized agent reads its own per-attempt settings, byte for byte, at
-the container path it is given, and cannot write them. The host file is
-unchanged. It is registered in `DOCKER_GATED_TESTS`.
+PR12-CONTAINER-CLAUDE-SETTINGS-HOST-PATH on a real runtime, as root's D-A
+narrowed it. A containerized agent reads its own settings, which its command
+records as `settings_file`, byte for byte, at the container path it is given.
+It cannot write them, and the host file is unchanged. Another attempt's
+settings file sits beside its own on the host: the container's
+`/upstroke/settings` lists only its own, the other is absent, and the run's
+private directory is not there. A filesystem witness, registered in
+`DOCKER_GATED_TESTS`; it accepts no real CLI's policy.
+
+## `#[cfg(target_os = "linux")]` › `fn real_docker_a_container_runs_as_the_coordinators_user_and_leaves_what_it_can_reclaim() {`
+
+Root's D-B on a real runtime. A worker container reports the coordinator's
+effective uid and gid from `id`, and makes a nested directory and a file in
+its worktree. The host sees all three as the coordinator's, and the
+coordinator removes them. A gate then runs Git in the same worktree,
+through the role view, with no `safe.directory` at all: it succeeds, reads
+the exact HEAD and finds the worktree clean. What the test establishes is
+the observed ownership, the reclamation and the gate's success, for this
+fixture's image; a rootless or remapped daemon is not covered.
+
+## `fn real_docker_a_containerized_program_reads_its_exact_stdin_then_eof() {`
+
+Root's D-C on a real runtime, three containers:
+- a 300 KiB payload, past any pipe buffer, read by `cat` to its end, which
+  `cat` reaches only at EOF: the byte count and the SHA-256 match what was
+  sent;
+- a program that reads 16 bytes of a mebibyte and exits 7: the run reports
+  exit 7, promptly, and the undelivered rest holds nothing;
+- a program that never reads a mebibyte of input, with a three-second
+  timeout: the timeout path stops and removes it, with the write still
+  pending, within a bound.
 
 ## `fn real_docker_confines_a_gate_to_its_mount() {`
 
@@ -1826,11 +1910,15 @@ running inside the boundary: the exact detached HEAD, the exact index
 objects that resolve. The coordinator's refs are re-read afterwards, so
 "without exposing **or mutating**" is both halves.
 
-## `fn real_docker_a_git_dependent_gate_sees_only_the_role_view…` › `let git = "git -c safe.directory='*' -C /upstroke/workspace";`
+## `fn real_docker_a_git_dependent_gate_sees_only_the_role_view…` › `let git = "git -C /upstroke/workspace";`
 
-`safe.directory` because the host paths are owned by the coordinator's
-user and the container's process is not it — an ownership check, not a
-confinement one.
+No `safe.directory`. This line carried `-c safe.directory='*'` until PR12's
+D-B, because the host paths are owned by the coordinator's user and the
+container's process was the image's user: an ownership check, not a
+confinement one. Every container now runs as the coordinator's numeric
+uid and gid, so Git inside it reads a worktree and a view its own user owns,
+and this test drops the wildcard. It is the second witness of that, beside
+`real_docker_a_container_runs_as_the_coordinators_user_and_leaves_what_it_can_reclaim`.
 
 ## `fn real_docker_a_git_dependent_gate_sees_only_the_role_view…` › `for name in &planted {`
 
@@ -1970,6 +2058,14 @@ Repair round R3b.
 
 PR12-CONTAINER-CLAUDE-SETTINGS-HOST-PATH.
 
+## `fn every_gated_test_of_this_lane_is_counted()` › `"real_docker_a_container_runs_as_the_coordinators_user_and_leaves_what_it_can_reclaim",`
+
+PR12's D-B.
+
+## `fn every_gated_test_of_this_lane_is_counted()` › `"real_docker_a_containerized_program_reads_its_exact_stdin_then_eof",`
+
+PR12's D-C.
+
 ## `fn removal_in_progress_diagnostic(name: &str) -> String {`
 
 The daemon's answer names the container it is about, and since round six nothing
@@ -1994,6 +2090,9 @@ leaves no container, intent or view; it is not collected, and only then does the
 its process or container". The same assertions as
 `a_container_that_outlives_its_timeout_is_stopped_and_removed`, which is the disposition's other
 cause.
+
+Since PR12's D-C the cancelled command carries input, and the cancellation path is the same: the
+payload went to the container at its start, and the release follows in its order.
 
 ## `fn a_container_call_cancelled_before_it_starts_writes_no_intent() {`
 

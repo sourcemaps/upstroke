@@ -92,7 +92,8 @@ impl WorkerAssembly<'_> {
         Ok(self
             .adapter
             .build(&task_run)?
-            .stdin(self.adapter.stdin_payload(&task_run).as_bytes().to_vec()))
+            .stdin(self.adapter.stdin_payload(&task_run).as_bytes().to_vec())
+            .settings_file(task_run.settings_path.clone()))
     }
 }
 

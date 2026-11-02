@@ -31,6 +31,7 @@ pub struct CommandSpec {
     pub args: Vec<String>,
     pub env: Vec<(String, String)>,
     pub stdin: Vec<u8>,
+    pub settings_file: Option<PathBuf>,
 }
 
 impl CommandSpec {
@@ -57,6 +58,12 @@ impl CommandSpec {
     #[must_use]
     pub fn stdin(mut self, stdin: impl Into<Vec<u8>>) -> Self {
         self.stdin = stdin.into();
+        self
+    }
+
+    #[must_use]
+    pub fn settings_file(mut self, settings_file: Option<PathBuf>) -> Self {
+        self.settings_file = settings_file;
         self
     }
 }
@@ -1678,12 +1685,16 @@ pub(crate) mod tests {
             (
                 "src/runner/container.rs",
                 1,
+                1,
                 0,
-                0,
-                "the Container funnel's `docker` CLI: one `Command::new(` in \
-                 `DockerCli::exec`, which every container operation converges \
-                 on, and no `.spawn()` because each is an `.output()` the \
-                 funnel waits on. Deliberately NOT routed through the Runner, \
+                "the Container funnel's `docker` CLI: one `Command::new(`, in \
+                 `docker_command`, the builder every container operation \
+                 converges on, and one `.spawn()`: the attached `docker start \
+                 --attach --interactive` that delivers a command's stdin payload \
+                 (PR12's D-C). Every other operation is an `.output()` the funnel \
+                 waits on; the attached client runs in its own process group, \
+                 is fed and reaped by a thread of its own, and so never makes a \
+                 start wait on the workload. Deliberately NOT routed through the Runner, \
                  and for the same reason as the two Git rows below — \
                  DESIGN.md:612's \"authoritative Git and the event log never \
                  do\" is about the things that BUILD the boundary rather than \
@@ -2489,6 +2500,29 @@ fn charge_allowance(&mut self) {}
                 0,
                 "the reviewer's prompt, from the same seam. The role grid \
                  carries it",
+            ),
+            (
+                "src/runner/container.rs",
+                2,
+                0,
+                0,
+                "the Container funnel delivering `CommandSpec::stdin` (PR12's \
+                 D-C): `DockerCli::start` reads the payload off its \
+                 `CoveredStart` once (`covered.stdin()`), and the one `.stdin(` \
+                 on a `std::process::Command` is `Stdio::piped()` on the attached \
+                 `docker start` that carries it. The payload reaches that pipe \
+                 and nothing else: not argv, the environment, a mount or a log",
+            ),
+            (
+                "src/runner/container/exec.rs",
+                0,
+                0,
+                2,
+                "the payload's way from the request to the runtime: the `stdin` \
+                 field of `CoveredStart` and the `stdin` parameter of \
+                 `Reaping::cover`, which `contain` hands `request.command.stdin`. \
+                 Neither builds a CommandSpec; both carry its payload to \
+                 `ContainerRuntime::start`",
             ),
             (
                 "src/workspace.rs",

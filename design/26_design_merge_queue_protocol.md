@@ -90,8 +90,10 @@ recorded by `run_started` (default `~/.upstroke/workspaces/<repo-key>/<run-id>`)
 They are separate from private transcripts and from the user's checkout. A
 container sees only the one workspace mounted for its role; sibling worktrees,
 the event log, and private artifacts are not mounted. The single exception is a
-worker's or reviewer's own permission-settings file, which its invocation names:
-that one file is bound read-only, and the directory holding it is not.
+worker's or reviewer's own permission-settings file: the one the engine
+materialized for that invocation, which its command records and its arguments
+name. That one file is bound read-only; the directory holding it, and every other
+attempt's settings, are not.
 
 A task branches from the integration SHA observed at **dispatch**, after all of
 its declared dependencies are `Merged`. Independent tasks may therefore begin
@@ -471,6 +473,19 @@ Persistent per-agent credential volumes survive token rotation. Codex retains
 the already-decided `external-sandbox` exception only inside a standard-hardened
 container. Host runner behavior remains available and honestly provides no OS
 boundary around gate code.
+
+On a Linux host every container, for work, review, gates and probes alike, runs
+as the coordinator's effective numeric uid and gid, so what a role writes into
+its worktree the coordinator can manage and reclaim, and Git inside the
+container needs no wildcard `safe.directory`. The image and the credential
+volumes must therefore be usable by that uid and gid: nothing changes their
+ownership, and no global Git setting or privileged cleanup stands in for it.
+Rootless and user-namespace-remapped daemons, Docker Desktop's file sharing and
+Windows are not covered by that mapping; off Linux a container keeps its image's
+user. A command's stdin reaches its container exactly as the host runner delivers
+it: the container is created with stdin open, the payload is written once by an
+attached start, then EOF, and the prompt never enters argv, the environment, a
+mount or a log.
 
 A linked worktree's `.git` file points back into the authoritative repository,
 which must not simply be mounted into an agent container: that would expose all

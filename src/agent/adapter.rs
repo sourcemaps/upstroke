@@ -1050,6 +1050,7 @@ mod probe_identity_tests {
                 args: Vec::new(),
                 env: Vec::new(),
                 stdin: Vec::new(),
+                settings_file: None,
             }
         }
 

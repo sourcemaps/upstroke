@@ -611,6 +611,7 @@ fn a_failed_reclamation_during_an_unwind_does_not_abort_the_process() {
             ],
             env: Vec::new(),
             stdin: Vec::new(),
+            settings_file: None,
         },
         workspace: workspace.path().to_path_buf(),
         role: ExecutionRole::Gate,

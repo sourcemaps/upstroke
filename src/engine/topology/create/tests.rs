@@ -3583,6 +3583,7 @@ fn probe_request_for(id: InvocationId, agent: Option<&str>) -> crate::runner::Ru
             args: Vec::new(),
             env: Vec::new(),
             stdin: Vec::new(),
+            settings_file: None,
         },
         workspace: std::env::temp_dir(),
         role: match agent {

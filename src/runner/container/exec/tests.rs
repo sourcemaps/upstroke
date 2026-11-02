@@ -1046,6 +1046,41 @@ fn the_mount_set_is_the_roles_own_and_reaches_nothing_of_the_coordinators() {
     assert_eq!(Withheld::ALL.len(), 4);
 }
 
+fn review_pass_id() -> InvocationId {
+    InvocationId::attempt(
+        TaskKey(0),
+        GenerationId(0),
+        AttemptNumber(1),
+        AttemptRole::ReviewPass(0),
+        0,
+    )
+}
+
+fn naming_its_settings(own: &Path) -> crate::runner::CommandSpec {
+    crate::runner::CommandSpec::new("claude")
+        .arg("-p")
+        .arg("--settings")
+        .arg(own.to_string_lossy().into_owned())
+        .settings_file(Some(own.to_path_buf()))
+}
+
+fn materialized_settings(fixture: &Fixture) -> (PathBuf, PathBuf) {
+    let settings = fixture.paths.settings();
+    let worker = settings.join("t1-1.json");
+    let reviewer = settings.join("t1-review.json");
+    for file in [&worker, &reviewer] {
+        std::fs::write(file, "{\"permissions\":{}}\n").expect("a materialized settings file");
+    }
+    (worker, reviewer)
+}
+
+fn settings_mounts(mounts: &[Mount]) -> Vec<&Mount> {
+    mounts
+        .iter()
+        .filter(|mount| mount.target().starts_with(BoundaryLayout::DEFAULT_SETTINGS))
+        .collect()
+}
+
 #[test]
 fn an_agents_own_settings_file_is_bound_read_only_and_named_by_its_container_path() {
     let fixture = Fixture::new("settings-bind", true);
@@ -1060,35 +1095,27 @@ fn an_agents_own_settings_file_is_bound_read_only_and_named_by_its_container_pat
             .join("settings"),
         "the runner recognizes the directory `RunPaths` materializes settings into"
     );
-    let file = settings.join("t1-1.json");
-    let host = file.to_string_lossy().into_owned();
-    let inside = "/upstroke/settings/t1-1.json";
-    let spec = crate::runner::CommandSpec::new("claude")
-        .arg("-p")
-        .arg("--settings")
-        .arg(host.clone());
-    let review = review_request(
-        spec.clone(),
-        fixture.task_a.clone(),
-        AgentId::new("claude-code"),
-        Duration::from_secs(10),
-        InvocationId::attempt(
-            TaskKey(0),
-            GenerationId(0),
-            AttemptNumber(1),
-            AttemptRole::ReviewPass(0),
-            0,
-        ),
-    );
+    let (worker_own, reviewer_own) = materialized_settings(&fixture);
+    let claude = AgentId::new("claude-code");
     let worker = worker_request(
-        spec.clone(),
+        naming_its_settings(&worker_own),
         fixture.task_a.clone(),
-        AgentId::new("claude-code"),
+        claude.clone(),
         Duration::from_secs(10),
         worker_id(0),
     );
-    for request in [worker, review] {
-        let plan = runner.plan(&request).expect("plans");
+    let review = review_request(
+        naming_its_settings(&reviewer_own),
+        fixture.task_a.clone(),
+        claude,
+        Duration::from_secs(10),
+        review_pass_id(),
+    );
+    for (request, own, inside) in [
+        (&worker, &worker_own, "/upstroke/settings/t1-1.json"),
+        (&review, &reviewer_own, "/upstroke/settings/t1-review.json"),
+    ] {
+        let plan = runner.plan(request).expect("plans");
         let mounts = plan.mounts();
         let targets: Vec<&str> = mounts.iter().map(Mount::target).collect();
         assert_eq!(
@@ -1102,17 +1129,17 @@ fn an_agents_own_settings_file_is_bound_read_only_and_named_by_its_container_pat
                 "/tmp",
                 inside,
             ],
-            "{:?}: the role's own mounts, and the one settings file",
+            "{:?}: the role's own mounts, and its one settings file",
             request.role
         );
         assert_eq!(
-            target_of(mounts, inside),
-            Some(&Mount::Path {
-                source: file.clone(),
+            settings_mounts(mounts),
+            vec![&Mount::Path {
+                source: own.clone(),
                 target: inside.to_owned(),
                 read_only: true,
-            }),
-            "{:?}: exactly that file, read-only",
+            }],
+            "{:?}: exactly its own file, read-only, and no other invocation's",
             request.role
         );
         assert_eq!(
@@ -1156,41 +1183,333 @@ fn an_agents_own_settings_file_is_bound_read_only_and_named_by_its_container_pat
             request.role
         );
     }
+}
 
-    let gate = gate_request(
-        spec,
+#[test]
+fn only_the_invocations_own_settings_file_is_bound_and_no_argument_grants_another() {
+    let fixture = Fixture::new("settings-own-only", true);
+    let runner = fixture.runner();
+    let (worker_own, reviewer_own) = materialized_settings(&fixture);
+    let claude = AgentId::new("claude-code");
+    let ten = Duration::from_secs(10);
+    let host = |path: &Path| path.to_string_lossy().into_owned();
+
+    let with_another = worker_request(
+        naming_its_settings(&worker_own).arg(host(&reviewer_own)),
         fixture.task_a.clone(),
-        Duration::from_secs(10),
-        gate_id(0),
+        claude.clone(),
+        ten,
+        worker_id(0),
     );
-    let plan = runner.plan(&gate).expect("plans");
-    assert!(
-        target_of(plan.mounts(), inside).is_none(),
-        "a gate is given no settings"
+    let plan = runner.plan(&with_another).expect("plans");
+    assert_eq!(
+        settings_mounts(plan.mounts()),
+        vec![&Mount::Path {
+            source: worker_own.clone(),
+            target: "/upstroke/settings/t1-1.json".to_owned(),
+            read_only: true,
+        }],
+        "another invocation's settings file named in the argv is given no mount"
     );
-    assert!(
-        plan.launch.spec.command.contains(&host),
-        "and its argv is its own"
+    assert_eq!(
+        plan.launch.spec.command,
+        vec![
+            "claude".to_owned(),
+            "-p".to_owned(),
+            "--settings".to_owned(),
+            "/upstroke/settings/t1-1.json".to_owned(),
+            host(&reviewer_own),
+        ],
+        "only the intended argument is rewritten; the other stays the host path it was"
     );
 
-    let elsewhere = fixture.paths.private.join("transcripts").join("t1-1.json");
-    let not_settings = worker_request(
-        crate::runner::CommandSpec::new("claude")
-            .arg("--settings")
-            .arg(elsewhere.to_string_lossy().into_owned()),
+    for (case, request) in [
+        (
+            "an argument naming a settings file, with no metadata",
+            worker_request(
+                crate::runner::CommandSpec::new("claude")
+                    .arg("--settings")
+                    .arg(host(&worker_own)),
+                fixture.task_a.clone(),
+                claude.clone(),
+                ten,
+                worker_id(1),
+            ),
+        ),
+        (
+            "metadata whose file no argument names",
+            worker_request(
+                crate::runner::CommandSpec::new("codex")
+                    .arg("exec")
+                    .settings_file(Some(worker_own.clone())),
+                fixture.task_a.clone(),
+                claude.clone(),
+                ten,
+                worker_id(2),
+            ),
+        ),
+        (
+            "a gate carrying metadata and the argument",
+            gate_request(
+                naming_its_settings(&worker_own),
+                fixture.task_a.clone(),
+                ten,
+                gate_id(0),
+            ),
+        ),
+        (
+            "an agent probe carrying metadata and the argument",
+            crate::agent::probe_request(
+                "claude-code",
+                naming_its_settings(&worker_own),
+                0,
+                ten,
+            )
+            .expect("an agent probe request"),
+        ),
+    ] {
+        let plan = runner.plan(&request).expect("plans");
+        assert!(
+            settings_mounts(plan.mounts()).is_empty(),
+            "{case}: no settings mount: {:?}",
+            plan.mounts()
+        );
+        let mut expected = vec![request.command.program.clone()];
+        expected.extend(request.command.args.iter().cloned());
+        assert_eq!(
+            plan.launch.spec.command, expected,
+            "{case}: the argv is the command's own"
+        );
+    }
+}
+
+#[test]
+fn an_own_settings_file_that_is_not_a_regular_file_of_the_runs_settings_directory_is_refused() {
+    let fixture = Fixture::new("settings-identity", true);
+    let runner = fixture.runner();
+    let (worker_own, _) = materialized_settings(&fixture);
+    let settings = fixture.paths.settings();
+    let a_directory = settings.join("t1-2.json");
+    std::fs::create_dir(&a_directory).expect("a directory where a settings file would be");
+    let elsewhere = fixture.paths.transcripts().join("k0-a1.md");
+    let mut cases = vec![
+        (
+            "a directory in the settings directory",
+            a_directory,
+            "not a regular file",
+        ),
+        (
+            "a file elsewhere in the private half",
+            elsewhere.clone(),
+            "not a file of the run's settings directory",
+        ),
+    ];
+    #[cfg(unix)]
+    {
+        let a_link = settings.join("t1-3.json");
+        std::os::unix::fs::symlink(&elsewhere, &a_link).expect("a link to a private artifact");
+        cases.push((
+            "a link in the settings directory to a private artifact",
+            a_link,
+            "not a regular file",
+        ));
+    }
+    for (case, own, why) in cases {
+        let request = worker_request(
+            naming_its_settings(&own),
+            fixture.task_a.clone(),
+            AgentId::new("claude-code"),
+            Duration::from_secs(10),
+            worker_id(0),
+        );
+        let refused = runner
+            .plan(&request)
+            .expect_err("a settings file that is not the invocation's own is refused");
+        assert!(refused.to_string().contains(why), "{case}: {refused}");
+    }
+    let control = worker_request(
+        naming_its_settings(&worker_own),
         fixture.task_a.clone(),
         AgentId::new("claude-code"),
         Duration::from_secs(10),
-        worker_id(1),
+        worker_id(0),
     );
-    let plan = runner.plan(&not_settings).expect("plans");
     assert!(
-        !plan
-            .mounts()
-            .iter()
-            .any(|mount| mount.target().starts_with("/upstroke/settings")),
-        "a file elsewhere in the private half is not a settings file"
+        runner.plan(&control).is_ok(),
+        "the control: the regular file the invocation materialized plans"
     );
+}
+
+#[cfg(target_os = "linux")]
+fn effective_ids() -> ContainerUser {
+    let status = std::fs::read_to_string("/proc/self/status").expect("this process's status");
+    let effective = |key: &str| -> u32 {
+        status
+            .lines()
+            .find_map(|line| line.strip_prefix(key))
+            .and_then(|ids| ids.split_whitespace().nth(1))
+            .and_then(|id| id.parse().ok())
+            .unwrap_or_else(|| panic!("no effective id after `{key}` in {status}"))
+    };
+    ContainerUser {
+        uid: effective("Uid:"),
+        gid: effective("Gid:"),
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn every_container_is_created_as_the_coordinators_user() {
+    let expected = effective_ids();
+    let fixture = Fixture::new("container-user", true);
+    let runner = fixture.runner();
+    let mut roles = BTreeSet::new();
+    for request in requests(&fixture.task_a) {
+        let plan = runner.plan(&request).expect("plans");
+        assert_eq!(
+            plan.launch.spec.user,
+            Some(expected),
+            "{:?} is not created as the coordinator's effective uid and gid",
+            request.role
+        );
+        let args = crate::runner::container::docker_create_arguments(&plan.launch.spec);
+        let at = args
+            .iter()
+            .position(|arg| arg == "--user")
+            .unwrap_or_else(|| panic!("{:?}: no --user in {args:?}", request.role));
+        assert_eq!(
+            args.get(at + 1),
+            Some(&format!("{}:{}", expected.uid, expected.gid)),
+            "{:?}: {args:?}",
+            request.role
+        );
+        assert!(
+            at < args
+                .iter()
+                .position(|arg| *arg == plan.launch.spec.image_id)
+                .expect("the image id"),
+            "{:?}: --user is an option of `docker create`, before the image: {args:?}",
+            request.role
+        );
+        roles.insert(request.role.label());
+    }
+    assert_eq!(
+        roles.len(),
+        5,
+        "both probes, the worker, the gate and the reviewer: {roles:?}"
+    );
+}
+
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn every_container_keeps_the_images_user_off_linux() {
+    let fixture = Fixture::new("container-user", true);
+    let runner = fixture.runner();
+    for request in requests(&fixture.task_a) {
+        let plan = runner.plan(&request).expect("plans");
+        assert_eq!(plan.launch.spec.user, None, "{:?}", request.role);
+        assert!(
+            !crate::runner::container::docker_create_arguments(&plan.launch.spec)
+                .contains(&"--user".to_owned()),
+            "{:?}",
+            request.role
+        );
+    }
+}
+
+const PROMPT_MARKER: &str = "PROMPT-MARKER-91f3";
+
+fn prompt(tag: &str, bytes: usize) -> Vec<u8> {
+    let mut payload = format!("{PROMPT_MARKER} {tag}\n").into_bytes();
+    let mut state: u32 = 0x9e37_79b9;
+    while payload.len() < bytes {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        payload.push(state.to_le_bytes()[0]);
+    }
+    payload
+}
+
+#[test]
+fn a_commands_stdin_reaches_its_own_container_exactly_and_through_nothing_else() {
+    let fixture = Fixture::new("stdin-delivery", true);
+    let runner = fixture.runner();
+    let claude = AgentId::new("claude-code");
+    let ten = Duration::from_secs(10);
+    let worker_prompt = prompt("worker", 200 * 1024);
+    let reviewer_prompt = prompt("reviewer", 3 * 1024);
+    assert_ne!(worker_prompt, reviewer_prompt);
+    let worker = worker_request(
+        ShellKind::Sh.spec("cat").stdin(worker_prompt.clone()),
+        fixture.task_a.clone(),
+        claude.clone(),
+        ten,
+        worker_id(0),
+    );
+    let review = review_request(
+        ShellKind::Sh.spec("cat").stdin(reviewer_prompt.clone()),
+        fixture.task_a.clone(),
+        claude,
+        ten,
+        review_pass_id(),
+    );
+    for (request, payload) in [(&worker, &worker_prompt), (&review, &reviewer_prompt)] {
+        let plan = runner.plan(request).expect("plans");
+        assert!(
+            plan.launch.spec.open_stdin,
+            "{:?}: a command with input is created with stdin open",
+            request.role
+        );
+        let spec = &plan.launch.spec;
+        let carried: Vec<String> = spec
+            .command
+            .iter()
+            .cloned()
+            .chain(spec.env.iter().map(|(key, value)| format!("{key}={value}")))
+            .chain(spec.labels.iter().map(|(key, value)| format!("{key}={value}")))
+            .chain(spec.mounts.iter().map(|mount| format!("{mount:?}")))
+            .chain(crate::runner::container::docker_create_arguments(spec))
+            .collect();
+        assert!(
+            !carried.iter().any(|text| text.contains(PROMPT_MARKER)),
+            "{:?}: the prompt reached argv, the environment, a label or a mount",
+            request.role
+        );
+        runner.run_blocking(request).expect("runs");
+        assert_eq!(
+            fixture
+                .runtime
+                .fake()
+                .stdin_received(plan.launch.name.as_str())
+                .as_ref(),
+            Some(payload),
+            "{:?}: its own payload, byte for byte",
+            request.role
+        );
+    }
+
+    for request in requests(&fixture.task_b)
+        .into_iter()
+        .filter(|request| matches!(request.role, ExecutionRole::Gate | ExecutionRole::Probe(_)))
+    {
+        let plan = runner.plan(&request).expect("plans");
+        assert!(
+            !plan.launch.spec.open_stdin,
+            "{:?}: a command with no input keeps the closed stdin it had",
+            request.role
+        );
+        let _ = runner.run_blocking(&request);
+        assert_eq!(
+            fixture
+                .runtime
+                .fake()
+                .stdin_received(plan.launch.name.as_str()),
+            None,
+            "{:?}",
+            request.role
+        );
+    }
 }
 
 #[test]
@@ -2216,8 +2535,9 @@ fn a_completed_invocation_releases_in_the_contracts_order_and_reports_the_result
 fn a_container_that_outlives_its_timeout_is_stopped_and_removed() {
     let fixture = Fixture::new("timeout", false);
     let runner = fixture.runner();
+    let payload = prompt("timeout", 128 * 1024);
     let mut request = worker_request(
-        ShellKind::Sh.spec("sleep 600"),
+        ShellKind::Sh.spec("sleep 600").stdin(payload.clone()),
         fixture.task_a.clone(),
         AgentId::new("claude-code"),
         Duration::from_secs(10),
@@ -2234,6 +2554,11 @@ fn a_container_that_outlives_its_timeout_is_stopped_and_removed() {
     assert_eq!(
         output.code, None,
         "a container the supervisor stopped did not exit on its own"
+    );
+    assert_eq!(
+        fixture.runtime.fake().stdin_received(name.as_str()),
+        Some(payload),
+        "the input went to the container at its start, and the timeout path is the same"
     );
 
     let rendered = fixture.trace.rendered();
@@ -3897,6 +4222,8 @@ const GATED_RUNS: &[(&str, &str)] = &[
     ("credenv", "01KZR3BGATED00000000000001"),
     ("descendant", "01KZR3BGATED00000000000002"),
     ("settings", "01KZP12GATED00000000000001"),
+    ("user", "01KZP12GATED00000000000002"),
+    ("stdin", "01KZP12GATED00000000000003"),
 ];
 
 fn gated_run(tag: &str) -> &'static str {
@@ -4194,21 +4521,28 @@ fn real_docker_a_containerized_agent_reads_its_own_settings_and_cannot_write_the
     .expect("a container policy")
     .with_poll(Duration::from_millis(10));
 
-    let settings =
-        RunPaths::with_private_root(&repo_dir, run_id, &identity.private_root).settings();
+    let paths = RunPaths::with_private_root(&repo_dir, run_id, &identity.private_root);
+    let settings = paths.settings();
     std::fs::create_dir_all(&settings).expect("the settings directory");
     let file = settings.join("k0-1.json");
     let written = "{\"permissions\":{\"allow\":[\"Edit\"],\"deny\":[\"Read(.upstroke/**)\"]}}\n";
     std::fs::write(&file, written).expect("an attempt's settings");
+    std::fs::write(settings.join("k0-2.json"), "SIBLING-SETTINGS-a5f2\n")
+        .expect("another attempt's settings");
     let workspace = root.join("ws-settings");
     std::fs::create_dir_all(&workspace).expect("a workspace");
     let spec = crate::runner::CommandSpec::new("sh")
         .arg("-c")
         .arg(
-            "cat \"$0\"; if ( echo tampered >> \"$0\" ) 2>/dev/null; then echo WROTE; \
+            "cat \"$0\"; ls -A /upstroke/settings | sed 's/^/LISTED=/'; \
+             test -e /upstroke/settings/k0-2.json && echo SIBLING=yes || echo SIBLING=no; \
+             test -e \"$1\" && echo PRIVATE=yes || echo PRIVATE=no; \
+             if ( echo tampered >> \"$0\" ) 2>/dev/null; then echo WROTE; \
              else echo READ-ONLY; fi",
         )
-        .arg(file.to_string_lossy().into_owned());
+        .arg(file.to_string_lossy().into_owned())
+        .arg(paths.private.to_string_lossy().into_owned())
+        .settings_file(Some(file.clone()));
     let request = worker_request(
         spec,
         workspace,
@@ -4228,10 +4562,262 @@ fn real_docker_a_containerized_agent_reads_its_own_settings_and_cannot_write_the
         "the settings are read-only to the agent: {}",
         output.stdout
     );
+    let listed: Vec<&str> = output
+        .stdout
+        .lines()
+        .filter_map(|line| line.strip_prefix("LISTED="))
+        .collect();
+    assert_eq!(
+        listed,
+        vec!["k0-1.json"],
+        "the agent sees its own settings file and no sibling: {}",
+        output.stdout
+    );
+    assert!(
+        output.stdout.contains("SIBLING=no") && output.stdout.contains("PRIVATE=no"),
+        "another attempt's settings or the run's private directory reached the container: {}",
+        output.stdout
+    );
     assert_eq!(
         std::fs::read_to_string(&file).expect("the host file"),
         written,
         "the host file is unchanged"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn real_docker_a_container_runs_as_the_coordinators_user_and_leaves_what_it_can_reclaim() {
+    use std::os::unix::fs::MetadataExt as _;
+    let trace = ContainerTrace::recording();
+    let docker = match docker_gate(
+        "real_docker_a_container_runs_as_the_coordinators_user_and_leaves_what_it_can_reclaim",
+        trace.clone(),
+    ) {
+        Ok(docker) => docker,
+        Err(reason) => return skipped(&reason),
+    };
+    let (_, image_id) = match discover(docker.as_ref(), GIT_IMAGES) {
+        Ok(found) => found,
+        Err(reason) => return no_image(&reason),
+    };
+
+    let tree = repo::scratch("real-user");
+    let root = tree.path();
+    let run_id = gated_run("user");
+    let repo_dir = root.join("repo");
+    let (head, _) = repo::repository(&repo_dir);
+    let identity = real_identity(root, &repo_dir, run_id);
+    let execution_root =
+        crate::workspace_manager::execution_root_of(&identity.private_root, repo_key(), run_id);
+    let workspace = execution_root.join("tasks").join("kalpha-g0");
+    repo::worktree(&repo_dir, &workspace, &head);
+    let _residue = LeaveNoResidue {
+        docker: (*docker).clone(),
+        private_root: identity.private_root.clone(),
+    };
+    let runner = ContainerRunner::new(
+        real_policy(&image_id),
+        identity.clone(),
+        &repo_dir,
+        image_environment_of(docker.as_ref(), &image_id),
+        Box::new((*docker).clone()),
+    )
+    .expect("a container policy")
+    .with_poll(Duration::from_millis(10));
+    let expected = effective_ids();
+    let line = |output: &ProcessOutput, key: &str| -> String {
+        output
+            .stdout
+            .lines()
+            .find_map(|line| line.strip_prefix(key))
+            .unwrap_or_else(|| {
+                panic!(
+                    "`{key}` is not in stdout {:?} / stderr {:?}",
+                    output.stdout, output.stderr
+                )
+            })
+            .trim()
+            .to_owned()
+    };
+
+    let worker = worker_request(
+        ShellKind::Sh.spec(
+            "id -u | sed 's/^/UID=/'; id -g | sed 's/^/GID=/'; \
+             mkdir -p nested/deeper && echo written > nested/deeper/file && echo MADE=yes",
+        ),
+        workspace.clone(),
+        AgentId::new("claude-code"),
+        Duration::from_secs(60),
+        worker_id(0),
+    );
+    let output = runner.run_blocking(&worker).expect("runs");
+    assert_eq!(output.code, Some(0), "{}{}", output.stdout, output.stderr);
+    assert_eq!(
+        (line(&output, "UID="), line(&output, "GID=")),
+        (expected.uid.to_string(), expected.gid.to_string()),
+        "the container's process is not the coordinator's effective uid and gid"
+    );
+    assert_eq!(line(&output, "MADE="), "yes");
+    let made = workspace.join("nested").join("deeper").join("file");
+    for path in [workspace.join("nested"), workspace.join("nested").join("deeper"), made] {
+        let metadata = std::fs::metadata(&path).expect("what the container made");
+        assert_eq!(
+            (metadata.uid(), metadata.gid()),
+            (expected.uid, expected.gid),
+            "the host sees {} as the coordinator's",
+            path.display()
+        );
+    }
+    std::fs::remove_dir_all(workspace.join("nested"))
+        .expect("the coordinator reclaims what the container made");
+    assert!(!workspace.join("nested").exists());
+
+    let gate = gate_request(
+        ShellKind::Sh.spec(
+            "git -C /upstroke/workspace rev-parse HEAD | sed 's/^/HEAD=/'; \
+             git -C /upstroke/workspace status --porcelain | wc -l | tr -d ' ' \
+             | sed 's/^/DIRTY=/'",
+        ),
+        workspace.clone(),
+        Duration::from_secs(60),
+        gate_id(0),
+    );
+    let output = runner.run_blocking(&gate).expect("runs");
+    assert_eq!(
+        output.code,
+        Some(0),
+        "a Git-dependent gate needs no wildcard safe.directory: {}",
+        output.stderr
+    );
+    assert!(
+        !output.stderr.contains("dubious ownership"),
+        "{}",
+        output.stderr
+    );
+    assert_eq!(line(&output, "HEAD="), head, "the exact detached HEAD");
+    assert_eq!(line(&output, "DIRTY="), "0", "the worktree is clean again");
+}
+
+#[test]
+fn real_docker_a_containerized_program_reads_its_exact_stdin_then_eof() {
+    use sha2::{Digest as _, Sha256};
+    let trace = ContainerTrace::recording();
+    let docker = match docker_gate(
+        "real_docker_a_containerized_program_reads_its_exact_stdin_then_eof",
+        trace.clone(),
+    ) {
+        Ok(docker) => docker,
+        Err(reason) => return skipped(&reason),
+    };
+    let (_, image_id) = match discover(docker.as_ref(), PREFERRED_IMAGES) {
+        Ok(found) => found,
+        Err(reason) => return no_image(&reason),
+    };
+
+    let tree = repo::scratch("real-stdin");
+    let root = tree.path();
+    let run_id = gated_run("stdin");
+    let repo_dir = root.join("repo");
+    repo::repository(&repo_dir);
+    let identity = real_identity(root, &repo_dir, run_id);
+    let workspace = root.join("ws-stdin");
+    std::fs::create_dir_all(&workspace).expect("a workspace");
+    let _residue = LeaveNoResidue {
+        docker: (*docker).clone(),
+        private_root: identity.private_root.clone(),
+    };
+    let runner = ContainerRunner::new(
+        real_policy(&image_id),
+        identity.clone(),
+        &repo_dir,
+        image_environment_of(docker.as_ref(), &image_id),
+        Box::new((*docker).clone()),
+    )
+    .expect("a container policy")
+    .with_poll(Duration::from_millis(10));
+    let claude = AgentId::new("claude-code");
+    let line = |output: &ProcessOutput, key: &str| -> String {
+        output
+            .stdout
+            .lines()
+            .find_map(|line| line.strip_prefix(key))
+            .unwrap_or_else(|| {
+                panic!(
+                    "`{key}` is not in stdout {:?} / stderr {:?}",
+                    output.stdout, output.stderr
+                )
+            })
+            .trim()
+            .to_owned()
+    };
+
+    let payload = prompt("exact", 300 * 1024);
+    let exact = worker_request(
+        ShellKind::Sh
+            .spec(
+                "cat > /tmp/in; wc -c < /tmp/in | tr -d ' ' | sed 's/^/BYTES=/'; \
+                 sha256sum /tmp/in | cut -d ' ' -f 1 | sed 's/^/SHA=/'",
+            )
+            .stdin(payload.clone()),
+        workspace.clone(),
+        claude.clone(),
+        Duration::from_secs(120),
+        worker_id(0),
+    );
+    let output = runner.run_blocking(&exact).expect("runs");
+    assert_eq!(output.code, Some(0), "{}{}", output.stdout, output.stderr);
+    assert!(!output.timed_out, "`cat` never saw the end of its input");
+    assert_eq!(
+        line(&output, "BYTES="),
+        payload.len().to_string(),
+        "every byte, beyond a pipe buffer"
+    );
+    let digest: String = Sha256::digest(&payload)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    assert_eq!(line(&output, "SHA="), digest, "exactly the bytes sent");
+
+    let early = worker_request(
+        ShellKind::Sh
+            .spec("head -c 16 > /dev/null; exit 7")
+            .stdin(prompt("early", 1024 * 1024)),
+        workspace.clone(),
+        claude.clone(),
+        Duration::from_secs(120),
+        worker_id(1),
+    );
+    let started = Instant::now();
+    let output = runner
+        .run_blocking(&early)
+        .expect("a program that stops reading early reports its own exit");
+    assert_eq!(output.code, Some(7), "{}{}", output.stdout, output.stderr);
+    assert!(!output.timed_out);
+    assert!(
+        started.elapsed() < Duration::from_secs(60),
+        "the undelivered rest of the input held the invocation: {:?}",
+        started.elapsed()
+    );
+
+    let never = worker_request(
+        ShellKind::Sh
+            .spec("sleep 600")
+            .stdin(prompt("never-read", 1024 * 1024)),
+        workspace,
+        claude,
+        Duration::from_secs(3),
+        worker_id(2),
+    );
+    let started = Instant::now();
+    let output = runner
+        .run_blocking(&never)
+        .expect("a timeout is an output, not an error");
+    assert!(output.timed_out, "{}{}", output.stdout, output.stderr);
+    assert!(
+        started.elapsed() < Duration::from_secs(90),
+        "a pending input write held the timeout: {:?}",
+        started.elapsed()
     );
 }
 
@@ -4807,7 +5393,7 @@ fn real_docker_a_git_dependent_gate_sees_only_the_role_view() {
     .expect("a container policy")
     .with_poll(Duration::from_millis(10));
 
-    let git = "git -c safe.directory='*' -C /upstroke/workspace";
+    let git = "git -C /upstroke/workspace";
     let leak = &planted[0];
     let script = format!(
         "{git} rev-parse HEAD | sed 's/^/HEAD=/'; \
@@ -5152,8 +5738,10 @@ fn every_gated_test_of_this_lane_is_counted() {
         "real_docker_withholds_an_image_credential_variable_from_a_role_that_takes_none",
         "real_docker_a_container_contains_a_daemonised_descendant",
         "real_docker_a_containerized_agent_reads_its_own_settings_and_cannot_write_them",
+        "real_docker_a_container_runs_as_the_coordinators_user_and_leaves_what_it_can_reclaim",
+        "real_docker_a_containerized_program_reads_its_exact_stdin_then_eof",
     ];
-    assert_eq!(MINE.len(), 11);
+    assert_eq!(MINE.len(), 13);
     assert_eq!(GATED_RUNS.len(), MINE.len(), "one run id per gated test");
     let ids: BTreeSet<&str> = GATED_RUNS.iter().map(|(_, run)| *run).collect();
     assert_eq!(
@@ -5209,8 +5797,9 @@ impl ContainerHooks for CancelAfter {
 fn a_cancelled_container_invocation_is_released_through_the_reclaim_steps_before_it_reports() {
     let fixture = Fixture::new("cancel-running", false);
     let runner = fixture.runner();
+    let payload = prompt("cancelled", 128 * 1024);
     let request = worker_request(
-        ShellKind::Sh.spec("sleep 600"),
+        ShellKind::Sh.spec("sleep 600").stdin(payload.clone()),
         fixture.task_a.clone(),
         AgentId::new("claude-code"),
         Duration::from_secs(600),
@@ -5233,6 +5822,11 @@ fn a_cancelled_container_invocation_is_released_through_the_reclaim_steps_before
         .expect_err("a cancelled invocation reports an error, not an output");
     assert!(error.is_cancelled(), "{error}");
     assert_eq!(error.fate, ProcessFate::Gone, "{error}");
+    assert_eq!(
+        fixture.runtime.fake().stdin_received(name.as_str()),
+        Some(payload),
+        "the input went to the container at its start, and the cancellation path is the same"
+    );
 
     let rendered = fixture.trace.rendered();
     let at = |needle: &str| {
@@ -6185,6 +6779,8 @@ fn reaper_spec(private_root: &Path, incarnation: &str) -> CreateSpec {
         command: Vec::new(),
         workdir: None,
         read_only_root: true,
+        user: None,
+        open_stdin: false,
     }
 }
 
@@ -6204,7 +6800,7 @@ fn a_scope_that_does_not_select_its_containers_labels_is_refused_with_no_reaper_
     let foreign = reaper_spec(&fixture.private_root, INCARNATION_2);
 
     let refused = reaping
-        .cover(&fixture.runtime, &fixture.identity, &foreign)
+        .cover(&fixture.runtime, &fixture.identity, &foreign, &[])
         .err()
         .expect("a container its runner's scope does not select is refused");
     assert!(
@@ -6226,7 +6822,7 @@ fn a_scope_that_does_not_select_its_containers_labels_is_refused_with_no_reaper_
 
     let own = reaper_spec(&fixture.private_root, INCARNATION_1);
     let (covered, _, _) = reaping
-        .cover(&fixture.runtime, &fixture.identity, &own)
+        .cover(&fixture.runtime, &fixture.identity, &own, &[])
         .expect("the runner's own container is covered");
     assert!(
         armed_for(&fixture.private_root, INCARNATION_1),
@@ -6252,7 +6848,7 @@ fn a_container_whose_labels_differ_from_the_armed_scope_is_refused_before_its_in
     let armed_for_another = reaper_spec(&fixture.private_root, INCARNATION_2);
     let (covered, _, _) = runner
         .reaping
-        .cover(&fixture.runtime, &foreign, &armed_for_another)
+        .cover(&fixture.runtime, &foreign, &armed_for_another, &[])
         .expect("a reaper armed for another incarnation, as a caller-built one would have been");
     covered.settle(ProcessFate::NeverStarted);
     assert!(armed_for(&fixture.private_root, INCARNATION_2));

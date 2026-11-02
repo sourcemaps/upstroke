@@ -8809,6 +8809,7 @@ fn gate_in(runner: &HostRunner, workspace: &Path, args: &[&str]) -> ProcessOutpu
             args: args.iter().map(|arg| (*arg).to_owned()).collect(),
             env: Vec::new(),
             stdin: Vec::new(),
+            settings_file: None,
         },
         workspace.to_path_buf(),
         std::time::Duration::from_secs(120),

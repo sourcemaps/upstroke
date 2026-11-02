@@ -763,6 +763,12 @@ program.
 whether an armed container reaper in this process selected its labels at the instant it
 started.
 
+## `struct State` › `stdin_received: BTreeMap<String, Vec<u8>>,`
+
+Every non-empty payload a start was given, by container name, exactly as
+the cover's start proof carried it (PR12's D-C). Kept after the container
+is removed, so a test reads what an invocation was fed after it ended.
+
 ## `impl FakeRuntime` › `pub(crate) fn observing_covers(&self) {`
 
 The design property's in-process observation (PR11 follow-up A): "while any container this
@@ -775,6 +781,10 @@ process, so the two-process witnesses do not use it; they observe the reaper's c
 ## `impl FakeRuntime` › `pub(crate) fn starts_observed(&self) -> Vec<(String, bool)> {`
 
 What `observing_covers` recorded, in start order.
+
+## `impl FakeRuntime` › `pub(crate) fn stdin_received(&self, name: &str) -> Option<Vec<u8>> {`
+
+What `name`'s start was fed, or `None` when it was given no input.
 
 ## `pub(crate) const NO_OP_REAPER_PROGRAM: &str = "/usr/bin/true";`
 

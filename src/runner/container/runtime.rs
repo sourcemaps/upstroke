@@ -168,6 +168,12 @@ impl Mount {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContainerUser {
+    pub uid: u32,
+    pub gid: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateSpec {
     pub name: String,
@@ -178,6 +184,8 @@ pub struct CreateSpec {
     pub command: Vec<String>,
     pub workdir: Option<String>,
     pub read_only_root: bool,
+    pub user: Option<ContainerUser>,
+    pub open_stdin: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
