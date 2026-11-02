@@ -17543,7 +17543,15 @@ const TOPOLOGY_STUB_VERDICT: &str = "```json\n{\"pass\": true, \"reasons\": [\"m
                                      acceptance criteria\"], \"required_changes\": []}\n```";
 const TOPOLOGY_STUB_QUESTION: &str =
     "UPSTROKE-QUESTION: which of the two widget formats does the spec mean?";
-const TOPOLOGY_STUB_EDIT: &str = "printf 'edited by the topology stub\\n' >> agent-output.txt";
+/// The worker's edit: one line appended to `agent-output.txt`, spelled so that
+/// both shells `shell_spec` picks run it alike, `cmd /C` on Windows and `sh -c`
+/// elsewhere (`gates::ShellKind::native`). `echo` is a builtin of both and `>>`
+/// appends in both; with no space before `>>`, `cmd` writes no trailing blank.
+/// `cmd` ends the line with CRLF and `sh` with LF, and every assertion over the
+/// file reads it by content. The `printf '…\n'` spelling this replaces was a
+/// `sh` command: `cmd` does not quote with `'`, has no `printf` builtin, and
+/// opens a redirection's file before it looks the program up.
+const TOPOLOGY_STUB_EDIT: &str = "echo edited by the topology stub>> agent-output.txt";
 
 struct TopologyStub {
     worker_script: String,
@@ -17596,6 +17604,26 @@ impl AgentAdapter for TopologyStub {
     }
 
     fn parse(&self, out: &ProcessOutput) -> Result<Outcome, UpstrokeError> {
+        // Only a worker that exited cleanly completed, as a real adapter reads
+        // its end (`agent::claude`'s `parse_output`): a timeout is a timeout,
+        // and any other end is an agent error whose stderr the attempt reports.
+        // Read as `Completed`, a failed edit was reported as an empty diff.
+        if out.timed_out || out.output_limited || out.code != Some(0) {
+            return Ok(Outcome {
+                status: if out.timed_out {
+                    OutcomeStatus::Timeout
+                } else {
+                    OutcomeStatus::AgentError
+                },
+                diff: String::new(),
+                detail: None,
+                session_id: None,
+                usage: None,
+                cost_usd: Some(0.01),
+                transcript_path: PathBuf::new(),
+                duration: out.duration,
+            });
+        }
         let detail = if out.stdout.contains(TOPOLOGY_STUB_REVIEW) {
             TOPOLOGY_STUB_VERDICT
         } else {
@@ -17623,6 +17651,69 @@ impl AgentAdapter for TopologyStub {
             duration: out.duration,
         })
     }
+}
+
+/// The stub's edit is a real append under the shell `shell_spec` picks on this
+/// platform, run by the production `HostRunner`: each run adds one line, so a
+/// task whose base already holds an earlier task's output still leaves a diff
+/// of its own. A second task's empty diff on the Windows guest (CI run
+/// 41529099549) is what an edit that left the file as it was looks like. Only
+/// a Windows host runs the edit under `cmd`, so only there does this
+/// discriminate between the spellings.
+#[test]
+fn the_topology_stubs_edit_appends_one_line_per_run_under_the_native_shell() {
+    let tree = temp_engine_scratch("topology-stub-edit");
+    let workspace = tree.path().to_path_buf();
+    let runner = crate::runner::host::HostRunner::new();
+    for runs in 1..=2 {
+        let output = runner
+            .run_blocking(&crate::runner::gate_request(
+                shell_spec(TOPOLOGY_STUB_EDIT),
+                workspace.clone(),
+                Duration::from_secs(60),
+                crate::runner::InvocationId::attempt(
+                    crate::topology::registry::TaskKey(0),
+                    crate::topology::events::GenerationId(0),
+                    crate::topology::events::AttemptNumber(1),
+                    crate::runner::invocation::AttemptRole::Gate(0),
+                    0,
+                ),
+            ))
+            .expect("the native shell runs the stub's edit");
+        assert_eq!(output.code, Some(0), "run {runs}: {output:?}");
+        let text = fs::read_to_string(workspace.join("agent-output.txt"))
+            .expect("the edit's file");
+        assert_eq!(
+            text.lines().collect::<Vec<_>>(),
+            vec!["edited by the topology stub"; runs],
+            "run {runs} appends exactly one line: {text:?}"
+        );
+    }
+}
+
+/// The stub reads a worker's end as a real adapter does: only a clean exit
+/// completes, a timeout is a timeout, and any other end is an agent error, so
+/// a failed edit is reported with its own exit and stderr, not as an empty
+/// diff. This holds and discriminates on every platform.
+#[test]
+fn the_topology_stub_completes_only_a_worker_that_exited_cleanly() {
+    let stub = TopologyStub::new(TOPOLOGY_STUB_EDIT, 0);
+    let status = |code: Option<i32>, timed_out: bool| {
+        stub.parse(&ProcessOutput {
+            code,
+            stdout: String::new(),
+            stderr: "the edit did not run".to_owned(),
+            duration: Duration::from_millis(1),
+            timed_out,
+            output_limited: false,
+        })
+        .expect("the stub reads every end")
+        .status
+    };
+    assert_eq!(status(Some(0), false), OutcomeStatus::Completed);
+    assert_eq!(status(Some(1), false), OutcomeStatus::AgentError);
+    assert_eq!(status(None, false), OutcomeStatus::AgentError);
+    assert_eq!(status(None, true), OutcomeStatus::Timeout);
 }
 
 /// The stub, shareable across the coordinator's pipeline threads.
