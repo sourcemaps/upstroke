@@ -684,7 +684,9 @@ fn drive(
                 }),
                 reviews: Arc::new(LegacyReviewPasses),
                 input_policy: Arc::new(LegacyReviewInputPolicy),
-                hooks: Arc::new(|| Box::new(NoTopologyHooks::new()) as Box<dyn TopologyHooks + Send>),
+                hooks: Arc::new(|| {
+                    Box::new(NoTopologyHooks::new()) as Box<dyn TopologyHooks + Send>
+                }),
                 slots: driving.slots,
             };
             run.run_concurrently(&seams, &pipelines, &mut hooks, None)?

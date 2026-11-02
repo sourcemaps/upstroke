@@ -546,8 +546,10 @@ pub(super) fn parse_engine(
     // A schema-4 run acts on all three: the merge-repair ceiling is recorded
     // in `run_started` and the slot limits bound the parallel scheduler. Only
     // the sequential engine leaves them inert.
-    let acts_on_topology_limits =
-        matches!(limits, EngineLimits::Topology | EngineLimits::TopologyResume);
+    let acts_on_topology_limits = matches!(
+        limits,
+        EngineLimits::Topology | EngineLimits::TopologyResume
+    );
     for (key, configured, default) in [
         (
             "max_merge_repairs",

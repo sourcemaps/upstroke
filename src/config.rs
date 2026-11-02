@@ -1972,8 +1972,14 @@ pool_fraction = 0.5
                 )
                 .expect("a schema-4 run honours the ceiling");
                 assert_eq!(cfg.max_parallel, parallel, "{limits:?}");
-                assert_eq!(cfg.max_per_agent, parallel, "{limits:?}: defaults to the width");
-                assert_eq!(cfg.max_per_pool, parallel, "{limits:?}: defaults to the width");
+                assert_eq!(
+                    cfg.max_per_agent, parallel,
+                    "{limits:?}: defaults to the width"
+                );
+                assert_eq!(
+                    cfg.max_per_pool, parallel,
+                    "{limits:?}: defaults to the width"
+                );
                 assert!(accepted.is_empty(), "{limits:?}: {accepted:?}");
             }
         }

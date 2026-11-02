@@ -247,7 +247,9 @@ impl RunReport {
             .unwrap_or_default();
 
         let mut tasks = Vec::new();
-        let entries = fold.registry().map_or(&[][..], |registry| registry.entries());
+        let entries = fold
+            .registry()
+            .map_or(&[][..], |registry| registry.entries());
         for entry in entries {
             let Some(task) = fold.task(entry.key) else {
                 continue;
@@ -291,9 +293,7 @@ impl RunReport {
                 .last()
                 .map(|record| record.model.clone())
                 .unwrap_or_default();
-            let session_id = attempts
-                .last()
-                .and_then(|record| record.session_id.clone());
+            let session_id = attempts.last().and_then(|record| record.session_id.clone());
             let mut review_models: Vec<String> = Vec::new();
             for model in attempts.iter().flat_map(AttemptRecord::review_models) {
                 if !review_models.contains(&model) {
