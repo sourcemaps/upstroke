@@ -24470,4 +24470,3 @@ fn core_ignorecase_helper() {
         other => panic!("no scope `{other}`"),
     }
 }
-
