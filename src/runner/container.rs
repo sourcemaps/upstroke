@@ -1013,11 +1013,12 @@ impl DockerCli {
     ) -> Result<(), RuntimeError> {
         let name = covered.name();
         self.trace.runtime(op, name);
-        let client =
-            attach_client(name, payload, covered.deadline()).map_err(|detail| RuntimeError::Failed {
+        let client = attach_client(name, payload, covered.deadline()).map_err(|detail| {
+            RuntimeError::Failed {
                 operation: op,
                 detail,
-            })?;
+            }
+        })?;
         let waited = await_started(
             covered.deadline(),
             covered.cancellation(),
@@ -1066,7 +1067,10 @@ impl DockerCli {
         ) {
             return Err(RuntimeError::Failed {
                 operation: op,
-                detail: format!("{reason}; its attached client {}", client.into_end().describe()),
+                detail: format!(
+                    "{reason}; its attached client {}",
+                    client.into_end().describe()
+                ),
             });
         }
         self.own_client(name, client);
@@ -1301,7 +1305,11 @@ fn settle_client(
     ended_within(grace)
 }
 
-fn delivery_verdict(name: &str, end: &ClientEnd, exit_code: Option<i32>) -> Result<(), RuntimeError> {
+fn delivery_verdict(
+    name: &str,
+    end: &ClientEnd,
+    exit_code: Option<i32>,
+) -> Result<(), RuntimeError> {
     let failed = |detail: String| -> Result<(), RuntimeError> {
         Err(RuntimeError::Failed {
             operation: RuntimeOp::Collect,

@@ -6855,7 +6855,14 @@ fn a_scope_that_does_not_select_its_containers_labels_is_refused_with_no_reaper_
     let foreign = reaper_spec(&fixture.private_root, INCARNATION_2);
 
     let refused = reaping
-        .cover(&fixture.runtime, &fixture.identity, &foreign, &[], Instant::now() + Duration::from_secs(60), &crate::runner::Cancellation::new())
+        .cover(
+            &fixture.runtime,
+            &fixture.identity,
+            &foreign,
+            &[],
+            Instant::now() + Duration::from_secs(60),
+            &crate::runner::Cancellation::new(),
+        )
         .err()
         .expect("a container its runner's scope does not select is refused");
     assert!(
@@ -6877,7 +6884,14 @@ fn a_scope_that_does_not_select_its_containers_labels_is_refused_with_no_reaper_
 
     let own = reaper_spec(&fixture.private_root, INCARNATION_1);
     let (covered, _, _) = reaping
-        .cover(&fixture.runtime, &fixture.identity, &own, &[], Instant::now() + Duration::from_secs(60), &crate::runner::Cancellation::new())
+        .cover(
+            &fixture.runtime,
+            &fixture.identity,
+            &own,
+            &[],
+            Instant::now() + Duration::from_secs(60),
+            &crate::runner::Cancellation::new(),
+        )
         .expect("the runner's own container is covered");
     assert!(
         armed_for(&fixture.private_root, INCARNATION_1),
@@ -6903,7 +6917,14 @@ fn a_container_whose_labels_differ_from_the_armed_scope_is_refused_before_its_in
     let armed_for_another = reaper_spec(&fixture.private_root, INCARNATION_2);
     let (covered, _, _) = runner
         .reaping
-        .cover(&fixture.runtime, &foreign, &armed_for_another, &[], Instant::now() + Duration::from_secs(60), &crate::runner::Cancellation::new())
+        .cover(
+            &fixture.runtime,
+            &foreign,
+            &armed_for_another,
+            &[],
+            Instant::now() + Duration::from_secs(60),
+            &crate::runner::Cancellation::new(),
+        )
         .expect("a reaper armed for another incarnation, as a caller-built one would have been");
     covered.settle(ProcessFate::NeverStarted);
     assert!(armed_for(&fixture.private_root, INCARNATION_2));

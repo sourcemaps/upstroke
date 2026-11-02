@@ -632,7 +632,11 @@ fn an_attached_start_held_at_created_ends_at_its_deadline_or_its_cancellation() 
         "a cancellation ends the wait on the poll that sees it: {waited:?}"
     );
     assert_eq!(polls.get(), 3);
-    assert!(began.elapsed() < Duration::from_secs(2), "{:?}", began.elapsed());
+    assert!(
+        began.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        began.elapsed()
+    );
 
     let far = Instant::now() + Duration::from_secs(600);
     let never = Cancellation::new();
@@ -669,7 +673,13 @@ fn an_attached_start_held_at_created_ends_at_its_deadline_or_its_cancellation() 
     for (state, client_ended) in [("running", false), ("exited", false), ("exited", true)] {
         assert!(
             matches!(
-                await_started(far, &never, poll, || Ok(Some(state.to_owned())), || client_ended),
+                await_started(
+                    far,
+                    &never,
+                    poll,
+                    || Ok(Some(state.to_owned())),
+                    || client_ended
+                ),
                 Ok(())
             ),
             "the control: a container that left `created` started ({state}, client ended: \
@@ -696,7 +706,12 @@ fn an_attached_client_is_settled_or_reported_unresolved_within_its_bound() {
     let delayed = Instant::now() + Duration::from_millis(40);
     let asked = Cell::new(false);
     assert!(
-        settle_client(|| Instant::now() >= delayed, || asked.set(true), grace, poll),
+        settle_client(
+            || Instant::now() >= delayed,
+            || asked.set(true),
+            grace,
+            poll
+        ),
         "a client whose feeding and exit end a little later, within the grace, is settled"
     );
     assert!(!asked.get(), "without being stopped");
