@@ -1360,7 +1360,7 @@ fn real_docker_a_schema_4_run_refuses_an_absent_image_before_the_worktree_lock()
             .image_by_reference(&reference)
             .expect("a read-only inspection of the controlled reference")
             .is_none(),
-        "the refused run pulled `{reference}`"
+        "the refused run left `{reference}` held by the runtime"
     );
     let runs = repo.join(".upstroke").join("runs");
     assert!(

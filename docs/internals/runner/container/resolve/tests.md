@@ -562,15 +562,24 @@ lock was on its far side.
 
 P12-06's ordering on the public path, against a real runtime: a schema-4 run
 whose `[runner]` names an image reference the runtime does not hold refuses
-on the image by read-only inspection before the worktree lock, pulls nothing,
-resolves no adapter and creates no run. It is Docker-gated
-(`DOCKER_GATED_TESTS`), because `engine::run_with` composes the production
-`DockerCli` and so meets whatever runtime the machine has. The fixture is
-controlled rather than ambient: the reference and the volume name carry a
-per-run nonce, and the gate's own runtime confirms the reference is absent
-before the run and still absent after it. Under `UPSTROKE_REQUIRE_DOCKER=1`
-an absent runtime fails it rather than skipping it; that run is the
-coordinator's acceptance, not this suite's.
+on the image by read-only inspection before the worktree lock, resolves no
+adapter and creates no run. It is Docker-gated (`DOCKER_GATED_TESTS`),
+because `engine::run_with` composes the production `DockerCli` and so meets
+whatever runtime the machine has. The fixture is controlled rather than
+ambient: the reference and the volume name carry a per-run nonce, and the
+gate's own runtime confirms the reference is absent before the run and still
+absent after it. Under `UPSTROKE_REQUIRE_DOCKER=1` an absent runtime fails it
+rather than skipping it; that run is the coordinator's acceptance, not this
+suite's, and an ordinary suite's `ok` for it can be a gated skip.
+
+**What the after-check proves, and what it does not.** The reference still
+absent after the refusal shows that no lasting acquisition of it happened in
+this observation. It does not, by itself, show that no implicit pull, network
+request, transient acquisition or later removal was attempted. That the
+pre-lock resolution never pulls is a property of the command funnel, from the
+source: `DockerCli::image_by_reference` is the `RuntimeOp::InspectImageByReference`
+operation, an image inspection, which does not pull (root's resolve-test
+follow-through, `6f5a5f4b`). The two are separate pieces of evidence.
 
 ## `fn every_engine_limits_reading_is_classified_for_a_container_selection() {`
 
