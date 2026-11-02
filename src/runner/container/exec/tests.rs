@@ -5151,8 +5151,9 @@ fn every_gated_test_of_this_lane_is_counted() {
         "real_docker_a_worktree_binary_cannot_shadow_the_certified_cli",
         "real_docker_withholds_an_image_credential_variable_from_a_role_that_takes_none",
         "real_docker_a_container_contains_a_daemonised_descendant",
+        "real_docker_a_containerized_agent_reads_its_own_settings_and_cannot_write_them",
     ];
-    assert_eq!(MINE.len(), 10);
+    assert_eq!(MINE.len(), 11);
     assert_eq!(GATED_RUNS.len(), MINE.len(), "one run id per gated test");
     let ids: BTreeSet<&str> = GATED_RUNS.iter().map(|(_, run)| *run).collect();
     assert_eq!(

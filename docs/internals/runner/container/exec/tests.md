@@ -1966,6 +1966,10 @@ Repair round R1.
 
 Repair round R3b.
 
+## `fn every_gated_test_of_this_lane_is_counted()` › `"real_docker_a_containerized_agent_reads_its_own_settings_and_cannot_write_them",`
+
+PR12-CONTAINER-CLAUDE-SETTINGS-HOST-PATH.
+
 ## `fn removal_in_progress_diagnostic(name: &str) -> String {`
 
 The daemon's answer names the container it is about, and since round six nothing
