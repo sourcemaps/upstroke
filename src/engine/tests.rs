@@ -17482,3 +17482,361 @@ fn a_gated_legacy_run_under_a_relative_common_dir_through_a_linked_registry_keep
 fn relative_common_dir_run_helper() {
     gated_run_under_an_inherited_common_dir();
 }
+
+// ===========================================================================
+// PR12: a schema-4 run through the public entry points
+// ===========================================================================
+//
+// The stub agent is a real CLI as far as the runner is concerned: every probe,
+// worker and reviewer is a native-shell process the production `HostRunner`
+// starts in the run's own worktrees. Nothing here replaces the runner, the
+// workspace manager, the loop or the event log.
+
+const TOPOLOGY_STUB: &str = "claude-code";
+const TOPOLOGY_STUB_REVIEW: &str = "UPSTROKE-TOPOLOGY-STUB-REVIEW";
+const TOPOLOGY_STUB_VERDICT: &str = "```json\n{\"pass\": true, \"reasons\": [\"meets the \
+                                     acceptance criteria\"], \"required_changes\": []}\n```";
+const TOPOLOGY_STUB_QUESTION: &str =
+    "UPSTROKE-QUESTION: which of the two widget formats does the spec mean?";
+const TOPOLOGY_STUB_EDIT: &str = "printf 'edited by the topology stub\\n' >> agent-output.txt";
+
+struct TopologyStub {
+    worker_script: String,
+    questions_left: Mutex<usize>,
+}
+
+impl TopologyStub {
+    fn new(worker_script: &str, questions: usize) -> Self {
+        Self {
+            worker_script: worker_script.to_owned(),
+            questions_left: Mutex::new(questions),
+        }
+    }
+}
+
+impl AgentAdapter for TopologyStub {
+    fn id(&self) -> &'static str {
+        TOPOLOGY_STUB
+    }
+
+    fn probe(&self, runner: &dyn crate::runner::Runner) -> Result<Caps, UpstrokeError> {
+        let request = crate::agent::probe_request(
+            TOPOLOGY_STUB,
+            shell_spec("exit 0"),
+            0,
+            Duration::from_secs(60),
+        )?;
+        let output = runner.run_blocking(&request)?;
+        if output.code != Some(0) {
+            return Err(UpstrokeError::Agent {
+                message: format!("the topology stub's probe exited {:?}", output.code),
+            });
+        }
+        Ok(Caps {
+            version: "0.0.0-topology-stub".to_owned(),
+            json_output: true,
+            session_resume: false,
+            cost_reporting: true,
+            read_only_mode: true,
+            acp: false,
+            model_list: false,
+        })
+    }
+
+    fn build(&self, run: &TaskRun) -> Result<CommandSpec, UpstrokeError> {
+        if run.profile.permissions == PermissionMode::ReadOnly {
+            return Ok(shell_spec(&format!("echo {TOPOLOGY_STUB_REVIEW}")));
+        }
+        Ok(shell_spec(&self.worker_script))
+    }
+
+    fn parse(&self, out: &ProcessOutput) -> Result<Outcome, UpstrokeError> {
+        let detail = if out.stdout.contains(TOPOLOGY_STUB_REVIEW) {
+            TOPOLOGY_STUB_VERDICT
+        } else {
+            let mut left = self
+                .questions_left
+                .lock()
+                .map_err(|_| UpstrokeError::Agent {
+                    message: "topology stub lock poisoned".to_owned(),
+                })?;
+            if *left > 0 {
+                *left -= 1;
+                TOPOLOGY_STUB_QUESTION
+            } else {
+                "done"
+            }
+        };
+        Ok(Outcome {
+            status: OutcomeStatus::Completed,
+            diff: String::new(),
+            detail: Some(detail.to_owned()),
+            session_id: None,
+            usage: None,
+            cost_usd: Some(0.01),
+            transcript_path: PathBuf::new(),
+            duration: out.duration,
+        })
+    }
+}
+
+/// The stub, shareable across the coordinator's pipeline threads.
+struct SharedTopologyStubs(std::sync::Arc<TopologyStub>);
+
+impl AdapterSource for SharedTopologyStubs {
+    fn get(&self, id: &str) -> Option<&dyn AgentAdapter> {
+        (id == TOPOLOGY_STUB).then_some(&*self.0 as &dyn AgentAdapter)
+    }
+
+    fn shared(&self) -> Option<std::sync::Arc<dyn AdapterSource + Send + Sync>> {
+        Some(std::sync::Arc::new(Self(std::sync::Arc::clone(&self.0))))
+    }
+}
+
+/// The same stub behind a source that cannot be shared: the step loop.
+struct BorrowedTopologyStub<'a>(&'a TopologyStub);
+
+impl AdapterSource for BorrowedTopologyStub<'_> {
+    fn get(&self, id: &str) -> Option<&dyn AgentAdapter> {
+        (id == TOPOLOGY_STUB).then_some(self.0 as &dyn AgentAdapter)
+    }
+}
+
+fn topology_options(repo: &Path) -> RunOptions {
+    let mut opts = options(repo);
+    opts.legacy_writer = false;
+    fs::create_dir_all(private_root_for(repo)).expect("the explicit private root");
+    opts
+}
+
+fn first_line_of_the_log(repo: &Path, run_id: &str) -> serde_json::Value {
+    let log = fs::read_to_string(rundir::public_dir(repo, run_id).join("events.jsonl"))
+        .expect("the run's event log");
+    serde_json::from_str(log.lines().next().expect("a committed first line"))
+        .expect("the first line is an event")
+}
+
+fn assert_merged_on_the_integration_branch(repo: &Path, report: &RunReport) {
+    let merged = git_in(
+        repo,
+        &["show", &format!("refs/heads/{}:agent-output.txt", report.branch)],
+    );
+    assert!(
+        merged.contains("edited by the topology stub"),
+        "the integration branch holds the stub's edit: {merged}"
+    );
+}
+
+#[test]
+fn a_schema_4_run_is_created_driven_and_merged_through_the_public_entry_point() {
+    let (_tree, repo) = temp_engine_repo("topology-fresh");
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        0,
+    )));
+    let report = run_with(&topology_options(&repo), &source).expect("the schema-4 run completes");
+
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:#?}");
+    assert!(committed(&report, "t1") && committed(&report, "t2"), "{report:#?}");
+    let first = first_line_of_the_log(&repo, &report.run_id);
+    assert_eq!(first["event"], "run_started");
+    assert_eq!(first["data"]["schema"], 4, "`upstroke run` wrote schema 4");
+    assert_eq!(first["data"]["runner"]["kind"], "host");
+    assert_eq!(report.branch, format!("upstroke/run-{}", report.run_id));
+    assert_merged_on_the_integration_branch(&repo, &report);
+
+    let mut resume = resume_options(&repo, &report.run_id);
+    resume.private_root = None;
+    let refused = resume_with(&resume, &source)
+        .expect_err("a finished run has nothing to continue");
+    assert!(
+        refused.to_string().contains("already finished"),
+        "the topology recovery order refused continuation: {refused}"
+    );
+}
+
+#[test]
+fn a_schema_4_run_on_an_unshareable_source_is_driven_by_the_step_loop() {
+    let (_tree, repo) = temp_engine_repo("topology-step");
+    let stub = TopologyStub::new(TOPOLOGY_STUB_EDIT, 0);
+    let report = run_with(&topology_options(&repo), &BorrowedTopologyStub(&stub))
+        .expect("the schema-4 run completes at width 1");
+
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:#?}");
+    assert!(committed(&report, "t1") && committed(&report, "t2"), "{report:#?}");
+    assert_eq!(first_line_of_the_log(&repo, &report.run_id)["data"]["schema"], 4);
+    assert_merged_on_the_integration_branch(&repo, &report);
+}
+
+#[test]
+fn a_schema_4_run_wider_than_one_refuses_an_unshareable_source_before_any_lock() {
+    let (_tree, repo) = temp_engine_repo("topology-unshareable");
+    seed(
+        &repo,
+        "## Implement the widget\n<!-- upstroke: id=t1 depends= -->\nMake it.\n",
+        Some("[engine]\nmax_parallel = 2\n"),
+    );
+    let stub = TopologyStub::new(TOPOLOGY_STUB_EDIT, 0);
+    let refused = run_with(&topology_options(&repo), &BorrowedTopologyStub(&stub))
+        .expect_err("width 2 needs a shareable adapter source");
+    assert!(
+        refused.to_string().contains("cannot be shared"),
+        "{refused}"
+    );
+    assert!(
+        !rundir::runs_root(&repo).exists()
+            || fs::read_dir(rundir::runs_root(&repo))
+                .expect("the runs root")
+                .next()
+                .is_none(),
+        "the refused run created a run directory"
+    );
+}
+
+#[cfg(unix)]
+const TWO_INDEPENDENT_TASKS: &str = "## Implement the widget\n<!-- upstroke: id=t1 depends= -->\n\
+                                     Make it.\n\n## Implement the gadget\n\
+                                     <!-- upstroke: id=t2 depends= -->\nMake that.\n";
+
+/// A worker that notes, for about a second, whether another stub worker is
+/// running beside it, then edits and leaves. `overlap.*` in `markers` is the
+/// evidence two workers ran at once.
+#[cfg(unix)]
+fn overlap_observing_worker(markers: &Path) -> String {
+    format!(
+        "d='{}'; me=$$; : > \"$d/run.$me\"; i=0; while [ $i -lt 10 ]; do \
+         n=$(ls \"$d\" | grep -c '^run\\.'); if [ \"$n\" -gt 1 ]; then : > \"$d/overlap.$me\"; fi; \
+         i=$((i+1)); sleep 0.1; done; {TOPOLOGY_STUB_EDIT}; rm -f \"$d/run.$me\"",
+        markers.display()
+    )
+}
+
+#[cfg(unix)]
+fn overlaps_in(markers: &Path) -> usize {
+    fs::read_dir(markers)
+        .expect("the marker directory")
+        .filter(|entry| {
+            entry
+                .as_ref()
+                .is_ok_and(|entry| entry.file_name().to_string_lossy().starts_with("overlap."))
+        })
+        .count()
+}
+
+/// A fresh run at `max_parallel = 2` over two independent tasks, under `[engine]`
+/// `extra`: whether two workers overlapped.
+#[cfg(unix)]
+fn fresh_overlap(tag: &str, extra: &str, pools: Option<&str>) -> usize {
+    let (tree, repo) = temp_engine_repo(tag);
+    seed(
+        &repo,
+        TWO_INDEPENDENT_TASKS,
+        Some(&format!("[engine]\nmax_parallel = 2\n{extra}")),
+    );
+    let markers = tree.path().join("markers");
+    fs::create_dir(&markers).expect("the marker directory");
+    let mut opts = topology_options(&repo);
+    if let Some(pools) = pools {
+        let path = tree.path().join("pools.toml");
+        fs::write(&path, pools).expect("the pools file");
+        opts.pools_path = Some(path);
+    }
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        &overlap_observing_worker(&markers),
+        0,
+    )));
+    let report = run_with(&opts, &source).expect("the run completes");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{tag}: {report:#?}");
+    assert!(committed(&report, "t1") && committed(&report, "t2"), "{tag}: {report:#?}");
+    overlaps_in(&markers)
+}
+
+#[cfg(unix)]
+#[test]
+fn a_schema_4_run_runs_two_workers_at_once_and_the_configured_slot_limits_bound_them() {
+    assert!(
+        fresh_overlap("topology-overlap", "", None) > 0,
+        "two independent tasks at `max_parallel = 2` never ran at once, so the bounds below \
+         would prove nothing"
+    );
+    assert_eq!(
+        fresh_overlap("topology-agent-bound", "max_per_agent = 1\n", None),
+        0,
+        "`max_per_agent = 1` let two invocations of one agent run at once"
+    );
+    assert_eq!(
+        fresh_overlap(
+            "topology-pool-bound",
+            "max_per_pool = 1\n",
+            Some("[pools.claude-max]\nkind = \"subscription-window\"\nagent = \"claude-code\"\n"),
+        ),
+        0,
+        "`max_per_pool = 1` let two invocations in one pool run at once"
+    );
+}
+
+/// A schema-4 run whose two tasks both park on a question, resumed with both
+/// answered under today's `[engine]` `extra`: whether the resumed workers
+/// overlapped.
+#[cfg(unix)]
+fn resumed_overlap(tag: &str, extra: &str) -> usize {
+    let (tree, repo) = temp_engine_repo(tag);
+    seed(
+        &repo,
+        TWO_INDEPENDENT_TASKS,
+        Some("[engine]\nmax_parallel = 2\n"),
+    );
+    let markers = tree.path().join("markers");
+    fs::create_dir(&markers).expect("the marker directory");
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        &overlap_observing_worker(&markers),
+        2,
+    )));
+    let parked = run_with(&topology_options(&repo), &source).expect("the run parks");
+    assert_eq!(parked.outcome(), RunOutcome::Parked, "{tag}: {parked:#?}");
+    for entry in fs::read_dir(&markers).expect("the marker directory") {
+        fs::remove_file(entry.expect("a marker").path()).expect("a clean marker directory");
+    }
+
+    let today = tree.path().join("today.toml");
+    fs::write(&today, format!("[engine]\nmax_parallel = 2\n{extra}")).expect("today's config");
+    let mut resume = resume_options(&repo, &parked.run_id);
+    resume.private_root = None;
+    resume.config_path = Some(today);
+    let answers = ScriptedAnswers::new(vec![
+        Answer::Answered {
+            text: "the first".to_owned(),
+        },
+        Answer::Answered {
+            text: "the first".to_owned(),
+        },
+    ]);
+    let report = resume_harness(
+        &resume,
+        &Harness {
+            adapters: &source,
+            answers: Some(&answers),
+            sleeper: None,
+        },
+    )
+    .expect("the resume completes the run");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{tag}: {report:#?}");
+    assert!(committed(&report, "t1") && committed(&report, "t2"), "{tag}: {report:#?}");
+    overlaps_in(&markers)
+}
+
+#[cfg(unix)]
+#[test]
+fn a_resumed_schema_4_run_acts_on_todays_slot_limits() {
+    assert!(
+        resumed_overlap("topology-resume-overlap", "") > 0,
+        "the resumed workers never ran at once at the recorded `max_parallel = 2`, so the bound \
+         below would prove nothing"
+    );
+    assert_eq!(
+        resumed_overlap("topology-resume-agent-bound", "max_per_agent = 1\n"),
+        0,
+        "the resume dropped today's `max_per_agent = 1`"
+    );
+}
+
