@@ -417,7 +417,8 @@ fn a_default_root_is_resolved_before_it_exists_and_authorized_only_once_it_does(
         .expect_err("a root that does not exist is not authorized");
     assert!(!root.exists(), "authorization created the default root");
 
-    create_private_dir(&root, &mut NoHooks).expect("the root, created as production's include does");
+    create_private_dir(&root, &mut NoHooks)
+        .expect("the root, created as production's include does");
     let runtime = ready();
     let checked = resolve_runner(&selection, Some(&runtime))
         .expect("resolves")

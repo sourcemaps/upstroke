@@ -1173,7 +1173,6 @@ fn legacy_container_selection_refused_before_effects() {
                     );
                 }
             }
-
         }
 
         let adapters = RecordingAdapters::default();
@@ -1337,8 +1336,8 @@ fn real_docker_a_schema_4_run_refuses_an_absent_image_before_the_worktree_lock()
     let adapters = RecordingAdapters::default();
     {
         let _lease = crate::rundir::WorktreeLock::acquire(&repo).expect("the test's lease");
-        let error = crate::engine::run_with(&opts, &adapters)
-            .expect_err("an absent image refuses the run");
+        let error =
+            crate::engine::run_with(&opts, &adapters).expect_err("an absent image refuses the run");
         let UpstrokeError::Refused { message } = &error else {
             panic!("a schema-4 run refused as {error:?}, not by its pre-lock inspection");
         };
@@ -1365,11 +1364,7 @@ fn real_docker_a_schema_4_run_refuses_an_absent_image_before_the_worktree_lock()
     );
     let runs = repo.join(".upstroke").join("runs");
     assert!(
-        !runs.exists()
-            || fs::read_dir(&runs)
-                .expect("runs root")
-                .next()
-                .is_none(),
+        !runs.exists() || fs::read_dir(&runs).expect("runs root").next().is_none(),
         "the refused run created a run directory"
     );
     assert!(
