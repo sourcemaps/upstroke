@@ -471,7 +471,9 @@ impl ContainerRunner {
         } else {
             None
         };
-        let mounts = self.mounts(request, git.as_ref(), &name);
+        let (args, settings) = self.settings_for(&request.role, &request.command.args);
+        let mut mounts = self.mounts(request, git.as_ref(), &name);
+        mounts.extend(settings);
         let mut confinement = self.confinement.clone();
         if let Some(layout) = &git {
             confinement =
@@ -497,7 +499,7 @@ impl ContainerRunner {
         let env = self.environment.compose(&scope, &request.command.env)?;
 
         let mut command = vec![request.command.program.clone()];
-        command.extend(request.command.args.iter().cloned());
+        command.extend(args);
         let view_path = view_dir(&self.identity.private_root, &name);
 
         Ok(InvocationPlan {
@@ -532,6 +534,39 @@ impl ContainerRunner {
             },
             git,
         })
+    }
+
+    fn settings_for(&self, role: &ExecutionRole, args: &[String]) -> (Vec<String>, Vec<Mount>) {
+        let directory = self
+            .identity
+            .private_root
+            .join("runs")
+            .join(&self.identity.run_id)
+            .join("settings");
+        let mut mounts = Vec::new();
+        let args = args
+            .iter()
+            .map(|arg| {
+                let path = Path::new(arg);
+                let file_name = path.file_name().and_then(|name| name.to_str());
+                match file_name {
+                    Some(file_name)
+                        if matches!(role, ExecutionRole::Implement | ExecutionRole::Review)
+                            && path.parent() == Some(directory.as_path()) =>
+                    {
+                        let target = self.layout.settings(file_name);
+                        mounts.push(Mount::Path {
+                            source: path.to_path_buf(),
+                            target: target.clone(),
+                            read_only: true,
+                        });
+                        target
+                    }
+                    _ => arg.clone(),
+                }
+            })
+            .collect();
+        (args, mounts)
     }
 
     fn mounts(

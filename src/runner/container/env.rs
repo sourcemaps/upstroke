@@ -19,6 +19,7 @@ pub struct BoundaryLayout {
     git_view: String,
     git_objects: String,
     scratch: String,
+    settings: String,
 }
 
 impl Default for BoundaryLayout {
@@ -38,6 +39,8 @@ impl BoundaryLayout {
 
     pub const DEFAULT_SCRATCH: &'static str = "/tmp";
 
+    pub const DEFAULT_SETTINGS: &'static str = "/upstroke/settings";
+
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -46,6 +49,7 @@ impl BoundaryLayout {
             git_view: Self::DEFAULT_GIT_VIEW.to_owned(),
             git_objects: Self::DEFAULT_GIT_OBJECTS.to_owned(),
             scratch: Self::DEFAULT_SCRATCH.to_owned(),
+            settings: Self::DEFAULT_SETTINGS.to_owned(),
         }
     }
 
@@ -63,6 +67,7 @@ impl BoundaryLayout {
             git_view: git_view.into(),
             git_objects: git_objects.into(),
             scratch: scratch.into(),
+            settings: Self::DEFAULT_SETTINGS.to_owned(),
         }
     }
 
@@ -99,6 +104,11 @@ impl BoundaryLayout {
     #[must_use]
     pub fn credential_root(&self) -> &str {
         &self.credentials
+    }
+
+    #[must_use]
+    pub fn settings(&self, file_name: &str) -> String {
+        format!("{}/{file_name}", self.settings)
     }
 }
 

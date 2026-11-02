@@ -1046,6 +1046,159 @@ fn the_mount_set_is_the_roles_own_and_reaches_nothing_of_the_coordinators() {
     assert_eq!(Withheld::ALL.len(), 4);
 }
 
+/// PR12-CONTAINER-CLAUDE-SETTINGS-HOST-PATH (the coordinator's real-Docker
+/// finding). An agent invocation that names its own per-attempt settings file,
+/// a file directly in the run's `settings` directory, receives exactly that
+/// file, bound read-only at `/upstroke/settings/<name>`, and its argument names
+/// that container path instead of the host's. Nothing else changes: the
+/// role's own mounts are those of the census above, every withheld path stays
+/// withheld (the run's private half, the settings directory included, is
+/// mounted nowhere), a gate is given no settings, and a file elsewhere in the
+/// private half is not a settings file.
+#[test]
+fn an_agents_own_settings_file_is_bound_read_only_and_named_by_its_container_path() {
+    let fixture = Fixture::new("settings-bind", true);
+    let runner = fixture.runner();
+    let settings = fixture.paths.settings();
+    assert_eq!(
+        settings,
+        fixture
+            .private_root
+            .join("runs")
+            .join(&fixture.identity.run_id)
+            .join("settings"),
+        "the runner recognizes the directory `RunPaths` materializes settings into"
+    );
+    let file = settings.join("t1-1.json");
+    let host = file.to_string_lossy().into_owned();
+    let inside = "/upstroke/settings/t1-1.json";
+    let spec = crate::runner::CommandSpec::new("claude")
+        .arg("-p")
+        .arg("--settings")
+        .arg(host.clone());
+    let review = review_request(
+        spec.clone(),
+        fixture.task_a.clone(),
+        AgentId::new("claude-code"),
+        Duration::from_secs(10),
+        InvocationId::attempt(
+            TaskKey(0),
+            GenerationId(0),
+            AttemptNumber(1),
+            AttemptRole::ReviewPass(0),
+            0,
+        ),
+    );
+    let worker = worker_request(
+        spec.clone(),
+        fixture.task_a.clone(),
+        AgentId::new("claude-code"),
+        Duration::from_secs(10),
+        worker_id(0),
+    );
+    for request in [worker, review] {
+        let plan = runner.plan(&request).expect("plans");
+        let mounts = plan.mounts();
+        let targets: Vec<&str> = mounts.iter().map(Mount::target).collect();
+        assert_eq!(
+            targets,
+            vec![
+                "/upstroke/workspace",
+                "/upstroke/gitview",
+                "/upstroke/gitobjects",
+                "/upstroke/workspace/.git",
+                "/upstroke/credentials/claude-code",
+                "/tmp",
+                inside,
+            ],
+            "{:?}: the role's own mounts, and the one settings file",
+            request.role
+        );
+        assert_eq!(
+            target_of(mounts, inside),
+            Some(&Mount::Path {
+                source: file.clone(),
+                target: inside.to_owned(),
+                read_only: true,
+            }),
+            "{:?}: exactly that file, read-only",
+            request.role
+        );
+        assert_eq!(
+            plan.launch.spec.command,
+            vec!["claude", "-p", "--settings", inside],
+            "{:?}: the agent is given the container's path",
+            request.role
+        );
+        assert!(
+            !plan
+                .launch
+                .spec
+                .command
+                .iter()
+                .any(|arg| arg.contains(&*fixture.private_root.to_string_lossy())),
+            "{:?}: no host path reaches the container's argv: {:?}",
+            request.role,
+            plan.launch.spec.command
+        );
+        assert!(
+            fixture.confinement().violations(mounts).is_empty(),
+            "{:?}",
+            fixture.confinement().violations(mounts)
+        );
+        for (category, path) in &fixture.withheld() {
+            for source in sources(mounts) {
+                assert!(
+                    !path.starts_with(&source),
+                    "the mount `{}` hands the container `{}` ({})",
+                    source.display(),
+                    path.display(),
+                    category.passage()
+                );
+            }
+        }
+        assert!(
+            !sources(mounts)
+                .iter()
+                .any(|source| source == &settings || source == &fixture.paths.private),
+            "{:?}: the settings directory and the private half stay withheld",
+            request.role
+        );
+    }
+
+    let gate = gate_request(
+        spec,
+        fixture.task_a.clone(),
+        Duration::from_secs(10),
+        gate_id(0),
+    );
+    let plan = runner.plan(&gate).expect("plans");
+    assert!(
+        target_of(plan.mounts(), inside).is_none(),
+        "a gate is given no settings"
+    );
+    assert!(plan.launch.spec.command.contains(&host), "and its argv is its own");
+
+    let elsewhere = fixture.paths.private.join("transcripts").join("t1-1.json");
+    let not_settings = worker_request(
+        crate::runner::CommandSpec::new("claude")
+            .arg("--settings")
+            .arg(elsewhere.to_string_lossy().into_owned()),
+        fixture.task_a.clone(),
+        AgentId::new("claude-code"),
+        Duration::from_secs(10),
+        worker_id(1),
+    );
+    let plan = runner.plan(&not_settings).expect("plans");
+    assert!(
+        !plan
+            .mounts()
+            .iter()
+            .any(|mount| mount.target().starts_with("/upstroke/settings")),
+        "a file elsewhere in the private half is not a settings file"
+    );
+}
+
 #[test]
 fn a_workspace_that_contains_a_withheld_path_is_refused_before_any_effect() {
     let fixture = Fixture::new("hostile-ws", true);
@@ -3749,6 +3902,7 @@ const GATED_RUNS: &[(&str, &str)] = &[
     ("shadow", "01KZR1GATED000000000000003"),
     ("credenv", "01KZR3BGATED00000000000001"),
     ("descendant", "01KZR3BGATED00000000000002"),
+    ("settings", "01KZP12GATED00000000000001"),
 ];
 
 fn gated_run(tag: &str) -> &'static str {
@@ -4008,6 +4162,90 @@ fn real_docker_refuses_a_reviewer_write_to_its_read_only_mount() {
             .expect("the control's file")
             .trim(),
         "upstroke-wrote-this"
+    );
+}
+
+/// PR12-CONTAINER-CLAUDE-SETTINGS-HOST-PATH on a real runtime: a containerized
+/// agent reads its own per-attempt settings at the container path it is given,
+/// byte for byte, and cannot write them; the host file is unchanged.
+#[test]
+fn real_docker_a_containerized_agent_reads_its_own_settings_and_cannot_write_them() {
+    let trace = ContainerTrace::recording();
+    let docker = match docker_gate(
+        "real_docker_a_containerized_agent_reads_its_own_settings_and_cannot_write_them",
+        trace.clone(),
+    ) {
+        Ok(docker) => docker,
+        Err(reason) => return skipped(&reason),
+    };
+    let (_, image_id) = match discover(docker.as_ref(), PREFERRED_IMAGES) {
+        Ok(found) => found,
+        Err(reason) => return no_image(&reason),
+    };
+
+    let tree = repo::scratch("real-settings");
+    let root = tree.path();
+    let run_id = gated_run("settings");
+    let repo_dir = root.join("repo");
+    repo::repository(&repo_dir);
+    let identity = real_identity(root, &repo_dir, run_id);
+    let _residue = LeaveNoResidue {
+        docker: (*docker).clone(),
+        private_root: identity.private_root.clone(),
+    };
+    let runner = ContainerRunner::new(
+        real_policy(&image_id),
+        identity.clone(),
+        &repo_dir,
+        image_environment_of(docker.as_ref(), &image_id),
+        Box::new((*docker).clone()),
+    )
+    .expect("a container policy")
+    .with_poll(Duration::from_millis(10));
+
+    let settings = RunPaths::with_private_root(&repo_dir, run_id, &identity.private_root).settings();
+    std::fs::create_dir_all(&settings).expect("the settings directory");
+    let file = settings.join("k0-1.json");
+    let written = "{\"permissions\":{\"allow\":[\"Edit\"],\"deny\":[\"Read(.upstroke/**)\"]}}\n";
+    std::fs::write(&file, written).expect("an attempt's settings");
+    let workspace = root.join("ws-settings");
+    std::fs::create_dir_all(&workspace).expect("a workspace");
+    let spec = crate::runner::CommandSpec::new("sh")
+        .arg("-c")
+        .arg(
+            "cat \"$0\"; if ( echo tampered >> \"$0\" ) 2>/dev/null; then echo WROTE; \
+             else echo READ-ONLY; fi",
+        )
+        .arg(file.to_string_lossy().into_owned());
+    let request = worker_request(
+        spec,
+        workspace,
+        AgentId::new("claude-code"),
+        Duration::from_secs(60),
+        worker_id(0),
+    );
+    let output = runner.run_blocking(&request).expect("runs");
+    assert_eq!(
+        output.code,
+        Some(0),
+        "{}{}",
+        output.stdout,
+        output.stderr
+    );
+    assert!(
+        output.stdout.contains(written.trim()),
+        "the agent read its settings: {}",
+        output.stdout
+    );
+    assert!(
+        output.stdout.contains("READ-ONLY") && !output.stdout.contains("WROTE"),
+        "the settings are read-only to the agent: {}",
+        output.stdout
+    );
+    assert_eq!(
+        std::fs::read_to_string(&file).expect("the host file"),
+        written,
+        "the host file is unchanged"
     );
 }
 
