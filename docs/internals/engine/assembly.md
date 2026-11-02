@@ -43,16 +43,13 @@ below the engine — depend upward on the engine.
 
 ### The module-level dead-code allow, removed (PR12)
 
-Until PR12 this file carried `#![cfg_attr(not(test), allow(dead_code))]`.
-The subsystem had no non-`#[cfg(test)]` caller, and narrowing
-`engine::topology` to `pub(crate)` made rustc report **328 items** across
-the module tree as never used; the `cfg_attr` form kept the test build
-without an allow. PR12's dispatch gives the subsystem its production
-callers, so the module-level allow is removed (root's checkpoint-2
-disposition, S11). The item-level allows in the S0-protected modules stay
-as they are. A lib build without warnings shows only that no item lacking
-an allow is unused; it does not show that every item has a production
-caller, and it is not evidence of activation.
+Until PR12 this file carried `#![cfg_attr(not(test), allow(dead_code))]`,
+for the reason `engine::topology`'s notes give: no non-`#[cfg(test)]`
+caller. The entry's dispatch now reaches every item here: with the allow
+removed, the lib build reports nothing in this file as unused (validation
+run V045 at `d1c0a7de`), so it is removed (root's checkpoint-2
+disposition, S11). That shows no item here is unused; it is not, by
+itself, evidence of activation.
 
 ## `#![forbid(`
 

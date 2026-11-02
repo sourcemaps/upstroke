@@ -58,18 +58,29 @@ schema 4 and `upstroke resume` resumes a schema-4 log, both through
 `#[cfg(test)]` `legacy_writer` keeps the legacy suite on the schema-1..3
 writer, and a legacy log still resumes on [`super::coordinator`]'s lines.
 
-### The module-level dead-code allow, removed (PR12)
+## `#![cfg_attr(not(test), allow(dead_code))]`
 
-Until PR12 this file carried `#![cfg_attr(not(test), allow(dead_code))]`.
-The subsystem had no non-`#[cfg(test)]` caller, and narrowing
-`engine::topology` to `pub(crate)` made rustc report **328 items** across
-the module tree as never used; the `cfg_attr` form kept the test build
-without an allow. PR12's dispatch gives the subsystem its production
-callers, so the module-level allow is removed (root's checkpoint-2
-disposition, S11). The item-level allows in the S0-protected modules stay
-as they are. A lib build without warnings shows only that no item lacking
-an allow is unused; it does not show that every item has a production
-caller, and it is not evidence of activation.
+**Kept at PR12, with the measurement that keeps it.** The allow was written
+for a subsystem with no non-`#[cfg(test)]` caller: narrowing
+`engine::topology` to `pub(crate)` made rustc report 328 items across the
+module tree as never used, and the `cfg_attr` form keeps the test build
+without an allow, so anything not reached even by a test is still an error
+at `-D warnings`.
+
+PR12's dispatch gives the subsystem its production callers, and root's
+checkpoint-2 disposition (S11) asked for this allow to be removed. With it
+removed, the lib build reports **171 items** as never used (validation run
+V045 at `d1c0a7de`): 42 in eleven S0-protected modules (`dispatch` 7,
+`candidate` 6, `coordinator` 5, `recover` 5, `settle` 5, `attempt` 4,
+`emit` 4, `permits` 2, `select` 2, `closure` 1, `integrate` 1) and 129 in
+ten others (`ledger` 46, `coverage` 31, `reachability` 22, `startup` 6,
+`create` 5, `identity` 5, `report` 4, `run` 4, `seams` 4, `preflight` 2).
+Removing it without editing the protected modules would fail `clippy -D
+warnings`, so it stays until root decides how those items are answered.
+`src/engine/assembly.rs`'s own module allow had nothing left to cover and is
+removed. A lib build without warnings would show only that no item lacking
+an allow is unused, not that every item has a production caller, and not
+activation.
 
 ## `#![forbid(`
 
