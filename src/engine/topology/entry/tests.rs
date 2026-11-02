@@ -150,3 +150,53 @@ fn a_resume_acts_on_the_slot_limits_written_today_and_defaults_the_rest_to_the_r
     let none = resumed_with("", 3);
     assert_eq!((none.per_agent(), none.per_pool()), (3, 3));
 }
+
+#[test]
+fn a_recorded_case_sensitive_policy_the_namespace_contradicts_refuses_and_nothing_else_does() {
+    let refused = case_policy_holds("01RUN", "/r/workspaces/k/01RUN", false, Some(true))
+        .expect_err("a recorded `case_fold = false` over a namespace that now folds refuses");
+    let said = refused.to_string();
+    assert!(
+        said.contains("case_fold = false") && said.contains("01RUN"),
+        "{said}"
+    );
+    for (recorded_fold, observed) in [
+        (false, Some(false)),
+        (false, None),
+        (true, Some(true)),
+        (true, Some(false)),
+        (true, None),
+    ] {
+        case_policy_holds("01RUN", "/r", recorded_fold, observed).unwrap_or_else(|error| {
+            panic!("recorded {recorded_fold}, observed {observed:?} refused: {error}")
+        });
+    }
+}
+
+#[test]
+fn the_case_observation_answers_only_what_one_directory_shows() {
+    let tree = scratch("entry-case-observation");
+    let dir = tree.path();
+    assert_eq!(
+        folds_case_at(dir, "tasks"),
+        None,
+        "an entry that is not there says nothing"
+    );
+    assert_eq!(
+        folds_case_at(dir, "0123"),
+        None,
+        "a name without an ASCII letter has no other case to look up"
+    );
+    write_file(&dir.join("tasks"), b"an entry\n");
+    let observed = folds_case_at(dir, "tasks");
+    let upper = dir.join("TASKS");
+    let expected = match std::fs::symlink_metadata(&upper) {
+        Ok(_) => Some(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(false),
+        Err(_) => None,
+    };
+    assert_eq!(
+        observed, expected,
+        "the observation agrees with a lookup of the other case in the same directory"
+    );
+}

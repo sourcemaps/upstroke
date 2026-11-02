@@ -216,6 +216,7 @@ impl FreshPrepared {
             WorktreeLock::acquire_in_hooked(&opts.repo_root, &worktree_git_dir, hooks.rundir())?;
         confirm_unchanged(&validate_opts, &captured)?;
         let repo_key = RepoKey::for_worktree_git_dir(&worktree_git_dir)?;
+        let include_spelling = repository.common_dir().to_path_buf();
         let runner: Arc<dyn Runner> = match image_environment {
             None => Arc::new(host_runner(repository)),
             Some(base) => Arc::new(container_runner(
@@ -252,6 +253,7 @@ impl FreshPrepared {
             checked.run_id(),
             &checked.incarnation().0,
         )?;
+        one_spelling(&include_spelling, &manager)?;
         manager.create_execution_root(hooks.effects())?;
         let case_fold = !matches!(
             folds_case_at(manager.execution_root(), "tasks"),
@@ -490,6 +492,7 @@ impl ResumePrepared {
         let worktree_git_dir = workspace.worktree_git_dir()?;
         let repo_key = RepoKey::for_worktree_git_dir(&worktree_git_dir)?;
         let incarnation = RealIds.incarnation();
+        let include_spelling = repository.common_dir().to_path_buf();
         let runner: Arc<dyn Runner> = match image_environment {
             None => Arc::new(host_runner(repository)),
             Some(base) => Arc::new(container_runner(
@@ -511,6 +514,7 @@ impl ResumePrepared {
             root.run_id(),
             &incarnation.0,
         )?;
+        one_spelling(&include_spelling, &manager)?;
         let paths = RunPaths::from_parts(
             root.public_dir().to_path_buf(),
             root.private_dir().to_path_buf(),
@@ -764,6 +768,23 @@ fn reported_outcome(outcome: &RunOutcome) -> ReportedOutcome {
     }
 }
 
+fn one_spelling(include: &Path, manager: &WorkspaceManager) -> Result<(), UpstrokeError> {
+    if include == manager.common_git_dir() {
+        return Ok(());
+    }
+    Err(UpstrokeError::Refused {
+        message: format!(
+            "the recorded-objects include names the managed repository's common directory as \
+             {}, and the workspace manager registers and verifies every slot against {}. A \
+             role's `.git` file is spelled from the second and the include's conditions from the \
+             first, so the two must be one spelling; that they differ is a defect, not a refusal \
+             of this layout. No role was started",
+            include.display(),
+            manager.common_git_dir().display()
+        ),
+    })
+}
+
 fn host_runner(repository: ManagedRepository) -> HostRunner {
     HostRunner::new().with_environment(
         HostEnvironment::from_process().reading(ObjectGraph::RecordedIn(repository)),
@@ -941,17 +962,30 @@ fn refuse_unsafe_case_policy(started: &RunStarted4) -> Result<(), UpstrokeError>
                     .and_then(|name| folds_case_at(root, name))
             })
     };
-    if observed != Some(true) {
+    case_policy_holds(
+        &started.run_id,
+        &started.execution_root,
+        started.path_policy.case_fold,
+        observed,
+    )
+}
+
+fn case_policy_holds(
+    run_id: &str,
+    execution_root: &str,
+    recorded_fold: bool,
+    observed: Option<bool>,
+) -> Result<(), UpstrokeError> {
+    if recorded_fold || observed != Some(true) {
         return Ok(());
     }
     Err(UpstrokeError::Refused {
         message: format!(
-            "run `{}` recorded a case-sensitive path policy (`case_fold = false`), and the \
-             filesystem its execution root {} is on now folds case: two task paths that differ \
-             only in case would be leased as disjoint while naming one file. The record is \
-             never rewritten, so nothing was locked or recovered; resume where the execution \
-             root is case-sensitive, or start a new run here",
-            started.run_id, started.execution_root
+            "run `{run_id}` recorded a case-sensitive path policy (`case_fold = false`), and the \
+             filesystem its execution root {execution_root} is on now folds case: two task paths \
+             that differ only in case would be leased as disjoint while naming one file. The \
+             record is never rewritten, so nothing was locked or recovered; resume where the \
+             execution root is case-sensitive, or start a new run here"
         ),
     })
 }

@@ -172,6 +172,17 @@ environment. Nothing is pulled and no other id is consulted.
 One `ContainerRunner` over the policy, the run's identity and the image's
 environment, executing through the production runtime.
 
+## `fn one_spelling(include: &Path, manager: &WorkspaceManager) -> Result<(), UpstrokeError> {`
+
+Root's D2 (b), one spelling source: the host runner's `ManagedRepository`
+comes from the include's publication (`Workspace::recorded_objects_scope`,
+outside this module), and every slot is registered and verified against
+`WorkspaceManager::common_git_dir`. A role's `.git` file is spelled from the
+second and the include's `includeIf.gitdir:` conditions from the first, so the
+two are compared, after the manager is derived and before its first effect or
+any role. A difference is returned as an error naming both: a defect signal,
+not a refusal of the layout.
+
 ## `fn refuse_unsafe_case_policy(started: &RunStarted4) -> Result<(), UpstrokeError> {`
 
 Root's Q3: a recorded case-sensitive policy (`case_fold = false`) that an
@@ -179,6 +190,13 @@ observation of the execution namespace contradicts refuses before effectful
 recovery, and the record is never rewritten. A conservative record
 (`case_fold = true`) is never refused, and an observation that cannot answer
 is not evidence of sensitivity.
+
+## `fn case_policy_holds(`
+
+The decision of `refuse_unsafe_case_policy`, apart from its observation, so
+that every combination is tested on any filesystem: only a recorded
+`case_fold = false` with an observation that the namespace folds refuses.
+(This box's filesystems cannot produce a folding observation natively.)
 
 ## `fn folds_case_at(directory: &Path, name: &str) -> Option<bool> {`
 
