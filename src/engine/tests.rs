@@ -19240,13 +19240,17 @@ fn display_of(projected: &crate::engine::topology::report::TopologyReport, key: 
         .unwrap_or_else(|| panic!("no task k{key} in the projection"))
 }
 
-/// S9, a halted run. Under the default `on_task_failure = halt`, a task whose
-/// gate fails on its one attempt halts the run. The `RunReport` that
-/// `engine::run_with` returns projects what the fold says: `outcome()` is
-/// `Halted`, `halted_at` names the task the log's `run_finished` names, the task
-/// behind it is skipped, and nothing claims a budget stop. A fresh observation of
-/// the log and finalize's `report.json` say the same. `main.rs` turns this
-/// outcome into its exit status; the command-line scenario's case E runs that.
+/// S9, a halted run. A task whose gate fails on its one attempt reaches the end of
+/// its ladder, and the run asks before failing it: it parks on the task's
+/// question (V109 found this, against the first draft's premise of a run that
+/// halts at once). The operator gives the task up through the public `answer
+/// --decline`, and under the default `on_task_failure = halt` the resume halts.
+/// The `RunReport` that `engine::resume_with` returns projects what the fold
+/// says: `outcome()` is `Halted`, `halted_at` names the task the log's
+/// `run_finished` names, the task behind it is skipped, and nothing claims a
+/// budget stop. A fresh observation of the log and finalize's `report.json` say
+/// the same. `main.rs` turns this outcome into its exit status; the command-line
+/// scenario's case E runs that.
 #[cfg(unix)]
 #[test]
 fn a_halted_schema_4_run_projects_where_it_halted_and_its_outcome() {
@@ -19266,7 +19270,30 @@ fn a_halted_schema_4_run_projects_where_it_halted_and_its_outcome() {
         TOPOLOGY_STUB_EDIT,
         0,
     )));
-    let report = run_with(&topology_options(&repo), &source).expect("the run ends");
+    let parked = run_with(&topology_options(&repo), &source).expect("the run ends");
+    assert_eq!(
+        parked.outcome(),
+        RunOutcome::Parked,
+        "the end of the ladder asks before the task fails: {parked:#?}"
+    );
+    until_released(&repo, &parked.run_id);
+    let [asked] = parked.questions.as_slice() else {
+        panic!("one question: {parked:#?}");
+    };
+    assert_eq!(
+        asked.question.affected_tasks,
+        vec![TaskId::from("t1")],
+        "{asked:#?}"
+    );
+    crate::answer::answer(
+        &repo,
+        &asked.question.id.to_string(),
+        crate::answer::Reply::Decline,
+    )
+    .expect("the task is given up");
+    let mut resume = resume_options(&repo, &parked.run_id);
+    resume.private_root = None;
+    let report = resume_with(&resume, &source).expect("the resume ends");
     until_released(&repo, &report.run_id);
 
     let events = log_events(&repo, &report.run_id);
