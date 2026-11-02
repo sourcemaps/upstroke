@@ -19282,7 +19282,10 @@ fn a_halted_schema_4_run_projects_where_it_halted_and_its_outcome() {
         .report()
         .expect("projects");
     let halted_task = display_of(&projected, halted_key);
-    assert_eq!(halted_task, "t1", "the fixture's premise: the first task halts the run");
+    assert_eq!(
+        halted_task, "t1",
+        "the fixture's premise: the first task halts the run"
+    );
 
     assert_eq!(report.outcome(), RunOutcome::Halted, "{report:#?}");
     assert_eq!(report.halted_at.as_deref(), Some(halted_task.as_str()));
@@ -19501,11 +19504,8 @@ fn a_fresh_run_records_the_case_policy_and_a_resume_never_changes_it() {
 
     git_in(&repo, &["config", "core.ignorecase", "false"]);
     let today_stub = TopologyStub::new(TOPOLOGY_STUB_EDIT, 0);
-    let today = run_with(
-        &topology_options(&repo),
-        &BorrowedTopologyStub(&today_stub),
-    )
-    .expect("a fresh run today");
+    let today = run_with(&topology_options(&repo), &BorrowedTopologyStub(&today_stub))
+        .expect("a fresh run today");
     until_released(&repo, &today.run_id);
     assert_eq!(
         recorded_case_fold(&repo, &today.run_id).1,
@@ -19658,7 +19658,10 @@ fn a_configured_reviewer_whose_cli_is_absent_fails_creation_before_p5b_and_commi
     )
     .expect_err("an absent reviewer CLI refuses creation");
     let said = refused.to_string();
-    assert!(said.contains("stopped at P3b"), "before P4 certified: {said}");
+    assert!(
+        said.contains("stopped at P3b"),
+        "before P4 certified: {said}"
+    );
     assert!(said.contains(ABSENT_REVIEWER_CLI), "{said}");
     assert!(said.contains("could not be executed"), "{said}");
 
@@ -19678,7 +19681,10 @@ fn a_configured_reviewer_whose_cli_is_absent_fails_creation_before_p5b_and_commi
             let path = entry.path();
             if path.is_dir() {
                 stack.push(path);
-            } else if path.file_name().is_some_and(|name| name == "committed.json") {
+            } else if path
+                .file_name()
+                .is_some_and(|name| name == "committed.json")
+            {
                 committed_records.push(path);
             }
         }
@@ -19689,7 +19695,14 @@ fn a_configured_reviewer_whose_cli_is_absent_fails_creation_before_p5b_and_commi
         "no private half carries a commit record"
     );
     assert_eq!(
-        git_in(&repo, &["for-each-ref", "--format=%(refname)", "refs/heads/upstroke/"]),
+        git_in(
+            &repo,
+            &[
+                "for-each-ref",
+                "--format=%(refname)",
+                "refs/heads/upstroke/"
+            ]
+        ),
         "",
         "no integration ref"
     );

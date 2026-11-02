@@ -217,38 +217,63 @@ fn every_case_observation_and_ignorecase_record_resolves_to_the_planned_case_fol
         (&CaseObservation::Folds, &IgnoreCase::Absent, true, &[]),
         (&CaseObservation::Folds, &IgnoreCase::Set(true), true, &[]),
         (&CaseObservation::Folds, &unreadable, true, &[]),
-        (&CaseObservation::Sensitive, &IgnoreCase::Set(false), false, &[]),
+        (
+            &CaseObservation::Sensitive,
+            &IgnoreCase::Set(false),
+            false,
+            &[],
+        ),
         (&CaseObservation::Sensitive, &IgnoreCase::Absent, false, &[]),
-        (&CaseObservation::Sensitive, &IgnoreCase::Set(true), true, &[]),
+        (
+            &CaseObservation::Sensitive,
+            &IgnoreCase::Set(true),
+            true,
+            &[],
+        ),
         (
             &CaseObservation::Sensitive,
             &unreadable,
             true,
-            &["`core.ignorecase` could not be read", "/r/.git/config: denied"],
+            &[
+                "`core.ignorecase` could not be read",
+                "/r/.git/config: denied",
+            ],
         ),
         (
             &unknown,
             &IgnoreCase::Set(false),
             true,
-            &["/r/workspaces/k/01RUN", "TASKS could not be looked up: denied"],
+            &[
+                "/r/workspaces/k/01RUN",
+                "TASKS could not be looked up: denied",
+            ],
         ),
         (
             &unknown,
             &IgnoreCase::Absent,
             true,
-            &["/r/workspaces/k/01RUN", "TASKS could not be looked up: denied"],
+            &[
+                "/r/workspaces/k/01RUN",
+                "TASKS could not be looked up: denied",
+            ],
         ),
         (
             &unknown,
             &IgnoreCase::Set(true),
             true,
-            &["/r/workspaces/k/01RUN", "TASKS could not be looked up: denied"],
+            &[
+                "/r/workspaces/k/01RUN",
+                "TASKS could not be looked up: denied",
+            ],
         ),
         (
             &unknown,
             &unreadable,
             true,
-            &["/r/workspaces/k/01RUN", "TASKS could not be looked up: denied"],
+            &[
+                "/r/workspaces/k/01RUN",
+                "TASKS could not be looked up: denied",
+            ],
         ),
     ];
     for (observed, ignorecase, expected, named) in table {
@@ -290,22 +315,37 @@ fn the_repository_config_says_whether_git_ignores_case() {
         ("[Core]\n\tIGNORECASE = Yes\n", Some(true)),
         ("[core]\n\tignorecase\n", Some(true)),
         ("[core]\n\tignorecase =\n", Some(false)),
-        ("[core]\n\tignorecase = \"on\" # set by git init\n", Some(true)),
+        (
+            "[core]\n\tignorecase = \"on\" # set by git init\n",
+            Some(true),
+        ),
         ("[core]\n\tignorecase = 0\n", Some(false)),
-        ("[core]\n\tignorecase = true\n\tignorecase = false\n", Some(false)),
+        (
+            "[core]\n\tignorecase = true\n\tignorecase = false\n",
+            Some(false),
+        ),
         ("[core] ignorecase = true\n", Some(true)),
         ("[core \"x\"]\n\tignorecase = true\n", None),
         ("[branch]\n\tignorecase = true\n", None),
         ("; [core] ignorecase = true\n# ignorecase = true\n", None),
-        ("[extensions]\n\tworktreeConfig = false\n[core]\n\tignorecase = true\n", Some(true)),
+        (
+            "[extensions]\n\tworktreeConfig = false\n[core]\n\tignorecase = true\n",
+            Some(true),
+        ),
     ] {
         assert_eq!(ignorecase_in(text), Ok(expected), "{text:?}");
     }
     for (text, said) in [
         ("[core]\n\tignorecase = maybe\n", "is not a boolean"),
         ("[include]\n\tpath = more.config\n", "included files"),
-        ("[includeIf \"gitdir:/x/\"]\n\tpath = more.config\n", "included files"),
-        ("[extensions]\n\tworktreeConfig = true\n", "per-worktree configuration"),
+        (
+            "[includeIf \"gitdir:/x/\"]\n\tpath = more.config\n",
+            "included files",
+        ),
+        (
+            "[extensions]\n\tworktreeConfig = true\n",
+            "per-worktree configuration",
+        ),
         ("[core\n\tignorecase = true\n", "is not closed"),
     ] {
         let refused = ignorecase_in(text).expect_err(text);
@@ -317,7 +357,10 @@ fn the_repository_config_says_whether_git_ignores_case() {
     assert_eq!(recorded_ignorecase(common), IgnoreCase::Absent);
     write_file(&common.join("config"), b"[core]\n\tignorecase = true\n");
     assert_eq!(recorded_ignorecase(common), IgnoreCase::Set(true));
-    write_file(&common.join("config"), b"[core]\n\tignorecase = sometimes\n");
+    write_file(
+        &common.join("config"),
+        b"[core]\n\tignorecase = sometimes\n",
+    );
     let unreadable = recorded_ignorecase(common);
     assert!(
         matches!(&unreadable, IgnoreCase::Unreadable(reason) if reason.contains("config")),

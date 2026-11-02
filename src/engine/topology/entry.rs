@@ -1149,14 +1149,19 @@ fn ignorecase_in(text: &str) -> Result<Option<bool>, String> {
         match section.as_str() {
             "core" if key.eq_ignore_ascii_case("ignorecase") => {
                 found = Some(config_bool(value).ok_or_else(|| {
-                    format!("`core.ignorecase = {}` is not a boolean", value.unwrap_or(""))
+                    format!(
+                        "`core.ignorecase = {}` is not a boolean",
+                        value.unwrap_or("")
+                    )
                 })?);
             }
             "extensions" if key.eq_ignore_ascii_case("worktreeconfig") => {
                 if config_bool(value) != Some(false) {
-                    return Err("`extensions.worktreeConfig` is on, and this reading does not \
+                    return Err(
+                        "`extensions.worktreeConfig` is on, and this reading does not \
                                 follow per-worktree configuration"
-                        .to_owned());
+                            .to_owned(),
+                    );
                 }
             }
             _ => {}
@@ -1210,9 +1215,10 @@ fn observe_case_at(directory: &Path, name: &str) -> CaseObservation {
     match std::fs::symlink_metadata(&other) {
         Ok(other_found) => same_entry(&spelled, &found, &other, &other_found),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => CaseObservation::Sensitive,
-        Err(error) => {
-            CaseObservation::Unknown(format!("{} could not be looked up: {error}", other.display()))
-        }
+        Err(error) => CaseObservation::Unknown(format!(
+            "{} could not be looked up: {error}",
+            other.display()
+        )),
     }
 }
 
