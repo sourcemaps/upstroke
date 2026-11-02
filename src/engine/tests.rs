@@ -12938,7 +12938,6 @@ fn real_git() -> String {
 
 #[cfg(unix)]
 fn git_shim(beside: &Path, label: &str, rules: &[ShimRule<'_>]) -> GitShim {
-    use std::os::unix::fs::PermissionsExt;
     let dir = beside.with_file_name(format!("{label}-shim"));
     fs::create_dir_all(&dir).expect("the shim's directory");
     let log = dir.join("calls.log");
@@ -12972,8 +12971,13 @@ fn git_shim(beside: &Path, label: &str, rules: &[ShimRule<'_>]) -> GitShim {
         script.push_str("exit $status\n");
     }
     let shim = dir.join("git");
-    fs::write(&shim, script).expect("the shim");
-    fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).expect("an executable shim");
+    // Written by a process of its own, never through a descriptor of this
+    // test process: a fork another test thread makes while this process held
+    // the shim open for writing keeps that writer until it execs, and the
+    // child engine's exec of the shim then fails with ETXTBSY. The helper and
+    // its witness are `runner::container::write_program_in_its_own_process`
+    // and `the_reaper_relay_writer_leaves_no_writer_in_another_threads_fork`.
+    crate::runner::container::write_program_in_its_own_process(&shim, &script);
     GitShim { dir, log }
 }
 
