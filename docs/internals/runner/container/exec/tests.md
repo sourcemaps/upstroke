@@ -623,10 +623,23 @@ because the two bases are *supposed* to differ (the Upstroke environment
 and the image environment) and a comparison of those would be a
 comparison of two fixtures rather than of two composition rules.
 
-The one place they legitimately differ is stated as an assertion rather
+One place they legitimately differ is stated as an assertion rather
 than skipped: a credential *location* is a path at the boundary that
 executes, so the host names a host directory and the container names its
-mount target. Both are supplied for exactly the same three roles.
+mount target. Both are supplied for exactly the same three roles. Since
+PR12's Q2 there is a second, stated the same way: the host environment's
+default object graph (`Recorded`) composes the process-wide
+`GIT_NO_REPLACE_OBJECTS`, and the container composes no process-wide
+replacement setting, because the role's projected view states that policy
+in its own `config`.
+
+## `fn host_and_container_compose_the_same_environment_for_ever…` › `.remove(crate::workspace_manager::NO_REPLACEMENT_OBJECTS.0)`
+
+The replacement-objects delta (PR12, Q2), named rather than skipped: the
+host's entry is taken out of the comparison and its value asserted (`1`),
+and the container's composed vector is asserted to carry no such key.
+Every other key is still compared exactly below (`env.md`, "No
+process-wide replacement setting since PR12").
 
 ## `fn host_and_container_compose_the_same_environment_for_ever…` › `let withheld: BTreeMap<String, String> = container_env`
 
