@@ -214,7 +214,10 @@ fn open_questions_are_pointed_at_where_their_run_keeps_them() {
     .render();
     assert!(legacy.contains("open questions (1):"), "{legacy}");
     assert!(legacy.contains("  payloads: "), "{legacy}");
-    assert!(!legacy.contains("upstroke answer <question id>"), "{legacy}");
+    assert!(
+        !legacy.contains("upstroke answer <question id>"),
+        "{legacy}"
+    );
 
     let in_log = RunReport {
         questions: vec![asked],
