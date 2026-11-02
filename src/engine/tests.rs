@@ -19093,7 +19093,10 @@ fn a_schema_4_run_that_cannot_be_read_keeps_a_lone_legacy_prefix_from_answering(
     legacy_question_run(&repo, "00LEGACY", legacy);
     let shown =
         crate::answer::show(&repo, "q-LEGACY").expect("a lone legacy prefix, every run read");
-    assert!(shown.contains("the legacy question q-LEGACY-ONLY"), "{shown}");
+    assert!(
+        shown.contains("the legacy question q-LEGACY-ONLY"),
+        "{shown}"
+    );
 
     let plan = rundir::public_dir(&repo, &parked.run_id).join("plan.normalized.json");
     let frozen = fs::read(&plan).expect("the frozen plan");
@@ -19109,13 +19112,15 @@ fn a_schema_4_run_that_cannot_be_read_keeps_a_lone_legacy_prefix_from_answering(
             .expect_err("a lone legacy prefix beside a run that could not be read")
             .to_string();
         assert!(
-            message.contains(
-                "matches one question (q-LEGACY-ONLY) among the runs that could be read"
-            ),
+            message
+                .contains("matches one question (q-LEGACY-ONLY) among the runs that could be read"),
             "{message}"
         );
         assert!(
-            message.contains(&format!("the log of run `{}` could not be read", parked.run_id)),
+            message.contains(&format!(
+                "the log of run `{}` could not be read",
+                parked.run_id
+            )),
             "{message}"
         );
     }

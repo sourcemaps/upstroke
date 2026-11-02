@@ -608,7 +608,10 @@ mod tests {
 
         let message = refused(decided(
             "q-1",
-            legacy(None, vec![legacy_at("01A", "q-1A"), legacy_at("01B", "q-1B")]),
+            legacy(
+                None,
+                vec![legacy_at("01A", "q-1A"), legacy_at("01B", "q-1B")],
+            ),
             schema_4(None, vec![open_at("01T", "q-1T")], Vec::new(), &[]),
             &[],
         ));
