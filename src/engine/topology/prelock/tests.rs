@@ -662,3 +662,21 @@ fn relative_name_pre_lock_child() {
         "the refused pre-lock checks made nothing"
     );
 }
+
+#[test]
+fn a_runtime_that_reads_no_image_environment_refuses_rather_than_inventing_one() {
+    let runtime = Inventory::reachable().with_image(IMAGE_REFERENCE, IMAGE_ID, None);
+    let error = runtime
+        .image_environment(IMAGE_ID)
+        .expect_err("the provided method refuses");
+    assert!(
+        matches!(
+            &error,
+            RuntimeError::Failed {
+                operation: RuntimeOp::InspectImageById,
+                detail,
+            } if detail.contains(IMAGE_ID)
+        ),
+        "{error:?}"
+    );
+}

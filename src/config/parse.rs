@@ -441,6 +441,8 @@ pub(super) fn parse_engine(
             max_merge_repairs: DEFAULT_MAX_MERGE_REPAIRS,
             max_per_agent: DEFAULT_MAX_PARALLEL,
             max_per_pool: DEFAULT_MAX_PARALLEL,
+            explicit_max_per_agent: None,
+            explicit_max_per_pool: None,
         });
     };
     let engine: RawEngine = value.try_into().map_err(|e| {
@@ -574,6 +576,8 @@ pub(super) fn parse_engine(
         max_merge_repairs,
         max_per_agent,
         max_per_pool,
+        explicit_max_per_agent: engine.max_per_agent,
+        explicit_max_per_pool: engine.max_per_pool,
     })
 }
 

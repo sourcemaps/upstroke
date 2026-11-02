@@ -1002,6 +1002,39 @@ struct ImageInspectionRaw {
     tags: Vec<String>,
 }
 
+fn image_environment_of(
+    id: &str,
+    text: &str,
+) -> Result<Option<Vec<(String, String)>>, RuntimeError> {
+    let malformed = |why: &str| RuntimeError::Failed {
+        operation: RuntimeOp::InspectImageById,
+        detail: format!(
+            "`docker image inspect {id}` reported an image environment this runner cannot read \
+             ({why})"
+        ),
+    };
+    let line = text.lines().next().unwrap_or_default();
+    let Some((reported, environment)) = line.split_once('\u{1f}') else {
+        return Err(malformed("the answer carries no environment field"));
+    };
+    if reported.trim() != id {
+        return Ok(None);
+    }
+    let entries: Option<Vec<String>> = serde_json::from_str(environment.trim())
+        .map_err(|error| malformed(&format!("the environment is not a JSON list: {error}")))?;
+    entries
+        .unwrap_or_default()
+        .into_iter()
+        .map(|entry| {
+            entry
+                .split_once('=')
+                .map(|(key, value)| (key.to_owned(), value.to_owned()))
+                .ok_or_else(|| malformed(&format!("the entry `{entry}` names no value")))
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(Some)
+}
+
 impl ImageInspectionRaw {
     fn into_inspection(self) -> runtime::ImageInspection {
         runtime::ImageInspection {
@@ -1221,6 +1254,24 @@ impl ContainerRuntime for DockerCli {
             return Ok(None);
         }
         Ok(Some(found.into_inspection()))
+    }
+
+    fn image_environment(&self, id: &str) -> Result<Option<Vec<(String, String)>>, RuntimeError> {
+        let Some(text) = self.inspect(
+            RuntimeOp::InspectImageById,
+            id,
+            &[
+                "image",
+                "inspect",
+                id,
+                "--format",
+                "{{.Id}}\u{1f}{{json .Config.Env}}",
+            ],
+        )?
+        else {
+            return Ok(None);
+        };
+        image_environment_of(id, &text)
     }
 
     fn volume_present(&self, name: &str) -> Result<bool, RuntimeError> {

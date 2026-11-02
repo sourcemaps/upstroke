@@ -63,14 +63,28 @@ either command.
    `RunnerPreflight` over the recorded probe set, `run_recovery_order`, the
    loop, the report.
 
-### What is not here yet
+### The runner
 
-The container runner is not composed: a container selection, fresh or
-recorded, refuses read-only before any effect (`container_composition_pending`)
-until the image environment is read from the recorded image id (S7). The
-host runner holds the run's managed repository through
-`ObjectGraph::RecordedIn` (the adopted ENV option C); the repository-scoping
-residual that shape leaves (Q1) is open.
+A host policy runs on `HostRunner::new()` reading
+`ObjectGraph::RecordedIn(repository)` (the adopted ENV option C, held
+unconditionally) with `worker_in_checkout = false`; the repository-scoping
+residual that shape leaves (Q1) is open. A container policy runs on one
+`ContainerRunner` per incarnation, over the resolved (fresh) or recorded
+(resume) policy, whose base environment is the image's own, read by
+`recorded_image_environment` from the recorded image id in the read-only
+half; the container's unconditional `GIT_NO_REPLACE_OBJECTS` is unchanged
+(Q2 open).
+
+### Slot limits
+
+`permits.agent_pool_slots`: "per-agent slots (max_per_agent, default
+max_parallel) and per-pool slots keyed by pool name (max_per_pool, default
+max_parallel); process-lifetime ephemeral scheduler state". Neither is
+recorded (`TopologyLimits` holds `max_parallel`, `max_defers` and
+`max_merge_repairs`), so both are the command's configuration: a fresh run
+takes `[engine] max_per_agent`/`max_per_pool` as resolved (defaulting to the
+configured width it records), and a resume takes the values written today,
+defaulting to the **recorded** `max_parallel` (`resumed_slot_limits`).
 
 ## `pub fn prepare_fresh(`
 
@@ -123,9 +137,28 @@ the runner, the review plan and the agents were resolved from that capture.
 ## `fn compare_recorded_limits(`
 
 A run keeps the limits it started with. Today's `max_parallel` and
-`max_merge_repairs` are compared with the record and a difference warns;
-today's slot limits are not acted on by a resume, whose slot limits default
-to the recorded width.
+`max_merge_repairs` are compared with the record and a difference warns.
+The slot limits are not recorded and are acted on (`resumed_slot_limits`).
+
+## `fn resumed_slot_limits(config: &config::Config, recorded_width: u32) -> Result<SlotLimits, UpstrokeError> {`
+
+A resume's slot limits: each written value governs, and an absent one is
+the recorded `max_parallel`, which is what the run's own
+`PermitBroker::for_run` defaults to.
+
+## `fn recorded_image_environment(`
+
+The container runner's base environment, read-only, from the policy's
+recorded image id: an absent image refuses (`InspectionRefusal::ImageIdAbsent`),
+an unreachable or failing runtime refuses with its own diagnosis, and an
+environment without a usable `PATH` refuses here, before any lock, by the
+same `certify_path` the runner applies when it composes a role's
+environment. Nothing is pulled and no other id is consulted.
+
+## `fn container_runner(`
+
+One `ContainerRunner` over the policy, the run's identity and the image's
+environment, executing through the production runtime.
 
 ## `fn refuse_unsafe_case_policy(started: &RunStarted4) -> Result<(), UpstrokeError> {`
 

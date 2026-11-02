@@ -453,6 +453,33 @@ absent from the runtime", which refuses a rebuild before any spawn.
 [`RuntimeError`] when the runtime cannot be reached or the inspection
 fails.
 
+## `pub trait ContainerRuntime: Send + Sync` › `fn image_environment(&self, id: &str) -> Result<Option<Vec<(String, String)>>, RuntimeError> {`
+
+The environment the image recorded as `id` declares (`Config.Env`), as
+`KEY=VALUE` pairs in the image's order — read-only, by the immutable id the
+run recorded and never by a reference, so it cannot be retargeted. PR12's
+S7: the container runner's base environment is the image's own
+(`ContainerEnvironment::from_image`), and this is where it comes from;
+there is no fallback to the host's environment.
+
+`Ok(None)` means the runtime holds no image with that id. `Ok(Some(vec![]))`
+means the image declares no environment, which is a value and not an
+absence; the runner's `certify_path` then refuses it, because no `PATH` is
+not a usable environment.
+
+**A provided method that refuses.** A runtime that does not implement it
+answers [`RuntimeError::Failed`] (operation `InspectImageById`) rather than an
+empty environment, so a test double, or a future runtime, that never learned
+to read one cannot be mistaken for an image without an environment. The
+production runtime implements it through the same read-only
+`docker image inspect` path as `image_by_id`; the effects classification
+lists it among the effect-free inspections.
+
+### Errors
+
+[`RuntimeError`] when the runtime cannot be reached, the inspection fails or
+its answer cannot be read, and the provided refusal above.
+
 ## `pub trait ContainerRuntime: Send + Sync` › `fn volume_present(&self, name: &str) -> Result<bool, RuntimeError>;`
 
 Whether a named volume exists. R20 volumes are operator-owned and are

@@ -259,6 +259,13 @@ pub trait ContainerRuntime: Send + Sync {
 
     fn image_by_id(&self, id: &str) -> Result<Option<ImageInspection>, RuntimeError>;
 
+    fn image_environment(&self, id: &str) -> Result<Option<Vec<(String, String)>>, RuntimeError> {
+        Err(RuntimeError::Failed {
+            operation: RuntimeOp::InspectImageById,
+            detail: format!("this container runtime does not report the environment of image `{id}`"),
+        })
+    }
+
     fn volume_present(&self, name: &str) -> Result<bool, RuntimeError>;
 
     fn containers_with_label(

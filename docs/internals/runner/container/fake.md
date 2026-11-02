@@ -236,6 +236,18 @@ Record the call and answer whether the operation may proceed.
 Put an image in the table under its **id**, with its digest or without
 one.
 
+## `impl FakeRuntime` › `pub(crate) fn set_image_environment(&self, id: &str, environment: &[(&str, &str)]) {`
+
+Set the environment an image in the table declares; an image starts with
+none. Refuses an id the table does not hold, so a fixture cannot set the
+environment of an image it never added.
+
+## `impl ContainerRuntime for FakeRuntime` › `fn image_environment(&self, id: &str) -> Result<Option<Vec<(String, String)>>, RuntimeError> {`
+
+The environment set on the image, `Ok(None)` for an id the table does not
+hold, through the same armed-failure gate as every inspection
+(`InspectImageById`).
+
 ## `impl FakeRuntime` › `pub(crate) fn tag(&self, reference: &str, id: &str) {`
 
 -- (2) the mutable tag table -------------------------------------------

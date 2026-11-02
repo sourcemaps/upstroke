@@ -27,6 +27,7 @@ use crate::workspace_manager::fixture::{LINK_BOUND, LinkedChild, ParentLink};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FakeImage {
     pub digest: Option<String>,
+    pub environment: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -272,8 +273,23 @@ impl FakeRuntime {
             id.to_owned(),
             FakeImage {
                 digest: digest.map(str::to_owned),
+                environment: Vec::new(),
             },
         );
+    }
+
+    pub(crate) fn set_image_environment(&self, id: &str, environment: &[(&str, &str)]) {
+        let mut state = self.state();
+        assert!(
+            state.images.contains_key(id),
+            "`{id}` is not an image of this fake runtime"
+        );
+        if let Some(image) = state.images.get_mut(id) {
+            image.environment = environment
+                .iter()
+                .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+                .collect();
+        }
     }
 
     pub(crate) fn tag(&self, reference: &str, id: &str) {
@@ -426,6 +442,15 @@ impl ContainerRuntime for FakeRuntime {
                 .map(|(name, _)| name.clone())
                 .collect(),
         }))
+    }
+
+    fn image_environment(&self, id: &str) -> Result<Option<Vec<(String, String)>>, RuntimeError> {
+        self.enter(RuntimeOp::InspectImageById, id)?;
+        Ok(self
+            .state()
+            .images
+            .get(id)
+            .map(|image| image.environment.clone()))
     }
 
     fn volume_present(&self, name: &str) -> Result<bool, RuntimeError> {

@@ -1492,6 +1492,25 @@ this question. The rebuild path's refusal is "the recorded image id
 is absent from the runtime", and a different id present is exactly
 that.
 
+## `fn image_environment(&self, id: &str) -> Result<Option<Vec<(String, String)>>, RuntimeError> {`
+
+`docker image inspect <id> --format '{{.Id}}<US>{{json .Config.Env}}'`
+through `inspect`, so a daemon that says the object does not exist is
+`Ok(None)` exactly as for `image_by_id`. The reported id rides along for
+the reason `image_by_id` compares it: `docker image inspect` resolves a
+prefix of an id and a tag alike, and an answer about another image is no
+answer about the recorded one. `image_environment_of` reads the answer.
+
+## `fn image_environment_of(`
+
+The answer of `image_environment`, read strictly. The first line must hold
+the reported id and the JSON environment separated by U+001F. A reported id
+other than the one asked for is `Ok(None)`. `null` is an image that declares
+no environment: `Some(vec![])`. Anything else that is not a JSON list of
+strings, and any entry without `=`, is `RuntimeError::Failed` naming what
+could not be read — the runner never guesses an environment it was not
+given.
+
 ## `fn collect(&self, name: &str) -> Result<ContainerExecution, RuntimeError> {` › `let (stdout, stderr) = self.exec_streams(RuntimeOp::Collect, name, &["logs", name])?;`
 
 Both streams, separately. `docker logs` writes the container's stdout

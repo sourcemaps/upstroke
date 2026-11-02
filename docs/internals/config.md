@@ -531,6 +531,20 @@ Validated and kept, acted on by the topology engine.
 `[engine] max_per_pool` (§17); defaults to the configured
 `max_parallel`. Validated and kept, acted on by the topology engine.
 
+## `pub explicit_max_per_agent: Option<u32>,`
+
+`[engine] max_per_agent` as written, `None` when the key is absent. The two
+`explicit_` fields exist for a schema-4 resume, which runs at its recorded
+`max_parallel` rather than today's: `permits.agent_pool_slots` gives both slot
+limits "default max_parallel", and on a resume that default is the recorded
+width, which the resolved `max_per_agent` (defaulted to *today's*
+`max_parallel`) cannot express. A value that is written governs either way
+(`engine::topology::entry`).
+
+## `pub explicit_max_per_pool: Option<u32>,`
+
+`[engine] max_per_pool` as written; see `explicit_max_per_agent`.
+
 ## `pub interaction_mode: InteractionMode,`
 
 `[interaction] mode` (§12); default `on_block`.

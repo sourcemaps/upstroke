@@ -946,8 +946,11 @@ effect_free = [
 ]
 
 # PR6's Container funnel. The read-only inspections of `ContainerRuntime`
-# (`probe`, `image_by_reference`, `image_by_id`, `volume_present`,
-# `containers_with_label`, `observe`, `collect`) are classified EFFECT-FREE:
+# (`probe`, `image_by_reference`, `image_by_id`, `image_environment`,
+# `volume_present`, `containers_with_label`, `observe`, `collect`) are
+# classified EFFECT-FREE (`image_environment`, PR12's S7, reads the recorded
+# image id's `Config.Env` through the same `docker image inspect` path as
+# `image_by_id`):
 # `ContainerSite` has no inspection variant, `classify_object_residue` is the
 # tree's precedent for "a read-only inspection (no effect)", and lane B's policy
 # resolution is required to call them ("resolved by read-only inspection"). They
@@ -1016,6 +1019,7 @@ effect_free = [
     "harness",
     "image_by_id",
     "image_by_reference",
+    "image_environment",
     "list_intents",
     # `PR6-ACCT-007`: the staged half of the same namespace scan. A directory
     # read and a parse, like `list_intents` beside it.

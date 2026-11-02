@@ -380,6 +380,10 @@ pub struct Config {
 
     pub max_per_pool: u32,
 
+    pub explicit_max_per_agent: Option<u32>,
+
+    pub explicit_max_per_pool: Option<u32>,
+
     pub interaction_mode: InteractionMode,
 
     pub notify: Vec<String>,
@@ -396,6 +400,8 @@ struct EngineSettings {
     max_merge_repairs: u32,
     max_per_agent: u32,
     max_per_pool: u32,
+    explicit_max_per_agent: Option<u32>,
+    explicit_max_per_pool: Option<u32>,
 }
 
 struct InteractionSettings {
@@ -798,6 +804,8 @@ pub fn load_captured_with(
         max_merge_repairs: engine.max_merge_repairs,
         max_per_agent: engine.max_per_agent,
         max_per_pool: engine.max_per_pool,
+        explicit_max_per_agent: engine.explicit_max_per_agent,
+        explicit_max_per_pool: engine.explicit_max_per_pool,
         interaction_mode: interaction.mode,
         notify: interaction.notify,
         wait_on_block: interaction.wait_on_block,

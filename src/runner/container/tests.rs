@@ -5696,3 +5696,71 @@ fn runtime_notes_rustdoc_shortcuts_resolve_to_links() {
         "unresolved Rustdoc shortcut reference(s) with no Markdown link target: {broken:?}"
     );
 }
+
+#[test]
+fn the_image_environment_is_read_strictly_from_the_inspection_of_the_recorded_id() {
+    const ID: &str = "sha256:0123456789abcdef";
+    assert_eq!(
+        super::image_environment_of(
+            ID,
+            "sha256:0123456789abcdef\u{1f}[\"PATH=/usr/bin:/bin\",\"LANG=C.UTF-8\",\"EMPTY=\"]\n",
+        ),
+        Ok(Some(vec![
+            ("PATH".to_owned(), "/usr/bin:/bin".to_owned()),
+            ("LANG".to_owned(), "C.UTF-8".to_owned()),
+            ("EMPTY".to_owned(), String::new()),
+        ])),
+        "every entry, in the image's order, split at its first `=`"
+    );
+    assert_eq!(
+        super::image_environment_of(ID, "sha256:0123456789abcdef\u{1f}null\n"),
+        Ok(Some(Vec::new())),
+        "an image that declares no environment has an empty one, not an unreadable one"
+    );
+    assert_eq!(
+        super::image_environment_of(ID, "sha256:fedcba9876543210\u{1f}[\"PATH=/bin\"]\n"),
+        Ok(None),
+        "an answer about another image is no answer about the recorded id"
+    );
+    for (text, why) in [
+        ("sha256:0123456789abcdef\n", "no environment field"),
+        (
+            "sha256:0123456789abcdef\u{1f}{\"PATH\":\"/bin\"}\n",
+            "not a JSON list",
+        ),
+        ("sha256:0123456789abcdef\u{1f}[\"PATH\"]\n", "names no value"),
+    ] {
+        let error = super::image_environment_of(ID, text).expect_err(why);
+        assert!(
+            matches!(
+                &error,
+                RuntimeError::Failed {
+                    operation: RuntimeOp::InspectImageById,
+                    detail,
+                } if detail.contains(why)
+            ),
+            "{why}: {error:?}"
+        );
+    }
+}
+
+#[test]
+fn the_fake_runtime_reports_the_environment_its_image_declares() {
+    let runtime = FakeRuntime::new(ContainerTrace::off());
+    runtime.add_image("sha256:abc", None);
+    assert_eq!(
+        runtime.image_environment("sha256:abc"),
+        Ok(Some(Vec::new())),
+        "an image starts with no environment"
+    );
+    runtime.set_image_environment("sha256:abc", &[("PATH", "/usr/bin")]);
+    assert_eq!(
+        runtime.image_environment("sha256:abc"),
+        Ok(Some(vec![("PATH".to_owned(), "/usr/bin".to_owned())]))
+    );
+    assert_eq!(
+        runtime.image_environment("sha256:absent"),
+        Ok(None),
+        "an id the runtime does not hold is absent"
+    );
+}
