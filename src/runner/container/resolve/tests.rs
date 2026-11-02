@@ -1115,13 +1115,13 @@ fn legacy_container_selection_refused_before_effects() {
             })
             .collect();
 
-        let run_opts = |legacy_writer: bool| {
+        let run_opts = || {
             let mut opts = RunOptions::new(repo.join("plan.md"), repo.clone());
             opts.pools_path = Some(empty_pools(&repo));
             opts.private_root = Some(private.clone());
             opts.wait_on_block = Some(Duration::ZERO);
             opts.defer_backoff = Duration::ZERO;
-            opts.legacy_writer = legacy_writer;
+            opts.legacy_writer = true;
             opts
         };
         let resume_opts = |run_id: &str| {
@@ -1138,7 +1138,7 @@ fn legacy_container_selection_refused_before_effects() {
             let adapters = RecordingAdapters::default();
             let mut outcomes = vec![(
                 "a run by the schema-1..3 writer".to_owned(),
-                crate::engine::run_with(&run_opts(true), &adapters),
+                crate::engine::run_with(&run_opts(), &adapters),
             )];
             for (schema, run_id) in &seeded {
                 outcomes.push((
@@ -1174,38 +1174,11 @@ fn legacy_container_selection_refused_before_effects() {
                 }
             }
 
-            // The production writer creates a schema-4 run, which resolves a container
-            // selection by read-only inspection before any lock: under the held lease its
-            // container cell refuses on the runtime, the image or a credential volume rather
-            // than at the lock, and never as the sequential engine's config refusal.
-            let fresh = crate::engine::run_with(&run_opts(false), &adapters)
-                .expect_err("the lease is held, so nothing can proceed");
-            let UpstrokeError::Refused { message } = &fresh else {
-                panic!("a schema-4 run refused as {fresh:?}, not by its pre-lock checks");
-            };
-            if kind == HOST_TOML {
-                assert!(
-                    message.contains("already driving worktree"),
-                    "the schema-4 control did not reach the worktree lock: {message}"
-                );
-            } else {
-                assert!(
-                    !message.contains("already driving worktree"),
-                    "a schema-4 run reached the worktree lock before resolving its runner: \
-                     {message}"
-                );
-                assert!(
-                    message.contains("container runtime") || message.contains("credential volume"),
-                    "the refusal names what the read-only resolution found: {message}"
-                );
-            }
         }
 
         let adapters = RecordingAdapters::default();
-        for legacy_writer in [true, false] {
-            let run = crate::engine::run_with(&run_opts(legacy_writer), &adapters);
-            assert!(run.is_err(), "the fixture has no agents");
-        }
+        let run = crate::engine::run_with(&run_opts(), &adapters);
+        assert!(run.is_err(), "the fixture has no agents");
         for (_, run_id) in &seeded {
             assert!(
                 crate::engine::resume_with(&resume_opts(run_id), &adapters).is_err(),
@@ -1269,6 +1242,140 @@ fn legacy_container_selection_refused_before_effects() {
             "the refused run created a branch: {branches}"
         );
     }
+}
+
+fn schema_4_run_options(repo: &Path, private: &Path) -> RunOptions {
+    let mut opts = RunOptions::new(repo.join("plan.md"), repo.to_path_buf());
+    opts.pools_path = Some(empty_pools(repo));
+    opts.private_root = Some(private.to_path_buf());
+    opts.wait_on_block = Some(Duration::ZERO);
+    opts.defer_backoff = Duration::ZERO;
+    opts.legacy_writer = false;
+    opts
+}
+
+#[test]
+fn a_schema_4_host_run_under_a_held_lease_is_refused_by_the_worktree_lock() {
+    let (_tree, repo) = temp_repo("schema4-host-control");
+    let private = repo.join("private");
+    fs::create_dir_all(&private).expect("private root");
+    fs::write(repo.join("upstroke.toml"), "[runner]\nkind = \"host\"\n").expect("config");
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-q", "-m", "config"]);
+    let opts = schema_4_run_options(&repo, &private);
+    let adapters = RecordingAdapters::default();
+    {
+        let _lease = crate::rundir::WorktreeLock::acquire(&repo).expect("the test's lease");
+        let error = crate::engine::run_with(&opts, &adapters)
+            .expect_err("the lease is held, so nothing can proceed");
+        assert!(
+            matches!(&error, UpstrokeError::Refused { message }
+                if message.contains("already driving worktree")),
+            "the schema-4 control did not reach the worktree lock: {error}"
+        );
+    }
+    assert!(
+        crate::engine::run_with(&opts, &adapters).is_err(),
+        "the fixture has no agents"
+    );
+    assert!(
+        !adapters.asked().is_empty(),
+        "the control never reached pre-flight, so the container cell's empty adapter log \
+         proves nothing"
+    );
+}
+
+#[test]
+fn real_docker_a_schema_4_run_refuses_an_absent_image_before_the_worktree_lock() {
+    let trace = ContainerTrace::recording();
+    let docker = match crate::runner::container::fake::docker_gate(
+        "real_docker_a_schema_4_run_refuses_an_absent_image_before_the_worktree_lock",
+        trace,
+    ) {
+        Ok(docker) => docker,
+        Err(reason) => {
+            assert_eq!(
+                reason,
+                crate::runner::container::fake::absent_reason(),
+                "a Docker-gated test skipped for a reason the gate does not know about"
+            );
+            return;
+        }
+    };
+    let nonce = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("the clock is after the epoch")
+            .as_nanos()
+    );
+    let reference = format!("upstroke-pr12-absent/r{nonce}:never");
+    let volume = format!("upstroke-pr12-absent-{nonce}");
+    assert!(
+        docker
+            .image_by_reference(&reference)
+            .expect("a read-only inspection of the controlled reference")
+            .is_none(),
+        "the fixture's premise: the runtime does not hold `{reference}`"
+    );
+
+    let (_tree, repo) = temp_repo("schema4-absent-image");
+    let private = repo.join("private");
+    fs::create_dir_all(&private).expect("private root");
+    fs::write(
+        repo.join("upstroke.toml"),
+        format!(
+            "[runner]\nkind = \"container\"\nimage = \"{reference}\"\n\
+             credential_volumes = {{ claude-code = \"{volume}\" }}\n"
+        ),
+    )
+    .expect("config");
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-q", "-m", "config"]);
+    let opts = schema_4_run_options(&repo, &private);
+    let adapters = RecordingAdapters::default();
+    {
+        let _lease = crate::rundir::WorktreeLock::acquire(&repo).expect("the test's lease");
+        let error = crate::engine::run_with(&opts, &adapters)
+            .expect_err("an absent image refuses the run");
+        let UpstrokeError::Refused { message } = &error else {
+            panic!("a schema-4 run refused as {error:?}, not by its pre-lock inspection");
+        };
+        assert!(
+            !message.contains("already driving worktree"),
+            "a schema-4 run reached the worktree lock before resolving its runner: {message}"
+        );
+        assert!(
+            message.contains(&reference) && message.contains("does not hold the image reference"),
+            "the refusal names the absent reference: {message}"
+        );
+    }
+    assert!(
+        adapters.asked().is_empty(),
+        "an adapter was resolved before the refusal: {:?}",
+        adapters.asked()
+    );
+    assert!(
+        docker
+            .image_by_reference(&reference)
+            .expect("a read-only inspection of the controlled reference")
+            .is_none(),
+        "the refused run pulled `{reference}`"
+    );
+    let runs = repo.join(".upstroke").join("runs");
+    assert!(
+        !runs.exists()
+            || fs::read_dir(&runs)
+                .expect("runs root")
+                .next()
+                .is_none(),
+        "the refused run created a run directory"
+    );
+    assert!(
+        !private.join("runs").exists(),
+        "the refused run created a private run directory"
+    );
 }
 
 #[test]

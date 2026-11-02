@@ -519,6 +519,18 @@ of phase B is what proves the run command reaches pre-flight at all.
 The whole-tree half of ST-16 (i)'s second clause is
 [`no_module_outside_the_container_runner_writes_a_container_intent`].
 
+**Since PR12 the run cells name the writer.** The production writer is
+schema 4, so this test sets `RunOptions::legacy_writer` and pins the
+schema-1..3 writer's refusal, with every legacy cell always run. For one
+checkpoint (PR12's `fffa73fa` to `18166f73`) it also held schema-4 cells
+that called `engine::run_with` with a container selection; those reach the
+production `DockerCli`, so their path depended on the runtime, image and
+volumes the machine happened to have, and under a fully available runtime
+the no-lock assertion could take another path (root's checkpoint-2
+disposition, decision 4). They are now the two tests below this one: a
+deterministic host control and a Docker-gated public-path cell, with the
+deterministic resolver checks in `prelock`'s tests over its fake runtime.
+
 ## `fn legacy_container_selection_refused_before_effects()` › `let seeded: Vec<(u32, String)> = [1_u32, 2, 3]`
 
 One seeded run per legacy schema: `EngineLimits::for_resume` reads the
@@ -532,6 +544,33 @@ only one reading.
 ## `fn legacy_container_selection_refused_before_effects()` › `let adapters = RecordingAdapters::default();`
 
 -- phase B: nothing was created ------------------------------------
+
+## `fn schema_4_run_options(repo: &Path, private: &Path) -> RunOptions {`
+
+A fresh run on the production (schema-4) writer, for the two tests below.
+
+## `fn a_schema_4_host_run_under_a_held_lease_is_refused_by_the_worktree_lock() {`
+
+The control for the gated cell below, and deterministic: a host selection
+resolves without asking a container runtime anything (`prelock::resolve_host`),
+so with nothing to refuse before the lock a schema-4 run under a held lease is
+refused by the lock, and without the lease it reaches pre-flight. Without this
+control, the gated cell's "did not reach the lock" would not show that the
+lock was on its far side.
+
+## `fn real_docker_a_schema_4_run_refuses_an_absent_image_before_the_worktree_lock() {`
+
+P12-06's ordering on the public path, against a real runtime: a schema-4 run
+whose `[runner]` names an image reference the runtime does not hold refuses
+on the image by read-only inspection before the worktree lock, pulls nothing,
+resolves no adapter and creates no run. It is Docker-gated
+(`DOCKER_GATED_TESTS`), because `engine::run_with` composes the production
+`DockerCli` and so meets whatever runtime the machine has. The fixture is
+controlled rather than ambient: the reference and the volume name carry a
+per-run nonce, and the gate's own runtime confirms the reference is absent
+before the run and still absent after it. Under `UPSTROKE_REQUIRE_DOCKER=1`
+an absent runtime fails it rather than skipping it; that run is the
+coordinator's acceptance, not this suite's.
 
 ## `fn every_engine_limits_reading_is_classified_for_a_container_selection() {`
 

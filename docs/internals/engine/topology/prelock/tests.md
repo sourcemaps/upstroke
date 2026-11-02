@@ -109,6 +109,20 @@ An absent credential volume refuses, and the digest is never computed.
 A `Container` selection with no runtime seam refuses rather than
 silently proceeding as though the inspection had passed.
 
+## `fn a_default_root_is_resolved_before_it_exists_and_authorized_only_once_it_does() {`
+
+Root's Q4, the default root's half, over the fake runtime. `resolve_runner`
+reads the selection and the runtime and nothing else, so a container
+selection the runtime cannot serve (an image it does not hold, an
+unreachable runtime, no runtime at all) refuses before the default root
+exists, and nothing on the way creates it. `RunnerResolved::authorize` is
+what requires the root: it refuses one that does not exist, creates nothing,
+and succeeds, with the canonical spelling, once something else has created
+it, which in production is the include's publication between the entry's two
+halves. This is the deterministic half of the schema-4 pre-lock requirement;
+the public path's real-runtime half is
+`runner::container::resolve::tests::real_docker_a_schema_4_run_refuses_an_absent_image_before_the_worktree_lock`.
+
 ## `fn a_private_root_that_is_not_a_real_directory_refuses_before_any_inspection() {`
 
 A private root that is not there refuses read-only, before anything

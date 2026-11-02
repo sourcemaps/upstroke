@@ -1456,6 +1456,7 @@ pub(crate) const DOCKER_GATED_TESTS: &[&str] = &[
     "real_docker_a_container_contains_a_daemonised_descendant",
     "real_docker_fails_locally_without_ever_saying_a_container_is_gone",
     "real_docker_lists_the_state_the_settlement_observation_reads",
+    "real_docker_a_schema_4_run_refuses_an_absent_image_before_the_worktree_lock",
 ];
 
 pub(crate) fn absent_reason() -> String {

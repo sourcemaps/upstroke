@@ -377,6 +377,62 @@ fn a_container_selection_without_a_runtime_refuses() {
 }
 
 #[test]
+fn a_default_root_is_resolved_before_it_exists_and_authorized_only_once_it_does() {
+    let scratch = Scratch::new("default-root");
+    let root = scratch.path().join("not-yet");
+    let selection = container_selection(IMAGE_REFERENCE, &[("codex", "upstroke-codex")]);
+
+    let without_image = Inventory::reachable().with_volume("upstroke-codex");
+    let refusal = resolve_runner(&selection, Some(&without_image))
+        .expect_err("an image the runtime does not hold refuses");
+    assert!(
+        refusal.to_string().contains(IMAGE_REFERENCE),
+        "the refusal names the image: {refusal}"
+    );
+    let unreachable = Inventory::default();
+    resolve_runner(&selection, Some(&unreachable)).expect_err("an unreachable runtime refuses");
+    assert_eq!(
+        unreachable.asked(),
+        vec!["probe".to_owned()],
+        "nothing past reachability was asked of an unreachable runtime"
+    );
+    resolve_runner(&selection, None).expect_err("no runtime to inspect");
+    assert!(
+        !root.exists(),
+        "a refused resolution created the default root"
+    );
+
+    let ready = || {
+        Inventory::reachable()
+            .with_image(IMAGE_REFERENCE, IMAGE_ID, None)
+            .with_volume("upstroke-codex")
+    };
+    let runtime = ready();
+    let resolved = resolve_runner(&selection, Some(&runtime))
+        .expect("a serviceable selection resolves with no root at all");
+    assert_eq!(resolved.runner_policy().kind, RunnerKind::Container);
+    assert!(!root.exists(), "resolution created the default root");
+    resolved
+        .authorize(&root, &Ids)
+        .expect_err("a root that does not exist is not authorized");
+    assert!(!root.exists(), "authorization created the default root");
+
+    create_private_dir(&root, &mut NoHooks).expect("the root, created as production's include does");
+    let runtime = ready();
+    let checked = resolve_runner(&selection, Some(&runtime))
+        .expect("resolves")
+        .authorize(&root, &Ids)
+        .expect("an existing root is authorized");
+    assert_eq!(
+        checked.private_root(),
+        std::fs::canonicalize(&root)
+            .expect("the root canonicalizes")
+            .as_path(),
+        "the authorized root is the canonical one"
+    );
+}
+
+#[test]
 fn a_private_root_that_is_not_a_real_directory_refuses_before_any_inspection() {
     let root = Scratch::new("root");
     let absent = root.path().join("absent");
