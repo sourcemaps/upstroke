@@ -173,7 +173,10 @@ fn a_recorded_case_sensitive_policy_the_namespace_contradicts_refuses_and_nothin
         said.contains("case_fold = false") && said.contains("01RUN"),
         "{said}"
     );
-    assert!(warnings.is_empty(), "a refusal is not a warning: {warnings:?}");
+    assert!(
+        warnings.is_empty(),
+        "a refusal is not a warning: {warnings:?}"
+    );
 
     let unknown = CaseObservation::Unknown("TASKS could not be looked up: denied".to_owned());
     let table: [(bool, &CaseObservation, &[&str]); 5] = [
@@ -182,17 +185,29 @@ fn a_recorded_case_sensitive_policy_the_namespace_contradicts_refuses_and_nothin
         (
             true,
             &CaseObservation::Sensitive,
-            &["recorded `case_fold = true`", "case-sensitive now", "keeps its record"],
+            &[
+                "recorded `case_fold = true`",
+                "case-sensitive now",
+                "keeps its record",
+            ],
         ),
         (
             false,
             &unknown,
-            &["could not", "TASKS could not be looked up: denied", "`case_fold = false`"],
+            &[
+                "could not",
+                "TASKS could not be looked up: denied",
+                "`case_fold = false`",
+            ],
         ),
         (
             true,
             &unknown,
-            &["could not", "TASKS could not be looked up: denied", "`case_fold = true`"],
+            &[
+                "could not",
+                "TASKS could not be looked up: denied",
+                "`case_fold = true`",
+            ],
         ),
     ];
     for (recorded_fold, observed, named) in table {

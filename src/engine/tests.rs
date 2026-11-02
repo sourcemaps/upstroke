@@ -19555,7 +19555,10 @@ fn a_task_budget_stop_projects_the_task_it_names() {
         .report()
         .expect("projects");
     let task = display_of(&projected, key);
-    assert_eq!(task, "t1", "the fixture's premise: the one task's retry was refused");
+    assert_eq!(
+        task, "t1",
+        "the fixture's premise: the one task's retry was refused"
+    );
 
     assert_eq!(report.outcome(), RunOutcome::BudgetExceeded, "{report:#?}");
     assert_eq!(
@@ -19642,7 +19645,8 @@ fn a_fresh_run_records_the_case_policy_and_a_resume_never_changes_it() {
     };
     let warns_of_a_sensitive_root = |report: &RunReport| {
         report.warnings.iter().any(|warning| {
-            warning.contains("recorded `case_fold = true`") && warning.contains("case-sensitive now")
+            warning.contains("recorded `case_fold = true`")
+                && warning.contains("case-sensitive now")
         })
     };
     let parked = |stub: &TopologyStub| {

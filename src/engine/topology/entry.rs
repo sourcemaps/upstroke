@@ -1018,7 +1018,8 @@ fn hold_recorded_case_policy(
             .and_then(Path::parent)
             .and_then(|workspaces| workspaces.parent().map(|root| (root, workspaces)))
         {
-            Some((root, workspaces)) => match workspaces.file_name().and_then(|name| name.to_str()) {
+            Some((root, workspaces)) => match workspaces.file_name().and_then(|name| name.to_str())
+            {
                 Some(name) => observe_case_at(root, name),
                 None => CaseObservation::Unknown(format!(
                     "{} names no directory whose case can be looked up",
