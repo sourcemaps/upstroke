@@ -348,6 +348,14 @@ became of it in between.
   spelling of the same directory would not match. A linked worktree, a
   separate Git directory and a `.git` behind a symbolic link all resolve to the
   one directory every worktree of the repository shares.
+- **It is spelled as the workspace manager spells it.** The canonical path then
+  loses Windows' verbatim prefix through the manager's own `strip_verbatim`,
+  exactly as `WorkspaceManager::common_git_dir` does, because a schema-4 run
+  compares the two (`engine::topology::entry::one_spelling`) before any role.
+  Before this repair the spelling kept the prefix, and that check refused every
+  schema-4 run and resume on Windows (CI run 41520547341). The
+  `includeIf.gitdir:` conditions do not change: `GitdirRule::Windows` drops the
+  prefix from its spelling either way.
 - **The include lives under the private root**, at
   `<private root>/git/recorded-objects.gitconfig`: engine-owned, outside every
   worktree, and, unless no home directory resolves, outside the system temporary
@@ -1092,10 +1100,11 @@ leave the bytes HEAD records. Until round 4 only the census held that path.
 
 ## `fn the_recorded_objects_scope_names_the_repositorys_own_common_directory() {`
 
-The scope's common directory is the canonical `.git`, the include is under the
-given private root with its exact bytes and verifies, an altered include is
-replaced by the next scope, a linked worktree of the same repository yields the
-same entries, and no staged copy is left in the include's directory.
+The scope's common directory is the canonical `.git` in the workspace manager's
+spelling (`strip_verbatim`, which is the identity off Windows), the include is
+under the given private root with its exact bytes and verifies, an altered
+include is replaced by the next scope, a linked worktree of the same repository
+yields the same entries, and no staged copy is left in the include's directory.
 
 ## `fn a_git_older_than_the_floor_is_refused_by_name() {`
 

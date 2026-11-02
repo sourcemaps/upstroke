@@ -360,3 +360,26 @@ fn every_case_observation_and_ignorecase_record_resolves_to_the_planned_case_fol
         assert!(warning.contains("`case_fold = true`"), "{warning}");
     }
 }
+
+/// Root's D2 (b) over a real repository: the include's `ManagedRepository`, as
+/// `Workspace::recorded_objects_scope` builds it for both public paths, spells
+/// the common directory exactly as `WorkspaceManager::common_git_dir` does, so
+/// `one_spelling` holds. On Windows the two differed by the verbatim prefix
+/// alone, which refused every schema-4 run and resume before any role (CI run
+/// 41520547341). Only a Windows host produces that prefix, so elsewhere this
+/// holds without discriminating.
+#[test]
+fn the_include_and_the_workspace_manager_spell_the_common_directory_alike() {
+    let fixture = crate::workspace_manager::fixture::Fixture::new("one-spelling");
+    let repository = Workspace::open(&fixture.base)
+        .expect("the managed base opens")
+        .recorded_objects_scope(Some(&fixture.private))
+        .expect("the include's repository");
+    assert_eq!(
+        repository.common_dir(),
+        fixture.manager.common_git_dir(),
+        "the include and the workspace manager spell one common directory two ways"
+    );
+    one_spelling(repository.common_dir(), &fixture.manager)
+        .expect("one spelling: the include's conditions and every slot's `.git` agree");
+}

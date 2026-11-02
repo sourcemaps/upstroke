@@ -344,8 +344,12 @@ pub(super) fn refuse_unreal_directory(path: &Path) -> Result<(), UpstrokeError> 
 /// out of every slot component; and both operands of every containment
 /// comparison pass through here, so a comparison is between like spellings
 /// either way.
+///
+/// Crate-visible for one more caller: `Workspace::recorded_objects_scope`
+/// spells the recorded-objects include's common directory through it, so that
+/// spelling is this module's (`engine::topology::entry::one_spelling`).
 #[cfg(windows)]
-pub(super) fn strip_verbatim(path: PathBuf) -> PathBuf {
+pub(crate) fn strip_verbatim(path: PathBuf) -> PathBuf {
     use std::path::Prefix;
 
     let mut components = path.components();
@@ -373,7 +377,7 @@ pub(super) fn strip_verbatim(path: PathBuf) -> PathBuf {
 
 /// See the Windows half: nothing to undo anywhere else.
 #[cfg(not(windows))]
-pub(super) fn strip_verbatim(path: PathBuf) -> PathBuf {
+pub(crate) fn strip_verbatim(path: PathBuf) -> PathBuf {
     path
 }
 

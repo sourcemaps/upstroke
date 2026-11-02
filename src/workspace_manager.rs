@@ -1173,9 +1173,9 @@ fn names_a_type(found: &str) -> String {
 // ---------------------------------------------------------------------------
 
 mod containment;
+pub(crate) use self::containment::strip_verbatim;
 use self::containment::{
     Leaf, canonical_prefix, is_at_or_inside, refuse_reparse_points, refuse_unreal_directory,
-    strip_verbatim,
 };
 
 // ---------------------------------------------------------------------------

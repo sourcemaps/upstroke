@@ -17,7 +17,7 @@ use crate::events::PreparedCommit;
 use crate::runner::host::{GitdirRule, ManagedRepository, RECORDED_OBJECTS_INCLUDE};
 use crate::workspace_manager::{
     Again, COMMON_DIR, INDEX_SELECTOR, NO_REPLACEMENT_OBJECTS, RegistryHold, WORK_TREE_SELECTORS,
-    keeps_common_dir, tolerant_registry_access,
+    keeps_common_dir, strip_verbatim, tolerant_registry_access,
 };
 
 pub struct Workspace {
@@ -166,10 +166,18 @@ impl Workspace {
         let private_root =
             private_root.map_or_else(crate::rundir::default_private_root, Path::to_path_buf);
         let common = self.git_path(&["rev-parse", "--path-format=absolute", "--git-common-dir"])?;
-        let common = fs::canonicalize(&common).map_err(|source| UpstrokeError::Io {
-            path: common.clone(),
-            source,
-        })?;
+        // Spelled as `WorkspaceManager::common_git_dir` spells it: canonical,
+        // and without Windows' verbatim prefix. Every slot's `.git` file is
+        // written from the manager's spelling and the include's conditions
+        // from this one, so `entry::one_spelling` requires the two to be
+        // equal. The conditions themselves are unchanged by the strip:
+        // `GitdirRule::Windows` drops the prefix from its spelling either way.
+        let common = fs::canonicalize(&common)
+            .map(strip_verbatim)
+            .map_err(|source| UpstrokeError::Io {
+                path: common.clone(),
+                source,
+            })?;
         let directory =
             std::path::absolute(private_root.join("git")).map_err(|source| UpstrokeError::Io {
                 path: private_root.to_path_buf(),
@@ -2938,7 +2946,9 @@ mod tests {
             .expect("the scope the v0.1 runner reads");
         assert_eq!(
             scope.common_dir(),
-            fs::canonicalize(repo.join(".git")).expect("the canonical common directory"),
+            strip_verbatim(
+                fs::canonicalize(repo.join(".git")).expect("the canonical common directory"),
+            ),
         );
         let include = private.join("git").join("recorded-objects.gitconfig");
         assert_eq!(scope.include(), include);

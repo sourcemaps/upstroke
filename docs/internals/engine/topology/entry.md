@@ -224,6 +224,15 @@ two are compared, after the manager is derived and before its first effect or
 any role. A difference is returned as an error naming both: a defect signal,
 not a refusal of the layout.
 
+That signal fired on Windows for every schema-4 run and resume (CI run
+41520547341): the include's spelling kept the verbatim prefix `\\?\` that the
+manager strips. The repair is at the spelling's source, not here:
+`recorded_objects_scope` now strips it with the manager's own `strip_verbatim`,
+and this comparison is unchanged.
+`the_include_and_the_workspace_manager_spell_the_common_directory_alike`
+holds the two spellings equal over a real repository on every platform. Only a
+Windows host produces the prefix, so only there does the test discriminate.
+
 ## `fn hold_recorded_case_policy(`
 
 The resume side of D7, at a0, read-only. The recorded `path_policy` is
