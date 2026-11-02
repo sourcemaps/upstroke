@@ -7,7 +7,10 @@ use crate::error::UpstrokeError;
 use crate::interaction::Sleeper;
 use crate::ir::{Question, TaskId};
 use crate::rundir::{self, RunPaths};
-use crate::topology::events::{RunStarted4, RunnerKind, TopologyEvent, TopologyEventBody};
+use crate::topology::events::{
+    AttemptSettlement, FrozenQuestion, FrozenSpawn, RunStarted4, RunnerKind, SettlementTransition,
+    SpawnAdmission, TopologyEvent, TopologyEventBody, UnavailableOutcome,
+};
 use crate::topology::fold::{OpenQuestion, QuestionOrigin, TopologyFold};
 use crate::topology::registry::{TaskKey, TaskRegistry};
 use crate::topology::schema::{
@@ -201,10 +204,10 @@ impl Observed {
 
     #[must_use]
     pub fn raised(&self, id: &str) -> bool {
-        self.events.iter().any(|event| {
-            matches!(&event.body, TopologyEventBody::QuestionRaised { data }
-                if data.question.id.0.eq_ignore_ascii_case(id))
-        })
+        self.events
+            .iter()
+            .filter_map(question_opened_by)
+            .any(|question| question.id.0.eq_ignore_ascii_case(id))
     }
 
     fn asked(&self, open: &OpenQuestion) -> OpenAsked {
@@ -323,6 +326,31 @@ impl Observed {
             _ => String::new(),
         };
         format!("{} {}{detail}", event.ts, event.body.kind())
+    }
+}
+
+fn question_opened_by(event: &TopologyEvent) -> Option<&FrozenQuestion> {
+    let spawned = |spawn: &FrozenSpawn| match &spawn.admission {
+        SpawnAdmission::Runnable => None,
+        SpawnAdmission::HumanRequired { question, .. }
+        | SpawnAdmission::HumanBinding { question, .. } => Some(question),
+    };
+    match &event.body {
+        TopologyEventBody::QuestionRaised { data } => Some(&data.question),
+        TopologyEventBody::AttemptFinished { data } => match &data.settlement {
+            AttemptSettlement::Closed {
+                transition: SettlementTransition::Parked { question },
+                ..
+            } => Some(question),
+            AttemptSettlement::Closed { .. } | AttemptSettlement::Retained { .. } => None,
+        },
+        TopologyEventBody::MergeVerificationUnavailable { data } => match &data.outcome {
+            UnavailableOutcome::Parked { question } => Some(question),
+            UnavailableOutcome::Deferred { .. } => None,
+        },
+        TopologyEventBody::TaskSpawned { data } => spawned(&data.spawn),
+        TopologyEventBody::MergeRejected { data } => spawned(&data.repair),
+        _ => None,
     }
 }
 

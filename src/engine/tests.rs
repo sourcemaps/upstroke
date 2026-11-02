@@ -18088,11 +18088,23 @@ fn a_parked_schema_4_question_is_shown_answered_once_and_ingested_on_resume() {
     assert!(late.to_string().contains("no longer open"), "{late}");
 }
 
-/// Two tasks in flight from one base that both create `shared.txt` with
-/// different contents, so the second candidate's merge conflicts and the queue
-/// spawns a merge-repair task.
+/// Three tasks in flight from one base. The two in slots `k0` and `k1` both
+/// create `shared.txt` with different contents, and the one in `k2` writes a file
+/// of its own: whichever merges first, a later candidate is stale and clean (a
+/// merge verification) and another conflicts (a merge rejection, which spawns a
+/// merge-repair task).
 #[cfg(unix)]
-const CONFLICTING_WORKER: &str = "sleep 1; printf 'written by %s\\n' \"$$\" > shared.txt";
+const THREE_INDEPENDENT_TASKS: &str = "## Implement the widget\n\
+                                       <!-- upstroke: id=t1 depends= paths=widget/** -->\n\
+                                       Make it.\n\n## Implement the gadget\n\
+                                       <!-- upstroke: id=t2 depends= paths=gadget/** -->\n\
+                                       Make that.\n\n## Implement the gizmo\n\
+                                       <!-- upstroke: id=t3 depends= paths=gizmo/** -->\n\
+                                       Make the third.\n";
+
+#[cfg(unix)]
+const CONFLICTING_WORKER: &str = "case \"$(basename \"$PWD\")\" in k2-*) f=own.txt ;; *) f=shared.txt ;; \
+                                  esac; sleep 1; printf 'written by %s\\n' \"$$\" > \"$f\"";
 
 /// P12-W18. `export-decisions` over a schema-4 run with a merge-repair task:
 /// one row per attempt, in today's columns, the repair task's attempts joined to
@@ -18104,8 +18116,8 @@ fn a_schema_4_export_keeps_todays_rows_and_joins_a_repair_task_to_the_registry()
     let (_tree, repo) = temp_engine_repo("topology-export");
     seed(
         &repo,
-        TWO_INDEPENDENT_TASKS,
-        Some("[engine]\nmax_parallel = 2\nmax_merge_repairs = 2\n"),
+        THREE_INDEPENDENT_TASKS,
+        Some("[engine]\nmax_parallel = 3\nmax_merge_repairs = 2\n"),
     );
     let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
         CONFLICTING_WORKER,
@@ -18152,7 +18164,9 @@ fn a_schema_4_export_keeps_todays_rows_and_joins_a_repair_task_to_the_registry()
         .map(|row| row["task_id"].as_str().unwrap_or_default())
         .collect();
     assert!(
-        task_ids.iter().any(|id| *id != "t1" && *id != "t2"),
+        task_ids
+            .iter()
+            .any(|id| *id != "t1" && *id != "t2" && *id != "t3"),
         "a repair task's attempts are rows, joined by its display id: {task_ids:?}"
     );
     let keys: Vec<String> = rows[0]
