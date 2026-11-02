@@ -5728,7 +5728,10 @@ fn the_image_environment_is_read_strictly_from_the_inspection_of_the_recorded_id
             "sha256:0123456789abcdef\u{1f}{\"PATH\":\"/bin\"}\n",
             "not a JSON list",
         ),
-        ("sha256:0123456789abcdef\u{1f}[\"PATH\"]\n", "names no value"),
+        (
+            "sha256:0123456789abcdef\u{1f}[\"PATH\"]\n",
+            "names no value",
+        ),
     ] {
         let error = super::image_environment_of(ID, text).expect_err(why);
         assert!(

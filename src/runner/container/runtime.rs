@@ -262,7 +262,9 @@ pub trait ContainerRuntime: Send + Sync {
     fn image_environment(&self, id: &str) -> Result<Option<Vec<(String, String)>>, RuntimeError> {
         Err(RuntimeError::Failed {
             operation: RuntimeOp::InspectImageById,
-            detail: format!("this container runtime does not report the environment of image `{id}`"),
+            detail: format!(
+                "this container runtime does not report the environment of image `{id}`"
+            ),
         })
     }
 

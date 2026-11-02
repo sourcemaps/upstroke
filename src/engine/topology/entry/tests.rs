@@ -41,10 +41,7 @@ fn the_container_runner_reads_its_base_environment_from_the_recorded_image_id() 
     assert_eq!(
         recorded_image_environment(&runtime, &container_policy(Some(IMAGE_ID)))
             .expect("the recorded image declares a usable environment"),
-        vec![(
-            "PATH".to_owned(),
-            "/usr/local/bin:/usr/bin:/bin".to_owned()
-        )]
+        vec![("PATH".to_owned(), "/usr/local/bin:/usr/bin:/bin".to_owned())]
     );
     assert_eq!(
         runtime.calls(),
@@ -73,7 +70,9 @@ fn an_absent_recorded_image_or_a_failing_runtime_refuses_and_nothing_else_is_ask
     let error = recorded_image_environment(&runtime, &container_policy(Some(IMAGE_ID)))
         .expect_err("the runtime holds no image with the recorded id");
     assert!(
-        error.to_string().contains("no longer holds the recorded image id"),
+        error
+            .to_string()
+            .contains("no longer holds the recorded image id"),
         "{error}"
     );
 

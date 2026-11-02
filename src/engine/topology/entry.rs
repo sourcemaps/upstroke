@@ -24,7 +24,9 @@ use crate::runner::container::DockerCli;
 use crate::runner::container::env::ContainerEnvironment;
 use crate::runner::container::exec::{ContainerRunner, RunIdentity};
 use crate::runner::container::resolve::InspectionRefusal;
-use crate::runner::container::runtime::{ContainerRuntime, ContainerTrace, LockProbe, RuntimeError};
+use crate::runner::container::runtime::{
+    ContainerRuntime, ContainerTrace, LockProbe, RuntimeError,
+};
 use crate::runner::container::view::RoleGitView;
 use crate::runner::host::{HostEnvironment, HostRunner, ManagedRepository, ObjectGraph};
 use crate::topology::events::{
@@ -844,7 +846,10 @@ fn compare_recorded_limits(
     }
 }
 
-fn resumed_slot_limits(config: &config::Config, recorded_width: u32) -> Result<SlotLimits, UpstrokeError> {
+fn resumed_slot_limits(
+    config: &config::Config,
+    recorded_width: u32,
+) -> Result<SlotLimits, UpstrokeError> {
     SlotLimits::new(
         config.explicit_max_per_agent.unwrap_or(recorded_width),
         config.explicit_max_per_pool.unwrap_or(recorded_width),
@@ -855,11 +860,14 @@ fn recorded_image_environment(
     runtime: &dyn ContainerRuntime,
     policy: &RunnerPolicy,
 ) -> Result<Vec<(String, String)>, UpstrokeError> {
-    let image = policy.image.as_ref().ok_or_else(|| UpstrokeError::Refused {
-        message: "the container runner policy records no image identity, so there is no image \
+    let image = policy
+        .image
+        .as_ref()
+        .ok_or_else(|| UpstrokeError::Refused {
+            message: "the container runner policy records no image identity, so there is no image \
                   environment to read"
-            .to_owned(),
-    })?;
+                .to_owned(),
+        })?;
     let environment = runtime
         .image_environment(&image.id)
         .map_err(|error| match error {
