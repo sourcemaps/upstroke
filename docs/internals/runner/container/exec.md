@@ -1437,6 +1437,17 @@ fails, and the invocation was cancelled, not broken
 The invocation's clock starts before the cover, so the deadline the start proof carries is
 the one supervision later enforces.
 
+The deadline is constructed checked (`Instant::checked_add`, K3, regular review 4,
+finding 3; standards §7, MUST NOT panic on configuration). A timeout that puts the deadline
+past every instant the platform's clock can hold is refused as
+`RunnerError::never_started` (`unrepresentable_deadline`), before the cover and so before
+anything is written or launched. Until K3 the deadline was `started + request.timeout`,
+and the configuration accepts such a timeout: `[routing] review = { tier = "frontier",
+timeout_secs = 9223372036854775807 }` passes `config::load` and
+`ReviewPlan::pass_timeout`, and the runner then panicked with "overflow when adding
+duration to instant" (the reviewer's witness). The host runner compares elapsed time with
+its timeout and adds nothing to an instant, so it never had the defect.
+
 ## `fn contain(` › `covered.settle(fate);`
 
 The fate the release established, recorded for the disarm rule before the result is
@@ -1511,6 +1522,14 @@ observation followed by a clean release reported `Gone`; `DockerCli` held
 the fact under the container and its removal reported it, but a runtime that
 does not hold such a fact lost it
 (`an_observation_that_leaves_a_process_unresolved_keeps_the_invocation_unresolved_after_a_clean_release`).
+
+## `fn unrepresentable_deadline(request: &RunnerRequest) -> UpstrokeError {`
+
+The refusal of an invocation whose deadline no instant can hold: it names the invocation
+and the timeout in seconds, and says nothing of it was written or launched. A refusal
+rather than a clamp to the latest representable instant: a timeout configured that long is
+one no supervisor could enforce, and the runner says so rather than run it under a bound
+it did not configure.
 
 ## `fn bounded(bytes: &[u8], limit: usize) -> (String, bool) {`
 

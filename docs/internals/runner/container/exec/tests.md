@@ -2520,3 +2520,16 @@ the mode's invocation through `run_blocking_with` with a cancellation of its
 own, and asserts the premise (the stub recorded the observation), the bound
 and the mode's outcome. Ignored in the default suite; only the witness runs
 it, with the stub first on its `PATH`.
+
+## `fn a_review_timeout_the_configuration_accepts_and_no_deadline_can_hold_is_refused_before_anything_is_written()`
+
+K3, regular review 4, finding 3 (P2, correctness; a MUST deviation from standards §7). The
+reviewer's configuration, `[routing] review = { tier = "frontier", timeout_secs =
+9223372036854775807 }`, through both of the readers that accept it: `config::load`, then
+`review::plan_for` and `ReviewPlan::pass_timeout`, over the settle fixture's plan. The
+premise is asserted, that both accept it. The review request carrying that timeout then
+goes to the runner, under `catch_unwind` so that an unwind fails the test with its own
+message. The runner returns a `NeverStarted` refusal naming the timeout. Nothing was asked
+of the funnel or the runtime (an empty trace), no intent was written and no container
+created. With the unchecked `started + request.timeout` restored, the runner panics with
+"overflow when adding duration to instant" and this test fails.

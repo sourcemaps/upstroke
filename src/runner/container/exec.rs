@@ -1117,7 +1117,9 @@ impl ContainerRunner {
         let never_started = |error| RunnerError::never_started(&request.invocation, error);
         let plan = self.plan(request).map_err(never_started)?;
         let started = Instant::now();
-        let deadline = started + request.timeout;
+        let deadline = started
+            .checked_add(request.timeout)
+            .ok_or_else(|| never_started(unrepresentable_deadline(request)))?;
         let (covered, to_create, to_start) = self
             .reaping
             .cover(
@@ -1210,6 +1212,18 @@ impl ContainerRunner {
             timed_out,
             output_limited: execution.output_limited || stdout_limited || stderr_limited,
         })
+    }
+}
+
+fn unrepresentable_deadline(request: &RunnerRequest) -> UpstrokeError {
+    UpstrokeError::Refused {
+        message: format!(
+            "`{}` was given a timeout of {} s, which puts its deadline past any instant this \
+             platform's clock can hold, so it is refused before anything of it is written or \
+             launched; a timeout configured that long can never be enforced",
+            request.invocation.render(),
+            request.timeout.as_secs()
+        ),
     }
 }
 

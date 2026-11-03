@@ -8401,3 +8401,90 @@ fn stalled_observation_child() {
         }
     }
 }
+
+#[test]
+fn a_review_timeout_the_configuration_accepts_and_no_deadline_can_hold_is_refused_before_anything_is_written()
+ {
+    use crate::error::ProcessFate;
+
+    let fixture = Fixture::new("unrepresentable-deadline", false);
+    let configuration = fixture.root.join("upstroke.toml");
+    std::fs::write(
+        &configuration,
+        "[routing]\nreview = { tier = \"frontier\", timeout_secs = 9223372036854775807 }\n",
+    )
+    .expect("the configuration");
+    let pools = fixture.root.join("pools.toml");
+    std::fs::write(&pools, "# no pools\n").expect("an empty pools file");
+    let mut warnings = Vec::new();
+    let config = crate::config::load(
+        Some(&configuration),
+        &fixture.root,
+        Some(&pools),
+        &mut warnings,
+    )
+    .expect("the configuration accepts the review timeout");
+    let plan = crate::engine::topology::settle::tests::plan();
+    let chains: Vec<_> = plan
+        .tasks
+        .iter()
+        .map(|task| crate::route::resolve(task, &config))
+        .collect();
+    let timeout = crate::review::plan_for(
+        &plan,
+        &chains,
+        &config,
+        |agent| agent == "claude-code",
+        &mut warnings,
+    )
+    .expect("the review plan resolves")
+    .pass_timeout()
+    .expect("and accepts the timeout");
+    assert_eq!(
+        timeout,
+        Duration::from_secs(9_223_372_036_854_775_807),
+        "the premise: both readers accept the configured timeout"
+    );
+
+    let request = review_request(
+        ShellKind::Sh.spec("exit 0"),
+        fixture.task_a.clone(),
+        AgentId::new("claude-code"),
+        timeout,
+        InvocationId::attempt(
+            TaskKey(0),
+            GenerationId(0),
+            AttemptNumber(1),
+            AttemptRole::ReviewPass(0),
+            0,
+        ),
+    );
+    let runner = fixture.runner();
+    let Ok(ran) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        runner.run_blocking(&request)
+    })) else {
+        panic!("the runner unwound on a review timeout the configuration accepted");
+    };
+    let error = ran.expect_err("an invocation whose deadline no instant can hold is refused");
+    assert_eq!(error.fate, ProcessFate::NeverStarted, "{error}");
+    assert!(!error.is_cancelled(), "{error}");
+    assert!(
+        error.to_string().contains("9223372036854775807 s"),
+        "the refusal names the timeout: {error}"
+    );
+    assert_eq!(
+        fixture.trace.rendered(),
+        Vec::<String>::new(),
+        "nothing was asked of the funnel or the runtime"
+    );
+    assert!(
+        list_intents(&fixture.private_root)
+            .expect("the container namespace reads")
+            .is_empty(),
+        "no intent was written"
+    );
+    assert!(
+        fixture.runtime.fake().container_names().is_empty(),
+        "no container was created"
+    );
+}
