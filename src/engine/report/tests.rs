@@ -232,3 +232,158 @@ fn open_questions_are_pointed_at_where_their_run_keeps_them() {
         "{in_log}"
     );
 }
+
+#[test]
+fn a_schema_4_report_keeps_each_interrupted_attempt_with_its_own_start_and_unknown_spend() {
+    use crate::engine::topology::settle::tests::{
+        ALEPH, BET, binding, ev, label, record_failing, started,
+    };
+    use crate::topology::events::{
+        AttemptFinished4, AttemptInterrupted4, AttemptNumber, AttemptSettlement, AttemptStarted4,
+        GenerationId, LeaseDisposition, SettlementTransition, TopologyEventBody,
+    };
+    use crate::topology::registry::TaskKey;
+
+    let fold = started();
+    let start = |key: TaskKey, generation: u32, model: &str| {
+        let mut bound = binding(&fold, key, 0);
+        bound.model = model.to_owned();
+        ev(TopologyEventBody::AttemptStarted {
+            data: AttemptStarted4 {
+                key,
+                generation: GenerationId(generation),
+                attempt: AttemptNumber(1),
+                rung: 0,
+                binding: bound,
+                pool: Some(format!("{}-pool", label(key))),
+                resume_session: None,
+                materialization_observed: None,
+            },
+        })
+    };
+    let interrupted = |key: TaskKey, generation: u32| {
+        ev(TopologyEventBody::AttemptInterrupted {
+            data: AttemptInterrupted4 {
+                key,
+                generation: GenerationId(generation),
+                attempt: AttemptNumber(1),
+                lease: LeaseDisposition::PredictedReleased,
+                detail: format!("{} was in flight when its coordinator died", label(key)),
+            },
+        })
+    };
+    let finished = ev(TopologyEventBody::AttemptFinished {
+        data: Box::new(AttemptFinished4 {
+            key: ALEPH,
+            generation: GenerationId(1),
+            attempt: AttemptNumber(1),
+            record: Box::new(record_failing(
+                1,
+                Some(0.5),
+                Some((FailureKind::GateFailed, FailureOrigin::Worker)),
+            )),
+            settlement: AttemptSettlement::Closed {
+                transition: SettlementTransition::Retry,
+                lease: LeaseDisposition::PredictedReleased,
+            },
+        }),
+    });
+    let events = vec![
+        start(ALEPH, 0, "aleph-first"),
+        start(BET, 0, "bet-first"),
+        interrupted(BET, 0),
+        interrupted(ALEPH, 0),
+        start(ALEPH, 1, "aleph-second"),
+        finished,
+    ];
+
+    let report = RunReport::from_topology(&fold, &events, Vec::new());
+    let row = |key: TaskKey| {
+        report
+            .tasks
+            .iter()
+            .find(|task| task.id == label(key))
+            .unwrap_or_else(|| panic!("a row for {}: {report:#?}", label(key)))
+    };
+    let shape = |record: &AttemptRecord| {
+        (
+            record.model.clone(),
+            record.pool.clone(),
+            record.cost_usd,
+            record.failure.as_ref().map(|failure| failure.kind),
+        )
+    };
+    assert_eq!(
+        row(ALEPH).attempts.iter().map(shape).collect::<Vec<_>>(),
+        [
+            (
+                "aleph-first".to_owned(),
+                Some("aleph-pool".to_owned()),
+                None,
+                Some(FailureKind::Interrupted)
+            ),
+            (
+                "aleph-Mid-model".to_owned(),
+                None,
+                Some(0.5),
+                Some(FailureKind::GateFailed)
+            ),
+        ],
+        "the interrupted attempt is kept once, in log order, with its own start's model and pool"
+    );
+    assert_eq!(
+        row(BET).attempts.iter().map(shape).collect::<Vec<_>>(),
+        [(
+            "bet-first".to_owned(),
+            Some("bet-pool".to_owned()),
+            None,
+            Some(FailureKind::Interrupted)
+        )],
+        "each task keeps its own interrupted attempt"
+    );
+    assert!(
+        row(ALEPH).cost_incomplete() && row(BET).cost_incomplete(),
+        "{report:#?}"
+    );
+    assert!(
+        (report.total_cost_usd - 0.5).abs() < f64::EPSILON,
+        "no price is invented for an interrupted attempt: {}",
+        report.total_cost_usd
+    );
+    assert!(report.total_is_floor(), "{report:#?}");
+    assert!(
+        report.warnings.is_empty(),
+        "every interrupted attempt has its start: {:?}",
+        report.warnings
+    );
+    assert_eq!(
+        report
+            .pool_drain
+            .iter()
+            .map(|row| (row.pool.as_str(), row.attempts, row.cost_usd, row.unpriced))
+            .collect::<Vec<_>>(),
+        [("aleph-pool", 1, None, 1), ("bet-pool", 1, None, 1)],
+        "each interrupted attempt drains its pool by an unpriced attempt"
+    );
+
+    let orphan = RunReport::from_topology(&fold, &[interrupted(BET, 3)], Vec::new());
+    let kept = orphan
+        .tasks
+        .iter()
+        .find(|task| task.id == label(BET))
+        .map(|task| task.attempts.as_slice());
+    assert!(
+        matches!(kept, Some([record]) if record.model.is_empty() && record.cost_usd.is_none()),
+        "an interrupted settlement with no start is still kept, naming nothing it lacks: \
+         {orphan:#?}"
+    );
+    assert!(orphan.total_is_floor(), "{orphan:#?}");
+    assert!(
+        orphan
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("without recording its start")),
+        "{:?}",
+        orphan.warnings
+    );
+}

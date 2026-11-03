@@ -251,21 +251,46 @@ stays the authority; this is the command's summary of the same run.
 
 - Tasks are the registry's entries, original and repair alike, in key order.
   A merged task is committed at the `merged_sha` of the `task_merged` that
-  satisfied it; a failed one carries its last attempt's failure; a task an
-  open question names is parked on it; anything else is queued, or skipped
-  when the run halted or stopped at a budget.
+  satisfied it; a failed one carries the failure of its last attempt that was
+  not interrupted (an interrupted attempt returns its task to pending and never
+  fails it, so a failed task's reason is read past one); a task an open
+  question names is parked on it; anything else is queued, or skipped when the
+  run halted or stopped at a budget.
 - Each task's attempts are the records the log holds for it, in log order:
-  `attempt_finished` for an attempt that did not succeed, and
-  `candidate_prepared` for one that did. The fold allows no other successful
-  settlement (`check_attempt`), and `select::Spend::replay` counts the same two
-  events. So the trail, the model, the duration, the worker cost and the
-  session are the legacy report's derivations over the same record type, and
-  the review cost, the review models and the unknown-cost flag start from them.
+  `attempt_finished` for an attempt that did not succeed, `candidate_prepared`
+  for one that did, and `attempt_interrupted` for one whose coordinator did not
+  see it end. The fold allows no other successful settlement (`check_attempt`),
+  and `select::Spend::replay` counts the same first two events. So the trail,
+  the model, the duration, the worker cost and the session are the legacy
+  report's derivations over the same record type, and the review cost, the
+  review models and the unknown-cost flag start from them.
 
   Until brief 3's S9 witness this read `attempt_finished` alone. A committed
   task then showed no model, duration or cost, and the total left out every
   successful attempt: the CLI's case F printed `total: $0.0000` beside a
   budget stop that recorded $0.02.
+- An interrupted attempt is recorded with unknown spend (DESIGN §15, INV-14).
+  `attempt_interrupted` carries no attempt record, so `interrupted_record`
+  builds one from the `attempt_started` of the same identity: task key,
+  generation and attempt number, which is how the fold names an attempt in
+  flight (`check_attempt_interrupted`) and how `export` pairs a start with its
+  settlement. The fold admits `attempt_interrupted` only for the identity in
+  flight, so an interrupted attempt is never also finished or prepared and is
+  counted once. Its record has no cost, so its task's `cost_incomplete`, and
+  `RunReport::total_is_floor`, say the total is a floor, and its pool's drain
+  row counts it as unpriced; nothing is added to the total and no price is
+  invented, so the total still equals `Spend::replay`'s and no mismatch
+  warning appears. An interrupted settlement whose start the log does not hold
+  (a valid log has none) is still kept, naming no tier or model, and a warning
+  says so.
+
+  Until J12 (regular review 3, finding 1) this read `attempt_finished` and
+  `candidate_prepared` alone. After a coordinator was killed mid-attempt and
+  the run resumed, the report held only the attempts that completed, with no
+  warning, and printed its known spend, `$0.04`, as the whole total.
+- Every clone here copies a value the borrowed log or fold holds into the
+  owned report: the report is an owned snapshot, returned to a caller that
+  outlives neither input's borrow (§6).
 - Merge verifications charge review passes that belong to no attempt record.
   `select::IntegrationReviews::replay` collects them from `merge_prepared`'s
   verification, a `merge_rejected` whose disposition is `CodeRejected`,
@@ -296,6 +321,18 @@ stays the authority; this is the command's summary of the same run.
 - `halted_at` and `budget_stop` are set only as the fold's own outcome says,
   so [`RunReport::outcome`] agrees with it; the entry compares the two and
   warns if they ever disagree.
+
+## `fn interrupted_record(`
+
+The attempt record of an interrupted attempt, from its `attempt_interrupted`
+and, when the log holds it, the `attempt_started` of the same identity. What
+the start recorded is kept: the attempt number, the tier and model it was bound
+to, its pool, and whether it resumed a session. What nobody observed is not
+invented: no cost, no usage, no reviews and no session of its own, and a zero
+duration, as the sequential engine's interrupted record has. Its failure is
+`Interrupted`, from the worker, and its reason is the event's own detail, which
+says why the attempt was settled interrupted (a coordinator that did not
+survive it, or a halt that cancelled it).
 
 ## `pub(super) struct ReportHeader<'a> {`
 

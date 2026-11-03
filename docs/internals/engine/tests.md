@@ -3413,3 +3413,22 @@ now.
 ## `fn relative_common_dir_run_helper() {`
 
 The child of the test above.
+
+## `fn signal_mid_attempt(`
+
+J12 (regular review 3, finding 1): after its order assertions, the driver
+asserts that the resumed run's report says its total is a floor
+(`RunReport::total_is_floor`), and that it keeps exactly one interrupted attempt,
+whose cost is unknown and whose model is the one recorded by the
+`attempt_started` with the same task key, generation and attempt as the
+`attempt_interrupted` the resume appended. At the reviewed head the report held
+only the attempts that completed, with no warning, and printed the run's known
+spend, `$0.04`, as its whole total.
+
+## `fn settled_attempts(events: &[serde_json::Value]) -> usize {`
+
+How many attempts the log settles: `attempt_finished` for each one that did not
+succeed, `candidate_prepared` for each one that did, and `attempt_interrupted`
+for each one whose coordinator did not see it end. Since J12 the schema-4 report
+keeps the last kind too, so the tests that compare the report's attempt rows
+with this count stay a comparison with every settlement.

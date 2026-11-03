@@ -18587,6 +18587,51 @@ fn signal_mid_attempt(
         "SIG{signal}: the interrupted attempt settled (recovery's step C), then \
          run_resumed (its step G), then the end: {appended:?}"
     );
+    assert!(
+        report.total_is_floor(),
+        "SIG{signal}: the interrupted attempt's unknown spend makes the total a floor: \
+         {report:#?}"
+    );
+    let interrupted: Vec<&events::AttemptRecord> = report
+        .tasks
+        .iter()
+        .flat_map(|task| task.attempts.iter())
+        .filter(|record| {
+            record
+                .failure
+                .as_ref()
+                .is_some_and(|failure| failure.kind == FailureKind::Interrupted)
+        })
+        .collect();
+    let [kept] = interrupted.as_slice() else {
+        panic!("SIG{signal}: the report keeps the one interrupted attempt: {report:#?}");
+    };
+    let logged: Vec<serde_json::Value> = resumed
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("an event"))
+        .collect();
+    let identity = |event: &serde_json::Value| {
+        ["key", "generation", "attempt"].map(|field| event["data"][field].as_u64())
+    };
+    let settled = logged
+        .iter()
+        .find(|event| event["event"] == "attempt_interrupted")
+        .expect("the interrupted settlement");
+    let started = logged
+        .iter()
+        .find(|event| event["event"] == "attempt_started" && identity(event) == identity(settled))
+        .expect("the start of the attempt the resume settled interrupted");
+    assert_eq!(
+        (kept.cost_usd, kept.model.as_str()),
+        (
+            None,
+            started["data"]["binding"]["model"]
+                .as_str()
+                .unwrap_or_default()
+        ),
+        "SIG{signal}: its spend is unknown and its model is the one its start recorded: \
+         {kept:#?}"
+    );
 }
 
 /// J8, PR12 regression review #5: the signal test owns its helper from the spawn, so neither a
@@ -19469,13 +19514,13 @@ fn log_events(repo: &Path, run_id: &str) -> Vec<serde_json::Value> {
         .collect()
 }
 
-/// How many attempts the log settles: `attempt_finished` for each one that did
-/// not succeed, `candidate_prepared` for each one that did.
 fn settled_attempts(events: &[serde_json::Value]) -> usize {
     events
         .iter()
         .filter(|event| {
-            event["event"] == "attempt_finished" || event["event"] == "candidate_prepared"
+            event["event"] == "attempt_finished"
+                || event["event"] == "candidate_prepared"
+                || event["event"] == "attempt_interrupted"
         })
         .count()
 }

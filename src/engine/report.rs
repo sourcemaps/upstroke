@@ -13,10 +13,10 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::capacity;
-use crate::events::{self, AttemptRecord, Progress, RunState, TaskState};
+use crate::events::{self, AttemptRecord, FailureRecord, Progress, RunState, TaskState};
 use crate::interaction::QuestionRecord;
 use crate::ir::{Plan, Question, Task, TaskId};
-use crate::ladder::FailureKind;
+use crate::ladder::{FailureKind, FailureOrigin};
 use crate::util;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -209,12 +209,16 @@ impl RunReport {
         mut warnings: Vec<String>,
     ) -> Self {
         use crate::events::RunOutcome as Finished;
-        use crate::topology::events::TopologyEventBody;
+        use crate::topology::events::{
+            AttemptNumber, AttemptStarted4, GenerationId, TopologyEventBody,
+        };
         use crate::topology::fold::TaskState as Topology;
         use crate::topology::registry::TaskKey;
 
         let mut merged: BTreeMap<TaskKey, String> = BTreeMap::new();
         let mut records: BTreeMap<TaskKey, Vec<AttemptRecord>> = BTreeMap::new();
+        let mut starts: BTreeMap<(TaskKey, GenerationId, AttemptNumber), &AttemptStarted4> =
+            BTreeMap::new();
         let mut exceeded = None;
         for event in events {
             match &event.body {
@@ -223,11 +227,31 @@ impl RunReport {
                         merged.insert(*key, data.merged_sha.0.clone());
                     }
                 }
+                TopologyEventBody::AttemptStarted { data } => {
+                    starts.insert((data.key, data.generation, data.attempt), data);
+                }
                 TopologyEventBody::AttemptFinished { data } => {
                     records
                         .entry(data.key)
                         .or_default()
                         .push(data.record.as_ref().clone());
+                }
+                TopologyEventBody::AttemptInterrupted { data } => {
+                    let started = starts
+                        .get(&(data.key, data.generation, data.attempt))
+                        .copied();
+                    if started.is_none() {
+                        warnings.push(format!(
+                            "the log settles attempt {} of task key {} (generation {}) \
+                             interrupted without recording its start, so its row names no tier \
+                             or model; its spend is unknown and this report's total is a floor",
+                            data.attempt.0, data.key.0, data.generation.0
+                        ));
+                    }
+                    records
+                        .entry(data.key)
+                        .or_default()
+                        .push(interrupted_record(data, started));
                 }
                 TopologyEventBody::CandidatePrepared { data } => {
                     records
@@ -275,7 +299,16 @@ impl RunReport {
                     sha: merged.get(&entry.key).cloned().unwrap_or_default(),
                 },
                 (Topology::Failed, _) => {
-                    let failure = attempts.last().and_then(|record| record.failure.as_ref());
+                    let failure = attempts
+                        .iter()
+                        .rev()
+                        .find(|record| {
+                            record
+                                .failure
+                                .as_ref()
+                                .is_none_or(|failure| failure.kind != FailureKind::Interrupted)
+                        })
+                        .and_then(|record| record.failure.as_ref());
                     TaskRunStatus::Failed {
                         kind: failure.map_or(FailureKind::AgentError, |failure| failure.kind),
                         reason: failure.map_or_else(
@@ -436,6 +469,30 @@ impl RunReport {
             interrupted: outcome.is_none(),
             questions_in_log: true,
         }
+    }
+}
+
+fn interrupted_record(
+    interrupted: &crate::topology::events::AttemptInterrupted4,
+    started: Option<&crate::topology::events::AttemptStarted4>,
+) -> AttemptRecord {
+    AttemptRecord {
+        attempt: interrupted.attempt.0,
+        tier: started.map_or_else(String::new, |started| started.binding.tier.to_string()),
+        model: started.map_or_else(String::new, |started| started.binding.model.clone()),
+        pool: started.and_then(|started| started.pool.clone()),
+        resumed: started.is_some_and(|started| started.resume_session.is_some()),
+        duration: Duration::ZERO,
+        cost_usd: None,
+        reviews: Vec::new(),
+        session_id: None,
+        usage: None,
+        failure: Some(FailureRecord {
+            kind: FailureKind::Interrupted,
+            origin: FailureOrigin::Worker,
+            reason: interrupted.detail.clone(),
+            detail: None,
+        }),
     }
 }
 
