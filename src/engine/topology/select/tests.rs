@@ -1643,12 +1643,23 @@ fn the_integration_ledger_reads_a_charged_record_as_a_lower_bound() {
 /// each attributed to the verified candidate's task, and an unpaired terminal attributed to no
 /// task. Each pass appears once, and the attributed and unattributed sums are exactly what the
 /// spend ledger replays, per task and for the run.
+///
+/// The passes draw on one named pool, and three of them report no cost. The report itself is
+/// then read, as `RunReport::from_topology` projects it from the same log: each task's row
+/// carries its own known amounts once and says when one of its passes reported none, the
+/// pool's row counts every pass once with its known amounts summed and its unpriced passes
+/// counted, and the total is every known amount once, the unattributed pass's included, so the
+/// report's only warning is that its total is a floor.
 #[test]
 fn integration_reviews_attribute_every_pass_once_as_the_spend_ledger_does() {
+    let pooled = |cost: Option<f64>| crate::events::ReviewRecord {
+        pool: Some("reviewer-pool".to_owned()),
+        ..review_costing(cost)
+    };
     let verification = |costs: [Option<f64>; 2]| crate::topology::events::VerificationRecord {
         verdict: crate::topology::events::VerificationVerdict::Passed,
         gates_passed: true,
-        reviews: costs.into_iter().map(review_costing).collect(),
+        reviews: costs.into_iter().map(pooled).collect(),
         detail: "judged".to_owned(),
     };
     let prepared = ev(TopologyEventBody::MergePrepared {
@@ -1717,14 +1728,15 @@ fn integration_reviews_attribute_every_pass_once_as_the_spend_ledger_does() {
         prepared,
         rejection,
         verification_started_at(3, GIMEL),
-        unavailable(3, vec![review_costing(Some(0.5))]),
+        unavailable(3, vec![pooled(Some(0.5))]),
         verification_started_at(4, ALEPH),
-        verification_charged(4, vec![review_costing(Some(0.25))]),
-        unavailable(9, vec![review_costing(Some(0.125)), review_costing(None)]),
+        verification_charged(4, vec![pooled(Some(0.25))]),
+        unavailable(9, vec![pooled(Some(0.125)), pooled(None)]),
     ];
 
     let integration = IntegrationReviews::replay(&events);
     let spend = Spend::replay(&events);
+    let report = crate::engine::RunReport::from_topology(&started(), &events, Vec::new());
     let priced = |passes: &[crate::events::ReviewRecord]| -> f64 {
         passes.iter().filter_map(|review| review.cost_usd).sum()
     };
@@ -1743,6 +1755,16 @@ fn integration_reviews_attribute_every_pass_once_as_the_spend_ledger_does() {
             unpriced,
             "{key:?}: an unpriced pass is kept, so the report can say its cost is unknown"
         );
+        let row = report
+            .tasks
+            .iter()
+            .find(|task| task.id == label(key))
+            .expect("the report has a row for every registered task");
+        assert_eq!(
+            (row.review_cost_usd, row.review_cost_incomplete),
+            (Some(expected), unpriced > 0),
+            "{key:?}: the task's row has its known amounts once, and says whether one is unknown"
+        );
     }
     assert_eq!(
         integration.unattributed().len(),
@@ -1755,5 +1777,33 @@ fn integration_reviews_attribute_every_pass_once_as_the_spend_ledger_does() {
         (total - spend.run_usd()).abs() < f64::EPSILON,
         "the run's passes are what the ledger replays: {total} against {}",
         spend.run_usd()
+    );
+
+    assert_eq!(
+        report.pool_drain,
+        [crate::engine::PoolDrainRow {
+            pool: "reviewer-pool".to_owned(),
+            attempts: 8,
+            cost_usd: Some(4.375),
+            unpriced: 3,
+        }],
+        "the named pool counts every pass once, its known amounts summed and its unpriced counted"
+    );
+    assert!(
+        (report.total_cost_usd - 4.375).abs() < f64::EPSILON,
+        "the report's total is every known amount once, the unattributed pass's included: {}",
+        report.total_cost_usd
+    );
+    assert!(
+        report.total_is_floor(),
+        "a task's pass that reported no cost makes the report's total a floor"
+    );
+    assert_eq!(
+        report.warnings,
+        [
+            "an integration review pass the log attributes to no task reported no cost, so this \
+             report's total is a floor"
+        ],
+        "the unattributed pass's missing cost is said, and the total is the ledger's: no mismatch"
     );
 }
