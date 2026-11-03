@@ -2582,9 +2582,18 @@ credential_volumes = { claude-code = "creds-cc" }
     #[test]
     fn the_legacy_refusal_is_about_the_kind_and_about_nothing_else() {
         for (limits, expected) in [
-            (EngineLimits::Fresh, "is being created by the schema-1..3 engine"),
-            (EngineLimits::SequentialResume, "keeps the boundary it started with"),
-            (EngineLimits::SequentialResumeWithRecordedGates, "keeps the boundary it started with"),
+            (
+                EngineLimits::Fresh,
+                "is being created by the schema-1..3 engine",
+            ),
+            (
+                EngineLimits::SequentialResume,
+                "keeps the boundary it started with",
+            ),
+            (
+                EngineLimits::SequentialResumeWithRecordedGates,
+                "keeps the boundary it started with",
+            ),
         ] {
             let container = RunnerSelection {
                 kind: RunnerKind::Container,

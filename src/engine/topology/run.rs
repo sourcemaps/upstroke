@@ -13,8 +13,8 @@ use crate::topology::fold::QuestionOrigin;
 use crate::events::AttemptRecord;
 use crate::interaction::Sleeper;
 use crate::topology::events::{
-    AttemptNumber, AttemptSettlement, CandidateLeaseEffect, CandidateRef, CommitSha, FrozenQuestion,
-    GenerationCloseReason, GenerationId, InfrastructureKind, Materialization,
+    AttemptNumber, AttemptSettlement, CandidateLeaseEffect, CandidateRef, CommitSha,
+    FrozenQuestion, GenerationCloseReason, GenerationId, InfrastructureKind, Materialization,
     MergeVerificationCharged, QuestionRaised4, RunStarted4, SequenceId, SessionId,
     SettlementTransition, TopologyEvent,
 };
@@ -2878,9 +2878,8 @@ fn escalated_onto(settlement: &AttemptSettlement) -> Option<u32> {
 /// Whether the run's reported spend is a floor rather than a total: an attempt or a review it
 /// records reported no cost (§13), as the sequential engine's `unpriced_attempts` counts them.
 fn spend_is_a_floor(events: &[TopologyEvent]) -> bool {
-    let unpriced = |record: &AttemptRecord| {
-        record.cost_usd.is_none() || record.review_cost_incomplete()
-    };
+    let unpriced =
+        |record: &AttemptRecord| record.cost_usd.is_none() || record.review_cost_incomplete();
     let attempts = events.iter().any(|event| match &event.body {
         TopologyEventBody::AttemptFinished { data } => unpriced(&data.record),
         TopologyEventBody::CandidatePrepared { data } => unpriced(&data.attempt),

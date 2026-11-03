@@ -381,7 +381,10 @@ impl RunReport {
 
         let unattributed = integration.unattributed();
         let total_cost_usd = total_of(&tasks)
-            + unattributed.iter().filter_map(|review| review.cost_usd).sum::<f64>();
+            + unattributed
+                .iter()
+                .filter_map(|review| review.cost_usd)
+                .sum::<f64>();
         if unattributed.iter().any(|review| review.cost_usd.is_none()) {
             warnings.push(
                 "an integration review pass the log attributes to no task reported no cost, so \

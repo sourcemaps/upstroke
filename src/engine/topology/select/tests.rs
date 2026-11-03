@@ -1751,7 +1751,10 @@ fn integration_reviews_attribute_every_pass_once_as_the_spend_ledger_does() {
             "{key:?}: the task's passes are what the ledger charges it"
         );
         assert_eq!(
-            passes.iter().filter(|review| review.cost_usd.is_none()).count(),
+            passes
+                .iter()
+                .filter(|review| review.cost_usd.is_none())
+                .count(),
             unpriced,
             "{key:?}: an unpriced pass is kept, so the report can say its cost is unknown"
         );

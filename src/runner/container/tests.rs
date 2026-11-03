@@ -1106,10 +1106,9 @@ fn the_attached_starts_observation_ends_at_its_deadline_and_on_its_cancellation(
     .expect("the stub");
     crate::workspace_manager::fixture::set_mode(&stub, 0o755);
     let inherited = std::env::var_os("PATH").unwrap_or_default();
-    let path = std::env::join_paths(
-        std::iter::once(bin.clone()).chain(std::env::split_paths(&inherited)),
-    )
-    .expect("a PATH with the stub first");
+    let path =
+        std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(&inherited)))
+            .expect("a PATH with the stub first");
     for mode in ["deadline", "cancel"] {
         let began = Instant::now();
         let status = crate::workspace_manager::fixture::run_kill_child_within(

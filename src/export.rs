@@ -149,10 +149,11 @@ pub fn load(repo_root: &Path, wanted: &str) -> Result<Loaded, UpstrokeError> {
             EventBody::RunStarted { data } => Some((event, data)),
             _ => None,
         });
-        let (started_event, started) = run_starts.next().ok_or_else(|| UpstrokeError::EventLog {
-            path: events_path.clone(),
-            message: "no run_started event".to_owned(),
-        })?;
+        let (started_event, started) =
+            run_starts.next().ok_or_else(|| UpstrokeError::EventLog {
+                path: events_path.clone(),
+                message: "no run_started event".to_owned(),
+            })?;
         if run_starts.next().is_some() {
             return invalid(&events_path, "duplicate run_started event".to_owned());
         }

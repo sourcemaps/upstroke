@@ -1198,12 +1198,10 @@ impl DockerCli {
                 detail,
             }
         })?;
-        let waited = self.await_attached_start(
-            name,
-            covered.deadline(),
-            covered.cancellation(),
-            || client.has_ended(),
-        );
+        let waited =
+            self.await_attached_start(name, covered.deadline(), covered.cancellation(), || {
+                client.has_ended()
+            });
         let reason = match waited {
             Ok(()) => {
                 self.own_client(name, client);

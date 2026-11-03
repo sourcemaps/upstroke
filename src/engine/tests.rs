@@ -20535,7 +20535,11 @@ fn a_schema_4_report_counts_every_integration_review_once() {
         "the report's total {} is the ledger's {ledger}",
         report.total_cost_usd
     );
-    let tasks: f64 = report.tasks.iter().filter_map(TaskReport::total_cost_usd).sum();
+    let tasks: f64 = report
+        .tasks
+        .iter()
+        .filter_map(TaskReport::total_cost_usd)
+        .sum();
     assert!(
         (tasks - ledger).abs() < 1e-9,
         "the tasks' own totals {tasks} add up to the ledger's {ledger}"
@@ -20862,7 +20866,9 @@ fn a_schema_4_spend_approval_parks_only_its_own_task() {
             "{}\n## Two\n<!-- upstroke: id=t2 kind=implement depends= -->\nMake it.\n",
             escalating_plan()
         ),
-        Some(&format!("{SPEND_APPROVAL_CONFIG}\n[engine]\nmax_parallel = 2\n")),
+        Some(&format!(
+            "{SPEND_APPROVAL_CONFIG}\n[engine]\nmax_parallel = 2\n"
+        )),
     );
     let stub = std::sync::Arc::new(ObservedStub::new(0));
     let source = SharedObserved(std::sync::Arc::clone(&stub));
@@ -20955,7 +20961,9 @@ fn a_schema_4_answer_in_words_reaches_the_next_worker_and_its_reviewer() {
             .expect("a resumed worker");
         assert!(
             worker.prompt.contains(UNIQUE_ANSWER)
-                && worker.prompt.contains("This is an instruction from a person"),
+                && worker
+                    .prompt
+                    .contains("This is an instruction from a person"),
             "shared {shared}: the worker is told:\n{}",
             worker.prompt
         );
