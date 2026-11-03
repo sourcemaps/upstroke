@@ -652,6 +652,20 @@ pub fn recheck_recorded_source(mount: &RecordedMount) -> Result<(), String> {
     Ok(())
 }
 
+/// Every recorded mount of `record` still names the object the run recorded (DESIGN §26).
+///
+/// Read-only: it resolves and identifies each source and changes nothing. So recovery asks it
+/// before any recovery effect, and every rebuild of the runner asks it again.
+pub fn recheck_recorded_mounts(record: &RunnerPolicy) -> Result<(), InspectionRefusal> {
+    for mount in &record.mounts {
+        recheck_recorded_source(mount).map_err(|reason| InspectionRefusal::MountSourceMoved {
+            mount: mount_label(&mount.source, &mount.target),
+            reason,
+        })?;
+    }
+    Ok(())
+}
+
 pub fn resolve_container(
     runtime: &dyn ContainerRuntime,
     selection: &RunnerSelection,
@@ -740,12 +754,7 @@ pub fn rebuild_by_inspection(
         .ok_or(InspectionRefusal::RecordIncomplete(
             RunnerRecordDefect::ContainerWithoutImage,
         ))?;
-    for mount in &record.mounts {
-        recheck_recorded_source(mount).map_err(|reason| InspectionRefusal::MountSourceMoved {
-            mount: mount_label(&mount.source, &mount.target),
-            reason,
-        })?;
-    }
+    recheck_recorded_mounts(record)?;
 
     runtime.probe().map_err(InspectionRefusal::from_runtime)?;
     if runtime

@@ -133,6 +133,8 @@ struct Damage {
     /// Every task's chain is the one Small rung: a merge repair's Mid floor
     /// then intersects it empty, and the repair is admitted `HumanBinding`.
     small_only: bool,
+    /// The mounts the container runner records, in both records.
+    recorded_mounts: Vec<crate::topology::events::RecordedMount>,
 }
 
 impl Fixture {
@@ -195,11 +197,12 @@ impl Fixture {
             .locator
             .clone()
             .unwrap_or_else(|| private_dir.display().to_string());
-        let runner = if damage.host_runner {
+        let mut runner = if damage.host_runner {
             host_runner()
         } else {
             container_runner()
         };
+        runner.mounts.clone_from(&damage.recorded_mounts);
         let started = run_started(&plan, &recorded_locator, runner, &base_sha, &damage);
 
         let marker = CreatingMarker {
@@ -26347,4 +26350,125 @@ fn t_pres_9_a_registration_repaired_by_the_operator_is_reclaimed_with_what_it_ho
     let (_, handle) = f_resume(&fixture).expect("a whole registration is reclaimed");
     drop(handle);
     assert!(!worktree.exists() && !f_has_intent(&fixture, &slot));
+}
+
+/// A mount source recorded as a fresh run records one: resolved and identified by the
+/// production `resolve_mounts`, in a world of its own outside the fixture's repository and
+/// private root.
+struct MountSource {
+    _tree: crate::rundir::scratch_tree::ScratchTree,
+    root: PathBuf,
+    source: PathBuf,
+    recorded: Vec<crate::topology::events::RecordedMount>,
+}
+
+fn mount_source(tag: &str) -> MountSource {
+    use crate::runner::container::resolve::{MountContext, resolve_mounts};
+
+    let tree = fixture_tree(tag);
+    let root = std::fs::canonicalize(tree.path()).expect("the mount world canonicalizes");
+    let repo = root.join("repo");
+    mkdir(&repo);
+    mkdir(&repo.join(".git"));
+    let private = root.join("private");
+    mkdir(&private);
+    let source = root.join("shared");
+    mkdir(&source);
+    let context = MountContext::bind_with(&repo, &private, &[])
+        .expect("the mount world binds a mount context");
+    let recorded = resolve_mounts(
+        &[crate::config::RunnerMount {
+            source: source.clone(),
+            target: "/data".to_owned(),
+            read_only: true,
+        }],
+        &context,
+    )
+    .expect("the source is recorded as a fresh run records it");
+    MountSource {
+        _tree: tree,
+        root,
+        source,
+        recorded,
+    }
+}
+
+/// J5, `PR12-MOVED-MOUNT-REFUSED-AFTER-RECOVERY-EFFECTS`. DESIGN §26 refuses a missing or
+/// rebound recorded mount source before any recovery. At the reviewed head the refusal came
+/// from the runner's rebuild, after the stable-prefix barrier had truncated the log's torn
+/// tail and the census had reclaimed the stale marker (1924 -> 1910 bytes, `RemoveMarker`).
+/// Each case leaves a torn tail and the reclaimable marker in place, and the refusal leaves
+/// both exactly as they were.
+fn a_moved_recorded_mount_refuses_before_recovery(
+    tag: &str,
+    moved: fn(&MountSource),
+    expected: &str,
+) {
+    let mounted = mount_source(&format!("{tag}-source"));
+    let fixture = Fixture::build(
+        tag,
+        Damage {
+            recorded_mounts: mounted.recorded.clone(),
+            ..Damage::default()
+        },
+    );
+    moved(&mounted);
+    let mut torn = fixture.log_bytes();
+    torn.extend_from_slice(b"{\"event\":\"torn");
+    crate::workspace_manager::fixture::write_file(&fixture.log(), &torn);
+    let marker = fixture.public().join(rundir::MARKER);
+    let marker_before = std::fs::read(&marker).expect("the reclaimable marker is in place");
+    let harness = harness();
+    let runtime = runtime_holding_the_record();
+    let certifies = AlwaysCertifies;
+    let given = Given::healthy(&fixture, &runtime, &certifies);
+
+    let (outcome, _) = resume(&fixture, &harness, &given);
+
+    let refused = message(&outcome.expect_err("a moved recorded mount refuses the resume"));
+    assert!(
+        refused.contains("cannot be re-established") && refused.contains(expected),
+        "the refusal names the moved source: {refused}"
+    );
+    assert_eq!(
+        fixture.log_bytes(),
+        torn,
+        "the log, its torn tail included, is as it was"
+    );
+    assert_eq!(
+        std::fs::read(&marker).ok(),
+        Some(marker_before),
+        "the reclaimable marker is still there"
+    );
+    assert!(
+        first_observation(&harness, EffectSiteId::Event(EventSite::OpenLog)).is_none(),
+        "the stable-prefix barrier never opened the log"
+    );
+    assert!(
+        first_observation(&harness, EffectSiteId::RunDir(RunDirSite::RemoveMarker)).is_none(),
+        "the census never reclaimed the marker"
+    );
+}
+
+#[test]
+fn a_missing_recorded_mount_source_refuses_before_any_recovery() {
+    a_moved_recorded_mount_refuses_before_recovery(
+        "mount-gone-before-recovery",
+        |mounted| crate::workspace_manager::fixture::remove_dir(&mounted.source),
+        "its source is gone",
+    );
+}
+
+#[test]
+fn a_rebound_recorded_mount_source_refuses_before_any_recovery() {
+    a_moved_recorded_mount_refuses_before_recovery(
+        "mount-rebound-before-recovery",
+        |mounted| {
+            let elsewhere = mounted.root.join("elsewhere");
+            mkdir(&elsewhere);
+            crate::workspace_manager::fixture::remove_dir(&mounted.source);
+            crate::workspace_manager::fixture::link_directory(&elsewhere, &mounted.source);
+        },
+        "rebound it",
+    );
 }

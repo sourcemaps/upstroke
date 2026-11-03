@@ -923,6 +923,13 @@ pub fn run_recovery_order(
     )?;
     let _cleanup_scope = locks.cleanup_scope();
     let records = RecordsVerified::verify(locks, seams.repo_key)?;
+    // DESIGN §26: a missing or rebound recorded mount source refuses before any recovery. The
+    // check reads the records just verified and stats each source, changing nothing, so it
+    // precedes the stable-prefix barrier and the census, which would otherwise truncate a torn
+    // tail and reclaim a stale marker of a run that cannot continue. The rebuild checks again.
+    crate::runner::container::resolve::recheck_recorded_mounts(
+        &records.locks().root().started().runner,
+    )?;
     let mut steps = vec![RecoveryStep::A];
 
     let log_path = records.locks().root().log_path();
