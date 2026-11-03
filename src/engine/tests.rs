@@ -18443,85 +18443,192 @@ fn a_schema_4_resume_refuses_a_missing_private_half_or_a_changed_plan_and_warns_
 fn a_schema_4_run_ended_by_a_signal_mid_attempt_resumes_and_settles_the_attempt() {
     for signal in ["KILL", "TERM", "INT"] {
         let (_tree, repo) = temp_engine_repo(&format!("topology-signal-{signal}"));
-        let mut child = Command::new(std::env::current_exe().expect("this test binary"))
-            .args([
-                "--exact",
-                "engine::tests::topology_signalled_child",
-                "--ignored",
-                "--test-threads",
-                "1",
-            ])
-            .env("UPSTROKE_TOPOLOGY_SIGNAL_REPO", &repo)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .expect("the child run starts");
-        let mut run_id = None;
-        for _ in 0..600 {
-            if let Some(id) = rundir::latest_run(&repo) {
-                let log = rundir::public_dir(&repo, &id).join("events.jsonl");
-                if fs::read_to_string(&log).is_ok_and(|text| text.contains("\"attempt_started\"")) {
-                    run_id = Some(id);
-                    break;
-                }
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        let run_id = run_id.expect("the child reached an attempt within a minute");
-        let status = Command::new("kill")
-            .args(["-s", signal, &child.id().to_string()])
-            .status()
-            .expect("kill runs");
-        assert!(status.success(), "kill -s {signal}");
-        let ended = child.wait().expect("the child ends");
-        assert!(!ended.success(), "SIG{signal} ended the child: {ended:?}");
+        let helper = std::sync::atomic::AtomicU32::new(0);
+        signal_mid_attempt(&repo, signal, SignalFault::None, &helper);
+    }
+}
 
-        let log = rundir::public_dir(&repo, &run_id).join("events.jsonl");
-        let killed = fs::read_to_string(&log).expect("the log");
-        assert!(
-            !killed.contains("\"run_finished\"") && !killed.contains("\"attempt_finished\""),
-            "SIG{signal}: the log ends inside the attempt:\n{killed}"
-        );
-        until_released(&repo, &run_id);
-        let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
-            TOPOLOGY_STUB_EDIT,
-            0,
-        )));
-        let mut resume = resume_options(&repo, &run_id);
-        resume.private_root = None;
-        let report = resume_with(&resume, &source).expect("the resume continues the run");
-        assert_eq!(
-            report.outcome(),
-            RunOutcome::Complete,
-            "SIG{signal}: {report:#?}"
-        );
-        let resumed = fs::read_to_string(&log).expect("the log");
-        assert!(
-            resumed.starts_with(&killed),
-            "SIG{signal}: the resume rewrote the log it adopted"
-        );
-        let appended: Vec<String> = resumed[killed.len()..]
-            .lines()
-            .map(|line| {
-                serde_json::from_str::<serde_json::Value>(line).expect("an event")["event"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .to_owned()
-            })
-            .collect();
-        let at = |kind: &str| appended.iter().position(|seen| seen == kind);
-        let (Some(resumed_at), Some(interrupted_at), Some(finished_at)) = (
-            at("run_resumed"),
-            at("attempt_interrupted"),
-            at("run_finished"),
-        ) else {
-            panic!("SIG{signal}: the resume appended {appended:?}");
+/// How [`signal_mid_attempt`] is made to fail, for the test of its own cleanup (J8). Once the
+/// helper's worker runs, the readiness the driver waited for, or the signal it sent, is
+/// reported as failed, as a real failure of either would be. `None` injects nothing.
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SignalFault {
+    None,
+    Readiness,
+    Signal,
+}
+
+/// The file the signal helper's workers write their pids to, beside the repository.
+#[cfg(unix)]
+fn signalled_workers(repo: &Path) -> PathBuf {
+    repo.with_file_name("worker-pids")
+}
+
+/// The pids the signal helper's workers wrote, one a line. Each leads a process group of its
+/// own: the process funnel puts every agent it starts in one.
+#[cfg(unix)]
+fn worker_pids(repo: &Path) -> Vec<u32> {
+    fs::read_to_string(signalled_workers(repo))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| line.trim().parse().ok())
+        .collect()
+}
+
+/// The signal test's driver. The helper, this test binary running `topology_signalled_child`,
+/// is owned from its spawn by a [`LinkedChild`](crate::workspace_manager::fixture::LinkedChild),
+/// which kills and reaps it within its bound however this function ends, and every wait here
+/// is bounded. At the reviewed head the helper was a bare `Child`: an assertion before its
+/// unbounded `wait` unwound past it and left the helper and its worker running (J8, PR12
+/// regression review #5). `helper` learns the helper's pid as it is spawned.
+#[cfg(unix)]
+fn signal_mid_attempt(
+    repo: &Path,
+    signal: &str,
+    fault: SignalFault,
+    helper: &std::sync::atomic::AtomicU32,
+) {
+    use crate::workspace_manager::fixture::{COLLECT_BOUND, LinkedChild, await_group_end};
+    use std::sync::atomic::Ordering;
+
+    let (child, _lines) = LinkedChild::spawn_with(
+        "engine::tests::topology_signalled_child",
+        &[("UPSTROKE_TOPOLOGY_SIGNAL_REPO", repo.as_os_str())],
+        &repo.with_file_name("signalled-child.stderr"),
+        |pid| {
+            helper.store(pid, Ordering::SeqCst);
+            std::thread::Builder::new()
+        },
+    );
+    let mut run_id = None;
+    for _ in 0..600 {
+        if let Some(id) = rundir::latest_run(repo) {
+            let log = rundir::public_dir(repo, &id).join("events.jsonl");
+            let started =
+                fs::read_to_string(&log).is_ok_and(|text| text.contains("\"attempt_started\""));
+            let working = worker_pids(repo)
+                .into_iter()
+                .any(crate::workspace_manager::fixture::process_exists);
+            if started && working {
+                run_id = Some(id);
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let run_id = run_id
+        .filter(|_| fault != SignalFault::Readiness)
+        .expect("the child reached an attempt within a minute");
+    let pid = helper.load(Ordering::SeqCst).to_string();
+    let delivered = fault != SignalFault::Signal
+        && Command::new("kill")
+            .args(["-s", signal, &pid])
+            .status()
+            .expect("kill runs")
+            .success();
+    assert!(delivered, "kill -s {signal}");
+    let ended = child
+        .wait_within(COLLECT_BOUND)
+        .unwrap_or_else(|| panic!("the child outlived SIG{signal} by {COLLECT_BOUND:?}"));
+    assert!(!ended.success(), "SIG{signal} ended the child: {ended:?}");
+
+    let log = rundir::public_dir(repo, &run_id).join("events.jsonl");
+    let killed = fs::read_to_string(&log).expect("the log");
+    assert!(
+        !killed.contains("\"run_finished\"") && !killed.contains("\"attempt_finished\""),
+        "SIG{signal}: the log ends inside the attempt:\n{killed}"
+    );
+    until_released(repo, &run_id);
+    for worker in worker_pids(repo) {
+        let group = i32::try_from(worker).expect("a pid");
+        await_group_end(group).unwrap_or_else(|outlived| panic!("SIG{signal}: {outlived}"));
+    }
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        0,
+    )));
+    let mut resume = resume_options(repo, &run_id);
+    resume.private_root = None;
+    let report = resume_with(&resume, &source).expect("the resume continues the run");
+    assert_eq!(
+        report.outcome(),
+        RunOutcome::Complete,
+        "SIG{signal}: {report:#?}"
+    );
+    let resumed = fs::read_to_string(&log).expect("the log");
+    assert!(
+        resumed.starts_with(&killed),
+        "SIG{signal}: the resume rewrote the log it adopted"
+    );
+    let appended: Vec<String> = resumed[killed.len()..]
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<serde_json::Value>(line).expect("an event")["event"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned()
+        })
+        .collect();
+    let at = |kind: &str| appended.iter().position(|seen| seen == kind);
+    let (Some(resumed_at), Some(interrupted_at), Some(finished_at)) = (
+        at("run_resumed"),
+        at("attempt_interrupted"),
+        at("run_finished"),
+    ) else {
+        panic!("SIG{signal}: the resume appended {appended:?}");
+    };
+    assert!(
+        interrupted_at < resumed_at && resumed_at < finished_at,
+        "SIG{signal}: the interrupted attempt settled (recovery's step C), then \
+         run_resumed (its step G), then the end: {appended:?}"
+    );
+}
+
+/// J8, PR12 regression review #5: the signal test owns its helper from the spawn, so neither a
+/// readiness that fails nor a signal that cannot be delivered leaves the helper, or the worker
+/// it started, running. The reviewer's witness was a `kill` that exited 1: the parent failed
+/// at its assertion, and seven of the helper's processes outlived it. Each fault is injected
+/// into the driver once the helper's worker runs. The driver fails as the test would, and
+/// then the helper has been reaped, the worker's group is gone, and nothing holds the run,
+/// each within its bound.
+#[cfg(unix)]
+#[test]
+fn the_signal_tests_helper_is_settled_when_its_readiness_or_its_signal_fails() {
+    use crate::workspace_manager::fixture::{await_group_end, process_exists};
+
+    for (fault, says) in [
+        (
+            SignalFault::Readiness,
+            "the child reached an attempt within a minute",
+        ),
+        (SignalFault::Signal, "kill -s TERM"),
+    ] {
+        let (_tree, repo) = temp_engine_repo(&format!("topology-signal-{fault:?}"));
+        let helper = std::sync::atomic::AtomicU32::new(0);
+        let payload = std::panic::catch_unwind(|| {
+            signal_mid_attempt(&repo, "TERM", fault, &helper);
+        })
+        .expect_err("the injected fault fails the driver");
+        let Some(message) = payload.downcast_ref::<String>() else {
+            panic!("{fault:?}: the driver's message is not a String");
         };
+        assert!(message.contains(says), "{fault:?}: {message}");
+
+        let child = helper.load(std::sync::atomic::Ordering::SeqCst);
+        assert_ne!(child, 0, "{fault:?}: the driver spawned its helper");
         assert!(
-            interrupted_at < resumed_at && resumed_at < finished_at,
-            "SIG{signal}: the interrupted attempt settled (recovery's step C), then \
-             run_resumed (its step G), then the end: {appended:?}"
+            !process_exists(child),
+            "{fault:?}: the helper {child} was reaped"
         );
+        let workers = worker_pids(&repo);
+        assert!(!workers.is_empty(), "{fault:?}: the premise, a worker ran");
+        for worker in workers {
+            let group = i32::try_from(worker).expect("a pid");
+            await_group_end(group).unwrap_or_else(|outlived| panic!("{fault:?}: {outlived}"));
+        }
+        let run_id = rundir::latest_run(&repo).expect("the helper's run");
+        until_released(&repo, &run_id);
     }
 }
 
@@ -18532,7 +18639,9 @@ fn topology_signalled_child() {
     let Some(repo) = std::env::var_os("UPSTROKE_TOPOLOGY_SIGNAL_REPO").map(PathBuf::from) else {
         return;
     };
-    let stub = TopologyStub::new("sleep 30", 0);
+    // Each worker writes its pid where the parent finds it, then sleeps as before.
+    let workers = signalled_workers(&repo);
+    let stub = TopologyStub::new(&format!("echo $$ >> '{}'; sleep 30", workers.display()), 0);
     let _ = run_with(&topology_options(&repo), &BorrowedTopologyStub(&stub));
 }
 
