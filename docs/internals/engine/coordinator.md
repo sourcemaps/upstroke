@@ -985,7 +985,7 @@ acceptance list, the three things the question prints. A [`ParkSubject`]
 also carries the attempts and rungs a park question quotes, which a spend
 question does not, so neither engine needs a task's progress to word one.
 
-## `impl<'a> SpendSubject<'a>` › `fn of(task: &'a Task) -> Self {`
+## `impl<'a> SpendSubject<'a>` › `fn from_task(task: &'a Task) -> Self {`
 
 The subject of a schema-3 plan task.
 

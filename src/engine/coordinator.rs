@@ -1106,7 +1106,7 @@ impl Run<'_> {
             .iter()
             .find(|task| question.affected_tasks.contains(&task.id));
         let context = spend_question_context(
-            named.map(SpendSubject::of),
+            named.map(SpendSubject::from_task),
             onto,
             self.reported_spend(None) + pending_spend,
             self.ask_before.frontier_escalation_over_usd.unwrap_or(0.0),
@@ -1377,7 +1377,7 @@ pub(super) struct SpendSubject<'a> {
 }
 
 impl<'a> SpendSubject<'a> {
-    fn of(task: &'a Task) -> Self {
+    fn from_task(task: &'a Task) -> Self {
         Self {
             display_id: task.id.as_str(),
             title: &task.title,
