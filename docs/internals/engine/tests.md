@@ -3520,7 +3520,7 @@ disjoint leases and run together at width 2.
 
 ## `fn a_schema_4_question_is_announced_before_its_sibling_is_released() {`
 
-J11 (regression review 3, finding 2): a question a schema-4 run raises is
+J11 (regression review 2, finding 2): a question a schema-4 run raises is
 announced through the configured notifier while an independent task is still
 held, under both drivers and after a resume. Four cells: a fresh run and a
 resumed one, each under the step loop (width 1, a source that cannot be shared)
@@ -3562,7 +3562,7 @@ a link is listed and not followed. What the J14 tests compare before and after.
 
 ## `fn a_schema_4_run_refuses_an_unspellable_default_private_root_before_it_creates_anything() {`
 
-J14 (regular review 3, finding 3; regression review 3, finding 5): a fresh
+J14 (regular review 3, finding 3; regression review 2, finding 5): a fresh
 schema-4 run with no explicit private root and a home no string spells is
 refused before anything is created, the recorded-objects include included.
 `HOME` is process-wide, so the run is a child of this test binary

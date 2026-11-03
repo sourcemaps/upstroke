@@ -1446,7 +1446,13 @@ same kind: a frontier escalation's spend approval, an answer's words reaching \
 the next worker and its reviewer, a report that counts each integration review \
 once, a resume that names how today's gates differ from the recorded ones, a \
 private root no string can spell and one named with the replacement character, \
-and the signal test's helper settled when its readiness or its signal fails. \
+the signal test's helper settled when its readiness or its signal fails or when \
+the command delivering its signal never exits (a stub the test writes, run as a \
+`LinkedChild` and waited for within its bound), and a mount inside an inherited \
+common directory refused by `run_with` and `resume_with` before the container \
+runtime is asked, in a child whose environment alone carries `GIT_COMMON_DIR`, \
+with a stub `docker` first on its `PATH` and a parked run's committed \
+`run_started` made to record that mount. \
 Existing tests and helpers change only so: the shared `options` helper selects \
 the legacy writer, so they still drive schemas 1..3; `empty_report` sets the \
 report's new `questions_in_log`; they read a legacy run's status through a \

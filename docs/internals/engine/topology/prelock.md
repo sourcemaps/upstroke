@@ -231,7 +231,7 @@ published under it.
 Whether the default private root, as it will resolve once the include's
 publication has created whatever of it is missing, can be recorded as text:
 read-only, and before anything is published, locked or created (J14, regular
-review 3, finding 3 and regression review 3, finding 5).
+review 3, finding 3 and regression review 2, finding 5).
 
 The root is made absolute as the include's publication makes it. Its deepest
 part that exists is canonicalized, and the parts still missing are appended as

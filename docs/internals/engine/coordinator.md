@@ -795,7 +795,7 @@ The question names its task through `build_question`, as every question this
 engine raises does, and its context describes the plan task that question
 names (`SpendSubject`). So the function reads no row of the plan or of the
 run's state by position; a function-local `#[deny(clippy::indexing_slicing)]`
-holds that (J16, regular review 3, finding 4; regression review 3, finding 6).
+holds that (J16, regular review 3, finding 4; regression review 2, finding 6).
 A question that names no task of the plan, which `build_question` cannot
 produce, would carry the spend facts without the task line and the acceptance
 list rather than invented ones. Until J16 the function built a `ParkSubject`

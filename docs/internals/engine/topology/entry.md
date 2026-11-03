@@ -154,7 +154,7 @@ reads them in the analysis afterwards (§6).
 A default root is authorized only after the include's publication has created
 it, so the UTF-8 half of that authorization is asked here first, read-only,
 against the path the root will resolve to. Until J14 (regular review 3,
-finding 3; regression review 3, finding 5) a home no string spells was refused
+finding 3; regression review 2, finding 5) a home no string spells was refused
 only in [`FreshPrepared::run`], after `.upstroke/git/recorded-objects.gitconfig`
 and its directories had been published under it, beside a refusal that said
 nothing was created.
@@ -276,7 +276,7 @@ each question an append opens as soon as that append returns, whichever driver
 runs it (`run.md`, `RunEmitter`). Questions already open when the command
 starts are not announced again, as the sequential engine does not repeat them.
 
-Until J11 (regression review 3, finding 2) the schema-4 entry built the answer
+Until J11 (regression review 2, finding 2) the schema-4 entry built the answer
 sources but never the notifiers. With `notify = ["cli"]`, unattended answers
 and an independent task still working, the sequential engine printed the
 question's id to stderr at once, and a schema-4 run printed nothing: the

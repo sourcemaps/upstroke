@@ -89,7 +89,7 @@ charged". The refusal writes nothing, so the type is still a forwarder with no
 append of its own.
 
 **A question an append opens is announced here, and nowhere else** (J11,
-regression review 3, finding 2). After an append returns, the emitter tells the
+regression review 2, finding 2). After an append returns, the emitter tells the
 run's notifiers about each question that is open in the fold now and was not
 before the append: a worker's park, a spend approval, a verification park, a
 human-gated repair. Every append a run makes passes this one point, so each
