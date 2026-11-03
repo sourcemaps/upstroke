@@ -18458,15 +18458,13 @@ fn a_schema_4_run_ended_by_a_signal_mid_attempt_resumes_and_settles_the_attempt(
     }
 }
 
-/// How [`signal_mid_attempt`] is made to fail, for the test of its own cleanup (J8). Once the
-/// helper's worker runs, the readiness the driver waited for, or the signal it sent, is
-/// reported as failed, as a real failure of either would be. `None` injects nothing.
 #[cfg(unix)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SignalFault {
     None,
     Readiness,
     Signal,
+    DeliveryNeverExits,
 }
 
 /// The file the signal helper's workers write their pids to, beside the repository.
@@ -18486,15 +18484,48 @@ fn worker_pids(repo: &Path) -> Vec<u32> {
         .collect()
 }
 
-/// The signal test's driver. The helper, this test binary running `topology_signalled_child`,
-/// is owned from its spawn by a [`LinkedChild`](crate::workspace_manager::fixture::LinkedChild),
-/// which kills and reaps it within its bound however this function ends. The waits on the
-/// helper are bounded: the readiness poll, the helper's end and its cleanup, its reader's
-/// settlement, each worker group's end and the run's release. The `kill` command that delivers
-/// the signal has no deadline of its own, and neither has the test as a whole. At the reviewed
-/// head the helper was a bare `Child`: an assertion before its unbounded `wait` unwound past it
-/// and left the helper and its worker running (J8, PR12 regression review #5). `helper` learns
-/// the helper's pid as it is spawned.
+#[cfg(unix)]
+fn stalled_delivery_pid(repo: &Path) -> PathBuf {
+    repo.with_file_name("stalled-delivery.pid")
+}
+
+#[cfg(unix)]
+fn delivery_program(repo: &Path, fault: SignalFault) -> PathBuf {
+    if fault != SignalFault::DeliveryNeverExits {
+        return PathBuf::from("kill");
+    }
+    let stalled = repo.with_file_name("kill-that-never-exits");
+    crate::runner::container::write_program_in_its_own_process(
+        &stalled,
+        &format!(
+            "#!/bin/sh\necho $$ > '{0}.tmp' && mv '{0}.tmp' '{0}'\nexec sleep 600\n",
+            stalled_delivery_pid(repo).display()
+        ),
+    );
+    stalled
+}
+
+#[cfg(unix)]
+fn deliver_within_its_bound(program: &Path, signal: &str, pid: &str, repo: &Path) -> bool {
+    use crate::workspace_manager::fixture::{COLLECT_BOUND, LinkedChild};
+    use std::ffi::OsStr;
+
+    let (delivery, _said) = LinkedChild::spawn_program(
+        program.as_os_str(),
+        &[OsStr::new("-s"), OsStr::new(signal), OsStr::new(pid)],
+        &repo.with_file_name("signal-delivery.stderr"),
+    );
+    delivery
+        .wait_within(COLLECT_BOUND)
+        .unwrap_or_else(|| {
+            panic!(
+                "`{} -s {signal} {pid}` had not exited {COLLECT_BOUND:?} after it was started",
+                program.display()
+            )
+        })
+        .success()
+}
+
 #[cfg(unix)]
 fn signal_mid_attempt(
     repo: &Path,
@@ -18535,11 +18566,7 @@ fn signal_mid_attempt(
         .expect("the child reached an attempt within a minute");
     let pid = helper.load(Ordering::SeqCst).to_string();
     let delivered = fault != SignalFault::Signal
-        && Command::new("kill")
-            .args(["-s", signal, &pid])
-            .status()
-            .expect("kill runs")
-            .success();
+        && deliver_within_its_bound(&delivery_program(repo, fault), signal, &pid, repo);
     assert!(delivered, "kill -s {signal}");
     let ended = child
         .wait_within(COLLECT_BOUND)
@@ -18688,6 +18715,44 @@ fn the_signal_tests_helper_is_settled_when_its_readiness_or_its_signal_fails() {
         let run_id = rundir::latest_run(&repo).expect("the helper's run");
         until_released(&repo, &run_id);
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn the_signal_tests_helper_is_settled_when_the_command_delivering_its_signal_never_exits() {
+    use crate::workspace_manager::fixture::{await_group_end, process_exists};
+
+    let (_tree, repo) = temp_engine_repo("topology-signal-stalled-delivery");
+    let helper = std::sync::atomic::AtomicU32::new(0);
+    let payload = std::panic::catch_unwind(|| {
+        signal_mid_attempt(&repo, "TERM", SignalFault::DeliveryNeverExits, &helper);
+    })
+    .expect_err("a delivery that never exits fails the driver");
+    let Some(message) = payload.downcast_ref::<String>() else {
+        panic!("the driver's message is not a String");
+    };
+    assert!(message.contains("had not exited"), "{message}");
+
+    let stalled: u32 = fs::read_to_string(stalled_delivery_pid(&repo))
+        .expect("the stalled delivery recorded its pid")
+        .trim()
+        .parse()
+        .expect("a pid");
+    assert!(
+        !process_exists(stalled),
+        "the stalled delivery {stalled} was killed and reaped"
+    );
+    let child = helper.load(std::sync::atomic::Ordering::SeqCst);
+    assert_ne!(child, 0, "the driver spawned its helper");
+    assert!(!process_exists(child), "the helper {child} was reaped");
+    let workers = worker_pids(&repo);
+    assert!(!workers.is_empty(), "the premise, a worker ran");
+    for worker in workers {
+        let group = i32::try_from(worker).expect("a pid");
+        await_group_end(group).unwrap_or_else(|outlived| panic!("{outlived}"));
+    }
+    let run_id = rundir::latest_run(&repo).expect("the helper's run");
+    until_released(&repo, &run_id);
 }
 
 #[cfg(unix)]

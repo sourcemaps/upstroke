@@ -3414,7 +3414,60 @@ now.
 
 The child of the test above.
 
+## `enum SignalFault {`
+
+How [`signal_mid_attempt`] is made to fail, for the tests of its own cleanup. Each
+fault is injected once the helper's worker runs. `Readiness` reports the readiness
+the driver waited for as failed, and `Signal` the signal it sent, as a real failure
+of either would be (J8, PR12 regression review #5). `DeliveryNeverExits` makes the
+command that delivers the signal one that never exits: a stub standing where `kill`
+stands, which records its pid and then sleeps for ten minutes (J15, regression
+review 2, finding 4). `None` injects nothing.
+
+## `fn stalled_delivery_pid(repo: &Path) -> PathBuf {`
+
+Where the stub of `SignalFault::DeliveryNeverExits` records its pid, beside the
+repository, published by a rename. The J15 test reads it after the driver has
+failed, to find that process gone.
+
+## `fn delivery_program(repo: &Path, fault: SignalFault) -> PathBuf {`
+
+The program that delivers the signal: `kill`, found on `PATH` as before, or, for
+`SignalFault::DeliveryNeverExits`, the stub, written beside the repository by a
+process of its own (`runner::container::write_program_in_its_own_process`), so that
+no other thread of this test binary holds it open for writing when it is executed.
+
+## `fn deliver_within_its_bound(program: &Path, signal: &str, pid: &str, repo: &Path) -> bool {`
+
+Delivers `signal` to `pid` by running `program -s <signal> <pid>` as a
+[`LinkedChild`](crate::workspace_manager::fixture::LinkedChild)
+(`LinkedChild::spawn_program`) and waiting for it with `wait_within(COLLECT_BOUND)`,
+the bound the helper's own end has. A delivery still running at the bound fails the
+driver, naming the command; as the failure unwinds, the link's drop kills and reaps
+the command within its own bound, so it outlives neither the driver nor the test.
+`true` when the command exited successfully.
+
 ## `fn signal_mid_attempt(`
+
+The signal test's driver. The helper, this test binary running
+`topology_signalled_child`, is owned from its spawn by a
+[`LinkedChild`](crate::workspace_manager::fixture::LinkedChild), which kills and
+reaps it within its bound however this function ends. Every wait the driver makes
+is bounded: the readiness poll, the delivery of the signal
+([`deliver_within_its_bound`]), the helper's end and its cleanup, its reader's
+settlement, each worker group's end and the run's release. At the reviewed head of
+J8 the helper was a bare `Child`: an assertion before its unbounded `wait` unwound
+past it and left the helper and its worker running (J8, PR12 regression review #5).
+`helper` learns the helper's pid as it is spawned.
+
+J15 (regression review 2, finding 4): J8 left one wait unbounded, and said so. The
+`kill` that delivers the signal was a `Command` whose `.status()` had no deadline:
+a `kill` that never exited held the driver inside that call, before either the
+delivery's assertion or `wait_within(COLLECT_BOUND)` could run, and the test and
+the helper it owned stayed live indefinitely. §12 binds every wait, and a
+disclosure does not discharge that. The delivery is now itself a link, waited for
+within `COLLECT_BOUND` ([`deliver_within_its_bound`]); `COLLECT_BOUND` and every
+assertion are kept, the J12 ones below included.
 
 J12 (regular review 3, finding 1): after its order assertions, the driver
 asserts that the resumed run's report says its total is a floor
@@ -3424,6 +3477,21 @@ whose cost is unknown and whose model is the one recorded by the
 `attempt_interrupted` the resume appended. At the reviewed head the report held
 only the attempts that completed, with no warning, and printed the run's known
 spend, `$0.04`, as its whole total.
+
+## `fn the_signal_tests_helper_is_settled_when_the_command_delivering_its_signal_never_exits() {`
+
+J15 (regression review 2, finding 4), the reviewer's guard: the signal's delivery
+is the stub of `SignalFault::DeliveryNeverExits`, a command that never exits. The
+driver fails, within its bound, naming the delivery that had not exited. Afterwards
+the stub, at the pid it recorded, is gone (its link's drop killed and reaped it);
+the helper is reaped; each worker's process group is gone within `GROUP_END_BOUND`;
+and nothing holds the run.
+
+Against the driver as J8 left it, with the delivery's `.status()` unbounded, the
+test does not end: measured once, it was still running past libtest's sixty-second
+notice, and the deadline put on it from outside (a session of its own under
+`timeout`, 120 seconds) killed it; nothing it started outlived the session, and
+the scratch tree its unwinding would have reclaimed was removed by hand.
 
 ## `fn settled_attempts(events: &[serde_json::Value]) -> usize {`
 

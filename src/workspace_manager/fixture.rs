@@ -3894,6 +3894,19 @@ pub(crate) const COLLECT_BOUND: std::time::Duration = std::time::Duration::from_
 /// unwinding, and says so on stderr instead. A reader still reading at the
 /// bound -- the child gone, and something it started still holding its end of
 /// the pipe -- is left running, and the drop says so.
+///
+/// **Another program.** [`Self::spawn_program`] links and owns a program
+/// other than this test binary in the same way, for a helper command whose end
+/// a test bounds with [`Self::wait_within`] and which its drop kills and reaps
+/// like any other link.
+///
+/// **Shared, and locked per resource.** The link is returned in an `Arc`
+/// because a test may hand it to a thread that serves the child while the
+/// test keeps it (the topology scaffold's `Served` does): the child is killed
+/// and reaped when the last holder drops it. Every method takes `&self`, so
+/// each resource it uses is behind a lock of its own -- the `Child` for
+/// `try_wait` and `kill`, the stdin pipe for `send` and its close, the
+/// reader's handle for the drop's join -- and no method holds two at once.
 pub(crate) struct LinkedChild {
     child: std::sync::Mutex<std::process::Child>,
     stdin: std::sync::Mutex<Option<std::process::ChildStdin>>,
@@ -3925,22 +3938,52 @@ impl LinkedChild {
         stderr: &Path,
         reader: impl FnOnce(u32) -> std::thread::Builder,
     ) -> (std::sync::Arc<Self>, std::sync::mpsc::Receiver<String>) {
-        let log = fs::File::create(stderr).expect("the linked child's stderr log");
         let mut command = Command::new(std::env::current_exe().expect("this test binary"));
-        command
-            .args([
-                "--exact",
-                test,
-                "--ignored",
-                "--nocapture",
-                "--test-threads=1",
-            ])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::from(log));
+        command.args([
+            "--exact",
+            test,
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ]);
         for (key, value) in env {
             command.env(key, value);
         }
+        Self::adopt(command, stderr, reader)
+    }
+
+    /// `program` run with `args`, linked and owned as [`Self::spawn`] links and
+    /// owns a test of this binary: for a command whose end a test bounds with
+    /// [`Self::wait_within`] and which must not outlive the test however it
+    /// ends -- the `kill` that delivers the signal test's signal
+    /// (`engine::tests::signal_mid_attempt`, J15). It speaks no protocol; the
+    /// receiver hands on whatever it prints.
+    pub(crate) fn spawn_program(
+        program: &OsStr,
+        args: &[&OsStr],
+        stderr: &Path,
+    ) -> (std::sync::Arc<Self>, std::sync::mpsc::Receiver<String>) {
+        let mut command = Command::new(program);
+        command.args(args);
+        Self::adopt(command, stderr, |_| std::thread::Builder::new())
+    }
+
+    /// Start `command`, its stdin and stdout piped and its stderr written to
+    /// `stderr`, and own it as a link from that moment: the one constructor
+    /// [`Self::spawn_with`] and [`Self::spawn_program`] share. The reader ends
+    /// at the end of the child's stdout, and a read that fails ends it the
+    /// same way: what it forwards is best-effort, and every wait on it is its
+    /// caller's, bounded.
+    fn adopt(
+        mut command: Command,
+        stderr: &Path,
+        reader: impl FnOnce(u32) -> std::thread::Builder,
+    ) -> (std::sync::Arc<Self>, std::sync::mpsc::Receiver<String>) {
+        let log = fs::File::create(stderr).expect("the linked child's stderr log");
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::from(log));
         let mut child = command.spawn().expect("spawn the linked child");
         let pid = child.id();
         let stdin = child.stdin.take();
