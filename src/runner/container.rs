@@ -34,8 +34,8 @@ use crate::runner::{Cancellation, InvocationId};
 use intent::{ContainerIntent, ContainerName, INTENT_STAGED_SUFFIX, IntentWritten, containers_dir};
 use runtime::{
     ContainerExecution, ContainerRuntime, ContainerTrace, CreateSpec, CreatedContainer,
-    DiscoveredContainer, DurableStep, Liveness, RuntimeError, RuntimeOp, Settled, StopMode,
-    TracePhase, ViewAction,
+    DiscoveredContainer, DurableStep, Liveness, QuestionBound, RuntimeError, RuntimeOp, Settled,
+    StopMode, TracePhase, ViewAction,
 };
 
 pub trait ContainerHooks {
@@ -654,7 +654,9 @@ pub fn observe_terminated(
     name: &ContainerName,
 ) -> Result<Liveness, UpstrokeError> {
     for _ in 0..TERMINATION_OBSERVATIONS {
-        let state = runtime.observe(name.as_str()).map_err(refused)?;
+        let state = runtime
+            .observe(name.as_str(), QuestionBound::Runtime)
+            .map_err(refused)?;
         if state.is_terminated() {
             return Ok(state);
         }
@@ -913,6 +915,8 @@ fn racing_removal(
 
 pub const DOCKER_PROGRAM: &str = "docker";
 
+const QUESTION_BOUND: Duration = Duration::from_secs(60);
+
 #[derive(Debug, Clone, Default)]
 pub struct DockerCli {
     trace: ContainerTrace,
@@ -920,6 +924,7 @@ pub struct DockerCli {
     /// Per container: the processes a bounded question about it started and could not establish
     /// gone (`hold_unresolved`), read by every later settlement of that container.
     unresolved_questions: Arc<Mutex<BTreeMap<String, String>>>,
+    question_bound: Option<Duration>,
 }
 
 impl DockerCli {
@@ -929,6 +934,7 @@ impl DockerCli {
             trace,
             deliveries: Arc::default(),
             unresolved_questions: Arc::default(),
+            question_bound: None,
         }
     }
 
@@ -945,8 +951,8 @@ impl DockerCli {
     }
 
     fn exec(&self, op: RuntimeOp, target: &str, args: &[&str]) -> Result<String, RuntimeError> {
-        self.exec_streams(op, target, args)
-            .map(|(stdout, _)| String::from_utf8_lossy(&stdout).into_owned())
+        let outcome = self.question(op, target, args, self.own_bound(), &|| false);
+        self.answer_within(op, target, args, outcome)
     }
 
     fn exec_streams(
@@ -954,19 +960,47 @@ impl DockerCli {
         op: RuntimeOp,
         target: &str,
         args: &[&str],
-    ) -> Result<(Vec<u8>, Vec<u8>), RuntimeError> {
-        self.trace.runtime(op, target);
-        let output = docker_command(args)
-            .output()
-            .map_err(|error| RuntimeError::Unreachable {
-                operation: op,
-                detail: format!("{DOCKER_PROGRAM} could not be started: {error}"),
-            })?;
-        if output.status.success() {
-            return Ok((output.stdout, output.stderr));
+    ) -> Result<(Vec<u8>, Vec<u8>, bool), RuntimeError> {
+        let output = self
+            .question(op, target, args, self.own_bound(), &|| false)
+            .map_err(|failure| self.unanswered(op, target, args, failure))?;
+        let limited = output.output_limited;
+        if !limited && (output.timed_out || output.code.is_none()) {
+            return Err(unfinished(op, args));
         }
-        let detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        Err(classify_docker_failure(op, detail))
+        if !limited && output.code != Some(0) {
+            return Err(classify_docker_failure(op, output.stderr.trim().to_owned()));
+        }
+        Ok((
+            output.stdout.into_bytes(),
+            output.stderr.into_bytes(),
+            limited,
+        ))
+    }
+
+    fn own_bound(&self) -> Duration {
+        self.question_bound.unwrap_or(QUESTION_BOUND)
+    }
+
+    fn question(
+        &self,
+        op: RuntimeOp,
+        target: &str,
+        args: &[&str],
+        timeout: Duration,
+        stop: &dyn Fn() -> bool,
+    ) -> Result<ProcessOutput, ProcessFailure> {
+        self.trace.runtime(op, target);
+        proc::run_with_timeout_classified(
+            ProcessSite::Spawn,
+            ProcessSite::Terminate,
+            docker_command(args),
+            &[],
+            timeout,
+            &[],
+            stop,
+            &mut proc::NoHooks,
+        )
     }
 
     fn inspect(
@@ -998,7 +1032,6 @@ impl DockerCli {
         )
     }
 
-    /// [`Self::listing`] for the attached start, bounded by [`Self::exec_within`].
     fn listing_within(
         &self,
         name: &str,
@@ -1022,13 +1055,6 @@ impl DockerCli {
         )
     }
 
-    /// [`Self::exec`] for the start's questions (the attached start's observations and its
-    /// diagnostic, and the detached `docker start`), which DESIGN §26 bounds by the invocation's
-    /// deadline and its cancellation. The question runs through the process funnel, which ends
-    /// it at `deadline` or as soon as `cancellation` fires, kills and reaps what it started, and
-    /// bounds what it captures. A question ended before it answered is an error, none is asked
-    /// once either bound has passed, and the answer keeps the funnel's fate
-    /// ([`Self::answer_within`]).
     fn exec_within(
         &self,
         op: RuntimeOp,
@@ -1047,27 +1073,16 @@ impl DockerCli {
                 ),
             });
         }
-        self.trace.runtime(op, target);
-        let outcome = proc::run_with_timeout_classified(
-            ProcessSite::Spawn,
-            ProcessSite::Terminate,
-            docker_command(args),
-            &[],
+        let outcome = self.question(
+            op,
+            target,
+            args,
             deadline.saturating_duration_since(Instant::now()),
-            &[],
             &|| cancellation.is_cancelled(),
-            &mut proc::NoHooks,
         );
         self.answer_within(op, target, args, outcome)
     }
 
-    /// What a bounded question about `target` answered, read from its supervisor's result with
-    /// the supervisor's fate kept. A question the supervisor never started is the runtime
-    /// unreachable, and one whose process it established gone is a failure. One whose process it
-    /// could not establish gone is unresolved, and that fact is also held under `target`
-    /// ([`Self::hold_unresolved`]), so no later reading of this error can lose it. A question
-    /// the deadline or a cancellation ended was killed and reaped, so it is a failure, as is an
-    /// ordinary nonzero exit.
     fn answer_within(
         &self,
         op: RuntimeOp,
@@ -1075,54 +1090,53 @@ impl DockerCli {
         args: &[&str],
         outcome: Result<ProcessOutput, ProcessFailure>,
     ) -> Result<String, RuntimeError> {
-        let asked = format!("`{DOCKER_PROGRAM} {}`", args.join(" "));
-        let output = match outcome {
-            Ok(output) => output,
-            Err(failure) => {
-                return Err(match failure.fate {
-                    ProcessFate::NeverStarted => RuntimeError::Unreachable {
-                        operation: op,
-                        detail: format!("{asked} could not be started: {}", failure.error),
-                    },
-                    ProcessFate::Gone => RuntimeError::Failed {
-                        operation: op,
-                        detail: format!("{asked} failed after it ended: {}", failure.error),
-                    },
-                    ProcessFate::Unresolved => {
-                        let fact = format!(
-                            "{asked}, asked about `{target}`, ended its supervision without \
-                             establishing its process gone, so {}: {}",
-                            ProcessFate::Unresolved.describe(),
-                            failure.error
-                        );
-                        self.hold_unresolved(target, &fact);
-                        RuntimeError::Unresolved {
-                            operation: op,
-                            detail: fact,
-                        }
-                    }
-                });
-            }
-        };
+        let output = outcome.map_err(|failure| self.unanswered(op, target, args, failure))?;
         if output.timed_out || output.code.is_none() {
-            return Err(RuntimeError::Failed {
-                operation: op,
-                detail: format!(
-                    "{asked} ended before it answered: the invocation's deadline passed, it was \
-                     cancelled, or a signal ended it"
-                ),
-            });
+            return Err(unfinished(op, args));
         }
         if output.output_limited {
             return Err(RuntimeError::Failed {
                 operation: op,
-                detail: format!("{asked} answered more than this runner reads"),
+                detail: format!("{} answered more than this runner reads", spelled(args)),
             });
         }
         if output.code == Some(0) {
             return Ok(output.stdout);
         }
         Err(classify_docker_failure(op, output.stderr.trim().to_owned()))
+    }
+
+    fn unanswered(
+        &self,
+        op: RuntimeOp,
+        target: &str,
+        args: &[&str],
+        failure: ProcessFailure,
+    ) -> RuntimeError {
+        let asked = spelled(args);
+        match failure.fate {
+            ProcessFate::NeverStarted => RuntimeError::Unreachable {
+                operation: op,
+                detail: format!("{asked} could not be started: {}", failure.error),
+            },
+            ProcessFate::Gone => RuntimeError::Failed {
+                operation: op,
+                detail: format!("{asked} failed after it ended: {}", failure.error),
+            },
+            ProcessFate::Unresolved => {
+                let fact = format!(
+                    "{asked}, asked about `{target}`, ended its supervision without \
+                     establishing its process gone, so {}: {}",
+                    ProcessFate::Unresolved.describe(),
+                    failure.error
+                );
+                self.hold_unresolved(target, &fact);
+                RuntimeError::Unresolved {
+                    operation: op,
+                    detail: fact,
+                }
+            }
+        }
     }
 
     /// Hold `fact`, a process a question about container `name` started and could not establish
@@ -1362,7 +1376,7 @@ impl DockerCli {
         };
         let owned = matches!(record, ClientRecord::Owned(_));
         self.keep_client_record(name, record);
-        if owned && self.observe(name)? == Liveness::Running {
+        if owned && self.observe(name, QuestionBound::Runtime)? == Liveness::Running {
             return Ok(());
         }
         match self.settle_client_of(name) {
@@ -1612,6 +1626,35 @@ fn docker_command(args: &[&str]) -> Command {
     let mut command = Command::new(DOCKER_PROGRAM);
     command.args(args);
     command
+}
+
+fn exit_status_of(name: &str, status: &str) -> Result<i32, RuntimeError> {
+    status
+        .trim()
+        .parse::<i32>()
+        .map_err(|error| RuntimeError::Failed {
+            operation: RuntimeOp::Collect,
+            detail: format!(
+                "`{DOCKER_PROGRAM} container inspect {name}` reported the exit status `{}`, \
+                 which is not a number: {error}",
+                status.trim()
+            ),
+        })
+}
+
+fn spelled(args: &[&str]) -> String {
+    format!("`{DOCKER_PROGRAM} {}`", args.join(" "))
+}
+
+fn unfinished(op: RuntimeOp, args: &[&str]) -> RuntimeError {
+    RuntimeError::Failed {
+        operation: op,
+        detail: format!(
+            "{} ended before it answered: the bound it was asked under passed, its invocation \
+             was cancelled, or a signal ended it",
+            spelled(args)
+        ),
+    }
 }
 
 fn exit_text(exit: Option<i32>) -> String {
@@ -1956,8 +1999,14 @@ impl ContainerRuntime for DockerCli {
         parse_ps_output(&text)
     }
 
-    fn observe(&self, name: &str) -> Result<Liveness, RuntimeError> {
-        let listing = self.listing(RuntimeOp::Observe, name)?;
+    fn observe(&self, name: &str, bound: QuestionBound<'_>) -> Result<Liveness, RuntimeError> {
+        let listing = match bound {
+            QuestionBound::Invocation {
+                deadline,
+                cancellation,
+            } => self.listing_within(name, deadline, cancellation)?,
+            QuestionBound::Runtime => self.listing(RuntimeOp::Observe, name)?,
+        };
         Ok(liveness_of(listed_state(&listing, name)))
     }
 
@@ -1978,13 +2027,15 @@ impl ContainerRuntime for DockerCli {
                 operation: RuntimeOp::Collect,
                 detail: format!("`{name}` is gone, so its exit status cannot be collected"),
             })?;
-        let exit_code = status.trim().parse::<i32>().ok();
-        let (stdout, stderr) = self.exec_streams(RuntimeOp::Collect, name, &["logs", name])?;
+        let exit_code = Some(exit_status_of(name, &status)?);
+        let (stdout, stderr, output_limited) =
+            self.exec_streams(RuntimeOp::Collect, name, &["logs", name])?;
         self.settle_delivery(name, exit_code)?;
         Ok(ContainerExecution {
             exit_code,
             stdout,
             stderr,
+            output_limited,
         })
     }
 
@@ -2037,7 +2088,7 @@ impl ContainerRuntime for DockerCli {
         settle_stop(
             name,
             self.exec(RuntimeOp::Stop, name, &[verb, name]),
-            |target| self.observe(target),
+            |target| self.observe(target, QuestionBound::Runtime),
         )
     }
 
@@ -2049,7 +2100,7 @@ impl ContainerRuntime for DockerCli {
                 name,
                 &["rm", "--force", "--volumes", name],
             ),
-            |target| self.observe(target),
+            |target| self.observe(target, QuestionBound::Runtime),
         );
         combined_removal(removed, self.settle_removed_client(name))
     }
@@ -2257,6 +2308,12 @@ impl DockerCli {
         args: &[&str],
     ) -> Result<String, RuntimeError> {
         self.exec(op, target, args)
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn with_question_bound(mut self, bound: Duration) -> Self {
+        self.question_bound = Some(bound);
+        self
     }
 }
 

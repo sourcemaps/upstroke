@@ -2452,3 +2452,71 @@ which the gates' `-D warnings` makes an error.
 The walk over a written tree: a stated allowance, a silent child that inherits it, a production
 forbid beneath it, and an allowance that holds in tests alone.
 
+
+## `struct Scripted {` › `observation_unresolved: std::sync::atomic::AtomicBool,`
+
+Set by `Runtime::leaves_its_observation_unresolved`: every later observation
+answers `RuntimeError::Unresolved` before it reaches the fake, as a bounded
+observation whose supervisor could not reap its process does. The fake's own
+trace therefore records no `Observe` for it.
+
+## `fn an_observation_that_leaves_a_process_unresolved_keeps_the_invocation_unresolved_after_a_clean_release()`
+
+K2, "preserved process fate" (regular review 4, finding 2). A started
+container's first observation reports a process it could not establish gone;
+the release then stops and removes the container cleanly. The invocation
+reports `ProcessFate::Unresolved`, with that description in its message: the
+release established the container gone, not the observation's process. The
+runtime is the scripted fake, whose removal knows nothing of the observation,
+so only `contain`'s own rule can keep the fate. With `contain`'s fate read from
+the release alone (the rule before K2) this reports `Gone` and fails.
+
+## `const STALLED_OBSERVATION_DOCKER: &str = "#!/bin/sh\n\`
+
+The stub `docker` of the stalled-observation witness, written by a process of
+its own (`write_program_in_its_own_process`, so no fork of this process holds
+it open for writing when the child executes it). A `ps` filtered by name,
+which only the supervision asks, records that it was asked in the file
+`UPSTROKE_TEST_OBSERVED` names and then sleeps a minute; a `ps` filtered by
+label, the container reaper's, lists nothing. `create`, `start` and `logs`
+answer at once, `container inspect` answers the recorded image id or an exit
+status of 0, and `stop` and `rm` answer at once, or sleep a minute when
+`UPSTROKE_TEST_CLEANUP_STALLS` is set. Anything else exits 93.
+
+## `fn a_running_container_whose_observation_stalls_settles_at_its_deadline_or_cancellation_and_keeps_its_fate()`
+
+K2, regular review 4, finding 2 (P2, liveness; prior
+PR7-STD-CONTAINER-EXEC-UNBOUNDED). The reviewer's witness: an invocation with a
+100 ms timeout took 1.063 s against a stub whose observation slept one second.
+Here the stub's observation sleeps a minute, and the whole production path
+runs, `ContainerRunner` over the real `DockerCli`, in an isolated child of
+this test binary whose `PATH` alone carries the stub
+(`run_test_isolated`, which keeps the child's output for the failure message
+and kills its process group at two minutes). Three modes, a shell probe each:
+- `deadline`: a 300 ms timeout. The observation ends at the deadline, the
+  invocation is collected as timed out (no exit code) and released, all
+  within 20 s;
+- `cancel`: a ten-minute timeout and a cancellation once the stub records the
+  observation. The invocation reports the cancellation with fate `Gone`
+  within 20 s: the release's stop and removal answered;
+- `cleanup`: the deadline mode with `stop` and `rm` stalled too and the
+  runtime's own bound shortened to one second (`with_question_bound`). Each
+  cleanup question ends at that bound, and the invocation reports fate
+  `Unresolved`, with its intent kept for the census: neither the stop nor the
+  removal was confirmed, and the bound does not turn that into `Gone`.
+
+Measured on the build box before commit: with the supervision's observation
+asked under the runtime's own bound instead of the invocation's, the deadline
+mode took 60.4 s and failed; with the cleanup questions given ten minutes, the
+cleanup mode was killed at the parent's two-minute bound and failed. The
+20 s bound is a bound on a stub that never answers, far above what a loaded
+runner needs for the dozen bounded questions a mode asks, and far below the
+minute the stub stalls.
+
+## `fn stalled_observation_child() {`
+
+The child of the witness above: it builds the exec fixture's repository, asks
+the mode's invocation through `run_blocking_with` with a cancellation of its
+own, and asserts the premise (the stub recorded the observation), the bound
+and the mode's outcome. Ignored in the default suite; only the witness runs
+it, with the stub first on its `PATH`.

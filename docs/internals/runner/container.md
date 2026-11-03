@@ -949,7 +949,10 @@ returns.
 ## `pub fn observe_terminated(`
 
 "wait until observed exited/removed" — a read-only observation, and so not
-a site.
+a site. Each observation is asked under the runtime's own bound
+(`QuestionBound::Runtime`, K2): a reclaim belongs to no invocation, so no
+deadline or cancellation of one applies, and a daemon that stops answering
+ends each question at that bound rather than holding the census.
 
 ### Errors
 
@@ -1234,10 +1237,30 @@ began and nothing has settled yet (`start_attached`, `settle_delivery`,
 began is the one its collection or removal settles, whichever clone does it.
 
 `unresolved_questions` holds, by container name, every process a bounded
-question about that container (`exec_within`) started and could not establish
-gone (`hold_unresolved`, root's PR12-J6-OBSERVATION-FATE-DROPPED). Shared by
-every clone in the same way, never cleared, and read by every settlement of
-that container (`settle_client_of`).
+question about that container (`answer_within`, `unanswered`) started and could
+not establish gone (`hold_unresolved`, root's PR12-J6-OBSERVATION-FATE-DROPPED).
+Shared by every clone in the same way, never cleared, and read by every
+settlement of that container (`settle_client_of`).
+
+`question_bound` is how long one question that no invocation bounds may take
+(`own_bound`): `None`, which `new` and `Default` give, is [`QUESTION_BOUND`].
+Only a test sets another (`with_question_bound`), so a witness of a stalled
+cleanup question ends in seconds rather than in a minute. It is a `Duration`
+behind an `Option` so that the derived `Default`, which production builds the
+CLI with, stays the production bound.
+
+## `const QUESTION_BOUND: Duration = Duration::from_secs(60);`
+
+The runtime's own bound for one `docker` question that no invocation bounds:
+the collection's `container inspect` and `docker logs`, the release's and a
+reclaim's `stop`, `kill`, `rm` and the observations that settle them, a
+census's listing, the probe, the image and volume inspections and `docker
+create` (K2, regular review 4, finding 2). Sixty seconds is a bound on a
+daemon that has stopped answering, not a timing of one that answers: `docker
+stop` alone may take its ten-second grace before it kills, and a healthy
+daemon answers the rest in milliseconds. A question that reaches the bound is
+killed and reaped by the funnel and fails like any question that ended before
+it answered.
 
 ## `impl DockerCli` › `pub fn new(trace: ContainerTrace) -> Self {`
 
@@ -1255,15 +1278,39 @@ disagree.
 
 ## `impl DockerCli` › `fn exec(&self, op: RuntimeOp, target: &str, args: &[&str]) -> Result<String, RuntimeError> {`
 
-Run one `docker` subcommand and capture it.
+Run one `docker` subcommand and capture its stdout, bounded by the runtime's
+own bound (`own_bound`, [`QUESTION_BOUND`]) and read as every bounded question
+is read (`answer_within`).
 
 `target` is what the call log names — the container, image or volume the
 operation is about, rather than the subcommand, so the trace of a real
 run and the trace of a fake one are the same shape.
 
+**Every question is bounded** (K2, regular review 4, finding 2; prior
+PR7-STD-CONTAINER-EXEC-UNBOUNDED). Until K2 this and `exec_streams` waited on
+an unbounded `Command::output()`, so a `docker` that stopped answering held
+the supervision, the collection and the cleanup that asked it for as long as
+it stalled: an invocation with a 100 ms timeout took 1.063 s against a stub
+whose observation slept one second (the reviewer's witness). Every question
+now runs under the process funnel (`question`), which ends it at its bound,
+kills and reaps what it started and keeps the fate it established. One
+consequence on Unix: the funnel refuses a launch once a termination signal is
+pending, so a release asked during a shutdown fails rather than waits, and
+the container is the container reaper's and the next census's to reclaim,
+as for any release that could not finish.
+
 ## `impl DockerCli` › `fn exec_streams(`
 
-The same call, keeping **both** streams.
+The same bounded call, keeping **both** streams, for `docker logs`, and saying
+whether the funnel ended it at its output limit. A limited answer is not a
+failure: the collection keeps what was read and reports it limited
+(`ContainerExecution::output_limited`), as the runner's own bound did before
+K2, so a gate whose output overran the limit still fails as one. Otherwise an
+answer that ended before it answered fails (`unfinished`), a nonzero exit is
+classified (`classify_docker_failure`), and a question its supervisor did not
+answer keeps that supervisor's fate (`unanswered`). The funnel captures at
+most its own limit of each stream, so a stream that reached it ends the
+question, and the other stream is what had been read by then.
 
 `PR6A-DOCKERCLI-MERGES-STDERR-INTO-STDOUT`: [`Self::exec`] returns only
 stdout and drops the child's stderr on success, so every container
@@ -1276,34 +1323,66 @@ container's stdout and `2>&1 >/dev/null` gives its stderr — so there was
 never anything to merge and the previous comment's premise was wrong as
 well as its consequence.
 
+## `impl DockerCli` › `fn own_bound(&self) -> Duration {`
+
+The bound of a question no invocation bounds: [`QUESTION_BOUND`] unless a test
+shortened it (`question_bound`).
+
+## `impl DockerCli` › `fn question(`
+
+The one `docker` question the runtime asks, under the process funnel
+(`agent::proc::run_with_timeout_classified`) with `timeout` and `stop` as the
+caller chooses them: the invocation's remaining time and its cancellation for
+`exec_within`, the runtime's own bound and no stop for `exec` and
+`exec_streams`. The funnel ends the question at either, kills and reaps what
+it started, and bounds what it captures. Every container operation but the
+attached client reaches the daemon through here, which is one of the two
+`run_with_timeout` mentions `every_production_process_start_is_classified`
+counts in this file; the other is `attach_client`.
+
 ## `impl DockerCli` › `fn inspect(`
 
 `docker inspect` a thing, tolerating "no such object" as absence.
 
+## `impl DockerCli` › `fn listing_within(`
+
+[`Self::listing`] bounded by the invocation (`exec_within`): the attached
+start's wait for its container to leave `created`, and the supervision's
+observations (`observe` under `QuestionBound::Invocation`, K2).
+
 ## `impl DockerCli` › `fn exec_within(`
 
-One of the start's `docker` questions (the attached start's state
-observations and its diagnostic after a client ended, and the detached
-`docker start`), bounded by the invocation's deadline and its cancellation
-(root's PR12-ATTACHED-START-UNBOUNDED-DOCKER-OBSERVATION finding, J6). It runs
-under the process funnel with the time left as its timeout and the
-cancellation as its stop. A question whose deadline has passed, or whose
-invocation was cancelled, is not asked.
+A `docker` question bounded by the invocation's deadline and its cancellation:
+the start's (the attached start's state observations and its diagnostic after
+a client ended, and the detached `docker start`; root's
+PR12-ATTACHED-START-UNBOUNDED-DOCKER-OBSERVATION finding, J6), and since K2 the
+supervision's observations of the started container. It runs under the process
+funnel (`question`) with the time left as its timeout and the cancellation as
+its stop. A question whose deadline has passed, or whose invocation was
+cancelled, is not asked.
 
 ## `impl DockerCli` › `fn answer_within(`
 
 What one bounded question answered, read with its supervisor's fate kept
-(PR12-J6-OBSERVATION-FATE-DROPPED):
-- a supervisor that never started the question: `RuntimeError::Unreachable`;
-- one that established its process gone and still failed: `Failed`;
-- one that could not establish its process gone: `Unresolved`. The fact is
-  held under the container the question was about (`hold_unresolved`) before
-  the error is returned. A caller that drops the error, as the diagnostic
-  after a client ended does, or one that reads a deadline or a cancellation at
-  the same moment, cannot lose it;
-- a question the deadline or a cancellation ended, which the funnel killed and
+(PR12-J6-OBSERVATION-FATE-DROPPED), whichever bound it was asked under:
+- a question its supervisor did not answer is read by `unanswered`;
+- a question its bound or a cancellation ended, which the funnel killed and
   reaped, an answer longer than the runner reads, or a nonzero exit: `Failed`,
   a nonzero exit through `classify_docker_failure`.
+
+## `impl DockerCli` › `fn unanswered(`
+
+A question whose supervisor returned no answer, by the fate the supervisor
+established:
+- it never started the question: `RuntimeError::Unreachable`;
+- it established the process gone and still failed: `Failed`;
+- it could not establish the process gone: `Unresolved`. The fact is held under
+  the container the question was about (`hold_unresolved`) before the error is
+  returned. A caller that drops the error, as the diagnostic after a client
+  ended does, or one that reads a deadline or a cancellation at the same
+  moment, cannot lose it. A question about something other than a container,
+  an image or a volume, holds its fact under that name, which no settlement
+  reads; its error is unresolved all the same.
 
 ## `impl DockerCli` › `fn hold_unresolved(&self, name: &str, fact: &str) {`
 
@@ -1552,10 +1631,30 @@ the view and the intent.
 ## `fn docker_command(args: &[&str]) -> Command {`
 
 The one builder of a `docker` child. Every container operation's
-`Command` comes from here: `exec_streams`' `.output()` calls, the
-attached client the process funnel runs, and the start's bounded questions
-it runs (`exec_within`), the things
+`Command` comes from here: the bounded questions the process funnel runs
+(`question`) and the attached client it runs (`attach_client`), the things
 `every_production_process_start_is_classified` counts.
+
+## `fn exit_status_of(name: &str, status: &str) -> Result<i32, RuntimeError> {`
+
+The exit status `docker container inspect --format {{.State.ExitCode}}`
+reported, as a number, or a `Failed` collection that quotes what it reported.
+Until K2 the collection read it with `.parse().ok()`, so an answer that was not
+a number became a missing exit code, which the runner reports as a process a
+signal ended: an ambiguous answer read as a fact (standards §9), and a
+discarded error that §7 binds in a body K2 changed. A free function, as
+[`classify_docker_failure`] is, so the reading is testable without a daemon
+(`tests::an_exit_status_the_runtime_reports_is_read_as_a_number_or_refused`).
+
+## `fn spelled(args: &[&str]) -> String {`
+
+A question as its diagnostics name it: `` `docker <args>` ``.
+
+## `fn unfinished(op: RuntimeOp, args: &[&str]) -> RuntimeError {`
+
+The failure of a question that ended before it answered: its bound passed, its
+invocation was cancelled, or a signal ended it. The funnel killed and reaped
+it, so it is `Failed`, not unresolved.
 
 ## `fn exit_text(exit: Option<i32>) -> String {`
 
@@ -1824,11 +1923,15 @@ strings, and any entry without `=`, is `RuntimeError::Failed` naming what
 could not be read — the runner never guesses an environment it was not
 given.
 
-## `fn collect(&self, name: &str) -> Result<ContainerExecution, RuntimeError> {` › `let (stdout, stderr) = self.exec_streams(RuntimeOp::Collect, name, &["logs", name])?;`
+## `fn collect(&self, name: &str) -> Result<ContainerExecution, RuntimeError> {` › `let (stdout, stderr, output_limited) =`
 
 Both streams, separately. `docker logs` writes the container's stdout
 to its own stdout and the container's stderr to its own stderr
-(measured, docker 29.7.2) — see [`Self::exec_streams`].
+(measured, docker 29.7.2) — see [`Self::exec_streams`]. Whether the funnel
+ended `docker logs` at its output limit is carried as
+`ContainerExecution::output_limited` (K2): the funnel keeps at most its limit
+of each stream, so the runner's own truncation (`exec::bounded`) could no
+longer see that a stream was cut, and a gate's verdict depends on it.
 
 ## `fn collect(&self, name: &str) -> Result<ContainerExecution, RuntimeError> {` › `self.settle_delivery(name, exit_code)?;`
 
@@ -2060,12 +2163,19 @@ succeeded is the daemon speaking, and the container's presence is a value in
 that listing rather than a phrase in a diagnostic. An absent container is an
 exit of **0** with no output, which no local failure can produce.
 
-## `fn observe(&self, name: &str) -> Result<Liveness, RuntimeError> {`
+## `fn observe(&self, name: &str, bound: QuestionBound<'_>) -> Result<Liveness, RuntimeError> {`
 
 Absence is read out of a listing that had to succeed, never out of a failed
 `container inspect`'s stderr: the phrase a diagnostic carries is text the
 environment shapes, and this is the observation every other settlement in the
 runtime is established against (round six, finding 1).
+
+The listing is asked under the bound the caller names (K2): the invocation's
+deadline and cancellation for the supervision (`listing_within`), the
+runtime's own bound for everything else (`listing`), among them the
+settlements of a stop, a removal and a delivery and a reclaim's
+`observe_terminated`, which run after the invocation's bounds may have passed
+and must not be cut short by its cancellation.
 
 ## `fn mount_option_refusal(value: &str) -> Option<&'static str> {`
 

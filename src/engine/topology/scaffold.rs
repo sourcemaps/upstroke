@@ -3348,6 +3348,7 @@ fn exit_zero() -> crate::runner::container::runtime::ContainerExecution {
         exit_code: Some(0),
         stdout: Vec::new(),
         stderr: Vec::new(),
+        output_limited: false,
     }
 }
 
@@ -3403,11 +3404,13 @@ fn played_by(
                     exit_code: output.code,
                     stdout: output.stdout.into_bytes(),
                     stderr: output.stderr.into_bytes(),
+                    output_limited: false,
                 },
                 Err(error) => crate::runner::container::runtime::ContainerExecution {
                     exit_code: None,
                     stdout: Vec::new(),
                     stderr: error.to_string().into_bytes(),
+                    output_limited: false,
                 },
             }
         }))

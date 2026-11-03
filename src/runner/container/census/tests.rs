@@ -8,6 +8,7 @@
 #[cfg(test)]
 mod this_file_is_test_only {}
 
+use crate::runner::container::runtime::QuestionBound;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -251,8 +252,9 @@ impl ContainerRuntime for WedgedRuntime {
     fn observe(
         &self,
         name: &str,
+        bound: QuestionBound<'_>,
     ) -> Result<Liveness, crate::runner::container::runtime::RuntimeError> {
-        self.inner.observe(name)
+        self.inner.observe(name, bound)
     }
     fn collect(
         &self,
@@ -2874,10 +2876,10 @@ fn real_docker_census_reclaims_a_dead_owner_and_spares_a_live_one() {
     let live_name = names[0].clone();
     let dead_name = names[1].clone();
     let live_still_there = docker
-        .observe(live_name.as_str())
+        .observe(live_name.as_str(), QuestionBound::Runtime)
         .expect("observe the live owner's container");
     let dead_gone = docker
-        .observe(dead_name.as_str())
+        .observe(dead_name.as_str(), QuestionBound::Runtime)
         .expect("observe the dead owner's container");
     for name in &names {
         cleanup(name);

@@ -242,6 +242,15 @@ Set the environment an image in the table declares; an image starts with
 none. Refuses an id the table does not hold, so a fixture cannot set the
 environment of an image it never added.
 
+## `impl ContainerRuntime for FakeRuntime` › `fn observe(&self, name: &str, _: QuestionBound<'_>) -> Result<Liveness, RuntimeError> {`
+
+The fake answers an observation from its own state and never blocks, so the
+bound a caller names (`QuestionBound`, K2) has nothing to end and is ignored;
+`LinkedRuntime` ignores it for the same reason, and the fake's own stop and
+removal settle under `QuestionBound::Runtime`, as `DockerCli`'s do. What the
+bound ends is witnessed against the real `DockerCli` and a stub `docker`
+(`exec::tests::a_running_container_whose_observation_stalls_settles_at_its_deadline_or_cancellation_and_keeps_its_fate`).
+
 ## `impl ContainerRuntime for FakeRuntime` › `fn image_environment(&self, id: &str) -> Result<Option<Vec<(String, String)>>, RuntimeError> {`
 
 The environment set on the image, `Ok(None)` for an id the table does not

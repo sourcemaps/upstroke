@@ -436,6 +436,27 @@ What a finished container did.
 
 `None` when the process was signalled rather than exiting.
 
+## `pub struct ContainerExecution` › `pub output_limited: bool,`
+
+Whether the runtime read only part of what the container wrote (K2):
+`DockerCli` sets it when the process funnel ended `docker logs` at its output
+limit, which keeps at most that limit of each stream. The runner then reports
+the output limited whatever the lengths it was handed
+(`exec::ContainerRunner::collect`), so a gate whose output overran the limit
+fails as it did when the runner's own truncation saw the whole output.
+
+## `pub enum QuestionBound<'a> {`
+
+How long one question about a container may take (K2, regular review 4,
+finding 2). `Invocation` is the running invocation's deadline and its
+cancellation: the question ends at whichever comes first, and is not asked
+once either has passed. `Runtime` is the runtime's own bound for one question
+(`DockerCli`'s `QUESTION_BOUND`), for a question no invocation bounds: a
+cleanup, a collection, a reclaim or a census, which may run after an
+invocation's deadline has passed or once it was cancelled and must still be
+asked. `Copy`, and it borrows the cancellation, which outlives every question
+asked under it.
+
 ## `pub trait ContainerRuntime: Send + Sync {`
 
 ---------------------------------------------------------------------------
@@ -531,9 +552,14 @@ Every container carrying `key=value`, with its labels.
 [`RuntimeError`] when the runtime cannot be reached or the listing
 fails.
 
-## `pub trait ContainerRuntime: Send + Sync` › `fn observe(&self, name: &str) -> Result<Liveness, RuntimeError>;`
+## `pub trait ContainerRuntime: Send + Sync` › `fn observe(&self, name: &str, bound: QuestionBound<'_>) -> Result<Liveness, RuntimeError>;`
 
-Whether a container is running, exited, or gone.
+Whether a container is running, exited, or gone, asked under `bound`
+(`QuestionBound`, K2): the supervision of a running invocation passes its
+deadline and its cancellation, so an observation that does not answer ends
+where the invocation does; everything else, a settlement, a reclaim or a test,
+passes the runtime's own bound. A runtime whose observations cannot block,
+as the fakes', may ignore it.
 
 ### Errors
 

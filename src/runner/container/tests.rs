@@ -6,6 +6,7 @@
 #![forbid(clippy::disallowed_types, clippy::disallowed_macros)]
 
 use super::runtime::Settled;
+use crate::runner::container::runtime::QuestionBound;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -1676,7 +1677,7 @@ fn the_availability_toggle_is_per_operation_so_ps_can_answer_while_inspect_canno
             RuntimeOp::InspectImageById => runtime.image_by_id("x").is_err(),
             RuntimeOp::InspectVolume => runtime.volume_present("x").is_err(),
             RuntimeOp::ListByLabel => runtime.containers_with_label("k", "v").is_err(),
-            RuntimeOp::Observe => runtime.observe("x").is_err(),
+            RuntimeOp::Observe => runtime.observe("x", QuestionBound::Runtime).is_err(),
             RuntimeOp::Collect => runtime.collect("x").is_err(),
             RuntimeOp::Create => runtime
                 .create(CoveredCreate::without_a_reaper(&CreateSpec {
@@ -1798,7 +1799,9 @@ fn the_call_log_is_ordered_and_holds_every_operation() {
         .start(CoveredStart::without_a_reaper(&spec.name))
         .expect("started");
     runtime.stop(&spec.name, StopMode::Kill).expect("stopped");
-    runtime.observe(&spec.name).expect("observed");
+    runtime
+        .observe(&spec.name, QuestionBound::Runtime)
+        .expect("observed");
     runtime.remove(&spec.name).expect("removed");
 
     assert_eq!(
@@ -3464,8 +3467,8 @@ impl ContainerRuntime for DockerLikeStop<'_> {
     ) -> Result<Vec<super::runtime::DiscoveredContainer>, RuntimeError> {
         self.inner.containers_with_label(key, value)
     }
-    fn observe(&self, name: &str) -> Result<Liveness, RuntimeError> {
-        self.inner.observe(name)
+    fn observe(&self, name: &str, bound: QuestionBound<'_>) -> Result<Liveness, RuntimeError> {
+        self.inner.observe(name, bound)
     }
     fn collect(&self, name: &str) -> Result<ContainerExecution, RuntimeError> {
         self.inner.collect(name)
@@ -3481,7 +3484,7 @@ impl ContainerRuntime for DockerLikeStop<'_> {
     }
 
     fn stop(&self, name: &str, mode: StopMode) -> Result<Settled, RuntimeError> {
-        let outcome = match self.inner.observe(name)? {
+        let outcome = match self.inner.observe(name, QuestionBound::Runtime)? {
             Liveness::Running => {
                 self.inner.stop(name, mode)?;
                 Ok(format!("{name}\n"))
@@ -3502,7 +3505,9 @@ impl ContainerRuntime for DockerLikeStop<'_> {
                 Ok(text) => format!("ok:{}", text.trim()),
                 Err(error) => format!("err:{error}"),
             });
-        super::settle_stop(name, outcome, |target| self.inner.observe(target))
+        super::settle_stop(name, outcome, |target| {
+            self.inner.observe(target, QuestionBound::Runtime)
+        })
     }
 
     fn remove(&self, name: &str) -> Result<Settled, RuntimeError> {
@@ -3697,6 +3702,7 @@ fn a_containers_exit_status_and_streams_come_back_through_the_seam() {
                 exit_code: code,
                 stdout: b"out".to_vec(),
                 stderr: b"err".to_vec(),
+                output_limited: false,
             },
         );
         let collected = runtime.collect("upstroke-a-b-c-d").expect("collected");
@@ -3713,7 +3719,9 @@ fn a_containers_exit_status_and_streams_come_back_through_the_seam() {
 
     runtime.set_container_state("upstroke-a-b-c-d", Liveness::Exited);
     assert_eq!(
-        runtime.observe("upstroke-a-b-c-d").expect("observed"),
+        runtime
+            .observe("upstroke-a-b-c-d", QuestionBound::Runtime)
+            .expect("observed"),
         Liveness::Exited
     );
     assert!(!Liveness::Running.is_terminated());
@@ -3724,7 +3732,9 @@ fn a_containers_exit_status_and_streams_come_back_through_the_seam() {
          concurrent reclaimers block each other"
     );
     assert_eq!(
-        runtime.observe("never-existed").expect("observed"),
+        runtime
+            .observe("never-existed", QuestionBound::Runtime)
+            .expect("observed"),
         Liveness::Gone
     );
 }
@@ -3766,8 +3776,8 @@ impl ContainerRuntime for NeverTerminates<'_> {
     ) -> Result<Vec<super::runtime::DiscoveredContainer>, RuntimeError> {
         self.0.containers_with_label(key, value)
     }
-    fn observe(&self, name: &str) -> Result<Liveness, RuntimeError> {
-        self.0.observe(name).map(|_| Liveness::Running)
+    fn observe(&self, name: &str, bound: QuestionBound<'_>) -> Result<Liveness, RuntimeError> {
+        self.0.observe(name, bound).map(|_| Liveness::Running)
     }
     fn collect(&self, name: &str) -> Result<ContainerExecution, RuntimeError> {
         self.0.collect(name)
@@ -4554,7 +4564,9 @@ fn wait_until_terminated_within(
     let mut observations = 0_u32;
     loop {
         observations += 1;
-        let state = docker.observe(name).expect("reachable");
+        let state = docker
+            .observe(name, QuestionBound::Runtime)
+            .expect("reachable");
         if state.is_terminated() {
             return Ok(state);
         }
@@ -4609,8 +4621,8 @@ impl<F: Fn(Liveness) -> Liveness + Send + Sync> ContainerRuntime for Scripted<'_
     ) -> Result<Vec<super::runtime::DiscoveredContainer>, RuntimeError> {
         self.0.containers_with_label(key, value)
     }
-    fn observe(&self, name: &str) -> Result<Liveness, RuntimeError> {
-        self.0.observe(name).map(&self.1)
+    fn observe(&self, name: &str, bound: QuestionBound<'_>) -> Result<Liveness, RuntimeError> {
+        self.0.observe(name, bound).map(&self.1)
     }
     fn collect(&self, name: &str) -> Result<ContainerExecution, RuntimeError> {
         self.0.collect(name)
@@ -5013,7 +5025,12 @@ fn real_docker_kill_on_an_already_exited_container_is_tolerated() {
         .expect("a reclaimer arriving second converges on an already-stopped container");
 
     docker.remove(name).expect("removed");
-    assert_eq!(docker.observe(name).expect("reachable"), Liveness::Gone);
+    assert_eq!(
+        docker
+            .observe(name, QuestionBound::Runtime)
+            .expect("reachable"),
+        Liveness::Gone
+    );
 }
 
 #[test]
@@ -5709,7 +5726,9 @@ fn real_docker_lists_the_state_the_settlement_observation_reads() {
     }
 
     assert_eq!(
-        docker.observe(&name).expect("reachable"),
+        docker
+            .observe(&name, QuestionBound::Runtime)
+            .expect("reachable"),
         Liveness::Gone,
         "a listing that succeeded and holds nothing is the daemon saying the container is gone"
     );
@@ -5746,24 +5765,38 @@ fn real_docker_lists_the_state_the_settlement_observation_reads() {
     assert_eq!(super::listed_state(&listing, &name), Some("created"));
     assert_eq!(super::listed_state(&listing, &longer), Some("running"));
     assert_eq!(
-        docker.observe(&name).expect("reachable"),
+        docker
+            .observe(&name, QuestionBound::Runtime)
+            .expect("reachable"),
         Liveness::Exited,
         "a created container holds no process"
     );
     assert_eq!(
-        docker.observe(&longer).expect("reachable"),
+        docker
+            .observe(&longer, QuestionBound::Runtime)
+            .expect("reachable"),
         Liveness::Running
     );
 
     docker
         .start(CoveredStart::without_a_reaper(&name))
         .expect("started");
-    assert_eq!(docker.observe(&name).expect("reachable"), Liveness::Running);
+    assert_eq!(
+        docker
+            .observe(&name, QuestionBound::Runtime)
+            .expect("reachable"),
+        Liveness::Running
+    );
     assert_eq!(
         docker.stop(&name, StopMode::Kill).expect("killed"),
         Settled::ProcessGone
     );
-    assert_eq!(docker.observe(&name).expect("reachable"), Liveness::Exited);
+    assert_eq!(
+        docker
+            .observe(&name, QuestionBound::Runtime)
+            .expect("reachable"),
+        Liveness::Exited
+    );
     assert_eq!(
         docker.stop(&name, StopMode::Kill).expect(
             "a second kill is the daemon's `is not running`, established against its own listing"
@@ -5776,7 +5809,12 @@ fn real_docker_lists_the_state_the_settlement_observation_reads() {
             docker.remove(existing).expect("removed"),
             Settled::ProcessGone
         );
-        assert_eq!(docker.observe(existing).expect("reachable"), Liveness::Gone);
+        assert_eq!(
+            docker
+                .observe(existing, QuestionBound::Runtime)
+                .expect("reachable"),
+            Liveness::Gone
+        );
     }
 }
 
@@ -6804,4 +6842,27 @@ fn the_fake_runtime_reports_the_environment_its_image_declares() {
         Ok(None),
         "an id the runtime does not hold is absent"
     );
+}
+
+#[test]
+fn an_exit_status_the_runtime_reports_is_read_as_a_number_or_refused() {
+    for (status, code) in [("0\n", 0), ("137", 137), (" -1 ", -1)] {
+        assert_eq!(
+            super::exit_status_of("upstroke-collected", status),
+            Ok(code),
+            "{status:?}"
+        );
+    }
+    for status in ["", "\n", "running", "0x1", "137 1"] {
+        let refused = super::exit_status_of("upstroke-collected", status)
+            .expect_err("an exit status that is not a number is not a missing one");
+        let RuntimeError::Failed { operation, detail } = &refused else {
+            panic!("{status:?}: {refused:?}");
+        };
+        assert_eq!(*operation, RuntimeOp::Collect, "{status:?}");
+        assert!(
+            detail.contains("upstroke-collected") && detail.contains("not a number"),
+            "{status:?}: {detail}"
+        );
+    }
 }

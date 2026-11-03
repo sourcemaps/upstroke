@@ -1,5 +1,6 @@
 //! Extended notes: `docs/internals/engine/topology/create/tests.md`
 
+use crate::runner::container::runtime::QuestionBound;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -2937,7 +2938,7 @@ impl crate::runner::container::runtime::ContainerRuntime for Inventory {
             .collect())
     }
 
-    fn observe(&self, name: &str) -> Result<Liveness, RuntimeError> {
+    fn observe(&self, name: &str, _: QuestionBound<'_>) -> Result<Liveness, RuntimeError> {
         Ok(self
             .state
             .lock()
@@ -2951,6 +2952,7 @@ impl crate::runner::container::runtime::ContainerRuntime for Inventory {
             exit_code: Some(0),
             stdout: Vec::new(),
             stderr: Vec::new(),
+            output_limited: false,
         })
     }
 
@@ -5013,6 +5015,7 @@ fn every_container_a_fresh_runs_creation_starts_is_covered_by_an_armed_reaper_wi
             exit_code: Some(0),
             stdout: Vec::new(),
             stderr: Vec::new(),
+            output_limited: false,
         })
     }));
     host.observing_covers();

@@ -1752,25 +1752,28 @@ container running.
 
 **What the budget bounds, exactly.** An observation is synchronous: the
 `docker ps --all --filter name=… --format …` listing [`DockerCli::observe`]
-makes runs to completion through `Command::output()`, with no deadline of
-its own. The budget is consulted only between observations, after one that
-found the container running, so it bounds how long the wait keeps *asking*,
-not how long the wait *takes*: an observation in flight is never
-interrupted, a [`TERMINATION_PAUSE`] begun after an under-budget observation
-is slept in full, and a scheduling delay anywhere in between is not seen
-until the next check. The wait can therefore end past the budget by one
-observation, one pause and whatever the scheduler adds, and a terminal
-observation that completes after the budget is still the answer. What the
-budget cannot do is bound a daemon that does not answer: an observation
-that blocks, blocks the wait with it. The tests below hold each of these
+makes runs under the process funnel and, asked with `QuestionBound::Runtime`
+as these tests ask it, ends at the runtime's own bound (`QUESTION_BOUND`,
+sixty seconds, K2) rather than at this budget. The budget is consulted only
+between observations, after one that found the container running, so it
+bounds how long the wait keeps *asking*, not how long the wait *takes*: an
+observation in flight is never interrupted by it, a [`TERMINATION_PAUSE`]
+begun after an under-budget observation is slept in full, and a scheduling
+delay anywhere in between is not seen until the next check. The wait can
+therefore end past the budget by one observation, one pause and whatever the
+scheduler adds, and a terminal observation that completes after the budget is
+still the answer. What the budget does not do is bound a daemon that does not
+answer: an observation that blocks holds the wait until the runtime's own
+bound ends it. Until K2 that observation had no bound at all. The tests below hold each of these
 with the fake — a running observation that takes 100 ms against a 20 ms
 budget is the wait's only observation and is reported in full, and a
 terminal one that takes as long is accepted — and against the real daemon
 on the build box (2026-09-23, `docker` 29.7.2) a container running
 `sleep 120` was reported running for 947 observations over 30.005 s before
 the wait gave up with that report as its panic message. That measures a
-daemon that answers; a daemon that stops answering has not been measured,
-and the synchronous call path says this budget would not see it.
+daemon that answers; a daemon that stops answering has not been measured
+here, and this budget would not see it: the runtime's own bound is what
+ends such an observation.
 
 **What it replaced.** Before 2026-09-23 the wait was **two hundred
 observations with a `yield_now` between them**, and its duration was
@@ -2928,3 +2931,11 @@ its proof minted by `CoveredStart::without_a_reaper_until` with that mode's
 deadline. In the cancel mode a scoped thread cancels the start once the stub has
 recorded the diagnostic (`UPSTROKE_TEST_INSPECTED`), so the cancellation lands
 on the diagnostic and not on the wait before it.
+
+## `fn an_exit_status_the_runtime_reports_is_read_as_a_number_or_refused() {`
+
+K2: the collection reads the exit status `docker container inspect` reports as
+a number (surrounding whitespace aside, a negative one included), and refuses
+anything else as a `Collect` failure naming the container, where it once read
+it as a missing exit code. The cases are the reading itself
+(`exit_status_of`), with no daemon.

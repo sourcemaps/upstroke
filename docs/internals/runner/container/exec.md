@@ -132,7 +132,9 @@ How often the supervisor asks whether the container has finished.
 `decisions.tests_acceptance.determinism` forbids sleeps in the suite, so
 this is a value and every test sets it to zero. A container that finishes
 between two observations is observed at the second; a container that does
-not finish by the request's deadline is stopped and removed.
+not finish by the request's deadline is stopped and removed. The rest between
+two observations never runs past the deadline: it is the poll or the time
+left, whichever is less (K2).
 
 ## `pub struct RunIdentity {`
 
@@ -1249,6 +1251,23 @@ Wait for the container, bounded by the request's own timeout and by the
 call's cancellation, and say which of the three ended the wait
 ([`Watched`]).
 
+**Each observation is bounded by the same two** (K2, regular review 4,
+finding 2; prior PR7-STD-CONTAINER-EXEC-UNBOUNDED). The observation is asked
+under `QuestionBound::Invocation`, so the runtime ends it at the deadline and
+on the cancellation (`DockerCli::listing_within`, the bound J6 and J13 gave the
+start's questions). Until K2 it was asked with no bound: `docker ps` stalled
+inside `Command::output`, the deadline and the cancellation were checked only
+after it answered, and an invocation with a 100 ms timeout took 1.063 s
+against a stub whose observation slept one second (the reviewer's witness);
+one that never answered held the invocation for ever. An observation that
+fails once the deadline has passed is the timeout, and one that fails once
+the call was cancelled is the cancellation, the deadline first, as for an
+observation that answered: that is what ended it, not a state the runtime
+could not give. An observation whose process its supervisor could not
+establish gone is reported as itself, whatever else coincided with it, with
+its `Unresolved` fate kept (`super::refused`), and `contain` keeps that fate.
+Any other failure ends the supervision as before.
+
 "timeout or shutdown stops and removes the container"
 (`slice_contract.cancellation`); PR11's cancellation is the same
 disposition: "a granted or non-slotted running invocation is cancelled after
@@ -1274,7 +1293,12 @@ local `NoHooks`.
 ## `impl ContainerRunner` › `fn contain(`
 
 One invocation under one observer: the pre-launch cancellation check, the
-plan, the cover, the launch, supervision, collection and the release, in that order. A call
+plan, the cover, the launch, supervision, collection and the release, in that order.
+Every wait among them is bounded: the start's questions and the supervision's
+observations by the invocation's deadline and its cancellation, and the
+collection's and the release's questions by the runtime's own bound
+(`DockerCli`'s `QUESTION_BOUND`, K2), which a cancellation does not shorten:
+what the invocation started is released whether or not it was cancelled. A call
 cancelled before anything is written is refused as
 `RunnerError::cancelled(.., NeverStarted)` with no intent, view or container
 (`a_container_call_cancelled_before_it_starts_writes_no_intent`). A call
@@ -1454,6 +1478,12 @@ container be reclaimed before the verification is settled.
 Collect after the supervision, which `run` performs itself so it knows
 whether the exit was observed before it releases.
 
+The output is limited when the runtime says it read only part of it
+(`ContainerExecution::output_limited`, which `DockerCli` sets when the process
+funnel ended `docker logs` at its output limit, K2) or when a stream is longer
+than this runner reads (`bounded`). A runtime failure keeps an `Unresolved`
+fate (`super::refused`), as the supervision's does.
+
 ## `impl ContainerRunner` › `let execution = self`
 
 Collected **before** the release: `docker logs` answers for a running
@@ -1466,9 +1496,21 @@ A container the supervisor stopped did not exit on its own,
 whatever status the runtime reports afterwards — the same
 disposition `agent::proc` gives a killed tree.
 
-## `fn refused_by_runtime(error: RuntimeError) -> UpstrokeError {`
+## `fn contain(` › `let fate = match (&outcome, &released) {`
 
-A runtime failure, as the engine's error type.
+The fate the invocation reports. An outcome whose error carries a process its
+runtime could not establish gone (`UpstrokeError::Runner` with
+`ProcessFate::Unresolved`, which `super::refused` makes of a
+`RuntimeError::Unresolved` from the supervision or the collection) keeps that
+fate whatever the release established, as `cancelled` keeps a launch's (K2,
+"preserved process fate"): the release's evidence is about the container, not
+about that process. Otherwise the release decides, as below. Until K2 the
+supervision's and the collection's failures were turned into
+`UpstrokeError::Refused` (`refused_by_runtime`, removed), so an unresolved
+observation followed by a clean release reported `Gone`; `DockerCli` held
+the fact under the container and its removal reported it, but a runtime that
+does not hold such a fact lost it
+(`an_observation_that_leaves_a_process_unresolved_keeps_the_invocation_unresolved_after_a_clean_release`).
 
 ## `fn bounded(bytes: &[u8], limit: usize) -> (String, bool) {`
 

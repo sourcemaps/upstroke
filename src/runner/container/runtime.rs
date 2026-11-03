@@ -10,7 +10,9 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
+use crate::runner::Cancellation;
 use crate::topology::effects::ContainerSite;
 
 use super::exec::{CoveredCreate, CoveredStart};
@@ -269,6 +271,16 @@ pub struct ContainerExecution {
     pub exit_code: Option<i32>,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
+    pub output_limited: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum QuestionBound<'a> {
+    Invocation {
+        deadline: Instant,
+        cancellation: &'a Cancellation,
+    },
+    Runtime,
 }
 
 pub trait ContainerRuntime: Send + Sync {
@@ -295,7 +307,7 @@ pub trait ContainerRuntime: Send + Sync {
         value: &str,
     ) -> Result<Vec<DiscoveredContainer>, RuntimeError>;
 
-    fn observe(&self, name: &str) -> Result<Liveness, RuntimeError>;
+    fn observe(&self, name: &str, bound: QuestionBound<'_>) -> Result<Liveness, RuntimeError>;
 
     fn collect(&self, name: &str) -> Result<ContainerExecution, RuntimeError>;
 

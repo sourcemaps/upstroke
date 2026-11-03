@@ -5,6 +5,7 @@
 #![allow(clippy::disallowed_methods)]
 #![forbid(clippy::disallowed_types, clippy::disallowed_macros)]
 
+use crate::runner::container::runtime::QuestionBound;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
@@ -131,6 +132,7 @@ struct Scripted {
     execution: Mutex<Option<ContainerExecution>>,
     /// Set by [`Runtime::leaves_its_start_unresolved`].
     start_unresolved: std::sync::atomic::AtomicBool,
+    observation_unresolved: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Debug, Clone)]
@@ -150,7 +152,13 @@ impl Runtime {
             exit_on_start,
             execution: Mutex::new(None),
             start_unresolved: std::sync::atomic::AtomicBool::new(false),
+            observation_unresolved: std::sync::atomic::AtomicBool::new(false),
         }))
+    }
+
+    fn leaves_its_observation_unresolved(&self) {
+        let flag = &self.0.observation_unresolved;
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Every later start runs and then reports a process it could not establish gone, as a
@@ -194,8 +202,18 @@ impl ContainerRuntime for Runtime {
     ) -> Result<Vec<DiscoveredContainer>, RuntimeError> {
         self.0.fake.containers_with_label(key, value)
     }
-    fn observe(&self, name: &str) -> Result<Liveness, RuntimeError> {
-        self.0.fake.observe(name)
+    fn observe(&self, name: &str, bound: QuestionBound<'_>) -> Result<Liveness, RuntimeError> {
+        let flag = &self.0.observation_unresolved;
+        if flag.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(RuntimeError::Unresolved {
+                operation: RuntimeOp::Observe,
+                detail: format!(
+                    "a question about `{name}` ended its supervision without establishing its \
+                     process gone"
+                ),
+            });
+        }
+        self.0.fake.observe(name, bound)
     }
     fn collect(&self, name: &str) -> Result<ContainerExecution, RuntimeError> {
         self.0.fake.collect(name)
@@ -2609,6 +2627,7 @@ fn failing_preflight_probe_on_resume_refuses_before_recovery_event_and_reclaims_
             exit_code: exit,
             stdout: Vec::new(),
             stderr: stderr.clone().into_bytes(),
+            output_limited: false,
         });
         let runner = fixture.runner();
         let name =
@@ -2965,6 +2984,7 @@ fn a_completed_invocation_releases_in_the_contracts_order_and_reports_the_result
         exit_code: Some(3),
         stdout: b"the work is done\n".to_vec(),
         stderr: b"a warning\n".to_vec(),
+        output_limited: false,
     });
     let runner = fixture.runner();
     let request = worker_request(
@@ -3135,6 +3155,7 @@ fn output_beyond_the_bound_is_truncated_and_reported_as_limited() {
             exit_code: Some(0),
             stdout: vec![b'x'; bytes],
             stderr: Vec::new(),
+            output_limited: false,
         });
         let runner = fixture.runner().with_output_limit(16);
         let request = gate_request(
@@ -8193,4 +8214,190 @@ fn no_reaper_test_reads_a_hold_as_released_once() {
         .is_empty(),
         "and accepts a read polled within a deadline"
     );
+}
+
+#[test]
+fn an_observation_that_leaves_a_process_unresolved_keeps_the_invocation_unresolved_after_a_clean_release()
+ {
+    use crate::error::ProcessFate;
+
+    let fixture = Fixture::new("unresolved-observation", false);
+    fixture.runtime.leaves_its_observation_unresolved();
+    let request = gate_request(
+        ShellKind::Sh.spec("exit 0"),
+        fixture.task_a.clone(),
+        Duration::from_secs(10),
+        gate_id(0),
+    );
+
+    let error = fixture
+        .runner()
+        .run_blocking(&request)
+        .expect_err("the supervision's observation left a process unresolved");
+    assert_eq!(error.fate, ProcessFate::Unresolved, "{error}");
+    assert!(
+        error
+            .to_string()
+            .contains(ProcessFate::Unresolved.describe()),
+        "{error}"
+    );
+    let ops = fixture.trace.ops();
+    assert!(
+        ops.contains(&RuntimeOp::Start)
+            && ops.contains(&RuntimeOp::Remove)
+            && !ops.contains(&RuntimeOp::Collect),
+        "the container started, nothing was collected, and the release removed it: {ops:?}"
+    );
+    assert_eq!(
+        fixture.runtime.fake().container_names(),
+        Vec::<String>::new(),
+        "the release completed, and the invocation is still unresolved"
+    );
+}
+
+#[cfg(unix)]
+const STALLED_OBSERVATION_MODE: &str = "UPSTROKE_TEST_STALLED_OBSERVATION";
+
+#[cfg(unix)]
+const STALLED_OBSERVATION_MARKER: &str = "UPSTROKE_TEST_OBSERVED";
+
+#[cfg(unix)]
+const STALLED_OBSERVATION_IMAGE: &str = "UPSTROKE_TEST_IMAGE";
+
+#[cfg(unix)]
+const STALLED_CLEANUP: &str = "UPSTROKE_TEST_CLEANUP_STALLS";
+
+#[cfg(unix)]
+const STALLED_OBSERVATION_DOCKER: &str = "#!/bin/sh\n\
+    case \"$1\" in\n\
+    ps)\n\
+    \x20 case \"$*\" in\n\
+    \x20 *\"filter name=\"*) : > \"$UPSTROKE_TEST_OBSERVED\"; exec sleep 60 ;;\n\
+    \x20 *) exit 0 ;;\n\
+    \x20 esac ;;\n\
+    create|start) exit 0 ;;\n\
+    container)\n\
+    \x20 case \"$*\" in\n\
+    \x20 *.Image*) printf '%s\\n' \"$UPSTROKE_TEST_IMAGE\" ;;\n\
+    \x20 *) printf '0\\n' ;;\n\
+    \x20 esac ;;\n\
+    logs) printf 'what the container wrote\\n' ;;\n\
+    stop|rm) if [ -n \"$UPSTROKE_TEST_CLEANUP_STALLS\" ]; then exec sleep 60; fi; exit 0 ;;\n\
+    *) exit 93 ;;\n\
+    esac\n";
+
+#[cfg(unix)]
+#[test]
+fn a_running_container_whose_observation_stalls_settles_at_its_deadline_or_cancellation_and_keeps_its_fate()
+ {
+    let tree = repo::scratch("stalled-observation");
+    let bin = tree.path().join("bin");
+    std::fs::create_dir(&bin).expect("the stub's directory");
+    let stub = bin.join("docker");
+    crate::runner::container::write_program_in_its_own_process(&stub, STALLED_OBSERVATION_DOCKER);
+    let inherited = std::env::var_os("PATH").unwrap_or_default();
+    let path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&inherited)))
+        .expect("a PATH with the stub first");
+    for mode in ["deadline", "cancel", "cleanup"] {
+        let observed = tree.path().join(format!("observed-{mode}"));
+        let mut vars = vec![
+            ("PATH", path.as_os_str()),
+            (STALLED_OBSERVATION_MODE, std::ffi::OsStr::new(mode)),
+            (STALLED_OBSERVATION_MARKER, observed.as_os_str()),
+            (STALLED_OBSERVATION_IMAGE, std::ffi::OsStr::new(IMAGE_ID)),
+        ];
+        if mode == "cleanup" {
+            vars.push((STALLED_CLEANUP, std::ffi::OsStr::new("1")));
+        }
+        let ended = crate::agent::proc::test_support::run_test_isolated(
+            "runner::container::exec::tests::stalled_observation_child",
+            &vars,
+            Duration::from_secs(120),
+        );
+        assert!(
+            ended.status.is_some_and(|status| status.success())
+                && ended.stdout.contains("1 passed"),
+            "{mode}: the stalled observation held the invocation, or it settled with another \
+             fate: {ended}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "spawned by the stalled-observation witness"]
+fn stalled_observation_child() {
+    use crate::error::ProcessFate;
+
+    let mode = std::env::var(STALLED_OBSERVATION_MODE).expect("the parent names the mode");
+    let observed = PathBuf::from(
+        std::env::var_os(STALLED_OBSERVATION_MARKER).expect("the parent names the marker"),
+    );
+    let fixture = Fixture::new(&format!("stalled-observation-{mode}"), false);
+    let docker = crate::runner::container::DockerCli::new(ContainerTrace::off());
+    let docker = if mode == "cleanup" {
+        docker.with_question_bound(Duration::from_secs(1))
+    } else {
+        docker
+    };
+    let runner = ContainerRunner::new(
+        container_policy(),
+        fixture.identity.clone(),
+        &fixture.repo,
+        fixtures::plain_checkout(&fixture.repo.join(".git")),
+        image_environment(),
+        Box::new(docker),
+    )
+    .expect("a container policy");
+    let mut request =
+        host::shell_probe_request(ShellKind::Sh, fixture.task_a.clone(), shell_probe_id());
+    request.timeout = if mode == "cancel" {
+        Duration::from_secs(600)
+    } else {
+        Duration::from_millis(300)
+    };
+    let cancellation = Cancellation::new();
+    let began = Instant::now();
+    let ran = std::thread::scope(|scope| {
+        if mode == "cancel" {
+            scope.spawn(|| {
+                let until = Instant::now() + Duration::from_secs(60);
+                while !observed.exists() && Instant::now() < until {
+                    crate::workspace_manager::fixture::rest(Duration::from_millis(10));
+                }
+                cancellation.cancel();
+            });
+        }
+        runner.run_blocking_with(&request, RunnerCall::new(cancellation.clone()))
+    });
+    let took = began.elapsed();
+    assert!(
+        observed.exists(),
+        "{mode}: the premise, the started container's observation was asked"
+    );
+    assert!(
+        took < Duration::from_secs(20),
+        "{mode}: the stalled `docker` held the invocation {took:?}"
+    );
+    match mode.as_str() {
+        "deadline" => {
+            let output = ran.expect("a timed-out invocation reports its output");
+            assert!(output.timed_out && output.code.is_none(), "{output:?}");
+        }
+        "cancel" => {
+            let error = ran.expect_err("a cancelled invocation reports an error");
+            assert!(error.is_cancelled(), "{error}");
+            assert_eq!(error.fate, ProcessFate::Gone, "{error}");
+        }
+        _ => {
+            let error = ran.expect_err("a release whose questions stalled reports an error");
+            assert_eq!(error.fate, ProcessFate::Unresolved, "{error}");
+            assert!(
+                !list_intents(&fixture.private_root)
+                    .expect("the container namespace reads")
+                    .is_empty(),
+                "the intent is kept for the census that reclaims the container"
+            );
+        }
+    }
 }

@@ -35,6 +35,7 @@
 #[cfg(test)]
 mod this_file_is_test_only {}
 
+use crate::runner::container::runtime::QuestionBound;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -2484,7 +2485,7 @@ impl ContainerRuntime for UnreachableRuntime {
         Err(unreachable_for(RuntimeOp::ListByLabel))
     }
 
-    fn observe(&self, _: &str) -> Result<Liveness, RuntimeError> {
+    fn observe(&self, _: &str, _: QuestionBound<'_>) -> Result<Liveness, RuntimeError> {
         Err(unreachable_for(RuntimeOp::Observe))
     }
 
@@ -2551,7 +2552,7 @@ impl ContainerRuntime for RefusingRuntime {
         })
     }
 
-    fn observe(&self, _: &str) -> Result<Liveness, RuntimeError> {
+    fn observe(&self, _: &str, _: QuestionBound<'_>) -> Result<Liveness, RuntimeError> {
         Err(unreachable_for(RuntimeOp::Observe))
     }
 

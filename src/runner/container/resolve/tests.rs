@@ -8,6 +8,7 @@
 #[cfg(test)]
 mod this_file_is_test_only {}
 
+use crate::runner::container::runtime::QuestionBound;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -2374,9 +2375,9 @@ impl ContainerRuntime for LoggingRuntime {
         self.inner.containers_with_label(key, value)
     }
 
-    fn observe(&self, name: &str) -> Result<Liveness, RuntimeError> {
+    fn observe(&self, name: &str, bound: QuestionBound<'_>) -> Result<Liveness, RuntimeError> {
         logged!(self, RuntimeOp::Observe);
-        self.inner.observe(name)
+        self.inner.observe(name, bound)
     }
 
     fn collect(

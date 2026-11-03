@@ -27,7 +27,7 @@ use super::resolve::{
     overlap, recheck_recorded_source, refuse_excluded,
 };
 use super::runtime::{
-    ContainerRuntime, ContainerTrace, ContainerUser, CreateSpec, Mount, RuntimeError,
+    ContainerRuntime, ContainerTrace, ContainerUser, CreateSpec, Mount, QuestionBound, RuntimeError,
 };
 use super::view::{self, RoleGitView};
 use super::{
@@ -985,10 +985,20 @@ impl ContainerRunner {
         cancellation: &Cancellation,
     ) -> Result<Watched, UpstrokeError> {
         loop {
-            let state = self
-                .runtime
-                .observe(name.as_str())
-                .map_err(refused_by_runtime)?;
+            let observed = self.runtime.observe(
+                name.as_str(),
+                QuestionBound::Invocation {
+                    deadline,
+                    cancellation,
+                },
+            );
+            let state = match observed {
+                Ok(state) => state,
+                Err(error @ RuntimeError::Unresolved { .. }) => return Err(super::refused(error)),
+                Err(_) if Instant::now() >= deadline => return Ok(Watched::TimedOut),
+                Err(_) if cancellation.is_cancelled() => return Ok(Watched::Cancelled),
+                Err(error) => return Err(super::refused(error)),
+            };
             if state.is_terminated() {
                 return Ok(Watched::Exited);
             }
@@ -998,8 +1008,11 @@ impl ContainerRunner {
             if cancellation.is_cancelled() {
                 return Ok(Watched::Cancelled);
             }
-            if !self.poll.is_zero() {
-                std::thread::sleep(self.poll);
+            let rest = self
+                .poll
+                .min(deadline.saturating_duration_since(Instant::now()));
+            if !rest.is_zero() {
+                std::thread::sleep(rest);
             }
         }
     }
@@ -1147,10 +1160,17 @@ impl ContainerRunner {
                 ContainerToRelease::MayBeRunning
             },
         );
-        let fate = match &released {
-            Ok(()) => ProcessFate::Gone,
-            Err(failure) if failure.container_gone => ProcessFate::Gone,
-            Err(_) => ProcessFate::Unresolved,
+        let fate = match (&outcome, &released) {
+            (
+                Err(UpstrokeError::Runner {
+                    fate: ProcessFate::Unresolved,
+                    ..
+                }),
+                _,
+            ) => ProcessFate::Unresolved,
+            (_, Ok(())) => ProcessFate::Gone,
+            (_, Err(failure)) if failure.container_gone => ProcessFate::Gone,
+            (_, Err(_)) => ProcessFate::Unresolved,
         };
         covered.settle(fate);
         match (outcome, released) {
@@ -1179,7 +1199,7 @@ impl ContainerRunner {
         let execution = self
             .runtime
             .collect(launched.name.as_str())
-            .map_err(refused_by_runtime)?;
+            .map_err(super::refused)?;
         let (stdout, stdout_limited) = bounded(&execution.stdout, self.output_limit);
         let (stderr, stderr_limited) = bounded(&execution.stderr, self.output_limit);
         Ok(ProcessOutput {
@@ -1188,14 +1208,8 @@ impl ContainerRunner {
             stderr,
             duration: started.elapsed(),
             timed_out,
-            output_limited: stdout_limited || stderr_limited,
+            output_limited: execution.output_limited || stdout_limited || stderr_limited,
         })
-    }
-}
-
-fn refused_by_runtime(error: RuntimeError) -> UpstrokeError {
-    UpstrokeError::Refused {
-        message: error.to_string(),
     }
 }
 

@@ -1,5 +1,6 @@
 //! Extended notes: `docs/internals/engine/topology/prelock/tests.md`
 
+use crate::runner::container::runtime::QuestionBound;
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
@@ -116,7 +117,7 @@ impl ContainerRuntime for Inventory {
         Ok(Vec::new())
     }
 
-    fn observe(&self, _name: &str) -> Result<Liveness, RuntimeError> {
+    fn observe(&self, _name: &str, _: QuestionBound<'_>) -> Result<Liveness, RuntimeError> {
         Ok(Liveness::Gone)
     }
 
@@ -125,6 +126,7 @@ impl ContainerRuntime for Inventory {
             exit_code: Some(0),
             stdout: Vec::new(),
             stderr: Vec::new(),
+            output_limited: false,
         })
     }
 

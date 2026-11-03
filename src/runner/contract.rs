@@ -1689,19 +1689,21 @@ pub(crate) mod tests {
                 2,
                 "the Container funnel's `docker` CLI: one `Command::new(`, in \
                  `docker_command`, the builder every container operation \
-                 converges on, and no `.spawn()`: every operation is an \
-                 `.output()` the funnel waits on, except two, the two \
-                 `run_with_timeout` mentions. The attached `docker start \
-                 --attach --interactive` that delivers a command's stdin \
-                 payload (PR12's D-C) runs under the process funnel, on a \
-                 thread of its own: the funnel spawns it in its own process \
-                 group, feeds it, bounds its output, stops, terminates and \
-                 reaps it, so a start never waits on the workload and the client \
-                 is never left unowned. The start's questions (`exec_within`: \
-                 the attached start's observations and diagnostic, and the \
-                 detached `docker start`) run under it too, bounded by the \
-                 invocation's deadline and its cancellation, and keep the fate \
-                 it established (PR12's J6). Deliberately NOT routed through the Runner, \
+                 converges on, and no `.spawn()`: every operation runs under \
+                 the process funnel, through the two `run_with_timeout` \
+                 mentions. The attached `docker start --attach --interactive` \
+                 that delivers a command's stdin payload (PR12's D-C) runs \
+                 under it on a thread of its own: the funnel spawns it in its \
+                 own process group, feeds it, bounds its output, stops, \
+                 terminates and reaps it, so a start never waits on the \
+                 workload and the client is never left unowned. Every other \
+                 `docker` question runs through `DockerCli::question`, the \
+                 other mention: the start's questions and the supervision's \
+                 observations end at the invocation's deadline and on its \
+                 cancellation (PR12's J6, J13 and K2), and every other \
+                 question, of collection, cleanup or a census, at the \
+                 runtime's own bound (K2), each keeping the fate the funnel \
+                 established. Deliberately NOT routed through the Runner, \
                  and for the same reason as the two Git rows below — \
                  DESIGN.md:612's \"authoritative Git and the event log never \
                  do\" is about the things that BUILD the boundary rather than \

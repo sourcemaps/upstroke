@@ -6,6 +6,7 @@
     clippy::disallowed_macros
 )]
 
+use crate::runner::container::runtime::QuestionBound;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
@@ -366,6 +367,7 @@ impl FakeRuntime {
                     exit_code: Some(0),
                     stdout: Vec::new(),
                     stderr: Vec::new(),
+                    output_limited: false,
                 },
             },
         );
@@ -486,7 +488,7 @@ impl ContainerRuntime for FakeRuntime {
             .collect())
     }
 
-    fn observe(&self, name: &str) -> Result<Liveness, RuntimeError> {
+    fn observe(&self, name: &str, _: QuestionBound<'_>) -> Result<Liveness, RuntimeError> {
         self.enter(RuntimeOp::Observe, name)?;
         self.settle_process(name);
         Ok(self
@@ -587,6 +589,7 @@ impl FakeRuntime {
                     exit_code: Some(0),
                     stdout: Vec::new(),
                     stderr: Vec::new(),
+                    output_limited: false,
                 },
             },
         );
@@ -647,7 +650,9 @@ impl FakeRuntime {
         if entered.is_ok() {
             self.kill_process(name);
         }
-        let settled = super::settle_stop(name, entered, |target| self.observe(target))?;
+        let settled = super::settle_stop(name, entered, |target| {
+            self.observe(target, QuestionBound::Runtime)
+        })?;
         if settled.process_gone() {
             if let Some(container) = self.state().containers.get_mut(name) {
                 container.state = Liveness::Exited;
@@ -663,7 +668,9 @@ impl FakeRuntime {
         if entered.is_ok() {
             self.kill_process(name);
         }
-        let removed = super::settle_remove(name, entered, |target| self.observe(target));
+        let removed = super::settle_remove(name, entered, |target| {
+            self.observe(target, QuestionBound::Runtime)
+        });
         if removed.as_ref().is_ok_and(|settled| settled.process_gone()) {
             self.state().containers.remove(name);
         }
@@ -731,6 +738,7 @@ impl FakeRuntime {
                 exit_code: None,
                 stdout: Vec::new(),
                 stderr: b"the fake container's process panicked".to_vec(),
+                output_limited: false,
             });
         if let Some(container) = self.state().containers.get_mut(name) {
             container.execution = execution;
@@ -999,7 +1007,7 @@ impl FakeRuntime {
                 .containers_with_label(&text("key"), &text("value"))
                 .map(|found| Value::Array(found.iter().map(discovered_json).collect())),
             RuntimeOp::Observe => self
-                .observe(&text("name"))
+                .observe(&text("name"), QuestionBound::Runtime)
                 .map(|state| Value::from(liveness_name(state))),
             RuntimeOp::Collect => self
                 .collect(&text("name"))
@@ -1116,7 +1124,7 @@ impl ContainerRuntime for LinkedRuntime {
             })
     }
 
-    fn observe(&self, name: &str) -> Result<Liveness, RuntimeError> {
+    fn observe(&self, name: &str, _: QuestionBound<'_>) -> Result<Liveness, RuntimeError> {
         let state = self.call(RuntimeOp::Observe, json!({"name": name}))?;
         state
             .as_str()
@@ -1284,6 +1292,7 @@ fn execution_of(value: &Value) -> ContainerExecution {
             .and_then(|code| i32::try_from(code).ok()),
         stdout: bytes("stdout"),
         stderr: bytes("stderr"),
+        output_limited: false,
     }
 }
 
