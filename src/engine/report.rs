@@ -131,6 +131,8 @@ pub struct RunReport {
     pub interrupted: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub questions_in_log: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unattributed_cost_incomplete: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -151,9 +153,11 @@ impl RunReport {
     }
 
     pub fn total_is_floor(&self) -> bool {
-        self.tasks
-            .iter()
-            .any(|task| task.cost_incomplete() || task.review_cost_incomplete)
+        self.unattributed_cost_incomplete
+            || self
+                .tasks
+                .iter()
+                .any(|task| task.cost_incomplete() || task.review_cost_incomplete)
     }
 
     fn committed_count(&self) -> usize {
@@ -264,9 +268,6 @@ impl RunReport {
             }
         }
 
-        // Integration verifications charge review passes outside every attempt record; they
-        // are review spend on the verified candidate's task, attributed as the run's spend
-        // ledger attributes them, and each is counted once.
         let integration = crate::engine::topology::select::IntegrationReviews::replay(events);
 
         let outcome = fold.finished().cloned();
@@ -360,7 +361,7 @@ impl RunReport {
                     .chain(integrated.iter().map(|review| review.cost_usd)),
             );
             let review_cost_incomplete = attempts.iter().any(AttemptRecord::review_cost_incomplete)
-                || integrated.iter().any(|review| review.cost_usd.is_none());
+                || integration.spend_unknown(entry.key);
             tasks.push(TaskReport {
                 id: entry.display_id.as_str().to_owned(),
                 title: entry.spec.title.clone(),
@@ -425,6 +426,13 @@ impl RunReport {
                     .to_owned(),
             );
         }
+        if integration.interrupted_unattributed() {
+            warnings.push(
+                "an integration verification the log attributes to no task was interrupted, so \
+                 what its review passes cost is unknown and this report's total is a floor"
+                    .to_owned(),
+            );
+        }
         let ledger = crate::engine::topology::select::Spend::replay(events).run_total();
         if (total_cost_usd - ledger).abs() > 1e-9 {
             warnings.push(format!(
@@ -468,6 +476,7 @@ impl RunReport {
             running: false,
             interrupted: outcome.is_none(),
             questions_in_log: true,
+            unattributed_cost_incomplete: integration.unattributed_spend_unknown(),
         }
     }
 }
@@ -577,6 +586,7 @@ pub(super) fn build_report(header: ReportHeader<'_>, plan: &Plan, state: &RunSta
         running,
         interrupted,
         questions_in_log: false,
+        unattributed_cost_incomplete: false,
     }
 }
 
@@ -771,6 +781,7 @@ impl RunReport {
                 TaskRunStatus::Committed { sha } => {
                     let partial = if task.review_cost_incomplete { "?" } else { "" };
                     let review = match (task.review_models.as_slice(), task.review_cost_usd) {
+                        ([], _) if task.review_cost_incomplete => " + review $?".to_owned(),
                         ([], _) => String::new(),
                         (models, Some(cost)) => {
                             format!(" + review {} ${cost:.4}{partial}", models.join(", "))
@@ -1004,8 +1015,8 @@ impl RunReport {
         ));
         if self.total_is_floor() {
             out.push(format_args!(
-                "  `?` marks a figure missing an attempt whose route reports no spend, or one \
-                 the engine was killed inside — a floor, not a total (§13)"
+                "  `?` marks a figure missing an attempt or a review pass whose route reports no \
+                 spend, or one the engine was killed inside — a floor, not a total (§13)"
             ));
         }
         if self.pool_drain.is_empty() {

@@ -8319,6 +8319,7 @@ fn empty_report() -> RunReport {
         running: false,
         interrupted: false,
         questions_in_log: false,
+        unattributed_cost_incomplete: false,
     }
 }
 

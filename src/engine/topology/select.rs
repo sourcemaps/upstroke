@@ -1,6 +1,6 @@
 //! Extended notes: `docs/internals/engine/topology/select.md`
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::error::UpstrokeError;
 use crate::events::RunOutcome;
@@ -115,14 +115,12 @@ impl Spend {
     }
 }
 
-/// The review passes integration verifications charged, attributed as [`Spend::replay`]
-/// attributes them: to the task whose candidate was verified when the log names it, and to the
-/// run alone otherwise. The fold admits a sequence's passes once (`check_spend_unrecorded`), so
-/// each pass appears here exactly once. The run's report reads its integration spend from this.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct IntegrationReviews {
     by_task: BTreeMap<TaskKey, Vec<ReviewRecord>>,
     unattributed: Vec<ReviewRecord>,
+    interrupted: BTreeSet<TaskKey>,
+    interrupted_unattributed: bool,
 }
 
 impl IntegrationReviews {
@@ -162,6 +160,17 @@ impl IntegrationReviews {
                         reviews.add(Some(data.candidate.key), &verification.reviews);
                     }
                 }
+                TopologyEventBody::MergeVerificationInterrupted { data } => {
+                    match verifying
+                        .take()
+                        .filter(|(sequence, _)| *sequence == data.sequence)
+                    {
+                        Some((_, key)) => {
+                            reviews.interrupted.insert(key);
+                        }
+                        None => reviews.interrupted_unattributed = true,
+                    }
+                }
                 _ => {}
             }
         }
@@ -179,22 +188,41 @@ impl IntegrationReviews {
         }
     }
 
-    /// The passes charged to `key`'s task.
     #[must_use]
     pub fn of_task(&self, key: TaskKey) -> &[ReviewRecord] {
         self.by_task.get(&key).map_or(&[][..], Vec::as_slice)
     }
 
-    /// The passes the log attributes to no task. A valid log has none: the fold admits a
-    /// verification's terminal only after its start.
     #[must_use]
     pub fn unattributed(&self) -> &[ReviewRecord] {
         &self.unattributed
     }
 
-    /// Every pass, attributed or not.
     pub fn all(&self) -> impl Iterator<Item = &ReviewRecord> {
         self.by_task.values().flatten().chain(&self.unattributed)
+    }
+
+    #[must_use]
+    pub fn spend_unknown(&self, key: TaskKey) -> bool {
+        self.interrupted.contains(&key)
+            || self
+                .of_task(key)
+                .iter()
+                .any(|review| review.cost_usd.is_none())
+    }
+
+    #[must_use]
+    pub const fn interrupted_unattributed(&self) -> bool {
+        self.interrupted_unattributed
+    }
+
+    #[must_use]
+    pub fn unattributed_spend_unknown(&self) -> bool {
+        self.interrupted_unattributed
+            || self
+                .unattributed
+                .iter()
+                .any(|review| review.cost_usd.is_none())
     }
 }
 

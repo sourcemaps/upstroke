@@ -1810,3 +1810,115 @@ fn integration_reviews_attribute_every_pass_once_as_the_spend_ledger_does() {
         "the unattributed pass's missing cost is said, and the total is the ledger's: no mismatch"
     );
 }
+
+#[test]
+fn an_interrupted_integration_verification_keeps_its_known_charges_and_makes_the_total_a_floor() {
+    let interrupted = |sequence: u32| {
+        ev(TopologyEventBody::MergeVerificationInterrupted {
+            data: crate::topology::events::MergeVerificationInterrupted {
+                sequence: crate::topology::events::SequenceId(sequence),
+                detail: "the coordinator that held this verification did not survive it".to_owned(),
+            },
+        })
+    };
+    let prepared = |sequence: u32, reviews: Vec<crate::events::ReviewRecord>| {
+        ev(TopologyEventBody::MergePrepared {
+            data: Box::new(crate::topology::events::MergePrepared {
+                sequence: crate::topology::events::SequenceId(sequence),
+                disposition: crate::topology::events::PreparedDisposition::StaleClean,
+                expected_head: sha("head"),
+                proposed_sha: sha("proposal"),
+                key: ALEPH,
+                generation: GenerationId(0),
+                candidate_sha: candidate_of(ALEPH, 0).commit_sha,
+                candidate_ref: candidate_of(ALEPH, 0).candidate_ref,
+                prepared_ref: Some(GitRef(format!("refs/upstroke/select/prepared/{sequence}"))),
+                verification_source: crate::topology::events::VerificationSource::Verification {
+                    sequence: crate::topology::events::SequenceId(sequence),
+                },
+                verification: Some(crate::topology::events::VerificationRecord {
+                    verdict: crate::topology::events::VerificationVerdict::Passed,
+                    gates_passed: true,
+                    reviews,
+                    detail: "judged".to_owned(),
+                }),
+                satisfies: vec![ALEPH],
+            }),
+        })
+    };
+    for (charged, later, total) in [
+        (Some(2.5), vec![review_costing(Some(0.75))], 3.25),
+        (None, Vec::new(), 0.0),
+    ] {
+        let mut events = vec![verification_started_at(1, ALEPH)];
+        if let Some(cost) = charged {
+            events.push(verification_charged(1, vec![review_costing(Some(cost))]));
+        }
+        events.extend([
+            interrupted(1),
+            verification_started_at(2, ALEPH),
+            prepared(2, later),
+        ]);
+
+        let integration = IntegrationReviews::replay(&events);
+        assert!(
+            integration.spend_unknown(ALEPH) && !integration.spend_unknown(BET),
+            "{charged:?}: the interrupted verification's task, and only it, has unknown spend"
+        );
+        assert!(
+            !integration.unattributed_spend_unknown(),
+            "{charged:?}: the interruption is attributed"
+        );
+        let report = crate::engine::RunReport::from_topology(&started(), &events, Vec::new());
+        let row = report
+            .tasks
+            .iter()
+            .find(|task| task.id == label(ALEPH))
+            .expect("the report has a row for every registered task");
+        let known = (total > 0.0).then_some(total);
+        assert_eq!(
+            (row.review_cost_usd, row.review_cost_incomplete),
+            (known, true),
+            "{charged:?}: the task keeps every known amount once and says one is unknown"
+        );
+        assert!(
+            (report.total_cost_usd - total).abs() < f64::EPSILON
+                && (report.total_cost_usd - Spend::replay(&events).run_usd()).abs() < f64::EPSILON,
+            "{charged:?}: the total is the known amounts, the ledger's: {}",
+            report.total_cost_usd
+        );
+        assert!(
+            report.total_is_floor(),
+            "{charged:?}: an interrupted verification makes the total a floor"
+        );
+        assert!(
+            report.warnings.is_empty(),
+            "{charged:?}: {:?}",
+            report.warnings
+        );
+        let rendered = report.render();
+        assert!(
+            rendered.contains(&format!("total: ${total:.4}? (api-equivalent)")),
+            "{charged:?}: the total is printed as a floor:\n{rendered}"
+        );
+        let ledger = report.render_ledger();
+        assert!(
+            ledger.contains(&format!("total ${total:.4}?"))
+                && ledger.contains("a floor, not a total"),
+            "{charged:?}: the ledger says so too:\n{ledger}"
+        );
+    }
+
+    let orphan = crate::engine::RunReport::from_topology(&started(), &[interrupted(7)], Vec::new());
+    assert!(
+        orphan.unattributed_cost_incomplete && orphan.total_is_floor(),
+        "an interruption no start pairs with makes the total a floor: {orphan:#?}"
+    );
+    assert_eq!(
+        orphan.warnings,
+        [
+            "an integration verification the log attributes to no task was interrupted, so what \
+             its review passes cost is unknown and this report's total is a floor"
+        ],
+    );
+}

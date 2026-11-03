@@ -189,6 +189,18 @@ run` and `resume` on a schema-4 run named a directory that is not there
 False, the legacy value, is the default and is never serialized, so a
 legacy report's JSON is byte-for-byte what it was.
 
+## `pub unattributed_cost_incomplete: bool,`
+
+Whether review spend the log attributes to no task is unknown: an
+integration review pass that no verification start pairs with reported no
+cost, or a `merge_verification_interrupted` that no start pairs with (K4,
+`select::IntegrationReviews::unattributed_spend_unknown`). No task row can
+carry it, so it is carried here and [`RunReport::total_is_floor`] reads it.
+A valid log has neither: the fold admits a verification's terminal only
+after its start. Only `from_topology` sets it; `build_report` leaves it
+false. Defaulted and never serialized when false, as `questions_in_log` is,
+so a legacy report's JSON is unchanged.
+
 ## `#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]`
 
 One pool's line in the ledger: what this run drew from which subscription.
@@ -216,7 +228,9 @@ than no ledger.
 Both halves count. The review side has been marked since step 9; the
 worker side became reachable the moment an implementer could report
 tokens without dollars, and is now the *normal* case for a
-codex-implemented run rather than an edge one.
+codex-implemented run rather than an edge one. A schema-4 report also
+counts the review spend no task row carries (`unattributed_cost_incomplete`,
+K4).
 
 ## `fn committed_count(&self) -> usize {`
 
@@ -310,10 +324,27 @@ stays the authority; this is the command's summary of the same run.
   The total is the tasks' own totals plus the unattributed passes' known
   costs. A warning names any difference of more than 1e-9 from
   `Spend::replay`'s run total; the log is the authority.
-  `RunReport::total_is_floor` reads the task rows only, so a total whose only
-  unknown cost is an unattributed pass prints without its `?`, and only that
-  warning says it is a floor. A valid log has no unattributed pass: the fold
-  admits a verification's terminal only after its start.
+  Until K4, `RunReport::total_is_floor` read the task rows only, so a total
+  whose only unknown cost was an unattributed pass printed without its `?`,
+  and only that warning said it was a floor. It also reads
+  `unattributed_cost_incomplete` now. A valid log has no unattributed pass:
+  the fold admits a verification's terminal only after its start.
+- A merge verification that ended `merge_verification_interrupted` has
+  unknown spend (DESIGN §26: the coordinator that died holding it recorded no
+  cost for anything it was running, and what no record carries stays unknown
+  spend). `IntegrationReviews` keeps the interruption against the task whose
+  candidate it verified (K4, regular review 4, finding 4), and that task's
+  `review_cost_incomplete` reads `IntegrationReviews::spend_unknown`, so its
+  row and the total read as floors. The passes a `merge_verification_charged`
+  recorded before the interruption stay in the task's review cost, the total
+  and the pool drain, once each. An interruption no start pairs with sets
+  `unattributed_cost_incomplete` and adds a warning saying so.
+
+  Until K4 the replay ignored that terminal. After a coordinator died
+  mid-verification and the candidate was verified again, the report printed
+  the known charges as the whole total and `total_is_floor` was false, with a
+  $2.50 charge and without one alike; the uncharged run printed `$0.0000`
+  with no qualification (the reviewer's focused guards).
 
   Until J3 (`PR12-REPORT-OMITS-INTEGRATION-REVIEW-SPEND`) this read attempt
   records alone, so its review costs, its total and its pool drain all missed
@@ -533,6 +564,12 @@ lines. Rendering leaves the report's serializable values unchanged.
 `?` marks a total with unreported components — the
 Copilot route bills nothing back, so a two-pass review
 shows one reviewer's spend and must not read as both.
+
+## `([], _) if task.review_cost_incomplete => " + review $?".to_owned(),`
+
+A committed task with no review pass on record whose review spend is still
+unknown: its candidate's verification was interrupted before any pass was
+charged (K4). Saying nothing would read as an unreviewed, free task.
 
 ## `(models, None) => format!(" + review {} $?", models.join(", ")),`
 

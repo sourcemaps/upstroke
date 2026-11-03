@@ -56,6 +56,7 @@ fn report() -> RunReport {
         running: false,
         interrupted: false,
         questions_in_log: false,
+        unattributed_cost_incomplete: false,
     }
 }
 
@@ -502,4 +503,36 @@ fn a_legacy_report_says_which_task_position_its_plan_does_not_hold_and_reports_t
         "the position the plan does not hold is named, not dropped: {:?}",
         report.warnings
     );
+}
+
+// K4: a committed task whose candidate's verification was interrupted before any review pass
+// was charged has no review model on record and an unknown review cost. Its line says the
+// review spend is unknown rather than reading as an unreviewed, free task, and a task with no
+// review spend owed still says nothing about review.
+#[test]
+fn a_committed_task_whose_review_spend_is_unknown_says_so_though_no_pass_is_on_record() {
+    let mut unknown = report();
+    if let Some(task) = unknown.tasks.first_mut() {
+        task.review_models = Vec::new();
+        task.review_cost_usd = None;
+        task.review_cost_incomplete = true;
+    }
+    let rendered = unknown.render();
+    assert!(
+        rendered.contains("worker $0.0100 + review $?)"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("total: $0.0300? (api-equivalent)"),
+        "{rendered}"
+    );
+
+    let mut unreviewed = report();
+    if let Some(task) = unreviewed.tasks.first_mut() {
+        task.review_models = Vec::new();
+        task.review_cost_usd = None;
+    }
+    let rendered = unreviewed.render();
+    assert!(rendered.contains("worker $0.0100)"), "{rendered}");
+    assert!(!rendered.contains("+ review"), "{rendered}");
 }

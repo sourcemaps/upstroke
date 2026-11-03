@@ -603,6 +603,7 @@ mod tests {
                 cost_usd: Some(0.01),
                 unpriced: 0,
             }],
+            unattributed_cost_incomplete: false,
         };
         let ledger = report.render_ledger();
         assert!(ledger.contains("worker"), "{ledger}");
@@ -645,6 +646,7 @@ mod tests {
             questions_in_log: false,
             total_cost_usd: 0.0,
             pool_drain: Vec::new(),
+            unattributed_cost_incomplete: false,
         };
         let ledger = report.render_ledger();
         assert!(
