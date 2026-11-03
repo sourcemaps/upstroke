@@ -1619,8 +1619,8 @@ impl TopologyRun {
     }
 
     /// Whether an answer approved `key`'s spend since its ladder last escalated onto `rung`: an
-    /// `ApproveSpend` question raised for the task after that settlement, answered as
-    /// approved. Each escalation needs its own approval.
+    /// `ApproveSpend` question raised for the task after that settlement, answered with its
+    /// approve option ([`approves`]). Each escalation needs its own approval.
     fn spend_approved(&self, key: TaskKey, rung: u32) -> bool {
         let mut asked = std::collections::BTreeSet::new();
         let mut approved = false;
@@ -1640,7 +1640,7 @@ impl TopologyRun {
                 }
                 TopologyEventBody::QuestionAnswered { data } => {
                     if asked.contains(&data.question) {
-                        approved = matches!(data.answer, Answer4::Answered { .. });
+                        approved = approves(&data.answer);
                     }
                 }
                 _ => {}
@@ -2851,6 +2851,16 @@ fn fresh_dispatch(admitted: &Admitted) -> Option<TaskKey> {
             ..
         } => Some(*key),
         _ => None,
+    }
+}
+
+/// Whether `answer` chose a spend approval's approve option: option 0, the only answer
+/// `answer_for` records as an approval. The fold gives a spend question's options no meaning
+/// of its own, so a record answering it otherwise approves nothing here.
+fn approves(answer: &Answer4) -> bool {
+    match answer {
+        Answer4::Answered { option_index, .. } => *option_index == 0,
+        Answer4::Declined { .. } => false,
     }
 }
 
