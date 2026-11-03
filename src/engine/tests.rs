@@ -20282,3 +20282,106 @@ fn a_schema_4_export_keeps_todays_rows_and_joins_a_repair_task_to_the_registry()
         "a header and one line per attempt"
     );
 }
+
+/// A directory name no string spells: a byte UTF-8 never produces on Unix, an unpaired
+/// surrogate on Windows.
+#[cfg(unix)]
+fn a_root_name_no_string_can_spell() -> std::ffi::OsString {
+    use std::os::unix::ffi::OsStringExt as _;
+    std::ffi::OsString::from_vec(b"private-\xff".to_vec())
+}
+
+#[cfg(windows)]
+fn a_root_name_no_string_can_spell() -> std::ffi::OsString {
+    use std::os::windows::ffi::OsStringExt as _;
+    let mut units: Vec<u16> = "private-".encode_utf16().collect();
+    units.push(0xD800);
+    std::ffi::OsString::from_wide(&units)
+}
+
+/// J4, `PR12-NONUTF8-PRIVATE-ROOT-LOSSY-IDENTITY`. A schema-4 run records its private half and
+/// execution root as text. At the reviewed head a private root holding a byte UTF-8 never
+/// produces was recorded lossily, and the resume then looked for another directory. The root
+/// is now refused before any lock, and afterwards nothing of the run exists: no run directory
+/// in the repository and nothing under the root. A filesystem that refuses such a name
+/// (`EILSEQ`, APFS) cannot hold the root at all, and the test says so and stops there.
+#[test]
+fn a_schema_4_run_refuses_a_private_root_no_string_can_spell_before_any_state() {
+    let (tree, repo) = temp_engine_repo("topology-unspellable-root");
+    let private = tree.path().join(a_root_name_no_string_can_spell());
+    match fs::create_dir(&private) {
+        Ok(()) => {}
+        #[cfg(unix)]
+        Err(error) if error.raw_os_error() == Some(libc::EILSEQ) => {
+            eprintln!(
+                "skipped: this filesystem refuses a directory name that is not UTF-8 ({error}), \
+                 so no private root of that shape can exist here"
+            );
+            return;
+        }
+        Err(error) => panic!("a private root UTF-8 cannot spell: {error}"),
+    }
+    let mut opts = topology_options(&repo);
+    opts.private_root = Some(private.clone());
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        0,
+    )));
+    let refused = run_with(&opts, &source).expect_err("an unspellable private root is refused");
+    assert!(
+        refused.to_string().contains("is not valid UTF-8"),
+        "the refusal says why: {refused}"
+    );
+    assert!(
+        rundir::run_dir_names(&repo).is_empty(),
+        "no run directory exists after the refusal"
+    );
+    assert!(
+        fs::read_dir(&private)
+            .expect("the refused root is still readable")
+            .next()
+            .is_none(),
+        "nothing was created under the refused root"
+    );
+}
+
+/// J4's other side: a private root whose name holds U+FFFD is valid UTF-8, so it is not
+/// refused, and the run records both paths that hang from it exactly. The resume finds the
+/// run's private half through the recorded locator alone, and refuses only because the run
+/// has finished.
+#[test]
+fn a_private_root_named_with_the_replacement_character_is_recorded_exactly() {
+    let (tree, repo) = temp_engine_repo("topology-replacement-root");
+    let private = tree.path().join("private-\u{FFFD}");
+    fs::create_dir(&private).expect("a private root whose name is valid UTF-8");
+    let mut opts = topology_options(&repo);
+    opts.private_root = Some(private.clone());
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        0,
+    )));
+    let report = run_with(&opts, &source).expect("the run completes");
+    until_released(&repo, &report.run_id);
+    let canonical = fs::canonicalize(&private).expect("the private root canonicalizes");
+    let recorded = first_line_of_the_log(&repo, &report.run_id);
+    assert_eq!(
+        recorded["data"]["private_dir"].as_str(),
+        canonical.join("runs").join(&report.run_id).to_str(),
+        "the private half is recorded exactly"
+    );
+    let execution_root = recorded["data"]["execution_root"]
+        .as_str()
+        .expect("the execution root is recorded");
+    assert!(
+        Path::new(execution_root).starts_with(canonical.join("workspaces")),
+        "the execution root is recorded exactly under the root: {execution_root}"
+    );
+    let mut resume = resume_options(&repo, &report.run_id);
+    resume.private_root = None;
+    let refused =
+        resume_with(&resume, &source).expect_err("a finished run has nothing to continue");
+    assert!(
+        refused.to_string().contains("already finished"),
+        "the recorded locator names the run's private half: {refused}"
+    );
+}

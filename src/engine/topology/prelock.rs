@@ -195,6 +195,22 @@ fn authorized_private_root(configured: &Path) -> Result<PathBuf, UpstrokeError> 
             ),
         });
     }
+    // A schema-4 run records its private half and its execution root, both of which hang from
+    // this root by ASCII names, as text in its owner record and `run_started`. A root no string
+    // spells exactly would be recorded as some other path and leave a run no resume can find,
+    // so it is refused here, before any lock and before anything of the run exists
+    // (CODING_STANDARDS §8: a lossy display string is never identity).
+    if canonical.to_str().is_none() {
+        return Err(UpstrokeError::Refused {
+            message: format!(
+                "the authorized private root {} is not valid UTF-8 once resolved; a schema-4 run \
+                 records its private half and execution root as text, so it would record another \
+                 path than this one. Nothing was locked or created: choose a private root whose \
+                 path is valid UTF-8",
+                canonical.display()
+            ),
+        });
+    }
     Ok(canonical)
 }
 

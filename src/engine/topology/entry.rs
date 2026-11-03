@@ -617,12 +617,8 @@ fn fresh_record(fresh: &FreshRecord<'_>) -> Result<RunStarted4, UpstrokeError> {
         branch: format!("upstroke/run-{run_id}"),
         integration_ref: GitRef(format!("refs/heads/upstroke/run-{run_id}")),
         base_sha: CommitSha(fresh.base_sha.clone()),
-        execution_root: fresh
-            .manager
-            .execution_root()
-            .to_string_lossy()
-            .into_owned(),
-        private_dir: fresh.checked.private_dir().to_string_lossy().into_owned(),
+        execution_root: recorded_path(fresh.manager.execution_root(), "execution root")?,
+        private_dir: recorded_path(&fresh.checked.private_dir(), "private half")?,
         plan_path: repo_relative(&fresh.opts.repo_root, &fresh.opts.plan_path),
         config_path: fresh
             .opts
@@ -664,6 +660,23 @@ fn fresh_record(fresh: &FreshRecord<'_>) -> Result<RunStarted4, UpstrokeError> {
     })?
     .digest();
     Ok(record)
+}
+
+/// A path the run record spells as text, spelled exactly.
+///
+/// `prelock` refuses a private root that is not valid UTF-8 before any lock, and both recorded
+/// paths hang from that root by ASCII names, so this refuses nothing a fresh run can reach. It
+/// replaces `to_string_lossy`, which recorded a different path than the run used.
+fn recorded_path(path: &Path, what: &str) -> Result<String, UpstrokeError> {
+    match path.to_str() {
+        Some(text) => Ok(text.to_owned()),
+        None => Err(UpstrokeError::Refused {
+            message: format!(
+                "the run's {what} {} is not valid UTF-8, so its record cannot spell it exactly",
+                path.display()
+            ),
+        }),
+    }
 }
 
 struct Driving {
