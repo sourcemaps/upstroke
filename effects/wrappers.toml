@@ -1200,8 +1200,11 @@ effectful_unnameable = []
 # `emit_capacity_snapshot` estimates through `capacity::estimate` and
 # `capacity::drain_of`, effect-free rows, and calls `emit`;
 # `fail_task_with_policy` builds one event and calls `emit`. `ParkSubject::of`,
-# `prepared_pin_ref` and the three question builders make values and strings
+# `prepared_pin_ref` and the four question builders make values and strings
 # (`question_context` through `util::fence_for`, an effect-free row).
+# `spend_question_context` joined them in PR12's J1, when the schema-4 driver
+# began raising the spend approval: it writes the approval's context into a
+# `String` and calls nothing else.
 effect_free = [
     "emit",
     "emit_capacity_snapshot",
@@ -1210,6 +1213,7 @@ effect_free = [
     "prepared_pin_ref",
     "question_context",
     "question_options",
+    "spend_question_context",
     "topology_question_options",
 ]
 
