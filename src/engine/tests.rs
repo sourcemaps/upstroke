@@ -20385,3 +20385,55 @@ fn a_private_root_named_with_the_replacement_character_is_recorded_exactly() {
         "the recorded locator names the run's private half: {refused}"
     );
 }
+
+/// J3, `PR12-REPORT-OMITS-INTEGRATION-REVIEW-SPEND` (both reviews). Three tasks in flight from
+/// one base: a later candidate is stale and clean, so its integration verification runs a
+/// review the run's spend ledger charges. At the reviewed head the CLI report collected
+/// attempt records only and its total missed that charge ($0.10 against $0.11 recorded; the
+/// second witness, $0.0400 against $0.0500). The report now carries those passes on the
+/// candidate's task, once, and its total, and the tasks' own totals, are the ledger's, with no
+/// mismatch warning.
+#[cfg(unix)]
+#[test]
+fn a_schema_4_report_counts_every_integration_review_once() {
+    let (_tree, repo) = temp_engine_repo("topology-integration-spend");
+    seed(
+        &repo,
+        THREE_INDEPENDENT_TASKS,
+        Some("[engine]\nmax_parallel = 3\nmax_merge_repairs = 2\n"),
+    );
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        CONFLICTING_WORKER,
+        0,
+    )));
+    let report = run_with(&topology_options(&repo), &source).expect("the run ends");
+    until_released(&repo, &report.run_id);
+    let log = fs::read(rundir::public_dir(&repo, &report.run_id).join("events.jsonl"))
+        .expect("the run's log");
+    let events = crate::topology::fold::TopologyFold::parse_log(&log).expect("the log parses");
+    let ledger = crate::engine::topology::select::Spend::replay(&events).run_total();
+    let integration = crate::engine::topology::select::IntegrationReviews::replay(&events);
+    let integration_cost: f64 = integration.all().filter_map(|review| review.cost_usd).sum();
+    assert!(
+        integration_cost > 0.0,
+        "the premise: an integration verification charged a review"
+    );
+    assert!(
+        (report.total_cost_usd - ledger).abs() < 1e-9,
+        "the report's total {} is the ledger's {ledger}",
+        report.total_cost_usd
+    );
+    let tasks: f64 = report.tasks.iter().filter_map(TaskReport::total_cost_usd).sum();
+    assert!(
+        (tasks - ledger).abs() < 1e-9,
+        "the tasks' own totals {tasks} add up to the ledger's {ledger}"
+    );
+    assert!(
+        !report
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("differs from")),
+        "no cost mismatch is reported: {:?}",
+        report.warnings
+    );
+}

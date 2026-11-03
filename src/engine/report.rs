@@ -206,7 +206,7 @@ impl RunReport {
     pub(crate) fn from_topology(
         fold: &crate::topology::fold::TopologyFold,
         events: &[crate::topology::events::TopologyEvent],
-        warnings: Vec<String>,
+        mut warnings: Vec<String>,
     ) -> Self {
         use crate::events::RunOutcome as Finished;
         use crate::topology::events::TopologyEventBody;
@@ -240,6 +240,11 @@ impl RunReport {
             }
         }
 
+        // Integration verifications charge review passes outside every attempt record; they
+        // are review spend on the verified candidate's task, attributed as the run's spend
+        // ledger attributes them, and each is counted once.
+        let integration = crate::engine::topology::select::IntegrationReviews::replay(events);
+
         let outcome = fold.finished().cloned();
         let display = |key: TaskKey| {
             fold.registry()
@@ -263,6 +268,7 @@ impl RunReport {
                 continue;
             };
             let attempts = records.remove(&entry.key).unwrap_or_default();
+            let integrated = integration.of_task(entry.key);
             let asked = open.iter().find(|asked| asked.question.key == entry.key);
             let status = match (task.state, asked) {
                 (Topology::Merged, _) => TaskRunStatus::Committed {
@@ -303,15 +309,25 @@ impl RunReport {
                 .unwrap_or_default();
             let session_id = attempts.last().and_then(|record| record.session_id.clone());
             let mut review_models: Vec<String> = Vec::new();
-            for model in attempts.iter().flat_map(AttemptRecord::review_models) {
+            for model in attempts
+                .iter()
+                .flat_map(AttemptRecord::review_models)
+                .chain(integrated.iter().map(|review| review.model.clone()))
+            {
                 if !review_models.contains(&model) {
                     review_models.push(model);
                 }
             }
             let duration = attempts.iter().map(|record| record.duration).sum();
             let cost_usd = sum_opt(attempts.iter().map(|record| record.cost_usd));
-            let review_cost_usd = sum_opt(attempts.iter().map(AttemptRecord::review_cost_usd));
-            let review_cost_incomplete = attempts.iter().any(AttemptRecord::review_cost_incomplete);
+            let review_cost_usd = sum_opt(
+                attempts
+                    .iter()
+                    .map(AttemptRecord::review_cost_usd)
+                    .chain(integrated.iter().map(|review| review.cost_usd)),
+            );
+            let review_cost_incomplete = attempts.iter().any(AttemptRecord::review_cost_incomplete)
+                || integrated.iter().any(|review| review.cost_usd.is_none());
             tasks.push(TaskReport {
                 id: entry.display_id.as_str().to_owned(),
                 title: entry.spec.title.clone(),
@@ -363,8 +379,35 @@ impl RunReport {
             Some(Finished::Complete | Finished::Parked | Finished::Halted) => None,
         };
 
-        let total_cost_usd = total_of(&tasks);
-        let pool_drain = capacity::drain_of(tasks.iter().flat_map(|task| task.attempts.iter()))
+        let unattributed = integration.unattributed();
+        let total_cost_usd = total_of(&tasks)
+            + unattributed.iter().filter_map(|review| review.cost_usd).sum::<f64>();
+        if unattributed.iter().any(|review| review.cost_usd.is_none()) {
+            warnings.push(
+                "an integration review pass the log attributes to no task reported no cost, so \
+                 this report's total is a floor"
+                    .to_owned(),
+            );
+        }
+        let ledger = crate::engine::topology::select::Spend::replay(events).run_total();
+        if (total_cost_usd - ledger).abs() > 1e-9 {
+            warnings.push(format!(
+                "this report's cost total ${total_cost_usd:.4} differs from the ${ledger:.4} the \
+                 run's event log records; the log is the authority"
+            ));
+        }
+        let mut drain = capacity::drain_of(tasks.iter().flat_map(|task| task.attempts.iter()));
+        for review in integration.all() {
+            if let Some(pool) = &review.pool {
+                let spend = drain.entry(pool.clone()).or_default();
+                spend.attempts = spend.attempts.saturating_add(1);
+                match review.cost_usd {
+                    Some(cost) => spend.usd = Some(spend.usd.unwrap_or(0.0) + cost),
+                    None => spend.unpriced = spend.unpriced.saturating_add(1),
+                }
+            }
+        }
+        let pool_drain = drain
             .into_iter()
             .map(|(pool, spend)| PoolDrainRow {
                 pool,

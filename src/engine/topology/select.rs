@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use crate::error::UpstrokeError;
 use crate::events::RunOutcome;
-use crate::events::{AttemptRecord, BudgetKind};
+use crate::events::{AttemptRecord, BudgetKind, ReviewRecord};
 use crate::ir::QuestionId;
 use crate::runner::InvocationId;
 use crate::topology::events::{
@@ -112,6 +112,89 @@ impl Spend {
     #[must_use]
     pub fn task_usd(&self, key: TaskKey) -> f64 {
         self.per_task.get(&key).copied().unwrap_or(0.0)
+    }
+}
+
+/// The review passes integration verifications charged, attributed as [`Spend::replay`]
+/// attributes them: to the task whose candidate was verified when the log names it, and to the
+/// run alone otherwise. The fold admits a sequence's passes once (`check_spend_unrecorded`), so
+/// each pass appears here exactly once. The run's report reads its integration spend from this.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct IntegrationReviews {
+    by_task: BTreeMap<TaskKey, Vec<ReviewRecord>>,
+    unattributed: Vec<ReviewRecord>,
+}
+
+impl IntegrationReviews {
+    #[must_use]
+    pub fn replay(events: &[TopologyEvent]) -> Self {
+        let mut reviews = Self::default();
+        let mut verifying: Option<(SequenceId, TaskKey)> = None;
+        for event in events {
+            match &event.body {
+                TopologyEventBody::MergeVerificationStarted { data } => {
+                    verifying = Some((data.sequence, data.candidate.key));
+                }
+                TopologyEventBody::MergeVerificationUnavailable { data } => {
+                    let key = verifying
+                        .take()
+                        .filter(|(sequence, _)| *sequence == data.sequence)
+                        .map(|(_, key)| key);
+                    reviews.add(key, &data.reviews);
+                }
+                TopologyEventBody::MergeVerificationCharged { data } => {
+                    let key = verifying
+                        .as_ref()
+                        .filter(|(sequence, _)| *sequence == data.sequence)
+                        .map(|(_, key)| *key);
+                    reviews.add(key, &data.reviews);
+                }
+                TopologyEventBody::MergePrepared { data } => {
+                    if let Some(verification) = &data.verification {
+                        reviews.add(Some(data.key), &verification.reviews);
+                    }
+                }
+                TopologyEventBody::MergeRejected { data } => {
+                    if let crate::topology::events::RejectionDisposition::CodeRejected {
+                        verification,
+                    } = &data.disposition
+                    {
+                        reviews.add(Some(data.candidate.key), &verification.reviews);
+                    }
+                }
+                _ => {}
+            }
+        }
+        reviews
+    }
+
+    fn add(&mut self, key: Option<TaskKey>, passes: &[ReviewRecord]) {
+        match key {
+            Some(key) => self
+                .by_task
+                .entry(key)
+                .or_default()
+                .extend(passes.iter().cloned()),
+            None => self.unattributed.extend(passes.iter().cloned()),
+        }
+    }
+
+    /// The passes charged to `key`'s task.
+    #[must_use]
+    pub fn of_task(&self, key: TaskKey) -> &[ReviewRecord] {
+        self.by_task.get(&key).map_or(&[][..], Vec::as_slice)
+    }
+
+    /// The passes the log attributes to no task. A valid log has none: the fold admits a
+    /// verification's terminal only after its start.
+    #[must_use]
+    pub fn unattributed(&self) -> &[ReviewRecord] {
+        &self.unattributed
+    }
+
+    /// Every pass, attributed or not.
+    pub fn all(&self) -> impl Iterator<Item = &ReviewRecord> {
+        self.by_task.values().flatten().chain(&self.unattributed)
     }
 }
 

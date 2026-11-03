@@ -1636,3 +1636,124 @@ fn the_integration_ledger_reads_a_charged_record_as_a_lower_bound() {
         );
     }
 }
+
+/// J3, `PR12-REPORT-OMITS-INTEGRATION-REVIEW-SPEND`. Every integration verification outcome
+/// that carries review passes, read by the report through `IntegrationReviews`: a prepared
+/// (successful) verification, a code rejection, an unavailable terminal and a charged record,
+/// each attributed to the verified candidate's task, and an unpaired terminal attributed to no
+/// task. Each pass appears once, and the attributed and unattributed sums are exactly what the
+/// spend ledger replays, per task and for the run.
+#[test]
+fn integration_reviews_attribute_every_pass_once_as_the_spend_ledger_does() {
+    let verification = |costs: [Option<f64>; 2]| crate::topology::events::VerificationRecord {
+        verdict: crate::topology::events::VerificationVerdict::Passed,
+        gates_passed: true,
+        reviews: costs.into_iter().map(review_costing).collect(),
+        detail: "judged".to_owned(),
+    };
+    let prepared = ev(TopologyEventBody::MergePrepared {
+        data: Box::new(crate::topology::events::MergePrepared {
+            sequence: crate::topology::events::SequenceId(1),
+            disposition: crate::topology::events::PreparedDisposition::StaleClean,
+            expected_head: sha("head"),
+            proposed_sha: sha("proposal"),
+            key: ALEPH,
+            generation: GenerationId(0),
+            candidate_sha: candidate_of(ALEPH, 0).commit_sha,
+            candidate_ref: candidate_of(ALEPH, 0).candidate_ref,
+            prepared_ref: Some(GitRef("refs/upstroke/select/prepared/1".to_owned())),
+            verification_source: crate::topology::events::VerificationSource::Verification {
+                sequence: crate::topology::events::SequenceId(1),
+            },
+            verification: Some(verification([Some(2.5), None])),
+            satisfies: vec![ALEPH],
+        }),
+    });
+    let mut rejected = verification([Some(1.0), None]);
+    rejected.verdict = crate::topology::events::VerificationVerdict::Rejected;
+    let repair_entry = {
+        let fold = started();
+        let mut entry = fold
+            .registry()
+            .expect("started")
+            .get(ALEPH)
+            .expect("aleph is registered")
+            .clone();
+        entry.key = GIMEL;
+        entry
+    };
+    let rejection = ev(TopologyEventBody::MergeRejected {
+        data: Box::new(crate::topology::events::MergeRejected {
+            sequence: crate::topology::events::SequenceId(2),
+            candidate: candidate_of(BET, 0),
+            rejecting_head: sha("head"),
+            disposition: crate::topology::events::RejectionDisposition::CodeRejected {
+                verification: rejected,
+            },
+            repair: crate::topology::events::FrozenSpawn {
+                key: GIMEL,
+                entry: repair_entry,
+                admission: crate::topology::events::SpawnAdmission::Runnable,
+            },
+            lease_effect: crate::topology::events::RejectionLeaseEffect::CreatesLineage {
+                root: BET,
+                paths: region(BET),
+            },
+        }),
+    });
+    let unavailable = |sequence: u32, reviews: Vec<crate::events::ReviewRecord>| {
+        ev(TopologyEventBody::MergeVerificationUnavailable {
+            data: crate::topology::events::MergeVerificationUnavailable {
+                sequence: crate::topology::events::SequenceId(sequence),
+                cause: crate::topology::events::UnavailableCause::Infrastructure {
+                    kind: crate::topology::events::InfrastructureKind::ReviewerTimeout,
+                },
+                outcome: crate::topology::events::UnavailableOutcome::Deferred { defers: 1 },
+                reviews,
+            },
+        })
+    };
+    let events = vec![
+        prepared,
+        rejection,
+        verification_started_at(3, GIMEL),
+        unavailable(3, vec![review_costing(Some(0.5))]),
+        verification_started_at(4, ALEPH),
+        verification_charged(4, vec![review_costing(Some(0.25))]),
+        unavailable(9, vec![review_costing(Some(0.125)), review_costing(None)]),
+    ];
+
+    let integration = IntegrationReviews::replay(&events);
+    let spend = Spend::replay(&events);
+    let priced = |passes: &[crate::events::ReviewRecord]| -> f64 {
+        passes.iter().filter_map(|review| review.cost_usd).sum()
+    };
+    for (key, expected, unpriced) in [(ALEPH, 2.75, 1), (BET, 1.0, 1), (GIMEL, 0.5, 0)] {
+        let passes = integration.of_task(key);
+        assert!(
+            (priced(passes) - expected).abs() < f64::EPSILON,
+            "{key:?}: {passes:?}"
+        );
+        assert!(
+            (priced(passes) - spend.task_usd(key)).abs() < f64::EPSILON,
+            "{key:?}: the task's passes are what the ledger charges it"
+        );
+        assert_eq!(
+            passes.iter().filter(|review| review.cost_usd.is_none()).count(),
+            unpriced,
+            "{key:?}: an unpriced pass is kept, so the report can say its cost is unknown"
+        );
+    }
+    assert_eq!(
+        integration.unattributed().len(),
+        2,
+        "an unpaired terminal names no task"
+    );
+    assert_eq!(integration.all().count(), 8, "every pass once");
+    let total: f64 = integration.all().filter_map(|review| review.cost_usd).sum();
+    assert!(
+        (total - spend.run_usd()).abs() < f64::EPSILON,
+        "the run's passes are what the ledger replays: {total} against {}",
+        spend.run_usd()
+    );
+}
