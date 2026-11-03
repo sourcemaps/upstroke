@@ -1233,6 +1233,12 @@ began and nothing has settled yet (`start_attached`, `settle_delivery`,
 `settle_removed_client`). Shared by every clone, so the client a start
 began is the one its collection or removal settles, whichever clone does it.
 
+`unresolved_questions` holds, by container name, every process a bounded
+question about that container (`exec_within`) started and could not establish
+gone (`hold_unresolved`, root's PR12-J6-OBSERVATION-FATE-DROPPED). Shared by
+every clone in the same way, never cleared, and read by every settlement of
+that container (`settle_client_of`).
+
 ## `impl DockerCli` › `pub fn new(trace: ContainerTrace) -> Self {`
 
 A CLI whose operations are recorded in `trace`, with no stdin delivery in
@@ -1274,6 +1280,37 @@ well as its consequence.
 
 `docker inspect` a thing, tolerating "no such object" as absence.
 
+## `impl DockerCli` › `fn exec_within(`
+
+One of the start's `docker` questions (the attached start's state
+observations and its diagnostic after a client ended, and the detached
+`docker start`), bounded by the invocation's deadline and its cancellation
+(root's PR12-ATTACHED-START-UNBOUNDED-DOCKER-OBSERVATION finding, J6). It runs
+under the process funnel with the time left as its timeout and the
+cancellation as its stop. A question whose deadline has passed, or whose
+invocation was cancelled, is not asked.
+
+## `impl DockerCli` › `fn answer_within(`
+
+What one bounded question answered, read with its supervisor's fate kept
+(PR12-J6-OBSERVATION-FATE-DROPPED):
+- a supervisor that never started the question: `RuntimeError::Unreachable`;
+- one that established its process gone and still failed: `Failed`;
+- one that could not establish its process gone: `Unresolved`. The fact is
+  held under the container the question was about (`hold_unresolved`) before
+  the error is returned. A caller that drops the error, as the diagnostic
+  after a client ended does, or one that reads a deadline or a cancellation at
+  the same moment, cannot lose it;
+- a question the deadline or a cancellation ended, which the funnel killed and
+  reaped, an answer longer than the runner reads, or a nonzero exit: `Failed`,
+  a nonzero exit through `classify_docker_failure`.
+
+## `impl DockerCli` › `fn hold_unresolved(&self, name: &str, fact: &str) {`
+
+Hold one unresolved question under container `name`. Nothing removes it: a
+later clean removal establishes the container gone, not this process, and no
+process scan looks for it.
+
 ## `impl DockerCli` › `fn image(`
 
 An image inspection from `docker image inspect`'s Go-template output.
@@ -1309,7 +1346,11 @@ The path, given that `create` passed `--interactive`:
   container is gone — the client is settled (`settle_client_of`) and the
   start fails, saying how the client ended. A client that cannot be
   established gone fails the start as `RuntimeError::Unresolved`, and its
-  record stays for the removal the failed launch's cancel then performs;
+  record stays for the removal the failed launch's cancel then performs.
+  So does a question of the wait or of the diagnostic whose process could not
+  be established gone: `await_started` reports such an observation as itself,
+  even at the deadline or on a cancellation, and the settlement reads the
+  fact `answer_within` held;
 - once the container has started, the client is kept, owned, by name, until
   its collection or its removal settles it.
 
@@ -1339,8 +1380,12 @@ Keep a record: an owned client, or an unresolved fact.
 
 ## `impl DockerCli` › `fn settle_client_of(&self, name: &str) -> ClientSettlement {`
 
-The one settlement of `name`'s client, for the start's failure, the
-collection and the removal alike (root's DELIVERY-OWNERSHIP follow-through):
+The one settlement of `name`'s processes, for the start's failure, the
+collection and the removal alike (root's DELIVERY-OWNERSHIP follow-through).
+A container with a held unresolved question (`hold_unresolved`) settles
+`Unresolved` whatever its client did, naming the client's settlement and the
+held facts both (PR12-J6-OBSERVATION-FATE-DROPPED). The client's own
+settlement (`settle_attached_client_of`):
 - no record: `Absent`;
 - an unresolved fact: `Unresolved`, and the fact stays, so repeated
   settlement keeps reporting it;
@@ -1452,7 +1497,9 @@ when it is anything else, gone when it is not listed. Not started when the
 client ended while it was still `created`, when the invocation was
 cancelled, or when the deadline passed. A state that cannot be read ends
 the wait too. Each is checked on every poll, so the wait is bounded by the
-deadline plus one poll and one listing.
+deadline plus one poll and one listing. A failed reading is the cancellation
+or the deadline when either has fired, except an unresolved one, which is
+always reported as itself (`NotStarted::Unobserved`).
 
 ## `fn settle_client(`
 
@@ -1490,8 +1537,9 @@ the view and the intent.
 ## `fn docker_command(args: &[&str]) -> Command {`
 
 The one builder of a `docker` child. Every container operation's
-`Command` comes from here: `exec_streams`' `.output()` calls, and the
-attached client the process funnel runs, the two things
+`Command` comes from here: `exec_streams`' `.output()` calls, the
+attached client the process funnel runs, and the start's bounded questions
+it runs (`exec_within`), the things
 `every_production_process_start_is_classified` counts.
 
 ## `fn exit_text(exit: Option<i32>) -> String {`

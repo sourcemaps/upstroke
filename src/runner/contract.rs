@@ -1686,18 +1686,22 @@ pub(crate) mod tests {
                 "src/runner/container.rs",
                 1,
                 0,
-                1,
+                2,
                 "the Container funnel's `docker` CLI: one `Command::new(`, in \
                  `docker_command`, the builder every container operation \
                  converges on, and no `.spawn()`: every operation is an \
-                 `.output()` the funnel waits on, except the attached `docker \
-                 start --attach --interactive` that delivers a command's stdin \
-                 payload (PR12's D-C), which is the one `run_with_timeout` \
-                 mention. That client runs under the process funnel, on a \
+                 `.output()` the funnel waits on, except two, the two \
+                 `run_with_timeout` mentions. The attached `docker start \
+                 --attach --interactive` that delivers a command's stdin \
+                 payload (PR12's D-C) runs under the process funnel, on a \
                  thread of its own: the funnel spawns it in its own process \
                  group, feeds it, bounds its output, stops, terminates and \
                  reaps it, so a start never waits on the workload and the client \
-                 is never left unowned. Deliberately NOT routed through the Runner, \
+                 is never left unowned. The start's questions (`exec_within`: \
+                 the attached start's observations and diagnostic, and the \
+                 detached `docker start`) run under it too, bounded by the \
+                 invocation's deadline and its cancellation, and keep the fate \
+                 it established (PR12's J6). Deliberately NOT routed through the Runner, \
                  and for the same reason as the two Git rows below — \
                  DESIGN.md:612's \"authoritative Git and the event log never \
                  do\" is about the things that BUILD the boundary rather than \

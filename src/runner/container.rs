@@ -917,6 +917,9 @@ pub const DOCKER_PROGRAM: &str = "docker";
 pub struct DockerCli {
     trace: ContainerTrace,
     deliveries: Arc<Mutex<BTreeMap<String, ClientRecord>>>,
+    /// Per container: the processes a bounded question about it started and could not establish
+    /// gone (`hold_unresolved`), read by every later settlement of that container.
+    unresolved_questions: Arc<Mutex<BTreeMap<String, String>>>,
 }
 
 impl DockerCli {
@@ -925,6 +928,7 @@ impl DockerCli {
         Self {
             trace,
             deliveries: Arc::default(),
+            unresolved_questions: Arc::default(),
         }
     }
 
@@ -1018,11 +1022,13 @@ impl DockerCli {
         )
     }
 
-    /// [`Self::exec`] for the attached start's observations, which DESIGN §26 bounds by the
-    /// invocation's deadline and its cancellation. The question runs through the process
-    /// funnel, which ends it at `deadline` or as soon as `cancellation` fires, kills and reaps
-    /// what it started, and bounds what it captures. A question ended before it answered is an
-    /// error, and none is asked once either bound has passed.
+    /// [`Self::exec`] for the start's questions (the attached start's observations and its
+    /// diagnostic, and the detached `docker start`), which DESIGN §26 bounds by the invocation's
+    /// deadline and its cancellation. The question runs through the process funnel, which ends
+    /// it at `deadline` or as soon as `cancellation` fires, kills and reaps what it started, and
+    /// bounds what it captures. A question ended before it answered is an error, none is asked
+    /// once either bound has passed, and the answer keeps the funnel's fate
+    /// ([`Self::answer_within`]).
     fn exec_within(
         &self,
         op: RuntimeOp,
@@ -1031,17 +1037,18 @@ impl DockerCli {
         deadline: Instant,
         cancellation: &Cancellation,
     ) -> Result<String, RuntimeError> {
-        let ended = |why: &str| RuntimeError::Failed {
-            operation: op,
-            detail: format!("`{DOCKER_PROGRAM} {}` {why}", args.join(" ")),
-        };
         if cancellation.is_cancelled() || Instant::now() >= deadline {
-            return Err(ended(
-                "was not asked: the invocation's deadline had passed or it was cancelled",
-            ));
+            return Err(RuntimeError::Failed {
+                operation: op,
+                detail: format!(
+                    "`{DOCKER_PROGRAM} {}` was not asked: the invocation's deadline had passed or \
+                     it was cancelled",
+                    args.join(" ")
+                ),
+            });
         }
         self.trace.runtime(op, target);
-        let output = proc::run_with_timeout_classified(
+        let outcome = proc::run_with_timeout_classified(
             ProcessSite::Spawn,
             ProcessSite::Terminate,
             docker_command(args),
@@ -1050,24 +1057,89 @@ impl DockerCli {
             &[],
             &|| cancellation.is_cancelled(),
             &mut proc::NoHooks,
-        )
-        .map_err(|failure| RuntimeError::Unreachable {
-            operation: op,
-            detail: format!("{DOCKER_PROGRAM} could not be run: {}", failure.error),
-        })?;
+        );
+        self.answer_within(op, target, args, outcome)
+    }
+
+    /// What a bounded question about `target` answered, read from its supervisor's result with
+    /// the supervisor's fate kept. A question the supervisor never started is the runtime
+    /// unreachable, and one whose process it established gone is a failure. One whose process it
+    /// could not establish gone is unresolved, and that fact is also held under `target`
+    /// ([`Self::hold_unresolved`]), so no later reading of this error can lose it. A question
+    /// the deadline or a cancellation ended was killed and reaped, so it is a failure, as is an
+    /// ordinary nonzero exit.
+    fn answer_within(
+        &self,
+        op: RuntimeOp,
+        target: &str,
+        args: &[&str],
+        outcome: Result<ProcessOutput, ProcessFailure>,
+    ) -> Result<String, RuntimeError> {
+        let asked = format!("`{DOCKER_PROGRAM} {}`", args.join(" "));
+        let output = match outcome {
+            Ok(output) => output,
+            Err(failure) => {
+                return Err(match failure.fate {
+                    ProcessFate::NeverStarted => RuntimeError::Unreachable {
+                        operation: op,
+                        detail: format!("{asked} could not be started: {}", failure.error),
+                    },
+                    ProcessFate::Gone => RuntimeError::Failed {
+                        operation: op,
+                        detail: format!("{asked} failed after it ended: {}", failure.error),
+                    },
+                    ProcessFate::Unresolved => {
+                        let fact = format!(
+                            "{asked}, asked about `{target}`, ended its supervision without \
+                             establishing its process gone, so {}: {}",
+                            ProcessFate::Unresolved.describe(),
+                            failure.error
+                        );
+                        self.hold_unresolved(target, &fact);
+                        RuntimeError::Unresolved {
+                            operation: op,
+                            detail: fact,
+                        }
+                    }
+                });
+            }
+        };
         if output.timed_out || output.code.is_none() {
-            return Err(ended(
-                "was ended before it answered: the invocation's deadline passed or it was \
-                 cancelled",
-            ));
+            return Err(RuntimeError::Failed {
+                operation: op,
+                detail: format!(
+                    "{asked} ended before it answered: the invocation's deadline passed, it was \
+                     cancelled, or a signal ended it"
+                ),
+            });
         }
         if output.output_limited {
-            return Err(ended("answered more than this runner reads"));
+            return Err(RuntimeError::Failed {
+                operation: op,
+                detail: format!("{asked} answered more than this runner reads"),
+            });
         }
         if output.code == Some(0) {
             return Ok(output.stdout);
         }
         Err(classify_docker_failure(op, output.stderr.trim().to_owned()))
+    }
+
+    /// Hold `fact`, a process a question about container `name` started and could not establish
+    /// gone, under that container. Every later settlement of the container reads it
+    /// ([`Self::settle_client_of`]), as an unresolved attached client is read, and nothing
+    /// removes it: a later successful cleanup of another process, or of the container itself,
+    /// does not establish this one gone.
+    fn hold_unresolved(&self, name: &str, fact: &str) {
+        let mut held = self
+            .unresolved_questions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let facts = held.entry(name.to_owned()).or_default();
+        if !facts.is_empty() {
+            facts.push_str("; ");
+        }
+        facts.push_str(fact);
     }
 
     fn image(
@@ -1223,7 +1295,30 @@ impl DockerCli {
             .insert(name.to_owned(), record);
     }
 
+    /// How container `name`'s processes settled: its attached client's end, and every process a
+    /// question about it left unresolved, which makes the settlement unresolved whatever the
+    /// client did.
     fn settle_client_of(&self, name: &str) -> ClientSettlement {
+        let settled = self.settle_attached_client_of(name);
+        let held = self
+            .unresolved_questions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(name)
+            .cloned();
+        let Some(questions) = held else {
+            return settled;
+        };
+        ClientSettlement::Unresolved(match settled {
+            ClientSettlement::Unresolved(fact) => format!("{fact}; {questions}"),
+            ClientSettlement::Ended(end) => {
+                format!("its attached client {}; {questions}", end.describe())
+            }
+            ClientSettlement::Absent => questions,
+        })
+    }
+
+    fn settle_attached_client_of(&self, name: &str) -> ClientSettlement {
         let client = match self.client_record(name) {
             None => return ClientSettlement::Absent,
             Some(ClientRecord::Unresolved(fact)) => {
@@ -1416,6 +1511,11 @@ fn await_started(
         let ended = client_ended();
         let observed = match state() {
             Ok(observed) => observed,
+            // An observation whose process could not be established gone is reported as itself,
+            // whatever else coincided with it: that fact must reach the start's settlement.
+            Err(error @ RuntimeError::Unresolved { .. }) => {
+                return Err(NotStarted::Unobserved(error));
+            }
             // A bounded observation ends at the deadline or on cancellation, and what ended
             // it is reported as itself rather than as a state the runtime could not give.
             Err(_) if cancellation.is_cancelled() => return Err(NotStarted::Cancelled),

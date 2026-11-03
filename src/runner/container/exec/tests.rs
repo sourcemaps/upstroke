@@ -128,6 +128,8 @@ struct Scripted {
     fake: FakeRuntime,
     exit_on_start: bool,
     execution: Mutex<Option<ContainerExecution>>,
+    /// Set by [`Runtime::leaves_its_start_unresolved`].
+    start_unresolved: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Debug, Clone)]
@@ -146,7 +148,15 @@ impl Runtime {
             fake,
             exit_on_start,
             execution: Mutex::new(None),
+            start_unresolved: std::sync::atomic::AtomicBool::new(false),
         }))
+    }
+
+    /// Every later start runs and then reports a process it could not establish gone, as a
+    /// bounded runtime question whose supervisor could not reap its process does.
+    fn leaves_its_start_unresolved(&self) {
+        let flag = &self.0.start_unresolved;
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     fn fake(&self) -> &FakeRuntime {
@@ -195,6 +205,16 @@ impl ContainerRuntime for Runtime {
     fn start(&self, covered: CoveredStart<'_>) -> Result<(), RuntimeError> {
         let name = covered.name();
         self.0.fake.start(covered)?;
+        let flag = &self.0.start_unresolved;
+        if flag.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(RuntimeError::Unresolved {
+                operation: RuntimeOp::Start,
+                detail: format!(
+                    "a question the start of `{name}` asked ended its supervision without \
+                     establishing its process gone"
+                ),
+            });
+        }
         if self.0.exit_on_start {
             self.0.fake.set_container_state(name, Liveness::Exited);
             if let Some(execution) = self
@@ -779,6 +799,45 @@ fn the_runner_reports_what_it_established_about_the_process_when_it_fails() {
         seen += 1;
     }
     assert_eq!(seen, 16, "every cell of the container fate matrix ran");
+}
+
+/// `PR12-J6-OBSERVATION-FATE-DROPPED`: a start that reports a process of its own unresolved
+/// keeps that fate when the cancel then stops and removes the container cleanly. The removal
+/// establishes the container gone, not the other process (`DockerCli` also holds such a process
+/// under the container, so its own removal reports it; this runtime's removal does not).
+#[test]
+fn a_start_that_left_a_process_unresolved_stays_unresolved_after_a_clean_cancel() {
+    use crate::error::ProcessFate;
+
+    let fixture = Fixture::new("unresolved-start", false);
+    fixture.runtime.leaves_its_start_unresolved();
+    let request = gate_request(
+        ShellKind::Sh.spec("exit 0"),
+        fixture.task_a.clone(),
+        Duration::from_secs(10),
+        gate_id(0),
+    );
+
+    let error = fixture
+        .runner()
+        .run_blocking(&request)
+        .expect_err("the start left a process unresolved");
+    assert_eq!(error.fate, ProcessFate::Unresolved, "{error}");
+    let message = error.to_string();
+    assert!(
+        message.contains(ProcessFate::Unresolved.describe()),
+        "{message}"
+    );
+    let ops = fixture.trace.ops();
+    assert!(
+        ops.contains(&RuntimeOp::Start) && ops.contains(&RuntimeOp::Remove),
+        "the start ran and the cancel removed the container: {ops:?}"
+    );
+    assert_eq!(
+        fixture.runtime.fake().container_names(),
+        Vec::<String>::new(),
+        "the cancel completed"
+    );
 }
 
 #[test]

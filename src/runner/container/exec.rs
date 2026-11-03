@@ -877,7 +877,17 @@ impl ContainerRunner {
         reached: Reached,
     ) -> RunnerError {
         let residue = self.cancel(hooks, &plan.private_root, &plan.name, &reached);
+        // A cause that left a process unresolved stays unresolved: the container's cleanup, or a
+        // settled attached client, does not establish a different process gone.
+        let unresolved = matches!(
+            cause,
+            UpstrokeError::Runner {
+                fate: ProcessFate::Unresolved,
+                ..
+            }
+        );
         let fate = match reached.container {
+            _ if unresolved => ProcessFate::Unresolved,
             ContainerReached::NotCreated | ContainerReached::Created => ProcessFate::NeverStarted,
             ContainerReached::Started if residue.container_gone => ProcessFate::Gone,
             ContainerReached::Started => ProcessFate::Unresolved,

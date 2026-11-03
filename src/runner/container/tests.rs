@@ -1175,6 +1175,205 @@ fn attached_start_observation_child() {
     );
 }
 
+/// `PR12-J6-OBSERVATION-FATE-DROPPED` (root's source finding on J6). A bounded docker question
+/// keeps its supervisor's fate. Each result below is synthetic: a supervisor that never
+/// started the question, one that saw its process gone, one that could not establish it gone,
+/// and ordinary ends. Only the unresolved one is unresolved, and only it is held under the
+/// container it was about.
+#[test]
+fn a_bounded_docker_question_keeps_its_supervisors_fate() {
+    use super::ClientSettlement;
+    use crate::agent::proc::ProcessFailure;
+    use crate::error::ProcessFate;
+
+    let cli = DockerCli::default();
+    let ask = |name: &str, outcome| cli.answer_within(RuntimeOp::Observe, name, &["ps"], outcome);
+    let failure = |fate| {
+        Err(ProcessFailure {
+            fate,
+            error: UpstrokeError::Agent {
+                message: "the supervisor's account".to_owned(),
+            },
+        })
+    };
+    let output = |code: Option<i32>, timed_out: bool| {
+        Ok(crate::agent::ProcessOutput {
+            code,
+            stdout: "answer".to_owned(),
+            stderr: "the daemon refused".to_owned(),
+            duration: Duration::from_millis(1),
+            timed_out,
+            output_limited: false,
+        })
+    };
+
+    let never = ask("upstroke-never", failure(ProcessFate::NeverStarted));
+    assert!(
+        matches!(never, Err(RuntimeError::Unreachable { .. })),
+        "a question its supervisor never started found no runtime: {never:?}"
+    );
+    let gone = ask("upstroke-gone", failure(ProcessFate::Gone));
+    assert!(
+        matches!(gone, Err(RuntimeError::Failed { .. })),
+        "a question whose process its supervisor saw gone failed: {gone:?}"
+    );
+    let held = ask("upstroke-held", failure(ProcessFate::Unresolved));
+    assert!(
+        matches!(held, Err(RuntimeError::Unresolved { .. })),
+        "a question whose process could not be established gone is unresolved: {held:?}"
+    );
+    assert_eq!(
+        ask("upstroke-ok", output(Some(0), false)),
+        Ok("answer".to_owned())
+    );
+    let refused = ask("upstroke-ok", output(Some(1), false));
+    assert!(
+        refused.is_err() && !matches!(refused, Err(RuntimeError::Unresolved { .. })),
+        "an ordinary nonzero exit is not an unresolved process: {refused:?}"
+    );
+    let ended = ask("upstroke-ok", output(None, true));
+    assert!(
+        matches!(ended, Err(RuntimeError::Failed { .. })),
+        "a question the deadline or a cancellation killed and reaped is not unresolved: {ended:?}"
+    );
+
+    match cli.settle_client_of("upstroke-held") {
+        ClientSettlement::Unresolved(fact) => assert!(
+            fact.contains("without establishing its process gone"),
+            "{fact}"
+        ),
+        other => panic!("{other:?}"),
+    }
+    for name in ["upstroke-never", "upstroke-gone", "upstroke-ok"] {
+        assert!(
+            matches!(cli.settle_client_of(name), ClientSettlement::Absent),
+            "{name}: only an unresolved question is held"
+        );
+    }
+}
+
+/// An attached client whose supervisor ended cleanly, as a synthetic result.
+fn an_attached_client_that_ended() -> super::AttachedClient {
+    let supervisor = std::thread::spawn(|| {
+        Ok::<_, crate::agent::proc::ProcessFailure>(crate::agent::ProcessOutput {
+            code: Some(0),
+            stdout: String::new(),
+            stderr: String::new(),
+            duration: Duration::from_millis(1),
+            timed_out: false,
+            output_limited: false,
+        })
+    });
+    super::AttachedClient {
+        stop: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        supervisor: Some(supervisor),
+    }
+}
+
+/// The held fact belongs to its container and outlives every later settlement of it. The
+/// attached start's optional diagnostic (`container inspect`) fails unresolved, and the start
+/// drops that error with `.ok()` as before. Yet the container's attached client ending cleanly,
+/// a removal, and a second removal all still settle unresolved, while another container's clean
+/// end stays clean.
+#[test]
+fn an_unresolved_question_stays_with_its_container_through_every_later_settlement() {
+    use super::ClientSettlement;
+    use crate::error::ProcessFate;
+
+    let cli = DockerCli::default();
+    let name = "upstroke-held";
+    let diagnostic = cli.answer_within(
+        RuntimeOp::Start,
+        name,
+        &["container", "inspect", name, "--format", "{{.State.Error}}"],
+        Err(crate::agent::proc::ProcessFailure {
+            fate: ProcessFate::Unresolved,
+            error: UpstrokeError::Agent {
+                message: "the inspect's supervision ended".to_owned(),
+            },
+        }),
+    );
+    assert!(
+        matches!(diagnostic, Err(RuntimeError::Unresolved { .. })),
+        "the start drops this diagnostic's error and keeps its reason: {diagnostic:?}"
+    );
+
+    cli.own_client(name, an_attached_client_that_ended());
+    match cli.settle_client_of(name) {
+        ClientSettlement::Unresolved(fact) => assert!(
+            fact.contains("its attached client ended") && fact.contains("container inspect"),
+            "the clean client end does not clear the held question: {fact}"
+        ),
+        other => panic!("{other:?}"),
+    }
+    for removal in 1..=2 {
+        assert!(
+            matches!(
+                cli.settle_removed_client(name),
+                Err(RuntimeError::Unresolved { .. })
+            ),
+            "removal {removal}: the container's removal reports the held question"
+        );
+    }
+
+    cli.own_client("upstroke-other", an_attached_client_that_ended());
+    assert!(
+        matches!(
+            cli.settle_client_of("upstroke-other"),
+            ClientSettlement::Ended(_)
+        ),
+        "another container's settlement is its own"
+    );
+}
+
+/// An observation that could not establish its process gone is reported as itself even when the
+/// deadline has passed or a cancellation fired at the same moment: that fact must reach the
+/// start's settlement. An ordinary failed observation at the deadline is still the deadline.
+#[test]
+fn an_unresolved_observation_is_reported_as_itself_at_a_deadline_or_a_cancellation() {
+    use super::{NotStarted, await_started};
+    use crate::runner::Cancellation;
+
+    let poll = Duration::from_millis(1);
+    let unresolved = || {
+        Err(RuntimeError::Unresolved {
+            operation: RuntimeOp::Observe,
+            detail: "the question's process could not be established gone".to_owned(),
+        })
+    };
+    let never = Cancellation::new();
+    let cancelled = Cancellation::new();
+    cancelled.cancel();
+    let far = Instant::now() + Duration::from_secs(600);
+    let waited = await_started(far, &cancelled, poll, unresolved, || false);
+    assert!(
+        matches!(
+            waited,
+            Err(NotStarted::Unobserved(RuntimeError::Unresolved { .. }))
+        ),
+        "with a cancellation: {waited:?}"
+    );
+    let waited = await_started(Instant::now(), &never, poll, unresolved, || false);
+    assert!(
+        matches!(
+            waited,
+            Err(NotStarted::Unobserved(RuntimeError::Unresolved { .. }))
+        ),
+        "at the deadline: {waited:?}"
+    );
+    let failed = || {
+        Err(RuntimeError::Failed {
+            operation: RuntimeOp::Observe,
+            detail: "ended before it answered".to_owned(),
+        })
+    };
+    let waited = await_started(Instant::now(), &never, poll, failed, || false);
+    assert!(
+        matches!(waited, Err(NotStarted::DeadlinePassed)),
+        "an ordinary failed observation at the deadline is the deadline: {waited:?}"
+    );
+}
+
 #[test]
 fn an_attached_client_is_settled_or_reported_unresolved_within_its_bound() {
     use super::settle_client;

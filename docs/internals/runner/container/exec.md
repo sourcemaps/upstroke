@@ -1131,6 +1131,11 @@ confirmed neither, and an answer that another reclaimer's removal is in
 progress confirms neither (`Settled::RemovalInProgress`, the daemon sets
 that flag before it kills) — because at this seam a start the daemon
 refused cannot be told from a start whose acknowledgement was lost.
+A `cause` that itself reports a process it could not establish gone
+(`UpstrokeError::Runner` with `ProcessFate::Unresolved`, which `refused`
+makes of a `RuntimeError::Unresolved`) keeps that fate whatever the launch
+reached and whatever the cancel established: the cancel's evidence is about
+the container, not about that process (PR12-J6-OBSERVATION-FATE-DROPPED).
  A refused start whose
 cancel completes therefore settles as an `Infrastructure{Other}` outage
 with the refusal in its detail rather than as `RunnerSpawnFailure`; both
