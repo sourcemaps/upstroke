@@ -20474,7 +20474,11 @@ fn a_schema_4_run_refuses_a_private_root_no_string_can_spell_before_any_state() 
 /// J4's other side: a private root whose name holds U+FFFD is valid UTF-8, so it is not
 /// refused, and the run records both paths that hang from it exactly. The resume finds the
 /// run's private half through the recorded locator alone, and refuses only because the run
-/// has finished.
+/// has finished. Each recorded path is spelled as the code that derives it spells it: the
+/// private half from the root as `fs::canonicalize` resolves it (`prelock`), and the execution
+/// root as the workspace manager spells the paths it derives, without Windows' verbatim prefix
+/// (`fixture::canonical`). Native Windows CI run 41579577562 failed when this test compared the
+/// execution root with the first spelling.
 #[test]
 fn a_private_root_named_with_the_replacement_character_is_recorded_exactly() {
     let (tree, repo) = temp_engine_repo("topology-replacement-root");
@@ -20495,11 +20499,14 @@ fn a_private_root_named_with_the_replacement_character_is_recorded_exactly() {
         canonical.join("runs").join(&report.run_id).to_str(),
         "the private half is recorded exactly"
     );
+    // The root as the workspace manager spells it: `fs::canonicalize` above, through
+    // `strip_verbatim` on Windows and unchanged elsewhere.
+    let managed_root = crate::workspace_manager::fixture::canonical(&private);
     let execution_root = recorded["data"]["execution_root"]
         .as_str()
         .expect("the execution root is recorded");
     assert!(
-        Path::new(execution_root).starts_with(canonical.join("workspaces")),
+        Path::new(execution_root).starts_with(managed_root.join("workspaces")),
         "the execution root is recorded exactly under the root: {execution_root}"
     );
     let mut resume = resume_options(&repo, &report.run_id);
