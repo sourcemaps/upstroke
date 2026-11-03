@@ -152,7 +152,10 @@ The §13 ceiling that stopped the run, if one did.
 
 ## `#[serde(default)]`
 
-What each pool drained, folded from this run's own attempts (§13).
+What each pool drained (§13), folded from this run's own attempts: each
+attempt record, and each review pass it carries, in the pool it names
+(`capacity::drain_of`). A schema-4 report also counts each integration review
+pass that names a pool, once (`from_topology`, below).
 
 ## `#[serde(default)]`
 
@@ -255,15 +258,41 @@ stays the authority; this is the command's summary of the same run.
   `attempt_finished` for an attempt that did not succeed, and
   `candidate_prepared` for one that did. The fold allows no other successful
   settlement (`check_attempt`), and `select::Spend::replay` counts the same two
-  events. So the trail, the costs, the review models and the session are the
-  legacy report's derivations over the same record type, and the total is the
-  attempts' spend.
+  events. So the trail, the model, the duration, the worker cost and the
+  session are the legacy report's derivations over the same record type, and
+  the review cost, the review models and the unknown-cost flag start from them.
 
   Until brief 3's S9 witness this read `attempt_finished` alone. A committed
   task then showed no model, duration or cost, and the total left out every
   successful attempt: the CLI's case F printed `total: $0.0000` beside a
-  budget stop that recorded $0.02. Merge-verification reviews are charged to
-  the run's spend but belong to no attempt, so they are not in this total.
+  budget stop that recorded $0.02.
+- Merge verifications charge review passes that belong to no attempt record.
+  `select::IntegrationReviews::replay` collects them from `merge_prepared`'s
+  verification, a `merge_rejected` whose disposition is `CodeRejected`,
+  `merge_verification_unavailable` and `merge_verification_charged`. It
+  attributes each pass as `Spend::replay` charges it: to the task whose
+  candidate the log names, or to no task for a terminal that no start pairs
+  with. The fold admits a sequence's passes once (`check_spend_unrecorded`),
+  so each pass is counted once:
+  - a task's passes join its review cost, its review models and its
+    unknown-cost flag (`review_cost_incomplete`);
+  - an unattributed pass's known cost joins the total, and if one of them has
+    no cost, a warning says the total is a floor;
+  - every pass that names a pool counts in that pool's drain row: in
+    `attempts`, with its known cost in `cost_usd` and an unknown one in
+    `unpriced`.
+
+  The total is the tasks' own totals plus the unattributed passes' known
+  costs. A warning names any difference of more than 1e-9 from
+  `Spend::replay`'s run total; the log is the authority.
+  `RunReport::total_is_floor` reads the task rows only, so a total whose only
+  unknown cost is an unattributed pass prints without its `?`, and only that
+  warning says it is a floor. A valid log has no unattributed pass: the fold
+  admits a verification's terminal only after its start.
+
+  Until J3 (`PR12-REPORT-OMITS-INTEGRATION-REVIEW-SPEND`) this read attempt
+  records alone, so its review costs, its total and its pool drain all missed
+  the review passes merge verifications charge.
 - `halted_at` and `budget_stop` are set only as the fold's own outcome says,
   so [`RunReport::outcome`] agrees with it; the entry compares the two and
   warns if they ever disagree.
