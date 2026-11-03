@@ -1638,10 +1638,8 @@ impl TopologyRun {
                         asked.insert(&question.id);
                     }
                 }
-                TopologyEventBody::QuestionAnswered { data } => {
-                    if asked.contains(&data.question) {
-                        approved = approves(&data.answer);
-                    }
+                TopologyEventBody::QuestionAnswered { data } if asked.contains(&data.question) => {
+                    approved = approves(&data.answer);
                 }
                 _ => {}
             }

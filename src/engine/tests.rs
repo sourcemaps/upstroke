@@ -20416,23 +20416,29 @@ fn a_root_name_no_string_can_spell() -> std::ffi::OsString {
 /// produces was recorded lossily, and the resume then looked for another directory. The root
 /// is now refused before any lock, and afterwards nothing of the run exists: no run directory
 /// in the repository and nothing under the root. A filesystem that refuses such a name
-/// (`EILSEQ`, APFS) cannot hold the root at all, and the test says so and stops there.
+/// (`EILSEQ`, APFS) cannot hold the root at all. There the run is refused earlier, where the
+/// root is first read, and the test asserts that refusal and that nothing of the run exists,
+/// under a label naming the assertions such a host cannot reach, as the `EILSEQ` cell of
+/// `runner/container/resolve/tests.rs` does.
 #[test]
 fn a_schema_4_run_refuses_a_private_root_no_string_can_spell_before_any_state() {
     let (tree, repo) = temp_engine_repo("topology-unspellable-root");
     let private = tree.path().join(a_root_name_no_string_can_spell());
-    match fs::create_dir(&private) {
-        Ok(()) => {}
+    // Where the name exists, the run reaches the UTF-8 guard, and its refusal and the empty root
+    // are asserted. Where creating it fails with `EILSEQ`, no such root can exist: the run is
+    // refused where the root is first read (`prelock::authorized_private_root`), before the
+    // UTF-8 guard, and the root is asserted to be still absent. Any other outcome fails.
+    let (label, needle, created) = match fs::create_dir(&private) {
+        Ok(()) => ("not UTF-8", "is not valid UTF-8".to_owned(), true),
         #[cfg(unix)]
-        Err(error) if error.raw_os_error() == Some(libc::EILSEQ) => {
-            eprintln!(
-                "skipped: this filesystem refuses a directory name that is not UTF-8 ({error}), \
-                 so no private root of that shape can exist here"
-            );
-            return;
-        }
+        Err(error) if error.raw_os_error() == Some(libc::EILSEQ) => (
+            "not UTF-8, refused by this host with EILSEQ: refused where the root is read, before \
+             the UTF-8 guard, so the UTF-8 refusal and the empty-root check are not reached",
+            format!("failed to read {}", private.display()),
+            false,
+        ),
         Err(error) => panic!("a private root UTF-8 cannot spell: {error}"),
-    }
+    };
     let mut opts = topology_options(&repo);
     opts.private_root = Some(private.clone());
     let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
@@ -20441,20 +20447,27 @@ fn a_schema_4_run_refuses_a_private_root_no_string_can_spell_before_any_state() 
     )));
     let refused = run_with(&opts, &source).expect_err("an unspellable private root is refused");
     assert!(
-        refused.to_string().contains("is not valid UTF-8"),
-        "the refusal says why: {refused}"
+        refused.to_string().contains(&needle),
+        "{label}: the refusal says why: {refused}"
     );
     assert!(
         rundir::run_dir_names(&repo).is_empty(),
-        "no run directory exists after the refusal"
+        "{label}: no run directory exists after the refusal"
     );
-    assert!(
-        fs::read_dir(&private)
-            .expect("the refused root is still readable")
-            .next()
-            .is_none(),
-        "nothing was created under the refused root"
-    );
+    if created {
+        assert!(
+            fs::read_dir(&private)
+                .expect("the refused root is still readable")
+                .next()
+                .is_none(),
+            "{label}: nothing was created under the refused root"
+        );
+    } else {
+        assert!(
+            fs::symlink_metadata(&private).is_err(),
+            "{label}: the root this host refused was not created by the run"
+        );
+    }
 }
 
 /// J4's other side: a private root whose name holds U+FFFD is valid UTF-8, so it is not
