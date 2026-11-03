@@ -18478,10 +18478,13 @@ fn worker_pids(repo: &Path) -> Vec<u32> {
 
 /// The signal test's driver. The helper, this test binary running `topology_signalled_child`,
 /// is owned from its spawn by a [`LinkedChild`](crate::workspace_manager::fixture::LinkedChild),
-/// which kills and reaps it within its bound however this function ends, and every wait here
-/// is bounded. At the reviewed head the helper was a bare `Child`: an assertion before its
-/// unbounded `wait` unwound past it and left the helper and its worker running (J8, PR12
-/// regression review #5). `helper` learns the helper's pid as it is spawned.
+/// which kills and reaps it within its bound however this function ends. The waits on the
+/// helper are bounded: the readiness poll, the helper's end and its cleanup, its reader's
+/// settlement, each worker group's end and the run's release. The `kill` command that delivers
+/// the signal has no deadline of its own, and neither has the test as a whole. At the reviewed
+/// head the helper was a bare `Child`: an assertion before its unbounded `wait` unwound past it
+/// and left the helper and its worker running (J8, PR12 regression review #5). `helper` learns
+/// the helper's pid as it is spawned.
 #[cfg(unix)]
 fn signal_mid_attempt(
     repo: &Path,
