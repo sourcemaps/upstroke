@@ -17232,7 +17232,8 @@ fn a_tracked_filtered_path_moved_out_stays_refused_and_is_pinned_once_its_attrib
 const INHERITED_RUN_ROOT: &str = "UPSTROKE_INHERITED_RUN_ROOT";
 #[cfg(unix)]
 const INHERITED_RUN_PRIVATE: &str = "UPSTROKE_INHERITED_RUN_PRIVATE";
-#[cfg(unix)]
+// Not `cfg(unix)`: the portable J7 test
+// `a_schema_4_resume_runs_the_recorded_gates_and_names_how_todays_differ` seeds it too.
 const WORKER_ONLY_PLAN: &str = "## Implement the widget\n<!-- upstroke: id=t1 depends= -->\n";
 #[cfg(unix)]
 const WORKER_ONLY_CONFIG: &str = "[routing]\nreview = { enabled = false }\n";
