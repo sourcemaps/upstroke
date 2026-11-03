@@ -1307,9 +1307,11 @@ has no ladder to escalate, so it is never held.
 ## `impl TopologyRun` › `fn spend_approved(&self, key: TaskKey, rung: u32) -> bool {`
 
 The approval is read from the log, not from process memory. The answer must
-be `answered`, to an `ApproveSpend` question raised for the task after its
-last escalation onto `rung`. Each escalation resets it, so each needs its own
-approval.
+be `answered` with the approve option, option 0 (`approves`), to an
+`ApproveSpend` question raised for the task after its last escalation onto
+`rung`. The fold gives a spend question's options no meaning of its own, so
+any other record approves nothing, and the hold asks again (root's J1
+audit). Each escalation resets it, so each needs its own approval.
 
 ## `impl TopologyRun` › `pub(super) fn ask_to_approve_spend(`
 
