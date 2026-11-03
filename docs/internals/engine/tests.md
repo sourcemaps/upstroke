@@ -3527,3 +3527,11 @@ string spells is refused, saying nothing was locked or created; a link no
 string spells that resolves to the home text spells passes (where the host can
 hold the link's name). The checks create nothing: the tree holds the home and
 the link only.
+
+## `fn a_frontier_escalation_over_the_threshold_parks_for_approval_then_runs_it() {`
+
+Since J16 it also asserts that the approval question names its task (`t1`)
+and that its context opens with the task line, `` Task `t1` — One ``: the
+question is built by `build_question` and described from the plan task it
+names, and must read as it did when `build_spend_approval` indexed the plan
+itself.

@@ -791,6 +791,18 @@ and write the payload where a UI or `upstroke answer` can read it.
 frontier rung, and the run has already reported enough spend that the
 operator asked to be consulted first.
 
+The question names its task through `build_question`, as every question this
+engine raises does, and its context describes the plan task that question
+names (`SpendSubject`). So the function reads no row of the plan or of the
+run's state by position; a function-local `#[deny(clippy::indexing_slicing)]`
+holds that (J16, regular review 3, finding 4; regression review 3, finding 6).
+A question that names no task of the plan, which `build_question` cannot
+produce, would carry the spend facts without the task line and the acceptance
+list rather than invented ones. Until J16 the function built a `ParkSubject`
+from `plan.tasks[index]` and `state.progress[index]`; J1 had added the second
+read for an attempt count and rungs spent that the spend question never
+prints.
+
 ## `impl Run<'_>` › `fn unpriced_attempts(&self) -> u32 {`
 
 Attempts whose route reported no spend at all (§13), so the figures this
@@ -966,12 +978,26 @@ plan. Naming them lets the schema-4 driver, which holds a `FrozenTaskSpec`
 and no `Task`, raise the same question the legacy engine does rather than
 wording its own.
 
+## `pub(super) struct SpendSubject<'a> {`
+
+The task a spend approval describes: its display id, its title and its
+acceptance list, the three things the question prints. A [`ParkSubject`]
+also carries the attempts and rungs a park question quotes, which a spend
+question does not, so neither engine needs a task's progress to word one.
+
+## `impl<'a> SpendSubject<'a>` › `fn of(task: &'a Task) -> Self {`
+
+The subject of a schema-3 plan task.
+
 ## `pub(super) fn spend_question_context(`
 
 §12's spend approval, in the operator's terms: what is about to happen, what
 it has cost so far, and how confident that figure is. The task comes as a
-[`ParkSubject`], so the schema-4 driver words its approval question the same
-way, including for a repair task the plan never named (J1).
+[`SpendSubject`], so the schema-4 driver words its approval question the same
+way, including for a repair task the plan never named (J1). Without a subject
+the task line and the acceptance list are left out and the rest is unchanged.
+Each `let _ = writeln!` writes into a `String`, whose `fmt::Write` cannot
+fail, so nothing but `Ok` is discarded.
 
 The threshold is a **spend-to-date** reading rather than a forward
 projection, and the text says so — see [`crate::config::AskBefore`] for why.

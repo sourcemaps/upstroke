@@ -7794,6 +7794,12 @@ fn a_frontier_escalation_over_the_threshold_parks_for_approval_then_runs_it() {
         "and quotes reported spend to date: {}",
         asked[0].question.context
     );
+    assert!(
+        asked[0].question.affected_tasks == [TaskId::from("t1")]
+            && asked[0].question.context.starts_with("Task `t1` — One\n"),
+        "and it names and describes the task it holds: {:?}",
+        asked[0].question
+    );
 
     let tiers: Vec<&str> = task(&report, "t1")
         .attempts

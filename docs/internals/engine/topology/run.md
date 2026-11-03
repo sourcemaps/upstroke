@@ -1377,7 +1377,10 @@ never` the run ends parked on the question.
 
 The approval question's frozen form. Its reported spend is the run's ledger
 total, a floor when [`spend_is_a_floor`] finds an unpriced attempt or review,
-as the sequential engine qualifies it.
+as the sequential engine qualifies it. Its subject is a
+`coordinator::SpendSubject` from the registry entry: display id, title and
+acceptance. Until J16 it built a `ParkSubject`, computing an attempt count and
+rungs spent that the spend question never printed.
 
 ## `impl TopologyRun` › `pub(super) fn exceed_budget(`
 

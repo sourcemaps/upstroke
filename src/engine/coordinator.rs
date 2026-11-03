@@ -1090,6 +1090,7 @@ impl Run<'_> {
         })
     }
 
+    #[deny(clippy::indexing_slicing)]
     fn build_spend_approval(
         &self,
         index: usize,
@@ -1097,17 +1098,24 @@ impl Run<'_> {
         pending_spend: f64,
         pending_unpriced: bool,
     ) -> Question {
+        let question = self.build_question(index, QuestionKind::ApproveSpend, String::new());
+        let named = self
+            .analysis
+            .plan
+            .tasks
+            .iter()
+            .find(|task| question.affected_tasks.contains(&task.id));
         let context = spend_question_context(
-            ParkSubject::of(
-                &self.analysis.plan.tasks[index],
-                &self.state.progress[index],
-            ),
+            named.map(SpendSubject::of),
             onto,
             self.reported_spend(None) + pending_spend,
             self.ask_before.frontier_escalation_over_usd.unwrap_or(0.0),
             self.unpriced_attempts() > 0 || pending_unpriced,
         );
-        self.build_question(index, QuestionKind::ApproveSpend, context)
+        Question {
+            context,
+            ..question
+        }
     }
 
     fn unpriced_attempts(&self) -> u32 {
@@ -1362,15 +1370,33 @@ pub(super) fn question_context(
     context
 }
 
+pub(super) struct SpendSubject<'a> {
+    pub(super) display_id: &'a str,
+    pub(super) title: &'a str,
+    pub(super) acceptance: &'a [String],
+}
+
+impl<'a> SpendSubject<'a> {
+    fn of(task: &'a Task) -> Self {
+        Self {
+            display_id: task.id.as_str(),
+            title: &task.title,
+            acceptance: &task.acceptance,
+        }
+    }
+}
+
 pub(super) fn spend_question_context(
-    task: ParkSubject<'_>,
+    task: Option<SpendSubject<'_>>,
     onto: crate::ir::Tier,
     spent: f64,
     threshold: f64,
     unpriced: bool,
 ) -> String {
     let mut context = String::new();
-    let _ = writeln!(context, "Task `{}` — {}", task.display_id, task.title);
+    if let Some(task) = &task {
+        let _ = writeln!(context, "Task `{}` — {}", task.display_id, task.title);
+    }
     let _ = writeln!(
         context,
         "Every attempt on the cheaper rungs failed, so this task is about to escalate onto the \
@@ -1388,7 +1414,7 @@ pub(super) fn spend_question_context(
          not an estimate of what the {onto} attempt will cost — upstroke measures spend rather than \
          predicting it (§10)."
     );
-    if !task.acceptance.is_empty() {
+    if let Some(task) = task.filter(|task| !task.acceptance.is_empty()) {
         context.push_str("Acceptance criteria this task must meet:\n");
         for item in task.acceptance {
             let _ = writeln!(context, "- {item}");

@@ -1766,11 +1766,6 @@ impl TopologyRun {
             .ok_or_else(|| UpstrokeError::Refused {
                 message: format!("task {} is not in this run's fold", key.index()),
             })?;
-        let attempts: u32 = task
-            .generations
-            .iter()
-            .map(|generation| generation.attempts)
-            .sum();
         let rung = usize::try_from(task.rung).unwrap_or(usize::MAX);
         let onto = entry
             .ladder
@@ -1782,13 +1777,11 @@ impl TopologyRun {
             key,
             kind: QuestionKind::ApproveSpend,
             context: crate::engine::coordinator::spend_question_context(
-                crate::engine::coordinator::ParkSubject {
+                Some(crate::engine::coordinator::SpendSubject {
                     display_id: entry.display_id.as_str(),
                     title: &entry.spec.title,
                     acceptance: &entry.spec.acceptance,
-                    attempts,
-                    rungs_spent: rung.saturating_add(1),
-                },
+                }),
                 onto,
                 self.spend.run_usd(),
                 threshold,
