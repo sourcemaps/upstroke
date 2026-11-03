@@ -88,6 +88,16 @@ in this process but the record of the review passes a verification had
 charged". The refusal writes nothing, so the type is still a forwarder with no
 append of its own.
 
+**A question an append opens is announced here, and nowhere else** (J11,
+regression review 3, finding 2). After an append returns, the emitter tells the
+run's notifiers about each question that is open in the fold now and was not
+before the append: a worker's park, a spend approval, a verification park, a
+human-gated repair. Every append a run makes passes this one point, so each
+question is announced as soon as it is durable, under either driver, while the
+rest of the run goes on, as the sequential engine's `materialize_question`
+announces a parked question right after its settlement. The announcement
+writes nothing to the log, so the type still has no append of its own.
+
 ## `pub struct RunEmitter<'a>` › `pub identity: &'a RunIdentity,`
 
 What every refusal names, and what the checked replay is derived
@@ -102,6 +112,14 @@ five things one append touches.
 
 Where the event's timestamp comes from.
 
+## `pub struct RunEmitter<'a>` › `pub notifiers: &'a [&'static dyn Notifier],`
+
+The run's notifiers, borrowed ([`TopologyRun::with_notifiers`]). Every
+`RunEmitter` a `TopologyRun` builds is given them: `emit_undischarged`, the
+`RunJournal` of `with_journal`, the `IntegrationCx` of `integrate` and the
+announcing emitter of `prepare_attempt`. Empty unless the entry configured
+some, and then nothing is announced and no open question is looked at.
+
 ## `pub struct RunEmitter<'a>` › `pub stopped: Option<&'a str>,`
 
 Why the run is stopped, while it is: the run's own latch, borrowed
@@ -112,8 +130,10 @@ puts it back.
 
 ## `impl EventEmitter for RunEmitter<'_>` › `fn emit(`
 
-[`emit`], and nothing after it; before it only a stopped run's refusal, which
-writes nothing (`stopped`, above).
+[`emit`]; before it only a stopped run's refusal, which writes nothing
+(`stopped`, above), and after it only the announcement of the questions the
+append opened, which writes nothing either (`announce_opened`, below). A failed
+append announces nothing.
 
 The event it returns is discarded because no caller of this trait has
 ever wanted it: what a caller needs to know is whether the effect that
@@ -129,6 +149,29 @@ and they differ only in whether the log was touched, which
 `EmitError::wrote_nothing` answers for a reader that cares. A stopped run's
 refusal is `EmitFailure::Clean`, naming the stop.
 
+## `impl RunEmitter<'_>` › `fn open_question_ids(&self) -> BTreeSet<QuestionId> {`
+
+The ids of the questions open in the fold before an append, copied because
+the append changes the fold they are read from. Nothing is read when the run
+has no notifiers.
+
+## `impl RunEmitter<'_>` › `fn announce_opened(&mut self, open_before: &BTreeSet<QuestionId>) {`
+
+Each question open after the append and not before it, handed to every
+notifier in turn. A notifier that cannot deliver warns, naming itself and the
+question, as the sequential engine's `materialize_question` does, and the
+others are still asked: the run never stops over an announcement, since the
+question is durable in the log and the final report names it whatever a
+notifier did.
+
+## `fn announced_question(fold: &TopologyFold, frozen: &FrozenQuestion) -> Question {`
+
+The question a notifier is shown: the frozen question's id, kind, context and
+options, and its task by display id, as `open_question` shows it to an answer
+source. A notifier takes an `ir::Question`, so these fields are copied out of
+the fold's record. A key the registry does not hold (a valid fold has none) is
+shown as `k<key>`, as the report shows it.
+
 ## `fn brokered(hooks: &mut dyn TopologyHooks, state: &EmitState<'_>, invocations: &InvocationLedger) {`
 
 Show the hooks the broker after an append that succeeded
@@ -138,8 +181,8 @@ holders of both halves, each right after its emitter returned `Ok` —
 `TopologyRun::emit_undischarged`, [`RunJournal`]'s two `emit`s,
 [`IntegrationCx`]'s `emit`, and `prepare_attempt` after `announce`'s one
 append — which between them are every append a `TopologyRun` makes. Not in
-[`RunEmitter`], which is the protocol and nothing after it and holds only the
-reservations. Nothing touches either ledger between the append and this call,
+[`RunEmitter`], which is the protocol and the announcement of what it opened,
+and holds only the reservations. Nothing touches either ledger between the append and this call,
 so a reservation the append's caller converts after it is still held.
 
 ## `struct RunJournal<'a, 'h> {`
@@ -1292,6 +1335,13 @@ entry sets it from the run's config, and a resume from today's config, as the
 sequential resume reads `ask_before` from today's analysis. At the reviewed
 head nothing supplied it, so a configured approval never asked (regression
 review #1, J1).
+
+## `impl TopologyRun` › `pub fn with_notifiers(mut self, notifiers: Vec<&'static dyn Notifier>) -> Self {`
+
+The run, with the notifiers its emitters announce each newly opened question
+to (`RunEmitter`'s `notifiers`). The entry builds them from `[interaction]
+notify`, a fresh run from its config and a resume from today's. `resumed`
+starts with none, so a run nobody configured announces nothing.
 
 ## `impl TopologyRun` › `fn spend_unapproved(&self, key: TaskKey) -> Result<bool, UpstrokeError> {`
 

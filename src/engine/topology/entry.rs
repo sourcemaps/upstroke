@@ -17,7 +17,7 @@ use crate::engine::report::{RunOutcome as ReportedOutcome, RunReport};
 use crate::error::UpstrokeError;
 use crate::events::{self, GateSummary, RunOutcome};
 use crate::gates::{self, ShellGate, ShellKind};
-use crate::interaction::{self, AnswerSource, InteractionMode, RealSleeper, Sleeper};
+use crate::interaction::{self, AnswerSource, InteractionMode, Notifier, RealSleeper, Sleeper};
 use crate::ir::{Answer, Plan, Question};
 use crate::review::{self, ReviewPlan};
 use crate::rundir::{self, RepoKey, RunPaths, WorktreeLock};
@@ -63,6 +63,7 @@ pub struct FreshPrepared {
     agents: Vec<String>,
     gate_cmds: Vec<GateSummary>,
     mode: InteractionMode,
+    notifiers: Vec<&'static dyn Notifier>,
     ceiling: Ceiling,
     slots: SlotLimits,
     authorization: Authorization,
@@ -168,6 +169,7 @@ pub fn prepare_fresh(
     let ceiling = ceiling_of(opts.budget_usd, &analysis.config.budgets)?;
     let slots = SlotLimits::new(analysis.config.max_per_agent, analysis.config.max_per_pool)?;
     let mode = opts.interaction.unwrap_or(analysis.config.interaction_mode);
+    let notifiers = interaction::notifiers_for(&analysis.config.notify, &mut warnings);
 
     Ok(FreshPrepared {
         validate_opts,
@@ -177,6 +179,7 @@ pub fn prepare_fresh(
         agents,
         gate_cmds,
         mode,
+        notifiers,
         ceiling,
         slots,
         authorization,
@@ -208,6 +211,7 @@ impl FreshPrepared {
             agents,
             gate_cmds,
             mode,
+            notifiers,
             ceiling,
             slots,
             authorization,
@@ -303,7 +307,7 @@ impl FreshPrepared {
         let ledger = Mutex::new(InvocationLedger::new());
         let request = Request {
             repo_root: &opts.repo_root,
-            repo_key: repo_key.clone(),
+            repo_key,
             normalized_plan: &normalized_plan,
             inputs: inputs.clone(),
             record,
@@ -345,8 +349,8 @@ impl FreshPrepared {
             manager,
             runner,
             paths,
-            gates: analysis.gates.clone(),
-            pools: analysis.config.pools.clone(),
+            gates: analysis.gates,
+            pools: analysis.config.pools,
             caps: probes.probed_caps(),
             worker_timeout: opts.attempt_timeout,
             mode,
@@ -355,7 +359,8 @@ impl FreshPrepared {
             slots,
         };
         let run = TopologyRun::resumed(handle, inputs, ceiling)
-            .with_spend_approval(analysis.config.ask_before.frontier_escalation_over_usd);
+            .with_spend_approval(analysis.config.ask_before.frontier_escalation_over_usd)
+            .with_notifiers(notifiers);
         finish(run, &driving, harness, warnings)
     }
 }
@@ -367,6 +372,7 @@ pub struct ResumePrepared {
     config: config::Config,
     shell: ShellKind,
     mode: InteractionMode,
+    notifiers: Vec<&'static dyn Notifier>,
     ceiling: Ceiling,
     slots: SlotLimits,
     image_environment: Option<Vec<(String, String)>>,
@@ -458,6 +464,7 @@ pub fn prepare_resume(
         .first()
         .map_or(config.shell, |gate| gate.shell);
     let mode = opts.interaction.unwrap_or(config.interaction_mode);
+    let notifiers = interaction::notifiers_for(&config.notify, &mut warnings);
 
     Ok(ResumePrepared {
         root,
@@ -466,6 +473,7 @@ pub fn prepare_resume(
         config,
         shell,
         mode,
+        notifiers,
         ceiling,
         slots,
         image_environment,
@@ -492,6 +500,7 @@ impl ResumePrepared {
             config,
             shell,
             mode,
+            notifiers,
             ceiling,
             slots,
             image_environment,
@@ -537,7 +546,7 @@ impl ResumePrepared {
             harness.adapters,
             shell,
             &crate::agent::probe_workspace(),
-            started.probed_agents.clone(),
+            started.probed_agents,
         );
         let (_recovered, handle) = run_recovery_order(
             root,
@@ -574,7 +583,7 @@ impl ResumePrepared {
                 .iter()
                 .map(ShellGate::from_record)
                 .collect(),
-            pools: config.pools.clone(),
+            pools: config.pools,
             caps,
             worker_timeout: opts.attempt_timeout,
             mode,
@@ -583,7 +592,8 @@ impl ResumePrepared {
             slots,
         };
         let run = TopologyRun::resumed(handle, inputs, ceiling)
-            .with_spend_approval(config.ask_before.frontier_escalation_over_usd);
+            .with_spend_approval(config.ask_before.frontier_escalation_over_usd)
+            .with_notifiers(notifiers);
         finish(run, &driving, harness, warnings)
     }
 }

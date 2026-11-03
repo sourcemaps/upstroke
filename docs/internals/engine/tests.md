@@ -3432,3 +3432,53 @@ succeed, `candidate_prepared` for each one that did, and `attempt_interrupted`
 for each one whose coordinator did not see it end. Since J12 the schema-4 report
 keeps the last kind too, so the tests that compare the report's attempt rows
 with this count stay a comparison with every settlement.
+
+## `const TOPOLOGY_STUB_ASKS: &str = "UPSTROKE-TOPOLOGY-STUB-ASKS";`
+
+What a topology stub worker prints to ask its question every time it runs.
+`TopologyStub::parse` answers such an output with `TOPOLOGY_STUB_QUESTION`,
+whatever its `questions_left` counter says, so a test can choose by task which
+worker asks; the counter still decides for every other output.
+
+## `fn announcing_worker(gate: &Path) -> String {`
+
+The J11 worker script, chosen by the task slot it runs in, as
+`CONFLICTING_WORKER` chooses: the second task (`k1-*`, `asks`) prints
+`TOPOLOGY_STUB_ASKS`; the third (`k2-*`, `waits`) writes `waits-started` in the
+gate directory and then waits, at most four minutes, for the test to create
+`release` there, failing if it never comes; the first (`first`) only edits.
+Each writes inside its own predicted region, so `asks` and `waits` hold
+disjoint leases and run together at width 2.
+
+## `fn a_schema_4_question_is_announced_before_its_sibling_is_released() {`
+
+J11 (regression review 3, finding 2): a question a schema-4 run raises is
+announced through the configured notifier while an independent task is still
+held, under both drivers and after a resume. Four cells: a fresh run and a
+resumed one, each under the step loop (width 1, a source that cannot be shared)
+and the coordinator (width 2). The config is `mode = "never"` and `notify =
+["cli"]`. For a resumed cell the first run, in this process, stops at a $0.015
+budget once `first` has spent, before `asks` or `waits` runs, and the child
+resumes it with a $10 budget.
+
+The run itself is a child of this test binary (`topology_announcing_child`)
+because the CLI notifier writes to the process's stderr, which the child sends
+to a file. The test reads that file until it holds the notifier's line for
+`asks` (`question … — parking asks; the run continues`) and `waits-started`
+exists. Only then does it release `waits`, which the run cannot finish without,
+so the announcement is shown to arrive before the sibling is released and while
+the run is still going. The child must then end successfully. Under the step
+loop `asks` runs before `waits` by key order, so the announcement precedes the
+sibling's start; under the coordinator the two run together.
+
+At the reviewed head nothing was announced: with the announcement removed from
+`RunEmitter::emit`, the first cell fails at its 90-second bound with an empty
+stderr.
+
+## `fn topology_announcing_child() {`
+
+The child of the test above: the fresh run (`run_with`), or the resume through
+the recorded locator with today's config and a raised budget (`resume_with`),
+under the driver the parent names, with a 600-second attempt timeout so the
+held sibling is never timed out. It asserts the run ends parked on `asks` alone,
+with `first` and `waits` committed.

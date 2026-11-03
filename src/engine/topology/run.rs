@@ -1,6 +1,6 @@
 //! Extended notes: `docs/internals/engine/topology/run.md`
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::error::{ProcessFate, UpstrokeError};
 use crate::events::RunOutcome;
@@ -11,7 +11,7 @@ use crate::topology::events::TopologyEventBody;
 use crate::topology::fold::QuestionOrigin;
 
 use crate::events::AttemptRecord;
-use crate::interaction::Sleeper;
+use crate::interaction::{Notifier, Sleeper};
 use crate::topology::events::{
     AttemptNumber, AttemptSettlement, CandidateLeaseEffect, CandidateRef, CommitSha,
     FrozenQuestion, GenerationCloseReason, GenerationId, InfrastructureKind, Materialization,
@@ -57,6 +57,7 @@ pub struct RunEmitter<'a> {
     pub state: EmitState<'a>,
     pub clock: &'a dyn TimeSource,
     pub stopped: Option<&'a str>,
+    pub notifiers: &'a [&'static dyn Notifier],
 }
 
 impl EventEmitter for RunEmitter<'_> {
@@ -73,12 +74,69 @@ impl EventEmitter for RunEmitter<'_> {
                 ),
             }));
         }
+        let open_before = self.open_question_ids();
         emit(self.identity, &mut self.state, self.clock, body, hooks)?;
+        self.announce_opened(&open_before);
         Ok(())
     }
 
     fn standing(&self, invocation: &crate::runner::InvocationId) -> Standing {
         Standing::of(self.state.fold, invocation)
+    }
+}
+
+impl RunEmitter<'_> {
+    fn open_question_ids(&self) -> BTreeSet<QuestionId> {
+        if self.notifiers.is_empty() {
+            return BTreeSet::new();
+        }
+        self.state
+            .fold
+            .open_questions()
+            .map(|open| open.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    fn announce_opened(&mut self, open_before: &BTreeSet<QuestionId>) {
+        if self.notifiers.is_empty() {
+            return;
+        }
+        let fold: &TopologyFold = self.state.fold;
+        let opened: Vec<Question> = fold
+            .open_questions()
+            .into_iter()
+            .flat_map(BTreeMap::values)
+            .filter(|open| !open_before.contains(&open.question.id))
+            .map(|open| announced_question(fold, &open.question))
+            .collect();
+        for question in &opened {
+            for notifier in self.notifiers {
+                if let Err(error) = notifier.ask(question) {
+                    self.state.warnings.push(format!(
+                        "notifier `{}` could not deliver question {}: {error}",
+                        notifier.id(),
+                        question.id
+                    ));
+                }
+            }
+        }
+    }
+}
+
+fn announced_question(fold: &TopologyFold, frozen: &FrozenQuestion) -> Question {
+    let display = fold
+        .registry()
+        .and_then(|registry| registry.get(frozen.key))
+        .map_or_else(
+            || format!("k{}", frozen.key.0),
+            |entry| entry.display_id.as_str().to_owned(),
+        );
+    Question {
+        id: frozen.id.clone(),
+        kind: frozen.kind,
+        affected_tasks: vec![crate::ir::TaskId(display)],
+        context: frozen.context.clone(),
+        options: frozen.options.clone(),
     }
 }
 
@@ -1364,6 +1422,7 @@ pub struct TopologyRun {
     /// `ask_before.frontier_escalation_over_usd` for this process
     /// ([`Self::with_spend_approval`]).
     approve_spend_over: Option<f64>,
+    notifiers: Vec<&'static dyn Notifier>,
 }
 
 impl TopologyRun {
@@ -1390,6 +1449,7 @@ impl TopologyRun {
             brief,
             stopped: None,
             approve_spend_over: None,
+            notifiers: Vec::new(),
         }
     }
 
@@ -1399,6 +1459,12 @@ impl TopologyRun {
     #[must_use]
     pub fn with_spend_approval(mut self, threshold: Option<f64>) -> Self {
         self.approve_spend_over = threshold;
+        self
+    }
+
+    #[must_use]
+    pub fn with_notifiers(mut self, notifiers: Vec<&'static dyn Notifier>) -> Self {
+        self.notifiers = notifiers;
         self
     }
 
@@ -1908,6 +1974,7 @@ impl TopologyRun {
                     },
                     clock: seams.clock,
                     stopped: self.stopped.as_deref(),
+                    notifiers: &self.notifiers,
                 },
                 hooks,
                 invocations,
@@ -2444,8 +2511,8 @@ impl TopologyRun {
             rung: run_as.rung,
             binding,
             workspace: site.worktree,
-            resume_session: run_as.resume_session.clone(),
-            feedback: run_as.feedback.clone(),
+            resume_session: run_as.resume_session,
+            feedback: run_as.feedback,
             materialization_observed: run_as.materialized,
         })?;
 
@@ -2462,6 +2529,7 @@ impl TopologyRun {
                 },
                 clock: seams.clock,
                 stopped: self.stopped.as_deref(),
+                notifiers: &self.notifiers,
             };
             AttemptContext {
                 manager: seams.manager,
@@ -2641,6 +2709,7 @@ impl TopologyRun {
                 },
                 clock: seams.clock,
                 stopped: self.stopped.as_deref(),
+                notifiers: &self.notifiers,
             },
             hooks,
             invocations,
@@ -2827,6 +2896,7 @@ impl TopologyRun {
             },
             clock: seams.clock,
             stopped: self.stopped.as_deref(),
+            notifiers: &self.notifiers,
         };
         emitter.emit(body, hooks)?;
         brokered(hooks, &emitter.state, invocations);

@@ -35,9 +35,9 @@ either command.
    private root, which must already exist, or [`prelock::resolve_runner`]
    for the default one, which may not); then the review plan, the probed
    agent set, the gate shells and programs (host runs only), the D4 width
-   check, the budget ceiling and the slot limits. The runner comes before the
-   review plan so that a refused container selection has asked the adapter
-   source nothing.
+   check, the budget ceiling, the slot limits and the configured notifiers.
+   The runner comes before the review plan so that a refused container
+   selection has asked the adapter source nothing.
 3. `run_harness` publishes the include under [`FreshPrepared::private_root`].
    For the default root this is also how a missing root comes to exist,
    through the include's existing private-directory creation (root's Q4).
@@ -64,7 +64,7 @@ either command.
    config is read under [`EngineLimits::TopologyResume`] and compared with
    the recorded limits and the recorded gates; the D4 width check against
    the recorded width; the Q3 case observation; a recorded container
-   image's environment; the slot limits.
+   image's environment; the slot limits; today's configured notifiers.
 4. `resume_harness` publishes the include under the recorded root.
 5. [`ResumePrepared::run`]: the runner from the record, the manager, the
    `RunnerPreflight` over the recorded probe set, `run_recovery_order`, the
@@ -200,6 +200,31 @@ Both halves hand the run `ask_before.frontier_escalation_over_usd`
 a resume from today's, as the sequential resume does. Without it the
 schema-4 entry never asked before an escalation onto the frontier
 (regression review #1, J1).
+
+## `notify` › the configured notifiers
+
+Both halves build the configured notifiers as the sequential preflight does
+(`interaction::notifiers_for` over `[interaction] notify`): a fresh run from
+its analysed config, a resume from today's, as the sequential resume does. A
+choice the build cannot honour (an unavailable or unknown notifier) warns, and
+the warning joins the command's warnings. Both `run` halves hand the notifiers
+to the run (`TopologyRun::with_notifiers`), and the run's emitter announces
+each question an append opens as soon as that append returns, whichever driver
+runs it (`run.md`, `RunEmitter`). Questions already open when the command
+starts are not announced again, as the sequential engine does not repeat them.
+
+Until J11 (regression review 3, finding 2) the schema-4 entry built the answer
+sources but never the notifiers. With `notify = ["cli"]`, unattended answers
+and an independent task still working, the sequential engine printed the
+question's id to stderr at once, and a schema-4 run printed nothing: the
+operator learned of the question from the final report.
+
+## `struct Driving {`
+
+What `drive` runs the loop with. The runner is an `Arc` because the concurrent
+driver hands the same runner to each pipeline it spawns on a thread of its own
+(`PipelineSeams.runner`, whose sharing the coordinator states beside that
+struct), and `Driving` keeps the coordinator's own handle.
 
 ## `fn compare_recorded_gates(`
 

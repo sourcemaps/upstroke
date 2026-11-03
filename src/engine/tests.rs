@@ -17544,6 +17544,7 @@ const TOPOLOGY_STUB_VERDICT: &str = "```json\n{\"pass\": true, \"reasons\": [\"m
                                      acceptance criteria\"], \"required_changes\": []}\n```";
 const TOPOLOGY_STUB_QUESTION: &str =
     "UPSTROKE-QUESTION: which of the two widget formats does the spec mean?";
+const TOPOLOGY_STUB_ASKS: &str = "UPSTROKE-TOPOLOGY-STUB-ASKS";
 /// The worker's edit: one line appended to `agent-output.txt`, spelled so that
 /// both shells `shell_spec` picks run it alike, `cmd /C` on Windows and `sh -c`
 /// elsewhere (`gates::ShellKind::native`). `echo` is a builtin of both and `>>`
@@ -17627,6 +17628,8 @@ impl AgentAdapter for TopologyStub {
         }
         let detail = if out.stdout.contains(TOPOLOGY_STUB_REVIEW) {
             TOPOLOGY_STUB_VERDICT
+        } else if out.stdout.contains(TOPOLOGY_STUB_ASKS) {
+            TOPOLOGY_STUB_QUESTION
         } else {
             let mut left = self
                 .questions_left
@@ -18692,6 +18695,174 @@ fn topology_signalled_child() {
     let workers = signalled_workers(&repo);
     let stub = TopologyStub::new(&format!("echo $$ >> '{}'; sleep 30", workers.display()), 0);
     let _ = run_with(&topology_options(&repo), &BorrowedTopologyStub(&stub));
+}
+
+#[cfg(unix)]
+const ANNOUNCE_PLAN: &str = "## Lay the first stone\n\
+                             <!-- upstroke: id=first depends= paths=first/** -->\n\
+                             Lay it.\n\n## Ask about the widget\n\
+                             <!-- upstroke: id=asks depends=first paths=asks/** -->\n\
+                             Ask which of the two formats the spec means.\n\n\
+                             ## Wait for the release\n\
+                             <!-- upstroke: id=waits depends=first paths=waits/** -->\n\
+                             Wait until the test releases this task.\n";
+
+#[cfg(unix)]
+fn announcing_worker(gate: &Path) -> String {
+    let gate = gate.display();
+    format!(
+        "case \"$(basename \"$PWD\")\" in \
+         k1-*) d=asks; echo {TOPOLOGY_STUB_ASKS} ;; \
+         k2-*) d=waits; : > '{gate}/waits-started'; i=0; \
+         while [ ! -e '{gate}/release' ] && [ \"$i\" -lt 4800 ]; do sleep 0.05; i=$((i+1)); done; \
+         [ -e '{gate}/release' ] || exit 7 ;; \
+         *) d=first ;; \
+         esac; mkdir -p \"$d\" && echo edited by the topology stub>> \"$d/out.txt\""
+    )
+}
+
+#[cfg(unix)]
+#[test]
+fn a_schema_4_question_is_announced_before_its_sibling_is_released() {
+    use crate::workspace_manager::fixture::LinkedChild;
+    use std::ffi::OsStr;
+
+    for (resumed, step) in [(false, true), (false, false), (true, true), (true, false)] {
+        let cell = format!(
+            "{} run, {} driver",
+            if resumed { "resumed" } else { "fresh" },
+            if step { "step" } else { "concurrent" }
+        );
+        let (tree, repo) = temp_engine_repo(&format!(
+            "topology-announce-{}{}",
+            u8::from(resumed),
+            u8::from(step)
+        ));
+        seed(
+            &repo,
+            ANNOUNCE_PLAN,
+            Some(&format!(
+                "[engine]\nmax_parallel = {}\n\n[interaction]\nmode = \"never\"\n\
+                 notify = [\"cli\"]\n",
+                if step { 1 } else { 2 }
+            )),
+        );
+        let gate = tree.path().join("gate");
+        fs::create_dir(&gate).expect("the gate");
+        let run_id = if resumed {
+            let stub = TopologyStub::new(&announcing_worker(&gate), 0);
+            let mut opts = topology_options(&repo);
+            opts.config_path = Some(repo.join("upstroke.toml"));
+            opts.budget_usd = Some(0.015);
+            let stopped = if step {
+                run_with(&opts, &BorrowedTopologyStub(&stub))
+            } else {
+                run_with(&opts, &SharedTopologyStubs(std::sync::Arc::new(stub)))
+            }
+            .expect("the first run ends");
+            assert_eq!(
+                stopped.outcome(),
+                RunOutcome::BudgetExceeded,
+                "{cell}: {stopped:#?}"
+            );
+            assert!(
+                !gate.join("waits-started").exists(),
+                "{cell}: the premise, the budget stopped the run before the sibling ran"
+            );
+            until_released(&repo, &stopped.run_id);
+            stopped.run_id
+        } else {
+            String::new()
+        };
+        let stderr = tree.path().join("announcing-child.stderr");
+        let (child, _lines) = LinkedChild::spawn(
+            "engine::tests::topology_announcing_child",
+            &[
+                ("UPSTROKE_ANNOUNCE_REPO", repo.as_os_str()),
+                ("UPSTROKE_ANNOUNCE_GATE", gate.as_os_str()),
+                (
+                    "UPSTROKE_ANNOUNCE_DRIVER",
+                    OsStr::new(if step { "step" } else { "concurrent" }),
+                ),
+                ("UPSTROKE_ANNOUNCE_RUN", OsStr::new(&run_id)),
+            ],
+            &stderr,
+        );
+        let announced = |said: &str| {
+            said.lines().any(|line| {
+                line.starts_with("question ") && line.ends_with("— parking asks; the run continues")
+            })
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(90);
+        loop {
+            let said = fs::read_to_string(&stderr).unwrap_or_default();
+            if announced(&said) && gate.join("waits-started").exists() {
+                break;
+            }
+            if let Some(ended) = child.wait_within(Duration::ZERO) {
+                panic!(
+                    "{cell}: the run ended ({ended:?}) before it announced the question while \
+                     the sibling was held:\n{said}"
+                );
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{cell}: no announcement of the question while the sibling was held, within \
+                 90 s:\n{said}"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        fs::write(gate.join("release"), b"").expect("the sibling's release");
+        let ended = child
+            .wait_within(Duration::from_secs(300))
+            .unwrap_or_else(|| panic!("{cell}: the run outlived its release by 300 s"));
+        assert!(
+            ended.success(),
+            "{cell}: {ended:?}\n{}",
+            fs::read_to_string(&stderr).unwrap_or_default()
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "subprocess helper"]
+fn topology_announcing_child() {
+    let Some(repo) = std::env::var_os("UPSTROKE_ANNOUNCE_REPO").map(PathBuf::from) else {
+        return;
+    };
+    let gate = std::env::var_os("UPSTROKE_ANNOUNCE_GATE")
+        .map(PathBuf::from)
+        .expect("the parent names the gate");
+    let step = std::env::var("UPSTROKE_ANNOUNCE_DRIVER").is_ok_and(|driver| driver == "step");
+    let run_id = std::env::var("UPSTROKE_ANNOUNCE_RUN").unwrap_or_default();
+    let stub = TopologyStub::new(&announcing_worker(&gate), 0);
+    let shared = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        &announcing_worker(&gate),
+        0,
+    )));
+    let borrowed = BorrowedTopologyStub(&stub);
+    let source: &dyn AdapterSource = if step { &borrowed } else { &shared };
+    let report = if run_id.is_empty() {
+        let mut opts = topology_options(&repo);
+        opts.config_path = Some(repo.join("upstroke.toml"));
+        opts.attempt_timeout = Duration::from_secs(600);
+        run_with(&opts, source)
+    } else {
+        let mut resume = resume_options(&repo, &run_id);
+        resume.private_root = None;
+        resume.config_path = Some(repo.join("upstroke.toml"));
+        resume.budget_usd = Some(10.0);
+        resume.attempt_timeout = Duration::from_secs(600);
+        resume_with(&resume, source)
+    }
+    .expect("the run ends");
+    assert_eq!(report.outcome(), RunOutcome::Parked, "{report:#?}");
+    assert_eq!(report.parked_tasks(), ["asks"], "{report:#?}");
+    assert!(
+        committed(&report, "first") && committed(&report, "waits"),
+        "{report:#?}"
+    );
 }
 
 /// A gate that builds a repository of its own in a temporary directory, installs
