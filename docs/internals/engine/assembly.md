@@ -300,9 +300,9 @@ How long one worker invocation may take.
 ## `pub struct FrozenPlans<'a>` › `pub decisions: &'a [String],`
 
 The operator decisions a judge must honour, as the worker was given
-them: run-wide ones here, which the schema-4 entry leaves empty, and before
+them: run-wide ones here, which the schema-4 entry leaves empty, and after
 them, per review, the task's own (`InputsRequest::decisions`, J2). `inputs`
-gives the review both.
+gives the review both, run-wide first and then the task's, in that order.
 
 ## `pub struct SharedPlans {`
 

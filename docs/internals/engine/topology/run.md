@@ -789,20 +789,30 @@ entry handed every review an empty list, in both execution modes (J2).
 
 ## `impl Brief` › `pub fn replay(events: &[TopologyEvent]) -> Self {`
 
-Every task's brief over a whole log. Since J2 it also reads
-`question_answered` through [`Self::record_answer`], against the question
-that event answered (`observe::question_opened_by`).
+Every task's brief over a whole log, from two readings that the live
+loop makes in the same way.
 
-**`attempt_finished` only, which is exactly the live loop's coverage.**
-Two events carry an [`AttemptRecord`] — `attempt_finished` and
-`candidate_prepared` — and the driver calls [`Self::record`] beside
-`Spend::record` at both of its own appends. `candidate_prepared` is the
-*successful* settlement (INV-07), so its record carries no failure and
-contributes nothing either way; walking it here would add a duplicate
-only on the replay side. `attempt_interrupted` is deliberately absent:
-nothing judged that attempt, the live path settles it in recovery rather
-than through a settlement, and a line for it would be a line replay
-invented.
+**For the attempts' feedback, `attempt_finished` only, which is exactly the
+live loop's coverage.** Two events carry an [`AttemptRecord`] —
+`attempt_finished` and `candidate_prepared` — and the driver calls
+[`Self::record`] beside `Spend::record` at both of its own appends.
+`candidate_prepared` is the *successful* settlement (INV-07), so its record
+carries no failure and contributes nothing either way; walking it here would
+add a duplicate only on the replay side. `attempt_interrupted` is
+deliberately absent: nothing judged that attempt, the live path settles it
+in recovery rather than through a settlement, and a line for it would be a
+line replay invented.
+
+**For the human instructions, `question_answered` (J2).** Each answer is
+read through [`Self::record_answer`] against the question it answered,
+which `observe::question_opened_by` finds in the event that opened it. The
+live loop calls the same function on the record it has just appended
+(`ingest_answer`), so the two readings cannot drift apart. These lines have
+semantics of their own (`human: true`). Only words that name none of the
+question's options become one, and the next prompt quotes it as an
+instruction from a person, not as a failure. A chosen option, a spend
+approval, a decline, and a record written before answers kept their words
+add none.
 
 ## `struct Retained {`
 
