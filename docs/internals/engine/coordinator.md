@@ -46,7 +46,9 @@ the include publication — the first effect, written here because
 effectful half (`FreshPrepared::run`). The include goes under the root the
 read-only half authorized, or under the default root, which it creates when
 missing (root's Q4: only after the runtime, image and credential-volume
-refusals). The legacy body below runs only for the test configuration's
+refusals, and only after the read-only half has refused a default root that
+would resolve to a path no string spells, J14, so that refusal leaves nothing
+behind). The legacy body below runs only for the test configuration's
 legacy writer ([`RunOptions::writes_topology`](options.md)).
 
 ## `run_harness_on(opts, harness, &HostRunner::for_legacy_workspace(repository))`

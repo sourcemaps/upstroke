@@ -3482,3 +3482,48 @@ the recorded locator with today's config and a raised budget (`resume_with`),
 under the driver the parent names, with a 600-second attempt timeout so the
 held sibling is never timed out. It asserts the run ends parked on `asks` alone,
 with `first` and `waits` committed.
+
+## `const UNSPELLABLE_HOME_REPO: &str = "UPSTROKE_UNSPELLABLE_HOME_REPO";`
+
+The variable that hands the J14 child its repository.
+
+## `fn every_path_under(root: &Path) -> Vec<PathBuf> {`
+
+Every file, directory and link under `root`, as paths relative to it, sorted;
+a link is listed and not followed. What the J14 tests compare before and after.
+
+## `fn a_schema_4_run_refuses_an_unspellable_default_private_root_before_it_creates_anything() {`
+
+J14 (regular review 3, finding 3; regression review 3, finding 5): a fresh
+schema-4 run with no explicit private root and a home no string spells is
+refused before anything is created, the recorded-objects include included.
+`HOME` is process-wide, so the run is a child of this test binary
+(`unspellable_default_root_child`, through `run_test_isolated`, whose output
+files live in a scratch tree of their own), with `HOME` and `USERPROFILE` set to
+`<tree>/private-\xff`. Two cells: that home exists and is empty, and it does not
+exist. A host that refuses the name (`EILSEQ`) cannot hold the first, which is
+then skipped; the second needs no such name on disk. Every path under the
+scratch tree, the repository and the home included, is the same after the
+child as before it, and there is no `.upstroke` under the home. The comparison
+comes first, so a regression shows what it left. With the read-only check
+removed from `prepare_fresh`, the first cell fails on exactly the reviewers'
+witness: `private-\xff/.upstroke`, its `git` directory and
+`recorded-objects.gitconfig` appear, and the run is refused later, by
+`authorize`.
+
+## `fn unspellable_default_root_child() {`
+
+The child of the test above: a fresh run through `run_with` with no private
+root, so the root is the default one under the child's `HOME`. It asserts the
+refusal is the default root's own, says the root is not valid UTF-8 and that
+nothing was locked or created, and that no run directory exists.
+
+## `fn the_default_root_check_judges_the_path_the_root_will_resolve_to() {`
+
+`prelock::refuse_unspellable_default_root` judges the path the default root
+will resolve to, not its spelling: a missing root under a home text spells and
+an existing root text spells pass; a missing root under a missing home no
+string spells is refused, saying nothing was locked or created; a link no
+string spells that resolves to the home text spells passes (where the host can
+hold the link's name). The checks create nothing: the tree holds the home and
+the link only.

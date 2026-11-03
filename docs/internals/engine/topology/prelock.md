@@ -168,7 +168,9 @@ Perform the read-only pre-lock checks, in the packet's order.
 
 [`resolve_runner`] and [`RunnerResolved::authorize`] are the same checks in
 the order 0, 2, 1, 3, for a default root that may not exist before the
-runner has been inspected.
+runner has been inspected. Step 1's UTF-8 refusal is not left until then: the
+entry asks [`refuse_unspellable_default_root`] before anything is published,
+against the path the root will resolve to once it is created.
 
 ### Errors
 
@@ -217,9 +219,37 @@ default root may not exist yet, and [`check`] would refuse it at step 1
 before the runner was inspected. After this returns, the caller publishes
 the recorded-objects include under the default root — which is also how the
 missing root comes to exist, through the include's existing private-directory
-creation — and only then calls [`RunnerResolved::authorize`]. An explicit
-root keeps [`check`]'s order: it must already exist, and it is authorized
-before anything is published under it.
+creation — and only then calls [`RunnerResolved::authorize`]. Before
+publishing, it has asked [`refuse_unspellable_default_root`], so the one
+refusal of step 1 that a missing root cannot be spared, a path no string
+spells, comes before anything exists. An explicit root keeps [`check`]'s
+order: it must already exist, and it is authorized before anything is
+published under it.
+
+## `pub fn refuse_unspellable_default_root(root: &Path) -> Result<(), UpstrokeError> {`
+
+Whether the default private root, as it will resolve once the include's
+publication has created whatever of it is missing, can be recorded as text:
+read-only, and before anything is published, locked or created (J14, regular
+review 3, finding 3 and regression review 3, finding 5).
+
+The root is made absolute as the include's publication makes it. Its deepest
+part that exists is canonicalized, and the parts still missing are appended as
+spelled, since the publication creates them as plain directories under it. So
+the path judged is the path [`RunnerResolved::authorize`] will canonicalize
+once the root exists: a home whose name no string spells is refused, and a
+link of such a name that resolves to a directory text spells is not. Only an
+actual not-found makes a part missing; any other failure to read a part, or to
+canonicalize the part that exists, is [`UpstrokeError::Io`], before anything
+is created. An existing root is judged as it resolves now, as
+[`RunnerResolved::authorize`] will judge it again.
+
+The refusal says, now truthfully, that nothing was locked or created, and
+names the home directory, since the default root hangs from it and the
+command has no flag that names another root. Until J14 the default root was
+judged only by [`RunnerResolved::authorize`], after the include's publication
+had created `.upstroke/git/recorded-objects.gitconfig` and its directories
+under a home no string spells, while the refusal claimed nothing was created.
 
 ## `pub struct RunnerResolved {`
 

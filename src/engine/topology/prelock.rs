@@ -172,6 +172,57 @@ fn resolve_policy(
     })
 }
 
+pub fn refuse_unspellable_default_root(root: &Path) -> Result<(), UpstrokeError> {
+    let absolute = std::path::absolute(root).map_err(|source| UpstrokeError::Io {
+        path: root.to_path_buf(),
+        source,
+    })?;
+    let mut existing = None;
+    for ancestor in absolute.ancestors() {
+        match std::fs::symlink_metadata(ancestor) {
+            Ok(_) => {
+                existing = Some(ancestor);
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(UpstrokeError::Io {
+                    path: ancestor.to_path_buf(),
+                    source,
+                });
+            }
+        }
+    }
+    let resolved = match existing {
+        Some(existing) => {
+            let canonical =
+                std::fs::canonicalize(existing).map_err(|source| UpstrokeError::Io {
+                    path: existing.to_path_buf(),
+                    source,
+                })?;
+            let missing: PathBuf = absolute
+                .components()
+                .skip(existing.components().count())
+                .collect();
+            canonical.join(missing)
+        }
+        None => absolute,
+    };
+    if resolved.to_str().is_some() {
+        return Ok(());
+    }
+    Err(UpstrokeError::Refused {
+        message: format!(
+            "the default private root {} is not valid UTF-8 once resolved ({}); a schema-4 run \
+             records its private half and execution root as text, so it would record another \
+             path than this one. Nothing was locked or created: run upstroke with a home \
+             directory whose path is valid UTF-8",
+            root.display(),
+            resolved.display()
+        ),
+    })
+}
+
 fn authorized_private_root(configured: &Path) -> Result<PathBuf, UpstrokeError> {
     let metadata = match std::fs::symlink_metadata(configured) {
         Ok(metadata) => metadata,

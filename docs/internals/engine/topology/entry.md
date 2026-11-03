@@ -30,7 +30,9 @@ either command.
    configures mounts, a `MountContext` is bound to the repository root, its
    Git directories, the private root (explicit, else the default, which
    need not exist yet) and the coordinator's credential locations, read
-   only; the runner policy, its configured mounts included,
+   only; for the default root, a refusal if the path it will resolve to once
+   created is not valid UTF-8 ([`prelock::refuse_unspellable_default_root`]);
+   the runner policy, its configured mounts included,
    is resolved by read-only inspection ([`prelock::check`] for an explicit
    private root, which must already exist, or [`prelock::resolve_runner`]
    for the default one, which may not); then the review plan, the probed
@@ -122,7 +124,17 @@ keeps its own first-statement check.
 The mount context is bound only when mounts are configured, so a run without
 them reads nothing it did not read before; it reads `.git` and `commondir`
 (`view::resolve`), canonicalizes paths and reads three environment variables
-and `HOME`, and writes nothing.
+and `HOME`, and writes nothing. It is bound to the root the run will use: the
+explicit one, or the default one, computed once and handed on to the pending
+authorization.
+
+A default root is authorized only after the include's publication has created
+it, so the UTF-8 half of that authorization is asked here first, read-only,
+against the path the root will resolve to. Until J14 (regular review 3,
+finding 3; regression review 3, finding 5) a home no string spells was refused
+only in [`FreshPrepared::run`], after `.upstroke/git/recorded-objects.gitconfig`
+and its directories had been published under it, beside a refusal that said
+nothing was created.
 
 ## `impl FreshPrepared` › `pub fn private_root(&self) -> &Path {`
 

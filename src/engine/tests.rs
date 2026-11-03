@@ -20735,6 +20735,147 @@ fn a_private_root_named_with_the_replacement_character_is_recorded_exactly() {
     );
 }
 
+#[cfg(unix)]
+const UNSPELLABLE_HOME_REPO: &str = "UPSTROKE_UNSPELLABLE_HOME_REPO";
+
+#[cfg(unix)]
+fn every_path_under(root: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(&directory).expect("a directory of the scratch tree") {
+            let path = entry.expect("a directory entry").path();
+            if fs::symlink_metadata(&path)
+                .expect("an entry's own metadata")
+                .is_dir()
+            {
+                pending.push(path.clone());
+            }
+            found.push(
+                path.strip_prefix(root)
+                    .expect("an entry under the root")
+                    .to_path_buf(),
+            );
+        }
+    }
+    found.sort();
+    found
+}
+
+#[cfg(unix)]
+#[test]
+fn a_schema_4_run_refuses_an_unspellable_default_private_root_before_it_creates_anything() {
+    for home_exists in [true, false] {
+        let (tree, repo) = temp_engine_repo(&format!(
+            "topology-unspellable-home-{}",
+            u8::from(home_exists)
+        ));
+        let home = tree.path().join(a_root_name_no_string_can_spell());
+        if home_exists {
+            match fs::create_dir(&home) {
+                Ok(()) => {}
+                Err(error) if error.raw_os_error() == Some(libc::EILSEQ) => continue,
+                Err(error) => panic!("a home directory UTF-8 cannot spell: {error}"),
+            }
+        }
+        let before = every_path_under(tree.path());
+        let ended = crate::agent::proc::test_support::run_test_isolated(
+            "engine::tests::unspellable_default_root_child",
+            &[
+                ("HOME", home.as_os_str()),
+                ("USERPROFILE", home.as_os_str()),
+                (UNSPELLABLE_HOME_REPO, repo.as_os_str()),
+            ],
+            Duration::from_secs(300),
+        );
+        assert_eq!(
+            every_path_under(tree.path()),
+            before,
+            "home exists: {home_exists}: the refusal created nothing, the recorded-objects \
+             include included: {ended}"
+        );
+        assert!(
+            ended.status.is_some_and(|status| status.success())
+                && ended.stdout.contains("1 passed"),
+            "home exists: {home_exists}: the run is refused for its default root: {ended}"
+        );
+        assert!(
+            fs::symlink_metadata(home.join(".upstroke")).is_err(),
+            "home exists: {home_exists}: no default root under the home"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "subprocess helper"]
+fn unspellable_default_root_child() {
+    let Some(repo) = std::env::var_os(UNSPELLABLE_HOME_REPO).map(PathBuf::from) else {
+        return;
+    };
+    let mut opts = options(&repo);
+    opts.legacy_writer = false;
+    opts.private_root = None;
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        0,
+    )));
+    let refused = run_with(&opts, &source).expect_err("an unspellable default root is refused");
+    let said = refused.to_string();
+    assert!(
+        said.contains("the default private root") && said.contains("is not valid UTF-8"),
+        "{said}"
+    );
+    assert!(said.contains("Nothing was locked or created"), "{said}");
+    assert!(
+        rundir::run_dir_names(&repo).is_empty(),
+        "no run directory exists after the refusal"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn the_default_root_check_judges_the_path_the_root_will_resolve_to() {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let check = crate::engine::topology::prelock::refuse_unspellable_default_root;
+    let tree = temp_engine_scratch("default-root-spelling");
+    let home = tree.path().join("home");
+    fs::create_dir(&home).expect("a home text spells");
+    check(&home.join(".upstroke")).expect("a missing root under a home text spells");
+    check(&home).expect("an existing root text spells");
+
+    let unspellable = tree.path().join(std::ffi::OsStr::from_bytes(b"home-\xff"));
+    let refused = check(&unspellable.join(".upstroke"))
+        .expect_err("a missing root under a missing home no string spells");
+    assert!(
+        refused.to_string().contains("is not valid UTF-8")
+            && refused
+                .to_string()
+                .contains("Nothing was locked or created"),
+        "{refused}"
+    );
+    let linked = match std::os::unix::fs::symlink(&home, &unspellable) {
+        Ok(()) => {
+            check(&unspellable.join(".upstroke"))
+                .expect("a link no string spells that resolves to a home text spells");
+            true
+        }
+        Err(error) if error.raw_os_error() == Some(libc::EILSEQ) => false,
+        Err(error) => panic!("a link whose name no string spells: {error}"),
+    };
+    let mut expected = vec![PathBuf::from("home")];
+    if linked {
+        expected.push(PathBuf::from(std::ffi::OsStr::from_bytes(b"home-\xff")));
+    }
+    expected.sort();
+    assert_eq!(
+        every_path_under(tree.path()),
+        expected,
+        "the checks created nothing"
+    );
+}
+
 /// J3, `PR12-REPORT-OMITS-INTEGRATION-REVIEW-SPEND` (both reviews). Three tasks in flight from
 /// one base: a later candidate is stale and clean, so its integration verification runs a
 /// review the run's spend ledger charges. At the reviewed head the CLI report collected
