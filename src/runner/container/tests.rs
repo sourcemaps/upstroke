@@ -1085,6 +1085,96 @@ fn an_attached_start_held_at_created_ends_at_its_deadline_or_its_cancellation() 
     }
 }
 
+/// J6, `PR12-ATTACHED-START-UNBOUNDED-DOCKER-OBSERVATION`. An attached start waits for its
+/// container to leave `created` by asking `docker ps`. At the reviewed head each question was
+/// an unbounded `Command::output`, so a stalled `docker` held the start past its deadline (a
+/// 50 ms deadline took 1.001 s against a one-second stub) and past its cancellation. The
+/// questions now run through the process funnel. A child of this test binary, whose `PATH`
+/// alone carries a `docker` that never answers `ps`, waits once to its deadline and once to
+/// its cancellation, and each wait ends promptly.
+#[cfg(unix)]
+#[test]
+fn the_attached_starts_observation_ends_at_its_deadline_and_on_its_cancellation() {
+    let tree = scratch("attached-start-observation");
+    let bin = tree.path().join("bin");
+    fs::create_dir(&bin).expect("the stub's directory");
+    let stub = bin.join("docker");
+    fs::write(
+        &stub,
+        "#!/bin/sh\ncase \"$1\" in\nps) exec sleep 60 ;;\n*) exit 93 ;;\nesac\n",
+    )
+    .expect("the stub");
+    crate::workspace_manager::fixture::set_mode(&stub, 0o755);
+    let inherited = std::env::var_os("PATH").unwrap_or_default();
+    let path = std::env::join_paths(
+        std::iter::once(bin.clone()).chain(std::env::split_paths(&inherited)),
+    )
+    .expect("a PATH with the stub first");
+    for mode in ["deadline", "cancel"] {
+        let began = Instant::now();
+        let status = crate::workspace_manager::fixture::run_kill_child_within(
+            "runner::container::tests::attached_start_observation_child",
+            &[
+                ("PATH", path.as_os_str()),
+                ("UPSTROKE_TEST_OBSERVATION", std::ffi::OsStr::new(mode)),
+            ],
+            Duration::from_secs(120),
+        )
+        .expect("the child ends within its bound");
+        assert!(
+            status.success(),
+            "{mode}: the child's bounded wait failed ({status:?})"
+        );
+        assert!(
+            began.elapsed() < Duration::from_secs(60),
+            "{mode}: the stalled `ps` held the child {:?}",
+            began.elapsed()
+        );
+    }
+}
+
+/// The child of `the_attached_starts_observation_ends_at_its_deadline_and_on_its_cancellation`:
+/// the production wait of an attached start, against the stalling `docker` on its `PATH`.
+#[cfg(unix)]
+#[test]
+#[ignore = "spawned by the attached start's bounded-observation witness"]
+fn attached_start_observation_child() {
+    use super::NotStarted;
+    use crate::runner::Cancellation;
+
+    let mode = std::env::var("UPSTROKE_TEST_OBSERVATION").expect("the parent names the mode");
+    let cli = DockerCli::default();
+    let cancellation = Cancellation::new();
+    let began = Instant::now();
+    let deadline = if mode == "deadline" {
+        began + Duration::from_millis(50)
+    } else {
+        began + Duration::from_secs(600)
+    };
+    let waited = std::thread::scope(|scope| {
+        if mode == "cancel" {
+            scope.spawn(|| {
+                std::thread::sleep(Duration::from_millis(50));
+                cancellation.cancel();
+            });
+        }
+        cli.await_attached_start("upstroke-observed", deadline, &cancellation, || false)
+    });
+    let took = began.elapsed();
+    if mode == "deadline" {
+        assert!(
+            matches!(waited, Err(NotStarted::DeadlinePassed)),
+            "{waited:?}"
+        );
+    } else {
+        assert!(matches!(waited, Err(NotStarted::Cancelled)), "{waited:?}");
+    }
+    assert!(
+        took < Duration::from_secs(10),
+        "{mode}: the stalled observation held the start {took:?}"
+    );
+}
+
 #[test]
 fn an_attached_client_is_settled_or_reported_unresolved_within_its_bound() {
     use super::settle_client;

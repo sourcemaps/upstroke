@@ -994,6 +994,82 @@ impl DockerCli {
         )
     }
 
+    /// [`Self::listing`] for the attached start, bounded by [`Self::exec_within`].
+    fn listing_within(
+        &self,
+        name: &str,
+        deadline: Instant,
+        cancellation: &Cancellation,
+    ) -> Result<String, RuntimeError> {
+        let filter = format!("name={name}");
+        self.exec_within(
+            RuntimeOp::Observe,
+            name,
+            &[
+                "ps",
+                "--all",
+                "--filter",
+                &filter,
+                "--format",
+                CONTAINER_STATE_FORMAT,
+            ],
+            deadline,
+            cancellation,
+        )
+    }
+
+    /// [`Self::exec`] for the attached start's observations, which DESIGN §26 bounds by the
+    /// invocation's deadline and its cancellation. The question runs through the process
+    /// funnel, which ends it at `deadline` or as soon as `cancellation` fires, kills and reaps
+    /// what it started, and bounds what it captures. A question ended before it answered is an
+    /// error, and none is asked once either bound has passed.
+    fn exec_within(
+        &self,
+        op: RuntimeOp,
+        target: &str,
+        args: &[&str],
+        deadline: Instant,
+        cancellation: &Cancellation,
+    ) -> Result<String, RuntimeError> {
+        let ended = |why: &str| RuntimeError::Failed {
+            operation: op,
+            detail: format!("`{DOCKER_PROGRAM} {}` {why}", args.join(" ")),
+        };
+        if cancellation.is_cancelled() || Instant::now() >= deadline {
+            return Err(ended(
+                "was not asked: the invocation's deadline had passed or it was cancelled",
+            ));
+        }
+        self.trace.runtime(op, target);
+        let output = proc::run_with_timeout_classified(
+            ProcessSite::Spawn,
+            ProcessSite::Terminate,
+            docker_command(args),
+            &[],
+            deadline.saturating_duration_since(Instant::now()),
+            &[],
+            &|| cancellation.is_cancelled(),
+            &mut proc::NoHooks,
+        )
+        .map_err(|failure| RuntimeError::Unreachable {
+            operation: op,
+            detail: format!("{DOCKER_PROGRAM} could not be run: {}", failure.error),
+        })?;
+        if output.timed_out || output.code.is_none() {
+            return Err(ended(
+                "was ended before it answered: the invocation's deadline passed or it was \
+                 cancelled",
+            ));
+        }
+        if output.output_limited {
+            return Err(ended("answered more than this runner reads"));
+        }
+        if output.code == Some(0) {
+            return Ok(output.stdout);
+        }
+        Err(classify_docker_failure(op, output.stderr.trim().to_owned()))
+    }
+
     fn image(
         &self,
         op: RuntimeOp,
@@ -1050,14 +1126,10 @@ impl DockerCli {
                 detail,
             }
         })?;
-        let waited = await_started(
+        let waited = self.await_attached_start(
+            name,
             covered.deadline(),
             covered.cancellation(),
-            ATTACHED_START_POLL,
-            || {
-                self.listing(RuntimeOp::Observe, name)
-                    .map(|listing| listed_state(&listing, name).map(str::to_owned))
-            },
             || client.has_ended(),
         );
         let reason = match waited {
@@ -1070,13 +1142,14 @@ impl DockerCli {
             Err(NotStarted::ClientEnded) => format!(
                 "`{DOCKER_PROGRAM} start --attach --interactive {name}` ended while the container \
                  was still created, so it never started{}",
-                self.inspect(
+                self.exec_within(
                     op,
                     name,
                     &["container", "inspect", name, "--format", "{{.State.Error}}"],
+                    Instant::now() + CLIENT_GRACE,
+                    covered.cancellation(),
                 )
                 .ok()
-                .flatten()
                 .map(|text| text.trim().to_owned())
                 .filter(|text| !text.is_empty())
                 .map(|text| format!(": {text}"))
@@ -1105,6 +1178,28 @@ impl DockerCli {
                 detail: reason,
             }),
         }
+    }
+
+    /// The attached start's wait: [`await_started`] over observations that each end at the
+    /// invocation's deadline or on its cancellation ([`Self::listing_within`]), so a stalled
+    /// `docker ps` holds the start past neither.
+    fn await_attached_start(
+        &self,
+        name: &str,
+        deadline: Instant,
+        cancellation: &Cancellation,
+        client_ended: impl Fn() -> bool,
+    ) -> Result<(), NotStarted> {
+        await_started(
+            deadline,
+            cancellation,
+            ATTACHED_START_POLL,
+            || {
+                self.listing_within(name, deadline, cancellation)
+                    .map(|listing| listed_state(&listing, name).map(str::to_owned))
+            },
+            client_ended,
+        )
     }
 
     fn own_client(&self, name: &str, client: AttachedClient) {
@@ -1319,7 +1414,15 @@ fn await_started(
 ) -> Result<(), NotStarted> {
     loop {
         let ended = client_ended();
-        match state().map_err(NotStarted::Unobserved)?.as_deref() {
+        let observed = match state() {
+            Ok(observed) => observed,
+            // A bounded observation ends at the deadline or on cancellation, and what ended
+            // it is reported as itself rather than as a state the runtime could not give.
+            Err(_) if cancellation.is_cancelled() => return Err(NotStarted::Cancelled),
+            Err(_) if Instant::now() >= deadline => return Err(NotStarted::DeadlinePassed),
+            Err(error) => return Err(NotStarted::Unobserved(error)),
+        };
+        match observed.as_deref() {
             Some("created") => {}
             Some(_) => return Ok(()),
             None => return Err(NotStarted::Gone),
@@ -1818,7 +1921,14 @@ impl ContainerRuntime for DockerCli {
             return self.start_attached(op, &covered, payload);
         }
         let name = covered.name();
-        self.exec(op, name, &["start", name]).map(|_| ())
+        self.exec_within(
+            op,
+            name,
+            &["start", name],
+            covered.deadline(),
+            covered.cancellation(),
+        )
+        .map(|_| ())
     }
 
     fn stop(&self, name: &str, mode: StopMode) -> Result<Settled, RuntimeError> {
