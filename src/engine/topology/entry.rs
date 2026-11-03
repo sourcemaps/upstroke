@@ -10,7 +10,9 @@ use crate::config::{self, Budgets, EngineLimits, OnTaskFailure};
 use crate::engine::assembly::{FrozenPlans, SharedPlans};
 use crate::engine::attempt::{LegacyReviewInputPolicy, LegacyReviewPasses};
 use crate::engine::options::{Harness, ResumeOptions, RunOptions};
-use crate::engine::preflight::{chain_summaries, normalized_plan_bytes, repo_relative};
+use crate::engine::preflight::{
+    chain_summaries, gates_differ, normalized_plan_bytes, repo_relative,
+};
 use crate::engine::report::{RunOutcome as ReportedOutcome, RunReport};
 use crate::error::UpstrokeError;
 use crate::events::{self, GateSummary, RunOutcome};
@@ -441,6 +443,7 @@ pub fn prepare_resume(
         &mut warnings,
     )?;
     compare_recorded_limits(&config, &started, &mut warnings);
+    compare_recorded_gates(&config, &opts.repo_root, &started, &mut warnings);
 
     refuse_unshareable_width(started.limits.max_parallel, harness)?;
     hold_recorded_case_policy(&started, &mut warnings)?;
@@ -956,6 +959,36 @@ fn compare_recorded_limits(
                 started.run_id
             ));
         }
+    }
+}
+
+/// A run keeps the gates it recorded, and its resume says how today's config differs, as the
+/// sequential resume does (`preflight::gates_differ`, DESIGN §17). Today's gates are the ones a
+/// fresh run would take: the config's `[[gates]]` under its shell, or, with none, the gates
+/// derived from the repository's shape (`validate::analyze_captured`).
+fn compare_recorded_gates(
+    config: &config::Config,
+    repo_root: &Path,
+    started: &RunStarted4,
+    warnings: &mut Vec<String>,
+) {
+    let today: Vec<GateSummary> = match &config.gates {
+        Some(configured) => configured
+            .iter()
+            .map(|gate| GateSummary {
+                name: gate.name.clone(),
+                cmd: gate.cmd.clone(),
+                timeout: gate.timeout,
+                shell: config.shell,
+            })
+            .collect(),
+        None => gates::derive(repo_root, config.shell)
+            .iter()
+            .map(gate_summary)
+            .collect(),
+    };
+    if let Some(difference) = gates_differ(&started.gate_cmds, &today) {
+        warnings.push(difference);
     }
 }
 

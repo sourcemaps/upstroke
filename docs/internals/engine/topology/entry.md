@@ -62,9 +62,9 @@ either command.
    a directory (a resume never creates it); the frozen plan is read from
    the run directory and its digest checked against the record; today's
    config is read under [`EngineLimits::TopologyResume`] and compared with
-   the recorded limits; the D4 width check against the recorded width; the
-   Q3 case observation; a recorded container image's environment; the slot
-   limits.
+   the recorded limits and the recorded gates; the D4 width check against
+   the recorded width; the Q3 case observation; a recorded container
+   image's environment; the slot limits.
 4. `resume_harness` publishes the include under the recorded root.
 5. [`ResumePrepared::run`]: the runner from the record, the manager, the
    `RunnerPreflight` over the recorded probe set, `run_recovery_order`, the
@@ -192,6 +192,18 @@ the runner, the review plan and the agents were resolved from that capture.
 A run keeps the limits it started with. Today's `max_parallel` and
 `max_merge_repairs` are compared with the record and a difference warns.
 The slot limits are not recorded and are acted on (`resumed_slot_limits`).
+
+## `fn compare_recorded_gates(`
+
+A run keeps the gates it recorded, and the recorded gates are the ones the
+resume runs (`ResumePrepared::run`). Today's gates are compared with them by
+the sequential resume's own `preflight::gates_differ`, and a difference warns,
+naming each edit: a command, a shell, a timeout, a gate only one side has
+(regression review #4, J7; DESIGN §17). Today's gates are the ones a fresh run
+would take: the config's `[[gates]]` under its shell, or, with none, the gates
+derived from the repository's shape. A `[[gates]]` section today's config
+cannot state is already announced as compared only
+(`EngineLimits::TopologyResume`).
 
 ## `fn resumed_slot_limits(`
 

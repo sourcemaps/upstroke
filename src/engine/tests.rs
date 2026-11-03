@@ -20437,3 +20437,88 @@ fn a_schema_4_report_counts_every_integration_review_once() {
         report.warnings
     );
 }
+
+/// J7, PR12 regression review #4: a schema-4 resume runs the gates its run recorded and says
+/// how today's config differs, as `resume_runs_the_gates_the_run_recorded_not_todays` pins for
+/// the sequential engine (DESIGN §17). At the reviewed head the resume restored the recorded
+/// gates without comparing them, so an edited gate passed unremarked. Today's config here edits
+/// one gate's command and another's timeout, renames a third, and changes the shell: the
+/// warning names every edit, and the recorded gates, not today's failing command, decide the
+/// run.
+#[test]
+fn a_schema_4_resume_runs_the_recorded_gates_and_names_how_todays_differ() {
+    let config = |shell: &str, check: &str, lint_secs: u64, third: &str| {
+        format!(
+            "[interaction]\nmode = \"never\"\n\n{shell}\
+             [[gates]]\nname = \"check\"\ncmd = \"{check}\"\ntimeout_secs = 600\n\n\
+             [[gates]]\nname = \"lint\"\ncmd = \"git --version\"\ntimeout_secs = {lint_secs}\n\n\
+             [[gates]]\nname = \"{third}\"\ncmd = \"git --version\"\ntimeout_secs = 600\n"
+        )
+    };
+    let (tree, repo) = temp_engine_repo("topology-gates-recorded");
+    seed(
+        &repo,
+        WORKER_ONLY_PLAN,
+        Some(&config("", "git --version", 600, "old")),
+    );
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        1,
+    )));
+    let parked = run_with(&topology_options(&repo), &source).expect("the run parks");
+    assert_eq!(parked.outcome(), RunOutcome::Parked, "{parked:#?}");
+    until_released(&repo, &parked.run_id);
+    let [asked] = parked.questions.as_slice() else {
+        panic!("one question: {parked:#?}");
+    };
+    crate::answer::answer(
+        &repo,
+        &asked.question.id.to_string(),
+        crate::answer::Reply::Text("the first".to_owned()),
+    )
+    .expect("the answer is recorded");
+
+    let today = tree.path().join("today.toml");
+    fs::write(
+        &today,
+        config(
+            "[engine]\nshell = \"pwsh\"\n\n",
+            "git frobnicate-not-a-command",
+            900,
+            "new",
+        ),
+    )
+    .expect("today's config");
+    let mut resume = resume_options(&repo, &parked.run_id);
+    resume.private_root = None;
+    resume.config_path = Some(today);
+    let resumed = resume_with(&resume, &source).expect("the resume completes the run");
+
+    assert_eq!(resumed.outcome(), RunOutcome::Complete, "{resumed:#?}");
+    assert!(
+        committed(&resumed, "t1"),
+        "the recorded `check` ran, not today's failing command: {resumed:#?}"
+    );
+    assert_eq!(resumed.gates, ["check", "lint", "old"]);
+    let warning = resumed
+        .warnings
+        .iter()
+        .find(|warning| warning.contains("the gates in today's config differ"))
+        .unwrap_or_else(|| panic!("no gate-difference warning: {:?}", resumed.warnings));
+    let native = crate::gates::ShellKind::native().program();
+    for edit in [
+        format!(
+            "`check` runs `git --version` and today's config says `git frobnicate-not-a-command`, \
+             and runs under `{native}` and today's config says `pwsh`"
+        ),
+        format!(
+            "`lint` runs under `{native}` and today's config says `pwsh`, and has 600s to finish \
+             and today's config allows 900s"
+        ),
+        "`old` (`git --version`) is in the record and not in today's config".to_owned(),
+        "`new` (`git --version`) is in today's config and not in the record".to_owned(),
+        "Start a new run to adopt them".to_owned(),
+    ] {
+        assert!(warning.contains(&edit), "names `{edit}`: {warning}");
+    }
+}
