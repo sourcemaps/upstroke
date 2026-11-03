@@ -1320,10 +1320,17 @@ pub(super) mod cover {
 
         impl<'a> CoveredStart<'a> {
             pub(crate) fn without_a_reaper(name: &'a str) -> Self {
+                Self::without_a_reaper_until(
+                    name,
+                    Instant::now() + Duration::from_secs(24 * 60 * 60),
+                )
+            }
+
+            pub(crate) fn without_a_reaper_until(name: &'a str, deadline: Instant) -> Self {
                 Self {
                     name,
                     stdin: &[],
-                    deadline: Instant::now() + Duration::from_secs(24 * 60 * 60),
+                    deadline,
                     cancellation: Cancellation::new(),
                 }
             }

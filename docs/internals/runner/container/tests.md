@@ -2903,3 +2903,28 @@ established against the listing rather than against its own diagnostic, and the
 comparison then discards. The colliding container is created deliberately, and
 the test fails if the filter stops matching it, so the comparison the repair
 rests on is never left untested.
+
+## `fn an_attached_start_whose_client_ended_early_asks_its_diagnostic_within_its_own_bounds() {`
+
+J13 (regular review 3, finding 2): the attached start's early-client-exit branch
+asks its diagnostic within the invocation's own deadline and cancellation. A
+child of this test binary, whose `PATH` alone carries a stub `docker`, runs the
+production `DockerCli::start_attached`. The stub's `docker start` ends at once,
+its `docker ps` keeps the container `created`, and its `docker container
+inspect` (the diagnostic) records that it was asked and then sleeps for a
+minute. Two modes: a 500 ms invocation, which must end within 1.5 s; and a
+ten-minute one cancelled as soon as the diagnostic is asked, which must end
+within 10 s. In both the start fails on the early-exit branch, its reason
+carries nothing from the stalled diagnostic, and the diagnostic was asked. With
+the fresh `CLIENT_GRACE` deadline restored, the deadline mode takes about five
+seconds and fails. It is a stub witness, as the reviewer's was: no daemon is
+involved.
+
+## `fn attached_start_early_exit_child() {`
+
+The child of the test above: one production attached start of
+`upstroke-early`, in the mode the parent names (`UPSTROKE_TEST_EARLY_EXIT`),
+its proof minted by `CoveredStart::without_a_reaper_until` with that mode's
+deadline. In the cancel mode a scoped thread cancels the start once the stub has
+recorded the diagnostic (`UPSTROKE_TEST_INSPECTED`), so the cancellation lands
+on the diagnostic and not on the wait before it.

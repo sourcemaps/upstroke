@@ -1216,7 +1216,7 @@ impl DockerCli {
                     op,
                     name,
                     &["container", "inspect", name, "--format", "{{.State.Error}}"],
-                    Instant::now() + CLIENT_GRACE,
+                    covered.deadline(),
                     covered.cancellation(),
                 )
                 .ok()

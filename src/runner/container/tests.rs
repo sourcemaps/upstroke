@@ -1174,6 +1174,95 @@ fn attached_start_observation_child() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn an_attached_start_whose_client_ended_early_asks_its_diagnostic_within_its_own_bounds() {
+    let tree = scratch("attached-start-early-exit");
+    let bin = tree.path().join("bin");
+    fs::create_dir(&bin).expect("the stub's directory");
+    let stub = bin.join("docker");
+    fs::write(
+        &stub,
+        "#!/bin/sh\ncase \"$1\" in\nstart) exit 0 ;;\nps) printf 'upstroke-early\\037created\\n' ;;\n\
+         container) : > \"$UPSTROKE_TEST_INSPECTED\"; exec sleep 60 ;;\n*) exit 93 ;;\nesac\n",
+    )
+    .expect("the stub");
+    crate::workspace_manager::fixture::set_mode(&stub, 0o755);
+    let inherited = std::env::var_os("PATH").unwrap_or_default();
+    let path =
+        std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(&inherited)))
+            .expect("a PATH with the stub first");
+    for mode in ["deadline", "cancel"] {
+        let inspected = tree.path().join(format!("inspected-{mode}"));
+        let status = crate::workspace_manager::fixture::run_kill_child_within(
+            "runner::container::tests::attached_start_early_exit_child",
+            &[
+                ("PATH", path.as_os_str()),
+                ("UPSTROKE_TEST_EARLY_EXIT", std::ffi::OsStr::new(mode)),
+                ("UPSTROKE_TEST_INSPECTED", inspected.as_os_str()),
+            ],
+            Duration::from_secs(120),
+        )
+        .expect("the child ends within its bound");
+        assert!(
+            status.success(),
+            "{mode}: the early-exit start was not held to its own invocation ({status:?})"
+        );
+        assert!(
+            inspected.exists(),
+            "{mode}: the premise, the start asked its diagnostic"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "spawned by the attached start's early-exit diagnostic witness"]
+fn attached_start_early_exit_child() {
+    use crate::runner::container::CoveredStart;
+
+    let mode = std::env::var("UPSTROKE_TEST_EARLY_EXIT").expect("the parent names the mode");
+    let inspected = std::env::var_os("UPSTROKE_TEST_INSPECTED")
+        .map(PathBuf::from)
+        .expect("the parent names the diagnostic's marker");
+    let cli = DockerCli::default();
+    let began = Instant::now();
+    let (deadline, bound) = if mode == "deadline" {
+        (
+            began + Duration::from_millis(500),
+            Duration::from_millis(1500),
+        )
+    } else {
+        (began + Duration::from_secs(600), Duration::from_secs(10))
+    };
+    let covered = CoveredStart::without_a_reaper_until("upstroke-early", deadline);
+    let started = std::thread::scope(|scope| {
+        if mode == "cancel" {
+            scope.spawn(|| {
+                let until = Instant::now() + Duration::from_secs(60);
+                while !inspected.exists() && Instant::now() < until {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                covered.cancellation().cancel();
+            });
+        }
+        cli.start_attached(RuntimeOp::Start, &covered, b"")
+    });
+    let took = began.elapsed();
+    let Err(RuntimeError::Failed { detail, .. }) = &started else {
+        panic!("{mode}: the start fails with its client settled: {started:?}");
+    };
+    assert!(
+        detail.contains("ended while the container was still created, so it never started;"),
+        "{mode}: the early-exit branch, to which the stalled diagnostic added nothing: {detail}"
+    );
+    assert!(inspected.exists(), "{mode}: the diagnostic was asked");
+    assert!(
+        took < bound,
+        "{mode}: the stalled diagnostic held the start {took:?}, past its bound {bound:?}"
+    );
+}
+
 /// `PR12-J6-OBSERVATION-FATE-DROPPED` (root's source finding on J6). A bounded docker question
 /// keeps its supervisor's fate. Each result below is synthetic: a supervisor that never
 /// started the question, one that saw its process gone, one that could not establish it gone,

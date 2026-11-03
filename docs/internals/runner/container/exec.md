@@ -677,6 +677,10 @@ The invocation's cancellation, which a waiting start checks on every poll.
 reaper armed, for tests that drive a primitive directly — the test-only free
 `container::launch` (so the frozen `recover/tests.rs` that calls it compiles unchanged) and
 the container suites' direct calls of the funnels and of a runtime's `create` and `start`.
+`CoveredStart::without_a_reaper` gives the start a day's deadline;
+`CoveredStart::without_a_reaper_until` is the same proof with the deadline a test names, for one
+that holds a start to a short invocation
+(`runner::container::tests::attached_start_early_exit_child`).
 `#[cfg(test)]`: no production build has them (`r2-p3`, `error[E0599]`), and the census refuses
 a production region that names them in a test build.
 

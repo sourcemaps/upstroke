@@ -1358,6 +1358,21 @@ So a start never waits for the workload or for an unbounded write; the
 runner's supervision, timeout and cancellation proceed as before; and no
 client is ever detached while something reports success.
 
+**The diagnostic after an early client exit is bounded by the invocation**
+(J13, regular review 3, finding 2; DESIGN §26). When the client ended while
+the container was still `created`, the start asks `docker container inspect
+--format {{.State.Error}}` for the daemon's reason and appends it to the
+failure. The question runs under the invocation's own deadline and
+cancellation (`exec_within`), the bounds the wait before it had, so a
+diagnostic that stalls ends where the invocation does and adds nothing to the
+reason. It is best-effort by design: its answer only enriches a failure that
+is already decided, so its error is dropped (`.ok()`), and what that could
+hide is kept instead: a question whose process could not be established gone
+is held under the container (`answer_within`, `hold_unresolved`) and makes
+the settlement unresolved. Until J13 the question took a fresh `CLIENT_GRACE`
+from the moment it was asked: a 200 ms invocation took 1.64 s against a stub
+diagnostic that slept 1.5 s (the reviewer's stub witness).
+
 The prompt reaches the client's stdin and nothing else: not argv, not the
 environment, not a mount, not a log. The trace records the operation and the
 container's name only.
