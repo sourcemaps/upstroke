@@ -204,6 +204,17 @@ which is exactly how a detached terminal behaves.
 Shared with the production path so tests exercise the same shell
 invocation (including its Windows quoting) rather than a parallel one.
 
+## `fn temp_engine_repo(tag: &str) -> (ScratchTree, PathBuf) {` › `git_in(&dir, &["config", "maintenance.auto", "false"]);`
+
+The fixture's repository runs no automatic `git maintenance` (K7). Git 2.47 and
+later detach `git maintenance run --auto` after a commit, and it holds
+`.git/objects/maintenance.lock` while it decides whether to work; in a test's
+tree that is a process the test did not start, writing beside a test that may be
+reading. CI's macOS leg ran git 2.56.0 and the J14 test's walk of this tree
+panicked on an entry it had listed and could no longer find. Set before the
+seed commit, so no commit in the fixture's repository, the engine's included,
+starts one. Nothing in the engine depends on automatic maintenance.
+
 ## `fn seed(repo: &Path, plan: &str, config: Option<&str>) {`
 
 Replace the plan and config, then commit so the tree is clean.
@@ -3555,10 +3566,42 @@ with `first` and `waits` committed.
 
 The variable that hands the J14 child its repository.
 
-## `fn every_path_under(root: &Path) -> Vec<PathBuf> {`
+## `struct TreeSnapshot {`
 
-Every file, directory and link under `root`, as paths relative to it, sorted;
-a link is listed and not followed. What the J14 tests compare before and after.
+What `every_path_under` saw: `entries`, every entry it listed, as a path
+relative to the root, sorted; and `unread`, the entries it listed and could not
+read, a directory it could not open by its listed name or an entry whose type
+could not be read because it was gone. The J14 tests compare the entries and
+carry the unread ones in their messages (K7).
+
+## `fn every_path_under(root: &Path) -> TreeSnapshot {`
+
+Every file, directory and link under `root`, by the names the platform lists
+and the types its listing reports (`DirEntry::file_type`, which reads the
+directory entry's own type and looks nothing up by name where the platform
+reports one); a link is listed and not followed. A directory is descended by
+its listed name; one that cannot be opened by it, or an entry gone before its
+type was read, is noted in `unread` rather than ending the walk. A root that
+cannot be read is noted the same way, as the empty path.
+
+Until K7 each listed entry was `lstat`ed by its listed path, with `.expect`.
+On CI's macOS leg (run 41724856814, job 126229500908, macOS 26 arm64, APFS, git
+2.56.0) the J14 test panicked inside this walk with `an entry's own metadata:
+NotFound`: an entry the listing had just named could not be found by its path.
+The job log does not say which entry, or which of the test's walks: the panic
+names neither. Two mechanisms fit it, and the repair holds against both:
+- a name the platform lists but cannot look up by the bytes it listed (the
+  coordinator's reading of a home named `private-\xff` on APFS). The walk no
+  longer looks a listed entry up to learn its type, notes a directory it cannot
+  open, and the J14 test also walks the home by the path it holds, so whatever
+  the run might create under it, the include included, is still compared;
+- an entry that existed when the directory was listed and was gone a moment
+  later: git 2.47 and later detach `git maintenance run --auto` after a commit,
+  and it holds `.git/objects/maintenance.lock` while it decides, so a walk
+  begun just after the fixture's commit could list that lock and miss it. The
+  fixture's repository now turns automatic maintenance off before its commit
+  (`temp_engine_repo`), and an entry gone before its type is read is noted
+  rather than fatal.
 
 ## `fn a_schema_4_run_refuses_an_unspellable_default_private_root_before_it_creates_anything() {`
 
@@ -3578,6 +3621,23 @@ removed from `prepare_fresh`, the first cell fails on exactly the reviewers'
 witness: `private-\xff/.upstroke`, its `git` directory and
 `recorded-objects.gitconfig` appear, and the run is refused later, by
 `authorize`.
+
+Since K7 (CI's macOS leg) each snapshot is two walks: the scratch tree, by the
+names the platform lists, and the home, by the path the test holds, which is
+the path the child's `HOME` names. What is compared is every entry listed; the
+entries a walk listed and could not read are carried in the message, before and
+after, as the record of what the platform would not show. On a host that can
+name the home, the home's own walk is the one that sees inside it however the
+tree's listing spells it; on one that refuses the name, the first cell is
+skipped as before.
+
+## `fn the_tree_snapshot_lists_by_the_platforms_own_names_and_types_and_notes_what_it_cannot_read() {`
+
+K7: the snapshot lists a directory, a file in it, a link to nothing and a link
+to the directory, by their names, without following either link, and notes a
+root it cannot read as the empty path rather than panicking. The macOS case
+itself (a listed name or entry that cannot then be found) is not reproducible
+on this box; this pins the walk's own rules.
 
 ## `fn unspellable_default_root_child() {`
 

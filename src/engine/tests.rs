@@ -756,6 +756,7 @@ fn temp_engine_repo(tag: &str) -> (ScratchTree, PathBuf) {
     git_in(&dir, &["init", "-q", "-b", "main"]);
     git_in(&dir, &["config", "user.email", "test@upstroke.local"]);
     git_in(&dir, &["config", "user.name", "upstroke tests"]);
+    git_in(&dir, &["config", "maintenance.auto", "false"]);
     fs::write(dir.join("README.md"), "seed\n").expect("seed");
     fs::write(
         dir.join("plan.md"),
@@ -20811,27 +20812,82 @@ fn a_private_root_named_with_the_replacement_character_is_recorded_exactly() {
 const UNSPELLABLE_HOME_REPO: &str = "UPSTROKE_UNSPELLABLE_HOME_REPO";
 
 #[cfg(unix)]
-fn every_path_under(root: &Path) -> Vec<PathBuf> {
-    let mut found = Vec::new();
+#[derive(Debug, Default, PartialEq, Eq)]
+struct TreeSnapshot {
+    entries: Vec<PathBuf>,
+    unread: Vec<PathBuf>,
+}
+
+#[cfg(unix)]
+fn every_path_under(root: &Path) -> TreeSnapshot {
+    let not_found = |error: &std::io::Error| error.kind() == std::io::ErrorKind::NotFound;
+    let relative = |path: &Path| {
+        path.strip_prefix(root)
+            .expect("an entry under the root")
+            .to_path_buf()
+    };
+    let mut snapshot = TreeSnapshot::default();
     let mut pending = vec![root.to_path_buf()];
     while let Some(directory) = pending.pop() {
-        for entry in fs::read_dir(&directory).expect("a directory of the scratch tree") {
-            let path = entry.expect("a directory entry").path();
-            if fs::symlink_metadata(&path)
-                .expect("an entry's own metadata")
-                .is_dir()
-            {
-                pending.push(path.clone());
+        let listed = match fs::read_dir(&directory) {
+            Ok(listed) => listed,
+            Err(error) if not_found(&error) => {
+                snapshot.unread.push(relative(&directory));
+                continue;
             }
-            found.push(
-                path.strip_prefix(root)
-                    .expect("an entry under the root")
-                    .to_path_buf(),
-            );
+            Err(error) => panic!("list {}: {error}", directory.display()),
+        };
+        for entry in listed {
+            let entry = entry
+                .unwrap_or_else(|error| panic!("an entry of {}: {error}", directory.display()));
+            let path = entry.path();
+            match entry.file_type() {
+                Ok(kind) => {
+                    if kind.is_dir() {
+                        pending.push(path.clone());
+                    }
+                    snapshot.entries.push(relative(&path));
+                }
+                Err(error) if not_found(&error) => snapshot.unread.push(relative(&path)),
+                Err(error) => panic!("the type of {}: {error}", path.display()),
+            }
         }
     }
-    found.sort();
-    found
+    snapshot.entries.sort();
+    snapshot.unread.sort();
+    snapshot
+}
+
+#[cfg(unix)]
+#[test]
+fn the_tree_snapshot_lists_by_the_platforms_own_names_and_types_and_notes_what_it_cannot_read() {
+    let tree = temp_engine_scratch("tree-snapshot");
+    let directory = tree.path().join("d");
+    fs::create_dir(&directory).expect("a directory");
+    fs::write(directory.join("f"), "a file\n").expect("a file");
+    std::os::unix::fs::symlink(tree.path().join("absent"), tree.path().join("dangling"))
+        .expect("a link to nothing");
+    std::os::unix::fs::symlink(&directory, tree.path().join("linked"))
+        .expect("a link to the directory");
+    assert_eq!(
+        every_path_under(tree.path()),
+        TreeSnapshot {
+            entries: ["d", "d/f", "dangling", "linked"]
+                .into_iter()
+                .map(PathBuf::from)
+                .collect(),
+            unread: Vec::new(),
+        },
+        "every entry by its listed name, links not followed"
+    );
+    assert_eq!(
+        every_path_under(&tree.path().join("absent")),
+        TreeSnapshot {
+            entries: Vec::new(),
+            unread: vec![PathBuf::new()],
+        },
+        "a root that cannot be read is noted, not a panic"
+    );
 }
 
 #[cfg(unix)]
@@ -20850,7 +20906,8 @@ fn a_schema_4_run_refuses_an_unspellable_default_private_root_before_it_creates_
                 Err(error) => panic!("a home directory UTF-8 cannot spell: {error}"),
             }
         }
-        let before = every_path_under(tree.path());
+        let snapshot = || (every_path_under(tree.path()), every_path_under(&home));
+        let before = snapshot();
         let ended = crate::agent::proc::test_support::run_test_isolated(
             "engine::tests::unspellable_default_root_child",
             &[
@@ -20860,11 +20917,15 @@ fn a_schema_4_run_refuses_an_unspellable_default_private_root_before_it_creates_
             ],
             Duration::from_secs(300),
         );
+        let after = snapshot();
         assert_eq!(
-            every_path_under(tree.path()),
-            before,
+            (&after.0.entries, &after.1.entries),
+            (&before.0.entries, &before.1.entries),
             "home exists: {home_exists}: the refusal created nothing, the recorded-objects \
-             include included: {ended}"
+             include included. Listed and not read, under the tree and the home: before {:?}, \
+             after {:?}: {ended}",
+            (&before.0.unread, &before.1.unread),
+            (&after.0.unread, &after.1.unread)
         );
         assert!(
             ended.status.is_some_and(|status| status.success())
@@ -20943,7 +21004,10 @@ fn the_default_root_check_judges_the_path_the_root_will_resolve_to() {
     expected.sort();
     assert_eq!(
         every_path_under(tree.path()),
-        expected,
+        TreeSnapshot {
+            entries: expected,
+            unread: Vec::new(),
+        },
         "the checks created nothing"
     );
 }
