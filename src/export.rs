@@ -145,19 +145,17 @@ pub fn load(repo_root: &Path, wanted: &str) -> Result<Loaded, UpstrokeError> {
             torn_tail_warning,
         } = events::parse_bytes(&events_path, &snapshot_bytes)?;
         let warnings = torn_tail_warning.into_iter().collect();
-        let mut run_starts = log
-            .iter()
-            .filter(|event| matches!(event.body, EventBody::RunStarted { .. }));
-        let started_event = run_starts.next().ok_or_else(|| UpstrokeError::EventLog {
+        let mut run_starts = log.iter().filter_map(|event| match &event.body {
+            EventBody::RunStarted { data } => Some((event, data)),
+            _ => None,
+        });
+        let (started_event, started) = run_starts.next().ok_or_else(|| UpstrokeError::EventLog {
             path: events_path.clone(),
             message: "no run_started event".to_owned(),
         })?;
         if run_starts.next().is_some() {
             return invalid(&events_path, "duplicate run_started event".to_owned());
         }
-        let EventBody::RunStarted { data: started } = &started_event.body else {
-            unreachable!()
-        };
         let effective_schema = events::ensure_supported_schema(started, &log, &events_path)?;
         if started.run_id != run_id {
             return invalid(

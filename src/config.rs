@@ -2581,10 +2581,10 @@ credential_volumes = { claude-code = "creds-cc" }
 
     #[test]
     fn the_legacy_refusal_is_about_the_kind_and_about_nothing_else() {
-        for limits in [
-            EngineLimits::Fresh,
-            EngineLimits::SequentialResume,
-            EngineLimits::SequentialResumeWithRecordedGates,
+        for (limits, expected) in [
+            (EngineLimits::Fresh, "is being created by the schema-1..3 engine"),
+            (EngineLimits::SequentialResume, "keeps the boundary it started with"),
+            (EngineLimits::SequentialResumeWithRecordedGates, "keeps the boundary it started with"),
         ] {
             let container = RunnerSelection {
                 kind: RunnerKind::Container,
@@ -2617,16 +2617,6 @@ credential_volumes = { claude-code = "creds-cc" }
                 "{limits:?}: {message}"
             );
 
-            let expected = match limits {
-                EngineLimits::Fresh => "is being created by the schema-1..3 engine",
-                EngineLimits::SequentialResume
-                | EngineLimits::SequentialResumeWithRecordedGates => {
-                    "keeps the boundary it started with"
-                }
-                EngineLimits::Topology | EngineLimits::TopologyResume => {
-                    unreachable!("the loop drives the sequential readings only")
-                }
-            };
             assert!(message.contains(expected), "{limits:?}: {message}");
             refuse_legacy_container_selection(&host, Path::new("upstroke.toml"), limits)
                 .expect("a host selection is not refused");

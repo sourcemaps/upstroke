@@ -65,13 +65,17 @@ pub fn observe_bytes(
     running: bool,
 ) -> Result<Observed, UpstrokeError> {
     let log = public.join(rundir::EVENT_LOG);
-    let committed = committed_len(bytes);
-    let (paths, events, fold) = checked_replay(run_id, public, &log, &bytes[..committed])?;
+    // `committed_len` never exceeds `bytes.len()`, so this split always succeeds. Its
+    // checked form turns a defect there into "no committed line", never a panic (§7).
+    let (committed, tail) = bytes
+        .split_at_checked(committed_len(bytes))
+        .unwrap_or((Default::default(), bytes));
+    let (paths, events, fold) = checked_replay(run_id, public, &log, committed)?;
     Ok(Observed {
         run_id: run_id.to_owned(),
         log,
         paths,
-        torn_tail: bytes.len() - committed,
+        torn_tail: tail.len(),
         running,
         events,
         fold,

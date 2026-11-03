@@ -387,7 +387,7 @@ impl RunnerPolicy {
                 let ordered = self
                     .mounts
                     .windows(2)
-                    .all(|pair| pair[0].target < pair[1].target);
+                    .all(|pair| matches!(pair, [first, second] if first.target < second.target));
                 if !ordered || !self.mounts.iter().all(recorded_mount_is_well_formed) {
                     return Err(RunnerRecordDefect::MountRecordMalformed);
                 }
