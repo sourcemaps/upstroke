@@ -911,6 +911,11 @@ One verification-park question ingested: `question_answered` is
 durable, and the candidate is back in the queue (`declined` false) or
 its lineage has failed (`declined` true).
 
+## `pub enum Progress` › `Asked {`
+
+A spend approval was raised (`ask_to_approve_spend`): `question_raised` is
+durable and the task waits for its answer.
+
 ## `pub enum Progress` › `Finished {`
 
 The run ended: closure appended `run_finished` and terminal finalization
@@ -1238,6 +1243,54 @@ the one call of each in this file (`run::tests::the_loop_selects_through_one_fun
 and the only way the coordinator selects too. A selection is never cached: the
 coordinator asks again after every message it applies, because the fold's
 append checks do not re-check admission (INV-21).
+
+One hold of the run's own follows the checkpoint (J1): a fresh dispatch whose
+spend [`Self::spend_unapproved`] says needs a person's approval is
+`Admitted::ApproveSpend` instead. Because both drivers act on this one value,
+neither can dispatch that attempt unapproved.
+
+## `impl TopologyRun` › `pub fn with_spend_approval(mut self, threshold: Option<f64>) -> Self {`
+
+The run, with `ask_before.frontier_escalation_over_usd` as the threshold at
+which an escalation onto a frontier rung waits for a person (DESIGN §12). The
+entry sets it from the run's config, and a resume from today's config, as the
+sequential resume reads `ask_before` from today's analysis. At the reviewed
+head nothing supplied it, so a configured approval never asked (regression
+review #1, J1).
+
+## `impl TopologyRun` › `fn spend_unapproved(&self, key: TaskKey) -> Result<bool, UpstrokeError> {`
+
+The sequential engine's `should_approve_spend`: the task's rung is a frontier
+one its ladder reached from a cheaper rung, the run's reported spend has
+reached the threshold, and (added here) no attempt has run on that rung yet
+and no answer since the escalation approved it. It is asked before the
+dispatch rather than at the settlement. A process that ended between the
+escalation and the question therefore still asks on resume, and an approval
+that landed before a crash is still honoured after it. A one-off human binding
+has no ladder to escalate, so it is never held.
+
+## `impl TopologyRun` › `fn spend_approved(&self, key: TaskKey, rung: u32) -> bool {`
+
+The approval is read from the log, not from process memory. The answer must
+be `answered`, to an `ApproveSpend` question raised for the task after its
+last escalation onto `rung`. Each escalation resets it, so each needs its own
+approval.
+
+## `impl TopologyRun` › `pub(super) fn ask_to_approve_spend(`
+
+Append `question_raised` for the held escalation, worded by
+`coordinator::spend_question_context` and offering
+`topology_question_options(ApproveSpend)`. The fold parks the task
+(`AwaitingInput`) and other tasks go on. An answer of its approve option
+returns the task to dispatch. Its decline option, or a decline, fails the
+task's lineage under the halt policy (`answer_for`). Under `interaction =
+never` the run ends parked on the question.
+
+## `impl TopologyRun` › `fn spend_question(`
+
+The approval question's frozen form. Its reported spend is the run's ledger
+total, a floor when [`spend_is_a_floor`] finds an unpriced attempt or review,
+as the sequential engine qualifies it.
 
 ## `impl TopologyRun` › `pub(super) fn exceed_budget(`
 
@@ -2219,7 +2272,10 @@ appended, as an attempt's reviews are charged in `settle`:
 ## `impl TopologyRun` › `fn answer_for(`
 
 One reading of an answer, for every origin. A decline becomes
-`Declined { decline_halts_run }` from the run's seam. For a
+`Declined { decline_halts_run }` from the run's seam. An `ApproveSpend`
+answer approves only by its approve option; its decline option's text is a
+decline, and any other text is refused before anything is appended, so words
+are never read as an approval (J1). For a
 `HumanBinding` admission the answer must be one of the frozen options
 (`chosen_index`, exact text), the option indexes the authorized agents
 the fold kept beside the question, and the override is

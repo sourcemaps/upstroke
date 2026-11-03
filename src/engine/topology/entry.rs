@@ -354,12 +354,9 @@ impl FreshPrepared {
             halts_run: analysis.config.on_task_failure == OnTaskFailure::Halt,
             slots,
         };
-        finish(
-            TopologyRun::resumed(handle, inputs, ceiling),
-            &driving,
-            harness,
-            warnings,
-        )
+        let run = TopologyRun::resumed(handle, inputs, ceiling)
+            .with_spend_approval(analysis.config.ask_before.frontier_escalation_over_usd);
+        finish(run, &driving, harness, warnings)
     }
 }
 
@@ -585,12 +582,9 @@ impl ResumePrepared {
             halts_run: config.on_task_failure == OnTaskFailure::Halt,
             slots,
         };
-        finish(
-            TopologyRun::resumed(handle, inputs, ceiling),
-            &driving,
-            harness,
-            warnings,
-        )
+        let run = TopologyRun::resumed(handle, inputs, ceiling)
+            .with_spend_approval(config.ask_before.frontier_escalation_over_usd);
+        finish(run, &driving, harness, warnings)
     }
 }
 

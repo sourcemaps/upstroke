@@ -622,6 +622,10 @@ impl Coordinator<'_> {
                         super::run::begin_dispatch(self, manager, key, generation, continuing)?;
                     self.spawn_attempt(job);
                 }
+                Admitted::ApproveSpend { key } => {
+                    self.open_gate();
+                    self.run.ask_to_approve_spend(key, self.seams, self.hooks)?;
+                }
                 Admitted::Backoff | Admitted::HardBlock { .. } | Admitted::Closure(_) => {
                     self.open_gate();
                     return Ok(());

@@ -103,11 +103,12 @@ for a question that has since settled cannot land an answer on another.
 
 ## `pub fn check_reply(asked: &OpenAsked, answer: &crate::ir::Answer) -> Result<(), UpstrokeError> {`
 
-The one validation the schema-4 loop adds to today's: a question that binds an
+The validations the schema-4 loop adds to today's. A question that binds an
 agent (`QuestionOrigin::Admission` with a frozen binding) accepts only one of
 its options, because the loop activates a binding only through an option the
-spawn froze (`run.rs`, `answer_for`). Refusing here keeps that refusal out of
-the run.
+spawn froze (`run.rs`, `answer_for`). An `ApproveSpend` question does too,
+because a spend is approved only by choosing its option, never by words
+(J1). Refusing here keeps those refusals out of the run.
 
 ## `pub fn follow(`
 

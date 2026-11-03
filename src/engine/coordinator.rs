@@ -1098,7 +1098,10 @@ impl Run<'_> {
         pending_unpriced: bool,
     ) -> Question {
         let context = spend_question_context(
-            &self.analysis.plan.tasks[index],
+            ParkSubject::of(
+                &self.analysis.plan.tasks[index],
+                &self.state.progress[index],
+            ),
             onto,
             self.reported_spend(None) + pending_spend,
             self.ask_before.frontier_escalation_over_usd.unwrap_or(0.0),
@@ -1359,15 +1362,15 @@ pub(super) fn question_context(
     context
 }
 
-fn spend_question_context(
-    task: &Task,
+pub(super) fn spend_question_context(
+    task: ParkSubject<'_>,
     onto: crate::ir::Tier,
     spent: f64,
     threshold: f64,
     unpriced: bool,
 ) -> String {
     let mut context = String::new();
-    let _ = writeln!(context, "Task `{}` — {}", task.id, task.title);
+    let _ = writeln!(context, "Task `{}` — {}", task.display_id, task.title);
     let _ = writeln!(
         context,
         "Every attempt on the cheaper rungs failed, so this task is about to escalate onto the \
@@ -1387,7 +1390,7 @@ fn spend_question_context(
     );
     if !task.acceptance.is_empty() {
         context.push_str("Acceptance criteria this task must meet:\n");
-        for item in &task.acceptance {
+        for item in task.acceptance {
             let _ = writeln!(context, "- {item}");
         }
     }

@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use crate::error::{ProcessFate, UpstrokeError};
 use crate::events::RunOutcome;
-use crate::ir::{Answer, Question, QuestionId};
+use crate::ir::{Answer, Question, QuestionId, QuestionKind, Tier};
 use crate::review;
 use crate::topology::events::Answer4;
 use crate::topology::events::TopologyEventBody;
@@ -13,9 +13,10 @@ use crate::topology::fold::QuestionOrigin;
 use crate::events::AttemptRecord;
 use crate::interaction::Sleeper;
 use crate::topology::events::{
-    AttemptNumber, CandidateLeaseEffect, CandidateRef, CommitSha, FrozenQuestion,
+    AttemptNumber, AttemptSettlement, CandidateLeaseEffect, CandidateRef, CommitSha, FrozenQuestion,
     GenerationCloseReason, GenerationId, InfrastructureKind, Materialization,
-    MergeVerificationCharged, RunStarted4, SequenceId, SessionId, TopologyEvent,
+    MergeVerificationCharged, QuestionRaised4, RunStarted4, SequenceId, SessionId,
+    SettlementTransition, TopologyEvent,
 };
 use crate::topology::fold::{FrozenInputs, TopologyFold};
 use crate::topology::registry::TaskKey;
@@ -1267,6 +1268,10 @@ pub enum Progress {
         question: QuestionId,
         declined: bool,
     },
+    Asked {
+        key: TaskKey,
+        question: QuestionId,
+    },
     Finished {
         outcome: RunOutcome,
         closed: usize,
@@ -1292,6 +1297,9 @@ pub struct TopologyRun {
     retained: BTreeMap<TaskKey, Retained>,
     brief: Brief,
     stopped: Option<String>,
+    /// `ask_before.frontier_escalation_over_usd` for this process
+    /// ([`Self::with_spend_approval`]).
+    approve_spend_over: Option<f64>,
 }
 
 impl TopologyRun {
@@ -1317,7 +1325,17 @@ impl TopologyRun {
             retained: BTreeMap::new(),
             brief,
             stopped: None,
+            approve_spend_over: None,
         }
+    }
+
+    /// The run, holding each escalation onto a frontier rung for a person's approval once its
+    /// reported spend reaches `threshold` (`ask_before.frontier_escalation_over_usd`, DESIGN
+    /// §12). `None` holds none.
+    #[must_use]
+    pub fn with_spend_approval(mut self, threshold: Option<f64>) -> Self {
+        self.approve_spend_over = threshold;
+        self
     }
 
     pub fn commitment_digest(&self) -> Option<&str> {
@@ -1461,6 +1479,7 @@ impl TopologyRun {
                 seams,
                 &closure::Cancelled::none(),
             ),
+            Admitted::ApproveSpend { key } => self.ask_to_approve_spend(key, seams, hooks),
         }
     }
 
@@ -1476,8 +1495,181 @@ impl TopologyRun {
         }
     }
 
+    /// What selection admits, with one hold of the run's own: a fresh dispatch onto a frontier
+    /// rung whose spend needs a person's approval first is [`Admitted::ApproveSpend`]
+    /// ([`Self::spend_unapproved`]). Both drivers act on this, so neither can start that attempt
+    /// unapproved.
     pub(super) fn admitted(&self) -> Result<Admitted, UpstrokeError> {
-        checkpoint(select(&self.handle.fold, &self.ceiling, &self.spend))
+        let admitted = checkpoint(select(&self.handle.fold, &self.ceiling, &self.spend))?;
+        if let Some(key) = fresh_dispatch(&admitted) {
+            if self.spend_unapproved(key)? {
+                return Ok(Admitted::ApproveSpend { key });
+            }
+        }
+        Ok(admitted)
+    }
+
+    /// Whether dispatching `key` now would start an attempt on a frontier rung its ladder
+    /// reached from a cheaper one, which `ask_before.frontier_escalation_over_usd` holds until a
+    /// person approves it: no attempt has run on that rung yet, the run's reported spend has
+    /// reached the threshold, and no answer since the escalation approved it. The sequential
+    /// engine's `should_approve_spend`, asked before the dispatch rather than at the
+    /// settlement, so that a log that ends between the escalation and its question still asks.
+    fn spend_unapproved(&self, key: TaskKey) -> Result<bool, UpstrokeError> {
+        let Some(threshold) = self.approve_spend_over else {
+            return Ok(false);
+        };
+        if self.handle.fold.binding_override(key).is_some() {
+            return Ok(false);
+        }
+        let task = self
+            .handle
+            .fold
+            .task(key)
+            .ok_or_else(|| UpstrokeError::Refused {
+                message: format!("task {} is not in this run's fold", key.index()),
+            })?;
+        let rungs = &self
+            .handle
+            .fold
+            .registry()
+            .and_then(|registry| registry.get(key))
+            .ok_or_else(|| UpstrokeError::Refused {
+                message: format!("task {} is not in this run's frozen registry", key.index()),
+            })?
+            .ladder
+            .rungs;
+        let rung = usize::try_from(task.rung).unwrap_or(usize::MAX);
+        let from_cheaper = rung
+            .checked_sub(1)
+            .and_then(|below| rungs.get(below))
+            .is_some_and(|below| below.tier != Tier::Frontier);
+        let onto_frontier = rungs
+            .get(rung)
+            .is_some_and(|onto| onto.tier == Tier::Frontier);
+        if !from_cheaper || !onto_frontier || task.attempts_on_rung > 0 {
+            return Ok(false);
+        }
+        let reached = self.spend.run_usd() >= threshold;
+        Ok(reached && !self.spend_approved(key, task.rung))
+    }
+
+    /// Whether an answer approved `key`'s spend since its ladder last escalated onto `rung`: an
+    /// `ApproveSpend` question raised for the task after that settlement, answered as
+    /// approved. Each escalation needs its own approval.
+    fn spend_approved(&self, key: TaskKey, rung: u32) -> bool {
+        let mut asked = std::collections::BTreeSet::new();
+        let mut approved = false;
+        for event in &self.handle.events {
+            match &event.body {
+                TopologyEventBody::AttemptFinished { data } if data.key == key => {
+                    if escalated_onto(&data.settlement) == Some(rung) {
+                        asked.clear();
+                        approved = false;
+                    }
+                }
+                TopologyEventBody::QuestionRaised { data } => {
+                    let question = &data.question;
+                    if question.key == key && question.kind == QuestionKind::ApproveSpend {
+                        asked.insert(&question.id);
+                    }
+                }
+                TopologyEventBody::QuestionAnswered { data } => {
+                    if asked.contains(&data.question) {
+                        approved = matches!(data.answer, Answer4::Answered { .. });
+                    }
+                }
+                _ => {}
+            }
+        }
+        approved
+    }
+
+    /// Hold `key`'s escalation onto the frontier rung for a person's approval (DESIGN §12).
+    /// `question_raised` parks the task, so nothing runs on that rung until an answer approves
+    /// it; a decline fails the task's lineage under the halt policy, and other tasks go on.
+    pub(super) fn ask_to_approve_spend(
+        &mut self,
+        key: TaskKey,
+        seams: &RunSeams<'_>,
+        hooks: &mut dyn TopologyHooks,
+    ) -> Result<Progress, UpstrokeError> {
+        let Some(threshold) = self.approve_spend_over else {
+            return Err(UpstrokeError::Refused {
+                message: format!(
+                    "task {} was held for a spend approval this run does not ask for, so \
+                     nothing was appended",
+                    key.index()
+                ),
+            });
+        };
+        let question = self.spend_question(key, threshold, seams.ids)?;
+        let id = question.id.clone();
+        self.emit(
+            TopologyEventBody::QuestionRaised {
+                data: QuestionRaised4 { question },
+            },
+            seams,
+            hooks,
+        )?;
+        Ok(Progress::Asked { key, question: id })
+    }
+
+    /// The approval question for `key`'s escalation onto its frontier rung, in the sequential
+    /// engine's words (`spend_question_context`) and with its options.
+    fn spend_question(
+        &self,
+        key: TaskKey,
+        threshold: f64,
+        ids: &dyn IdSource,
+    ) -> Result<FrozenQuestion, UpstrokeError> {
+        let entry = self
+            .handle
+            .fold
+            .registry()
+            .and_then(|registry| registry.get(key))
+            .ok_or_else(|| UpstrokeError::Refused {
+                message: format!("task {} is not in this run's frozen registry", key.index()),
+            })?;
+        let task = self
+            .handle
+            .fold
+            .task(key)
+            .ok_or_else(|| UpstrokeError::Refused {
+                message: format!("task {} is not in this run's fold", key.index()),
+            })?;
+        let attempts: u32 = task
+            .generations
+            .iter()
+            .map(|generation| generation.attempts)
+            .sum();
+        let rung = usize::try_from(task.rung).unwrap_or(usize::MAX);
+        let onto = entry
+            .ladder
+            .rungs
+            .get(rung)
+            .map_or(Tier::Frontier, |onto| onto.tier);
+        Ok(FrozenQuestion {
+            id: ids.question_id(),
+            key,
+            kind: QuestionKind::ApproveSpend,
+            context: crate::engine::coordinator::spend_question_context(
+                crate::engine::coordinator::ParkSubject {
+                    display_id: entry.display_id.as_str(),
+                    title: &entry.spec.title,
+                    acceptance: &entry.spec.acceptance,
+                    attempts,
+                    rungs_spent: rung.saturating_add(1),
+                },
+                onto,
+                self.spend.run_usd(),
+                threshold,
+                spend_is_a_floor(&self.handle.events),
+            ),
+            options: crate::engine::coordinator::topology_question_options(
+                QuestionKind::ApproveSpend,
+            ),
+        })
     }
 
     pub(super) fn cleanup_scope(&self) -> crate::rundir::CleanupScope {
@@ -1846,6 +2038,27 @@ impl TopologyRun {
                 });
             }
         };
+        if asked.question.kind == QuestionKind::ApproveSpend {
+            // A spend is approved only by its own option, never by words that name none.
+            return match chosen_index(&asked.question.options, &text) {
+                Some(0) => Ok(Answer4::Answered {
+                    option_index: 0,
+                    binding_override: None,
+                }),
+                Some(1) => Ok(Answer4::Declined {
+                    decline_halts_run: seams.halts_run,
+                }),
+                _ => Err(UpstrokeError::Refused {
+                    message: format!(
+                        "question {} asks to approve the spend of task {}'s escalation onto the \
+                         frontier rung, and `{text}` is neither of its options; a spend is \
+                         approved only by choosing its option, so nothing was appended",
+                        id.0,
+                        asked.key.index()
+                    ),
+                }),
+            };
+        }
         let (Some(authorized), QuestionOrigin::Admission) = (&asked.binding, asked.origin) else {
             return Ok(Answer4::Answered {
                 option_index: chosen_index(&asked.question.options, &text).unwrap_or(0),
@@ -2541,6 +2754,50 @@ impl TopologyRun {
         brokered(hooks, &emitter.state, invocations);
         Ok(())
     }
+}
+
+/// The task a fresh dispatch would open a generation for. A continuation's generation is open
+/// already, and it opened only once its spend was approved or needed no approval.
+fn fresh_dispatch(admitted: &Admitted) -> Option<TaskKey> {
+    match admitted {
+        Admitted::Dispatch {
+            key,
+            continuing: false,
+            ..
+        }
+        | Admitted::RepairDispatch {
+            key,
+            continuing: false,
+            ..
+        } => Some(*key),
+        _ => None,
+    }
+}
+
+/// The rung a settlement escalated its task onto, when it escalated.
+fn escalated_onto(settlement: &AttemptSettlement) -> Option<u32> {
+    match settlement {
+        AttemptSettlement::Closed {
+            transition: SettlementTransition::Escalated { rung },
+            ..
+        } => Some(*rung),
+        AttemptSettlement::Closed { .. } | AttemptSettlement::Retained { .. } => None,
+    }
+}
+
+/// Whether the run's reported spend is a floor rather than a total: an attempt or a review it
+/// records reported no cost (§13), as the sequential engine's `unpriced_attempts` counts them.
+fn spend_is_a_floor(events: &[TopologyEvent]) -> bool {
+    let unpriced = |record: &AttemptRecord| {
+        record.cost_usd.is_none() || record.review_cost_incomplete()
+    };
+    let attempts = events.iter().any(|event| match &event.body {
+        TopologyEventBody::AttemptFinished { data } => unpriced(&data.record),
+        TopologyEventBody::CandidatePrepared { data } => unpriced(&data.attempt),
+        _ => false,
+    });
+    let reviews = super::select::IntegrationReviews::replay(events);
+    attempts || reviews.all().any(|review| review.cost_usd.is_none())
 }
 
 fn reclaim_snapshots_of(

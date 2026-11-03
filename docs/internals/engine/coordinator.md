@@ -948,8 +948,9 @@ typed answer un-parks the task and reaches no agent
 (`PR249-ANSWER-TEXT-NOT-CARRIED`). PR8's fourteenth review found the
 `Clarify` list promising delivery the driver does not make; this list
 promises nothing it cannot keep, and its give-up option is the shared
-constant, so `answer_for_option` reads it as a decline. `ApproveSpend` is
-not a kind this driver raises and keeps the legacy pair for totality.
+constant, so `answer_for_option` reads it as a decline. `ApproveSpend` keeps
+the legacy pair, approve or the shared decline constant. The schema-4 driver
+raises it since J1 (`TopologyRun::ask_to_approve_spend`).
 
 ## `pub(super) fn question_context(`
 
@@ -961,10 +962,12 @@ plan. Naming them lets the schema-4 driver, which holds a `FrozenTaskSpec`
 and no `Task`, raise the same question the legacy engine does rather than
 wording its own.
 
-## `fn spend_question_context(`
+## `pub(super) fn spend_question_context(`
 
 §12's spend approval, in the operator's terms: what is about to happen, what
-it has cost so far, and how confident that figure is.
+it has cost so far, and how confident that figure is. The task comes as a
+[`ParkSubject`], so the schema-4 driver words its approval question the same
+way, including for a repair task the plan never named (J1).
 
 The threshold is a **spend-to-date** reading rather than a forward
 projection, and the text says so — see [`crate::config::AskBefore`] for why.

@@ -20634,3 +20634,276 @@ fn a_schema_4_resume_runs_the_recorded_gates_and_names_how_todays_differ() {
         assert!(warning.contains(&edit), "names `{edit}`: {warning}");
     }
 }
+
+/// The model the default bindings give the frontier tier (`catalog::example_binding`).
+const FRONTIER_MODEL: &str = "claude-opus-5";
+
+/// The mark a task's body carries to make its workers below the frontier end without an
+/// edit, so that its ladder must escalate onto the frontier.
+const ESCALATES: &str = "UPSTROKE-ESCALATES";
+
+/// A ladder from the mid tier onto the frontier for implementation tasks, an approval once the
+/// run has reported half a cent of spend, and nobody at a terminal.
+const SPEND_APPROVAL_CONFIG: &str = "[routing]\n\
+     implement = { chain = [\"mid\", \"frontier\"], attempts_per = 1 }\n\n\
+     [interaction]\nmode = \"never\"\nask_before = { frontier_escalation_over_usd = 0.005 }\n";
+
+/// What [`ObservedStub`] was asked to build.
+#[derive(Debug, Clone)]
+struct Built {
+    model: String,
+    reviewer: bool,
+    prompt: String,
+}
+
+/// The topology stub, recording every worker and reviewer it is asked to build: the model, whether
+/// it reviews, and the prompt it was handed. A worker below the frontier tier whose prompt
+/// carries [`ESCALATES`] ends without an edit.
+struct ObservedStub {
+    stub: TopologyStub,
+    built: Mutex<Vec<Built>>,
+}
+
+impl ObservedStub {
+    fn new(questions: usize) -> Self {
+        Self {
+            stub: TopologyStub::new(TOPOLOGY_STUB_EDIT, questions),
+            built: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn built(&self) -> Vec<Built> {
+        self.built
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// The model each worker ran on, in order.
+    fn workers(&self) -> Vec<String> {
+        self.built()
+            .into_iter()
+            .filter(|built| !built.reviewer)
+            .map(|built| built.model)
+            .collect()
+    }
+}
+
+impl AgentAdapter for ObservedStub {
+    fn id(&self) -> &'static str {
+        self.stub.id()
+    }
+
+    fn probe(&self, runner: &dyn crate::runner::Runner) -> Result<Caps, UpstrokeError> {
+        self.stub.probe(runner)
+    }
+
+    fn build(&self, run: &TaskRun) -> Result<CommandSpec, UpstrokeError> {
+        let reviewer = run.profile.permissions == PermissionMode::ReadOnly;
+        self.built
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(Built {
+                model: run.profile.model.clone(),
+                reviewer,
+                prompt: run.prompt.clone(),
+            });
+        if !reviewer && run.profile.model != FRONTIER_MODEL && run.prompt.contains(ESCALATES) {
+            return Ok(shell_spec("exit 0"));
+        }
+        self.stub.build(run)
+    }
+
+    fn parse(&self, out: &ProcessOutput) -> Result<Outcome, UpstrokeError> {
+        self.stub.parse(out)
+    }
+}
+
+/// [`ObservedStub`], shareable across the coordinator's pipeline threads.
+struct SharedObserved(std::sync::Arc<ObservedStub>);
+
+impl AdapterSource for SharedObserved {
+    fn get(&self, id: &str) -> Option<&dyn AgentAdapter> {
+        (id == TOPOLOGY_STUB).then_some(&*self.0 as &dyn AgentAdapter)
+    }
+
+    fn shared(&self) -> Option<std::sync::Arc<dyn AdapterSource + Send + Sync>> {
+        Some(std::sync::Arc::new(Self(std::sync::Arc::clone(&self.0))))
+    }
+}
+
+/// [`ObservedStub`] behind a source that cannot be shared: the step loop.
+struct BorrowedObserved<'a>(&'a ObservedStub);
+
+impl AdapterSource for BorrowedObserved<'_> {
+    fn get(&self, id: &str) -> Option<&dyn AgentAdapter> {
+        (id == TOPOLOGY_STUB).then_some(self.0 as &dyn AgentAdapter)
+    }
+}
+
+/// One task whose ladder escalates from the mid tier onto the frontier.
+fn escalating_plan() -> String {
+    format!("## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n{ESCALATES}\n")
+}
+
+/// J1, PR12 regression review #1 (P1). A schema-4 ladder that escalates onto the frontier once
+/// the run's reported spend has reached `ask_before.frontier_escalation_over_usd` asks first,
+/// as the sequential engine's `should_approve_spend` does (DESIGN §12). At the reviewed head the
+/// schema-4 entry never supplied the control and the frontier ran unasked. Here, under the
+/// coordinator, the question parks the run before any frontier worker starts, a resume with no
+/// answer parks again and starts nothing, and the approval then runs the frontier attempt.
+#[test]
+fn a_schema_4_frontier_escalation_over_the_threshold_waits_for_its_approval() {
+    let (_tree, repo) = temp_engine_repo("topology-approve-spend");
+    seed(&repo, &escalating_plan(), Some(SPEND_APPROVAL_CONFIG));
+    let stub = std::sync::Arc::new(ObservedStub::new(0));
+    let source = SharedObserved(std::sync::Arc::clone(&stub));
+    let parked = run_with(&topology_options(&repo), &source).expect("the run parks");
+    assert_eq!(parked.outcome(), RunOutcome::Parked, "{parked:#?}");
+    let [asked] = parked.questions.as_slice() else {
+        panic!("one question: {parked:#?}");
+    };
+    assert_eq!(asked.question.kind, QuestionKind::ApproveSpend);
+    for named in ["frontier", "$0.0100"] {
+        assert!(
+            asked.question.context.contains(named),
+            "the question names `{named}`: {}",
+            asked.question.context
+        );
+    }
+    assert_eq!(
+        stub.workers(),
+        ["claude-sonnet-5"],
+        "no frontier worker ran unapproved"
+    );
+    until_released(&repo, &parked.run_id);
+
+    let mut resume = resume_options(&repo, &parked.run_id);
+    resume.private_root = None;
+    let again = resume_with(&resume, &source).expect("an unanswered resume parks again");
+    assert_eq!(again.outcome(), RunOutcome::Parked, "{again:#?}");
+    assert_eq!(
+        stub.workers(),
+        ["claude-sonnet-5"],
+        "and still runs nothing on the frontier"
+    );
+    until_released(&repo, &parked.run_id);
+
+    crate::answer::answer(
+        &repo,
+        &asked.question.id.to_string(),
+        crate::answer::Reply::Option(1),
+    )
+    .expect("the approval is recorded");
+    let report = resume_with(&resume, &source).expect("the approved run completes");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:#?}");
+    assert!(committed(&report, "t1"), "{report:#?}");
+    assert_eq!(stub.workers(), ["claude-sonnet-5", FRONTIER_MODEL]);
+    let events = log_events(&repo, &parked.run_id);
+    let at = |kind: &str| events.iter().position(|event| event["event"] == kind);
+    let raised = at("question_raised").expect("the question");
+    let answered = at("question_answered").expect("its answer");
+    let frontier = events
+        .iter()
+        .position(|event| event["event"] == "attempt_started" && event["data"]["rung"] == 1)
+        .expect("the frontier attempt");
+    assert!(
+        raised < answered && answered < frontier,
+        "asked, then approved, then run: {raised}, {answered}, {frontier}"
+    );
+}
+
+/// J1: a declined spend approval fails the task through the halt policy with nothing spent on
+/// the frontier, here through the step loop (the sequential engine's
+/// `a_declined_spend_approval_fails_the_task_through_the_halt_policy`).
+#[test]
+fn a_schema_4_declined_spend_approval_fails_the_task_before_the_frontier_runs() {
+    let (_tree, repo) = temp_engine_repo("topology-decline-spend");
+    seed(&repo, &escalating_plan(), Some(SPEND_APPROVAL_CONFIG));
+    let stub = ObservedStub::new(0);
+    let source = BorrowedObserved(&stub);
+    let parked = run_with(&topology_options(&repo), &source).expect("the run parks");
+    assert_eq!(parked.outcome(), RunOutcome::Parked, "{parked:#?}");
+    until_released(&repo, &parked.run_id);
+    let [asked] = parked.questions.as_slice() else {
+        panic!("one question: {parked:#?}");
+    };
+    crate::answer::answer(
+        &repo,
+        &asked.question.id.to_string(),
+        crate::answer::Reply::Decline,
+    )
+    .expect("the decline is recorded");
+
+    let mut resume = resume_options(&repo, &parked.run_id);
+    resume.private_root = None;
+    let report = resume_with(&resume, &source).expect("the declined run ends");
+    assert_eq!(report.outcome(), RunOutcome::Halted, "{report:#?}");
+    assert!(
+        matches!(task(&report, "t1").status, TaskRunStatus::Failed { .. }),
+        "{report:#?}"
+    );
+    assert_eq!(
+        stub.workers(),
+        ["claude-sonnet-5"],
+        "declining spent nothing on the frontier"
+    );
+}
+
+/// J1: while one task's escalation waits for its approval, an unrelated task runs to its merge
+/// under the coordinator, and the run ends parked on the one question with nothing run on the
+/// frontier.
+#[test]
+fn a_schema_4_spend_approval_parks_only_its_own_task() {
+    let (_tree, repo) = temp_engine_repo("topology-approve-spend-alongside");
+    seed(
+        &repo,
+        &format!(
+            "{}\n## Two\n<!-- upstroke: id=t2 kind=implement depends= -->\nMake it.\n",
+            escalating_plan()
+        ),
+        Some(&format!("{SPEND_APPROVAL_CONFIG}\n[engine]\nmax_parallel = 2\n")),
+    );
+    let stub = std::sync::Arc::new(ObservedStub::new(0));
+    let source = SharedObserved(std::sync::Arc::clone(&stub));
+    let parked = run_with(&topology_options(&repo), &source).expect("the run parks");
+    assert_eq!(parked.outcome(), RunOutcome::Parked, "{parked:#?}");
+    assert!(
+        committed(&parked, "t2"),
+        "the unrelated task merged: {parked:#?}"
+    );
+    assert!(
+        matches!(task(&parked, "t1").status, TaskRunStatus::Parked { .. }),
+        "{parked:#?}"
+    );
+    let [asked] = parked.questions.as_slice() else {
+        panic!("one question: {parked:#?}");
+    };
+    assert_eq!(asked.question.kind, QuestionKind::ApproveSpend);
+    assert!(
+        !stub.workers().iter().any(|model| model == FRONTIER_MODEL),
+        "{:?}",
+        stub.workers()
+    );
+}
+
+/// J1: under the threshold an escalation onto the frontier needs no approval, and its attempt
+/// runs unasked.
+#[test]
+fn a_schema_4_frontier_escalation_under_the_threshold_runs_unasked() {
+    let (_tree, repo) = temp_engine_repo("topology-spend-under-threshold");
+    let config = SPEND_APPROVAL_CONFIG.replace("0.005", "1.0");
+    seed(&repo, &escalating_plan(), Some(&config));
+    let stub = ObservedStub::new(0);
+    let report =
+        run_with(&topology_options(&repo), &BorrowedObserved(&stub)).expect("the run completes");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:#?}");
+    assert!(committed(&report, "t1"), "{report:#?}");
+    assert_eq!(stub.workers(), ["claude-sonnet-5", FRONTIER_MODEL]);
+    assert!(
+        !event_kinds(&repo, &report.run_id)
+            .iter()
+            .any(|kind| kind == "question_raised"),
+        "nothing was asked"
+    );
+}

@@ -193,6 +193,14 @@ A run keeps the limits it started with. Today's `max_parallel` and
 `max_merge_repairs` are compared with the record and a difference warns.
 The slot limits are not recorded and are acted on (`resumed_slot_limits`).
 
+## `ask_before` › the spend approval
+
+Both halves hand the run `ask_before.frontier_escalation_over_usd`
+(`TopologyRun::with_spend_approval`): a fresh run from its analysed config,
+a resume from today's, as the sequential resume does. Without it the
+schema-4 entry never asked before an escalation onto the frontier
+(regression review #1, J1).
+
 ## `fn compare_recorded_gates(`
 
 A run keeps the gates it recorded, and the recorded gates are the ones the

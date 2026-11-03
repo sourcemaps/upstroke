@@ -447,7 +447,22 @@ pub fn check_reply(asked: &OpenAsked, answer: &crate::ir::Answer) -> Result<(), 
     let crate::ir::Answer::Answered { text } = answer else {
         return Ok(());
     };
-    if !asked.binds_an_agent || asked.question.options.iter().any(|option| option == text) {
+    if asked.question.options.iter().any(|option| option == text) {
+        return Ok(());
+    }
+    if asked.question.kind == crate::ir::QuestionKind::ApproveSpend {
+        return Err(UpstrokeError::Refused {
+            message: format!(
+                "question {} asks to approve the spend of an escalation onto the frontier rung, \
+                 and `{text}` is neither of its {} option(s); a spend is approved only by \
+                 choosing its option, so answer it with --option N or --decline. Nothing was \
+                 written",
+                asked.question.id,
+                asked.question.options.len()
+            ),
+        });
+    }
+    if !asked.binds_an_agent {
         return Ok(());
     }
     Err(UpstrokeError::Refused {

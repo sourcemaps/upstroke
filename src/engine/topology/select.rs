@@ -304,6 +304,9 @@ pub enum Admitted {
         questions: Vec<QuestionId>,
     },
     Closure(DerivedOutcome),
+    ApproveSpend {
+        key: TaskKey,
+    },
 }
 
 #[must_use]

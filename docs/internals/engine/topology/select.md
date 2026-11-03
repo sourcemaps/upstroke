@@ -336,8 +336,10 @@ checkpoint refuses continuation, quoting the outcome.
 
 The branches an **intermediate build** is entitled to perform.
 
-[`Step`] has **eleven** variants and this has **eight**, so **three** do
-not cross: `Poisoned`, `NotStarted` and `Finished`. None of the three is a
+[`Step`] has **eleven** variants and this has **nine**: **eight** cross
+from it, and the ninth, `ApproveSpend`, is not a selection at all but the
+run's own hold on one (below). So **three** do not cross: `Poisoned`,
+`NotStarted` and `Finished`. None of the three is a
 refusal of a *branch* any more. `Closure` was, for PR7 through PR9 — the
 whole of `checkpoint_refusals`, made unrepresentable rather than remembered:
 no value of this type could carry a run end — and it crossed when PR10
@@ -363,7 +365,7 @@ Both counts are computed, per §22:
 $ awk '/^pub enum Step \{/,/^\}/'     src/engine/topology/select.rs | grep -cE '^    [A-Z]'
 11
 $ awk '/^pub enum Admitted \{/,/^\}/' src/engine/topology/select.rs | grep -cE '^    [A-Z]'
-8
+9
 ```
 
 ## `pub enum Admitted` › `BudgetExceeded(Box<BudgetExceeded4>),`
@@ -426,6 +428,21 @@ closure procedure and terminal finalization (`closure.md`, `finalize.md`).
 The `DerivedOutcome` it carries is the fold's derivation at selection; the
 closure reads the ending outcome again for itself, because a budget stop or
 a halt outranks a derivation that a retained generation still blocks.
+
+## `pub enum Admitted` › `ApproveSpend {`
+
+Not a selection. `TopologyRun::admitted` turns a fresh `Dispatch` or
+`RepairDispatch` into this when that dispatch would start an attempt on a
+frontier rung that `ask_before.frontier_escalation_over_usd` holds for a
+person's approval (regression review #1, J1; DESIGN §12). Both drivers raise
+the approval question (`TopologyRun::ask_to_approve_spend`) instead of
+dispatching, so no such attempt starts unapproved. `select` itself is
+unchanged: the hold reads the run's configured threshold and its log, which
+selection never sees.
+
+## `pub enum Admitted` › `key: TaskKey,`
+
+The task whose escalation waits for approval.
 
 ## `pub fn select(fold: &TopologyFold, ceiling: &Ceiling, spend: &Spend) -> Step {`
 
