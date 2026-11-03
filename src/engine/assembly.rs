@@ -218,7 +218,12 @@ impl AttemptPlans for FrozenPlans<'_> {
                 &self.paths.artifacts(),
                 WorkerSubject::of_frozen(&entry.spec),
             ),
-            decisions: self.decisions.to_vec(),
+            decisions: self
+                .decisions
+                .iter()
+                .chain(request.decisions)
+                .cloned()
+                .collect(),
             stem: crate::util::filename_component(entry.display_id.as_str()),
         })
     }

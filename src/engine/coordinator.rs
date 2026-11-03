@@ -1417,7 +1417,8 @@ pub(super) fn topology_question_options(kind: QuestionKind) -> Vec<String> {
     match kind {
         QuestionKind::ApproveSpend => question_options(kind),
         QuestionKind::Clarify | QuestionKind::Unblock | QuestionKind::Continue => vec![
-            "retry this task (typed text un-parks it and is not passed to the agent)".to_owned(),
+            "retry this task (typed text un-parks it and reaches the agent and its reviewer)"
+                .to_owned(),
             interaction::GIVE_UP_OPTION.to_owned(),
         ],
     }

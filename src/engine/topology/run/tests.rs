@@ -1268,3 +1268,89 @@ mod scaffold_runner {
         );
     }
 }
+
+/// J2, `PR249-ANSWER-TEXT-NOT-CARRIED`: the brief takes a person's words from
+/// `question_answered`, live and on replay alike. Words that name none of the question's options
+/// become an instruction from a person, which is also the review's decision. A chosen option, a
+/// spend approval, a decline, and an older record with no words add nothing.
+#[test]
+fn the_brief_takes_an_answers_words_from_the_log_live_and_on_replay() {
+    use crate::topology::events::{QuestionAnswered4, QuestionRaised4};
+
+    let words = "Use UNIQUE_ZEBRA_FORMAT_739 for the widget.";
+    let ask = |id: &str, kind: QuestionKind| FrozenQuestion {
+        id: QuestionId(id.to_owned()),
+        key: TaskKey(0),
+        kind,
+        context: "a person is asked".to_owned(),
+        options: crate::engine::coordinator::topology_question_options(kind),
+    };
+    let answered = |id: &str, answer: Answer4, text: Option<&str>| QuestionAnswered4 {
+        key: TaskKey(0),
+        question: QuestionId(id.to_owned()),
+        answer,
+        via: "event-log".to_owned(),
+        text: text.map(str::to_owned),
+    };
+    let chosen = Answer4::Answered {
+        option_index: 0,
+        binding_override: None,
+    };
+    let declined = Answer4::Declined {
+        decline_halts_run: false,
+    };
+    let options = crate::engine::coordinator::topology_question_options(QuestionKind::Clarify);
+    let retry = &options[0];
+    let cases = [
+        (
+            ask("q-words", QuestionKind::Clarify),
+            answered("q-words", chosen.clone(), Some(words)),
+        ),
+        (
+            ask("q-option", QuestionKind::Clarify),
+            answered("q-option", chosen.clone(), Some(retry)),
+        ),
+        (
+            ask("q-spend", QuestionKind::ApproveSpend),
+            answered("q-spend", chosen.clone(), Some("spend it")),
+        ),
+        (
+            ask("q-older", QuestionKind::Unblock),
+            answered("q-older", chosen, None),
+        ),
+        (
+            ask("q-declined", QuestionKind::Continue),
+            answered("q-declined", declined, None),
+        ),
+    ];
+
+    let mut live = Brief::new();
+    let mut events = Vec::new();
+    for (question, answer) in &cases {
+        live.record_answer(question.kind, &question.options, answer);
+        for body in [
+            TopologyEventBody::QuestionRaised {
+                data: QuestionRaised4 {
+                    question: question.clone(),
+                },
+            },
+            TopologyEventBody::QuestionAnswered {
+                data: answer.clone(),
+            },
+        ] {
+            events.push(TopologyEvent {
+                ts: "2026-11-03T00:00:00.000Z".to_owned(),
+                body,
+            });
+        }
+    }
+    let replayed = Brief::replay(&events);
+    assert_eq!(replayed, live, "the replay reaches the live brief");
+    let lines = replayed.lines(TaskKey(0));
+    let [line] = lines.as_slice() else {
+        panic!("one instruction from a person: {lines:?}");
+    };
+    assert!(line.human, "{line:?}");
+    assert_eq!(line.detail.as_deref(), Some(words));
+    assert_eq!(replayed.decisions(TaskKey(0)), [words]);
+}

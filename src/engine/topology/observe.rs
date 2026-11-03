@@ -333,7 +333,8 @@ fn spawn_question(spawn: &FrozenSpawn) -> Option<&FrozenQuestion> {
     }
 }
 
-fn question_opened_by(event: &TopologyEvent) -> Option<&FrozenQuestion> {
+/// The question `event` opened, if it opened one: what an answer to it answers.
+pub(super) fn question_opened_by(event: &TopologyEvent) -> Option<&FrozenQuestion> {
     match &event.body {
         TopologyEventBody::QuestionRaised { data } => Some(&data.question),
         TopologyEventBody::AttemptFinished { data } => match &data.settlement {

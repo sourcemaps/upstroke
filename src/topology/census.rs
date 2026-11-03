@@ -1101,6 +1101,7 @@ pub(crate) mod tests {
                 question: question.clone(),
                 answer,
                 via: "census".to_owned(),
+                text: None,
             },
         })
     }

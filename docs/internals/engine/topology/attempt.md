@@ -247,6 +247,13 @@ The task under review, as the prompt quotes it.
 
 The diff being judged, as the engine captured it.
 
+## `pub struct InputsRequest<'a>` › `pub decisions: &'a [String],`
+
+What the operator answered about this task in words
+(`run::Brief::decisions`): the decisions the review must honour (J2). The
+attempt's review takes them from its `AttemptJob`, and an integration
+verification's review from its `VerificationJob`.
+
 ## `pub trait AttemptPlans {`
 
 Where an [`AttemptPlan`] and the review inputs beside it are assembled.
@@ -1794,7 +1801,9 @@ resumably. Its Git error ends the command whatever its variant, as it did.
 Everything an attempt's body needs that the coordinator knows when it starts
 the attempt: the site (key, generation, base, slot, worktree), the plan and the
 frozen registry entry, owned, so it can move to a pipeline's thread. The
-coordinator keeps its own copy for the settlement.
+coordinator keeps its own copy for the settlement. Since J2 it also carries
+`decisions`, the task's human decisions as the attempt was prepared, so the
+attempt's review is given them in either execution mode.
 
 ## `pub struct Judged {`
 

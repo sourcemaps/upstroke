@@ -11935,6 +11935,7 @@ mod tests {
                     decline_halts_run: false,
                 },
                 via: "the scheduler declines the sibling's question".to_owned(),
+                text: None,
             },
         });
         events

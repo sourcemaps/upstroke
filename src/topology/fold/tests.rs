@@ -6773,6 +6773,7 @@ fn answered(key: TaskKey, id: &str, answer: Answer4) -> TopologyEvent {
             question: QuestionId::from(id),
             answer,
             via: "  upstroke answer  ".to_owned(),
+            text: None,
         },
     })
 }

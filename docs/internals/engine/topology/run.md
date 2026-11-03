@@ -764,9 +764,34 @@ nothing.
 A record with no failure adds nothing: a successful attempt has no
 feedback, and `detail` is `None` on an attempt nothing judged.
 
+## `impl Brief` › `pub fn record_answer(`
+
+A person's words on an answered question, read as the sequential fold
+reads them (`events::RunState`'s `question_answered`; J2). Words that name
+none of the question's options are an instruction from a person
+(`human: true`). The next attempt's prompt quotes it with the legacy
+precedence ("an instruction from a person, and it takes precedence"), and
+its review is given it as a decision ([`Self::decisions`]). Four answers add
+nothing: a chosen option (its text is canned), a spend approval, a decline,
+and a record written before answers kept their words (`text` absent). For
+that last one the words were never recorded, and none are invented.
+
+The live loop calls it from the record it has just appended
+(`ingest_answer`), and [`Self::replay`] from the same record in the log,
+so recovery rebuilds the instruction from events alone.
+
+## `impl Brief` › `pub fn decisions(&self, key: TaskKey) -> Vec<String> {`
+
+The person's instructions in this task's brief, oldest first: the
+`decisions` its review, and its integration verification's review, are
+given (`AttemptJob::decisions`, `VerificationJob`). At the reviewed head the
+entry handed every review an empty list, in both execution modes (J2).
+
 ## `impl Brief` › `pub fn replay(events: &[TopologyEvent]) -> Self {`
 
-Every task's brief over a whole log.
+Every task's brief over a whole log. Since J2 it also reads
+`question_answered` through [`Self::record_answer`], against the question
+that event answered (`observe::question_opened_by`).
 
 **`attempt_finished` only, which is exactly the live loop's coverage.**
 Two events carry an [`AttemptRecord`] — `attempt_finished` and
@@ -2289,7 +2314,9 @@ override.
 ## `impl TopologyRun` › `fn ingest_answer(`
 
 Append `question_answered` for whichever origin `answer_for` read, and
-report `Answered { declined }`. The fold does the routing: `AwaitingMerge`
+report `Answered { declined }`. An `answered` record keeps the person's
+words (`text`, J2), and the brief then takes them from the appended record
+(`Brief::record_answer`). The fold does the routing: `AwaitingMerge`
 for a verification park (the candidate re-verifies under a new
 sequence), `Pending` for an admission, a failed lineage for a decline
 with its queue position consumed and its lease released, halting per

@@ -129,6 +129,13 @@ An embedded record a writer may have recorded as absent.
 
 As [`field`], when one is present.
 
+## `pub(crate) mod strict` › `pub(crate) fn present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>`
+
+The decoder of a field that later records always carry and earlier ones
+may lack. Absent, it is `None` through `#[serde(default)]`. Present, it
+must be a value, and `null` is refused. Its one use is
+`QuestionAnswered4::text` (J2).
+
 ## `pub(crate) mod strict` › `pub(crate) fn required<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>`
 
 An optional field whose *key* is still required.
@@ -677,6 +684,33 @@ meant.
 Which channel produced it — a terminal, an out-of-band `upstroke answer`,
 or a resume picking up an answer written while the run was dead.
 
+## `pub struct QuestionAnswered4` › `pub text: Option<String>,`
+
+The person's words (regression review #2, J2, closing the gap
+`PR249-ANSWER-TEXT-NOT-CARRIED` deferred for want of this field). Every
+`answered` answer this build appends carries `text`: the exact text the
+answer source read, which is an option's own text when an option was
+chosen. A decline carries none (`AnswerDefect::DeclineWithText`).
+
+**The serialized change.** It is one optional key, `text`, on the
+`question_answered` payload. It is written only when there are words
+(`skip_serializing_if`), so a decline, and every record without words,
+serializes exactly as before. Present, it must be a string: `null` or any
+other value is refused (`strict::present`).
+
+**Compatibility.** The schema stays 4. No released build reads schema 4,
+because the base's activation was `Inactive` and its `MAX_READABLE_SCHEMA`
+was 3, so a release refuses any schema-4 log at its ceiling. Schema-4
+records that the PR12 branch's earlier builds wrote lack the key and still
+decode: an absent `text` reads as words not recorded. Nothing is filled in
+for it, and no instruction is derived from it (`run::Brief::record_answer`).
+This is the one schema-4 field where an absent key means "written before
+the field existed" (compare `strict::required`). The canonical corpus's own
+`question_answered` is such a record, so
+`every_event_decodes_from_its_independently_written_payload` pins that it
+still decodes. An earlier PR12 build that meets a record carrying `text`
+refuses it as an unknown field, so it fails closed. Schemas 1–3 are untouched.
+
 ## `pub enum AnswerDefect {`
 
 How an answer disagrees with itself.
@@ -696,6 +730,12 @@ The override records a different option from the one chosen.
 ## `pub enum AnswerDefect` › `DeclineWithOverride,`
 
 A decline carrying a binding.
+
+## `pub enum AnswerDefect` › `DeclineWithText,`
+
+A decline carrying words. Only an `answered` answer keeps the person's
+words (J2), so a decline with `text` is a record no writer of this build
+produces, and the fold refuses it rather than guessing what it meant.
 
 ## `impl QuestionAnswered4` › `pub fn self_consistency(&self) -> Result<(), AnswerDefect> {`
 

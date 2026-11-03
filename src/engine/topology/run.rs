@@ -136,6 +136,7 @@ struct IntegrationCx<'a, 'h> {
     hooks: &'h mut dyn TopologyHooks,
     invocations: &'h mut InvocationLedger,
     spend: &'h mut Spend,
+    brief: &'h Brief,
     seams: &'h RunSeams<'a>,
     charged: Vec<crate::events::ReviewRecord>,
 }
@@ -507,9 +508,10 @@ pub(super) fn hard_block<O: Operator + ?Sized>(
             Answer::Unanswered => continue,
             answer => answer,
         };
+        let given = answer.clone();
         let answer4 = operator.driven().answer_for(id, &asked, answer, seams)?;
         let (run, seams, hooks) = operator.parts();
-        return run.ingest_answer(id, asked.key, answer4, seams, hooks);
+        return run.ingest_answer(id, &asked, answer4, &given, seams, hooks);
     }
     close_run(operator, seams, &closure::Cancelled::none())
 }
@@ -767,7 +769,8 @@ fn implementer_binding(
 
 impl Verification for IntegrationCx<'_, '_> {
     fn verify(&mut self, request: &VerifyRequest<'_>) -> Result<Verified, UpstrokeError> {
-        let job = VerificationJob::of(self.emitter.state.fold, request)?;
+        let decisions = self.brief.decisions(request.candidate.key);
+        let job = VerificationJob::of(self.emitter.state.fold, request, decisions)?;
         let mut charged = Vec::new();
         let outcome = {
             let ledger = std::sync::Mutex::new(&mut *self.invocations);
@@ -857,10 +860,16 @@ pub struct VerificationJob {
     entry: crate::topology::registry::TaskEntry,
     base: Option<CommitSha>,
     implementer: crate::review::PassBinding,
+    /// The task's human decisions, for the verification's review ([`Brief::decisions`]).
+    decisions: Vec<String>,
 }
 
 impl VerificationJob {
-    pub fn of(fold: &TopologyFold, request: &VerifyRequest<'_>) -> Result<Self, UpstrokeError> {
+    pub fn of(
+        fold: &TopologyFold,
+        request: &VerifyRequest<'_>,
+        decisions: Vec<String>,
+    ) -> Result<Self, UpstrokeError> {
         let key = request.candidate.key;
         let entry = fold
             .registry()
@@ -888,6 +897,7 @@ impl VerificationJob {
             entry,
             base,
             implementer: implementer_binding(fold, key)?,
+            decisions,
         })
     }
 }
@@ -957,6 +967,7 @@ pub fn verification_body(
         .inputs(&InputsRequest {
             entry: &job.entry,
             diff,
+            decisions: &job.decisions,
         })
         .map_err(JudgeError::Other)?;
 
@@ -1209,12 +1220,65 @@ impl Brief {
             });
     }
 
+    /// The person's words on an answered question, as the sequential fold reads them
+    /// (`events::RunState`'s `question_answered`): words that name none of the question's
+    /// options are an instruction from a person for the task's next attempt and its review. A
+    /// chosen option, a spend approval, a decline, and a record written before answers kept
+    /// their words add nothing.
+    pub fn record_answer(
+        &mut self,
+        kind: QuestionKind,
+        options: &[String],
+        answered: &crate::topology::events::QuestionAnswered4,
+    ) {
+        let (Answer4::Answered { .. }, Some(text)) = (&answered.answer, &answered.text) else {
+            return;
+        };
+        if kind == QuestionKind::ApproveSpend || options.iter().any(|option| option == text) {
+            return;
+        }
+        let lines = self.per_task.entry(answered.key).or_default();
+        let attempt = lines.last().map_or(0, |line| line.attempt);
+        lines.push(crate::events::Feedback {
+            attempt,
+            tier: String::new(),
+            summary: "the operator answered the open question".to_owned(),
+            detail: Some(text.clone()),
+            human: true,
+        });
+    }
+
+    /// The person's instructions this task's brief holds, oldest first: the decisions its
+    /// review is given (the sequential engine's `decisions`).
+    #[must_use]
+    pub fn decisions(&self, key: TaskKey) -> Vec<String> {
+        self.per_task
+            .get(&key)
+            .into_iter()
+            .flatten()
+            .filter(|line| line.human)
+            .filter_map(|line| line.detail.clone())
+            .collect()
+    }
+
     #[must_use]
     pub fn replay(events: &[TopologyEvent]) -> Self {
         let mut brief = Self::new();
+        let mut asked = BTreeMap::new();
         for event in events {
-            if let TopologyEventBody::AttemptFinished { data } = &event.body {
-                brief.record(data.key, &data.record);
+            if let Some(question) = super::observe::question_opened_by(event) {
+                asked.insert(&question.id, question);
+            }
+            match &event.body {
+                TopologyEventBody::AttemptFinished { data } => {
+                    brief.record(data.key, &data.record);
+                }
+                TopologyEventBody::QuestionAnswered { data } => {
+                    if let Some(question) = asked.get(&data.question) {
+                        brief.record_answer(question.kind, &question.options, data);
+                    }
+                }
+                _ => {}
             }
         }
         brief
@@ -1769,9 +1833,10 @@ impl TopologyRun {
                 Answer::Unanswered => continue,
                 answer => answer,
             };
+            let given = answer.clone();
             let answer4 = self.answer_for(id, &asked, answer, seams)?;
             return self
-                .ingest_answer(id, asked.key, answer4, seams, hooks)
+                .ingest_answer(id, &asked, answer4, &given, seams, hooks)
                 .map(Some);
         }
         Ok(None)
@@ -1849,6 +1914,7 @@ impl TopologyRun {
                 hooks,
                 invocations,
                 spend: &mut self.spend,
+                brief: &self.brief,
                 seams,
                 charged: Vec::new(),
             };
@@ -1933,7 +1999,8 @@ impl TopologyRun {
         &self,
         request: &VerifyRequest<'_>,
     ) -> Result<VerificationJob, UpstrokeError> {
-        VerificationJob::of(&self.handle.fold, request)
+        let decisions = self.brief.decisions(request.candidate.key);
+        VerificationJob::of(&self.handle.fold, request, decisions)
     }
 
     pub(super) fn charge_reviews(&mut self, key: TaskKey, reviews: &[crate::events::ReviewRecord]) {
@@ -2110,29 +2177,41 @@ impl TopologyRun {
         })
     }
 
+    /// Append `question_answered` for `asked`, as `answer_for` read `given`. An `answered`
+    /// record keeps the person's words (`text`, J2), and the brief takes them from the record
+    /// it appended ([`Brief::record_answer`]), as a replay of the log takes them.
     fn ingest_answer(
         &mut self,
         id: &QuestionId,
-        key: TaskKey,
+        asked: &OpenAsked,
         answer4: Answer4,
+        given: &Answer,
         seams: &RunSeams<'_>,
         hooks: &mut dyn TopologyHooks,
     ) -> Result<Progress, UpstrokeError> {
         let declined = matches!(answer4, Answer4::Declined { .. });
+        let text = match (&answer4, given) {
+            (Answer4::Answered { .. }, Answer::Answered { text }) => Some(text.clone()),
+            _ => None,
+        };
+        let answered = crate::topology::events::QuestionAnswered4 {
+            key: asked.key,
+            question: id.clone(),
+            answer: answer4,
+            via: seams.answers.id().to_owned(),
+            text,
+        };
         self.emit(
             TopologyEventBody::QuestionAnswered {
-                data: crate::topology::events::QuestionAnswered4 {
-                    key,
-                    question: id.clone(),
-                    answer: answer4,
-                    via: seams.answers.id().to_owned(),
-                },
+                data: answered.clone(),
             },
             seams,
             hooks,
         )?;
+        self.brief
+            .record_answer(asked.question.kind, &asked.question.options, &answered);
         Ok(Progress::Answered {
-            key,
+            key: asked.key,
             question: id.clone(),
             declined,
         })
@@ -2408,6 +2487,7 @@ impl TopologyRun {
             worktree: site.worktree.to_path_buf(),
             plan,
             entry,
+            decisions: self.brief.decisions(key),
         })
     }
 

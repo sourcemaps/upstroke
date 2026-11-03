@@ -20907,3 +20907,75 @@ fn a_schema_4_frontier_escalation_under_the_threshold_runs_unasked() {
         "nothing was asked"
     );
 }
+
+/// The words the J2 test answers with: an instruction no prompt holds unless the answer reached
+/// it.
+const UNIQUE_ANSWER: &str = "Use UNIQUE_ZEBRA_FORMAT_739 for the widget.";
+
+/// J2, PR12 regression review #2 (P1), `PR249-ANSWER-TEXT-NOT-CARRIED`: a person's answer in their
+/// own words reaches the resumed worker as an instruction and its reviewer as a decision, under
+/// the coordinator and under the step loop, and the log keeps the words. At the reviewed head the
+/// answer un-parked the task and reached no agent: `question_answered` kept only an option index
+/// and the entry gave every review an empty list of decisions. Each mode parks on the worker's
+/// question, takes `upstroke answer --text` and resumes.
+#[test]
+fn a_schema_4_answer_in_words_reaches_the_next_worker_and_its_reviewer() {
+    for shared in [true, false] {
+        let (_tree, repo) = temp_engine_repo(&format!("topology-answer-words-{shared}"));
+        let stub = std::sync::Arc::new(ObservedStub::new(1));
+        let shared_source = SharedObserved(std::sync::Arc::clone(&stub));
+        let borrowed_source = BorrowedObserved(&stub);
+        let source: &dyn AdapterSource = if shared {
+            &shared_source
+        } else {
+            &borrowed_source
+        };
+        let parked = run_with(&topology_options(&repo), source).expect("the run parks");
+        assert_eq!(parked.outcome(), RunOutcome::Parked, "{parked:#?}");
+        until_released(&repo, &parked.run_id);
+        let [asked] = parked.questions.as_slice() else {
+            panic!("one question: {parked:#?}");
+        };
+        crate::answer::answer(
+            &repo,
+            &asked.question.id.to_string(),
+            crate::answer::Reply::Text(UNIQUE_ANSWER.to_owned()),
+        )
+        .expect("the answer is recorded");
+        let before = stub.built().len();
+
+        let mut resume = resume_options(&repo, &parked.run_id);
+        resume.private_root = None;
+        let report = resume_with(&resume, source).expect("the resume completes the run");
+        assert_eq!(report.outcome(), RunOutcome::Complete, "{report:#?}");
+        let resumed = stub.built().split_off(before);
+        let worker = resumed
+            .iter()
+            .find(|built| !built.reviewer)
+            .expect("a resumed worker");
+        assert!(
+            worker.prompt.contains(UNIQUE_ANSWER)
+                && worker.prompt.contains("This is an instruction from a person"),
+            "shared {shared}: the worker is told:\n{}",
+            worker.prompt
+        );
+        let reviewer = resumed
+            .iter()
+            .find(|built| built.reviewer)
+            .expect("its reviewer");
+        assert!(
+            reviewer.prompt.contains(UNIQUE_ANSWER)
+                && reviewer.prompt.contains("This is a decision from a person"),
+            "shared {shared}: the reviewer is told:\n{}",
+            reviewer.prompt
+        );
+        let answered = log_events(&repo, &parked.run_id)
+            .into_iter()
+            .find(|event| event["event"] == "question_answered")
+            .expect("the answer's record");
+        assert_eq!(
+            answered["data"]["text"], UNIQUE_ANSWER,
+            "shared {shared}: the log keeps the words"
+        );
+    }
+}

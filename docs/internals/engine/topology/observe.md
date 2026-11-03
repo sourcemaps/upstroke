@@ -110,6 +110,13 @@ spawn froze (`run.rs`, `answer_for`). An `ApproveSpend` question does too,
 because a spend is approved only by choosing its option, never by words
 (J1). Refusing here keeps those refusals out of the run.
 
+## `pub(super) fn question_opened_by(event: &TopologyEvent) -> Option<&FrozenQuestion> {`
+
+The question an event opened, whichever kind opened it.
+`open_question_candidates` reads it to name the questions a run has
+already settled, and since J2 `run::Brief::replay` reads it too, to judge
+an answer's words against the options of the question it answered.
+
 ## `pub fn follow(`
 
 Each poll is a fresh observation, and the events past the count already

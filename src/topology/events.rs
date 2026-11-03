@@ -101,6 +101,16 @@ pub(crate) mod strict {
     {
         Option::deserialize(deserializer)
     }
+
+    /// A field a later record always carries and an earlier one may lack: absent it is `None`
+    /// (through `#[serde(default)]`), and present it must be a value, never `null`.
+    pub(crate) fn present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+    where
+        D: Deserializer<'de>,
+        T: Deserialize<'de>,
+    {
+        T::deserialize(deserializer).map(Some)
+    }
 }
 
 #[derive(
@@ -607,6 +617,14 @@ pub struct QuestionAnswered4 {
     pub question: QuestionId,
     pub answer: Answer4,
     pub via: String,
+    /// The person's words, on every `answered` answer this build records (J2,
+    /// `PR249-ANSWER-TEXT-NOT-CARRIED`): the text the answer source read, which may be an
+    /// option's own text. Absent on a decline. Absent too on a schema-4 record written before
+    /// answers kept their words, which reads as words not recorded and is never filled in.
+    /// Present, it must be a string (`strict::present`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "strict::present")]
+    pub text: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -615,6 +633,7 @@ pub enum AnswerDefect {
     OverrideNamesAnotherTask,
     OverrideNamesAnotherOption,
     DeclineWithOverride,
+    DeclineWithText,
 }
 
 impl fmt::Display for AnswerDefect {
@@ -630,12 +649,16 @@ impl fmt::Display for AnswerDefect {
                 "the binding override records a different option from the one chosen"
             }
             Self::DeclineWithOverride => "a declined answer carries a binding override",
+            Self::DeclineWithText => "a declined answer carries an answer's words",
         })
     }
 }
 
 impl QuestionAnswered4 {
     pub fn self_consistency(&self) -> Result<(), AnswerDefect> {
+        if matches!(self.answer, Answer4::Declined { .. }) && self.text.is_some() {
+            return Err(AnswerDefect::DeclineWithText);
+        }
         let Answer4::Answered {
             option_index,
             binding_override: Some(binding),
@@ -2119,6 +2142,7 @@ mod tests {
                         }),
                     },
                     via: "  upstroke answer  ".to_owned(),
+                    text: None,
                 },
             },
             TopologyEventBody::BudgetExceeded {
@@ -2269,6 +2293,69 @@ mod tests {
         }
     }
 
+    /// J2, `PR249-ANSWER-TEXT-NOT-CARRIED`: `question_answered` keeps the person's words in
+    /// `text`. A record written before the field existed (the canonical corpus's own
+    /// `question_answered` is one) decodes with no words and serializes back without the key, so
+    /// none are made up. A present `text` must be a string, and a decline carries none.
+    #[test]
+    fn a_question_answered_keeps_its_words_and_an_older_record_reads_without_them() {
+        let words = "  Use UNIQUE_ZEBRA_FORMAT_739, Ünicode and all  ";
+        let with_words = QuestionAnswered4 {
+            key: task_key(3),
+            question: QuestionId::from("q-park-0007"),
+            answer: Answer4::Answered {
+                option_index: 0,
+                binding_override: None,
+            },
+            via: "event-log".to_owned(),
+            text: Some(words.to_owned()),
+        };
+        let json = serde_json::to_value(&with_words).expect("serialize");
+        assert_eq!(json["text"], words);
+        let back: QuestionAnswered4 = serde_json::from_value(json.clone()).expect("decode");
+        assert_eq!(back, with_words, "the words survive the round trip");
+
+        let mut older = json.clone();
+        older
+            .as_object_mut()
+            .expect("an object")
+            .remove("text")
+            .expect("a text key");
+        let read: QuestionAnswered4 =
+            serde_json::from_value(older.clone()).expect("an older record decodes");
+        assert_eq!(read.text, None, "an older record's words are not made up");
+        assert_eq!(
+            serde_json::to_value(&read).expect("serialize"),
+            older,
+            "and it serializes back without a text key"
+        );
+
+        for malformed in [serde_json::Value::Null, serde_json::Value::from(7)] {
+            let mut value = json.clone();
+            value["text"] = malformed;
+            assert!(
+                serde_json::from_value::<QuestionAnswered4>(value.clone()).is_err(),
+                "a present text is a string: {value}"
+            );
+        }
+
+        let declined = QuestionAnswered4 {
+            answer: Answer4::Declined {
+                decline_halts_run: true,
+            },
+            ..with_words
+        };
+        assert_eq!(
+            declined.self_consistency(),
+            Err(AnswerDefect::DeclineWithText)
+        );
+        let declined = QuestionAnswered4 {
+            text: None,
+            ..declined
+        };
+        assert_eq!(declined.self_consistency(), Ok(()));
+    }
+
     #[test]
     fn a_question_answered_transaction_refuses_an_attribution_key() {
         let canonical = every_kind()
@@ -2292,7 +2379,8 @@ mod tests {
             assert_eq!(
                 refused.to_string(),
                 format!(
-                    "unknown field `{key}`, expected one of `key`, `question`, `answer`, `via`"
+                    "unknown field `{key}`, expected one of `key`, `question`, `answer`, `via`, \
+                     `text`"
                 ),
                 "on the payload"
             );
@@ -4006,6 +4094,7 @@ mod tests {
                 question: QuestionId::from("q-park-0007"),
                 answer,
                 via: "terminal".to_owned(),
+                text: None,
             },
         }
     }
@@ -4214,6 +4303,7 @@ mod tests {
                                 }),
                             },
                             via: "terminal".to_owned(),
+                            text: None,
                         };
                         cells += 1;
                         let expected = if !same_question {

@@ -943,12 +943,14 @@ attempt.
 
 The schema-4 driver's options for the same kinds, worded for what that
 engine does with an answer. `question_answered(schema 4)` records an option
-index and, for a binding, an override; it has no field for typed text, so a
-typed answer un-parks the task and reaches no agent
-(`PR249-ANSWER-TEXT-NOT-CARRIED`). PR8's fourteenth review found the
-`Clarify` list promising delivery the driver does not make; this list
-promises nothing it cannot keep, and its give-up option is the shared
-constant, so `answer_for_option` reads it as a decline. `ApproveSpend` keeps
+index, for a binding an override, and since J2 the person's words (`text`).
+Typed text un-parks the task and reaches its next attempt as an instruction
+and its review as a decision (`run::Brief::record_answer`). The retry
+option says so. It promised the opposite while the vocabulary had no field
+for the words (`PR249-ANSWER-TEXT-NOT-CARRIED`). PR8's fourteenth review
+had found the `Clarify` list promising a delivery the driver did not make.
+The give-up option is the shared constant, so `answer_for_option` reads it
+as a decline. `ApproveSpend` keeps
 the legacy pair, approve or the shared decline constant. The schema-4 driver
 raises it since J1 (`TopologyRun::ask_to_approve_spend`).
 
