@@ -2068,7 +2068,7 @@ pub(crate) mod tests {
             ),
             (
                 "src/engine/classify.rs",
-                5,
+                6,
                 3,
                 "what was INLINE in `run_attempt`'s verification ladder: the \
                  diff's two observations and a failed gate, plus the three \
@@ -2078,7 +2078,11 @@ pub(crate) mod tests {
                  raises before any gate runs (`repairs.dispatch`: unresolved \
                  index entries fail capture before gates). Both engines read \
                  these, and this is the only production site that CONSTRUCTS \
-                 a `ReviewPassOutcome`",
+                 a `ReviewPassOutcome`. Plus `interrupted_failure`, the \
+                 interruption a schema-4 report's `interrupted_record` hands \
+                 `attempt_record` for an `attempt_interrupted` settlement, so \
+                 that record is built by the one record builder (J12 \
+                 follow-up)",
             ),
             (
                 "src/engine/coordinator.rs",

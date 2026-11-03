@@ -1,5 +1,7 @@
 use super::*;
+use crate::events::FailureRecord;
 use crate::ir::{Question, QuestionId, QuestionKind, TaskId};
+use crate::ladder::FailureOrigin;
 
 fn report() -> RunReport {
     RunReport {
@@ -385,6 +387,78 @@ fn a_schema_4_report_keeps_each_interrupted_attempt_with_its_own_start_and_unkno
             .any(|warning| warning.contains("without recording its start")),
         "{:?}",
         orphan.warnings
+    );
+}
+
+#[test]
+fn an_interrupted_attempts_record_comes_from_the_one_record_builder_and_names_nothing_it_lacks() {
+    use crate::engine::topology::settle::tests::{ALEPH, binding, started};
+    use crate::topology::events::{
+        AttemptInterrupted4, AttemptNumber, AttemptStarted4, GenerationId, LeaseDisposition,
+        SessionId,
+    };
+
+    let fold = started();
+    let mut bound = binding(&fold, ALEPH, 0);
+    bound.tier = crate::ir::Tier::Frontier;
+    bound.model = "aleph-resumed-model".to_owned();
+    let start = AttemptStarted4 {
+        key: ALEPH,
+        generation: GenerationId(2),
+        attempt: AttemptNumber(3),
+        rung: 0,
+        binding: bound,
+        pool: Some("aleph-pool".to_owned()),
+        resume_session: Some(SessionId("aleph-session".to_owned())),
+        materialization_observed: None,
+    };
+    let interrupted = AttemptInterrupted4 {
+        key: ALEPH,
+        generation: GenerationId(2),
+        attempt: AttemptNumber(3),
+        lease: LeaseDisposition::PredictedReleased,
+        detail: "aleph was in flight when its coordinator died".to_owned(),
+    };
+    let failure = Some(FailureRecord {
+        kind: FailureKind::Interrupted,
+        origin: FailureOrigin::Worker,
+        reason: "aleph was in flight when its coordinator died".to_owned(),
+        detail: None,
+    });
+
+    assert_eq!(
+        interrupted_record(&interrupted, Some(&start)),
+        AttemptRecord {
+            attempt: 3,
+            tier: "frontier".to_owned(),
+            model: "aleph-resumed-model".to_owned(),
+            pool: Some("aleph-pool".to_owned()),
+            resumed: true,
+            duration: Duration::ZERO,
+            cost_usd: None,
+            reviews: Vec::new(),
+            session_id: None,
+            usage: None,
+            failure: failure.clone(),
+        },
+        "the start's tier, model, pool and resumption are kept, and no spend is invented"
+    );
+    assert_eq!(
+        interrupted_record(&interrupted, None),
+        AttemptRecord {
+            attempt: 3,
+            tier: String::new(),
+            model: String::new(),
+            pool: None,
+            resumed: false,
+            duration: Duration::ZERO,
+            cost_usd: None,
+            reviews: Vec::new(),
+            session_id: None,
+            usage: None,
+            failure,
+        },
+        "with no start the record names no tier or model the log does not hold"
     );
 }
 

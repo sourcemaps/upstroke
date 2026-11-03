@@ -334,6 +334,37 @@ duration, as the sequential engine's interrupted record has. Its failure is
 says why the attempt was settled interrupted (a coordinator that did not
 survive it, or a halt that cancelled it).
 
+It is built by `classify::attempt_record`, the one production construction of
+an attempt's ledger line (`runner::contract`'s
+`an_attempts_ledger_line_is_constructed_in_one_production_place`), classified
+by `classify::interrupted_failure`. Until the J12 follow-up (regular review 3,
+finding 1) it was a second `AttemptRecord` literal here, and that census failed
+on it.
+
+`attempt_record` reads `duration`, `cost_usd`, `session_id` and `usage` from the
+outcome it is given, and `unobserved` gives it a zero duration and none of the
+other three, so the record says what the literal said. Its `status`, `diff`,
+`detail` and `transcript_path` are placeholders that `attempt_record` does not
+read: they reach neither the record nor the report. `OutcomeStatus` has no
+variant for an attempt nobody saw end, so `AgentError` there stands for nothing
+observed. The feedback carrier is schema 4's, `AttemptRecord`, as the schema-4
+driver's own settlement passes; the failure carries no feedback, so the
+record's failure detail is empty under either carrier.
+
+`AttemptFacts::tier` is a `crate::ir::Tier`, which has no unknown value. With no
+start, the record is built with `Tier::Small` as a placeholder and its tier is
+cleared before it is returned, so it names no tier the log does not hold; the
+model is passed empty, the pool as none and the attempt as not resumed. That is
+the narrowest place to remove the placeholder: `attempt_record`, `AttemptFacts`
+and every other caller stay as they are, and a record with a start is exactly
+what `attempt_record` built. The report's tests pin both records whole
+(`an_interrupted_attempts_record_comes_from_the_one_record_builder_and_names_nothing_it_lacks`).
+
+Its copies are the event's detail into the failure's owned reason, which
+`attempt_record` copies again into the record, and the start's pool into the
+owned record: owned snapshots of the borrowed log, as the rest of
+`from_topology` takes (§6).
+
 ## `pub(super) struct ReportHeader<'a> {`
 
 Everything a report needs that is not the plan or the state, kept together

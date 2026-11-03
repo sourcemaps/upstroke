@@ -1305,7 +1305,9 @@ disagreed about what its diff was.
 
 Columns count the constructors of the two verdict types: `AttemptFailure`
 and `ReviewRecord`. `src/engine/classify.rs` holds what was inline in
-the legacy verification ladder. `src/engine/attempt.rs` keeps its count
+the legacy verification ladder, and `interrupted_failure`, the
+classification the schema-4 report's record of an interrupted attempt is
+built with (J12 follow-up). `src/engine/attempt.rs` keeps its count
 for `review_failure`, which was **already a function** — a pure move of
 something already callable is churn, not extraction — and `src/ladder.rs`
 keeps its own for the escalation vocabulary it owns.

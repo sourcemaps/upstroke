@@ -13,10 +13,10 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::capacity;
-use crate::events::{self, AttemptRecord, FailureRecord, Progress, RunState, TaskState};
+use crate::events::{self, AttemptRecord, Progress, RunState, TaskState};
 use crate::interaction::QuestionRecord;
 use crate::ir::{Plan, Question, Task, TaskId};
-use crate::ladder::{FailureKind, FailureOrigin};
+use crate::ladder::FailureKind;
 use crate::util;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -476,24 +476,34 @@ fn interrupted_record(
     interrupted: &crate::topology::events::AttemptInterrupted4,
     started: Option<&crate::topology::events::AttemptStarted4>,
 ) -> AttemptRecord {
-    AttemptRecord {
-        attempt: interrupted.attempt.0,
-        tier: started.map_or_else(String::new, |started| started.binding.tier.to_string()),
-        model: started.map_or_else(String::new, |started| started.binding.model.clone()),
-        pool: started.and_then(|started| started.pool.clone()),
-        resumed: started.is_some_and(|started| started.resume_session.is_some()),
-        duration: Duration::ZERO,
-        cost_usd: None,
-        reviews: Vec::new(),
+    let unobserved = crate::ir::Outcome {
+        status: crate::ir::OutcomeStatus::AgentError,
+        diff: String::new(),
+        detail: None,
         session_id: None,
         usage: None,
-        failure: Some(FailureRecord {
-            kind: FailureKind::Interrupted,
-            origin: FailureOrigin::Worker,
-            reason: interrupted.detail.clone(),
-            detail: None,
-        }),
+        cost_usd: None,
+        transcript_path: std::path::PathBuf::new(),
+        duration: Duration::ZERO,
+    };
+    let failure = super::classify::interrupted_failure(interrupted.detail.clone());
+    let mut record = super::classify::attempt_record(
+        interrupted.attempt.0,
+        super::classify::AttemptFacts {
+            tier: started.map_or(crate::ir::Tier::Small, |started| started.binding.tier),
+            model: started.map_or("", |started| started.binding.model.as_str()),
+            pool: started.and_then(|started| started.pool.clone()),
+            resumed: started.is_some_and(|started| started.resume_session.is_some()),
+            outcome: &unobserved,
+            reviews: &[],
+            failure: Some(&failure),
+            feedback: super::classify::FeedbackCarrier::AttemptRecord,
+        },
+    );
+    if started.is_none() {
+        record.tier.clear();
     }
+    record
 }
 
 pub(super) struct ReportHeader<'a> {
