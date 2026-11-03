@@ -1006,6 +1006,16 @@ Copilot attempts report nothing has a reported total that is a floor, and
 presenting a floor as a total is how someone approves a number they did not
 actually see.
 
+`floor` is the caller's: the sequential engine's `unpriced_attempts` (a record
+with no cost or an incomplete review cost, an interrupted attempt among them),
+and the schema-4 driver's `spend_is_a_floor`, which is the schema-4 report's own
+`total_is_floor` (K5). A floor is worded for every cause either can find, not
+only a route that reports no spend: "some of the run's spend was never reported,
+by an attempt or a review pass on a route that reports none, or by one the engine
+was killed inside", and the figure is "at least what the run has already cost".
+Until K5 the qualifier named routes that report no spend alone, and the sentence
+after it said the figure was what the run had cost even when it was a floor.
+
 ## `run_harness_inner_with_id` › `path: plan_path.clone(),`
 
 The returned error owns its diagnostic path independently

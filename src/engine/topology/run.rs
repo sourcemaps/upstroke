@@ -1743,50 +1743,24 @@ impl TopologyRun {
         Ok(Progress::Asked { key, question: id })
     }
 
-    /// The approval question for `key`'s escalation onto its frontier rung, in the sequential
-    /// engine's words (`spend_question_context`) and with its options.
     fn spend_question(
         &self,
         key: TaskKey,
         threshold: f64,
         ids: &dyn IdSource,
     ) -> Result<FrozenQuestion, UpstrokeError> {
-        let entry = self
-            .handle
-            .fold
-            .registry()
-            .and_then(|registry| registry.get(key))
-            .ok_or_else(|| UpstrokeError::Refused {
-                message: format!("task {} is not in this run's frozen registry", key.index()),
-            })?;
-        let task = self
-            .handle
-            .fold
-            .task(key)
-            .ok_or_else(|| UpstrokeError::Refused {
-                message: format!("task {} is not in this run's fold", key.index()),
-            })?;
-        let rung = usize::try_from(task.rung).unwrap_or(usize::MAX);
-        let onto = entry
-            .ladder
-            .rungs
-            .get(rung)
-            .map_or(Tier::Frontier, |onto| onto.tier);
+        let context = spend_approval_context(
+            &self.handle.fold,
+            &self.handle.events,
+            key,
+            self.spend.run_usd(),
+            threshold,
+        )?;
         Ok(FrozenQuestion {
             id: ids.question_id(),
             key,
             kind: QuestionKind::ApproveSpend,
-            context: crate::engine::coordinator::spend_question_context(
-                Some(crate::engine::coordinator::SpendSubject {
-                    display_id: entry.display_id.as_str(),
-                    title: &entry.spec.title,
-                    acceptance: &entry.spec.acceptance,
-                }),
-                onto,
-                self.spend.run_usd(),
-                threshold,
-                spend_is_a_floor(&self.handle.events),
-            ),
+            context,
             options: crate::engine::coordinator::topology_question_options(
                 QuestionKind::ApproveSpend,
             ),
@@ -2936,18 +2910,43 @@ fn escalated_onto(settlement: &AttemptSettlement) -> Option<u32> {
     }
 }
 
-/// Whether the run's reported spend is a floor rather than a total: an attempt or a review it
-/// records reported no cost (§13), as the sequential engine's `unpriced_attempts` counts them.
-fn spend_is_a_floor(events: &[TopologyEvent]) -> bool {
-    let unpriced =
-        |record: &AttemptRecord| record.cost_usd.is_none() || record.review_cost_incomplete();
-    let attempts = events.iter().any(|event| match &event.body {
-        TopologyEventBody::AttemptFinished { data } => unpriced(&data.record),
-        TopologyEventBody::CandidatePrepared { data } => unpriced(&data.attempt),
-        _ => false,
-    });
-    let reviews = super::select::IntegrationReviews::replay(events);
-    attempts || reviews.all().any(|review| review.cost_usd.is_none())
+fn spend_approval_context(
+    fold: &TopologyFold,
+    events: &[TopologyEvent],
+    key: TaskKey,
+    spent: f64,
+    threshold: f64,
+) -> Result<String, UpstrokeError> {
+    let entry = fold
+        .registry()
+        .and_then(|registry| registry.get(key))
+        .ok_or_else(|| UpstrokeError::Refused {
+            message: format!("task {} is not in this run's frozen registry", key.index()),
+        })?;
+    let task = fold.task(key).ok_or_else(|| UpstrokeError::Refused {
+        message: format!("task {} is not in this run's fold", key.index()),
+    })?;
+    let rung = usize::try_from(task.rung).unwrap_or(usize::MAX);
+    let onto = entry
+        .ladder
+        .rungs
+        .get(rung)
+        .map_or(Tier::Frontier, |onto| onto.tier);
+    Ok(crate::engine::coordinator::spend_question_context(
+        Some(crate::engine::coordinator::SpendSubject {
+            display_id: entry.display_id.as_str(),
+            title: &entry.spec.title,
+            acceptance: &entry.spec.acceptance,
+        }),
+        onto,
+        spent,
+        threshold,
+        spend_is_a_floor(fold, events),
+    ))
+}
+
+fn spend_is_a_floor(fold: &TopologyFold, events: &[TopologyEvent]) -> bool {
+    crate::engine::RunReport::from_topology(fold, events, Vec::new()).total_is_floor()
 }
 
 fn reclaim_snapshots_of(

@@ -1391,7 +1391,7 @@ pub(super) fn spend_question_context(
     onto: crate::ir::Tier,
     spent: f64,
     threshold: f64,
-    unpriced: bool,
+    floor: bool,
 ) -> String {
     let mut context = String::new();
     if let Some(task) = &task {
@@ -1403,16 +1403,21 @@ pub(super) fn spend_question_context(
          {onto} rung. You asked to approve that once the run had reported \
          ${threshold:.4} of spend (`ask_before.frontier_escalation_over_usd`)."
     );
-    let qualifier = if unpriced {
-        " — a floor, not a total: some attempts ran on routes that report no spend at all (§13)"
+    let (qualifier, already) = if floor {
+        (
+            " — a floor, not a total: some of the run's spend was never reported, by an attempt \
+             or a review pass on a route that reports none, or by one the engine was killed \
+             inside (§13)",
+            "at least what the run has already cost",
+        )
     } else {
-        ""
+        ("", "what the run has already cost")
     };
     let _ = writeln!(
         context,
-        "Reported spend so far: ${spent:.4}{qualifier}. This is what the run has already cost, \
-         not an estimate of what the {onto} attempt will cost — upstroke measures spend rather than \
-         predicting it (§10)."
+        "Reported spend so far: ${spent:.4}{qualifier}. This is {already}, not an estimate of \
+         what the {onto} attempt will cost — upstroke measures spend rather than predicting it \
+         (§10)."
     );
     if let Some(task) = task.filter(|task| !task.acceptance.is_empty()) {
         context.push_str("Acceptance criteria this task must meet:\n");

@@ -1375,12 +1375,40 @@ never` the run ends parked on the question.
 
 ## `impl TopologyRun` › `fn spend_question(`
 
-The approval question's frozen form. Its reported spend is the run's ledger
-total, a floor when [`spend_is_a_floor`] finds an unpriced attempt or review,
-as the sequential engine qualifies it. Its subject is a
-`coordinator::SpendSubject` from the registry entry: display id, title and
-acceptance. Until J16 it built a `ParkSubject`, computing an attempt count and
-rungs spent that the spend question never printed.
+The approval question for `key`'s escalation onto its frontier rung, in the
+sequential engine's words (`spend_question_context`) and with its options: its
+frozen form, whose context `spend_approval_context` words from the handle's fold
+and log and the run's ledger total. The context is built before the question's id
+is drawn, so a refusal draws none. Until J16 it built a `ParkSubject`, computing
+an attempt count and rungs spent that the spend question never printed.
+
+## `fn spend_approval_context(`
+
+The approval's context: the subject is a `coordinator::SpendSubject` from the
+registry entry (display id, title and acceptance), `onto` is the tier of the
+rung the fold has the task on, and the reported spend is the run's ledger total,
+a floor when [`spend_is_a_floor`] says so. A free function over the fold and the
+log, so the guard words an approval from a replayed log without a run handle
+(K5). A task the registry or the fold does not hold is refused, as before.
+
+## `fn spend_is_a_floor(`
+
+Whether the run's reported spend is a floor rather than a total, answered by the
+run's own report: `RunReport::from_topology(..).total_is_floor()`. So the
+approval and the report share one treatment of unknown spend (K5, regular review
+4, finding 5; first bad `e8ab8838`, J1's repair): an attempt or a review pass
+that reported no cost, an interrupted attempt (J12), an interrupted integration
+verification (K4), and unknown spend no task carries. The report is projected
+once per approval question, which is rare: an escalation onto a frontier rung
+over the threshold.
+
+Until K5 this scanned `attempt_finished` and `candidate_prepared` records and the
+integration passes itself, and ignored `attempt_interrupted`. After a worker ran
+and its coordinator died, resume settled the attempt interrupted, and a later
+priced failure that escalated onto the frontier asked for approval with "Reported
+spend so far: $0.0100. This is what the run has already cost…" and no floor
+warning (the reviewer's focused guard), while the report of the same log said
+its total was a floor.
 
 ## `impl TopologyRun` › `pub(super) fn exceed_budget(`
 

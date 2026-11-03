@@ -460,3 +460,24 @@ cancellation, the budget drain, promotion and publication inside closure — was
 `close_run`, a halt's vouched identities settled, a budget stop drained, only unvouched in-flight work
 refused — and that the retired sentence does not come back. It matches on the prose with its whitespace
 collapsed, as the pins above do.
+
+## `fn escalated_log(interrupted_first: bool) -> (TopologyFold, Vec<TopologyEvent>) {`
+
+A schema-4 log replayed into the settle fixture's fold, every event applied, so
+the fold admits each one: aleph is dispatched and its attempt started, and, when
+`interrupted_first`, that attempt is settled `attempt_interrupted` (with the
+disposition its predicted lease requires) and aleph is dispatched again under the
+next generation; the attempt then fails at $0.50 and escalates (`Next::Escalate`).
+
+## `fn a_spend_approval_after_an_interrupted_attempt_calls_its_reported_spend_a_floor_as_the_report_does()`
+
+K5, regular review 4, finding 5 (P2, correctness; first bad `e8ab8838`, J1's
+repair). The reviewer's sequence: a worker runs and its coordinator dies, resume
+records `attempt_interrupted`, and a later priced failure escalates onto the
+frontier and asks for approval. The approval's context, worded from that log by
+`spend_approval_context`, reports $0.5000 as "a floor, not a total" and "at least
+what the run has already cost"; the run's report of the same log is a floor too.
+Without the interruption it is neither, and the context says "This is what the
+run has already cost". With the approval's floor read by the event scan it had
+before K5, the interrupted case fails with the reviewer's own text: "Reported
+spend so far: $0.5000. This is what the run has already cost, …".

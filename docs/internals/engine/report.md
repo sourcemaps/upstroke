@@ -232,6 +232,11 @@ codex-implemented run rather than an edge one. A schema-4 report also
 counts the review spend no task row carries (`unattributed_cost_incomplete`,
 K4).
 
+For a schema-4 run this is the one treatment of unknown spend: the spend
+approval asks it of the report of the same log (`engine::topology::run`'s
+`spend_is_a_floor`, K5), so what the ledger marks `?` and what the approval calls
+a floor cannot differ.
+
 ## `fn committed_count(&self) -> usize {`
 
 How much of the plan actually landed — the one figure every ending

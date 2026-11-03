@@ -1354,3 +1354,82 @@ fn the_brief_takes_an_answers_words_from_the_log_live_and_on_replay() {
     assert_eq!(line.detail.as_deref(), Some(words));
     assert_eq!(replayed.decisions(TaskKey(0)), [words]);
 }
+
+fn escalated_log(interrupted_first: bool) -> (TopologyFold, Vec<TopologyEvent>) {
+    use crate::engine::topology::settle::tests::{
+        ALEPH, apply, attempt_started, dispatch, ev, finished, settle_into, started,
+    };
+    use crate::topology::events::{AttemptInterrupted4, LeaseDisposition};
+
+    let mut fold = started();
+    let mut events = Vec::new();
+    let mut generation = 0;
+    if interrupted_first {
+        for event in [
+            dispatch(ALEPH, 0),
+            attempt_started(&fold, ALEPH, 0, 1),
+            ev(TopologyEventBody::AttemptInterrupted {
+                data: AttemptInterrupted4 {
+                    key: ALEPH,
+                    generation: GenerationId(0),
+                    attempt: AttemptNumber(1),
+                    lease: LeaseDisposition::PredictedReleased,
+                    detail: "the coordinator that started this attempt did not survive it"
+                        .to_owned(),
+                },
+            }),
+        ] {
+            apply(&mut fold, &event);
+            events.push(event);
+        }
+        generation = 1;
+    }
+    let dispatched = dispatch(ALEPH, generation);
+    apply(&mut fold, &dispatched);
+    events.push(dispatched);
+    let start = attempt_started(&fold, ALEPH, generation, 1);
+    apply(&mut fold, &start);
+    events.push(start);
+    let settled = settle_into(
+        &mut fold,
+        &finished(ALEPH, generation, 1, crate::ladder::Next::Escalate),
+    );
+    events.push(ev(TopologyEventBody::AttemptFinished {
+        data: Box::new(settled),
+    }));
+    (fold, events)
+}
+
+#[test]
+fn a_spend_approval_after_an_interrupted_attempt_calls_its_reported_spend_a_floor_as_the_report_does()
+ {
+    use crate::engine::topology::settle::tests::ALEPH;
+
+    for (interrupted_first, floor) in [(true, true), (false, false)] {
+        let (fold, events) = escalated_log(interrupted_first);
+        let spent = Spend::replay(&events).run_usd();
+        let context = spend_approval_context(&fold, &events, ALEPH, spent, 0.005)
+            .expect("the approval question's context");
+        assert!(
+            context.contains("Reported spend so far: $0.5000"),
+            "{interrupted_first}: the priced escalation's spend is reported: {context}"
+        );
+        assert_eq!(
+            context.contains("a floor, not a total")
+                && context.contains("This is at least what the run has already cost"),
+            floor,
+            "interrupted first: {interrupted_first}: {context}"
+        );
+        assert_eq!(
+            context.contains("This is what the run has already cost"),
+            !floor,
+            "interrupted first: {interrupted_first}: {context}"
+        );
+        assert_eq!(
+            crate::engine::RunReport::from_topology(&fold, &events, Vec::new()).total_is_floor(),
+            floor,
+            "interrupted first: {interrupted_first}: the report and the approval treat the \
+             run's unknown spend alike"
+        );
+    }
+}
