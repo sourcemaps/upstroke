@@ -3958,6 +3958,9 @@ impl LinkedChild {
     /// ends -- the `kill` that delivers the signal test's signal
     /// (`engine::tests::signal_mid_attempt`, J15). It speaks no protocol; the
     /// receiver hands on whatever it prints.
+    ///
+    /// Unix only, because its one caller is; on Windows it would be dead code.
+    #[cfg(unix)]
     pub(crate) fn spawn_program(
         program: &OsStr,
         args: &[&OsStr],
