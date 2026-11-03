@@ -33,9 +33,11 @@ Every function here takes a [`ContainerRuntime`] and values, and nothing
 else: no run directory, no lock, no [`crate::runner::Runner`], no path it
 could write. Configured mounts (root's recorded-mounts disposition,
 2026-11-02) add filesystem *observation* and nothing more: `fs::canonicalize`,
-`fs::symlink_metadata` and `MetadataExt`'s device and inode, plus
-`view::resolve`, which reads `.git` and `commondir` and is classified
-`effect_free` in `effects/wrappers.toml`. None of them is a governed
+`fs::symlink_metadata` and `MetadataExt`'s device and inode. The repository's
+Git directories are not read here at all: the caller hands them in
+([`RepositoryGit`]), because only the caller knows which ones Git takes for
+this checkout. Until J10 this module read them from the checkout's `.git`
+through `view::resolve`. None of these is a governed
 primitive on the clippy denylist; they are recorded here as read-only API
 use, not as an effect exemption, and
 `tests::the_resolution_module_names_no_lock_no_write_and_no_spawn` admits
@@ -266,10 +268,10 @@ What a configured mount source may not be, contain or lie inside:
 
 - `RepositoryRoot`: the canonical repository root, which also covers its
   public run directories and, for an ordinary checkout, its `.git`;
-- `AuthoritativeGit`: the Git directory and common directory the
-  repository's own `.git` names (`view::resolve`, the file rule the
-  runner's Git view applies), so a linked worktree's common directory
-  elsewhere is withheld too;
+- `AuthoritativeGit`: the checkout's Git directory and the effective common
+  directory, as the caller hands them in ([`RepositoryGit`]), so a linked
+  worktree's common directory elsewhere, and one an inherited
+  `GIT_COMMON_DIR` places outside the checkout, are withheld too;
 - `PrivateRoot`: the authorized private root, which holds every run's
   private half, the execution roots and their worktrees, the container
   intents and the recorded-objects include. A run's worktrees are under
@@ -277,24 +279,56 @@ What a configured mount source may not be, contain or lie inside:
 - `CredentialLocation`: see `DEFAULT_CREDENTIAL_HOMES`.
 
 All in both directions. The generated own-role mounts keep their own,
-one-directional `Confinement` check in `exec.rs`, unchanged: a worktree
+one-directional `Confinement::violations` check in `exec.rs`: a worktree
 legitimately lies inside the private root, and a configured source never
-may.
+may, which `Confinement::configured_violations` holds there in both
+directions too.
+
+## `pub struct RepositoryGit<'a> {`
+
+The two Git directories of the checkout a run integrates into, as the
+caller resolved them: `git_dir`, where Git keeps this checkout's `HEAD`
+and index, and `common_dir`, the effective common directory, where its
+refs and objects are. This module never derives them. The schema-4 entry
+builds the value twice, from two sources:
+
+- before any lock (`entry::checkout_mount_context`): the Git directory
+  Git reports and the common directory Git's precedence gives (an
+  inherited `GIT_COMMON_DIR` as the checkout names it, else the Git
+  directory's `commondir`, else the Git directory);
+- for the container runner: the same Git directory and the common
+  directory of the `ManagedRepository` the coordinator holds, the one the
+  host runner reads as `ObjectGraph::RecordedIn`.
+
+J10 (regression review 2, finding 1): `bind_with` built its
+`AuthoritativeGit` exclusions from `view::resolve` over the checkout's own
+`.git`, which an inherited `GIT_COMMON_DIR` does not change. With the
+common directory relocated outside the checkout and selected that way,
+a writable mount of its `refs` was accepted, and a gate's launch plan
+received it. DESIGN §26 refuses a source that is, contains or lies
+inside "the repository root, its Git or common directory", and the common
+directory Git uses is the one that checkout resolved (§26, the runner
+contracts). Both are now named by the caller, and nothing here reads
+`.git`.
 
 ## `pub struct MountContext {`
 
 The read-only context `resolve_container` lacked: the exclusion list
 above, bound once before any lock. `unbound()` binds nothing and accepts
-no configured mount; `for_selection` returns it when no mounts are
+no configured mount; the entry binds a context only when mounts are
 configured, so a run without mounts reads nothing it did not read before.
 `bind` reads the coordinator's credential locations; `bind_with` takes
-them explicitly, for tests.
+them explicitly, for tests. `excluded` lends the list and
+`into_excluded` gives it up (the runner keeps it without a copy); both
+are empty for an unbound context, which no caller asks.
 
 ### Errors
 
 `bind` and `bind_with` fail when the repository root cannot be
-canonicalized, and refuse when it has no `.git`, since then the Git
-directories a mount must never reach cannot be found.
+canonicalized, and refuse when either Git directory they are given is not
+an absolute path: a relative one would be resolved against whatever the
+process's directory is, and the comparison would then withhold some other
+directory while accepting a mount of the real one.
 
 ## `pub fn canonical_spelling(path: &Path) -> PathBuf {`
 
@@ -636,3 +670,12 @@ Today's `[runner]` selection, expressed in the recorded record's shape.
 ## `fn today_in_record_shape(record: &RunnerPolicy, today: &Run…` › `id: record`
 
 From the record: see `configured_difference`.
+
+## `#[cfg(test)]` › `pub(crate) mod fixtures {`
+
+Test-only, after every production item, and a module so that the first
+`#[cfg(test)]` of the file is one (`effects::tests::every_production_region_that_stops_early_stops_at_a_module`).
+`plain_checkout` is what Git reports for an ordinary checkout, whose `.git`
+directory is both its Git directory and its common directory: the shape of
+every fixture that builds a runner or a context over one repository. A test
+about any other layout names the two directories itself.

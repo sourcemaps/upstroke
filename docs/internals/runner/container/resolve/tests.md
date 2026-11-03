@@ -299,7 +299,9 @@ A real directory tree for the mount tests: a repository root with a
 `home/`, a shared directory and a tool file, all under one canonicalized
 scratch root. Built on Unix and Windows, the two platforms that record an
 identity; the Unix tests use symlinks, sockets and non-UTF-8 names, the
-Windows test only renames.
+Windows test only renames. Its `context` is given the repository's `.git`
+as both Git directories (`resolve::fixtures::plain_checkout`), what Git
+reports for an ordinary checkout.
 
 ## `fn a_configured_mount_is_recorded_and_rebuilt_from_the_record() {`
 
@@ -321,6 +323,18 @@ holds the closed form.
   digest unchanged, and warns once, naming the configured mount set as
   ignored.
 
+## `fn a_mount_context_withholds_the_git_directories_it_is_given_and_refuses_relative_ones() {`
+
+J10 (regression review 2, finding 1), at the context: a common directory
+outside the checkout, beside a repository whose own `.git` is an ordinary
+directory. Bound to that `.git` alone, the context lets a mount of the
+outside directory's `refs` resolve (the control, and the pre-repair
+reading). Given the outside directory as the common directory, resolution
+refuses the same mount as `MountRefused`, lying inside it, authoritative
+Git. A Git directory or common directory given relative is refused when
+the context is bound, so no comparison is made against a path the
+process's directory would decide.
+
 ## `fn every_configured_mount_that_could_reach_a_withheld_path_is_refused_before_the_runtime_is_asked()`
 
 The refusal table. Twenty-three source cells: relative, absent, a socket,
@@ -328,7 +342,9 @@ the repository, inside and above it and its `.git`, the private root,
 inside and above it, a credential location, inside and above it, the
 common Git directory of a linked worktree, inside and above it, the
 linked worktree's admin directory, a comma, a quote, a newline, edge
-whitespace, a name that is not UTF-8, and an unbound context. Thirteen
+whitespace, a name that is not UTF-8, and an unbound context. The linked
+worktree's context is given the two directories Git reports for it, its
+admin directory and the main `.git`. Thirteen
 target cells: relative, `/`, four non-normal spellings, `/upstroke` and
 `/tmp` at and under, a comma, edge whitespace and empty. Three pairs:
 repeated, nested and enclosing targets. Each refuses as `MountRefused`,

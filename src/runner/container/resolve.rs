@@ -157,6 +157,12 @@ impl MountExclusion {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RepositoryGit<'a> {
+    pub git_dir: &'a Path,
+    pub common_dir: &'a Path,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MountContext {
     excluded: Option<Vec<(MountExclusion, PathBuf)>>,
@@ -168,23 +174,17 @@ impl MountContext {
         Self { excluded: None }
     }
 
-    pub fn for_selection(
-        selection: &RunnerSelection,
+    pub fn bind(
         repo_root: &Path,
+        git: RepositoryGit<'_>,
         private_root: &Path,
     ) -> Result<Self, UpstrokeError> {
-        if selection.mounts.is_empty() {
-            return Ok(Self::unbound());
-        }
-        Self::bind(repo_root, private_root)
-    }
-
-    pub fn bind(repo_root: &Path, private_root: &Path) -> Result<Self, UpstrokeError> {
-        Self::bind_with(repo_root, private_root, &host_credential_locations())
+        Self::bind_with(repo_root, git, private_root, &host_credential_locations())
     }
 
     pub fn bind_with(
         repo_root: &Path,
+        git: RepositoryGit<'_>,
         private_root: &Path,
         credential_locations: &[PathBuf],
     ) -> Result<Self, UpstrokeError> {
@@ -192,24 +192,28 @@ impl MountContext {
             path: repo_root.to_path_buf(),
             source,
         })?;
-        let Some(layout) = super::view::resolve(&root)? else {
+        if let Some(relative) = [git.git_dir, git.common_dir]
+            .into_iter()
+            .find(|directory| !directory.is_absolute())
+        {
             return Err(UpstrokeError::Refused {
                 message: format!(
-                    "[runner] mounts are configured and `{}` has no `.git`, so the repository's \
-                     Git directories, which a mount must never reach, cannot be found",
-                    root.display()
+                    "[runner] mounts are configured and `{}`, a Git directory of the repository \
+                     this run integrates into, is not an absolute path, so whether a mount \
+                     reaches it cannot be decided",
+                    relative.display()
                 ),
             });
-        };
+        }
         let mut excluded = vec![
             (MountExclusion::RepositoryRoot, root),
             (
                 MountExclusion::AuthoritativeGit,
-                canonical_spelling(&layout.git_dir),
+                canonical_spelling(git.git_dir),
             ),
             (
                 MountExclusion::AuthoritativeGit,
-                canonical_spelling(&layout.common_dir),
+                canonical_spelling(git.common_dir),
             ),
             (
                 MountExclusion::PrivateRoot,
@@ -230,6 +234,11 @@ impl MountContext {
     #[must_use]
     pub fn excluded(&self) -> &[(MountExclusion, PathBuf)] {
         self.excluded.as_deref().unwrap_or_default()
+    }
+
+    #[must_use]
+    pub fn into_excluded(self) -> Vec<(MountExclusion, PathBuf)> {
+        self.excluded.unwrap_or_default()
     }
 
     #[must_use]
@@ -871,6 +880,20 @@ fn today_in_record_shape(record: &RunnerPolicy, today: &RunnerSelection) -> Runn
             credential_volumes: Some(today.credential_volumes.clone()),
             mounts: record.mounts.clone(),
         },
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod fixtures {
+    use std::path::Path;
+
+    use super::RepositoryGit;
+
+    pub(crate) const fn plain_checkout(git_dir: &Path) -> RepositoryGit<'_> {
+        RepositoryGit {
+            git_dir,
+            common_dir: git_dir,
+        }
     }
 }
 

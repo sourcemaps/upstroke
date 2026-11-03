@@ -170,6 +170,12 @@ plain delegation — and what makes the sibling assertions in
 statements about the production helper rather than about the
 fixture.
 
+The repository's Git it is given, like every runner and mount context
+the fixtures here build, is `resolve::fixtures::plain_checkout` over the
+repository's `.git`: what Git reports for an ordinary checkout, whose
+`.git` is both its Git directory and its common directory. A test about
+a relocated common directory names that directory itself.
+
 ## `impl Fixture` › `fn withheld(&self) -> Vec<(Withheld, PathBuf)> {`
 
 The concrete host paths this run withholds, as a table a test can
@@ -420,6 +426,27 @@ The plan-time recheck. The recorded source moved away refuses the plan
 record whose mount names the private root, with that root's true
 identity, refuses against the bound exclusions. No intent and no
 container exists afterwards.
+
+## `fn a_recorded_mount_inside_the_common_directory_the_runner_is_given_refuses_the_plan() {`
+
+J10 (regression review 2, finding 1), at the runner: the common directory
+is relocated outside the checkout, and the mounted policy's first mount is
+re-recorded at its `refs`. Over the checkout's own Git
+(`resolve::fixtures::plain_checkout`, as before the repair) the gate plans: the
+source is an ordinary directory there. Given that relocated directory as
+the run's common directory, as the entry gives the managed repository's,
+the same policy refuses the plan, naming the directory as authoritative
+Git, with no intent and no container.
+
+## `fn a_configured_mount_that_lies_inside_a_withheld_directory_is_refused_and_a_roles_own_is_not() {`
+
+J10's second half, at the confinement, with no runner and no repository:
+a confinement withholding a common directory outside the checkout reports
+a configured mount that is it, contains it or lies inside it, once each,
+naming the relation and the authoritative-Git passage. The rule for a
+role's own mounts stays one-directional: `violations` refuses the first
+two and not the third, which is how a role's object store lies inside the
+common directory. A directory beside every withheld path is neither.
 
 ## `fn a_mount_the_runtimes_option_cannot_carry_exactly_refuses_the_plan_before_any_effect() {`
 
@@ -1273,7 +1300,7 @@ varies is only which directory of the worktree namespace is offered.
 `decisions.workspace_candidates.manager`: "tasks/k<key>-g<gen>,
 merge/s<seq>", plus `snapshots`.
 
-## `fn the_execution_root_and_its_worktree_namespaces_are_withh…` › `let confinement = Confinement::of_run(&fixture.identity, &fixture.repo);`
+## `fn the_execution_root_and_its_worktree_namespaces_are_withh…` › `let confinement = Confinement::of_run(`
 
 (a) `of_run` names each of them, under the sibling-worktree category.
 

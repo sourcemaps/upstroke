@@ -9340,6 +9340,9 @@ fn production_container_runner(
             repo_key: fixture.repo_key.as_str().to_owned(),
         },
         &fixture.repo_root,
+        crate::runner::container::resolve::fixtures::plain_checkout(
+            &fixture.repo_root.join(".git"),
+        ),
         crate::runner::container::env::ContainerEnvironment::from_image(vec![
             ("PATH".to_owned(), "/usr/bin:/bin".to_owned()),
             ("HOME".to_owned(), "/root".to_owned()),
@@ -26374,8 +26377,13 @@ fn mount_source(tag: &str) -> MountSource {
     mkdir(&private);
     let source = root.join("shared");
     mkdir(&source);
-    let context = MountContext::bind_with(&repo, &private, &[])
-        .expect("the mount world binds a mount context");
+    let context = MountContext::bind_with(
+        &repo,
+        crate::runner::container::resolve::fixtures::plain_checkout(&repo.join(".git")),
+        &private,
+        &[],
+    )
+    .expect("the mount world binds a mount context");
     let recorded = resolve_mounts(
         &[crate::config::RunnerMount {
             source: source.clone(),

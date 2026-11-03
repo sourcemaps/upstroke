@@ -27,11 +27,13 @@ either command.
 1. `run_harness` establishes containment.
 2. [`prepare_fresh`], read-only: the plan, the config and the pools are
    captured and analysed under [`EngineLimits::Topology`]; when `[runner]`
-   configures mounts, a `MountContext` is bound to the repository root, its
-   Git directories, the private root (explicit, else the default, which
-   need not exist yet) and the coordinator's credential locations, read
-   only; for the default root, a refusal if the path it will resolve to once
-   created is not valid UTF-8 ([`prelock::refuse_unspellable_default_root`]);
+   configures mounts, a `MountContext` is bound to the repository root, the
+   checkout's Git directory and effective common directory as Git takes them
+   ([`checkout_mount_context`]), the private root (explicit, else the
+   default, which need not exist yet) and the coordinator's credential
+   locations, read only; for the default root, a refusal if the path it
+   will resolve to once created is not valid UTF-8
+   ([`prelock::refuse_unspellable_default_root`]);
    the runner policy, its configured mounts included,
    is resolved by read-only inspection ([`prelock::check`] for an explicit
    private root, which must already exist, or [`prelock::resolve_runner`]
@@ -65,7 +67,10 @@ either command.
    the run directory and its digest checked against the record; today's
    config is read under [`EngineLimits::TopologyResume`] and compared with
    the recorded limits and the recorded gates; the D4 width check against
-   the recorded width; the Q3 case observation; a recorded container
+   the recorded width; the Q3 case observation; a recorded mount that
+   reaches the checkout's Git directories, the repository root, the private
+   root or a credential location, refused before the runtime is asked
+   anything ([`refuse_withheld_recorded_mounts`]); a recorded container
    image's environment; the slot limits; today's configured notifiers.
 4. `resume_harness` publishes the include under the recorded root.
 5. [`ResumePrepared::run`]: the runner from the record, the manager, the
@@ -86,6 +91,16 @@ role, by the role's own Git view (`core.useReplaceRefs = false` in the view's
 `config`, `runner::container::view`), and composition adds no process-wide
 `GIT_NO_REPLACE_OBJECTS` (Q2's paired candidate; the real-container
 acceptance is owed, and its limits are in `runner/container/env.md`).
+
+Both runners take the repository's Git from what the coordinator holds. The
+container runner is given the worktree Git directory and the common directory
+of the same `ManagedRepository` the host runner reads, and its configured-mount
+exclusions and its confinement's authoritative-Git entries come from those two
+(`runner::container::resolve::RepositoryGit`). J10 (regression review 2,
+finding 1): they came from the checkout's own `.git`, so with the common
+directory relocated outside the checkout and selected by an inherited
+`GIT_COMMON_DIR`, a configured writable mount of its `refs` was accepted and
+reached a gate's launch plan.
 
 ### The probe set
 
@@ -121,12 +136,20 @@ the public path's first Git child failing on one with Git's own "not a git
 repository" before `prelock::check` could name the variable. `prelock::check`
 keeps its own first-statement check.
 
-The mount context is bound only when mounts are configured, so a run without
-them reads nothing it did not read before; it reads `.git` and `commondir`
-(`view::resolve`), canonicalizes paths and reads three environment variables
-and `HOME`, and writes nothing. It is bound to the root the run will use: the
-explicit one, or the default one, computed once and handed on to the pending
-authorization.
+The mount context is bound only when mounts are configured ([`mount_context`]),
+so a run without them reads nothing it did not read before; it asks Git,
+read-only, for the checkout's Git directory, reads `GIT_COMMON_DIR` and, without
+it, the Git directory's `commondir` ([`checkout_mount_context`]), canonicalizes
+paths and reads three environment variables and `HOME`, and writes nothing. It
+is bound to the root the run will use: the explicit one, or the default one,
+computed once and handed on to the pending authorization. Until J10
+(regression review 2, finding 1) it read the checkout's `.git` instead
+(`view::resolve`), which an inherited `GIT_COMMON_DIR` does not change, and a
+configured mount inside a common directory relocated outside the checkout was
+resolved and recorded.
+
+The analysis's warnings are moved into the command's, not copied: nothing
+reads them in the analysis afterwards (§6).
 
 A default root is authorized only after the include's publication has created
 it, so the UTF-8 half of that authorization is asked here first, read-only,
@@ -147,6 +170,14 @@ The effectful half. The order is the module section's; the lock is held from
 its acquisition through the census and the whole run, and handed to the
 `RunHandle` by `WorktreeLocked::into_lock` with no release in between.
 
+A container runner is given the worktree Git directory and `repository`'s
+common directory (J10, see the module's runner section). The copies this body
+makes are owned snapshots (§6): the include's spelling, kept for
+[`one_spelling`] because a host run moves `repository` into its runner; the
+run identity's strings and paths, which the runner owns; the frozen inputs'
+plan, which [`fresh_record`] still reads from the analysis; and the request's
+frozen inputs, which `create_run` consumes while the run keeps its own.
+
 ## `pub fn route_resume(opts: &ResumeOptions) -> Result<Option<RootDerived>, UpstrokeError> {`
 
 Which engine resumes this run: `None` for a legacy log (or one whose header
@@ -160,10 +191,30 @@ The read-only half of a topology resume. It begins with R5's check of the
 repository-wide names, as `prepare_fresh` does, before the include's
 publication starts a Git child.
 
+A recorded container runner's mounts are checked against today's exclusions
+([`refuse_withheld_recorded_mounts`]) before the runtime is asked for the
+image's environment. The record was accepted when the run began, against the
+Git the checkout took then; under an inherited `GIT_COMMON_DIR` the same source
+can now lie inside the common directory Git takes, and the resume refuses
+before anything is published, locked or written, so the run stays resumable
+once the environment is what it was.
+
+`started` is an owned snapshot of the record `root` carries (§6): `root` is
+consumed by `run_recovery_order`, and the run still reads the record's gates
+afterwards.
+
 ## `impl ResumePrepared` › `pub fn run(`
 
 The effectful half of a resume. The runner is the recorded one: today's
 `[runner]` reaches recovery only as the selection it is compared with.
+
+A container runner is given the worktree Git directory and `repository`'s
+common directory, as in [`FreshPrepared::run`]. The include's spelling, the
+run identity and the recovery seams' frozen inputs are owned snapshots (§6),
+for the reasons given there. The probed capabilities default only where
+nothing was probed, which cannot follow a recovery that returned: its step C
+is `RunnerPreflight::certify`, which records what it probed before it returns
+`Ok`, so the default discards no error (§7).
 
 ## `fn fresh_record(fresh: &FreshRecord<'_>) -> Result<RunStarted4, UpstrokeError> {`
 
@@ -267,8 +318,52 @@ environment. Nothing is pulled and no other id is consulted.
 
 ## `fn container_runner(`
 
-One `ContainerRunner` over the policy, the run's identity and the image's
-environment, executing through the production runtime.
+One `ContainerRunner` over the policy, the run's identity, the repository's
+Git as the coordinator holds it and the image's environment, executing
+through the production runtime. The runner owns its copy of the recorded
+policy; the caller keeps the record (§6).
+
+## `fn mount_context(`
+
+The fresh run's mount context: unbound when `[runner]` configures no mounts,
+so such a run asks Git nothing more, and otherwise [`checkout_mount_context`].
+
+## `fn refuse_withheld_recorded_mounts(`
+
+The resume's read-only check of a recorded runner's mounts, against the
+exclusions a fresh run would bind today ([`checkout_mount_context`], over the
+recorded private root). A mount that is, contains or lies inside one is
+refused, naming the run, the mount and the reason
+(`resolve::refuse_excluded`'s); a runner without mounts asks Git nothing. The
+container runner checks every recorded mount again at each plan, against the
+managed repository's own common directory.
+
+## `fn checkout_mount_context(`
+
+The `MountContext` of the checkout the command was started in, read-only and
+before any lock: the Git directory is Git's own answer
+(`Workspace::worktree_git_dir`, `rev-parse --absolute-git-dir`), and the common
+directory follows Git's precedence ([`effective_common_dir`]).
+
+It is not the `ManagedRepository`, which does not exist yet: the include's
+publication builds it, after this half (J14's order, and root's Q4), and this
+module may not call `recorded_objects_scope`. A `Workspace` function asking
+Git for the common directory would be a new classified function of
+`src/workspace.rs` (`effects/wrappers.toml`), so the precedence is applied
+here instead, to the Git directory Git reports. It is the rule
+`recorded_objects_scope`'s `rev-parse --git-common-dir`, run at the checkout's
+top, answers by, and the container runner, given the managed repository's own
+common directory, refuses at every plan whatever this half admitted.
+
+## `fn effective_common_dir(`
+
+The common directory Git takes for a checkout whose Git directory is
+`git_dir`: an inherited `GIT_COMMON_DIR`, joined to the checkout's top, where
+Git started from there resolves a relative one (an absolute value joins to
+itself); else the Git directory's `commondir` record, relative to the Git
+directory, without its line ending, as Git strips it; else the Git directory.
+Only an actual not-found makes the record absent; any other failure to read it
+is an `Io` error naming it, never the Git directory instead (§7).
 
 ## `fn one_spelling(include: &Path, manager: &WorkspaceManager) -> Result<(), UpstrokeError> {`
 

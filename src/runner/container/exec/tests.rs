@@ -13,6 +13,7 @@ use crate::gates::ShellKind;
 use crate::rundir::RunPaths;
 use crate::rundir::scratch_tree::ScratchTree;
 use crate::runner::container::intent::LABEL_PRIVATE_ROOT;
+use crate::runner::container::resolve::fixtures;
 use crate::runner::container::runtime::{
     ContainerExecution, ContainerTrace, CreatedContainer, DiscoveredContainer, ImageInspection,
     Liveness, RuntimeOp, Settled, StopMode,
@@ -377,7 +378,11 @@ impl Fixture {
     }
 
     fn confinement(&self) -> Confinement {
-        Confinement::of_run(&self.identity, &self.repo)
+        Confinement::of_run(
+            &self.identity,
+            &self.repo,
+            fixtures::plain_checkout(&self.repo.join(".git")),
+        )
     }
 
     fn runner(&self) -> ContainerRunner {
@@ -390,6 +395,7 @@ impl Fixture {
             policy,
             self.identity.clone(),
             &self.repo,
+            fixtures::plain_checkout(&self.repo.join(".git")),
             image_environment(),
             Box::new(self.runtime.clone()),
         )
@@ -422,8 +428,13 @@ impl Fixture {
             ],
             from_config: true,
         };
-        let context = MountContext::bind_with(&self.repo, &self.private_root, &[])
-            .expect("the fixture binds a mount context");
+        let context = MountContext::bind_with(
+            &self.repo,
+            fixtures::plain_checkout(&self.repo.join(".git")),
+            &self.private_root,
+            &[],
+        )
+        .expect("the fixture binds a mount context");
         let policy = crate::runner::container::resolve::resolve_container(
             self.runtime.fake(),
             &selection,
@@ -442,6 +453,7 @@ impl Fixture {
             container_policy(),
             identity,
             &self.repo,
+            fixtures::plain_checkout(&self.repo.join(".git")),
             image_environment(),
             Box::new(self.runtime.clone()),
         )
@@ -1955,6 +1967,118 @@ fn a_record_spelled_through_a_link_is_refused_as_rebound_before_any_exclusion() 
 
 #[cfg(unix)]
 #[test]
+fn a_recorded_mount_inside_the_common_directory_the_runner_is_given_refuses_the_plan() {
+    let fixture = Fixture::new("mount-common-dir", true);
+    let common = fixture.root.join("relocated-common");
+    std::fs::create_dir_all(common.join("refs")).expect("a common directory outside the checkout");
+    let (mut policy, _shared, _tools) = fixture.mounted_policy();
+    let (source, source_identity) = recorded_directory(&common.join("refs"));
+    let Some(first) = policy.mounts.first_mut() else {
+        panic!("the mounted policy records its mounts: {policy:?}");
+    };
+    first.source = source;
+    first.source_identity = source_identity;
+    let request = gate_request(
+        ShellKind::Sh.spec("exit 0"),
+        fixture.task_a.clone(),
+        Duration::from_secs(10),
+        gate_id(0),
+    );
+    fixture
+        .runner_over(policy.clone())
+        .plan(&request)
+        .expect("the control: beside the checkout's own Git the source is an ordinary directory");
+
+    let git_dir = fixture.repo.join(".git");
+    let refusal = ContainerRunner::new(
+        policy,
+        fixture.identity.clone(),
+        &fixture.repo,
+        RepositoryGit {
+            git_dir: &git_dir,
+            common_dir: &common,
+        },
+        image_environment(),
+        Box::new(fixture.runtime.clone()),
+    )
+    .expect("a container policy")
+    .plan(&request)
+    .expect_err("a recorded source inside the run's common directory refuses the plan");
+    let said = refusal.to_string();
+    let canonical = std::fs::canonicalize(&common).expect("the common directory resolves");
+    assert!(
+        said.contains(&format!("lies inside `{}`", canonical.display()))
+            && said.contains("authoritative Git"),
+        "{said}"
+    );
+    assert!(
+        list_intents(&fixture.private_root)
+            .expect("scan")
+            .is_empty(),
+        "a refused plan wrote an intent"
+    );
+    assert!(fixture.runtime.fake().container_names().is_empty());
+}
+
+#[test]
+fn a_configured_mount_that_lies_inside_a_withheld_directory_is_refused_and_a_roles_own_is_not() {
+    let tree = repo::scratch("configured-confinement");
+    let root = tree.path();
+    let repo_dir = root.join("repo");
+    let git_dir = repo_dir.join(".git");
+    let relocated = root.join("relocated");
+    let common = relocated.join("common");
+    let identity = RunIdentity {
+        private_root: root.join("private"),
+        run_id: RUN_ID.to_owned(),
+        run_dir: root.join("public"),
+        incarnation: INCARNATION_1.to_owned(),
+        repo_key: repo_key().to_owned(),
+    };
+    let confinement = Confinement::of_run(
+        &identity,
+        &repo_dir,
+        RepositoryGit {
+            git_dir: &git_dir,
+            common_dir: &common,
+        },
+    );
+    let mount = |source: PathBuf| Mount::Path {
+        source,
+        target: "/data".to_owned(),
+        read_only: false,
+    };
+    for (relation, source, own_rule_refuses) in [
+        ("is", common.clone(), true),
+        ("contains", relocated.clone(), true),
+        ("lies inside", common.join("refs"), false),
+    ] {
+        let mounted = [mount(source)];
+        let found = confinement.configured_violations(&mounted);
+        let [only] = found.as_slice() else {
+            panic!("`{relation}`: one configured violation, of the common directory: {found:?}");
+        };
+        assert!(
+            only.contains(&format!("{relation} `{}`", common.display()))
+                && only.contains(Withheld::AuthoritativeGit.passage()),
+            "`{relation}`: {only}"
+        );
+        assert_eq!(
+            !confinement.violations(&mounted).is_empty(),
+            own_rule_refuses,
+            "`{relation}`: the rule for a role's own mounts is unchanged, one-directional"
+        );
+    }
+    let beside = [mount(root.join("shared"))];
+    assert!(
+        confinement.configured_violations(&beside).is_empty()
+            && confinement.violations(&beside).is_empty(),
+        "a directory beside every withheld path is no violation"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn a_mount_the_runtimes_option_cannot_carry_exactly_refuses_the_plan_before_any_effect() {
     let fixture = Fixture::new("mount-spelling", true);
     let runner = fixture.runner();
@@ -1994,6 +2118,7 @@ fn the_credential_volume_is_mounted_exactly_when_its_location_is_supplied() {
         },
         fixture.identity.clone(),
         &fixture.repo,
+        fixtures::plain_checkout(&fixture.repo.join(".git")),
         image_environment(),
         Box::new(fixture.runtime.clone()),
     )
@@ -2394,6 +2519,7 @@ fn a_policy_that_is_not_a_container_policy_is_refused_at_construction() {
             policy,
             fixture.identity.clone(),
             &fixture.repo,
+            fixtures::plain_checkout(&fixture.repo.join(".git")),
             image_environment(),
             Box::new(fixture.runtime.clone()),
         )
@@ -2404,6 +2530,7 @@ fn a_policy_that_is_not_a_container_policy_is_refused_at_construction() {
         container_policy(),
         fixture.identity.clone(),
         &fixture.repo,
+        fixtures::plain_checkout(&fixture.repo.join(".git")),
         image_environment(),
         Box::new(fixture.runtime.clone()),
     )
@@ -3096,6 +3223,7 @@ fn a_credential_volume_is_never_created_or_pruned_by_any_disposition() {
                 container_policy(),
                 fixture.identity.clone(),
                 &fixture.repo,
+                fixtures::plain_checkout(&fixture.repo.join(".git")),
                 image_environment(),
                 Box::new(fixture.runtime.clone()),
             )
@@ -3212,6 +3340,7 @@ fn a_launch_that_fails_after_a_committed_effect_still_releases_everything() {
                 container_policy(),
                 fixture.identity.clone(),
                 &fixture.repo,
+                fixtures::plain_checkout(&fixture.repo.join(".git")),
                 image_environment(),
                 Box::new(fixture.runtime.clone()),
             )
@@ -3790,6 +3919,7 @@ fn the_public_constructor_withholds_every_category_from_every_role() {
         container_policy(),
         fixture.identity.clone(),
         &fixture.repo,
+        fixtures::plain_checkout(&fixture.repo.join(".git")),
         image_environment(),
         Box::new(fixture.runtime.clone()),
     )
@@ -3880,7 +4010,11 @@ fn the_execution_root_and_its_worktree_namespaces_are_withheld_and_one_worktree_
         execution_root.join("snapshots"),
     ];
 
-    let confinement = Confinement::of_run(&fixture.identity, &fixture.repo);
+    let confinement = Confinement::of_run(
+        &fixture.identity,
+        &fixture.repo,
+        fixtures::plain_checkout(&fixture.repo.join(".git")),
+    );
     for path in &namespaces {
         assert!(
             confinement
@@ -3942,6 +4076,7 @@ fn every_role_writes_and_syncs_its_own_six_field_intent_before_its_container_is_
         container_policy(),
         fixture.identity.clone(),
         &fixture.repo,
+        fixtures::plain_checkout(&fixture.repo.join(".git")),
         image_environment(),
         Box::new(fixture.runtime.clone()),
     )
@@ -4402,6 +4537,7 @@ fn a_cwd_relative_or_absent_path_refuses_every_role_before_any_effect() {
             container_policy(),
             fixture.identity.clone(),
             &fixture.repo,
+            fixtures::plain_checkout(&fixture.repo.join(".git")),
             environment,
             Box::new(fixture.runtime.clone()),
         )
@@ -4692,6 +4828,7 @@ fn real_docker_runs_from_the_recorded_image_id_and_composes_over_the_image_envir
         real_policy(&image_id),
         identity.clone(),
         &repo_dir,
+        fixtures::plain_checkout(&repo_dir.join(".git")),
         image_environment_of(docker.as_ref(), &image_id),
         Box::new((*docker).clone()),
     )
@@ -4806,6 +4943,7 @@ fn real_docker_refuses_a_reviewer_write_to_its_read_only_mount() {
         real_policy(&image_id),
         identity.clone(),
         &repo_dir,
+        fixtures::plain_checkout(&repo_dir.join(".git")),
         image_environment_of(docker.as_ref(), &image_id),
         Box::new((*docker).clone()),
     )
@@ -4909,6 +5047,7 @@ fn real_docker_a_containerized_agent_reads_its_own_settings_and_cannot_write_the
         real_policy(&image_id),
         identity.clone(),
         &repo_dir,
+        fixtures::plain_checkout(&repo_dir.join(".git")),
         image_environment_of(docker.as_ref(), &image_id),
         Box::new((*docker).clone()),
     )
@@ -5014,6 +5153,7 @@ fn real_docker_a_container_runs_as_the_coordinators_user_and_leaves_what_it_can_
         real_policy(&image_id),
         identity.clone(),
         &repo_dir,
+        fixtures::plain_checkout(&repo_dir.join(".git")),
         image_environment_of(docker.as_ref(), &image_id),
         Box::new((*docker).clone()),
     )
@@ -5129,6 +5269,7 @@ fn real_docker_a_containerized_program_reads_its_exact_stdin_then_eof() {
         real_policy(&image_id),
         identity.clone(),
         &repo_dir,
+        fixtures::plain_checkout(&repo_dir.join(".git")),
         image_environment_of(docker.as_ref(), &image_id),
         Box::new((*docker).clone()),
     )
@@ -5272,6 +5413,7 @@ fn real_docker_confines_a_gate_to_its_mount() {
         real_policy(&image_id),
         identity.clone(),
         &repo_dir,
+        fixtures::plain_checkout(&repo_dir.join(".git")),
         image_environment_of(docker.as_ref(), &image_id),
         Box::new((*docker).clone()),
     )
@@ -5358,6 +5500,7 @@ fn real_docker_a_gate_write_outside_every_declared_mount_fails() {
         real_policy(&image_id),
         identity.clone(),
         &repo_dir,
+        fixtures::plain_checkout(&repo_dir.join(".git")),
         image_environment_of(docker.as_ref(), &image_id),
         Box::new((*docker).clone()),
     )
@@ -5469,6 +5612,7 @@ fn real_docker_the_daemon_holds_exactly_the_specs_mounts_and_a_read_only_root() 
         real_policy(&image_id),
         identity.clone(),
         &repo_dir,
+        fixtures::plain_checkout(&repo_dir.join(".git")),
         image_environment_of(docker.as_ref(), &image_id),
         Box::new((*docker).clone()),
     )
@@ -5652,6 +5796,7 @@ fn real_docker_a_worktree_binary_cannot_shadow_the_certified_cli() {
         real_policy(&image_id),
         identity.clone(),
         &repo_dir,
+        fixtures::plain_checkout(&repo_dir.join(".git")),
         ContainerEnvironment::from_image(vec![("PATH".to_owned(), format!(".:{IMAGE_PATH}"))]),
         Box::new((*docker).clone()),
     )
@@ -5679,6 +5824,7 @@ fn real_docker_a_worktree_binary_cannot_shadow_the_certified_cli() {
         real_policy(&image_id),
         identity.clone(),
         &repo_dir,
+        fixtures::plain_checkout(&repo_dir.join(".git")),
         image_environment_of(docker.as_ref(), &image_id),
         Box::new((*docker).clone()),
     )
@@ -5785,6 +5931,7 @@ fn real_docker_a_git_dependent_gate_sees_only_the_role_view() {
         real_policy(&image_id),
         identity.clone(),
         &repo_dir,
+        fixtures::plain_checkout(&repo_dir.join(".git")),
         image_environment_of(docker.as_ref(), &image_id),
         Box::new((*docker).clone()),
     )
@@ -5887,6 +6034,7 @@ fn real_docker_adapter_parsing_matches_the_host_table() {
         real_policy(&image_id),
         identity.clone(),
         &repo_dir,
+        fixtures::plain_checkout(&repo_dir.join(".git")),
         image_environment_of(docker.as_ref(), &image_id),
         Box::new((*docker).clone()),
     )
@@ -5964,6 +6112,7 @@ fn real_docker_withholds_an_image_credential_variable_from_a_role_that_takes_non
         real_policy(&image_id),
         identity,
         &repo_dir,
+        fixtures::plain_checkout(&repo_dir.join(".git")),
         image_environment_of(docker.as_ref(), &image_id),
         Box::new((*docker).clone()),
     )
@@ -6063,6 +6212,7 @@ fn real_docker_a_container_contains_a_daemonised_descendant() {
         real_policy(&image_id),
         identity.clone(),
         &repo_dir,
+        fixtures::plain_checkout(&repo_dir.join(".git")),
         image_environment_of(docker.as_ref(), &image_id),
         Box::new((*docker).clone()),
     )
@@ -6170,8 +6320,12 @@ impl MountedReal {
         docker: &crate::runner::container::DockerCli,
         mounts: Vec<crate::config::RunnerMount>,
     ) -> RunnerPolicy {
-        let context = MountContext::bind(&self.repo, &self.identity.private_root)
-            .expect("the real fixture binds a mount context");
+        let context = MountContext::bind(
+            &self.repo,
+            fixtures::plain_checkout(&self.repo.join(".git")),
+            &self.identity.private_root,
+        )
+        .expect("the real fixture binds a mount context");
         crate::runner::container::resolve::resolve_container(
             docker,
             &self.selection(mounts),
@@ -6189,6 +6343,7 @@ impl MountedReal {
             policy,
             self.identity.clone(),
             &self.repo,
+            fixtures::plain_checkout(&self.repo.join(".git")),
             image_environment_of(docker, &self.image_id),
             Box::new(docker.clone()),
         )

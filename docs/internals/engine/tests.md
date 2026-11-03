@@ -3535,3 +3535,62 @@ and that its context opens with the task line, `` Task `t1` — One ``: the
 question is built by `build_question` and described from the plan task it
 names, and must read as it did when `build_spend_approval` indexed the plan
 itself.
+
+## `const INHERITED_COMMON_IMAGE: &str = "upstroke-tests/inherited-common:1";`
+
+The image reference J10's guard configures and records. No runtime holds it,
+and none is asked: the guard's stub runtime fails every command it is given.
+
+## `const INHERITED_COMMON_REFUSALS: &str = "UPSTROKE_INHERITED_COMMON_REFUSALS";`
+
+The variable that names, to J10's child, the file it writes both refusals to.
+
+## `fn run_directory_names(repo: &Path) -> Vec<String> {`
+
+The names under the repository's runs root, sorted: what J10's guard compares
+before and after its children, so a refused run that left a run directory
+fails it.
+
+## `fn record_a_container_runner_mounting(repo: &Path, run_id: &str, source: &Path) {`
+
+Makes the parked run's committed `run_started` record a container runner whose
+one mount is `source`, writable at `/data`, with the canonical spelling and the
+identity a resolution would record. The runner's JSON is replaced in the first
+line, which must spell it exactly once, and every other byte of the log is
+kept. It stands for the record a container run would have written: the public
+fresh path cannot create one here without a container runtime, and a resume
+reads nothing of the run but `run_started`, its frozen plan and its private
+half before it refuses.
+
+## `fn a_mount_inside_an_inherited_common_directory_is_refused_by_run_and_resume_before_the_runtime_is_asked()`
+
+J10 (regression review 2, finding 1). A parked schema-4 run, then the
+repository's `.git` copied to `common`, a sibling of the checkout, as the
+reviewer's layout places it. A configuration selects the container runner with
+a writable mount of `common/refs`, and the parked run's record is made to name
+the same mount. A stub `docker`, first on the children's `PATH`, appends what
+it is asked to a file and exits 93, so no real runtime can be reached.
+
+For `GIT_COMMON_DIR` set absolute and set relative (`../common`, from the
+checkout), a child of this test binary whose environment alone carries it
+(`inherited_common_dir_mount_child`, under `run_test_isolated`) runs a fresh
+run and a resume and records both refusals; the parent requires the child's
+success and libtest's `1 passed`, and that both recorded refusals name the
+canonical common directory as the source's container. Afterwards the stub
+was never asked anything, so no image was inspected, no runner was built and
+no launch plan was made; the recorded log is byte-identical; and the runs
+root holds what it held.
+
+With the fix removed (`MountContext` bound from the checkout's `.git`, the
+pre-J10 entry), the absolute cell fails: the fresh run accepts the mount, and
+its first runtime question, the probe, reaches the stub ("the container runtime
+refused `probe`"). Even then only the stub could be asked.
+
+## `fn inherited_common_dir_mount_child() {`
+
+The child of the test above. `run_with` over the container configuration is
+refused with `[runner] the mount … is refused`, its source lying inside the
+canonical common directory, authoritative Git; `resume_with` on the parked run
+is refused as recording that mount, for the same reason, with nothing
+published, locked or written. It then writes both refusals to the file its
+parent names, the evidence that it ran.

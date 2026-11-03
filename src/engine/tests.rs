@@ -21371,3 +21371,221 @@ fn a_schema_4_answer_in_words_reaches_the_next_worker_and_its_reviewer() {
         );
     }
 }
+
+#[cfg(unix)]
+const INHERITED_COMMON_IMAGE: &str = "upstroke-tests/inherited-common:1";
+#[cfg(unix)]
+const INHERITED_COMMON_REFUSALS: &str = "UPSTROKE_INHERITED_COMMON_REFUSALS";
+
+#[cfg(unix)]
+fn run_directory_names(repo: &Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(rundir::runs_root(repo))
+        .expect("the runs root")
+        .map(|entry| {
+            entry
+                .expect("an entry of the runs root")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+#[cfg(unix)]
+fn record_a_container_runner_mounting(repo: &Path, run_id: &str, source: &Path) {
+    use crate::topology::events::{
+        ImageIdentity, MountSourceIdentity, MountSourceKind, RecordedMount, RunnerContract,
+        RunnerKind, RunnerPolicy, TopologyEvent, TopologyEventBody,
+    };
+    use std::os::unix::fs::MetadataExt as _;
+
+    let canonical = fs::canonicalize(source).expect("the mounted directory resolves");
+    let metadata = fs::metadata(&canonical).expect("the mounted directory");
+    let runner = RunnerPolicy {
+        kind: RunnerKind::Container,
+        policy: RunnerContract::ContainerV1,
+        image: Some(ImageIdentity {
+            reference: INHERITED_COMMON_IMAGE.to_owned(),
+            id: format!("sha256:{}", "a".repeat(64)),
+            digest: None,
+        }),
+        credential_volumes: Some(std::collections::BTreeMap::new()),
+        mounts: vec![RecordedMount {
+            source: canonical.to_str().expect("a UTF-8 source").to_owned(),
+            target: "/data".to_owned(),
+            read_only: false,
+            source_identity: MountSourceIdentity::Unix {
+                kind: MountSourceKind::Directory,
+                device: metadata.dev(),
+                inode: metadata.ino(),
+            },
+        }],
+    };
+    let log = rundir::public_dir(repo, run_id).join("events.jsonl");
+    let bytes = fs::read(&log).expect("the parked run's log");
+    let end = bytes
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .expect("a committed first line");
+    let (first, rest) = bytes.split_at(end);
+    let first = std::str::from_utf8(first).expect("a UTF-8 first line");
+    let event: TopologyEvent = serde_json::from_str(first).expect("the first line is an event");
+    let TopologyEventBody::RunStarted { data } = event.body else {
+        panic!("the first line is not `run_started`: {first}");
+    };
+    let recorded = serde_json::to_string(&data.runner).expect("the recorded runner serializes");
+    assert_eq!(
+        first.matches(&recorded).count(),
+        1,
+        "the first line spells its runner `{recorded}` exactly once: {first}"
+    );
+    let mut planted = first
+        .replacen(
+            &recorded,
+            &serde_json::to_string(&runner).expect("the container runner serializes"),
+            1,
+        )
+        .into_bytes();
+    planted.extend_from_slice(rest);
+    fs::write(&log, planted).expect("the container runner recorded");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_mount_inside_an_inherited_common_directory_is_refused_by_run_and_resume_before_the_runtime_is_asked()
+ {
+    let (tree, repo) = temp_engine_repo("inherited-common-mount");
+    git_in(&repo, &["config", "maintenance.auto", "false"]);
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        1,
+    )));
+    let parked = run_with(&topology_options(&repo), &source).expect("the run parks");
+    assert_eq!(parked.outcome(), RunOutcome::Parked, "{parked:#?}");
+    until_released(&repo, &parked.run_id);
+
+    let common = repo.with_file_name("common");
+    copy_tree_for_a_layout(&repo.join(".git"), &common);
+    let refs = common.join("refs");
+    fs::write(
+        repo.with_file_name("container.toml"),
+        format!(
+            "[runner]\nkind = \"container\"\nimage = \"{INHERITED_COMMON_IMAGE}\"\n\
+             mounts = [{{ source = \"{}\", target = \"/data\", read_only = false }}]\n",
+            refs.display()
+        ),
+    )
+    .expect("a container configuration mounting the common directory's refs");
+    record_a_container_runner_mounting(&repo, &parked.run_id, &refs);
+
+    let bin = tree.path().join("bin");
+    fs::create_dir(&bin).expect("the stub runtime's directory");
+    let asked = tree.path().join("runtime-asked");
+    crate::runner::container::write_program_in_its_own_process(
+        &bin.join(crate::runner::container::DOCKER_PROGRAM),
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nexit 93\n",
+            asked.display()
+        ),
+    );
+    let inherited = std::env::var_os("PATH").unwrap_or_default();
+    let path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&inherited)))
+        .expect("a PATH with the stub runtime first");
+
+    let log = rundir::public_dir(&repo, &parked.run_id).join("events.jsonl");
+    let before = fs::read(&log).expect("the recorded log");
+    let runs = run_directory_names(&repo);
+    for (spelling, value) in [
+        ("absolute", common.as_os_str()),
+        ("relative", std::ffi::OsStr::new("../common")),
+    ] {
+        let refusals = tree.path().join(format!("refusals-{spelling}"));
+        let ended = crate::agent::proc::test_support::run_test_isolated(
+            "engine::tests::inherited_common_dir_mount_child",
+            &[
+                ("GIT_COMMON_DIR", value),
+                ("PATH", path.as_os_str()),
+                (INHERITED_RUN_ROOT, repo.as_os_str()),
+                (INHERITED_RUN_ID, std::ffi::OsStr::new(&parked.run_id)),
+                (INHERITED_COMMON_REFUSALS, refusals.as_os_str()),
+            ],
+            Duration::from_secs(300),
+        );
+        assert!(
+            ended.status.is_some_and(|status| status.success())
+                && ended.stdout.contains("1 passed"),
+            "under the {spelling} GIT_COMMON_DIR the run and the resume refused the mount: {ended}"
+        );
+        let said = fs::read_to_string(&refusals).unwrap_or_else(|error| {
+            panic!("the {spelling} cell's child recorded no refusals ({error}): {ended}")
+        });
+        let canonical = fs::canonicalize(&common).expect("the relocated common directory");
+        assert_eq!(
+            said.matches(&format!("lies inside `{}`", canonical.display()))
+                .count(),
+            2,
+            "the {spelling} GIT_COMMON_DIR: both refusals name the common directory:\n{said}"
+        );
+    }
+    assert!(
+        !asked.exists(),
+        "the container runtime was asked: {}",
+        fs::read_to_string(&asked).unwrap_or_default()
+    );
+    assert_eq!(
+        fs::read(&log).expect("the recorded log"),
+        before,
+        "a refused command wrote the recorded log"
+    );
+    assert_eq!(
+        run_directory_names(&repo),
+        runs,
+        "a refused run created a run directory"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "subprocess helper"]
+fn inherited_common_dir_mount_child() {
+    let Some(repo) = std::env::var_os(INHERITED_RUN_ROOT).map(PathBuf::from) else {
+        return;
+    };
+    let run_id = std::env::var_os(INHERITED_RUN_ID)
+        .and_then(|id| id.into_string().ok())
+        .expect("the recorded run's id");
+    let common =
+        fs::canonicalize(repo.with_file_name("common")).expect("the relocated common directory");
+    let names_the_common_directory = |said: &str| {
+        said.contains(&format!("lies inside `{}`", common.display()))
+            && said.contains("authoritative Git")
+    };
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        0,
+    )));
+
+    let mut opts = topology_options(&repo);
+    opts.config_path = Some(repo.with_file_name("container.toml"));
+    let refused = run_with(&opts, &source).expect_err("a fresh run refuses the configured mount");
+    let said = refused.to_string();
+    assert!(
+        said.contains("[runner] the mount") && names_the_common_directory(&said),
+        "the fresh run: {said}"
+    );
+
+    let refused = resume_with(&resume_options(&repo, &run_id), &source)
+        .expect_err("a resume refuses the recorded mount");
+    let resumed = refused.to_string();
+    assert!(
+        resumed.contains(&format!("run `{run_id}` records the mount"))
+            && names_the_common_directory(&resumed)
+            && resumed.contains("nothing was published, locked or written"),
+        "the resume: {resumed}"
+    );
+    let refusals =
+        std::env::var_os(INHERITED_COMMON_REFUSALS).expect("the parent names the refusals' file");
+    fs::write(refusals, format!("{said}\n{resumed}\n")).expect("the refusals recorded");
+}

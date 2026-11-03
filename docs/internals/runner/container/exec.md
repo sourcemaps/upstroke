@@ -276,7 +276,7 @@ this module can produce. The shape is `PR4-CONF-003`'s — the property is
 established by the function that derives it from the layout, not asserted by
 a caller who remembered to call a builder.
 
-## `impl Confinement` › `pub fn of_run(identity: &RunIdentity, repo_root: &Path) -> Self {`
+## `impl Confinement` › `pub fn of_run(identity: &RunIdentity, repo_root: &Path, git: RepositoryGit<'_>) -> Self {`
 
 Everything `identity`'s run withholds.
 
@@ -287,6 +287,15 @@ set moves when the layout moves. `run` adds one more per invocation: the
 workspace's **resolved** common Git directory, which is where a linked
 worktree's refs really are rather than where an assumed `<repo>/.git`
 would be.
+
+`git` adds the repository's Git directory and its effective common
+directory, as the coordinator holds them (`resolve::RepositoryGit`), as
+authoritative Git beside `<repo>/.git`, each once. J10 (regression
+review 2, finding 1): only `<repo>/.git` was withheld, so a probe, which
+has no worktree whose common directory `plan` could add, withheld nothing
+of a common directory an inherited `GIT_COMMON_DIR` placed outside the
+checkout. The execution root moves into the set after its namespaces are
+derived from it, rather than being copied (§6).
 
 #### The sibling-worktree namespace (`PR6-CORRECTNESS-013`)
 
@@ -334,6 +343,24 @@ list" — passes on both.
 ## `pub fn violations(&self, mounts: &[Mount]) -> Vec<String>` › `let Mount::Path { source, target, .. } = mount else {`
 
 A named volume has no host path, so it can carry none of these.
+
+## `impl Confinement` › `pub fn configured_violations(&self, configured: &[Mount]) -> Vec<String> {`
+
+Which of the operator's configured mounts reach a withheld path, in both
+directions: a source that **is**, **contains** or **lies inside** one, the
+relation `resolve::overlap` names. Each withheld path is compared as
+spelled and, failing that, in its canonical spelling, because a configured
+source is recorded canonical while a withheld path is spelled as the run's
+layout spells it.
+
+The role's own mounts keep `violations`' one direction, because they
+legitimately lie inside withheld directories (its worktree inside the
+execution root, its object store inside the common directory). A
+configured source never may: DESIGN §26 refuses one that "is, contains or
+lies inside the repository root, its Git or common directory, the private
+root". J10 (regression review 2, finding 1): `plan` checked configured
+mounts with `violations` alone, so a source inside the task worktree's
+resolved common directory, its `refs` say, was accepted.
 
 ## `#[cfg(unix)]` › `fn coordinator_user() -> Option<ContainerUser> {`
 
@@ -506,9 +533,10 @@ reaper cannot be duplicated with it.
 ## `pub struct ContainerRunner` › `mount_exclusions: Vec<(MountExclusion, PathBuf)>,`
 
 The configured-mount exclusions bound when the runner is built (repository
-root, its Git and common directories, the private root, the coordinator's
-credential locations; `resolve::MountContext::bind`), and only when the
-record has mounts: a runner without them binds nothing and reads nothing.
+root, the Git directory and effective common directory it is given, the
+private root, the coordinator's credential locations;
+`resolve::MountContext::bind`), and only when the record has mounts: a
+runner without them binds nothing and reads nothing.
 `configured_mounts` refuses a recorded source that is, contains or lies
 inside any of them. This is the configured-mount rule, in both directions;
 the role's own mounts keep `Confinement`'s one-directional check.
@@ -735,10 +763,25 @@ locations"; a runner that read no base could supply none of them.
 It also fixes the run's settings directory and reads the coordinator's
 numeric identity (`coordinator_user`), once.
 
+`git` is the repository's Git directory and its effective common
+directory as the coordinator holds them, and a parameter for the same
+reason as `repo_root`: the schema-4 entry passes its worktree Git
+directory and the common directory of the `ManagedRepository` it hands
+the host runner as `ObjectGraph::RecordedIn`, so the container runner and
+the host runner take the repository's Git from one value. The confinement's
+authoritative-Git entries and the configured-mount exclusions both come
+from it, and the runner reads no `.git` of its own. J10 (regression
+review 2, finding 1): the exclusions came from `view::resolve` over the
+checkout's `.git`, which an inherited `GIT_COMMON_DIR` does not change.
+The bound exclusions are moved out of the context
+(`MountContext::into_excluded`), not copied (§6).
+
 ### Errors
 
 [`UpstrokeError::Refused`] when `policy` is not a usable container policy
-— see [`recorded_image_id`].
+— see [`recorded_image_id`] — or when it records mounts and a Git
+directory in `git` is not absolute. [`UpstrokeError::Io`] when the
+repository root cannot be canonicalized for those exclusions.
 
 ## `impl ContainerRunner` › `pub fn with_layout(mut self, layout: BoundaryLayout) -> Self {`
 
@@ -845,7 +888,18 @@ container. `intent::path_label` carries the argument.
 
 The worktree's *resolved* common directory, which is where a
 linked worktree's refs really are — rather than an assumed
-`<repo>/.git`.
+`<repo>/.git`. It goes on the invocation's own copy of the
+runner's confinement: `plan` takes `&self`, so the runner's set
+is never changed by one invocation (§6, an owned snapshot).
+
+## `pub fn plan(&self, request: &RunnerRequest) -> Result<Invoc…` › `violations.extend(confinement.configured_violations(&configured));`
+
+The role's own mounts against that copy one way
+(`Confinement::violations`), the configured mounts both ways
+(`Confinement::configured_violations`), before the configured
+mounts join the plan. Before J10 (regression review 2,
+finding 1) both went through `violations`, which let a
+configured source lie inside the resolved common directory.
 
 ## `pub fn plan(&self, request: &RunnerRequest) -> Result<Invoc…` › `image_id: self.image_id.clone(),`
 

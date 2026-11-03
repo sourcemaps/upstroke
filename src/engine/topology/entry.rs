@@ -25,7 +25,9 @@ use crate::runner::Runner;
 use crate::runner::container::DockerCli;
 use crate::runner::container::env::ContainerEnvironment;
 use crate::runner::container::exec::{ContainerRunner, RunIdentity};
-use crate::runner::container::resolve::{InspectionRefusal, MountContext};
+use crate::runner::container::resolve::{
+    InspectionRefusal, MountContext, RepositoryGit, mount_label, refuse_excluded,
+};
 use crate::runner::container::runtime::{
     ContainerRuntime, ContainerTrace, LockProbe, RuntimeError,
 };
@@ -101,14 +103,13 @@ pub fn prepare_fresh(
         engine_limits: EngineLimits::Topology,
     };
     let captured = CapturedInputs::capture(&validate_opts);
-    let analysis = validate::analyze_captured(&captured, &validate_opts)?;
-    let mut warnings = analysis.warnings.clone();
+    let mut analysis = validate::analyze_captured(&captured, &validate_opts)?;
+    let mut warnings = std::mem::take(&mut analysis.warnings);
 
     let runtime = DockerCli::default();
     let authorization = match &opts.private_root {
         Some(root) => {
-            let mounts =
-                MountContext::for_selection(&analysis.config.runner, &opts.repo_root, root)?;
+            let mounts = mount_context(&analysis.config.runner, &opts.repo_root, root)?;
             Authorization::Checked(prelock::check(&PreLock {
                 selection: &analysis.config.runner,
                 runtime: Some(&runtime),
@@ -119,8 +120,7 @@ pub fn prepare_fresh(
         }
         None => {
             let root = rundir::default_private_root();
-            let mounts =
-                MountContext::for_selection(&analysis.config.runner, &opts.repo_root, &root)?;
+            let mounts = mount_context(&analysis.config.runner, &opts.repo_root, &root)?;
             prelock::refuse_unspellable_default_root(&root)?;
             Authorization::Pending {
                 resolved: prelock::resolve_runner(
@@ -251,6 +251,10 @@ impl FreshPrepared {
                     repo_key: repo_key.as_str().to_owned(),
                 },
                 &opts.repo_root,
+                RepositoryGit {
+                    git_dir: &worktree_git_dir,
+                    common_dir: repository.common_dir(),
+                },
                 base,
             )?),
         };
@@ -456,6 +460,7 @@ pub fn prepare_resume(
 
     refuse_unshareable_width(started.limits.max_parallel, harness)?;
     hold_recorded_case_policy(&started, &mut warnings)?;
+    refuse_withheld_recorded_mounts(&started, &opts.repo_root, root.private_root())?;
     let image_environment = match started.runner.kind {
         RunnerKind::Host => None,
         RunnerKind::Container => Some(recorded_image_environment(
@@ -533,6 +538,10 @@ impl ResumePrepared {
                     repo_key: repo_key.as_str().to_owned(),
                 },
                 &opts.repo_root,
+                RepositoryGit {
+                    git_dir: &worktree_git_dir,
+                    common_dir: repository.common_dir(),
+                },
                 base,
             )?),
         };
@@ -1046,15 +1055,93 @@ fn container_runner(
     policy: &RunnerPolicy,
     identity: RunIdentity,
     repo_root: &Path,
+    git: RepositoryGit<'_>,
     base: Vec<(String, String)>,
 ) -> Result<ContainerRunner, UpstrokeError> {
     ContainerRunner::new(
         policy.clone(),
         identity,
         repo_root,
+        git,
         ContainerEnvironment::from_image(base),
         Box::new(DockerCli::default()),
     )
+}
+
+fn mount_context(
+    selection: &config::RunnerSelection,
+    repo_root: &Path,
+    private_root: &Path,
+) -> Result<MountContext, UpstrokeError> {
+    if selection.mounts.is_empty() {
+        return Ok(MountContext::unbound());
+    }
+    checkout_mount_context(repo_root, private_root)
+}
+
+fn refuse_withheld_recorded_mounts(
+    started: &RunStarted4,
+    repo_root: &Path,
+    private_root: &Path,
+) -> Result<(), UpstrokeError> {
+    if started.runner.mounts.is_empty() {
+        return Ok(());
+    }
+    let context = checkout_mount_context(repo_root, private_root)?;
+    for mount in &started.runner.mounts {
+        if let Err(reason) = refuse_excluded(Path::new(&mount.source), context.excluded()) {
+            return Err(UpstrokeError::Refused {
+                message: format!(
+                    "run `{}` records the mount {}, which no container of this resume may \
+                     receive: {reason}. A run keeps the mounts it started with, so it cannot \
+                     continue while that holds; nothing was published, locked or written",
+                    started.run_id,
+                    mount_label(&mount.source, &mount.target)
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn checkout_mount_context(
+    repo_root: &Path,
+    private_root: &Path,
+) -> Result<MountContext, UpstrokeError> {
+    let workspace = Workspace::open(repo_root)?;
+    let git_dir = workspace.worktree_git_dir()?;
+    let common_dir = effective_common_dir(
+        workspace.root(),
+        &git_dir,
+        std::env::var_os(crate::workspace_manager::COMMON_DIR).as_deref(),
+    )?;
+    MountContext::bind(
+        repo_root,
+        RepositoryGit {
+            git_dir: &git_dir,
+            common_dir: &common_dir,
+        },
+        private_root,
+    )
+}
+
+fn effective_common_dir(
+    checkout: &Path,
+    git_dir: &Path,
+    inherited: Option<&std::ffi::OsStr>,
+) -> Result<PathBuf, UpstrokeError> {
+    if let Some(value) = inherited {
+        return Ok(checkout.join(value));
+    }
+    let record = git_dir.join("commondir");
+    match std::fs::read_to_string(&record) {
+        Ok(text) => Ok(git_dir.join(text.trim_end_matches(['\n', '\r']))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(git_dir.to_path_buf()),
+        Err(source) => Err(UpstrokeError::Io {
+            path: record,
+            source,
+        }),
+    }
 }
 
 fn refuse_unshareable_width(width: u32, harness: &Harness<'_>) -> Result<(), UpstrokeError> {

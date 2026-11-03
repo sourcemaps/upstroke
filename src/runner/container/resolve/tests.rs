@@ -596,6 +596,7 @@ impl MountWorld {
     fn context(&self) -> MountContext {
         MountContext::bind_with(
             &self.repo,
+            fixtures::plain_checkout(&self.repo.join(".git")),
             &self.private,
             std::slice::from_ref(&self.credentials),
         )
@@ -822,6 +823,60 @@ fn a_configured_mount_is_recorded_and_rebuilt_from_the_record() {
     }
 }
 
+#[cfg(any(unix, windows))]
+#[test]
+fn a_mount_context_withholds_the_git_directories_it_is_given_and_refuses_relative_ones() {
+    let world = mount_world("mount-given-git");
+    let git_dir = world.repo.join(".git");
+    let common = world.root.join("common");
+    fs::create_dir_all(common.join("refs")).expect("a common directory outside the checkout");
+    let mounted = mounted_selection(vec![configured(&common.join("refs"), "/data", false)]);
+    let (runtime, _trace) = ready_runtime();
+    resolve_container(&runtime, &mounted, &world.context())
+        .expect("the control: beside the checkout's own Git the source is an ordinary directory");
+
+    let relocated = MountContext::bind_with(
+        &world.repo,
+        RepositoryGit {
+            git_dir: &git_dir,
+            common_dir: &common,
+        },
+        &world.private,
+        &[],
+    )
+    .expect("the context binds the directories it is given");
+    match resolve_container(&runtime, &mounted, &relocated) {
+        Err(InspectionRefusal::MountRefused { reason, .. }) => assert!(
+            reason.contains(&format!(
+                "lies inside `{}`",
+                canonical_spelling(&common).display()
+            )) && reason.contains("authoritative Git"),
+            "{reason}"
+        ),
+        other => panic!("a source inside the given common directory resolved as {other:?}"),
+    }
+
+    for (git_dir, common_dir) in [
+        (Path::new(".git"), common.as_path()),
+        (git_dir.as_path(), Path::new("../common")),
+    ] {
+        let refused = MountContext::bind_with(
+            &world.repo,
+            RepositoryGit {
+                git_dir,
+                common_dir,
+            },
+            &world.private,
+            &[],
+        )
+        .expect_err("a relative Git directory cannot be compared with a source");
+        assert!(
+            refused.to_string().contains("is not an absolute path"),
+            "{refused}"
+        );
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn every_configured_mount_that_could_reach_a_withheld_path_is_refused_before_the_runtime_is_asked()
@@ -843,6 +898,10 @@ fn every_configured_mount_that_could_reach_a_withheld_path_is_refused_before_the
     .expect("gitfile");
     let linked_context = MountContext::bind_with(
         &linked,
+        RepositoryGit {
+            git_dir: &admin,
+            common_dir: &main_git,
+        },
         &world.private,
         std::slice::from_ref(&world.credentials),
     )

@@ -1041,8 +1041,13 @@ fn a_run_with_configured_mounts_records_one_runner_in_its_marker_owner_record_an
         ..container_selection()
     };
     let runtime = container_runtime();
-    let context = MountContext::bind_with(&fixture.repo, &fixture.private_root, &[])
-        .expect("the fixture binds a mount context");
+    let context = MountContext::bind_with(
+        &fixture.repo,
+        crate::runner::container::resolve::fixtures::plain_checkout(&fixture.repo.join(".git")),
+        &fixture.private_root,
+        &[],
+    )
+    .expect("the fixture binds a mount context");
     let checked = super::super::prelock::check(&super::super::prelock::PreLock {
         selection: &selection,
         runtime: Some(&runtime),
@@ -3046,6 +3051,7 @@ fn container_execution(
         checked.runner_policy().clone(),
         identity,
         &fixture.repo,
+        crate::runner::container::resolve::fixtures::plain_checkout(&fixture.repo.join(".git")),
         crate::runner::container::env::ContainerEnvironment::from_image(vec![(
             "PATH".to_owned(),
             "/usr/bin:/bin".to_owned(),
@@ -4792,6 +4798,7 @@ fn p4_execution(
         checked.runner_policy().clone(),
         identity,
         &fixture.repo,
+        crate::runner::container::resolve::fixtures::plain_checkout(&fixture.repo.join(".git")),
         crate::runner::container::env::ContainerEnvironment::from_image(vec![(
             "PATH".to_owned(),
             "/usr/bin:/bin".to_owned(),

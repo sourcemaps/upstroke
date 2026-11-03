@@ -1083,7 +1083,9 @@ Containerized probes
 ## `fn container_execution(`
 
 The probes of a containerized run: the real [`ContainerRunner`], over a
-runtime with no daemon behind it.
+runtime with no daemon behind it, given the fixture repository's `.git` as
+both its Git directories (`resolve::fixtures::plain_checkout`), what Git reports
+for that ordinary checkout.
 
 [`ContainerRunner`]: crate::runner::container::exec::ContainerRunner
 The container runner a containerized creation executes through.

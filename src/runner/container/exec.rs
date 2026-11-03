@@ -23,8 +23,8 @@ use super::census::ReaperContainerScope;
 use super::env::{BoundaryLayout, ContainerEnvironment, RoleScope, supplies_credential_location};
 use super::intent::{ContainerIntent, ContainerName, LABEL_INCARNATION, LABEL_PRIVATE_ROOT};
 use super::resolve::{
-    MountContext, MountExclusion, mount_label, nested_targets, recheck_recorded_source,
-    refuse_excluded,
+    MountContext, MountExclusion, RepositoryGit, canonical_spelling, mount_label, nested_targets,
+    overlap, recheck_recorded_source, refuse_excluded,
 };
 use super::runtime::{
     ContainerRuntime, ContainerTrace, ContainerUser, CreateSpec, Mount, RuntimeError,
@@ -102,7 +102,7 @@ pub struct Confinement {
 
 impl Confinement {
     #[must_use]
-    pub fn of_run(identity: &RunIdentity, repo_root: &Path) -> Self {
+    pub fn of_run(identity: &RunIdentity, repo_root: &Path, git: RepositoryGit<'_>) -> Self {
         let paths =
             RunPaths::with_private_root(repo_root, &identity.run_id, &identity.private_root);
         let execution_root = crate::workspace_manager::execution_root_of(
@@ -110,6 +110,7 @@ impl Confinement {
             &identity.repo_key,
             &identity.run_id,
         );
+        let namespaces = worktree_namespaces(&execution_root);
         let mut entries = vec![
             (Withheld::PublicLog, paths.public),
             (Withheld::PrivateArtifacts, paths.private),
@@ -118,9 +119,14 @@ impl Confinement {
                 super::intent::containers_dir(&identity.private_root),
             ),
             (Withheld::AuthoritativeGit, repo_root.join(".git")),
-            (Withheld::SiblingWorktree, execution_root.clone()),
         ];
-        for namespace in worktree_namespaces(&execution_root) {
+        for directory in [git.git_dir, git.common_dir] {
+            if !entries.iter().any(|(_, withheld)| withheld == directory) {
+                entries.push((Withheld::AuthoritativeGit, directory.to_path_buf()));
+            }
+        }
+        entries.push((Withheld::SiblingWorktree, execution_root));
+        for namespace in namespaces {
             entries.push((Withheld::SiblingWorktree, namespace));
         }
         Self { entries }
@@ -148,6 +154,29 @@ impl Confinement {
                 if withheld.starts_with(source) {
                     found.push(format!(
                         "the mount `{}` -> `{target}` would hand the container `{}` ({})",
+                        source.display(),
+                        withheld.display(),
+                        category.passage()
+                    ));
+                }
+            }
+        }
+        found
+    }
+
+    #[must_use]
+    pub fn configured_violations(&self, configured: &[Mount]) -> Vec<String> {
+        let mut found = Vec::new();
+        for mount in configured {
+            let Mount::Path { source, target, .. } = mount else {
+                continue;
+            };
+            for (category, withheld) in &self.entries {
+                let relation = overlap(source, withheld)
+                    .or_else(|| overlap(source, &canonical_spelling(withheld)));
+                if let Some(relation) = relation {
+                    found.push(format!(
+                        "the configured mount `{}` -> `{target}` {relation} `{}` ({})",
                         source.display(),
                         withheld.display(),
                         category.passage()
@@ -371,6 +400,7 @@ impl ContainerRunner {
         policy: RunnerPolicy,
         identity: RunIdentity,
         repo_root: &Path,
+        git: RepositoryGit<'_>,
         environment: ContainerEnvironment,
         runtime: Box<dyn ContainerRuntime>,
     ) -> Result<Self, UpstrokeError> {
@@ -380,13 +410,11 @@ impl ContainerRunner {
         let layout = BoundaryLayout::new();
         let view = RoleGitView::new(ContainerTrace::off())
             .for_reader(layout.git_view(), layout.git_objects());
-        let confinement = Confinement::of_run(&identity, repo_root);
+        let confinement = Confinement::of_run(&identity, repo_root, git);
         let mount_exclusions = if policy.mounts.is_empty() {
             Vec::new()
         } else {
-            MountContext::bind(repo_root, &identity.private_root)?
-                .excluded()
-                .to_vec()
+            MountContext::bind(repo_root, git, &identity.private_root)?.into_excluded()
         };
         let settings_directory =
             RunPaths::with_private_root(repo_root, &identity.run_id, &identity.private_root)
@@ -520,8 +548,7 @@ impl ContainerRunner {
         let mut mounts = self.mounts(request, git.as_ref(), &name);
         mounts.extend(settings);
         let configured = self.configured_mounts(&request.role, &mounts)?;
-        mounts.extend(configured);
-        for mount in &mounts {
+        for mount in mounts.iter().chain(&configured) {
             super::mount_argument(mount).map_err(|reason| UpstrokeError::Refused {
                 message: format!(
                     "the container for `{}` cannot be given its mount at `{}`: {reason}",
@@ -533,9 +560,11 @@ impl ContainerRunner {
         let mut confinement = self.confinement.clone();
         if let Some(layout) = &git {
             confinement =
-                confinement.withholding(Withheld::AuthoritativeGit, layout.common_dir.clone());
+                confinement.withholding(Withheld::AuthoritativeGit, layout.common_dir.as_path());
         }
-        let violations = confinement.violations(&mounts);
+        let mut violations = confinement.violations(&mounts);
+        violations.extend(confinement.configured_violations(&configured));
+        mounts.extend(configured);
         if !violations.is_empty() {
             return Err(UpstrokeError::Refused {
                 message: format!(

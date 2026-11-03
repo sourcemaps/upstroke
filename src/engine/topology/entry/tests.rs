@@ -360,3 +360,57 @@ fn every_case_observation_and_ignorecase_record_resolves_to_the_planned_case_fol
         assert!(warning.contains("`case_fold = true`"), "{warning}");
     }
 }
+
+/// J10 (regression review 2, finding 1): the common directory the read-only halves withhold
+/// from configured mounts is the one Git takes. With no record the Git directory is its own;
+/// a `commondir` record names it, relative to the Git directory or absolute, without its line
+/// ending; an inherited `GIT_COMMON_DIR` wins over the record and names its path at the
+/// checkout. A record that cannot be read is an error, never an absence.
+#[test]
+fn the_common_directory_is_the_inherited_one_at_the_checkout_else_the_git_directorys_record() {
+    use std::ffi::OsStr;
+
+    let tree = scratch("effective-common-dir");
+    let root = tree.path();
+    let checkout = root.join("checkout");
+    let git_dir = checkout.join(".git");
+    crate::workspace_manager::fixture::create_dir(&git_dir);
+    let elsewhere = root.join("common");
+    let record = git_dir.join("commondir");
+    let common = |inherited: Option<&OsStr>| {
+        effective_common_dir(&checkout, &git_dir, inherited)
+            .unwrap_or_else(|error| panic!("{inherited:?}: {error}"))
+    };
+
+    assert_eq!(
+        common(None),
+        git_dir,
+        "with no record, the Git directory is its own common directory"
+    );
+    write_file(&record, b"../..\n");
+    assert_eq!(
+        common(None),
+        git_dir.join("../.."),
+        "a relative record names a path from the Git directory"
+    );
+    write_file(&record, format!("{}\r\n", elsewhere.display()).as_bytes());
+    assert_eq!(
+        common(None),
+        elsewhere,
+        "an absolute record is taken as written, without its line ending"
+    );
+    for inherited in [elsewhere.as_os_str(), OsStr::new("../common")] {
+        assert_eq!(
+            common(Some(inherited)),
+            checkout.join(inherited),
+            "an inherited value wins over the record, and names its path at the checkout"
+        );
+    }
+
+    crate::workspace_manager::fixture::remove_file(&record);
+    crate::workspace_manager::fixture::create_dir(&record);
+    match effective_common_dir(&checkout, &git_dir, None) {
+        Err(UpstrokeError::Io { path, .. }) => assert_eq!(path, record),
+        other => panic!("a record that cannot be read is an error, not an absence: {other:?}"),
+    }
+}

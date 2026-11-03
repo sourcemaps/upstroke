@@ -3332,6 +3332,7 @@ pub(super) fn container_runner(
         container_policy(),
         identity,
         repo_root,
+        crate::runner::container::resolve::fixtures::plain_checkout(&repo_root.join(".git")),
         image_environment(),
         runtime,
     )
