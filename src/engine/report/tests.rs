@@ -387,3 +387,45 @@ fn a_schema_4_report_keeps_each_interrupted_attempt_with_its_own_start_and_unkno
         orphan.warnings
     );
 }
+
+#[test]
+fn a_legacy_report_says_which_task_position_its_plan_does_not_hold_and_reports_the_rest() {
+    let plan = crate::engine::topology::settle::tests::plan();
+    let beyond = plan.tasks.len() + 4;
+    let mut state = RunState::new(plan.tasks.iter().map(|task| task.id.to_string()).collect());
+    state.order = vec![beyond, 0];
+    let report = build_report(
+        ReportHeader {
+            run_id: "run-1",
+            branch: "upstroke/run-1",
+            gates: Vec::new(),
+            gates_from_config: false,
+            warnings: Vec::new(),
+            running: false,
+            interrupted: false,
+        },
+        &plan,
+        &state,
+    );
+    assert_eq!(
+        report
+            .tasks
+            .iter()
+            .map(|task| task.id.as_str())
+            .collect::<Vec<_>>(),
+        plan.tasks
+            .iter()
+            .map(|task| task.id.as_str())
+            .collect::<Vec<_>>(),
+        "every task the plan holds has its row, in the state's order"
+    );
+    assert!(
+        matches!(
+            report.warnings.as_slice(),
+            [warning] if warning.contains(&format!("task position {beyond}"))
+                && warning.contains("no row for it")
+        ),
+        "the position the plan does not hold is named, not dropped: {:?}",
+        report.warnings
+    );
+}

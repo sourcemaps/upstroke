@@ -506,31 +506,42 @@ pub(super) struct ReportHeader<'a> {
     pub(super) interrupted: bool,
 }
 
+#[deny(clippy::indexing_slicing)]
 pub(super) fn build_report(header: ReportHeader<'_>, plan: &Plan, state: &RunState) -> RunReport {
     let ReportHeader {
         run_id,
         branch,
         gates,
         gates_from_config,
-        warnings,
+        mut warnings,
         running,
         interrupted,
     } = header;
     let settled = settle(plan, &state.states, running);
-    let tasks: Vec<TaskReport> = state
+    let mut tasks: Vec<TaskReport> = Vec::with_capacity(plan.tasks.len());
+    for index in state
         .order
         .iter()
         .copied()
         .chain((0..plan.tasks.len()).filter(|i| !state.order.contains(i)))
-        .map(|index| {
-            task_report(
-                &plan.tasks[index],
-                &settled[index],
-                &state.progress[index],
-                running,
-            )
-        })
-        .collect();
+    {
+        match (
+            plan.tasks.get(index),
+            settled.get(index),
+            state.progress.get(index),
+        ) {
+            (Some(task), Some(settled), Some(progress)) => {
+                tasks.push(task_report(task, settled, progress, running));
+            }
+            _ => warnings.push(format!(
+                "the run's state names task position {index}, which its plan ({} task(s)) or its \
+                 state ({} row(s)) does not hold; this report has no row for it, and its spend, \
+                 if any, is not in the total",
+                plan.tasks.len(),
+                state.progress.len()
+            )),
+        }
+    }
     let total_cost_usd = total_of(&tasks);
     let pool_drain = capacity::drain_of(state.progress.iter().flat_map(|p| p.records.iter()))
         .into_iter()

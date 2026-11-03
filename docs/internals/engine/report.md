@@ -347,6 +347,25 @@ Whether an engine is driving this run right now.
 
 Whether this run stopped without ever recording that it finished.
 
+## `pub(super) fn build_report(header: ReportHeader<'_>, plan: &Plan, state: &RunState) -> RunReport {`
+
+The legacy report, from a header, the plan and a replayed state.
+
+Each task position is read with checked access: the plan's task, its settled
+state and its progress row. A position that one of them does not hold gets no
+row and a warning that names it and says its spend, if any, is not in the
+total, rather than a panic, a row dropped without a word or one invented to
+fill the gap. A valid state has none: `RunState` holds one row per plan task,
+and the log orders only positions it found by id. A function-local
+`#[deny(clippy::indexing_slicing)]` holds the function to this (J17, regular
+review 3, finding 5). Until J17 it read `plan.tasks[index]`,
+`settled[index]` and `state.progress[index]`. Those reads were older than the
+standard, and `questions_in_log` (a87d2439) brought the whole body under §7
+when it changed the function.
+
+The state's halt, questions and budget stop are cloned into the report, which
+is an owned snapshot of a state the caller keeps (§6).
+
 ## `.chain((0..plan.tasks.len()).filter(|i| !state.order.contains(i)))`
 
 Tasks that never started append in plan order, so the report reads
