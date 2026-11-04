@@ -637,6 +637,32 @@ fn identity_of(path: &Path) -> MountSourceIdentity {
     }
 }
 
+#[cfg(any(unix, windows))]
+const REFUSED_TARGETS: [(&str, &str); 15] = [
+    ("data", "not an absolute path"),
+    ("/", "the container's root"),
+    ("/data/", "normal form"),
+    ("/data//x", "normal form"),
+    ("/./data", "normal form"),
+    ("/data/../etc", "normal form"),
+    ("/cache/../upstroke/settings", "normal form"),
+    ("/upstroke", "reserves"),
+    ("/upstroke/cache", "reserves"),
+    ("/upstroke/settings", "reserves"),
+    ("/tmp", "reserves"),
+    ("/tmp/cache", "reserves"),
+    ("/data,readonly=false", "contains `,`"),
+    (" /data", "whitespace"),
+    ("", "is empty"),
+];
+
+#[cfg(any(unix, windows))]
+const NESTED_TARGETS: [(&str, &str, &str); 3] = [
+    ("a repeated target", "/data", "/data"),
+    ("a nested target", "/data", "/data/inner"),
+    ("an enclosing target", "/srv/data/inner", "/srv/data"),
+];
+
 #[cfg(windows)]
 #[test]
 fn a_windows_configured_mount_is_recorded_with_its_volume_and_full_file_id_and_rebuilt_from_it() {
@@ -1072,21 +1098,6 @@ fn every_configured_mount_that_could_reach_a_withheld_path_is_refused_before_the
             "no repository context",
         ),
     ];
-    let target_cells: [(&str, &str); 13] = [
-        ("data", "not an absolute path"),
-        ("/", "the container's root"),
-        ("/data/", "normal form"),
-        ("/data//x", "normal form"),
-        ("/./data", "normal form"),
-        ("/data/../etc", "normal form"),
-        ("/upstroke", "reserves"),
-        ("/upstroke/cache", "reserves"),
-        ("/tmp", "reserves"),
-        ("/tmp/cache", "reserves"),
-        ("/data,readonly=false", "contains `,`"),
-        (" /data", "whitespace"),
-        ("", "is empty"),
-    ];
 
     let mut refused = 0_usize;
     let mut expect_refused =
@@ -1115,7 +1126,7 @@ fn every_configured_mount_that_could_reach_a_withheld_path_is_refused_before_the
             needle,
         );
     }
-    for (target, needle) in target_cells {
+    for (target, needle) in REFUSED_TARGETS {
         expect_refused(
             target,
             mounted_selection(vec![configured(&world.shared, target, true)]),
@@ -1123,11 +1134,7 @@ fn every_configured_mount_that_could_reach_a_withheld_path_is_refused_before_the
             needle,
         );
     }
-    for (label, first, second) in [
-        ("a repeated target", "/data", "/data"),
-        ("a nested target", "/data", "/data/inner"),
-        ("an enclosing target", "/srv/data/inner", "/srv/data"),
-    ] {
+    for (label, first, second) in NESTED_TARGETS {
         expect_refused(
             label,
             mounted_selection(vec![
@@ -1138,7 +1145,10 @@ fn every_configured_mount_that_could_reach_a_withheld_path_is_refused_before_the
             "one holds the other",
         );
     }
-    assert_eq!(refused, source_cells.len() + 13 + 3);
+    assert_eq!(
+        refused,
+        source_cells.len() + REFUSED_TARGETS.len() + NESTED_TARGETS.len()
+    );
 
     for reserved in [
         BoundaryLayout::DEFAULT_WORKSPACE,
@@ -1174,6 +1184,110 @@ fn every_configured_mount_that_could_reach_a_withheld_path_is_refused_before_the
             .map(|mount| mount.target.as_str())
             .collect::<Vec<_>>(),
         vec!["/database", "/tmpfile", "/upstroked"]
+    );
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn every_target_a_fresh_run_refuses_is_refused_in_a_recorded_policy_before_the_runtime_is_asked() {
+    let world = mount_world("recorded-targets");
+    let context = world.context();
+    let today = mounted_selection(vec![configured(&world.shared, "/data", true)]);
+    let (runtime, _trace) = ready_runtime();
+    let record =
+        resolve_container(&runtime, &today, &context).expect("the record a fresh run makes");
+    let Some(template) = record.mounts.first() else {
+        panic!("the fresh record carries its mount: {record:?}");
+    };
+    assert_eq!(
+        recheck_recorded_mounts(&record),
+        Ok(()),
+        "the control: the record a fresh run made is rechecked clean"
+    );
+
+    let mut cells: Vec<Vec<&str>> = REFUSED_TARGETS
+        .iter()
+        .map(|(target, _)| vec![*target])
+        .collect();
+    for (_, first, second) in NESTED_TARGETS {
+        let mut pair = vec![first, second];
+        pair.sort_unstable();
+        cells.push(pair);
+    }
+    cells.extend(
+        fixtures::REFUSED_RECORDED_TARGETS
+            .iter()
+            .map(|(targets, _)| targets.to_vec()),
+    );
+    let mut self_consistent = 0_usize;
+    for targets in &cells {
+        let (fresh_runtime, _) = ready_runtime();
+        let fresh = resolve_container(
+            &fresh_runtime,
+            &mounted_selection(
+                targets
+                    .iter()
+                    .map(|target| configured(&world.shared, target, true))
+                    .collect(),
+            ),
+            &context,
+        );
+        let Err(InspectionRefusal::MountRefused { reason, .. }) = fresh else {
+            panic!("a fresh run refuses {targets:?}, and it answered {fresh:?}");
+        };
+        let Some(offending) = targets.last() else {
+            panic!("a cell names a target");
+        };
+        let expected = InspectionRefusal::RecordedTargetRefused {
+            mount: mount_label(&template.source, offending),
+            reason,
+        };
+        let planted = fixtures::with_recorded_targets(&record, targets);
+        assert_eq!(
+            recheck_recorded_mounts(&planted),
+            Err(expected.clone()),
+            "{targets:?}: a recorded policy is refused by the rule a fresh run applies, with the \
+             reason it gives"
+        );
+
+        let (rebuild_runtime, trace) = ready_runtime();
+        let mut warnings = Vec::new();
+        let rebuilt = rebuild_by_inspection(&rebuild_runtime, &planted, &today, &mut warnings);
+        if planted.completeness() == Ok(()) {
+            self_consistent += 1;
+            assert_eq!(
+                rebuilt,
+                Err(expected),
+                "{targets:?}: a self-consistent record is refused by the target rule"
+            );
+        } else {
+            assert_eq!(
+                rebuilt,
+                Err(InspectionRefusal::RecordIncomplete(
+                    RunnerRecordDefect::MountRecordMalformed
+                )),
+                "{targets:?}: a record its own shape refuses is refused as malformed"
+            );
+        }
+        assert!(
+            trace.ops().is_empty(),
+            "{targets:?}: the runtime was asked before the record was refused: {:?}",
+            trace.rendered()
+        );
+        assert!(
+            warnings.is_empty(),
+            "{targets:?}: a refusal warned {warnings:?}"
+        );
+    }
+    assert_eq!(
+        cells.len(),
+        REFUSED_TARGETS.len() + NESTED_TARGETS.len() + fixtures::REFUSED_RECORDED_TARGETS.len()
+    );
+    assert_eq!(
+        self_consistent,
+        cells.len() - 4,
+        "every cell but the non-absolute, empty and space-led targets and the repeated pair is \
+         a self-consistent record, which only the target rule refuses"
     );
 }
 

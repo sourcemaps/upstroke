@@ -3679,16 +3679,19 @@ The names under the repository's runs root, sorted: what J10's guard compares
 before and after its children, so a refused run that left a run directory
 fails it.
 
-## `fn record_a_container_runner_mounting(repo: &Path, run_id: &str, source: &Path) {`
+## `fn record_a_container_runner_mounting(repo: &Path, run_id: &str, mounts: &[(&Path, &str)]) {`
 
 Makes the parked run's committed `run_started` record a container runner whose
-one mount is `source`, writable at `/data`, with the canonical spelling and the
-identity a resolution would record. The runner's JSON is replaced in the first
+mounts are `mounts`, each source writable at its target, with the canonical
+spelling and the identity a resolution would record, in the order given. The
+runner's JSON is replaced in the first
 line, which must spell it exactly once, and every other byte of the log is
-kept. It stands for the record a container run would have written: the public
+kept, so a second call replaces the first one's runner. It stands for the
+record a container run would have written: the public
 fresh path cannot create one here without a container runtime, and a resume
 reads nothing of the run but `run_started`, its frozen plan and its private
-half before it refuses.
+half before it refuses. J10 records one mount at `/data`; K1 records the
+targets a fresh run refuses, which no resolution would write.
 
 ## `fn a_mount_inside_an_inherited_common_directory_is_refused_by_run_and_resume_before_the_runtime_is_asked()`
 
@@ -3722,6 +3725,44 @@ canonical common directory, authoritative Git; `resume_with` on the parked run
 is refused as recording that mount, for the same reason, with nothing
 published, locked or written. It then writes both refusals to the file its
 parent names, the evidence that it ran.
+
+## `const RECORDED_TARGET_REFUSAL: &str = "UPSTROKE_RECORDED_TARGET_REFUSAL";`
+
+The variable that names, to K1's child, the file it writes its refusal to.
+
+## `fn a_recorded_mount_whose_target_a_fresh_run_refuses_is_refused_by_the_resume_before_the_runtime_is_asked()`
+
+K1 (regular review 4: recorded mounts bypass target validation), through the
+public resume, `engine::resume_with`. A parked schema-4 run; a stub `docker`,
+first on the children's `PATH`, appends what it is asked to a file and exits
+93, as in J10's guard, so no real runtime can be reached. For each set of
+`resolve::fixtures::REFUSED_RECORDED_TARGETS` (the container's root,
+`/upstroke/settings`, `/cache/../upstroke/settings`, and `/cache` with
+`/cache/inner`), the parked run's `run_started` is made to record a
+container runner mounting a real directory at those targets
+(`record_a_container_runner_mounting`), a complete record that a resume
+reads back from the log. A child of this test binary
+(`recorded_target_resume_child`, under `run_test_isolated`) resumes it and
+records the refusal; the parent requires the child's success and libtest's
+`1 passed`, a refusal that names the run, the mount, the target rule's words
+and that nothing was published, locked or written, and a log byte-identical
+to the one the child was given. Afterwards the stub was never asked
+anything, so the image's environment was not read, no runner was built and
+nothing was recovered; and the runs root holds what it held.
+
+The public resume asks the runtime before recovery does: `prepare_resume`
+reads the recorded image's environment. With
+`resolve::refuse_recorded_targets` bypassed, the child's resume reaches
+the stub ("the container runtime refused `inspect-image-by-id`") and the
+test fails on the root cell (measured before the commit). Recovery's own
+check, which a resume reaches only after that question, is the subject of
+`engine::topology::recover::tests`' K1 guard.
+
+## `fn recorded_target_resume_child() {`
+
+The child of the test above: `resume_with` on the parked run is refused, and
+the refusal is written to the file its parent names, the evidence that it
+ran.
 
 ## `fn a_schema_4_follow_prints_one_line_per_event_and_no_raw_control_whatever_the_plan_or_the_record_holds()`
 

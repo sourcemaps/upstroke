@@ -21977,15 +21977,13 @@ fn run_directory_names(repo: &Path) -> Vec<String> {
 }
 
 #[cfg(unix)]
-fn record_a_container_runner_mounting(repo: &Path, run_id: &str, source: &Path) {
+fn record_a_container_runner_mounting(repo: &Path, run_id: &str, mounts: &[(&Path, &str)]) {
     use crate::topology::events::{
         ImageIdentity, MountSourceIdentity, MountSourceKind, RecordedMount, RunnerContract,
         RunnerKind, RunnerPolicy, TopologyEvent, TopologyEventBody,
     };
     use std::os::unix::fs::MetadataExt as _;
 
-    let canonical = fs::canonicalize(source).expect("the mounted directory resolves");
-    let metadata = fs::metadata(&canonical).expect("the mounted directory");
     let runner = RunnerPolicy {
         kind: RunnerKind::Container,
         policy: RunnerContract::ContainerV1,
@@ -21995,16 +21993,23 @@ fn record_a_container_runner_mounting(repo: &Path, run_id: &str, source: &Path) 
             digest: None,
         }),
         credential_volumes: Some(std::collections::BTreeMap::new()),
-        mounts: vec![RecordedMount {
-            source: canonical.to_str().expect("a UTF-8 source").to_owned(),
-            target: "/data".to_owned(),
-            read_only: false,
-            source_identity: MountSourceIdentity::Unix {
-                kind: MountSourceKind::Directory,
-                device: metadata.dev(),
-                inode: metadata.ino(),
-            },
-        }],
+        mounts: mounts
+            .iter()
+            .map(|(source, target)| {
+                let canonical = fs::canonicalize(source).expect("the mounted directory resolves");
+                let metadata = fs::metadata(&canonical).expect("the mounted directory");
+                RecordedMount {
+                    source: canonical.to_str().expect("a UTF-8 source").to_owned(),
+                    target: (*target).to_owned(),
+                    read_only: false,
+                    source_identity: MountSourceIdentity::Unix {
+                        kind: MountSourceKind::Directory,
+                        device: metadata.dev(),
+                        inode: metadata.ino(),
+                    },
+                }
+            })
+            .collect(),
     };
     let log = rundir::public_dir(repo, run_id).join("events.jsonl");
     let bytes = fs::read(&log).expect("the parked run's log");
@@ -22061,7 +22066,7 @@ fn a_mount_inside_an_inherited_common_directory_is_refused_by_run_and_resume_bef
         ),
     )
     .expect("a container configuration mounting the common directory's refs");
-    record_a_container_runner_mounting(&repo, &parked.run_id, &refs);
+    record_a_container_runner_mounting(&repo, &parked.run_id, &[(refs.as_path(), "/data")]);
 
     let bin = tree.path().join("bin");
     fs::create_dir(&bin).expect("the stub runtime's directory");
@@ -22171,4 +22176,112 @@ fn inherited_common_dir_mount_child() {
     let refusals =
         std::env::var_os(INHERITED_COMMON_REFUSALS).expect("the parent names the refusals' file");
     fs::write(refusals, format!("{said}\n{resumed}\n")).expect("the refusals recorded");
+}
+
+#[cfg(unix)]
+const RECORDED_TARGET_REFUSAL: &str = "UPSTROKE_RECORDED_TARGET_REFUSAL";
+
+#[cfg(unix)]
+#[test]
+fn a_recorded_mount_whose_target_a_fresh_run_refuses_is_refused_by_the_resume_before_the_runtime_is_asked()
+ {
+    use crate::runner::container::resolve::fixtures::REFUSED_RECORDED_TARGETS;
+
+    let (tree, repo) = temp_engine_repo("recorded-target-resume");
+    git_in(&repo, &["config", "maintenance.auto", "false"]);
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        1,
+    )));
+    let parked = run_with(&topology_options(&repo), &source).expect("the run parks");
+    assert_eq!(parked.outcome(), RunOutcome::Parked, "{parked:#?}");
+    until_released(&repo, &parked.run_id);
+
+    let shared = tree.path().join("shared");
+    fs::create_dir(&shared).expect("a directory the record mounts");
+    let bin = tree.path().join("bin");
+    fs::create_dir(&bin).expect("the stub runtime's directory");
+    let asked = tree.path().join("runtime-asked");
+    crate::runner::container::write_program_in_its_own_process(
+        &bin.join(crate::runner::container::DOCKER_PROGRAM),
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nexit 93\n",
+            asked.display()
+        ),
+    );
+    let inherited = std::env::var_os("PATH").unwrap_or_default();
+    let path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&inherited)))
+        .expect("a PATH with the stub runtime first");
+
+    let log = rundir::public_dir(&repo, &parked.run_id).join("events.jsonl");
+    let runs = run_directory_names(&repo);
+    for (index, (targets, needle)) in REFUSED_RECORDED_TARGETS.iter().enumerate() {
+        let mounts: Vec<(&Path, &str)> = targets
+            .iter()
+            .map(|target| (shared.as_path(), *target))
+            .collect();
+        record_a_container_runner_mounting(&repo, &parked.run_id, &mounts);
+        let before = fs::read(&log).expect("the log recording the container runner");
+        let refusal = tree.path().join(format!("refusal-{index}"));
+        let ended = crate::agent::proc::test_support::run_test_isolated(
+            "engine::tests::recorded_target_resume_child",
+            &[
+                ("PATH", path.as_os_str()),
+                (INHERITED_RUN_ROOT, repo.as_os_str()),
+                (INHERITED_RUN_ID, std::ffi::OsStr::new(&parked.run_id)),
+                (RECORDED_TARGET_REFUSAL, refusal.as_os_str()),
+            ],
+            Duration::from_secs(300),
+        );
+        assert!(
+            ended.status.is_some_and(|status| status.success())
+                && ended.stdout.contains("1 passed"),
+            "{targets:?}: an isolated child resumed the run under the stub runtime: {ended}"
+        );
+        let said = fs::read_to_string(&refusal).unwrap_or_else(|error| {
+            panic!("{targets:?}: the child recorded no refusal ({error}): {ended}")
+        });
+        assert!(
+            said.contains(&format!("run `{}` records the mount", parked.run_id))
+                && said.contains(needle)
+                && said.contains("A fresh run refuses that target")
+                && said.contains("nothing was published, locked or written"),
+            "{targets:?}: the resume refuses the recorded target by the rule a fresh run \
+             applies: {said}"
+        );
+        assert_eq!(
+            fs::read(&log).expect("the recorded log"),
+            before,
+            "{targets:?}: a refused resume wrote the recorded log"
+        );
+    }
+    assert!(
+        !asked.exists(),
+        "the container runtime was asked: {}",
+        fs::read_to_string(&asked).unwrap_or_default()
+    );
+    assert_eq!(
+        run_directory_names(&repo),
+        runs,
+        "a refused resume created a run directory"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "subprocess helper"]
+fn recorded_target_resume_child() {
+    let repo = PathBuf::from(
+        std::env::var_os(INHERITED_RUN_ROOT).expect("the parent names the recorded repository"),
+    );
+    let run_id = std::env::var(INHERITED_RUN_ID).expect("the recorded run's UTF-8 id");
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        0,
+    )));
+    let refused = resume_with(&resume_options(&repo, &run_id), &source)
+        .expect_err("a resume refuses the recorded target");
+    let refusal =
+        std::env::var_os(RECORDED_TARGET_REFUSAL).expect("the parent names the refusal's file");
+    fs::write(refusal, refused.to_string()).expect("the refusal recorded");
 }

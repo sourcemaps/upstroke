@@ -166,6 +166,19 @@ operator wrote it and the first rule it breaks.
 A recorded mount whose source is gone, rebound or another object: the
 rebuild's refusal, before any spawn.
 
+## `pub enum InspectionRefusal` › `RecordedTargetRefused { mount: String, reason: String },`
+
+A recorded mount whose target a fresh run refuses: the mount as the record
+spells it and the first target rule it breaks, in the words
+`refuse_target` or the nesting rule gives a fresh run
+(`refuse_recorded_targets`). A different decision from `MountSourceMoved`:
+a moved source can come back and the run resume, while a target is the
+record's own and never changes, so a run whose record carries one cannot
+continue. K1 (regular review 4): until it, a record that completeness
+accepted reached recovery and the launch plan with `/`, a reserved target
+or `/cache/../upstroke/settings`, which Docker normalizes into the reserved
+`/upstroke/settings`.
+
 ## `pub enum InspectionRefusal` › `RecordIncomplete(RunnerRecordDefect),`
 
 The record this resolution produced is one PR3's fold would refuse.
@@ -365,8 +378,45 @@ at or under `/upstroke` or `/tmp`.
 
 Two targets that are the same path or where one holds the other. Two
 such configured mounts would make what the container sees there depend
-on mount order, so both resolution and the plan refuse them, the plan
-also against the role's own targets.
+on mount order, so resolution, every use of a record
+(`refuse_recorded_targets`) and the plan refuse them, the plan also
+against the role's own targets.
+
+## `pub fn refuse_recorded_targets(mounts: &[RecordedMount]) -> Result<(), (&RecordedMount, String)> {`
+
+The target rules a fresh run applies, applied to a recorded mount list:
+each target through `refuse_target`, then every pair through
+`refuse_nested_targets`. These are the two functions `resolve_mounts`
+applies, so a recorded policy is refused for every target a fresh
+configuration is refused for, by the same rule and in the same words, and
+there is no second copy of a rule to drift (K1, regular review 4). It
+answers the first mount that breaks one and the reason; each caller labels
+the refusal in its own terms.
+
+Completeness (`RunnerPolicy::completeness` in `topology::events`) checks
+the record's shape only: an absolute-looking target, a well-formed source,
+targets strictly ordered. It accepted `/`, `/upstroke/settings` and
+`/cache/../upstroke/settings`, which Docker normalizes into the reserved
+`/upstroke/settings`, so the record is held to the target rules where it
+is used, not where it is folded; the topology layer does not reach into
+this module. The uses, each before its effect:
+
+- the public resume, read-only, before Git or the runtime is asked
+  anything (`engine::topology::entry`'s `refuse_recorded_mount_targets`);
+- recovery, before any recovery effect, and every rebuild of the runner,
+  before the runtime is asked (`recheck_recorded_mounts`);
+- every container plan, before any intent, reaper or container
+  (`exec`'s `configured_mounts`).
+
+Pure: it reads the strings and nothing else, so it can run first at each.
+
+## `fn refuse_nested_targets(mounts: &[RecordedMount]) -> Result<(), (&RecordedMount, String)> {`
+
+The nesting rule over a mount list: every pair, in list order, and the
+later mount of the first pair that `nested_targets` joins, with the
+earlier one named in the reason. `resolve_mounts` applies it to the
+resolved list sorted by target, so its refusal names what it named when
+the loop was inline there; a recorded list is applied as recorded.
 
 ## `fn resolve_source(source: &Path) -> Result<(String, MountSourceIdentity), String> {`
 
@@ -418,7 +468,8 @@ The recorded list for today's configured mounts, or the first refusal.
 It is called by `resolve_container` before the runtime is asked
 anything, so a refused mount reaches no runtime operation, no lock and no
 probe. Every configured mount is checked; the list is sorted by target
-and refused if two targets are the same or nested.
+and refused if two targets are the same or nested
+(`refuse_nested_targets`, which every use of a record applies too).
 
 ## `pub fn recheck_recorded_source(mount: &RecordedMount) -> Result<(), String> {`
 
@@ -428,6 +479,23 @@ canonicalize to itself (a link or a move rebinds it otherwise) and still
 name the recorded object (kind, device, object). A failure refuses: the
 record is the boundary, and a different object at the same path is not
 it.
+
+## `pub fn recheck_recorded_mounts(record: &RunnerPolicy) -> Result<(), InspectionRefusal> {`
+
+Every recorded mount of `record` has a target a fresh run accepts, and
+still names the object the run recorded (DESIGN §26).
+
+Read-only: the targets are checked first, as strings
+(`refuse_recorded_targets`), then each source is resolved and identified;
+nothing changes. So recovery asks it before any recovery effect, and every
+rebuild of the runner asks it again.
+
+### Errors
+
+`InspectionRefusal::RecordedTargetRefused` for the first mount whose target
+a fresh run refuses, before any source is looked at; otherwise
+`InspectionRefusal::MountSourceMoved` for the first source that is gone,
+rebound or another object.
 
 ## `pub fn resolve_container(`
 
@@ -529,7 +597,7 @@ From `decisions.sequential_substrate.runner` and INV-23:
 |---|---|
 | today's `[runner]` config **differs** | warn **naming the difference**, and ignore it — the record wins |
 | the recorded reference **now names another image** | warn, and use the recorded id |
-| the record cannot be re-established (runtime / recorded id / volume / a recorded mount source gone or rebound) | **refuse, before any spawn** |
+| the record cannot be re-established (runtime / recorded id / volume / a recorded mount source gone or rebound / a recorded mount target a fresh run refuses) | **refuse, before any spawn** |
 
 The fourth — a recorded shell or CLI that fails inside the image — is not
 here and cannot be: it is observed only by spawns. See
@@ -550,18 +618,23 @@ warnings at all.
 
 ### Errors
 
-The first [`InspectionRefusal`] — an unavailable runtime, a recorded image id
-the runtime no longer holds, or an absent credential volume.
+The first [`InspectionRefusal`] — an incomplete record, a recorded mount
+target a fresh run refuses, a recorded mount source that moved, an
+unavailable runtime, a recorded image id the runtime no longer holds, or an
+absent credential volume.
 
 ## `for mount in &record.mounts {`
 
-A recorded mount source that is gone, rebound or another object refuses
-first, before the runtime is asked anything. The refusal is an
-`Inspection` one, so it is before any spawn and the run stays
-resumable: put the source back and the next resume re-establishes the
-record. Only the recorded identities are inspected; nothing today's
-config names is opened, so a source configured today that does not exist
-cannot refuse or replace the record.
+`recheck_recorded_mounts`, which the rebuild asks before the runtime is
+asked anything. A recorded target a fresh run refuses is refused first,
+as `RecordedTargetRefused`: the record is not one this run may continue
+from, whatever its sources. Then a recorded mount source that is gone,
+rebound or another object refuses. Both refusals are `Inspection` ones, so
+they come before any spawn; a moved source leaves the run resumable: put
+the source back and the next resume re-establishes the record. Only the
+recorded targets and identities are inspected; nothing today's config
+names is opened, so a source configured today that does not exist cannot
+refuse or replace the record.
 
 ## `runtime.probe().map_err(InspectionRefusal::from_runtime)?;`
 
@@ -679,3 +752,20 @@ Test-only, after every production item, and a module so that the first
 directory is both its Git directory and its common directory: the shape of
 every fixture that builds a runner or a context over one repository. A test
 about any other layout names the two directories itself.
+
+`REFUSED_RECORDED_TARGETS` is K1's guard set, the four kinds of recorded
+target regular review 4 named: the container's root, a reserved target
+(`/upstroke/settings`), a target not in normal form
+(`/cache/../upstroke/settings`, which Docker normalizes into the reserved
+one) and two nested targets, each with the words its refusal carries. Each
+is a self-consistent record: absolute, strictly ordered, so completeness
+accepts it and only the target rule can refuse it. The resolve, exec,
+recover and engine guards share it, so the four uses are tested against
+one set.
+
+`with_recorded_targets` is a record as a run's files hold it with the given
+targets: one copy of the record's first mount per target (its source and
+identity, so the source recheck passes), the policy written with
+`serde_json` and read back, and the read required to equal what was
+written. A recorded policy deserializes whatever its targets are; the
+refusal has to come from where the record is used.

@@ -427,6 +427,22 @@ record whose mount names the private root, with that root's true
 identity, refuses against the bound exclusions. No intent and no
 container exists afterwards.
 
+## `fn a_recorded_policy_whose_targets_a_fresh_run_refuses_starts_no_container() {`
+
+K1 (regular review 4: recorded mounts bypass target validation), at the
+launch plan. The mounted policy's first mount, read back through
+`serde_json` at `/data` (`resolve::fixtures::with_recorded_targets`), plans:
+the control. Each set of `resolve::fixtures::REFUSED_RECORDED_TARGETS` (the
+container's root, `/upstroke/settings`, `/cache/../upstroke/settings`, and
+`/cache` with `/cache/inner`) is planted the same way and is a complete
+record. A gate invocation over each ends `NeverStarted`, refused for this
+container with the words of the target rule. Afterwards the runtime's
+journal holds no create, no intent was written and no container exists:
+the plan refuses before `Reaping::cover`, so no reaper is armed either.
+
+With the shared `resolve::refuse_recorded_targets` validator bypassed, the root cell's invocation
+runs to exit 0 and the test fails (measured before the commit).
+
 ## `fn a_recorded_mount_inside_the_common_directory_the_runner_is_given_refuses_the_plan() {`
 
 J10 (regression review 2, finding 1), at the runner: the common directory

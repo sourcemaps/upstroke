@@ -26480,3 +26480,83 @@ fn a_rebound_recorded_mount_source_refuses_before_any_recovery() {
         "rebound it",
     );
 }
+
+#[test]
+fn a_recorded_target_a_fresh_run_refuses_refuses_the_resume_before_any_recovery_or_runtime_question()
+ {
+    use crate::runner::container::resolve::fixtures::{
+        REFUSED_RECORDED_TARGETS, with_recorded_targets,
+    };
+
+    for (index, (targets, needle)) in REFUSED_RECORDED_TARGETS.iter().enumerate() {
+        let tag = format!("recorded-target-before-recovery-{index}");
+        let mounted = mount_source(&format!("{tag}-source"));
+        let planted = with_recorded_targets(
+            &RunnerPolicy {
+                mounts: mounted.recorded.clone(),
+                ..container_runner()
+            },
+            targets,
+        );
+        assert_eq!(
+            planted.completeness(),
+            Ok(()),
+            "{targets:?}: the record is self-consistent, so only the target rule can refuse it"
+        );
+        let fixture = Fixture::build(
+            &tag,
+            Damage {
+                recorded_mounts: planted.mounts,
+                ..Damage::default()
+            },
+        );
+        let mut torn = fixture.log_bytes();
+        torn.extend_from_slice(b"{\"event\":\"torn");
+        crate::workspace_manager::fixture::write_file(&fixture.log(), &torn);
+        let marker = fixture.public().join(rundir::MARKER);
+        let marker_before = std::fs::read(&marker).expect("the reclaimable marker is in place");
+        let harness = harness();
+        let trace = ContainerTrace::recording();
+        let runtime = FakeRuntime::new(trace.clone());
+        runtime.add_image(IMAGE_ID, Some("sha256:2222"));
+        runtime.tag(IMAGE_REF, IMAGE_ID);
+        runtime.add_volume(VOLUME);
+        let certifies = AlwaysCertifies;
+        let given = Given::healthy(&fixture, &runtime, &certifies);
+
+        let (outcome, _) = resume(&fixture, &harness, &given);
+
+        let refused = message(
+            &outcome.expect_err("a recorded target a fresh run refuses refuses the resume"),
+        );
+        assert!(
+            refused.contains("is refused")
+                && refused.contains(needle)
+                && refused.contains("A fresh run refuses that target"),
+            "{targets:?}: the refusal names the target rule: {refused}"
+        );
+        assert_eq!(
+            fixture.log_bytes(),
+            torn,
+            "{targets:?}: the log, its torn tail included, is as it was"
+        );
+        assert_eq!(
+            std::fs::read(&marker).ok(),
+            Some(marker_before),
+            "{targets:?}: the reclaimable marker is still there"
+        );
+        assert!(
+            first_observation(&harness, EffectSiteId::Event(EventSite::OpenLog)).is_none(),
+            "{targets:?}: the stable-prefix barrier never opened the log"
+        );
+        assert!(
+            first_observation(&harness, EffectSiteId::RunDir(RunDirSite::RemoveMarker)).is_none(),
+            "{targets:?}: the census never reclaimed the marker"
+        );
+        assert!(
+            trace.ops().is_empty(),
+            "{targets:?}: the runtime was asked before the record was refused: {:?}",
+            trace.rendered()
+        );
+    }
+}

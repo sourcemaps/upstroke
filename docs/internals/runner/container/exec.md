@@ -942,7 +942,14 @@ seam note rather than worked around silently.
 The run's recorded operator mounts, as this role receives them, after its
 own. Every role and probe gets the recorded list, the same list probe and
 execution compose; review and probes get it read-only
-(`forces_configured_mounts_read_only`). Before each is given:
+(`forces_configured_mounts_read_only`). First, the whole list is held to
+the target rules a fresh run applies (`resolve::refuse_recorded_targets`:
+each target in normal form, never `/`, never at or under `/upstroke` or
+`/tmp`, spellable in the mount option, and no two the same or nested), so a
+record that carries a target a fresh run refuses plans nothing: no intent,
+no reaper and no container (K1, regular review 4; Docker normalizes
+`/cache/../upstroke/settings` into the reserved `/upstroke/settings`).
+Then, before each is given:
 
 - `resolve::recheck_recorded_source`: the recorded path still canonicalizes
   to itself and names the recorded object;

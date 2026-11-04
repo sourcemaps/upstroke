@@ -27,6 +27,7 @@ use crate::runner::container::env::ContainerEnvironment;
 use crate::runner::container::exec::{ContainerRunner, RunIdentity};
 use crate::runner::container::resolve::{
     InspectionRefusal, MountContext, RepositoryGit, mount_label, refuse_excluded,
+    refuse_recorded_targets,
 };
 use crate::runner::container::runtime::{
     ContainerRuntime, ContainerTrace, LockProbe, RuntimeError,
@@ -460,6 +461,7 @@ pub fn prepare_resume(
 
     refuse_unshareable_width(started.limits.max_parallel, harness)?;
     hold_recorded_case_policy(&started, &mut warnings)?;
+    refuse_recorded_mount_targets(&started)?;
     refuse_withheld_recorded_mounts(&started, &opts.repo_root, root.private_root())?;
     let image_environment = match started.runner.kind {
         RunnerKind::Host => None,
@@ -1077,6 +1079,20 @@ fn mount_context(
         return Ok(MountContext::unbound());
     }
     checkout_mount_context(repo_root, private_root)
+}
+
+fn refuse_recorded_mount_targets(started: &RunStarted4) -> Result<(), UpstrokeError> {
+    refuse_recorded_targets(&started.runner.mounts).map_err(|(mount, reason)| {
+        UpstrokeError::Refused {
+            message: format!(
+                "run `{}` records the mount {}, which no container of this resume may receive: \
+                 {reason}. A fresh run refuses that target, and so does every use of the \
+                 record; nothing was published, locked or written",
+                started.run_id,
+                mount_label(&mount.source, &mount.target)
+            ),
+        }
+    })
 }
 
 fn refuse_withheld_recorded_mounts(

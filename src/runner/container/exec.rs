@@ -17,14 +17,14 @@ use crate::runner::{
     AgentId, Cancellation, CommandSpec, ExecutionRole, InvocationId, RunFuture, Runner, RunnerCall,
     RunnerError, RunnerRequest,
 };
-use crate::topology::events::{RunnerContract, RunnerKind, RunnerPolicy};
+use crate::topology::events::{RecordedMount, RunnerContract, RunnerKind, RunnerPolicy};
 
 use super::census::ReaperContainerScope;
 use super::env::{BoundaryLayout, ContainerEnvironment, RoleScope, supplies_credential_location};
 use super::intent::{ContainerIntent, ContainerName, LABEL_INCARNATION, LABEL_PRIVATE_ROOT};
 use super::resolve::{
     MountContext, MountExclusion, RepositoryGit, canonical_spelling, mount_label, nested_targets,
-    overlap, recheck_recorded_source, refuse_excluded,
+    overlap, recheck_recorded_source, refuse_excluded, refuse_recorded_targets,
 };
 use super::runtime::{
     ContainerRuntime, ContainerTrace, ContainerUser, CreateSpec, Mount, QuestionBound, RuntimeError,
@@ -628,26 +628,32 @@ impl ContainerRunner {
         role: &ExecutionRole,
         own: &[Mount],
     ) -> Result<Vec<Mount>, UpstrokeError> {
+        let refused = |mount: &RecordedMount, reason: String| UpstrokeError::Refused {
+            message: format!(
+                "the recorded mount {} is refused for this container: {reason}",
+                mount_label(&mount.source, &mount.target)
+            ),
+        };
+        refuse_recorded_targets(&self.policy.mounts)
+            .map_err(|(mount, reason)| refused(mount, reason))?;
         let forced = forces_configured_mounts_read_only(role);
         let mut configured = Vec::with_capacity(self.policy.mounts.len());
         for mount in &self.policy.mounts {
-            let refused = |reason: String| UpstrokeError::Refused {
-                message: format!(
-                    "the recorded mount {} is refused for this container: {reason}",
-                    mount_label(&mount.source, &mount.target)
-                ),
-            };
-            recheck_recorded_source(mount).map_err(refused)?;
-            refuse_excluded(Path::new(&mount.source), &self.mount_exclusions).map_err(refused)?;
+            recheck_recorded_source(mount).map_err(|reason| refused(mount, reason))?;
+            refuse_excluded(Path::new(&mount.source), &self.mount_exclusions)
+                .map_err(|reason| refused(mount, reason))?;
             if let Some(clash) = own
                 .iter()
                 .find(|given| nested_targets(given.target(), &mount.target))
             {
-                return Err(refused(format!(
-                    "its target and `{}`, which this role is given, are the same path or one \
-                     holds the other",
-                    clash.target()
-                )));
+                return Err(refused(
+                    mount,
+                    format!(
+                        "its target and `{}`, which this role is given, are the same path or one \
+                         holds the other",
+                        clash.target()
+                    ),
+                ));
             }
             configured.push(Mount::Path {
                 source: PathBuf::from(&mount.source),

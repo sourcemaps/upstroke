@@ -78,11 +78,13 @@ too. `run_harness` makes it in the checkout's admission (L2), and
    the run directory and its digest checked against the record; today's
    config is read under [`EngineLimits::TopologyResume`] and compared with
    the recorded limits and the recorded gates; the D4 width check against
-   the recorded width; the Q3 case observation; a recorded mount that
-   reaches the checkout's Git directories, the repository root, the private
-   root or a credential location, refused before the runtime is asked
-   anything ([`refuse_withheld_recorded_mounts`]); a recorded container
-   image's environment; the slot limits; today's configured notifiers.
+   the recorded width; the Q3 case observation; a recorded mount whose
+   target a fresh run refuses ([`refuse_recorded_mount_targets`]), and one
+   that reaches the checkout's Git directories, the repository root, the
+   private root or a credential location
+   ([`refuse_withheld_recorded_mounts`]), each refused before the runtime
+   is asked anything; a recorded container image's environment; the slot
+   limits; today's configured notifiers.
 4. `resume_harness` makes the run exclusion (`Workspace::ensure_run_exclusions`,
    L4), as the sequential resume does after its prerequisites, so a run whose
    `.upstroke/.gitignore` went missing is ignored by Git again. This step is the
@@ -207,9 +209,13 @@ The read-only half of a topology resume. It begins with R5's check of the
 repository-wide names, as `prepare_fresh` does, before the include's
 publication starts a Git child.
 
-A recorded container runner's mounts are checked against today's exclusions
-([`refuse_withheld_recorded_mounts`]) before the runtime is asked for the
-image's environment. The record was accepted when the run began, against the
+A recorded container runner's mount targets are held to the rules a fresh
+run applies ([`refuse_recorded_mount_targets`]), and its mounts are then
+checked against today's exclusions ([`refuse_withheld_recorded_mounts`]),
+both before the runtime is asked for the image's environment. The targets
+come first because they need nothing but the record, while the exclusions
+ask Git for the checkout's directories. The record was accepted when the
+run began, against the
 Git the checkout took then; under an inherited `GIT_COMMON_DIR` the same source
 can now lie inside the common directory Git takes, and the resume refuses
 before anything is published, locked or written, so the run stays resumable
@@ -343,6 +349,22 @@ policy; the caller keeps the record (§6).
 
 The fresh run's mount context: unbound when `[runner]` configures no mounts,
 so such a run asks Git nothing more, and otherwise [`checkout_mount_context`].
+
+## `fn refuse_recorded_mount_targets(started: &RunStarted4) -> Result<(), UpstrokeError> {`
+
+The resume's read-only check of a recorded runner's mount targets, by the
+rules a fresh run applies (`resolve::refuse_recorded_targets`, the
+functions `resolve_mounts` applies): each target in normal form, never `/`,
+never at or under `/upstroke` or `/tmp`, spellable in the mount option, and
+no two the same or nested. A target that breaks one is refused, naming the
+run, the mount and the reason, with nothing published, locked or written:
+before Git or the runtime is asked anything, so a record whose target a
+fresh run refuses never reaches the image's environment, the runner's
+construction or recovery (K1, regular review 4). Completeness, which the
+record passed when it was read, checks its shape and not these rules.
+Recovery and the rebuild hold the record to them again
+(`resolve::recheck_recorded_mounts`), and the container runner at every
+plan.
 
 ## `fn refuse_withheld_recorded_mounts(`
 

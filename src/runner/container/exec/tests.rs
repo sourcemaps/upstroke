@@ -1921,6 +1921,66 @@ fn a_recorded_mount_that_moved_or_reaches_a_withheld_path_refuses_the_plan_befor
     assert!(fixture.runtime.fake().container_names().is_empty());
 }
 
+#[cfg(unix)]
+#[test]
+fn a_recorded_policy_whose_targets_a_fresh_run_refuses_starts_no_container() {
+    use crate::error::ProcessFate;
+    use crate::runner::container::runtime::RuntimeOp;
+
+    let fixture = Fixture::new("recorded-target-plan", true);
+    let (policy, _shared, _tools) = fixture.mounted_policy();
+    let request = gate_request(
+        ShellKind::Sh.spec("exit 0"),
+        fixture.task_a.clone(),
+        Duration::from_secs(10),
+        gate_id(0),
+    );
+    fixture
+        .runner_over(fixtures::with_recorded_targets(&policy, &["/data"]))
+        .plan(&request)
+        .expect("the control: the same record at a target a fresh run accepts plans");
+
+    for (targets, needle) in fixtures::REFUSED_RECORDED_TARGETS {
+        let planted = fixtures::with_recorded_targets(&policy, targets);
+        assert_eq!(
+            planted.completeness(),
+            Ok(()),
+            "{targets:?}: the record is self-consistent, so only the target rule can refuse it"
+        );
+        let refused = fixture
+            .runner_over(planted)
+            .run_blocking(&request)
+            .expect_err("a recorded target a fresh run refuses refuses the invocation");
+        assert_eq!(
+            refused.fate,
+            ProcessFate::NeverStarted,
+            "{targets:?}: {refused}"
+        );
+        let message = refused.to_string();
+        assert!(
+            message.contains("is refused for this container") && message.contains(needle),
+            "{targets:?}: the refusal names the target rule: {message}"
+        );
+    }
+    assert!(
+        !fixture
+            .runtime
+            .fake()
+            .journal()
+            .iter()
+            .any(|entry| entry.op == RuntimeOp::Create),
+        "a refused record created a container: {:?}",
+        fixture.runtime.fake().journal()
+    );
+    assert!(
+        list_intents(&fixture.private_root)
+            .expect("scan")
+            .is_empty(),
+        "a refused plan wrote an intent"
+    );
+    assert!(fixture.runtime.fake().container_names().is_empty());
+}
+
 /// A directory as selection records a mount source (`resolve_source`): its
 /// canonical spelling, and the identity of the object that spelling names.
 #[cfg(unix)]

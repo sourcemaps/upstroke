@@ -66,6 +66,11 @@ pub enum InspectionRefusal {
          started with, so it cannot continue until that source is back as recorded"
     )]
     MountSourceMoved { mount: String, reason: String },
+    #[error(
+        "the recorded mount {mount} is refused: {reason}. A fresh run refuses that target, and so \
+         does every use of a run's record, so the run cannot continue with it"
+    )]
+    RecordedTargetRefused { mount: String, reason: String },
 }
 
 impl InspectionRefusal {
@@ -393,6 +398,31 @@ pub fn nested_targets(first: &str, second: &str) -> bool {
             .is_some_and(|rest| rest.starts_with('/'))
 }
 
+pub fn refuse_recorded_targets(mounts: &[RecordedMount]) -> Result<(), (&RecordedMount, String)> {
+    for mount in mounts {
+        refuse_target(&mount.target).map_err(|reason| (mount, reason))?;
+    }
+    refuse_nested_targets(mounts)
+}
+
+fn refuse_nested_targets(mounts: &[RecordedMount]) -> Result<(), (&RecordedMount, String)> {
+    for (index, first) in mounts.iter().enumerate() {
+        for second in mounts.iter().skip(index + 1) {
+            if nested_targets(&first.target, &second.target) {
+                return Err((
+                    second,
+                    format!(
+                        "its target and that of {} are the same path or one holds the other, so \
+                         which source the container sees there would depend on mount order",
+                        mount_label(&first.source, &first.target)
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn resolve_source(source: &Path) -> Result<(String, MountSourceIdentity), String> {
     if !source.is_absolute() {
         return Err(format!(
@@ -618,20 +648,12 @@ pub fn resolve_mounts(
         });
     }
     recorded.sort_by(|left, right| left.target.cmp(&right.target));
-    for (index, first) in recorded.iter().enumerate() {
-        for second in recorded.iter().skip(index + 1) {
-            if nested_targets(&first.target, &second.target) {
-                return Err(InspectionRefusal::MountRefused {
-                    mount: mount_label(&second.source, &second.target),
-                    reason: format!(
-                        "its target and that of {} are the same path or one holds the other, so \
-                         which source the container sees there would depend on mount order",
-                        mount_label(&first.source, &first.target)
-                    ),
-                });
-            }
+    refuse_nested_targets(&recorded).map_err(|(mount, reason)| {
+        InspectionRefusal::MountRefused {
+            mount: mount_label(&mount.source, &mount.target),
+            reason,
         }
-    }
+    })?;
     Ok(recorded)
 }
 
@@ -661,11 +683,13 @@ pub fn recheck_recorded_source(mount: &RecordedMount) -> Result<(), String> {
     Ok(())
 }
 
-/// Every recorded mount of `record` still names the object the run recorded (DESIGN §26).
-///
-/// Read-only: it resolves and identifies each source and changes nothing. So recovery asks it
-/// before any recovery effect, and every rebuild of the runner asks it again.
 pub fn recheck_recorded_mounts(record: &RunnerPolicy) -> Result<(), InspectionRefusal> {
+    refuse_recorded_targets(&record.mounts).map_err(|(mount, reason)| {
+        InspectionRefusal::RecordedTargetRefused {
+            mount: mount_label(&mount.source, &mount.target),
+            reason,
+        }
+    })?;
     for mount in &record.mounts {
         recheck_recorded_source(mount).map_err(|reason| InspectionRefusal::MountSourceMoved {
             mount: mount_label(&mount.source, &mount.target),
@@ -888,12 +912,44 @@ pub(crate) mod fixtures {
     use std::path::Path;
 
     use super::RepositoryGit;
+    use crate::topology::events::{RecordedMount, RunnerPolicy};
 
     pub(crate) const fn plain_checkout(git_dir: &Path) -> RepositoryGit<'_> {
         RepositoryGit {
             git_dir,
             common_dir: git_dir,
         }
+    }
+
+    pub(crate) const REFUSED_RECORDED_TARGETS: [(&[&str], &str); 4] = [
+        (&["/"], "the container's root"),
+        (&["/upstroke/settings"], "which the runner reserves"),
+        (&["/cache/../upstroke/settings"], "not in normal form"),
+        (&["/cache", "/cache/inner"], "one holds the other"),
+    ];
+
+    pub(crate) fn with_recorded_targets(record: &RunnerPolicy, targets: &[&str]) -> RunnerPolicy {
+        let Some(template) = record.mounts.first() else {
+            panic!("the record carries a mount to plant the targets on: {record:?}");
+        };
+        let planted = RunnerPolicy {
+            mounts: targets
+                .iter()
+                .map(|target| RecordedMount {
+                    target: (*target).to_owned(),
+                    ..template.clone()
+                })
+                .collect(),
+            ..record.clone()
+        };
+        let wire = serde_json::to_string(&planted).expect("a recorded policy serializes");
+        let read: RunnerPolicy = serde_json::from_str(&wire)
+            .expect("a recorded policy deserializes whatever targets it carries");
+        assert_eq!(
+            read, planted,
+            "the policy reads back exactly as it was written"
+        );
+        read
     }
 }
 

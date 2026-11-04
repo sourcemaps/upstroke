@@ -344,14 +344,52 @@ common Git directory of a linked worktree, inside and above it, the
 linked worktree's admin directory, a comma, a quote, a newline, edge
 whitespace, a name that is not UTF-8, and an unbound context. The linked
 worktree's context is given the two directories Git reports for it, its
-admin directory and the main `.git`. Thirteen
-target cells: relative, `/`, four non-normal spellings, `/upstroke` and
-`/tmp` at and under, a comma, edge whitespace and empty. Three pairs:
-repeated, nested and enclosing targets. Each refuses as `MountRefused`,
+admin directory and the main `.git`. The fifteen
+target cells of `REFUSED_TARGETS` and the three pairs of `NESTED_TARGETS`
+follow. Each refuses as `MountRefused`,
 for its own reason, with the runtime never asked. Every `BoundaryLayout`
 default except the scratch lies under `BOUNDARY_ROOT`. The positive control
 accepts `/upstroked`, `/tmpfile` and `/database` (a prefix of a reserved
 name is not under it) and a directory of another repository's checkout.
+
+## `const REFUSED_TARGETS: [(&str, &str); 15] = [`
+
+The targets a fresh run refuses, each with the words of its refusal:
+relative, `/`, five non-normal spellings (one of them regular review 4's
+`/cache/../upstroke/settings`), `/upstroke` at and under (one of them its
+`/upstroke/settings`), `/tmp` at and under, a comma, edge whitespace and
+empty. Thirteen until K1, which added review 4's two. Module-level so the
+fresh table above and the recorded census below read one list.
+
+## `const NESTED_TARGETS: [(&str, &str, &str); 3] = [`
+
+The pairs a fresh run refuses together: a repeated, a nested and an
+enclosing target, with their order as configured.
+
+## `fn every_target_a_fresh_run_refuses_is_refused_in_a_recorded_policy_before_the_runtime_is_asked()`
+
+K1 (regular review 4: recorded mounts bypass target validation), at the
+recheck and the rebuild. The record a fresh run makes of one mount is the
+control, rechecked clean. Every cell of `REFUSED_TARGETS`, every pair of
+`NESTED_TARGETS` (sorted, as a record holds it) and every set of
+`resolve::fixtures::REFUSED_RECORDED_TARGETS` is then planted in that
+record and read back through `serde_json`
+(`resolve::fixtures::with_recorded_targets`). For each:
+
+- a fresh run, configured with the same targets, refuses as
+  `MountRefused`; that refusal's reason is the oracle;
+- `recheck_recorded_mounts` refuses the planted record as
+  `RecordedTargetRefused`, naming the offending recorded mount, with
+  exactly that reason: the same rule, through the same functions;
+- `rebuild_by_inspection` refuses it with the runtime never asked and no
+  warning: as `RecordedTargetRefused` when completeness accepts the record,
+  which every cell but four does, and as the malformed record it is for
+  those four (the relative, empty and space-led targets and the repeated
+  pair, whose shape completeness refuses).
+
+With `refuse_recorded_targets` bypassed, the recheck answers
+`Ok(())` for the first cell and the test fails there (measured before the
+commit).
 
 ## `fn a_windows_configured_mount_is_recorded_with_its_volume_and_full_file_id_and_rebuilt_from_it()`
 
