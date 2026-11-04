@@ -2543,18 +2543,42 @@ own, and asserts the premise (the stub recorded the observation), the bound
 and the mode's outcome. Ignored in the default suite; only the witness runs
 it, with the stub first on its `PATH`.
 
-## `fn a_review_timeout_the_configuration_accepts_and_no_deadline_can_hold_is_refused_before_anything_is_written()`
+## `fn review_timeouts_obey_the_platform_deadline_range() {`
 
-K3, regular review 4, finding 3 (P2, correctness; a MUST deviation from standards §7). The
-reviewer's configuration, `[routing] review = { tier = "frontier", timeout_secs =
-9223372036854775807 }`, through both of the readers that accept it: `config::load`, then
-`review::plan_for` and `ReviewPlan::pass_timeout`, over the settle fixture's plan. The
-premise is asserted, that both accept it. The review request carrying that timeout then
-goes to the runner, under `catch_unwind` so that an unwind fails the test with its own
-message. The runner returns a `NeverStarted` refusal naming the timeout. Nothing was asked
-of the funnel or the runtime (an empty trace), no intent was written and no container
-created. With the unchecked `started + request.timeout` restored, the runner panics with
-"overflow when adding duration to instant" and this test fails.
+The K3 regression runs `review_deadline_child` through `HostRunner` and its existing
+cross-platform process supervisor with a two-minute bound. It requires a non-timeout exit, code zero and libtest's
+`1 passed`, so a wedged helper, failed assertion or misnamed test fails the parent. The bound
+covers fixture setup and the whole helper lifecycle, independently of the review timeout.
+
+K3 originally named this guard
+`a_review_timeout_the_configuration_accepts_and_no_deadline_can_hold_is_refused_before_anything_is_written`.
+That test assumed every platform rejects `i64::MAX` seconds. Its fake never exited after
+start and its zero-delay watch kept recording observations on platforms that could represent
+the deadline. Repair6 corrects the premise and bounds that lifecycle; it does not attribute
+the historical native Windows allocation failure to this test.
+
+## `fn review_deadline_child() {`
+
+An owned helper, ignored in the default suite and always invoked by the parent above. The
+original configuration, `[routing] review = { tier = "frontier", timeout_secs =
+9223372036854775807 }`, still passes through `config::load`, `review::plan_for` and
+`ReviewPlan::pass_timeout`; the exact accepted duration is asserted. That duration is sent
+unchanged to the runner, with the outcome selected by the platform's `Instant::checked_add`
+range. Two additional cases assert their premises before invoking the runner: sixty seconds
+is representable, and `Duration::MAX` is not. Both outcomes therefore run on every platform;
+the overflowing case cannot silently become an untested branch.
+
+Each case has its own fixture, whose fake exits immediately when started. Its ten-millisecond
+poll prevents a non-exiting regression from accumulating an unbounded rate of trace entries
+while the parent's supervisor enforces the helper bound. No sleep establishes readiness.
+The request owns a copy of the task path while the fixture retains its cleanup paths.
+
+All invocations remain under `catch_unwind`. An unrepresentable deadline must return a
+non-cancellation `NeverStarted` refusal naming the supplied seconds, with an empty funnel
+and runtime trace, no intent and no container. A representable deadline must complete with
+code zero, without timing out, and with start, collection and removal recorded. Every case
+finishes with no intent or container. Restoring unchecked addition fails the overflow case;
+requiring refusal independently of the platform range fails the representable control.
 
 ## `fn a_start_that_left_a_process_unresolved_stays_unresolved_after_a_clean_cancel() {`
 

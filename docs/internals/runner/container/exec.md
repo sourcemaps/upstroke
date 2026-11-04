@@ -1452,8 +1452,17 @@ anything is written or launched. Until K3 the deadline was `started + request.ti
 and the configuration accepts such a timeout: `[routing] review = { tier = "frontier",
 timeout_secs = 9223372036854775807 }` passes `config::load` and
 `ReviewPlan::pass_timeout`, and the runner then panicked with "overflow when adding
-duration to instant" (the reviewer's witness). The host runner compares elapsed time with
+duration to instant" on the reviewer's platform. The host runner compares elapsed time with
 its timeout and adds nothing to an instant, so it never had the defect.
+
+Representability is a platform property, not a configuration limit. The
+[standard-library contract](https://doc.rust-lang.org/std/time/struct.Instant.html#os-specific-behaviors)
+permits different ranges. Rust 1.97.1's
+[Windows implementation](https://github.com/rust-lang/rust/blob/1.97.1/library/std/src/sys/time/windows.rs)
+stores the instant as a `Duration`, so `i64::MAX` seconds can fit there. A representable
+timeout proceeds normally; no arbitrary cap or substitute timeout is imposed. The bounded
+`review_timeouts_obey_the_platform_deadline_range` guard preserves the original configuration
+case and independently tests a representable duration and an asserted unrepresentable one.
 
 ## `fn contain(` › `covered.settle(fate);`
 
