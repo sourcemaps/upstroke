@@ -151,10 +151,14 @@ which by looking at the ref.
 
 Since PR12 `MAX_READABLE_SCHEMA` is 4 and `TOPOLOGY_ACTIVATION` is `Active`,
 so [`RootDerived::derive`] admits a schema-4 log, and `upstroke resume`
-reaches this order through `engine::topology::entry::prepare_resume` and
-`ResumePrepared::run`. Until PR12 the ceiling was 3 and this order was
-reached by tests alone, through [`RootDerived::derive_with`] at a raised
-ceiling.
+reaches this order through `engine::topology::entry::prepare_resume`,
+`ResumePrepared::verify` (step (a), through [`verify_for_recovery`]) and
+`ResumeVerified::run` (steps (a1)–(h), through [`recover_verified`]). The
+public entry publishes the run's recorded-objects include between the two —
+the resume's first private write, so after step (a) and never before it
+(PR12-CI-01) — which is why the order is split at that one point. Until PR12
+the ceiling was 3 and this order was reached by tests alone, through
+[`RootDerived::derive_with`] at a raised ceiling.
 
 (That sentence deliberately does not spell the test-configuration attribute
 out. Two source censuses in this tree cut a file at its first occurrence of
@@ -431,8 +435,9 @@ after acquiring the lock; the topology path acquired it here and entered
 nothing, so every reaper of the probes at (c) and of the loop's gates and
 reviewers held no lease — the cover review of `8a5f59e8` measured a real
 reaper at `ReaperStarted` with the run's hold absent
-(`PR8-R4-CLEANUP-LEASE`). [`run_recovery_order`] enters it for its own
-duration, and `TopologyRun::step` enters one per step.
+(`PR8-R4-CLEANUP-LEASE`). [`verify_for_recovery`] and [`recover_verified`]
+each enter it for their own duration, so [`run_recovery_order`] holds it from
+the locks to its end as before, and `TopologyRun::step` enters one per step.
 
 ## `impl LocksHeld` › `pub fn into_guards(self) -> (RunLock, WorktreeLock, RootDerived) {`
 
@@ -1239,10 +1244,12 @@ disappears from the trace. That is what makes
 ## `pub fn run_recovery_order(`
 
 Steps (a) through (h), in the packet's order, each step consuming the last
-step's witness.
+step's witness: [`verify_for_recovery`], then [`recover_verified`] on the
+records it proved.
 
 The ordering claim of this function is not in its statements — it is in the
 types. `RecordsVerified::verify` cannot be called without a `LocksHeld`;
+[`recover_verified`] cannot be called without a `RecordsVerified`;
 `ResumeCensused::census` cannot be called without a `BarrierHeld`; and
 [`run_resumed`] eats the `PreflightCertified` that every recovery emitter
 needs. Reordering the body does not compile.
@@ -1250,11 +1257,34 @@ needs. Reordering the body does not compile.
 Step (i), admission, is the loop's and is not here: `checkpoint_refusals`
 gives the loop's refusals to `select.rs`, and this file owns step (b)'s.
 
-The lock's cleanup scope is entered as soon as the locks are held and
-lives to the end of the function ([`LocksHeld::cleanup_scope`]), so the
-reapers of (c)'s host probes hold the run's R28 lease; the loop enters its
-own per step, because the scope is thread-local and the handle may be
-driven elsewhere.
+The lock's cleanup scope is entered as soon as the locks are held, by each
+half for its own duration ([`LocksHeld::cleanup_scope`]), so the reapers of
+(c)'s host probes hold the run's R28 lease; the loop enters its own per step,
+because the scope is thread-local and the handle may be driven elsewhere.
+
+## `pub fn verify_for_recovery(`
+
+Recovery step (a), alone: the worktree lease then the run lock, the owner and
+commit records verified against the committed first line, and the recorded
+mounts rechecked. Nothing here writes anything private, and the
+`RecordsVerified` it returns holds both locks.
+
+It is a function of its own because the public resume needs a point between
+(a) and (a1): the recorded-objects include is that resume's first private
+write, and `Workspace::recorded_objects_scope`, which writes it, is denied to
+every topology module, so `engine::resume::resume_harness` publishes it there,
+under the root these records proved and with both locks held (PR12-CI-01,
+INV-15, O18). Recovery-only tests call [`run_recovery_order`] and never saw
+that composition; the public guard is `engine::tests`'
+`a_schema_4_resume_proves_its_owner_and_commit_records_before_it_writes_its_include`.
+
+## `pub fn recover_verified(`
+
+Steps (a1) through (h) on records step (a) proved: the stable-prefix barrier,
+the census, step (b), the rebuild and pre-flight, and every recovery event.
+Taking the `RecordsVerified` by value is what makes it the continuation of
+[`verify_for_recovery`] and of nothing else: it neither takes the locks again
+nor reads a record the proof did not.
 
 ### Errors
 
@@ -1287,7 +1317,7 @@ the fold is poisoned and the next resume repeats from (a0).
 
 (c) the recorded Runner by inspection, then its probes.
 
-## `pub fn run_recovery_order(` › `let publication_pending = matches!(`
+## `pub fn recover_verified(` › `let publication_pending = matches!(`
 
 A `Prepared` transaction owns the ref: `finish_integration` compares it
 against the authorization and swaps it, so the startup check would only
@@ -1321,7 +1351,7 @@ refuses, untouched. The reviews of `3414dc58` found this step deleting every
 pin it did not recognise, the still-Prepared transaction's and a
 substituted one included (`pr8-triage.md` C2).
 
-## `pub fn run_recovery_order(` › `let live_pin = reclaim_stale_residue(&certified, seams.manager, &mut context)?;`
+## `pub fn recover_verified(` › `let live_pin = reclaim_stale_residue(&certified, seams.manager, &mut context)?;`
 
 T-PROPOSAL residue and the pins the log accounts for: staging worktrees
 no live transaction owns are reclaimed with force, a resolved sequence's
@@ -1330,18 +1360,18 @@ checked against its record and kept, and exactly the provisional orphan
 `prepared/<next_seq>` is reclaimed. Before the namespace check, so that
 check refuses whatever the log does not account for — untouched.
 
-## `pub fn run_recovery_order(` › `expected.push(fold.started().map_or_else(String::new, |started| {`
+## `pub fn recover_verified(` › `expected.push(fold.started().map_or_else(String::new, |started| {`
 
 The run's own integration ref sits under this namespace and is never
 unexpected; `expected_refs` leaves it out because it enumerates
 candidate refs, so the recovery names it here.
 
-## `pub fn run_recovery_order(` › `if let Some(pin) = &live_pin {`
+## `pub fn recover_verified(` › `if let Some(pin) = &live_pin {`
 
 The open transaction's pin is expected: it keeps the proposal
 reachable while the transaction resolves, verifying or prepared.
 
-## `pub fn run_recovery_order(` › `if !publication_pending {`
+## `pub fn recover_verified(` › `if !publication_pending {`
 
 The P7/P8 integration-ref repair is for a run killed at run-start, and
 the published-run check for every later one. A run with a prepared

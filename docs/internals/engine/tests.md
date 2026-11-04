@@ -3425,6 +3425,56 @@ now.
 
 The child of the test above.
 
+## `enum PrivateEntry {`
+
+What one path under a private root is, for [`private_snapshot`]: a directory or a
+file with its permission bits (on Windows, the read-only flag), the file with its
+bytes, or a link with its target.
+
+## `fn private_snapshot(root: &Path) -> std::collections::BTreeMap<PathBuf, PrivateEntry> {`
+
+Every persistent entry under a private root, the root itself included, keyed by its
+path relative to the root. A refused resume that published the include, created its
+`git` directory, left a staged temporary, renamed anything into place or tightened a
+mode changes it; [`moved_entries`] names what moved without printing any bytes.
+
+## `fn put_include(root: &Path, state: IncludeState) {`
+
+The two include states the CI-01 guard holds a refusal to: `Absent` removes the root's
+whole `git` directory, so a premature write would have to create a directory, a staged
+file and the include; `Changed` leaves other bytes in a directory loosened to `0755`
+on Unix, so a premature write would also rename over them and tighten the directory
+to `0700`.
+
+## `fn a_schema_4_resume_proves_its_owner_and_commit_records_before_it_writes_its_include() {`
+
+PR12-CI-01 (P1, concurrency/invariants lens) and
+PR12-RESUME-INCLUDE-BEFORE-RECORD-VERIFICATION (P2, regression lens): one defect, one
+guard (INV-15, O18: the private root is derived read-only before any lock, and the owner
+and commit records are verified before any private write). A real schema-4 run parks
+through `run_with`; every resume below goes through `engine::resume_with` — the public
+composition, which the recovery-order tests never reach — with no `--private-root`, so
+the run's committed locator is the only root authority, and with the private half
+present.
+
+Ten damages to the run's own records — owner record missing, not JSON, or naming
+another run, repository, run directory, incarnation or runner (each owner field
+`RecordsVerified::verify` compares); commit record missing, not JSON, or naming
+another first line — each under both include states, refuse with the record's own
+refusal. The locator retargeted, in the committed first line, to another existing root
+of the conforming `<root>/runs/<run-id>` shape refuses too, both when that root holds
+no records and when it holds copies of the run's own, which only the commit record's
+digest of the first line tells apart, again under both include states. For every one of
+those twenty-four refusals the whole persistent private root — and the foreign root for the
+retargeted cases — is unchanged entry by entry, byte by byte and mode by mode, the log
+is unchanged, every ref is where it was, and no probe ran.
+
+The positive control resumes the provable run with the include absent and then changed:
+the include holds its fixed bytes again, its directory is `0700` on Unix, the resume
+reached its probes and appended `run_resumed`. With `resume_harness` publishing the
+include before `ResumePrepared::verify` (the order before PR12-CI-01), the first refusal
+fails on the private root that moved.
+
 ## `enum SignalFault {`
 
 How [`signal_mid_attempt`] is made to fail, for the tests of its own cleanup. Each

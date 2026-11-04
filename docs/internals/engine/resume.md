@@ -34,8 +34,25 @@ every refusal it raises, runs the lines below exactly as before — with one
 containment establishment, as every public entry point has. A topology log
 is resumed by the topology order: containment, the read-only half
 (`prepare_resume`, which may read a recorded container image's environment,
-a `docker` child), the include under the **recorded** root (never today's
-default, and never a fabricated private half), then `ResumePrepared::run`.
+a `docker` child), the run exclusion, the proof (`ResumePrepared::verify`:
+both locks, then `owner.json` and `committed.json` against the committed first
+line, then the recorded mounts — recovery step (a)), the include under the
+root that proof verified (never today's default, never a fabricated private
+half, and never a root the public locator merely names), then
+`ResumeVerified::run`.
+
+The include is the resume's first private write, so it follows the proof
+(INV-15, O18: the owner and commit records are verified before any private
+write). Until PR12-CI-01 (P1, and the regression lens's
+PR12-RESUME-INCLUDE-BEFORE-RECORD-VERIFICATION, the same defect) it was
+published before `ResumePrepared::run` took the locks, so a run whose private
+half was present but whose owner or commit record was missing, malformed or
+another's — or whose public locator had been retargeted to another root of the
+same shape — created `<root>/git`, staged a file there and renamed the include
+into place before the recovery order refused it.
+`ResumePrepared` no longer answers a private root at all: the only root this
+body can publish under is `ResumeVerified::private_root`, the one the records
+proved.
 
 ## `pub fn resume_harness(`
 
@@ -57,12 +74,15 @@ gates this run has been using all along is exactly right.
 builds the same `ManagedRepository` [`run_harness`](coordinator.md) does, through
 `Workspace::recorded_objects_scope`, so an include that went missing or was
 altered between the run and its resume is whole again before a resumed worker,
-gate or reviewer starts; the runner refuses any role while it is not.
+gate or reviewer starts; the runner refuses any role while it is not. On the
+schema-4 branch that is after the proof and before the first role, which is the
+step-(c) shell probe: the runner is built over the `ManagedRepository` only once
+the include has been written.
 
 **Every resume makes the run exclusion.** The sequential resume calls
 `Workspace::ensure_run_exclusions` after `ensure_execution_prerequisites`. The
 schema-4 branch calls it after the read-only `prepare_resume`, just before the
-include (L4, regression review 3, finding 4). The topology tree cannot call it
+proof and the include (L4, regression review 3, finding 4). The topology tree cannot call it
 itself (`clippy.toml` denies it to every topology module). Until L4 a schema-4
 resume never made it. So a run whose `.upstroke/.gitignore` had gone missing,
 or one created before the fresh entry made it (L2), exposed its log, report and

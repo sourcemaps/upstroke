@@ -17,12 +17,17 @@ It composes functions that already exist, in the spec's order
 public function is one half of a command whose other half lives in the
 legacy entry point (`engine::coordinator::run_harness`,
 `engine::resume::resume_harness`): those two bodies publish the
-recorded-objects include between this module's read-only half and its
-effectful half, because `Workspace::recorded_objects_scope` is denied to
-every topology module (`clippy.toml`). The first effect of either command is
-the run exclusion, which both bodies make just before the include, for the same
-reason: `Workspace::ensure_run_exclusions` is denied to every topology module
-too. `run_harness` makes it in the checkout's admission (L2), and
+recorded-objects include between this module's halves, because
+`Workspace::recorded_objects_scope` is denied to every topology module
+(`clippy.toml`) — `run_harness` between the read-only half and the effectful
+half, and `resume_harness` between the proof that the run's private records
+are its own ([`ResumePrepared::verify`]) and the effectful half
+([`ResumeVerified::run`]), because on a resume the include is a write into a
+private root that only those records authorize (INV-15, O18; PR12-CI-01). The
+first effect of either command is
+the run exclusion, which both bodies make before the include — `run_harness` just
+before it, `resume_harness` just before the proof — for the same reason:
+`Workspace::ensure_run_exclusions` is denied to every topology module too. `run_harness` makes it in the checkout's admission (L2), and
 `resume_harness` on its own (L4).
 
 ### The fresh order
@@ -90,10 +95,17 @@ too. `run_harness` makes it in the checkout's admission (L2), and
    `.upstroke/.gitignore` went missing is ignored by Git again. This step is the
    exclusion alone: the dirty-tree refusal is the fresh run's admission (L2),
    and no refusal is added to the resume.
-5. `resume_harness` publishes the include under the recorded root.
-6. [`ResumePrepared::run`]: the runner from the record, the manager, the
-   `RunnerPreflight` over the recorded probe set, `run_recovery_order`, the
-   loop, the report.
+5. [`ResumePrepared::verify`], the proof, recovery step (a): the checkout's Git
+   directory and repo key, this incarnation, the workspace manager (read-only,
+   as before), then `recover::verify_for_recovery` — the worktree lease and the
+   run lock, `owner.json` and `committed.json` verified against the committed
+   first line, and the recorded mounts rechecked. Every refusal so far has
+   written nothing private.
+6. `resume_harness` publishes the include under [`ResumeVerified::private_root`],
+   the root the records proved, with both locks held.
+7. [`ResumeVerified::run`]: the runner from the record, the `RunnerPreflight`
+   over the recorded probe set, `recover::recover_verified` (steps (a1)–(h)),
+   the loop, the report.
 
 ### The runner
 
@@ -222,13 +234,40 @@ before anything is published, locked or written, so the run stays resumable
 once the environment is what it was.
 
 `started` is an owned snapshot of the record `root` carries (§6): `root` is
-consumed by `run_recovery_order`, and the run still reads the record's gates
-afterwards.
+consumed by the proof, and the run still reads the record's gates afterwards.
 
-## `impl ResumePrepared` › `pub fn run(`
+## `pub struct ResumeVerified {`
+
+What a resume holds once its records are proved: the verified records — and
+with them the worktree lease and the run lock, taken by
+`recover::verify_for_recovery` and held until the run ends — the read-only
+half's settlement, and the repository identity the proof was made against. It
+is the only value whose `private_root` a resume publishes the include under,
+and the only one with a `run`.
+
+## `impl ResumePrepared` › `pub fn verify(self, opts: &ResumeOptions) -> Result<ResumeVerified, UpstrokeError> {`
+
+The proof half of a resume, recovery step (a). The checkout's Git directory,
+the repo key, the incarnation and the workspace manager are read before the
+locks, as they were before the proof moved here; then
+`recover::verify_for_recovery` takes the worktree lease and the run lock,
+verifies `owner.json` and `committed.json` and rechecks the recorded mounts.
+It writes nothing private: a refusal here leaves the private root, the log and
+the refs exactly as they were, which is what lets `resume_harness` publish the
+include only after it (PR12-CI-01).
+
+## `impl ResumeVerified` › `pub fn private_root(&self) -> &Path {`
+
+The root the verified records hang from: the one `RootDerived` derived from the
+committed first line, now proved by the owner and commit records under it.
+
+## `impl ResumeVerified` › `pub fn run(`
 
 The effectful half of a resume. The runner is the recorded one: today's
-`[runner]` reaches recovery only as the selection it is compared with.
+`[runner]` reaches recovery only as the selection it is compared with. It is
+built over `repository` only here, after the include was written, and drives
+`recover::recover_verified` from the records the proof holds, so the recovery
+order's steps (a1)–(h) follow the proof without taking the locks again.
 
 A container runner is given the worktree Git directory and `repository`'s
 common directory, as in [`FreshPrepared::run`]. The include's spelling, the
@@ -314,7 +353,7 @@ struct), and `Driving` keeps the coordinator's own handle.
 ## `fn compare_recorded_gates(`
 
 A run keeps the gates it recorded, and the recorded gates are the ones the
-resume runs (`ResumePrepared::run`). Today's gates are compared with them by
+resume runs (`ResumeVerified::run`). Today's gates are compared with them by
 the sequential resume's own `preflight::gates_differ`, and a difference warns,
 naming each edit: a command, a shell, a timeout, a gate only one side has
 (regression review #4, J7; DESIGN §17). Today's gates are the ones a fresh run

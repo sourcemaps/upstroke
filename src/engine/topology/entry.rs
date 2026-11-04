@@ -35,7 +35,7 @@ use crate::runner::container::runtime::{
 use crate::runner::container::view::RoleGitView;
 use crate::runner::host::{HostEnvironment, HostRunner, ManagedRepository, ObjectGraph};
 use crate::topology::events::{
-    CommitSha, GitRef, RunStarted4, RunnerKind, RunnerPolicy, TopologyLimits,
+    CommitSha, GitRef, IncarnationId, RunStarted4, RunnerKind, RunnerPolicy, TopologyLimits,
 };
 use crate::topology::fold::FrozenInputs;
 use crate::topology::paths::{PathGrammar, PathPolicy, PathPolicyVersion};
@@ -52,7 +52,9 @@ use super::create::{Disposition, ProbePair, Request, RunnerProbes, create_run};
 use super::identity::{InvocationLedger, SlotLimits};
 use super::preflight::RunPreflight;
 use super::prelock::{self, PreLock, PreLockChecked, RunnerResolved};
-use super::recover::{ResumeSeams, RootDerived, run_recovery_order};
+use super::recover::{
+    RecordsVerified, ResumeSeams, RootDerived, recover_verified, verify_for_recovery,
+};
 use super::run::{Progress, RunSeams, TopologyRun};
 use super::seams::{IdSource, NoTopologyHooks, RealIds, SystemClock, TopologyHooks};
 use super::select::Ceiling;
@@ -378,6 +380,20 @@ impl FreshPrepared {
 
 pub struct ResumePrepared {
     root: RootDerived,
+    settled: ResumeSettled,
+}
+
+pub struct ResumeVerified {
+    records: RecordsVerified,
+    settled: ResumeSettled,
+    worktree_git_dir: PathBuf,
+    repo_key: RepoKey,
+    incarnation: IncarnationId,
+    manager: WorkspaceManager,
+    hooks: NoTopologyHooks,
+}
+
+struct ResumeSettled {
     started: RunStarted4,
     inputs: FrozenInputs,
     config: config::Config,
@@ -481,33 +497,7 @@ pub fn prepare_resume(
 
     Ok(ResumePrepared {
         root,
-        started,
-        inputs,
-        config,
-        shell,
-        mode,
-        notifiers,
-        ceiling,
-        slots,
-        image_environment,
-        warnings,
-    })
-}
-
-impl ResumePrepared {
-    #[must_use]
-    pub fn private_root(&self) -> &Path {
-        self.root.private_root()
-    }
-
-    pub fn run(
-        self,
-        opts: &ResumeOptions,
-        harness: &Harness<'_>,
-        repository: ManagedRepository,
-    ) -> Result<RunReport, UpstrokeError> {
-        let Self {
-            root,
+        settled: ResumeSettled {
             started,
             inputs,
             config,
@@ -517,16 +507,82 @@ impl ResumePrepared {
             ceiling,
             slots,
             image_environment,
-            mut warnings,
-        } = self;
-        let runtime = DockerCli::default();
-        let view = RoleGitView::new(ContainerTrace::off());
+            warnings,
+        },
+    })
+}
+
+impl ResumePrepared {
+    pub fn verify(self, opts: &ResumeOptions) -> Result<ResumeVerified, UpstrokeError> {
+        let Self { root, settled } = self;
         let mut hooks = NoTopologyHooks::new();
 
         let workspace = Workspace::open(&opts.repo_root)?;
         let worktree_git_dir = workspace.worktree_git_dir()?;
         let repo_key = RepoKey::for_worktree_git_dir(&worktree_git_dir)?;
         let incarnation = RealIds.incarnation();
+        let manager = WorkspaceManager::derive(
+            &opts.repo_root,
+            root.private_root(),
+            root.run_id(),
+            &incarnation.0,
+        )?;
+        let records = verify_for_recovery(
+            root,
+            &opts.repo_root,
+            &worktree_git_dir,
+            &repo_key,
+            &mut hooks,
+        )?;
+        Ok(ResumeVerified {
+            records,
+            settled,
+            worktree_git_dir,
+            repo_key,
+            incarnation,
+            manager,
+            hooks,
+        })
+    }
+}
+
+impl ResumeVerified {
+    #[must_use]
+    pub fn private_root(&self) -> &Path {
+        self.records.locks().root().private_root()
+    }
+
+    pub fn run(
+        self,
+        opts: &ResumeOptions,
+        harness: &Harness<'_>,
+        repository: ManagedRepository,
+    ) -> Result<RunReport, UpstrokeError> {
+        let Self {
+            records,
+            settled:
+                ResumeSettled {
+                    started,
+                    inputs,
+                    config,
+                    shell,
+                    mode,
+                    notifiers,
+                    ceiling,
+                    slots,
+                    image_environment,
+                    mut warnings,
+                },
+            worktree_git_dir,
+            repo_key,
+            incarnation,
+            manager,
+            mut hooks,
+        } = self;
+        let runtime = DockerCli::default();
+        let view = RoleGitView::new(ContainerTrace::off());
+
+        let root = records.locks().root();
         let include_spelling = repository.common_dir().to_path_buf();
         let runner: Arc<dyn Runner> = match image_environment {
             None => Arc::new(host_runner(repository)),
@@ -547,12 +603,6 @@ impl ResumePrepared {
                 base,
             )?),
         };
-        let manager = WorkspaceManager::derive(
-            &opts.repo_root,
-            root.private_root(),
-            root.run_id(),
-            &incarnation.0,
-        )?;
         one_spelling(&include_spelling, &manager)?;
         let paths = RunPaths::from_parts(
             root.public_dir().to_path_buf(),
@@ -565,8 +615,8 @@ impl ResumePrepared {
             &crate::agent::probe_workspace(),
             started.probed_agents,
         );
-        let (_recovered, handle) = run_recovery_order(
-            root,
+        let (_recovered, handle) = recover_verified(
+            records,
             &ResumeSeams {
                 repo_root: &opts.repo_root,
                 worktree_git_dir: &worktree_git_dir,

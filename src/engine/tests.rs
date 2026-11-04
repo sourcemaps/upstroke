@@ -18445,6 +18445,400 @@ fn a_schema_4_resume_refuses_a_missing_private_half_or_a_changed_plan_and_warns_
     );
 }
 
+/// What one path under a private root is: its kind, its permission bits and its bytes or target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PrivateEntry {
+    Directory { mode: u32 },
+    File { mode: u32, bytes: Vec<u8> },
+    Link { target: PathBuf },
+}
+
+/// Everything persistent under `root`, the root itself included, by path relative to it.
+fn private_snapshot(root: &Path) -> std::collections::BTreeMap<PathBuf, PrivateEntry> {
+    fn mode(metadata: &fs::Metadata) -> u32 {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            metadata.permissions().mode()
+        }
+        #[cfg(not(unix))]
+        {
+            u32::from(metadata.permissions().readonly())
+        }
+    }
+    let mut entries = std::collections::BTreeMap::new();
+    let top = fs::symlink_metadata(root).expect("the private root");
+    entries.insert(PathBuf::new(), PrivateEntry::Directory { mode: mode(&top) });
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(&directory).expect("a directory under the private root") {
+            let path = entry.expect("a directory entry").path();
+            let relative = path
+                .strip_prefix(root)
+                .expect("under the root")
+                .to_path_buf();
+            let metadata = fs::symlink_metadata(&path).expect("the entry's metadata");
+            let found = if metadata.file_type().is_symlink() {
+                PrivateEntry::Link {
+                    target: fs::read_link(&path).expect("the link's target"),
+                }
+            } else if metadata.is_dir() {
+                pending.push(path.clone());
+                PrivateEntry::Directory {
+                    mode: mode(&metadata),
+                }
+            } else {
+                PrivateEntry::File {
+                    mode: mode(&metadata),
+                    bytes: fs::read(&path).expect("the file's bytes"),
+                }
+            };
+            entries.insert(relative, found);
+        }
+    }
+    entries
+}
+
+/// The paths whose entry differs between two snapshots, each with how, and never its bytes.
+fn moved_entries(
+    before: &std::collections::BTreeMap<PathBuf, PrivateEntry>,
+    after: &std::collections::BTreeMap<PathBuf, PrivateEntry>,
+) -> Vec<String> {
+    let mut moved = Vec::new();
+    for (path, entry) in after {
+        match before.get(path) {
+            None => moved.push(format!("created {}", path.display())),
+            Some(earlier) if earlier != entry => moved.push(format!("changed {}", path.display())),
+            Some(_) => {}
+        }
+    }
+    for path in before.keys().filter(|path| !after.contains_key(*path)) {
+        moved.push(format!("removed {}", path.display()));
+    }
+    moved
+}
+
+fn every_ref(repo: &Path) -> String {
+    git_in(repo, &["for-each-ref", "--format=%(refname) %(objectname)"])
+}
+
+#[derive(Debug, Clone, Copy)]
+enum IncludeState {
+    Absent,
+    Changed,
+}
+
+/// Leaves `root`'s include absent — its whole `git` directory gone — or holding other bytes in
+/// a directory a writer would tighten, so that publishing it is visible in every path, byte and
+/// mode it touches.
+fn put_include(root: &Path, state: IncludeState) {
+    let directory = root.join("git");
+    match state {
+        IncludeState::Absent => {
+            if directory.exists() {
+                fs::remove_dir_all(&directory).expect("the include's directory, removed");
+            }
+        }
+        IncludeState::Changed => {
+            fs::create_dir_all(&directory).expect("the include's directory");
+            fs::write(
+                directory.join("recorded-objects.gitconfig"),
+                "[core]\n\tuseReplaceRefs = true\n",
+            )
+            .expect("an include holding other bytes");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                fs::set_permissions(&directory, fs::Permissions::from_mode(0o755))
+                    .expect("a directory the include's writer would tighten");
+            }
+        }
+    }
+}
+
+/// PR12-CI-01 (P1) and, the same defect, PR12-RESUME-INCLUDE-BEFORE-RECORD-VERIFICATION
+/// (INV-15, O18): through `engine::resume_with`, a parked schema-4 run whose private half is
+/// present refuses before any private write when its owner or commit record is missing,
+/// malformed or another's, or when its public locator names another conforming root, with the
+/// include absent or changed; a provable run's resume still writes the include again.
+#[test]
+fn a_schema_4_resume_proves_its_owner_and_commit_records_before_it_writes_its_include() {
+    let (tree, repo) = temp_engine_repo("topology-resume-include-after-proof");
+    let witness = OwnerWitness {
+        stub: TopologyStub::new(TOPOLOGY_STUB_EDIT, 1),
+        private_root: private_root_for(&repo),
+        owner_at_probe: Mutex::new(Vec::new()),
+    };
+    let source = BorrowedOwnerWitness(&witness);
+    let probes = || {
+        witness
+            .owner_at_probe
+            .lock()
+            .expect("the probe witness")
+            .len()
+    };
+    let parked = run_with(&topology_options(&repo), &source).expect("the run parks");
+    assert_eq!(parked.outcome(), RunOutcome::Parked, "{parked:#?}");
+    until_released(&repo, &parked.run_id);
+
+    let home = private_root_for(&repo);
+    let private = private_dir_of(&repo, &parked.run_id);
+    assert_eq!(
+        private,
+        home.join("runs").join(&parked.run_id),
+        "the premise: the run's private half is present under the root its locator names"
+    );
+    let log = rundir::public_dir(&repo, &parked.run_id).join(rundir::EVENT_LOG);
+    let committed = fs::read(&log).expect("the parked run's log");
+    let owner_path = private.join(rundir::OWNER_RECORD);
+    let commit_path = private.join(rundir::COMMIT_RECORD);
+    let owner = fs::read(&owner_path).expect("owner.json");
+    let commit = fs::read(&commit_path).expect("committed.json");
+    let mut resume = resume_options(&repo, &parked.run_id);
+    resume.private_root = None;
+
+    let with_field = |record: &[u8], field: &str, value: &str| {
+        let mut parsed: serde_json::Value = serde_json::from_slice(record).expect("a record");
+        parsed[field] = serde_json::Value::from(value);
+        serde_json::to_vec(&parsed).expect("the damaged record")
+    };
+    let mut other_runner: serde_json::Value = serde_json::from_slice(&owner).expect("a record");
+    other_runner["runner"]["kind"] = serde_json::Value::from("container");
+    let other_runner = serde_json::to_vec(&other_runner).expect("the damaged record");
+    let damages: Vec<(&str, &Path, Option<Vec<u8>>, &str)> = vec![
+        (
+            "a missing owner record",
+            &owner_path,
+            None,
+            "private half has no",
+        ),
+        (
+            "an owner record that is not JSON",
+            &owner_path,
+            Some(b"{\"run_id\":".to_vec()),
+            "is not the record this build understands",
+        ),
+        (
+            "another run's owner record",
+            &owner_path,
+            Some(with_field(&owner, "run_id", "01FOREIGNRUN00000000000000")),
+            "records run id",
+        ),
+        (
+            "another repository's owner record",
+            &owner_path,
+            Some(with_field(&owner, "repo_key", "0000000000000000")),
+            "records repo key",
+        ),
+        (
+            "another run directory's owner record",
+            &owner_path,
+            Some(with_field(
+                &owner,
+                "public_dir",
+                "/elsewhere/.upstroke/runs/01FOREIGN",
+            )),
+            "records public directory",
+        ),
+        (
+            "another incarnation's owner record",
+            &owner_path,
+            Some(with_field(
+                &owner,
+                "incarnation",
+                "01FOREIGNINC00000000000000",
+            )),
+            "records incarnation",
+        ),
+        (
+            "an owner record of another runner",
+            &owner_path,
+            Some(other_runner),
+            "records a different runner",
+        ),
+        (
+            "a missing commit record",
+            &commit_path,
+            None,
+            "private half has no",
+        ),
+        (
+            "a commit record that is not JSON",
+            &commit_path,
+            Some(b"not json".to_vec()),
+            "is not the record this build understands",
+        ),
+        (
+            "a commit record of another first line",
+            &commit_path,
+            Some(with_field(
+                &commit,
+                "run_started_sha256",
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            )),
+            "says the committed first line digests",
+        ),
+    ];
+    for state in [IncludeState::Absent, IncludeState::Changed] {
+        for (what, path, damaged, says) in &damages {
+            put_include(&home, state);
+            match damaged {
+                None => fs::remove_file(path).expect("the record, removed"),
+                Some(bytes) => fs::write(path, bytes).expect("the record, damaged"),
+            }
+            let before = private_snapshot(&home);
+            let refs = every_ref(&repo);
+            let probed = probes();
+            let refused = resume_with(&resume, &source)
+                .expect_err("a run whose records do not prove it is refused");
+            assert!(
+                refused.to_string().contains(says),
+                "{what}, include {state:?}: {refused}"
+            );
+            let moved = moved_entries(&before, &private_snapshot(&home));
+            assert!(
+                moved.is_empty(),
+                "{what}, include {state:?}: the refused resume wrote under the private root: \
+                 {moved:?}"
+            );
+            assert!(
+                fs::read(&log).expect("the log") == committed,
+                "{what}, include {state:?}: the refused resume wrote the log"
+            );
+            assert_eq!(
+                every_ref(&repo),
+                refs,
+                "{what}, include {state:?}: the refs moved"
+            );
+            assert_eq!(probes(), probed, "{what}, include {state:?}: a probe ran");
+            let original = if *path == owner_path.as_path() {
+                &owner
+            } else {
+                &commit
+            };
+            fs::write(path, original).expect("the record, restored");
+            until_released(&repo, &parked.run_id);
+        }
+    }
+
+    let foreign = tree.path().join("another-home");
+    let foreign_half = foreign.join("runs").join(&parked.run_id);
+    let first_end = committed
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .expect("a committed first line");
+    let first = std::str::from_utf8(committed.get(..first_end).expect("the first line"))
+        .expect("a UTF-8 first line");
+    let spelled = |path: &Path| {
+        format!(
+            "\"private_dir\":{}",
+            serde_json::to_string(path.to_str().expect("a UTF-8 path")).expect("a JSON string")
+        )
+    };
+    assert_eq!(
+        first.matches(&spelled(&private)).count(),
+        1,
+        "the premise: the first line spells its locator once"
+    );
+    let mut retargeted = first
+        .replacen(&spelled(&private), &spelled(&foreign_half), 1)
+        .into_bytes();
+    retargeted.extend_from_slice(committed.get(first_end..).expect("the rest of the log"));
+    for (what, copies, says) in [
+        (
+            "a conforming root holding no records",
+            false,
+            "private half has no",
+        ),
+        (
+            "a conforming root holding copies of this run's records",
+            true,
+            "says the committed first line digests",
+        ),
+    ] {
+        for state in [IncludeState::Absent, IncludeState::Changed] {
+            fs::create_dir_all(&foreign_half).expect("a conforming private half elsewhere");
+            for (name, bytes) in [
+                (rundir::OWNER_RECORD, &owner),
+                (rundir::COMMIT_RECORD, &commit),
+            ] {
+                let copy = foreign_half.join(name);
+                if copies {
+                    fs::write(&copy, bytes).expect("a copied record");
+                } else if copy.exists() {
+                    fs::remove_file(&copy).expect("no record");
+                }
+            }
+            put_include(&foreign, state);
+            fs::write(&log, &retargeted).expect("the locator, retargeted");
+            let mine = private_snapshot(&home);
+            let theirs = private_snapshot(&foreign);
+            let refs = every_ref(&repo);
+            let probed = probes();
+            let refused = resume_with(&resume, &source)
+                .expect_err("a locator naming another root is not proof of it");
+            assert!(
+                refused.to_string().contains(says),
+                "{what}, include {state:?}: {refused}"
+            );
+            for (root, snapshot) in [(&home, &mine), (&foreign, &theirs)] {
+                let moved = moved_entries(snapshot, &private_snapshot(root));
+                assert!(
+                    moved.is_empty(),
+                    "{what}, include {state:?}: the refused resume wrote under {}: {moved:?}",
+                    root.display()
+                );
+            }
+            assert!(
+                fs::read(&log).expect("the log") == retargeted,
+                "{what}, include {state:?}: the refused resume wrote the log"
+            );
+            assert_eq!(
+                every_ref(&repo),
+                refs,
+                "{what}, include {state:?}: the refs moved"
+            );
+            assert_eq!(probes(), probed, "{what}, include {state:?}: a probe ran");
+            fs::write(&log, &committed).expect("the locator, restored");
+            until_released(&repo, &parked.run_id);
+        }
+    }
+
+    for state in [IncludeState::Absent, IncludeState::Changed] {
+        put_include(&home, state);
+        let resumed_before = event_kinds(&repo, &parked.run_id)
+            .iter()
+            .filter(|kind| *kind == "run_resumed")
+            .count();
+        let probed = probes();
+        resume_with(&resume, &source).expect("a run its records prove resumes");
+        assert_eq!(
+            fs::read(include_for(&repo)).expect("the include the resume wrote again"),
+            crate::runner::host::RECORDED_OBJECTS_INCLUDE,
+            "include {state:?}"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = fs::metadata(home.join("git"))
+                .expect("the include's directory")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o700, "include {state:?}: {mode:o}");
+        }
+        assert!(
+            probes() > probed,
+            "include {state:?}: the resume reached its probes after writing the include"
+        );
+        let resumed_after = event_kinds(&repo, &parked.run_id)
+            .iter()
+            .filter(|kind| *kind == "run_resumed")
+            .count();
+        assert_eq!(resumed_after, resumed_before + 1, "include {state:?}");
+        until_released(&repo, &parked.run_id);
+    }
+}
+
 /// P12-W2 and P12-W16 (D6): a schema-4 run whose process dies by SIGKILL,
 /// SIGTERM or SIGINT inside an attempt leaves a log that ends mid-attempt; the
 /// resume settles that attempt as interrupted, appends `run_resumed`, and
