@@ -3804,3 +3804,19 @@ The log cut just after `merge_verification_started`:
 
 The ledger and settlement mutations above fail it too.
 
+## `fn a_completed_schema_4_run_leaves_no_generated_file_for_an_ordinary_git_add_to_take() {`
+
+L4 (regression review 3, finding 4). A real schema-4 run, through `run_with`, completes in a
+repository that has no `.upstroke` exclusion before it (the premise is asserted). Its public
+directory holds the run's log and report. Afterwards `git status` lists nothing, and an ordinary
+`git add -A` stages nothing (`git diff --cached --name-only` is empty). With the exclusion removed
+from `coordinator::refuse_dirty_tree`, it fails on `?? .upstroke/`.
+
+## `fn a_schema_4_resume_restores_a_missing_run_exclusion() {`
+
+L4, the resume. A schema-4 run parks on its one question, the answer is recorded, and the
+exclusion its fresh run made is deleted. The premise is asserted: `git status` now lists
+`.upstroke/`. The resume, through `resume_with`, completes the run. Afterwards the exclusion is
+back and `git status` lists nothing. With the schema-4 branch's `ensure_run_exclusions` removed
+from `resume_harness`, it fails on "the resume made the exclusion again".
+

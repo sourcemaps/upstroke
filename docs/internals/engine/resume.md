@@ -59,6 +59,16 @@ builds the same `ManagedRepository` [`run_harness`](coordinator.md) does, throug
 altered between the run and its resume is whole again before a resumed worker,
 gate or reviewer starts; the runner refuses any role while it is not.
 
+**Every resume makes the run exclusion.** The sequential resume calls
+`Workspace::ensure_run_exclusions` after `ensure_execution_prerequisites`. The
+schema-4 branch calls it after the read-only `prepare_resume`, just before the
+include (L4, regression review 3, finding 4). The topology tree cannot call it
+itself (`clippy.toml` denies it to every topology module). Until L4 a schema-4
+resume never made it. So a run whose `.upstroke/.gitignore` had gone missing,
+or one created before the fresh entry made it (L2), exposed its log, report and
+locks to an ordinary `git add -A` after the resume as before it. The call is the
+exclusion alone: it refuses nothing, and a resume adds no dirty-tree refusal.
+
 The refusal off the run branch names `git --no-replace-objects -c
 core.useReplaceRefs=false status`: both controls, because on Git 2.41 a
 configured `core.useReplaceRefs = true` outranks the first alone and that

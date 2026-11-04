@@ -19666,6 +19666,96 @@ fn a_schema_4_status_prints_the_integration_review_spend_run_reports_and_its_flo
     );
 }
 
+/// L4 (regression review 3, finding 4). A completed production run in a repository with no
+/// `.upstroke` exclusion leaves its generated public files (its log, frozen plan, report and
+/// locks) where Git ignores them: `git status` lists nothing, and an ordinary `git add -A`
+/// stages nothing.
+#[test]
+fn a_completed_schema_4_run_leaves_no_generated_file_for_an_ordinary_git_add_to_take() {
+    let (_tree, repo) = temp_engine_repo("topology-run-exclusion");
+    assert!(
+        !repo.join(".upstroke").exists(),
+        "the premise: the repository has no exclusion before its first run"
+    );
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        0,
+    )));
+    let report = run_with(&topology_options(&repo), &source).expect("the schema-4 run completes");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:#?}");
+    until_released(&repo, &report.run_id);
+    let generated: Vec<String> = fs::read_dir(rundir::public_dir(&repo, &report.run_id))
+        .expect("the run's public directory")
+        .map(|entry| {
+            entry
+                .expect("a public entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    assert!(
+        ["events.jsonl", "report.json"]
+            .iter()
+            .all(|name| generated.iter().any(|file| file == name)),
+        "the premise: the run generated its public files: {generated:?}"
+    );
+    let listed = status_of(&repo);
+    assert!(
+        listed.trim().is_empty(),
+        "`git status` lists none of the run's files: {listed}"
+    );
+    git_in(&repo, &["add", "-A"]);
+    let staged = git_in(&repo, &["diff", "--cached", "--name-only"]);
+    assert!(
+        staged.trim().is_empty(),
+        "an ordinary `git add -A` stages none of them: {staged}"
+    );
+}
+
+/// L4, the resume. A schema-4 resume makes the run exclusion, as the sequential resume does, so
+/// a run whose `.upstroke/.gitignore` went missing while it was parked is ignored by Git again
+/// once it is resumed.
+#[test]
+fn a_schema_4_resume_restores_a_missing_run_exclusion() {
+    let (_tree, repo) = temp_engine_repo("topology-resume-exclusion");
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        1,
+    )));
+    let parked = run_with(&topology_options(&repo), &source).expect("the run parks");
+    assert_eq!(parked.outcome(), RunOutcome::Parked, "{parked:#?}");
+    until_released(&repo, &parked.run_id);
+    let [asked] = parked.questions.as_slice() else {
+        panic!("one question: {parked:#?}");
+    };
+    crate::answer::answer(
+        &repo,
+        &asked.question.id.to_string(),
+        crate::answer::Reply::Text("the first".to_owned()),
+    )
+    .expect("the answer is recorded");
+    let exclusion = repo.join(".upstroke").join(".gitignore");
+    fs::remove_file(&exclusion).expect("the fresh run made the exclusion");
+    let exposed = status_of(&repo);
+    assert!(
+        exposed.contains(".upstroke/"),
+        "the premise: without the exclusion the run's files are exposed: {exposed}"
+    );
+
+    let mut resume = resume_options(&repo, &parked.run_id);
+    resume.private_root = None;
+    let report = resume_with(&resume, &source).expect("the resume completes the run");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:#?}");
+    until_released(&repo, &parked.run_id);
+    assert!(exclusion.exists(), "the resume made the exclusion again");
+    let listed = status_of(&repo);
+    assert!(
+        listed.trim().is_empty(),
+        "`git status` lists none of the run's files after the resume: {listed}"
+    );
+}
+
 /// P12-W13. A parked schema-4 question has no payload file: `status` names it,
 /// `show` renders it from the fold by an id prefix, `answer` records it once and
 /// refuses a second, the resume ingests it from the file the run polls, and an

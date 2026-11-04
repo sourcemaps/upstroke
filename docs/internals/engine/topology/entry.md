@@ -19,10 +19,11 @@ legacy entry point (`engine::coordinator::run_harness`,
 `engine::resume::resume_harness`): those two bodies publish the
 recorded-objects include between this module's read-only half and its
 effectful half, because `Workspace::recorded_objects_scope` is denied to
-every topology module (`clippy.toml`). The include is the resume's first
-effect; a fresh run's is the run exclusion, which `run_harness` makes just
-before it, in the checkout's admission (L2), for the same reason:
-`Workspace::ensure_run_exclusions` is denied to every topology module too.
+every topology module (`clippy.toml`). The first effect of either command is
+the run exclusion, which both bodies make just before the include, for the same
+reason: `Workspace::ensure_run_exclusions` is denied to every topology module
+too. `run_harness` makes it in the checkout's admission (L2), and
+`resume_harness` on its own (L4).
 
 ### The fresh order
 
@@ -82,8 +83,13 @@ before it, in the checkout's admission (L2), for the same reason:
    root or a credential location, refused before the runtime is asked
    anything ([`refuse_withheld_recorded_mounts`]); a recorded container
    image's environment; the slot limits; today's configured notifiers.
-4. `resume_harness` publishes the include under the recorded root.
-5. [`ResumePrepared::run`]: the runner from the record, the manager, the
+4. `resume_harness` makes the run exclusion (`Workspace::ensure_run_exclusions`,
+   L4), as the sequential resume does after its prerequisites, so a run whose
+   `.upstroke/.gitignore` went missing is ignored by Git again. This step is the
+   exclusion alone: the dirty-tree refusal is the fresh run's admission (L2),
+   and no refusal is added to the resume.
+5. `resume_harness` publishes the include under the recorded root.
+6. [`ResumePrepared::run`]: the runner from the record, the manager, the
    `RunnerPreflight` over the recorded probe set, `run_recovery_order`, the
    loop, the report.
 
