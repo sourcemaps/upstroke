@@ -132,6 +132,7 @@ fn run_started_of(
             mounts: Vec::new(),
         },
         probed_agents: probed_agents(),
+        shell: ShellKind::Bash,
         branch: "upstroke/run-01SCAFFOLD00000000000000AA".to_owned(),
         integration_ref: GitRef("refs/heads/upstroke/run-01SCAFFOLD00000000000000AA".to_owned()),
         base_sha: CommitSha(fixture.head.clone()),

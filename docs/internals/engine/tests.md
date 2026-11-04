@@ -3425,6 +3425,111 @@ now.
 
 The child of the test above.
 
+## `enum PrivateEntry {`
+
+What one path under a private root is, for [`private_snapshot`]: a directory or a
+file with its permission bits (on Windows, the read-only flag), the file with its
+bytes, or a link with its target.
+
+## `fn private_snapshot(root: &Path) -> std::collections::BTreeMap<PathBuf, PrivateEntry> {`
+
+Every persistent entry under a private root, the root itself included, keyed by its
+path relative to the root. A refused resume that published the include, created its
+`git` directory, left a staged temporary, renamed anything into place or tightened a
+mode changes it; [`moved_entries`] names what moved without printing any bytes.
+
+## `fn put_include(root: &Path, state: IncludeState) {`
+
+The two include states the CI-01 guard holds a refusal to: `Absent` removes the root's
+whole `git` directory, so a premature write would have to create a directory, a staged
+file and the include; `Changed` leaves other bytes in a directory loosened to `0755`
+on Unix, so a premature write would also rename over them and tighten the directory
+to `0700`.
+
+## `fn a_schema_4_resume_proves_its_owner_and_commit_records_before_it_writes_its_include() {`
+
+PR12-CI-01 (P1, concurrency/invariants lens) and
+PR12-RESUME-INCLUDE-BEFORE-RECORD-VERIFICATION (P2, regression lens): one defect, one
+guard (INV-15, O18: the private root is derived read-only before any lock, and the owner
+and commit records are verified before any private write). A real schema-4 run parks
+through `run_with`; every resume below goes through `engine::resume_with` — the public
+composition, which the recovery-order tests never reach — with no `--private-root`, so
+the run's committed locator is the only root authority, and with the private half
+present.
+
+Ten damages to the run's own records — owner record missing, not JSON, or naming
+another run, repository, run directory, incarnation or runner (each owner field
+`RecordsVerified::verify` compares); commit record missing, not JSON, or naming
+another first line — each under both include states, refuse with the record's own
+refusal. The locator retargeted, in the committed first line, to another existing root
+of the conforming `<root>/runs/<run-id>` shape refuses too, both when that root holds
+no records and when it holds copies of the run's own, which only the commit record's
+digest of the first line tells apart, again under both include states. For every one of
+those twenty-four refusals the whole persistent private root — and the foreign root for the
+retargeted cases — is unchanged entry by entry, byte by byte and mode by mode, the log
+is unchanged, every ref is where it was, and no probe ran.
+
+The positive control resumes the provable run with the include absent and then changed:
+the include holds its fixed bytes again, its directory is `0700` on Unix, the resume
+reached its probes and appended `run_resumed`. With `resume_harness` publishing the
+include before `ResumePrepared::verify` (the order before PR12-CI-01), the first refusal
+fails on the private root that moved.
+
+## `fn on_this_path(program: &str) -> bool {`
+
+Whether a file named `program` is in a directory of this process's `PATH`; the
+recorded-shell guards assert that `cmd` is not, so that "unavailable" is a fact of the
+host and not an assumption.
+
+## `fn a_fake_cmd(tree: &ScratchTree) -> PathBuf {`
+
+A directory holding a `cmd` that exits 0, written by a process of its own
+(`runner::container::write_program_in_its_own_process`) so that no thread of this test
+binary holds it open for writing when it is executed.
+
+## `fn with_shells_on_path(`
+
+Runs [`recorded_shell_helper`] in a process of its own whose `PATH` starts with the
+fake shell's directory, so the shell is available to that process alone and to no other
+test.
+
+## `fn recorded_shell_helper() {`
+
+The recorded-shell guards' child. `create` makes and parks a zero-gate run under the
+config it is given; `resume` resumes the latest run under the config it is given and
+asserts that it appended `run_resumed`. Without its environment it does nothing.
+
+## `fn a_zero_gate_schema_4_resume_probes_its_recorded_shell_when_todays_config_names_an_unavailable_one()`
+
+PR12-CI-03 (INV-23), one direction of today's drift. A zero-gate run is created under
+`sh` (the premises: `gate_cmds` is empty, `run_started(4).shell` is `sh`, and this host
+has no `cmd`). Its resume through `resume_with`, with today's config naming
+`shell = "cmd"`, passes its pre-flight, recovers (one `run_resumed`) and warns that
+today's `cmd` is not the run's and that the pre-flight probes `sh`. With the resume's
+shell taken from `gate_cmds` else today's config again, it fails: the pre-flight probes
+`cmd` and refuses.
+
+## `fn a_zero_gate_schema_4_resume_refuses_its_unavailable_recorded_shell_whatever_todays_config_names()`
+
+PR12-CI-03 (INV-23), the other direction, and the unavailable recorded shell. A
+zero-gate run is created under `cmd` by a child whose `PATH` holds a fake `cmd` (the
+premises: no gates, `run_started(4).shell` is `cmd`, and this host has no `cmd`). Its
+resume in this process, where `cmd` is not on `PATH`, with today's config naming the
+available `sh`, refuses at the pre-flight naming the recorded shell `cmd`, and the log
+is unchanged, so no recovery event was appended. The same resume in a child whose
+`PATH` holds the fake `cmd` again continues and appends `run_resumed`: the run stayed
+resumable. With the resume's shell taken from `gate_cmds` else today's config again,
+the first resume probes `sh`, recovers and fails the refusal it expects.
+
+## `fn a_schema_4_log_without_a_recorded_shell_is_refused_and_never_resumed_under_another() {`
+
+PR12-CI-03, the record's compatibility (`run_started(4).shell` is required, as every
+schema-4 transaction-payload field is). A parked run's committed first line, rewritten
+without `shell`, stands for a log written before the field. Its resume through
+`resume_with` refuses at the committed first line, naming `shell`, writes nothing to
+the log and nothing under the private root, and never resumes under a shell the record
+does not hold.
+
 ## `enum SignalFault {`
 
 How [`signal_mid_attempt`] is made to fail, for the tests of its own cleanup. Each

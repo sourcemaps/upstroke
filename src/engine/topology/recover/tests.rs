@@ -700,6 +700,11 @@ fn run_started(
         } else {
             vec![AGENT.to_owned()]
         },
+        shell: if damage.host_gate.is_some() {
+            ShellKind::Sh
+        } else {
+            ShellKind::Bash
+        },
         branch: "upstroke/run".to_owned(),
         integration_ref: GitRef(format!("refs/upstroke/runs/{RUN_ID}/integration")),
         base_sha: base.clone(),

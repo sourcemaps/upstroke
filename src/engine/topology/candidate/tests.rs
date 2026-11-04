@@ -568,6 +568,7 @@ fn run_started(base_sha: CommitSha) -> RunStarted4 {
         incarnation: IncarnationId(INCARNATION.to_owned()),
         runner: crate::runner::policy::host_policy(),
         probed_agents: vec!["alpha-agent".to_owned()],
+        shell: ShellKind::Bash,
         branch: format!("upstroke/run-{RUN_ID}"),
         integration_ref: GitRef(format!("refs/heads/upstroke/run-{RUN_ID}")),
         base_sha,

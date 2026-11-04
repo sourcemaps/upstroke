@@ -561,6 +561,7 @@ pub(crate) mod tests {
                 mounts: Vec::new(),
             },
             probed_agents: probed_agents(),
+            shell: ShellKind::Bash,
             branch: format!("upstroke/run-{RUN_ID}"),
             integration_ref: git_ref("integration"),
             base_sha: sha("base"),

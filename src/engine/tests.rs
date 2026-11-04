@@ -18445,6 +18445,646 @@ fn a_schema_4_resume_refuses_a_missing_private_half_or_a_changed_plan_and_warns_
     );
 }
 
+/// What one path under a private root is: its kind, its permission bits and its bytes or target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PrivateEntry {
+    Directory { mode: u32 },
+    File { mode: u32, bytes: Vec<u8> },
+    Link { target: PathBuf },
+}
+
+/// Everything persistent under `root`, the root itself included, by path relative to it.
+fn private_snapshot(root: &Path) -> std::collections::BTreeMap<PathBuf, PrivateEntry> {
+    fn mode(metadata: &fs::Metadata) -> u32 {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            metadata.permissions().mode()
+        }
+        #[cfg(not(unix))]
+        {
+            u32::from(metadata.permissions().readonly())
+        }
+    }
+    let mut entries = std::collections::BTreeMap::new();
+    let top = fs::symlink_metadata(root).expect("the private root");
+    entries.insert(PathBuf::new(), PrivateEntry::Directory { mode: mode(&top) });
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(&directory).expect("a directory under the private root") {
+            let path = entry.expect("a directory entry").path();
+            let relative = path
+                .strip_prefix(root)
+                .expect("under the root")
+                .to_path_buf();
+            let metadata = fs::symlink_metadata(&path).expect("the entry's metadata");
+            let found = if metadata.file_type().is_symlink() {
+                PrivateEntry::Link {
+                    target: fs::read_link(&path).expect("the link's target"),
+                }
+            } else if metadata.is_dir() {
+                pending.push(path.clone());
+                PrivateEntry::Directory {
+                    mode: mode(&metadata),
+                }
+            } else {
+                PrivateEntry::File {
+                    mode: mode(&metadata),
+                    bytes: fs::read(&path).expect("the file's bytes"),
+                }
+            };
+            entries.insert(relative, found);
+        }
+    }
+    entries
+}
+
+/// The paths whose entry differs between two snapshots, each with how, and never its bytes.
+fn moved_entries(
+    before: &std::collections::BTreeMap<PathBuf, PrivateEntry>,
+    after: &std::collections::BTreeMap<PathBuf, PrivateEntry>,
+) -> Vec<String> {
+    let mut moved = Vec::new();
+    for (path, entry) in after {
+        match before.get(path) {
+            None => moved.push(format!("created {}", path.display())),
+            Some(earlier) if earlier != entry => moved.push(format!("changed {}", path.display())),
+            Some(_) => {}
+        }
+    }
+    for path in before.keys().filter(|path| !after.contains_key(*path)) {
+        moved.push(format!("removed {}", path.display()));
+    }
+    moved
+}
+
+fn every_ref(repo: &Path) -> String {
+    git_in(repo, &["for-each-ref", "--format=%(refname) %(objectname)"])
+}
+
+#[derive(Debug, Clone, Copy)]
+enum IncludeState {
+    Absent,
+    Changed,
+}
+
+/// Leaves `root`'s include absent — its whole `git` directory gone — or holding other bytes in
+/// a directory a writer would tighten, so that publishing it is visible in every path, byte and
+/// mode it touches.
+fn put_include(root: &Path, state: IncludeState) {
+    let directory = root.join("git");
+    match state {
+        IncludeState::Absent => {
+            if directory.exists() {
+                fs::remove_dir_all(&directory).expect("the include's directory, removed");
+            }
+        }
+        IncludeState::Changed => {
+            fs::create_dir_all(&directory).expect("the include's directory");
+            fs::write(
+                directory.join("recorded-objects.gitconfig"),
+                "[core]\n\tuseReplaceRefs = true\n",
+            )
+            .expect("an include holding other bytes");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                fs::set_permissions(&directory, fs::Permissions::from_mode(0o755))
+                    .expect("a directory the include's writer would tighten");
+            }
+        }
+    }
+}
+
+/// PR12-CI-01 (P1) and, the same defect, PR12-RESUME-INCLUDE-BEFORE-RECORD-VERIFICATION
+/// (INV-15, O18): through `engine::resume_with`, a parked schema-4 run whose private half is
+/// present refuses before any private write when its owner or commit record is missing,
+/// malformed or another's, or when its public locator names another conforming root, with the
+/// include absent or changed; a provable run's resume still writes the include again.
+#[test]
+fn a_schema_4_resume_proves_its_owner_and_commit_records_before_it_writes_its_include() {
+    let (tree, repo) = temp_engine_repo("topology-resume-include-after-proof");
+    let witness = OwnerWitness {
+        stub: TopologyStub::new(TOPOLOGY_STUB_EDIT, 1),
+        private_root: private_root_for(&repo),
+        owner_at_probe: Mutex::new(Vec::new()),
+    };
+    let source = BorrowedOwnerWitness(&witness);
+    let probes = || {
+        witness
+            .owner_at_probe
+            .lock()
+            .expect("the probe witness")
+            .len()
+    };
+    let parked = run_with(&topology_options(&repo), &source).expect("the run parks");
+    assert_eq!(parked.outcome(), RunOutcome::Parked, "{parked:#?}");
+    until_released(&repo, &parked.run_id);
+
+    let home = private_root_for(&repo);
+    let private = private_dir_of(&repo, &parked.run_id);
+    assert_eq!(
+        private,
+        home.join("runs").join(&parked.run_id),
+        "the premise: the run's private half is present under the root its locator names"
+    );
+    let log = rundir::public_dir(&repo, &parked.run_id).join(rundir::EVENT_LOG);
+    let committed = fs::read(&log).expect("the parked run's log");
+    let owner_path = private.join(rundir::OWNER_RECORD);
+    let commit_path = private.join(rundir::COMMIT_RECORD);
+    let owner = fs::read(&owner_path).expect("owner.json");
+    let commit = fs::read(&commit_path).expect("committed.json");
+    let mut resume = resume_options(&repo, &parked.run_id);
+    resume.private_root = None;
+
+    let with_field = |record: &[u8], field: &str, value: &str| {
+        let mut parsed: serde_json::Value = serde_json::from_slice(record).expect("a record");
+        parsed[field] = serde_json::Value::from(value);
+        serde_json::to_vec(&parsed).expect("the damaged record")
+    };
+    let mut other_runner: serde_json::Value = serde_json::from_slice(&owner).expect("a record");
+    other_runner["runner"]["kind"] = serde_json::Value::from("container");
+    let other_runner = serde_json::to_vec(&other_runner).expect("the damaged record");
+    let damages: Vec<(&str, &Path, Option<Vec<u8>>, &str)> = vec![
+        (
+            "a missing owner record",
+            &owner_path,
+            None,
+            "private half has no",
+        ),
+        (
+            "an owner record that is not JSON",
+            &owner_path,
+            Some(b"{\"run_id\":".to_vec()),
+            "is not the record this build understands",
+        ),
+        (
+            "another run's owner record",
+            &owner_path,
+            Some(with_field(&owner, "run_id", "01FOREIGNRUN00000000000000")),
+            "records run id",
+        ),
+        (
+            "another repository's owner record",
+            &owner_path,
+            Some(with_field(&owner, "repo_key", "0000000000000000")),
+            "records repo key",
+        ),
+        (
+            "another run directory's owner record",
+            &owner_path,
+            Some(with_field(
+                &owner,
+                "public_dir",
+                "/elsewhere/.upstroke/runs/01FOREIGN",
+            )),
+            "records public directory",
+        ),
+        (
+            "another incarnation's owner record",
+            &owner_path,
+            Some(with_field(
+                &owner,
+                "incarnation",
+                "01FOREIGNINC00000000000000",
+            )),
+            "records incarnation",
+        ),
+        (
+            "an owner record of another runner",
+            &owner_path,
+            Some(other_runner),
+            "records a different runner",
+        ),
+        (
+            "a missing commit record",
+            &commit_path,
+            None,
+            "private half has no",
+        ),
+        (
+            "a commit record that is not JSON",
+            &commit_path,
+            Some(b"not json".to_vec()),
+            "is not the record this build understands",
+        ),
+        (
+            "a commit record of another first line",
+            &commit_path,
+            Some(with_field(
+                &commit,
+                "run_started_sha256",
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            )),
+            "says the committed first line digests",
+        ),
+    ];
+    for state in [IncludeState::Absent, IncludeState::Changed] {
+        for (what, path, damaged, says) in &damages {
+            put_include(&home, state);
+            match damaged {
+                None => fs::remove_file(path).expect("the record, removed"),
+                Some(bytes) => fs::write(path, bytes).expect("the record, damaged"),
+            }
+            let before = private_snapshot(&home);
+            let refs = every_ref(&repo);
+            let probed = probes();
+            let refused = resume_with(&resume, &source)
+                .expect_err("a run whose records do not prove it is refused");
+            assert!(
+                refused.to_string().contains(says),
+                "{what}, include {state:?}: {refused}"
+            );
+            let moved = moved_entries(&before, &private_snapshot(&home));
+            assert!(
+                moved.is_empty(),
+                "{what}, include {state:?}: the refused resume wrote under the private root: \
+                 {moved:?}"
+            );
+            assert!(
+                fs::read(&log).expect("the log") == committed,
+                "{what}, include {state:?}: the refused resume wrote the log"
+            );
+            assert_eq!(
+                every_ref(&repo),
+                refs,
+                "{what}, include {state:?}: the refs moved"
+            );
+            assert_eq!(probes(), probed, "{what}, include {state:?}: a probe ran");
+            let original = if *path == owner_path.as_path() {
+                &owner
+            } else {
+                &commit
+            };
+            fs::write(path, original).expect("the record, restored");
+            until_released(&repo, &parked.run_id);
+        }
+    }
+
+    let foreign = tree.path().join("another-home");
+    let foreign_half = foreign.join("runs").join(&parked.run_id);
+    let first_end = committed
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .expect("a committed first line");
+    let first = std::str::from_utf8(committed.get(..first_end).expect("the first line"))
+        .expect("a UTF-8 first line");
+    let spelled = |path: &Path| {
+        format!(
+            "\"private_dir\":{}",
+            serde_json::to_string(path.to_str().expect("a UTF-8 path")).expect("a JSON string")
+        )
+    };
+    assert_eq!(
+        first.matches(&spelled(&private)).count(),
+        1,
+        "the premise: the first line spells its locator once"
+    );
+    let mut retargeted = first
+        .replacen(&spelled(&private), &spelled(&foreign_half), 1)
+        .into_bytes();
+    retargeted.extend_from_slice(committed.get(first_end..).expect("the rest of the log"));
+    for (what, copies, says) in [
+        (
+            "a conforming root holding no records",
+            false,
+            "private half has no",
+        ),
+        (
+            "a conforming root holding copies of this run's records",
+            true,
+            "says the committed first line digests",
+        ),
+    ] {
+        for state in [IncludeState::Absent, IncludeState::Changed] {
+            fs::create_dir_all(&foreign_half).expect("a conforming private half elsewhere");
+            for (name, bytes) in [
+                (rundir::OWNER_RECORD, &owner),
+                (rundir::COMMIT_RECORD, &commit),
+            ] {
+                let copy = foreign_half.join(name);
+                if copies {
+                    fs::write(&copy, bytes).expect("a copied record");
+                } else if copy.exists() {
+                    fs::remove_file(&copy).expect("no record");
+                }
+            }
+            put_include(&foreign, state);
+            fs::write(&log, &retargeted).expect("the locator, retargeted");
+            let mine = private_snapshot(&home);
+            let theirs = private_snapshot(&foreign);
+            let refs = every_ref(&repo);
+            let probed = probes();
+            let refused = resume_with(&resume, &source)
+                .expect_err("a locator naming another root is not proof of it");
+            assert!(
+                refused.to_string().contains(says),
+                "{what}, include {state:?}: {refused}"
+            );
+            for (root, snapshot) in [(&home, &mine), (&foreign, &theirs)] {
+                let moved = moved_entries(snapshot, &private_snapshot(root));
+                assert!(
+                    moved.is_empty(),
+                    "{what}, include {state:?}: the refused resume wrote under {}: {moved:?}",
+                    root.display()
+                );
+            }
+            assert!(
+                fs::read(&log).expect("the log") == retargeted,
+                "{what}, include {state:?}: the refused resume wrote the log"
+            );
+            assert_eq!(
+                every_ref(&repo),
+                refs,
+                "{what}, include {state:?}: the refs moved"
+            );
+            assert_eq!(probes(), probed, "{what}, include {state:?}: a probe ran");
+            fs::write(&log, &committed).expect("the locator, restored");
+            until_released(&repo, &parked.run_id);
+        }
+    }
+
+    for state in [IncludeState::Absent, IncludeState::Changed] {
+        put_include(&home, state);
+        let resumed_before = event_kinds(&repo, &parked.run_id)
+            .iter()
+            .filter(|kind| *kind == "run_resumed")
+            .count();
+        let probed = probes();
+        resume_with(&resume, &source).expect("a run its records prove resumes");
+        assert_eq!(
+            fs::read(include_for(&repo)).expect("the include the resume wrote again"),
+            crate::runner::host::RECORDED_OBJECTS_INCLUDE,
+            "include {state:?}"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = fs::metadata(home.join("git"))
+                .expect("the include's directory")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o700, "include {state:?}: {mode:o}");
+        }
+        assert!(
+            probes() > probed,
+            "include {state:?}: the resume reached its probes after writing the include"
+        );
+        let resumed_after = event_kinds(&repo, &parked.run_id)
+            .iter()
+            .filter(|kind| *kind == "run_resumed")
+            .count();
+        assert_eq!(resumed_after, resumed_before + 1, "include {state:?}");
+        until_released(&repo, &parked.run_id);
+    }
+}
+
+/// Whether `program` is a file in one of the directories of this process's `PATH`.
+#[cfg(unix)]
+fn on_this_path(program: &str) -> bool {
+    std::env::var_os("PATH").is_some_and(|path| {
+        std::env::split_paths(&path).any(|directory| directory.join(program).is_file())
+    })
+}
+
+/// A `cmd` that exits 0, in a directory of its own, for a process whose `PATH` it leads.
+#[cfg(unix)]
+fn a_fake_cmd(tree: &ScratchTree) -> PathBuf {
+    let directory = tree.path().join("fake-shells");
+    fs::create_dir(&directory).expect("the fake shells' directory");
+    crate::runner::container::write_program_in_its_own_process(
+        &directory.join("cmd"),
+        "#!/bin/sh\nexit 0\n",
+    );
+    directory
+}
+
+/// Runs [`recorded_shell_helper`] in a process of its own whose `PATH` starts with `shells`.
+#[cfg(unix)]
+fn with_shells_on_path(
+    shells: &Path,
+    repo: &Path,
+    config: &Path,
+    mode: &str,
+) -> std::process::Output {
+    let mut directories = vec![shells.to_path_buf()];
+    directories.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    Command::new(std::env::current_exe().expect("this test binary"))
+        .args([
+            "--exact",
+            "engine::tests::recorded_shell_helper",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env("PATH", std::env::join_paths(directories).expect("a PATH"))
+        .env("UPSTROKE_RECORDED_SHELL_REPO", repo)
+        .env("UPSTROKE_RECORDED_SHELL_CONFIG", config)
+        .env("UPSTROKE_RECORDED_SHELL_MODE", mode)
+        .output()
+        .expect("the helper process")
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "spawned by the recorded-shell guards, in a process whose PATH holds a fake shell"]
+fn recorded_shell_helper() {
+    let Some(repo) = std::env::var_os("UPSTROKE_RECORDED_SHELL_REPO") else {
+        return;
+    };
+    let repo = PathBuf::from(repo);
+    let config = PathBuf::from(
+        std::env::var_os("UPSTROKE_RECORDED_SHELL_CONFIG").expect("the helper's config"),
+    );
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        1,
+    )));
+    match std::env::var("UPSTROKE_RECORDED_SHELL_MODE").as_deref() {
+        Ok("create") => {
+            let mut opts = topology_options(&repo);
+            opts.config_path = Some(config);
+            let parked = run_with(&opts, &source).expect("the run is created and parks");
+            assert_eq!(parked.outcome(), RunOutcome::Parked, "{parked:#?}");
+        }
+        Ok("resume") => {
+            let run_id = rundir::latest_run(&repo).expect("the parked run");
+            let resumed =
+                |kinds: Vec<String>| kinds.iter().filter(|kind| *kind == "run_resumed").count();
+            let before = resumed(event_kinds(&repo, &run_id));
+            let mut resume = resume_options(&repo, &run_id);
+            resume.config_path = Some(config);
+            resume_with(&resume, &source)
+                .expect("the recorded shell runs again, so the run resumes");
+            assert_eq!(resumed(event_kinds(&repo, &run_id)), before + 1);
+        }
+        other => panic!("the recorded-shell helper has no mode {other:?}"),
+    }
+}
+
+/// PR12-CI-03 (INV-23), today's config moved to a shell this host cannot run: a zero-gate
+/// schema-4 run created under `sh` resumes, through `engine::resume_with`, probing `sh`, and
+/// warns that today's `[engine] shell = "cmd"` is not the run's.
+#[cfg(unix)]
+#[test]
+fn a_zero_gate_schema_4_resume_probes_its_recorded_shell_when_todays_config_names_an_unavailable_one()
+ {
+    assert!(!on_this_path("cmd"), "the premise: this host has no `cmd`");
+    let (tree, repo) = temp_engine_repo("topology-resume-recorded-shell-kept");
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        1,
+    )));
+    let parked = run_with(&topology_options(&repo), &source).expect("the run parks");
+    assert_eq!(parked.outcome(), RunOutcome::Parked, "{parked:#?}");
+    until_released(&repo, &parked.run_id);
+    let first = first_line_of_the_log(&repo, &parked.run_id);
+    assert_eq!(
+        first["data"]["gate_cmds"],
+        serde_json::json!([]),
+        "the premise: no gates"
+    );
+    assert_eq!(
+        first["data"]["shell"], "sh",
+        "the run records the shell it probed"
+    );
+
+    let today = tree.path().join("today.toml");
+    fs::write(&today, "[engine]\nshell = \"cmd\"\n").expect("today's config");
+    let mut resume = resume_options(&repo, &parked.run_id);
+    resume.config_path = Some(today);
+    let resumed = resume_with(&resume, &source)
+        .expect("the resume probes the recorded `sh`, not today's `cmd`");
+    assert!(
+        resumed.warnings.iter().any(|warning| warning
+            .contains("`shell = cmd` differs from the `shell = sh` run")
+            && warning.ends_with("pre-flight probes `sh`")),
+        "{:?}",
+        resumed.warnings
+    );
+    assert_eq!(
+        event_kinds(&repo, &parked.run_id)
+            .iter()
+            .filter(|kind| *kind == "run_resumed")
+            .count(),
+        1,
+        "the resume passed its pre-flight and recovered"
+    );
+}
+
+/// PR12-CI-03 (INV-23), the recorded shell gone: a zero-gate schema-4 run created under `cmd`
+/// (a fake one on its creator's `PATH`) refuses its resume at the pre-flight, naming `cmd`,
+/// although today's `[engine] shell = "sh"` would run, and appends nothing; once `cmd` is back,
+/// the same resume continues.
+#[cfg(unix)]
+#[test]
+fn a_zero_gate_schema_4_resume_refuses_its_unavailable_recorded_shell_whatever_todays_config_names()
+{
+    assert!(!on_this_path("cmd"), "the premise: this host has no `cmd`");
+    let (tree, repo) = temp_engine_repo("topology-resume-recorded-shell-gone");
+    let shells = a_fake_cmd(&tree);
+    fs::write(repo.join("upstroke.toml"), "[engine]\nshell = \"cmd\"\n").expect("the config");
+    git_in(&repo, &["add", "upstroke.toml"]);
+    git_in(&repo, &["commit", "-q", "-m", "a run under cmd"]);
+    let created = with_shells_on_path(&shells, &repo, &repo.join("upstroke.toml"), "create");
+    assert!(
+        created.status.success(),
+        "the run is created where `cmd` runs: {}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    let run_id = rundir::latest_run(&repo).expect("the created run");
+    until_released(&repo, &run_id);
+    let first = first_line_of_the_log(&repo, &run_id);
+    assert_eq!(
+        first["data"]["gate_cmds"],
+        serde_json::json!([]),
+        "the premise: no gates"
+    );
+    assert_eq!(
+        first["data"]["shell"], "cmd",
+        "the run records the shell it probed"
+    );
+
+    let today = tree.path().join("today.toml");
+    fs::write(&today, "[engine]\nshell = \"sh\"\n").expect("today's config");
+    let mut resume = resume_options(&repo, &run_id);
+    resume.config_path = Some(today.clone());
+    let log = rundir::public_dir(&repo, &run_id).join(rundir::EVENT_LOG);
+    let before = fs::read(&log).expect("the log");
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        1,
+    )));
+    let refused = resume_with(&resume, &source)
+        .expect_err("the recorded `cmd` cannot run here, whatever today's config names");
+    assert!(
+        refused.to_string().contains("the recorded shell `cmd`"),
+        "{refused}"
+    );
+    assert!(
+        fs::read(&log).expect("the log") == before,
+        "the refused resume appended a recovery event"
+    );
+    until_released(&repo, &run_id);
+
+    let continued = with_shells_on_path(&shells, &repo, &today, "resume");
+    assert!(
+        continued.status.success(),
+        "the run stayed resumable: {}",
+        String::from_utf8_lossy(&continued.stderr)
+    );
+}
+
+/// PR12-CI-03, the record's compatibility: `run_started(4).shell` is required, so a schema-4 log
+/// whose first line predates it is refused at its committed first line, through
+/// `engine::resume_with`, before any lock or private write, and is never resumed under a shell
+/// it does not record.
+#[test]
+fn a_schema_4_log_without_a_recorded_shell_is_refused_and_never_resumed_under_another() {
+    let (_tree, repo) = temp_engine_repo("topology-resume-no-recorded-shell");
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        1,
+    )));
+    let parked = run_with(&topology_options(&repo), &source).expect("the run parks");
+    assert_eq!(parked.outcome(), RunOutcome::Parked, "{parked:#?}");
+    until_released(&repo, &parked.run_id);
+    let log = rundir::public_dir(&repo, &parked.run_id).join(rundir::EVENT_LOG);
+    let text = fs::read_to_string(&log).expect("the log");
+    let (first, rest) = text.split_once('\n').expect("a committed first line");
+    let mut line: serde_json::Value = serde_json::from_str(first).expect("the first line");
+    assert!(
+        line["data"]
+            .as_object_mut()
+            .expect("run_started's data")
+            .remove("shell")
+            .is_some(),
+        "the premise: the run recorded its shell"
+    );
+    let predates = format!(
+        "{}\n{rest}",
+        serde_json::to_string(&line).expect("the older first line")
+    );
+    fs::write(&log, &predates).expect("a log written before the field");
+    let home = private_root_for(&repo);
+    let before = private_snapshot(&home);
+
+    let refused = resume_with(&resume_options(&repo, &parked.run_id), &source)
+        .expect_err("a schema-4 run_started without its shell is refused");
+    let refused = refused.to_string();
+    assert!(
+        refused.contains("is not a topology event") && refused.contains("shell"),
+        "{refused}"
+    );
+    assert!(
+        fs::read_to_string(&log).expect("the log") == predates,
+        "the refused resume wrote the log"
+    );
+    let moved = moved_entries(&before, &private_snapshot(&home));
+    assert!(moved.is_empty(), "the refused resume wrote: {moved:?}");
+}
+
 /// P12-W2 and P12-W16 (D6): a schema-4 run whose process dies by SIGKILL,
 /// SIGTERM or SIGINT inside an attempt leaves a log that ends mid-attempt; the
 /// resume settles that attempt as interrupted, appends `run_resumed`, and

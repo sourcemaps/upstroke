@@ -52,8 +52,9 @@ pub fn resume_harness(
         let prepared = super::topology::entry::prepare_resume(opts, harness, root)?;
         let workspace = Workspace::open(&opts.repo_root)?;
         workspace.ensure_run_exclusions()?;
-        let repository = workspace.recorded_objects_scope(Some(prepared.private_root()))?;
-        return prepared.run(opts, harness, repository);
+        let verified = prepared.verify(opts)?;
+        let repository = workspace.recorded_objects_scope(Some(verified.private_root()))?;
+        return verified.run(opts, harness, repository);
     }
     let repository =
         Workspace::open(&opts.repo_root)?.recorded_objects_scope(opts.private_root.as_deref())?;
