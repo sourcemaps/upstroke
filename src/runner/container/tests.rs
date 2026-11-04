@@ -1176,26 +1176,35 @@ fn attached_start_observation_child() {
 }
 
 #[cfg(unix)]
+const EARLY_EXIT_DEADLINE: Duration = Duration::from_secs(3);
+
+#[cfg(unix)]
+const EARLY_EXIT_SLACK: Duration = Duration::from_millis(1500);
+
+#[cfg(unix)]
 #[test]
 fn an_attached_start_whose_client_ended_early_asks_its_diagnostic_within_its_own_bounds() {
+    assert!(
+        EARLY_EXIT_DEADLINE + EARLY_EXIT_SLACK < super::CLIENT_GRACE,
+        "the deadline mode's bound must stay below a fresh client grace, or the diagnostic \
+         this witness exists to hold to its invocation could take one and pass"
+    );
     let tree = scratch("attached-start-early-exit");
     let bin = tree.path().join("bin");
     fs::create_dir(&bin).expect("the stub's directory");
     let stub = bin.join("docker");
-    fs::write(
+    super::write_program_in_its_own_process(
         &stub,
         "#!/bin/sh\ncase \"$1\" in\nstart) exit 0 ;;\nps) printf 'upstroke-early\\037created\\n' ;;\n\
          container) : > \"$UPSTROKE_TEST_INSPECTED\"; exec sleep 60 ;;\n*) exit 93 ;;\nesac\n",
-    )
-    .expect("the stub");
-    crate::workspace_manager::fixture::set_mode(&stub, 0o755);
+    );
     let inherited = std::env::var_os("PATH").unwrap_or_default();
     let path =
         std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(&inherited)))
             .expect("a PATH with the stub first");
     for mode in ["deadline", "cancel"] {
         let inspected = tree.path().join(format!("inspected-{mode}"));
-        let status = crate::workspace_manager::fixture::run_kill_child_within(
+        let ended = crate::agent::proc::test_support::run_test_isolated(
             "runner::container::tests::attached_start_early_exit_child",
             &[
                 ("PATH", path.as_os_str()),
@@ -1203,11 +1212,11 @@ fn an_attached_start_whose_client_ended_early_asks_its_diagnostic_within_its_own
                 ("UPSTROKE_TEST_INSPECTED", inspected.as_os_str()),
             ],
             Duration::from_secs(120),
-        )
-        .expect("the child ends within its bound");
+        );
         assert!(
-            status.success(),
-            "{mode}: the early-exit start was not held to its own invocation ({status:?})"
+            ended.status.is_some_and(|status| status.success())
+                && ended.stdout.contains("1 passed"),
+            "{mode}: the early-exit start was not held to its own invocation: {ended}"
         );
         assert!(
             inspected.exists(),
@@ -1230,8 +1239,8 @@ fn attached_start_early_exit_child() {
     let began = Instant::now();
     let (deadline, bound) = if mode == "deadline" {
         (
-            began + Duration::from_millis(500),
-            Duration::from_millis(1500),
+            began + EARLY_EXIT_DEADLINE,
+            EARLY_EXIT_DEADLINE + EARLY_EXIT_SLACK,
         )
     } else {
         (began + Duration::from_secs(600), Duration::from_secs(10))
@@ -1262,6 +1271,13 @@ fn attached_start_early_exit_child() {
         took < bound,
         "{mode}: the stalled diagnostic held the start {took:?}, past its bound {bound:?}"
     );
+    if mode == "deadline" {
+        assert!(
+            took >= EARLY_EXIT_DEADLINE,
+            "deadline: the start ended {took:?}, before its {EARLY_EXIT_DEADLINE:?} deadline, so \
+             something other than the deadline ended the stalled diagnostic"
+        );
+    }
 }
 
 /// `PR12-J6-OBSERVATION-FATE-DROPPED` (root's source finding on J6). A bounded docker question

@@ -2907,21 +2907,59 @@ comparison then discards. The colliding container is created deliberately, and
 the test fails if the filter stops matching it, so the comparison the repair
 rests on is never left untested.
 
+## `const EARLY_EXIT_DEADLINE: Duration = Duration::from_secs(3);`
+
+The deadline mode's invocation deadline, measured from the child's start (K8).
+It bounds a stalled diagnostic, and so must leave the start ample time to reach
+the diagnostic first: one attached client that ends at once and one or two
+`docker ps` questions through the process funnel.
+
+## `const EARLY_EXIT_SLACK: Duration = Duration::from_millis(1500);`
+
+How long after that deadline the deadline mode may end: the funnel's kill and
+reap of the stalled diagnostic and the start's settlement of a client that has
+already ended. The witness asserts the two together stay below `CLIENT_GRACE`,
+so a diagnostic given a fresh grace from the moment it was asked, the defect J13
+repaired, cannot end inside the bound.
+
 ## `fn an_attached_start_whose_client_ended_early_asks_its_diagnostic_within_its_own_bounds() {`
 
 J13 (regular review 3, finding 2): the attached start's early-client-exit branch
 asks its diagnostic within the invocation's own deadline and cancellation. A
-child of this test binary, whose `PATH` alone carries a stub `docker`, runs the
+child of this test binary, whose `PATH` alone carries a stub `docker` (written
+by a process of its own, `write_program_in_its_own_process`), runs the
 production `DockerCli::start_attached`. The stub's `docker start` ends at once,
 its `docker ps` keeps the container `created`, and its `docker container
 inspect` (the diagnostic) records that it was asked and then sleeps for a
-minute. Two modes: a 500 ms invocation, which must end within 1.5 s; and a
-ten-minute one cancelled as soon as the diagnostic is asked, which must end
-within 10 s. In both the start fails on the early-exit branch, its reason
-carries nothing from the stalled diagnostic, and the diagnostic was asked. With
-the fresh `CLIENT_GRACE` deadline restored, the deadline mode takes about five
-seconds and fails. It is a stub witness, as the reviewer's was: no daemon is
-involved.
+minute. Two modes: an invocation with a three-second deadline
+(`EARLY_EXIT_DEADLINE`), which must end at or after it and within
+`EARLY_EXIT_SLACK` of it; and a ten-minute one cancelled as soon as the
+diagnostic is asked, which must end within 10 s. In both the start fails on the
+early-exit branch, its reason carries nothing from the stalled diagnostic, and
+the diagnostic was asked. With the fresh `CLIENT_GRACE` deadline restored, the
+deadline mode fails: measured before K8's commit, the child reported "the
+stalled diagnostic held the start 5.164364925s, past its bound 4.5s". It is a
+stub witness, as the reviewer's was: no daemon is involved. The child runs
+through `run_test_isolated`, so a failure carries the child's own output.
+
+**K8 (CI's macOS leg, run 41724856814, job 126229500908).** The deadline mode's
+child exited 101 (`unix_wait_status(25856)`): a failed assertion in the child,
+not a kill or an overrun of the parent's bound. The log holds nothing the child
+printed: the witness then ran it through `run_kill_child_within`, which sends a
+child's stdout and stderr to `/dev/null`, so the log cannot say which assertion
+failed. The stub on `PATH` and its `ps` and `inspect` behaviour are not in
+question: J6's witness, with the same stub mechanism, passed on the same leg.
+On this box the failure was reproduced by slowing the stub's answers (`ps` a
+quarter second, `start` 0.4 s, as a slower process funnel would): the child
+failed with exit 101, the start reporting "`upstroke-early` was still created
+when the invocation's deadline passed, so it never started" instead of the
+early-exit branch. The deadline mode's deadline was then 500 ms (the 200 ms is
+the J13 reviewer's witness, not this test's), and on a runner whose funnel
+questions are slow it passed before the wait saw the client's end. That outcome is the production
+branch behaving as specified, a failed start at its deadline; what failed was the
+guard's premise, a deadline short enough to expire on a loaded runner
+(standards §12). With the three-second deadline the same slowed stub passes, in
+3.04 s. The other assertions are unchanged.
 
 ## `fn attached_start_early_exit_child() {`
 
@@ -2930,7 +2968,9 @@ The child of the test above: one production attached start of
 its proof minted by `CoveredStart::without_a_reaper_until` with that mode's
 deadline. In the cancel mode a scoped thread cancels the start once the stub has
 recorded the diagnostic (`UPSTROKE_TEST_INSPECTED`), so the cancellation lands
-on the diagnostic and not on the wait before it.
+on the diagnostic and not on the wait before it. In the deadline mode it also
+asserts the start ended no earlier than its deadline, so the stalled diagnostic
+was still in flight when the deadline ended it (K8).
 
 ## `fn an_exit_status_the_runtime_reports_is_read_as_a_number_or_refused() {`
 
