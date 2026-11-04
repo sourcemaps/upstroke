@@ -19303,6 +19303,78 @@ fn a_schema_4_status_reads_the_committed_prefix_and_leaves_the_log_as_it_found_i
     );
 }
 
+#[test]
+fn a_schema_4_follow_prints_one_line_per_event_and_no_raw_control_whatever_the_plan_or_the_record_holds()
+ {
+    let (_tree, repo) = temp_engine_repo("topology-follow-controls");
+    seed(
+        &repo,
+        "## One\n<!-- upstroke: id=t1\u{1b}[2J kind=implement depends= -->\nMake it.\n",
+        None,
+    );
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        0,
+    )));
+    let report = run_with(&topology_options(&repo), &source).expect("the run completes");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:#?}");
+    until_released(&repo, &report.run_id);
+    let committed = log_events(&repo, &report.run_id);
+
+    let loaded = crate::status::load(&repo, Some(&report.run_id)).expect("status reads the run");
+    let mut out: Vec<u8> = Vec::new();
+    crate::status::follow(
+        &loaded,
+        &RecordingSleeper::default(),
+        Duration::ZERO,
+        2,
+        &mut out,
+    )
+    .expect("follow");
+    let followed = String::from_utf8(out).expect("utf8");
+    assert_eq!(
+        followed.lines().count(),
+        committed.len(),
+        "one physical line per committed event:\n{followed}"
+    );
+    assert!(
+        !followed.chars().any(|c| c.is_control() && c != '\n'),
+        "no raw control reaches the terminal: {followed:?}"
+    );
+    for kind in ["attempt_started", "task_merged"] {
+        assert!(
+            followed
+                .lines()
+                .any(|line| line.contains(kind) && line.contains("t1\\u{1b}[2J")),
+            "the `{kind}` line names the task with its control made visible:\n{followed}"
+        );
+    }
+
+    let observed = crate::engine::topology::observe::observe(&repo, &report.run_id)
+        .expect("observes")
+        .expect("a schema-4 log");
+    let mut hostile = observed
+        .events()
+        .iter()
+        .find(|event| event.body.kind() == "attempt_started")
+        .expect("the run started an attempt")
+        .clone();
+    hostile.ts = "2026-11-04T00:00:00Z\r\u{1b}[2K".to_owned();
+    if let crate::topology::events::TopologyEventBody::AttemptStarted { data } = &mut hostile.body {
+        data.binding.agent = "agent\n\u{1b}[31m".to_owned();
+        data.binding.model = "model\t\u{7}".to_owned();
+    }
+    let line = observed.describe(&hostile);
+    assert!(
+        !line.chars().any(char::is_control),
+        "a recorded field's controls never reach the line: {line:?}"
+    );
+    assert!(
+        line.contains("agent \\u{1b}[31m") && line.contains("model \\u{7}"),
+        "{line:?}"
+    );
+}
+
 /// P12-W13. A parked schema-4 question has no payload file: `status` names it,
 /// `show` renders it from the fold by an id prefix, `answer` records it once and
 /// refuses a second, the resume ingests it from the file the run polls, and an

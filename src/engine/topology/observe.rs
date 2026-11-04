@@ -16,7 +16,7 @@ use crate::topology::registry::{TaskKey, TaskRegistry};
 use crate::topology::schema::{
     MAX_READABLE_SCHEMA, ReaderSelection, probe_header, select_for_schema,
 };
-use crate::util::terminal::TerminalLines;
+use crate::util::terminal::{TerminalLines, one_line};
 
 use super::report::{TopologyReport, outcome_label};
 
@@ -321,7 +321,7 @@ impl Observed {
             }
             _ => String::new(),
         };
-        format!("{} {}{detail}", event.ts, event.body.kind())
+        one_line(format!("{} {}{detail}", event.ts, event.body.kind()))
     }
 }
 

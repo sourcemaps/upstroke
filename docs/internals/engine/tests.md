@@ -3722,3 +3722,16 @@ canonical common directory, authoritative Git; `resume_with` on the parked run
 is refused as recording that mount, for the same reason, with nothing
 published, locked or written. It then writes both refusals to the file its
 parent names, the evidence that it ran.
+
+## `fn a_schema_4_follow_prints_one_line_per_event_and_no_raw_control_whatever_the_plan_or_the_record_holds()`
+
+L1 (regression review 3, finding 1; DESIGN §18). A schema-4 run of one task
+annotated `id=t1` followed by ESC `[2J` completes, and `status --follow`, through
+the public `status::load` and `status::follow`, prints exactly one physical line
+per committed event, with no control character but the line breaks, and the
+`attempt_started` and `task_merged` lines name the task as `t1\u{1b}[2J`. Then
+`Observed::describe` is given that run's `attempt_started` with controls in
+three recorded fields, its timestamp, its agent and its model: the line holds no
+control, and the agent and model appear with theirs made visible. With
+`describe`'s `one_line` removed, the follow assertion fails on the raw ESC bytes.
+

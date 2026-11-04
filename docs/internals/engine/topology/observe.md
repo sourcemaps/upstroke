@@ -76,6 +76,19 @@ One line per event for `--follow`: its timestamp, its kind, and for the
 attempt, question, merge and finish events the task (by display id) and the
 detail an operator watches for.
 
+**The assembled line goes through `util::terminal::one_line`** (L1, regression
+review 3, finding 1; DESIGN §18), the sanitization the settled rendering
+(`TerminalLines`) and the legacy `status::describe` use: a newline, carriage
+return or tab in any field becomes a space and every other control character
+its visible escape, so one event is one physical line and no field reaches the
+terminal as a control. Every field on the line is on-disk data the line does not
+choose: a task's display id comes from the plan, an agent and model from the
+recorded binding, a sha, question id, run id or incarnation from the record, and
+the timestamp from the record too. Until L1 the line was printed as assembled: a
+task annotated `id=t1` followed by ESC `[2J` made `status --follow` clear the
+operator's screen twice, on its `attempt_started` and `task_merged` lines (the
+reviewer's executed witness), while `status` printed the same id escaped.
+
 An `attempt_started` line is the attempt's admission. Its slot permit is
 acquired after it, so two attempts both started are not two workers running.
 
