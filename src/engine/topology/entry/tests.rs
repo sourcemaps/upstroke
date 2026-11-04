@@ -152,6 +152,55 @@ fn a_resume_acts_on_the_slot_limits_written_today_and_defaults_the_rest_to_the_r
     assert_eq!((none.per_agent(), none.per_pool()), (3, 3));
 }
 
+/// PR12-CI-03 (INV-23): the shell a resume's pre-flight probes is the one `run_started(4)`
+/// recorded, whichever way today's `[engine] shell` moved; a differing one warns, naming both,
+/// and an unchanged one says nothing. No shell needs to exist for this, so it holds on every
+/// platform; the public guards in `engine::tests` probe real shells on Unix.
+#[test]
+fn a_resume_takes_the_recorded_shell_whichever_way_todays_config_moved() {
+    for (recorded, today) in [
+        (ShellKind::Sh, ShellKind::Cmd),
+        (ShellKind::Cmd, ShellKind::Sh),
+        (ShellKind::Pwsh, ShellKind::Bash),
+    ] {
+        let mut warnings = Vec::new();
+        assert_eq!(
+            recorded_shell("01RECORDEDSHELL", recorded, today, &mut warnings),
+            recorded,
+            "today's `{}` replaced the recorded `{}`",
+            today.program(),
+            recorded.program()
+        );
+        let named = format!(
+            "[engine] `shell = {}` differs from the `shell = {}` run `01RECORDEDSHELL` recorded",
+            today.program(),
+            recorded.program()
+        );
+        let probes = format!("pre-flight probes `{}`", recorded.program());
+        assert!(
+            matches!(
+                warnings.as_slice(),
+                [only] if only.starts_with(&named) && only.ends_with(&probes)
+            ),
+            "one warning naming both shells and the one probed: {warnings:?}"
+        );
+    }
+    let mut warnings = Vec::new();
+    assert_eq!(
+        recorded_shell(
+            "01RECORDEDSHELL",
+            ShellKind::Bash,
+            ShellKind::Bash,
+            &mut warnings
+        ),
+        ShellKind::Bash
+    );
+    assert!(
+        warnings.is_empty(),
+        "an unchanged shell is no drift: {warnings:?}"
+    );
+}
+
 /// Root's Q3, and the resume side of D7 (plan addendum, the re-observation at
 /// a0): a recorded `case_fold = false` over a namespace that now folds refuses,
 /// and nothing else does. A recorded `true` over a case-sensitive root continues

@@ -3475,6 +3475,61 @@ reached its probes and appended `run_resumed`. With `resume_harness` publishing 
 include before `ResumePrepared::verify` (the order before PR12-CI-01), the first refusal
 fails on the private root that moved.
 
+## `fn on_this_path(program: &str) -> bool {`
+
+Whether a file named `program` is in a directory of this process's `PATH`; the
+recorded-shell guards assert that `cmd` is not, so that "unavailable" is a fact of the
+host and not an assumption.
+
+## `fn a_fake_cmd(tree: &ScratchTree) -> PathBuf {`
+
+A directory holding a `cmd` that exits 0, written by a process of its own
+(`runner::container::write_program_in_its_own_process`) so that no thread of this test
+binary holds it open for writing when it is executed.
+
+## `fn with_shells_on_path(`
+
+Runs [`recorded_shell_helper`] in a process of its own whose `PATH` starts with the
+fake shell's directory, so the shell is available to that process alone and to no other
+test.
+
+## `fn recorded_shell_helper() {`
+
+The recorded-shell guards' child. `create` makes and parks a zero-gate run under the
+config it is given; `resume` resumes the latest run under the config it is given and
+asserts that it appended `run_resumed`. Without its environment it does nothing.
+
+## `fn a_zero_gate_schema_4_resume_probes_its_recorded_shell_when_todays_config_names_an_unavailable_one()`
+
+PR12-CI-03 (INV-23), one direction of today's drift. A zero-gate run is created under
+`sh` (the premises: `gate_cmds` is empty, `run_started(4).shell` is `sh`, and this host
+has no `cmd`). Its resume through `resume_with`, with today's config naming
+`shell = "cmd"`, passes its pre-flight, recovers (one `run_resumed`) and warns that
+today's `cmd` is not the run's and that the pre-flight probes `sh`. With the resume's
+shell taken from `gate_cmds` else today's config again, it fails: the pre-flight probes
+`cmd` and refuses.
+
+## `fn a_zero_gate_schema_4_resume_refuses_its_unavailable_recorded_shell_whatever_todays_config_names()`
+
+PR12-CI-03 (INV-23), the other direction, and the unavailable recorded shell. A
+zero-gate run is created under `cmd` by a child whose `PATH` holds a fake `cmd` (the
+premises: no gates, `run_started(4).shell` is `cmd`, and this host has no `cmd`). Its
+resume in this process, where `cmd` is not on `PATH`, with today's config naming the
+available `sh`, refuses at the pre-flight naming the recorded shell `cmd`, and the log
+is unchanged, so no recovery event was appended. The same resume in a child whose
+`PATH` holds the fake `cmd` again continues and appends `run_resumed`: the run stayed
+resumable. With the resume's shell taken from `gate_cmds` else today's config again,
+the first resume probes `sh`, recovers and fails the refusal it expects.
+
+## `fn a_schema_4_log_without_a_recorded_shell_is_refused_and_never_resumed_under_another() {`
+
+PR12-CI-03, the record's compatibility (`run_started(4).shell` is required, as every
+schema-4 transaction-payload field is). A parked run's committed first line, rewritten
+without `shell`, stands for a log written before the field. Its resume through
+`resume_with` refuses at the committed first line, naming `shell`, writes nothing to
+the log and nothing under the private root, and never resumes under a shell the record
+does not hold.
+
 ## `enum SignalFault {`
 
 How [`signal_mid_attempt`] is made to fail, for the tests of its own cleanup. Each

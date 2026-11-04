@@ -488,10 +488,7 @@ pub fn prepare_resume(
     };
     let ceiling = ceiling_of(opts.budget_usd, &config.budgets)?;
     let slots = resumed_slot_limits(&config, started.limits.max_parallel)?;
-    let shell = started
-        .gate_cmds
-        .first()
-        .map_or(config.shell, |gate| gate.shell);
+    let shell = recorded_shell(&started.run_id, started.shell, config.shell, &mut warnings);
     let mode = opts.interaction.unwrap_or(config.interaction_mode);
     let notifiers = interaction::notifiers_for(&config.notify, &mut warnings);
 
@@ -688,6 +685,7 @@ fn fresh_record(fresh: &FreshRecord<'_>) -> Result<RunStarted4, UpstrokeError> {
         incarnation: fresh.checked.incarnation().clone(),
         runner: fresh.checked.runner_policy().clone(),
         probed_agents: fresh.agents.to_vec(),
+        shell: fresh.analysis.config.shell,
         branch: format!("upstroke/run-{run_id}"),
         integration_ref: GitRef(format!("refs/heads/upstroke/run-{run_id}")),
         base_sha: CommitSha(fresh.base_sha.clone()),
@@ -1061,6 +1059,24 @@ fn compare_recorded_gates(
     if let Some(difference) = gates_differ(&started.gate_cmds, &today) {
         warnings.push(difference);
     }
+}
+
+fn recorded_shell(
+    run_id: &str,
+    recorded: ShellKind,
+    today: ShellKind,
+    warnings: &mut Vec<String>,
+) -> ShellKind {
+    if today != recorded {
+        warnings.push(format!(
+            "[engine] `shell = {today}` differs from the `shell = {kept}` run `{run_id}` \
+             recorded; a run keeps the shell it started with, so this resume's pre-flight \
+             probes `{kept}`",
+            today = today.program(),
+            kept = recorded.program(),
+        ));
+    }
+    recorded
 }
 
 fn resumed_slot_limits(

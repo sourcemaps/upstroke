@@ -89,7 +89,8 @@ before it, `resume_harness` just before the proof — for the same reason:
    private root or a credential location
    ([`refuse_withheld_recorded_mounts`]), each refused before the runtime
    is asked anything; a recorded container image's environment; the slot
-   limits; today's configured notifiers.
+   limits; the recorded shell ([`recorded_shell`]); today's configured
+   notifiers.
 4. `resume_harness` makes the run exclusion (`Workspace::ensure_run_exclusions`,
    L4), as the sequential resume does after its prerequisites, so a run whose
    `.upstroke/.gitignore` went missing is ignored by Git again. This step is the
@@ -139,7 +140,10 @@ name, at P4, and fails the run's creation on any failure, before anything is
 committed: a configured reviewer whose CLI is missing fails the run where the
 sequential engine dropped an unprobeable alternative (root's D9, "the recorded
 probe set is binding"). A resume probes the recorded set, through
-`RunnerPreflight`, the same way.
+`RunnerPreflight`, the same way. The recorded set is `run_started(4).shell` and
+`run_started(4).probed_agents`: the shell is recorded on its own, whether or not
+the run has gates, because a gate's recorded shell is no record at all for a run
+with none (PR12-CI-03).
 
 ### Slot limits
 
@@ -236,6 +240,14 @@ once the environment is what it was.
 `started` is an owned snapshot of the record `root` carries (§6): `root` is
 consumed by the proof, and the run still reads the record's gates afterwards.
 
+The pre-flight's shell is the record's ([`recorded_shell`]), never today's
+`[engine] shell` and never a gate's. Until PR12-CI-03 it was
+`started.gate_cmds.first()`'s shell, else today's `config.shell`: a run with no
+gates recorded no shell anywhere, so its resume probed whatever today's config
+named — refusing a run whose recorded shell still worked when today's named one
+was missing, and continuing past a recorded shell that no longer ran when
+today's did.
+
 ## `pub struct ResumeVerified {`
 
 What a resume holds once its records are proved: the verified records — and
@@ -284,6 +296,11 @@ witnesses (`run_id`, `incarnation`, `runner`, `private_dir`,
 `probed_agents`) are filled here with the same values, so that
 `registry_digest` — computed over `registry_record()` and the probed agents —
 is the digest of the record that is appended.
+
+`shell` is `analysis.config.shell`, the shell `RunnerProbes` probes at P4, so
+every resume probes the shell its creation probed, with gates or without
+(PR12-CI-03). Every gate the analysis settled runs under that same shell, so for
+a run with gates it equals each recorded gate's.
 
 ## `struct DeliveredFirst<'a> {`
 
@@ -361,6 +378,15 @@ would take: the config's `[[gates]]` under its shell, or, with none, the gates
 derived from the repository's shape. A `[[gates]]` section today's config
 cannot state is already announced as compared only
 (`EngineLimits::TopologyResume`).
+
+## `fn recorded_shell(`
+
+The shell a resume's `RunnerPreflight` probes: the one `run_started(4)` recorded.
+Today's `[engine] shell` that differs warns, naming both, and is ignored — as
+INV-23 treats today's `[runner]` and [`compare_recorded_limits`] the recorded
+ceilings — so changing today's config cannot change what the pre-flight probes,
+in either direction. A recorded shell that no longer runs is the step-(c) shell
+probe's refusal, before any recovery event, and the run stays resumable.
 
 ## `fn resumed_slot_limits(`
 

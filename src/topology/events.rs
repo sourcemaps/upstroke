@@ -9,6 +9,7 @@ use crate::events::{
     AttemptRecord, BudgetKind, CapacitySnapshot, ChainSummary, DesignDefect, GateSummary,
     PoolExhausted, ReviewRecord, RunOutcome, RunStarted,
 };
+use crate::gates::ShellKind;
 use crate::ir::{Effort, QuestionId, QuestionKind, ResolvedEffortPolicy, Tier};
 use crate::review::ReviewPlan;
 use crate::topology::paths::{PathPolicy, PathSet};
@@ -455,6 +456,7 @@ pub struct RunStarted4 {
     pub incarnation: IncarnationId,
     pub runner: RunnerPolicy,
     pub probed_agents: Vec<String>,
+    pub shell: ShellKind,
     pub branch: String,
     pub integration_ref: GitRef,
     pub base_sha: CommitSha,
@@ -1728,6 +1730,7 @@ mod tests {
                 "claude-code".to_owned(),
                 "copilot".to_owned(),
             ],
+            shell: ShellKind::Pwsh,
             branch: format!("upstroke/run-{RUN_ID}"),
             integration_ref: GitRef::from("refs/heads/Ünïcode/Integration Target"),
             base_sha: CommitSha::from(SHA_BASE),
@@ -2628,7 +2631,7 @@ mod tests {
             }
         }
         assert_eq!(
-            deletions, 382,
+            deletions, 383,
             "the corpus requires a different number of fields than it did"
         );
     }
@@ -4906,6 +4909,7 @@ mod tests {
                     "incarnation": "01J8ZQKB2M7NC5PQR0TVWXYZ12",
                     "runner": canonical_runner(),
                     "probed_agents": ["codex", "claude-code", "copilot"],
+                    "shell": "pwsh",
                     "branch": format!("upstroke/run-{RUN_ID}"),
                     "integration_ref": "refs/heads/Ünïcode/Integration Target",
                     "base_sha": SHA_BASE,

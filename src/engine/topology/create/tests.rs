@@ -661,6 +661,7 @@ fn record(agents: &[String], runner: RunnerPolicy) -> RunStarted4 {
         incarnation: IncarnationId(INCARNATION.to_owned()),
         runner,
         probed_agents: agents.to_vec(),
+        shell: crate::gates::ShellKind::Sh,
         branch: "main".to_owned(),
         integration_ref: GitRef(INTEGRATION_REF.to_owned()),
         base_sha: CommitSha(BASE_SHA.to_owned()),

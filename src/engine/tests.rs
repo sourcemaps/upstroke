@@ -18839,6 +18839,252 @@ fn a_schema_4_resume_proves_its_owner_and_commit_records_before_it_writes_its_in
     }
 }
 
+/// Whether `program` is a file in one of the directories of this process's `PATH`.
+#[cfg(unix)]
+fn on_this_path(program: &str) -> bool {
+    std::env::var_os("PATH").is_some_and(|path| {
+        std::env::split_paths(&path).any(|directory| directory.join(program).is_file())
+    })
+}
+
+/// A `cmd` that exits 0, in a directory of its own, for a process whose `PATH` it leads.
+#[cfg(unix)]
+fn a_fake_cmd(tree: &ScratchTree) -> PathBuf {
+    let directory = tree.path().join("fake-shells");
+    fs::create_dir(&directory).expect("the fake shells' directory");
+    crate::runner::container::write_program_in_its_own_process(
+        &directory.join("cmd"),
+        "#!/bin/sh\nexit 0\n",
+    );
+    directory
+}
+
+/// Runs [`recorded_shell_helper`] in a process of its own whose `PATH` starts with `shells`.
+#[cfg(unix)]
+fn with_shells_on_path(
+    shells: &Path,
+    repo: &Path,
+    config: &Path,
+    mode: &str,
+) -> std::process::Output {
+    let mut directories = vec![shells.to_path_buf()];
+    directories.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    Command::new(std::env::current_exe().expect("this test binary"))
+        .args([
+            "--exact",
+            "engine::tests::recorded_shell_helper",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env("PATH", std::env::join_paths(directories).expect("a PATH"))
+        .env("UPSTROKE_RECORDED_SHELL_REPO", repo)
+        .env("UPSTROKE_RECORDED_SHELL_CONFIG", config)
+        .env("UPSTROKE_RECORDED_SHELL_MODE", mode)
+        .output()
+        .expect("the helper process")
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "spawned by the recorded-shell guards, in a process whose PATH holds a fake shell"]
+fn recorded_shell_helper() {
+    let Some(repo) = std::env::var_os("UPSTROKE_RECORDED_SHELL_REPO") else {
+        return;
+    };
+    let repo = PathBuf::from(repo);
+    let config = PathBuf::from(
+        std::env::var_os("UPSTROKE_RECORDED_SHELL_CONFIG").expect("the helper's config"),
+    );
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        1,
+    )));
+    match std::env::var("UPSTROKE_RECORDED_SHELL_MODE").as_deref() {
+        Ok("create") => {
+            let mut opts = topology_options(&repo);
+            opts.config_path = Some(config);
+            let parked = run_with(&opts, &source).expect("the run is created and parks");
+            assert_eq!(parked.outcome(), RunOutcome::Parked, "{parked:#?}");
+        }
+        Ok("resume") => {
+            let run_id = rundir::latest_run(&repo).expect("the parked run");
+            let resumed =
+                |kinds: Vec<String>| kinds.iter().filter(|kind| *kind == "run_resumed").count();
+            let before = resumed(event_kinds(&repo, &run_id));
+            let mut resume = resume_options(&repo, &run_id);
+            resume.config_path = Some(config);
+            resume_with(&resume, &source)
+                .expect("the recorded shell runs again, so the run resumes");
+            assert_eq!(resumed(event_kinds(&repo, &run_id)), before + 1);
+        }
+        other => panic!("the recorded-shell helper has no mode {other:?}"),
+    }
+}
+
+/// PR12-CI-03 (INV-23), today's config moved to a shell this host cannot run: a zero-gate
+/// schema-4 run created under `sh` resumes, through `engine::resume_with`, probing `sh`, and
+/// warns that today's `[engine] shell = "cmd"` is not the run's.
+#[cfg(unix)]
+#[test]
+fn a_zero_gate_schema_4_resume_probes_its_recorded_shell_when_todays_config_names_an_unavailable_one()
+ {
+    assert!(!on_this_path("cmd"), "the premise: this host has no `cmd`");
+    let (tree, repo) = temp_engine_repo("topology-resume-recorded-shell-kept");
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        1,
+    )));
+    let parked = run_with(&topology_options(&repo), &source).expect("the run parks");
+    assert_eq!(parked.outcome(), RunOutcome::Parked, "{parked:#?}");
+    until_released(&repo, &parked.run_id);
+    let first = first_line_of_the_log(&repo, &parked.run_id);
+    assert_eq!(
+        first["data"]["gate_cmds"],
+        serde_json::json!([]),
+        "the premise: no gates"
+    );
+    assert_eq!(
+        first["data"]["shell"], "sh",
+        "the run records the shell it probed"
+    );
+
+    let today = tree.path().join("today.toml");
+    fs::write(&today, "[engine]\nshell = \"cmd\"\n").expect("today's config");
+    let mut resume = resume_options(&repo, &parked.run_id);
+    resume.config_path = Some(today);
+    let resumed = resume_with(&resume, &source)
+        .expect("the resume probes the recorded `sh`, not today's `cmd`");
+    assert!(
+        resumed.warnings.iter().any(|warning| warning
+            .contains("`shell = cmd` differs from the `shell = sh` run")
+            && warning.ends_with("pre-flight probes `sh`")),
+        "{:?}",
+        resumed.warnings
+    );
+    assert_eq!(
+        event_kinds(&repo, &parked.run_id)
+            .iter()
+            .filter(|kind| *kind == "run_resumed")
+            .count(),
+        1,
+        "the resume passed its pre-flight and recovered"
+    );
+}
+
+/// PR12-CI-03 (INV-23), the recorded shell gone: a zero-gate schema-4 run created under `cmd`
+/// (a fake one on its creator's `PATH`) refuses its resume at the pre-flight, naming `cmd`,
+/// although today's `[engine] shell = "sh"` would run, and appends nothing; once `cmd` is back,
+/// the same resume continues.
+#[cfg(unix)]
+#[test]
+fn a_zero_gate_schema_4_resume_refuses_its_unavailable_recorded_shell_whatever_todays_config_names()
+{
+    assert!(!on_this_path("cmd"), "the premise: this host has no `cmd`");
+    let (tree, repo) = temp_engine_repo("topology-resume-recorded-shell-gone");
+    let shells = a_fake_cmd(&tree);
+    fs::write(repo.join("upstroke.toml"), "[engine]\nshell = \"cmd\"\n").expect("the config");
+    git_in(&repo, &["add", "upstroke.toml"]);
+    git_in(&repo, &["commit", "-q", "-m", "a run under cmd"]);
+    let created = with_shells_on_path(&shells, &repo, &repo.join("upstroke.toml"), "create");
+    assert!(
+        created.status.success(),
+        "the run is created where `cmd` runs: {}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    let run_id = rundir::latest_run(&repo).expect("the created run");
+    until_released(&repo, &run_id);
+    let first = first_line_of_the_log(&repo, &run_id);
+    assert_eq!(
+        first["data"]["gate_cmds"],
+        serde_json::json!([]),
+        "the premise: no gates"
+    );
+    assert_eq!(
+        first["data"]["shell"], "cmd",
+        "the run records the shell it probed"
+    );
+
+    let today = tree.path().join("today.toml");
+    fs::write(&today, "[engine]\nshell = \"sh\"\n").expect("today's config");
+    let mut resume = resume_options(&repo, &run_id);
+    resume.config_path = Some(today.clone());
+    let log = rundir::public_dir(&repo, &run_id).join(rundir::EVENT_LOG);
+    let before = fs::read(&log).expect("the log");
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        1,
+    )));
+    let refused = resume_with(&resume, &source)
+        .expect_err("the recorded `cmd` cannot run here, whatever today's config names");
+    assert!(
+        refused.to_string().contains("the recorded shell `cmd`"),
+        "{refused}"
+    );
+    assert!(
+        fs::read(&log).expect("the log") == before,
+        "the refused resume appended a recovery event"
+    );
+    until_released(&repo, &run_id);
+
+    let continued = with_shells_on_path(&shells, &repo, &today, "resume");
+    assert!(
+        continued.status.success(),
+        "the run stayed resumable: {}",
+        String::from_utf8_lossy(&continued.stderr)
+    );
+}
+
+/// PR12-CI-03, the record's compatibility: `run_started(4).shell` is required, so a schema-4 log
+/// whose first line predates it is refused at its committed first line, through
+/// `engine::resume_with`, before any lock or private write, and is never resumed under a shell
+/// it does not record.
+#[test]
+fn a_schema_4_log_without_a_recorded_shell_is_refused_and_never_resumed_under_another() {
+    let (_tree, repo) = temp_engine_repo("topology-resume-no-recorded-shell");
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        1,
+    )));
+    let parked = run_with(&topology_options(&repo), &source).expect("the run parks");
+    assert_eq!(parked.outcome(), RunOutcome::Parked, "{parked:#?}");
+    until_released(&repo, &parked.run_id);
+    let log = rundir::public_dir(&repo, &parked.run_id).join(rundir::EVENT_LOG);
+    let text = fs::read_to_string(&log).expect("the log");
+    let (first, rest) = text.split_once('\n').expect("a committed first line");
+    let mut line: serde_json::Value = serde_json::from_str(first).expect("the first line");
+    assert!(
+        line["data"]
+            .as_object_mut()
+            .expect("run_started's data")
+            .remove("shell")
+            .is_some(),
+        "the premise: the run recorded its shell"
+    );
+    let predates = format!(
+        "{}\n{rest}",
+        serde_json::to_string(&line).expect("the older first line")
+    );
+    fs::write(&log, &predates).expect("a log written before the field");
+    let home = private_root_for(&repo);
+    let before = private_snapshot(&home);
+
+    let refused = resume_with(&resume_options(&repo, &parked.run_id), &source)
+        .expect_err("a schema-4 run_started without its shell is refused");
+    let refused = refused.to_string();
+    assert!(
+        refused.contains("is not a topology event") && refused.contains("shell"),
+        "{refused}"
+    );
+    assert!(
+        fs::read_to_string(&log).expect("the log") == predates,
+        "the refused resume wrote the log"
+    );
+    let moved = moved_entries(&before, &private_snapshot(&home));
+    assert!(moved.is_empty(), "the refused resume wrote: {moved:?}");
+}
+
 /// P12-W2 and P12-W16 (D6): a schema-4 run whose process dies by SIGKILL,
 /// SIGTERM or SIGINT inside an attempt leaves a log that ends mid-attempt; the
 /// resume settles that attempt as interrupted, appends `run_resumed`, and

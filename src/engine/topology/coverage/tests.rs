@@ -964,6 +964,7 @@ fn witness_run_started() -> crate::topology::events::RunStarted4 {
             mounts: Vec::new(),
         },
         probed_agents: vec!["claude-code".to_owned()],
+        shell: ShellKind::Sh,
         branch: "upstroke/run-st07".to_owned(),
         integration_ref: GitRef::from("refs/upstroke/integration"),
         base_sha: CommitSha::from("0f5c1c4"),

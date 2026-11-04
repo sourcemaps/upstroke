@@ -523,6 +523,7 @@ fn run_started_unauthenticated() -> RunStarted4 {
             mounts: Vec::new(),
         },
         probed_agents: vec!["claude-code".to_owned(), "copilot".to_owned()],
+        shell: ShellKind::Sh,
         branch: format!("upstroke/run-{RUN_ID}"),
         integration_ref: GitRef::from("refs/upstroke/integration"),
         base_sha: CommitSha::from("0f5c1c4"),

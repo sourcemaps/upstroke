@@ -504,6 +504,24 @@ What every process of this run executes through, for its whole life.
 The agents pre-flight actually probed. The allow-list every task's
 bindings — including one a human names for a repair — is drawn from.
 
+## `pub struct RunStarted4` › `pub shell: ShellKind,`
+
+The shell pre-flight probed: the non-slotted `RunnerPreflight` probe executes
+it at P4 and at every resume's step (c) (INV-23, "the recorded shell executing
+exit 0"), and every gate the run records runs under it. Recorded on its own,
+with gates or without: until PR12-CI-03 a resume took it from the first entry of
+`gate_cmds`, so a run with no gates recorded no shell and its resume probed
+today's `[engine] shell` instead.
+
+Required like every field here. A `run_started` written before it is refused at
+parse — at a resume's (a0), by the fold's `RewrittenLog` at line 1 naming the
+missing field — and is never read as holding a shell. Run-directory
+classification reads only `event`, `schema` and `run_id`, so such a run is still
+`Committed` and never a husk. Schema 4 is pre-release, so no log is under a
+compatibility promise a default would keep (DESIGN §26); the field is not in
+`registry_record`, `RunnerPolicy` or `run_resumed`, so the registry digest, the
+runner digest and the runner-equality refusal are unchanged.
+
 ## `pub struct RunStarted4` › `pub integration_ref: GitRef,`
 
 The ref this run publishes onto, named rather than re-derived.

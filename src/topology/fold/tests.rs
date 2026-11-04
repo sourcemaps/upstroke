@@ -364,6 +364,7 @@ fn run_started_unauthenticated() -> RunStarted4 {
         incarnation: IncarnationId("01J8ZQKB2M7NC5PQR0TVWXYZ12".to_owned()),
         runner: container_runner(),
         probed_agents: probed_agents(),
+        shell: ShellKind::Bash,
         branch: format!("upstroke/run-{RUN_ID}"),
         integration_ref: git_ref("integration"),
         base_sha: sha("base"),
