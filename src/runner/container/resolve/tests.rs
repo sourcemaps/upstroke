@@ -1940,9 +1940,11 @@ fn schema_4_run_options(repo: &Path, private: &Path) -> RunOptions {
 #[test]
 fn a_schema_4_host_run_under_a_held_lease_is_refused_by_the_worktree_lock() {
     let (_tree, repo) = temp_repo("schema4-host-control");
-    let private = repo.join("private");
+    let private_tree = scratch("schema4-host-control-private");
+    let private = private_tree.path().join("private");
     fs::create_dir_all(&private).expect("private root");
     fs::write(repo.join("upstroke.toml"), "[runner]\nkind = \"host\"\n").expect("config");
+    empty_pools(&repo);
     git(&repo, &["add", "-A"]);
     git(&repo, &["commit", "-q", "-m", "config"]);
     let opts = schema_4_run_options(&repo, &private);

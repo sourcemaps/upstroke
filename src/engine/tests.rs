@@ -19375,6 +19375,59 @@ fn a_schema_4_follow_prints_one_line_per_event_and_no_raw_control_whatever_the_p
     );
 }
 
+#[test]
+fn a_fresh_schema_4_run_refuses_a_staged_an_unstaged_or_an_untracked_change_before_any_worker_or_log()
+ {
+    for dirt in ["staged", "unstaged", "untracked"] {
+        let (_tree, repo) = temp_engine_repo(&format!("topology-dirty-{dirt}"));
+        match dirt {
+            "staged" => {
+                fs::write(repo.join("README.md"), "a staged edit\n").expect("an edit");
+                git_in(&repo, &["add", "README.md"]);
+            }
+            "unstaged" => fs::write(repo.join("README.md"), "an unstaged edit\n").expect("an edit"),
+            _ => fs::write(repo.join("notes.txt"), "an untracked file\n").expect("a new file"),
+        }
+        let stub = ObservedStub::new(0);
+        let refused = run_with(&topology_options(&repo), &BorrowedObserved(&stub))
+            .expect_err("a dirty tree is refused");
+        assert!(
+            refused.to_string().contains("working tree is not clean"),
+            "{dirt}: {refused}"
+        );
+        assert!(
+            stub.built().is_empty(),
+            "{dirt}: no worker or reviewer was built"
+        );
+        assert!(
+            rundir::run_dir_names(&repo).is_empty(),
+            "{dirt}: no run directory, so no run log, exists"
+        );
+        let kept = match dirt {
+            "staged" => git_in(&repo, &["diff", "--cached", "--name-only"]).contains("README.md"),
+            "unstaged" => {
+                fs::read_to_string(repo.join("README.md")).expect("README.md")
+                    == "an unstaged edit\n"
+            }
+            _ => repo.join("notes.txt").exists(),
+        };
+        assert!(
+            kept,
+            "{dirt}: the change is the operator's and is untouched"
+        );
+    }
+
+    let (_tree, repo) = temp_engine_repo("topology-clean-twice");
+    for run in ["first", "second"] {
+        let stub = ObservedStub::new(0);
+        let report = run_with(&topology_options(&repo), &BorrowedObserved(&stub))
+            .unwrap_or_else(|error| panic!("the {run} run of a clean tree is admitted: {error}"));
+        assert_eq!(report.outcome(), RunOutcome::Complete, "{run}: {report:#?}");
+        assert!(!stub.workers().is_empty(), "{run}: its workers ran");
+        until_released(&repo, &report.run_id);
+    }
+}
+
 /// P12-W13. A parked schema-4 question has no payload file: `status` names it,
 /// `show` renders it from the fold by an id prefix, `answer` records it once and
 /// refuses a second, the resume ingests it from the file the run polls, and an

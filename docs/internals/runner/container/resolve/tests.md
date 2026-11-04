@@ -628,6 +628,15 @@ refused by the lock, and without the lease it reaches pre-flight. Without this
 control, the gated cell's "did not reach the lock" would not show that the
 lock was on its far side.
 
+Its tree is clean, which the control depends on: since L2 a fresh schema-4
+run refuses a dirty tree before the lock (DESIGN §20, through
+`engine::coordinator::run_harness`), so a fixture with anything untracked
+would be refused there and reach neither the lock nor pre-flight. The pools
+file is committed with the config, and the private root is a separate scratch
+tree outside the checkout, because the first run's include publication writes
+under the private root and a root inside the checkout would leave the second
+run's tree dirty.
+
 ## `fn real_docker_a_schema_4_run_refuses_an_absent_image_before_the_worktree_lock() {`
 
 P12-06's ordering on the public path, against a real runtime: a schema-4 run

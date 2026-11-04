@@ -19,8 +19,10 @@ legacy entry point (`engine::coordinator::run_harness`,
 `engine::resume::resume_harness`): those two bodies publish the
 recorded-objects include between this module's read-only half and its
 effectful half, because `Workspace::recorded_objects_scope` is denied to
-every topology module (`clippy.toml`), and the include is the first effect of
-either command.
+every topology module (`clippy.toml`). The include is the resume's first
+effect; a fresh run's is the run exclusion, which `run_harness` makes just
+before it, in the checkout's admission (L2), for the same reason:
+`Workspace::ensure_run_exclusions` is denied to every topology module too.
 
 ### The fresh order
 
@@ -42,10 +44,18 @@ either command.
    check, the budget ceiling, the slot limits and the configured notifiers.
    The runner comes before the review plan so that a refused container
    selection has asked the adapter source nothing.
-3. `run_harness` publishes the include under [`FreshPrepared::private_root`].
+3. `run_harness` admits the checkout through the sequential entry's own rule,
+   `engine::coordinator::refuse_dirty_tree` (L2; DESIGN §20 and §14's
+   pre-flight, "clean working tree required"): the run exclusion, then the
+   refusal of any staged, unstaged or untracked change. Nothing of the run
+   exists yet, so a refused run has started no worker and created no run log.
+   The sequential entry makes the same call later, under its worktree lock and
+   after its pre-flight; here it is a refusal before the lock, as every check
+   of the read-only half is.
+4. `run_harness` publishes the include under [`FreshPrepared::private_root`].
    For the default root this is also how a missing root comes to exist,
    through the include's existing private-directory creation (root's Q4).
-4. [`FreshPrepared::run`]: the default root is authorized; the worktree lock;
+5. [`FreshPrepared::run`]: the default root is authorized; the worktree lock;
    the inputs re-captured and compared with the checked capture (a difference
    refuses); the startup census; the workspace manager; the execution root
    (`Worktree.CreateExecutionRoot`, which the inventory places before

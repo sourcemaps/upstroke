@@ -3735,3 +3735,17 @@ three recorded fields, its timestamp, its agent and its model: the line holds no
 control, and the agent and model appear with theirs made visible. With
 `describe`'s `one_line` removed, the follow assertion fails on the raw ESC bytes.
 
+## `fn a_fresh_schema_4_run_refuses_a_staged_an_unstaged_or_an_untracked_change_before_any_worker_or_log()`
+
+L2 (regression review 3, finding 2; DESIGN §20). Through the production entry
+(`run_with` with the topology active), three repositories with one kind of dirt
+each: a staged edit of `README.md`, an unstaged edit of it, and an untracked
+file. Each run is refused with "working tree is not clean", before any worker or
+reviewer is built (`ObservedStub` records none) and before any run directory, and
+so any run log, exists; the operator's change is untouched. The control: one
+clean repository is admitted twice in a row, its workers running each time, so
+the first run's public directory does not make the second run's tree dirty.
+Measured before commit: with the schema-4 dispatch's refusal removed the staged
+case runs to completion and the test fails; with the exclusion removed from
+`refuse_dirty_tree` the second clean run is refused and the test fails.
+

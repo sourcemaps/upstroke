@@ -41,9 +41,14 @@ below. The bodies are what they were; the call in `run_contained` lost its
 PR12's dispatch: since the topology is active, `upstroke run` creates a
 schema-4 run, and this branch is it. The order is the read-only half
 ([`crate::engine::topology::entry::prepare_fresh`], after containment), then
-the include publication — the first effect, written here because
-`recorded_objects_scope` is denied to every topology module — then the
-effectful half (`FreshPrepared::run`). The include goes under the root the
+the legacy admission of the checkout (`refuse_dirty_tree`: the run exclusion,
+then the refusal of a dirty tree; L2), then the include publication, written
+here because `recorded_objects_scope` is denied to every topology module, then
+the effectful half (`FreshPrepared::run`). The admission is here for the same
+reason: `Workspace::ensure_run_exclusions` is an effectful wrapper no topology
+module may call, so the schema-4 entry cannot make it, and this is the first
+point on the path where the legacy entry's rule can run as written, before
+anything of the run exists. The include goes under the root the
 read-only half authorized, or under the default root, which it creates when
 missing (root's Q4: only after the runtime, image and credential-volume
 refusals, and only after the read-only half has refused a default root that
@@ -82,7 +87,29 @@ the private root. That write happens even for a run refused later, and is
 harmless: the file's bytes never vary, it lives in the private root, and no Git
 configuration names it; only the environment of a role this runner starts does.
 
-## `if !workspace.is_clean()? {`
+## `fn refuse_dirty_tree(workspace: &Workspace) -> Result<(), UpstrokeError> {`
+
+The checkout's admission, one definition for both entries (L2, regression
+review 3, finding 2; DESIGN §20, "the engine refuses dirty trees"): first
+`Workspace::ensure_run_exclusions`, so the engine's own `.upstroke/` (its public
+run directories) is ignored by Git, then `Workspace::is_clean`, refusing any
+staged, unstaged or untracked change with the message below. The order is the
+legacy entry's and it is load-bearing: without the exclusion, a repository that
+already holds a run's public directory reads as dirty, and its next run is
+refused for the engine's own files (measured with the exclusion removed: the
+second fresh schema-4 run in one repository was refused).
+
+The legacy entry (`run_harness_inner_with_id`) calls it after
+`ensure_execution_prerequisites`, where these two steps were written inline, and
+the schema-4 dispatch in `run_harness` calls it before the include publication.
+Until L2 the schema-4 path made no such check: a fresh `upstroke run` over a
+modified tracked file ran its worker and reviewer against the committed tree,
+recorded a completed run and exited 0 (the reviewer's executed comparison;
+the base refused with this message and created no run log). A refused run
+leaves the exclusion (`.upstroke/.gitignore`) and nothing else, as the legacy
+entry always has.
+
+## `refuse_dirty_tree` › `if !workspace.is_clean()? {`
 
 The dirty-tree refusal names the command that shows what upstroke found,
 `git --no-replace-objects -c core.useReplaceRefs=false status`, and `git replace

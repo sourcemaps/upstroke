@@ -58,13 +58,31 @@ pub fn run_harness(opts: &RunOptions, harness: &Harness<'_>) -> Result<RunReport
     if opts.writes_topology() {
         let _contained = contain_write_command(&mut NoHooks)?;
         let prepared = super::topology::entry::prepare_fresh(opts, harness)?;
-        let repository = Workspace::open(&opts.repo_root)?
-            .recorded_objects_scope(Some(prepared.private_root()))?;
+        let workspace = Workspace::open(&opts.repo_root)?;
+        refuse_dirty_tree(&workspace)?;
+        let repository = workspace.recorded_objects_scope(Some(prepared.private_root()))?;
         return prepared.run(opts, harness, repository);
     }
     let repository =
         Workspace::open(&opts.repo_root)?.recorded_objects_scope(opts.private_root.as_deref())?;
     run_harness_on(opts, harness, &HostRunner::for_legacy_workspace(repository))
+}
+
+fn refuse_dirty_tree(workspace: &Workspace) -> Result<(), UpstrokeError> {
+    workspace.ensure_run_exclusions()?;
+    if !workspace.is_clean()? {
+        return Err(UpstrokeError::Git {
+            message: "working tree is not clean; commit or stash first (the engine refuses \
+                      dirty trees). upstroke compares the checkout with the objects the \
+                      repository records, never with what `git replace` substitutes for \
+                      them, so `git --no-replace-objects -c core.useReplaceRefs=false \
+                      status` lists what it found; plain `git status` can report the \
+                      checkout clean when a replacement changes what HEAD holds \
+                      (`git replace -l` lists them)"
+                .to_owned(),
+        });
+    }
+    Ok(())
 }
 
 pub(super) fn run_harness_on(
@@ -152,19 +170,7 @@ pub(super) fn run_harness_inner_with_id(
     } = preflight(opts, harness, runner, analysis)?;
 
     workspace.ensure_execution_prerequisites()?;
-    workspace.ensure_run_exclusions()?;
-    if !workspace.is_clean()? {
-        return Err(UpstrokeError::Git {
-            message: "working tree is not clean; commit or stash first (the engine refuses \
-                      dirty trees). upstroke compares the checkout with the objects the \
-                      repository records, never with what `git replace` substitutes for \
-                      them, so `git --no-replace-objects -c core.useReplaceRefs=false \
-                      status` lists what it found; plain `git status` can report the \
-                      checkout clean when a replacement changes what HEAD holds \
-                      (`git replace -l` lists them)"
-                .to_owned(),
-        });
-    }
+    refuse_dirty_tree(&workspace)?;
     let base_sha = workspace.head_sha_full()?;
     let wait_on_block = opts.wait_on_block;
 
