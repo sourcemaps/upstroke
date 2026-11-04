@@ -3749,3 +3749,58 @@ Measured before commit: with the schema-4 dispatch's refusal removed the staged
 case runs to completion and the test fails; with the exclusion removed from
 `refuse_dirty_tree` the second clean run is refused and the test fails.
 
+## `fn stub_pool_file(tree: &ScratchTree) -> PathBuf {`
+
+One pool, `claude-max`, for the topology stub's agent (`claude-code`), so a run's attempts and
+review passes are attributed to it. The file is in the scratch tree, outside the checkout: a
+schema-4 run refuses a dirty tree (L2), and an untracked pools file would be dirt.
+
+## `fn cut_log_after(`
+
+A coordinator that died just after appending an event leaves exactly the committed prefix that
+ends with it, because the log only grows at its end. This cuts a finished run's log back to that
+prefix after the first matching line. The run is released before the cut, so `status` reads it
+as interrupted, not running.
+
+## `fn upstroke_status(repo: &Path, run_id: &str) -> String {`
+
+What `upstroke status <run>` prints, through the public `status::load` and `status::render`.
+
+## `fn ledger_cells(status: &str, id: &str) -> Vec<String> {`
+
+The cells of the ledger row `status` prints for one task, split on whitespace. A trail with
+several words spreads over several cells, so callers count the amounts from the end.
+
+## `fn a_schema_4_status_prints_the_ledger_run_reports_for_a_completed_and_an_interrupted_run() {`
+
+L3 (regression review 3, finding 3; DESIGN §18). Two dependent tasks on one pool, completed.
+- `status` prints, byte for byte, the ledger the run returned (`RunReport::render_ledger`): the
+  task rows, the known total, the per-pool drain.
+- Both fast integration rows end `(0 review(s), cost none)`.
+
+The same log cut just after the second task's `attempt_started`:
+- `status` reads the run as interrupted. The first task's row shows its exact known spend.
+- The second task's row counts the cut-off attempt and knows no amount (`—`).
+- The total and the pool drain carry `?`, and the floor legend is printed.
+
+Measured before commit, each mutation failing this test:
+- with the ledger removed from `Observed::render`, on the completed comparison;
+- with the interrupted view's settlement removed, on the cut-off row (`t2 0 — — — —`, no floor);
+- with `ran_no_review` removed, on the fast rows.
+
+## `fn a_schema_4_status_prints_the_integration_review_spend_run_reports_and_its_floor_once_cut_off()`
+
+L3, the integration reviews (Unix: the worker writes a file named by its own process). Two
+independent tasks at width 2 make the second merge a stale candidate's re-verification, with one
+priced review pass that the verified task pays for. Completed:
+- `status` prints the ledger the run returned; the verified task's review cell includes that
+  pass.
+- The `stale_clean` row ends `(1 review(s), cost $X)` and the fast row `(0 review(s), cost none)`.
+
+The log cut just after `merge_verification_started`:
+- The verified task's review cell is its attempt's known pass with `?`, and the run's total is a
+  floor.
+- The integration row is `open` with `cost ? (unknown)`.
+
+The ledger and settlement mutations above fail it too.
+

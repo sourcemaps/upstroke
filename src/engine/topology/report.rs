@@ -521,12 +521,26 @@ impl TopologyReport {
                 match row.review_cost_usd {
                     Some(cost) if !row.review_cost_incomplete => format!("${cost:.4}"),
                     Some(cost) => format!("at least ${cost:.4} (?)"),
+                    None if ran_no_review(row) => "none".to_owned(),
                     None => "? (unknown)".to_owned(),
                 }
             ));
         }
         out.into_string()
     }
+}
+
+/// A row whose terminal carried its review passes and lists none spent nothing on
+/// review: a fast merge and a conflict run no verification, and a prepared, rejected
+/// or unavailable terminal records every pass its verification ran. Only a row still
+/// open, or interrupted without a charged record, has spend no terminal carried.
+fn ran_no_review(row: &LedgerRow) -> bool {
+    row.reviews == 0
+        && !row.review_cost_incomplete
+        && !matches!(
+            row.terminal.as_str(),
+            "open" | "merge_verification_interrupted"
+        )
 }
 
 #[must_use]

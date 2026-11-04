@@ -19428,6 +19428,244 @@ fn a_fresh_schema_4_run_refuses_a_staged_an_unstaged_or_an_untracked_change_befo
     }
 }
 
+/// One pool, `claude-max`, for the topology stub's agent, in a file outside the checkout.
+fn stub_pool_file(tree: &ScratchTree) -> PathBuf {
+    let path = tree.path().join("pools.toml");
+    fs::write(
+        &path,
+        "[pools.claude-max]\nkind = \"subscription-window\"\nagent = \"claude-code\"\n",
+    )
+    .expect("the pools file");
+    path
+}
+
+/// Cuts a run's log after the first committed line whose event is `kind` and that `matches`,
+/// as a coordinator that died just after appending it leaves the log: a committed prefix.
+fn cut_log_after(
+    repo: &Path,
+    run_id: &str,
+    kind: &str,
+    matches: impl Fn(&serde_json::Value) -> bool,
+) {
+    let log = rundir::public_dir(repo, run_id).join("events.jsonl");
+    let text = fs::read_to_string(&log).expect("the run's event log");
+    let mut kept = String::new();
+    for line in text.split_inclusive('\n') {
+        kept.push_str(line);
+        let event: serde_json::Value =
+            serde_json::from_str(line.trim_end()).expect("a committed event");
+        if event["event"] == kind && matches(&event) {
+            fs::write(&log, kept).expect("the log, cut where its coordinator died");
+            return;
+        }
+    }
+    panic!("the premise: the log commits a matching `{kind}`:\n{text}");
+}
+
+/// The `status` a reader gets for `run_id`, through the public load and render.
+fn upstroke_status(repo: &Path, run_id: &str) -> String {
+    crate::status::render(&crate::status::load(repo, Some(run_id)).expect("status reads the run"))
+}
+
+/// The ledger row `status` prints for task `id`, split into its cells.
+fn ledger_cells(status: &str, id: &str) -> Vec<String> {
+    let ledger = status
+        .split_once("\nledger:\n")
+        .map(|(_, ledger)| ledger)
+        .unwrap_or_else(|| panic!("status prints a ledger:\n{status}"));
+    ledger
+        .lines()
+        .find(|line| line.split_whitespace().next() == Some(id))
+        .unwrap_or_else(|| panic!("the ledger has a row for `{id}`:\n{status}"))
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// L3 (regression review 3, finding 3; DESIGN §18, "the report and its ledger (§13)"). A
+/// schema-4 `status` prints the accounting projection `run` reports: the task ledger, the
+/// known total, its floors and the per-pool drain. A completed run of two tasks on one pool
+/// prints, byte for byte, the ledger the run itself returned, and its two fast merges say
+/// they spent nothing on review. The same log cut just after the second task's
+/// `attempt_started`, as a coordinator that died there leaves it, prints the first task's
+/// known spend and marks everything the cut-off attempt reaches as a floor: its row, the
+/// total and the pool, with the legend that says what `?` means.
+#[test]
+fn a_schema_4_status_prints_the_ledger_run_reports_for_a_completed_and_an_interrupted_run() {
+    let (tree, repo) = temp_engine_repo("topology-status-ledger");
+    let mut opts = topology_options(&repo);
+    opts.pools_path = Some(stub_pool_file(&tree));
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        0,
+    )));
+    let report = run_with(&opts, &source).expect("the schema-4 run completes");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:#?}");
+    until_released(&repo, &report.run_id);
+    let ledger = report.render_ledger();
+    assert!(
+        !report.total_is_floor() && report.total_cost_usd > 0.0 && ledger.contains("claude-max"),
+        "the premise: every amount is known and the pool paid for it:\n{ledger}"
+    );
+
+    let status = upstroke_status(&repo, &report.run_id);
+    assert!(
+        status.contains(&ledger),
+        "status prints the ledger the run reported:\n{status}\n--- the run's ledger:\n{ledger}"
+    );
+    let fast: Vec<&str> = status
+        .lines()
+        .filter(|line| line.contains(" fast expected "))
+        .collect();
+    assert_eq!(
+        fast.len(),
+        2,
+        "the premise: both merges were fast:\n{status}"
+    );
+    assert!(
+        fast.iter()
+            .all(|line| line.ends_with("(0 review(s), cost none)")),
+        "a fast merge runs no review, so its spend is known to be none:\n{status}"
+    );
+
+    let first = task(&report, "t1")
+        .total_cost_usd()
+        .expect("the first task's spend is known");
+    let second = crate::engine::topology::observe::observe(&repo, &report.run_id)
+        .expect("observes")
+        .expect("a schema-4 log")
+        .registry()
+        .and_then(|registry| {
+            registry
+                .entries()
+                .iter()
+                .find(|entry| entry.display_id.as_str() == "t2")
+        })
+        .map(|entry| entry.key.0)
+        .expect("t2 is registered");
+    cut_log_after(&repo, &report.run_id, "attempt_started", |event| {
+        event["data"]["key"] == second
+    });
+    let status = upstroke_status(&repo, &report.run_id);
+    assert!(status.contains("state: interrupted"), "{status}");
+    let known = ledger_cells(&status, "t1");
+    assert_eq!(
+        known.last().map(String::as_str),
+        Some(format!("${first:.4}").as_str()),
+        "the first task's spend is known and exact: {known:?}\n{status}"
+    );
+    let cut = ledger_cells(&status, "t2");
+    assert!(
+        cut.get(1).map(String::as_str) == Some("1")
+            && cut.len() > 3
+            && cut.iter().rev().take(3).all(|cell| cell == "—"),
+        "the cut-off attempt is counted, and nothing it spent is known: {cut:?}\n{status}"
+    );
+    for floor in [
+        format!("  total ${first:.4}? (api-equivalent"),
+        "  `?` marks a figure missing an attempt".to_owned(),
+        format!("    claude-max: 3 attempt(s), ${first:.4}?"),
+    ] {
+        assert!(
+            status.contains(&floor),
+            "the known spend is a floor, not a total: no `{floor}` in\n{status}"
+        );
+    }
+}
+
+/// L3, the integration reviews. Two independent tasks at width 2 make the second merge a stale
+/// candidate's re-verification, whose review pass is paid for by the verified task. A completed
+/// run's `status` prints the ledger the run reported, that pass's cost on the integration row
+/// and "none" on the fast one. The same log cut just after `merge_verification_started` leaves
+/// the verification in flight: the verified task's review is a floor, and so is the total.
+#[cfg(unix)]
+#[test]
+fn a_schema_4_status_prints_the_integration_review_spend_run_reports_and_its_floor_once_cut_off() {
+    let (tree, repo) = temp_engine_repo("topology-status-integration");
+    seed(
+        &repo,
+        TWO_INDEPENDENT_TASKS,
+        Some("[engine]\nmax_parallel = 2\n"),
+    );
+    let mut opts = topology_options(&repo);
+    opts.pools_path = Some(stub_pool_file(&tree));
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        "printf 'edited by the topology stub\\n' > \"out.$$.txt\"",
+        0,
+    )));
+    let report = run_with(&opts, &source).expect("the schema-4 run completes");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:#?}");
+    until_released(&repo, &report.run_id);
+    let observed = crate::engine::topology::observe::observe(&repo, &report.run_id)
+        .expect("observes")
+        .expect("a schema-4 log");
+    let projected = observed.report().expect("projects");
+    let stale = projected
+        .integration_ledger
+        .iter()
+        .find(|row| row.basis == "stale_clean")
+        .unwrap_or_else(|| {
+            panic!(
+                "the premise: one merge was a stale candidate's re-verification: {:#?}",
+                projected.integration_ledger
+            )
+        });
+    let paid = match (stale.reviews, stale.review_cost_usd) {
+        (1.., Some(cost)) if !stale.review_cost_incomplete => cost,
+        _ => panic!("the premise: the re-verification ran a priced review pass: {stale:#?}"),
+    };
+    let verified = observed.display_id(stale.candidate.key);
+
+    let ledger = report.render_ledger();
+    let status = upstroke_status(&repo, &report.run_id);
+    assert!(
+        status.contains(&ledger),
+        "status prints the ledger the run reported:\n{status}\n--- the run's ledger:\n{ledger}"
+    );
+    for (basis, cost) in [
+        (
+            "stale_clean",
+            format!("({} review(s), cost ${paid:.4})", stale.reviews),
+        ),
+        ("fast", "(0 review(s), cost none)".to_owned()),
+    ] {
+        assert!(
+            status
+                .lines()
+                .any(|line| line.contains(&format!(" {basis} expected ")) && line.ends_with(&cost)),
+            "the {basis} integration row ends `{cost}`:\n{status}"
+        );
+    }
+
+    cut_log_after(&repo, &report.run_id, "merge_verification_started", |_| {
+        true
+    });
+    let status = upstroke_status(&repo, &report.run_id);
+    assert!(status.contains("state: interrupted"), "{status}");
+    let cells = ledger_cells(&status, &verified);
+    let review = cells
+        .get(cells.len().saturating_sub(2))
+        .map_or("", String::as_str);
+    assert!(
+        review.starts_with('$') && review.ends_with('?'),
+        "the verified task's review is what its attempt's pass cost, and a floor: {cells:?}\n{status}"
+    );
+    assert!(
+        status
+            .lines()
+            .any(|line| line.trim_start().starts_with("total $")
+                && line.contains("? (api-equivalent")),
+        "the run's total is a floor:\n{status}"
+    );
+    assert!(
+        status
+            .lines()
+            .any(|line| line.contains(" -> open ")
+                && line.ends_with("(0 review(s), cost ? (unknown))")),
+        "the verification in flight is unknown on its integration row:\n{status}"
+    );
+}
+
 /// P12-W13. A parked schema-4 question has no payload file: `status` names it,
 /// `show` renders it from the fold by an id prefix, `answer` records it once and
 /// refuses a second, the resume ingests it from the file the run polls, and an

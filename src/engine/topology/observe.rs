@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::engine::RunReport;
 use crate::error::UpstrokeError;
 use crate::interaction::Sleeper;
 use crate::ir::{Question, TaskId};
@@ -18,6 +19,7 @@ use crate::topology::schema::{
 };
 use crate::util::terminal::{TerminalLines, one_line};
 
+use super::closure;
 use super::report::{TopologyReport, outcome_label};
 
 const STABLE_READ_ATTEMPTS: usize = 8;
@@ -223,6 +225,13 @@ impl Observed {
     pub fn render(&self) -> Result<String, UpstrokeError> {
         let report = self.report()?;
         let mut rendered = report.render();
+        let accounting = self.accounting();
+        let mut warned = TerminalLines::default();
+        for warning in &accounting.warnings {
+            warned.push(format_args!("warning: {warning}"));
+        }
+        rendered.push_str(&warned.into_string());
+        rendered.push_str(&accounting.render_ledger());
         let mut out = TerminalLines::default();
         out.push(format_args!(
             "log: schema 4, {} committed line(s) in {}",
@@ -260,6 +269,29 @@ impl Observed {
         ));
         rendered.push_str(&out.into_string());
         Ok(rendered)
+    }
+
+    /// The accounting projection `run` reports (`RunReport::from_topology`): the
+    /// task ledger, the known total and its floors, the per-pool drain and the
+    /// integration reviews each task paid for. For an interrupted run it is read
+    /// over the committed log followed by the interrupted settlements its resume
+    /// will append for what is in flight, so the spend nobody can know is a floor
+    /// here as it will be in the log.
+    fn accounting(&self) -> RunReport {
+        if self.running || self.finished() {
+            return RunReport::from_topology(&self.fold, &self.events, Vec::new());
+        }
+        // An owned snapshot is the intended semantics: the view adds settlements the
+        // log does not hold yet, and `self.events` stays the committed log that
+        // `describe` and `follow` print. Closure's settlement bodies are reused for
+        // their identities; their halt details reach no line of the ledger.
+        let mut settled = self.events.clone();
+        settled.extend(
+            closure::in_flight(&self.fold)
+                .iter()
+                .map(|item| TopologyEvent::now(item.interrupted())),
+        );
+        RunReport::from_topology(&self.fold, &settled, Vec::new())
     }
 
     #[must_use]

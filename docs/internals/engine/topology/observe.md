@@ -64,11 +64,48 @@ reporting a prefix it could not hold still.
 
 ## `impl Observed` › `pub fn render(&self) -> Result<String, UpstrokeError> {`
 
-`TopologyReport::render` (which names the runner identity), then the lines
-legacy `status` adds: the log's schema and committed line count, the run's
-state (running now; or interrupted, with the resume command), a torn tail's
-byte count, the open questions with the command that answers each, and where
-the transcripts are.
+`TopologyReport::render` (which names the runner identity), then the
+accounting projection's warnings and its ledger (`RunReport::render_ledger`,
+read through `accounting` below), then the lines legacy `status` adds: the log's
+schema and committed line count, the run's state (running now; or interrupted,
+with the resume command), a torn tail's byte count, the open questions with the
+command that answers each, and where the transcripts are.
+
+The ledger is L3 (regression review 3, finding 3; DESIGN §18, "`status` prints
+the report and its ledger (§13)"). Until L3 a schema-4 `status` printed only the
+topology report: task states and the integration ledger, but no spend. The
+worker's known `$0.0100`, the run's total, the task ledger and the pool drain
+that `run` had printed could not be recovered from `status`. The only cost on
+the screen was the fast integration row's `cost ? (unknown)`. Both new parts
+come from the existing renderings, `RunReport`'s warning lines and
+`render_ledger`. So the floors J3, J12, K4 and K5 put in the projection read the
+same in `status` as in the run's own report: an unpriced pass, an unattributed
+or interrupted integration verification, and an attempt killed in flight.
+
+## `impl Observed` › `fn accounting(&self) -> RunReport {`
+
+`RunReport::from_topology`, the projection `run` and `resume` return, over this
+log. A finished run and one another process holds are projected as committed.
+
+**An interrupted run is projected as its resume will record it.** Nothing holds
+it and it has not finished, so whatever its log has in flight (an attempt
+started and never settled, or an integration verification started and never
+ended) was cut off with its spend unknown. The legacy `status` settles such an
+attempt in memory for the same reason (`status::load`'s `settle_interrupted`).
+Here the committed events are followed, in an owned copy, by the interrupted
+settlements `engine::topology::closure::in_flight` names: the same identities
+recovery's steps (d) and (f) will settle. The projection then reads the cut-off
+attempt as counted with nothing known, and the verified task's review as a floor.
+The total and the pool drain carry `?`, and the legend says what it means.
+Without this, the total of a run killed mid-attempt read as exact.
+
+- The settlement bodies are closure's own (`InFlight::interrupted`). Their
+  details are written for a halt, and the ledger prints none of them.
+- Nothing is written, and the fold is not replayed again. The topology report
+  above the ledger still shows the generation in flight and the verification
+  `open`, as the log does.
+- A run another process holds is not settled: its attempt is working, not
+  interrupted (`status.md` says the same of the legacy view).
 
 ## `impl Observed` › `pub fn describe(&self, event: &TopologyEvent) -> String {`
 
