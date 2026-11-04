@@ -2493,6 +2493,62 @@ lifecycle as J6's unresolved-start guard. Its assertions now live in
 `unresolved_process_in_an_owned_helper`; Windows, which has no Unix container
 reaper, executes the same assertions directly.
 
+## `const STALLED_OBSERVATION_DEADLINE: Duration = Duration::from_secs(10);`
+
+The timeout the deadline and cleanup modes give their invocation (R6-N2,
+regular review 6, P2; the concurrency lens's PR12-CI-02 and the regression
+lens's PR12-K2-OBSERVATION-PREMISE-DEADLINE are the same defect).
+It was 300 ms, chosen without counting what a deadline here covers. `contain`
+starts the deadline before reaper coverage and the launch, and
+`DockerCli::exec_within` asks nothing once it has passed, so a launch that
+spent the 300 ms never asked the observation this witness stalls, and the
+child failed its premise instead of testing it. Native10's macOS deadline child
+failed exactly there, at `observed.exists()` (run 41904743958, job
+126836335262; its whole test, fixture included, took 2.94 s). That run does not
+say which phase was slow, and no failure rate was measured; what the repair
+removes is the budget. On the idle build box the observation is asked about
+171 ms after the helper calls `run_blocking_with`, a moment before `contain`
+starts the deadline, so roughly half the old deadline was spent before the
+stub was reached.
+
+What the deadline covers before the first observation, read from the source:
+
+- arming the runner's container reaper (`Reaping::cover`, `arm_container_reaper`):
+  a fork and its READY handshake, which production lets take
+  `HELPER_READY_BUDGET` (2 s) before it gives up;
+- writing the intent and materializing the Git view: file work, no process;
+- three supervised questions, `docker create`, `docker container inspect` and
+  `docker start`: each starts its own cleanup reaper, under the same 2 s
+  budget, and the stub's `sh`;
+- the observation's own cleanup reaper and `sh`, up to the marker.
+
+The job-control guard is not among them: the fixture's setup started it. Five
+helper starts that production tolerates up to 2 s each make 10 s, and the four
+shell starts and the file work are small beside them. That is the stated
+assumption: a launch whose helpers each start within their own production
+budget reaches the observation inside the deadline. A slower launch fails the
+premise with the invocation's result, its elapsed time and its timeout, and is
+a slow or wedged launch, never a deadline or fate defect.
+
+No clock seam can force the interleaving instead: `contain` and `supervise`
+read `Instant::now()` directly, and this repair leaves `exec.rs` byte-for-byte
+unchanged. A witness of the production deadline over the production `contain`
+therefore needs its launch to fit inside the deadline it was given; the repair
+makes that a budget with stated phases rather than a narrow interval, and
+establishes readiness at the observation boundary itself, the stub's marker,
+reporting on every run how long it took to reach it.
+
+## `const STALLED_OBSERVATION_SETTLES: Duration = Duration::from_secs(20);`
+
+How long an invocation may take to settle after what ends it: after the
+deadline in the deadline and cleanup modes, whose bound is the deadline plus
+this, and after its start in the cancel mode, whose cancellation follows the
+stub's marker. It is K2's 20 s bound with its meaning unchanged: far above what
+a loaded runner needs for the bounded questions a mode asks after its end (the
+cleanup mode's stalled stop and removal take about 2.2 s on the build box),
+and far below the minute the stub stalls, so an observation that neither the
+deadline nor the cancellation ended fails it.
+
 ## `const STALLED_OBSERVATION_DOCKER: &str = "#!/bin/sh\n\`
 
 The stub `docker` of the stalled-observation witness, written by a process of
@@ -2500,10 +2556,18 @@ its own (`write_program_in_its_own_process`, so no fork of this process holds
 it open for writing when the child executes it). A `ps` filtered by name,
 which only the supervision asks, records that it was asked in the file
 `UPSTROKE_TEST_OBSERVED` names and then sleeps a minute; a `ps` filtered by
-label, the container reaper's, lists nothing. `create`, `start` and `logs`
-answer at once, `container inspect` answers the recorded image id or an exit
-status of 0, and `stop` and `rm` answer at once, or sleep a minute when
+label, the container reaper's, lists nothing. `create` and `logs` answer at
+once, `start` at once or after the whole seconds `UPSTROKE_TEST_START_HELD`
+names, `container inspect` answers the recorded image id or an exit status
+of 0, and `stop` and `rm` answer at once, or sleep a minute when
 `UPSTROKE_TEST_CLEANUP_STALLS` is set. Anything else exits 93.
+
+Nothing else asks the name-filtered `ps` here. The release's stop and removal
+either answer, or stall and end at the question bound with no daemon answer
+for `settle` to confirm by observation, and the collection lists nothing. So
+the marker exists only if the supervision asked its observation, which
+`exec_within` does only before the deadline. Each stall `exec`s into `sleep`,
+so it stays the supervised process itself.
 
 ## `fn a_running_container_whose_observation_stalls_settles_at_its_deadline_or_cancellation_and_keeps_its_fate()`
 
@@ -2515,33 +2579,118 @@ runs, `ContainerRunner` over the real `DockerCli`, in an isolated child of
 this test binary whose `PATH` alone carries the stub
 (`run_test_isolated`, which keeps the child's output for the failure message
 and kills its process group at two minutes). Three modes, a shell probe each:
-- `deadline`: a 300 ms timeout. The observation ends at the deadline, the
-  invocation is collected as timed out (no exit code) and released, all
-  within 20 s;
+- `deadline`: a `STALLED_OBSERVATION_DEADLINE` (10 s) timeout. The observation
+  ends at the deadline, the invocation is collected as timed out (no exit
+  code) and released, within `STALLED_OBSERVATION_SETTLES` of the deadline;
 - `cancel`: a ten-minute timeout and a cancellation once the stub records the
   observation. The invocation reports the cancellation with fate `Gone`
-  within 20 s: the release's stop and removal answered;
+  within `STALLED_OBSERVATION_SETTLES`: the release's stop and removal
+  answered;
 - `cleanup`: the deadline mode with `stop` and `rm` stalled too and the
   runtime's own bound shortened to one second (`with_question_bound`). Each
   cleanup question ends at that bound, and the invocation reports fate
   `Unresolved`, with its intent kept for the census: neither the stop nor the
-  removal was confirmed, and the bound does not turn that into `Gone`.
+  removal was confirmed, and the bound does not turn that into `Gone`. Its
+  `docker start` is also held for 2 s (`UPSTROKE_TEST_START_HELD`): the
+  in-suite setup-delay case the concurrency lens (PR12-CI-02) and the
+  regression lens (PR12-K2-OBSERVATION-PREMISE-DEADLINE) asked for. Every run
+  shows a launch delayed far past the former 300 ms deadline still reaching
+  the stalled observation, and the helper requires the observation to come
+  after the hold, so a hold that never happened cannot pass as one. The hold
+  costs no time: this mode's length is its deadline's.
 
-Measured on the build box before commit: with the supervision's observation
-asked under the runtime's own bound instead of the invocation's, the deadline
-mode took 60.4 s and failed; with the cleanup questions given ten minutes, the
-cleanup mode was killed at the parent's two-minute bound and failed. The
-20 s bound is a bound on a stub that never answers, far above what a loaded
-runner needs for the dozen bounded questions a mode asks, and far below the
-minute the stub stalls.
+Each mode runs in two helpers (R6-N1), one ending in an ordinary return and
+one in a deliberate unwind after its runner dropped. The parent requires the
+helper's successful exit, libtest's `1 passed`, exactly one job-control-guard
+collection marker and one ECHILD marker, and the mode's reaper evidence: in
+the cleanup mode exactly one `collected retained stub reaper` marker and no
+disarm marker; in the deadline and cancel modes exactly one `disarmed its
+container reaper on drop` marker and no retained-reaper collection. A helper
+that settled with another fate, kept a reaper it should have dropped, dropped
+one it should have kept, or left a direct child cannot pass. Each helper's
+captured output is reported through the fixture's `say` funnel.
+
+Measured on the build box before commit (K2): with the supervision's
+observation asked under the runtime's own bound instead of the invocation's,
+the deadline mode took 60.4 s and failed; with the cleanup questions given ten
+minutes, the cleanup mode was killed at the parent's two-minute bound and
+failed. Repair7, same box (Linux; not macOS evidence): all six helpers pass.
+The deadline and cancel modes asked their observation about 171 ms after the
+invocation began, the cleanup mode, its start held 2 s, after 2.14 s; the
+deadline mode settled after 10.26 s, the cleanup mode after 12.19 s and the
+cancel mode after 0.34 s; the parent took 49 s.
+
+Bounded controls on the same box, each one exact replacement restored
+byte-for-byte. Replacing the cleanup mode's `reaper.collect()` with
+`std::mem::forget(reaper)` (R6-N1's omission witness) fails `cleanup/return`
+at the helper's direct-child census (`waitpid=0`), and so the parent, while
+the deadline and cancel helpers still pass. Holding the stub's `docker start`
+5 s in every mode still reaches the stalled observation in all six helpers,
+about 5.15 s in. Holding it 12 s, past the deadline, fails `deadline/return`
+at the premise, whose message names the start that ended at the deadline
+(`ended before it answered`), 10.16 s and the 10 s timeout; nothing hangs.
+Two temporary controls of `container.rs` answer the regression lens's
+proposed guard; `exec.rs` is never touched. Asking the supervision's
+observation under the runtime's own bound instead of the invocation's fails
+`deadline/return` at the settle bound after 60.39 s (K2's original bypass
+took 60.4 s). A release that reports its container gone fails
+`cleanup/return` with fate `Gone` where `Unresolved` is required.
 
 ## `fn stalled_observation_child() {`
 
-The child of the witness above: it builds the exec fixture's repository, asks
-the mode's invocation through `run_blocking_with` with a cancellation of its
-own, and asserts the premise (the stub recorded the observation), the bound
-and the mode's outcome. Ignored in the default suite; only the witness runs
-it, with the stub first on its `PATH`.
+Ignored because only the parent above supplies its mode, ending, marker and
+stub. R6-N1 (regular review 6, P2): until repair7 this helper returned with
+its cleanup mode's container reaper, which `Reaping::drop` deliberately keeps
+(`kept_until_the_process_exits`), left to outlive the helper, and in every
+mode with the job-control guard its fixture's setup started left to the
+helper's exit; `run_test_isolated` collects the helper, not the helper's
+children. It now owns both, as L5's `unresolved_process_child` does.
+`IsolatedJobControl` is constructed before the fixture, whose setup starts the
+process-global guard and its probe. `RetainedStubReaper` is constructed
+before the invocation, for the runner's exact scope, with the `DockerCli`'s
+own `reaper_program()` and the stub the parent wrote.
+`assert_a_stalled_observation_settles` runs the invocation and drops its
+runner. The cleanup mode then requires the scope still registered, the
+production backstop having kept the reaper; the deadline and cancel modes
+require it disarmed, their runners having settled `Gone` and cancelled and
+waited for their own reapers on drop, and say so. On ordinary return the helper
+collects the retained reaper (cleanup) and the guard explicitly; on the
+deliberate unwind their Drops do, and in the other modes the reaper owner finds
+nothing registered. The catch accepts only that exact deliberate panic; any
+other failure still fails the helper. Finally
+`assert_no_children_in_isolated_test` requires ECHILD before the parent
+collects the helper.
+
+ECHILD is a direct-child claim. It covers the helper's own children: the
+job-control guard, the container reaper, and each cleanup reaper and stub
+process the `docker` questions started, which their supervisions end and
+collect before the questions return; the guard's collection requires that no
+command group is still registered. It is not proof about arbitrary
+descendants. The retained reaper's no-grandchildren argument is in
+`agent/proc.md` (`RetainedStubReaper`), and the guard's distinct collected
+status proves its probe reaped. The environment keys select the mode, ending,
+marker, image and stub, the cleanup stalls and the start hold; the scratch
+trees and output files keep their RAII owners.
+
+## `fn assert_a_stalled_observation_settles(`
+
+One mode's invocation: the runner over the real `DockerCli` (its question bound
+shortened to one second in the cleanup mode), the shell probe with the mode's
+timeout, a watcher, and the assertions; the runner drops when this returns or
+unwinds, before the helper looks at its reaper. The watcher polls for the
+marker every 10 ms until it appears, the invocation ends or a minute passes,
+records how long after the invocation began it appeared, and in the cancel
+mode then cancels (at the minute if the marker never came). The premise is
+the unchanged `observed.exists()`; when it fails, it names the invocation's
+result, elapsed time and timeout, which tell a launch refused or ended at the
+deadline (`docker start` not asked, or ended before it answered) from one that
+started and was never observed. A launch the parent held at `docker start`
+must have reached its observation after the hold. Then the bound, `took`
+under the deadline plus `STALLED_OBSERVATION_SETTLES`
+(`STALLED_OBSERVATION_SETTLES` alone in the cancel mode), and the unchanged
+outcomes: timed out with no exit code; cancelled with fate `Gone`; fate
+`Unresolved` with the intent kept. Every run says how long the observation
+took to reach and the invocation to settle.
 
 ## `fn review_timeouts_obey_the_platform_deadline_range() {`
 

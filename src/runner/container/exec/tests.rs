@@ -8416,13 +8416,28 @@ fn unresolved_process_child() {
 const STALLED_OBSERVATION_MODE: &str = "UPSTROKE_TEST_STALLED_OBSERVATION";
 
 #[cfg(unix)]
+const STALLED_OBSERVATION_ENDING: &str = "UPSTROKE_TEST_STALLED_OBSERVATION_ENDING";
+
+#[cfg(unix)]
 const STALLED_OBSERVATION_MARKER: &str = "UPSTROKE_TEST_OBSERVED";
 
 #[cfg(unix)]
 const STALLED_OBSERVATION_IMAGE: &str = "UPSTROKE_TEST_IMAGE";
 
 #[cfg(unix)]
+const STALLED_OBSERVATION_STUB: &str = "UPSTROKE_TEST_STALLED_OBSERVATION_STUB";
+
+#[cfg(unix)]
 const STALLED_CLEANUP: &str = "UPSTROKE_TEST_CLEANUP_STALLS";
+
+#[cfg(unix)]
+const STALLED_START_HELD: &str = "UPSTROKE_TEST_START_HELD";
+
+#[cfg(unix)]
+const STALLED_OBSERVATION_DEADLINE: Duration = Duration::from_secs(10);
+
+#[cfg(unix)]
+const STALLED_OBSERVATION_SETTLES: Duration = Duration::from_secs(20);
 
 #[cfg(unix)]
 const STALLED_OBSERVATION_DOCKER: &str = "#!/bin/sh\n\
@@ -8432,7 +8447,8 @@ const STALLED_OBSERVATION_DOCKER: &str = "#!/bin/sh\n\
     \x20 *\"filter name=\"*) : > \"$UPSTROKE_TEST_OBSERVED\"; exec sleep 60 ;;\n\
     \x20 *) exit 0 ;;\n\
     \x20 esac ;;\n\
-    create|start) exit 0 ;;\n\
+    create) exit 0 ;;\n\
+    start) if [ -n \"$UPSTROKE_TEST_START_HELD\" ]; then sleep \"$UPSTROKE_TEST_START_HELD\"; fi; exit 0 ;;\n\
     container)\n\
     \x20 case \"$*\" in\n\
     \x20 *.Image*) printf '%s\\n' \"$UPSTROKE_TEST_IMAGE\" ;;\n\
@@ -8456,42 +8472,146 @@ fn a_running_container_whose_observation_stalls_settles_at_its_deadline_or_cance
     let path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&inherited)))
         .expect("a PATH with the stub first");
     for mode in ["deadline", "cancel", "cleanup"] {
-        let observed = tree.path().join(format!("observed-{mode}"));
-        let mut vars = vec![
-            ("PATH", path.as_os_str()),
-            (STALLED_OBSERVATION_MODE, std::ffi::OsStr::new(mode)),
-            (STALLED_OBSERVATION_MARKER, observed.as_os_str()),
-            (STALLED_OBSERVATION_IMAGE, std::ffi::OsStr::new(IMAGE_ID)),
-        ];
-        if mode == "cleanup" {
-            vars.push((STALLED_CLEANUP, std::ffi::OsStr::new("1")));
+        let (retained, disarmed) = if mode == "cleanup" { (1, 0) } else { (0, 1) };
+        for ending in ["return", "unwind"] {
+            let observed = tree.path().join(format!("observed-{mode}-{ending}"));
+            let mut vars = vec![
+                ("PATH", path.as_os_str()),
+                (STALLED_OBSERVATION_MODE, std::ffi::OsStr::new(mode)),
+                (STALLED_OBSERVATION_ENDING, std::ffi::OsStr::new(ending)),
+                (STALLED_OBSERVATION_MARKER, observed.as_os_str()),
+                (STALLED_OBSERVATION_IMAGE, std::ffi::OsStr::new(IMAGE_ID)),
+                (STALLED_OBSERVATION_STUB, stub.as_os_str()),
+            ];
+            if mode == "cleanup" {
+                vars.push((STALLED_CLEANUP, std::ffi::OsStr::new("1")));
+                vars.push((STALLED_START_HELD, std::ffi::OsStr::new("2")));
+            }
+            let ended = crate::agent::proc::test_support::run_test_isolated(
+                "runner::container::exec::tests::stalled_observation_child",
+                &vars,
+                Duration::from_secs(120),
+            );
+            assert!(
+                ended.status.is_some_and(|status| status.success())
+                    && ended.stdout.contains("1 passed")
+                    && ended
+                        .stderr
+                        .matches("collected retained stub reaper ")
+                        .count()
+                        == retained
+                    && ended
+                        .stderr
+                        .matches("disarmed its container reaper on drop")
+                        .count()
+                        == disarmed
+                    && ended
+                        .stderr
+                        .matches("collected isolated job-control guard ")
+                        .count()
+                        == 1
+                    && ended
+                        .stderr
+                        .matches("isolated helper has no direct children (ECHILD)")
+                        .count()
+                        == 1,
+                "{mode}/{ending}: the stalled observation held the invocation, it settled with \
+                 another fate, or the owned helper did not collect its retained reaper and its \
+                 job-control guard before succeeding: {ended}"
+            );
+            crate::workspace_manager::fixture::say(&format!("{mode}/{ending}: {ended}"));
         }
-        let ended = crate::agent::proc::test_support::run_test_isolated(
-            "runner::container::exec::tests::stalled_observation_child",
-            &vars,
-            Duration::from_secs(120),
-        );
-        assert!(
-            ended.status.is_some_and(|status| status.success())
-                && ended.stdout.contains("1 passed"),
-            "{mode}: the stalled observation held the invocation, or it settled with another \
-             fate: {ended}"
-        );
     }
 }
 
 #[cfg(unix)]
 #[test]
-#[ignore = "spawned by the stalled-observation witness"]
+#[ignore = "owned helper of the stalled-observation witness"]
 fn stalled_observation_child() {
-    use crate::error::ProcessFate;
+    use crate::agent::proc::test_support::{
+        IsolatedJobControl, RetainedStubReaper, assert_no_children_in_isolated_test,
+    };
 
+    let job_control = IsolatedJobControl::new();
     let mode = std::env::var(STALLED_OBSERVATION_MODE).expect("the parent names the mode");
+    let ending =
+        std::env::var(STALLED_OBSERVATION_ENDING).expect("the parent names the helper ending");
+    assert!(
+        matches!(mode.as_str(), "deadline" | "cancel" | "cleanup"),
+        "{mode}"
+    );
+    assert!(matches!(ending.as_str(), "return" | "unwind"), "{ending}");
     let observed = PathBuf::from(
         std::env::var_os(STALLED_OBSERVATION_MARKER).expect("the parent names the marker"),
     );
-    let fixture = Fixture::new(&format!("stalled-observation-{mode}"), false);
-    let docker = crate::runner::container::DockerCli::new(ContainerTrace::off());
+    let stub = PathBuf::from(
+        std::env::var_os(STALLED_OBSERVATION_STUB).expect("the parent names its stub"),
+    );
+    let held = std::env::var(STALLED_START_HELD).ok().map(|seconds| {
+        Duration::from_secs(
+            seconds
+                .parse()
+                .expect("the parent holds the start for whole seconds"),
+        )
+    });
+    let fixture = Fixture::new(&format!("stalled-observation-{mode}-{ending}"), false);
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let job_control = job_control;
+        let docker = crate::runner::container::DockerCli::new(ContainerTrace::off());
+        let reaper = RetainedStubReaper::new(
+            &fixture.private_root,
+            INCARNATION_1,
+            &docker.reaper_program(),
+            &stub,
+        );
+        assert_a_stalled_observation_settles(&fixture, &mode, &observed, held, docker);
+        let armed = armed_for(&fixture.private_root, INCARNATION_1);
+        if mode == "cleanup" {
+            assert!(
+                armed,
+                "the unresolved runner's drop exercised the production retained-reaper backstop"
+            );
+        } else {
+            assert!(
+                !armed,
+                "{mode}: the settled runner's drop disarmed its container reaper"
+            );
+            crate::workspace_manager::fixture::say(&format!(
+                "{mode}: the settled runner disarmed its container reaper on drop"
+            ));
+        }
+        assert!(
+            ending != "unwind",
+            "deliberate unwind after the runner dropped"
+        );
+        if mode == "cleanup" {
+            reaper.collect();
+        }
+        job_control.collect();
+    }));
+    if ending == "unwind" {
+        let payload = outcome.expect_err("the deliberate unwind exercised guard cleanup");
+        assert_eq!(
+            payload.downcast_ref::<&str>(),
+            Some(&"deliberate unwind after the runner dropped")
+        );
+    } else if let Err(payload) = outcome {
+        std::panic::resume_unwind(payload);
+    }
+    assert_no_children_in_isolated_test();
+}
+
+#[cfg(unix)]
+fn assert_a_stalled_observation_settles(
+    fixture: &Fixture,
+    mode: &str,
+    observed: &Path,
+    held: Option<Duration>,
+    docker: crate::runner::container::DockerCli,
+) {
+    use crate::error::ProcessFate;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     let docker = if mode == "cleanup" {
         docker.with_question_bound(Duration::from_secs(1))
     } else {
@@ -8508,35 +8628,62 @@ fn stalled_observation_child() {
     .expect("a container policy");
     let mut request =
         host::shell_probe_request(ShellKind::Sh, fixture.task_a.clone(), shell_probe_id());
-    request.timeout = if mode == "cancel" {
-        Duration::from_secs(600)
+    let settles_within = if mode == "cancel" {
+        request.timeout = Duration::from_secs(600);
+        STALLED_OBSERVATION_SETTLES
     } else {
-        Duration::from_millis(300)
+        request.timeout = STALLED_OBSERVATION_DEADLINE;
+        STALLED_OBSERVATION_DEADLINE + STALLED_OBSERVATION_SETTLES
     };
     let cancellation = Cancellation::new();
+    let ended = AtomicBool::new(false);
     let began = Instant::now();
-    let ran = std::thread::scope(|scope| {
-        if mode == "cancel" {
-            scope.spawn(|| {
-                let until = Instant::now() + Duration::from_secs(60);
-                while !observed.exists() && Instant::now() < until {
-                    crate::workspace_manager::fixture::rest(Duration::from_millis(10));
+    let (ran, asked_after) = std::thread::scope(|scope| {
+        let watcher = scope.spawn(|| {
+            let until = Instant::now() + Duration::from_secs(60);
+            let asked = loop {
+                let finished = ended.load(Ordering::SeqCst);
+                if observed.exists() {
+                    break Some(began.elapsed());
                 }
+                if finished || Instant::now() >= until {
+                    break None;
+                }
+                crate::workspace_manager::fixture::rest(Duration::from_millis(10));
+            };
+            if mode == "cancel" {
                 cancellation.cancel();
-            });
-        }
-        runner.run_blocking_with(&request, RunnerCall::new(cancellation.clone()))
+            }
+            asked
+        });
+        let ran = runner.run_blocking_with(&request, RunnerCall::new(cancellation.clone()));
+        ended.store(true, Ordering::SeqCst);
+        (ran, watcher.join().expect("the observation watcher"))
     });
     let took = began.elapsed();
     assert!(
         observed.exists(),
-        "{mode}: the premise, the started container's observation was asked"
+        "{mode}: the premise, the started container's observation was asked: the invocation \
+         returned {ran:?} after {took:?} under a {:?} timeout without asking it",
+        request.timeout
     );
+    if let Some(held) = held {
+        assert!(
+            asked_after.is_some_and(|after| after >= held),
+            "{mode}: the launch was held {held:?} at `docker start`, and its observation was \
+             asked after {asked_after:?}"
+        );
+    }
     assert!(
-        took < Duration::from_secs(20),
-        "{mode}: the stalled `docker` held the invocation {took:?}"
+        took < settles_within,
+        "{mode}: the stalled `docker` held the invocation {took:?}, past {settles_within:?}"
     );
-    match mode.as_str() {
+    crate::workspace_manager::fixture::say(&format!(
+        "{mode}: the observation was asked after {asked_after:?} and the invocation settled \
+         after {took:?}, under a {:?} timeout",
+        request.timeout
+    ));
+    match mode {
         "deadline" => {
             let output = ran.expect("a timed-out invocation reports its output");
             assert!(output.timed_out && output.code.is_none(), "{output:?}");

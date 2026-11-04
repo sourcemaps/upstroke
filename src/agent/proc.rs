@@ -10144,60 +10144,7 @@ pub(crate) mod test_support {
                 }
                 *pid
             };
-            if let Some(status) = poll_retained_mock_reaper(pid)
-                .map_err(|error| format!("inspect retained mock reaper {pid}: {error}"))?
-            {
-                self.note_collected(pid);
-                return Err(format!(
-                    "retained mock reaper {pid} had already exited: {status}"
-                ));
-            }
-            // SAFETY: this helper is isolated and has no competing waiter. The registry
-            // identifies its mock reaper, whose runner has dropped; waitpid just proved
-            // it is still this process's unreaped child, so its pid cannot be reused.
-            // SIGKILL cannot execute the reaper's parent-death cleanup or spawn children.
-            if unsafe { libc::kill(pid, libc::SIGKILL) } != 0 {
-                return Err(format!(
-                    "kill retained mock reaper {pid}: {}",
-                    std::io::Error::last_os_error()
-                ));
-            }
-            let deadline = Instant::now() + ISOLATED_CHILD_COLLECTION_BOUND;
-            loop {
-                match poll_retained_mock_reaper(pid) {
-                    Ok(Some(status)) => {
-                        self.note_collected(pid);
-                        if !libc::WIFSIGNALED(status) || libc::WTERMSIG(status) != libc::SIGKILL {
-                            return Err(format!(
-                                "retained mock reaper {pid} ended unexpectedly: {status}"
-                            ));
-                        }
-                        crate::workspace_manager::fixture::say(&format!(
-                            "collected retained mock reaper {pid}"
-                        ));
-                        return Ok(true);
-                    }
-                    Ok(None) => {}
-                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
-                    Err(error) => {
-                        return Err(format!("collect retained mock reaper {pid}: {error}"));
-                    }
-                }
-                if Instant::now() >= deadline {
-                    return Err(format!(
-                        "retained mock reaper {pid} was not collected within {ISOLATED_CHILD_COLLECTION_BOUND:?}"
-                    ));
-                }
-                crate::workspace_manager::fixture::rest(Duration::from_millis(10));
-            }
-        }
-
-        fn note_collected(&mut self, pid: libc::pid_t) {
-            self.collected = true;
-            super::termination::ARMED_CONTAINER_REAPERS
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .retain(|(armed, _)| *armed != pid);
+            collect_retained_reaper(pid, "mock", &mut self.collected)
         }
     }
 
@@ -10213,6 +10160,156 @@ pub(crate) mod test_support {
                 ));
             }
         }
+    }
+
+    #[cfg(unix)]
+    pub(crate) struct RetainedStubReaper {
+        listing: Vec<String>,
+        program: std::path::PathBuf,
+        stub: std::path::PathBuf,
+        collected: bool,
+    }
+
+    #[cfg(unix)]
+    impl RetainedStubReaper {
+        pub(crate) fn new(
+            private_root: &std::path::Path,
+            incarnation: &str,
+            program: &std::path::Path,
+            stub: &std::path::Path,
+        ) -> Self {
+            let scope = crate::runner::container::census::ReaperContainerScope::new(
+                program,
+                private_root,
+                incarnation,
+            )
+            .expect("the stub runtime's reaper scope");
+            Self {
+                listing: scope.list_argv(),
+                program: program.to_path_buf(),
+                stub: stub.to_path_buf(),
+                collected: false,
+            }
+        }
+
+        pub(crate) fn collect(mut self) {
+            let result = self.collect_if_armed();
+            assert_eq!(
+                result,
+                Ok(true),
+                "one retained stub reaper was collected: {result:?}"
+            );
+        }
+
+        fn collect_if_armed(&mut self) -> Result<bool, String> {
+            let pid = {
+                let armed = super::termination::ARMED_CONTAINER_REAPERS
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let mut matching = armed.iter().filter(|(_, argv)| *argv == self.listing);
+                let Some((pid, _)) = matching.next() else {
+                    self.collected = true;
+                    return Ok(false);
+                };
+                if matching.next().is_some() || *pid <= 0 {
+                    return Err(
+                        "the scope must name exactly one stub reaper with a positive pid"
+                            .to_owned(),
+                    );
+                }
+                *pid
+            };
+            let resolved = match self.program.to_str() {
+                Some(name) if !name.contains('/') => crate::util::find_program(name),
+                _ => Some(self.program.clone()),
+            };
+            if resolved.as_deref() != Some(self.stub.as_path()) {
+                return Err(format!(
+                    "the scope's program `{}` resolves to {resolved:?}, not to the stub {}",
+                    self.program.display(),
+                    self.stub.display()
+                ));
+            }
+            collect_retained_reaper(pid, "stub", &mut self.collected)
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for RetainedStubReaper {
+        fn drop(&mut self) {
+            if self.collected {
+                return;
+            }
+            if let Err(error) = self.collect_if_armed() {
+                crate::workspace_manager::fixture::say(&format!(
+                    "retained stub reaper cleanup failed: {error}"
+                ));
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn collect_retained_reaper(
+        pid: libc::pid_t,
+        kind: &str,
+        collected: &mut bool,
+    ) -> Result<bool, String> {
+        if let Some(status) = poll_retained_mock_reaper(pid)
+            .map_err(|error| format!("inspect retained {kind} reaper {pid}: {error}"))?
+        {
+            forget_collected_reaper(pid, collected);
+            return Err(format!(
+                "retained {kind} reaper {pid} had already exited: {status}"
+            ));
+        }
+        // SAFETY: this helper is isolated and has no competing waiter. The caller selected
+        // this pid from the registry by its exact scope and program, after its runner
+        // dropped; waitpid just proved it is still this process's unreaped child, so its
+        // pid cannot be reused. SIGKILL cannot execute the reaper's parent-death cleanup
+        // or spawn children.
+        if unsafe { libc::kill(pid, libc::SIGKILL) } != 0 {
+            return Err(format!(
+                "kill retained {kind} reaper {pid}: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        let deadline = Instant::now() + ISOLATED_CHILD_COLLECTION_BOUND;
+        loop {
+            match poll_retained_mock_reaper(pid) {
+                Ok(Some(status)) => {
+                    forget_collected_reaper(pid, collected);
+                    if !libc::WIFSIGNALED(status) || libc::WTERMSIG(status) != libc::SIGKILL {
+                        return Err(format!(
+                            "retained {kind} reaper {pid} ended unexpectedly: {status}"
+                        ));
+                    }
+                    crate::workspace_manager::fixture::say(&format!(
+                        "collected retained {kind} reaper {pid}"
+                    ));
+                    return Ok(true);
+                }
+                Ok(None) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) => {
+                    return Err(format!("collect retained {kind} reaper {pid}: {error}"));
+                }
+            }
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "retained {kind} reaper {pid} was not collected within {ISOLATED_CHILD_COLLECTION_BOUND:?}"
+                ));
+            }
+            crate::workspace_manager::fixture::rest(Duration::from_millis(10));
+        }
+    }
+
+    #[cfg(unix)]
+    fn forget_collected_reaper(pid: libc::pid_t, collected: &mut bool) {
+        *collected = true;
+        super::termination::ARMED_CONTAINER_REAPERS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .retain(|(armed, _)| *armed != pid);
     }
 
     #[cfg(unix)]
