@@ -2471,7 +2471,7 @@ be established), with its own message naming the container reaper. What differs 
 exit wait after an acknowledgement: `ReaperEnding::UnleasedExit`, bounded, where `cancel`'s
 is the unbounded `AcknowledgedExit` (`FUA-D1-CONC-1`).
 
-## `mod termination` › `static ARMED_CONTAINER_REAPERS: Mutex<Vec<(libc::pid_t, Vec<String>)>> = Mutex::new(Vec::new());`
+## `mod termination` › `pub(super) static ARMED_CONTAINER_REAPERS:`
 
 Test-only: the listing argv of every container reaper this test process has armed and not
 cancelled, keyed by pid. `note_armed_container_reaper` adds one after READY,
@@ -2480,6 +2480,12 @@ cancelled, keyed by pid. `note_armed_container_reaper` adds one after READY,
 root label and incarnation; `fake.rs` asks it at each container start
 (`FakeRuntime::observing_covers`), which is how the design property's in-process witnesses
 see "covered by an armed reaper with its scope" at the instant a container starts.
+The test-support module can inspect and remove a collected entry for L5's
+`RetainedMockReaper`; that visibility exists only in test builds. The mutex
+protects this shared registry because independent runner tests register and
+query their own scopes concurrently. Collection copies only the selected pid,
+releases the lock before any process operation or wait, and locks again only to
+remove that entry after reaping it.
 ## `mod termination` › `if let Some(scope) = scope {`
 
 Rendered here so a scope that cannot be turned into argv is refused
@@ -3490,3 +3496,104 @@ the `errno` this call left alone and is an enumeration of nothing; an ordinary
 listing, where a stale `errno` cannot make a non-zero return unknown because a
 non-zero return is the syscall's own success; and a buffer filled to its last
 byte or a negative return, neither of which is an enumeration.
+
+## `pub(crate) mod test_support` › `pub(crate) struct RetainedMockReaper {`
+
+L5's Unix test guard, for an isolated helper whose runner exercises
+`Reaping::drop`'s existing `kept_until_the_process_exits` path. It owns collection
+of the retained mock reaper for one private-root label and incarnation. Construct
+it before the invocation and drop every runner of that scope before collection;
+the helper runs one test and no competing waiter. It is not a production cleanup
+path, and neither `Reaping::drop` nor `kept_until_the_process_exits` changes.
+
+`collect` requires exactly one collection. On unwind, `Drop` attempts the same
+bounded collection; an error is printed, and the calling guard requires both the
+collection marker and the helper's child census, so a failed cleanup cannot yield
+a passing outer test. No registered reaper is harmless on an early unwind before
+one was armed, but cannot satisfy the successful guard's required marker.
+
+`collect_if_armed` selects exactly one positive pid from the existing registry,
+and refuses any scope whose program is not the fake runtime's no-op program.
+It first asks `waitpid(pid, WNOHANG)` to establish that the reaper is still its
+own unreaped child. With no competing waiter in this isolated helper, that
+number cannot be reused between this check and `SIGKILL`. It then polls that
+same child within `ISOLATED_CHILD_COLLECTION_BOUND`, requires the SIGKILL exit,
+and only after reaping it removes its registry entry and prints the collection
+marker. The marker carries no authority before that wait succeeds.
+
+This mock reaper has no command process group or anchor. While its helper lives,
+the forgotten guard keeps its command descriptors open; there is no CANCEL,
+CLEANUP or parent-death request to start runtime children. SIGKILL collects it
+before the helper exits and cannot execute the reaper's cleanup/fork path. Thus
+these two fake-runtime fixtures do not leave reaper grandchildren to collect.
+This argument is specific to these fixtures, not a claim about arbitrary
+container reapers.
+
+## `pub(crate) mod test_support` › `fn poll_retained_mock_reaper(pid: libc::pid_t) -> std::io::Result<Option<libc::c_int>> {`
+
+A nonblocking wait for the selected, positive child pid. `None` is still there,
+`Some` is the collected exit status, and an OS error stays an error. The caller
+adds the operation and pid; interruptions in the bounded collection loop are
+retried only within its deadline. The FFI safety obligations stay at the calls.
+
+## `pub(crate) mod test_support` › `pub(crate) fn assert_no_children_in_isolated_test() {`
+
+The isolated helper's direct-child census: `waitpid(-1, WNOHANG)` must report
+`ECHILD`. A live or stopped child, an uncollected exit, and any other error fail.
+This proves no direct children remain; it does not prove an arbitrary descendant
+tree is empty. The mock-reaper protocol above supplies the separate reason these
+fixtures cannot have reaper grandchildren at successful collection. The outer
+`run_test_isolated` caller then collects the helper itself.
+
+## `mod termination` › `const COLLECT_ISOLATED_TEST_GUARD: u8 = 0xf1;`
+
+L5's shutdown command exists only in test builds, as does its match arm in
+`guard_loop`. Arming a real container reaper also initializes the process-global
+job-control guard, which forks a probe child. The isolated fixture therefore
+owns this guard and that grandchild in addition to its retained container reaper.
+`IsolatedJobControl` supplies their test-only ownership; production guard and
+retained-reaper protocols are unchanged.
+
+## `mod termination` › `fn collect_probe_for_isolated_test(probe_pid: libc::pid_t, probe_fd: libc::c_int) -> ! {`
+
+Runs inside the forked guard on the test-only shutdown command, using fixed
+storage and the existing syscall-only bounded wait. The guard normally ignores
+SIGCHLD, so it first restores the default disposition, making the probe's exit
+waitable. It closes the probe's sole command writer; the probe reads EOF and
+exits without forking. Only a successful wait for that exact probe with exit
+status zero earns `ISOLATED_PROBE_COLLECTED`, a distinct guard exit status. Any
+failure earns status 1. The wait uses `HELPER_END_BUDGET` and `SingleAttempt`
+rests; it cannot hold the parent indefinitely. Restoring SIGCHLD is confined to
+this ending of the forked test guard and changes no embedding host disposition.
+
+## `mod termination` › `pub(crate) struct IsolatedJobControl {`
+
+Constructed in a fresh, single-test helper before fixture setup and dropped
+after its retained-reaper owner. It owns the one process-global job-control
+guard for that helper's remaining lifetime. Its explicit `collect` and its
+unwind `Drop` both ask the guard to collect its probe, then wait for the guard
+within `ISOLATED_CHILD_COLLECTION_BOUND`. Collection requires no registered
+launches or command groups, copies the guard under its existing state lock,
+and releases that lock before the nonblocking request and waits. The monitor
+shares this state; the short critical section preserves its invariant, and
+no command may launch after this shutdown. No new shared ownership is added.
+
+Only the distinct guard status proves probe collection. After collecting the
+guard, the owner retires the signal-handler descriptor and probe pid and closes
+the guard's descriptors, including any identity descriptor. It prints the guard
+and probe pids only after that wait succeeds. An uninitialized guard is harmless
+on an early fixture failure, but does not satisfy the successful test's marker.
+Drop reports any cleanup error; the outer test requires both collection markers,
+successful child status and the helper's direct-child census. The deliberate
+unwind exercises both owners, retaining the same requirements as normal return.
+
+Collection markers and cleanup errors use the existing fixture `say` funnel,
+whose bounded writes do not panic during unwinding; the parent reads these from
+the helper's captured stderr. The required markers make a refused output channel
+a test failure rather than a silent success.
+
+The final ECHILD assertion covers the helper's direct guard and container
+reaper. The guard's distinct collected status supplies the separate evidence
+that its probe grandchild has already been reaped; the mock-reaper protocol
+above explains why it has no grandchildren. This does not use ECHILD as a claim
+about an arbitrary descendant tree.

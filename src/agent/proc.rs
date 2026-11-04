@@ -4072,6 +4072,10 @@ mod termination {
                             wake = false;
                             drain_pipe(wake_fd);
                         }
+                        #[cfg(test)]
+                        COLLECT_ISOLATED_TEST_GUARD => {
+                            collect_probe_for_isolated_test(probe_pid, probe_fd)
+                        }
                         _ => wake = true,
                     }
                 }
@@ -4941,7 +4945,8 @@ mod termination {
     }
 
     #[cfg(test)]
-    static ARMED_CONTAINER_REAPERS: Mutex<Vec<(libc::pid_t, Vec<String>)>> = Mutex::new(Vec::new());
+    pub(super) static ARMED_CONTAINER_REAPERS: Mutex<Vec<(libc::pid_t, Vec<String>)>> =
+        Mutex::new(Vec::new());
 
     #[cfg(test)]
     fn note_armed_container_reaper(pid: libc::pid_t, list_argv: Vec<String>) {
@@ -5170,6 +5175,161 @@ mod termination {
         }
         if let Some(containers) = containers {
             reclaim_labeled_containers(containers);
+        }
+    }
+
+    #[cfg(test)]
+    const COLLECT_ISOLATED_TEST_GUARD: u8 = 0xf1;
+
+    #[cfg(test)]
+    const ISOLATED_PROBE_COLLECTED: libc::c_int = 42;
+
+    #[cfg(test)]
+    fn collect_probe_for_isolated_test(probe_pid: libc::pid_t, probe_fd: libc::c_int) -> ! {
+        let waitable = set_signal_disposition(libc::SIGCHLD, libc::SIG_DFL);
+        close_fd(probe_fd);
+        let (waited, errno, status) = wait_for_an_ended_helper(
+            probe_pid,
+            EndingWait::CollectingStatus,
+            EndingRetry::WhileInterrupted,
+            EndingRest::SingleAttempt,
+        );
+        let collected = waitable
+            && waited == probe_pid
+            && errno == 0
+            && libc::WIFEXITED(status)
+            && libc::WEXITSTATUS(status) == 0;
+        // SAFETY: the forked guard cannot return to Rust. Only the completed
+        // wait above earns this distinct status; the probe itself never forks.
+        unsafe {
+            libc::_exit(if collected {
+                ISOLATED_PROBE_COLLECTED
+            } else {
+                1
+            })
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) struct IsolatedJobControl {
+        collected: bool,
+    }
+
+    #[cfg(test)]
+    impl IsolatedJobControl {
+        pub(crate) fn new() -> Self {
+            Self { collected: false }
+        }
+
+        pub(crate) fn collect(mut self) {
+            let result = self.collect_if_installed();
+            assert_eq!(
+                result,
+                Ok(true),
+                "the isolated job-control guard and its probe were collected: {result:?}"
+            );
+        }
+
+        fn collect_if_installed(&mut self) -> Result<bool, String> {
+            let Some(state) = STATE.get() else {
+                self.collected = true;
+                return Ok(false);
+            };
+            let state = state.as_ref().map_err(|message| {
+                format!("the isolated helper's job-control setup failed: {message}")
+            })?;
+            let guard = {
+                // The monitor also owns this state. Copy only the guard after
+                // every launch settled, and release the lock before waiting.
+                let state = state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if state.spawning != 0 || !state.groups.is_empty() {
+                    return Err("the isolated helper still has registered commands".to_owned());
+                }
+                state.guard
+            };
+            let probe_pid = PROBE_PID.load(Ordering::SeqCst);
+            // SAFETY: the isolated helper owns this nonblocking command pipe.
+            // The byte lives for the call, and no command will launch after it.
+            let sent = unsafe {
+                libc::write(
+                    guard.command_fd,
+                    std::ptr::from_ref(&COLLECT_ISOLATED_TEST_GUARD).cast(),
+                    1,
+                )
+            };
+            if sent != 1 {
+                return Err(format!(
+                    "ask the isolated job-control guard to collect its probe: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            let deadline =
+                std::time::Instant::now() + super::test_support::ISOLATED_CHILD_COLLECTION_BOUND;
+            loop {
+                let mut status = 0;
+                // SAFETY: this isolated helper has no competing waiter for its
+                // guard. The status is writable, and WNOHANG never blocks.
+                let waited = unsafe { libc::waitpid(guard.pid, &mut status, libc::WNOHANG) };
+                if waited == guard.pid {
+                    self.collected = true;
+                    GUARD_COMMAND_FD.store(-1, Ordering::SeqCst);
+                    PROBE_PID.store(-1, Ordering::SeqCst);
+                    for fd in [
+                        guard.command_fd,
+                        guard.ack_fd,
+                        guard._command_keepalive_fd,
+                        guard.identity,
+                    ] {
+                        if fd >= 0 {
+                            close_fd(fd);
+                        }
+                    }
+                    if !libc::WIFEXITED(status)
+                        || libc::WEXITSTATUS(status) != ISOLATED_PROBE_COLLECTED
+                    {
+                        return Err(format!(
+                            "isolated job-control guard {} did not prove probe {probe_pid} collected: {status}",
+                            guard.pid
+                        ));
+                    }
+                    crate::workspace_manager::fixture::say(&format!(
+                        "collected isolated job-control guard {} after its probe {probe_pid}",
+                        guard.pid
+                    ));
+                    return Ok(true);
+                }
+                if waited < 0 && !last_errno_is_interrupted() {
+                    return Err(format!(
+                        "collect isolated job-control guard {}: {}",
+                        guard.pid,
+                        std::io::Error::last_os_error()
+                    ));
+                }
+                if std::time::Instant::now() >= deadline {
+                    return Err(format!(
+                        "isolated job-control guard {} did not collect probe {probe_pid} and end within {:?}",
+                        guard.pid,
+                        super::test_support::ISOLATED_CHILD_COLLECTION_BOUND
+                    ));
+                }
+                crate::workspace_manager::fixture::rest(Duration::from_millis(10));
+            }
+        }
+    }
+
+    #[cfg(test)]
+    impl Drop for IsolatedJobControl {
+        fn drop(&mut self) {
+            if self.collected {
+                return;
+            }
+            if let Err(error) = self.collect_if_installed() {
+                crate::workspace_manager::fixture::say(&format!(
+                    "isolated job-control cleanup failed: {error}"
+                ));
+            }
         }
     }
 
@@ -9907,6 +10067,9 @@ mod termination {
 pub(crate) mod test_support {
     use super::*;
 
+    #[cfg(unix)]
+    pub(crate) use super::termination::IsolatedJobControl;
+
     pub(crate) fn run_with_timeout(
         command: Command,
         stdin_data: &str,
@@ -9924,6 +10087,162 @@ pub(crate) mod test_support {
 
     #[cfg(unix)]
     pub(crate) const ISOLATED_CHILD_COLLECTION_BOUND: Duration = Duration::from_secs(10);
+
+    #[cfg(unix)]
+    pub(crate) struct RetainedMockReaper {
+        root_filter: String,
+        incarnation_filter: String,
+        collected: bool,
+    }
+
+    #[cfg(unix)]
+    impl RetainedMockReaper {
+        pub(crate) fn new(private_root: &std::path::Path, incarnation: &str) -> Self {
+            use crate::runner::container::intent::{
+                LABEL_INCARNATION, LABEL_PRIVATE_ROOT, private_root_label,
+            };
+            Self {
+                root_filter: format!(
+                    "label={LABEL_PRIVATE_ROOT}={}",
+                    private_root_label(private_root)
+                ),
+                incarnation_filter: format!("label={LABEL_INCARNATION}={incarnation}"),
+                collected: false,
+            }
+        }
+
+        pub(crate) fn collect(mut self) {
+            let result = self.collect_if_armed();
+            assert_eq!(
+                result,
+                Ok(true),
+                "one retained mock reaper was collected: {result:?}"
+            );
+        }
+
+        fn collect_if_armed(&mut self) -> Result<bool, String> {
+            let pid = {
+                let armed = super::termination::ARMED_CONTAINER_REAPERS
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let mut matching = armed.iter().filter(|(_, argv)| {
+                    argv.contains(&self.root_filter) && argv.contains(&self.incarnation_filter)
+                });
+                let Some((pid, argv)) = matching.next() else {
+                    self.collected = true;
+                    return Ok(false);
+                };
+                if matching.next().is_some()
+                    || *pid <= 0
+                    || argv.first().map(String::as_str)
+                        != Some(crate::runner::container::NO_OP_REAPER_PROGRAM)
+                {
+                    return Err(
+                        "the scope must name exactly one mock reaper with a positive pid"
+                            .to_owned(),
+                    );
+                }
+                *pid
+            };
+            if let Some(status) = poll_retained_mock_reaper(pid)
+                .map_err(|error| format!("inspect retained mock reaper {pid}: {error}"))?
+            {
+                self.note_collected(pid);
+                return Err(format!(
+                    "retained mock reaper {pid} had already exited: {status}"
+                ));
+            }
+            // SAFETY: this helper is isolated and has no competing waiter. The registry
+            // identifies its mock reaper, whose runner has dropped; waitpid just proved
+            // it is still this process's unreaped child, so its pid cannot be reused.
+            // SIGKILL cannot execute the reaper's parent-death cleanup or spawn children.
+            if unsafe { libc::kill(pid, libc::SIGKILL) } != 0 {
+                return Err(format!(
+                    "kill retained mock reaper {pid}: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            let deadline = Instant::now() + ISOLATED_CHILD_COLLECTION_BOUND;
+            loop {
+                match poll_retained_mock_reaper(pid) {
+                    Ok(Some(status)) => {
+                        self.note_collected(pid);
+                        if !libc::WIFSIGNALED(status) || libc::WTERMSIG(status) != libc::SIGKILL {
+                            return Err(format!(
+                                "retained mock reaper {pid} ended unexpectedly: {status}"
+                            ));
+                        }
+                        crate::workspace_manager::fixture::say(&format!(
+                            "collected retained mock reaper {pid}"
+                        ));
+                        return Ok(true);
+                    }
+                    Ok(None) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(error) => {
+                        return Err(format!("collect retained mock reaper {pid}: {error}"));
+                    }
+                }
+                if Instant::now() >= deadline {
+                    return Err(format!(
+                        "retained mock reaper {pid} was not collected within {ISOLATED_CHILD_COLLECTION_BOUND:?}"
+                    ));
+                }
+                crate::workspace_manager::fixture::rest(Duration::from_millis(10));
+            }
+        }
+
+        fn note_collected(&mut self, pid: libc::pid_t) {
+            self.collected = true;
+            super::termination::ARMED_CONTAINER_REAPERS
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .retain(|(armed, _)| *armed != pid);
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for RetainedMockReaper {
+        fn drop(&mut self) {
+            if self.collected {
+                return;
+            }
+            if let Err(error) = self.collect_if_armed() {
+                crate::workspace_manager::fixture::say(&format!(
+                    "retained mock reaper cleanup failed: {error}"
+                ));
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn poll_retained_mock_reaper(pid: libc::pid_t) -> std::io::Result<Option<libc::c_int>> {
+        let mut status = 0;
+        // SAFETY: the caller supplies the positive pid from its scoped reaper registry.
+        // The status is writable, and WNOHANG waits for neither a live nor a stopped child.
+        let waited = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+        if waited == pid {
+            Ok(Some(status))
+        } else if waited == 0 {
+            Ok(None)
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn assert_no_children_in_isolated_test() {
+        // SAFETY: this runs only in an isolated test helper with no competing waiter.
+        // It observes that helper's direct children only; no exit status is requested.
+        let waited = unsafe { libc::waitpid(-1, std::ptr::null_mut(), libc::WNOHANG) };
+        let error = (waited < 0).then(std::io::Error::last_os_error);
+        assert!(
+            waited == -1
+                && error.as_ref().and_then(std::io::Error::raw_os_error) == Some(libc::ECHILD),
+            "the isolated helper still owned a direct child: waitpid={waited}, error={error:?}"
+        );
+        crate::workspace_manager::fixture::say("isolated helper has no direct children (ECHILD)");
+    }
 
     #[cfg(unix)]
     pub(crate) struct Isolated {

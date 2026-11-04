@@ -831,15 +831,17 @@ fn the_runner_reports_what_it_established_about_the_process_when_it_fails() {
     assert_eq!(seen, 16, "every cell of the container fate matrix ran");
 }
 
-/// `PR12-J6-OBSERVATION-FATE-DROPPED`: a start that reports a process of its own unresolved
-/// keeps that fate when the cancel then stops and removes the container cleanly. The removal
-/// establishes the container gone, not the other process (`DockerCli` also holds such a process
-/// under the container, so its own removal reports it; this runtime's removal does not).
 #[test]
 fn a_start_that_left_a_process_unresolved_stays_unresolved_after_a_clean_cancel() {
+    #[cfg(unix)]
+    unresolved_process_in_an_owned_helper("start");
+    #[cfg(not(unix))]
+    assert_unresolved_start_fate(&Fixture::new("unresolved-start", false));
+}
+
+fn assert_unresolved_start_fate(fixture: &Fixture) {
     use crate::error::ProcessFate;
 
-    let fixture = Fixture::new("unresolved-start", false);
     fixture.runtime.leaves_its_start_unresolved();
     let request = gate_request(
         ShellKind::Sh.spec("exit 0"),
@@ -8279,9 +8281,15 @@ fn no_reaper_test_reads_a_hold_as_released_once() {
 #[test]
 fn an_observation_that_leaves_a_process_unresolved_keeps_the_invocation_unresolved_after_a_clean_release()
  {
+    #[cfg(unix)]
+    unresolved_process_in_an_owned_helper("observation");
+    #[cfg(not(unix))]
+    assert_unresolved_observation_fate(&Fixture::new("unresolved-observation", false));
+}
+
+fn assert_unresolved_observation_fate(fixture: &Fixture) {
     use crate::error::ProcessFate;
 
-    let fixture = Fixture::new("unresolved-observation", false);
     fixture.runtime.leaves_its_observation_unresolved();
     let request = gate_request(
         ShellKind::Sh.spec("exit 0"),
@@ -8313,6 +8321,95 @@ fn an_observation_that_leaves_a_process_unresolved_keeps_the_invocation_unresolv
         Vec::<String>::new(),
         "the release completed, and the invocation is still unresolved"
     );
+}
+
+#[cfg(unix)]
+const UNRESOLVED_PROCESS_CASE: &str = "UPSTROKE_TEST_UNRESOLVED_PROCESS_CASE";
+
+#[cfg(unix)]
+const UNRESOLVED_PROCESS_ENDING: &str = "UPSTROKE_TEST_UNRESOLVED_PROCESS_ENDING";
+
+#[cfg(unix)]
+fn unresolved_process_in_an_owned_helper(case: &str) {
+    for ending in ["return", "unwind"] {
+        let ended = crate::agent::proc::test_support::run_test_isolated(
+            "runner::container::exec::tests::unresolved_process_child",
+            &[
+                (UNRESOLVED_PROCESS_CASE, std::ffi::OsStr::new(case)),
+                (UNRESOLVED_PROCESS_ENDING, std::ffi::OsStr::new(ending)),
+            ],
+            FIXTURE_CHILD_BOUND,
+        );
+        assert!(
+            ended.status.is_some_and(|status| status.success())
+                && ended.stdout.contains("1 passed")
+                && ended
+                    .stderr
+                    .matches("collected retained mock reaper ")
+                    .count()
+                    == 1
+                && ended
+                    .stderr
+                    .matches("collected isolated job-control guard ")
+                    .count()
+                    == 1
+                && ended
+                    .stderr
+                    .matches("isolated helper has no direct children (ECHILD)")
+                    .count()
+                    == 1,
+            "{case}/{ending}: the owned helper must prove the fate and collect its retained \
+             reaper before succeeding: {ended}"
+        );
+        crate::workspace_manager::fixture::say(&format!("{case}/{ending}: {ended}"));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "owned helper for the unresolved start and observation guards"]
+fn unresolved_process_child() {
+    use crate::agent::proc::test_support::{
+        IsolatedJobControl, RetainedMockReaper, assert_no_children_in_isolated_test,
+    };
+
+    let job_control = IsolatedJobControl::new();
+    let case =
+        std::env::var(UNRESOLVED_PROCESS_CASE).expect("the parent names the unresolved case");
+    let ending =
+        std::env::var(UNRESOLVED_PROCESS_ENDING).expect("the parent names the helper ending");
+    assert!(matches!(case.as_str(), "start" | "observation"), "{case}");
+    assert!(matches!(ending.as_str(), "return" | "unwind"), "{ending}");
+    let fixture = Fixture::new(&format!("unresolved-{case}-{ending}"), false);
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let job_control = job_control;
+        let reaper = RetainedMockReaper::new(&fixture.private_root, INCARNATION_1);
+        match case.as_str() {
+            "start" => assert_unresolved_start_fate(&fixture),
+            "observation" => assert_unresolved_observation_fate(&fixture),
+            _ => panic!("an unknown unresolved-process case: {case}"),
+        }
+        assert!(
+            armed_for(&fixture.private_root, INCARNATION_1),
+            "the runner's drop exercised the production retained-reaper backstop"
+        );
+        assert!(
+            ending != "unwind",
+            "deliberate unwind after retained reaper"
+        );
+        reaper.collect();
+        job_control.collect();
+    }));
+    if ending == "unwind" {
+        let payload = outcome.expect_err("the deliberate unwind exercised guard cleanup");
+        assert_eq!(
+            payload.downcast_ref::<&str>(),
+            Some(&"deliberate unwind after retained reaper")
+        );
+    } else if let Err(payload) = outcome {
+        std::panic::resume_unwind(payload);
+    }
+    assert_no_children_in_isolated_test();
 }
 
 #[cfg(unix)]

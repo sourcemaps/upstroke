@@ -2487,6 +2487,12 @@ runtime is the scripted fake, whose removal knows nothing of the observation,
 so only `contain`'s own rule can keep the fate. With `contain`'s fate read from
 the release alone (the rule before K2) this reports `Gone` and fails.
 
+L5 includes this companion guard because it has the same retained-reaper
+lifecycle as J6's unresolved-start guard. Its assertions now live in
+`assert_unresolved_observation_fate`. Unix executes them through
+`unresolved_process_in_an_owned_helper`; Windows, which has no Unix container
+reaper, executes the same assertions directly.
+
 ## `const STALLED_OBSERVATION_DOCKER: &str = "#!/bin/sh\n\`
 
 The stub `docker` of the stalled-observation witness, written by a process of
@@ -2549,3 +2555,63 @@ message. The runner returns a `NeverStarted` refusal naming the timeout. Nothing
 of the funnel or the runtime (an empty trace), no intent was written and no container
 created. With the unchecked `started + request.timeout` restored, the runner panics with
 "overflow when adding duration to instant" and this test fails.
+
+## `fn a_start_that_left_a_process_unresolved_stays_unresolved_after_a_clean_cancel() {`
+
+`PR12-J6-OBSERVATION-FATE-DROPPED`: a start that reports a process of its own
+unresolved keeps that fate when cancellation stops and removes the container.
+The removal establishes the container gone, not the other process. DockerCli
+also holds such a process under the container, so its removal reports it;
+this scripted runtime's removal does not. `assert_unresolved_start_fate`
+retains the original fate, message, Start/Remove and empty-container assertions.
+
+L5 moves this invocation into an owned, bounded helper on Unix. The original
+test dropped a temporary runner in libtest's process; its unresolved fate
+selected the production retained-reaper backstop, leaving the reaper beyond
+that test executable's exit. Windows retains the direct assertion because that
+Unix reaper does not exist there.
+
+## `fn unresolved_process_in_an_owned_helper(case: &str) {`
+
+Both J6's start case and K2's observation case run `unresolved_process_child`
+under `run_test_isolated` and `FIXTURE_CHILD_BOUND`. Each runs twice: ordinary
+return and deliberate unwinding after the runner dropped. The outer assertion
+requires the collected helper's successful exit, libtest's `1 passed`, and
+exactly one retained-mock-reaper collection marker and one job-control-guard
+collection marker, plus the final ECHILD marker. These markers arrive on captured
+stderr through the fixture's `say` funnel. The successful captured output,
+including the collected pids, is reported through that same funnel for the
+guard's evidence. A wrong helper name, failed fate assertion, uncollected
+reaper/probe or failed unwind cleanup cannot pass.
+
+## `fn unresolved_process_child() {`
+
+Ignored because only the owner above supplies its case and ending.
+`IsolatedJobControl` is constructed before scratch-fixture setup, which starts
+the process-global job-control guard and its probe. `RetainedMockReaper` is
+constructed before the invocation; the runner's temporary then drops through
+the unchanged production backstop. The helper
+requires the scoped reaper to remain armed. On ordinary return it explicitly
+collects both owners; on the deliberate panic their Drops collect their
+children. The catch accepts only that exact deliberate panic; other failures
+still fail the child. Finally `assert_no_children_in_isolated_test` requires
+ECHILD, before the outer owner collects this helper.
+
+ECHILD is a direct-child claim. The separate no-grandchildren argument is in
+`agent/proc.md`: this retained fake-runtime reaper has no supervised command
+process group or anchor,
+receives no cleanup command while the helper lives, and is killed and reaped
+before helper exit can trigger the runtime-cleanup fork path. No real container
+is started. The separate job-control probe is reaped by its own guard using a
+test-only shutdown command, and only that successful wait earns the guard's
+distinct exit status, which its owner requires. The two environment keys only
+select the fixture and return/unwind mode. Scratch trees and output files retain
+their existing RAII owners.
+
+Measured omission witness: replacing the explicit `reaper.collect()` with
+`std::mem::forget(reaper)` in the return case fails both guards at the helper's
+direct-child census (`waitpid=0`). The job-control guard and probe have already
+been collected, so that check sees the retained reaper omitted by the mutation.
+The unchanged fate assertions still run. The witness covers omitted normal
+collection; the same collection routine is exercised during the deliberate
+unwind, not separately mutation-tested there.
