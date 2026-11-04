@@ -2198,15 +2198,20 @@ and a Unix path holding a backslash, and joined fields with commas a path
 could carry). A bind source must be UTF-8 (`to_str`, never lossy) and pass
 `mount_option_refusal`; so must every target and volume name. A backslash
 is an ordinary byte of a Unix name and is carried as written; only a
-Windows build rewrites it to `/` (`host_spelling`), for the generated
-paths it mounts, since configured mounts are refused off Unix.
+Windows build rewrites it to `/` (`host_spelling`), for every bind source it
+mounts: the generated paths and the configured mounts. A Windows build accepts
+configured mounts once `resolve.rs` has recorded each source's volume serial
+and full 128-bit file id; only a platform that is neither Unix nor Windows
+refuses `[runner] mounts`. `exec.rs` plans an accepted configured mount as the
+same `Mount::Path` a generated path is.
 `tests::a_mount_argument_carries_each_value_exactly_or_refuses_it` holds
 both halves.
 
 ## `fn host_spelling(path: &str) -> String {`
 
 The host path as `docker` on this platform takes it: unchanged on Unix,
-`\` as `/` on Windows (the generated paths only).
+`\` as `/` on Windows, for every bind source `mount_argument` writes, a
+generated path or an accepted configured mount alike.
 
 ## `fn mount_argument(mount: &runtime::Mount) -> Result<String, String>` › `parts.push("type=tmpfs".to_owned());`
 
