@@ -45,10 +45,10 @@ use crate::topology::schema::{
 };
 use crate::validate::{self, Analysis, CapturedInputs, ValidateOptions};
 use crate::workspace::Workspace;
-use crate::workspace_manager::WorkspaceManager;
+use crate::workspace_manager::{EffectHooks, WorkspaceManager};
 
 use super::coordinator::PipelineSeams;
-use super::create::{Disposition, ProbePair, Request, RunnerProbes, create_run};
+use super::create::{ProbePair, Request, RunnerProbes, create_run};
 use super::identity::{InvocationLedger, SlotLimits};
 use super::preflight::RunPreflight;
 use super::prelock::{self, PreLock, PreLockChecked, RunnerResolved};
@@ -355,13 +355,6 @@ impl FreshLeased {
             &checked.incarnation().0,
         )?;
         one_spelling(&include_spelling, &manager)?;
-        manager.create_execution_root(hooks.effects())?;
-        let case_fold = resolve_case_fold(
-            manager.execution_root(),
-            &observe_case_at(manager.execution_root(), "tasks"),
-            &recorded_ignorecase(&manager),
-            &mut warnings,
-        );
         let base_sha = workspace.head_sha_full()?;
 
         let normalized_plan = normalized_plan_bytes(&analysis.plan, &opts.plan_path)?;
@@ -380,7 +373,6 @@ impl FreshLeased {
             mode,
             base_sha,
             normalized_plan_digest: &inputs.normalized_plan_digest,
-            case_fold,
         })?;
 
         let probes = RunnerProbes::new(
@@ -396,6 +388,7 @@ impl FreshLeased {
             normalized_plan: &normalized_plan,
             inputs: inputs.clone(),
             record,
+            root: &manager,
             agents: &agents,
             probes: &probes,
             refs: &manager,
@@ -403,30 +396,8 @@ impl FreshLeased {
             runner: &*runner,
             pair: ProbePair::grant(&ledger),
         };
-        let started = match create_run(checked, request, &mut hooks, &mut warnings) {
-            Ok(started) => started,
-            Err(refused) => {
-                let removed = matches!(
-                    *refused.disposition,
-                    Disposition::NothingCreated
-                        | Disposition::PublicHalfRemoved(_)
-                        | Disposition::BothHalvesRemoved { .. }
-                );
-                let error = refused.into_error();
-                if removed {
-                    if let Err(cleanup) = manager.remove_execution_root(hooks.effects()) {
-                        return Err(UpstrokeError::Refused {
-                            message: format!(
-                                "{error}. The empty execution root {} created for this run \
-                                 could not be removed: {cleanup}",
-                                manager.execution_root().display()
-                            ),
-                        });
-                    }
-                }
-                return Err(error);
-            }
-        };
+        let started = create_run(checked, request, &mut hooks, &mut warnings)
+            .map_err(super::create::Refused::into_error)?;
 
         let paths = started.paths().clone();
         let handle = started.into_handle(locked.into_lock());
@@ -762,7 +733,6 @@ struct FreshRecord<'a> {
     mode: InteractionMode,
     base_sha: String,
     normalized_plan_digest: &'a str,
-    case_fold: bool,
 }
 
 fn fresh_record(fresh: &FreshRecord<'_>) -> Result<RunStarted4, UpstrokeError> {
@@ -791,7 +761,7 @@ fn fresh_record(fresh: &FreshRecord<'_>) -> Result<RunStarted4, UpstrokeError> {
         registry_digest: String::new(),
         path_policy: PathPolicy {
             version: PathPolicyVersion::V2,
-            case_fold: fresh.case_fold,
+            case_fold: false,
             grammar: PathGrammar::Globset,
         },
         limits: TopologyLimits {
@@ -837,6 +807,24 @@ fn recorded_path(path: &Path, what: &str) -> Result<String, UpstrokeError> {
                 path.display()
             ),
         }),
+    }
+}
+
+impl super::create::RootCreation for WorkspaceManager {
+    fn create(
+        &self,
+        hooks: &mut dyn EffectHooks,
+    ) -> Result<(), crate::workspace_manager::FreshRootFailure> {
+        crate::workspace_manager::FreshExecutionRoot(self).create_execution_root(hooks)
+    }
+
+    fn case_fold(&self, warnings: &mut Vec<String>) -> bool {
+        resolve_case_fold(
+            self.execution_root(),
+            &observe_case_at(self.execution_root(), "tasks"),
+            &recorded_ignorecase(self),
+            warnings,
+        )
     }
 }
 

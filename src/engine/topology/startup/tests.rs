@@ -116,6 +116,10 @@ impl Fixture {
         let private_root = root.join("private");
         rundir::create_public_dir(&repo, hooks).expect("the scratch repository");
         rundir::create_private_dir(&git_dir, hooks).expect("the worktree git dir");
+        // A repository, because a census that would reclaim a husk with a
+        // marker first derives where its run's execution root would be, and
+        // that derivation asks Git for the common directory.
+        crate::workspace_manager::fixture::git(&repo, &["init", "-q", "-b", "main"]);
         // `runs` must exist before the proof canonicalizes it, and every
         // private half is created under it.
         rundir::create_private_dir(&private_root.join("runs"), hooks).expect("the private root");
@@ -1614,6 +1618,14 @@ fn the_census_answer_is_total_and_covers_every_outcome_kind() {
     // every other row of this test.
     let stuck = "010000STUCK000000000000000";
     let stuck_husk = Husk::at_p0(&fixture, stuck);
+    // root-retained: a proven husk whose run's execution-root path is occupied.
+    let rooted = "01GGGG00000000000000000000";
+    Husk::at_p0(&fixture, rooted)
+        .stage_marker()
+        .publish_marker()
+        .create_private()
+        .publish_owner();
+    root_at_the_husks_path(&fixture, rooted);
 
     let (report, _) =
         fixture.run_census_armed(None, (RunDirSite::RemovePublicHusk, HookPhase::Before, 1));
@@ -1625,7 +1637,9 @@ fn the_census_answer_is_total_and_covers_every_outcome_kind() {
         .collect();
     assert_eq!(
         ids,
-        vec![stuck, bare, bound, retained, repaired, committed, skipped],
+        vec![
+            stuck, bare, bound, retained, repaired, committed, skipped, rooted
+        ],
         "one entry per directory, in run-id order"
     );
     assert_eq!(
@@ -2596,5 +2610,175 @@ impl GitView for NeverView {
 
     fn discard(&self, _: &Path) -> Result<(), UpstrokeError> {
         panic!("no fixture in this suite has a Git view");
+    }
+}
+
+/// Every entry under `top`, relative to it, with whether it is a directory:
+/// enough to show a directory tree untouched. Read-only.
+fn tree_of(top: &Path) -> Vec<(PathBuf, bool)> {
+    let mut entries = Vec::new();
+    let mut pending = vec![top.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(&directory).expect("list the tree") {
+            let path = entry.expect("an entry").path();
+            let is_dir = fs::symlink_metadata(&path).expect("its metadata").is_dir();
+            if is_dir {
+                pending.push(path.clone());
+            }
+            entries.push((
+                path.strip_prefix(top).expect("under the top").to_path_buf(),
+                is_dir,
+            ));
+        }
+    }
+    entries.sort();
+    entries
+}
+
+/// The execution root a creator of `run_id` would claim at P3c, made here by the
+/// idempotent create site: whoever made a root at that path — the husk's own
+/// creator after P3c, or another actor while the creator was stopped before it
+/// — the census cannot tell, and deletes neither.
+fn root_at_the_husks_path(fixture: &Fixture, run_id: &str) -> PathBuf {
+    let manager = crate::workspace_manager::WorkspaceManager::derive(
+        &fixture.repo,
+        &fixture.private_root,
+        run_id,
+        INCARNATION,
+    )
+    .expect("the husk's run's manager");
+    manager
+        .create_execution_root(&mut crate::workspace_manager::NoHooks)
+        .expect("a root at the husk's path");
+    manager.execution_root().to_path_buf()
+}
+
+/// PR12-INV7-PREPUBLICATION-EXECUTION-ROOT-ORPHAN, the census's half. A husk's
+/// proof authenticates its two halves, not who made a directory at its run's
+/// execution-root path, so a census deletes no execution root: a proven husk
+/// whose root path is occupied is retained — both halves, the marker that
+/// locates the root and the owner record that authenticates the run — and reported
+/// with the root's path, and the root is left exactly as it is. Once the path
+/// is empty, the same husk is reclaimed as before.
+#[test]
+fn a_proven_husk_whose_execution_root_path_is_occupied_is_kept_until_the_path_is_empty() {
+    let fixture = Fixture::new("root-occupied");
+    let run_id = crate::ulid::ulid();
+    let husk = Husk::at_p0(&fixture, &run_id)
+        .stage_marker()
+        .publish_marker()
+        .create_private()
+        .publish_owner();
+    let root = root_at_the_husks_path(&fixture, &run_id);
+    let before = tree_of(&root);
+
+    let report = fixture.run_census();
+    let entry = only(&report);
+    let RunDirOutcome::RootRetained {
+        root: Some(kept), ..
+    } = &entry.outcome
+    else {
+        panic!("{:?}", entry.outcome);
+    };
+    assert_eq!(kept, &root);
+    assert_eq!(entry.outcome.kind(), "root-retained");
+    assert!(
+        !entry.outcome.reclaimed_anything() && !entry.outcome.may_have_deleted_a_private_half()
+    );
+    assert!(
+        exists(&husk.public().join(MARKER)) && exists(&husk.private().join(OWNER_RECORD)),
+        "the marker that locates the root and the owner record that authenticates the run stay"
+    );
+    assert_eq!(tree_of(&root), before, "the root is untouched");
+    assert!(
+        entry.describe().contains(&root.display().to_string()),
+        "{}",
+        entry.describe()
+    );
+
+    crate::workspace_manager::WorkspaceManager::derive(
+        &fixture.repo,
+        &fixture.private_root,
+        &run_id,
+        INCARNATION,
+    )
+    .expect("the manager")
+    .remove_execution_root(&mut crate::workspace_manager::NoHooks)
+    .expect("the root goes, by an authority that is not the census's");
+    let report = fixture.run_census();
+    assert_eq!(
+        only(&report).outcome,
+        RunDirOutcome::ReclaimedBothHalves,
+        "with the path empty the husk is reclaimed as before"
+    );
+}
+
+/// The same for a husk whose marker names a private half that is gone: nothing
+/// proves the root is the run's, and the marker is all that locates it, so the
+/// public husk stays while the path is occupied, and goes once it is empty.
+#[test]
+fn a_target_absent_husk_whose_execution_root_path_is_occupied_keeps_its_marker() {
+    let fixture = Fixture::new("root-target-absent");
+    let run_id = crate::ulid::ulid();
+    let husk = Husk::at_p0(&fixture, &run_id)
+        .stage_marker()
+        .publish_marker();
+    let root = root_at_the_husks_path(&fixture, &run_id);
+    let before = tree_of(&root);
+
+    let report = fixture.run_census();
+    assert!(
+        matches!(only(&report).outcome, RunDirOutcome::RootRetained { .. }),
+        "{:?}",
+        only(&report).outcome
+    );
+    assert!(exists(&husk.public().join(MARKER)), "the marker stays");
+    assert_eq!(tree_of(&root), before, "the root is untouched");
+
+    crate::workspace_manager::WorkspaceManager::derive(
+        &fixture.repo,
+        &fixture.private_root,
+        &run_id,
+        INCARNATION,
+    )
+    .expect("the manager")
+    .remove_execution_root(&mut crate::workspace_manager::NoHooks)
+    .expect("the root goes");
+    let report = fixture.run_census();
+    assert_eq!(
+        only(&report).outcome,
+        RunDirOutcome::ReclaimedPublicOnly(UnboundShape::TargetAbsent)
+    );
+}
+
+/// The census asks whether a run id could have an execution root at all before
+/// it derives where one would be: P3c creates a root only through a manager
+/// derived for its run id. Its answer is held to `WorkspaceManager::derive`'s,
+/// over a canonical id and every way of not being one.
+#[test]
+fn the_censuss_run_id_shape_is_the_one_the_workspace_manager_derives_roots_for() {
+    let fixture = Fixture::new("root-run-id-shape");
+    let canonical = crate::ulid::ulid();
+    let head: String = canonical.chars().take(25).collect();
+    let tail: String = canonical.chars().skip(1).collect();
+    for id in [
+        canonical.clone(),
+        canonical.to_lowercase(),
+        format!("8{tail}"),
+        format!("{head}O"),
+        format!("{head}U"),
+        head.clone(),
+        format!("{canonical}0"),
+        "01BOUND0000000000000000000".to_owned(),
+        "01ABSENT000000000000000000".to_owned(),
+    ] {
+        let derived = crate::workspace_manager::WorkspaceManager::derive(
+            &fixture.repo,
+            &fixture.private_root,
+            &id,
+            INCARNATION,
+        )
+        .is_ok();
+        assert_eq!(super::could_have_a_root(&id), derived, "`{id}`");
     }
 }

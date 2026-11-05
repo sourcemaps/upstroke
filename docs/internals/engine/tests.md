@@ -3452,6 +3452,23 @@ path relative to the root. A refused resume that published the include, created 
 `git` directory, left a staged temporary, renamed anything into place or tightened a
 mode changes it; [`moved_entries`] names what moved without printing any bytes.
 
+[`snapshot_under`] with no case: every read that fails still fails the test, now
+naming the snapshot's top, the path that failed and what was being read.
+
+## `fn private_snapshot_in(root: &Path, case: &str) -> std::collections::BTreeMap<PathBuf, PrivateEntry> {`
+
+[`private_snapshot`] whose failures also name the case: what the guards of a matrix
+take, so a read failure says which of its cases it struck.
+
+## `fn snapshot_under(`
+
+The one walk behind both snapshots: `symlink_metadata` on every entry, never
+followed, a directory by its mode, a file by its mode and bytes, a link by its target;
+`outside_git` leaves the checkout's top-level `.git` out. **Every read that fails
+still panics** — nothing is skipped, ignored or retried — and the message names the
+case, the snapshot's top, the path and the read (PR12-R12-WINDOWS-HUSK-SNAPSHOT-LOCK:
+Native16's `os error 33` named neither the file nor the case).
+
 ## `fn put_include(root: &Path, state: IncludeState) {`
 
 The two include states the CI-01 guard holds a refusal to: `Absent` removes the root's
@@ -4043,6 +4060,10 @@ everything under `.upstroke` — the exclusion, every run's public half, its log
 [`every_ref`]'s, and the lease file in it is created by whoever takes the lease first; the guards
 below compare refs instead.
 
+## `fn public_snapshot_in(repo: &Path, case: &str) -> std::collections::BTreeMap<PathBuf, PrivateEntry> {`
+
+[`public_snapshot`] whose failures also name the case.
+
 ## `fn assert_refused_under_a_held_lease<H>(`
 
 The held-lease controls of PR12-R9-PUBLIC-PUBLICATION-BEFORE-WORKTREE-LOCK,
@@ -4234,6 +4255,54 @@ that `create`'s append-error protocol answers `RetainedPossiblyCommittedHusk` le
 protocol reads, the same two halves (its torn line truncated by `Event.OpenLog`); that producer is
 not run here.
 
+## `const WORKTREE_LEASE_CONTENDER: &str = "engine::tests::worktree_lease_contender";`
+
+The helper [`contend_for_the_worktree_lease`] runs in a process of its own.
+
+## `const CONTENDER_REPO: &str = "UPSTROKE_TEST_CONTENDER_REPO";`
+
+The checkout whose lease the contender asks for.
+
+## `const CONTENDER_GIT_DIR: &str = "UPSTROKE_TEST_CONTENDER_GIT_DIR";`
+
+Its worktree Git directory, so the contender asks with `WorktreeLock::acquire_in` and runs no Git
+command of its own: nothing it does can change `.git`.
+
+## `const CONTENDER_TOOK: &str = "worktree lease contender: took the lease and gave it back";`
+
+What the contender says when the lease was free.
+
+## `const CONTENDER_REFUSED: &str = "worktree lease contender: refused: ";`
+
+What it says, followed by the refusal, when it was not.
+
+## `enum Contended {`
+
+The contender's answer.
+
+## `fn contend_for_the_worktree_lease(`
+
+Ask another process for `repo`'s worktree lease, and say what it found. The process is this test
+binary running [`worktree_lease_contender`] alone, `--ignored`, under the production `HostRunner`
+with a 120-second bound — the runner owns, bounds and reaps it, as it does the husk producer's — and
+it must run to its end (`1 passed`) and say one of its two lines, or the guard fails. A process of
+its own, because the lease's two holds differ inside one process: the in-process claim refuses a
+second acquisition here whatever the operating system lock is doing, and a POSIX `F_SETLK` lock
+never excludes the process that holds it. Only another process sees whether the physical lock is
+held.
+
+## `fn assert_the_lease_is(held: bool, repo: &Path, git_dir: &Path, scratch: &Path, case: &str) {`
+
+The physical premise, asked of another process. Free: the contender takes the lease and gives it
+back. Held: it is refused as by another engine driving the worktree, and on Unix the refusal names
+this process's pid — `F_GETLK`'s holder — so the lock is this test's and is still held. Windows'
+`LockFileEx` reports no holder, so there the refusal alone is the answer.
+
+## `fn worktree_lease_contender() {`
+
+The contender: `WorktreeLock::acquire_in` on the named checkout and Git directory, then drops what it
+took. Returns at once when its parent's variables are absent.
+
 ## `fn a_retained_schema_4_husk_is_refused_before_any_root_is_published() {`
 
 PR12-REG9-HUSK-REFUSAL-LEGACY-PUBLICATION through `resume_with` naming an explicit root
@@ -4247,6 +4316,23 @@ resume changes nothing under the root it names, under the creation root, in the 
 `.git` or in `.git` (every path, kind, mode and byte), builds nothing, and is refused with the
 resolver's own refusal, byte for byte. The no-write comparisons precede the refusal's identity, so
 they are what the old fold fails.
+
+**The held lease is held, physically, throughout.** PR12-R12-WINDOWS-HUSK-SNAPSHOT-LOCK,
+PR12-REG10-HUSK-SNAPSHOT-LOCK and PR12-INV7-HELD-LEASE-SNAPSHOT-WINDOWS (one defect, first in
+`fbdd3e69`): the guard took the lease and then snapshotted `.git`, which reads
+`.git/upstroke-worktree.lock` through a handle of its own. On Windows that read meets the
+holder's `LockFileEx` range lock — Native16's `test (winguest)` failed in the snapshot's `fs::read`
+with `os error 33`, though the log names no file, case or holder — and on Unix closing that
+second descriptor released this process's `F_SETLK` lock (`rundir`'s lock notes: a holder must
+never open its own lock file again), so the resume ran against a lease the operating system no
+longer held, with only the in-process claim left. Now `.git` is snapshotted only outside the held
+interval — before the lease is taken and after it drops — so nothing in this process opens the
+lease file while it holds it; the lease file is created once before the loop and asserted present
+(R25: created on first acquisition, never removed), so no acquisition below creates anything in
+`.git`; and in every case [`assert_the_lease_is`] asks another process: before the resume (held:
+refused, naming this process; free: taken and given back) and, held, again after the resume and
+every observation made under the lease. Nothing is skipped on any platform, no production lock
+changes, and every assertion the guard made it still makes, failures naming their case and path.
 
 Measured before commit as negative control A13 (the router's three lines folding the resolver's
 refusal into `Ok(None)` again, exactly as at `328ee6dd`): the legacy control passed, and the first
@@ -4280,6 +4366,10 @@ makes a directory of its own fixture tree the child's `HOME` and `USERPROFILE`, 
 success, `1 passed` and [`DEFAULT_ROOT_HUSK_DONE`]. No variable of this process changes.
 
 ## `fn default_root_husk_resume_child() {`
+
+The same physical treatment as the explicit-root guard above: `.git` outside the held interval,
+the lease file accounted for before the first snapshot, and the contender — spawned from this child
+— before the resume in each case and, held, after it.
 
 The child of the test above. Its premises: the default root resolves under the child's home and
 does not exist yet, the husk's creation root is outside that home, and the resolver refuses the
@@ -4464,3 +4554,61 @@ again, as at `8b7b22d4`, over the same read): it fails at the first comparison, 
 .upstroke/runs/<survivor>/answers" and "created .upstroke/runs/<survivor>/answers/<its
 question>.json": `answer` wrote the survivor's answer to the shared prefix.
 
+## `fn blocked_closure_plan() -> String {`
+
+Four tasks: `t1`, whose body carries [`ESCALATES`] so its workers below the frontier end without an
+edit; `t2` on `t1`; `t3` on `t2`; and `t4` on nothing.
+
+## `fn dependent_rows(rendered: &str) -> Vec<&str> {`
+
+The rendered rows of `t2` and `t3`, the direct and the transitive dependent.
+
+## `fn declined_failure_run(repo: &Path, stub: &ObservedStub) -> RunReport {`
+
+A schema-4 run through the public `run_harness` whose end-of-ladder question is declined by the
+harness's scripted answer, so `t1` fails after its one attempt, under whatever `on_task_failure`
+the repository's config holds.
+
+## `fn a_completed_schema_4_run_reports_its_failed_tasks_dependents_blocked_live_and_replayed() {`
+
+PR12-INV7-BLOCKED-TASK-REPORTED-QUEUED. With `on_task_failure = "continue"` the run completes with
+`t1` failed and `t4` committed, and its final summary prints ``t2: blocked by `t1` `` and
+``t3: blocked by `t2` ``, never `queued`: the derived Blocked view of the canonical completion rule.
+The run's committed log, replayed through the fold's checked transitions with the frozen plan read
+as `entry::frozen_inputs` reads it, is `Complete` with `t2` and `t3` still structurally `Pending`
+— the run's own `report.json` says `pending` too — and projects the same rows. On the same log, the
+prefix before the event that fails `t1` reports them `queued`, and the prefix ending with it
+reports them blocked: that event, and nothing else, is what blocks them.
+
+## `fn a_schema_4_report_keeps_queued_behind_a_parked_task_and_skipped_behind_a_halting_failure() {`
+
+The controls. A task behind one parked on an unanswered question is `queued`: a question is not a
+failure. And the same failing chain under the default `on_task_failure = halt` ends `Halted` at
+`t1`, with `t2` and `t3` `skipped (run halted)`: a halted run keeps skipping what it did not reach.
+
+## `fn execution_roots_under(private_root: &Path) -> Vec<String> {`
+
+The run ids of every execution root under a private root's `workspaces/`, by name, so a root
+spelled through a canonicalized private root compares equal.
+
+## `fn a_fresh_run_on_an_unborn_branch_is_refused_before_it_creates_anything_and_a_born_one_runs() {`
+
+PR12-INV7-PREPUBLICATION-EXECUTION-ROOT-ORPHAN through the public entry, on the route the finding
+names: a clean repository on an unborn branch, its plan outside the worktree. The run is refused by
+`git rev-parse HEAD` — the base commit it cannot record — and leaves no execution root of its own,
+no run directory, no private half and no build, with the lease free; another run's root in the same
+namespace, content included, is untouched. Before the repair the root was made before that read,
+and stayed with no record naming it. Then the branch is born, and a fresh run on it completes and
+records the root it created; the other run's root is still untouched.
+
+## `fn a_configured_reviewer_whose_cli_is_absent_fails_creation_before_p5b_and_commits_nothing() {`
+
+P12-W17 (D9). A configured reviewer whose CLI is absent fails creation before P5b, and nothing is
+committed. Every recorded reviewer is probed at P4, so `run_with` refuses there, naming the
+reviewer's program, after P3c claimed the run's execution root. The creator's cleanup leaves no run
+directory, no private half holding `committed.json`, no execution root and no integration ref, and
+no run was made without the reviewer. The control: the same configuration, with the reviewer's CLI
+present, creates the run, records both agents as probed, and completes it.
+
+This prose sat above the test in the source until the execution root moved into the create protocol
+at P3c; the refusal used to be reported after P3b, and the root was made before creation began.

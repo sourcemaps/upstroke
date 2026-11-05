@@ -271,6 +271,7 @@ impl RunReport {
         let integration = crate::engine::topology::select::IntegrationReviews::replay(events);
 
         let outcome = fold.finished().cloned();
+        let blocked = derived_blocked(fold);
         let display = |key: TaskKey| {
             fold.registry()
                 .and_then(|registry| registry.get(key))
@@ -334,7 +335,11 @@ impl RunReport {
                     None,
                 ) => match outcome {
                     Some(Finished::Halted | Finished::BudgetExceeded) => TaskRunStatus::Skipped,
-                    Some(Finished::Complete | Finished::Parked) | None => TaskRunStatus::Queued,
+                    Some(Finished::Complete | Finished::Parked) | None => {
+                        blocked.get(&entry.key).map_or(TaskRunStatus::Queued, |by| {
+                            TaskRunStatus::Blocked { by: display(*by) }
+                        })
+                    }
                 },
             };
             let model = attempts
@@ -479,6 +484,45 @@ impl RunReport {
             unattributed_cost_incomplete: integration.unattributed_spend_unknown(),
         }
     }
+}
+
+fn derived_blocked(
+    fold: &crate::topology::fold::TopologyFold,
+) -> BTreeMap<crate::topology::registry::TaskKey, crate::topology::registry::TaskKey> {
+    use crate::topology::fold::TaskState as Topology;
+
+    let Some(registry) = fold.registry() else {
+        return BTreeMap::new();
+    };
+    let failed = |key| fold.task_state(key) == Some(Topology::Failed);
+    let mut closure = std::collections::BTreeSet::new();
+    loop {
+        let before = closure.len();
+        for entry in registry.entries() {
+            if fold.task_state(entry.key) == Some(Topology::Pending)
+                && entry
+                    .deps
+                    .iter()
+                    .any(|dep| failed(*dep) || closure.contains(dep))
+            {
+                closure.insert(entry.key);
+            }
+        }
+        if closure.len() == before {
+            break;
+        }
+    }
+    closure
+        .iter()
+        .filter_map(|key| {
+            registry
+                .get(*key)?
+                .deps
+                .iter()
+                .find(|dep| failed(**dep) || closure.contains(*dep))
+                .map(|dep| (*key, *dep))
+        })
+        .collect()
 }
 
 fn interrupted_record(

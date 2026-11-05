@@ -283,6 +283,238 @@ fn the_execution_root_is_pruned_only_when_it_is_empty() {
     assert!(!fixture.manager.execution_root().exists());
 }
 
+/// Every entry under `top`, by path relative to it: its kind, its permission
+/// bits, and a file's bytes or a link's target. What "untouched" is measured by.
+fn root_state(top: &Path) -> Vec<(PathBuf, String)> {
+    fn mode(metadata: &fs::Metadata) -> u32 {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            metadata.permissions().mode()
+        }
+        #[cfg(not(unix))]
+        {
+            u32::from(metadata.permissions().readonly())
+        }
+    }
+    let mut state = Vec::new();
+    let mut pending = vec![top.to_path_buf()];
+    while let Some(path) = pending.pop() {
+        let metadata = fs::symlink_metadata(&path)
+            .unwrap_or_else(|error| panic!("the state of {}: {error}", path.display()));
+        let relative = path.strip_prefix(top).expect("under the top").to_path_buf();
+        let kind = if metadata.file_type().is_symlink() {
+            format!(
+                "link to {}",
+                fs::read_link(&path).expect("the link").display()
+            )
+        } else if metadata.is_dir() {
+            for entry in fs::read_dir(&path).expect("list the directory") {
+                pending.push(entry.expect("an entry").path());
+            }
+            format!("directory {:o}", mode(&metadata))
+        } else {
+            format!(
+                "file {:o} {:?}",
+                mode(&metadata),
+                fs::read(&path).expect("the file's bytes")
+            )
+        };
+        state.push((relative, kind));
+    }
+    state.sort();
+    state
+}
+
+const SCAFFOLDING: [&str; 5] = ["intents", "tasks", "merge", "snapshots", "hooks-none"];
+
+/// `FreshExecutionRoot`, PR12-INV7-PREPUBLICATION-EXECUTION-ROOT-ORPHAN: a fresh
+/// run claims its root with one exclusive create of the leaf, inside the same
+/// `Worktree.CreateExecutionRoot` funnel. The claim makes the root and its
+/// scaffolding; a second claim of the same path is refused as unclaimed and
+/// leaves it exactly as it was; and the idempotent form every other caller uses
+/// still reuses it.
+#[test]
+fn a_fresh_execution_root_is_claimed_exclusively_and_a_claimed_one_is_never_claimed_twice() {
+    let fixture = Fixture::new("fresh-root-claim");
+    let root = fixture.manager.execution_root().to_path_buf();
+    assert!(
+        fs::symlink_metadata(&root).is_err(),
+        "the premise: no root exists yet"
+    );
+    FreshExecutionRoot(&fixture.manager)
+        .create_execution_root(&mut NoHooks)
+        .expect("a fresh claim of an empty path");
+    for directory in SCAFFOLDING {
+        assert!(root.join(directory).is_dir(), "the claim makes {directory}");
+    }
+
+    let before = root_state(&root);
+    match FreshExecutionRoot(&fixture.manager).create_execution_root(&mut NoHooks) {
+        Err(FreshRootFailure::Unclaimed(UpstrokeError::Filesystem { path, source, .. })) => {
+            assert_eq!(path, root, "the refusal names the root");
+            assert_eq!(source.kind(), std::io::ErrorKind::AlreadyExists, "{source}");
+        }
+        other => panic!("a root already there is refused, not adopted: {other:?}"),
+    }
+    assert_eq!(
+        root_state(&root),
+        before,
+        "the refused claim changed the root"
+    );
+
+    fixture
+        .manager
+        .create_execution_root(&mut NoHooks)
+        .expect("the idempotent form still reuses the root");
+}
+
+/// The claim boundary: a root another actor puts at the path after every check
+/// a caller can make and before the leaf is created — here at the funnel's
+/// `Before` phase, the last point before the primitive — is refused as
+/// unclaimed, and nothing in it changes: not the five empty scaffolding
+/// directories that look exactly like a run's own, not its modes, not a file
+/// beside them. And a link at the leaf is refused without being followed.
+#[test]
+fn a_root_that_appears_at_the_claim_boundary_is_refused_and_left_as_it_was() {
+    struct PlantAtBefore {
+        root: PathBuf,
+        with_a_file: bool,
+        planted: Option<Vec<(PathBuf, String)>>,
+    }
+
+    impl EffectHooks for PlantAtBefore {
+        fn phase(&mut self, site: EffectSiteId, phase: HookPhase) -> Injection {
+            if site == EffectSiteId::Worktree(WorktreeSite::CreateExecutionRoot)
+                && phase == HookPhase::Before
+                && self.planted.is_none()
+            {
+                for directory in SCAFFOLDING {
+                    fs::create_dir_all(self.root.join(directory)).expect("another actor's root");
+                }
+                if self.with_a_file {
+                    fs::write(self.root.join("theirs.txt"), b"another actor's bytes")
+                        .expect("another actor's file");
+                }
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt as _;
+                    fs::set_permissions(&self.root, fs::Permissions::from_mode(0o750))
+                        .expect("its own mode");
+                }
+                self.planted = Some(root_state(&self.root));
+            }
+            Injection::Proceed
+        }
+
+        fn refusal_cause(&self) -> Option<String> {
+            None
+        }
+    }
+
+    for (tag, with_a_file) in [
+        ("fresh-root-foreign", false),
+        ("fresh-root-foreign-file", true),
+    ] {
+        let fixture = Fixture::new(tag);
+        let root = fixture.manager.execution_root().to_path_buf();
+        let mut hooks = PlantAtBefore {
+            root: root.clone(),
+            with_a_file,
+            planted: None,
+        };
+        let failure = FreshExecutionRoot(&fixture.manager)
+            .create_execution_root(&mut hooks)
+            .expect_err("a root already at the path is refused");
+        assert!(
+            matches!(failure, FreshRootFailure::Unclaimed(_)),
+            "{tag}: not this caller's: {failure:?}"
+        );
+        assert_eq!(
+            Some(root_state(&root)),
+            hooks.planted,
+            "{tag}: the other actor's root changed"
+        );
+    }
+
+    #[cfg(unix)]
+    {
+        let fixture = Fixture::new("fresh-root-link");
+        let root = fixture.manager.execution_root().to_path_buf();
+        let target = fixture.root.join("link-target");
+        fs::create_dir_all(&target).expect("the link's target");
+        fs::create_dir_all(root.parent().expect("a parent")).expect("the namespace");
+        std::os::unix::fs::symlink(&target, &root).expect("a link at the leaf");
+        let failure = FreshExecutionRoot(&fixture.manager)
+            .create_execution_root(&mut NoHooks)
+            .expect_err("a link at the leaf is refused");
+        assert!(
+            matches!(failure, FreshRootFailure::Unclaimed(_)),
+            "not this caller's: {failure:?}"
+        );
+        assert_eq!(
+            fs::read_link(&root).expect("the link is still there"),
+            target
+        );
+        assert_eq!(
+            fs::read_dir(&target).expect("the target").count(),
+            0,
+            "nothing was made through the link"
+        );
+    }
+}
+
+/// The claim carried: a failure after the exclusive create — the after-phase
+/// hook here, standing for a scaffolding directory or the durability barrier —
+/// answers `Claimed`, so its caller knows the root, whole or in part, is its
+/// own. A failure before it answers `Unclaimed` and leaves no root.
+#[test]
+fn a_failure_after_the_claim_leaves_the_root_claimed_and_one_before_it_leaves_none() {
+    struct ErrorAt(HookPhase);
+
+    impl EffectHooks for ErrorAt {
+        fn phase(&mut self, site: EffectSiteId, phase: HookPhase) -> Injection {
+            if site == EffectSiteId::Worktree(WorktreeSite::CreateExecutionRoot) && phase == self.0
+            {
+                Injection::Error
+            } else {
+                Injection::Proceed
+            }
+        }
+
+        fn refusal_cause(&self) -> Option<String> {
+            None
+        }
+    }
+
+    let fixture = Fixture::new("fresh-root-after");
+    let root = fixture.manager.execution_root().to_path_buf();
+    let failure = FreshExecutionRoot(&fixture.manager)
+        .create_execution_root(&mut ErrorAt(HookPhase::After))
+        .expect_err("the after phase fails");
+    assert!(
+        matches!(failure, FreshRootFailure::Claimed(_)),
+        "made, then failed: {failure:?}"
+    );
+    for directory in SCAFFOLDING {
+        assert!(
+            root.join(directory).is_dir(),
+            "the claimed root holds {directory}"
+        );
+    }
+
+    let fixture = Fixture::new("fresh-root-before");
+    let root = fixture.manager.execution_root().to_path_buf();
+    let failure = FreshExecutionRoot(&fixture.manager)
+        .create_execution_root(&mut ErrorAt(HookPhase::Before))
+        .expect_err("the before phase fails");
+    assert!(
+        matches!(failure, FreshRootFailure::Unclaimed(_)),
+        "nothing was made: {failure:?}"
+    );
+    assert!(fs::symlink_metadata(&root).is_err(), "and there is no root");
+}
+
 // -----------------------------------------------------------------------
 // The containment refusals — real temp repositories, one test per reason
 // -----------------------------------------------------------------------

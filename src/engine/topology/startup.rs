@@ -10,6 +10,7 @@ use crate::rundir::{
 use crate::runner::container::GitView;
 use crate::runner::container::census::{Census, CensusComplete, CensusStart, run_startup_census};
 use crate::runner::container::runtime::{ContainerRuntime, OwnerLiveness};
+use crate::workspace_manager::WorkspaceManager;
 
 use super::seams::TopologyHooks;
 
@@ -96,7 +97,14 @@ pub enum RunDirOutcome {
     RepairedStaleMarker,
     Committed,
     Skipped,
-    Unreclaimable { step: FailedStep, detail: String },
+    Unreclaimable {
+        step: FailedStep,
+        detail: String,
+    },
+    RootRetained {
+        root: Option<PathBuf>,
+        detail: String,
+    },
 }
 
 impl RunDirOutcome {
@@ -108,6 +116,7 @@ impl RunDirOutcome {
         "committed",
         "skipped",
         "unreclaimable",
+        "root-retained",
     ];
 
     #[must_use]
@@ -120,6 +129,7 @@ impl RunDirOutcome {
             Self::Committed => "committed",
             Self::Skipped => "skipped",
             Self::Unreclaimable { .. } => "unreclaimable",
+            Self::RootRetained { .. } => "root-retained",
         }
     }
 
@@ -216,6 +226,18 @@ impl RunDirEntry {
             RunDirOutcome::Unreclaimable { step, detail } => format!(
                 "retained with the error recorded, and the census carried on: {} ({detail})",
                 step.what_failed()
+            ),
+            RunDirOutcome::RootRetained { root, detail } => format!(
+                "retained, nothing deleted: {} ({detail}). A census deletes no execution root, \
+                 because a husk's proof authenticates its two halves and not who made a directory \
+                 at its root's path, so the husk stays as that root's locator",
+                root.as_ref().map_or_else(
+                    || "where this run's execution root would be cannot be told".to_owned(),
+                    |root| format!(
+                        "this run's execution-root path {} is occupied",
+                        root.display()
+                    )
+                )
             ),
         };
         match &self.locator {
@@ -390,6 +412,10 @@ enum Planned {
     ReclaimPublicOnly(UnboundShape),
     ReclaimBothHalves(PrivateHalfProof),
     Retain(RetainReason),
+    KeepForRoot {
+        root: Option<PathBuf>,
+        detail: String,
+    },
     RepairStaleMarker,
     Committed,
     Skip,
@@ -455,7 +481,9 @@ fn scan_classified(
             );
             let plan = match report.disposition {
                 HuskDisposition::Unstarted(Reclaimable::PublicOnly(shape)) => {
-                    Planned::ReclaimPublicOnly(shape)
+                    unless_its_root_is_there(&report.public, run_id, inputs, shape, || {
+                        Planned::ReclaimPublicOnly(shape)
+                    })
                 }
                 HuskDisposition::Unstarted(Reclaimable::BothHalves) => {
                     match rundir::prove_private_half_ownership(
@@ -463,9 +491,16 @@ fn scan_classified(
                         inputs.repo_key,
                         inputs.authorized_root,
                     ) {
-                        PrivateHalfOwnership::Proven(proof) => Planned::ReclaimBothHalves(proof),
+                        PrivateHalfOwnership::Proven(proof) => {
+                            match root_in_the_way(&report.public, run_id, inputs) {
+                                Some((root, detail)) => Planned::KeepForRoot { root, detail },
+                                None => Planned::ReclaimBothHalves(proof),
+                            }
+                        }
                         PrivateHalfOwnership::NothingBound(shape) => {
-                            Planned::ReclaimPublicOnly(shape)
+                            unless_its_root_is_there(&report.public, run_id, inputs, shape, || {
+                                Planned::ReclaimPublicOnly(shape)
+                            })
                         }
                         PrivateHalfOwnership::Retained(reason) => Planned::Retain(reason),
                     }
@@ -499,6 +534,7 @@ fn apply(hooks: &mut dyn RunDirHooks, public: &Path, plan: Planned) -> RunDirOut
             }
         }
         Planned::Retain(reason) => RunDirOutcome::Retained(reason),
+        Planned::KeepForRoot { root, detail } => RunDirOutcome::RootRetained { root, detail },
         Planned::RepairStaleMarker => match rundir::remove_marker(public, hooks) {
             Ok(()) => RunDirOutcome::RepairedStaleMarker,
             Err(error) => unreclaimable(FailedStep::StaleMarker, &error),
@@ -506,6 +542,69 @@ fn apply(hooks: &mut dyn RunDirHooks, public: &Path, plan: Planned) -> RunDirOut
         Planned::Committed => RunDirOutcome::Committed,
         Planned::Skip => RunDirOutcome::Skipped,
     }
+}
+
+fn unless_its_root_is_there(
+    public: &Path,
+    run_id: &str,
+    inputs: &CensusInputs<'_>,
+    shape: UnboundShape,
+    reclaim: impl FnOnce() -> Planned,
+) -> Planned {
+    if shape != UnboundShape::TargetAbsent {
+        return reclaim();
+    }
+    match root_in_the_way(public, run_id, inputs) {
+        Some((root, detail)) => Planned::KeepForRoot { root, detail },
+        None => reclaim(),
+    }
+}
+
+fn root_in_the_way(
+    public: &Path,
+    run_id: &str,
+    inputs: &CensusInputs<'_>,
+) -> Option<(Option<PathBuf>, String)> {
+    if !could_have_a_root(run_id) {
+        return None;
+    }
+    let marker = match std::fs::read_to_string(public.join(rundir::MARKER))
+        .map_err(|error| error.to_string())
+        .and_then(|text| {
+            serde_json::from_str::<rundir::CreatingMarker>(&text).map_err(|error| error.to_string())
+        }) {
+        Ok(marker) => marker,
+        Err(error) => {
+            return Some((None, format!("its marker cannot be read again: {error}")));
+        }
+    };
+    let manager = match WorkspaceManager::derive(
+        inputs.repo_root,
+        inputs.authorized_root,
+        run_id,
+        &marker.incarnation,
+    ) {
+        Ok(manager) => manager,
+        Err(error) => {
+            return Some((None, format!("the root's path cannot be derived: {error}")));
+        }
+    };
+    let root = manager.execution_root().to_path_buf();
+    match std::fs::symlink_metadata(&root) {
+        Err(absent) if absent.kind() == std::io::ErrorKind::NotFound => None,
+        Ok(_) => Some((Some(root), "something is there".to_owned())),
+        Err(error) => Some((Some(root), format!("it cannot be read: {error}"))),
+    }
+}
+
+fn could_have_a_root(run_id: &str) -> bool {
+    const CROCKFORD: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+    run_id.len() == 26
+        && run_id.bytes().all(|byte| CROCKFORD.contains(&byte))
+        && run_id
+            .as_bytes()
+            .first()
+            .is_some_and(|first| (b'0'..=b'7').contains(first))
 }
 
 fn unreclaimable(step: FailedStep, error: &UpstrokeError) -> RunDirOutcome {

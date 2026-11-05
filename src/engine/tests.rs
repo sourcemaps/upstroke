@@ -18485,6 +18485,21 @@ enum PrivateEntry {
 
 /// Everything persistent under `root`, the root itself included, by path relative to it.
 fn private_snapshot(root: &Path) -> std::collections::BTreeMap<PathBuf, PrivateEntry> {
+    snapshot_under(root, false, "")
+}
+
+fn private_snapshot_in(
+    root: &Path,
+    case: &str,
+) -> std::collections::BTreeMap<PathBuf, PrivateEntry> {
+    snapshot_under(root, false, case)
+}
+
+fn snapshot_under(
+    top: &Path,
+    outside_git: bool,
+    case: &str,
+) -> std::collections::BTreeMap<PathBuf, PrivateEntry> {
     fn mode(metadata: &fs::Metadata) -> u32 {
         #[cfg(unix)]
         {
@@ -18496,21 +18511,47 @@ fn private_snapshot(root: &Path) -> std::collections::BTreeMap<PathBuf, PrivateE
             u32::from(metadata.permissions().readonly())
         }
     }
+    let at = if case.is_empty() {
+        String::new()
+    } else {
+        format!("{case}: ")
+    };
+    let failed = |what: &str, path: &Path, error: &std::io::Error| {
+        format!(
+            "{at}the snapshot of {}: {what} {}: {error}",
+            top.display(),
+            path.display()
+        )
+    };
     let mut entries = std::collections::BTreeMap::new();
-    let top = fs::symlink_metadata(root).expect("the private root");
-    entries.insert(PathBuf::new(), PrivateEntry::Directory { mode: mode(&top) });
-    let mut pending = vec![root.to_path_buf()];
+    let first = fs::symlink_metadata(top)
+        .unwrap_or_else(|error| panic!("{}", failed("the metadata of", top, &error)));
+    entries.insert(
+        PathBuf::new(),
+        PrivateEntry::Directory { mode: mode(&first) },
+    );
+    let mut pending = vec![top.to_path_buf()];
     while let Some(directory) = pending.pop() {
-        for entry in fs::read_dir(&directory).expect("a directory under the private root") {
-            let path = entry.expect("a directory entry").path();
+        let listed = fs::read_dir(&directory)
+            .unwrap_or_else(|error| panic!("{}", failed("listing", &directory, &error)));
+        for entry in listed {
+            let path = entry
+                .unwrap_or_else(|error| panic!("{}", failed("an entry of", &directory, &error)))
+                .path();
             let relative = path
-                .strip_prefix(root)
-                .expect("under the root")
+                .strip_prefix(top)
+                .expect("under the snapshot's top")
                 .to_path_buf();
-            let metadata = fs::symlink_metadata(&path).expect("the entry's metadata");
+            if outside_git && relative == Path::new(".git") {
+                continue;
+            }
+            let metadata = fs::symlink_metadata(&path)
+                .unwrap_or_else(|error| panic!("{}", failed("the metadata of", &path, &error)));
             let found = if metadata.file_type().is_symlink() {
                 PrivateEntry::Link {
-                    target: fs::read_link(&path).expect("the link's target"),
+                    target: fs::read_link(&path).unwrap_or_else(|error| {
+                        panic!("{}", failed("the target of", &path, &error))
+                    }),
                 }
             } else if metadata.is_dir() {
                 pending.push(path.clone());
@@ -18520,7 +18561,8 @@ fn private_snapshot(root: &Path) -> std::collections::BTreeMap<PathBuf, PrivateE
             } else {
                 PrivateEntry::File {
                     mode: mode(&metadata),
-                    bytes: fs::read(&path).expect("the file's bytes"),
+                    bytes: fs::read(&path)
+                        .unwrap_or_else(|error| panic!("{}", failed("reading", &path, &error))),
                 }
             };
             entries.insert(relative, found);
@@ -20609,51 +20651,14 @@ fn put_exclusion(repo: &Path, state: ExclusionState) {
 /// exclusion and every run's public half with its log. [`private_snapshot`]'s walk, without
 /// `.git`, whose refs [`every_ref`] reads and whose lease file belongs to the lease's holder.
 fn public_snapshot(repo: &Path) -> std::collections::BTreeMap<PathBuf, PrivateEntry> {
-    fn mode(metadata: &fs::Metadata) -> u32 {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            metadata.permissions().mode()
-        }
-        #[cfg(not(unix))]
-        {
-            u32::from(metadata.permissions().readonly())
-        }
-    }
-    let mut entries = std::collections::BTreeMap::new();
-    let top = fs::symlink_metadata(repo).expect("the checkout");
-    entries.insert(PathBuf::new(), PrivateEntry::Directory { mode: mode(&top) });
-    let mut pending = vec![repo.to_path_buf()];
-    while let Some(directory) = pending.pop() {
-        for entry in fs::read_dir(&directory).expect("a directory of the checkout") {
-            let path = entry.expect("a directory entry").path();
-            let relative = path
-                .strip_prefix(repo)
-                .expect("under the checkout")
-                .to_path_buf();
-            if relative == Path::new(".git") {
-                continue;
-            }
-            let metadata = fs::symlink_metadata(&path).expect("the entry's metadata");
-            let found = if metadata.file_type().is_symlink() {
-                PrivateEntry::Link {
-                    target: fs::read_link(&path).expect("the link's target"),
-                }
-            } else if metadata.is_dir() {
-                pending.push(path.clone());
-                PrivateEntry::Directory {
-                    mode: mode(&metadata),
-                }
-            } else {
-                PrivateEntry::File {
-                    mode: mode(&metadata),
-                    bytes: fs::read(&path).expect("the file's bytes"),
-                }
-            };
-            entries.insert(relative, found);
-        }
-    }
-    entries
+    snapshot_under(repo, true, "")
+}
+
+fn public_snapshot_in(
+    repo: &Path,
+    case: &str,
+) -> std::collections::BTreeMap<PathBuf, PrivateEntry> {
+    snapshot_under(repo, true, case)
 }
 
 /// Runs `command` once for each exclusion and include state while `hold` keeps the checkout's
@@ -21380,6 +21385,126 @@ fn retained_p5b_husk(root: &Path) -> String {
     husk
 }
 
+const WORKTREE_LEASE_CONTENDER: &str = "engine::tests::worktree_lease_contender";
+
+const CONTENDER_REPO: &str = "UPSTROKE_TEST_CONTENDER_REPO";
+
+const CONTENDER_GIT_DIR: &str = "UPSTROKE_TEST_CONTENDER_GIT_DIR";
+
+const CONTENDER_TOOK: &str = "worktree lease contender: took the lease and gave it back";
+
+const CONTENDER_REFUSED: &str = "worktree lease contender: refused: ";
+
+#[derive(Debug, PartialEq, Eq)]
+enum Contended {
+    Took,
+    Refused(String),
+}
+
+fn contend_for_the_worktree_lease(
+    repo: &Path,
+    git_dir: &Path,
+    scratch: &Path,
+    case: &str,
+) -> Contended {
+    let exe = std::env::current_exe().expect("the test binary");
+    let mut command = CommandSpec::new(exe.to_string_lossy().into_owned());
+    command.args = [
+        "--exact",
+        WORKTREE_LEASE_CONTENDER,
+        "--ignored",
+        "--nocapture",
+        "--test-threads",
+        "1",
+    ]
+    .map(str::to_owned)
+    .to_vec();
+    command.env = vec![
+        (
+            CONTENDER_REPO.to_owned(),
+            repo.to_string_lossy().into_owned(),
+        ),
+        (
+            CONTENDER_GIT_DIR.to_owned(),
+            git_dir.to_string_lossy().into_owned(),
+        ),
+    ];
+    let request = crate::runner::gate_request(
+        command,
+        scratch.to_path_buf(),
+        Duration::from_secs(120),
+        crate::runner::InvocationId::attempt(
+            crate::topology::registry::TaskKey(0),
+            crate::topology::events::GenerationId(0),
+            crate::topology::events::AttemptNumber(1),
+            crate::runner::invocation::AttemptRole::Gate(0),
+            0,
+        ),
+    );
+    let output =
+        crate::runner::Runner::run_blocking(&crate::runner::host::HostRunner::new(), &request)
+            .unwrap_or_else(|error| panic!("{case}: the lease contender did not run: {error}"));
+    assert!(
+        !output.timed_out && output.code == Some(0) && output.stdout.contains("1 passed"),
+        "{case}: the lease contender did not run to its end: {output:?}"
+    );
+    if output.stderr.contains(CONTENDER_TOOK) {
+        return Contended::Took;
+    }
+    let refused = output
+        .stderr
+        .lines()
+        .find_map(|line| line.strip_prefix(CONTENDER_REFUSED))
+        .unwrap_or_else(|| panic!("{case}: the lease contender said neither: {output:?}"));
+    Contended::Refused(refused.to_owned())
+}
+
+fn assert_the_lease_is(held: bool, repo: &Path, git_dir: &Path, scratch: &Path, case: &str) {
+    let contended = contend_for_the_worktree_lease(repo, git_dir, scratch, case);
+    if !held {
+        assert_eq!(
+            contended,
+            Contended::Took,
+            "{case}: another process could not take the free worktree lease"
+        );
+        return;
+    }
+    let Contended::Refused(refusal) = &contended else {
+        panic!("{case}: another process took the worktree lease this test holds");
+    };
+    assert!(
+        refusal.contains("is already driving worktree"),
+        "{case}: the contender was refused for another reason: {refusal}"
+    );
+    if cfg!(unix) {
+        let holder = format!("(pid {})", std::process::id());
+        assert!(
+            refusal.contains(&holder),
+            "{case}: the lease's holder is not this process {holder}: {refusal}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "subprocess helper"]
+fn worktree_lease_contender() {
+    let (Some(repo), Some(git_dir)) = (
+        std::env::var_os(CONTENDER_REPO).map(PathBuf::from),
+        std::env::var_os(CONTENDER_GIT_DIR).map(PathBuf::from),
+    ) else {
+        return;
+    };
+    match WorktreeLock::acquire_in(&repo, &git_dir) {
+        Ok(lease) => {
+            drop(lease);
+            crate::workspace_manager::fixture::say(CONTENDER_TOOK);
+        }
+        Err(refused) => {
+            crate::workspace_manager::fixture::say(&format!("{CONTENDER_REFUSED}{refused}"));
+        }
+    }
+}
+
 #[test]
 fn a_retained_schema_4_husk_is_refused_before_any_root_is_published() {
     use crate::engine::topology::entry::route_resume;
@@ -21420,25 +21545,48 @@ fn a_retained_schema_4_husk_is_refused_before_any_root_is_published() {
     let resume = resume_options(&repo, &husk);
     let stub = ObservedStub::new(0);
     let source = BorrowedObserved(&stub);
+    let git_dir = repo.join(".git");
+    drop(WorktreeLock::acquire(&repo).expect("the lease, taken once so that its file exists"));
+    assert!(
+        git_dir.join("upstroke-worktree.lock").is_file(),
+        "the premise: the lease's own file exists before the first snapshot of .git, so no lease \
+         taken below creates anything there"
+    );
 
     for held in [false, true] {
         for exclusion in [ExclusionState::Absent, ExclusionState::Changed] {
             for include in [IncludeState::Absent, IncludeState::Changed] {
                 put_exclusion(&repo, exclusion);
                 put_include(&named, include);
-                let lease = held.then(|| WorktreeLock::acquire(&repo).expect("the test's lease"));
-                let selected = private_snapshot(&named);
-                let created = private_snapshot(&creation_root);
-                let checkout = public_snapshot(&repo);
-                let git = private_snapshot(&repo.join(".git"));
-                let refused = resume_with(&resume, &source);
-                let selected_after = private_snapshot(&named);
-                let created_after = private_snapshot(&creation_root);
-                let checkout_after = public_snapshot(&repo);
-                let git_after = private_snapshot(&repo.join(".git"));
-                drop(lease);
                 let case =
                     format!("lease held {held}, exclusion {exclusion:?}, include {include:?}");
+                let git = private_snapshot_in(&git_dir, &case);
+                let lease = held.then(|| WorktreeLock::acquire(&repo).expect("the test's lease"));
+                assert_the_lease_is(
+                    held,
+                    &repo,
+                    &git_dir,
+                    tree.path(),
+                    &format!("{case}, before the resume"),
+                );
+                let selected = private_snapshot_in(&named, &case);
+                let created = private_snapshot_in(&creation_root, &case);
+                let checkout = public_snapshot_in(&repo, &case);
+                let refused = resume_with(&resume, &source);
+                let selected_after = private_snapshot_in(&named, &case);
+                let created_after = private_snapshot_in(&creation_root, &case);
+                let checkout_after = public_snapshot_in(&repo, &case);
+                if held {
+                    assert_the_lease_is(
+                        true,
+                        &repo,
+                        &git_dir,
+                        tree.path(),
+                        &format!("{case}, after the resume and every observation under the lease"),
+                    );
+                }
+                drop(lease);
+                let git_after = private_snapshot_in(&git_dir, &case);
                 for (place, before, after) in [
                     ("under the root it names", &selected, &selected_after),
                     ("under the husk's creation root", &created, &created_after),
@@ -21539,24 +21687,48 @@ fn default_root_husk_resume_child() {
     resume.private_root = None;
     let stub = ObservedStub::new(0);
     let source = BorrowedObserved(&stub);
+    let git_dir = repo.join(".git");
+    let scratch = repo.parent().expect("the checkout's fixture tree");
+    drop(WorktreeLock::acquire(&repo).expect("the lease, taken once so that its file exists"));
+    assert!(
+        git_dir.join("upstroke-worktree.lock").is_file(),
+        "the premise: the lease's own file exists before the first snapshot of .git, so no lease \
+         taken below creates anything there"
+    );
 
     for state in ["no default root", "a default root holding another include"] {
         if state != "no default root" {
             put_include(&root, IncludeState::Changed);
         }
         for held in [false, true] {
-            let lease = held.then(|| WorktreeLock::acquire(&repo).expect("the test's lease"));
-            let homes = private_snapshot(&home);
-            let created = private_snapshot(&creation_root);
-            let checkout = public_snapshot(&repo);
-            let git = private_snapshot(&repo.join(".git"));
-            let refused = resume_with(&resume, &source);
-            let homes_after = private_snapshot(&home);
-            let created_after = private_snapshot(&creation_root);
-            let checkout_after = public_snapshot(&repo);
-            let git_after = private_snapshot(&repo.join(".git"));
-            drop(lease);
             let case = format!("{state}, lease held {held}");
+            let git = private_snapshot_in(&git_dir, &case);
+            let lease = held.then(|| WorktreeLock::acquire(&repo).expect("the test's lease"));
+            assert_the_lease_is(
+                held,
+                &repo,
+                &git_dir,
+                scratch,
+                &format!("{case}, before the resume"),
+            );
+            let homes = private_snapshot_in(&home, &case);
+            let created = private_snapshot_in(&creation_root, &case);
+            let checkout = public_snapshot_in(&repo, &case);
+            let refused = resume_with(&resume, &source);
+            let homes_after = private_snapshot_in(&home, &case);
+            let created_after = private_snapshot_in(&creation_root, &case);
+            let checkout_after = public_snapshot_in(&repo, &case);
+            if held {
+                assert_the_lease_is(
+                    true,
+                    &repo,
+                    &git_dir,
+                    scratch,
+                    &format!("{case}, after the resume and every observation under the lease"),
+                );
+            }
+            drop(lease);
+            let git_after = private_snapshot_in(&git_dir, &case);
             for (place, before, after) in [
                 ("under the home", &homes, &homes_after),
                 ("under the husk's creation root", &created, &created_after),
@@ -21582,6 +21754,31 @@ fn default_root_husk_resume_child() {
         }
     }
     crate::workspace_manager::fixture::say(DEFAULT_ROOT_HUSK_DONE);
+}
+
+fn execution_roots_under(private_root: &Path) -> Vec<String> {
+    let workspaces = private_root.join("workspaces");
+    let keys = match fs::read_dir(&workspaces) {
+        Ok(keys) => keys,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(error) => panic!("list {}: {error}", workspaces.display()),
+    };
+    let mut roots = Vec::new();
+    for key in keys {
+        let key = key.expect("a repository namespace").path();
+        for root in
+            fs::read_dir(&key).unwrap_or_else(|error| panic!("list {}: {error}", key.display()))
+        {
+            roots.push(
+                root.expect("an execution root")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+    }
+    roots.sort();
+    roots
 }
 
 fn recorded_execution_root(repo: &Path, run_id: &str) -> PathBuf {
@@ -22901,6 +23098,206 @@ fn a_halted_schema_4_run_projects_where_it_halted_and_its_outcome() {
     assert_eq!(finalized["halted_at"], halted_key, "{finalized}");
 }
 
+fn blocked_closure_plan() -> String {
+    format!(
+        "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n\
+         Its workers below the frontier end without an edit: {ESCALATES}.\n\n\
+         ## Implement the gadget\n<!-- upstroke: id=t2 kind=implement depends=t1 -->\n\
+         Make it on top of the widget.\n\n\
+         ## Implement the gizmo\n<!-- upstroke: id=t3 kind=implement depends=t2 -->\n\
+         Make it on top of the gadget.\n\n\
+         ## Implement the sprocket\n<!-- upstroke: id=t4 kind=implement depends= -->\n\
+         Make it on its own.\n"
+    )
+}
+
+fn dependent_rows(rendered: &str) -> Vec<&str> {
+    rendered
+        .lines()
+        .filter(|line| line.starts_with("  t2:") || line.starts_with("  t3:"))
+        .collect()
+}
+
+fn declined_failure_run(repo: &Path, stub: &ObservedStub) -> RunReport {
+    let answers = ScriptedAnswers::new(vec![Answer::Declined]);
+    let report = run_harness(
+        &topology_options(repo),
+        &Harness {
+            adapters: &BorrowedObserved(stub),
+            answers: Some(&answers),
+            sleeper: None,
+        },
+    )
+    .expect("the run ends");
+    until_released(repo, &report.run_id);
+    report
+}
+
+#[test]
+fn a_completed_schema_4_run_reports_its_failed_tasks_dependents_blocked_live_and_replayed() {
+    use crate::topology::fold::{FrozenInputs, TaskState as Structural, TopologyFold};
+
+    let (_tree, repo) = temp_engine_repo("topology-blocked-closure");
+    seed(
+        &repo,
+        &blocked_closure_plan(),
+        Some(&format!(
+            "[engine]\non_task_failure = \"continue\"\n\n{ONE_ATTEMPT_ROUTING}"
+        )),
+    );
+    let stub = ObservedStub::new(0);
+    let report = declined_failure_run(&repo, &stub);
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:#?}");
+    assert!(
+        matches!(task(&report, "t1").status, TaskRunStatus::Failed { .. }),
+        "the premise: t1 failed: {report:#?}"
+    );
+    assert!(
+        committed(&report, "t4"),
+        "the premise: the independent task merged: {report:#?}"
+    );
+    let rendered = report.render();
+    assert_eq!(
+        dependent_rows(&rendered),
+        ["  t2: blocked by `t1`", "  t3: blocked by `t2`"],
+        "the failed t1's direct and transitive dependents, as the completed run's final summary \
+         prints them:\n{rendered}"
+    );
+    for (id, by) in [("t2", "t1"), ("t3", "t2")] {
+        assert!(
+            matches!(&task(&report, id).status, TaskRunStatus::Blocked { by: blocker } if blocker == by),
+            "{id} is blocked by {by}: {report:#?}"
+        );
+    }
+    assert!(
+        rendered.contains(&format!(
+            "run complete: 1 task(s) committed on {}",
+            report.branch
+        )),
+        "{rendered}"
+    );
+
+    let log = fs::read(rundir::public_dir(&repo, &report.run_id).join(rundir::EVENT_LOG))
+        .expect("the run's log");
+    let events = TopologyFold::parse_log(&log).expect("the committed log parses");
+    let frozen = fs::read(paths_of(&repo, &report.run_id).plan_json()).expect("the frozen plan");
+    let inputs = || FrozenInputs {
+        plan: serde_json::from_slice(&frozen).expect("the frozen plan parses"),
+        normalized_plan_digest: crate::events::normalized_plan_digest(&frozen),
+    };
+    let replay = |end: usize| {
+        TopologyFold::replay(inputs(), events.get(..end).unwrap_or_default()).unwrap_or_else(
+            |error| panic!("the log's first {end} event(s) replay through the fold: {error}"),
+        )
+    };
+    let replayed = replay(events.len());
+    assert_eq!(
+        replayed.finished(),
+        Some(&crate::events::RunOutcome::Complete)
+    );
+    let key = |id: &str| {
+        replayed
+            .registry()
+            .and_then(|registry| registry.key_of(id))
+            .unwrap_or_else(|| panic!("task {id} in the registry"))
+    };
+    assert_eq!(
+        ["t1", "t2", "t3", "t4"].map(|id| replayed.task_state(key(id))),
+        [
+            Some(Structural::Failed),
+            Some(Structural::Pending),
+            Some(Structural::Pending),
+            Some(Structural::Merged),
+        ],
+        "the durable states the projection reads: t2 and t3 stay Pending"
+    );
+    let projected = RunReport::from_topology(&replayed, &events, Vec::new()).render();
+    assert_eq!(
+        dependent_rows(&projected),
+        dependent_rows(&rendered),
+        "the replayed log's projection:\n{projected}"
+    );
+    let finalized: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(rundir::public_dir(&repo, &report.run_id).join("report.json"))
+            .expect("finalize's report"),
+    )
+    .expect("json");
+    for id in ["t2", "t3"] {
+        let state = finalized["tasks"]
+            .as_array()
+            .and_then(|tasks| tasks.iter().find(|task| task["display_id"] == id))
+            .map(|task| task["state"].clone());
+        assert_eq!(
+            state,
+            Some(serde_json::Value::from("pending")),
+            "the run's own report keeps {id}'s durable state: {finalized}"
+        );
+    }
+
+    let fails_t1 = (1..=events.len())
+        .find(|&end| replay(end).task_state(key("t1")) == Some(Structural::Failed))
+        .expect("an event of the log fails t1");
+    let before = RunReport::from_topology(
+        &replay(fails_t1 - 1),
+        events.get(..fails_t1 - 1).unwrap_or_default(),
+        Vec::new(),
+    )
+    .render();
+    assert_eq!(
+        dependent_rows(&before),
+        ["  t2: queued", "  t3: queued"],
+        "before the event that fails t1, its dependents wait on a task that has not failed:\n{before}"
+    );
+    let at = RunReport::from_topology(
+        &replay(fails_t1),
+        events.get(..fails_t1).unwrap_or_default(),
+        Vec::new(),
+    )
+    .render();
+    assert_eq!(
+        dependent_rows(&at),
+        ["  t2: blocked by `t1`", "  t3: blocked by `t2`"],
+        "the event that fails t1 is the one that blocks its dependents:\n{at}"
+    );
+}
+
+#[test]
+fn a_schema_4_report_keeps_queued_behind_a_parked_task_and_skipped_behind_a_halting_failure() {
+    let (_parked_tree, parked_repo) = temp_engine_repo("topology-queued-parked");
+    let asking = ObservedStub::new(1);
+    let parked = run_with(&topology_options(&parked_repo), &BorrowedObserved(&asking))
+        .expect("the run parks");
+    until_released(&parked_repo, &parked.run_id);
+    assert_eq!(parked.outcome(), RunOutcome::Parked, "{parked:#?}");
+    assert!(
+        matches!(task(&parked, "t1").status, TaskRunStatus::Parked { .. }),
+        "the premise: t1 is parked on its question: {parked:#?}"
+    );
+    let rendered = parked.render();
+    assert_eq!(
+        dependent_rows(&rendered),
+        ["  t2: queued"],
+        "t2 waits on a question, not behind a failure:\n{rendered}"
+    );
+
+    let (_halted_tree, halted_repo) = temp_engine_repo("topology-skipped-halted");
+    seed(
+        &halted_repo,
+        &blocked_closure_plan(),
+        Some(ONE_ATTEMPT_ROUTING),
+    );
+    let stub = ObservedStub::new(0);
+    let halted = declined_failure_run(&halted_repo, &stub);
+    assert_eq!(halted.outcome(), RunOutcome::Halted, "{halted:#?}");
+    assert_eq!(halted.halted_at.as_deref(), Some("t1"), "{halted:#?}");
+    let rendered = halted.render();
+    assert_eq!(
+        dependent_rows(&rendered),
+        ["  t2: skipped (run halted)", "  t3: skipped (run halted)"],
+        "a halted run skips the failed task's dependents, as it always has:\n{rendered}"
+    );
+}
+
 /// S9, a budget stop. A run budget the first task's spend crosses stops the run
 /// before the next attempt. The `RunReport` projects the stop the log records:
 /// `outcome()` is `BudgetExceeded`, and `budget_stop` carries the log's
@@ -23355,13 +23752,6 @@ const COPILOT_REVIEWER_CONFIG: &str = "[routing]\n\
                                        [[pins]]\ntier = \"frontier\"\nagent = \"copilot\"\n\
                                        model = \"gpt-5.3-codex\"\n";
 
-/// P12-W17 (D9). A configured reviewer whose CLI is absent fails creation before
-/// P5b, and nothing is committed. Every recorded reviewer is probed at P4, so
-/// `run_with` refuses there, naming the reviewer's program, after P3b. The
-/// creator's cleanup leaves no run directory, no private half holding
-/// `committed.json`, and no integration ref, and no run was made without the
-/// reviewer. The control: the same configuration, with the reviewer's CLI
-/// present, creates the run, records both agents as probed, and completes it.
 #[test]
 fn a_configured_reviewer_whose_cli_is_absent_fails_creation_before_p5b_and_commits_nothing() {
     let (_tree, repo) = temp_engine_repo("topology-absent-reviewer");
@@ -23377,10 +23767,15 @@ fn a_configured_reviewer_whose_cli_is_absent_fails_creation_before_p5b_and_commi
     .expect_err("an absent reviewer CLI refuses creation");
     let said = refused.to_string();
     assert!(
-        said.contains("stopped at P3b"),
-        "before P4 certified: {said}"
+        said.contains("stopped at P3c"),
+        "after the execution root's claim, before P4 certified: {said}"
     );
     assert!(said.contains(ABSENT_REVIEWER_CLI), "{said}");
+    assert_eq!(
+        execution_roots_under(&private_root_for(&repo)),
+        Vec::<String>::new(),
+        "the creator settled the root it claimed before it reclaimed either half: {said}"
+    );
     assert!(said.contains("could not be executed"), "{said}");
 
     assert_eq!(
@@ -23442,6 +23837,102 @@ fn a_configured_reviewer_whose_cli_is_absent_fails_creation_before_p5b_and_commi
         "{first}"
     );
     until_released(&repo, &report.run_id);
+}
+
+#[test]
+fn a_fresh_run_on_an_unborn_branch_is_refused_before_it_creates_anything_and_a_born_one_runs() {
+    let tree = temp_engine_scratch("topology-unborn");
+    let repo = tree.path().join("repo");
+    fs::create_dir(&repo).expect("the repository, a child of the guarded tree");
+    git_in(&repo, &["init", "-q", "-b", "main"]);
+    git_in(&repo, &["config", "user.email", "test@upstroke.local"]);
+    git_in(&repo, &["config", "user.name", "upstroke tests"]);
+    git_in(&repo, &["config", "maintenance.auto", "false"]);
+    assert!(
+        !repo
+            .join(".git")
+            .join("refs")
+            .join("heads")
+            .join("main")
+            .exists()
+            && !repo.join(".git").join("packed-refs").exists(),
+        "the premise: the branch is unborn"
+    );
+    let plan = "## Implement the widget\n<!-- upstroke: id=t1 depends= -->\nMake it.\n";
+    let outside = tree.path().join("plan.md");
+    fs::write(&outside, plan).expect("the plan, outside the worktree, which stays clean");
+    let mut opts = topology_options(&repo);
+    opts.plan_path = outside;
+    let home = private_root_for(&repo);
+
+    let foreign_id = crate::ulid::ulid();
+    let foreign = crate::workspace_manager::WorkspaceManager::derive(
+        &repo,
+        &home,
+        &foreign_id,
+        &crate::ulid::ulid(),
+    )
+    .expect("another run's manager");
+    foreign
+        .create_execution_root(&mut crate::workspace_manager::NoHooks)
+        .expect("another run's root, in the same namespace");
+    fs::write(
+        foreign.execution_root().join("theirs.txt"),
+        b"another run's bytes",
+    )
+    .expect("another run's content");
+    let foreign_before = private_snapshot(foreign.execution_root());
+
+    let stub = ObservedStub::new(0);
+    let refused = run_with(&opts, &BorrowedObserved(&stub))
+        .expect_err("an unborn branch has no base commit to record");
+    let said = refused.to_string();
+    assert!(
+        said.contains("rev-parse") && said.contains("HEAD"),
+        "the refusal is the base commit's: {said}"
+    );
+    assert_eq!(
+        execution_roots_under(&home),
+        vec![foreign_id.clone()],
+        "the refused run left an execution root behind: {said}"
+    );
+    assert!(
+        rundir::run_dir_names(&repo).is_empty(),
+        "no run directory was published"
+    );
+    assert!(!home.join("runs").exists(), "no private half was made");
+    assert!(stub.built().is_empty(), "nothing was built");
+    assert_eq!(
+        private_snapshot(foreign.execution_root()),
+        foreign_before,
+        "another run's root changed"
+    );
+    drop(WorktreeLock::acquire(&repo).expect("the lease is free after the refusal"));
+
+    fs::write(repo.join("README.md"), "seed\n").expect("seed");
+    fs::write(repo.join("plan.md"), plan).expect("the plan, now in the repository");
+    git_in(&repo, &["add", "-A"]);
+    git_in(&repo, &["commit", "-q", "-m", "seed"]);
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        0,
+    )));
+    let report =
+        run_with(&topology_options(&repo), &source).expect("a fresh run on the born branch");
+    until_released(&repo, &report.run_id);
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:#?}");
+    assert_eq!(
+        recorded_execution_root(&repo, &report.run_id)
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned()),
+        Some(report.run_id.clone()),
+        "the run created and recorded its own root"
+    );
+    assert_eq!(
+        private_snapshot(foreign.execution_root()),
+        foreign_before,
+        "another run's root changed"
+    );
 }
 
 /// Where `no_committer_identity_helper` records that it ran.

@@ -274,7 +274,25 @@ stays the authority; this is the command's summary of the same run.
   not interrupted (an interrupted attempt returns its task to pending and never
   fails it, so a failed task's reason is read past one); a task an open
   question names is parked on it; anything else is queued, or skipped when the
-  run halted or stopped at a budget.
+  run halted or stopped at a budget — except that a pending task with a failed
+  task in its transitive dependency closure is blocked ([`derived_blocked`])
+  when the run completed, parked or has no `run_finished`.
+
+  That exception is the canonical derived Blocked view
+  (`decisions.run_end_policy.derived_outcome`, "Pending with a Failed task in
+  its transitive dependency closure (derived Blocked)", and
+  `decisions.repairs.terminal_failure`, "dependents Blocked as a derived
+  view"). The durable state stays `Pending`: the fold keeps it, completes the
+  run over it (`complete_shape`), and its own `report.json` still names it
+  pending. Only this summary reads it. Until PR12-INV7-BLOCKED-TASK-REPORTED-QUEUED
+  (first in `fffa73fa`) every such task at `Complete` was `Queued`, and
+  `upstroke run` and `upstroke resume` ended a finished run by printing work
+  that could never run as "queued", hiding why it had not. A halted or
+  budget-stopped run keeps `Skipped` for every task it did not reach, failed
+  ancestor or not, as it always has (the S9 halted guard,
+  `engine::tests::a_halted_schema_4_run_projects_where_it_halted_and_its_outcome`,
+  holds its failed task's dependent skipped); a pending task behind a parked
+  one, or behind any task that has not failed, is still queued.
 - Each task's attempts are the records the log holds for it, in log order:
   `attempt_finished` for an attempt that did not succeed, `candidate_prepared`
   for one that did, and `attempt_interrupted` for one whose coordinator did not
@@ -357,6 +375,27 @@ stays the authority; this is the command's summary of the same run.
 - `halted_at` and `budget_stop` are set only as the fold's own outcome says,
   so [`RunReport::outcome`] agrees with it; the entry compares the two and
   warns if they ever disagree.
+
+## `fn derived_blocked(`
+
+The derived Blocked view of a schema-4 run, for [`RunReport::from_topology`]:
+every task the fold holds `Pending` with a `Failed` task in its transitive
+dependency closure, each mapped to the dependency it is blocked by.
+
+The closure is the one the fold's completion rule computes
+(`RunState::blocked_tasks`, behind `complete_shape`), from the same facts —
+the registry's dependency keys (`TaskEntry::deps`) and the fold's task
+states — read here through `TopologyFold::registry` and
+`TopologyFold::task_state`, because the fold's own function is private to it.
+It grows until a pass adds nothing, so a plan that lists a dependent before
+the task it waits on is still closed.
+
+The dependency it names is the first of the task's own dependencies, in
+`deps` order, that is failed or itself blocked: the legacy [`settle`]'s
+naming, so a direct dependent of a failed task names that task, and a
+transitive one names the blocked dependency it waits on, whose own row names
+the next link. The answer is the same whatever order the passes found the
+closure in. A fold with no registry (no `run_started`) blocks nothing.
 
 ## `fn interrupted_record(`
 

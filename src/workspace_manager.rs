@@ -2761,6 +2761,74 @@ impl<'p> Destination<'p> {
     }
 }
 
+/// How `Worktree.CreateExecutionRoot` makes the root itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RootLeaf {
+    /// `create_dir_all`: a root already there is reused.
+    Reused,
+    /// The parent chain with `create_dir_all`, then the root with one
+    /// exclusive `create_dir`: a root already there — empty scaffolding, a
+    /// link, anything — is refused, never adopted.
+    Exclusive,
+}
+
+/// A manager's execution root, as a **fresh** run claims it.
+///
+/// `resource_accounting[R18]` lets a run account for, and remove, only a root
+/// it made. [`WorkspaceManager::create_execution_root`] reuses whatever is at
+/// the path, which is right for a resume recreating its recorded root and
+/// wrong for a run that has never had one: a directory another actor put
+/// there — empty scaffolding included — would become this run's to prune. So a
+/// fresh run creates through this, and the answer says whether it claimed.
+///
+/// Its one method is the same `Worktree.CreateExecutionRoot` funnel under the
+/// same name — the same revalidation, containment and reparse checks,
+/// scaffolding, durability barrier and hook phases — differing only in the
+/// leaf ([`RootLeaf::Exclusive`]), so the site, its inventory row and its
+/// classification are the ones already there.
+#[derive(Debug, Clone, Copy)]
+pub struct FreshExecutionRoot<'a>(pub &'a WorkspaceManager);
+
+impl FreshExecutionRoot<'_> {
+    /// `Worktree.CreateExecutionRoot` (R18), claiming the root exclusively.
+    ///
+    /// # Errors
+    ///
+    /// [`FreshRootFailure::Unclaimed`] when nothing at the root's path is this
+    /// call's: it was already there, a containment or reparse refusal or the
+    /// before-phase hook stopped it, or the parent chain or the root could not
+    /// be made. [`FreshRootFailure::Claimed`] when this call made the root and
+    /// then failed — a scaffolding directory, the durability barrier, or the
+    /// after-phase hook — so the root, whole or in part, is the caller's.
+    pub fn create_execution_root(
+        &self,
+        hooks: &mut dyn EffectHooks,
+    ) -> Result<(), FreshRootFailure> {
+        let mut claimed = false;
+        self.0
+            .create_execution_root_as(hooks, RootLeaf::Exclusive, &mut claimed)
+            .map_err(|error| {
+                if claimed {
+                    FreshRootFailure::Claimed(error)
+                } else {
+                    FreshRootFailure::Unclaimed(error)
+                }
+            })
+    }
+}
+
+/// Why [`FreshExecutionRoot::create_execution_root`] failed, and whose the
+/// root is.
+#[derive(Debug)]
+pub enum FreshRootFailure {
+    /// Nothing at the root's path was made by this call: it is not the
+    /// caller's to claim, change or delete.
+    Unclaimed(UpstrokeError),
+    /// This call made the root, then failed: the root, whole or in part, is
+    /// the caller's.
+    Claimed(UpstrokeError),
+}
+
 impl WorkspaceManager {
     /// Derive the execution root of `run_id` from the managed base and the
     /// authorized private root, and refuse every containment condition
@@ -3380,10 +3448,30 @@ impl WorkspaceManager {
 
     /// `Worktree.CreateExecutionRoot` (R18).
     ///
+    /// Idempotent: a root that is already there is reused, which is what a
+    /// resume recreating its recorded root, recovery and the fixtures rely on.
+    /// A fresh run claims its root with [`FreshExecutionRoot`] instead.
+    ///
     /// # Errors
     ///
     /// The containment refusals, or an I/O error creating the directories.
     pub fn create_execution_root(&self, hooks: &mut dyn EffectHooks) -> Result<(), UpstrokeError> {
+        self.create_execution_root_as(hooks, RootLeaf::Reused, &mut false)
+    }
+
+    /// The one primitive behind both forms of `Worktree.CreateExecutionRoot`:
+    /// the same revalidation, funnel, scaffolding and barrier, and only the
+    /// leaf's creation differs. `claimed` is set in the statement after an
+    /// [`RootLeaf::Exclusive`] create of the leaf succeeds, inside the funnel,
+    /// so a caller reads it after any error the funnel returns — a scaffolding
+    /// directory, the barrier or the after-phase hook — and knows the root is
+    /// its own.
+    fn create_execution_root_as(
+        &self,
+        hooks: &mut dyn EffectHooks,
+        leaf: RootLeaf,
+        claimed: &mut bool,
+    ) -> Result<(), UpstrokeError> {
         self.revalidate_pausing(hooks)?;
         let ledger = hooks.durability_ledger();
         funnel(
@@ -3391,13 +3479,36 @@ impl WorkspaceManager {
             EffectSiteId::Worktree(WorktreeSite::CreateExecutionRoot),
             || {
                 self.revalidate_acted_through(Primitive::CreateExecutionRoot, None, None)?;
-                fs::create_dir_all(&self.execution_root).map_err(|source| {
-                    UpstrokeError::Filesystem {
-                        operation: "create",
-                        path: self.execution_root.clone(),
-                        source,
+                match leaf {
+                    RootLeaf::Reused => {
+                        fs::create_dir_all(&self.execution_root).map_err(|source| {
+                            UpstrokeError::Filesystem {
+                                operation: "create",
+                                path: self.execution_root.clone(),
+                                source,
+                            }
+                        })?
                     }
-                })?;
+                    RootLeaf::Exclusive => {
+                        if let Some(parent) = self.execution_root.parent() {
+                            fs::create_dir_all(parent).map_err(|source| {
+                                UpstrokeError::Filesystem {
+                                    operation: "create",
+                                    path: parent.to_path_buf(),
+                                    source,
+                                }
+                            })?;
+                        }
+                        fs::create_dir(&self.execution_root).map_err(|source| {
+                            UpstrokeError::Filesystem {
+                                operation: "create",
+                                path: self.execution_root.clone(),
+                                source,
+                            }
+                        })?;
+                        *claimed = true;
+                    }
+                }
                 for directory in [
                     self.execution_root.join("intents"),
                     self.execution_root.join("tasks"),

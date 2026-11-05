@@ -300,6 +300,29 @@ holds a run over a default root that does not exist yet to both halves of
 that: nothing under the home while the lease is held, the root created and
 authorized once it is not).
 
+**The execution root is not made here.** Everything fallible this body
+prepares — the census, `WorkspaceManager::derive`, [`one_spelling`], the base
+commit (`head_sha_full`, which an unborn branch refuses), the normalized plan,
+the frozen inputs and [`fresh_record`] — runs before `create_run`, and none of
+it creates R18, so an ordinary refusal there leaves nothing to account for: no
+public run directory, no private half, no execution root. The root is
+`create_run`'s, at P3c: claimed exclusively, after the marker that locates
+the run and the owner record that authenticates it, and settled by the
+creator's own cleanup before either half, or kept with both when it cannot be
+(`engine::topology::create`'s module notes). The manager is handed to the
+request as `root` (its `RootCreation` implementation is below), and a refusal
+from `create_run` is its `Refused::into_error`, the disposition already
+settled.
+
+Until PR12-INV7-PREPUBLICATION-EXECUTION-ROOT-ORPHAN (first in `fffa73fa`)
+this body made the root itself, before `head_sha_full`, the normalized plan
+and the record, and pruned it only in `create_run`'s refusal arm: a failure
+in between — an unborn branch, the clean repository with its plan and config
+outside it, is one — returned with a root no run directory named, which no
+census could find. Pruning on every error from here would not have closed it:
+a removal that fails leaves the same root with no record naming it, so the
+creation moved into the create protocol, after the records that locate it.
+
 A container runner is given the worktree Git directory and `repository`'s
 common directory (J10, see the module's runner section). The copies this body
 makes are owned snapshots (§6): the include's spelling, kept for
@@ -479,10 +502,30 @@ witnesses (`run_id`, `incarnation`, `runner`, `private_dir`,
 `registry_digest` — computed over `registry_record()` and the probed agents —
 is the digest of the record that is appended.
 
+`path_policy.case_fold` is the sixth stamped field, and the one this function
+cannot know: it is observed at the execution root, which `create_run` makes
+at P3c, after this record exists. The `false` written here is never what is
+committed — P5b stamps P3c's observation over it — and `registry_record()`
+does not cover the path policy, so the digest is unaffected.
+
 `shell` is `analysis.config.shell`, the shell `RunnerProbes` probes at P4, so
 every resume probes the shell its creation probed, with gates or without
 (PR12-CI-03). Every gate the analysis settled runs under that same shell, so for
 a run with gates it equals each recorded gate's.
+
+## `impl super::create::RootCreation for WorkspaceManager {`
+
+The capability `create_run`'s P3c creates R18 through. `create` is
+`workspace_manager::FreshExecutionRoot`'s `create_execution_root`: the
+`Worktree.CreateExecutionRoot` funnel claiming the root with one exclusive
+create of its leaf, so a root already at the path — empty scaffolding
+included — is refused and never adopted, and its answer says whether the claim
+happened (`FreshRootFailure::Claimed` or `Unclaimed`). `case_fold` is this
+module's observation at the root just made: [`observe_case_at`] on its `tasks`
+directory, resolved with the repository's `core.ignorecase`
+([`resolve_case_fold`]), never at an ancestor. `path` and `remove` are the
+manager's own (`impl UnpublishedRoot for WorkspaceManager`, in
+`engine::topology::create`).
 
 ## `struct DeliveredFirst<'a> {`
 

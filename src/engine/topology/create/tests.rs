@@ -616,6 +616,32 @@ impl Fixture {
     fn husk(&self) -> crate::rundir::HuskReport {
         crate::rundir::husk_report(&self.repo, RUN_ID, &self.repo_key, &self.private_root)
     }
+
+    fn no_root(&self) -> NoRoot {
+        NoRoot(self.root.join("no-execution-root").join(RUN_ID))
+    }
+}
+
+struct NoRoot(PathBuf);
+
+impl UnpublishedRoot for NoRoot {
+    fn path(&self) -> &Path {
+        &self.0
+    }
+
+    fn remove(&self, _hooks: &mut dyn EffectHooks) -> Result<bool, UpstrokeError> {
+        Ok(false)
+    }
+}
+
+impl RootCreation for NoRoot {
+    fn create(&self, _hooks: &mut dyn EffectHooks) -> Result<(), FreshRootFailure> {
+        Ok(())
+    }
+
+    fn case_fold(&self, _warnings: &mut Vec<String>) -> bool {
+        false
+    }
 }
 
 fn plan() -> Plan {
@@ -726,6 +752,7 @@ struct Driver<'a> {
     fixture: &'a Fixture,
     probes: &'a dyn Probes,
     refs: &'a dyn IntegrationRefs,
+    root: Option<&'a dyn RootCreation>,
     agents: Vec<String>,
     runner: RunnerPolicy,
     execution: RecordingRunner,
@@ -739,6 +766,7 @@ impl<'a> Driver<'a> {
             fixture,
             probes,
             refs,
+            root: None,
             agents: agents(),
             runner: crate::runner::policy::host_policy(),
             execution: RecordingRunner::default(),
@@ -759,12 +787,14 @@ impl<'a> Driver<'a> {
     fn run(&mut self, hooks: &mut TestHooks) -> Result<Started, Refused> {
         let plan_bytes = normalized_plan();
         let clock = Fixed::default();
+        let no_root = self.fixture.no_root();
         let request = Request {
             repo_root: &self.fixture.repo,
             repo_key: self.fixture.repo_key.clone(),
             normalized_plan: &plan_bytes,
             inputs: inputs(),
             record: record(&self.agents, self.runner.clone()),
+            root: self.root.unwrap_or(&no_root),
             agents: &self.agents,
             probes: self.probes,
             refs: self.refs,
@@ -1092,12 +1122,14 @@ fn a_run_with_configured_mounts_records_one_runner_in_its_marker_owner_record_an
     let plan_bytes = normalized_plan();
     let clock = Fixed::default();
     let agents = agents();
+    let no_root = fixture.no_root();
     let request = Request {
         repo_root: &fixture.repo,
         repo_key: fixture.repo_key.clone(),
         normalized_plan: &plan_bytes,
         inputs: inputs(),
         record: record(&agents, policy.clone()),
+        root: &no_root,
         agents: &agents,
         probes: &probes,
         refs: &refs,
@@ -1765,11 +1797,12 @@ fn a_commit_record_stat_that_cannot_answer_retains_both_halves_and_releases_the_
         repo_key: fixture.repo_key.clone(),
         private_root: fixture.private_root_canonical(),
         run_id: RUN_ID.to_owned(),
+        root: RootClaim::NotCreated,
         error: UpstrokeError::Refused {
             message: "the step that stopped the run".to_owned(),
         },
     };
-    let disposition = stat_after_error(&mut aborted, &mut hooks);
+    let disposition = stat_after_error(&mut aborted, &fixture.no_root(), &mut hooks);
 
     let Disposition::PossiblyCommitted {
         ref locator,
@@ -2648,7 +2681,7 @@ fn expected_disposition(prefix: Prefix) -> &'static str {
         Prefix::P1Staged => "public-only:staged",
         Prefix::P1 | Prefix::P2 => "public-only:target-absent",
         Prefix::P3a | Prefix::P3aStaged => "retained:owner-record-missing",
-        Prefix::P3b | Prefix::P4 | Prefix::P5 => "both-halves",
+        Prefix::P3b | Prefix::P3c | Prefix::P4 | Prefix::P5 => "both-halves",
         Prefix::P5b => "retained:possibly-committed",
         Prefix::Nothing | Prefix::P6 | Prefix::P7 | Prefix::P8 => "committed",
     }
@@ -3138,12 +3171,14 @@ fn container_probe_kill_child() {
     let clock = Fixed::default();
     let agents = agents();
     let ledger = std::sync::Mutex::new(InvocationLedger::new());
+    let no_root = fixture.no_root();
     let request = Request {
         repo_root: &fixture.repo,
         repo_key: fixture.repo_key.clone(),
         normalized_plan: &plan_bytes,
         inputs: inputs(),
         record: record(&agents, checked.runner_policy().clone()),
+        root: &no_root,
         agents: &agents,
         probes: &probes,
         refs: &refs,
@@ -4189,7 +4224,7 @@ fn the_granted_pairs_balance_answers_for_the_ledger_and_the_slots() {
 fn the_deletion_boundary_falls_between_p5_and_p5b() {
     assert_eq!(
         Prefix::ALL.len(),
-        14,
+        15,
         "a prefix was added to the sequence and not to its closed set"
     );
     let mut names: Vec<&str> = Prefix::ALL.iter().map(|prefix| prefix.name()).collect();
@@ -4585,6 +4620,8 @@ fn census_of(
 ) -> crate::engine::topology::startup::RunDirCensusReport {
     use crate::engine::topology::startup::{CensusInputs, census_run_dirs};
 
+    crate::workspace_manager::fixture::git(&fixture.repo, &["init", "-q", "-b", "main"]);
+
     let runtime = crate::runner::container::FakeRuntime::new(
         crate::runner::container::runtime::ContainerTrace::default(),
     );
@@ -4845,12 +4882,14 @@ fn create_over_containers(
     let clock = Fixed::default();
     let agents = agents();
     let ledger = std::sync::Mutex::new(InvocationLedger::new());
+    let no_root = fixture.no_root();
     let request = Request {
         repo_root: &fixture.repo,
         repo_key: fixture.repo_key.clone(),
         normalized_plan: &plan_bytes,
         inputs: inputs(),
         record: record(&agents, checked.runner_policy().clone()),
+        root: &no_root,
         agents: &agents,
         probes: &probes,
         refs: &refs,
@@ -5037,5 +5076,542 @@ fn every_container_a_fresh_runs_creation_starts_is_covered_by_an_armed_reaper_wi
         observed.iter().all(|(_, covered)| *covered),
         "every P4 probe container started under an armed reaper whose scope selects its labels: \
          {observed:?}"
+    );
+}
+
+impl Fixture {
+    fn manager(&self) -> WorkspaceManager {
+        crate::workspace_manager::fixture::git(&self.repo, &["init", "-q", "-b", "main"]);
+        WorkspaceManager::derive(&self.repo, &self.private_root, RUN_ID, INCARNATION)
+            .expect("a manager for the fixture's run")
+    }
+}
+
+struct ErrorAt(EffectSiteId, HookPhase);
+
+impl EffectHooks for ErrorAt {
+    fn phase(&mut self, site: EffectSiteId, phase: HookPhase) -> Injection {
+        if site == self.0 && phase == self.1 {
+            Injection::Error
+        } else {
+            Injection::Proceed
+        }
+    }
+
+    fn refusal_cause(&self) -> Option<String> {
+        None
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Twist {
+    None,
+    Folding,
+    AnotherActorFirst,
+    FailAfterClaim,
+    ContentAfterClaim,
+    RemovalFails,
+}
+
+struct RealRoot {
+    manager: WorkspaceManager,
+    twist: Twist,
+}
+
+impl UnpublishedRoot for RealRoot {
+    fn path(&self) -> &Path {
+        self.manager.execution_root()
+    }
+
+    fn remove(&self, hooks: &mut dyn EffectHooks) -> Result<bool, UpstrokeError> {
+        if self.twist == Twist::RemovalFails {
+            return self.manager.remove_execution_root(&mut ErrorAt(
+                EffectSiteId::Worktree(crate::topology::effects::WorktreeSite::RemoveExecutionRoot),
+                HookPhase::Before,
+            ));
+        }
+        self.manager.remove_execution_root(hooks)
+    }
+}
+
+impl RootCreation for RealRoot {
+    fn create(&self, hooks: &mut dyn EffectHooks) -> Result<(), FreshRootFailure> {
+        let fresh = crate::workspace_manager::FreshExecutionRoot(&self.manager);
+        match self.twist {
+            Twist::AnotherActorFirst => {
+                self.manager
+                    .create_execution_root(&mut crate::workspace_manager::NoHooks)
+                    .expect("another actor's root, at the claim boundary");
+                fresh.create_execution_root(hooks)
+            }
+            Twist::FailAfterClaim => fresh.create_execution_root(&mut ErrorAt(
+                EffectSiteId::Worktree(crate::topology::effects::WorktreeSite::CreateExecutionRoot),
+                HookPhase::After,
+            )),
+            Twist::ContentAfterClaim => {
+                fresh.create_execution_root(hooks)?;
+                create_private_dir(
+                    &self.manager.execution_root().join("theirs"),
+                    &mut NoRunDirHooks,
+                )
+                .expect("content this run did not make");
+                Ok(())
+            }
+            Twist::None | Twist::Folding | Twist::RemovalFails => {
+                fresh.create_execution_root(hooks)
+            }
+        }
+    }
+
+    fn case_fold(&self, warnings: &mut Vec<String>) -> bool {
+        self.twist == Twist::Folding
+            || <WorkspaceManager as RootCreation>::case_fold(&self.manager, warnings)
+    }
+}
+
+fn names_of(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap_or_else(|error| panic!("list {}: {error}", dir.display()))
+        .map(|entry| {
+            entry
+                .expect("an entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+fn scaffolding_only(root: &Path) -> bool {
+    let mut expected: Vec<String> = SCAFFOLDING.iter().map(|name| (*name).to_owned()).collect();
+    expected.sort();
+    names_of(root) == expected
+        && SCAFFOLDING
+            .iter()
+            .all(|name| names_of(&root.join(name)).is_empty())
+}
+
+fn run_over(
+    fixture: &Fixture,
+    root: &RealRoot,
+    refuse_shell: bool,
+) -> (Result<Started, Refused>, TestHooks) {
+    let mut probes = RecordingProbes::new(&host_digest());
+    probes.refuse_shell = refuse_shell;
+    let refs = FakeRefs::empty();
+    let mut hooks = TestHooks::new();
+    let mut driver = Driver::new(fixture, &probes, &refs);
+    driver.root = Some(root);
+    let outcome = driver.run(&mut hooks);
+    (outcome, hooks)
+}
+
+#[test]
+fn p3c_claims_the_execution_root_after_the_owner_record_and_the_record_carries_its_case_policy() {
+    let fixture = Fixture::new("p3c-claim");
+    let root = RealRoot {
+        manager: fixture.manager(),
+        twist: Twist::None,
+    };
+    let (outcome, hooks) = run_over(&fixture, &root, false);
+    let started = outcome.expect("the run is created");
+    let path = root.manager.execution_root();
+    assert!(
+        scaffolding_only(path),
+        "the claim made the root and its scaffolding"
+    );
+    let of_interest = [
+        EffectSiteId::RunDir(RunDirSite::PublishMarker),
+        EffectSiteId::RunDir(RunDirSite::PublishOwnerRecord),
+        EffectSiteId::Worktree(crate::topology::effects::WorktreeSite::CreateExecutionRoot),
+        EffectSiteId::RunDir(RunDirSite::WritePlan),
+        EffectSiteId::RunDir(RunDirSite::PublishCommitRecord),
+    ];
+    assert_eq!(
+        hooks.first_execution_order(&of_interest),
+        of_interest.to_vec(),
+        "R18 is claimed after the marker that locates the run and the owner record that \
+         authenticates it, and before the plan and the commit record"
+    );
+    let observed = std::fs::symlink_metadata(path.join("TASKS")).is_ok();
+    assert_eq!(
+        started.run_started().path_policy.case_fold,
+        observed,
+        "the committed record carries the case policy the created root shows"
+    );
+
+    let fixture = Fixture::new("p3c-folding");
+    let root = RealRoot {
+        manager: fixture.manager(),
+        twist: Twist::Folding,
+    };
+    let (outcome, _) = run_over(&fixture, &root, false);
+    assert!(
+        outcome
+            .expect("the run is created")
+            .run_started()
+            .path_policy
+            .case_fold,
+        "P5b stamps P3c's observation over whatever the caller's record held"
+    );
+}
+
+#[test]
+fn a_refusal_after_p3c_settles_the_claimed_root_before_either_half() {
+    let fixture = Fixture::new("p3c-p4-refused");
+    let root = RealRoot {
+        manager: fixture.manager(),
+        twist: Twist::None,
+    };
+    let (outcome, hooks) = run_over(&fixture, &root, true);
+    let refused = outcome.expect_err("the shell probe refused");
+    assert_eq!(refused.reached, Prefix::P3c);
+    assert!(
+        matches!(*refused.disposition, Disposition::BothHalvesRemoved { .. }),
+        "{:?}",
+        refused.disposition
+    );
+    assert!(
+        std::fs::symlink_metadata(root.manager.execution_root()).is_err(),
+        "the claimed root is gone"
+    );
+    assert!(!fixture.public().exists() && !fixture.private().exists());
+    let removals = [
+        EffectSiteId::Worktree(crate::topology::effects::WorktreeSite::RemoveExecutionRoot),
+        EffectSiteId::RunDir(RunDirSite::RemovePrivateHusk),
+        EffectSiteId::RunDir(RunDirSite::RemovePublicHusk),
+    ];
+    assert_eq!(
+        hooks.first_execution_order(&removals),
+        removals.to_vec(),
+        "the root is settled while the marker that locates it and the owner record that \
+         authenticates the run are still there"
+    );
+}
+
+#[test]
+fn a_failure_after_the_claim_leaves_a_root_that_is_this_creators_to_settle() {
+    let fixture = Fixture::new("p3c-claimed-then-failed");
+    let root = RealRoot {
+        manager: fixture.manager(),
+        twist: Twist::FailAfterClaim,
+    };
+    let (outcome, _) = run_over(&fixture, &root, false);
+    let refused = outcome.expect_err("the create site failed after its claim");
+    assert_eq!(refused.reached, Prefix::P3b);
+    assert!(
+        matches!(*refused.disposition, Disposition::BothHalvesRemoved { .. }),
+        "{:?}",
+        refused.disposition
+    );
+    assert!(
+        std::fs::symlink_metadata(root.manager.execution_root()).is_err(),
+        "the root the claim made, whole, was settled"
+    );
+}
+
+#[test]
+fn a_root_another_actor_puts_at_the_claim_boundary_is_refused_and_untouched() {
+    let fixture = Fixture::new("p3c-another-actor");
+    let root = RealRoot {
+        manager: fixture.manager(),
+        twist: Twist::AnotherActorFirst,
+    };
+    let (outcome, hooks) = run_over(&fixture, &root, false);
+    let refused = outcome.expect_err("the claim found a root already there");
+    assert_eq!(refused.reached, Prefix::P3b);
+    assert!(
+        refused
+            .error
+            .to_string()
+            .contains(&root.manager.execution_root().display().to_string()),
+        "{}",
+        refused.error
+    );
+    assert!(
+        matches!(*refused.disposition, Disposition::BothHalvesRemoved { .. }),
+        "the halves this run made are reclaimed: {:?}",
+        refused.disposition
+    );
+    assert!(
+        scaffolding_only(root.manager.execution_root()),
+        "the other actor's root is exactly as it made it"
+    );
+    assert!(
+        !hooks.observed(
+            EffectSiteId::Worktree(crate::topology::effects::WorktreeSite::RemoveExecutionRoot),
+            HookPhase::Before
+        ),
+        "the creator never reached for a root it did not claim"
+    );
+}
+
+#[test]
+fn a_claimed_root_the_creator_cannot_settle_keeps_the_husk_that_locates_it() {
+    for (tag, twist, says) in [
+        ("p3c-content", Twist::ContentAfterClaim, "theirs"),
+        (
+            "p3c-removal-fails",
+            Twist::RemovalFails,
+            "RemoveExecutionRoot",
+        ),
+    ] {
+        let fixture = Fixture::new(tag);
+        let root = RealRoot {
+            manager: fixture.manager(),
+            twist,
+        };
+        let (outcome, _) = run_over(&fixture, &root, true);
+        let refused = outcome.expect_err("the shell probe refused");
+        let Disposition::ExecutionRootRetained {
+            root: kept,
+            public,
+            locator,
+            detail,
+        } = &*refused.disposition
+        else {
+            panic!("{tag}: {:?}", refused.disposition);
+        };
+        assert_eq!(kept, root.manager.execution_root(), "{tag}");
+        assert!(detail.contains(says), "{tag}: {detail}");
+        assert_eq!(public, &fixture.public(), "{tag}");
+        assert_eq!(locator.as_ref(), Some(&fixture.private()), "{tag}");
+        assert!(
+            std::fs::symlink_metadata(root.manager.execution_root()).is_ok(),
+            "{tag}: the root is kept"
+        );
+        assert!(
+            fixture.public().join(crate::rundir::MARKER).is_file(),
+            "{tag}: the marker that locates it is kept"
+        );
+        assert!(
+            matches!(
+                prove_private_half_ownership(
+                    &fixture.public(),
+                    &fixture.repo_key,
+                    &fixture.private_root
+                ),
+                PrivateHalfOwnership::Proven(_)
+            ),
+            "{tag}: and the proof still authenticates the husk"
+        );
+    }
+}
+
+#[test]
+fn a_claimed_root_whose_private_half_is_gone_is_settled_before_the_public_husk_goes() {
+    for (tag, twist) in [
+        ("p3c-unbound-pruned", Twist::None),
+        ("p3c-unbound-kept", Twist::ContentAfterClaim),
+    ] {
+        let fixture = Fixture::new(tag);
+        let mut hooks = TestHooks::new();
+        let public = fixture.public();
+        let marker = CreatingMarker {
+            run_id: RUN_ID.to_owned(),
+            repo_key: fixture.repo_key.as_str().to_owned(),
+            private_dir: fixture
+                .checked()
+                .private_dir()
+                .to_string_lossy()
+                .into_owned(),
+            incarnation: INCARNATION.to_owned(),
+            pid: 4242,
+            runner_policy_sha256: host_digest(),
+        };
+        create_public_dir(&public, &mut NoRunDirHooks).expect("P0");
+        stage_marker(&public, &marker, &mut NoRunDirHooks).expect("P1a");
+        publish_marker(&public, &mut NoRunDirHooks).expect("P1b");
+        let root = RealRoot {
+            manager: fixture.manager(),
+            twist,
+        };
+        root.create(&mut crate::workspace_manager::NoHooks)
+            .expect("this creator's claim");
+        let lock = RunLock::acquire_hooked(&public, hooks.rundir()).expect("the run lock is free");
+
+        let mut aborted = Aborted {
+            reached: Prefix::P3c,
+            paths: RunPaths::from_parts(public.clone(), fixture.private()),
+            lock: Some(lock),
+            repo_key: fixture.repo_key.clone(),
+            private_root: fixture.private_root_canonical(),
+            run_id: RUN_ID.to_owned(),
+            root: RootClaim::Owned,
+            error: UpstrokeError::Refused {
+                message: "the step that stopped the run".to_owned(),
+            },
+        };
+        let disposition = stat_after_error(&mut aborted, &root, &mut hooks);
+
+        assert!(
+            hooks.observed(EffectSiteId::Lock(LockSite::Release), HookPhase::Before),
+            "{tag}: the run lock goes back through `Lock.Release`"
+        );
+        let remove_root =
+            EffectSiteId::Worktree(crate::topology::effects::WorktreeSite::RemoveExecutionRoot);
+        let remove_public = EffectSiteId::RunDir(RunDirSite::RemovePublicHusk);
+        if twist == Twist::None {
+            assert!(
+                matches!(
+                    disposition,
+                    Disposition::PublicHalfRemoved(UnboundShape::TargetAbsent)
+                ),
+                "{tag}: {disposition:?}"
+            );
+            assert!(
+                matches!(
+                    std::fs::symlink_metadata(root.manager.execution_root()),
+                    Err(ref gone) if gone.kind() == std::io::ErrorKind::NotFound
+                ),
+                "{tag}: the root this creator claimed is settled"
+            );
+            assert!(!public.exists(), "{tag}: then the public husk goes");
+            assert_eq!(
+                hooks.first_execution_order(&[remove_root, remove_public]),
+                vec![remove_root, remove_public],
+                "{tag}: the root is settled before the public husk, whose marker locates it"
+            );
+        } else {
+            let Disposition::ExecutionRootRetained {
+                root: ref kept,
+                public: ref kept_public,
+                ref locator,
+                ref detail,
+            } = disposition
+            else {
+                panic!("{tag}: {disposition:?}");
+            };
+            assert_eq!(kept, root.manager.execution_root(), "{tag}");
+            assert_eq!(kept_public, &public, "{tag}");
+            assert_eq!(locator, &None, "{tag}: no private half was bound");
+            assert!(detail.contains("theirs"), "{tag}: {detail}");
+            assert_eq!(
+                names_of(root.manager.execution_root())
+                    .iter()
+                    .filter(|name| *name == "theirs")
+                    .count(),
+                1,
+                "{tag}: content this run did not make is untouched"
+            );
+            assert!(
+                public.join(crate::rundir::MARKER).is_file(),
+                "{tag}: the public directory keeps the marker that names the run"
+            );
+            for site in [remove_root, remove_public] {
+                assert!(
+                    !hooks.observed(site, HookPhase::Before),
+                    "{tag}: {site:?} ran for a root that holds content this run did not make"
+                );
+            }
+            let sentence = disposition.describe();
+            assert!(
+                sentence.contains("No private half was bound to it any more"),
+                "{tag}: {sentence}"
+            );
+            assert!(
+                !sentence.contains("owner record are kept"),
+                "{tag}: {sentence}"
+            );
+        }
+        assert!(!disposition.removed_the_private_half(), "{tag}");
+    }
+}
+
+#[test]
+fn a_root_already_there_before_the_run_is_refused_before_anything_is_published() {
+    let fixture = Fixture::new("p3c-preexisting");
+    let root = RealRoot {
+        manager: fixture.manager(),
+        twist: Twist::None,
+    };
+    root.manager
+        .create_execution_root(&mut crate::workspace_manager::NoHooks)
+        .expect("a root already there");
+    let (outcome, hooks) = run_over(&fixture, &root, false);
+    let refused = outcome.expect_err("the admission refuses");
+    assert_eq!(refused.reached, Prefix::Nothing);
+    assert!(
+        matches!(*refused.disposition, Disposition::NothingCreated),
+        "{:?}",
+        refused.disposition
+    );
+    assert!(
+        !fixture.public().exists(),
+        "no husk could lead a census to it"
+    );
+    assert!(
+        scaffolding_only(root.manager.execution_root()),
+        "the root is exactly as it was"
+    );
+    assert!(
+        !hooks.observed(
+            EffectSiteId::RunDir(RunDirSite::CreatePublicDir),
+            HookPhase::Before
+        ),
+        "nothing was published"
+    );
+}
+
+#[test]
+#[ignore = "spawned as a subprocess by a_kill_after_p3c_leaves_a_husk_the_census_keeps_with_its_root"]
+fn create_root_kill_child() {
+    let root = PathBuf::from(std::env::var("UPSTROKE_TEST_KILL_DIR").expect("dir"));
+    let fixture = Fixture::at(&root);
+    let real = RealRoot {
+        manager: fixture.manager(),
+        twist: Twist::None,
+    };
+    let mut probes = RecordingProbes::new(&host_digest());
+    probes.kill_shell = true;
+    let refs = FakeRefs::empty();
+    let mut hooks = TestHooks::new();
+    let mut driver = Driver::new(&fixture, &probes, &refs);
+    driver.root = Some(&real);
+    let _ = driver.run(&mut hooks);
+    panic!("the creation driver returned past the kill armed in the shell probe");
+}
+
+#[test]
+fn a_kill_after_p3c_leaves_a_husk_the_census_keeps_with_its_root() {
+    use crate::engine::topology::startup::RunDirOutcome;
+
+    let fixture = Fixture::new("kill-p3c-root");
+    let code = spawn_and_wait(
+        "engine::topology::create::tests::create_root_kill_child",
+        &fixture.root,
+        "p3c",
+        0,
+    );
+    assert_ne!(code, Some(0), "the child must have died");
+    let manager =
+        WorkspaceManager::derive(&fixture.repo, &fixture.private_root, RUN_ID, INCARNATION)
+            .expect("the run's manager");
+    assert!(
+        scaffolding_only(manager.execution_root()),
+        "the killed creator left the root it claimed"
+    );
+
+    let mut hooks = TestHooks::new();
+    let report = census_of(&fixture, &mut hooks);
+    let [entry] = report.entries() else {
+        panic!("one husk: {report:?}");
+    };
+    assert!(
+        matches!(
+            &entry.outcome,
+            RunDirOutcome::RootRetained { root: Some(kept), .. } if kept == manager.execution_root()
+        ),
+        "{report:?}"
+    );
+    assert!(
+        fixture.public().join(MARKER).is_file() && fixture.private().join(OWNER_RECORD).is_file(),
+        "the marker that locates the root and the owner record that authenticates the run stay"
+    );
+    assert!(
+        scaffolding_only(manager.execution_root()),
+        "and the census left the root as it was"
     );
 }

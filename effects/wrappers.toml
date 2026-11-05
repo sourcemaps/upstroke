@@ -108,7 +108,7 @@
 [[module]]
 path = "src/workspace_manager.rs"
 crate_path = "upstroke::workspace_manager"
-shared = { common_git_dir = 2, object_exists = 2 }
+shared = { common_git_dir = 2, create_execution_root = 2, object_exists = 2 }
 funnel = [
     "add_site",
     "add_worktree",
