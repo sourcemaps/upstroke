@@ -1636,7 +1636,13 @@ stopped by its funnel at its backstop, the invocation's deadline plus two
 
 ## `impl AttachedClient` › `fn has_ended(&self) -> bool {`
 
-Whether the funnel has returned: the client has ended and been reaped.
+Whether the client's supervision has finished: the thread that runs the funnel
+has returned, or its result was already taken, so the result is there for
+`into_end` to read. That says nothing about the client's process. The funnel
+can return a `ProcessFailure` whose fate is `Unresolved`, and the thread can
+have panicked; in either case the client may still be running. `into_end`
+reads the typed fate that says which, and `settle_attached_client_of` keeps an
+unresolved one (PR12-REG6-ATTACHED-END-NOTES).
 
 ## `impl AttachedClient` › `fn ask_to_stop(&self) {`
 
