@@ -501,7 +501,6 @@ pub fn route_resume(opts: &ResumeOptions) -> Result<Option<RootDerived>, Upstrok
 }
 
 pub(super) fn read_initial_log(log: &Path) -> Result<Vec<u8>, UpstrokeError> {
-    #[cfg(test)]
     initial_log_read_fault::refuse(log)?;
     crate::util::read_file_bounded(log).map_err(|source| UpstrokeError::Io {
         path: log.to_path_buf(),
@@ -509,50 +508,15 @@ pub(super) fn read_initial_log(log: &Path) -> Result<Vec<u8>, UpstrokeError> {
     })
 }
 
-#[cfg(test)]
-pub(crate) mod initial_log_read_fault {
-    use std::cell::RefCell;
-    use std::path::{Path, PathBuf};
+#[cfg(not(test))]
+mod initial_log_read_fault {
+    use std::path::Path;
 
     use crate::error::UpstrokeError;
 
-    pub(crate) const INJECTED: &str = "injected failure of the initial complete log read";
-
-    thread_local! {
-        static ARMED: RefCell<Option<(PathBuf, usize)>> = const { RefCell::new(None) };
-    }
-
-    #[must_use]
-    pub(crate) struct Armed(());
-
-    pub(crate) fn arm(log: &Path) -> Armed {
-        ARMED.with(|armed| *armed.borrow_mut() = Some((log.to_path_buf(), 0)));
-        Armed(())
-    }
-
-    impl Armed {
-        pub(crate) fn hits(&self) -> usize {
-            ARMED.with(|armed| armed.borrow().as_ref().map_or(0, |(_, hits)| *hits))
-        }
-    }
-
-    impl Drop for Armed {
-        fn drop(&mut self) {
-            ARMED.with(|armed| *armed.borrow_mut() = None);
-        }
-    }
-
-    pub(super) fn refuse(log: &Path) -> Result<(), UpstrokeError> {
-        ARMED.with(|armed| match armed.borrow_mut().as_mut() {
-            Some((armed_log, hits)) if armed_log.as_path() == log => {
-                *hits += 1;
-                Err(UpstrokeError::Io {
-                    path: log.to_path_buf(),
-                    source: std::io::Error::other(INJECTED),
-                })
-            }
-            _ => Ok(()),
-        })
+    #[inline]
+    pub(super) fn refuse(_log: &Path) -> Result<(), UpstrokeError> {
+        Ok(())
     }
 }
 
@@ -1571,6 +1535,53 @@ fn ceiling_of(flag: Option<f64>, configured: &Budgets) -> Result<Ceiling, Upstro
         run_usd: flag.or(configured.run_usd),
         task_usd: configured.task_usd,
     })
+}
+
+#[cfg(test)]
+pub(crate) mod initial_log_read_fault {
+    use std::cell::RefCell;
+    use std::path::{Path, PathBuf};
+
+    use crate::error::UpstrokeError;
+
+    pub(crate) const INJECTED: &str = "injected failure of the initial complete log read";
+
+    thread_local! {
+        static ARMED: RefCell<Option<(PathBuf, usize)>> = const { RefCell::new(None) };
+    }
+
+    #[must_use]
+    pub(crate) struct Armed(());
+
+    pub(crate) fn arm(log: &Path) -> Armed {
+        ARMED.with(|armed| *armed.borrow_mut() = Some((log.to_path_buf(), 0)));
+        Armed(())
+    }
+
+    impl Armed {
+        pub(crate) fn hits(&self) -> usize {
+            ARMED.with(|armed| armed.borrow().as_ref().map_or(0, |(_, hits)| *hits))
+        }
+    }
+
+    impl Drop for Armed {
+        fn drop(&mut self) {
+            ARMED.with(|armed| *armed.borrow_mut() = None);
+        }
+    }
+
+    pub(super) fn refuse(log: &Path) -> Result<(), UpstrokeError> {
+        ARMED.with(|armed| match armed.borrow_mut().as_mut() {
+            Some((armed_log, hits)) if armed_log.as_path() == log => {
+                *hits += 1;
+                Err(UpstrokeError::Io {
+                    path: log.to_path_buf(),
+                    source: std::io::Error::other(INJECTED),
+                })
+            }
+            _ => Ok(()),
+        })
+    }
 }
 
 #[cfg(test)]

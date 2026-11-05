@@ -341,19 +341,34 @@ it after the census classified the run's committed header from its first
 line, so its failure is neither "legacy" nor "absent" to either of them
 ([`route_resume`] above, and `observe`'s notes).
 
-## `pub(crate) mod initial_log_read_fault {`
+Before it reads, it asks `initial_log_read_fault::refuse`: the no-op below in
+a production build, the test-only fault at the bottom of the file in a test
+build.
 
-Test-only: it fails [`read_initial_log`] for one log. The failure the guards
-of the read above need cannot be made through the filesystem: the census has
-just read the same regular file's first line, and an ordinary file that read
-once reads again, short of a race, a permission (the build box's user may be
-privileged) or a process-wide exhaustion, none of them deterministic or
-confined to one test. `arm(log)` makes every [`read_initial_log`] of that one
-path on the arming thread fail with `INJECTED` until the returned `Armed`
-drops, and `Armed::hits` counts the attempts, so a guard shows that the
-failure struck the initial read and no other read. Thread-local, so tests
-running in parallel never meet each other's fault; one log at a time per
-thread. Nothing of it is compiled into a production build.
+## `mod initial_log_read_fault {`
+
+The production half of the read's fault seam. Its `refuse` is `Ok(())`,
+holds nothing and cannot be armed, so the call in [`read_initial_log`]
+compiles away. The `#[cfg(test)]` half, the fault itself, is the module of
+the same name at the **bottom** of this file, beside `mod tests`.
+
+**Why the halves are split.** `effects::production_region` truncates a
+source at its first `#[cfg(test)]`, whatever that attribute is on, and every
+census that reads the region sees nothing below the cut. Until
+PR12-FINAL17-INITIAL-READ-FAULT-CENSUS-CUT (first in `4d45a93b`) the read
+called the fault through a `#[cfg(test)]` statement, with the test module
+directly below it, so this file's region ended inside [`read_initial_log`]:
+the read itself, [`prepare_resume`] and every item after them had left every
+census that reads the region, and
+`effects::tests::every_production_region_that_stops_early_stops_at_a_module`
+failed with this file added to its set. Taking the attribute off the
+statement alone would not have repaired it: the test module would then have
+been the cut, and a module passes that test's shape check while still hiding
+everything below it. `#[cfg(not(test))]` carries no cut, which is why this
+half sits where it is read and the file's first `#[cfg(test)]` opens a tail
+that holds test-only code alone. The class is
+`PR5-R1-CFG-TEST-SHRINKS-THE-DOMAIN`; the twin shape is `workspace_manager`'s
+`note_removal_attempt` and `engine::coordinator::legacy_append_hooks`'s.
 
 ## `pub fn prepare_resume(`
 
@@ -733,3 +748,21 @@ When it cannot say, it says why:
 Its observation is of one directory. It does not establish how a
 filesystem's descendants inherit case behaviour, nor anything about links or
 reparse points (validation open).
+
+## `pub(crate) mod initial_log_read_fault {`
+
+Test-only: it fails [`read_initial_log`] for one log. The failure the guards
+of that read need cannot be made through the filesystem: the census has
+just read the same regular file's first line, and an ordinary file that read
+once reads again, short of a race, a permission (the build box's user may be
+privileged) or a process-wide exhaustion, none of them deterministic or
+confined to one test. `arm(log)` makes every [`read_initial_log`] of that one
+path on the arming thread fail with `INJECTED` until the returned `Armed`
+drops, and `Armed::hits` counts the attempts, so a guard shows that the
+failure struck the initial read and no other read. Thread-local, so tests
+running in parallel never meet each other's fault; one log at a time per
+thread. Nothing of it is compiled into a production build.
+
+It is the file's first `#[cfg(test)]` and opens the test-only tail, so every
+production item is above it. The production half beside
+[`read_initial_log`] says why it is here.
