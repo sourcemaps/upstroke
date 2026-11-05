@@ -558,11 +558,34 @@ step instead, so parked work can be skipped past.
 
 Unreachable on a validated plan; degrade to plan order.
 
+## `fn switched_the_checkout(&self) -> bool {`
+
+Whether this run checked its branch out over the operator's checkout, which
+is what the summary's `git switch -` returns from. A schema-1..3 run does: the
+coordinator's `create_branch` switches to the run branch when it starts, and a
+resume's `switch_branch` does when the operator is elsewhere. A schema-4 run
+never does: it integrates onto its branch through refs and leaves the user's
+checkout untouched (DESIGN §14, INV-12), so a `git switch -` printed after it
+moves the operator to whatever branch they last left, or fails when there is
+none (PR12-REG6-TOPOLOGY-RETURN-HINT; the regression lens read the line in the
+C1 and C2 cell streams).
+
+The distinction is the existing projection one rather than a new field:
+`from_topology`, the one projection of a schema-4 run, is the only construction
+that sets `questions_in_log`, and every legacy one — `build_report`,
+`from_state`, a deserialized `report.json` — leaves it false. A field of its
+own would change the serialized `RunReport` and every literal that spells it,
+for a fact the projection already carries.
+
 ## `pub fn render(&self) -> String {`
 
 Human-readable report with one sanitized payload per layout line.
 Control characters in recorded fields cannot add terminal commands or
 lines. Rendering leaves the report's serializable values unchanged.
+
+The branch line keeps `(return with: git switch -)` only for a run that
+switched the checkout ([`switched_the_checkout`]); a schema-4 summary, fresh
+or resumed, names the branch alone. The legacy wording is unchanged.
 
 ## `let partial = if task.review_cost_incomplete { "?" } else { "" };`
 

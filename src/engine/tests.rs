@@ -20614,6 +20614,92 @@ fn a_parked_schema_4_question_is_shown_answered_once_and_ingested_on_resume() {
     assert!(late.to_string().contains("no longer open"), "{late}");
 }
 
+#[test]
+fn a_schema_4_run_and_its_resume_leave_the_checkout_and_print_no_way_back_from_it() {
+    let checkout = |repo: &Path| {
+        (
+            git_in(repo, &["symbolic-ref", "HEAD"]).trim().to_owned(),
+            git_in(repo, &["rev-parse", "HEAD"]).trim().to_owned(),
+        )
+    };
+    let names_the_branch_alone = |summary: &str, branch: &str, when: &str| {
+        assert!(
+            summary
+                .lines()
+                .any(|line| line == format!("branch: {branch}")),
+            "{when}: the summary names the run's branch: {summary}"
+        );
+        assert!(
+            !summary.contains("return with") && !summary.contains("git switch"),
+            "{when}: nothing switched the checkout, so nothing is returned from: {summary}"
+        );
+    };
+
+    let (_tree, repo) = temp_engine_repo("topology-no-return");
+    let before = checkout(&repo);
+    assert_eq!(
+        before.0, "refs/heads/main",
+        "the premise: the operator is on `main`"
+    );
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        1,
+    )));
+    let parked = run_with(&topology_options(&repo), &source).expect("the run parks");
+    assert_eq!(parked.outcome(), RunOutcome::Parked, "{parked:#?}");
+    assert_eq!(
+        checkout(&repo),
+        before,
+        "the fresh run left the checkout where it was"
+    );
+    names_the_branch_alone(&parked.render(), &parked.branch, "fresh");
+
+    until_released(&repo, &parked.run_id);
+    let [asked] = parked.questions.as_slice() else {
+        panic!("one question: {parked:#?}");
+    };
+    crate::answer::answer(
+        &repo,
+        &asked.question.id.to_string(),
+        crate::answer::Reply::Text("the first".to_owned()),
+    )
+    .expect("the answer is recorded");
+    let mut resume = resume_options(&repo, &parked.run_id);
+    resume.private_root = None;
+    let resumed = resume_with(&resume, &source).expect("the resume completes the run");
+    assert_eq!(resumed.outcome(), RunOutcome::Complete, "{resumed:#?}");
+    assert_eq!(
+        checkout(&repo),
+        before,
+        "the resume left the checkout where it was"
+    );
+    names_the_branch_alone(&resumed.render(), &resumed.branch, "resumed");
+    assert_merged_on_the_integration_branch(&repo, &resumed);
+
+    let (_legacy_tree, legacy) = temp_engine_repo("legacy-return-hint");
+    let report =
+        run_with(&options(&legacy), &fake(Effect::EditFile)).expect("the legacy run completes");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:#?}");
+    assert_eq!(
+        git_in(&legacy, &["rev-parse", "--abbrev-ref", "HEAD"]).trim(),
+        report.branch,
+        "the control: a legacy run checks its branch out"
+    );
+    let summary = report.render();
+    assert!(
+        summary
+            .lines()
+            .any(|line| line == format!("branch: {} (return with: git switch -)", report.branch)),
+        "{summary}"
+    );
+    git_in(&legacy, &["switch", "-"]);
+    assert_eq!(
+        git_in(&legacy, &["rev-parse", "--abbrev-ref", "HEAD"]).trim(),
+        "main",
+        "and the instruction it prints takes the operator back to where the run began"
+    );
+}
+
 /// A committed legacy (schema-3) run whose public half holds one open question
 /// file, as `answer`'s own suite seeds one: the first line is written by hand, so
 /// the fixture pins the wire rather than agreeing with the writer.

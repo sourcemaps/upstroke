@@ -4010,3 +4010,16 @@ exclusion its fresh run made is deleted. The premise is asserted: `git status` n
 back and `git status` lists nothing. With the schema-4 branch's `ensure_run_exclusions` removed
 from `resume_harness`, it fails on "the resume made the exclusion again".
 
+## `fn a_schema_4_run_and_its_resume_leave_the_checkout_and_print_no_way_back_from_it() {`
+
+PR12-REG6-TOPOLOGY-RETURN-HINT, through the public entry points. A schema-4 run, through
+`run_with`, parks on its one question; the answer is recorded through `answer::answer`; the
+resume, through `resume_with`, completes the run onto its integration branch. The operator's
+checkout is read before and after each: `symbolic-ref HEAD` stays `refs/heads/main` and HEAD's
+commit does not move. Each summary (`RunReport::render`, which `main::finish` prints) has the line
+`branch: <run branch>` and no `return with` or `git switch`, and the completed run's edit is on
+that branch. The legacy control, a schema-1..3 run through the legacy writer, does check its branch
+out, prints `branch: <run branch> (return with: git switch -)`, and running that `git switch -`
+takes the repository back to `main`: the instruction is true where it is printed. With the render
+printing the instruction unconditionally, as before repair9, both topology summaries fail.
+

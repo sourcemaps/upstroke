@@ -753,13 +753,21 @@ pub fn topo_order(plan: &Plan) -> Vec<usize> {
 }
 
 impl RunReport {
+    fn switched_the_checkout(&self) -> bool {
+        !self.questions_in_log
+    }
+
     pub fn render(&self) -> String {
         let mut out = util::terminal::TerminalLines::default();
         out.push(format_args!("run: {}", self.run_id));
-        out.push(format_args!(
-            "branch: {} (return with: git switch -)",
-            self.branch
-        ));
+        if self.switched_the_checkout() {
+            out.push(format_args!(
+                "branch: {} (return with: git switch -)",
+                self.branch
+            ));
+        } else {
+            out.push(format_args!("branch: {}", self.branch));
+        }
         if self.gates.is_empty() {
             out.push(format_args!("gates: none"));
         } else {

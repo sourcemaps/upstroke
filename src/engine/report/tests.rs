@@ -197,6 +197,39 @@ fn report_layout_keeps_the_budget_resume_command_on_its_own_line() {
     assert!(rendered.starts_with("run: run-1\nbranch: upstroke/run-1 (return with: git switch -)\ngates: check [from config]\n"), "{rendered:?}");
 }
 
+/// PR12-REG6-TOPOLOGY-RETURN-HINT. A schema-1..3 run checks its branch out (`create_branch`
+/// when it starts, `switch_branch` when it resumes), so its summary says how to go back; a
+/// schema-4 run integrates onto its branch through refs and leaves the operator's checkout
+/// where it was (DESIGN §14), so its summary, which `from_topology` builds, names the branch
+/// and no way back from a switch that never happened.
+#[test]
+fn only_a_run_that_switched_the_checkout_says_how_to_return_from_its_branch() {
+    use crate::engine::topology::settle::tests::started;
+
+    let topology = RunReport::from_topology(&started(), &[], Vec::new());
+    assert!(
+        topology.branch.starts_with("upstroke/run-"),
+        "the premise: the projection names the run's branch: {topology:#?}"
+    );
+    let rendered = topology.render();
+    assert_eq!(
+        rendered.lines().nth(1),
+        Some(format!("branch: {}", topology.branch).as_str()),
+        "{rendered:?}"
+    );
+    assert!(
+        !rendered.contains("return with") && !rendered.contains("git switch"),
+        "{rendered:?}"
+    );
+
+    let legacy = report().render();
+    assert_eq!(
+        legacy.lines().nth(1),
+        Some("branch: upstroke/run-1 (return with: git switch -)"),
+        "a legacy run's summary keeps its instruction: {legacy:?}"
+    );
+}
+
 /// A schema-1..3 run writes a payload file for each question and its summary
 /// points at the directory; a schema-4 run keeps its questions in its log and
 /// writes no such file, so its summary says how to reach one instead of naming
