@@ -357,10 +357,22 @@ acted on without the "not acted on" warning, and `[runner] kind =
 
 A resume of a schema-4 run. The run's own record governs what it
 recorded — the runner, the gates, `max_parallel` and `max_merge_repairs` —
-so today's `[runner]` and `[[gates]]` are read to be compared and are never
-refused over (the gates take the compare-only reading
+so today's `[runner]` and `[[gates]]` are read to be compared, and a
+well-formed selection that differs from the record is warned about while the
+record is what runs (the recorded runner is rebuilt and the configured one
+ignored). The gates take the compare-only reading
 [`EngineLimits::SequentialResumeWithRecordedGates`] has, because a schema-4
-log always records its gates), and the parallel keys parse as under
+log always records its gates, so today's `[[gates]]` is never refused over:
+even a shape a fresh run refuses is announced instead (`refuse_or_announce`).
+**`[runner]` is still read strictly first.** `parse_runner` runs `read_runner`
+under every reading, and only the legacy container refusal
+(`refuse_legacy_container_selection`) is skipped here, so a malformed runner
+section — not a table of the accepted keys and types, an unknown key, an
+unrecognized `kind`, `kind = "container"` without `image`, an empty `image`,
+`image`, `credential_volumes` or `mounts` on the host runner, an empty
+credential-volume entry, a mount with an empty `source` or `target` —
+refuses this resume as it would a fresh run, before anything is compared
+(PR12-REG6-RESUME-CONFIG-NOTES). The parallel keys parse as under
 [`EngineLimits::Topology`]. Chosen only by [`EngineLimits::for_resume`].
 
 ## `SequentialResume,`
