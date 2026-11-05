@@ -4021,5 +4021,6 @@ commit does not move. Each summary (`RunReport::render`, which `main::finish` pr
 that branch. The legacy control, a schema-1..3 run through the legacy writer, does check its branch
 out, prints `branch: <run branch> (return with: git switch -)`, and running that `git switch -`
 takes the repository back to `main`: the instruction is true where it is printed. With the render
-printing the instruction unconditionally, as before repair9, both topology summaries fail.
+printing the instruction unconditionally, as before repair9, the test fails at the fresh summary's
+assertion, the first it reaches; the resumed summary's identical assertion is not reached then.
 
