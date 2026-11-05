@@ -172,12 +172,18 @@ The runtime could not be reached for this operation.
 
 ## `pub enum RuntimeError` › `Unresolved {`
 
-The operation's own effect completed, and a process the runtime started for
-the container could not be established gone (PR12's attached client, root's
-DELIVERY-OWNERSHIP follow-through). `DockerCli`'s collection and removal
-answer it, and the start when it fails; the funnel's `refused` keeps it
-typed, as `ProcessFate::Unresolved`, for the release. Inspection never
-answers it, so a pre-flight that meets one reads it as a runtime failure.
+A process the runtime started could not be established gone. The error does
+not establish that the operation's own effect completed. `DockerCli` answers
+it from every bounded `docker` question, an image or volume inspection (since
+K2) as much as a removal, whose supervisor could not establish the question's
+own process gone (`unanswered`, which first holds the fact under the name the
+question asked about). It answers it too from an attached start that fails,
+and from a collection or a removal, while the container's attached client, or
+a fact held under the container, is unresolved (PR12's attached client, root's
+DELIVERY-OWNERSHIP follow-through). The funnel's `refused` keeps it typed, as
+`ProcessFate::Unresolved`, for the release. A pre-flight inspection reads it
+as a runtime failure: `InspectionRefusal::from_runtime` and
+`recorded_image_environment` fold it into `RuntimeFailed`.
 
 ## `pub enum RuntimeError` › `Failed {`
 
