@@ -20824,6 +20824,106 @@ fn a_schema_4_resume_that_loses_the_worktree_lease_restores_no_exclusion_and_wri
     );
 }
 
+#[cfg(unix)]
+const DEFAULT_ROOT_LEASE_REPO: &str = "UPSTROKE_DEFAULT_ROOT_LEASE_REPO";
+
+/// The same defect over the default private root, which only the include's publication creates:
+/// in a child whose home is a directory of this fixture, so the default root it resolves is the
+/// fixture's and nobody else's.
+#[cfg(unix)]
+#[test]
+fn a_fresh_schema_4_run_over_the_default_root_that_loses_the_worktree_lease_creates_nothing_under_home()
+ {
+    let (tree, repo) = temp_engine_repo("topology-default-root-lease");
+    let home = tree.path().join("child-home");
+    fs::create_dir(&home).expect("the child's home");
+    let ended = crate::agent::proc::test_support::run_test_isolated(
+        "engine::tests::default_root_lease_child",
+        &[
+            ("HOME", home.as_os_str()),
+            ("USERPROFILE", home.as_os_str()),
+            (DEFAULT_ROOT_LEASE_REPO, repo.as_os_str()),
+        ],
+        Duration::from_secs(300),
+    );
+    assert!(
+        ended.status.is_some_and(|status| status.success()) && ended.stdout.contains("1 passed"),
+        "the default-root run, refused under a held lease and then admitted: {ended}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "subprocess helper"]
+fn default_root_lease_child() {
+    let Some(repo) = std::env::var_os(DEFAULT_ROOT_LEASE_REPO).map(PathBuf::from) else {
+        return;
+    };
+    let home = PathBuf::from(std::env::var_os("HOME").expect("the parent names the home"));
+    let root = rundir::default_private_root();
+    assert_eq!(
+        root,
+        home.join(".upstroke"),
+        "the premise: the default root hangs from this home"
+    );
+    assert!(
+        fs::symlink_metadata(&root).is_err(),
+        "the premise: no default root exists yet"
+    );
+    let mut opts = options(&repo);
+    opts.legacy_writer = false;
+    opts.private_root = None;
+    let stub = ObservedStub::new(0);
+    let source = BorrowedObserved(&stub);
+
+    let lease = WorktreeLock::acquire(&repo).expect("the test's lease");
+    let checkout = public_snapshot(&repo);
+    let homes = private_snapshot(&home);
+    let refs = every_ref(&repo);
+    let refused = run_with(&opts, &source).expect_err("the lease is held");
+    let checkout_after = public_snapshot(&repo);
+    let homes_after = private_snapshot(&home);
+    let refs_after = every_ref(&repo);
+    drop(lease);
+    assert!(
+        refused.to_string().contains("is already driving worktree"),
+        "{refused}"
+    );
+    assert!(stub.built().is_empty(), "no worker or reviewer was built");
+    let moved = moved_entries(&homes, &homes_after);
+    assert!(
+        moved.is_empty(),
+        "the refused run created under the home: {moved:?}"
+    );
+    let moved = moved_entries(&checkout, &checkout_after);
+    assert!(
+        moved.is_empty(),
+        "the refused run wrote in the checkout: {moved:?}"
+    );
+    assert_eq!(refs_after, refs, "the refs moved");
+
+    let report = run_with(&opts, &source).expect("with the lease free the run is admitted");
+    until_released(&repo, &report.run_id);
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:#?}");
+    assert_eq!(
+        fs::read(root.join("git").join("recorded-objects.gitconfig")).expect("the include"),
+        crate::runner::host::RECORDED_OBJECTS_INCLUDE,
+        "the admitted run created the default root through the include's publication"
+    );
+    assert_eq!(
+        private_dir_of(&repo, &report.run_id),
+        fs::canonicalize(&root)
+            .expect("the default root, created")
+            .join("runs")
+            .join(&report.run_id),
+        "the run's private half is under the default root it authorized once it existed"
+    );
+    assert_eq!(
+        fs::read(repo.join(".upstroke").join(".gitignore")).expect("the run exclusion"),
+        b"*\n"
+    );
+}
+
 /// P12-W13. A parked schema-4 question has no payload file: `status` names it,
 /// `show` renders it from the fold by an id prefix, `answer` records it once and
 /// refuses a second, the resume ingests it from the file the run polls, and an

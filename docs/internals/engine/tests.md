@@ -4084,6 +4084,37 @@ Measured before commit as negative control A1 (`resume_harness` making the exclu
 `ResumePrepared::verify`, byte for byte the file at `eceed606`): it fails at the first case on
 "created .upstroke/.gitignore".
 
+## `const DEFAULT_ROOT_LEASE_REPO: &str = "UPSTROKE_DEFAULT_ROOT_LEASE_REPO";`
+
+The repository the default-root lease child runs in, named by its parent.
+
+## `fn a_fresh_schema_4_run_over_the_default_root_that_loses_the_worktree_lease_creates_nothing_under_home()`
+
+The same defect over the default private root (Unix, as `run_test_isolated` is). The default root
+is `$HOME/.upstroke`, which no test may touch in the operator's home, so the parent makes a
+directory of its own fixture tree the child's `HOME` and `USERPROFILE`, as
+`a_schema_4_run_refuses_an_unspellable_default_private_root_before_it_creates_anything` does, runs
+`default_root_lease_child` under `run_test_isolated` with a 300-second bound, and requires its
+success and `1 passed`. The default root is the one branch whose root the include's publication
+creates, and whose authorization (`RunnerResolved::authorize`) therefore follows the lease; this
+is its witness that losing the lease creates no root, and that winning it creates and authorizes
+one.
+
+## `fn default_root_lease_child() {`
+
+The child of the test above, with no `--private-root`. Its premises: the default root resolves
+under the child's home and does not exist yet. Under the lease it holds in-process, a fresh run
+through `run_with` is refused as already driven, builds nothing, and leaves the home (the would-be
+root's parent, walked by [`private_snapshot`]), the checkout outside `.git` and every ref exactly as
+they were. Released, the same run is admitted and completes: the include is under the root it
+created, the run's recorded private half is under that root canonicalized
+(`run_started(4).private_dir`), and the run exclusion is made.
+
+Measured before commit as supplementary negative control A1b (A1's old ordering, applied again):
+the refused run created the default root itself, its `git` directory and the include under the
+home ("created .upstroke", "created .upstroke/git", "created
+.upstroke/git/recorded-objects.gitconfig"), and the child and this test fail.
+
 ## `fn a_schema_4_run_and_its_resume_leave_the_checkout_and_print_no_way_back_from_it() {`
 
 PR12-REG6-TOPOLOGY-RETURN-HINT, through the public entry points. A schema-4 run, through

@@ -64,8 +64,10 @@ cleanup hold on a run of the checkout — had already written both: one defect,
 reported three times (PR12-R9-PUBLIC-PUBLICATION-BEFORE-WORKTREE-LOCK,
 PR12-REG7-PRELOCK-WRITES, PR12-N4-PRELOCK-PUBLICATION) against the canonical
 rule that a write command's first effect is the worktree lock. The ordering is
-in `engine/topology/entry.md`; the guard is
-`engine::tests::a_fresh_schema_4_run_that_loses_the_worktree_lease_publishes_no_exclusion_and_no_include`.
+in `engine/topology/entry.md`; the guards are
+`engine::tests::a_fresh_schema_4_run_that_loses_the_worktree_lease_publishes_no_exclusion_and_no_include`
+and, for the default private root (Unix),
+`engine::tests::a_fresh_schema_4_run_over_the_default_root_that_loses_the_worktree_lease_creates_nothing_under_home`.
 
 ## `run_harness_on(opts, harness, &HostRunner::for_legacy_workspace(repository))`
 
