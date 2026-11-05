@@ -184,6 +184,11 @@ pub trait UnpublishedRoot {
 }
 
 /// What P3c creates the root through.
+///
+/// The functions that settle a root are generic over `R: UnpublishedRoot +
+/// ?Sized` rather than taking `&dyn UnpublishedRoot`, so a `&dyn RootCreation`
+/// is passed as it is: coercing it to `&dyn UnpublishedRoot` is trait
+/// upcasting, which Rust stabilized in 1.86, after this crate's MSRV.
 pub trait RootCreation: UnpublishedRoot {
     /// `Worktree.CreateExecutionRoot`, claiming the root exclusively
     /// (`workspace_manager::FreshExecutionRoot`): a root already at the path is
@@ -239,8 +244,8 @@ pub enum RootSettled {
 /// first step sweeps slot instances of other incarnations, is not called. What
 /// the remover leaves is read again rather than inferred from its answer: gone
 /// is [`RootSettled::Pruned`], present or unreadable is [`RootSettled::Kept`].
-pub fn settle_unpublished_root(
-    root: &dyn UnpublishedRoot,
+pub fn settle_unpublished_root<R: UnpublishedRoot + ?Sized>(
+    root: &R,
     hooks: &mut dyn EffectHooks,
 ) -> RootSettled {
     let path = root.path();
@@ -1747,9 +1752,9 @@ impl Refused {
 /// reclaimed container's boundary from its intent. A creator that killed them
 /// here would be a second reclaim authority for the same rows, and would have to
 /// re-derive the boundary the census already reports.
-fn stat_after_error(
+fn stat_after_error<R: UnpublishedRoot + ?Sized>(
     aborted: &mut Aborted,
-    root: &dyn UnpublishedRoot,
+    root: &R,
     hooks: &mut dyn TopologyHooks,
 ) -> Disposition {
     if aborted.reached == Prefix::Nothing {
@@ -2159,7 +2164,7 @@ fn p3c_create_execution_root(
 /// already occupied when this invocation begins never gets a husk that could
 /// lead a census to it. It decides nothing about ownership; P3c's exclusive
 /// claim does.
-fn admit_execution_root(root: &dyn UnpublishedRoot) -> Result<(), UpstrokeError> {
+fn admit_execution_root<R: UnpublishedRoot + ?Sized>(root: &R) -> Result<(), UpstrokeError> {
     let path = root.path();
     match std::fs::symlink_metadata(path) {
         Err(absent) if absent.kind() == std::io::ErrorKind::NotFound => Ok(()),
