@@ -18,7 +18,7 @@ use crate::error::UpstrokeError;
 use crate::events::{self, GateSummary, RunOutcome};
 use crate::gates::{self, ShellGate, ShellKind};
 use crate::interaction::{self, AnswerSource, InteractionMode, Notifier, RealSleeper, Sleeper};
-use crate::ir::{Answer, Plan, Question};
+use crate::ir::{Answer, Plan, Question, QuestionId};
 use crate::review::{self, ReviewPlan};
 use crate::rundir::{self, RepoKey, RunPaths, WorktreeLock};
 use crate::runner::Runner;
@@ -76,12 +76,55 @@ pub struct FreshPrepared {
     warnings: Vec<String>,
 }
 
+pub struct FreshLeased {
+    prepared: FreshPrepared,
+    workspace: Workspace,
+    worktree_git_dir: PathBuf,
+    worktree: WorktreeLock,
+    hooks: NoTopologyHooks,
+}
+
 enum Authorization {
     Checked(PreLockChecked),
     Pending {
         resolved: RunnerResolved,
+        ids: DrawnIds,
         root: PathBuf,
     },
+}
+
+struct DrawnIds {
+    run_id: String,
+    incarnation: IncarnationId,
+    pid: u32,
+}
+
+impl DrawnIds {
+    fn draw(ids: &dyn IdSource) -> Self {
+        Self {
+            run_id: ids.run_id(),
+            incarnation: ids.incarnation(),
+            pid: ids.pid(),
+        }
+    }
+}
+
+impl IdSource for DrawnIds {
+    fn run_id(&self) -> String {
+        self.run_id.clone()
+    }
+
+    fn incarnation(&self) -> IncarnationId {
+        self.incarnation.clone()
+    }
+
+    fn pid(&self) -> u32 {
+        self.pid
+    }
+
+    fn question_id(&self) -> QuestionId {
+        RealIds.question_id()
+    }
 }
 
 impl Authorization {
@@ -131,6 +174,7 @@ pub fn prepare_fresh(
                     Some(&runtime),
                     &mounts,
                 )?,
+                ids: DrawnIds::draw(&RealIds),
                 root,
             }
         }
@@ -206,6 +250,28 @@ impl FreshPrepared {
         }
     }
 
+    pub fn lease(self, opts: &RunOptions) -> Result<FreshLeased, UpstrokeError> {
+        let mut hooks = NoTopologyHooks::new();
+        let workspace = Workspace::open(&opts.repo_root)?;
+        let worktree_git_dir = workspace.worktree_git_dir()?;
+        let worktree =
+            WorktreeLock::acquire_in_hooked(&opts.repo_root, &worktree_git_dir, hooks.rundir())?;
+        Ok(FreshLeased {
+            prepared: self,
+            workspace,
+            worktree_git_dir,
+            worktree,
+            hooks,
+        })
+    }
+}
+
+impl FreshLeased {
+    #[must_use]
+    pub fn private_root(&self) -> &Path {
+        self.prepared.private_root()
+    }
+
     pub fn run(
         self,
         opts: &RunOptions,
@@ -213,32 +279,38 @@ impl FreshPrepared {
         repository: ManagedRepository,
     ) -> Result<RunReport, UpstrokeError> {
         let Self {
-            validate_opts,
-            captured,
-            analysis,
-            review_plan,
-            agents,
-            gate_cmds,
-            mode,
-            notifiers,
-            ceiling,
-            slots,
-            authorization,
-            image_environment,
-            mut warnings,
+            prepared:
+                FreshPrepared {
+                    validate_opts,
+                    captured,
+                    analysis,
+                    review_plan,
+                    agents,
+                    gate_cmds,
+                    mode,
+                    notifiers,
+                    ceiling,
+                    slots,
+                    authorization,
+                    image_environment,
+                    mut warnings,
+                },
+            workspace,
+            worktree_git_dir,
+            worktree,
+            mut hooks,
         } = self;
         let checked = match authorization {
             Authorization::Checked(checked) => checked,
-            Authorization::Pending { resolved, root } => resolved.authorize(&root, &RealIds)?,
+            Authorization::Pending {
+                resolved,
+                ids,
+                root,
+            } => resolved.authorize(&root, &ids)?,
         };
         let runtime = DockerCli::default();
         let view = RoleGitView::new(ContainerTrace::off());
-        let mut hooks = NoTopologyHooks::new();
 
-        let workspace = Workspace::open(&opts.repo_root)?;
-        let worktree_git_dir = workspace.worktree_git_dir()?;
-        let worktree =
-            WorktreeLock::acquire_in_hooked(&opts.repo_root, &worktree_git_dir, hooks.rundir())?;
         confirm_unchanged(&validate_opts, &captured)?;
         let repo_key = RepoKey::for_worktree_git_dir(&worktree_git_dir)?;
         let include_spelling = repository.common_dir().to_path_buf();

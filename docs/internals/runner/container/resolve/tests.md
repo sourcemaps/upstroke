@@ -666,14 +666,18 @@ refused by the lock, and without the lease it reaches pre-flight. Without this
 control, the gated cell's "did not reach the lock" would not show that the
 lock was on its far side.
 
-Its tree is clean, which the control depends on: since L2 a fresh schema-4
-run refuses a dirty tree before the lock (DESIGN §20, through
-`engine::coordinator::run_harness`), so a fixture with anything untracked
-would be refused there and reach neither the lock nor pre-flight. The pools
-file is committed with the config, and the private root is a separate scratch
-tree outside the checkout, because the first run's include publication writes
-under the private root and a root inside the checkout would leave the second
-run's tree dirty.
+Its tree is clean, which the control's second half depends on: since L2 a
+fresh schema-4 run refuses a dirty tree (DESIGN §20, through
+`engine::coordinator::run_harness`), and since repair10 it does so under the
+worktree lease, directly after taking it. A fixture with anything untracked
+would still meet the held lease first, but without the lease it would be
+refused as dirty and never reach pre-flight. The pools file is committed with
+the config, and the private root is a separate scratch tree outside the
+checkout, so nothing a run publishes under it can make the checkout dirty.
+That this refused run publishes nothing — no exclusion, no include, under
+either root — is
+`engine::tests::a_fresh_schema_4_run_that_loses_the_worktree_lease_publishes_no_exclusion_and_no_include`'s
+to show; this control shows only the refusal's precedence.
 
 ## `fn real_docker_a_schema_4_run_refuses_an_absent_image_before_the_worktree_lock() {`
 

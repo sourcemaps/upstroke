@@ -41,20 +41,31 @@ below. The bodies are what they were; the call in `run_contained` lost its
 PR12's dispatch: since the topology is active, `upstroke run` creates a
 schema-4 run, and this branch is it. The order is the read-only half
 ([`crate::engine::topology::entry::prepare_fresh`], after containment), then
-the legacy admission of the checkout (`refuse_dirty_tree`: the run exclusion,
-then the refusal of a dirty tree; L2), then the include publication, written
-here because `recorded_objects_scope` is denied to every topology module, then
-the effectful half (`FreshPrepared::run`). The admission is here for the same
-reason: `Workspace::ensure_run_exclusions` is an effectful wrapper no topology
-module may call, so the schema-4 entry cannot make it, and this is the first
-point on the path where the legacy entry's rule can run as written, before
-anything of the run exists. The include goes under the root the
-read-only half authorized, or under the default root, which it creates when
-missing (root's Q4: only after the runtime, image and credential-volume
-refusals, and only after the read-only half has refused a default root that
-would resolve to a path no string spells, J14, so that refusal leaves nothing
-behind). The legacy body below runs only for the test configuration's
-legacy writer ([`RunOptions::writes_topology`](options.md)).
+the physical worktree lease (`FreshPrepared::lease`), the command's first
+effect, then — under that lease — the legacy admission of the checkout
+(`refuse_dirty_tree`: the run exclusion, then the refusal of a dirty tree; L2),
+then the include publication, written here because `recorded_objects_scope` is
+denied to every topology module, then the effectful half (`FreshLeased::run`),
+which keeps the same lease through the startup census and the run. The
+admission is here for the same reason: `Workspace::ensure_run_exclusions` is an
+effectful wrapper no topology module may call, so the schema-4 entry cannot
+make it, and this is the first point on the path where the legacy entry's rule
+can run as written once the lease is held, before anything of the run exists.
+The include goes under the root the read-only half authorized, or under the
+default root, which it creates when missing (root's Q4: only after the runtime,
+image and credential-volume refusals, and only after the read-only half has
+refused a default root that would resolve to a path no string spells, J14, so
+that refusal leaves nothing behind). The legacy body below runs only for the
+test configuration's legacy writer ([`RunOptions::writes_topology`](options.md)).
+
+Until repair10 the exclusion and the include came before the lease, so a fresh
+run that lost it — to a conductor holding it, or to a surviving reaper's
+cleanup hold on a run of the checkout — had already written both: one defect,
+reported three times (PR12-R9-PUBLIC-PUBLICATION-BEFORE-WORKTREE-LOCK,
+PR12-REG7-PRELOCK-WRITES, PR12-N4-PRELOCK-PUBLICATION) against the canonical
+rule that a write command's first effect is the worktree lock. The ordering is
+in `engine/topology/entry.md`; the guard is
+`engine::tests::a_fresh_schema_4_run_that_loses_the_worktree_lease_publishes_no_exclusion_and_no_include`.
 
 ## `run_harness_on(opts, harness, &HostRunner::for_legacy_workspace(repository))`
 
@@ -99,15 +110,19 @@ already holds a run's public directory reads as dirty, and its next run is
 refused for the engine's own files (measured with the exclusion removed: the
 second fresh schema-4 run in one repository was refused).
 
-The legacy entry (`run_harness_inner_with_id`) calls it after
-`ensure_execution_prerequisites`, where these two steps were written inline, and
-the schema-4 dispatch in `run_harness` calls it before the include publication.
-Until L2 the schema-4 path made no such check: a fresh `upstroke run` over a
-modified tracked file ran its worker and reviewer against the committed tree,
-recorded a completed run and exited 0 (the reviewer's executed comparison;
-the base refused with this message and created no run log). A refused run
-leaves the exclusion (`.upstroke/.gitignore`) and nothing else, as the legacy
-entry always has.
+Both entries call it under the worktree lease. The legacy entry
+(`run_harness_inner_with_id`) calls it after `ensure_execution_prerequisites`,
+where these two steps were written inline, and the schema-4 dispatch in
+`run_harness` calls it after `FreshPrepared::lease` and before the include
+publication. Until L2 the schema-4 path made no such check: a fresh `upstroke
+run` over a modified tracked file ran its worker and reviewer against the
+committed tree, recorded a completed run and exited 0 (the reviewer's executed
+comparison; the base refused with this message and created no run log). From
+L2 until repair10 the schema-4 dispatch called it before any lease, so a run
+that went on to lose the lease had written the exclusion first. A refused run
+leaves the exclusion (`.upstroke/.gitignore`) and, as every command that took
+the lease does, the worktree lock file (R25, which spans runs), and nothing
+else, as the legacy entry always has.
 
 The exclusion is also what keeps an admitted fresh run's generated public files
 out of Git (L4, regression review 3, finding 4). Before L2 a schema-4 run made no

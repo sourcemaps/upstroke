@@ -134,7 +134,11 @@ Inputs
 Everything both halves need, as one value.
 
 **There is one `authorized_root` and both halves census it.** `R` is computed
-read-only by recovery step (a0) before any lock is taken, and half (a)'s
+read-only before any lock is taken — by recovery step (a0) on a resume, by
+`prelock::check` for a fresh run's explicit root — except for a fresh run's
+default root, which may not exist until the include's publication under the
+worktree lease creates it and is canonicalized only then, still before this
+census (`engine/topology/entry.md`). Half (a)'s
 `private_root` and half (b)'s ownership root are the same field here rather
 than two parameters that a caller could disagree with itself about. A
 container census under one root followed by an ownership proof under another
@@ -152,7 +156,10 @@ it, or the husk is a directory copied from another repository.
 
 ## `pub struct CensusInputs<'a>` › `pub authorized_root: &'a Path,`
 
-The authorized private root `R`, computed read-only before any lock.
+The authorized private root `R`: computed read-only before any lock for a
+resume and for an explicit root, and for a fresh run's default root
+canonicalized under the worktree lease once the include's publication has
+created it, before this census.
 
 ## `pub struct CensusInputs<'a>` › `pub incarnation: &'a str,`
 

@@ -20541,6 +20541,289 @@ fn a_schema_4_resume_restores_a_missing_run_exclusion() {
     );
 }
 
+#[derive(Debug, Clone, Copy)]
+enum ExclusionState {
+    Absent,
+    Changed,
+}
+
+/// Leaves the checkout's run exclusion absent — `.upstroke` itself gone when nothing else is in
+/// it — or holding bytes that exclude nothing, so that making it is visible in every path and
+/// byte it touches.
+fn put_exclusion(repo: &Path, state: ExclusionState) {
+    let namespace = repo.join(".upstroke");
+    let exclusion = namespace.join(".gitignore");
+    match state {
+        ExclusionState::Absent => {
+            if exclusion.exists() {
+                fs::remove_file(&exclusion).expect("the exclusion, removed");
+            }
+            if namespace.exists()
+                && fs::read_dir(&namespace)
+                    .expect("the namespace")
+                    .next()
+                    .is_none()
+            {
+                fs::remove_dir(&namespace).expect("the empty namespace, removed");
+            }
+        }
+        ExclusionState::Changed => {
+            fs::create_dir_all(&namespace).expect("the namespace");
+            fs::write(&exclusion, "# excludes nothing\n").expect("an exclusion of other bytes");
+        }
+    }
+}
+
+/// Everything persistent in the checkout but its Git directory, the checkout itself included,
+/// by path relative to it: the operator's files and the engine's `.upstroke` namespace, its
+/// exclusion and every run's public half with its log. [`private_snapshot`]'s walk, without
+/// `.git`, whose refs [`every_ref`] reads and whose lease file belongs to the lease's holder.
+fn public_snapshot(repo: &Path) -> std::collections::BTreeMap<PathBuf, PrivateEntry> {
+    fn mode(metadata: &fs::Metadata) -> u32 {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            metadata.permissions().mode()
+        }
+        #[cfg(not(unix))]
+        {
+            u32::from(metadata.permissions().readonly())
+        }
+    }
+    let mut entries = std::collections::BTreeMap::new();
+    let top = fs::symlink_metadata(repo).expect("the checkout");
+    entries.insert(PathBuf::new(), PrivateEntry::Directory { mode: mode(&top) });
+    let mut pending = vec![repo.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(&directory).expect("a directory of the checkout") {
+            let path = entry.expect("a directory entry").path();
+            let relative = path
+                .strip_prefix(repo)
+                .expect("under the checkout")
+                .to_path_buf();
+            if relative == Path::new(".git") {
+                continue;
+            }
+            let metadata = fs::symlink_metadata(&path).expect("the entry's metadata");
+            let found = if metadata.file_type().is_symlink() {
+                PrivateEntry::Link {
+                    target: fs::read_link(&path).expect("the link's target"),
+                }
+            } else if metadata.is_dir() {
+                pending.push(path.clone());
+                PrivateEntry::Directory {
+                    mode: mode(&metadata),
+                }
+            } else {
+                PrivateEntry::File {
+                    mode: mode(&metadata),
+                    bytes: fs::read(&path).expect("the file's bytes"),
+                }
+            };
+            entries.insert(relative, found);
+        }
+    }
+    entries
+}
+
+/// Runs `command` once for each exclusion and include state while `hold` keeps the checkout's
+/// worktree lease from it. Each run must be refused with `says`, build no worker or reviewer,
+/// and leave the checkout outside `.git`, the private root and every ref exactly as they were:
+/// every path, kind, mode and byte. Both snapshots are taken while the hold is held, so whatever
+/// taking it creates is in both.
+fn assert_refused_under_a_held_lease<H>(
+    repo: &Path,
+    what: &str,
+    says: &str,
+    hold: impl Fn() -> H,
+    command: impl Fn() -> Result<RunReport, UpstrokeError>,
+    built: impl Fn() -> usize,
+) {
+    let home = private_root_for(repo);
+    for exclusion in [ExclusionState::Absent, ExclusionState::Changed] {
+        for include in [IncludeState::Absent, IncludeState::Changed] {
+            put_exclusion(repo, exclusion);
+            put_include(&home, include);
+            let held = hold();
+            let public = public_snapshot(repo);
+            let private = private_snapshot(&home);
+            let refs = every_ref(repo);
+            let calls = built();
+            let refused = command().expect_err("the lease is held, so the command is refused");
+            let public_after = public_snapshot(repo);
+            let private_after = private_snapshot(&home);
+            let refs_after = every_ref(repo);
+            drop(held);
+            let case = format!("{what}, exclusion {exclusion:?}, include {include:?}");
+            assert!(refused.to_string().contains(says), "{case}: {refused}");
+            assert_eq!(built(), calls, "{case}: a worker or reviewer was built");
+            let moved = moved_entries(&public, &public_after);
+            assert!(
+                moved.is_empty(),
+                "{case}: the refused command wrote in the checkout: {moved:?}"
+            );
+            let moved = moved_entries(&private, &private_after);
+            assert!(
+                moved.is_empty(),
+                "{case}: the refused command wrote under the private root: {moved:?}"
+            );
+            assert_eq!(refs_after, refs, "{case}: the refs moved");
+        }
+    }
+}
+
+/// With nothing holding the lease, `command` is admitted and makes the run exclusion and the
+/// include from their absent states: the exclusion's fixed `*`, the include's fixed bytes, and
+/// on Unix the include's directory at `0700`.
+fn assert_admitted_and_published(
+    repo: &Path,
+    command: impl Fn() -> Result<RunReport, UpstrokeError>,
+) -> RunReport {
+    let home = private_root_for(repo);
+    put_exclusion(repo, ExclusionState::Absent);
+    put_include(&home, IncludeState::Absent);
+    let report = command().expect("with the lease free the command is admitted");
+    until_released(repo, &report.run_id);
+    assert_eq!(
+        fs::read(repo.join(".upstroke").join(".gitignore")).expect("the run exclusion"),
+        b"*\n",
+        "the admitted command made the run exclusion"
+    );
+    assert_eq!(
+        fs::read(include_for(repo)).expect("the include"),
+        crate::runner::host::RECORDED_OBJECTS_INCLUDE,
+        "the admitted command published the include"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = fs::metadata(home.join("git"))
+            .expect("the include's directory")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o700, "{mode:o}");
+    }
+    report
+}
+
+/// A surviving reaper's shared hold on `public`'s cleanup lease (R28): the suite's own holder,
+/// `rundir::tests::cleanup_hold_child`, in a child this test owns, which is killed and reaped
+/// when the returned value drops.
+#[cfg(unix)]
+fn a_surviving_reaper_holding(
+    public: &Path,
+) -> crate::agent::proc::test_support::readiness::Producer {
+    let mut reaper = crate::workspace_manager::fixture::spawn_ready_helper(
+        "rundir::tests::cleanup_hold_child",
+        &[("UPSTROKE_TEST_CLEANUP_DIR", public.as_os_str())],
+    );
+    reaper
+        .await_line("held", Duration::from_secs(30))
+        .or_fail("the surviving reaper never took its hold");
+    assert!(
+        rundir::observe_cleanup_hold(public, &mut rundir::NoHooks),
+        "the premise: a surviving reaper holds the run's cleanup lease"
+    );
+    reaper
+}
+
+/// PR12-R9-PUBLIC-PUBLICATION-BEFORE-WORKTREE-LOCK, PR12-REG7-PRELOCK-WRITES and
+/// PR12-N4-PRELOCK-PUBLICATION, one defect, the fresh half: through `run_with`, a fresh schema-4
+/// run that loses the worktree lease publishes nothing first, and the same run admitted makes
+/// both the exclusion and the include.
+#[test]
+fn a_fresh_schema_4_run_that_loses_the_worktree_lease_publishes_no_exclusion_and_no_include() {
+    let (_tree, repo) = temp_engine_repo("topology-fresh-lease-first");
+    let opts = topology_options(&repo);
+    assert!(
+        !repo.join(".upstroke").exists(),
+        "the premise: the checkout has no `.upstroke` before its first run"
+    );
+    let stub = ObservedStub::new(0);
+    let source = BorrowedObserved(&stub);
+    assert_refused_under_a_held_lease(
+        &repo,
+        "a fresh run under another conductor's lease",
+        "is already driving worktree",
+        || WorktreeLock::acquire(&repo).expect("the test's lease"),
+        || run_with(&opts, &source),
+        || stub.built().len(),
+    );
+    let first = assert_admitted_and_published(&repo, || run_with(&opts, &source));
+    assert_eq!(first.outcome(), RunOutcome::Complete, "{first:#?}");
+    #[cfg(unix)]
+    {
+        let public = rundir::public_dir(&repo, &first.run_id);
+        assert_refused_under_a_held_lease(
+            &repo,
+            "a fresh run beside a surviving reaper of the first",
+            "still has a process of its own alive",
+            || a_surviving_reaper_holding(&public),
+            || run_with(&opts, &source),
+            || stub.built().len(),
+        );
+        let second = assert_admitted_and_published(&repo, || run_with(&opts, &source));
+        assert_eq!(second.outcome(), RunOutcome::Complete, "{second:#?}");
+    }
+}
+
+/// The same defect, the resume half: through `resume_with`, a parked schema-4 run's resume that
+/// loses the worktree lease restores no exclusion and writes no include, its log and refs
+/// unmoved, and the same resume admitted makes both.
+#[test]
+fn a_schema_4_resume_that_loses_the_worktree_lease_restores_no_exclusion_and_writes_no_include() {
+    let (_tree, repo) = temp_engine_repo("topology-resume-lease-first");
+    let stub = ObservedStub::new(1);
+    let source = BorrowedObserved(&stub);
+    let parked = run_with(&topology_options(&repo), &source).expect("the run parks");
+    assert_eq!(parked.outcome(), RunOutcome::Parked, "{parked:#?}");
+    until_released(&repo, &parked.run_id);
+    let mut resume = resume_options(&repo, &parked.run_id);
+    resume.private_root = None;
+    let log = rundir::public_dir(&repo, &parked.run_id).join(rundir::EVENT_LOG);
+    let committed = fs::read(&log).expect("the parked run's log");
+
+    assert_refused_under_a_held_lease(
+        &repo,
+        "a resume under another conductor's lease",
+        "is already driving worktree",
+        || WorktreeLock::acquire(&repo).expect("the test's lease"),
+        || resume_with(&resume, &source),
+        || stub.built().len(),
+    );
+    #[cfg(unix)]
+    {
+        let public = rundir::public_dir(&repo, &parked.run_id);
+        assert_refused_under_a_held_lease(
+            &repo,
+            "a resume beside its run's surviving reaper",
+            "still has a process of its own alive",
+            || a_surviving_reaper_holding(&public),
+            || resume_with(&resume, &source),
+            || stub.built().len(),
+        );
+    }
+    assert!(
+        fs::read(&log).expect("the log") == committed,
+        "the refused resumes wrote the log"
+    );
+
+    let resumed = || {
+        event_kinds(&repo, &parked.run_id)
+            .iter()
+            .filter(|kind| *kind == "run_resumed")
+            .count()
+    };
+    let before = resumed();
+    let report = assert_admitted_and_published(&repo, || resume_with(&resume, &source));
+    assert_eq!(report.run_id, parked.run_id);
+    assert_eq!(
+        resumed(),
+        before + 1,
+        "the admitted resume appended `run_resumed`"
+    );
+}
+
 /// P12-W13. A parked schema-4 question has no payload file: `status` names it,
 /// `show` renders it from the fold by an id prefix, `answer` records it once and
 /// refuses a second, the resume ingests it from the file the run polls, and an

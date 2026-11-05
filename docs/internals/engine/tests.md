@@ -4010,6 +4010,80 @@ exclusion its fresh run made is deleted. The premise is asserted: `git status` n
 back and `git status` lists nothing. With the schema-4 branch's `ensure_run_exclusions` removed
 from `resume_harness`, it fails on "the resume made the exclusion again".
 
+## `enum ExclusionState {`
+
+The two run-exclusion states the lease guards hold a refusal to, beside [`IncludeState`]'s two.
+
+## `fn put_exclusion(repo: &Path, state: ExclusionState) {`
+
+`Absent` removes `.upstroke/.gitignore`, and `.upstroke` itself when nothing else is in it, so a
+premature exclusion would have to create the directory too; `Changed` leaves a file holding bytes
+with no `*`, which `Workspace::ensure_run_exclusions` rewrites, so a premature one would show as
+changed bytes.
+
+## `fn public_snapshot(repo: &Path) -> std::collections::BTreeMap<PathBuf, PrivateEntry> {`
+
+[`private_snapshot`]'s walk over the checkout, without its Git directory: every operator file and
+everything under `.upstroke` — the exclusion, every run's public half, its log, `run.lock` and
+`cleanup.lock` — by path, kind, mode and bytes. `.git` is left out because its refs are
+[`every_ref`]'s, and the lease file in it is created by whoever takes the lease first; the guards
+below compare refs instead.
+
+## `fn assert_refused_under_a_held_lease<H>(`
+
+The held-lease controls of PR12-R9-PUBLIC-PUBLICATION-BEFORE-WORKTREE-LOCK,
+PR12-REG7-PRELOCK-WRITES and PR12-N4-PRELOCK-PUBLICATION (one defect), shared by the fresh and
+resume guards below. For each of the four exclusion and include states (absent or changed, each)
+it puts the states, takes the hold, snapshots the checkout outside `.git`, the private root and
+every ref, runs the public command, snapshots again, and only then releases the hold: so whatever
+taking the hold itself creates (a lease file, a reaper's open of `cleanup.lock`) is in both
+snapshots and nothing is attributed to the command that it did not do. Each run must be refused
+with the holder's own words, build no worker or reviewer, and leave every path, kind, mode and
+byte in both roots, and every ref, as it found them.
+
+## `fn assert_admitted_and_published(`
+
+The positive control, run once the hold is released: with the exclusion and the include both
+absent, the same public command is admitted, and afterwards the exclusion holds its fixed `*\n`,
+the include its fixed bytes, and on Unix the include's directory is `0700`. It returns the report,
+whose run is released before it returns.
+
+## `fn a_surviving_reaper_holding(`
+
+A surviving reaper's shared hold on one run's cleanup lease (R28), by the suite's own holder,
+`rundir::tests::cleanup_hold_child`, through `workspace_manager::fixture::spawn_ready_helper`: a
+child of this test, bounded by its 30-second `await_line` and by its own sleep, and killed and
+reaped when the returned `Producer` drops. The premise — that the hold is observed — is asserted
+before it is returned. Unix only, as the helper and the hold are.
+
+## `fn a_fresh_schema_4_run_that_loses_the_worktree_lease_publishes_no_exclusion_and_no_include() {`
+
+The fresh half of the one defect, through `run_with` with the topology active. A pristine
+repository (the premise: no `.upstroke`) and its explicit private root; the run is refused under
+the lease this test takes in-process (the conductor's case, "is already driving worktree") in all
+four states, with nothing published in either root and no ref moved. Released, the same run is
+admitted and completes, and makes the exclusion and the include from absent. On Unix, beside a
+surviving reaper of that first run (R28's case, "still has a process of its own alive"), the four
+refusals again publish nothing; released, a second run is admitted and makes both again.
+
+Measured before commit as negative control A1 (the old ordering restored in `run_harness`, the
+exclusion, the dirty-tree refusal and the include before `FreshPrepared::lease`): it fails at the
+first case on "created .upstroke", "created .upstroke/.gitignore".
+
+## `fn a_schema_4_resume_that_loses_the_worktree_lease_restores_no_exclusion_and_writes_no_include() {`
+
+The resume half of the one defect, through `resume_with` with no `--private-root`, so the committed
+locator is the only root authority. A run parks on its one question; its log's bytes are kept.
+Under the lease this test holds, and on Unix beside a surviving reaper of the parked run, each of
+the four states' resume is refused with nothing written in either root, no ref moved and no worker
+or reviewer built; the log is the parked run's, byte for byte. Released, the resume is admitted,
+appends `run_resumed`, and makes the exclusion and the include from absent. The owner and commit
+proof before the include stays `a_schema_4_resume_proves_its_owner_and_commit_records_before_it_writes_its_include`'s.
+
+Measured before commit as negative control A1 (`resume_harness` making the exclusion before
+`ResumePrepared::verify`, byte for byte the file at `eceed606`): it fails at the first case on
+"created .upstroke/.gitignore".
+
 ## `fn a_schema_4_run_and_its_resume_leave_the_checkout_and_print_no_way_back_from_it() {`
 
 PR12-REG6-TOPOLOGY-RETURN-HINT, through the public entry points. A schema-4 run, through

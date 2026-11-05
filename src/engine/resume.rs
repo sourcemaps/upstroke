@@ -50,9 +50,9 @@ pub fn resume_harness(
     if let Some(root) = super::topology::entry::route_resume(opts)? {
         let _contained = contain_write_command(&mut NoHooks)?;
         let prepared = super::topology::entry::prepare_resume(opts, harness, root)?;
+        let verified = prepared.verify(opts)?;
         let workspace = Workspace::open(&opts.repo_root)?;
         workspace.ensure_run_exclusions()?;
-        let verified = prepared.verify(opts)?;
         let repository = workspace.recorded_objects_scope(Some(verified.private_root()))?;
         return verified.run(opts, harness, repository);
     }

@@ -14,21 +14,40 @@ and `upstroke resume` reach once the topology is active.
 It composes functions that already exist, in the spec's order
 (`workspace_candidates.run_creation`, `sequential_substrate.startup_census`,
 `recovery_order`, `selection`), and adds no effect site of its own. Each
-public function is one half of a command whose other half lives in the
+public function is one step of a command whose other steps live in the
 legacy entry point (`engine::coordinator::run_harness`,
-`engine::resume::resume_harness`): those two bodies publish the
-recorded-objects include between this module's halves, because
-`Workspace::recorded_objects_scope` is denied to every topology module
-(`clippy.toml`) — `run_harness` between the read-only half and the effectful
-half, and `resume_harness` between the proof that the run's private records
-are its own ([`ResumePrepared::verify`]) and the effectful half
-([`ResumeVerified::run`]), because on a resume the include is a write into a
-private root that only those records authorize (INV-15, O18; PR12-CI-01). The
-first effect of either command is
-the run exclusion, which both bodies make before the include — `run_harness` just
-before it, `resume_harness` just before the proof — for the same reason:
-`Workspace::ensure_run_exclusions` is denied to every topology module too. `run_harness` makes it in the checkout's admission (L2), and
+`engine::resume::resume_harness`): those two bodies make the run exclusion
+and publish the recorded-objects include between this module's steps,
+because `Workspace::ensure_run_exclusions` and
+`Workspace::recorded_objects_scope` are denied to every topology module
+(`clippy.toml`).
+
+Both are publications — between them they create directories, write a file,
+stage and rename another and tighten a directory's mode — so both follow the
+command's first effect, the physical worktree lease (`scope_and_constraints[19]`:
+"the first effect of any write command is the worktree lock"; R17), and both
+are made under the lease the rest of the command keeps: `run_harness` between
+[`FreshPrepared::lease`] and [`FreshLeased::run`], and `resume_harness`
+between the proof that the run's private records are its own
+([`ResumePrepared::verify`], which takes both leases) and
+[`ResumeVerified::run`], because on a resume the include is a write into a
+private root that only those records authorize (INV-15, O18; PR12-CI-01).
+`run_harness` makes the exclusion in the checkout's admission (L2), and
 `resume_harness` on its own (L4).
+
+Until repair10 (PR12-R9-PUBLIC-PUBLICATION-BEFORE-WORKTREE-LOCK,
+PR12-REG7-PRELOCK-WRITES and PR12-N4-PRELOCK-PUBLICATION, three records of one
+defect) both bodies made the exclusion before any lease: `run_harness` before
+the include, and the include before `FreshPrepared::run` took the lease;
+`resume_harness` before the proof. A command that then lost the lease, to a
+live conductor or to a surviving reaper's cleanup hold, had already created
+`.upstroke`, written `.upstroke/.gitignore` and, on a fresh run, created the
+private root's `git` directory, staged and renamed the include into place and
+tightened that directory's mode. The fresh exclusion entered that path in
+`8cbd9983` (L2), the resumed one in `5316d668` (L4), and the fresh include's
+publication before the lease with this module (`fffa73fa`). The legacy (schema
+1–3) entries publish their include before their leases too; that order is the
+activation base's, older than all three, and unchanged here.
 
 ### The fresh order
 
@@ -45,29 +64,52 @@ before it, `resume_harness` just before the proof — for the same reason:
    the runner policy, its configured mounts included,
    is resolved by read-only inspection ([`prelock::check`] for an explicit
    private root, which must already exist, or [`prelock::resolve_runner`]
-   for the default one, which may not); then the review plan, the probed
+   for the default one, which may not); for the default root the run id and
+   the incarnation are drawn next ([`DrawnIds`]), as [`prelock::check`]
+   draws them for an explicit root; then the review plan, the probed
    agent set, the gate shells and programs (host runs only), the D4 width
    check, the budget ceiling, the slot limits and the configured notifiers.
    The runner comes before the review plan so that a refused container
    selection has asked the adapter source nothing.
-3. `run_harness` admits the checkout through the sequential entry's own rule,
-   `engine::coordinator::refuse_dirty_tree` (L2; DESIGN §20 and §14's
-   pre-flight, "clean working tree required"): the run exclusion, then the
-   refusal of any staged, unstaged or untracked change. Nothing of the run
-   exists yet, so a refused run has started no worker and created no run log.
-   The sequential entry makes the same call later, under its worktree lock and
-   after its pre-flight; here it is a refusal before the lock, as every check
-   of the read-only half is.
-4. `run_harness` publishes the include under [`FreshPrepared::private_root`].
-   For the default root this is also how a missing root comes to exist,
-   through the include's existing private-directory creation (root's Q4).
-5. [`FreshPrepared::run`]: the default root is authorized; the worktree lock;
-   the inputs re-captured and compared with the checked capture (a difference
-   refuses); the startup census; the workspace manager; the execution root
+3. [`FreshPrepared::lease`]: the checkout's Git directory, read, then the
+   physical worktree lease (`Lock.CreateWorktreeLockFile`,
+   `Lock.AcquireWorktree`), the command's first effect. A conductor holding
+   it, or a surviving reaper's cleanup hold on any run of the checkout (R28,
+   which the acquisition observes), refuses here, and the refused command has
+   published nothing.
+4. `run_harness`, under the lease, admits the checkout through the
+   sequential entry's own rule, `engine::coordinator::refuse_dirty_tree` (L2;
+   DESIGN §20 and §14's pre-flight, "clean working tree required"): the run
+   exclusion, then the refusal of any staged, unstaged or untracked change.
+   Nothing of the run exists yet, so a refused run has started no worker and
+   created no run log. The sequential entry makes the same call under its
+   worktree lock too, after its pre-flight. The admission is no read-only
+   check: the exclusion it makes first is a write, and the dirty-tree test
+   needs it (L2), so it follows the lease rather than joining the read-only
+   half.
+5. `run_harness` publishes the include under [`FreshLeased::private_root`],
+   still under the lease. For the default root this is also how a missing
+   root comes to exist, through the include's existing private-directory
+   creation (root's Q4).
+6. [`FreshLeased::run`]: the default root is authorized — canonicalized now
+   that it exists, and refused unless it is a real directory, with the ids
+   drawn in step 2; the inputs re-captured and compared with the checked
+   capture (a difference refuses); the startup census, under the lease step 3
+   took; the workspace manager; the execution root
    (`Worktree.CreateExecutionRoot`, which the inventory places before
    `run_started`, and removed again when creation ends with nothing retained);
    the case observation; `run_started(4)`; P0–P8; the handover to the loop;
    the loop; the report.
+
+So the checks before any lock are the configuration's validation, the runner
+policy's read-only inspection and the run id and incarnation for either root,
+plus, for an explicit root, its authorization (an existing real directory,
+canonical, spelled in UTF-8: [`prelock::check`]) and, for the default root,
+the spelling of the path it will resolve to
+([`prelock::refuse_unspellable_default_root`]). What follows the lease for
+the default root alone is what cannot precede the root's existence: its
+creation by the include's publication and its canonicalization and
+real-directory check by `RunnerResolved::authorize`.
 
 ### The resume order
 
@@ -91,17 +133,20 @@ before it, `resume_harness` just before the proof — for the same reason:
    is asked anything; a recorded container image's environment; the slot
    limits; the recorded shell ([`recorded_shell`]); today's configured
    notifiers.
-4. `resume_harness` makes the run exclusion (`Workspace::ensure_run_exclusions`,
-   L4), as the sequential resume does after its prerequisites, so a run whose
-   `.upstroke/.gitignore` went missing is ignored by Git again. This step is the
-   exclusion alone: the dirty-tree refusal is the fresh run's admission (L2),
-   and no refusal is added to the resume.
-5. [`ResumePrepared::verify`], the proof, recovery step (a): the checkout's Git
+4. [`ResumePrepared::verify`], the proof, recovery step (a): the checkout's Git
    directory and repo key, this incarnation, the workspace manager (read-only,
    as before), then `recover::verify_for_recovery` — the worktree lease and the
    run lock, `owner.json` and `committed.json` verified against the committed
    first line, and the recorded mounts rechecked. Every refusal so far has
-   written nothing private.
+   written nothing, public or private: a resume that loses the worktree lease
+   to a conductor or to a surviving reaper's cleanup hold has made no
+   exclusion and no include.
+5. `resume_harness`, holding both leases, makes the run exclusion
+   (`Workspace::ensure_run_exclusions`, L4), as the sequential resume does
+   under its locks after its prerequisites, so a run whose
+   `.upstroke/.gitignore` went missing is ignored by Git again. This step is
+   the exclusion alone: the dirty-tree refusal is the fresh run's admission
+   (L2), and no refusal is added to the resume.
 6. `resume_harness` publishes the include under [`ResumeVerified::private_root`],
    the root the records proved, with both locks held.
 7. [`ResumeVerified::run`]: the runner from the record, the `RunnerPreflight`
@@ -186,23 +231,66 @@ The analysis's warnings are moved into the command's, not copied: nothing
 reads them in the analysis afterwards (§6).
 
 A default root is authorized only after the include's publication has created
-it, so the UTF-8 half of that authorization is asked here first, read-only,
-against the path the root will resolve to. Until J14 (regular review 3,
-finding 3; regression review 2, finding 5) a home no string spells was refused
-only in [`FreshPrepared::run`], after `.upstroke/git/recorded-objects.gitconfig`
-and its directories had been published under it, beside a refusal that said
-nothing was created.
+it, and that publication follows the worktree lease, so the UTF-8 half of that
+authorization is asked here first, read-only, against the path the root will
+resolve to. The run id and the incarnation are drawn here for the default root
+too, right after the runner's resolution ([`DrawnIds`]), so they precede the
+lease whichever root the run uses; only the root's own canonicalization and
+real-directory check wait for the root. Until J14 (regular review 3, finding 3;
+regression review 2, finding 5) a home no string spells was refused only in
+the effectful half (`FreshPrepared::run` then), after
+`.upstroke/git/recorded-objects.gitconfig` and its directories had been
+published under it, beside a refusal that said nothing was created.
+
+## `pub struct FreshLeased {`
+
+A [`FreshPrepared`] whose command holds the physical worktree lease and has
+done nothing else: what `run_harness` makes the run exclusion and publishes
+the include under. It owns the lease (`worktree`), the hooks its acquisition
+was observed by, and the opened workspace and its Git directory, which the
+effectful half reads. Dropping it — a refused admission, an include that
+cannot be written — releases the lease.
+
+## `struct DrawnIds {`
+
+The run id, the incarnation and the pid of a fresh run over the default
+root, drawn before the lease ([`prepare_fresh`]) and handed to
+`RunnerResolved::authorize` once the root exists. `run_creation` lists their
+generation ("no effect") among a fresh run's pre-lock steps, and
+[`prelock::check`] draws them there for an explicit root; drawing them here
+keeps that order for the default root, whose authorization can only follow the
+root's creation under the lease. Its `IdSource` answers each with the value
+drawn — the clones are the trait's owned returns of one draw, not second
+draws — and a question id fresh from `RealIds`, which authorization never
+asks for.
 
 ## `impl FreshPrepared` › `pub fn private_root(&self) -> &Path {`
 
 Where the include is published: the authorized (canonical) explicit root,
 or the default root as [`crate::rundir::default_private_root`] spells it.
 
-## `impl FreshPrepared` › `pub fn run(`
+## `impl FreshPrepared` › `pub fn lease(self, opts: &RunOptions) -> Result<FreshLeased, UpstrokeError> {`
 
-The effectful half. The order is the module section's; the lock is held from
-its acquisition through the census and the whole run, and handed to the
-`RunHandle` by `WorktreeLocked::into_lock` with no release in between.
+The command's first effect, after every read-only refusal of
+[`prepare_fresh`]: the checkout's Git directory, read, then
+`WorktreeLock::acquire_in_hooked` — the lease file if it is missing (R25) and
+this process's hold on it (R17) — which refuses a lease another conductor
+holds, and one a surviving reaper's cleanup hold on any run of the checkout
+(R28) keeps from it. A refusal here leaves the checkout, the private root and
+every ref as they were.
+
+## `impl FreshLeased` › `pub fn private_root(&self) -> &Path {`
+
+[`FreshPrepared::private_root`], for `run_harness`'s include.
+
+## `impl FreshLeased` › `pub fn run(`
+
+The effectful half, under the lease [`FreshPrepared::lease`] took. The order
+is the module section's; that lease is held from its acquisition through the
+census and the whole run, and handed to the `RunHandle` by
+`WorktreeLocked::into_lock` with no release in between. The default root's
+authorization comes first, because the include `run_harness` published just
+before it is what created the root.
 
 A container runner is given the worktree Git directory and `repository`'s
 common directory (J10, see the module's runner section). The copies this body
@@ -264,9 +352,12 @@ the repo key, the incarnation and the workspace manager are read before the
 locks, as they were before the proof moved here; then
 `recover::verify_for_recovery` takes the worktree lease and the run lock,
 verifies `owner.json` and `committed.json` and rechecks the recorded mounts.
-It writes nothing private: a refusal here leaves the private root, the log and
-the refs exactly as they were, which is what lets `resume_harness` publish the
-include only after it (PR12-CI-01).
+Its leases are the command's first effects, and it publishes nothing: a
+refusal here — a lease another conductor holds, a surviving reaper's cleanup
+hold, records that do not prove the run — leaves the checkout, the private
+root, the log and the refs exactly as they were, which is what lets
+`resume_harness` make the run exclusion (repair10) and publish the include
+(PR12-CI-01) only after it.
 
 ## `impl ResumeVerified` › `pub fn private_root(&self) -> &Path {`
 
@@ -282,7 +373,7 @@ built over `repository` only here, after the include was written, and drives
 order's steps (a1)–(h) follow the proof without taking the locks again.
 
 A container runner is given the worktree Git directory and `repository`'s
-common directory, as in [`FreshPrepared::run`]. The include's spelling, the
+common directory, as in [`FreshLeased::run`]. The include's spelling, the
 run identity and the recovery seams' frozen inputs are owned snapshots (§6),
 for the reasons given there. The probed capabilities default only where
 nothing was probed, which cannot follow a recovery that returned: its step C

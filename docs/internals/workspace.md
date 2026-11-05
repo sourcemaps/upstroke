@@ -337,9 +337,13 @@ for us without changing tracked or working-tree state.
 
 The repository the v0.1 runner keeps its role processes on the recorded graph
 of, as `crate::runner::host::ManagedRepository` names it. `engine::run_harness`
-and `engine::resume_harness` call it before anything else, so every run and
-every resume writes the include again before its first role starts, whatever
-became of it in between.
+and `engine::resume_harness` call it on every run and every resume, so the
+include is written again before the command's first role starts, whatever
+became of it in between. Their schema-4 branches call it under the worktree
+lease — a fresh run after its admission, a resume after the proof of its
+records — because it is a publication a command that has not won the lease
+must not make (repair10); their legacy branches call it first, before their
+leases, as at the activation base.
 
 - **The common directory is Git's answer, made canonical.** `rev-parse
   --path-format=absolute --git-common-dir`, through `git_command` like every
@@ -525,6 +529,12 @@ pattern cargo uses for `target/`) rather than an entry in
 owns, disappears with the directory, and — unlike `info/exclude` under
 `--git-dir` — behaves correctly in a linked worktree, where git reads
 excludes only from the common directory.
+
+It creates `.upstroke` and writes the file, so every caller makes it under
+the worktree lease: the legacy entries after taking theirs, the schema-4
+run in its admission after `FreshPrepared::lease`, and the schema-4 resume
+after the proof of its records (repair10; until then both schema-4 calls
+preceded every lease).
 
 ## `impl Workspace` › `pub fn capture_candidate(&self) -> Result<CapturedCandidate, UpstrokeError> {`
 

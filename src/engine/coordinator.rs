@@ -58,10 +58,11 @@ pub fn run_harness(opts: &RunOptions, harness: &Harness<'_>) -> Result<RunReport
     if opts.writes_topology() {
         let _contained = contain_write_command(&mut NoHooks)?;
         let prepared = super::topology::entry::prepare_fresh(opts, harness)?;
+        let leased = prepared.lease(opts)?;
         let workspace = Workspace::open(&opts.repo_root)?;
         refuse_dirty_tree(&workspace)?;
-        let repository = workspace.recorded_objects_scope(Some(prepared.private_root()))?;
-        return prepared.run(opts, harness, repository);
+        let repository = workspace.recorded_objects_scope(Some(leased.private_root()))?;
+        return leased.run(opts, harness, repository);
     }
     let repository =
         Workspace::open(&opts.repo_root)?.recorded_objects_scope(opts.private_root.as_deref())?;
