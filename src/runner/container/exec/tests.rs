@@ -6934,55 +6934,153 @@ fn a_launch_that_fails_after_a_cancellation_reports_the_cancellation() {
 #[test]
 fn an_invocation_whose_removal_leaves_a_process_unresolved_is_never_reported_gone() {
     for cancelled in [true, false] {
-        let fixture = Fixture::new(&format!("unresolved-removal-{cancelled}"), !cancelled);
-        let runner = fixture.runner();
-        let request = worker_request(
-            ShellKind::Sh
-                .spec("cat")
-                .stdin(prompt("unresolved", 4 * 1024)),
-            fixture.task_a.clone(),
-            AgentId::new("claude-code"),
-            Duration::from_secs(600),
-            worker_id(0),
-        );
-        let name = ContainerName::new(repo_key(), RUN_ID, INCARNATION_1, &request.invocation)
-            .expect("a name");
-        fixture
-            .runtime
-            .fake()
-            .leave_a_process_unresolved_at_removal(name.as_str());
-        let cancellation = crate::runner::Cancellation::new();
-        let mut observer = CancelAfter {
-            inner: RecordingHooks::new(fixture.trace.clone()),
-            cancellation: cancellation.clone(),
-            at: crate::topology::effects::EffectSiteId::Container(if cancelled {
-                ContainerSite::Start
-            } else {
-                ContainerSite::RemoveIntent
-            }),
-        };
-        let error = runner
-            .run_blocking_with(
-                &request,
-                RunnerCall::new(cancellation).observed_in_container_by(&mut observer),
-            )
-            .expect_err("an invocation with a process left unresolved is not a success");
-        assert!(
-            !error.is_cancelled(),
-            "cancelled {cancelled}: not a plain cancellation: {error}"
-        );
-        assert_eq!(
-            error.fate,
-            ProcessFate::Unresolved,
-            "cancelled {cancelled}: never Gone while a process may still run: {error}"
-        );
-        assert!(
-            error
-                .to_string()
-                .contains("could not establish every process"),
-            "cancelled {cancelled}: the unresolved fact is the error: {error}"
+        #[cfg(unix)]
+        unresolved_removal_in_an_owned_helper(cancelled);
+        #[cfg(not(unix))]
+        assert_unresolved_removal_fate(
+            &Fixture::new(&format!("unresolved-removal-{cancelled}"), !cancelled),
+            cancelled,
         );
     }
+}
+
+fn assert_unresolved_removal_fate(fixture: &Fixture, cancelled: bool) {
+    let runner = fixture.runner();
+    let request = worker_request(
+        ShellKind::Sh
+            .spec("cat")
+            .stdin(prompt("unresolved", 4 * 1024)),
+        fixture.task_a.clone(),
+        AgentId::new("claude-code"),
+        Duration::from_secs(600),
+        worker_id(0),
+    );
+    let name =
+        ContainerName::new(repo_key(), RUN_ID, INCARNATION_1, &request.invocation).expect("a name");
+    fixture
+        .runtime
+        .fake()
+        .leave_a_process_unresolved_at_removal(name.as_str());
+    let cancellation = crate::runner::Cancellation::new();
+    let mut observer = CancelAfter {
+        inner: RecordingHooks::new(fixture.trace.clone()),
+        cancellation: cancellation.clone(),
+        at: crate::topology::effects::EffectSiteId::Container(if cancelled {
+            ContainerSite::Start
+        } else {
+            ContainerSite::RemoveIntent
+        }),
+    };
+    let error = runner
+        .run_blocking_with(
+            &request,
+            RunnerCall::new(cancellation).observed_in_container_by(&mut observer),
+        )
+        .expect_err("an invocation with a process left unresolved is not a success");
+    assert!(
+        !error.is_cancelled(),
+        "cancelled {cancelled}: not a plain cancellation: {error}"
+    );
+    assert_eq!(
+        error.fate,
+        ProcessFate::Unresolved,
+        "cancelled {cancelled}: never Gone while a process may still run: {error}"
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("could not establish every process"),
+        "cancelled {cancelled}: the unresolved fact is the error: {error}"
+    );
+}
+
+#[cfg(unix)]
+const UNRESOLVED_REMOVAL_PATH: &str = "UPSTROKE_TEST_UNRESOLVED_REMOVAL_PATH";
+
+#[cfg(unix)]
+const UNRESOLVED_REMOVAL_ENDING: &str = "UPSTROKE_TEST_UNRESOLVED_REMOVAL_ENDING";
+
+#[cfg(unix)]
+fn unresolved_removal_in_an_owned_helper(cancelled: bool) {
+    let path = if cancelled { "cancelled" } else { "completed" };
+    for ending in ["return", "unwind"] {
+        let ended = crate::agent::proc::test_support::run_test_isolated(
+            "runner::container::exec::tests::unresolved_removal_child",
+            &[
+                (UNRESOLVED_REMOVAL_PATH, std::ffi::OsStr::new(path)),
+                (UNRESOLVED_REMOVAL_ENDING, std::ffi::OsStr::new(ending)),
+            ],
+            FIXTURE_CHILD_BOUND,
+        );
+        assert!(
+            ended.status.is_some_and(|status| status.success())
+                && ended.stdout.contains("1 passed")
+                && ended
+                    .stderr
+                    .matches("collected retained mock reaper ")
+                    .count()
+                    == 1
+                && ended
+                    .stderr
+                    .matches("collected isolated job-control guard ")
+                    .count()
+                    == 1
+                && ended
+                    .stderr
+                    .matches("isolated helper has no direct children (ECHILD)")
+                    .count()
+                    == 1,
+            "{path}/{ending}: the owned helper must prove the unresolved fate and collect its \
+             retained reaper before succeeding: {ended}"
+        );
+        crate::workspace_manager::fixture::say(&format!("removal {path}/{ending}: {ended}"));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "owned helper for the unresolved-removal guard"]
+fn unresolved_removal_child() {
+    use crate::agent::proc::test_support::{
+        IsolatedJobControl, RetainedMockReaper, assert_no_children_in_isolated_test,
+    };
+
+    let job_control = IsolatedJobControl::new();
+    let path = std::env::var(UNRESOLVED_REMOVAL_PATH).expect("the parent names the removal path");
+    let cancelled = match path.as_str() {
+        "cancelled" => true,
+        "completed" => false,
+        _ => panic!("an unknown removal path: {path}"),
+    };
+    let ending =
+        std::env::var(UNRESOLVED_REMOVAL_ENDING).expect("the parent names the helper ending");
+    assert!(matches!(ending.as_str(), "return" | "unwind"), "{ending}");
+    let fixture = Fixture::new(&format!("unresolved-removal-{path}-{ending}"), !cancelled);
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let job_control = job_control;
+        let reaper = RetainedMockReaper::new(&fixture.private_root, INCARNATION_1);
+        assert_unresolved_removal_fate(&fixture, cancelled);
+        assert!(
+            armed_for(&fixture.private_root, INCARNATION_1),
+            "the runner's drop exercised the production retained-reaper backstop"
+        );
+        assert!(
+            ending != "unwind",
+            "deliberate unwind after retained reaper"
+        );
+        reaper.collect();
+        job_control.collect();
+    }));
+    if ending == "unwind" {
+        let payload = outcome.expect_err("the deliberate unwind exercised guard cleanup");
+        assert_eq!(
+            payload.downcast_ref::<&str>(),
+            Some(&"deliberate unwind after retained reaper")
+        );
+    } else if let Err(payload) = outcome {
+        std::panic::resume_unwind(payload);
+    }
+    assert_no_children_in_isolated_test();
 }
 
 #[test]

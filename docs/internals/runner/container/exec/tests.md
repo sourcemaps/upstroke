@@ -2240,7 +2240,74 @@ leaves a process unresolved, as an attached client whose supervision ended
 `Unresolved` does, yields an invocation whose fate is `Unresolved` with that
 fact as its error: on the cancellation path, not a plain cancellation, and on
 the completed path, not a success, even though the container was observed
-exited.
+exited. The assertions are `assert_unresolved_removal_fate`'s. Unix runs each
+path through `unresolved_removal_in_an_owned_helper`; Windows, which has no
+Unix container reaper, runs the same assertions directly.
+
+PR12-R9-REMOVAL-GUARD-RETAINS-UNOWNED-REAPER and PR12-REG7-REMOVAL-GUARD-REAPER,
+two records of one defect: from `c08d9935`, which introduced this guard, until
+repair10 both paths ran in libtest's own process. Each built a real
+`ContainerRunner`, whose `Reaping::cover` forks a real Unix reaper, and its
+deliberately unresolved removal left that reaper to the production
+retained-reaper backstop (`Armed::kept_until_the_process_exits`) when the
+runner dropped, with no owner in the test's scope, on ordinary return and on
+unwinding alike. The backstop is production's and intentional; what was
+missing was the test's ownership, the lifecycle L5 gave J6's and K2's guards
+and R6-N1 the stalled observation's. No historical failure, hang or residue is
+attributed to it.
+
+## `fn assert_unresolved_removal_fate(fixture: &Fixture, cancelled: bool) {`
+
+The guard's assertions for one path, unchanged: a worker request whose
+container the fake leaves a process unresolved at removal
+(`leave_a_process_unresolved_at_removal`), cancelled at the container's start
+or once the container exited and its intent is being removed. The invocation
+is not a plain cancellation, its fate is `Unresolved`, and its error says it
+could not establish every process. Its runner drops when it returns, which is
+what hands the reaper to the backstop.
+
+## `fn unresolved_removal_in_an_owned_helper(cancelled: bool) {`
+
+Runs `unresolved_removal_child` for one path (`cancelled` or `completed`,
+through `UNRESOLVED_REMOVAL_PATH`) under `run_test_isolated` and
+`FIXTURE_CHILD_BOUND`, twice: ordinary return and deliberate unwinding after
+the runner dropped (`UNRESOLVED_REMOVAL_ENDING`). As
+`unresolved_process_in_an_owned_helper` does for the start, observation,
+pre-start-cleanup and volume-inspection cases, which stay as they are, the
+outer assertion requires the helper's successful exit, libtest's `1 passed`,
+exactly one retained-mock-reaper collection marker and one job-control-guard
+collection marker, and the final ECHILD marker, all arriving on captured
+stderr through the fixture's `say` funnel, which also reports the successful
+output. A failed fate assertion, an uncollected reaper or probe, or failed
+unwind cleanup cannot pass.
+
+## `fn unresolved_removal_child() {`
+
+Ignored because only the owner above supplies its path and ending. The shape
+is `unresolved_process_child`'s: `IsolatedJobControl` before the fixture,
+whose setup starts the process-global job-control guard and its probe;
+`RetainedMockReaper` for the runner's exact scope (`private_root`,
+`INCARNATION_1`) before the invocation; the completed path's fixture exits its
+container on start, as the in-process guard's did. After
+`assert_unresolved_removal_fate` returns, the runner has dropped through the
+unchanged production backstop, and the helper requires the scoped reaper
+still armed. On ordinary return it collects the reaper and the guard
+explicitly; on the deliberate panic their Drops collect them. The catch accepts
+only that exact panic. Finally `assert_no_children_in_isolated_test` requires
+ECHILD before the owner collects the helper.
+
+ECHILD is a direct-child claim, as for `unresolved_process_child`: this
+retained fake-runtime reaper has no supervised command group or anchor,
+receives no cleanup command while the helper lives, and is killed and reaped
+before the helper's exit could start its runtime cleanup, so the
+no-grandchildren argument in `agent/proc.md` is the same one. It says nothing
+about arbitrary descendants.
+
+Measured before commit as negative control B1 (the scoped `RetainedMockReaper`
+and its collection removed from this helper, which is the guard's state before
+repair10): the first path, `cancelled/return`, fails at the helper's
+direct-child census (`waitpid=0`) with no collection marker, and the owner's
+assertion fails on it.
 
 ## `fn a_container_call_cancelled_before_it_starts_writes_no_intent() {`
 
