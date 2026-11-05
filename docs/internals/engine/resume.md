@@ -29,9 +29,14 @@ PR12's dispatch: the run's committed first line decides the engine
 (`selection`: "schemas 1-3 always run the legacy engine; schema 4 always runs
 TopologyRun"). [`crate::engine::topology::entry::route_resume`] reads it,
 read-only and without starting a process, and answers `None` for a legacy
-log or one whose header it cannot read, so every sequential resume, and
+log or one whose header does not parse, so every sequential resume, and
 every refusal it raises, runs the lines below exactly as before — with one
-containment establishment, as every public entry point has. A topology log
+containment establishment, as every public entry point has. A log it cannot
+read at all it refuses itself, with the read's own error: `None` would send a
+schema-4 run down the lines below, whose include is published under the
+selected or default root before they read the log
+(PR12-INV5-RESUME-READ-ERROR-LEGACY-PUBLICATION,
+PR12-REG8-RESUME-READ-ERROR-LEGACY-PUBLICATION; the router's notes). A topology log
 is resumed by the topology order: containment, the read-only half
 (`prepare_resume`, which may read a recorded container image's environment,
 a `docker` child), the proof (`ResumePrepared::verify`: both locks, the

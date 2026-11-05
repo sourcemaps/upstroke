@@ -45,15 +45,33 @@ and by count, and constrained by what it may not name.
 ## `pub fn is_topology_log(bytes: &[u8], log: &Path) -> Result<bool, UpstrokeError> {`
 
 The header probe of `entry::route_resume`, for readers: schema 4 reads here,
-a legacy schema or a header that cannot be read goes to the legacy reader
+a legacy schema or a header that does not parse goes to the legacy reader
 (which diagnoses it), and a schema above the ceiling refuses with the probe's
-own refusal.
+own refusal. It probes bytes already read: a log that could not be read never
+reaches it (`observe` below).
 
 ## `pub fn observe(repo_root: &Path, run_id: &str) -> Result<Option<Observed>, UpstrokeError> {`
 
 `None` for a legacy log, so a legacy run's reader is unchanged; the probe read
 is separate from the stable read, so a legacy log is never subjected to the
 schema-4 reader's rereads.
+
+**`None` means read and classified legacy, and nothing else.** The probe read
+is `entry::read_initial_log`, the resume router's own first read, and its
+failure, whatever its kind (`NotFound` included), returns as that read's error,
+`failed to read <log>: <cause>`, never as `None`. Every caller reaches this
+after a census classified the run's committed header from its first line:
+`status` through `resolve_run_id` or `latest_run`, `status --follow` through
+`status`, and `answer` and `show` through the committed directories of their
+one census. A log the full read then cannot deliver is a run nobody has
+classified, and reading it as legacy drops it. Until
+PR12-REG10-INITIAL-LOG-READ-IS-ABSENCE and PR12-REG8-INITIAL-LOG-READ-IS-ABSENCE
+(one defect, first in `cdf87556`) the failure was `Ok(None)`:
+`open_question_candidates` skipped the run instead of carrying it as unread, so
+a prefix that the other run's question, or a legacy question, carried among
+the runs left was accepted, and `answer` wrote that question's answer. `status`
+and `status --follow` now report the read's error rather than handing a
+schema-4 log to the legacy reader.
 
 ## `fn stable_read(log: &Path, public: &Path) -> Result<(Vec<u8>, bool), UpstrokeError> {`
 
@@ -136,7 +154,8 @@ structure rather than as a verdict or a sentence (root's correction
 PR12-ANSWER-CROSS-SCHEMA-PREFIX, 7021b42d): the open question whose full id it
 is; the open questions whose id begins with it; the questions a log records as
 raised and no longer open whose id is it or begins with it; and the runs whose
-log could not be observed, carried rather than dropped. ASCII
+log could not be observed, a failed initial read among them (`observe` above),
+carried rather than dropped. ASCII
 case-insensitive, as the legacy finder is. A legacy log observes as `None` and
 contributes nothing here. There is no question-payload file: root withdrew
 that option.

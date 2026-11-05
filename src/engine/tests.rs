@@ -20924,6 +20924,345 @@ fn default_root_lease_child() {
     );
 }
 
+fn with_initial_read_failing<T>(log: &Path, call: impl FnOnce() -> T) -> (T, usize) {
+    let fault = crate::engine::topology::entry::initial_log_read_fault::arm(log);
+    let result = call();
+    (result, fault.hits())
+}
+
+fn assert_the_initial_read_refused(refused: Option<UpstrokeError>, log: &Path, case: &str) {
+    match refused {
+        Some(UpstrokeError::Io { path, source }) => {
+            assert_eq!(path, log, "{case}: the refusal names another path");
+            assert_eq!(
+                source.to_string(),
+                crate::engine::topology::entry::initial_log_read_fault::INJECTED,
+                "{case}: the refusal is not the failed read's own"
+            );
+        }
+        other => panic!("{case}: not the failed initial read's own refusal: {other:?}"),
+    }
+}
+
+#[test]
+fn a_schema_4_resume_whose_router_cannot_read_its_log_refuses_before_publishing_anything() {
+    use crate::engine::topology::entry::route_resume;
+
+    let (_tree, repo) = temp_engine_repo("topology-resume-unread-route");
+    let stub = ObservedStub::new(1);
+    let source = BorrowedObserved(&stub);
+    let parked = run_with(&topology_options(&repo), &source).expect("the run parks");
+    assert_eq!(parked.outcome(), RunOutcome::Parked, "{parked:#?}");
+    until_released(&repo, &parked.run_id);
+    let public = rundir::public_dir(&repo, &parked.run_id);
+    let log = public.join(rundir::EVENT_LOG);
+    let committed = fs::read(&log).expect("the parked run's log");
+    let home = private_root_for(&repo);
+    let resume = resume_options(&repo, &parked.run_id);
+    assert_eq!(
+        rundir::classify_run_dir(&public),
+        rundir::RunDirClass::Committed,
+        "the premise: the census classifies the run's committed header"
+    );
+    assert_eq!(
+        rundir::resolve_run_id(&repo, &parked.run_id)
+            .ok()
+            .as_deref(),
+        Some(parked.run_id.as_str()),
+        "the premise: the run's id resolves"
+    );
+    assert!(
+        route_resume(&resume)
+            .expect("a readable schema-4 log routes")
+            .is_some(),
+        "the control: read, its header routes the resume to the topology"
+    );
+
+    for exclusion in [ExclusionState::Absent, ExclusionState::Changed] {
+        for include in [IncludeState::Absent, IncludeState::Changed] {
+            put_exclusion(&repo, exclusion);
+            put_include(&home, include);
+            let lease = WorktreeLock::acquire(&repo).expect("the test's lease");
+            let checkout = public_snapshot(&repo);
+            let private = private_snapshot(&home);
+            let refs = every_ref(&repo);
+            let calls = stub.built().len();
+            let (refused, reads) =
+                with_initial_read_failing(&log, || resume_with(&resume, &source));
+            let checkout_after = public_snapshot(&repo);
+            let private_after = private_snapshot(&home);
+            let refs_after = every_ref(&repo);
+            drop(lease);
+            let case = format!("exclusion {exclusion:?}, include {include:?}");
+            let moved = moved_entries(&private, &private_after);
+            assert!(
+                moved.is_empty(),
+                "{case}: the unread resume wrote under the private root: {moved:?}"
+            );
+            let moved = moved_entries(&checkout, &checkout_after);
+            assert!(
+                moved.is_empty(),
+                "{case}: the unread resume wrote in the checkout: {moved:?}"
+            );
+            assert_eq!(refs_after, refs, "{case}: the refs moved");
+            assert_eq!(
+                stub.built().len(),
+                calls,
+                "{case}: a worker or reviewer was built"
+            );
+            assert_eq!(reads, 1, "{case}: the router's initial read failed once");
+            assert_the_initial_read_refused(refused.err(), &log, &case);
+        }
+    }
+
+    let private_dir = private_dir_of(&repo, &parked.run_id);
+    let owner_path = private_dir.join(rundir::OWNER_RECORD);
+    let commit_path = private_dir.join(rundir::COMMIT_RECORD);
+    let owner = fs::read(&owner_path).expect("owner.json");
+    let commit = fs::read(&commit_path).expect("committed.json");
+    let with_field = |record: &[u8], field: &str, value: &str| {
+        let mut parsed: serde_json::Value = serde_json::from_slice(record).expect("a record");
+        parsed[field] = serde_json::Value::from(value);
+        serde_json::to_vec(&parsed).expect("the damaged record")
+    };
+    for (what, path, original, damaged, says) in [
+        (
+            "another run's owner record",
+            &owner_path,
+            &owner,
+            with_field(&owner, "run_id", "01FOREIGNRUN00000000000000"),
+            "records run id",
+        ),
+        (
+            "a commit record of another first line",
+            &commit_path,
+            &commit,
+            with_field(
+                &commit,
+                "run_started_sha256",
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            ),
+            "says the committed first line digests",
+        ),
+    ] {
+        fs::write(path, &damaged).expect("the record, damaged");
+        put_include(&home, IncludeState::Absent);
+        let private = private_snapshot(&home);
+        let (refused, reads) = with_initial_read_failing(&log, || resume_with(&resume, &source));
+        let moved = moved_entries(&private, &private_snapshot(&home));
+        assert!(
+            moved.is_empty(),
+            "{what}, its log unread: the resume wrote under the private root: {moved:?}"
+        );
+        assert_eq!(reads, 1, "{what}: the router's initial read failed once");
+        assert_the_initial_read_refused(refused.err(), &log, what);
+        let refused = resume_with(&resume, &source)
+            .expect_err("read, a run whose records do not prove it is refused");
+        let moved = moved_entries(&private, &private_snapshot(&home));
+        assert!(
+            moved.is_empty(),
+            "{what}, its log read: the resume wrote under the private root: {moved:?}"
+        );
+        assert!(refused.to_string().contains(says), "{what}: {refused}");
+        fs::write(path, original).expect("the record, restored");
+    }
+
+    put_include(&home, IncludeState::Changed);
+    let lease = WorktreeLock::acquire(&repo).expect("the test's lease");
+    let checkout = public_snapshot(&repo);
+    let private = private_snapshot(&home);
+    let refused = resume_with(&resume, &source).expect_err("read, the resume meets the lease");
+    let checkout_after = public_snapshot(&repo);
+    let private_after = private_snapshot(&home);
+    drop(lease);
+    assert!(
+        refused.to_string().contains("is already driving worktree"),
+        "{refused}"
+    );
+    let moved = moved_entries(&private, &private_after);
+    assert!(
+        moved.is_empty(),
+        "read, the refused resume wrote under the private root: {moved:?}"
+    );
+    let moved = moved_entries(&checkout, &checkout_after);
+    assert!(
+        moved.is_empty(),
+        "read, the refused resume wrote in the checkout: {moved:?}"
+    );
+    assert!(
+        fs::read(&log).expect("the log") == committed,
+        "a refused resume wrote the log"
+    );
+    let resumed = || {
+        event_kinds(&repo, &parked.run_id)
+            .iter()
+            .filter(|kind| *kind == "run_resumed")
+            .count()
+    };
+    let before = resumed();
+    let report = assert_admitted_and_published(&repo, || resume_with(&resume, &source));
+    assert_eq!(report.run_id, parked.run_id);
+    assert_eq!(
+        resumed(),
+        before + 1,
+        "the admitted resume appended `run_resumed`"
+    );
+
+    let (_legacy_tree, legacy_repo, legacy_run) = parked_run("topology-resume-unread-legacy");
+    let legacy_resume = resume_options(&legacy_repo, &legacy_run);
+    let legacy_log = rundir::public_dir(&legacy_repo, &legacy_run).join(rundir::EVENT_LOG);
+    let legacy_home = private_root_for(&legacy_repo);
+    assert!(
+        route_resume(&legacy_resume)
+            .expect("a readable legacy log routes")
+            .is_none(),
+        "the control: read, a legacy header routes the resume to the legacy lines"
+    );
+    put_include(&legacy_home, IncludeState::Absent);
+    let checkout = public_snapshot(&legacy_repo);
+    let private = private_snapshot(&legacy_home);
+    let (refused, reads) = with_initial_read_failing(&legacy_log, || {
+        resume_with(&legacy_resume, &fake(Effect::EditFile))
+    });
+    let moved = moved_entries(&private, &private_snapshot(&legacy_home));
+    assert!(
+        moved.is_empty(),
+        "a legacy run's unread log: the resume wrote under the private root: {moved:?}"
+    );
+    let moved = moved_entries(&checkout, &public_snapshot(&legacy_repo));
+    assert!(
+        moved.is_empty(),
+        "a legacy run's unread log: the resume wrote in the checkout: {moved:?}"
+    );
+    assert_eq!(reads, 1, "the legacy router's initial read failed once");
+    assert_the_initial_read_refused(
+        refused.err(),
+        &legacy_log,
+        "a legacy run whose log the router cannot read",
+    );
+    let report = resume_answering(&legacy_repo, &legacy_run, Effect::EditFile);
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:#?}");
+    assert_eq!(
+        fs::read(include_for(&legacy_repo)).expect("the include"),
+        crate::runner::host::RECORDED_OBJECTS_INCLUDE,
+        "read, the legacy lines published the include as before"
+    );
+}
+
+#[cfg(unix)]
+const DEFAULT_ROOT_UNREAD_REPO: &str = "UPSTROKE_DEFAULT_ROOT_UNREAD_REPO";
+
+#[cfg(unix)]
+const DEFAULT_ROOT_UNREAD_RUN: &str = "UPSTROKE_DEFAULT_ROOT_UNREAD_RUN";
+
+#[cfg(unix)]
+const DEFAULT_ROOT_UNREAD_DONE: &str =
+    "default-root unread resume: refused in both default-root states, then admitted";
+
+#[cfg(unix)]
+#[test]
+fn a_schema_4_resume_over_the_default_root_whose_router_cannot_read_its_log_creates_nothing_under_home()
+ {
+    let (tree, repo) = temp_engine_repo("topology-default-root-unread");
+    let stub = ObservedStub::new(1);
+    let parked =
+        run_with(&topology_options(&repo), &BorrowedObserved(&stub)).expect("the run parks");
+    assert_eq!(parked.outcome(), RunOutcome::Parked, "{parked:#?}");
+    until_released(&repo, &parked.run_id);
+    let home = tree.path().join("child-home");
+    fs::create_dir(&home).expect("the child's home");
+    let ended = crate::agent::proc::test_support::run_test_isolated(
+        "engine::tests::default_root_unread_resume_child",
+        &[
+            ("HOME", home.as_os_str()),
+            ("USERPROFILE", home.as_os_str()),
+            (DEFAULT_ROOT_UNREAD_REPO, repo.as_os_str()),
+            (
+                DEFAULT_ROOT_UNREAD_RUN,
+                std::ffi::OsStr::new(parked.run_id.as_str()),
+            ),
+        ],
+        Duration::from_secs(300),
+    );
+    assert!(
+        ended.status.is_some_and(|status| status.success())
+            && ended.stdout.contains("1 passed")
+            && ended.stderr.contains(DEFAULT_ROOT_UNREAD_DONE),
+        "the default-root resume, refused on its unread log and then admitted: {ended}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "subprocess helper"]
+fn default_root_unread_resume_child() {
+    let (Some(repo), Some(run_id)) = (
+        std::env::var_os(DEFAULT_ROOT_UNREAD_REPO).map(PathBuf::from),
+        std::env::var(DEFAULT_ROOT_UNREAD_RUN).ok(),
+    ) else {
+        return;
+    };
+    let home = PathBuf::from(std::env::var_os("HOME").expect("the parent names the home"));
+    let root = rundir::default_private_root();
+    assert_eq!(
+        root,
+        home.join(".upstroke"),
+        "the premise: the default root hangs from this home"
+    );
+    assert!(
+        fs::symlink_metadata(&root).is_err(),
+        "the premise: no default root exists yet"
+    );
+    let log = rundir::public_dir(&repo, &run_id).join(rundir::EVENT_LOG);
+    let mut resume = resume_options(&repo, &run_id);
+    resume.private_root = None;
+    let stub = ObservedStub::new(0);
+    let source = BorrowedObserved(&stub);
+
+    for state in ["no default root", "a default root holding another include"] {
+        if state != "no default root" {
+            put_include(&root, IncludeState::Changed);
+        }
+        let lease = WorktreeLock::acquire(&repo).expect("the test's lease");
+        let homes = private_snapshot(&home);
+        let checkout = public_snapshot(&repo);
+        let refs = every_ref(&repo);
+        let (refused, reads) = with_initial_read_failing(&log, || resume_with(&resume, &source));
+        let homes_after = private_snapshot(&home);
+        let checkout_after = public_snapshot(&repo);
+        let refs_after = every_ref(&repo);
+        drop(lease);
+        let moved = moved_entries(&homes, &homes_after);
+        assert!(
+            moved.is_empty(),
+            "{state}: the unread resume wrote under the home: {moved:?}"
+        );
+        let moved = moved_entries(&checkout, &checkout_after);
+        assert!(
+            moved.is_empty(),
+            "{state}: the unread resume wrote in the checkout: {moved:?}"
+        );
+        assert_eq!(refs_after, refs, "{state}: the refs moved");
+        assert!(
+            stub.built().is_empty(),
+            "{state}: a worker or reviewer was built"
+        );
+        assert_eq!(reads, 1, "{state}: the router's initial read failed once");
+        assert_the_initial_read_refused(refused.err(), &log, state);
+    }
+
+    let homes = private_snapshot(&home);
+    let report = assert_admitted_and_published(&repo, || resume_with(&resume, &source));
+    assert_eq!(report.run_id, run_id);
+    let moved = moved_entries(&homes, &private_snapshot(&home));
+    assert!(
+        moved.is_empty(),
+        "read, the schema-4 resume wrote under today's default root, which is not its authority: \
+         {moved:?}"
+    );
+    crate::workspace_manager::fixture::say(DEFAULT_ROOT_UNREAD_DONE);
+}
+
 /// P12-W13. A parked schema-4 question has no payload file: `status` names it,
 /// `show` renders it from the fold by an id prefix, `answer` records it once and
 /// refuses a second, the resume ingests it from the file the run polls, and an
@@ -21381,6 +21720,214 @@ fn a_schema_4_run_that_cannot_be_read_keeps_a_lone_legacy_prefix_from_answering(
     let shown = crate::answer::show(&repo, &id[..id.len() - 6])
         .expect("read again, the schema-4 question answers to its prefix");
     assert!(shown.contains("widget formats"), "{shown}");
+}
+
+#[test]
+fn a_run_whose_initial_log_read_fails_after_the_census_keeps_a_shared_prefix_from_answering() {
+    let (_tree, repo) = temp_engine_repo("topology-answer-unread-initial");
+    let mut parked = Vec::new();
+    for _ in 0..2 {
+        let stub = ObservedStub::new(1);
+        let report =
+            run_with(&topology_options(&repo), &BorrowedObserved(&stub)).expect("the run parks");
+        assert_eq!(report.outcome(), RunOutcome::Parked, "{report:#?}");
+        until_released(&repo, &report.run_id);
+        let [asked] = report.questions.as_slice() else {
+            panic!("one question: {report:#?}");
+        };
+        let id = asked.question.id.to_string();
+        parked.push((report.run_id, id));
+    }
+    let [(unread_run, unread_id), (survivor_run, survivor_id)] = parked.as_slice() else {
+        panic!("two parked runs: {parked:?}");
+    };
+    let shared: String = unread_id
+        .chars()
+        .zip(survivor_id.chars())
+        .take_while(|(left, right)| left == right)
+        .map(|(left, _)| left)
+        .collect();
+    assert!(
+        shared.starts_with("q-") && shared.len() < unread_id.len().min(survivor_id.len()),
+        "the fixture's premise: two ids that share a proper prefix ({unread_id}, {survivor_id})"
+    );
+    let unread_own = &unread_id[..=shared.len()];
+    let survivor_own = &survivor_id[..=shared.len()];
+    for run in [unread_run, survivor_run] {
+        assert_eq!(
+            rundir::classify_run_dir(&rundir::public_dir(&repo, run)),
+            rundir::RunDirClass::Committed,
+            "the premise: the census classifies run {run}'s committed header"
+        );
+    }
+    let log = rundir::public_dir(&repo, unread_run).join(rundir::EVENT_LOG);
+    let lone = |only: &str| {
+        format!(
+            "that prefix matches one question ({only}) among the runs that could be read, and a \
+             run that could not may hold another; use the full question id; and the log of run \
+             `{unread_run}` could not be read"
+        )
+    };
+    let question = |id: &str| format!("question {id} ");
+
+    let checkout = public_snapshot(&repo);
+    let (refused, reads) = with_initial_read_failing(&log, || answer_and_show(&repo, &shared));
+    let moved = moved_entries(&checkout, &public_snapshot(&repo));
+    assert!(
+        moved.is_empty(),
+        "a prefix an unread run's question shares wrote in the checkout: {moved:?}"
+    );
+    assert_eq!(
+        reads, 2,
+        "answer and show each failed the unread run's initial read"
+    );
+    for refused in refused {
+        let message = refused
+            .expect_err("a prefix an unread run may share selects nothing")
+            .to_string();
+        assert!(message.contains(&lone(survivor_id)), "{message}");
+    }
+    let (status, reads) = with_initial_read_failing(&log, || {
+        crate::status::load(&repo, Some(unread_run.as_str()))
+    });
+    assert_eq!(reads, 1, "status failed the unread run's initial read");
+    assert_the_initial_read_refused(status.err(), &log, "status of the unread run");
+    let (shown, _) = with_initial_read_failing(&log, || crate::answer::show(&repo, survivor_id));
+    let shown = shown.expect("the survivor's full id answers whatever went unread");
+    assert!(shown.contains(&question(survivor_id)), "{shown}");
+    let (missing, _) = with_initial_read_failing(&log, || crate::answer::show(&repo, unread_id));
+    let message = missing
+        .expect_err("the unread run's question is not found while its log cannot be read")
+        .to_string();
+    assert!(message.contains("no question with that id"), "{message}");
+    assert!(
+        message.contains(&format!("the log of run `{unread_run}` could not be read")),
+        "{message}"
+    );
+
+    for refused in answer_and_show(&repo, &shared) {
+        let message = refused
+            .expect_err("read again, a prefix two questions share selects neither")
+            .to_string();
+        assert!(
+            message.contains("that prefix matches 2 questions"),
+            "{message}"
+        );
+        for id in [unread_id, survivor_id] {
+            assert!(message.contains(id.as_str()), "{id}: {message}");
+        }
+        assert!(!message.contains("could not be read"), "{message}");
+    }
+    for (own, id) in [(unread_own, unread_id), (survivor_own, survivor_id)] {
+        let shown = crate::answer::show(&repo, own)
+            .expect("read again, a prefix one question carries is that question's");
+        assert!(shown.contains(&question(id)), "{own}: {shown}");
+    }
+    let moved = moved_entries(&checkout, &public_snapshot(&repo));
+    assert!(
+        moved.is_empty(),
+        "a lookup wrote in the checkout: {moved:?}"
+    );
+
+    let legacy = format!("{unread_own}LEGACY");
+    legacy_question_run(&repo, "00LEGACY", &legacy);
+    let checkout = public_snapshot(&repo);
+    let (refused, reads) = with_initial_read_failing(&log, || answer_and_show(&repo, unread_own));
+    let moved = moved_entries(&checkout, &public_snapshot(&repo));
+    assert!(
+        moved.is_empty(),
+        "a prefix a legacy question shares with an unread run's question wrote in the \
+         checkout: {moved:?}"
+    );
+    assert_eq!(
+        reads, 2,
+        "answer and show each failed the unread run's initial read"
+    );
+    for refused in refused {
+        let message = refused
+            .expect_err("a lone legacy match beside an unread run selects nothing")
+            .to_string();
+        assert!(message.contains(&lone(&legacy)), "{message}");
+    }
+    let (shown, _) = with_initial_read_failing(&log, || crate::answer::show(&repo, &legacy));
+    let shown = shown.expect("the legacy question's full id answers whatever went unread");
+    assert!(
+        shown.contains(&format!("the legacy question {legacy}")),
+        "{shown}"
+    );
+    for refused in answer_and_show(&repo, unread_own) {
+        let message = refused
+            .expect_err(
+                "read again, a prefix a legacy and a schema-4 question share selects neither",
+            )
+            .to_string();
+        assert!(
+            message.contains("that prefix matches 2 questions"),
+            "{message}"
+        );
+        for id in [legacy.as_str(), unread_id.as_str()] {
+            assert!(message.contains(id), "{id}: {message}");
+        }
+    }
+    let moved = moved_entries(&checkout, &public_snapshot(&repo));
+    assert!(
+        moved.is_empty(),
+        "a lookup wrote in the checkout: {moved:?}"
+    );
+
+    let (recorded, _) = with_initial_read_failing(&log, || {
+        crate::answer::answer(
+            &repo,
+            survivor_id,
+            crate::answer::Reply::Text("the first".to_owned()),
+        )
+    });
+    let recorded = recorded.expect("the survivor's full id is answered whatever went unread");
+    assert_eq!(
+        (recorded.run_id.as_str(), recorded.question_id.as_str()),
+        (survivor_run.as_str(), survivor_id.as_str())
+    );
+    let (recorded, _) = with_initial_read_failing(&log, || {
+        crate::answer::answer(
+            &repo,
+            &legacy,
+            crate::answer::Reply::Text("the first".to_owned()),
+        )
+    });
+    let recorded =
+        recorded.expect("the legacy question's full id is answered whatever went unread");
+    assert_eq!(
+        (recorded.run_id.as_str(), recorded.question_id.as_str()),
+        ("00LEGACY", legacy.as_str())
+    );
+    let recorded = crate::answer::answer(
+        &repo,
+        unread_id,
+        crate::answer::Reply::Text("the first".to_owned()),
+    )
+    .expect("read again, the once-unread run's question is answered by its full id");
+    assert_eq!(
+        (recorded.run_id.as_str(), recorded.question_id.as_str()),
+        (unread_run.as_str(), unread_id.as_str())
+    );
+    let mut written = answer_files(&repo);
+    written.sort();
+    let mut expected = vec![
+        rundir::public_dir(&repo, "00LEGACY")
+            .join("answers")
+            .join(format!("{legacy}.json")),
+        rundir::public_dir(&repo, survivor_run)
+            .join("answers")
+            .join(format!("{survivor_id}.json")),
+        rundir::public_dir(&repo, unread_run)
+            .join("answers")
+            .join(format!("{unread_id}.json")),
+    ];
+    expected.sort();
+    assert_eq!(
+        written, expected,
+        "each full id wrote its own question's answer, and nothing else was written"
+    );
 }
 
 /// PR12-ANSWER-CROSS-SCHEMA-PREFIX, settled questions: a schema-4 question its

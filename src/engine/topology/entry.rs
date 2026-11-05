@@ -483,9 +483,7 @@ pub fn route_resume(opts: &ResumeOptions) -> Result<Option<RootDerived>, Upstrok
         return Ok(None);
     };
     let log = rundir::public_dir(&opts.repo_root, &run_id).join(rundir::EVENT_LOG);
-    let Ok(bytes) = crate::util::read_file_bounded(&log) else {
-        return Ok(None);
-    };
+    let bytes = read_initial_log(&log)?;
     let Ok(header) = probe_header(&bytes) else {
         return Ok(None);
     };
@@ -500,6 +498,62 @@ pub fn route_resume(opts: &ResumeOptions) -> Result<Option<RootDerived>, Upstrok
     }
 
     RootDerived::derive(&opts.repo_root, &run_id, opts.private_root.as_deref()).map(Some)
+}
+
+pub(super) fn read_initial_log(log: &Path) -> Result<Vec<u8>, UpstrokeError> {
+    #[cfg(test)]
+    initial_log_read_fault::refuse(log)?;
+    crate::util::read_file_bounded(log).map_err(|source| UpstrokeError::Io {
+        path: log.to_path_buf(),
+        source,
+    })
+}
+
+#[cfg(test)]
+pub(crate) mod initial_log_read_fault {
+    use std::cell::RefCell;
+    use std::path::{Path, PathBuf};
+
+    use crate::error::UpstrokeError;
+
+    pub(crate) const INJECTED: &str = "injected failure of the initial complete log read";
+
+    thread_local! {
+        static ARMED: RefCell<Option<(PathBuf, usize)>> = const { RefCell::new(None) };
+    }
+
+    #[must_use]
+    pub(crate) struct Armed(());
+
+    pub(crate) fn arm(log: &Path) -> Armed {
+        ARMED.with(|armed| *armed.borrow_mut() = Some((log.to_path_buf(), 0)));
+        Armed(())
+    }
+
+    impl Armed {
+        pub(crate) fn hits(&self) -> usize {
+            ARMED.with(|armed| armed.borrow().as_ref().map_or(0, |(_, hits)| *hits))
+        }
+    }
+
+    impl Drop for Armed {
+        fn drop(&mut self) {
+            ARMED.with(|armed| *armed.borrow_mut() = None);
+        }
+    }
+
+    pub(super) fn refuse(log: &Path) -> Result<(), UpstrokeError> {
+        ARMED.with(|armed| match armed.borrow_mut().as_mut() {
+            Some((armed_log, hits)) if armed_log.as_path() == log => {
+                *hits += 1;
+                Err(UpstrokeError::Io {
+                    path: log.to_path_buf(),
+                    source: std::io::Error::other(INJECTED),
+                })
+            }
+            _ => Ok(()),
+        })
+    }
 }
 
 pub fn prepare_resume(

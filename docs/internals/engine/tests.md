@@ -4115,6 +4115,89 @@ the refused run created the default root itself, its `git` directory and the inc
 home ("created .upstroke", "created .upstroke/git", "created
 .upstroke/git/recorded-objects.gitconfig"), and the child and this test fail.
 
+## `fn with_initial_read_failing<T>(log: &Path, call: impl FnOnce() -> T) -> (T, usize) {`
+
+`call`'s result with every initial complete read of `log` failing on this thread
+(`entry::initial_log_read_fault`), and how many such reads it attempted. The fault is disarmed
+when this returns, and on unwinding.
+
+## `fn assert_the_initial_read_refused(refused: Option<UpstrokeError>, log: &Path, case: &str) {`
+
+The refusal the guards below require: `UpstrokeError::Io` naming `log`, whose source is the
+injected failure's own message, so neither another read's error nor another refusal stands in
+for it.
+
+## `fn a_schema_4_resume_whose_router_cannot_read_its_log_refuses_before_publishing_anything() {`
+
+PR12-INV5-RESUME-READ-ERROR-LEGACY-PUBLICATION and PR12-REG8-RESUME-READ-ERROR-LEGACY-PUBLICATION
+(one defect), through `resume_with` with the explicit private root the run recorded. A run parks
+on its one question, and the premises are read first: the census classifies its committed header,
+its id resolves, and read normally its header routes the resume to the topology. Then, for each
+of the four exclusion and include states (absent or changed, each), under the worktree lease this
+test holds and with the router's initial read of the run's log failing, the resume is refused with
+that read's own error after exactly one attempt at the read, and nothing was published: every
+path, kind, mode and byte of the checkout outside `.git` and of the private root, and every ref,
+as they were, and no worker or reviewer built. The no-publication comparison is asserted before
+the refusal's identity, so it is the assertion the old fold fails.
+
+The controls follow. With the run's owner record naming another run, and then with its commit
+record digesting another first line, the unread resume is refused with the read's error and writes
+nothing, and the same resume read normally is refused by the record (`records run id`, `says the
+committed first line digests`) and writes nothing either: the read's refusal comes first, and the
+proof still stands behind it. Read normally under the held lease, the resume is refused as already
+driven and publishes nothing, and the log is the parked run's, byte for byte. Released, the resume
+is admitted, appends `run_resumed`, and makes the exclusion and the include from absent
+(`assert_admitted_and_published`). A genuine legacy run (`parked_run`) routes to the legacy lines
+when read; with its log unreadable to the router it is refused with the read's error and nothing is
+published under its root either; read again, `resume_answering` takes it to completion and the
+legacy lines publish its include as before.
+
+Measured before commit as negative control B1 (`route_resume` folding the failed read into
+`Ok(None)` again, as at `8b7b22d4`, over the same read): it fails at the first case, exclusion and
+include absent, on "created git", "created git/recorded-objects.gitconfig" under the private root.
+
+## `const DEFAULT_ROOT_UNREAD_REPO: &str = "UPSTROKE_DEFAULT_ROOT_UNREAD_REPO";`
+
+The repository the default-root unread child resumes in, named by its parent.
+
+## `const DEFAULT_ROOT_UNREAD_RUN: &str = "UPSTROKE_DEFAULT_ROOT_UNREAD_RUN";`
+
+The parked run that child resumes.
+
+## `const DEFAULT_ROOT_UNREAD_DONE: &str =`
+
+The line the child says on stderr once its last assertion has passed. The child returns early,
+and still reports `1 passed`, when its parent's variables are absent (an `--ignored` run of the
+whole suite), so its parent requires this line as well: a child that skipped cannot produce it.
+
+## `fn a_schema_4_resume_over_the_default_root_whose_router_cannot_read_its_log_creates_nothing_under_home()`
+
+The same defect with no `--private-root` (Unix, as `run_test_isolated` is). The legacy lines'
+include goes under today's default root, `$HOME/.upstroke`, which no test may touch in the
+operator's home; so, as
+`a_fresh_schema_4_run_over_the_default_root_that_loses_the_worktree_lease_creates_nothing_under_home`
+does, the parent parks a run under its explicit fixture root, makes a directory of its own fixture
+tree the child's `HOME` and `USERPROFILE`, runs `default_root_unread_resume_child` under
+`run_test_isolated` with a 300-second bound, and requires its success, `1 passed` and
+`DEFAULT_ROOT_UNREAD_DONE`.
+
+## `fn default_root_unread_resume_child() {`
+
+The child of the test above, resuming with no `--private-root`. Its premises: the default root
+resolves under the child's home and does not exist yet. With no default root, and then with one
+holding an include of other bytes in a directory the writer would tighten, under the lease it holds
+in-process and with the router's initial read failing, the resume is refused with the read's own
+error after one attempt, builds nothing, and leaves the home (walked by [`private_snapshot`]), the
+checkout outside `.git` and every ref exactly as they were. Read again and released, the resume is
+the topology's: it is admitted and publishes under the root the run recorded
+(`assert_admitted_and_published`), and it leaves the home, today's default root included, exactly
+as it was, since today's default is not a resume's authority.
+
+Measured before commit under the same negative control B1: with no default root, the refused
+resume created the default root, its `git` directory and the include under the home ("created
+.upstroke", "created .upstroke/git", "created .upstroke/git/recorded-objects.gitconfig"), and the
+child and its parent fail.
+
 ## `fn a_schema_4_run_and_its_resume_leave_the_checkout_and_print_no_way_back_from_it() {`
 
 PR12-REG6-TOPOLOGY-RETURN-HINT, through the public entry points. A schema-4 run, through
@@ -4128,4 +4211,37 @@ out, prints `branch: <run branch> (return with: git switch -)`, and running that
 takes the repository back to `main`: the instruction is true where it is printed. With the render
 printing the instruction unconditionally, as before repair9, the test fails at the fresh summary's
 assertion, the first it reaches; the resumed summary's identical assertion is not reached then.
+
+## `fn a_run_whose_initial_log_read_fails_after_the_census_keeps_a_shared_prefix_from_answering() {`
+
+PR12-REG10-INITIAL-LOG-READ-IS-ABSENCE and PR12-REG8-INITIAL-LOG-READ-IS-ABSENCE (one defect),
+through `answer::answer`, `answer::show` and `status::load`. Two schema-4 runs park, each on one
+question; the two ids share a proper prefix (ULIDs drawn moments apart share their time digits),
+and each id's prefix one character longer is its own. Both runs classify `Committed` in the census.
+The first run's initial complete read then fails (`entry::initial_log_read_fault`), while the
+census, which reads only the first line, still classifies it.
+
+With that read failing, `answer` and `show` of the shared prefix are refused, each naming the
+survivor's question as the one match among the runs that could be read and the first run as the
+one whose log could not be read; each made exactly one attempt at the read, and the checkout
+outside `.git` is unchanged: no answer file, nothing else. That comparison is asserted before the
+refusals' sentences, so it is the assertion the old fold fails. `status` of the first run is
+refused with the read's own error. The survivor's full id still shows its question; the first
+run's full id is not found, and the refusal names the run that could not be read.
+
+Read again, the shared prefix is ambiguous ("matches 2 questions", naming both), and each run's
+own prefix shows its own question. Then a legacy run (`00LEGACY`) holds a question whose id is the
+first run's own prefix followed by `LEGACY` (`L` is not a Crockford digit, so no minted id
+continues it). With the first run's read failing, `answer` and `show` of that prefix are refused,
+naming the legacy question as the one match among the runs that could be read and the first run as
+unread, and nothing is written: the old fold dropped the run, found the topology silent and handed
+the prefix to the legacy finder, which answered it. The legacy question's full id still shows it;
+read again, the prefix is ambiguous between the legacy question and the first run's. Last, each
+full id is answered, the survivor's and the legacy question's with the first run still unreadable
+and the first run's once it reads, and the answer files are exactly those three.
+
+Measured before commit as negative control A1 (`observe` folding the failed read into `Ok(None)`
+again, as at `8b7b22d4`, over the same read): it fails at the first comparison, on "created
+.upstroke/runs/<survivor>/answers" and "created .upstroke/runs/<survivor>/answers/<its
+question>.json": `answer` wrote the survivor's answer to the shared prefix.
 

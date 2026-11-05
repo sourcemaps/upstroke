@@ -50,9 +50,7 @@ pub fn is_topology_log(bytes: &[u8], log: &Path) -> Result<bool, UpstrokeError> 
 pub fn observe(repo_root: &Path, run_id: &str) -> Result<Option<Observed>, UpstrokeError> {
     let public = rundir::public_dir(repo_root, run_id);
     let log = public.join(rundir::EVENT_LOG);
-    let Ok(probe) = crate::util::read_file_bounded(&log) else {
-        return Ok(None);
-    };
+    let probe = super::entry::read_initial_log(&log)?;
     if !is_topology_log(&probe, &log)? {
         return Ok(None);
     }

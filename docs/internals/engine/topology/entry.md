@@ -115,10 +115,11 @@ real-directory check by `RunnerResolved::authorize`.
 
 1. [`route_resume`], read-only and starting no process: the header of the
    committed first line selects the reader. A legacy log, or one whose
-   header cannot be read, returns `None` and `resume_harness` runs today's
-   sequential lines unchanged; a schema above the ceiling refuses with the
-   probe's own refusal. For a topology log it returns `RootDerived::derive`
-   (a0).
+   header does not parse, returns `None` and `resume_harness` runs today's
+   sequential lines unchanged; a log the router cannot read refuses with
+   that read's own error, before anything else; a schema above the ceiling
+   refuses with the probe's own refusal. For a topology log it returns
+   `RootDerived::derive` (a0).
 2. `resume_harness` establishes containment.
 3. [`prepare_resume`], read-only: the recorded private half must already be
    a directory (a resume never creates it); the frozen plan is read from
@@ -310,6 +311,49 @@ Which engine resumes this run: `None` for a legacy log (or one whose header
 the legacy path should diagnose), `RootDerived` for a topology log. It reads
 files and starts no process, so the legacy path keeps its single
 containment establishment.
+
+**A log it cannot read is a refusal, never `None`.** `None` sends
+`resume_harness` down the legacy lines, whose prelude publishes the
+recorded-objects include under the command's selected or default root
+(`Workspace::recorded_objects_scope`) before the legacy path reads the log,
+takes a lease or proves anything. For a schema-4 run that is a private write
+before the physical worktree lease and before INV-15's owner and commit proof,
+under a root that need not be the one the run recorded, and it survives the
+legacy path's later refusal. So the router's first read ([`read_initial_log`])
+returns its failure as that read's own error, and the resume stops there with
+nothing published, locked or written. Until
+PR12-INV5-RESUME-READ-ERROR-LEGACY-PUBLICATION and
+PR12-REG8-RESUME-READ-ERROR-LEGACY-PUBLICATION (one defect, first in
+`fffa73fa`) the failure was `Ok(None)`.
+
+The other two `None`s are not that repair's and are unchanged: an id
+`resolve_run_id` does not resolve, and a header that does not parse, still go
+to the legacy lines, which diagnose them after their prelude has published the
+include, as base's resume published it before resolving any id.
+
+## `pub(super) fn read_initial_log(log: &Path) -> Result<Vec<u8>, UpstrokeError> {`
+
+The first complete read of a run's event log: the bytes [`route_resume`] and
+`observe::observe` select a reader from. It is `util::read_file_bounded` with
+its failure mapped to `UpstrokeError::Io` carrying the log's path, as
+`RootDerived::derive` maps its own read of the same file. Both callers reach
+it after the census classified the run's committed header from its first
+line, so its failure is neither "legacy" nor "absent" to either of them
+([`route_resume`] above, and `observe`'s notes).
+
+## `pub(crate) mod initial_log_read_fault {`
+
+Test-only: it fails [`read_initial_log`] for one log. The failure the guards
+of the read above need cannot be made through the filesystem: the census has
+just read the same regular file's first line, and an ordinary file that read
+once reads again, short of a race, a permission (the build box's user may be
+privileged) or a process-wide exhaustion, none of them deterministic or
+confined to one test. `arm(log)` makes every [`read_initial_log`] of that one
+path on the arming thread fail with `INJECTED` until the returned `Armed`
+drops, and `Armed::hits` counts the attempts, so a guard shows that the
+failure struck the initial read and no other read. Thread-local, so tests
+running in parallel never meet each other's fault; one log at a time per
+thread. Nothing of it is compiled into a production build.
 
 ## `pub fn prepare_resume(`
 
