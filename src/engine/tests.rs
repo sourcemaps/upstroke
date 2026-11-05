@@ -18583,9 +18583,10 @@ fn a_schema_4_resume_proves_its_owner_and_commit_records_before_it_writes_its_in
 
     let home = private_root_for(&repo);
     let private = private_dir_of(&repo, &parked.run_id);
+    let root = fs::canonicalize(&home).expect("the private root resolves");
     assert_eq!(
         private,
-        home.join("runs").join(&parked.run_id),
+        root.join("runs").join(&parked.run_id),
         "the premise: the run's private half is present under the root its locator names"
     );
     let log = rundir::public_dir(&repo, &parked.run_id).join(rundir::EVENT_LOG);

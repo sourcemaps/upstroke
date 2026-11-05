@@ -3457,6 +3457,18 @@ composition, which the recovery-order tests never reach — with no `--private-r
 the run's committed locator is the only root authority, and with the private half
 present.
 
+The premise holds that locator to the root the run was given, spelled as the code that
+records it spells it: `run_started(4).private_dir` is the configured root through
+`fs::canonicalize` (`prelock::authorized_private_root`) joined with `runs/<run-id>`
+(`PreLockChecked::private_dir`), so the expected path is `fs::canonicalize` of the same
+`private_root_for` joined with the same two components, compared by exact `PathBuf`
+equality. The configured spelling is another spelling of that directory wherever the
+temporary directory is not canonical — Windows' verbatim `\\?\` prefix, macOS's `/var`
+for `/private/var` — and native CI run 41936043911 failed this premise on both before
+any refusal ran, when it compared the locator with that spelling
+(PR12-NATIVE11-WINDOWS-PRIVATE-PATH-ORACLE). On a canonical temporary directory, as on
+the Linux runners, the two spellings are the same path.
+
 Ten damages to the run's own records — owner record missing, not JSON, or naming
 another run, repository, run directory, incarnation or runner (each owner field
 `RecordsVerified::verify` compares); commit record missing, not JSON, or naming
