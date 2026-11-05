@@ -479,9 +479,7 @@ struct ResumeSettled {
 }
 
 pub fn route_resume(opts: &ResumeOptions) -> Result<Option<RootDerived>, UpstrokeError> {
-    let Ok(run_id) = rundir::resolve_run_id(&opts.repo_root, &opts.run_id) else {
-        return Ok(None);
-    };
+    let run_id = rundir::resolve_run_id(&opts.repo_root, &opts.run_id)?;
     let log = rundir::public_dir(&opts.repo_root, &run_id).join(rundir::EVENT_LOG);
     let bytes = read_initial_log(&log)?;
     let Ok(header) = probe_header(&bytes) else {
@@ -621,6 +619,7 @@ impl ResumePrepared {
             &repo_key,
             &mut hooks,
         )?;
+        hold_recorded_execution_root(records.locks().root(), &manager)?;
         Ok(ResumeVerified {
             records,
             settled,
@@ -1026,6 +1025,31 @@ fn one_spelling(include: &Path, manager: &WorkspaceManager) -> Result<(), Upstro
              first, so the two must be one spelling; that they differ is a defect, not a refusal \
              of this layout. No role was started",
             include.display(),
+            manager.common_git_dir().display()
+        ),
+    })
+}
+
+fn hold_recorded_execution_root(
+    root: &RootDerived,
+    manager: &WorkspaceManager,
+) -> Result<(), UpstrokeError> {
+    let recorded = &root.started().execution_root;
+    if Path::new(recorded) == manager.execution_root() {
+        return Ok(());
+    }
+    Err(UpstrokeError::Refused {
+        message: format!(
+            "run `{}` records its execution root as {recorded}, and the workspace manager derives \
+             {} for it today, from the canonical private root {} and the repository's effective \
+             common directory {}. Every slot, intent, snapshot and staging directory the run owns \
+             is under the root it recorded, and recovery and finalization act only on what their \
+             manager's root holds, so a resume never adopts another root: nothing was published, \
+             recovered, reclaimed or created. Resume it under the Git environment it started \
+             under, whose common directory derives the root it recorded",
+            root.run_id(),
+            manager.execution_root().display(),
+            manager.private_root().display(),
             manager.common_git_dir().display()
         ),
     })

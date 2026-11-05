@@ -9112,9 +9112,9 @@ fn every_public_write_coordinator_entry_point_establishes_containment() {
     let (_tree, repo) = temp_engine_repo("containment-facade");
     let mut run_opts = options(&repo);
     run_opts.plan_path = repo.join("absent-plan.md");
-    let mut resume_opts = ResumeOptions::new("01ABSENTRUN".to_owned(), repo.clone());
-    resume_opts.pools_path = Some(no_pools());
-    resume_opts.private_root = Some(private_root_for(&repo));
+    let (_legacy_tree, legacy_repo, legacy_run) = parked_run("containment-facade-resume");
+    fs::remove_file(legacy_repo.join("plan.md")).expect("the recorded run's plan, removed");
+    let resume_opts = resume_options(&legacy_repo, &legacy_run);
     let adapters = BuiltinAdapters;
 
     type Call<'a> = Box<dyn Fn() -> Result<RunReport, UpstrokeError> + 'a>;
@@ -9165,6 +9165,36 @@ fn every_public_write_coordinator_entry_point_establishes_containment() {
         assert!(
             crate::agent::proc::ambient_job_established(),
             "`engine::{name}` returned without this process joining its ambient Job Object"
+        );
+    }
+
+    let mut unknown = ResumeOptions::new("01ABSENTRUN".to_owned(), repo.clone());
+    unknown.pools_path = Some(no_pools());
+    unknown.private_root = Some(private_root_for(&repo));
+    let says = rundir::resolve_run_id(&repo, "01ABSENTRUN")
+        .expect_err("no run has that id")
+        .to_string();
+    let refused_by_the_router: Vec<(&str, Call<'_>)> = vec![
+        ("resume", Box::new(|| resume(&unknown))),
+        ("resume_with", Box::new(|| resume_with(&unknown, &adapters))),
+        (
+            "resume_harness",
+            Box::new(|| resume_harness(&unknown, &Harness::new(&adapters))),
+        ),
+    ];
+    for (name, call) in &refused_by_the_router {
+        let before = crate::runner::host::containment_establishments();
+        let refused = call().expect_err("an id the router refuses");
+        assert_eq!(
+            crate::runner::host::containment_establishments(),
+            before,
+            "`engine::{name}`: an id the router refuses is refused read-only, before any \
+             containment, so the caller never becomes a write coordinator"
+        );
+        assert_eq!(
+            refused.to_string(),
+            says,
+            "`engine::{name}`: the resolver's own refusal"
         );
     }
 }
@@ -21261,6 +21291,723 @@ fn default_root_unread_resume_child() {
          {moved:?}"
     );
     crate::workspace_manager::fixture::say(DEFAULT_ROOT_UNREAD_DONE);
+}
+
+const RETAINED_HUSK_PRODUCER: &str = "engine::topology::create::tests::create_kill_child";
+
+fn retained_p5b_husk(root: &Path) -> String {
+    let exe = std::env::current_exe().expect("the test binary");
+    let mut command = CommandSpec::new(exe.to_string_lossy().into_owned());
+    command.args = [
+        "--exact",
+        RETAINED_HUSK_PRODUCER,
+        "--ignored",
+        "--nocapture",
+        "--test-threads",
+        "1",
+    ]
+    .map(str::to_owned)
+    .to_vec();
+    command.env = vec![
+        (
+            "UPSTROKE_TEST_KILL_DIR".to_owned(),
+            root.to_string_lossy().into_owned(),
+        ),
+        ("UPSTROKE_TEST_KILL_SITE".to_owned(), "p5b".to_owned()),
+    ];
+    let request = crate::runner::gate_request(
+        command,
+        root.to_path_buf(),
+        Duration::from_secs(120),
+        crate::runner::InvocationId::attempt(
+            crate::topology::registry::TaskKey(0),
+            crate::topology::events::GenerationId(0),
+            crate::topology::events::AttemptNumber(1),
+            crate::runner::invocation::AttemptRole::Gate(0),
+            0,
+        ),
+    );
+    let output =
+        crate::runner::Runner::run_blocking(&crate::runner::host::HostRunner::new(), &request)
+            .expect("the producer starts");
+    assert!(
+        !output.timed_out,
+        "the producer outlived its bound: {output:?}"
+    );
+    assert_ne!(
+        output.code,
+        Some(0),
+        "the producer must have died at P5b: {output:?}"
+    );
+
+    let repo = root.join("repo");
+    let [husk]: [String; 1] =
+        rundir::run_dir_names(&repo)
+            .try_into()
+            .unwrap_or_else(|names: Vec<String>| {
+                panic!("the producer made one run directory: {names:?}")
+            });
+    let public = rundir::public_dir(&repo, &husk);
+    let private = fs::canonicalize(root.join("private"))
+        .expect("the creation private root")
+        .join("runs")
+        .join(&husk);
+    assert!(
+        private.join(rundir::COMMIT_RECORD).is_file(),
+        "the commit record is what makes this the P5b prefix"
+    );
+    assert!(
+        fs::read(public.join(rundir::EVENT_LOG))
+            .expect("the log exists")
+            .is_empty(),
+        "nothing was appended"
+    );
+    assert_eq!(rundir::classify_run_dir(&public), rundir::RunDirClass::Husk);
+    let report = rundir::husk_report(
+        &repo,
+        &husk,
+        &rundir::RepoKey::v1(&root.join("git-dir")),
+        &root.join("private"),
+    );
+    assert!(
+        matches!(
+            report.disposition,
+            rundir::HuskDisposition::Retained(rundir::RetainReason::PossiblyCommitted)
+        ),
+        "{:?}",
+        report.disposition
+    );
+    husk
+}
+
+#[test]
+fn a_retained_schema_4_husk_is_refused_before_any_root_is_published() {
+    use crate::engine::topology::entry::route_resume;
+
+    let (_legacy_tree, legacy_repo, legacy_run) = parked_run("topology-husk-legacy");
+    assert!(
+        route_resume(&resume_options(&legacy_repo, &legacy_run))
+            .expect("a resolved legacy run routes")
+            .is_none(),
+        "the control: a resolved legacy run routes to the legacy lines"
+    );
+    put_include(&private_root_for(&legacy_repo), IncludeState::Absent);
+    let report = resume_answering(&legacy_repo, &legacy_run, Effect::EditFile);
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:#?}");
+    assert_eq!(
+        fs::read(include_for(&legacy_repo)).expect("the include"),
+        crate::runner::host::RECORDED_OBJECTS_INCLUDE,
+        "the control: the legacy lines published the include as before"
+    );
+
+    let (tree, repo) = temp_engine_repo("topology-husk-refusal");
+    let husk = retained_p5b_husk(tree.path());
+    let creation_root = tree.path().join("private");
+    let named = private_root_for(&repo);
+    fs::create_dir_all(&named).expect("the root the resume names");
+    assert_ne!(
+        fs::canonicalize(&creation_root).expect("the creation root"),
+        fs::canonicalize(&named).expect("the named root"),
+        "the premise: the resume names a root the husk was not created under"
+    );
+    let says = rundir::resolve_run_id(&repo, &husk)
+        .expect_err("the premise: the resolver refuses the husk's exact id")
+        .to_string();
+    assert!(
+        says.contains(&format!("`{husk}` never recorded a committed run_started")),
+        "the premise: the resolver's husk sentence names this run: {says}"
+    );
+    let resume = resume_options(&repo, &husk);
+    let stub = ObservedStub::new(0);
+    let source = BorrowedObserved(&stub);
+
+    for held in [false, true] {
+        for exclusion in [ExclusionState::Absent, ExclusionState::Changed] {
+            for include in [IncludeState::Absent, IncludeState::Changed] {
+                put_exclusion(&repo, exclusion);
+                put_include(&named, include);
+                let lease = held.then(|| WorktreeLock::acquire(&repo).expect("the test's lease"));
+                let selected = private_snapshot(&named);
+                let created = private_snapshot(&creation_root);
+                let checkout = public_snapshot(&repo);
+                let git = private_snapshot(&repo.join(".git"));
+                let refused = resume_with(&resume, &source);
+                let selected_after = private_snapshot(&named);
+                let created_after = private_snapshot(&creation_root);
+                let checkout_after = public_snapshot(&repo);
+                let git_after = private_snapshot(&repo.join(".git"));
+                drop(lease);
+                let case =
+                    format!("lease held {held}, exclusion {exclusion:?}, include {include:?}");
+                for (place, before, after) in [
+                    ("under the root it names", &selected, &selected_after),
+                    ("under the husk's creation root", &created, &created_after),
+                    ("in the checkout", &checkout, &checkout_after),
+                    ("in the checkout's Git directory", &git, &git_after),
+                ] {
+                    let moved = moved_entries(before, after);
+                    assert!(
+                        moved.is_empty(),
+                        "{case}: the husk's resume wrote {place}: {moved:?}"
+                    );
+                }
+                assert!(
+                    stub.built().is_empty(),
+                    "{case}: a worker or reviewer was built"
+                );
+                let refused = refused.expect_err("a husk has no run to open");
+                assert_eq!(
+                    refused.to_string(),
+                    says,
+                    "{case}: not the resolver's own refusal"
+                );
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+const DEFAULT_ROOT_HUSK_REPO: &str = "UPSTROKE_DEFAULT_ROOT_HUSK_REPO";
+
+#[cfg(unix)]
+const DEFAULT_ROOT_HUSK_RUN: &str = "UPSTROKE_DEFAULT_ROOT_HUSK_RUN";
+
+#[cfg(unix)]
+const DEFAULT_ROOT_HUSK_CREATION_ROOT: &str = "UPSTROKE_DEFAULT_ROOT_HUSK_CREATION_ROOT";
+
+#[cfg(unix)]
+const DEFAULT_ROOT_HUSK_DONE: &str =
+    "default-root husk resume: refused in both default-root states, the lease free and held";
+
+#[cfg(unix)]
+#[test]
+fn a_retained_schema_4_husk_resumed_over_the_default_root_creates_nothing_under_home() {
+    let (tree, repo) = temp_engine_repo("topology-husk-default-root");
+    let husk = retained_p5b_husk(tree.path());
+    let creation_root = tree.path().join("private");
+    let home = tree.path().join("child-home");
+    fs::create_dir(&home).expect("the child's home");
+    let ended = crate::agent::proc::test_support::run_test_isolated(
+        "engine::tests::default_root_husk_resume_child",
+        &[
+            ("HOME", home.as_os_str()),
+            ("USERPROFILE", home.as_os_str()),
+            (DEFAULT_ROOT_HUSK_REPO, repo.as_os_str()),
+            (DEFAULT_ROOT_HUSK_RUN, std::ffi::OsStr::new(husk.as_str())),
+            (DEFAULT_ROOT_HUSK_CREATION_ROOT, creation_root.as_os_str()),
+        ],
+        Duration::from_secs(300),
+    );
+    assert!(
+        ended.status.is_some_and(|status| status.success())
+            && ended.stdout.contains("1 passed")
+            && ended.stderr.contains(DEFAULT_ROOT_HUSK_DONE),
+        "the default-root husk resume, refused before anything was published: {ended}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "subprocess helper"]
+fn default_root_husk_resume_child() {
+    let (Some(repo), Some(run_id), Some(creation_root)) = (
+        std::env::var_os(DEFAULT_ROOT_HUSK_REPO).map(PathBuf::from),
+        std::env::var(DEFAULT_ROOT_HUSK_RUN).ok(),
+        std::env::var_os(DEFAULT_ROOT_HUSK_CREATION_ROOT).map(PathBuf::from),
+    ) else {
+        return;
+    };
+    let home = PathBuf::from(std::env::var_os("HOME").expect("the parent names the home"));
+    let root = rundir::default_private_root();
+    assert_eq!(
+        root,
+        home.join(".upstroke"),
+        "the premise: the default root hangs from this home"
+    );
+    assert!(
+        fs::symlink_metadata(&root).is_err(),
+        "the premise: no default root exists yet"
+    );
+    assert!(
+        !creation_root.starts_with(&home),
+        "the premise: the husk was created under a root outside this home"
+    );
+    let says = rundir::resolve_run_id(&repo, &run_id)
+        .expect_err("the premise: the resolver refuses the husk's exact id")
+        .to_string();
+    let mut resume = resume_options(&repo, &run_id);
+    resume.private_root = None;
+    let stub = ObservedStub::new(0);
+    let source = BorrowedObserved(&stub);
+
+    for state in ["no default root", "a default root holding another include"] {
+        if state != "no default root" {
+            put_include(&root, IncludeState::Changed);
+        }
+        for held in [false, true] {
+            let lease = held.then(|| WorktreeLock::acquire(&repo).expect("the test's lease"));
+            let homes = private_snapshot(&home);
+            let created = private_snapshot(&creation_root);
+            let checkout = public_snapshot(&repo);
+            let git = private_snapshot(&repo.join(".git"));
+            let refused = resume_with(&resume, &source);
+            let homes_after = private_snapshot(&home);
+            let created_after = private_snapshot(&creation_root);
+            let checkout_after = public_snapshot(&repo);
+            let git_after = private_snapshot(&repo.join(".git"));
+            drop(lease);
+            let case = format!("{state}, lease held {held}");
+            for (place, before, after) in [
+                ("under the home", &homes, &homes_after),
+                ("under the husk's creation root", &created, &created_after),
+                ("in the checkout", &checkout, &checkout_after),
+                ("in the checkout's Git directory", &git, &git_after),
+            ] {
+                let moved = moved_entries(before, after);
+                assert!(
+                    moved.is_empty(),
+                    "{case}: the husk's resume wrote {place}: {moved:?}"
+                );
+            }
+            assert!(
+                stub.built().is_empty(),
+                "{case}: a worker or reviewer was built"
+            );
+            let refused = refused.expect_err("a husk has no run to open");
+            assert_eq!(
+                refused.to_string(),
+                says,
+                "{case}: not the resolver's own refusal"
+            );
+        }
+    }
+    crate::workspace_manager::fixture::say(DEFAULT_ROOT_HUSK_DONE);
+}
+
+fn recorded_execution_root(repo: &Path, run_id: &str) -> PathBuf {
+    PathBuf::from(
+        first_line_of_the_log(repo, run_id)["data"]["execution_root"]
+            .as_str()
+            .expect("the run records its execution root"),
+    )
+}
+
+fn execution_namespaces(repo: &Path) -> Vec<String> {
+    let workspaces = private_root_for(repo).join("workspaces");
+    let mut keys: Vec<String> = match fs::read_dir(&workspaces) {
+        Ok(listed) => listed
+            .map(|entry| {
+                entry
+                    .expect("an entry of the workspaces directory")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => panic!("list {}: {error}", workspaces.display()),
+    };
+    keys.sort();
+    keys
+}
+
+#[test]
+fn a_budget_stopped_schema_4_resume_recreates_its_pruned_execution_root_where_it_recorded_it() {
+    let (_tree, repo) = temp_engine_repo("topology-pruned-root");
+    seed(&repo, ONE_ATTEMPT_PLAN, Some(ONE_ATTEMPT_ROUTING));
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        0,
+    )));
+    let mut opts = topology_options(&repo);
+    opts.budget_usd = Some(0.015);
+    let stopped = run_with(&opts, &source).expect("the run ends");
+    assert_eq!(
+        stopped.outcome(),
+        RunOutcome::BudgetExceeded,
+        "{stopped:#?}"
+    );
+    until_released(&repo, &stopped.run_id);
+    let recorded = recorded_execution_root(&repo, &stopped.run_id);
+    assert!(
+        fs::symlink_metadata(&recorded).is_err(),
+        "the premise: finalization pruned the stopped run's emptied root"
+    );
+    let namespaces = execution_namespaces(&repo);
+
+    let mut resume = resume_options(&repo, &stopped.run_id);
+    resume.private_root = None;
+    resume.budget_usd = Some(1.0);
+    let resumed = resume_with(&resume, &source).expect("a budget-stopped run resumes");
+    until_released(&repo, &stopped.run_id);
+    assert!(
+        resumed.warnings.iter().any(|warning| warning.contains(
+            "the execution root was pruned when the run last ended and has been recreated"
+        )),
+        "the resume recreated the pruned root: {:?}",
+        resumed.warnings
+    );
+    assert_eq!(
+        execution_namespaces(&repo),
+        namespaces,
+        "the resume made no other namespace"
+    );
+}
+
+#[cfg(unix)]
+fn manager_today(repo: &Path, run_id: &str) -> crate::workspace_manager::WorkspaceManager {
+    let root = crate::engine::topology::recover::chain::RootDerived::derive(repo, run_id, None)
+        .expect("the run's recorded root");
+    let first = first_line_of_the_log(repo, run_id);
+    let incarnation = first["data"]["incarnation"]
+        .as_str()
+        .expect("the run records its incarnation");
+    crate::workspace_manager::WorkspaceManager::derive(
+        repo,
+        root.private_root(),
+        run_id,
+        incarnation,
+    )
+    .expect("the run's workspace manager")
+}
+
+#[cfg(unix)]
+fn retain_execution_root(repo: &Path, run_id: &str) {
+    let manager = manager_today(repo, run_id);
+    assert_eq!(
+        manager.execution_root(),
+        recorded_execution_root(repo, run_id),
+        "the premise: the run's own namespace derives the root it recorded"
+    );
+    manager
+        .create_execution_root(&mut crate::workspace_manager::NoHooks)
+        .expect("the retained scaffolding");
+}
+
+#[cfg(unix)]
+fn copy_common_dir(from: &Path, to: &Path) {
+    let mut pending = vec![(from.to_path_buf(), to.to_path_buf())];
+    while let Some((source, target)) = pending.pop() {
+        fs::create_dir(&target).expect("a directory of the copy");
+        for entry in fs::read_dir(&source).expect("a directory of the common directory") {
+            let entry = entry.expect("a directory entry");
+            let name = entry.file_name();
+            if source == from && (name == "worktrees" || name == "upstroke-worktree.lock") {
+                continue;
+            }
+            let kind = entry.file_type().expect("the entry's type");
+            if kind.is_dir() {
+                pending.push((entry.path(), target.join(&name)));
+            } else if kind.is_file() {
+                fs::copy(entry.path(), target.join(&name)).expect("a file of the copy");
+            } else {
+                panic!(
+                    "{} is neither a file nor a directory",
+                    entry.path().display()
+                );
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+type Places = Vec<(
+    &'static str,
+    std::collections::BTreeMap<PathBuf, PrivateEntry>,
+)>;
+
+#[cfg(unix)]
+fn common_dir_fixture(repo: &Path, other: &Path) -> Places {
+    vec![
+        ("in the checkout", public_snapshot(repo)),
+        (
+            "in the checkout's Git directory",
+            private_snapshot(&repo.join(".git")),
+        ),
+        (
+            "under the private root",
+            private_snapshot(&private_root_for(repo)),
+        ),
+        ("in the other common directory", private_snapshot(other)),
+    ]
+}
+
+#[cfg(unix)]
+fn moved_in(before: &Places, after: &Places) -> Vec<String> {
+    before
+        .iter()
+        .zip(after)
+        .flat_map(|((place, earlier), (_, later))| {
+            moved_entries(earlier, later)
+                .into_iter()
+                .map(move |moved| format!("{place}: {moved}"))
+        })
+        .collect()
+}
+
+#[cfg(unix)]
+fn assert_admitted_at_the_recorded_roots(repo: &Path, open: &str, finished: &str) {
+    for run_id in [open, finished] {
+        assert_eq!(
+            manager_today(repo, run_id).execution_root(),
+            recorded_execution_root(repo, run_id),
+            "the premise: this Git environment derives the root `{run_id}` recorded"
+        );
+    }
+    let namespaces = execution_namespaces(repo);
+    let stub = ObservedStub::new(0);
+    let source = BorrowedObserved(&stub);
+
+    let mut resume = resume_options(repo, open);
+    resume.private_root = None;
+    let report = assert_admitted_and_published(repo, || resume_with(&resume, &source));
+    assert_eq!(report.run_id, open);
+
+    let residue = recorded_execution_root(repo, finished);
+    assert!(
+        residue.is_dir(),
+        "the premise: the finished run's root is retained"
+    );
+    let mut resume = resume_options(repo, finished);
+    resume.private_root = None;
+    let refused = resume_with(&resume, &source).expect_err("a finished run does not continue");
+    assert!(
+        refused.to_string().contains("already finished"),
+        "the finished run was finalized: {refused}"
+    );
+    assert!(
+        fs::symlink_metadata(&residue).is_err(),
+        "finalization reclaimed the root the run recorded: {refused}"
+    );
+    assert_eq!(
+        execution_namespaces(repo),
+        namespaces,
+        "the admitted resumes made no other namespace"
+    );
+}
+
+#[cfg(unix)]
+const COMMON_DIR_REPO: &str = "UPSTROKE_COMMON_DIR_REPO";
+
+#[cfg(unix)]
+const COMMON_DIR_OPEN_RUN: &str = "UPSTROKE_COMMON_DIR_OPEN_RUN";
+
+#[cfg(unix)]
+const COMMON_DIR_FINISHED_RUN: &str = "UPSTROKE_COMMON_DIR_FINISHED_RUN";
+
+#[cfg(unix)]
+const COMMON_DIR_REFUSED: &str =
+    "common-dir resume: both runs refused under another common directory, nothing changed";
+
+#[cfg(unix)]
+const COMMON_DIR_ADMITTED: &str =
+    "common-dir resume: admitted and finalized at the roots the runs recorded";
+
+#[cfg(unix)]
+#[test]
+fn a_schema_4_resume_under_another_effective_common_directory_refuses_before_any_effect() {
+    let (tree, repo) = temp_engine_repo("topology-common-dir");
+    let park = || {
+        let stub = ObservedStub::new(1);
+        let parked =
+            run_with(&topology_options(&repo), &BorrowedObserved(&stub)).expect("the run parks");
+        assert_eq!(parked.outcome(), RunOutcome::Parked, "{parked:#?}");
+        until_released(&repo, &parked.run_id);
+        parked.run_id
+    };
+    let open = park();
+    let open_absolute = park();
+    let open_relative = park();
+    let open_unchanged = park();
+    let finished = {
+        let stub = ObservedStub::new(0);
+        let report = run_with(&topology_options(&repo), &BorrowedObserved(&stub))
+            .expect("the run completes");
+        assert_eq!(report.outcome(), RunOutcome::Complete, "{report:#?}");
+        until_released(&repo, &report.run_id);
+        report.run_id
+    };
+    assert!(
+        fs::symlink_metadata(recorded_execution_root(&repo, &finished)).is_err(),
+        "the premise: finalization pruned the finished run's root"
+    );
+    retain_execution_root(&repo, &finished);
+    let isolated = |test: &str, common: &std::ffi::OsStr, open: &str| {
+        crate::agent::proc::test_support::run_test_isolated(
+            test,
+            &[
+                ("GIT_COMMON_DIR", common),
+                (COMMON_DIR_REPO, repo.as_os_str()),
+                (COMMON_DIR_OPEN_RUN, std::ffi::OsStr::new(open)),
+                (
+                    COMMON_DIR_FINISHED_RUN,
+                    std::ffi::OsStr::new(finished.as_str()),
+                ),
+            ],
+            Duration::from_secs(300),
+        )
+    };
+
+    let checkout_common =
+        fs::canonicalize(repo.join(".git")).expect("the checkout's common directory");
+    for (spelling, value, run_id) in [
+        ("absolute", checkout_common.as_os_str(), &open_absolute),
+        ("relative", std::ffi::OsStr::new(".git"), &open_relative),
+    ] {
+        let admitted = isolated(
+            "engine::tests::common_dir_admitted_resume_child",
+            value,
+            run_id,
+        );
+        assert!(
+            admitted.status.is_some_and(|status| status.success())
+                && admitted.stdout.contains("1 passed")
+                && admitted.stderr.contains(COMMON_DIR_ADMITTED),
+            "the control: the checkout's own common directory, spelled {spelling}: {admitted}"
+        );
+        retain_execution_root(&repo, &finished);
+    }
+    assert_admitted_at_the_recorded_roots(&repo, &open_unchanged, &finished);
+    retain_execution_root(&repo, &finished);
+
+    let other = tree.path().join("common-b");
+    copy_common_dir(&repo.join(".git"), &other);
+    let other = fs::canonicalize(&other).expect("the other common directory");
+    let refused = isolated(
+        "engine::tests::common_dir_refused_resume_child",
+        other.as_os_str(),
+        &open,
+    );
+    assert!(
+        refused.status.is_some_and(|status| status.success())
+            && refused.stdout.contains("1 passed")
+            && refused.stderr.contains(COMMON_DIR_REFUSED),
+        "under another common directory both resumes refuse before any effect: {refused}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "subprocess helper"]
+fn common_dir_refused_resume_child() {
+    let (Some(repo), Some(open), Some(finished), Some(other)) = (
+        std::env::var_os(COMMON_DIR_REPO).map(PathBuf::from),
+        std::env::var(COMMON_DIR_OPEN_RUN).ok(),
+        std::env::var(COMMON_DIR_FINISHED_RUN).ok(),
+        std::env::var_os("GIT_COMMON_DIR").map(PathBuf::from),
+    ) else {
+        return;
+    };
+    assert!(
+        other.is_absolute() && !other.starts_with(&repo),
+        "the premise: this process's Git environment names another common directory, absolute \
+         and outside the checkout: {}",
+        other.display()
+    );
+    let git_dir = Workspace::open(&repo)
+        .expect("the checkout")
+        .worktree_git_dir()
+        .expect("its Git directory");
+    let physical = rundir::RepoKey::for_worktree_git_dir(&git_dir)
+        .expect("the checkout's physical repository key");
+    assert!(
+        recorded_execution_root(&repo, &finished).is_dir(),
+        "the premise: the finished run's root is retained"
+    );
+    let stub = ObservedStub::new(0);
+    let source = BorrowedObserved(&stub);
+
+    for (what, run_id) in [("the open run", &open), ("the finished run", &finished)] {
+        let owner: serde_json::Value = serde_json::from_slice(
+            &fs::read(private_dir_of(&repo, run_id).join(rundir::OWNER_RECORD))
+                .expect("the owner record"),
+        )
+        .expect("an owner record");
+        assert_eq!(
+            owner["repo_key"].as_str(),
+            Some(physical.as_str()),
+            "the premise: {what}'s owner record names the checkout's physical key"
+        );
+        let recorded = recorded_execution_root(&repo, run_id);
+        let manager = manager_today(&repo, run_id);
+        assert_eq!(
+            manager.common_git_dir(),
+            other.as_path(),
+            "the premise: today's manager of {what} takes the other common directory"
+        );
+        assert_ne!(
+            manager.execution_root(),
+            recorded.as_path(),
+            "the premise: and derives another execution root than {what} recorded"
+        );
+        let mut resume = resume_options(&repo, run_id);
+        resume.private_root = None;
+        for exclusion in [ExclusionState::Absent, ExclusionState::Changed] {
+            for include in [IncludeState::Absent, IncludeState::Changed] {
+                put_exclusion(&repo, exclusion);
+                put_include(&private_root_for(&repo), include);
+                let before = common_dir_fixture(&repo, &other);
+                let refused = resume_with(&resume, &source);
+                let after = common_dir_fixture(&repo, &other);
+                let case = format!("{what}, exclusion {exclusion:?}, include {include:?}");
+                let moved = moved_in(&before, &after);
+                assert!(
+                    moved.is_empty(),
+                    "{case}: the resume under another common directory wrote {moved:?}"
+                );
+                assert!(
+                    stub.built().is_empty(),
+                    "{case}: a worker or reviewer was built"
+                );
+                let refused = refused
+                    .expect_err("a resume never adopts another root")
+                    .to_string();
+                for named in [
+                    format!(
+                        "run `{run_id}` records its execution root as {}",
+                        recorded.display()
+                    ),
+                    format!(
+                        "derives {} for it today",
+                        manager.execution_root().display()
+                    ),
+                    format!(
+                        "canonical private root {}",
+                        manager.private_root().display()
+                    ),
+                    format!(
+                        "effective common directory {}",
+                        manager.common_git_dir().display()
+                    ),
+                ] {
+                    assert!(
+                        refused.contains(&named),
+                        "{case}: the refusal names `{named}`: {refused}"
+                    );
+                }
+            }
+        }
+    }
+    crate::workspace_manager::fixture::say(COMMON_DIR_REFUSED);
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "subprocess helper"]
+fn common_dir_admitted_resume_child() {
+    let (Some(repo), Some(open), Some(finished)) = (
+        std::env::var_os(COMMON_DIR_REPO).map(PathBuf::from),
+        std::env::var(COMMON_DIR_OPEN_RUN).ok(),
+        std::env::var(COMMON_DIR_FINISHED_RUN).ok(),
+    ) else {
+        return;
+    };
+    assert!(
+        std::env::var_os("GIT_COMMON_DIR").is_some(),
+        "the premise: this process's Git environment names a common directory"
+    );
+    assert_admitted_at_the_recorded_roots(&repo, &open, &finished);
+    crate::workspace_manager::fixture::say(COMMON_DIR_ADMITTED);
 }
 
 /// P12-W13. A parked schema-4 question has no payload file: `status` names it,

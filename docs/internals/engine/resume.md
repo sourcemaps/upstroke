@@ -32,16 +32,22 @@ read-only and without starting a process, and answers `None` for a legacy
 log or one whose header does not parse, so every sequential resume, and
 every refusal it raises, runs the lines below exactly as before — with one
 containment establishment, as every public entry point has. A log it cannot
-read at all it refuses itself, with the read's own error: `None` would send a
-schema-4 run down the lines below, whose include is published under the
-selected or default root before they read the log
+read at all it refuses itself, with the read's own error, and an id
+`rundir::resolve_run_id` refuses — a retained schema-4 husk's among them — it
+refuses with the resolver's own refusal, which the lines below would raise
+unchanged after their prelude: `None` would send such a run down the lines
+below, whose include is published under the selected or default root before
+they resolve the id or read the log
 (PR12-INV5-RESUME-READ-ERROR-LEGACY-PUBLICATION,
-PR12-REG8-RESUME-READ-ERROR-LEGACY-PUBLICATION; the router's notes). A topology log
+PR12-REG8-RESUME-READ-ERROR-LEGACY-PUBLICATION,
+PR12-REG9-HUSK-REFUSAL-LEGACY-PUBLICATION; the router's notes). A topology log
 is resumed by the topology order: containment, the read-only half
 (`prepare_resume`, which may read a recorded container image's environment,
 a `docker` child), the proof (`ResumePrepared::verify`: both locks, the
 command's first effects, then `owner.json` and `committed.json` against the
-committed first line, then the recorded mounts — recovery step (a)), the run
+committed first line, then the recorded mounts, then the workspace manager
+held to the execution root that line records,
+PR12-INV6-RESUME-COMMON-DIR-REBIND — recovery step (a)), the run
 exclusion, the include under the root that proof verified (never today's
 default, never a fabricated private half, and never a root the public locator
 merely names), then `ResumeVerified::run`. Both publications are made with both

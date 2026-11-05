@@ -2500,8 +2500,22 @@ pre-effect refusal, because nothing attempted the join.
 The oracle is [`crate::runner::host::containment_establishments`], which
 counts on the calling thread: "this call established containment", not "some
 earlier call in this process did". Each entry point is driven with input it
-must refuse (an absent plan, an unknown run id) so the assertion is about
-the entry point and not about a run.
+must refuse once it is a write coordinator, so the assertion is about the
+entry point and not about a run: an absent plan for a run, and for a resume a
+recorded legacy run (`parked_run`) whose plan is gone, which the router passes
+to the legacy lines, where containment is established before they refuse on
+the plan.
+
+An id the router refuses never makes its caller a write coordinator. Since
+PR12-REG9-HUSK-REFUSAL-LEGACY-PUBLICATION the router returns
+`rundir::resolve_run_id`'s refusal itself, read-only and before containment,
+as it already returned its read and schema refusals (the documented resume
+order: the router, then containment). So the three resume entry points are
+also driven with an unknown run id, and each is refused with the resolver's
+own refusal and no establishment. Until that repair the unknown id was this
+test's resume input: it reached the legacy lines' containment only after their
+prelude had published the include under the named root. The CLI is unaffected:
+`src/main.rs` joins the ambient job for `resume` before the engine is called.
 
 The *class* is what is asserted: the table is crossed against the facade's
 own `pub fn` list, so this cannot be satisfied by covering the two the
@@ -4197,6 +4211,211 @@ Measured before commit under the same negative control B1: with no default root,
 resume created the default root, its `git` directory and the include under the home ("created
 .upstroke", "created .upstroke/git", "created .upstroke/git/recorded-objects.gitconfig"), and the
 child and its parent fail.
+
+## `const RETAINED_HUSK_PRODUCER: &str = "engine::topology::create::tests::create_kill_child";`
+
+The producer of the retained schema-4 husk the guards below resume: `create`'s own kill child,
+whose `p5b` site is the one `kill_between_commit_record_and_run_started_retained_as_possibly_committed`
+measures.
+
+## `fn retained_p5b_husk(root: &Path) -> String {`
+
+The retained husk P5b leaves, made by the actual producer rather than written by hand:
+`create_run`, driven by `create`'s tests' driver, killed after `RunDir.PublishCommitRecord` and
+before its first append, in the child [`RETAINED_HUSK_PRODUCER`] names, under the production
+`HostRunner` with a 120-second bound (`create`'s own `spawn_and_wait` shape). The child lays out
+`create`'s fixture under `root`: `root/repo`, which here is the Git checkout `temp_engine_repo`
+already made (`create_private_dir` is `create_dir_all`), so the legacy lines' prelude would find a
+repository there, and `root/private`, the husk's creation private root. It then asserts the shape
+the producer's own test asserts: one run directory, `committed.json` in the private half, an empty
+log, the census's `Husk`, and the disposition `Retained(PossiblyCommitted)` under that fixture's
+own repository key. Returns the husk's id. It produces the P5b shape only. A failed first append
+that `create`'s append-error protocol answers `RetainedPossiblyCommittedHusk` leaves, as that
+protocol reads, the same two halves (its torn line truncated by `Event.OpenLog`); that producer is
+not run here.
+
+## `fn a_retained_schema_4_husk_is_refused_before_any_root_is_published() {`
+
+PR12-REG9-HUSK-REFUSAL-LEGACY-PUBLICATION through `resume_with` naming an explicit root
+(`private_root_for`, the fixture's `home`) that is not the husk's creation root. The positive
+control runs first: a genuine legacy run (`parked_run`) still routes to the legacy lines and, with
+its include absent, `resume_answering` takes it to completion and the legacy lines publish the
+include as before. Then the husk is produced, the premises are read (the two roots differ; the
+resolver refuses the exact id with its husk sentence naming the run), and for each of the eight
+cases — the worktree lease free and held by this test, each exclusion and include state — the
+resume changes nothing under the root it names, under the creation root, in the checkout outside
+`.git` or in `.git` (every path, kind, mode and byte), builds nothing, and is refused with the
+resolver's own refusal, byte for byte. The no-write comparisons precede the refusal's identity, so
+they are what the old fold fails.
+
+Measured before commit as negative control A13 (the router's three lines folding the resolver's
+refusal into `Ok(None)` again, exactly as at `328ee6dd`): the legacy control passed, and the first
+case failed on "created git", "created git/recorded-objects.gitconfig" under the named root. A
+compiled and executed failure on the unwanted write, not a compile error or a timeout.
+
+## `const DEFAULT_ROOT_HUSK_REPO: &str = "UPSTROKE_DEFAULT_ROOT_HUSK_REPO";`
+
+The checkout holding the husk the default-root child resumes, named by its parent.
+
+## `const DEFAULT_ROOT_HUSK_RUN: &str = "UPSTROKE_DEFAULT_ROOT_HUSK_RUN";`
+
+The husk's id.
+
+## `const DEFAULT_ROOT_HUSK_CREATION_ROOT: &str = "UPSTROKE_DEFAULT_ROOT_HUSK_CREATION_ROOT";`
+
+The husk's creation private root, which the child snapshots.
+
+## `const DEFAULT_ROOT_HUSK_DONE: &str =`
+
+The line the child says once its last assertion has passed; its parent requires it, as
+`DEFAULT_ROOT_UNREAD_DONE`'s does, since the child returns early, and still reports `1 passed`,
+when its parent's variables are absent.
+
+## `fn a_retained_schema_4_husk_resumed_over_the_default_root_creates_nothing_under_home() {`
+
+The same defect with no `--private-root` (Unix, as `run_test_isolated` is): the case the finding
+names, where today's default root is not the husk's creation root. The parent produces the husk,
+makes a directory of its own fixture tree the child's `HOME` and `USERPROFILE`, runs
+`default_root_husk_resume_child` under `run_test_isolated` with a 300-second bound, and requires its
+success, `1 passed` and [`DEFAULT_ROOT_HUSK_DONE`]. No variable of this process changes.
+
+## `fn default_root_husk_resume_child() {`
+
+The child of the test above. Its premises: the default root resolves under the child's home and
+does not exist yet, the husk's creation root is outside that home, and the resolver refuses the
+husk. With no default root, and then with one holding an include of other bytes in a directory the
+writer would tighten, each with the lease free and held, the resume changes nothing under the home,
+under the creation root, in the checkout or in `.git`, builds nothing, and is refused with the
+resolver's own refusal, byte for byte.
+
+Measured before commit under negative control A13: with no default root and the lease free, the
+resume created the default root, its `git` directory and the include under the home ("created
+.upstroke", "created .upstroke/git", "created .upstroke/git/recorded-objects.gitconfig"), and the
+child and its parent fail.
+
+## `fn recorded_execution_root(repo: &Path, run_id: &str) -> PathBuf {`
+
+The execution root a schema-4 run's committed first line records, as text, for comparison with the
+root a manager derives: both are the workspace manager's spelling, so neither side is a spelling
+this test makes up.
+
+## `fn execution_namespaces(repo: &Path) -> Vec<String> {`
+
+The repository keys the fixture's private root holds execution roots under, sorted; empty before
+any run made one.
+
+## `fn a_budget_stopped_schema_4_resume_recreates_its_pruned_execution_root_where_it_recorded_it() {`
+
+The positive control of PR12-INV6-RESUME-COMMON-DIR-REBIND for a root that finalization legitimately
+pruned, on every platform. A run stopped at its budget (S9's fixture: one attempt per task, a
+`0.015` run budget) is closed and finalized, and its emptied execution root is pruned; the premise
+reads the recorded root absent. Resumed with a larger budget under the same Git environment, the
+run is admitted although its root does not exist — the binding compares paths and requires no
+existence — and recovery recreates the root, saying so ("the execution root was pruned when the run
+last ended and has been recreated"), with no other namespace made under the private root.
+
+## `fn manager_today(repo: &Path, run_id: &str) -> crate::workspace_manager::WorkspaceManager {`
+
+`run_id`'s workspace manager as a resume derives it in this process: `WorkspaceManager::derive`
+over the private root `RootDerived` reads from the run's record and the incarnation it recorded,
+under this process's Git environment. Read-only.
+
+## `fn retain_execution_root(repo: &Path, run_id: &str) {`
+
+Leaves a finished run's execution root as a run keeps it when it ends before finalization's last
+step: the scaffolding `WorkspaceManager::create_execution_root` makes, through [`manager_today`],
+after asserting that this manager derives the root the run recorded.
+
+## `fn copy_common_dir(from: &Path, to: &Path) {`
+
+A second common directory this test owns: the checkout's Git directory copied file by file
+(objects, refs, packed refs, logs and configuration) without its linked-worktree registry and
+without the worktree lease's file. With `GIT_COMMON_DIR` naming it, Git keeps the checkout's own
+`--absolute-git-dir` and answers this directory for `--git-common-dir`, which is the split the
+finding needs, and nothing outside the fixture is copied or touched. A plain-Git fact the test
+relies on, not a reproduction of anything by Git alone.
+
+## `type Places = Vec<(`
+
+What [`common_dir_fixture`] returns: each place by name with its snapshot.
+
+## `fn common_dir_fixture(repo: &Path, other: &Path) -> Places {`
+
+Every place a resume under another common directory could write: the checkout outside `.git`
+(`public_snapshot`: every run's log, report and lock files, the exclusion), the checkout's Git
+directory whole (refs, packed refs, reflogs, objects, the worktree registry, the lease's file), the
+private root (the include, every private half, every execution root and its intents, task, merge
+and snapshot directories, every namespace), and the other common directory whole.
+
+## `fn moved_in(before: &Places, after: &Places) -> Vec<String> {`
+
+Every moved entry of every place, each prefixed with its place, so one assertion reports the whole
+of what a resume wrote.
+
+## `fn assert_admitted_at_the_recorded_roots(repo: &Path, open: &str, finished: &str) {`
+
+The positive controls under the Git environment of the process that calls it: its manager of each
+run derives the root that run recorded; the open run's resume is admitted and makes the exclusion
+and the include from absent (`assert_admitted_and_published`); the finished run's resume is
+finalized and refused as already finished, and finalization reclaims the scaffolding retained at the
+root it recorded; and no other namespace appears under the private root.
+
+## `const COMMON_DIR_REPO: &str = "UPSTROKE_COMMON_DIR_REPO";`
+
+The checkout the common-directory children resume in, named by their parent.
+
+## `const COMMON_DIR_OPEN_RUN: &str = "UPSTROKE_COMMON_DIR_OPEN_RUN";`
+
+The parked run a child resumes.
+
+## `const COMMON_DIR_FINISHED_RUN: &str = "UPSTROKE_COMMON_DIR_FINISHED_RUN";`
+
+The finished run, its execution root retained, that a child resumes.
+
+## `const COMMON_DIR_REFUSED: &str =`
+
+The line the refusing child says once its last assertion has passed.
+
+## `const COMMON_DIR_ADMITTED: &str =`
+
+The line an admitting child says once its last assertion has passed.
+
+## `fn a_schema_4_resume_under_another_effective_common_directory_refuses_before_any_effect() {`
+
+PR12-INV6-RESUME-COMMON-DIR-REBIND through `resume_with` on the host runner (Unix, as
+`run_test_isolated` is; `GIT_COMMON_DIR` changes only in the children's environments, never in this
+process's). In one checkout with no `GIT_COMMON_DIR`, four runs park on their one question (open,
+resumable prefixes) and one completes, its pruned root then retained ([`retain_execution_root`]),
+a valid terminal prefix with execution-root residue. Their owner, commit and log bytes are the
+engine's own. The positive controls run first: a child with `GIT_COMMON_DIR` naming the checkout's
+own common directory absolute, then one naming it relative (`.git`, given its meaning at the
+checkout), then this process with none, each admitting its own open run and finalizing the finished
+run at the root it recorded ([`assert_admitted_at_the_recorded_roots`]; the residue retained again
+after each). Then [`copy_common_dir`] makes the other common directory, and the refusing child runs
+with `GIT_COMMON_DIR` naming it. Each child has a 300-second bound and a completion sentinel.
+
+Measured before commit as negative control B13 (`ResumePrepared::verify` discarding the binding's
+answer with `let _ =`, so today's manager is adopted as at `328ee6dd`): the three positive controls
+passed, and the refusing child failed at its first case on the wrong-root admission's writes — the
+exclusion and the include published, the open run's log and report changed, and a namespace
+`workspaces/<key>` of the other common directory created under the private root.
+
+## `fn common_dir_refused_resume_child() {`
+
+The refusing child. Its premises: `GIT_COMMON_DIR` names another directory, absolute and outside the
+checkout; the checkout's Git directory and its physical repository key are unchanged, and each run's
+owner record names that key, so the owner and commit proofs still pass; and for each run, today's
+manager takes the other common directory and derives another execution root than the run recorded.
+For the open run and then the finished run, in each exclusion and include state, the resume changes
+nothing in any place of [`common_dir_fixture`], builds nothing, and is refused naming the run, the
+root it recorded, the root derived today, the canonical private root and the effective common
+directory.
+
+## `fn common_dir_admitted_resume_child() {`
+
+An admitting child: with `GIT_COMMON_DIR` set by its parent to a spelling of the checkout's own
+common directory, [`assert_admitted_at_the_recorded_roots`] for the open run its parent names and
+the finished run.
 
 ## `fn a_schema_4_run_and_its_resume_leave_the_checkout_and_print_no_way_back_from_it() {`
 

@@ -114,12 +114,13 @@ real-directory check by `RunnerResolved::authorize`.
 ### The resume order
 
 1. [`route_resume`], read-only and starting no process: the header of the
-   committed first line selects the reader. A legacy log, or one whose
-   header does not parse, returns `None` and `resume_harness` runs today's
-   sequential lines unchanged; a log the router cannot read refuses with
-   that read's own error, before anything else; a schema above the ceiling
-   refuses with the probe's own refusal. For a topology log it returns
-   `RootDerived::derive` (a0).
+   committed first line selects the reader. An id `rundir::resolve_run_id`
+   refuses — a retained husk's among them — refuses with the resolver's own
+   refusal, first of all; a legacy log, or one whose header does not parse,
+   returns `None` and `resume_harness` runs today's sequential lines
+   unchanged; a log the router cannot read refuses with that read's own
+   error; a schema above the ceiling refuses with the probe's own refusal.
+   For a topology log it returns `RootDerived::derive` (a0).
 2. `resume_harness` establishes containment.
 3. [`prepare_resume`], read-only: the recorded private half must already be
    a directory (a resume never creates it); the frozen plan is read from
@@ -138,10 +139,12 @@ real-directory check by `RunnerResolved::authorize`.
    directory and repo key, this incarnation, the workspace manager (read-only,
    as before), then `recover::verify_for_recovery` — the worktree lease and the
    run lock, `owner.json` and `committed.json` verified against the committed
-   first line, and the recorded mounts rechecked. Every refusal so far has
-   written nothing, public or private: a resume that loses the worktree lease
-   to a conductor or to a surviving reaper's cleanup hold has made no
-   exclusion and no include.
+   first line, and the recorded mounts rechecked — and then the workspace
+   manager bound to the execution root that first line records
+   ([`hold_recorded_execution_root`]). Every refusal so far has written
+   nothing, public or private: a resume that loses the worktree lease to a
+   conductor or to a surviving reaper's cleanup hold, or whose manager derives
+   another execution root, has made no exclusion and no include.
 5. `resume_harness`, holding both leases, makes the run exclusion
    (`Workspace::ensure_run_exclusions`, L4), as the sequential resume does
    under its locks after its prerequisites, so a run whose
@@ -326,10 +329,31 @@ PR12-INV5-RESUME-READ-ERROR-LEGACY-PUBLICATION and
 PR12-REG8-RESUME-READ-ERROR-LEGACY-PUBLICATION (one defect, first in
 `fffa73fa`) the failure was `Ok(None)`.
 
-The other two `None`s are not that repair's and are unchanged: an id
-`resolve_run_id` does not resolve, and a header that does not parse, still go
-to the legacy lines, which diagnose them after their prelude has published the
-include, as base's resume published it before resolving any id.
+**An id the resolver refuses is a refusal too, and the resolver's own.**
+`rundir::resolve_run_id` answers a run id or an `UpstrokeError::Refused`: a
+directory that never recorded a committed `run_started` (a husk), one whose
+observation did not finish, a prefix it cannot resolve or that matches several
+runs, and no match at all. Each is definitive about the id it was asked, and
+the first step of the legacy lines after their prelude and their containment
+(`resume_harness_inner_on`) resolves the same id and refuses with that same
+value — by then the prelude has published the include. So folding the refusal
+into `None` could admit nothing; it only published first. The router returns it,
+and the resume stops before containment, any lease or any write, with the
+resolver's sentence unchanged. Until PR12-REG9-HUSK-REFUSAL-LEGACY-PUBLICATION
+(first in `fffa73fa`, whose activated lifecycle produces the retained P5b husk:
+`create_run` publishes `committed.json` before its first append) the refusal
+was `Ok(None)`, and a resume of a retained husk's exact id without
+`--private-root`, or naming another root, published the include under today's
+default or that root, whatever lease another conductor held. The legacy
+prelude itself predates PR12 (base's resume published before resolving any id)
+and is unchanged; only what reaches it changed.
+
+One `None` is left besides a legacy schema, and it is not this repair's: a
+header `probe_header` cannot read still goes to the legacy lines, since a
+schema-less legacy header is one (`HeaderWithoutSchema`), and the legacy lines
+diagnose it after their prelude has published the include. A resolved run's
+header failing to probe needs the log to change between the census and this
+read; that race is not separately reproduced here.
 
 ## `pub(super) fn read_initial_log(log: &Path) -> Result<Vec<u8>, UpstrokeError> {`
 
@@ -414,13 +438,17 @@ The proof half of a resume, recovery step (a). The checkout's Git directory,
 the repo key, the incarnation and the workspace manager are read before the
 locks, as they were before the proof moved here; then
 `recover::verify_for_recovery` takes the worktree lease and the run lock,
-verifies `owner.json` and `committed.json` and rechecks the recorded mounts.
-Its leases are the command's first effects, and it publishes nothing: a
-refusal here — a lease another conductor holds, a surviving reaper's cleanup
-hold, records that do not prove the run — leaves the checkout, the private
-root, the log and the refs exactly as they were, which is what lets
-`resume_harness` make the run exclusion (repair10) and publish the include
-(PR12-CI-01) only after it.
+verifies `owner.json` and `committed.json` and rechecks the recorded mounts;
+then [`hold_recorded_execution_root`] holds the manager to the execution root
+the first line those records authenticated names. Its leases are the
+command's first effects, and it publishes nothing: a refusal here — a lease
+another conductor holds, a surviving reaper's cleanup hold, records that do
+not prove the run, a manager that derives another execution root — leaves the
+checkout, the private root, the log and the refs exactly as they were, which
+is what lets `resume_harness` make the run exclusion (repair10) and publish
+the include (PR12-CI-01) only after it. The leases' own files are created
+once, on a run's first acquisition, and never rewritten, so a refusal after
+them adds none.
 
 ## `impl ResumeVerified` › `pub fn private_root(&self) -> &Path {`
 
@@ -642,6 +670,45 @@ and this comparison is unchanged. `workspace`'s
 holds the two spellings equal over a real repository on every platform; it sits
 there because this module's tests are denied `recorded_objects_scope`. Only a
 Windows host produces the prefix, so only there does the test discriminate.
+
+## `fn hold_recorded_execution_root(`
+
+A resumed run's execution root is the one its committed `run_started(4)`
+records (`decisions.workspace_candidates.execution_root`: recorded exactly,
+per run), never the one today's environment would derive. Every slot,
+intent, snapshot and staging directory the run owns hangs from that root, and
+recovery and finalization act only on what their manager's root holds; a
+manager over another root would recreate and inventory a root the run never
+used, and finalize while the recorded one keeps its residue.
+
+The two identities this resume holds are taken differently. The owner record
+is checked against `RepoKey::for_worktree_git_dir`, the physical common
+directory of the checkout's Git directory (`--absolute-git-dir`), while
+`WorkspaceManager::derive` keys the root on Git's effective common directory
+(`--git-common-dir`), which an inherited `GIT_COMMON_DIR` names, legally under
+R5. So with `GIT_COMMON_DIR` naming another valid common directory, the owner
+and commit proofs still pass and the manager names another root. Until
+PR12-INV6-RESUME-COMMON-DIR-REBIND (first in `fffa73fa`) nothing compared the
+two before recovery used the manager; [`one_spelling`] compares the include's
+spelling with the manager's, both today's.
+
+Called by [`ResumePrepared::verify`] after `verify_for_recovery`, so the
+record compared is the one `committed.json` authenticated, and before any
+publication, append, census, reclamation, finalization or root creation. The
+comparison is `Path` equality of the recorded text with the derived path, and
+reads nothing: both are the manager's own spelling (`fresh_record` records
+`manager.execution_root()` exactly), `RootDerived` gives the private root the
+run recorded, and `derive` canonicalizes Git's absolute answer before hashing
+it. The checkout's own common directory therefore derives the recorded root
+however `GIT_COMMON_DIR` spells it, absolute, relative or unset, and a root
+that finalization pruned at that namespace compares equal without existing,
+so recovery recreates it where it was (`recover`'s pruned-root step). A
+difference is refused, naming the run, both roots, the canonical private root
+and the effective common directory. Nothing is reconstructed —
+`WorkspaceManager` has no constructor from a recorded root, and this repair
+adds none — and no `GIT_COMMON_DIR` is refused as such: only a namespace
+other than the recorded one is. A private root whose canonical form moved between epochs
+differs the same way and is refused the same way.
 
 ## `fn hold_recorded_case_policy(`
 
