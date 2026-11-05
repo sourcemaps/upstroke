@@ -133,6 +133,7 @@ struct Scripted {
     /// Set by [`Runtime::leaves_its_start_unresolved`].
     start_unresolved: std::sync::atomic::AtomicBool,
     observation_unresolved: std::sync::atomic::AtomicBool,
+    volume_inspection_unresolved: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Debug, Clone)]
@@ -153,11 +154,17 @@ impl Runtime {
             execution: Mutex::new(None),
             start_unresolved: std::sync::atomic::AtomicBool::new(false),
             observation_unresolved: std::sync::atomic::AtomicBool::new(false),
+            volume_inspection_unresolved: std::sync::atomic::AtomicBool::new(false),
         }))
     }
 
     fn leaves_its_observation_unresolved(&self) {
         let flag = &self.0.observation_unresolved;
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn leaves_its_volume_inspections_unresolved(&self) {
+        let flag = &self.0.volume_inspection_unresolved;
         flag.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
@@ -193,7 +200,18 @@ impl ContainerRuntime for Runtime {
         self.0.fake.image_by_id(id)
     }
     fn volume_present(&self, name: &str) -> Result<bool, RuntimeError> {
-        self.0.fake.volume_present(name)
+        let asked = self.0.fake.volume_present(name);
+        let flag = &self.0.volume_inspection_unresolved;
+        if flag.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(RuntimeError::Unresolved {
+                operation: RuntimeOp::InspectVolume,
+                detail: format!(
+                    "a question about the credential volume `{name}` ended its supervision \
+                     without establishing its process gone"
+                ),
+            });
+        }
+        asked
     }
     fn containers_with_label(
         &self,
@@ -8323,6 +8341,281 @@ fn assert_unresolved_observation_fate(fixture: &Fixture) {
     );
 }
 
+#[test]
+fn a_prestart_failure_whose_cleanup_leaves_a_process_unresolved_keeps_the_invocation_unresolved() {
+    #[cfg(unix)]
+    unresolved_process_in_an_owned_helper("prestart-cleanup");
+    #[cfg(not(unix))]
+    assert_unresolved_prestart_cleanup_fate(&Fixture::new("unresolved-prestart-cleanup", false));
+}
+
+#[test]
+fn an_unresolved_credential_volume_inspection_keeps_the_invocation_unresolved_and_held() {
+    #[cfg(unix)]
+    unresolved_process_in_an_owned_helper("volume-inspection");
+    #[cfg(not(unix))]
+    assert_unresolved_volume_inspection_fate(&Fixture::new("unresolved-volume-inspection", false));
+}
+
+struct ProbeEnd {
+    fate: crate::error::ProcessFate,
+    cancelled: bool,
+    message: String,
+    view_retained: bool,
+    intent_retained: bool,
+    registration_kept: bool,
+    slot_held: bool,
+    spawn_outage: bool,
+}
+
+fn agent_probe_named(ordinal: u32) -> (RunnerRequest, ContainerName) {
+    let request = crate::agent::probe_request(
+        "claude-code",
+        ShellKind::Sh.spec("exit 0"),
+        ordinal,
+        Duration::from_secs(10),
+    )
+    .expect("an agent probe request");
+    let name = ContainerName::new(repo_key(), RUN_ID, INCARNATION_1, &request.invocation)
+        .expect("a container name");
+    (request, name)
+}
+
+fn run_admitted(
+    fixture: &Fixture,
+    runner: &ContainerRunner,
+    request: &RunnerRequest,
+    name: &ContainerName,
+) -> ProbeEnd {
+    use crate::engine::topology::identity::{
+        InvocationEnd, InvocationLedger, SlotLimits, SlotPair,
+    };
+    use crate::engine::topology::integrate::Verified;
+    use crate::engine::topology::select::Standing;
+    use crate::topology::events::{InfrastructureKind, SequenceId};
+
+    let mut ledger =
+        InvocationLedger::with_limits(SlotLimits::new(1, 1).expect("one slot per agent"));
+    ledger
+        .register_slotted(
+            &request.invocation,
+            SlotPair {
+                agent: "claude-code".to_owned(),
+                pool: None,
+            },
+            &Standing::preflight(),
+        )
+        .expect("the probe is admitted");
+    assert!(
+        ledger.slots().holds(&request.invocation),
+        "the premise: the probe holds its slot while it runs"
+    );
+    let outcome = runner.run_blocking(request);
+    ledger
+        .end(&request.invocation, &InvocationEnd::of(&outcome))
+        .expect("the ledger takes the end");
+    let error = outcome.expect_err("the launch failed before any start");
+    let (fate, cancelled, message) = (error.fate, error.is_cancelled(), error.to_string());
+    let spawn_outage = matches!(
+        crate::engine::topology::run::verified(
+            Err(crate::engine::topology::attempt::JudgeError::Runner(error)),
+            Vec::new(),
+            SequenceId(0),
+        ),
+        Ok(Verified::Unavailable {
+            kind: InfrastructureKind::RunnerSpawnFailure,
+            ..
+        })
+    );
+    ProbeEnd {
+        fate,
+        cancelled,
+        message,
+        view_retained: view_dir(&fixture.private_root, name).exists(),
+        intent_retained: name.intent_path(&fixture.private_root).exists(),
+        registration_kept: !ledger.settled(&request.invocation),
+        slot_held: ledger.slots().holds(&request.invocation),
+        spawn_outage,
+    }
+}
+
+fn assert_settled_and_released(case: &str, end: &ProbeEnd) {
+    use crate::error::ProcessFate;
+
+    assert_eq!(
+        end.fate,
+        ProcessFate::NeverStarted,
+        "{case}: {}",
+        end.message
+    );
+    assert!(
+        !end.view_retained && !end.intent_retained,
+        "{case}: the cancel released the R19 view and the R26 intent: {}",
+        end.message
+    );
+    assert!(
+        !end.registration_kept && !end.slot_held,
+        "{case}: the ledger released the registration and its slot"
+    );
+    assert!(
+        end.spawn_outage,
+        "{case}: a settled pre-start failure is the outage verification settles"
+    );
+}
+
+fn assert_unresolved_and_held(case: &str, end: &ProbeEnd) {
+    use crate::error::ProcessFate;
+
+    assert_eq!(end.fate, ProcessFate::Unresolved, "{case}: {}", end.message);
+    assert!(
+        !end.cancelled,
+        "{case}: not a plain cancellation: {}",
+        end.message
+    );
+    assert!(
+        end.view_retained && end.intent_retained,
+        "{case}: the R19 view and the R26 intent are kept for the census: {}",
+        end.message
+    );
+    assert!(
+        end.registration_kept && end.slot_held,
+        "{case}: the ledger keeps the registration and its slot"
+    );
+    assert!(
+        !end.spawn_outage,
+        "{case}: no RunnerSpawnFailure outage is settled over an unresolved process"
+    );
+    assert!(
+        end.message.contains(ProcessFate::Unresolved.describe())
+            && end.message.contains("deliberately retained"),
+        "{case}: the error names the unresolved fate and the residue it keeps: {}",
+        end.message
+    );
+}
+
+fn assert_unresolved_prestart_cleanup_fate(fixture: &Fixture) {
+    let runner = fixture.runner();
+
+    let (control, control_name) = agent_probe_named(0);
+    fixture
+        .runtime
+        .fake()
+        .substitute_reported_image_id(control_name.as_str(), OTHER_IMAGE_ID);
+    let settled = run_admitted(fixture, &runner, &control, &control_name);
+    assert_settled_and_released("a mismatch whose cleanup is clean", &settled);
+
+    for (ordinal, case, primary) in [
+        (
+            1,
+            "a reported image id that differs from the record",
+            "reports image id",
+        ),
+        (2, "a create the runtime refuses", "armed failing"),
+    ] {
+        let (request, name) = agent_probe_named(ordinal);
+        if ordinal == 1 {
+            fixture
+                .runtime
+                .fake()
+                .substitute_reported_image_id(name.as_str(), OTHER_IMAGE_ID);
+        } else {
+            fixture.runtime.fake().set_failing(RuntimeOp::Create);
+        }
+        fixture
+            .runtime
+            .fake()
+            .leave_a_process_unresolved_at_removal(name.as_str());
+        let end = run_admitted(fixture, &runner, &request, &name);
+        assert_unresolved_and_held(case, &end);
+        assert!(
+            end.message.contains(primary) && end.message.contains("unresolved at its removal"),
+            "{case}: the primary failure and the cleanup's own fact are both reported: {}",
+            end.message
+        );
+        assert!(
+            fixture.runtime.fake().container(name.as_str()).is_none(),
+            "{case}: the cleanup removed what the runtime created; only a process is unknown"
+        );
+    }
+    assert!(
+        !fixture.trace.ops().contains(&RuntimeOp::Start),
+        "no invocation here reached `docker start`: {:?}",
+        fixture.trace.ops()
+    );
+}
+
+fn assert_unresolved_volume_inspection_fate(fixture: &Fixture) {
+    let volume = "upstroke-creds-claude";
+    let context = MountContext::bind_with(
+        &fixture.repo,
+        fixtures::plain_checkout(&fixture.repo.join(".git")),
+        &fixture.private_root,
+        &[],
+    )
+    .expect("the fixture binds a mount context");
+    let selection = crate::config::RunnerSelection {
+        kind: RunnerKind::Container,
+        image: Some(IMAGE_REFERENCE.to_owned()),
+        credential_volumes: recorded_volumes(&container_policy()),
+        mounts: Vec::new(),
+        from_config: true,
+    };
+    let resolved = crate::runner::container::resolve::resolve_container(
+        &fixture.runtime,
+        &selection,
+        &context,
+    )
+    .expect("the run's preflight finds every recorded credential volume");
+    assert_eq!(
+        resolved.credential_volumes,
+        container_policy().credential_volumes,
+        "the premise: the initial resolution recorded the volumes the runner mounts"
+    );
+    let runner = fixture.runner();
+
+    fixture.runtime.fake().remove_volume(volume);
+    let (absent, absent_name) = agent_probe_named(0);
+    let refused = run_admitted(fixture, &runner, &absent, &absent_name);
+    assert_settled_and_released("an absent volume", &refused);
+    assert!(
+        refused
+            .message
+            .contains("is not present in the container runtime"),
+        "{}",
+        refused.message
+    );
+    fixture.runtime.fake().add_volume(volume);
+
+    fixture.runtime.fake().set_failing(RuntimeOp::InspectVolume);
+    let (failed, failed_name) = agent_probe_named(1);
+    let failure = run_admitted(fixture, &runner, &failed, &failed_name);
+    assert_settled_and_released("an inspection that failed", &failure);
+
+    fixture.runtime.leaves_its_volume_inspections_unresolved();
+    let (request, name) = agent_probe_named(2);
+    let end = run_admitted(fixture, &runner, &request, &name);
+    assert_unresolved_and_held("an unresolved inspection", &end);
+    assert!(
+        end.message
+            .contains("could not be asked whether the credential volume")
+            && end.message.contains(volume),
+        "the contextual R20 refusal is kept beside the fate: {}",
+        end.message
+    );
+    let ops = fixture.trace.ops();
+    assert!(
+        !ops.contains(&RuntimeOp::Create)
+            && ops.contains(&RuntimeOp::Stop)
+            && ops.contains(&RuntimeOp::Remove),
+        "no container was ever created, and each cancel's stop and removal were asked: {ops:?}"
+    );
+    assert!(
+        fixture.runtime.fake().container_names().is_empty(),
+        "the runtime established the never-created container absent, which settles nothing \
+         about the inspection's process"
+    );
+}
+
 #[cfg(unix)]
 const UNRESOLVED_PROCESS_CASE: &str = "UPSTROKE_TEST_UNRESOLVED_PROCESS_CASE";
 
@@ -8367,7 +8660,8 @@ fn unresolved_process_in_an_owned_helper(case: &str) {
 
 #[cfg(unix)]
 #[test]
-#[ignore = "owned helper for the unresolved start and observation guards"]
+#[ignore = "owned helper for the unresolved start, observation, pre-start cleanup and volume \
+            inspection guards"]
 fn unresolved_process_child() {
     use crate::agent::proc::test_support::{
         IsolatedJobControl, RetainedMockReaper, assert_no_children_in_isolated_test,
@@ -8378,7 +8672,13 @@ fn unresolved_process_child() {
         std::env::var(UNRESOLVED_PROCESS_CASE).expect("the parent names the unresolved case");
     let ending =
         std::env::var(UNRESOLVED_PROCESS_ENDING).expect("the parent names the helper ending");
-    assert!(matches!(case.as_str(), "start" | "observation"), "{case}");
+    assert!(
+        matches!(
+            case.as_str(),
+            "start" | "observation" | "prestart-cleanup" | "volume-inspection"
+        ),
+        "{case}"
+    );
     assert!(matches!(ending.as_str(), "return" | "unwind"), "{ending}");
     let fixture = Fixture::new(&format!("unresolved-{case}-{ending}"), false);
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -8387,6 +8687,8 @@ fn unresolved_process_child() {
         match case.as_str() {
             "start" => assert_unresolved_start_fate(&fixture),
             "observation" => assert_unresolved_observation_fate(&fixture),
+            "prestart-cleanup" => assert_unresolved_prestart_cleanup_fate(&fixture),
+            "volume-inspection" => assert_unresolved_volume_inspection_fate(&fixture),
             _ => panic!("an unknown unresolved-process case: {case}"),
         }
         assert!(

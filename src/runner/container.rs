@@ -302,9 +302,8 @@ fn expect_mounted_volumes_present(
         let runtime::Mount::Volume { name, target, .. } = mount else {
             continue;
         };
-        let present = runtime
-            .volume_present(name)
-            .map_err(|error| UpstrokeError::Refused {
+        let present = runtime.volume_present(name).map_err(|error| {
+            let refusal = UpstrokeError::Refused {
                 message: format!(
                     "the container runtime could not be asked whether the credential volume \
                      `{name}` exists before creating `{}`: {error}. A named volume that \
@@ -314,7 +313,16 @@ fn expect_mounted_volumes_present(
                      answer refuses rather than risking it",
                     spec.name
                 ),
-            })?;
+            };
+            match error {
+                RuntimeError::Unresolved { operation, .. } => UpstrokeError::Runner {
+                    invocation: format!("the container runtime's `{operation}`"),
+                    fate: ProcessFate::Unresolved,
+                    source: Box::new(refusal),
+                },
+                RuntimeError::Unreachable { .. } | RuntimeError::Failed { .. } => refusal,
+            }
+        })?;
         if !present {
             return Err(UpstrokeError::Refused {
                 message: format!(
@@ -457,10 +465,17 @@ pub enum ContainerToRelease {
     ObservedExited,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CauseFate {
+    Settled,
+    Unresolved,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CancelResidue {
     pub messages: Vec<String>,
     pub container_gone: bool,
+    pub process_unresolved: bool,
 }
 
 impl CancelResidue {
@@ -470,6 +485,11 @@ impl CancelResidue {
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a cancel takes the funnel's three handles, the container's identity, what the \
+              launch reached, and the fate of the step it follows"
+)]
 pub fn cancel_reached(
     hooks: &mut dyn ContainerHooks,
     runtime: &dyn ContainerRuntime,
@@ -478,6 +498,7 @@ pub fn cancel_reached(
     name: &ContainerName,
     container: ContainerToRelease,
     view_path: Option<&Path>,
+    cause: CauseFate,
 ) -> CancelResidue {
     let mut residue = Vec::new();
     let mut container_gone = container != ContainerToRelease::MayBeRunning;
@@ -523,6 +544,21 @@ pub fn cancel_reached(
         return CancelResidue {
             messages: residue,
             container_gone: false,
+            process_unresolved: true,
+        };
+    }
+    if cause == CauseFate::Unresolved {
+        residue.push(format!(
+            "the R19 Git view and the R26 intent record of `{name}` are deliberately retained: \
+             the step this cancel follows left a process it started unresolved, and no cleanup \
+             of the container establishes that process gone, so this invocation's processes are \
+             unresolved, and the intent is what the next census reclaims both through \
+             (decisions.resource_accounting.rows[R19].at_run_end.NoRunFinished)"
+        ));
+        return CancelResidue {
+            messages: residue,
+            container_gone,
+            process_unresolved: true,
         };
     }
     if !container_gone {
@@ -535,6 +571,7 @@ pub fn cancel_reached(
         return CancelResidue {
             messages: residue,
             container_gone,
+            process_unresolved: false,
         };
     }
     let mut view_survives = false;
@@ -553,6 +590,7 @@ pub fn cancel_reached(
         return CancelResidue {
             messages: residue,
             container_gone,
+            process_unresolved: false,
         };
     }
     if let Err(error) = remove_intent(hooks, ContainerSite::RemoveIntent, private_root, name) {
@@ -563,6 +601,7 @@ pub fn cancel_reached(
     CancelResidue {
         messages: residue,
         container_gone,
+        process_unresolved: false,
     }
 }
 
@@ -613,6 +652,7 @@ pub fn release_classified(
         &launched.name,
         container,
         Some(&launched.view_path),
+        CauseFate::Settled,
     );
     if residue.is_empty() {
         return Ok(());
@@ -2266,6 +2306,7 @@ mod uncovered {
             name,
             ContainerToRelease::MayBeRunning,
             view_path,
+            CauseFate::Settled,
         )
         .messages
     }

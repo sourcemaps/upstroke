@@ -2476,6 +2476,15 @@ answers `RuntimeError::Unresolved` before it reaches the fake, as a bounded
 observation whose supervisor could not reap its process does. The fake's own
 trace therefore records no `Observe` for it.
 
+## `struct Scripted {` › `volume_inspection_unresolved: std::sync::atomic::AtomicBool,`
+
+Set by `Runtime::leaves_its_volume_inspections_unresolved`: every later
+credential-volume inspection is still asked of the fake, which records it in
+the trace, and then answers `RuntimeError::Unresolved` whatever the fake said,
+as a bounded `docker volume inspect` whose supervisor could not reap its process
+does. The flag wins over a failure the fake was armed with, so one fixture can
+run the failed-inspection control before it.
+
 ## `fn an_observation_that_leaves_a_process_unresolved_keeps_the_invocation_unresolved_after_a_clean_release()`
 
 K2, "preserved process fate" (regular review 4, finding 2). A started
@@ -2492,6 +2501,110 @@ lifecycle as J6's unresolved-start guard. Its assertions now live in
 `assert_unresolved_observation_fate`. Unix executes them through
 `unresolved_process_in_an_owned_helper`; Windows, which has no Unix container
 reaper, executes the same assertions directly.
+
+## `fn a_prestart_failure_whose_cleanup_leaves_a_process_unresolved_keeps_the_invocation_unresolved()`
+
+PR12-R8-PRESTART-CLEANUP-FATE (regular review 8, P2). An ordinary failure
+before `docker start` — a reported image id that differs from the record, then
+a create the runtime refuses — whose cancel's removal answers
+`RuntimeError::Unresolved` (the fake's `leave_a_process_unresolved_at_removal`,
+as an unresolved question or attached client would). Each invocation must
+report `ProcessFate::Unresolved`, not a plain cancellation, with the R19 view
+and the R26 intent kept, the ledger's registration and slot pair kept, and no
+`RunnerSpawnFailure` verdict; its message carries both the primary failure and
+the removal's own fact, and the container the runtime created is removed. The
+same-shape control runs first on the same runner: a mismatch whose cleanup is
+clean reports `NeverStarted` and releases all four. The fate matrix
+(`the_runner_reports_what_it_established_about_the_process_when_it_fails`)
+keeps the other controls: a create the runtime refuses and a created container
+that reports another image (clean pre-start, `NeverStarted`), a runtime down
+before create and a funnel refusal before `docker start` whose cancel cannot
+reach the runtime (ordinary cleanup failures, still `NeverStarted`), and a
+refused start whose cancel completes (confirmed post-start `Gone`).
+`an_invocation_whose_removal_leaves_a_process_unresolved_is_never_reported_gone`
+remains the started-path guard. With `cancelled` reading the cause's fate
+alone, the rule before repair9, the first unresolved case reports
+`NeverStarted` and this fails.
+
+Unix runs the assertions through `unresolved_process_in_an_owned_helper` (case
+`prestart-cleanup`): the unresolved fates leave the runner's reaper to the
+production retained-reaper backstop, the lifecycle L5 gave J6's and K2's
+guards. Windows runs them directly.
+
+## `fn an_unresolved_credential_volume_inspection_keeps_the_invocation_unresolved_and_held() {`
+
+PR12-R8-VOLUME-INSPECTION-FATE and PR12-REG6-VOLUME-INSPECTION-FATE, two
+reports of one defect. The run's initial resolution
+(`resolve::resolve_container` over the scripted runtime, whose
+`inspect_volumes` is the preflight's own question) finds every recorded
+credential volume. Then an agent probe, which mounts its agent's volume, meets
+an invocation-time inspection that answers `RuntimeError::Unresolved`, and its
+cancel's stop and removal are answered cleanly for a container that was never
+created. It must report `Unresolved` with the R19 view and the R26 intent kept,
+the registration and the slot pair held, no `RunnerSpawnFailure` verdict, and
+the contextual R20 refusal in its message, and no create may have been asked.
+Controls on the same runner run first: an absent volume (the R20 refusal; the
+volume is never created) and an inspection the fake fails, both `NeverStarted`
+with everything released. `a_create_whose_named_volume_is_absent_is_refused_before_any_effect`
+stays the create-level absent and unreachable control. With the blanket
+`Refused` the inspection had before repair9 the fate is `NeverStarted` and
+this fails; with the fate typed but the cancel told `CauseFate::Settled` the
+view and the intent are released and the retained-resources assertion fails,
+so a relabelled fate alone does not pass. Unix runs through the owned helper
+(case `volume-inspection`); Windows runs directly.
+
+## `struct ProbeEnd {`
+
+What one admitted agent probe's failed launch left: its fate, whether it was a
+plain cancellation, its message, whether its R19 view and R26 intent exist,
+whether `InvocationLedger` kept its registration and its slot pair after `end`,
+and whether verification's classifier (`run::verified`) would settle a
+`RunnerSpawnFailure` outage over it.
+
+## `fn agent_probe_named(ordinal: u32) -> (RunnerRequest, ContainerName) {`
+
+An agent probe for `claude-code`, which receives a credential volume and a slot
+pair, and its container's name. Distinct ordinals are distinct containers on
+one runner, so one runner (one retained reaper) carries a guard's controls and
+its cases.
+
+## `fn run_admitted(`
+
+One probe, accounted for by the production decisions rather than copies of
+them. `InvocationLedger::register_slotted` under `Standing::preflight()` admits
+it with its pair, and the premise asserts the slot is held while it runs; the
+runner runs it; `InvocationEnd::of` hands the outcome to
+`InvocationLedger::end` as `RegisteringRunner::settle` does; and `run::verified`
+classifies the runner's error as an integration verification would. The R19
+view and the R26 intent are read from the fixture afterwards.
+
+## `fn assert_settled_and_released(case: &str, end: &ProbeEnd) {`
+
+A settled pre-start failure: `NeverStarted`, the view and the intent released,
+the registration and the slot released, and the `RunnerSpawnFailure` outage
+verification settles over it. The controls make the ledger and verifier probes
+discriminating.
+
+## `fn assert_unresolved_and_held(case: &str, end: &ProbeEnd) {`
+
+An unresolved one: `Unresolved` and no plain cancellation; the view and the
+intent kept; the registration and the slot kept; no spawn outage; and a message
+naming the fate and the deliberately retained residue. The resource assertions
+come before the message so that a cancel which releases them fails at them.
+
+## `fn assert_unresolved_prestart_cleanup_fate(fixture: &Fixture) {`
+
+The assertions of
+`a_prestart_failure_whose_cleanup_leaves_a_process_unresolved_keeps_the_invocation_unresolved`:
+the clean control, the two unresolved cases, and no `docker start` anywhere.
+
+## `fn assert_unresolved_volume_inspection_fate(fixture: &Fixture) {`
+
+The assertions of
+`an_unresolved_credential_volume_inspection_keeps_the_invocation_unresolved_and_held`:
+the initial resolution, the absent and failed controls, the unresolved case,
+and the trace (no `Create`; each cancel's `Stop` and `Remove` asked; no
+container left).
 
 ## `const STALLED_OBSERVATION_DEADLINE: Duration = Duration::from_secs(10);`
 
@@ -2746,7 +2859,8 @@ Unix reaper does not exist there.
 
 ## `fn unresolved_process_in_an_owned_helper(case: &str) {`
 
-Both J6's start case and K2's observation case run `unresolved_process_child`
+J6's start case, K2's observation case, and repair9's pre-start-cleanup and
+volume-inspection cases run `unresolved_process_child`
 under `run_test_isolated` and `FIXTURE_CHILD_BOUND`. Each runs twice: ordinary
 return and deliberate unwinding after the runner dropped. The outer assertion
 requires the collected helper's successful exit, libtest's `1 passed`, and

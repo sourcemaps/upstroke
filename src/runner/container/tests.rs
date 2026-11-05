@@ -1431,6 +1431,70 @@ fn an_unresolved_question_stays_with_its_container_through_every_later_settlemen
     );
 }
 
+#[test]
+fn an_unresolved_credential_volume_question_is_held_under_the_volume_where_no_container_reads_it() {
+    use super::ClientSettlement;
+    use crate::agent::proc::ProcessFailure;
+    use crate::error::ProcessFate;
+
+    let cli = DockerCli::default();
+    let ask = |volume: &str, fate| {
+        cli.answer_within(
+            RuntimeOp::InspectVolume,
+            volume,
+            &["volume", "inspect", volume, "--format", "{{.Name}}"],
+            Err(ProcessFailure {
+                fate,
+                error: UpstrokeError::Agent {
+                    message: "the supervisor's account".to_owned(),
+                },
+            }),
+        )
+    };
+
+    let never = ask("upstroke-creds-never", ProcessFate::NeverStarted);
+    assert!(
+        matches!(never, Err(RuntimeError::Unreachable { .. })),
+        "{never:?}"
+    );
+    let gone = ask("upstroke-creds-gone", ProcessFate::Gone);
+    assert!(matches!(gone, Err(RuntimeError::Failed { .. })), "{gone:?}");
+    let held = ask("upstroke-creds-held", ProcessFate::Unresolved);
+    assert!(
+        matches!(
+            held,
+            Err(RuntimeError::Unresolved {
+                operation: RuntimeOp::InspectVolume,
+                ..
+            })
+        ),
+        "a volume question whose process could not be established gone is unresolved: {held:?}"
+    );
+
+    let container = "upstroke-mounts-the-held-volume";
+    assert!(
+        matches!(cli.settle_client_of(container), ClientSettlement::Absent),
+        "the container that mounts the volume holds no fact of the volume's question"
+    );
+    assert!(
+        cli.settle_removed_client(container).is_ok(),
+        "so that container's clean removal reports nothing unresolved"
+    );
+    assert!(
+        matches!(
+            cli.settle_client_of("upstroke-creds-held"),
+            ClientSettlement::Unresolved(_)
+        ),
+        "the fact is held under the volume the question was about"
+    );
+    for settled in ["upstroke-creds-never", "upstroke-creds-gone"] {
+        assert!(
+            matches!(cli.settle_client_of(settled), ClientSettlement::Absent),
+            "{settled}: a question whose fate was established holds nothing"
+        );
+    }
+}
+
 /// An observation that could not establish its process gone is reported as itself even when the
 /// deadline has passed or a cancellation fired at the same moment: that fact must reach the
 /// start's settlement. An ordinary failed observation at the deadline is still the deadline.

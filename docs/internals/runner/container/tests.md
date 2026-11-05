@@ -275,6 +275,20 @@ not count the container gone, names both failures, and keeps the view and
 the intent. The control: with the client settled, the ordinary removal error
 is the release's, and the observed exit keeps its fate.
 
+## `fn an_unresolved_credential_volume_question_is_held_under_the_volume_where_no_container_reads_it()`
+
+The premise of the volume-inspection repair (PR12-R8-VOLUME-INSPECTION-FATE,
+PR12-REG6-VOLUME-INSPECTION-FATE), on the real `DockerCli` classifier and with
+no process: synthetic supervisor results for a `volume inspect` question
+(`answer_within`). A question its supervisor never started is `Unreachable`,
+one whose process it saw gone is `Failed`, and one whose process it could not
+establish gone is `Unresolved` under `RuntimeOp::InspectVolume`. Only that one
+is held, and it is held under the volume's name: the container that would
+mount the volume settles `Absent`, and its removal reports nothing unresolved.
+So no cleanup of the container can recover the fact, and the launch keeps it
+only through the typed error `expect_mounted_volumes_present` now returns,
+with the cancel keeping the view and the intent for it (`CauseFate`).
+
 ## `fn the_docker_create_arguments_carry_a_user_and_an_open_stdin_only_when_the_spec_does() {`
 
 The `docker create` argv, read with no daemon (`docker_create_arguments`). A

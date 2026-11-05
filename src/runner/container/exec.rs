@@ -31,8 +31,8 @@ use super::runtime::{
 };
 use super::view::{self, RoleGitView};
 use super::{
-    CancelResidue, ContainerHooks, ContainerToRelease, GitView, GitViewRequest, LaunchPlan,
-    Launched, NoHooks, create_container, mount_git_view, start_container, write_intent,
+    CancelResidue, CauseFate, ContainerHooks, ContainerToRelease, GitView, GitViewRequest,
+    LaunchPlan, Launched, NoHooks, create_container, mount_git_view, start_container, write_intent,
 };
 use crate::topology::effects::ContainerSite;
 pub(in crate::runner::container) use cover::{CoveredCreate, CoveredStart};
@@ -911,7 +911,6 @@ impl ContainerRunner {
         cause: UpstrokeError,
         reached: Reached,
     ) -> RunnerError {
-        let residue = self.cancel(hooks, &plan.private_root, &plan.name, &reached);
         // A cause that left a process unresolved stays unresolved: the container's cleanup, or a
         // settled attached client, does not establish a different process gone.
         let unresolved = matches!(
@@ -921,8 +920,19 @@ impl ContainerRunner {
                 ..
             }
         );
+        let residue = self.cancel(
+            hooks,
+            &plan.private_root,
+            &plan.name,
+            &reached,
+            if unresolved {
+                CauseFate::Unresolved
+            } else {
+                CauseFate::Settled
+            },
+        );
         let fate = match reached.container {
-            _ if unresolved => ProcessFate::Unresolved,
+            _ if unresolved || residue.process_unresolved => ProcessFate::Unresolved,
             ContainerReached::NotCreated | ContainerReached::Created => ProcessFate::NeverStarted,
             ContainerReached::Started if residue.container_gone => ProcessFate::Gone,
             ContainerReached::Started => ProcessFate::Unresolved,
@@ -950,6 +960,7 @@ impl ContainerRunner {
         private_root: &Path,
         name: &ContainerName,
         reached: &Reached,
+        cause: CauseFate,
     ) -> CancelResidue {
         super::cancel_reached(
             hooks,
@@ -964,6 +975,7 @@ impl ContainerRunner {
                 }
             },
             reached.view.as_deref(),
+            cause,
         )
     }
 

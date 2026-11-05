@@ -1184,7 +1184,8 @@ Release what a failed launch reached and answer `cause` with whatever
 could not be released appended, as a `RunnerError` whose fate is decided
 by how far the launch got and by what the cancel established — two facts
 kept apart. Before `docker start` was attempted (`NotCreated`, `Created`)
-the fate is `NeverStarted` whatever the cancel achieved: a created but
+the fate is `NeverStarted` whatever the cancel achieved for the container,
+unless a process is known unresolved (below): a created but
 never started container holds no process, and a `docker create` whose
 answer was lost cannot have started one either. Whether the start was
 attempted is the funnel's to say ([`super::StartFailure`]): a refusal at
@@ -1203,6 +1204,24 @@ A `cause` that itself reports a process it could not establish gone
 makes of a `RuntimeError::Unresolved`) keeps that fate whatever the launch
 reached and whatever the cancel established: the cancel's evidence is about
 the container, not about that process (PR12-J6-OBSERVATION-FATE-DROPPED).
+
+Repair9 keeps two more facts. **The cancel's own typed cleanup fact**
+(`CancelResidue::process_unresolved`, PR12-R8-PRESTART-CLEANUP-FATE): a
+removal that answered `RuntimeError::Unresolved` left a process the runtime
+started for the container unresolved, so after an ordinary pre-start failure —
+a create the runtime refused, a reported image id that differs from the record
+— the fate is `Unresolved`, not `NeverStarted`. That the container never
+started says nothing about its cleanup's process. Until repair9 the cancel
+kept the R19 view and the R26 intent for that fact and this mapping still
+answered `NeverStarted`, which `Covered`, `RegisteringRunner`'s ledger and
+verification read as settled. An ordinary cleanup failure is not that fact and
+leaves `NeverStarted`. **The cause's fate reaches the cancel**
+(`super::CauseFate`): an unresolved cause makes the cancel keep the view and
+the intent for the census even when the container's stop and removal are
+clean, because they establish nothing about the cause's process; the
+credential-volume inspection's is held under the volume's name
+(PR12-REG6-VOLUME-INSPECTION-FATE). The cause's fate is read before the cancel
+so that it can be passed.
  A refused start whose
 cancel completes therefore settles as an `Infrastructure{Other}` outage
 with the refusal in its detail rather than as `RunnerSpawnFailure`; both
@@ -1216,7 +1235,8 @@ substituted image" has been handed the symptom and not the diagnosis.
 ## `impl ContainerRunner` › `fn cancel(`
 
 Stop, remove, unmount and remove-intent for whatever `reached` says
-exists, **attempting every step even after one fails**.
+exists, **attempting every step even after one fails**. `cause`, the fate of
+the step being cancelled, is passed through to [`super::cancel_reached`].
 
 `PR6-LANEF-006`'s shape, applied to the runner's own launch rather than
 to `super::launch`: with `?` in place a failing `Container.Stop` left

@@ -515,19 +515,44 @@ inspection, so it is not a site and performs no effect — and it runs before
 
 **Fail-closed in both directions**: a volume that is absent refuses, and a
 runtime that will not answer *whether* it is present refuses too. "The
-runtime did not say" is not "the volume is there".
+runtime did not say" is not "the volume is there". A question whose process
+could not be established gone refuses with that fate kept
+([`expect_mounted_volumes_present`]).
 
 ### Errors
 
 [`UpstrokeError::Refused`] when `site` does not name this operation, when
 `intent` does not name the covered spec's name, when a named volume the spec mounts is
 absent or cannot be inspected, or when the runtime refuses.
+`UpstrokeError::Runner` with `ProcessFate::Unresolved` when the volume
+inspection or the runtime's create reports a process it could not establish
+gone (`RuntimeError::Unresolved`): the inspection keeps its contextual refusal
+as the source, and the create's answer goes through `refused`.
 
 ## `fn expect_mounted_volumes_present(`
 
 Refuse a create whose named volumes are not already there.
 
 See [`create_container`] for why this is here and not only at resolution.
+
+**A question that could not establish its process gone keeps that fate**
+(PR12-R8-VOLUME-INSPECTION-FATE and PR12-REG6-VOLUME-INSPECTION-FATE, two
+reports of one defect). `volume_present` answers `RuntimeError::Unresolved`
+when the bounded `docker volume inspect` behind it ended its supervision
+without establishing its process gone, and `DockerCli` holds that fact under
+the *volume's* name (`unanswered`, `hold_unresolved`), which no settlement of
+the container reads. The typed error is therefore the only thing that carries
+it to the launch: the refusal stays the contextual R20 one, as the source of
+an `UpstrokeError::Runner` with `ProcessFate::Unresolved`, the conversion
+`refused` makes of any other runtime answer. Until repair9 every error here
+became a plain `Refused`, so the launch's cancel settled `NeverStarted`, the
+cover counted the invocation settled, `InvocationLedger::end` released its
+registration and slot pair, and verification could settle a
+`RunnerSpawnFailure` outage over a process that may still be running.
+`Unreachable` and `Failed` stay the plain refusal: a question its supervisor
+never started, or whose process it saw gone, leaves nothing running. The
+absent-volume refusal is unchanged, and nothing here creates or prunes a
+volume.
 
 ## `pub struct StartFailure {`
 
@@ -766,6 +791,9 @@ The answer is a list of descriptions rather than a `Result`, because the
 caller must return the refusal it already has: this function's failure is
 never the thing to report *instead of* an integrity violation.
 
+It passes [`CauseFate::Settled`]: its one caller is the uncovered launch's
+image-id refusal, which started no process.
+
 ## `pub enum ContainerToRelease {`
 
 What the caller already knows about the container a cancel or a release is
@@ -778,10 +806,23 @@ say — an observed exit is process-fate evidence in its own right, and the
 review of `79ddbffb` found it thrown away the moment a later step failed
 (`PR8-R3-CONTAINER-EVIDENCE`).
 
+## `pub enum CauseFate {`
+
+What the failed step a cancel follows established about the processes it
+started, as [`cancel_reached`] is told it. `Settled`: it started none, or
+established every one it started gone — what a refusal leaves, and a runtime
+answer other than `RuntimeError::Unresolved`. `Unresolved`: it reported one it
+could not establish gone (`UpstrokeError::Runner` with
+`ProcessFate::Unresolved`, which `refused` and
+[`expect_mounted_volumes_present`] make of `RuntimeError::Unresolved`). An
+enum rather than a `bool` because the call site has to say which (standards
+§5).
+
 ## `pub struct CancelResidue {`
 
-What a cancel or a release could not do, and one fact beside the messages:
-whether the runtime established that no process of the container survives.
+What a cancel or a release could not do, and two facts beside the messages:
+whether the runtime established that no process of the container survives,
+and whether a process the invocation started is known unresolved.
 The messages are for the operator; the fact is for `ContainerRunner::run`
 and `cancelled`, which classify the process by it — a container the runtime
 never confirmed stopped or removed may still be running its process, and
@@ -809,6 +850,21 @@ fate `Gone`, survivor `Running`, view and intent pruned
 (`PR8-R4-REMOVAL-IN-PROGRESS`). The runtime now says which of the two it
 established, and only `ProcessGone` counts.
 
+`process_unresolved` is **the typed cleanup fact, kept apart from both**
+(PR12-R8-PRESTART-CLEANUP-FATE). It is true when the removal answered
+`RuntimeError::Unresolved` — a process the runtime started for the container,
+a question or an attached client, could not be established gone — and when the
+step the cancel follows did ([`CauseFate::Unresolved`]). `cancelled` reads it
+whatever the launch reached: a container that was only created holds no
+process of its own, and that says nothing about a cleanup question the runtime
+started for it, so `Created` with this fact is `Unresolved`, never
+`NeverStarted`. Until repair9 the cancel kept the view and the intent for that
+fact and then reported `NeverStarted` anyway, which the cover, the ledger and
+verification read as settled. An ordinary cleanup failure — a stop or a
+removal that failed without that type, a removal another reclaimer holds, a
+view that could not be pruned — never sets it: that is residue for the census,
+not evidence about a process.
+
 ## `pub fn cancel_reached(`
 
 The one exhaustive cleanup in this tree: stop, remove, unmount, remove the
@@ -826,6 +882,25 @@ established gone (root's DELIVERY-OWNERSHIP follow-through). Then nothing
 counts as established: `container_gone` is false even for a container the
 supervisor observed exited, so the invocation's fate is `Unresolved` and
 never `Gone`, and the view and the intent are kept for the next census.
+
+**`cause` is the fate of the step the cancel follows** ([`CauseFate`]). An
+`Unresolved` cause is a process this invocation started that the container's
+own stop and removal establish nothing about: the credential-volume
+inspection's process is held under the volume's name, which no settlement of
+the container reads (`DockerCli::hold_unresolved`). So the stop and the
+removal still run — a container the step may have created is still removed —
+and then the view and the intent are kept for the census exactly as after an
+unresolved removal, the residue says why, `process_unresolved` is set, and
+`container_gone` stays whatever the stop and the removal established.
+Releasing them would authorize the destructive half of the cleanup over a
+process nobody established gone; relabelling the fate alone left exactly that
+(PR12-REG6-VOLUME-INSPECTION-FATE).
+
+Eight parameters — the funnel's three handles, the container's root and name,
+what the launch reached (the container and its view), and the cause — so the
+count stands under `#[expect(clippy::too_many_arguments)]` naming them, rather
+than behind a request type whose only constructors would be these three
+callers.
 
 #### Why the view and the intent outlive an unconfirmed container (`PR8-R3-CONTAINER-RETAIN`)
 
@@ -914,6 +989,15 @@ be running or only a view or an intent for the census.
 ([`ContainerToRelease`]) so a container seen to exit is not held to be
 running because its stop then failed; `release` is the same call, assuming
 `MayBeRunning`, for a caller that has nothing to classify.
+
+It passes [`CauseFate::Settled`]: a release follows a supervision, not a failed
+step, and `ContainerRunner::run` reads that supervision's own fate beside the
+release's. Every question a started invocation asks — its observations, its
+collection, the release's own stop and removal — is about its container, so
+`DockerCli` holds any it leaves unresolved under the container's name and the
+release's removal reports it (`settle_removed_client`), keeping the view and
+the intent by that path. Only the pre-create volume inspection asks about
+another name, and it fails a launch, never a release.
 
 ## `pub const TERMINATION_OBSERVATIONS: usize = 8;`
 
