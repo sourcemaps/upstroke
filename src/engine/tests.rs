@@ -18872,17 +18872,163 @@ fn with_shells_on_path(
     directories.extend(std::env::split_paths(
         &std::env::var_os("PATH").unwrap_or_default(),
     ));
-    let path = std::env::join_paths(directories).expect("a PATH");
-    crate::agent::proc::test_support::run_test_isolated(
-        "engine::tests::recorded_shell_helper",
-        &[
-            ("PATH", path.as_os_str()),
-            ("UPSTROKE_RECORDED_SHELL_REPO", repo.as_os_str()),
-            ("UPSTROKE_RECORDED_SHELL_CONFIG", config.as_os_str()),
-            ("UPSTROKE_RECORDED_SHELL_MODE", std::ffi::OsStr::new(mode)),
-        ],
-        Duration::from_secs(300),
-    )
+    let tree = temp_engine_scratch("recorded-shell-child");
+    let stdout = tree.path().join("stdout");
+    let stderr = tree.path().join("stderr");
+    let mut helper = Command::new(std::env::current_exe().expect("this test binary"));
+    helper
+        .args([
+            "--exact",
+            "engine::tests::recorded_shell_helper",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env("PATH", std::env::join_paths(directories).expect("a PATH"))
+        .env("UPSTROKE_RECORDED_SHELL_REPO", repo)
+        .env("UPSTROKE_RECORDED_SHELL_CONFIG", config)
+        .env("UPSTROKE_RECORDED_SHELL_MODE", mode)
+        .stdin(std::process::Stdio::null())
+        .stdout(fs::File::create(&stdout).expect("the helper's stdout file"))
+        .stderr(fs::File::create(&stderr).expect("the helper's stderr file"));
+    let status = RecordedShellScope::start(helper).wait(Duration::from_secs(300));
+    crate::agent::proc::test_support::Isolated {
+        status,
+        stdout: fs::read_to_string(&stdout).unwrap_or_default(),
+        stderr: fs::read_to_string(&stderr).unwrap_or_default(),
+    }
+}
+
+#[cfg(unix)]
+struct RecordedShellScope {
+    anchor: std::process::Child,
+    group: libc::pid_t,
+    helper: Option<std::process::Child>,
+    settled: bool,
+}
+
+#[cfg(unix)]
+impl RecordedShellScope {
+    fn start(mut helper: Command) -> Self {
+        use std::os::unix::process::CommandExt as _;
+
+        let mut anchor = Command::new("/bin/sleep")
+            .arg("600")
+            .process_group(0)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("the recorded-shell helper's group anchor");
+        let Ok(group) = libc::pid_t::try_from(anchor.id()) else {
+            let _ = anchor.kill();
+            let _ = anchor.wait();
+            panic!("the group anchor's pid {} is not a process id", anchor.id());
+        };
+        let mut scope = Self {
+            anchor,
+            group,
+            helper: None,
+            settled: false,
+        };
+        scope.helper = Some(
+            helper
+                .process_group(group)
+                .spawn()
+                .expect("the helper process"),
+        );
+        scope
+    }
+
+    fn wait(&mut self, bound: Duration) -> Option<std::process::ExitStatus> {
+        let deadline = std::time::Instant::now() + bound;
+        let ended = loop {
+            match self.helper.as_mut().map(std::process::Child::try_wait) {
+                Some(Ok(Some(status))) => break Some(status),
+                Some(Err(error)) => {
+                    let settled = self.settle();
+                    panic!("poll the recorded-shell helper: {error}; its group: {settled:?}");
+                }
+                Some(Ok(None)) | None => {}
+            }
+            if std::time::Instant::now() >= deadline {
+                break None;
+            }
+            crate::workspace_manager::fixture::rest(Duration::from_millis(10));
+        };
+        if let Err(error) = self.settle() {
+            panic!("the recorded-shell helper's group: {error}");
+        }
+        ended
+    }
+
+    fn settle(&mut self) -> Result<(), String> {
+        self.settled = true;
+        let mut problems = Vec::new();
+        // SAFETY: `group` is the pid of `anchor`, this scope's own child, which leads the group and
+        // is collected only below, after this signal; until then the id is this child's and
+        // cannot be reused, so the signal reaches the anchor and every process still in its group
+        // (the helper, if it has not ended, and whatever of its descendants stayed in the group)
+        // and nothing else.
+        if unsafe { libc::kill(-self.group, libc::SIGKILL) } != 0 {
+            problems.push(format!(
+                "SIGKILL to group {}: {}",
+                self.group,
+                std::io::Error::last_os_error()
+            ));
+        }
+        let bound = crate::agent::proc::test_support::ISOLATED_CHILD_COLLECTION_BOUND;
+        let deadline = std::time::Instant::now() + bound;
+        let mut helper = self.helper.is_none();
+        let mut anchor = false;
+        while !(helper && anchor) {
+            for (what, child, done) in [
+                ("helper", self.helper.as_mut(), &mut helper),
+                ("group anchor", Some(&mut self.anchor), &mut anchor),
+            ] {
+                let Some(child) = child.filter(|_| !*done) else {
+                    continue;
+                };
+                match child.try_wait() {
+                    Ok(Some(_)) => *done = true,
+                    Ok(None) => {}
+                    Err(error) => {
+                        problems.push(format!("collect the {what}: {error}"));
+                        *done = true;
+                    }
+                }
+            }
+            if helper && anchor {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                problems.push(format!(
+                    "helper collected {helper}, group anchor collected {anchor}, {bound:?} after \
+                     the SIGKILL"
+                ));
+                break;
+            }
+            crate::workspace_manager::fixture::rest(Duration::from_millis(10));
+        }
+        if problems.is_empty() {
+            Ok(())
+        } else {
+            Err(problems.join("; "))
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for RecordedShellScope {
+    fn drop(&mut self) {
+        if self.settled {
+            return;
+        }
+        if let Err(error) = self.settle() {
+            crate::workspace_manager::fixture::say(&format!(
+                "the recorded-shell helper's group, settled on unwind: {error}"
+            ));
+        }
+    }
 }
 
 #[cfg(unix)]

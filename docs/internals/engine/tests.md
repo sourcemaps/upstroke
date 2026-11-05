@@ -3505,18 +3505,37 @@ Runs [`recorded_shell_helper`] in a process of its own whose `PATH` starts with 
 fake shell's directory, so the shell is available to that process alone and to no other
 test.
 
-`agent::proc::test_support::run_test_isolated` owns that process. It leads a process
-group of its own, and its stdout and stderr go to files in a scratch tree, not to pipes,
-so nothing it leaves running can hold the wait open. The wait is bounded at 300 seconds,
-the bound `a_legacy_run_under_an_inherited_selection_checks_its_review_input_at_the_selected_repository`
-gives a whole run in such a child; past it the group is killed and the child collected
-within `ISOLATED_CHILD_COLLECTION_BOUND`, or the test fails rather than wait for it.
-Each caller requires a successful exit status and `1 passed`, and prints the child's
-status, stdout and stderr when that does not hold, so a child killed at the bound, one
-that failed and one that matched no test all fail with their diagnostics.
-The `Command::output` this replaced waited without a bound for the child and for every
-holder of its pipes (PR12-R7-RECORDED-SHELL-HELPER-UNBOUNDED, with its correlated
+[`RecordedShellScope`] owns that process and its process group. Its stdout and stderr
+go to files in a scratch tree, not to pipes, so nothing it leaves running can hold the
+wait open, and its stdin is null, as `Command::output` made it. The wait is bounded at
+300 seconds, the bound
+`a_legacy_run_under_an_inherited_selection_checks_its_review_input_at_the_selected_repository`
+gives a whole run in a child of its own. Each caller requires a successful exit status
+and `1 passed`, and prints the child's status, stdout and stderr when that does not
+hold, so a child killed at the bound (status `None`), one that failed and one that
+matched no test all fail with their diagnostics. The `Command::output` this replaced
+waited without a bound for the child and for every holder of its pipes
+(PR12-R7-RECORDED-SHELL-HELPER-UNBOUNDED, with its correlated
 PR12-CI2-RECORDED-SHELL-HELPER-UNBOUNDED).
+
+## `struct RecordedShellScope {`
+
+The recorded-shell helper's process group, owned on every way out. An anchor
+(`/bin/sleep`) starts first, leading a group of its own, and the helper joins that
+group. The anchor is collected only after the group has been killed, so the group id is
+this test's for the whole scope — after the helper has been collected, and even if the
+anchor has exited — and the kill cannot reach a process that reused it. `settle` sends
+`SIGKILL` to the group and then collects the helper and the anchor within
+`ISOLATED_CHILD_COLLECTION_BOUND`. It runs when the helper ends, successfully or not,
+so whatever of its descendants stayed in its group dies with the anchor; at the bound;
+when polling the helper fails; and from `Drop`, so a panic between the helper's start
+and its settlement settles it too. A settlement that cannot collect both within its
+bound fails the test or, while unwinding, says so, and leaves the rest to this process's
+exit. Descendants that left the group, as the engine's commands and their reapers each
+do, are the engine's to settle, as after any run. `agent::proc::test_support::run_test_isolated`,
+which this fix first used, kills its child's group only at its deadline: it collects a
+child that ended by itself without settling the group, and a failed poll panics with the
+child unkilled and no guard to settle it.
 
 ## `fn recorded_shell_helper() {`
 
