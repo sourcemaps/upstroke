@@ -3505,6 +3505,19 @@ Runs [`recorded_shell_helper`] in a process of its own whose `PATH` starts with 
 fake shell's directory, so the shell is available to that process alone and to no other
 test.
 
+`agent::proc::test_support::run_test_isolated` owns that process. It leads a process
+group of its own, and its stdout and stderr go to files in a scratch tree, not to pipes,
+so nothing it leaves running can hold the wait open. The wait is bounded at 300 seconds,
+the bound `a_legacy_run_under_an_inherited_selection_checks_its_review_input_at_the_selected_repository`
+gives a whole run in such a child; past it the group is killed and the child collected
+within `ISOLATED_CHILD_COLLECTION_BOUND`, or the test fails rather than wait for it.
+Each caller requires a successful exit status and `1 passed`, and prints the child's
+status, stdout and stderr when that does not hold, so a child killed at the bound, one
+that failed and one that matched no test all fail with their diagnostics.
+The `Command::output` this replaced waited without a bound for the child and for every
+holder of its pipes (PR12-R7-RECORDED-SHELL-HELPER-UNBOUNDED, with its correlated
+PR12-CI2-RECORDED-SHELL-HELPER-UNBOUNDED).
+
 ## `fn recorded_shell_helper() {`
 
 The recorded-shell guards' child. `create` makes and parks a zero-gate run under the

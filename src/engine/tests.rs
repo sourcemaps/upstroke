@@ -18867,24 +18867,22 @@ fn with_shells_on_path(
     repo: &Path,
     config: &Path,
     mode: &str,
-) -> std::process::Output {
+) -> crate::agent::proc::test_support::Isolated {
     let mut directories = vec![shells.to_path_buf()];
     directories.extend(std::env::split_paths(
         &std::env::var_os("PATH").unwrap_or_default(),
     ));
-    Command::new(std::env::current_exe().expect("this test binary"))
-        .args([
-            "--exact",
-            "engine::tests::recorded_shell_helper",
-            "--ignored",
-            "--nocapture",
-        ])
-        .env("PATH", std::env::join_paths(directories).expect("a PATH"))
-        .env("UPSTROKE_RECORDED_SHELL_REPO", repo)
-        .env("UPSTROKE_RECORDED_SHELL_CONFIG", config)
-        .env("UPSTROKE_RECORDED_SHELL_MODE", mode)
-        .output()
-        .expect("the helper process")
+    let path = std::env::join_paths(directories).expect("a PATH");
+    crate::agent::proc::test_support::run_test_isolated(
+        "engine::tests::recorded_shell_helper",
+        &[
+            ("PATH", path.as_os_str()),
+            ("UPSTROKE_RECORDED_SHELL_REPO", repo.as_os_str()),
+            ("UPSTROKE_RECORDED_SHELL_CONFIG", config.as_os_str()),
+            ("UPSTROKE_RECORDED_SHELL_MODE", std::ffi::OsStr::new(mode)),
+        ],
+        Duration::from_secs(300),
+    )
 }
 
 #[cfg(unix)]
@@ -18990,9 +18988,9 @@ fn a_zero_gate_schema_4_resume_refuses_its_unavailable_recorded_shell_whatever_t
     git_in(&repo, &["commit", "-q", "-m", "a run under cmd"]);
     let created = with_shells_on_path(&shells, &repo, &repo.join("upstroke.toml"), "create");
     assert!(
-        created.status.success(),
-        "the run is created where `cmd` runs: {}",
-        String::from_utf8_lossy(&created.stderr)
+        created.status.is_some_and(|status| status.success())
+            && created.stdout.contains("1 passed"),
+        "the run is created where `cmd` runs: {created}"
     );
     let run_id = rundir::latest_run(&repo).expect("the created run");
     until_released(&repo, &run_id);
@@ -19031,9 +19029,9 @@ fn a_zero_gate_schema_4_resume_refuses_its_unavailable_recorded_shell_whatever_t
 
     let continued = with_shells_on_path(&shells, &repo, &today, "resume");
     assert!(
-        continued.status.success(),
-        "the run stayed resumable: {}",
-        String::from_utf8_lossy(&continued.stderr)
+        continued.status.is_some_and(|status| status.success())
+            && continued.stdout.contains("1 passed"),
+        "the run stayed resumable: {continued}"
     );
 }
 
