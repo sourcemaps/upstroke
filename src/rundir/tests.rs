@@ -12127,6 +12127,7 @@ fn build_refusals() -> Vec<BuildRefusal> {
                 target: PathBuf::new(),
                 public: PathBuf::new(),
                 run_id: String::new(),
+                incarnation: String::new(),
             }
         }
 "#,
