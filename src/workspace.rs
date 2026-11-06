@@ -17,7 +17,7 @@ use crate::events::PreparedCommit;
 use crate::runner::host::{GitdirRule, ManagedRepository, RECORDED_OBJECTS_INCLUDE};
 use crate::workspace_manager::{
     Again, COMMON_DIR, INDEX_SELECTOR, NO_REPLACEMENT_OBJECTS, RegistryHold, WORK_TREE_SELECTORS,
-    keeps_common_dir, tolerant_registry_access,
+    keeps_common_dir, strip_verbatim, tolerant_registry_access,
 };
 
 pub struct Workspace {
@@ -166,10 +166,18 @@ impl Workspace {
         let private_root =
             private_root.map_or_else(crate::rundir::default_private_root, Path::to_path_buf);
         let common = self.git_path(&["rev-parse", "--path-format=absolute", "--git-common-dir"])?;
-        let common = fs::canonicalize(&common).map_err(|source| UpstrokeError::Io {
-            path: common.clone(),
-            source,
-        })?;
+        // Spelled as `WorkspaceManager::common_git_dir` spells it: canonical,
+        // and without Windows' verbatim prefix. Every slot's `.git` file is
+        // written from the manager's spelling and the include's conditions
+        // from this one, so `entry::one_spelling` requires the two to be
+        // equal. The conditions themselves are unchanged by the strip:
+        // `GitdirRule::Windows` drops the prefix from its spelling either way.
+        let common = fs::canonicalize(&common)
+            .map(strip_verbatim)
+            .map_err(|source| UpstrokeError::Io {
+                path: common.clone(),
+                source,
+            })?;
         let directory =
             std::path::absolute(private_root.join("git")).map_err(|source| UpstrokeError::Io {
                 path: private_root.to_path_buf(),
@@ -2938,7 +2946,9 @@ mod tests {
             .expect("the scope the v0.1 runner reads");
         assert_eq!(
             scope.common_dir(),
-            fs::canonicalize(repo.join(".git")).expect("the canonical common directory"),
+            strip_verbatim(
+                fs::canonicalize(repo.join(".git")).expect("the canonical common directory"),
+            ),
         );
         let include = private.join("git").join("recorded-objects.gitconfig");
         assert_eq!(scope.include(), include);
@@ -2982,6 +2992,27 @@ mod tests {
             .map(|entry| entry.file_name())
             .collect();
         assert_eq!(staged.len(), 1, "no staged copy is left behind: {staged:?}");
+    }
+
+    /// Root's D2 (b) from the include's side, over a real repository: the scope
+    /// spells the common directory exactly as `WorkspaceManager::common_git_dir`
+    /// does, which `engine::topology::entry::one_spelling` requires of every
+    /// schema-4 run and resume before any role. On Windows the scope kept the
+    /// verbatim prefix the manager strips, and that check refused them all (CI
+    /// run 41520547341). Only a Windows host produces the prefix, so elsewhere
+    /// this holds without discriminating.
+    #[test]
+    fn the_recorded_objects_scope_spells_the_common_directory_as_the_workspace_manager_does() {
+        let fixture = crate::workspace_manager::fixture::Fixture::new("scope-spelling");
+        let scope = Workspace::open(&fixture.base)
+            .expect("open the managed base")
+            .recorded_objects_scope(Some(&fixture.private))
+            .expect("the include's repository");
+        assert_eq!(
+            scope.common_dir(),
+            fixture.manager.common_git_dir(),
+            "the include and the workspace manager spell one common directory two ways"
+        );
     }
 
     #[test]

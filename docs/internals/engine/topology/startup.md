@@ -134,7 +134,11 @@ Inputs
 Everything both halves need, as one value.
 
 **There is one `authorized_root` and both halves census it.** `R` is computed
-read-only by recovery step (a0) before any lock is taken, and half (a)'s
+read-only before any lock is taken — by recovery step (a0) on a resume, by
+`prelock::check` for a fresh run's explicit root — except for a fresh run's
+default root, which may not exist until the include's publication under the
+worktree lease creates it and is canonicalized only then, still before this
+census (`engine/topology/entry.md`). Half (a)'s
 `private_root` and half (b)'s ownership root are the same field here rather
 than two parameters that a caller could disagree with itself about. A
 container census under one root followed by an ownership proof under another
@@ -152,7 +156,10 @@ it, or the husk is a directory copied from another repository.
 
 ## `pub struct CensusInputs<'a>` › `pub authorized_root: &'a Path,`
 
-The authorized private root `R`, computed read-only before any lock.
+The authorized private root `R`: computed read-only before any lock for a
+resume and for an explicit root, and for a fresh run's default root
+canonicalized under the worktree lease once the include's publication has
+created it, before this census.
 
 ## `pub struct CensusInputs<'a>` › `pub incarnation: &'a str,`
 
@@ -299,6 +306,58 @@ attempt, because of a different run's residue.
 side of the same answer, and states the same policy: "it is not a second
 error to report over the one that stopped the run".
 
+## `pub enum RunDirOutcome` › `RootRetained {`
+
+A husk this census would otherwise reclaim, **kept** because of a directory at
+or near its run's execution-root path that nothing proves the run's, or that
+this command cannot settle ([`plan_root_at`], [`unbound_root`]); nothing is
+deleted and the census carries on. `root` is that directory's real path when
+there is one, and `detail` says why.
+
+**What a census settles, and what it keeps (repair15).** A root P3c published
+carries two facts across a crash: the location record in the private half
+(`execution-root.v1.<key>`, the key the root was published under) and the claim
+token inside the root (`claim.<incarnation>`, the incarnation the marker and
+the owner record carry). A proven, uncommitted husk whose recorded root carries
+that token is this run's, wherever this command's own context would put a root,
+and the census retires it ([`RunDirOutcome::ReclaimedRootAndBothHalves`]). It is
+kept, with its real locator, only when:
+
+* the private half records no location, or a record this version does not
+  write, or two — a run created before the record existed, or another actor's
+  directory: an unknown history acquires no proof;
+* this command's effective common directory derives another repository key
+  than the record's, or this command cannot derive one at all: the root stays
+  where it was published until a write command in the creating context settles
+  it (the context-rebind rule; the record, never the current `GIT_COMMON_DIR`,
+  locates the root);
+* the recorded root holds something besides empty scaffolding and the token;
+* a token entry is not a real directory, or something cannot be read;
+* the husk is target-absent (no private half, so no record) and a directory of
+  its run's name exists under the census's root or the marker's own root.
+
+A directory at the recorded path **without** the run's token, or one of the
+run's name under another key, is another actor's: it is never touched, it is
+named in the entry's `left_alone`, and it does not stop the run's own provable
+halves from converging.
+
+## `pub enum RunDirOutcome` › `ReclaimedRootAndBothHalves {`
+
+The run's own published root retired into its private half through
+`Worktree.RemoveExecutionRoot`'s retiring form (scaffolding first, then the root
+renamed with its token inside, then the barrier), and then the private half
+through the proof token — which takes the retired tree with it — and the public
+directory with the marker last.
+
+## `pub enum FailedStep` › `ExecutionRoot,`
+
+The run's published root could not be retired — the retirement funnel refused
+(containment, an occupied or unreadable retirement destination, a rename that
+would not run) or its barrier failed, possibly after its rename. Both halves
+are kept, with the location record and the marker, so the proof and the locator
+survive until a later census completes the retirement durably. Nothing about
+the private half is known to have been deleted.
+
 ## `pub enum RunDirOutcome` › `step: FailedStep,`
 
 Which effect refused, and therefore what is left on disk.
@@ -399,6 +458,20 @@ its entry is always a retention: see `fn scan_classified(`.
 
 What was done, and why.
 
+## `pub struct RunDirEntry` › `pub left_alone: Vec<PathBuf>,`
+
+Directories named after this run that the census found and did not touch,
+because nothing proves them the run's: one at the recorded root path without
+the run's token, or one under another repository key. The operator is told of
+them in the entry's sentence.
+
+## `impl RunDirEntry` › `pub fn needs_operator(&self) -> bool {`
+
+Whether the entry is one an operator must hear of (PR12-INV8-STARTUP-CENSUS-
+REPORT-DROPPED): retained, root-retained or unreclaimable, or any entry that
+left a directory of the run's name alone. A reclaim, a repair, a committed run
+and a skipped live husk are not.
+
 ## `impl RunDirEntry` › `pub const fn retain_reason(&self) -> Option<&RetainReason> {`
 
 The reason this directory was retained, when it was.
@@ -465,6 +538,28 @@ no [`RetainReason`], because nothing was *classified* as unremovable —
 the plan was to remove and the funnel refused. A caller that wants
 "everything still on disk after this census" asks both.
 
+## `impl RunDirCensusReport` › `pub fn operator_lines(&self) -> Vec<String> {`
+
+The report as the operator reads it: one line per entry that
+[`RunDirEntry::needs_operator`], each [`RunDirEntry::describe`] — the run id,
+the public locator, what was kept and why, and the private locator when the
+marker names one. The fresh composition (`entry.rs`) and the resume
+composition (`recover.rs`) put these lines in the run's warnings and attach
+them to every error the command ends with after the census, so a later
+startup or recovery failure still reports them. Diagnostics only: nothing here
+reclaims, authorizes or relabels anything.
+
+## `pub fn container_lines(report: &CensusReport) -> Vec<String> {`
+
+Half (a)'s part of the same report: each container the census reclaimed, with
+the boundary its intent named, and each staged container intent kept because
+another owner's. A container census that refused ends the command before half
+(b) runs (half (a) precedes half (b)), so there is then no run-directory report
+to carry, and none is invented. A container census that completed is reported
+even when half (b) then fails: both compositions attach these lines to half
+(b)'s error ([`both_halves`], `ResumeCensused::census`), so the report is never
+deferred until both halves succeed.
+
 ## `pub struct StartupCensus {`
 
 Both halves' results, and nothing else.
@@ -519,8 +614,9 @@ Whatever half (a) refuses with — an unreachable runtime with intents present,
 an intent naming this process's own incarnation, a labeled container whose
 ownership cannot be established, a dead container that cannot be observed
 terminated — and [`UpstrokeError::Io`] from half (b) when the runs directory
-exists and cannot be enumerated. A reclaim or a repair that fails in half (b)
-is a [`RunDirOutcome::Unreclaimable`] entry and not an error.
+exists and cannot be enumerated, carrying half (a)'s [`container_lines`] as
+its warnings. A reclaim or a repair that fails in half (b) is a
+[`RunDirOutcome::Unreclaimable`] entry and not an error.
 
 ## `fn both_halves(`
 
@@ -535,6 +631,14 @@ intent namespace's own evidence of who a running container belonged to.
 (a). Its own contract is "refuse before any effect" if any container
 classification refuses, so an `Err` here means nothing was reclaimed and
 half (b) has not touched the disk either.
+
+## `let run_dirs = census_run_dirs(hooks, inputs, start.own_run())`
+
+(b). Half (a) has completed by now and what it reclaimed is gone, so an `Err`
+here — the runs directory exists and cannot be enumerated — must not end the
+command without a word of it. The error stays half (b)'s own, its variant and
+its text unchanged, and carries half (a)'s [`container_lines`] as its
+warnings. Nothing is reclaimed or authorized on the error's behalf.
 
 ## `pub(crate) fn census_run_dirs(`
 
@@ -614,6 +718,16 @@ and is spent by [`rundir::remove_private_husk`]. Holding it here rather than
 re-proving in phase 2 is what makes "the proof that authorized this deletion"
 and "the proof this census computed" the same object.
 
+`Planned::SettleRootThenBothHalves` carries the same token, the manager whose
+root equals the recorded one, the run's claim token, the retirement destination
+in the private half and whether the root is the run's (`ours`). Its first effect
+is always the retirement funnel — a retirement when `ours`, otherwise its
+barrier alone — and the private half goes only after that returned `Ok`.
+
+`Planned::KeepForRoot` is the reclaim [`plan_root_at`] or [`unbound_root`]
+stopped: no effect, as for `Retain`, and reported as
+[`RunDirOutcome::RootRetained`].
+
 ## `fn scan(run_id: &str, inputs: &CensusInputs<'_>, own_run: Option<&str>) -> Scanned {`
 
 Classify one directory, read-only, and hand the classification to the decision.
@@ -648,7 +762,7 @@ four spellings that would undo it.
 The `Indeterminate` arm asks nothing further about the directory, and that is
 the arm's whole content — see below.
 
-## `fn scan_classified(` › `RunDirClass::Indeterminate => Scanned {`
+## `fn scan_classified(` › `RunDirClass::Indeterminate => plain(`
 
 **The retaining answer, taken before any second observation.** The probe could
 not read this directory's `events.jsonl`; the lock probe, the marker read and
@@ -659,9 +773,9 @@ of them folds its own failures towards reclaiming — `read_dir_names` answers
 asking them and hoping. Nothing is deleted and nothing is repaired, and the
 entry names why: `RetainReason::ClassificationIncomplete`.
 
-`locator: None` for the same reason. The marker would parse and would name a
-private half, but a locator is a claim about a private half this census has
-deliberately not reasoned about.
+The locator is `None` for the same reason. The marker would parse and would
+name a private half, but a locator is a claim about a private half this census
+has deliberately not reasoned about.
 
 ## `fn scan_classified(` › `let lock_held = rundir::is_running(&public);`
 
@@ -678,9 +792,9 @@ here**", and the stale-marker sentence's "otherwise its live owner
 removes it in recovery step (a)" is the same removal from the other
 side. It licenses the marker repair and nothing else.
 
-## `fn scan_classified(` › `locator: None,`
+## `fn scan_classified(` › `plain(public, None, plan)`
 
-A committed run's private half is bound by
+No locator: a committed run's private half is bound by
 `run_started.private_dir`, which recovery step (a) verifies. A
 marker on it is stale residue, not a binding to report.
 
@@ -705,7 +819,13 @@ is recomputed here to mint one. A second answer that is not `Proven`
 differ — a commit record that has since appeared, an owner record that
 has since been rewritten — is a reason not to delete.
 
-## `fn apply(hooks: &mut dyn RunDirHooks, public: &Path, plan: Planned) -> RunDirOutcome {`
+A proven husk's root is decided by [`plan_root`]: nothing of the run's name
+anywhere and no record (reclaim the halves), a record (settle through the
+retirement funnel, then the halves), or something it cannot prove or settle
+(`Planned::KeepForRoot`). The husks with a marker whose private half is gone
+(`TargetAbsent`) go through [`unbound_unless_rooted`].
+
+## `fn apply(hooks: &mut dyn TopologyHooks, public: &Path, plan: Planned) -> RunDirOutcome {`
 
 Perform one plan. The only place in this module that has an effect.
 
@@ -715,7 +835,7 @@ directory's residue cannot end the command that censused it. The retain arm
 keeps a second guarantee it had before: it reaches no funnel at all, which is
 now visible in the signature as well as in the body.
 
-## `fn apply(hooks: &mut dyn RunDirHooks, public: &Path, plan: Planned) -> RunDirOutcome {` › `if let Err(error) = rundir::remove_private_husk(proof, hooks) {`
+## `fn apply(hooks: &mut dyn TopologyHooks, public: &Path, plan: Planned) -> RunDirOutcome {` › `Planned::ReclaimBothHalves(proof) => reclaim_both_halves(hooks, public, proof, None),`
 
 The order is load-bearing: "the census reclaims the private half
 through the proof-token funnel, **then** the public directory with
@@ -730,10 +850,131 @@ with the directory and that marker is the private half's only
 locator. The creator states the identical rule at its own
 `RunDir.RemovePrivateHusk`; this is the census's half of it.
 
-## `fn apply(hooks: &mut dyn RunDirHooks, public: &Path, plan: Planned) -> RunDirOutcome {` › `Planned::Retain(reason) => RunDirOutcome::Retained(reason),`
+## `fn apply(hooks: &mut dyn TopologyHooks, public: &Path, plan: Planned) -> RunDirOutcome {` › `Planned::Retain(reason) => RunDirOutcome::Retained(reason),`
 
 Arm (iii). No effect, by construction rather than by discipline:
 there is no funnel call on this path at all.
+
+## `fn reclaim_both_halves(`
+
+The private half through the proof token, then the public directory with the
+marker last; `retired` names the root a retirement just took, for the outcome.
+
+## `pub(crate) enum RootPlan {`
+
+What [`plan_root_at`] decided for a proven husk's root: `Nothing` (no record and
+nothing of the run's name anywhere), `Settle` (a valid record; `ours` when the
+recorded root carries the run's token), or `Keep` (the real path and the
+reason). `left_alone` lists the directories of the run's name that are not its
+own. `Settle` carries a [`RootToSettle`].
+
+## `pub(crate) enum RootToSettle {`
+
+How a settled root is retired (repair16, `PR12-INV9-RECORDED-ROOT-CONTEXT-CONVERGENCE`).
+`Derived` when the record's key is the one this command derives -- the manager's own
+retirement, as before. `Recorded` when the record names another key (the run was created
+under a different Git context, a common directory this command no longer sees): the root is
+`<R>/workspaces/<recorded key>/<run id>`, and its retirement goes through
+`WorkspaceManager::retire_recorded_execution_root`, which takes the key from the proven private
+half's own location record and the token from the incarnation that same proof authenticated,
+never from a caller's string, and refuses what that proof does not bind (another run, another
+incarnation, a committed husk, a held run, a path that is not under the private root's
+`runs/<run id>`, a reparse point on the chain). `path()` is the root either way; `retire` takes
+the proof.
+
+## `pub(crate) fn plan_root_at(`
+
+The census's decision for a proven, uncommitted husk's root, read-only from end
+to end, and the one `status` asks too ([`husk_root_view`]).
+
+1. A run id that cannot have a root answers `Nothing` ([`could_have_a_root`]).
+2. [`roots_named`] lists every directory named after this run under
+   `<canonical authorized root>/workspaces/*`. Only the run's own name is
+   looked up, so a live run of another worktree, which has its own id, is
+   never among them, and nothing here deletes.
+3. The location record is read strictly (`create::read_location_record`). No
+   record: `Nothing` when nothing was found (by P3c's order no root of a run
+   without a record was ever published), else `Keep` — an unknown history
+   acquires no proof. A malformed record, two records, or a retired tree in
+   the private half with no record: `Keep` unless nothing was found and no
+   retired tree is there.
+4. With a record naming key `k`, the root is `<R>/workspaces/<k>/<run id>`; the
+   other directories found are left alone. Whether it is the run's is its
+   token, `claim.<marker incarnation>`, as a real directory.
+5. This command's `WorkspaceManager` is derived (the marker's incarnation, the
+   authorized root, the current repository). A derive error is `Keep`. A key
+   other than `k` was `Keep` until repair16; it is now `Settle` with
+   `RootToSettle::Recorded` over the recorded root, so a husk created under
+   another Git context converges like one created here
+   (`PR12-INV9-RECORDED-ROOT-CONTEXT-CONVERGENCE`).
+6. A root of the run's holding anything but empty scaffolding and the token is
+   `Keep`. Otherwise `Settle`.
+
+**The durable replay (PROTOCOL-5).** Every `Settle` is applied through the
+retirement funnel before the private half goes — a retirement when the root is
+the run's, its barrier alone otherwise — so the root's absence from its path is
+made durable by this census, not inferred from a read a moment after an
+earlier retirement that may have been cut before its own barrier.
+
+## `pub(crate) fn plan_root(`
+
+[`plan_root_at`] over a census's inputs.
+
+## `pub(crate) fn husk_root_view(`
+
+`status <husk id>`'s view of a husk's root, from the same [`plan_root_at`] and
+[`unbound_root`] the census acts on, so the two cannot disagree about a root. A
+recorded root under another key says so ("under repository key `k`, which its
+location record names").
+Read-only: the proof token is dropped unspent and nothing is created, removed
+or synced. `None` leaves `status`'s own sentence (`HuskDisposition::describe`).
+`status` asks under the default private root, as it always has.
+
+## `fn unbound_unless_rooted(`
+
+The public-only reclaim of a husk, unless a directory of its run's name exists.
+Only `TargetAbsent` asks — a valid marker naming a private half that is gone:
+with the private half gone there is no location record and nothing proves a
+root, and the marker is all that locates one, so the husk is kept while such a
+directory exists. A husk with no marker (`Bare`, `StagedMarkerOnly`) never
+reached P1, and so never P3c: no root of its run exists, and its reclaim is
+unchanged.
+
+## `pub(crate) fn unbound_root(`
+
+The directories of a target-absent husk's run name, under the census's root and
+under the private root the marker's own locator hangs from (a target-absent
+proof is answered before the locator is checked against the census's root).
+
+## `fn roots_named(run_id: &str, bases: &[PathBuf]) -> Result<Vec<PathBuf>, (PathBuf, String)> {`
+
+Every `<base>/workspaces/<entry>/<run id>` that exists or cannot be read, read
+with `symlink_metadata` and never followed; a `workspaces` directory that
+cannot be listed is an error naming it. Sorted, so a report is stable.
+
+## `fn marker_incarnation(public: &Path) -> Result<String, String> {`
+
+The marker read again for its incarnation: the claim token's name and the
+manager's instance tag both come from it. Unreadable is a reason to keep.
+
+## `fn marker_private_root(public: &Path, run_id: &str) -> Option<PathBuf> {`
+
+The private root a marker's `<root>/runs/<run id>` locator hangs from, when the
+locator has that shape and the root resolves.
+
+## `fn could_have_a_root(run_id: &str) -> bool {`
+
+Whether `run_id` has the one shape `WorkspaceManager::derive` accepts (its
+private `is_canonical_ulid`): twenty-six uppercase Crockford base32
+characters, the first `0` to `7`. P3c publishes a root only through a manager
+derived for its run's id, so no creator ever made a root for an id of any
+other shape, and [`plan_root_at`] and [`unbound_root`] answer that nothing is
+there without looking. Every other `derive` refusal — a repository Git cannot
+read, a registry that does not answer — keeps the husk.
+
+The copy is held to `derive`'s own answer by
+`startup::tests::the_censuss_run_id_shape_is_the_one_the_workspace_manager_derives_roots_for`,
+over a canonical id and each way of not being one.
 
 ## `fn unreclaimable(step: FailedStep, error: &UpstrokeError) -> RunDirOutcome {`
 
@@ -811,6 +1052,15 @@ The lock this witness is holding.
 ## `impl WorktreeLocked` › `#[allow(dead_code)]` (trailing)
 
 never called at 610106b; see `PR7-NARROWED-SURFACE-19-UNCALLED` (§2)
+
+## `impl WorktreeLocked` › `pub fn into_lock(self) -> WorktreeLock {`
+
+Hands the lock back, consuming the witness. The production creation chain
+(`engine::topology::entry`, PR12) takes the lock "across the startup census
+and the whole run": the census consumes the witness, `FreshCensused::into_parts`
+returns it, and this gives the lock itself to `Started::into_handle`, which
+holds it in the `RunHandle` until the run ends. There is no point between
+the acquisition and the handle at which the lock is released.
 
 ## `mod witness` › `mod fresh {`
 

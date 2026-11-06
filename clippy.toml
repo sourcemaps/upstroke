@@ -127,6 +127,7 @@ disallowed-methods = [
     { path = "libc::raise", reason = "UPSTROKE-EFFECT: signals this process" },
     { path = "libc::_exit", reason = "UPSTROKE-EFFECT: terminates the process without unwinding" },
     { path = "libc::syscall", reason = "UPSTROKE-EFFECT: an arbitrary kernel call; close_range and getdents64 reach the kernel through it" },
+    { path = "libc::renamex_np", reason = "UPSTROKE-EFFECT R18: renames a directory without replacing; Worktree.CreateExecutionRoot publishes and Worktree.RemoveExecutionRoot retires a fresh root with it", allow-invalid = true },
 
     # -- windows_sys: process, job, and the file locks ----------------------
     # "windows_sys process, job, and LockFileEx/UnlockFileEx functions".
@@ -137,6 +138,7 @@ disallowed-methods = [
     # `effects::tests::every_platform_conditional_denial_names_something_real`.
     { path = "windows_sys::Win32::Storage::FileSystem::LockFileEx", reason = "UPSTROKE-EFFECT R17/R25: lock acquisition is Lock.Acquire*" },
     { path = "windows_sys::Win32::Storage::FileSystem::UnlockFileEx", reason = "UPSTROKE-EFFECT R17: lock release is Lock.Release" },
+    { path = "windows_sys::Win32::Storage::FileSystem::MoveFileExW", reason = "UPSTROKE-EFFECT R18: moves a directory without replacing; Worktree.CreateExecutionRoot publishes and Worktree.RemoveExecutionRoot retires a fresh root with it" },
     { path = "windows_sys::Win32::System::Threading::CreateProcessW", reason = "UPSTROKE-EFFECT R22: Spawn.CreatedSuspended" },
     { path = "windows_sys::Win32::System::Threading::OpenProcess", reason = "UPSTROKE-EFFECT R22: takes a handle on another process" },
     { path = "windows_sys::Win32::System::Threading::TerminateProcess", reason = "UPSTROKE-EFFECT R22: kills a process" },
@@ -208,12 +210,12 @@ disallowed-methods = [
     # under its own recorded allow of `clippy::disallowed_methods`.
     { path = "upstroke::engine::coordinator::run", reason = "UPSTROKE-WRAPPER: the legacy run entry point; run_with with the built-in adapters supplied" },
     { path = "upstroke::engine::coordinator::run_with", reason = "UPSTROKE-WRAPPER: the legacy run entry point; run_harness over a Harness of the given adapters" },
-    { path = "upstroke::engine::coordinator::run_harness", reason = "UPSTROKE-WRAPPER: the legacy run entry point; run_harness_on with the legacy-workspace HostRunner supplied" },
+    { path = "upstroke::engine::coordinator::run_harness", reason = "UPSTROKE-WRAPPER: the run entry point; with the topology active it establishes containment, publishes the recorded-objects include and drives engine::topology::entry's schema-4 creation, and for the test configuration's legacy writer it calls run_harness_on with the legacy-workspace HostRunner supplied" },
     { path = "upstroke::engine::coordinator::run_harness_on", reason = "UPSTROKE-WRAPPER: the legacy run on an explicit Runner; run_contained with production's containment step supplied" },
     { path = "upstroke::engine::coordinator::run_contained", reason = "UPSTROKE-WRAPPER: establishes containment, then drives run_harness_inner_on" },
     { path = "upstroke::engine::resume::resume", reason = "UPSTROKE-WRAPPER: the legacy resume entry point; resume_with with the built-in adapters supplied" },
     { path = "upstroke::engine::resume::resume_with", reason = "UPSTROKE-WRAPPER: the legacy resume entry point; resume_harness over a Harness of the given adapters" },
-    { path = "upstroke::engine::resume::resume_harness", reason = "UPSTROKE-WRAPPER: the legacy resume entry point; resume_harness_on with the legacy-workspace HostRunner supplied" },
+    { path = "upstroke::engine::resume::resume_harness", reason = "UPSTROKE-WRAPPER: the resume entry point; it establishes containment, resumes a schema-4 log through engine::topology::entry after publishing the recorded-objects include under the run's recorded root, and every other log through resume_harness_on with the legacy-workspace HostRunner supplied" },
     { path = "upstroke::engine::resume::resume_harness_on", reason = "UPSTROKE-WRAPPER: the legacy resume on an explicit Runner; resume_contained with production's containment step supplied" },
     { path = "upstroke::engine::resume::resume_contained", reason = "UPSTROKE-WRAPPER: establishes containment, then drives resume_harness_inner_on" },
 

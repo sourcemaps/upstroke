@@ -109,6 +109,24 @@ An absent credential volume refuses, and the digest is never computed.
 A `Container` selection with no runtime seam refuses rather than
 silently proceeding as though the inspection had passed.
 
+## `fn a_default_root_is_resolved_before_it_exists_and_authorized_only_once_it_does() {`
+
+Component-level evidence for root's Q4, over the fake runtime. `resolve_runner`
+reads the selection and the runtime and nothing else, so a container
+selection the runtime cannot serve (an image it does not hold, an
+unreachable runtime, no runtime at all) refuses before the default root
+exists, and nothing on the way creates it. `RunnerResolved::authorize` is
+what requires the root: it refuses one that does not exist, creates nothing,
+and succeeds, with the canonical spelling, once something else has created
+it, which in production is the include's publication between the entry's two
+halves. It is component-level: `resolve_runner` takes no root, and the
+gated public-path cell
+(`runner::container::resolve::tests::real_docker_a_schema_4_run_refuses_an_absent_image_before_the_worktree_lock`)
+creates and supplies an explicit private root. Neither shows that the public
+default-root entry composes these steps in this order; that negative cell and
+the fresh-success cell on the default root remain owed in the command-line and
+acceptance work (root's resolve-test follow-through, `6f5a5f4b`).
+
 ## `fn a_private_root_that_is_not_a_real_directory_refuses_before_any_inspection() {`
 
 A private root that is not there refuses read-only, before anything

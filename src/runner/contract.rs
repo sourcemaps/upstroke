@@ -31,6 +31,7 @@ pub struct CommandSpec {
     pub args: Vec<String>,
     pub env: Vec<(String, String)>,
     pub stdin: Vec<u8>,
+    pub settings_file: Option<PathBuf>,
 }
 
 impl CommandSpec {
@@ -57,6 +58,12 @@ impl CommandSpec {
     #[must_use]
     pub fn stdin(mut self, stdin: impl Into<Vec<u8>>) -> Self {
         self.stdin = stdin.into();
+        self
+    }
+
+    #[must_use]
+    pub fn settings_file(mut self, settings_file: Option<PathBuf>) -> Self {
+        self.settings_file = settings_file;
         self
     }
 }
@@ -1679,11 +1686,24 @@ pub(crate) mod tests {
                 "src/runner/container.rs",
                 1,
                 0,
-                0,
-                "the Container funnel's `docker` CLI: one `Command::new(` in \
-                 `DockerCli::exec`, which every container operation converges \
-                 on, and no `.spawn()` because each is an `.output()` the \
-                 funnel waits on. Deliberately NOT routed through the Runner, \
+                2,
+                "the Container funnel's `docker` CLI: one `Command::new(`, in \
+                 `docker_command`, the builder every container operation \
+                 converges on, and no `.spawn()`: every operation runs under \
+                 the process funnel, through the two `run_with_timeout` \
+                 mentions. The attached `docker start --attach --interactive` \
+                 that delivers a command's stdin payload (PR12's D-C) runs \
+                 under it on a thread of its own: the funnel spawns it in its \
+                 own process group, feeds it, bounds its output, stops, \
+                 terminates and reaps it, so a start never waits on the \
+                 workload and the client is never left unowned. Every other \
+                 `docker` question runs through `DockerCli::question`, the \
+                 other mention: the start's questions and the supervision's \
+                 observations end at the invocation's deadline and on its \
+                 cancellation (PR12's J6, J13 and K2), and every other \
+                 question, of collection, cleanup or a census, at the \
+                 runtime's own bound (K2), each keeping the fate the funnel \
+                 established. Deliberately NOT routed through the Runner, \
                  and for the same reason as the two Git rows below — \
                  DESIGN.md:612's \"authoritative Git and the event log never \
                  do\" is about the things that BUILD the boundary rather than \
@@ -2050,7 +2070,7 @@ pub(crate) mod tests {
             ),
             (
                 "src/engine/classify.rs",
-                5,
+                6,
                 3,
                 "what was INLINE in `run_attempt`'s verification ladder: the \
                  diff's two observations and a failed gate, plus the three \
@@ -2060,7 +2080,11 @@ pub(crate) mod tests {
                  raises before any gate runs (`repairs.dispatch`: unresolved \
                  index entries fail capture before gates). Both engines read \
                  these, and this is the only production site that CONSTRUCTS \
-                 a `ReviewPassOutcome`",
+                 a `ReviewPassOutcome`. Plus `interrupted_failure`, the \
+                 interruption a schema-4 report's `interrupted_record` hands \
+                 `attempt_record` for an `attempt_interrupted` settlement, so \
+                 that record is built by the one record builder (J12 \
+                 follow-up)",
             ),
             (
                 "src/engine/coordinator.rs",
@@ -2489,6 +2513,29 @@ fn charge_allowance(&mut self) {}
                 0,
                 "the reviewer's prompt, from the same seam. The role grid \
                  carries it",
+            ),
+            (
+                "src/runner/container.rs",
+                1,
+                0,
+                0,
+                "the Container funnel delivering `CommandSpec::stdin` (PR12's \
+                 D-C): `DockerCli::start` reads the payload off its \
+                 `CoveredStart` once (`covered.stdin()`) and hands it to the \
+                 process funnel as the attached client's input. The payload \
+                 reaches that client's stdin and nothing else: not argv, the \
+                 environment, a mount or a log",
+            ),
+            (
+                "src/runner/container/exec.rs",
+                0,
+                0,
+                2,
+                "the payload's way from the request to the runtime: the `stdin` \
+                 field of `CoveredStart` and the `stdin` parameter of \
+                 `Reaping::cover`, which `contain` hands `request.command.stdin`. \
+                 Neither builds a CommandSpec; both carry its payload to \
+                 `ContainerRuntime::start`",
             ),
             (
                 "src/workspace.rs",

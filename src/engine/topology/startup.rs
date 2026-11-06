@@ -5,12 +5,19 @@ use std::path::{Path, PathBuf};
 use crate::error::UpstrokeError;
 use crate::rundir::{
     self, HuskDisposition, PrivateHalfOwnership, PrivateHalfProof, Reclaimable, RepoKey,
-    RetainReason, RunDirClass, RunDirHooks, UnboundShape,
+    RetainReason, RunDirClass, UnboundShape,
 };
 use crate::runner::container::GitView;
-use crate::runner::container::census::{Census, CensusComplete, CensusStart, run_startup_census};
+use crate::runner::container::census::{
+    Boundary, Census, CensusComplete, CensusReport, CensusStart, StagedDisposition,
+    run_startup_census,
+};
 use crate::runner::container::runtime::{ContainerRuntime, OwnerLiveness};
+use crate::workspace_manager::{EffectHooks, WorkspaceManager};
 
+use super::create::{
+    LocationRecord, RETIRED_ROOT, claim_token, read_location_record, unsettleable,
+};
 use super::seams::TopologyHooks;
 
 pub use witness::{FreshCensused, WorktreeLocked};
@@ -42,6 +49,7 @@ pub enum FailedStep {
     PrivateHalf,
     PublicHalfAfterPrivate,
     StaleMarker,
+    ExecutionRoot,
 }
 
 impl FailedStep {
@@ -50,6 +58,7 @@ impl FailedStep {
         Self::PrivateHalf,
         Self::PublicHalfAfterPrivate,
         Self::StaleMarker,
+        Self::ExecutionRoot,
     ];
 
     #[must_use]
@@ -59,6 +68,7 @@ impl FailedStep {
             Self::PrivateHalf => "private-half",
             Self::PublicHalfAfterPrivate => "public-half-after-private",
             Self::StaleMarker => "stale-marker",
+            Self::ExecutionRoot => "execution-root",
         }
     }
 
@@ -84,6 +94,12 @@ impl FailedStep {
                 "the stale `.creating` marker could not be removed; the run itself is untouched \
                  and the marker is residue the next census repairs"
             }
+            Self::ExecutionRoot => {
+                "the execution root this run published could not be retired into its private \
+                 half, so neither half was touched: the location record and the marker still \
+                 locate the root and its claim token still proves it is this run's, so the \
+                 next census retires it first and then reclaims both halves"
+            }
         }
     }
 }
@@ -92,22 +108,34 @@ impl FailedStep {
 pub enum RunDirOutcome {
     ReclaimedPublicOnly(UnboundShape),
     ReclaimedBothHalves,
+    ReclaimedRootAndBothHalves {
+        root: PathBuf,
+    },
     Retained(RetainReason),
     RepairedStaleMarker,
     Committed,
     Skipped,
-    Unreclaimable { step: FailedStep, detail: String },
+    Unreclaimable {
+        step: FailedStep,
+        detail: String,
+    },
+    RootRetained {
+        root: Option<PathBuf>,
+        detail: String,
+    },
 }
 
 impl RunDirOutcome {
     pub const KINDS: &'static [&'static str] = &[
         "reclaimed-public-only",
         "reclaimed-both-halves",
+        "reclaimed-root-and-both-halves",
         "retained",
         "repaired-stale-marker",
         "committed",
         "skipped",
         "unreclaimable",
+        "root-retained",
     ];
 
     #[must_use]
@@ -115,11 +143,13 @@ impl RunDirOutcome {
         match self {
             Self::ReclaimedPublicOnly(_) => "reclaimed-public-only",
             Self::ReclaimedBothHalves => "reclaimed-both-halves",
+            Self::ReclaimedRootAndBothHalves { .. } => "reclaimed-root-and-both-halves",
             Self::Retained(_) => "retained",
             Self::RepairedStaleMarker => "repaired-stale-marker",
             Self::Committed => "committed",
             Self::Skipped => "skipped",
             Self::Unreclaimable { .. } => "unreclaimable",
+            Self::RootRetained { .. } => "root-retained",
         }
     }
 
@@ -129,6 +159,7 @@ impl RunDirOutcome {
             self,
             Self::ReclaimedPublicOnly(_)
                 | Self::ReclaimedBothHalves
+                | Self::ReclaimedRootAndBothHalves { .. }
                 | Self::Unreclaimable {
                     step: FailedStep::PublicHalfAfterPrivate,
                     ..
@@ -141,6 +172,7 @@ impl RunDirOutcome {
         matches!(
             self,
             Self::ReclaimedBothHalves
+                | Self::ReclaimedRootAndBothHalves { .. }
                 | Self::Unreclaimable {
                     step: FailedStep::PublicHalfAfterPrivate,
                     ..
@@ -153,6 +185,7 @@ impl RunDirOutcome {
         matches!(
             self,
             Self::ReclaimedBothHalves
+                | Self::ReclaimedRootAndBothHalves { .. }
                 | Self::Unreclaimable {
                     step: FailedStep::PrivateHalf | FailedStep::PublicHalfAfterPrivate,
                     ..
@@ -168,6 +201,7 @@ pub struct RunDirEntry {
     pub locator: Option<PathBuf>,
     pub class: RunDirClass,
     pub outcome: RunDirOutcome,
+    pub left_alone: Vec<PathBuf>,
 }
 
 impl RunDirEntry {
@@ -203,6 +237,13 @@ impl RunDirEntry {
                  directory with the marker last"
                     .to_owned()
             }
+            RunDirOutcome::ReclaimedRootAndBothHalves { root } => format!(
+                "retired the execution root {} this run published, which its location record \
+                 names and its claim token proves, into the private half; then reclaimed the \
+                 private half under the ownership proof and the public directory with the \
+                 marker last",
+                root.display()
+            ),
             RunDirOutcome::Retained(reason) => {
                 format!("retained, nothing deleted: {reason}")
             }
@@ -217,6 +258,26 @@ impl RunDirEntry {
                 "retained with the error recorded, and the census carried on: {} ({detail})",
                 step.what_failed()
             ),
+            RunDirOutcome::RootRetained { root, detail } => format!(
+                "retained, nothing deleted: {} ({detail}), so the husk stays as that \
+                 directory's locator",
+                root.as_ref().map_or_else(
+                    || "where this run's execution root is cannot be told".to_owned(),
+                    |root| format!("a directory at {} is kept", root.display())
+                )
+            ),
+        };
+        let what = if self.left_alone.is_empty() {
+            what
+        } else {
+            format!(
+                "{what}; left untouched, because nothing proves them this run's: {}",
+                self.left_alone
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
         };
         match &self.locator {
             Some(locator) => format!(
@@ -227,6 +288,16 @@ impl RunDirEntry {
             ),
             None => format!("{} at {}: {what}", self.run_id, self.public.display()),
         }
+    }
+
+    #[must_use]
+    pub fn needs_operator(&self) -> bool {
+        matches!(
+            self.outcome,
+            RunDirOutcome::Retained(_)
+                | RunDirOutcome::RootRetained { .. }
+                | RunDirOutcome::Unreclaimable { .. }
+        ) || !self.left_alone.is_empty()
     }
 }
 
@@ -285,6 +356,48 @@ impl RunDirCensusReport {
             .filter(|entry| keep(&entry.outcome))
             .collect()
     }
+
+    #[must_use]
+    pub fn operator_lines(&self) -> Vec<String> {
+        self.entries
+            .iter()
+            .filter(|entry| entry.needs_operator())
+            .map(|entry| format!("startup census: run directory {}", entry.describe()))
+            .collect()
+    }
+}
+
+#[must_use]
+pub fn container_lines(report: &CensusReport) -> Vec<String> {
+    let reclaimed = report.reclaimed.iter().map(|entry| {
+        format!(
+            "startup census: reclaimed container {} of run {} (incarnation {}), {}",
+            entry.name,
+            entry.run_id,
+            entry.incarnation,
+            match &entry.boundary {
+                Boundary::FromIntent(digest) => {
+                    format!("boundary from its intent: runner policy {digest}")
+                }
+                Boundary::NoIntentRecord => {
+                    "no intent recorded its boundary, so none is named".to_owned()
+                }
+            }
+        )
+    });
+    let staged = report
+        .staged
+        .iter()
+        .filter(|entry| entry.disposition == StagedDisposition::RetainedForeignOwner)
+        .map(|entry| {
+            format!(
+                "startup census: retained staged container intent {} for {}: another owner's, so \
+                 nothing was removed",
+                entry.path.display(),
+                entry.name
+            )
+        });
+    reclaimed.chain(staged).collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -309,6 +422,13 @@ impl StartupCensus {
     pub fn into_parts(self) -> (CensusComplete, RunDirCensusReport) {
         (self.containers, self.run_dirs)
     }
+
+    #[must_use]
+    pub fn operator_lines(&self) -> Vec<String> {
+        let mut lines = container_lines(self.containers.report());
+        lines.extend(self.run_dirs.operator_lines());
+        lines
+    }
 }
 
 pub fn startup_census(
@@ -332,7 +452,8 @@ fn both_halves(
         view: inputs.view,
     };
     let containers = run_startup_census(hooks.container(), &census)?;
-    let run_dirs = census_run_dirs(hooks.rundir(), inputs, start.own_run())?;
+    let run_dirs = census_run_dirs(hooks, inputs, start.own_run())
+        .map_err(|error| error.with_warnings(container_lines(containers.report())))?;
     Ok(StartupCensus {
         containers,
         run_dirs,
@@ -340,7 +461,7 @@ fn both_halves(
 }
 
 pub(crate) fn census_run_dirs(
-    hooks: &mut dyn RunDirHooks,
+    hooks: &mut dyn TopologyHooks,
     inputs: &CensusInputs<'_>,
     own_run: Option<&str>,
 ) -> Result<RunDirCensusReport, UpstrokeError> {
@@ -358,6 +479,7 @@ pub(crate) fn census_run_dirs(
             locator: item.locator,
             class: item.class,
             outcome,
+            left_alone: item.left_alone,
         });
     }
     Ok(RunDirCensusReport { entries })
@@ -383,13 +505,25 @@ struct Scanned {
     locator: Option<PathBuf>,
     class: RunDirClass,
     plan: Planned,
+    left_alone: Vec<PathBuf>,
 }
 
 #[derive(Debug)]
 enum Planned {
     ReclaimPublicOnly(UnboundShape),
     ReclaimBothHalves(PrivateHalfProof),
+    SettleRootThenBothHalves {
+        root: RootToSettle,
+        token: String,
+        into: PathBuf,
+        ours: bool,
+        proof: PrivateHalfProof,
+    },
     Retain(RetainReason),
+    KeepForRoot {
+        root: Option<PathBuf>,
+        detail: String,
+    },
     RepairStaleMarker,
     Committed,
     Skip,
@@ -408,14 +542,20 @@ fn scan_classified(
     inputs: &CensusInputs<'_>,
     own_run: Option<&str>,
 ) -> Scanned {
+    let plain = |public: PathBuf, locator: Option<PathBuf>, plan: Planned| Scanned {
+        run_id: run_id.to_owned(),
+        public,
+        locator,
+        class,
+        plan,
+        left_alone: Vec::new(),
+    };
     match class {
-        RunDirClass::Indeterminate => Scanned {
-            run_id: run_id.to_owned(),
+        RunDirClass::Indeterminate => plain(
             public,
-            locator: None,
-            class,
-            plan: Planned::Retain(RetainReason::ClassificationIncomplete),
-        },
+            None,
+            Planned::Retain(RetainReason::ClassificationIncomplete),
+        ),
 
         RunDirClass::Committed => {
             let lock_held = rundir::is_running(&public);
@@ -427,24 +567,12 @@ fn scan_classified(
             } else {
                 Planned::RepairStaleMarker
             };
-            Scanned {
-                run_id: run_id.to_owned(),
-                public,
-                locator: None,
-                class,
-                plan,
-            }
+            plain(public, None, plan)
         }
 
         RunDirClass::Husk => {
             if rundir::is_running(&public) {
-                return Scanned {
-                    run_id: run_id.to_owned(),
-                    public,
-                    locator: None,
-                    class,
-                    plan: Planned::Skip,
-                };
+                return plain(public, None, Planned::Skip);
             }
 
             let report = rundir::husk_report(
@@ -453,24 +581,53 @@ fn scan_classified(
                 inputs.repo_key,
                 inputs.authorized_root,
             );
-            let plan = match report.disposition {
-                HuskDisposition::Unstarted(Reclaimable::PublicOnly(shape)) => {
-                    Planned::ReclaimPublicOnly(shape)
-                }
+            let (plan, left_alone) = match report.disposition {
+                HuskDisposition::Unstarted(Reclaimable::PublicOnly(shape)) => (
+                    unbound_unless_rooted(&report.public, run_id, inputs, shape),
+                    Vec::new(),
+                ),
                 HuskDisposition::Unstarted(Reclaimable::BothHalves) => {
                     match rundir::prove_private_half_ownership(
                         &report.public,
                         inputs.repo_key,
                         inputs.authorized_root,
                     ) {
-                        PrivateHalfOwnership::Proven(proof) => Planned::ReclaimBothHalves(proof),
-                        PrivateHalfOwnership::NothingBound(shape) => {
-                            Planned::ReclaimPublicOnly(shape)
+                        PrivateHalfOwnership::Proven(proof) => {
+                            match plan_root(&report.public, run_id, proof.target(), inputs) {
+                                RootPlan::Nothing { left_alone } => {
+                                    (Planned::ReclaimBothHalves(proof), left_alone)
+                                }
+                                RootPlan::Settle {
+                                    root,
+                                    token,
+                                    into,
+                                    ours,
+                                    left_alone,
+                                } => (
+                                    Planned::SettleRootThenBothHalves {
+                                        root,
+                                        token,
+                                        into,
+                                        ours,
+                                        proof,
+                                    },
+                                    left_alone,
+                                ),
+                                RootPlan::Keep { root, detail } => {
+                                    (Planned::KeepForRoot { root, detail }, Vec::new())
+                                }
+                            }
                         }
-                        PrivateHalfOwnership::Retained(reason) => Planned::Retain(reason),
+                        PrivateHalfOwnership::NothingBound(shape) => (
+                            unbound_unless_rooted(&report.public, run_id, inputs, shape),
+                            Vec::new(),
+                        ),
+                        PrivateHalfOwnership::Retained(reason) => {
+                            (Planned::Retain(reason), Vec::new())
+                        }
                     }
                 }
-                HuskDisposition::Retained(reason) => Planned::Retain(reason),
+                HuskDisposition::Retained(reason) => (Planned::Retain(reason), Vec::new()),
             };
             Scanned {
                 run_id: report.run_id,
@@ -478,34 +635,515 @@ fn scan_classified(
                 locator: report.locator,
                 class,
                 plan,
+                left_alone,
             }
         }
     }
 }
 
-fn apply(hooks: &mut dyn RunDirHooks, public: &Path, plan: Planned) -> RunDirOutcome {
+fn apply(hooks: &mut dyn TopologyHooks, public: &Path, plan: Planned) -> RunDirOutcome {
     match plan {
-        Planned::ReclaimPublicOnly(shape) => match rundir::remove_public_husk(public, hooks) {
-            Ok(()) => RunDirOutcome::ReclaimedPublicOnly(shape),
-            Err(error) => unreclaimable(FailedStep::PublicHalf, &error),
-        },
-        Planned::ReclaimBothHalves(proof) => {
-            if let Err(error) = rundir::remove_private_husk(proof, hooks) {
-                return unreclaimable(FailedStep::PrivateHalf, &error);
+        Planned::ReclaimPublicOnly(shape) => {
+            match rundir::remove_public_husk(public, hooks.rundir()) {
+                Ok(()) => RunDirOutcome::ReclaimedPublicOnly(shape),
+                Err(error) => unreclaimable(FailedStep::PublicHalf, &error),
             }
-            match rundir::remove_public_husk(public, hooks) {
-                Ok(()) => RunDirOutcome::ReclaimedBothHalves,
-                Err(error) => unreclaimable(FailedStep::PublicHalfAfterPrivate, &error),
+        }
+        Planned::ReclaimBothHalves(proof) => reclaim_both_halves(hooks, public, proof, None),
+        Planned::SettleRootThenBothHalves {
+            root: settle,
+            token,
+            into,
+            ours,
+            proof,
+        } => {
+            let root = settle.path().to_path_buf();
+            match settle.retire(hooks.effects(), &proof, &into, &token) {
+                Err(error) => unreclaimable(FailedStep::ExecutionRoot, &error),
+                Ok(true) => reclaim_both_halves(hooks, public, proof, Some(root)),
+                Ok(false) if !ours => reclaim_both_halves(hooks, public, proof, None),
+                Ok(false) => RunDirOutcome::RootRetained {
+                    root: Some(root),
+                    detail: "it changed while the census was settling it, so nothing was \
+                             retired and both halves stay"
+                        .to_owned(),
+                },
             }
         }
         Planned::Retain(reason) => RunDirOutcome::Retained(reason),
-        Planned::RepairStaleMarker => match rundir::remove_marker(public, hooks) {
+        Planned::KeepForRoot { root, detail } => RunDirOutcome::RootRetained { root, detail },
+        Planned::RepairStaleMarker => match rundir::remove_marker(public, hooks.rundir()) {
             Ok(()) => RunDirOutcome::RepairedStaleMarker,
             Err(error) => unreclaimable(FailedStep::StaleMarker, &error),
         },
         Planned::Committed => RunDirOutcome::Committed,
         Planned::Skip => RunDirOutcome::Skipped,
     }
+}
+
+fn reclaim_both_halves(
+    hooks: &mut dyn TopologyHooks,
+    public: &Path,
+    proof: PrivateHalfProof,
+    retired: Option<PathBuf>,
+) -> RunDirOutcome {
+    if let Err(error) = rundir::remove_private_husk(proof, hooks.rundir()) {
+        return unreclaimable(FailedStep::PrivateHalf, &error);
+    }
+    match rundir::remove_public_husk(public, hooks.rundir()) {
+        Ok(()) => retired.map_or(RunDirOutcome::ReclaimedBothHalves, |root| {
+            RunDirOutcome::ReclaimedRootAndBothHalves { root }
+        }),
+        Err(error) => unreclaimable(FailedStep::PublicHalfAfterPrivate, &error),
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum RootPlan {
+    Nothing {
+        left_alone: Vec<PathBuf>,
+    },
+    Settle {
+        root: RootToSettle,
+        token: String,
+        into: PathBuf,
+        ours: bool,
+        left_alone: Vec<PathBuf>,
+    },
+    Keep {
+        root: Option<PathBuf>,
+        detail: String,
+    },
+}
+
+/// The root a [`RootPlan::Settle`] retires, and through which funnel.
+///
+/// **Derived**: this command's effective common directory derives the key the
+/// location record names, so the root is the manager's own execution root and
+/// `WorkspaceManager::retire_execution_root` settles it, as since repair15.
+///
+/// **Recorded**: this command's context is legal (the manager derived) but
+/// derives another key — `GIT_COMMON_DIR` set to another absolute common
+/// directory, say — and the root is the one the location record names under the
+/// key it recorded, `<authorized private root>/workspaces/<key>/<run id>`. It is
+/// settled through `WorkspaceManager::retire_recorded_execution_root`, the
+/// authenticated historical-root retirement, which takes the key from the
+/// ownership proof's own location record and the claim token from the
+/// incarnation that proof authenticated, re-checks the proof's private half,
+/// its absent commit record, the run's free lock and lease and a link-free
+/// chain below the authorized root before it acts, and never touches the root
+/// today's context derives. Until repair16 this case was kept for good, telling
+/// the operator to return to the creating context, so a census in a changed
+/// context never converged a proven husk
+/// (`PR12-INV9-RECORDED-ROOT-CONTEXT-CONVERGENCE`).
+#[derive(Debug)]
+pub(crate) enum RootToSettle {
+    Derived(Box<WorkspaceManager>),
+    Recorded {
+        manager: Box<WorkspaceManager>,
+        key: String,
+        path: PathBuf,
+    },
+}
+
+impl RootToSettle {
+    /// The root's path, in the manager's own spelling.
+    #[must_use]
+    pub(crate) fn path(&self) -> &Path {
+        match self {
+            Self::Derived(manager) => manager.execution_root(),
+            Self::Recorded { path, .. } => path,
+        }
+    }
+
+    /// The location record's key, when the root is the recorded one.
+    #[must_use]
+    pub(crate) fn recorded_key(&self) -> Option<&str> {
+        match self {
+            Self::Derived(_) => None,
+            Self::Recorded { key, .. } => Some(key),
+        }
+    }
+
+    fn retire(
+        &self,
+        hooks: &mut dyn EffectHooks,
+        proof: &PrivateHalfProof,
+        into: &Path,
+        token: &str,
+    ) -> Result<bool, UpstrokeError> {
+        match self {
+            Self::Derived(manager) => manager.retire_execution_root(hooks, into, token),
+            // Inside the funnel the recorded root's key is read again from the
+            // location record of the proof's own private half, and its claim
+            // token is derived from the incarnation the proof authenticated;
+            // the plan's copies only named the root to report and to check.
+            Self::Recorded { manager, .. } => {
+                manager.retire_recorded_execution_root(hooks, proof, into)
+            }
+        }
+    }
+}
+
+pub(crate) fn plan_root(
+    public: &Path,
+    run_id: &str,
+    private: &Path,
+    inputs: &CensusInputs<'_>,
+) -> RootPlan {
+    plan_root_at(
+        public,
+        run_id,
+        private,
+        inputs.repo_root,
+        inputs.authorized_root,
+    )
+}
+
+pub(crate) fn plan_root_at(
+    public: &Path,
+    run_id: &str,
+    private: &Path,
+    repo_root: &Path,
+    authorized_root: &Path,
+) -> RootPlan {
+    if !could_have_a_root(run_id) {
+        return RootPlan::Nothing {
+            left_alone: Vec::new(),
+        };
+    }
+    let base = match std::fs::canonicalize(authorized_root) {
+        Ok(base) => base,
+        Err(error) => {
+            return RootPlan::Keep {
+                root: None,
+                detail: format!(
+                    "the authorized private root {} cannot be resolved: {error}",
+                    authorized_root.display()
+                ),
+            };
+        }
+    };
+    let found = match roots_named(run_id, std::slice::from_ref(&base)) {
+        Ok(found) => found,
+        Err((root, detail)) => {
+            return RootPlan::Keep {
+                root: Some(root),
+                detail,
+            };
+        }
+    };
+    let retired_tree = std::fs::symlink_metadata(private.join(RETIRED_ROOT)).is_ok();
+    let key = match read_location_record(private) {
+        LocationRecord::Keyed(key) => key,
+        LocationRecord::Absent if !retired_tree => {
+            return found.into_iter().next().map_or(
+                RootPlan::Nothing {
+                    left_alone: Vec::new(),
+                },
+                |root| RootPlan::Keep {
+                    root: Some(root),
+                    detail: "this run's private half records no location for an execution \
+                             root, so nothing proves the directory is this run's: a run \
+                             created before that record existed, or another actor's"
+                        .to_owned(),
+                },
+            );
+        }
+        LocationRecord::Absent => {
+            return RootPlan::Keep {
+                root: found.into_iter().next(),
+                detail: "this run's private half holds a retired execution root and no \
+                         location record, so where that root was cannot be made durable"
+                    .to_owned(),
+            };
+        }
+        LocationRecord::Unreadable(why) => {
+            if found.is_empty() && !retired_tree {
+                return RootPlan::Nothing {
+                    left_alone: Vec::new(),
+                };
+            }
+            return RootPlan::Keep {
+                root: found.into_iter().next(),
+                detail: format!(
+                    "this run's location record proves nothing ({why}), so nothing proves a \
+                     directory is this run's or makes its state durable"
+                ),
+            };
+        }
+    };
+    let root = base.join("workspaces").join(&key).join(run_id);
+    let mut left_alone: Vec<PathBuf> = found
+        .iter()
+        .filter(|path| **path != root)
+        .cloned()
+        .collect();
+    let incarnation = match marker_incarnation(public) {
+        Ok(incarnation) => incarnation,
+        Err(detail) => {
+            return RootPlan::Keep {
+                root: Some(root),
+                detail,
+            };
+        }
+    };
+    let token = claim_token(&incarnation);
+    let ours = if found.contains(&root) {
+        match std::fs::symlink_metadata(root.join(&token)) {
+            Err(absent) if absent.kind() == std::io::ErrorKind::NotFound => {
+                left_alone.push(root.clone());
+                false
+            }
+            Ok(found) if found.is_dir() => true,
+            Ok(_) => {
+                return RootPlan::Keep {
+                    root: Some(root),
+                    detail: format!("its entry {token} is not a claim token this run made"),
+                };
+            }
+            Err(error) => {
+                return RootPlan::Keep {
+                    root: Some(root),
+                    detail: format!("its claim token cannot be read: {error}"),
+                };
+            }
+        }
+    } else {
+        false
+    };
+    let manager = match WorkspaceManager::derive(repo_root, authorized_root, run_id, &incarnation) {
+        Ok(manager) => manager,
+        Err(error) => {
+            return RootPlan::Keep {
+                root: Some(root),
+                detail: format!(
+                    "this run published its execution root under repository key {key}, and \
+                     this command cannot derive the repository context to make that directory's \
+                     state durable or to settle it: {error}"
+                ),
+            };
+        }
+    };
+    // A legal context that derives another key settles the root the record
+    // names, under the key it recorded, through the authenticated
+    // historical-root retirement; it never settles the root today's key
+    // derives, which the scan above has already named in `left_alone` if
+    // anything is there.
+    let settle = if manager.repo_key() == key {
+        RootToSettle::Derived(Box::new(manager))
+    } else {
+        let path =
+            crate::workspace_manager::execution_root_of(manager.private_root(), &key, run_id);
+        RootToSettle::Recorded {
+            manager: Box::new(manager),
+            key,
+            path,
+        }
+    };
+    if ours {
+        if let Some(why) = unsettleable(settle.path(), &token) {
+            return RootPlan::Keep {
+                root: Some(root),
+                detail: why,
+            };
+        }
+    }
+    RootPlan::Settle {
+        root: settle,
+        token,
+        into: private.join(RETIRED_ROOT),
+        ours,
+        left_alone,
+    }
+}
+
+pub(crate) fn husk_root_view(
+    repo_root: &Path,
+    run_id: &str,
+    repo_key: &RepoKey,
+    authorized_root: &Path,
+    disposition: &HuskDisposition,
+) -> Option<String> {
+    let public = rundir::public_dir(repo_root, run_id);
+    let kept = |root: Option<PathBuf>, detail: String| {
+        format!(
+            "a retained husk, nothing deleted: {} ({detail}), so the husk stays as that \
+             directory's locator",
+            root.map_or_else(
+                || "where this run's execution root is cannot be told".to_owned(),
+                |root| format!("a directory at {} is kept", root.display())
+            )
+        )
+    };
+    let untouched = |left_alone: &[PathBuf]| {
+        left_alone
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    match disposition {
+        HuskDisposition::Unstarted(Reclaimable::BothHalves) => {
+            let PrivateHalfOwnership::Proven(proof) =
+                rundir::prove_private_half_ownership(&public, repo_key, authorized_root)
+            else {
+                return None;
+            };
+            match plan_root_at(&public, run_id, proof.target(), repo_root, authorized_root) {
+                RootPlan::Keep { root, detail } => Some(kept(root, detail)),
+                RootPlan::Settle {
+                    ours: true,
+                    root,
+                    left_alone,
+                    ..
+                } => Some(format!(
+                    "an unstarted husk that the next write command reclaims: it first retires \
+                     the execution root {} this run published{}, then both halves{}",
+                    root.path().display(),
+                    root.recorded_key().map_or_else(String::new, |key| format!(
+                        " under repository key {key}, which its location record names"
+                    )),
+                    if left_alone.is_empty() {
+                        String::new()
+                    } else {
+                        format!(
+                            "; it leaves {} untouched, because nothing proves them this run's",
+                            untouched(&left_alone)
+                        )
+                    }
+                )),
+                RootPlan::Settle { left_alone, .. } | RootPlan::Nothing { left_alone }
+                    if !left_alone.is_empty() =>
+                {
+                    Some(format!(
+                        "an unstarted husk that the next write command reclaims, both halves; \
+                         it leaves {} untouched, because nothing proves them this run's",
+                        untouched(&left_alone)
+                    ))
+                }
+                RootPlan::Settle { .. } | RootPlan::Nothing { .. } => None,
+            }
+        }
+        HuskDisposition::Unstarted(Reclaimable::PublicOnly(UnboundShape::TargetAbsent)) => {
+            unbound_root(&public, run_id, authorized_root).map(|(root, detail)| kept(root, detail))
+        }
+        HuskDisposition::Unstarted(Reclaimable::PublicOnly(_)) | HuskDisposition::Retained(_) => {
+            None
+        }
+    }
+}
+
+fn unbound_unless_rooted(
+    public: &Path,
+    run_id: &str,
+    inputs: &CensusInputs<'_>,
+    shape: UnboundShape,
+) -> Planned {
+    if shape != UnboundShape::TargetAbsent {
+        return Planned::ReclaimPublicOnly(shape);
+    }
+    match unbound_root(public, run_id, inputs.authorized_root) {
+        Some((root, detail)) => Planned::KeepForRoot { root, detail },
+        None => Planned::ReclaimPublicOnly(shape),
+    }
+}
+
+pub(crate) fn unbound_root(
+    public: &Path,
+    run_id: &str,
+    authorized_root: &Path,
+) -> Option<(Option<PathBuf>, String)> {
+    if !could_have_a_root(run_id) {
+        return None;
+    }
+    let mut bases: Vec<PathBuf> = std::fs::canonicalize(authorized_root).into_iter().collect();
+    if let Some(own) = marker_private_root(public, run_id) {
+        if !bases.contains(&own) {
+            bases.push(own);
+        }
+    }
+    match roots_named(run_id, &bases) {
+        Ok(found) => found.into_iter().next().map(|root| {
+            (
+                Some(root),
+                "no private half is bound to this husk any more, so no location record says \
+                 whose the directory is"
+                    .to_owned(),
+            )
+        }),
+        Err((root, detail)) => Some((Some(root), detail)),
+    }
+}
+
+fn roots_named(run_id: &str, bases: &[PathBuf]) -> Result<Vec<PathBuf>, (PathBuf, String)> {
+    let mut found = Vec::new();
+    for base in bases {
+        let workspaces = base.join("workspaces");
+        let listed = match std::fs::read_dir(&workspaces) {
+            Ok(listed) => listed,
+            Err(absent) if absent.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err((
+                    workspaces,
+                    format!("where this run's execution root could be cannot be listed: {error}"),
+                ));
+            }
+        };
+        for entry in listed {
+            let entry = entry.map_err(|error| {
+                (
+                    workspaces.clone(),
+                    format!("where this run's execution root could be cannot be listed: {error}"),
+                )
+            })?;
+            let candidate = entry.path().join(run_id);
+            match std::fs::symlink_metadata(&candidate) {
+                Ok(_) => found.push(candidate),
+                Err(absent)
+                    if matches!(
+                        absent.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                    ) => {}
+                Err(_) => found.push(candidate),
+            }
+        }
+    }
+    found.sort();
+    Ok(found)
+}
+
+fn marker_incarnation(public: &Path) -> Result<String, String> {
+    std::fs::read_to_string(public.join(rundir::MARKER))
+        .map_err(|error| error.to_string())
+        .and_then(|text| {
+            serde_json::from_str::<rundir::CreatingMarker>(&text).map_err(|error| error.to_string())
+        })
+        .map(|marker| marker.incarnation)
+        .map_err(|error| format!("its marker cannot be read again: {error}"))
+}
+
+fn marker_private_root(public: &Path, run_id: &str) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(public.join(rundir::MARKER)).ok()?;
+    let marker = serde_json::from_str::<rundir::CreatingMarker>(&text).ok()?;
+    let locator = PathBuf::from(marker.private_dir);
+    let runs = locator.parent()?;
+    let shaped = locator.file_name() == Some(std::ffi::OsStr::new(run_id))
+        && runs.file_name() == Some(std::ffi::OsStr::new("runs"));
+    if !shaped {
+        return None;
+    }
+    std::fs::canonicalize(runs.parent()?).ok()
+}
+
+fn could_have_a_root(run_id: &str) -> bool {
+    const CROCKFORD: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+    run_id.len() == 26
+        && run_id.bytes().all(|byte| CROCKFORD.contains(&byte))
+        && run_id
+            .as_bytes()
+            .first()
+            .is_some_and(|first| (b'0'..=b'7').contains(first))
 }
 
 fn unreclaimable(step: FailedStep, error: &UpstrokeError) -> RunDirOutcome {
@@ -543,6 +1181,11 @@ mod witness {
             #[allow(dead_code)]
             pub const fn lock(&self) -> &WorktreeLock {
                 &self.lock
+            }
+
+            #[must_use]
+            pub fn into_lock(self) -> WorktreeLock {
+                self.lock
             }
         }
     }

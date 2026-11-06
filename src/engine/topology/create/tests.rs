@@ -1,5 +1,6 @@
 //! Extended notes: `docs/internals/engine/topology/create/tests.md`
 
+use crate::runner::container::runtime::QuestionBound;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -234,10 +235,42 @@ impl ContainerHooks for ArmedContainer {
     }
 }
 
+/// The workspace effects of [`TestHooks`]: every phase recorded on the shared
+/// harness exactly as `HarnessEffects` records it, and answered by the phase
+/// faults a test armed, so a `Worktree` site's `After` can be made to return
+/// its error as a `RunDir` site's can (the recorded-root retirement's
+/// post-rename error window, `PR12-INV9-RECORDED-ROOT-CONTEXT-CONVERGENCE`).
+struct ArmedEffects {
+    inner: crate::workspace_manager::HarnessEffects,
+    faults: Faults,
+}
+
+impl EffectHooks for ArmedEffects {
+    fn phase(&mut self, site: EffectSiteId, phase: HookPhase) -> Injection {
+        let recorded = self.inner.phase(site, phase);
+        match self.faults.phase(site, phase) {
+            Injection::Proceed => recorded,
+            armed => armed,
+        }
+    }
+
+    fn durability_ledger(&self) -> DurabilityLedger {
+        self.inner.durability_ledger()
+    }
+
+    fn refusal_cause(&self) -> Option<String> {
+        self.inner.refusal_cause()
+    }
+
+    fn registry_pause(&mut self, pause: std::time::Duration) -> Result<(), UpstrokeError> {
+        self.inner.registry_pause(pause)
+    }
+}
+
 struct TestHooks {
     rundir: ArmedRunDir,
     events: ArmedEvents,
-    effects: crate::workspace_manager::HarnessEffects,
+    effects: ArmedEffects,
     container: ArmedContainer,
     spawn: crate::runner::HarnessHooks,
     harness: Arc<Mutex<HookHarness>>,
@@ -261,7 +294,10 @@ impl TestHooks {
                 ledger,
                 synced: Arc::new(Mutex::new(Vec::new())),
             },
-            effects: crate::workspace_manager::HarnessEffects::new(Arc::clone(&harness)),
+            effects: ArmedEffects {
+                inner: crate::workspace_manager::HarnessEffects::new(Arc::clone(&harness)),
+                faults: faults.clone(),
+            },
             container: ArmedContainer {
                 harness: Arc::clone(&harness),
                 faults: faults.clone(),
@@ -592,6 +628,7 @@ impl Fixture {
             runtime: None,
             private_root: &self.private_root,
             ids: &Fixed::default(),
+            mounts: &crate::runner::container::resolve::MountContext::unbound(),
         })
         .expect("the host runner resolves")
     }
@@ -613,6 +650,90 @@ impl Fixture {
 
     fn husk(&self) -> crate::rundir::HuskReport {
         crate::rundir::husk_report(&self.repo, RUN_ID, &self.repo_key, &self.private_root)
+    }
+
+    /// The root a creator of this fixture's run would publish, keyed exactly
+    /// as production keys it: `WorkspaceManager::derive` hashes the common
+    /// directory Git names, `fs::canonicalize`d and spelt without Windows'
+    /// verbatim prefix (`common_git_dir`'s `strip_verbatim`), and hangs the
+    /// root from the private root in the same spelling (`canonical_prefix`).
+    /// `fixture::canonical` is that spelling. The repository is not yet
+    /// initialized when a kill child records this key, so its `.git` is
+    /// joined to the canonical repository; [`census_of`] asserts, once `git
+    /// init` has made it, that this is the identity production derives
+    /// (Native18, `REGULAR14-NATIVE18-NOROOT-KEY`,
+    /// `PR12-REGRESSION12-WINDOWS-NOROOT-KEY`).
+    fn no_root(&self) -> NoRoot {
+        let repo = crate::workspace_manager::fixture::canonical(&self.repo);
+        let key = crate::workspace_manager::repo_key_v1(&repo.join(".git"));
+        NoRoot {
+            path: crate::workspace_manager::fixture::canonical(&self.private_root)
+                .join("workspaces")
+                .join(&key)
+                .join(RUN_ID),
+            key,
+        }
+    }
+
+    /// The identity premise at the initialized-repository boundary: the key
+    /// and the path [`Self::no_root`] gives are the ones
+    /// `WorkspaceManager::derive` gives for this fixture's run. Without it a
+    /// census that settles a recorded root under another key could converge a
+    /// husk whose location record a mistaken fixture wrote, and a test that
+    /// means the creating context would pass while exercising a changed one.
+    fn assert_no_root_is_what_production_derives(&self) {
+        let manager = WorkspaceManager::derive(&self.repo, &self.private_root, RUN_ID, INCARNATION)
+            .expect("the fixture's initialized repository derives a manager");
+        let no_root = self.no_root();
+        assert_eq!(
+            no_root.key,
+            manager.repo_key(),
+            "the premise: NoRoot records the repository key production derives"
+        );
+        assert_eq!(
+            no_root.path,
+            manager.execution_root(),
+            "the premise: NoRoot's root is the path production derives"
+        );
+    }
+}
+
+struct NoRoot {
+    path: PathBuf,
+    key: String,
+}
+
+impl UnpublishedRoot for NoRoot {
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn retire(
+        &self,
+        _hooks: &mut dyn EffectHooks,
+        _into: &Path,
+        _token: &str,
+    ) -> Result<bool, UpstrokeError> {
+        Ok(false)
+    }
+}
+
+impl RootCreation for NoRoot {
+    fn key(&self) -> &str {
+        &self.key
+    }
+
+    fn create(
+        &self,
+        _hooks: &mut dyn EffectHooks,
+        _staging: &Path,
+        _token: &str,
+    ) -> Result<(), FreshRootFailure> {
+        Ok(())
+    }
+
+    fn case_fold(&self, _warnings: &mut Vec<String>) -> bool {
+        false
     }
 }
 
@@ -659,6 +780,7 @@ fn record(agents: &[String], runner: RunnerPolicy) -> RunStarted4 {
         incarnation: IncarnationId(INCARNATION.to_owned()),
         runner,
         probed_agents: agents.to_vec(),
+        shell: crate::gates::ShellKind::Sh,
         branch: "main".to_owned(),
         integration_ref: GitRef(INTEGRATION_REF.to_owned()),
         base_sha: CommitSha(BASE_SHA.to_owned()),
@@ -723,6 +845,7 @@ struct Driver<'a> {
     fixture: &'a Fixture,
     probes: &'a dyn Probes,
     refs: &'a dyn IntegrationRefs,
+    root: Option<&'a dyn RootCreation>,
     agents: Vec<String>,
     runner: RunnerPolicy,
     execution: RecordingRunner,
@@ -736,6 +859,7 @@ impl<'a> Driver<'a> {
             fixture,
             probes,
             refs,
+            root: None,
             agents: agents(),
             runner: crate::runner::policy::host_policy(),
             execution: RecordingRunner::default(),
@@ -756,12 +880,14 @@ impl<'a> Driver<'a> {
     fn run(&mut self, hooks: &mut TestHooks) -> Result<Started, Refused> {
         let plan_bytes = normalized_plan();
         let clock = Fixed::default();
+        let no_root = self.fixture.no_root();
         let request = Request {
             repo_root: &self.fixture.repo,
             repo_key: self.fixture.repo_key.clone(),
             normalized_plan: &plan_bytes,
             inputs: inputs(),
             record: record(&self.agents, self.runner.clone()),
+            root: self.root.unwrap_or(&no_root),
             agents: &self.agents,
             probes: self.probes,
             refs: self.refs,
@@ -1017,6 +1143,114 @@ fn run_started_records_runner_policy_resolved_before_worktree_lock() {
         data.private_dir,
         fixture.private().to_string_lossy(),
         "the recorded locator is the authorized one, not the caller's"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_run_with_configured_mounts_records_one_runner_in_its_marker_owner_record_and_run_started() {
+    use crate::runner::container::resolve::MountContext;
+    use crate::runner::policy::{canonical_bytes, runner_policy_sha256};
+
+    let fixture = Fixture::new("mounted-record");
+    create_private_dir(&fixture.repo.join(".git"), &mut NoRunDirHooks)
+        .expect("the repository's .git");
+    let shared = fixture.root.join("operator-shared");
+    create_private_dir(&shared, &mut NoRunDirHooks).expect("an operator directory");
+    let selection = crate::config::RunnerSelection {
+        mounts: vec![crate::config::RunnerMount {
+            source: shared.clone(),
+            target: "/data".to_owned(),
+            read_only: true,
+        }],
+        ..container_selection()
+    };
+    let runtime = container_runtime();
+    let context = MountContext::bind_with(
+        &fixture.repo,
+        crate::runner::container::resolve::fixtures::plain_checkout(&fixture.repo.join(".git")),
+        &fixture.private_root,
+        &[],
+    )
+    .expect("the fixture binds a mount context");
+    let checked = super::super::prelock::check(&super::super::prelock::PreLock {
+        selection: &selection,
+        runtime: Some(&runtime),
+        private_root: &fixture.private_root,
+        ids: &Fixed::default(),
+        mounts: &context,
+    })
+    .expect("the mounted container policy resolves before the lock");
+    let policy = checked.runner_policy().clone();
+    assert_eq!(
+        policy
+            .mounts
+            .iter()
+            .map(|mount| (mount.source.clone(), mount.target.as_str(), mount.read_only))
+            .collect::<Vec<_>>(),
+        vec![(
+            std::fs::canonicalize(&shared)
+                .expect("canonical")
+                .to_str()
+                .expect("utf-8")
+                .to_owned(),
+            "/data",
+            true
+        )]
+    );
+    let digest = runner_policy_sha256(&policy);
+    assert_eq!(checked.runner_policy_sha256(), digest);
+    assert!(canonical_bytes(&policy).starts_with(b"25:upstroke.runner-policy.v2;"));
+
+    let probes = RecordingProbes::new(&digest);
+    let refs = FakeRefs::empty();
+    let mut hooks = TestHooks::new();
+    hooks.faults().arm_phase(
+        EffectSiteId::RunDir(RunDirSite::RemoveMarker),
+        HookPhase::Before,
+        Injection::Error,
+    );
+    let execution = RecordingRunner::default();
+    let ledger = std::sync::Mutex::new(InvocationLedger::new());
+    let plan_bytes = normalized_plan();
+    let clock = Fixed::default();
+    let agents = agents();
+    let no_root = fixture.no_root();
+    let request = Request {
+        repo_root: &fixture.repo,
+        repo_key: fixture.repo_key.clone(),
+        normalized_plan: &plan_bytes,
+        inputs: inputs(),
+        record: record(&agents, policy.clone()),
+        root: &no_root,
+        agents: &agents,
+        probes: &probes,
+        refs: &refs,
+        clock: &clock,
+        runner: &execution,
+        pair: ProbePair::grant(&ledger),
+    };
+    let mut warnings = Vec::new();
+    let refused =
+        create_run(checked, request, &mut hooks, &mut warnings).expect_err("P7 was made to fail");
+    assert_eq!(refused.reached, Prefix::P6);
+
+    let marker = marker_of(&fixture.public());
+    assert_eq!(
+        marker.runner_policy_sha256, digest,
+        "the marker carries the v2 digest of the mounted record"
+    );
+    let owner = owner_of(&fixture.private());
+    assert_eq!(owner.runner, policy, "owner.json records the mounts");
+    let event = committed_first_line(&fixture.public()).expect("run_started is committed");
+    let TopologyEventBody::RunStarted { data } = event.body else {
+        panic!("the first line is not `run_started`");
+    };
+    assert_eq!(data.runner, policy, "run_started records the same mounts");
+    assert_eq!(
+        runner_policy_sha256(&data.runner),
+        marker.runner_policy_sha256,
+        "and the marker's digest is that record's"
     );
 }
 
@@ -1656,11 +1890,13 @@ fn a_commit_record_stat_that_cannot_answer_retains_both_halves_and_releases_the_
         repo_key: fixture.repo_key.clone(),
         private_root: fixture.private_root_canonical(),
         run_id: RUN_ID.to_owned(),
+        token: super::claim_token(INCARNATION),
+        root: RootClaim::NotCreated,
         error: UpstrokeError::Refused {
             message: "the step that stopped the run".to_owned(),
         },
     };
-    let disposition = stat_after_error(&mut aborted, &mut hooks);
+    let disposition = stat_after_error(&mut aborted, &fixture.no_root(), &mut hooks);
 
     let Disposition::PossiblyCommitted {
         ref locator,
@@ -1782,6 +2018,7 @@ fn the_append_error_balance_reads_the_ledger_the_probes_used() {
         workspace: fixture.repo.clone(),
         adapters: &source,
         policy_digest: host_digest(),
+        probed: Default::default(),
     };
     let refs = FakeRefs::empty();
     let mut hooks = TestHooks::new();
@@ -2538,7 +2775,7 @@ fn expected_disposition(prefix: Prefix) -> &'static str {
         Prefix::P1Staged => "public-only:staged",
         Prefix::P1 | Prefix::P2 => "public-only:target-absent",
         Prefix::P3a | Prefix::P3aStaged => "retained:owner-record-missing",
-        Prefix::P3b | Prefix::P4 | Prefix::P5 => "both-halves",
+        Prefix::P3b | Prefix::P3c | Prefix::P4 | Prefix::P5 => "both-halves",
         Prefix::P5b => "retained:possibly-committed",
         Prefix::Nothing | Prefix::P6 | Prefix::P7 | Prefix::P8 => "committed",
     }
@@ -2713,6 +2950,7 @@ fn write_command_start(
         runtime: Some(runtime),
         private_root: &fixture.private_root,
         ids: &Fixed::default(),
+        mounts: &crate::runner::container::resolve::MountContext::unbound(),
     })?;
     crate::rundir::WorktreeLock::acquire_in(&fixture.repo, git_dir)
 }
@@ -2828,7 +3066,7 @@ impl crate::runner::container::runtime::ContainerRuntime for Inventory {
             .collect())
     }
 
-    fn observe(&self, name: &str) -> Result<Liveness, RuntimeError> {
+    fn observe(&self, name: &str, _: QuestionBound<'_>) -> Result<Liveness, RuntimeError> {
         Ok(self
             .state
             .lock()
@@ -2842,6 +3080,7 @@ impl crate::runner::container::runtime::ContainerRuntime for Inventory {
             exit_code: Some(0),
             stdout: Vec::new(),
             stderr: Vec::new(),
+            output_limited: false,
         })
     }
 
@@ -2942,6 +3181,7 @@ fn container_execution(
         checked.runner_policy().clone(),
         identity,
         &fixture.repo,
+        crate::runner::container::resolve::fixtures::plain_checkout(&fixture.repo.join(".git")),
         crate::runner::container::env::ContainerEnvironment::from_image(vec![(
             "PATH".to_owned(),
             "/usr/bin:/bin".to_owned(),
@@ -3009,6 +3249,7 @@ fn container_probe_kill_child() {
         runtime: Some(&runtime),
         private_root: &fixture.private_root,
         ids: &Fixed::default(),
+        mounts: &crate::runner::container::resolve::MountContext::unbound(),
     })
     .expect("the container policy resolves by inspection");
     let refs = FakeRefs::empty();
@@ -3024,12 +3265,14 @@ fn container_probe_kill_child() {
     let clock = Fixed::default();
     let agents = agents();
     let ledger = std::sync::Mutex::new(InvocationLedger::new());
+    let no_root = fixture.no_root();
     let request = Request {
         repo_root: &fixture.repo,
         repo_key: fixture.repo_key.clone(),
         normalized_plan: &plan_bytes,
         inputs: inputs(),
         record: record(&agents, checked.runner_policy().clone()),
+        root: &no_root,
         agents: &agents,
         probes: &probes,
         refs: &refs,
@@ -3244,6 +3487,7 @@ fn container_policy() -> RunnerPolicy {
                 .into_iter()
                 .collect(),
         ),
+        mounts: Vec::new(),
     }
 }
 
@@ -3383,6 +3627,7 @@ fn the_creation_ledger_accounts_every_probe_process() {
         workspace: std::env::temp_dir(),
         adapters: &source,
         policy_digest: host_digest(),
+        probed: Default::default(),
     };
 
     probes
@@ -3490,6 +3735,7 @@ fn the_production_probes_run_both_halves_through_the_runs_runner() {
         workspace: std::env::temp_dir(),
         adapters: &source,
         policy_digest: host_digest(),
+        probed: Default::default(),
     };
     assert_eq!(probes.policy_digest(), host_digest());
 
@@ -3580,6 +3826,7 @@ fn probe_request_for(id: InvocationId, agent: Option<&str>) -> crate::runner::Ru
             args: Vec::new(),
             env: Vec::new(),
             stdin: Vec::new(),
+            settings_file: None,
         },
         workspace: std::env::temp_dir(),
         role: match agent {
@@ -4071,7 +4318,7 @@ fn the_granted_pairs_balance_answers_for_the_ledger_and_the_slots() {
 fn the_deletion_boundary_falls_between_p5_and_p5b() {
     assert_eq!(
         Prefix::ALL.len(),
-        14,
+        15,
         "a prefix was added to the sequence and not to its closed set"
     );
     let mut names: Vec<&str> = Prefix::ALL.iter().map(|prefix| prefix.name()).collect();
@@ -4408,7 +4655,7 @@ fn a_kill_after_the_first_line_is_synced_leaves_a_committed_run_whose_next_censu
         crate::runner::container::runtime::ContainerTrace::default(),
     );
     let report = census_run_dirs(
-        hooks.rundir(),
+        &mut hooks,
         &CensusInputs {
             repo_root: &fixture.repo,
             repo_key: &fixture.repo_key,
@@ -4467,6 +4714,9 @@ fn census_of(
 ) -> crate::engine::topology::startup::RunDirCensusReport {
     use crate::engine::topology::startup::{CensusInputs, census_run_dirs};
 
+    crate::workspace_manager::fixture::git(&fixture.repo, &["init", "-q", "-b", "main"]);
+    fixture.assert_no_root_is_what_production_derives();
+
     let runtime = crate::runner::container::FakeRuntime::new(
         crate::runner::container::runtime::ContainerTrace::default(),
     );
@@ -4475,7 +4725,7 @@ fn census_of(
         crate::runner::container::runtime::ContainerTrace::default(),
     );
     census_run_dirs(
-        hooks.rundir(),
+        hooks,
         &CensusInputs {
             repo_root: &fixture.repo,
             repo_key: &fixture.repo_key,
@@ -4605,12 +4855,13 @@ fn a_kill_after_the_plan_is_written_leaves_a_husk_the_next_census_reclaims_priva
         "settings".to_owned(),
         "gates".to_owned(),
         "gate-worktrees".to_owned(),
+        format!("execution-root.v1.{}", fixture.no_root().key),
     ];
     left_in_private.sort();
     assert_eq!(
         names_in(&private),
         left_in_private,
-        "the owner record and the private skeleton, and no commit record"
+        "the owner record, the private skeleton and the location record, and no commit record"
     );
     assert!(
         !crate::rundir::is_running(&public),
@@ -4683,6 +4934,7 @@ fn p4_execution(
         checked.runner_policy().clone(),
         identity,
         &fixture.repo,
+        crate::runner::container::resolve::fixtures::plain_checkout(&fixture.repo.join(".git")),
         crate::runner::container::env::ContainerEnvironment::from_image(vec![(
             "PATH".to_owned(),
             "/usr/bin:/bin".to_owned(),
@@ -4708,6 +4960,7 @@ fn create_over_containers(
         runtime: Some(runtime),
         private_root: &fixture.private_root,
         ids: &Fixed::default(),
+        mounts: &crate::runner::container::resolve::MountContext::unbound(),
     })
     .expect("the container policy resolves by inspection");
     let execution = p4_execution(fixture, &checked, execution_runtime);
@@ -4717,6 +4970,7 @@ fn create_over_containers(
         workspace: fixture.repo.clone(),
         adapters: &source,
         policy_digest: execution.policy_digest().to_owned(),
+        probed: Default::default(),
     };
     let refs = FakeRefs::empty();
     let mut hooks = TestHooks::new();
@@ -4724,12 +4978,14 @@ fn create_over_containers(
     let clock = Fixed::default();
     let agents = agents();
     let ledger = std::sync::Mutex::new(InvocationLedger::new());
+    let no_root = fixture.no_root();
     let request = Request {
         repo_root: &fixture.repo,
         repo_key: fixture.repo_key.clone(),
         normalized_plan: &plan_bytes,
         inputs: inputs(),
         record: record(&agents, checked.runner_policy().clone()),
+        root: &no_root,
         agents: &agents,
         probes: &probes,
         refs: &refs,
@@ -4895,6 +5151,7 @@ fn every_container_a_fresh_runs_creation_starts_is_covered_by_an_armed_reaper_wi
             exit_code: Some(0),
             stdout: Vec::new(),
             stderr: Vec::new(),
+            output_limited: false,
         })
     }));
     host.observing_covers();
@@ -4916,4 +5173,1201 @@ fn every_container_a_fresh_runs_creation_starts_is_covered_by_an_armed_reaper_wi
         "every P4 probe container started under an armed reaper whose scope selects its labels: \
          {observed:?}"
     );
+}
+
+impl Fixture {
+    fn manager(&self) -> WorkspaceManager {
+        crate::workspace_manager::fixture::git(&self.repo, &["init", "-q", "-b", "main"]);
+        WorkspaceManager::derive(&self.repo, &self.private_root, RUN_ID, INCARNATION)
+            .expect("a manager for the fixture's run")
+    }
+}
+
+struct ErrorAt(EffectSiteId, HookPhase);
+
+impl EffectHooks for ErrorAt {
+    fn phase(&mut self, site: EffectSiteId, phase: HookPhase) -> Injection {
+        if site == self.0 && phase == self.1 {
+            Injection::Error
+        } else {
+            Injection::Proceed
+        }
+    }
+
+    fn refusal_cause(&self) -> Option<String> {
+        None
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Twist {
+    None,
+    Folding,
+    AnotherActorFirst,
+    FailAfterClaim,
+    ContentAfterClaim,
+    RemovalFails,
+}
+
+struct RealRoot {
+    manager: WorkspaceManager,
+    twist: Twist,
+}
+
+impl UnpublishedRoot for RealRoot {
+    fn path(&self) -> &Path {
+        self.manager.execution_root()
+    }
+
+    fn retire(
+        &self,
+        hooks: &mut dyn EffectHooks,
+        into: &Path,
+        token: &str,
+    ) -> Result<bool, UpstrokeError> {
+        if self.twist == Twist::RemovalFails {
+            return self.manager.retire_execution_root(
+                &mut ErrorAt(
+                    EffectSiteId::Worktree(
+                        crate::topology::effects::WorktreeSite::RemoveExecutionRoot,
+                    ),
+                    HookPhase::Before,
+                ),
+                into,
+                token,
+            );
+        }
+        self.manager.retire_execution_root(hooks, into, token)
+    }
+}
+
+impl RootCreation for RealRoot {
+    fn key(&self) -> &str {
+        self.manager.repo_key()
+    }
+
+    fn create(
+        &self,
+        hooks: &mut dyn EffectHooks,
+        staging: &Path,
+        token: &str,
+    ) -> Result<(), FreshRootFailure> {
+        let fresh = crate::workspace_manager::FreshExecutionRoot(&self.manager);
+        match self.twist {
+            Twist::AnotherActorFirst => {
+                self.manager
+                    .create_execution_root(&mut crate::workspace_manager::NoHooks)
+                    .expect("another actor's root, at the claim boundary");
+                fresh.create_execution_root(hooks, staging, token)
+            }
+            Twist::FailAfterClaim => fresh.create_execution_root(
+                &mut ErrorAt(
+                    EffectSiteId::Worktree(
+                        crate::topology::effects::WorktreeSite::CreateExecutionRoot,
+                    ),
+                    HookPhase::After,
+                ),
+                staging,
+                token,
+            ),
+            Twist::ContentAfterClaim => {
+                fresh.create_execution_root(hooks, staging, token)?;
+                create_private_dir(
+                    &self.manager.execution_root().join("theirs"),
+                    &mut NoRunDirHooks,
+                )
+                .expect("content this run did not make");
+                Ok(())
+            }
+            Twist::None | Twist::Folding | Twist::RemovalFails => {
+                fresh.create_execution_root(hooks, staging, token)
+            }
+        }
+    }
+
+    fn case_fold(&self, warnings: &mut Vec<String>) -> bool {
+        self.twist == Twist::Folding
+            || <WorkspaceManager as RootCreation>::case_fold(&self.manager, warnings)
+    }
+}
+
+fn names_of(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap_or_else(|error| panic!("list {}: {error}", dir.display()))
+        .map(|entry| {
+            entry
+                .expect("an entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+fn published_with_token(root: &Path) -> bool {
+    let mut expected: Vec<String> = SCAFFOLDING.iter().map(|name| (*name).to_owned()).collect();
+    expected.push(claim_token(INCARNATION));
+    expected.sort();
+    names_of(root) == expected
+        && expected
+            .iter()
+            .all(|name| names_of(&root.join(name)).is_empty())
+}
+
+fn scaffolding_only(root: &Path) -> bool {
+    let mut expected: Vec<String> = SCAFFOLDING.iter().map(|name| (*name).to_owned()).collect();
+    expected.sort();
+    names_of(root) == expected
+        && SCAFFOLDING
+            .iter()
+            .all(|name| names_of(&root.join(name)).is_empty())
+}
+
+fn run_over(
+    fixture: &Fixture,
+    root: &RealRoot,
+    refuse_shell: bool,
+) -> (Result<Started, Refused>, TestHooks) {
+    let mut probes = RecordingProbes::new(&host_digest());
+    probes.refuse_shell = refuse_shell;
+    let refs = FakeRefs::empty();
+    let mut hooks = TestHooks::new();
+    let mut driver = Driver::new(fixture, &probes, &refs);
+    driver.root = Some(root);
+    let outcome = driver.run(&mut hooks);
+    (outcome, hooks)
+}
+
+#[test]
+fn p3c_claims_the_execution_root_after_the_owner_record_and_the_record_carries_its_case_policy() {
+    let fixture = Fixture::new("p3c-claim");
+    let root = RealRoot {
+        manager: fixture.manager(),
+        twist: Twist::None,
+    };
+    let (outcome, hooks) = run_over(&fixture, &root, false);
+    let started = outcome.expect("the run is created");
+    let path = root.manager.execution_root();
+    assert!(
+        published_with_token(path),
+        "the publication made the root with its claim token and its scaffolding"
+    );
+    assert!(
+        fixture
+            .private()
+            .join(format!("execution-root.v1.{}", root.manager.repo_key()))
+            .is_dir(),
+        "the location record names the key the root was published under"
+    );
+    assert!(
+        std::fs::symlink_metadata(fixture.private().join(STAGED_ROOT)).is_err(),
+        "the staged tree is what the publication renamed onto the root's path"
+    );
+    let of_interest = [
+        EffectSiteId::RunDir(RunDirSite::PublishMarker),
+        EffectSiteId::RunDir(RunDirSite::PublishOwnerRecord),
+        EffectSiteId::Worktree(crate::topology::effects::WorktreeSite::CreateExecutionRoot),
+        EffectSiteId::RunDir(RunDirSite::WritePlan),
+        EffectSiteId::RunDir(RunDirSite::PublishCommitRecord),
+    ];
+    assert_eq!(
+        hooks.first_execution_order(&of_interest),
+        of_interest.to_vec(),
+        "R18 is claimed after the marker that locates the run and the owner record that \
+         authenticates it, and before the plan and the commit record"
+    );
+    let observed = std::fs::symlink_metadata(path.join("TASKS")).is_ok();
+    assert_eq!(
+        started.run_started().path_policy.case_fold,
+        observed,
+        "the committed record carries the case policy the created root shows"
+    );
+
+    let fixture = Fixture::new("p3c-folding");
+    let root = RealRoot {
+        manager: fixture.manager(),
+        twist: Twist::Folding,
+    };
+    let (outcome, _) = run_over(&fixture, &root, false);
+    assert!(
+        outcome
+            .expect("the run is created")
+            .run_started()
+            .path_policy
+            .case_fold,
+        "P5b stamps P3c's observation over whatever the caller's record held"
+    );
+}
+
+#[test]
+fn a_refusal_after_p3c_settles_the_claimed_root_before_either_half() {
+    let fixture = Fixture::new("p3c-p4-refused");
+    let root = RealRoot {
+        manager: fixture.manager(),
+        twist: Twist::None,
+    };
+    let (outcome, hooks) = run_over(&fixture, &root, true);
+    let refused = outcome.expect_err("the shell probe refused");
+    assert_eq!(refused.reached, Prefix::P3c);
+    assert!(
+        matches!(*refused.disposition, Disposition::BothHalvesRemoved { .. }),
+        "{:?}",
+        refused.disposition
+    );
+    assert!(
+        std::fs::symlink_metadata(root.manager.execution_root()).is_err(),
+        "the claimed root is gone"
+    );
+    assert!(!fixture.public().exists() && !fixture.private().exists());
+    let removals = [
+        EffectSiteId::Worktree(crate::topology::effects::WorktreeSite::RemoveExecutionRoot),
+        EffectSiteId::RunDir(RunDirSite::RemovePrivateHusk),
+        EffectSiteId::RunDir(RunDirSite::RemovePublicHusk),
+    ];
+    assert_eq!(
+        hooks.first_execution_order(&removals),
+        removals.to_vec(),
+        "the root is settled while the marker that locates it and the owner record that \
+         authenticates the run are still there"
+    );
+}
+
+#[test]
+fn a_failure_after_the_claim_leaves_a_root_that_is_this_creators_to_settle() {
+    let fixture = Fixture::new("p3c-claimed-then-failed");
+    let root = RealRoot {
+        manager: fixture.manager(),
+        twist: Twist::FailAfterClaim,
+    };
+    let (outcome, _) = run_over(&fixture, &root, false);
+    let refused = outcome.expect_err("the create site failed after its claim");
+    assert_eq!(refused.reached, Prefix::P3b);
+    assert!(
+        matches!(*refused.disposition, Disposition::BothHalvesRemoved { .. }),
+        "{:?}",
+        refused.disposition
+    );
+    assert!(
+        std::fs::symlink_metadata(root.manager.execution_root()).is_err(),
+        "the root the claim made, whole, was settled"
+    );
+}
+
+#[test]
+fn a_root_another_actor_puts_at_the_claim_boundary_is_refused_and_untouched() {
+    let fixture = Fixture::new("p3c-another-actor");
+    let root = RealRoot {
+        manager: fixture.manager(),
+        twist: Twist::AnotherActorFirst,
+    };
+    let (outcome, hooks) = run_over(&fixture, &root, false);
+    let refused = outcome.expect_err("the claim found a root already there");
+    assert_eq!(refused.reached, Prefix::P3b);
+    assert!(
+        refused
+            .error
+            .to_string()
+            .contains(&root.manager.execution_root().display().to_string()),
+        "{}",
+        refused.error
+    );
+    assert!(
+        matches!(*refused.disposition, Disposition::BothHalvesRemoved { .. }),
+        "the halves this run made are reclaimed: {:?}",
+        refused.disposition
+    );
+    assert!(
+        scaffolding_only(root.manager.execution_root()),
+        "the other actor's root is exactly as it made it"
+    );
+    assert!(
+        !hooks.observed(
+            EffectSiteId::Worktree(crate::topology::effects::WorktreeSite::RemoveExecutionRoot),
+            HookPhase::Before
+        ),
+        "the creator never reached for a root it did not claim"
+    );
+}
+
+#[test]
+fn a_claimed_root_the_creator_cannot_settle_keeps_the_husk_that_locates_it() {
+    for (tag, twist, says) in [
+        ("p3c-content", Twist::ContentAfterClaim, "theirs"),
+        (
+            "p3c-removal-fails",
+            Twist::RemovalFails,
+            "RemoveExecutionRoot",
+        ),
+    ] {
+        let fixture = Fixture::new(tag);
+        let root = RealRoot {
+            manager: fixture.manager(),
+            twist,
+        };
+        let (outcome, _) = run_over(&fixture, &root, true);
+        let refused = outcome.expect_err("the shell probe refused");
+        let Disposition::ExecutionRootRetained {
+            root: kept,
+            public,
+            locator,
+            detail,
+        } = &*refused.disposition
+        else {
+            panic!("{tag}: {:?}", refused.disposition);
+        };
+        assert_eq!(kept, root.manager.execution_root(), "{tag}");
+        assert!(detail.contains(says), "{tag}: {detail}");
+        assert_eq!(public, &fixture.public(), "{tag}");
+        assert_eq!(locator.as_ref(), Some(&fixture.private()), "{tag}");
+        assert!(
+            std::fs::symlink_metadata(root.manager.execution_root()).is_ok(),
+            "{tag}: the root is kept"
+        );
+        assert!(
+            fixture.public().join(crate::rundir::MARKER).is_file(),
+            "{tag}: the marker that locates it is kept"
+        );
+        assert!(
+            matches!(
+                prove_private_half_ownership(
+                    &fixture.public(),
+                    &fixture.repo_key,
+                    &fixture.private_root
+                ),
+                PrivateHalfOwnership::Proven(_)
+            ),
+            "{tag}: and the proof still authenticates the husk"
+        );
+    }
+}
+
+#[test]
+fn a_published_root_whose_private_half_is_gone_keeps_the_public_husk_that_locates_it() {
+    for (tag, twist) in [
+        ("p3c-unbound-retiring", Twist::None),
+        ("p3c-unbound-content", Twist::ContentAfterClaim),
+    ] {
+        let fixture = Fixture::new(tag);
+        let mut hooks = TestHooks::new();
+        let public = fixture.public();
+        let marker = CreatingMarker {
+            run_id: RUN_ID.to_owned(),
+            repo_key: fixture.repo_key.as_str().to_owned(),
+            private_dir: fixture
+                .checked()
+                .private_dir()
+                .to_string_lossy()
+                .into_owned(),
+            incarnation: INCARNATION.to_owned(),
+            pid: 4242,
+            runner_policy_sha256: host_digest(),
+        };
+        create_public_dir(&public, &mut NoRunDirHooks).expect("P0");
+        stage_marker(&public, &marker, &mut NoRunDirHooks).expect("P1a");
+        publish_marker(&public, &mut NoRunDirHooks).expect("P1b");
+        let root = RealRoot {
+            manager: fixture.manager(),
+            twist,
+        };
+        let elsewhere = fixture.private_root_canonical().join("elsewhere");
+        create_private_dir(&elsewhere, &mut NoRunDirHooks).expect("a staging place");
+        root.create(
+            &mut crate::workspace_manager::NoHooks,
+            &elsewhere.join(STAGED_ROOT),
+            &claim_token(INCARNATION),
+        )
+        .expect("this creator's publication");
+        let published = names_of(root.manager.execution_root());
+        let lock = RunLock::acquire_hooked(&public, hooks.rundir()).expect("the run lock is free");
+
+        let mut aborted = Aborted {
+            reached: Prefix::P3c,
+            paths: RunPaths::from_parts(public.clone(), fixture.private()),
+            lock: Some(lock),
+            repo_key: fixture.repo_key.clone(),
+            private_root: fixture.private_root_canonical(),
+            run_id: RUN_ID.to_owned(),
+            token: super::claim_token(INCARNATION),
+            root: RootClaim::Owned,
+            error: UpstrokeError::Refused {
+                message: "the step that stopped the run".to_owned(),
+            },
+        };
+        let disposition = stat_after_error(&mut aborted, &root, &mut hooks);
+
+        assert!(
+            hooks.observed(EffectSiteId::Lock(LockSite::Release), HookPhase::Before),
+            "{tag}: the run lock goes back through `Lock.Release`"
+        );
+        let Disposition::ExecutionRootRetained {
+            root: ref kept,
+            public: ref kept_public,
+            ref locator,
+            ..
+        } = disposition
+        else {
+            panic!("{tag}: {disposition:?}");
+        };
+        assert_eq!(kept, root.manager.execution_root(), "{tag}");
+        assert_eq!(kept_public, &public, "{tag}");
+        assert_eq!(locator, &None, "{tag}: no private half was bound");
+        assert!(
+            root.manager
+                .execution_root()
+                .join(claim_token(INCARNATION))
+                .is_dir(),
+            "{tag}: the root keeps the token that proves it, with nowhere to be retired to"
+        );
+        if twist == Twist::ContentAfterClaim {
+            assert_eq!(
+                names_of(root.manager.execution_root()),
+                published,
+                "{tag}: content this run did not make keeps the root untouched"
+            );
+        }
+        assert!(
+            public.join(crate::rundir::MARKER).is_file(),
+            "{tag}: the public directory keeps the marker that names the run"
+        );
+        assert!(
+            !hooks.observed(
+                EffectSiteId::RunDir(RunDirSite::RemovePublicHusk),
+                HookPhase::Before
+            ),
+            "{tag}: the public husk is the root's only locator and is not removed"
+        );
+        let sentence = disposition.describe();
+        assert!(
+            sentence.contains("No private half is bound to it any more"),
+            "{tag}: {sentence}"
+        );
+        assert!(!disposition.removed_the_private_half(), "{tag}");
+    }
+}
+
+#[test]
+fn a_root_already_there_before_the_run_is_refused_before_anything_is_published() {
+    let fixture = Fixture::new("p3c-preexisting");
+    let root = RealRoot {
+        manager: fixture.manager(),
+        twist: Twist::None,
+    };
+    root.manager
+        .create_execution_root(&mut crate::workspace_manager::NoHooks)
+        .expect("a root already there");
+    let (outcome, hooks) = run_over(&fixture, &root, false);
+    let refused = outcome.expect_err("the admission refuses");
+    assert_eq!(refused.reached, Prefix::Nothing);
+    assert!(
+        matches!(*refused.disposition, Disposition::NothingCreated),
+        "{:?}",
+        refused.disposition
+    );
+    assert!(
+        !fixture.public().exists(),
+        "no husk could lead a census to it"
+    );
+    assert!(
+        scaffolding_only(root.manager.execution_root()),
+        "the root is exactly as it was"
+    );
+    assert!(
+        !hooks.observed(
+            EffectSiteId::RunDir(RunDirSite::CreatePublicDir),
+            HookPhase::Before
+        ),
+        "nothing was published"
+    );
+}
+
+const ROOT_KILLS: &[(&str, &str)] = &[
+    ("staged", "both"),
+    ("published", "root"),
+    ("shell", "root"),
+    ("agent", "root"),
+    ("plan", "root"),
+    ("commit", "root"),
+];
+
+#[test]
+#[ignore = "spawned as a subprocess by the real-root kill and retirement grids"]
+fn create_root_kill_child() {
+    let root = PathBuf::from(std::env::var("UPSTROKE_TEST_KILL_DIR").expect("dir"));
+    let which = std::env::var("UPSTROKE_TEST_KILL_SITE").expect("site");
+    let fixture = Fixture::at(&root);
+    let real = RealRoot {
+        manager: fixture.manager(),
+        twist: Twist::None,
+    };
+    let _cut =
+        crate::workspace_manager::RootPublicationCut::arm(real.manager.execution_root(), &which);
+    let mut probes = RecordingProbes::new(&host_digest());
+    let refs = FakeRefs::empty();
+    let mut hooks = TestHooks::new();
+    match which.as_str() {
+        "staged" | "published" => {}
+        "shell" => probes.kill_shell = true,
+        "agent" => probes.kill_agent = true,
+        "plan" => {
+            hooks.faults().arm_phase(
+                EffectSiteId::RunDir(RunDirSite::WritePlan),
+                HookPhase::After,
+                Injection::Kill,
+            );
+        }
+        "commit" => {
+            hooks.faults().arm_phase(
+                EffectSiteId::RunDir(RunDirSite::StageCommitRecord),
+                HookPhase::Before,
+                Injection::Kill,
+            );
+        }
+        other => panic!("unknown cut `{other}`"),
+    }
+    let mut driver = Driver::new(&fixture, &probes, &refs);
+    driver.root = Some(&real);
+    let _ = driver.run(&mut hooks);
+    panic!("the creation driver returned past the kill armed at `{which}`");
+}
+
+#[test]
+#[ignore = "spawned as a subprocess by an_interrupted_retirement_converges_in_the_next_census"]
+fn census_root_kill_child() {
+    let root = PathBuf::from(std::env::var("UPSTROKE_TEST_KILL_DIR").expect("dir"));
+    let which = std::env::var("UPSTROKE_TEST_KILL_SITE").expect("site");
+    let fixture = Fixture::at(&root);
+    let manager = fixture.manager();
+    let _cut = crate::workspace_manager::RootPublicationCut::arm(manager.execution_root(), &which)
+        .expect("a retirement cut point");
+    let mut hooks = TestHooks::new();
+    let _ = census_of(&fixture, &mut hooks);
+    panic!("the census returned past the cut armed at `{which}`");
+}
+
+fn assert_left_by_the_kill(
+    fixture: &Fixture,
+    manager: &WorkspaceManager,
+    which: &str,
+    expect: &str,
+) {
+    let root = manager.execution_root();
+    let token = claim_token(INCARNATION);
+    assert!(
+        fixture
+            .private()
+            .join(format!("execution-root.v1.{}", manager.repo_key()))
+            .is_dir(),
+        "`{which}`: the location record survived the kill"
+    );
+    assert!(
+        fixture.public().join(MARKER).is_file() && fixture.private().join(OWNER_RECORD).is_file(),
+        "`{which}`: the marker and the owner record survived the kill"
+    );
+    match expect {
+        "both" => {
+            assert!(
+                std::fs::symlink_metadata(root).is_err(),
+                "`{which}`: nothing of this run is at the root's path before its rename"
+            );
+            assert!(
+                fixture.private().join(STAGED_ROOT).join(&token).is_dir(),
+                "`{which}`: the staged tree, token inside, is private content"
+            );
+        }
+        "root" => assert!(
+            root.join(&token).is_dir(),
+            "`{which}`: the published root carries its token"
+        ),
+        other => panic!("unknown expectation `{other}`"),
+    }
+}
+
+#[test]
+fn a_kill_after_p3c_converges_in_the_next_census_without_manual_removal() {
+    use crate::engine::topology::startup::RunDirOutcome;
+
+    for (ordinal, (which, expect)) in ROOT_KILLS.iter().enumerate() {
+        let fixture = Fixture::new(&format!("kill-root-{which}"));
+        let code = spawn_and_wait(
+            "engine::topology::create::tests::create_root_kill_child",
+            &fixture.root,
+            which,
+            200 + u32::try_from(ordinal).expect("a small ordinal"),
+        );
+        assert_ne!(code, Some(0), "`{which}`: the child must have died");
+        let manager =
+            WorkspaceManager::derive(&fixture.repo, &fixture.private_root, RUN_ID, INCARNATION)
+                .expect("the run's manager");
+        assert_left_by_the_kill(&fixture, &manager, which, expect);
+
+        let mut hooks = TestHooks::new();
+        let report = census_of(&fixture, &mut hooks);
+        let [entry] = report.entries() else {
+            panic!("`{which}`: one husk: {report:?}");
+        };
+        match *expect {
+            "both" => assert_eq!(
+                entry.outcome,
+                RunDirOutcome::ReclaimedBothHalves,
+                "`{which}`"
+            ),
+            _ => assert!(
+                matches!(
+                    &entry.outcome,
+                    RunDirOutcome::ReclaimedRootAndBothHalves { root } if root == manager.execution_root()
+                ),
+                "`{which}`: {report:?}"
+            ),
+        }
+        assert!(
+            std::fs::symlink_metadata(manager.execution_root()).is_err(),
+            "`{which}`: no execution root is left"
+        );
+        assert!(
+            !fixture.public().exists() && !fixture.private().exists(),
+            "`{which}`: both halves are gone"
+        );
+        let order = [
+            EffectSiteId::Worktree(crate::topology::effects::WorktreeSite::RemoveExecutionRoot),
+            EffectSiteId::RunDir(RunDirSite::RemovePrivateHusk),
+            EffectSiteId::RunDir(RunDirSite::RemovePublicHusk),
+        ];
+        assert_eq!(
+            hooks.first_execution_order(&order),
+            order.to_vec(),
+            "`{which}`: the root's retirement and its barrier come before the private half, \
+             and the marker goes last"
+        );
+        let again = census_of(&fixture, &mut TestHooks::new());
+        assert!(
+            again.entries().is_empty(),
+            "`{which}`: a second census finds nothing: {again:?}"
+        );
+    }
+}
+
+#[test]
+fn an_interrupted_retirement_converges_in_the_next_census() {
+    use crate::engine::topology::startup::RunDirOutcome;
+
+    for (ordinal, which) in ["emptied", "retired"].iter().enumerate() {
+        let fixture = Fixture::new(&format!("cut-retire-{which}"));
+        let base = 300 + 2 * u32::try_from(ordinal).expect("a small ordinal");
+        let code = spawn_and_wait(
+            "engine::topology::create::tests::create_root_kill_child",
+            &fixture.root,
+            "shell",
+            base,
+        );
+        assert_ne!(code, Some(0), "`{which}`: the creator must have died");
+        let code = spawn_and_wait(
+            "engine::topology::create::tests::census_root_kill_child",
+            &fixture.root,
+            which,
+            base + 1,
+        );
+        assert_ne!(code, Some(0), "`{which}`: the census must have died");
+        let manager =
+            WorkspaceManager::derive(&fixture.repo, &fixture.private_root, RUN_ID, INCARNATION)
+                .expect("the run's manager");
+        let root = manager.execution_root();
+        let token = claim_token(INCARNATION);
+        assert!(
+            fixture
+                .private()
+                .join(format!("execution-root.v1.{}", manager.repo_key()))
+                .is_dir()
+                && fixture.private().join(OWNER_RECORD).is_file()
+                && fixture.public().join(MARKER).is_file(),
+            "`{which}`: the location record, the owner record and the marker are all still there"
+        );
+        let outcome_root = match *which {
+            "emptied" => {
+                assert_eq!(
+                    names_of(root),
+                    vec![token.clone()],
+                    "`{which}`: the root is at its path with its token alone"
+                );
+                Some(root.to_path_buf())
+            }
+            _ => {
+                assert!(
+                    std::fs::symlink_metadata(root).is_err(),
+                    "`{which}`: nothing is at the root's path"
+                );
+                assert!(
+                    fixture.private().join(RETIRED_ROOT).join(&token).is_dir(),
+                    "`{which}`: the retired tree, token inside, is in the private half"
+                );
+                None
+            }
+        };
+
+        let mut hooks = TestHooks::new();
+        let report = census_of(&fixture, &mut hooks);
+        let [entry] = report.entries() else {
+            panic!("`{which}`: one husk: {report:?}");
+        };
+        match outcome_root {
+            Some(expected) => assert!(
+                matches!(&entry.outcome, RunDirOutcome::ReclaimedRootAndBothHalves { root } if root == &expected),
+                "`{which}`: {report:?}"
+            ),
+            None => assert_eq!(
+                entry.outcome,
+                RunDirOutcome::ReclaimedBothHalves,
+                "`{which}`"
+            ),
+        }
+        let order = [
+            EffectSiteId::Worktree(crate::topology::effects::WorktreeSite::RemoveExecutionRoot),
+            EffectSiteId::RunDir(RunDirSite::RemovePrivateHusk),
+        ];
+        assert_eq!(
+            hooks.first_execution_order(&order),
+            order.to_vec(),
+            "`{which}`: the retirement funnel's barrier runs again before the private half goes"
+        );
+        assert!(
+            !fixture.public().exists() && !fixture.private().exists(),
+            "`{which}`: both halves are gone"
+        );
+        assert!(
+            census_of(&fixture, &mut TestHooks::new())
+                .entries()
+                .is_empty(),
+            "`{which}`: a second census finds nothing"
+        );
+    }
+}
+
+#[cfg(unix)]
+fn census_without_init(
+    fixture: &Fixture,
+    hooks: &mut TestHooks,
+) -> crate::engine::topology::startup::RunDirCensusReport {
+    use crate::engine::topology::startup::{CensusInputs, census_run_dirs};
+
+    let runtime = crate::runner::container::FakeRuntime::new(
+        crate::runner::container::runtime::ContainerTrace::default(),
+    );
+    let liveness = crate::runner::container::FakeOwnerLiveness::new();
+    let view = crate::runner::container::DisposableDirView::new(
+        crate::runner::container::runtime::ContainerTrace::default(),
+    );
+    census_run_dirs(
+        hooks,
+        &CensusInputs {
+            repo_root: &fixture.repo,
+            repo_key: &fixture.repo_key,
+            authorized_root: &fixture.private_root,
+            incarnation: "01KZTINCB0CREATE0000000002",
+            runtime: &runtime,
+            liveness: &liveness,
+            view: &view,
+        },
+        None,
+    )
+    .expect("the census runs")
+}
+
+/// The census half of every changed-context guard
+/// (`PR12-INV9-RECORDED-ROOT-CONTEXT-CONVERGENCE`): a child of this test binary
+/// whose environment alone carries another absolute `GIT_COMMON_DIR`, so the
+/// manager it derives gives a repository key other than the one the husk's
+/// location record names, and nothing of the creating context is restored.
+/// `UPSTROKE_TEST_CENSUS_CASE` names the husk's durable stage and what the
+/// census must do with it; every converging case also censuses again in the
+/// same changed context and requires that nothing is left to find.
+#[cfg(unix)]
+#[test]
+#[ignore = "subprocess helper"]
+fn census_under_another_common_dir_child() {
+    use crate::engine::topology::startup::{FailedStep, RunDirOutcome};
+
+    let (Some(root), Some(other), Ok(case)) = (
+        std::env::var_os("UPSTROKE_TEST_KILL_DIR").map(PathBuf::from),
+        std::env::var_os("GIT_COMMON_DIR").map(PathBuf::from),
+        std::env::var("UPSTROKE_TEST_CENSUS_CASE"),
+    ) else {
+        return;
+    };
+    assert!(
+        other.is_absolute(),
+        "the premise: an absolute GIT_COMMON_DIR"
+    );
+    let fixture = Fixture::at(&root);
+    let today = WorkspaceManager::derive(&fixture.repo, &fixture.private_root, RUN_ID, INCARNATION)
+        .expect("this process's manager");
+    let recorded = names_in(&fixture.private())
+        .into_iter()
+        .find_map(|name| name.strip_prefix("execution-root.v1.").map(str::to_owned))
+        .expect("the location record");
+    assert_ne!(
+        today.repo_key(),
+        recorded,
+        "the premise: this process's effective common directory derives another key"
+    );
+    let published =
+        crate::workspace_manager::execution_root_of(today.private_root(), &recorded, RUN_ID);
+    let token = claim_token(INCARNATION);
+    let converged = |fixture: &Fixture| {
+        assert!(
+            std::fs::symlink_metadata(&published).is_err()
+                && !fixture.public().exists()
+                && !fixture.private().exists(),
+            "{case}: nothing of the run is left at the recorded root or in either half"
+        );
+        let again = census_without_init(fixture, &mut TestHooks::new());
+        assert!(
+            again.entries().is_empty(),
+            "{case}: a repeated census in the same changed context finds nothing: {again:?}"
+        );
+    };
+    let only = |report: &crate::engine::topology::startup::RunDirCensusReport| {
+        let [entry] = report.entries() else {
+            panic!("{case}: one husk: {report:?}");
+        };
+        entry.clone()
+    };
+    match case.as_str() {
+        "published" => {
+            assert!(
+                published.join(&token).is_dir(),
+                "the premise: the published root"
+            );
+            let report = census_without_init(&fixture, &mut TestHooks::new());
+            let entry = only(&report);
+            assert_eq!(
+                entry.outcome,
+                RunDirOutcome::ReclaimedRootAndBothHalves {
+                    root: published.clone()
+                },
+                "under another common directory the recorded root is retired and both halves \
+                 go: {report:?}"
+            );
+            assert!(entry.left_alone.is_empty(), "{report:?}");
+            converged(&fixture);
+        }
+        "absent" | "staged" | "retired-replay" => {
+            assert!(
+                std::fs::symlink_metadata(&published).is_err(),
+                "the premise: nothing at the recorded root"
+            );
+            let in_private = |name: &str| fixture.private().join(name).join(&token).is_dir();
+            assert_eq!(
+                (in_private(STAGED_ROOT), in_private(RETIRED_ROOT)),
+                match case.as_str() {
+                    "absent" => (false, false),
+                    "staged" => (true, false),
+                    _ => (false, true),
+                },
+                "the premise: {case}"
+            );
+            let report = census_without_init(&fixture, &mut TestHooks::new());
+            assert_eq!(
+                only(&report).outcome,
+                RunDirOutcome::ReclaimedBothHalves,
+                "{case}: the recorded root's barrier, then both halves: {report:?}"
+            );
+            converged(&fixture);
+        }
+        "retired-cut" => {
+            assert!(
+                published.join(&token).is_dir(),
+                "the premise: the published root"
+            );
+            let _cut = crate::workspace_manager::RootPublicationCut::arm(&published, "retired")
+                .expect("a retirement cut point");
+            let _ = census_without_init(&fixture, &mut TestHooks::new());
+            panic!("the census returned past the cut armed after the retirement's rename");
+        }
+        "error-replay" => {
+            assert!(
+                published.join(&token).is_dir(),
+                "the premise: the published root"
+            );
+            let mut hooks = TestHooks::new();
+            hooks.faults().arm_phase(
+                EffectSiteId::Worktree(crate::topology::effects::WorktreeSite::RemoveExecutionRoot),
+                HookPhase::After,
+                Injection::Error,
+            );
+            let report = census_without_init(&fixture, &mut hooks);
+            assert!(
+                matches!(
+                    only(&report).outcome,
+                    RunDirOutcome::Unreclaimable {
+                        step: FailedStep::ExecutionRoot,
+                        ..
+                    }
+                ),
+                "an error after the retirement's rename keeps both halves: {report:?}"
+            );
+            assert!(
+                std::fs::symlink_metadata(&published).is_err()
+                    && fixture.private().join(RETIRED_ROOT).join(&token).is_dir()
+                    && fixture.public().join(MARKER).is_file()
+                    && fixture.private().join(OWNER_RECORD).is_file(),
+                "the root was renamed into the private half, and the marker and owner record \
+                 still locate and prove it"
+            );
+            let report = census_without_init(&fixture, &mut TestHooks::new());
+            assert_eq!(
+                only(&report).outcome,
+                RunDirOutcome::ReclaimedBothHalves,
+                "the replay repeats the barrier and converges: {report:?}"
+            );
+            converged(&fixture);
+        }
+        "foreign" => {
+            assert!(
+                published.is_dir() && !published.join(&token).exists(),
+                "the premise: a directory at the recorded root without this run's token"
+            );
+            let foreign = std::fs::canonicalize(&published).expect("the foreign directory");
+            let report = census_without_init(&fixture, &mut TestHooks::new());
+            let entry = only(&report);
+            assert_eq!(
+                entry.outcome,
+                RunDirOutcome::ReclaimedBothHalves,
+                "{report:?}"
+            );
+            assert_eq!(entry.left_alone, vec![foreign], "{report:?}");
+            assert!(
+                published.is_dir() && names_in(&published).is_empty(),
+                "the foreign directory is left exactly as it was"
+            );
+            assert!(!fixture.public().exists() && !fixture.private().exists());
+            assert!(
+                census_without_init(&fixture, &mut TestHooks::new())
+                    .entries()
+                    .is_empty()
+            );
+        }
+        "lookalike" => {
+            assert!(
+                published.join(&token).is_dir(),
+                "the premise: the published root"
+            );
+            let lookalike = today.execution_root().to_path_buf();
+            crate::workspace_manager::fixture::create_dir(&lookalike.join(&token));
+            let report = census_without_init(&fixture, &mut TestHooks::new());
+            let entry = only(&report);
+            assert_eq!(
+                entry.outcome,
+                RunDirOutcome::ReclaimedRootAndBothHalves {
+                    root: published.clone()
+                },
+                "{report:?}"
+            );
+            assert_eq!(
+                entry.left_alone,
+                vec![std::fs::canonicalize(&lookalike).expect("the lookalike")],
+                "the directory at this command's own key is named and left: {report:?}"
+            );
+            assert!(
+                lookalike.join(&token).is_dir() && names_in(&lookalike) == vec![token.clone()],
+                "the lookalike under today's key is untouched, the run's token inside it included"
+            );
+            converged(&fixture);
+        }
+        other => panic!("unknown case `{other}`"),
+    }
+}
+
+/// Run [`census_under_another_common_dir_child`] for `case` over `fixture`,
+/// with another bare repository's common directory in the child's environment.
+#[cfg(unix)]
+fn in_another_common_directory(
+    fixture: &Fixture,
+    case: &str,
+) -> crate::agent::proc::test_support::Isolated {
+    let other = fixture.root.join("other.git");
+    if std::fs::symlink_metadata(&other).is_err() {
+        crate::workspace_manager::fixture::git(
+            &fixture.root,
+            &["init", "-q", "--bare", "other.git"],
+        );
+    }
+    let other = std::fs::canonicalize(&other).expect("another common dir");
+    crate::agent::proc::test_support::run_test_isolated(
+        "engine::topology::create::tests::census_under_another_common_dir_child",
+        &[
+            ("UPSTROKE_TEST_KILL_DIR", fixture.root.as_os_str()),
+            ("GIT_COMMON_DIR", other.as_os_str()),
+            ("UPSTROKE_TEST_CENSUS_CASE", std::ffi::OsStr::new(case)),
+        ],
+        std::time::Duration::from_secs(120),
+    )
+}
+
+/// [`in_another_common_directory`], required to converge: the child's own
+/// assertions passed, and neither half of the run is left -- with no census in
+/// the creating context.
+#[cfg(unix)]
+fn converged_in_another_common_directory(fixture: &Fixture, case: &str) {
+    let ended = in_another_common_directory(fixture, case);
+    assert!(
+        ended.status.is_some_and(|status| status.success()) && ended.stdout.contains("1 passed"),
+        "{case}: the census under another common directory converged the husk: {ended}"
+    );
+    assert!(
+        !fixture.public().exists() && !fixture.private().exists(),
+        "{case}: nothing of the run is left, and no census ran in the creating context"
+    );
+}
+
+/// A creator killed after P3c published its root, censused only under another
+/// effective common directory: the root the location record names is retired
+/// and both halves go, and a repeated census in that context finds nothing --
+/// without restoring the creating context, a manual deletion or a prune.
+#[cfg(unix)]
+#[test]
+fn a_census_under_another_common_directory_converges_the_husk_and_its_published_root() {
+    let fixture = Fixture::new("root-common-dir-drift");
+    let code = spawn_and_wait(
+        "engine::topology::create::tests::create_root_kill_child",
+        &fixture.root,
+        "shell",
+        320,
+    );
+    assert_ne!(code, Some(0), "the creator must have died");
+    let manager =
+        WorkspaceManager::derive(&fixture.repo, &fixture.private_root, RUN_ID, INCARNATION)
+            .expect("the run's manager, in the creating context");
+    assert!(
+        manager
+            .execution_root()
+            .join(claim_token(INCARNATION))
+            .is_dir(),
+        "the premise: the root is published at its recorded path"
+    );
+    converged_in_another_common_directory(&fixture, "published");
+    assert!(
+        std::fs::symlink_metadata(manager.execution_root()).is_err(),
+        "the root is gone from its recorded path"
+    );
+}
+
+/// S0, an absent external root: a creator killed after its plan was written,
+/// whose location record names the creating context's key and which published
+/// nothing. Under another common directory the census takes the recorded
+/// root's barrier and reclaims both halves.
+#[cfg(unix)]
+#[test]
+fn a_census_under_another_common_directory_converges_a_husk_that_published_no_root() {
+    let fixture = Fixture::new("root-common-dir-absent");
+    kill_the_creation(&fixture.root, "p4plan");
+    crate::workspace_manager::fixture::git(&fixture.repo, &["init", "-q", "-b", "main"]);
+    fixture.assert_no_root_is_what_production_derives();
+    converged_in_another_common_directory(&fixture, "absent");
+}
+
+/// S1, private staging: a creator killed after its root was built in the
+/// private half and before the rename published it. Under another common
+/// directory the staged tree goes with the private half.
+#[cfg(unix)]
+#[test]
+fn a_census_under_another_common_directory_converges_a_husk_whose_root_was_only_staged() {
+    let fixture = Fixture::new("root-common-dir-staged");
+    let code = spawn_and_wait(
+        "engine::topology::create::tests::create_root_kill_child",
+        &fixture.root,
+        "staged",
+        321,
+    );
+    assert_ne!(code, Some(0), "the creator must have died");
+    converged_in_another_common_directory(&fixture, "staged");
+}
+
+/// S3 by interruption: a census under another common directory killed after
+/// the recorded root's retirement rename and before its barrier, then a census
+/// in the same changed context: a root read as absent is not a durable
+/// retirement, so the barrier is taken again before both halves go.
+#[cfg(unix)]
+#[test]
+fn a_census_under_another_common_directory_cut_after_the_retirement_rename_converges_next() {
+    let fixture = Fixture::new("root-common-dir-retired");
+    let code = spawn_and_wait(
+        "engine::topology::create::tests::create_root_kill_child",
+        &fixture.root,
+        "shell",
+        322,
+    );
+    assert_ne!(code, Some(0), "the creator must have died");
+    let cut = in_another_common_directory(&fixture, "retired-cut");
+    assert!(
+        cut.status
+            .as_ref()
+            .is_some_and(crate::workspace_manager::fixture::died_by_abort),
+        "the census died at the cut after the retirement's rename: {cut}"
+    );
+    converged_in_another_common_directory(&fixture, "retired-replay");
+}
+
+/// The post-rename error window: an error injected at the recorded root's
+/// `Worktree.RemoveExecutionRoot` After phase -- the rename and its barrier
+/// performed, then `Err` -- leaves both halves and the retired tree, and the
+/// next census in the same changed context converges.
+#[cfg(unix)]
+#[test]
+fn a_census_under_another_common_directory_that_errs_after_the_rename_converges_next() {
+    let fixture = Fixture::new("root-common-dir-error");
+    let code = spawn_and_wait(
+        "engine::topology::create::tests::create_root_kill_child",
+        &fixture.root,
+        "shell",
+        323,
+    );
+    assert_ne!(code, Some(0), "the creator must have died");
+    converged_in_another_common_directory(&fixture, "error-replay");
+}
+
+/// The foreign control: a directory at the recorded root without this run's
+/// claim token is another actor's. Under another common directory it is named
+/// and left exactly as it is, and the run's own proven halves converge.
+#[cfg(unix)]
+#[test]
+fn a_census_under_another_common_directory_leaves_a_foreign_directory_at_the_recorded_root() {
+    let fixture = Fixture::new("root-common-dir-foreign");
+    let code = spawn_and_wait(
+        "engine::topology::create::tests::create_root_kill_child",
+        &fixture.root,
+        "staged",
+        324,
+    );
+    assert_ne!(code, Some(0), "the creator must have died");
+    let recorded = names_in(&fixture.private())
+        .into_iter()
+        .find_map(|name| name.strip_prefix("execution-root.v1.").map(str::to_owned))
+        .expect("the location record");
+    let foreign = crate::workspace_manager::execution_root_of(
+        &crate::workspace_manager::fixture::canonical(&fixture.private_root),
+        &recorded,
+        RUN_ID,
+    );
+    crate::workspace_manager::fixture::create_dir(&foreign);
+    converged_in_another_common_directory(&fixture, "foreign");
+    assert!(foreign.is_dir(), "the foreign directory stays");
+}
+
+/// The current-context lookalike control: a directory of the run's name under
+/// the key this changed context derives -- holding the run's own claim token
+/// -- is not the root the location record names. The census retires the
+/// recorded root and leaves the lookalike exactly as it is.
+#[cfg(unix)]
+#[test]
+fn a_census_under_another_common_directory_leaves_a_lookalike_under_its_own_key() {
+    let fixture = Fixture::new("root-common-dir-lookalike");
+    let code = spawn_and_wait(
+        "engine::topology::create::tests::create_root_kill_child",
+        &fixture.root,
+        "shell",
+        325,
+    );
+    assert_ne!(code, Some(0), "the creator must have died");
+    converged_in_another_common_directory(&fixture, "lookalike");
 }

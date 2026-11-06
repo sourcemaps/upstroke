@@ -58,7 +58,7 @@ path from such a writer.
 
 The split keeps transcripts and reviewer records out of ordinary workspace reads, but the shipped host runner does **not** make the public half authoritative against hostile candidate code. Adapter deny rules reduce direct agent-tool access; they are defence in depth, not an OS boundary. Repository-controlled gates execute candidate build/test code as the Upstroke user and can discover the source worktree and modify `.upstroke`. A host-run event log is therefore an operational recovery record for trusted repositories and plans, not a tamper-resistant attestation. Moving coordinator authority outside every role mount and enforcing that with the external/container runner is a blocking backlog item before any stronger claim; use a dedicated OS account or VM for untrusted input.
 
-The v0.2 execution root is deliberately non-authoritative. A container receives only its role's one worktree mount; it never receives the public log, sibling worktrees, or private artifacts. On the host runner the agent permission surface remains the boundary and gate code is not OS-confined — the reason the container runner exists. Worktree disappearance is recoverable from events and internal refs, and cleanup follows a terminal event rather than creating one.
+The v0.2 execution root is deliberately non-authoritative. A container receives only its role's one worktree mount; it never receives the public log, sibling worktrees, or private artifacts. The single exception is a worker's or reviewer's own permission-settings file: the one the engine materialized for that invocation, which its command records and its arguments name. That one file is bound read-only; the directory holding it, and every other attempt's settings, are not. Beyond these, a container receives the operator's configured `[runner]` mounts, exactly as the run recorded them (`design/26` §6), and nothing that would reach the repository, its Git, the private root or a host credential location. On the host runner the agent permission surface remains the boundary and gate code is not OS-confined — the reason the container runner exists. Worktree disappearance is recoverable from events and internal refs, and cleanup follows a terminal event rather than creating one.
 
 The execution root is created only when the managed base is a real directory, the chain from the authorized private root down to the root carries no symlink or reparse point and no regular file, the canonical root is inside no repository worktree, and no foreign worktree is inside it. A run id is one plain path component, so the path recorded above is the only one it can name. Every create, reclaim and delete revalidates all of that before entering its effect funnel, and re-checks the chain inside the funnel, after its before-hook and immediately before the effect.
 
@@ -379,23 +379,27 @@ and `worktree add --detach` materialises `A`, while a process inside that worktr
 through Git sees `B` — `git show HEAD:f` returns the replacement and
 `git status --porcelain` reports the untouched checkout modified. Two trees for one
 snapshot is not a tree §4's "ground truth is the diff" could name, so upstroke removes the ambiguity
-rather than detecting it. On the schema-4 path every child that runs Git over a snapshot — the
-manager's own commands and read-only reads, and every gate, reviewer and implementer the runners
-start, on the host runner and in a container alike — runs with `GIT_NO_REPLACE_OBJECTS=1`, which the
-runners compose last. On Git 2.42 and later the variable is final, and no adapter, image or command
-overlay can turn it back on. On Git 2.41, the oldest version `README.md` supports, it is not final: a
+rather than detecting it. On the schema-4 path every Git child of the workspace manager — its own
+commands and its read-only reads — runs with `GIT_NO_REPLACE_OBJECTS=1`. On Git 2.42 and later the
+variable is final. On Git 2.41, the oldest version `README.md` supports, it is not final: a
 `core.useReplaceRefs = true` in a system, global, repository or worktree configuration file, or in
-command-line configuration a child inherits, which is what a `GIT_CONFIG_*` pair in an image or an
-overlay is, turns replacements back on for a child that carries only the variable (measured with Git
-on 2.40.0 and 2.41.0 at each of those places; 2.42.0 and 2.43.0 held). The variable is also
-process-wide, so a role that creates a repository of its own loses that repository's replacements
-too. Both are filed against the schema-4 path, which no supported configuration activates
-(`PR326-MANAGER-GIT-CHILDREN-CARRY-THE-VARIABLE-ALONE` for the manager,
-`PR326-SCHEMA4-ROLE-ENVIRONMENT-REFUSES-REPLACEMENTS-EVERYWHERE` for the runners), and the v0.1 path
-below has neither. A replacement graph is a ref outside the recorded inputs of a run, so a verdict
+command-line configuration a child inherits, turns replacements back on for a child that carries only
+the variable (measured with Git on 2.40.0 and 2.41.0 at each of those places; 2.42.0 and 2.43.0
+held); that half is filed as `PR326-MANAGER-GIT-CHILDREN-CARRY-THE-VARIABLE-ALONE`. **The roles
+carry no process-wide setting since PR12 activated schema 4**, because the variable is process-wide:
+a role that creates or is handed a repository of its own lost that repository's replacements too
+(`PR326-SCHEMA4-ROLE-ENVIRONMENT-REFUSES-REPLACEMENTS-EVERYWHERE`). A host role reads the managed
+repository's recorded graph through the run's conditional include, the mechanism the next paragraph
+describes for the v0.1 conductor, with its conditions spelled from the workspace manager's own common
+directory and with the residual spellings that paragraph names (root's Q1, open). A container role
+reads it through its projected Git view, whose own `config` sets `core.useReplaceRefs = false`; the
+view is writable and higher-precedence configuration outranks a repository's, so that is the policy
+of the view and not a tamper-proof boundary (`docs/internals/runner/container/env.md`; root's Q2,
+accepted only in its host-witnessed scope). A repository a role creates, clones or is handed keeps
+Git's own semantics. A replacement graph is a ref outside the recorded inputs of a run, so a verdict
 that depended on one would not be reproducible from the record; an operator who wants the replaced
 history judged rewrites it, and the run judges what the repository then holds. The variable is one
-constant, `NO_REPLACEMENT_OBJECTS` in `src/workspace_manager.rs`, named at each of those boundaries.
+constant, `NO_REPLACEMENT_OBJECTS` in `src/workspace_manager.rs`, named at each boundary that sets it.
 
 **Exact snapshots are §5's; the recorded graph is every run's.** The released v0.1 path has no exact
 snapshot: its workspace and its ephemeral gate snapshots come from `src/workspace.rs`, frozen at

@@ -10,7 +10,9 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
+use crate::runner::Cancellation;
 use crate::topology::effects::ContainerSite;
 
 use super::exec::{CoveredCreate, CoveredStart};
@@ -93,13 +95,19 @@ pub enum RuntimeError {
         operation: RuntimeOp,
         detail: String,
     },
+    Unresolved {
+        operation: RuntimeOp,
+        detail: String,
+    },
 }
 
 impl RuntimeError {
     #[must_use]
     pub const fn operation(&self) -> RuntimeOp {
         match self {
-            Self::Unreachable { operation, .. } | Self::Failed { operation, .. } => *operation,
+            Self::Unreachable { operation, .. }
+            | Self::Failed { operation, .. }
+            | Self::Unresolved { operation, .. } => *operation,
         }
     }
 
@@ -119,6 +127,11 @@ impl fmt::Display for RuntimeError {
             Self::Failed { operation, detail } => {
                 write!(f, "the container runtime refused `{operation}`: {detail}")
             }
+            Self::Unresolved { operation, detail } => write!(
+                f,
+                "the container runtime's `{operation}` could not establish every process of the \
+                 container gone: {detail}"
+            ),
         }
     }
 }
@@ -168,6 +181,12 @@ impl Mount {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContainerUser {
+    pub uid: u32,
+    pub gid: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateSpec {
     pub name: String,
@@ -178,6 +197,8 @@ pub struct CreateSpec {
     pub command: Vec<String>,
     pub workdir: Option<String>,
     pub read_only_root: bool,
+    pub user: Option<ContainerUser>,
+    pub open_stdin: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -250,6 +271,16 @@ pub struct ContainerExecution {
     pub exit_code: Option<i32>,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
+    pub output_limited: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum QuestionBound<'a> {
+    Invocation {
+        deadline: Instant,
+        cancellation: &'a Cancellation,
+    },
+    Runtime,
 }
 
 pub trait ContainerRuntime: Send + Sync {
@@ -259,6 +290,15 @@ pub trait ContainerRuntime: Send + Sync {
 
     fn image_by_id(&self, id: &str) -> Result<Option<ImageInspection>, RuntimeError>;
 
+    fn image_environment(&self, id: &str) -> Result<Option<Vec<(String, String)>>, RuntimeError> {
+        Err(RuntimeError::Failed {
+            operation: RuntimeOp::InspectImageById,
+            detail: format!(
+                "this container runtime does not report the environment of image `{id}`"
+            ),
+        })
+    }
+
     fn volume_present(&self, name: &str) -> Result<bool, RuntimeError>;
 
     fn containers_with_label(
@@ -267,7 +307,7 @@ pub trait ContainerRuntime: Send + Sync {
         value: &str,
     ) -> Result<Vec<DiscoveredContainer>, RuntimeError>;
 
-    fn observe(&self, name: &str) -> Result<Liveness, RuntimeError>;
+    fn observe(&self, name: &str, bound: QuestionBound<'_>) -> Result<Liveness, RuntimeError>;
 
     fn collect(&self, name: &str) -> Result<ContainerExecution, RuntimeError>;
 

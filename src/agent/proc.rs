@@ -834,7 +834,7 @@ pub use self::ambient::{
 #[cfg(all(unix, test))]
 pub(crate) use self::termination::armed_container_reaper_selects;
 #[cfg(unix)]
-pub use self::termination::{ContainerReaper, arm_container_reaper};
+pub use self::termination::{BackstopHold, ContainerReaper, arm_container_reaper};
 
 #[cfg(windows)]
 mod windows_job {
@@ -2375,7 +2375,18 @@ mod termination {
             self.close_and_wait();
         }
 
-        fn cancel_unleased(self) {
+        /// A container reaper's cancellation, with a bound on every wait, for
+        /// a backstop that holds its invocations' cleanup leases and for one
+        /// that holds none alike: the lease decides nothing here.
+        ///
+        /// Unacknowledged, the reaper may still be settling: it is neither
+        /// killed nor treated as settled. Fail-closed termination is armed for
+        /// this process and the reaper's pipes are closed, so it settles as
+        /// after its coordinator's death, still the owner of what it settles,
+        /// and its own exit releases whatever hold it has. Acknowledged, the
+        /// acknowledgement is not its exit: [`ReaperEnding::ContainerExit`]
+        /// waits for that exit, bounded, and collects it.
+        fn cancel_container(self) {
             let mut frame = [0_u8; 5];
             frame[0] = REAPER_CANCEL;
             let cancelled = write_raw(self.command_fd, &frame)
@@ -2390,7 +2401,7 @@ mod termination {
                 close_fd(self.identity);
                 return;
             }
-            let _ = self.close_and_wait_reporting(ReaperEnding::UnleasedExit);
+            let _ = self.close_and_wait_reporting(ReaperEnding::ContainerExit);
         }
 
         fn abandon(self) -> HelperEnd {
@@ -2436,7 +2447,7 @@ mod termination {
                     ReaperEnding::UnacknowledgedCleanup | ReaperEnding::AbandonedHelper => {
                         wait_for_an_ended_helper_through_identity(self.identity, self.rest)
                     }
-                    ReaperEnding::UnleasedExit => {
+                    ReaperEnding::ContainerExit => {
                         let answered =
                             wait_for_an_ended_helper_through_identity(self.identity, self.rest);
                         if answered.0 == STILL_THERE_AT_THE_BUDGET {
@@ -2478,7 +2489,7 @@ mod termination {
                         self.rest,
                     )
                 }
-                ReaperEnding::UnleasedExit => {
+                ReaperEnding::ContainerExit => {
                     let answered = wait_for_an_ended_helper(
                         self.pid,
                         EndingWait::CollectingStatus,
@@ -2489,8 +2500,12 @@ mod termination {
                         return answered;
                     }
                     // SAFETY: `pid` is the unreaped container reaper this
-                    // process forked; it acknowledged CANCEL, holds no cleanup
-                    // lease, and its only remaining step is its own exit.
+                    // process forked. It acknowledged CANCEL, which its runner
+                    // sends only once every container it covered is settled, so
+                    // it has no cleanup left to do and its only remaining step
+                    // is its own exit -- the exit that also releases any
+                    // cleanup lease it holds. Ending it releases nothing an
+                    // unsettled cleanup still needs.
                     let _ = unsafe { libc::kill(self.pid, libc::SIGKILL) };
                     wait_for_an_ended_helper(
                         self.pid,
@@ -2547,7 +2562,19 @@ mod termination {
         /// collectable however long the wait is, so the unbounded form buys a
         /// wedged parent beside the wedged child rather than a released lease.
         AbandonedHelper,
-        UnleasedExit,
+        /// A container reaper that acknowledged CANCEL
+        /// ([`Reaper::cancel_container`]), whatever hold it keeps. The
+        /// acknowledgement is not its exit, so this waits for the exit and
+        /// collects it, and carries `HELPER_END_BUDGET`: a reaper still there
+        /// at the end of it has acknowledged that it has nothing left to
+        /// settle, and is ended (`SIGKILL`, through its identity on Linux) and
+        /// collected under the same bound. Its exit is what releases any hold
+        /// it has, so a collected exit is a released hold; one that cannot be
+        /// collected even then is left for this process's exit, and whatever
+        /// hold it still has stays observable to the next writer's admission,
+        /// which refuses rather than assume it gone. Unlike `AcknowledgedExit`,
+        /// no wait here is unbounded.
+        ContainerExit,
     }
 
     fn spawn_reaper(carried: &[PathBuf]) -> Result<Reaper, String> {
@@ -4072,6 +4099,10 @@ mod termination {
                             wake = false;
                             drain_pipe(wake_fd);
                         }
+                        #[cfg(test)]
+                        COLLECT_ISOLATED_TEST_GUARD => {
+                            collect_probe_for_isolated_test(probe_pid, probe_fd)
+                        }
                         _ => wake = true,
                     }
                 }
@@ -4816,7 +4847,23 @@ mod termination {
         program: std::ffi::CString,
         _ps: Vec<std::ffi::CString>,
         ps_argv: Vec<*const libc::c_char>,
+        /// For a backstop that holds nothing while its coordinator lives
+        /// ([`BackstopHold::BeforeActing`]): the exclusion it takes at its
+        /// coordinator's death before it may reclaim anything, rendered before
+        /// the fork. `None` for a reaper that holds its leases throughout.
+        before_acting: Option<ExclusionBeforeActing>,
     }
+
+    struct ExclusionBeforeActing {
+        leases: Vec<std::ffi::CString>,
+        run_lock: std::ffi::CString,
+    }
+
+    /// How many times, 10 ms apart, a backstop asks for its shared hold on a
+    /// lease path at its coordinator's death before it gives up acting: 3 s.
+    /// An exclusive hold on a cleanup lease is only ever an admission's
+    /// momentary probe.
+    const BEFORE_ACTING_LOCK_TRIES: u16 = 300;
 
     static CONTAINER_SCOPE: OnceLock<
         Mutex<Option<crate::runner::container::census::ReaperContainerScope>>,
@@ -4891,6 +4938,34 @@ mod termination {
             program,
             _ps: ps,
             ps_argv,
+            before_acting: None,
+        })
+    }
+
+    /// The exclusion a [`BackstopHold::BeforeActing`] backstop takes before it
+    /// acts, rendered here, before the fork, so its reaper only opens what it
+    /// is handed; a path that cannot be a C string refuses the arming.
+    fn render_exclusion(
+        leases: &[PathBuf],
+        run_lock: &std::path::Path,
+    ) -> Result<ExclusionBeforeActing, UpstrokeError> {
+        let rendered = |path: &std::path::Path| {
+            std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).map_err(|_| {
+                UpstrokeError::Refused {
+                    message: format!(
+                        "a container backstop's cleanup exclusion names `{}`, which carries an \
+                         interior NUL and cannot be opened by its reaper",
+                        path.display()
+                    ),
+                }
+            })
+        };
+        Ok(ExclusionBeforeActing {
+            leases: leases
+                .iter()
+                .map(|path| rendered(path))
+                .collect::<Result<_, _>>()?,
+            run_lock: rendered(run_lock)?,
         })
     }
 
@@ -4907,9 +4982,46 @@ mod termination {
         reaper: Option<Reaper>,
     }
 
+    /// The cleanup exclusion (R28) a container-label backstop keeps.
+    #[derive(Debug, Clone, Copy)]
+    pub enum BackstopHold<'a> {
+        /// These lease paths, each held by the backstop's own shared `flock`
+        /// from before `READY` for the whole of its life, as a command reaper
+        /// holds its leases.
+        Throughout(&'a [PathBuf]),
+        /// Nothing while its coordinator lives, for a backstop that can act
+        /// only once its coordinator has died: at that death, before it
+        /// reclaims anything, it takes its own shared `flock` on each of
+        /// `leases`, then asks `F_GETLK` of `run_lock`, and reclaims nothing if
+        /// another process holds the run -- an engine already admitted, whose
+        /// census owns the dead incarnation's containers -- or if either step
+        /// fails. What a container runner arms (`runner::container::exec`).
+        BeforeActing {
+            leases: &'a [PathBuf],
+            run_lock: &'a std::path::Path,
+        },
+    }
+
+    /// Arm a container-label backstop for a container runner's incarnation.
+    ///
+    /// `hold` is the cleanup exclusion (R28) it keeps
+    /// (`PR12-INV9-CONTAINER-HELPER-CLEANUP-LEASE`). Held
+    /// [`BackstopHold::Throughout`], the forked reaper opens each lease path
+    /// and takes its own shared `flock` in its setup, before it acknowledges
+    /// `READY` — exactly as a command reaper does in `spawn_reaper` — so the
+    /// hold is established, and acknowledged, before this returns and so
+    /// before the governed launch it covers, and it keeps the hold for its
+    /// whole life: when the coordinator dies it reclaims the labeled
+    /// containers and exits, and its exit is what releases the hold.
+    /// [`BackstopHold::BeforeActing`], it holds nothing while its coordinator
+    /// lives and takes the exclusion at that death, before it may act. Either
+    /// way it never reclaims beside an engine admitted to the run. A hold is
+    /// restart exclusion only; it is never evidence that an invocation
+    /// settled.
     pub fn arm_container_reaper(
         terminate_site: ProcessSite,
         scope: &crate::runner::container::census::ReaperContainerScope,
+        hold: BackstopHold<'_>,
     ) -> Result<ContainerReaper, UpstrokeError> {
         if terminate_site != ProcessSite::Terminate {
             return Err(UpstrokeError::Agent {
@@ -4919,9 +5031,16 @@ mod termination {
                 ),
             });
         }
-        let containers = render_container_argv(scope)?;
+        let mut containers = render_container_argv(scope)?;
+        let held = match hold {
+            BackstopHold::Throughout(leases) => leases.to_vec(),
+            BackstopHold::BeforeActing { leases, run_lock } => {
+                containers.before_acting = Some(render_exclusion(leases, run_lock)?);
+                Vec::new()
+            }
+        };
         shared_state()?;
-        let reaper = fork_reaper(Vec::new(), Some(containers), EndingRest::SingleAttempt)
+        let reaper = fork_reaper(held, Some(containers), EndingRest::SingleAttempt)
             .map_err(|message| UpstrokeError::Agent { message })?;
         #[cfg(test)]
         note_armed_container_reaper(reaper.pid, scope.list_argv());
@@ -4935,13 +5054,18 @@ mod termination {
             if let Some(reaper) = self.reaper.take() {
                 #[cfg(test)]
                 note_disarmed_container_reaper(reaper.pid);
-                reaper.cancel_unleased();
+                // The bounded container ending, whatever hold it keeps
+                // (`Reaper::cancel_container`): a runner drops its backstop
+                // only once every container it covered is settled, and an
+                // unsettled runner keeps it for this process's life instead.
+                reaper.cancel_container();
             }
         }
     }
 
     #[cfg(test)]
-    static ARMED_CONTAINER_REAPERS: Mutex<Vec<(libc::pid_t, Vec<String>)>> = Mutex::new(Vec::new());
+    pub(super) static ARMED_CONTAINER_REAPERS: Mutex<Vec<(libc::pid_t, Vec<String>)>> =
+        Mutex::new(Vec::new());
 
     #[cfg(test)]
     fn note_armed_container_reaper(pid: libc::pid_t, list_argv: Vec<String>) {
@@ -5169,7 +5293,235 @@ mod termination {
             cleanup_reaper_group(pgid, anchor, cleanup_delay_ms);
         }
         if let Some(containers) = containers {
-            reclaim_labeled_containers(containers);
+            if excluded_before_acting(containers) {
+                reclaim_labeled_containers(containers);
+            }
+        }
+    }
+
+    /// Whether a container backstop whose coordinator has died may reclaim:
+    /// at once for one that has held its leases throughout; for one that has
+    /// held nothing ([`BackstopHold::BeforeActing`]), only once it holds its
+    /// own shared `flock` on each of its run's lease paths -- the descriptors
+    /// stay open, and the holds with them, until this reaper exits -- and the
+    /// run's lock file answers `F_GETLK` with no holder. An engine admitted
+    /// before the hold is taken holds the run lock, and an engine that takes
+    /// it after is refused by its own cleanup probe; either way the reaper
+    /// stands down, and any failure stands it down too. Async-signal-safe:
+    /// `open`, `flock`, `fcntl`, `close` and `nanosleep` over strings rendered
+    /// before the fork.
+    fn excluded_before_acting(containers: &ReaperContainers) -> bool {
+        let Some(exclusion) = &containers.before_acting else {
+            return true;
+        };
+        for path in &exclusion.leases {
+            // SAFETY: `path` is a NUL-terminated string rendered before the
+            // fork; `open` allocates nothing in this process.
+            let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+            if fd < 0 {
+                return false;
+            }
+            let mut tries = 0_u16;
+            loop {
+                // SAFETY: `fd` is the descriptor just opened.
+                if unsafe { libc::flock(fd, libc::LOCK_SH | libc::LOCK_NB) } == 0 {
+                    break;
+                }
+                let errno = last_errno();
+                let momentary =
+                    errno == libc::EWOULDBLOCK || errno == libc::EAGAIN || errno == libc::EINTR;
+                if !momentary || tries >= BEFORE_ACTING_LOCK_TRIES {
+                    return false;
+                }
+                tries = tries.saturating_add(1);
+                raw_sleep_10ms();
+            }
+        }
+        run_lock_is_free(&exclusion.run_lock)
+    }
+
+    /// `true` only when the run's lock file answers `F_GETLK` with no holder.
+    /// This reaper holds no `fcntl` lock of its own, so closing its descriptor
+    /// releases nothing.
+    fn run_lock_is_free(path: &std::ffi::CStr) -> bool {
+        let (Ok(write), Ok(start), Ok(unlocked)) = (
+            libc::c_short::try_from(libc::F_WRLCK),
+            libc::c_short::try_from(libc::SEEK_SET),
+            libc::c_short::try_from(libc::F_UNLCK),
+        ) else {
+            return false;
+        };
+        // SAFETY: `path` is a NUL-terminated string rendered before the fork.
+        let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+        if fd < 0 {
+            return false;
+        }
+        let mut request = libc::flock {
+            l_type: write,
+            l_whence: start,
+            l_start: 0,
+            l_len: 0,
+            l_pid: 0,
+        };
+        // SAFETY: `request` is a valid, writable `flock` record and `fd` is
+        // the descriptor just opened; `F_GETLK` only reports.
+        let asked = unsafe { libc::fcntl(fd, libc::F_GETLK, &mut request) };
+        close_fd(fd);
+        asked == 0 && request.l_type == unlocked
+    }
+
+    #[cfg(test)]
+    const COLLECT_ISOLATED_TEST_GUARD: u8 = 0xf1;
+
+    #[cfg(test)]
+    const ISOLATED_PROBE_COLLECTED: libc::c_int = 42;
+
+    #[cfg(test)]
+    fn collect_probe_for_isolated_test(probe_pid: libc::pid_t, probe_fd: libc::c_int) -> ! {
+        let waitable = set_signal_disposition(libc::SIGCHLD, libc::SIG_DFL);
+        close_fd(probe_fd);
+        let (waited, errno, status) = wait_for_an_ended_helper(
+            probe_pid,
+            EndingWait::CollectingStatus,
+            EndingRetry::WhileInterrupted,
+            EndingRest::SingleAttempt,
+        );
+        let collected = waitable
+            && waited == probe_pid
+            && errno == 0
+            && libc::WIFEXITED(status)
+            && libc::WEXITSTATUS(status) == 0;
+        // SAFETY: the forked guard cannot return to Rust. Only the completed
+        // wait above earns this distinct status; the probe itself never forks.
+        unsafe {
+            libc::_exit(if collected {
+                ISOLATED_PROBE_COLLECTED
+            } else {
+                1
+            })
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) struct IsolatedJobControl {
+        collected: bool,
+    }
+
+    #[cfg(test)]
+    impl IsolatedJobControl {
+        pub(crate) fn new() -> Self {
+            Self { collected: false }
+        }
+
+        pub(crate) fn collect(mut self) {
+            let result = self.collect_if_installed();
+            assert_eq!(
+                result,
+                Ok(true),
+                "the isolated job-control guard and its probe were collected: {result:?}"
+            );
+        }
+
+        fn collect_if_installed(&mut self) -> Result<bool, String> {
+            let Some(state) = STATE.get() else {
+                self.collected = true;
+                return Ok(false);
+            };
+            let state = state.as_ref().map_err(|message| {
+                format!("the isolated helper's job-control setup failed: {message}")
+            })?;
+            let guard = {
+                // The monitor also owns this state. Copy only the guard after
+                // every launch settled, and release the lock before waiting.
+                let state = state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if state.spawning != 0 || !state.groups.is_empty() {
+                    return Err("the isolated helper still has registered commands".to_owned());
+                }
+                state.guard
+            };
+            let probe_pid = PROBE_PID.load(Ordering::SeqCst);
+            // SAFETY: the isolated helper owns this nonblocking command pipe.
+            // The byte lives for the call, and no command will launch after it.
+            let sent = unsafe {
+                libc::write(
+                    guard.command_fd,
+                    std::ptr::from_ref(&COLLECT_ISOLATED_TEST_GUARD).cast(),
+                    1,
+                )
+            };
+            if sent != 1 {
+                return Err(format!(
+                    "ask the isolated job-control guard to collect its probe: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            let deadline =
+                std::time::Instant::now() + super::test_support::ISOLATED_CHILD_COLLECTION_BOUND;
+            loop {
+                let mut status = 0;
+                // SAFETY: this isolated helper has no competing waiter for its
+                // guard. The status is writable, and WNOHANG never blocks.
+                let waited = unsafe { libc::waitpid(guard.pid, &mut status, libc::WNOHANG) };
+                if waited == guard.pid {
+                    self.collected = true;
+                    GUARD_COMMAND_FD.store(-1, Ordering::SeqCst);
+                    PROBE_PID.store(-1, Ordering::SeqCst);
+                    for fd in [
+                        guard.command_fd,
+                        guard.ack_fd,
+                        guard._command_keepalive_fd,
+                        guard.identity,
+                    ] {
+                        if fd >= 0 {
+                            close_fd(fd);
+                        }
+                    }
+                    if !libc::WIFEXITED(status)
+                        || libc::WEXITSTATUS(status) != ISOLATED_PROBE_COLLECTED
+                    {
+                        return Err(format!(
+                            "isolated job-control guard {} did not prove probe {probe_pid} collected: {status}",
+                            guard.pid
+                        ));
+                    }
+                    crate::workspace_manager::fixture::say(&format!(
+                        "collected isolated job-control guard {} after its probe {probe_pid}",
+                        guard.pid
+                    ));
+                    return Ok(true);
+                }
+                if waited < 0 && !last_errno_is_interrupted() {
+                    return Err(format!(
+                        "collect isolated job-control guard {}: {}",
+                        guard.pid,
+                        std::io::Error::last_os_error()
+                    ));
+                }
+                if std::time::Instant::now() >= deadline {
+                    return Err(format!(
+                        "isolated job-control guard {} did not collect probe {probe_pid} and end within {:?}",
+                        guard.pid,
+                        super::test_support::ISOLATED_CHILD_COLLECTION_BOUND
+                    ));
+                }
+                crate::workspace_manager::fixture::rest(Duration::from_millis(10));
+            }
+        }
+    }
+
+    #[cfg(test)]
+    impl Drop for IsolatedJobControl {
+        fn drop(&mut self) {
+            if self.collected {
+                return;
+            }
+            if let Err(error) = self.collect_if_installed() {
+                crate::workspace_manager::fixture::say(&format!(
+                    "isolated job-control cleanup failed: {error}"
+                ));
+            }
         }
     }
 
@@ -9359,8 +9711,12 @@ mod termination {
                 STATE.get().is_none(),
                 "no host launch has installed the signal monitor in this isolated process"
             );
-            let reaper = arm_container_reaper(ProcessSite::Terminate, &a_container_scope(program))
-                .expect("arm the container reaper");
+            let reaper = arm_container_reaper(
+                ProcessSite::Terminate,
+                &a_container_scope(program),
+                BackstopHold::Throughout(&[]),
+            )
+            .expect("arm the container reaper");
             report(&format!(
                 "signal monitor installed by arming: {}",
                 STATE.get().is_some_and(Result::is_ok)
@@ -9377,6 +9733,7 @@ mod termination {
             let refused = arm_container_reaper(
                 ProcessSite::Spawn,
                 &a_container_scope(std::path::Path::new("/usr/bin/true")),
+                BackstopHold::Throughout(&[]),
             );
             assert!(
                 refused
@@ -9394,6 +9751,7 @@ mod termination {
             let container = arm_container_reaper(
                 ProcessSite::Terminate,
                 &a_container_scope(std::path::Path::new("/usr/bin/true")),
+                BackstopHold::Throughout(&[]),
             )
             .expect("arm a container reaper");
             let container_rest = container.reaper.as_ref().map(|reaper| reaper.rest);
@@ -9597,6 +9955,7 @@ mod termination {
             let reaper = arm_container_reaper(
                 ProcessSite::Terminate,
                 &a_container_scope(std::path::Path::new("/usr/bin/true")),
+                BackstopHold::Throughout(&[]),
             )
             .expect("arm the container reaper inside the same cleanup scope");
             let not_held_while_armed = not_held_within(Duration::from_secs(20));
@@ -9635,6 +9994,182 @@ mod termination {
                 ),
                 "a host reaper forked inside the run's cleanup scope holds R28, and a container \
                  reaper armed inside it holds none: {ended}"
+            );
+        }
+
+        #[test]
+        #[ignore = "isolated caller of a_leased_container_reaper_holds_its_lease_until_its_drop_returns"]
+        fn leased_container_reaper_lease_child() {
+            let public = std::path::PathBuf::from(
+                std::env::var_os(CONTAINER_REAPER_RUN_DIR)
+                    .expect("the parent names a run directory"),
+            );
+            let lock = crate::rundir::RunLock::acquire(&public).expect("take the run lock");
+            let lease = public.join("cleanup.lock");
+            let held_before =
+                crate::rundir::observe_cleanup_hold(&public, &mut crate::rundir::NoHooks);
+            // Outside any cleanup scope: the backstop holds what it is handed,
+            // which is how an invocation's leases reach it across a thread.
+            let reaper = arm_container_reaper(
+                ProcessSite::Terminate,
+                &a_container_scope(std::path::Path::new("/usr/bin/true")),
+                BackstopHold::Throughout(std::slice::from_ref(&lease)),
+            )
+            .expect("arm a leased container reaper");
+            let held_once_armed =
+                crate::rundir::observe_cleanup_hold(&public, &mut crate::rundir::NoHooks);
+            let started = Instant::now();
+            drop(reaper);
+            let took = started.elapsed();
+            let held_after_its_drop =
+                crate::rundir::observe_cleanup_hold(&public, &mut crate::rundir::NoHooks);
+            report(&format!(
+                "held before arming: {held_before}; held once armed: {held_once_armed}; held \
+                 after its drop returned: {held_after_its_drop}; the drop was bounded: {}",
+                took < HELPER_END_BUDGET * 4
+            ));
+            drop(lock);
+        }
+
+        #[test]
+        #[ignore = "isolated caller of a_leased_container_reaper_stopped_before_its_cancellation_keeps_its_hold"]
+        fn leased_container_reaper_stopped_before_its_cancellation_child() {
+            let public = std::path::PathBuf::from(
+                std::env::var_os(CONTAINER_REAPER_RUN_DIR)
+                    .expect("the parent names a run directory"),
+            );
+            let lock = crate::rundir::RunLock::acquire(&public).expect("take the run lock");
+            let lease = public.join("cleanup.lock");
+            let reaper = arm_container_reaper(
+                ProcessSite::Terminate,
+                &a_container_scope(std::path::Path::new("/usr/bin/true")),
+                BackstopHold::Throughout(std::slice::from_ref(&lease)),
+            )
+            .expect("arm a leased container reaper");
+            let pid = armed_pid(&reaper);
+            #[cfg(target_os = "linux")]
+            answer_a_wait_by_number_that_would_block_with(seccomp_refuse_with(libc::EPERM));
+            // SAFETY: `pid` is this isolated process's own unreaped reaper.
+            assert_eq!(unsafe { libc::kill(pid, libc::SIGSTOP) }, 0);
+            let stopped = waited_within(pid, libc::WUNTRACED, ISOLATED_CHILD_COLLECTION_BOUND);
+            assert!(
+                stopped.is_some_and(|status| libc::WIFSTOPPED(status)),
+                "the reaper {pid} stopped: {stopped:?}"
+            );
+            report(&format!("stopped leased reaper {pid}"));
+            let started = Instant::now();
+            drop(reaper);
+            let took = started.elapsed();
+            let held_after_the_failed_cancellation =
+                crate::rundir::observe_cleanup_hold(&public, &mut crate::rundir::NoHooks);
+            report(&format!(
+                "the failed cancellation returned within its bound: {}; the stopped owner \
+                 still holds the lease: {held_after_the_failed_cancellation}",
+                took < HELPER_END_BUDGET * 4
+            ));
+            drop(lock);
+            wait_out_a_fail_closed_termination();
+        }
+
+        /// A leased backstop stopped before it could acknowledge CANCEL
+        /// (`PR12-INV9-CONTAINER-HELPER-CLEANUP-LEASE`, the amendment's
+        /// fail-closed shape): its caller's drop returns within the bound and
+        /// ends the caller fail-closed, as an unleased one's does, and the
+        /// stopped reaper -- still the owner of whatever it was settling -- is
+        /// neither killed nor released to free its hold: the hold is still held
+        /// when the failed cancellation returns. Once the reaper runs again
+        /// with its caller gone, it settles and its exit releases the hold.
+        #[test]
+        fn a_leased_container_reaper_stopped_before_its_cancellation_keeps_its_hold() {
+            use std::os::unix::process::ExitStatusExt;
+            let parent = std::env::temp_dir();
+            let tree =
+                crate::rundir::scratch_tree::acquire(&parent, "container-reaper-stopped-leased")
+                    .unwrap_or_else(|refusal| {
+                        panic!("a scratch tree under {}: {refusal:?}", parent.display())
+                    });
+            let public = tree.path().join("run");
+            crate::workspace_manager::fixture::create_dir(&public);
+            let ended = run_isolated(
+                "leased_container_reaper_stopped_before_its_cancellation_child",
+                &[(CONTAINER_REAPER_RUN_DIR, public.as_os_str())],
+                CONTAINER_REAPER_CHILD_BOUND,
+            );
+            let reaper = ended
+                .stdout
+                .split("stopped leased reaper ")
+                .nth(1)
+                .and_then(|rest| rest.split_whitespace().next())
+                .and_then(|pid| pid.parse::<libc::pid_t>().ok());
+            assert_eq!(
+                ended.status.and_then(|status| status.signal()),
+                Some(libc::SIGTERM),
+                "the caller went on with its leased reaper stopped and its CANCEL \
+                 unacknowledged: {ended}"
+            );
+            assert!(
+                ended.stdout.contains(
+                    "the failed cancellation returned within its bound: true; the stopped owner \
+                     still holds the lease: true"
+                ),
+                "the failed cancellation neither waited without a bound nor released the stopped \
+                 owner's hold: {ended}"
+            );
+            let deadline = Instant::now() + CONTAINER_REAPER_CHILD_BOUND;
+            let released = loop {
+                if let Some(pid) = reaper {
+                    if process_is_stopped(pid) == Some(true) {
+                        // SAFETY: `pid` is the reaper the isolated caller forked
+                        // and left stopped when it ended; continuing it is what
+                        // the kernel does for an orphaned stopped group.
+                        let _ = unsafe { libc::kill(pid, libc::SIGCONT) };
+                    }
+                }
+                if !crate::rundir::observe_cleanup_hold(&public, &mut crate::rundir::NoHooks) {
+                    break true;
+                }
+                if Instant::now() >= deadline {
+                    break false;
+                }
+                rest_once(Duration::from_millis(10));
+            };
+            assert!(
+                reaper.is_some() && released,
+                "the reaper, running again with its caller gone, settled and released its hold \
+                 (reaper {reaper:?}): {ended}"
+            );
+        }
+
+        /// The container-label backstop's lease (`PR12-INV9-CONTAINER-HELPER-CLEANUP-LEASE`):
+        /// armed with an invocation's lease paths, the reaper holds R28 from the moment
+        /// `arm_container_reaper` returns -- its setup took the shared hold before it
+        /// acknowledged READY -- and no longer once its drop has returned, because a leased
+        /// backstop's cancellation waits for the exit that releases the hold.
+        #[test]
+        fn a_leased_container_reaper_holds_its_lease_until_its_drop_returns() {
+            let parent = std::env::temp_dir();
+            let tree = crate::rundir::scratch_tree::acquire(&parent, "container-reaper-leased")
+                .unwrap_or_else(|refusal| {
+                    panic!("a scratch tree under {}: {refusal:?}", parent.display())
+                });
+            let public = tree.path().join("run");
+            crate::workspace_manager::fixture::create_dir(&public);
+            let ended = run_isolated(
+                "leased_container_reaper_lease_child",
+                &[(CONTAINER_REAPER_RUN_DIR, public.as_os_str())],
+                CONTAINER_REAPER_CHILD_BOUND,
+            );
+            assert!(
+                ended.status.is_some_and(|status| status.success()),
+                "the isolated caller ended: {ended}"
+            );
+            assert!(
+                ended.stdout.contains(
+                    "held before arming: false; held once armed: true; held after its drop \
+                     returned: false; the drop was bounded: true"
+                ),
+                "a backstop armed with the invocation's lease holds R28 from its arming until \
+                 its drop returns: {ended}"
             );
         }
 
@@ -9907,6 +10442,9 @@ mod termination {
 pub(crate) mod test_support {
     use super::*;
 
+    #[cfg(unix)]
+    pub(crate) use super::termination::IsolatedJobControl;
+
     pub(crate) fn run_with_timeout(
         command: Command,
         stdin_data: &str,
@@ -9924,6 +10462,259 @@ pub(crate) mod test_support {
 
     #[cfg(unix)]
     pub(crate) const ISOLATED_CHILD_COLLECTION_BOUND: Duration = Duration::from_secs(10);
+
+    #[cfg(unix)]
+    pub(crate) struct RetainedMockReaper {
+        root_filter: String,
+        incarnation_filter: String,
+        collected: bool,
+    }
+
+    #[cfg(unix)]
+    impl RetainedMockReaper {
+        pub(crate) fn new(private_root: &std::path::Path, incarnation: &str) -> Self {
+            use crate::runner::container::intent::{
+                LABEL_INCARNATION, LABEL_PRIVATE_ROOT, private_root_label,
+            };
+            Self {
+                root_filter: format!(
+                    "label={LABEL_PRIVATE_ROOT}={}",
+                    private_root_label(private_root)
+                ),
+                incarnation_filter: format!("label={LABEL_INCARNATION}={incarnation}"),
+                collected: false,
+            }
+        }
+
+        pub(crate) fn collect(mut self) {
+            let result = self.collect_if_armed();
+            assert_eq!(
+                result,
+                Ok(true),
+                "one retained mock reaper was collected: {result:?}"
+            );
+        }
+
+        fn collect_if_armed(&mut self) -> Result<bool, String> {
+            let pid = {
+                let armed = super::termination::ARMED_CONTAINER_REAPERS
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let mut matching = armed.iter().filter(|(_, argv)| {
+                    argv.contains(&self.root_filter) && argv.contains(&self.incarnation_filter)
+                });
+                let Some((pid, argv)) = matching.next() else {
+                    self.collected = true;
+                    return Ok(false);
+                };
+                if matching.next().is_some()
+                    || *pid <= 0
+                    || argv.first().map(String::as_str)
+                        != Some(crate::runner::container::NO_OP_REAPER_PROGRAM)
+                {
+                    return Err(
+                        "the scope must name exactly one mock reaper with a positive pid"
+                            .to_owned(),
+                    );
+                }
+                *pid
+            };
+            collect_retained_reaper(pid, "mock", &mut self.collected)
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for RetainedMockReaper {
+        fn drop(&mut self) {
+            if self.collected {
+                return;
+            }
+            if let Err(error) = self.collect_if_armed() {
+                crate::workspace_manager::fixture::say(&format!(
+                    "retained mock reaper cleanup failed: {error}"
+                ));
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    pub(crate) struct RetainedStubReaper {
+        listing: Vec<String>,
+        program: std::path::PathBuf,
+        stub: std::path::PathBuf,
+        collected: bool,
+    }
+
+    #[cfg(unix)]
+    impl RetainedStubReaper {
+        pub(crate) fn new(
+            private_root: &std::path::Path,
+            incarnation: &str,
+            program: &std::path::Path,
+            stub: &std::path::Path,
+        ) -> Self {
+            let scope = crate::runner::container::census::ReaperContainerScope::new(
+                program,
+                private_root,
+                incarnation,
+            )
+            .expect("the stub runtime's reaper scope");
+            Self {
+                listing: scope.list_argv(),
+                program: program.to_path_buf(),
+                stub: stub.to_path_buf(),
+                collected: false,
+            }
+        }
+
+        pub(crate) fn collect(mut self) {
+            let result = self.collect_if_armed();
+            assert_eq!(
+                result,
+                Ok(true),
+                "one retained stub reaper was collected: {result:?}"
+            );
+        }
+
+        fn collect_if_armed(&mut self) -> Result<bool, String> {
+            let pid = {
+                let armed = super::termination::ARMED_CONTAINER_REAPERS
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let mut matching = armed.iter().filter(|(_, argv)| *argv == self.listing);
+                let Some((pid, _)) = matching.next() else {
+                    self.collected = true;
+                    return Ok(false);
+                };
+                if matching.next().is_some() || *pid <= 0 {
+                    return Err(
+                        "the scope must name exactly one stub reaper with a positive pid"
+                            .to_owned(),
+                    );
+                }
+                *pid
+            };
+            let resolved = match self.program.to_str() {
+                Some(name) if !name.contains('/') => crate::util::find_program(name),
+                _ => Some(self.program.clone()),
+            };
+            if resolved.as_deref() != Some(self.stub.as_path()) {
+                return Err(format!(
+                    "the scope's program `{}` resolves to {resolved:?}, not to the stub {}",
+                    self.program.display(),
+                    self.stub.display()
+                ));
+            }
+            collect_retained_reaper(pid, "stub", &mut self.collected)
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for RetainedStubReaper {
+        fn drop(&mut self) {
+            if self.collected {
+                return;
+            }
+            if let Err(error) = self.collect_if_armed() {
+                crate::workspace_manager::fixture::say(&format!(
+                    "retained stub reaper cleanup failed: {error}"
+                ));
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn collect_retained_reaper(
+        pid: libc::pid_t,
+        kind: &str,
+        collected: &mut bool,
+    ) -> Result<bool, String> {
+        if let Some(status) = poll_retained_mock_reaper(pid)
+            .map_err(|error| format!("inspect retained {kind} reaper {pid}: {error}"))?
+        {
+            forget_collected_reaper(pid, collected);
+            return Err(format!(
+                "retained {kind} reaper {pid} had already exited: {status}"
+            ));
+        }
+        // SAFETY: this helper is isolated and has no competing waiter. The caller selected
+        // this pid from the registry by its exact scope and program, after its runner
+        // dropped; waitpid just proved it is still this process's unreaped child, so its
+        // pid cannot be reused. SIGKILL cannot execute the reaper's parent-death cleanup
+        // or spawn children.
+        if unsafe { libc::kill(pid, libc::SIGKILL) } != 0 {
+            return Err(format!(
+                "kill retained {kind} reaper {pid}: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        let deadline = Instant::now() + ISOLATED_CHILD_COLLECTION_BOUND;
+        loop {
+            match poll_retained_mock_reaper(pid) {
+                Ok(Some(status)) => {
+                    forget_collected_reaper(pid, collected);
+                    if !libc::WIFSIGNALED(status) || libc::WTERMSIG(status) != libc::SIGKILL {
+                        return Err(format!(
+                            "retained {kind} reaper {pid} ended unexpectedly: {status}"
+                        ));
+                    }
+                    crate::workspace_manager::fixture::say(&format!(
+                        "collected retained {kind} reaper {pid}"
+                    ));
+                    return Ok(true);
+                }
+                Ok(None) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) => {
+                    return Err(format!("collect retained {kind} reaper {pid}: {error}"));
+                }
+            }
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "retained {kind} reaper {pid} was not collected within {ISOLATED_CHILD_COLLECTION_BOUND:?}"
+                ));
+            }
+            crate::workspace_manager::fixture::rest(Duration::from_millis(10));
+        }
+    }
+
+    #[cfg(unix)]
+    fn forget_collected_reaper(pid: libc::pid_t, collected: &mut bool) {
+        *collected = true;
+        super::termination::ARMED_CONTAINER_REAPERS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .retain(|(armed, _)| *armed != pid);
+    }
+
+    #[cfg(unix)]
+    fn poll_retained_mock_reaper(pid: libc::pid_t) -> std::io::Result<Option<libc::c_int>> {
+        let mut status = 0;
+        // SAFETY: the caller supplies the positive pid from its scoped reaper registry.
+        // The status is writable, and WNOHANG waits for neither a live nor a stopped child.
+        let waited = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+        if waited == pid {
+            Ok(Some(status))
+        } else if waited == 0 {
+            Ok(None)
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn assert_no_children_in_isolated_test() {
+        // SAFETY: this runs only in an isolated test helper with no competing waiter.
+        // It observes that helper's direct children only; no exit status is requested.
+        let waited = unsafe { libc::waitpid(-1, std::ptr::null_mut(), libc::WNOHANG) };
+        let error = (waited < 0).then(std::io::Error::last_os_error);
+        assert!(
+            waited == -1
+                && error.as_ref().and_then(std::io::Error::raw_os_error) == Some(libc::ECHILD),
+            "the isolated helper still owned a direct child: waitpid={waited}, error={error:?}"
+        );
+        crate::workspace_manager::fixture::say("isolated helper has no direct children (ECHILD)");
+    }
 
     #[cfg(unix)]
     pub(crate) struct Isolated {
@@ -10014,6 +10805,113 @@ pub(crate) mod test_support {
             status,
             stdout: std::fs::read_to_string(&stdout_path).unwrap_or_default(),
             stderr: std::fs::read_to_string(&stderr_path).unwrap_or_default(),
+        }
+    }
+
+    /// The pids of the container reapers this process has armed and not yet
+    /// disarmed (`arm_container_reaper`'s test-build record), for a harness
+    /// that must know which of a coordinator's processes is its
+    /// container-label backstop.
+    #[cfg(unix)]
+    pub(crate) fn armed_container_reaper_pids() -> Vec<libc::pid_t> {
+        super::termination::ARMED_CONTAINER_REAPERS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .map(|(pid, _)| *pid)
+            .collect()
+    }
+
+    /// A child of this test binary running one ignored test, in a process
+    /// group of its own, started without waiting for it: for a harness that
+    /// must end it mid-run -- the coordinator it kills at an acknowledged
+    /// boundary -- and then collect it. Whatever that child supervised leads
+    /// groups of its own, so the kill reaches the child alone. A child still
+    /// running when this is dropped (a failing assertion, a panic) is killed
+    /// the same way and collected within [`ISOLATED_CHILD_COLLECTION_BOUND`].
+    #[cfg(unix)]
+    pub(crate) struct RunningTestChild {
+        child: Option<std::process::Child>,
+    }
+
+    #[cfg(unix)]
+    impl RunningTestChild {
+        pub(crate) fn start(
+            test: &str,
+            vars: &[(&str, &std::ffi::OsStr)],
+            stdout: &std::path::Path,
+            stderr: &std::path::Path,
+        ) -> Self {
+            use std::os::unix::process::CommandExt;
+
+            let mut command = Command::new(std::env::current_exe().expect("the test executable"));
+            command.args([
+                test,
+                "--exact",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ]);
+            for (name, value) in vars {
+                command.env(name, value);
+            }
+            let child = command
+                .process_group(0)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::fs::File::create(stdout).expect("the child's stdout file"))
+                .stderr(std::fs::File::create(stderr).expect("the child's stderr file"))
+                .spawn()
+                .unwrap_or_else(|error| panic!("start {test}: {error}"));
+            Self { child: Some(child) }
+        }
+
+        /// The child's pid, while this owns it.
+        pub(crate) fn pid(&self) -> Option<libc::pid_t> {
+            self.child
+                .as_ref()
+                .and_then(|child| libc::pid_t::try_from(child.id()).ok())
+        }
+
+        /// The child's exit status, once it has exited and been collected.
+        pub(crate) fn exited(&mut self) -> Option<std::process::ExitStatus> {
+            self.child
+                .as_mut()
+                .and_then(|child| child.try_wait().ok().flatten())
+        }
+
+        /// `SIGKILL` the child's process group and collect the child within
+        /// [`ISOLATED_CHILD_COLLECTION_BOUND`]; `None` if it was not collected.
+        pub(crate) fn kill_and_collect(mut self) -> Option<std::process::ExitStatus> {
+            self.end()
+        }
+
+        fn end(&mut self) -> Option<std::process::ExitStatus> {
+            let mut child = self.child.take()?;
+            if let Ok(Some(status)) = child.try_wait() {
+                return Some(status);
+            }
+            let group = libc::pid_t::try_from(child.id()).ok()?;
+            // SAFETY: `group` is this test's own unreaped child and the leader
+            // of the group `process_group(0)` gave it, so the signal reaches
+            // that group and nothing else.
+            let _ = unsafe { libc::kill(-group, libc::SIGKILL) };
+            let deadline = Instant::now() + ISOLATED_CHILD_COLLECTION_BOUND;
+            loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => return Some(status),
+                    Ok(None) if Instant::now() < deadline => {
+                        crate::workspace_manager::fixture::rest(Duration::from_millis(10));
+                    }
+                    _ => return None,
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for RunningTestChild {
+        fn drop(&mut self) {
+            let _ = self.end();
         }
     }
 

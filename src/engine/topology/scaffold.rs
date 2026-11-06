@@ -129,8 +129,10 @@ fn run_started_of(
             policy: RunnerContract::HostV1,
             image: None,
             credential_volumes: None,
+            mounts: Vec::new(),
         },
         probed_agents: probed_agents(),
+        shell: ShellKind::Bash,
         branch: "upstroke/run-01SCAFFOLD00000000000000AA".to_owned(),
         integration_ref: GitRef("refs/heads/upstroke/run-01SCAFFOLD00000000000000AA".to_owned()),
         base_sha: CommitSha(fixture.head.clone()),
@@ -3296,6 +3298,7 @@ pub(super) fn container_policy() -> RunnerPolicy {
                 .map(|(agent, volume)| (agent.to_owned(), volume.to_owned()))
                 .collect(),
         ),
+        mounts: Vec::new(),
     }
 }
 
@@ -3330,6 +3333,7 @@ pub(super) fn container_runner(
         container_policy(),
         identity,
         repo_root,
+        crate::runner::container::resolve::fixtures::plain_checkout(&repo_root.join(".git")),
         image_environment(),
         runtime,
     )
@@ -3345,6 +3349,7 @@ fn exit_zero() -> crate::runner::container::runtime::ContainerExecution {
         exit_code: Some(0),
         stdout: Vec::new(),
         stderr: Vec::new(),
+        output_limited: false,
     }
 }
 
@@ -3400,11 +3405,13 @@ fn played_by(
                     exit_code: output.code,
                     stdout: output.stdout.into_bytes(),
                     stderr: output.stderr.into_bytes(),
+                    output_limited: false,
                 },
                 Err(error) => crate::runner::container::runtime::ContainerExecution {
                     exit_code: None,
                     stdout: Vec::new(),
                     stderr: error.to_string().into_bytes(),
+                    output_limited: false,
                 },
             }
         }))

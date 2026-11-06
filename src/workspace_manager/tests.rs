@@ -283,6 +283,407 @@ fn the_execution_root_is_pruned_only_when_it_is_empty() {
     assert!(!fixture.manager.execution_root().exists());
 }
 
+/// Every entry under `top`, by path relative to it: its kind, its permission
+/// bits, and a file's bytes or a link's target. What "untouched" is measured by.
+fn root_state(top: &Path) -> Vec<(PathBuf, String)> {
+    fn mode(metadata: &fs::Metadata) -> u32 {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            metadata.permissions().mode()
+        }
+        #[cfg(not(unix))]
+        {
+            u32::from(metadata.permissions().readonly())
+        }
+    }
+    let mut state = Vec::new();
+    let mut pending = vec![top.to_path_buf()];
+    while let Some(path) = pending.pop() {
+        let metadata = fs::symlink_metadata(&path)
+            .unwrap_or_else(|error| panic!("the state of {}: {error}", path.display()));
+        let relative = path.strip_prefix(top).expect("under the top").to_path_buf();
+        let kind = if metadata.file_type().is_symlink() {
+            format!(
+                "link to {}",
+                fs::read_link(&path).expect("the link").display()
+            )
+        } else if metadata.is_dir() {
+            for entry in fs::read_dir(&path).expect("list the directory") {
+                pending.push(entry.expect("an entry").path());
+            }
+            format!("directory {:o}", mode(&metadata))
+        } else {
+            format!(
+                "file {:o} {:?}",
+                mode(&metadata),
+                fs::read(&path).expect("the file's bytes")
+            )
+        };
+        state.push((relative, kind));
+    }
+    state.sort();
+    state
+}
+
+const SCAFFOLDING: [&str; 5] = ["intents", "tasks", "merge", "snapshots", "hooks-none"];
+
+/// The claim token the fixture's fresh roots are published with: `claim.` and
+/// an incarnation, as `engine::topology::create::claim_token` builds one from
+/// the run's.
+const TOKEN: &str = "claim.01KZSWEEPC1A1M000000000001";
+
+/// Where the fixture's fresh root is staged: inside a private half under the
+/// manager's private root, as P3c stages one, the private half made here.
+fn staging_of(fixture: &Fixture, name: &str) -> PathBuf {
+    let private = fixture.private.join("runs").join(super::fixture::RUN_ID);
+    fs::create_dir_all(&private).expect("the run's private half");
+    private.join(name)
+}
+
+/// `FreshExecutionRoot`, PR12-INV7-PREPUBLICATION-EXECUTION-ROOT-ORPHAN and
+/// repair15: a fresh run publishes its root whole — built at a staging path in
+/// its private half with its claim token inside, then renamed onto the root's
+/// path by a rename that never replaces anything. The published root holds the
+/// token and the scaffolding and the staging name is gone; a second
+/// publication onto the same path is refused as unclaimed, leaves the root
+/// exactly as it was, and leaves its own staged tree where it was staged; and
+/// the idempotent form every other caller uses still reuses the root.
+#[test]
+fn a_fresh_execution_root_is_claimed_exclusively_and_a_claimed_one_is_never_claimed_twice() {
+    let fixture = Fixture::new("fresh-root-claim");
+    let root = fixture.manager.execution_root().to_path_buf();
+    assert!(
+        fs::symlink_metadata(&root).is_err(),
+        "the premise: no root exists yet"
+    );
+    let staging = staging_of(&fixture, "staged-execution-root");
+    FreshExecutionRoot(&fixture.manager)
+        .create_execution_root(&mut NoHooks, &staging, TOKEN)
+        .expect("a fresh publication onto an empty path");
+    assert!(
+        root.join(TOKEN).is_dir(),
+        "the published root carries its token"
+    );
+    for directory in SCAFFOLDING {
+        assert!(
+            root.join(directory).is_dir(),
+            "the publication makes {directory}"
+        );
+    }
+    assert!(
+        fs::symlink_metadata(&staging).is_err(),
+        "the staged tree is what was renamed onto the root's path"
+    );
+
+    let before = root_state(&root);
+    let again = staging_of(&fixture, "staged-again");
+    match FreshExecutionRoot(&fixture.manager).create_execution_root(&mut NoHooks, &again, TOKEN) {
+        Err(FreshRootFailure::Unclaimed(UpstrokeError::Filesystem { path, source, .. })) => {
+            assert_eq!(path, root, "the refusal names the root");
+            assert_eq!(source.kind(), std::io::ErrorKind::AlreadyExists, "{source}");
+        }
+        other => panic!("a root already there is refused, not adopted: {other:?}"),
+    }
+    assert_eq!(
+        root_state(&root),
+        before,
+        "the refused publication changed the root"
+    );
+    assert!(
+        again.join(TOKEN).is_dir(),
+        "the refused publication's staged tree stays where it was staged, private content"
+    );
+
+    fixture
+        .manager
+        .create_execution_root(&mut NoHooks)
+        .expect("the idempotent form still reuses the root");
+}
+
+/// The claim boundary: a root another actor puts at the path after every check
+/// a caller can make and before the publication — here at the funnel's
+/// `Before` phase, the last point before the primitive — is refused as
+/// unclaimed, and nothing in it changes: not the five empty scaffolding
+/// directories that look exactly like a run's own, not an empty directory, not
+/// its modes, not a file beside them. And a link at the leaf is refused without
+/// being followed.
+#[test]
+fn a_root_that_appears_at_the_claim_boundary_is_refused_and_left_as_it_was() {
+    struct PlantAtBefore {
+        root: PathBuf,
+        scaffolding: bool,
+        with_a_file: bool,
+        planted: Option<Vec<(PathBuf, String)>>,
+    }
+
+    impl EffectHooks for PlantAtBefore {
+        fn phase(&mut self, site: EffectSiteId, phase: HookPhase) -> Injection {
+            if site == EffectSiteId::Worktree(WorktreeSite::CreateExecutionRoot)
+                && phase == HookPhase::Before
+                && self.planted.is_none()
+            {
+                fs::create_dir_all(&self.root).expect("another actor's root");
+                if self.scaffolding {
+                    for directory in SCAFFOLDING {
+                        fs::create_dir_all(self.root.join(directory))
+                            .expect("another actor's scaffolding");
+                    }
+                }
+                if self.with_a_file {
+                    fs::write(self.root.join("theirs.txt"), b"another actor's bytes")
+                        .expect("another actor's file");
+                }
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt as _;
+                    fs::set_permissions(&self.root, fs::Permissions::from_mode(0o750))
+                        .expect("its own mode");
+                }
+                self.planted = Some(root_state(&self.root));
+            }
+            Injection::Proceed
+        }
+
+        fn refusal_cause(&self) -> Option<String> {
+            None
+        }
+    }
+
+    for (tag, scaffolding, with_a_file) in [
+        ("fresh-root-foreign", true, false),
+        ("fresh-root-foreign-file", true, true),
+        ("fresh-root-foreign-empty", false, false),
+    ] {
+        let fixture = Fixture::new(tag);
+        let root = fixture.manager.execution_root().to_path_buf();
+        let staging = staging_of(&fixture, "staged-execution-root");
+        let mut hooks = PlantAtBefore {
+            root: root.clone(),
+            scaffolding,
+            with_a_file,
+            planted: None,
+        };
+        let failure = FreshExecutionRoot(&fixture.manager)
+            .create_execution_root(&mut hooks, &staging, TOKEN)
+            .expect_err("a root already at the path is refused");
+        assert!(
+            matches!(failure, FreshRootFailure::Unclaimed(_)),
+            "{tag}: not this caller's: {failure:?}"
+        );
+        assert_eq!(
+            Some(root_state(&root)),
+            hooks.planted,
+            "{tag}: the other actor's root changed"
+        );
+    }
+
+    #[cfg(unix)]
+    {
+        let fixture = Fixture::new("fresh-root-link");
+        let root = fixture.manager.execution_root().to_path_buf();
+        let target = fixture.root.join("link-target");
+        fs::create_dir_all(&target).expect("the link's target");
+        fs::create_dir_all(root.parent().expect("a parent")).expect("the namespace");
+        std::os::unix::fs::symlink(&target, &root).expect("a link at the leaf");
+        let staging = staging_of(&fixture, "staged-execution-root");
+        let failure = FreshExecutionRoot(&fixture.manager)
+            .create_execution_root(&mut NoHooks, &staging, TOKEN)
+            .expect_err("a link at the leaf is refused");
+        assert!(
+            matches!(failure, FreshRootFailure::Unclaimed(_)),
+            "not this caller's: {failure:?}"
+        );
+        assert_eq!(
+            fs::read_link(&root).expect("the link is still there"),
+            target
+        );
+        assert_eq!(
+            fs::read_dir(&target).expect("the target").count(),
+            0,
+            "nothing was made through the link"
+        );
+    }
+}
+
+/// The claim carried: a failure after the publication's rename — the
+/// after-phase hook here, standing for the durability barrier after it —
+/// answers `Claimed`, so its caller knows the root at the path, token and
+/// scaffolding, is its own, and nothing is left staged. A failure before the
+/// primitive answers `Unclaimed` and leaves no root and no staged tree.
+#[test]
+fn a_failure_after_the_claim_leaves_the_root_claimed_and_one_before_it_leaves_none() {
+    struct ErrorAt(HookPhase);
+
+    impl EffectHooks for ErrorAt {
+        fn phase(&mut self, site: EffectSiteId, phase: HookPhase) -> Injection {
+            if site == EffectSiteId::Worktree(WorktreeSite::CreateExecutionRoot) && phase == self.0
+            {
+                Injection::Error
+            } else {
+                Injection::Proceed
+            }
+        }
+
+        fn refusal_cause(&self) -> Option<String> {
+            None
+        }
+    }
+
+    let fixture = Fixture::new("fresh-root-after");
+    let root = fixture.manager.execution_root().to_path_buf();
+    let staging = staging_of(&fixture, "staged-execution-root");
+    let failure = FreshExecutionRoot(&fixture.manager)
+        .create_execution_root(&mut ErrorAt(HookPhase::After), &staging, TOKEN)
+        .expect_err("the after phase fails");
+    assert!(
+        matches!(failure, FreshRootFailure::Claimed(_)),
+        "published, then failed: {failure:?}"
+    );
+    assert!(
+        root.join(TOKEN).is_dir(),
+        "the claimed root carries its token"
+    );
+    for directory in SCAFFOLDING {
+        assert!(
+            root.join(directory).is_dir(),
+            "the claimed root holds {directory}"
+        );
+    }
+    assert!(
+        fs::symlink_metadata(&staging).is_err(),
+        "the staged tree is the published root"
+    );
+
+    let fixture = Fixture::new("fresh-root-before");
+    let root = fixture.manager.execution_root().to_path_buf();
+    let staging = staging_of(&fixture, "staged-execution-root");
+    let failure = FreshExecutionRoot(&fixture.manager)
+        .create_execution_root(&mut ErrorAt(HookPhase::Before), &staging, TOKEN)
+        .expect_err("the before phase fails");
+    assert!(
+        matches!(failure, FreshRootFailure::Unclaimed(_)),
+        "nothing was published: {failure:?}"
+    );
+    assert!(fs::symlink_metadata(&root).is_err(), "and there is no root");
+    assert!(fs::symlink_metadata(&staging).is_err(), "nor a staged tree");
+}
+
+/// The publication's rename is the no-replace one on every supported
+/// platform, so an occupied destination is refused **by the rename itself**,
+/// not only by a check before it: an empty directory, which `std::fs::rename`
+/// would replace on Unix and on Windows 10 1607 and later (Rust 1.85's own
+/// documentation), stays exactly as it was, and so does the tree that was to be
+/// moved. No hook phase falls between the publication's absence check and its
+/// rename, so this is where the rename's own refusal is witnessed.
+#[test]
+fn the_publication_rename_never_replaces_an_empty_directory() {
+    let tree = scratch("no-replace-rename");
+    let from = tree.path().join("staged");
+    let onto = tree.path().join("occupied");
+    fs::create_dir_all(from.join(TOKEN)).expect("a staged tree");
+    fs::create_dir_all(&onto).expect("another actor's empty directory");
+    let staged_before = root_state(&from);
+    let occupied_before = root_state(&onto);
+
+    let refused = super::rename_no_clobber(&from, &onto)
+        .expect_err("an occupied destination is refused, empty or not");
+    assert!(
+        matches!(
+            refused.kind(),
+            std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::DirectoryNotEmpty
+        ) || cfg!(windows),
+        "{refused}"
+    );
+    assert_eq!(
+        root_state(&onto),
+        occupied_before,
+        "the destination changed"
+    );
+    assert_eq!(root_state(&from), staged_before, "the source moved");
+
+    let fresh = tree.path().join("fresh");
+    super::rename_no_clobber(&from, &fresh).expect("an absent destination is published to");
+    assert!(fresh.join(TOKEN).is_dir() && fs::symlink_metadata(&from).is_err());
+}
+
+/// A fresh root's retirement (repair15): a root holding its token and empty
+/// scaffolding is renamed, token inside, to the destination in its private
+/// half; a root without that token is another actor's and nothing in it is
+/// touched; an occupied destination refuses and leaves the root at its path
+/// with its token; and an absent root retires nothing. Every answer that is
+/// not an error ran the barrier first.
+#[test]
+fn a_fresh_root_is_retired_into_its_private_half_only_when_it_carries_the_token() {
+    let fixture = Fixture::new("fresh-root-retire");
+    let root = fixture.manager.execution_root().to_path_buf();
+    let into = staging_of(&fixture, "retired-execution-root");
+
+    assert!(
+        !fixture
+            .manager
+            .retire_execution_root(&mut NoHooks, &into, TOKEN)
+            .expect("an absent root retires nothing"),
+        "nothing was at the path"
+    );
+
+    fs::create_dir_all(&root).expect("another actor's root");
+    for directory in SCAFFOLDING {
+        fs::create_dir_all(root.join(directory)).expect("another actor's scaffolding");
+    }
+    let foreign = root_state(&root);
+    assert!(
+        !fixture
+            .manager
+            .retire_execution_root(&mut NoHooks, &into, TOKEN)
+            .expect("a root without the token retires nothing"),
+        "another actor's root is not retired"
+    );
+    assert_eq!(
+        root_state(&root),
+        foreign,
+        "another actor's root was touched"
+    );
+    fs::remove_dir_all(&root).expect("the other actor's root goes, by its own hand");
+
+    let staging = staging_of(&fixture, "staged-execution-root");
+    FreshExecutionRoot(&fixture.manager)
+        .create_execution_root(&mut NoHooks, &staging, TOKEN)
+        .expect("a fresh publication");
+    fs::create_dir_all(&into).expect("an occupied retirement destination");
+    let published = root_state(&root);
+    let refused = fixture
+        .manager
+        .retire_execution_root(&mut NoHooks, &into, TOKEN)
+        .expect_err("an occupied destination refuses the retirement");
+    assert!(refused.to_string().contains("already there"), "{refused}");
+    assert!(
+        root.join(TOKEN).is_dir(),
+        "the root stays at its path with the token that proves it"
+    );
+    assert!(
+        root_state(&root).len() <= published.len(),
+        "nothing was added to the root"
+    );
+    fs::remove_dir(&into).expect("the obstruction goes");
+
+    assert!(
+        fixture
+            .manager
+            .retire_execution_root(&mut NoHooks, &into, TOKEN)
+            .expect("a token-bearing root is retired"),
+        "the root was retired"
+    );
+    assert!(
+        fs::symlink_metadata(&root).is_err(),
+        "nothing is at the root's path"
+    );
+    assert!(
+        into.join(TOKEN).is_dir(),
+        "the retired tree carries the token into the private half"
+    );
+}
+
 // -----------------------------------------------------------------------
 // The containment refusals — real temp repositories, one test per reason
 // -----------------------------------------------------------------------
@@ -8809,6 +9210,7 @@ fn gate_in(runner: &HostRunner, workspace: &Path, args: &[&str]) -> ProcessOutpu
             args: args.iter().map(|arg| (*arg).to_owned()).collect(),
             env: Vec::new(),
             stdin: Vec::new(),
+            settings_file: None,
         },
         workspace.to_path_buf(),
         std::time::Duration::from_secs(120),
@@ -24320,4 +24722,267 @@ fn relative_name_derive_helper() {
             }
         }
     }
+}
+
+/// The scope a `core_ignorecase_helper` child measures, and where it records
+/// that it ran.
+const IGNORECASE_SCOPE: &str = "UPSTROKE_D7_IGNORECASE_SCOPE";
+const IGNORECASE_MARKER: &str = "UPSTROKE_D7_IGNORECASE_MARKER";
+
+/// D7_CONFIG_REPAIR (root's checkpoint-3 disposition). `core_ignorecase` is
+/// Git's effective answer, through the manager's builder, at every scope Git
+/// reads, and a result Git cannot give cleanly is an error, never a guess.
+///
+/// Each child runs with every ambient Git control taken away and only its own
+/// configuration added (`run_challenged_replacement_witness_child`), so no
+/// user's repository or global file is read or written. In the `global`
+/// child, the global file is a fixture file named by `GIT_CONFIG_GLOBAL` for
+/// that child only. In the `environment` child, the pair is
+/// `GIT_CONFIG_COUNT`/`KEY_0`/`VALUE_0`, again for that child only. Each child
+/// writes a marker before it asserts, so a child that ran no test cannot pass
+/// for one that did.
+///
+/// The controls are across children: the `neutral` child reads an untouched
+/// repository as unset, and its repository-level `false` as false. That is
+/// what makes the `global` child's `true` the global file's, and the
+/// `environment` child's `true` over a repository-level `false` the
+/// environment's.
+#[test]
+fn core_ignorecase_is_gits_effective_answer_at_every_scope() {
+    let tree = scratch("d7-ignorecase-scopes");
+    let global = tree.path().join("global.gitconfig");
+    write_file(&global, b"[core]\n\tignorecase = true\n");
+    let challenges: [(&str, Vec<(&str, OsString)>); 3] = [
+        ("neutral", Vec::new()),
+        (
+            "global",
+            vec![("GIT_CONFIG_GLOBAL", global.clone().into_os_string())],
+        ),
+        (
+            "environment",
+            vec![
+                ("GIT_CONFIG_COUNT", OsString::from("1")),
+                ("GIT_CONFIG_KEY_0", OsString::from("core.ignorecase")),
+                ("GIT_CONFIG_VALUE_0", OsString::from("true")),
+            ],
+        ),
+    ];
+    for (scope, mut challenge) in challenges {
+        let marker = tree.path().join(format!("ran-{scope}"));
+        challenge.push((IGNORECASE_SCOPE, OsString::from(scope)));
+        challenge.push((IGNORECASE_MARKER, marker.clone().into_os_string()));
+        let status = super::fixture::run_challenged_replacement_witness_child(
+            "workspace_manager::tests::core_ignorecase_helper",
+            &challenge,
+        );
+        assert!(status.success(), "the `{scope}` child ended {status:?}");
+        assert!(
+            marker.exists(),
+            "the `{scope}` child never reached the helper, so it measured nothing"
+        );
+    }
+}
+
+#[test]
+#[ignore = "subprocess helper"]
+fn core_ignorecase_helper() {
+    if std::env::var_os(REPLACEMENT_WITNESS).is_none() {
+        return;
+    }
+    let scope = std::env::var(IGNORECASE_SCOPE).expect("the scope this child measures");
+    let marker = PathBuf::from(std::env::var_os(IGNORECASE_MARKER).expect("the marker"));
+    write_file(&marker, b"ran\n");
+    let read = |configure: &dyn Fn(&Fixture)| {
+        let fixture = Fixture::new("d7-ignorecase");
+        // The fixture-local unset baseline (root's
+        // PR12-D7-UNSET-FIXTURE-PRECONDITION). `git init` writes
+        // `core.ignorecase = true` into a repository it creates on a folding
+        // filesystem, and neither the neutral environment nor the pinned
+        // global file reaches that. So the key is taken out of this fixture's
+        // own file, and its absence there is checked, before the case applies
+        // its configuration. Only the new fixture's file is written, and the
+        // child's global or environment challenge is left as it was.
+        let unset = git_out(
+            &fixture.base,
+            &["config", "--local", "--unset-all", "core.ignorecase"],
+        );
+        assert!(
+            matches!(unset.status.code(), Some(0 | 5)),
+            "clearing the fixture's own core.ignorecase: {unset:?}"
+        );
+        let left = git_out(
+            &fixture.base,
+            &["config", "--local", "--get-all", "core.ignorecase"],
+        );
+        assert_eq!(
+            left.status.code(),
+            Some(1),
+            "the baseline: the fixture's own file sets no core.ignorecase: {left:?}"
+        );
+        configure(&fixture);
+        fixture.manager.core_ignorecase()
+    };
+    let local = |value: &'static str| {
+        move |fixture: &Fixture| {
+            git(&fixture.base, &["config", "core.ignorecase", value]);
+        }
+    };
+    let included = |value: Option<&'static str>| {
+        move |fixture: &Fixture| {
+            let file = fixture.root.join("included.gitconfig");
+            let text = value.map_or_else(String::new, |value| {
+                format!("[core]\n\tignorecase = {value}\n")
+            });
+            write_file(&file, text.as_bytes());
+            write_include_path(&fixture.base.join(".git").join("config"), &file);
+        }
+    };
+    match scope.as_str() {
+        "neutral" => {
+            assert_eq!(read(&|_| {}).expect("an unset key reads"), None);
+            assert_eq!(read(&local("true")).expect("reads"), Some(true));
+            assert_eq!(read(&local("false")).expect("reads"), Some(false));
+            assert_eq!(
+                read(&local("yes")).expect("reads"),
+                Some(true),
+                "Git's own boolean spellings"
+            );
+            assert_eq!(
+                read(&included(Some("true"))).expect("reads"),
+                Some(true),
+                "a file the repository's config includes"
+            );
+            assert_eq!(
+                read(&included(None)).expect("reads"),
+                None,
+                "the control: the same include, without the key"
+            );
+            let malformed = read(&local("sometimes")).expect_err("a value that is not a boolean");
+            assert!(
+                malformed.to_string().contains("core.ignorecase"),
+                "{malformed}"
+            );
+            let unparseable = read(&|fixture: &Fixture| {
+                let config = fixture.base.join(".git").join("config");
+                let mut text = fs::read_to_string(&config).expect("the repository's config");
+                text.push_str("[core\n");
+                write_file(&config, text.as_bytes());
+            })
+            .expect_err("a configuration file Git cannot parse");
+            assert!(
+                unparseable.to_string().contains("ended Some("),
+                "{unparseable}"
+            );
+        }
+        "global" => {
+            assert_eq!(
+                read(&|_| {}).expect("reads"),
+                Some(true),
+                "the fixture's global file sets it, and nothing outranks it"
+            );
+            assert_eq!(
+                read(&local("false")).expect("reads"),
+                Some(false),
+                "the repository's own file outranks the global one"
+            );
+        }
+        "environment" => {
+            assert_eq!(read(&|_| {}).expect("reads"), Some(true));
+            assert_eq!(
+                read(&local("false")).expect("reads"),
+                Some(true),
+                "the environment's pair outranks the repository's own file"
+            );
+        }
+        other => panic!("no scope `{other}`"),
+    }
+}
+
+/// `PR12-INV9-RECORDED-ROOT-CONTEXT-CONVERGENCE`: the recorded-root retirement
+/// walks the chain from the authorized private root down to the root a proven
+/// husk's location record names without following a link, so a key directory
+/// that is a symlink refuses the retirement and the directory it reaches --
+/// holding the run's own claim token -- is untouched. (The census suite may not
+/// plant a link; this module may.)
+#[cfg(unix)]
+#[test]
+fn the_recorded_root_retirement_refuses_a_link_on_its_chain() {
+    let tree = scratch("recorded-root-link");
+    let top = tree.path();
+    let repo = top.join("repo");
+    create_dir(&repo);
+    git(&repo, &["init", "-q", "-b", "main"]);
+    create_dir(&top.join("private").join("runs"));
+    let private_root = fs::canonicalize(top.join("private")).expect("the private root");
+    let run_id = crate::ulid::ulid();
+    let incarnation = "01KZTRECORDEDLINK000000001";
+    let public = crate::rundir::public_dir(&repo, &run_id);
+    let private = private_root.join("runs").join(&run_id);
+    let repo_key = crate::rundir::RepoKey::v1(&repo.join(".git"));
+    let policy = crate::runner::policy::host_policy();
+    let hooks = &mut crate::rundir::NoHooks;
+    crate::rundir::create_public_dir(&public, hooks).expect("P0");
+    let marker = crate::rundir::CreatingMarker {
+        run_id: run_id.clone(),
+        repo_key: repo_key.as_str().to_owned(),
+        private_dir: private.to_string_lossy().into_owned(),
+        incarnation: incarnation.to_owned(),
+        pid: 1,
+        runner_policy_sha256: crate::runner::policy::runner_policy_sha256(&policy),
+    };
+    crate::rundir::stage_marker(&public, &marker, hooks).expect("P1a");
+    crate::rundir::publish_marker(&public, hooks).expect("P1b");
+    crate::rundir::create_private_dir(&private, hooks).expect("P3a");
+    let owner = crate::rundir::OwnerRecord {
+        run_id: run_id.clone(),
+        repo_key: repo_key.as_str().to_owned(),
+        public_dir: fs::canonicalize(&public)
+            .expect("the public half")
+            .to_string_lossy()
+            .into_owned(),
+        incarnation: incarnation.to_owned(),
+        runner: policy,
+    };
+    crate::rundir::stage_owner_record(&private, &owner, hooks).expect("P3a staged");
+    crate::rundir::publish_owner_record(&private, hooks).expect("P3b");
+    let key = "0123456789abcdef";
+    crate::rundir::create_private_dir(&private.join(format!("execution-root.v1.{key}")), hooks)
+        .expect("the location record");
+    let elsewhere = top.join("elsewhere");
+    let reached = elsewhere
+        .join(&run_id)
+        .join(crate::engine::topology::create::claim_token(incarnation));
+    create_dir(&reached);
+    create_dir(&private_root.join("workspaces"));
+    std::os::unix::fs::symlink(&elsewhere, private_root.join("workspaces").join(key))
+        .expect("the key directory is a link");
+    let crate::rundir::PrivateHalfOwnership::Proven(proof) =
+        crate::rundir::prove_private_half_ownership(&public, &repo_key, &private_root)
+    else {
+        panic!("the husk proves");
+    };
+    let manager = WorkspaceManager::derive(&repo, &private_root, &run_id, incarnation)
+        .expect("this command's manager");
+    assert_ne!(manager.repo_key(), key, "the premise: another key");
+
+    let refused = manager
+        .retire_recorded_execution_root(
+            &mut NoHooks,
+            &proof,
+            &private.join(crate::engine::topology::create::RETIRED_ROOT),
+        )
+        .expect_err("a link on the chain is refused");
+    assert!(
+        refused
+            .to_string()
+            .contains("is a symlink or reparse point"),
+        "{refused}"
+    );
+    assert!(reached.is_dir(), "what the link reaches is untouched");
+    assert!(
+        !private
+            .join(crate::engine::topology::create::RETIRED_ROOT)
+            .exists(),
+        "nothing was retired"
+    );
 }

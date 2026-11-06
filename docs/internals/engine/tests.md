@@ -204,6 +204,17 @@ which is exactly how a detached terminal behaves.
 Shared with the production path so tests exercise the same shell
 invocation (including its Windows quoting) rather than a parallel one.
 
+## `fn temp_engine_repo(tag: &str) -> (ScratchTree, PathBuf) {` › `git_in(&dir, &["config", "maintenance.auto", "false"]);`
+
+The fixture's repository runs no automatic `git maintenance` (K7). Git 2.47 and
+later detach `git maintenance run --auto` after a commit, and it holds
+`.git/objects/maintenance.lock` while it decides whether to work; in a test's
+tree that is a process the test did not start, writing beside a test that may be
+reading. CI's macOS leg ran git 2.56.0 and the J14 test's walk of this tree
+panicked on an entry it had listed and could no longer find. Set before the
+seed commit, so no commit in the fixture's repository, the engine's included,
+starts one. Nothing in the engine depends on automatic maintenance.
+
 ## `fn seed(repo: &Path, plan: &str, config: Option<&str>) {`
 
 Replace the plan and config, then commit so the tree is clean.
@@ -2489,8 +2500,22 @@ pre-effect refusal, because nothing attempted the join.
 The oracle is [`crate::runner::host::containment_establishments`], which
 counts on the calling thread: "this call established containment", not "some
 earlier call in this process did". Each entry point is driven with input it
-must refuse (an absent plan, an unknown run id) so the assertion is about
-the entry point and not about a run.
+must refuse once it is a write coordinator, so the assertion is about the
+entry point and not about a run: an absent plan for a run, and for a resume a
+recorded legacy run (`parked_run`) whose plan is gone, which the router passes
+to the legacy lines, where containment is established before they refuse on
+the plan.
+
+An id the router refuses never makes its caller a write coordinator. Since
+PR12-REG9-HUSK-REFUSAL-LEGACY-PUBLICATION the router returns
+`rundir::resolve_run_id`'s refusal itself, read-only and before containment,
+as it already returned its read and schema refusals (the documented resume
+order: the router, then containment). So the three resume entry points are
+also driven with an unknown run id, and each is refused with the resolver's
+own refusal and no establishment. Until that repair the unknown id was this
+test's resume input: it reached the legacy lines' containment only after their
+prelude had published the include under the named root. The CLI is unaffected:
+`src/main.rs` joins the ambient job for `resume` before the engine is called.
 
 The *class* is what is asserted: the table is crossed against the facade's
 own `pub fn` list, so this cannot be satisfied by covering the two the
@@ -3413,3 +3438,1247 @@ now.
 ## `fn relative_common_dir_run_helper() {`
 
 The child of the test above.
+
+## `enum PrivateEntry {`
+
+What one path under a private root is, for [`private_snapshot`]: a directory or a
+file with its permission bits (on Windows, the read-only flag), the file with its
+bytes, or a link with its target.
+
+## `fn private_snapshot(root: &Path) -> std::collections::BTreeMap<PathBuf, PrivateEntry> {`
+
+Every persistent entry under a private root, the root itself included, keyed by its
+path relative to the root. A refused resume that published the include, created its
+`git` directory, left a staged temporary, renamed anything into place or tightened a
+mode changes it; [`moved_entries`] names what moved without printing any bytes.
+
+[`snapshot_under`] with no case: every read that fails still fails the test, now
+naming the snapshot's top, the path that failed and what was being read.
+
+## `fn private_snapshot_in(root: &Path, case: &str) -> std::collections::BTreeMap<PathBuf, PrivateEntry> {`
+
+[`private_snapshot`] whose failures also name the case: what the guards of a matrix
+take, so a read failure says which of its cases it struck.
+
+## `fn snapshot_under(`
+
+The one walk behind both snapshots: `symlink_metadata` on every entry, never
+followed, a directory by its mode, a file by its mode and bytes, a link by its target;
+`outside_git` leaves the checkout's top-level `.git` out. **Every read that fails
+still panics** — nothing is skipped, ignored or retried — and the message names the
+case, the snapshot's top, the path and the read (PR12-R12-WINDOWS-HUSK-SNAPSHOT-LOCK:
+Native16's `os error 33` named neither the file nor the case).
+
+## `fn put_include(root: &Path, state: IncludeState) {`
+
+The two include states the CI-01 guard holds a refusal to: `Absent` removes the root's
+whole `git` directory, so a premature write would have to create a directory, a staged
+file and the include; `Changed` leaves other bytes in a directory loosened to `0755`
+on Unix, so a premature write would also rename over them and tighten the directory
+to `0700`.
+
+## `fn a_schema_4_resume_proves_its_owner_and_commit_records_before_it_writes_its_include() {`
+
+PR12-CI-01 (P1, concurrency/invariants lens) and
+PR12-RESUME-INCLUDE-BEFORE-RECORD-VERIFICATION (P2, regression lens): one defect, one
+guard (INV-15, O18: the private root is derived read-only before any lock, and the owner
+and commit records are verified before any private write). A real schema-4 run parks
+through `run_with`; every resume below goes through `engine::resume_with` — the public
+composition, which the recovery-order tests never reach — with no `--private-root`, so
+the run's committed locator is the only root authority, and with the private half
+present.
+
+The premise holds that locator to the root the run was given, spelled as the code that
+records it spells it: `run_started(4).private_dir` is the configured root through
+`fs::canonicalize` (`prelock::authorized_private_root`) joined with `runs/<run-id>`
+(`PreLockChecked::private_dir`), so the expected path is `fs::canonicalize` of the same
+`private_root_for` joined with the same two components, compared by exact `PathBuf`
+equality. The configured spelling is another spelling of that directory wherever the
+temporary directory is not canonical — Windows' verbatim `\\?\` prefix, macOS's `/var`
+for `/private/var` — and native CI run 41936043911 failed this premise on both before
+any refusal ran, when it compared the locator with that spelling
+(PR12-NATIVE11-WINDOWS-PRIVATE-PATH-ORACLE). On a canonical temporary directory, as on
+the Linux runners, the two spellings are the same path.
+
+Ten damages to the run's own records — owner record missing, not JSON, or naming
+another run, repository, run directory, incarnation or runner (each owner field
+`RecordsVerified::verify` compares); commit record missing, not JSON, or naming
+another first line — each under both include states, refuse with the record's own
+refusal. The locator retargeted, in the committed first line, to another existing root
+of the conforming `<root>/runs/<run-id>` shape refuses too, both when that root holds
+no records and when it holds copies of the run's own, which only the commit record's
+digest of the first line tells apart, again under both include states. For every one of
+those twenty-four refusals the whole persistent private root — and the foreign root for the
+retargeted cases — is unchanged entry by entry, byte by byte and mode by mode, the log
+is unchanged, every ref is where it was, and no probe ran.
+
+The positive control resumes the provable run with the include absent and then changed:
+the include holds its fixed bytes again, its directory is `0700` on Unix, the resume
+reached its probes and appended `run_resumed`. With `resume_harness` publishing the
+include before `ResumePrepared::verify` (the order before PR12-CI-01), the first refusal
+fails on the private root that moved.
+
+## `fn on_this_path(program: &str) -> bool {`
+
+Whether a file named `program` is in a directory of this process's `PATH`; the
+recorded-shell guards assert that `cmd` is not, so that "unavailable" is a fact of the
+host and not an assumption.
+
+## `fn a_fake_cmd(tree: &ScratchTree) -> PathBuf {`
+
+A directory holding a `cmd` that exits 0, written by a process of its own
+(`runner::container::write_program_in_its_own_process`) so that no thread of this test
+binary holds it open for writing when it is executed.
+
+## `fn with_shells_on_path(`
+
+Runs [`recorded_shell_helper`] in a process of its own whose `PATH` starts with the
+fake shell's directory, so the shell is available to that process alone and to no other
+test.
+
+[`RecordedShellScope`] owns that process and its process group. Its stdout and stderr
+go to files in a scratch tree, not to pipes, so nothing it leaves running can hold the
+wait open, and its stdin is null, as `Command::output` made it. The wait is bounded at
+300 seconds, the bound
+`a_legacy_run_under_an_inherited_selection_checks_its_review_input_at_the_selected_repository`
+gives a whole run in a child of its own. Each caller requires a successful exit status
+and `1 passed`, and prints the child's status, stdout and stderr when that does not
+hold, so a child killed at the bound (status `None`), one that failed and one that
+matched no test all fail with their diagnostics. The `Command::output` this replaced
+waited without a bound for the child and for every holder of its pipes
+(PR12-R7-RECORDED-SHELL-HELPER-UNBOUNDED, with its correlated
+PR12-CI2-RECORDED-SHELL-HELPER-UNBOUNDED).
+
+## `struct RecordedShellScope {`
+
+The recorded-shell helper's process group, owned on every way out. An anchor
+(`/bin/sleep`) starts first, leading a group of its own, and the helper joins that
+group. The anchor is collected only after the group has been killed, so the group id is
+this test's for the whole scope — after the helper has been collected, and even if the
+anchor has exited — and the kill cannot reach a process that reused it. `settle` sends
+`SIGKILL` to the group and then collects the helper and the anchor within
+`ISOLATED_CHILD_COLLECTION_BOUND`. It runs when the helper ends, successfully or not,
+so whatever of its descendants stayed in its group dies with the anchor; at the bound;
+when polling the helper fails; and from `Drop`, so a panic between the helper's start
+and its settlement settles it too. A settlement that cannot collect both within its
+bound fails the test or, while unwinding, says so, and leaves the rest to this process's
+exit. Descendants that left the group, as the engine's commands and their reapers each
+do, are the engine's to settle, as after any run. `agent::proc::test_support::run_test_isolated`,
+which this fix first used, kills its child's group only at its deadline: it collects a
+child that ended by itself without settling the group, and a failed poll panics with the
+child unkilled and no guard to settle it.
+
+## `fn recorded_shell_helper() {`
+
+The recorded-shell guards' child. `create` makes and parks a zero-gate run under the
+config it is given; `resume` resumes the latest run under the config it is given and
+asserts that it appended `run_resumed`. Without its environment it does nothing.
+
+## `fn a_zero_gate_schema_4_resume_probes_its_recorded_shell_when_todays_config_names_an_unavailable_one()`
+
+PR12-CI-03 (INV-23), one direction of today's drift. A zero-gate run is created under
+`sh` (the premises: `gate_cmds` is empty, `run_started(4).shell` is `sh`, and this host
+has no `cmd`). Its resume through `resume_with`, with today's config naming
+`shell = "cmd"`, passes its pre-flight, recovers (one `run_resumed`) and warns that
+today's `cmd` is not the run's and that the pre-flight probes `sh`. With the resume's
+shell taken from `gate_cmds` else today's config again, it fails: the pre-flight probes
+`cmd` and refuses.
+
+## `fn a_zero_gate_schema_4_resume_refuses_its_unavailable_recorded_shell_whatever_todays_config_names()`
+
+PR12-CI-03 (INV-23), the other direction, and the unavailable recorded shell. A
+zero-gate run is created under `cmd` by a child whose `PATH` holds a fake `cmd` (the
+premises: no gates, `run_started(4).shell` is `cmd`, and this host has no `cmd`). Its
+resume in this process, where `cmd` is not on `PATH`, with today's config naming the
+available `sh`, refuses at the pre-flight naming the recorded shell `cmd`, and the log
+is unchanged, so no recovery event was appended. The same resume in a child whose
+`PATH` holds the fake `cmd` again continues and appends `run_resumed`: the run stayed
+resumable. With the resume's shell taken from `gate_cmds` else today's config again,
+the first resume probes `sh`, recovers and fails the refusal it expects.
+
+## `fn a_schema_4_log_without_a_recorded_shell_is_refused_and_never_resumed_under_another() {`
+
+PR12-CI-03, the record's compatibility (`run_started(4).shell` is required, as every
+schema-4 transaction-payload field is). A parked run's committed first line, rewritten
+without `shell`, stands for a log written before the field. Its resume through
+`resume_with` refuses at the committed first line, naming `shell`, writes nothing to
+the log and nothing under the private root, and never resumes under a shell the record
+does not hold.
+
+## `enum SignalFault {`
+
+How [`signal_mid_attempt`] is made to fail, for the tests of its own cleanup. Each
+fault is injected once the helper's worker runs. `Readiness` reports the readiness
+the driver waited for as failed, and `Signal` the signal it sent, as a real failure
+of either would be (J8, PR12 regression review #5). `DeliveryNeverExits` makes the
+command that delivers the signal one that never exits: a stub standing where `kill`
+stands, which records its pid and then sleeps for ten minutes (J15, regression
+review 2, finding 4). `None` injects nothing.
+
+## `fn stalled_delivery_pid(repo: &Path) -> PathBuf {`
+
+Where the stub of `SignalFault::DeliveryNeverExits` records its pid, beside the
+repository, published by a rename. The J15 test reads it after the driver has
+failed, to find that process gone.
+
+## `fn delivery_program(repo: &Path, fault: SignalFault) -> PathBuf {`
+
+The program that delivers the signal: `kill`, found on `PATH` as before, or, for
+`SignalFault::DeliveryNeverExits`, the stub, written beside the repository by a
+process of its own (`runner::container::write_program_in_its_own_process`), so that
+no other thread of this test binary holds it open for writing when it is executed.
+
+## `fn deliver_within_its_bound(program: &Path, signal: &str, pid: &str, repo: &Path) -> bool {`
+
+Delivers `signal` to `pid` by running `program -s <signal> <pid>` as a
+[`LinkedChild`](crate::workspace_manager::fixture::LinkedChild)
+(`LinkedChild::spawn_program`) and waiting for it with `wait_within(COLLECT_BOUND)`,
+the bound the helper's own end has. A delivery still running at the bound fails the
+driver, naming the command; as the failure unwinds, the link's drop kills and reaps
+the command within its own bound, so it outlives neither the driver nor the test.
+`true` when the command exited successfully.
+
+## `fn signal_mid_attempt(`
+
+The signal test's driver. The helper, this test binary running
+`topology_signalled_child`, is owned from its spawn by a
+[`LinkedChild`](crate::workspace_manager::fixture::LinkedChild), which kills and
+reaps it within its bound however this function ends. Every wait the driver makes
+is bounded: the readiness poll, the delivery of the signal
+([`deliver_within_its_bound`]), the helper's end and its cleanup, its reader's
+settlement, each worker group's end and the run's release. At the reviewed head of
+J8 the helper was a bare `Child`: an assertion before its unbounded `wait` unwound
+past it and left the helper and its worker running (J8, PR12 regression review #5).
+`helper` learns the helper's pid as it is spawned.
+
+J15 (regression review 2, finding 4): J8 left one wait unbounded, and said so. The
+`kill` that delivers the signal was a `Command` whose `.status()` had no deadline:
+a `kill` that never exited held the driver inside that call, before either the
+delivery's assertion or `wait_within(COLLECT_BOUND)` could run, and the test and
+the helper it owned stayed live indefinitely. §12 binds every wait, and a
+disclosure does not discharge that. The delivery is now itself a link, waited for
+within `COLLECT_BOUND` ([`deliver_within_its_bound`]); `COLLECT_BOUND` and every
+assertion are kept, the J12 ones below included.
+
+J12 (regular review 3, finding 1): after its order assertions, the driver
+asserts that the resumed run's report says its total is a floor
+(`RunReport::total_is_floor`), and that it keeps exactly one interrupted attempt,
+whose cost is unknown and whose model is the one recorded by the
+`attempt_started` with the same task key, generation and attempt as the
+`attempt_interrupted` the resume appended. At the reviewed head the report held
+only the attempts that completed, with no warning, and printed the run's known
+spend, `$0.04`, as its whole total.
+
+## `fn the_signal_tests_helper_is_settled_when_the_command_delivering_its_signal_never_exits() {`
+
+J15 (regression review 2, finding 4), the reviewer's guard: the signal's delivery
+is the stub of `SignalFault::DeliveryNeverExits`, a command that never exits. The
+driver fails, within its bound, naming the delivery that had not exited. Afterwards
+the stub, at the pid it recorded, is gone (its link's drop killed and reaped it);
+the helper is reaped; each worker's process group is gone within `GROUP_END_BOUND`;
+and nothing holds the run.
+
+Against the driver as J8 left it, with the delivery's `.status()` unbounded, the
+test does not end: measured once, it was still running past libtest's sixty-second
+notice, and the deadline put on it from outside (a session of its own under
+`timeout`, 120 seconds) killed it; nothing it started outlived the session, and
+the scratch tree its unwinding would have reclaimed was removed by hand.
+
+## `fn settled_attempts(events: &[serde_json::Value]) -> usize {`
+
+How many attempts the log settles: `attempt_finished` for each one that did not
+succeed, `candidate_prepared` for each one that did, and `attempt_interrupted`
+for each one whose coordinator did not see it end. Since J12 the schema-4 report
+keeps the last kind too, so the tests that compare the report's attempt rows
+with this count stay a comparison with every settlement.
+
+## `const TOPOLOGY_STUB_ASKS: &str = "UPSTROKE-TOPOLOGY-STUB-ASKS";`
+
+What a topology stub worker prints to ask its question every time it runs.
+`TopologyStub::parse` answers such an output with `TOPOLOGY_STUB_QUESTION`,
+whatever its `questions_left` counter says, so a test can choose by task which
+worker asks; the counter still decides for every other output.
+
+## `fn announcing_worker(gate: &Path) -> String {`
+
+The J11 worker script, chosen by the task slot it runs in, as
+`CONFLICTING_WORKER` chooses: the second task (`k1-*`, `asks`) prints
+`TOPOLOGY_STUB_ASKS`; the third (`k2-*`, `waits`) writes `waits-started` in the
+gate directory and then waits, at most four minutes, for the test to create
+`release` there, failing if it never comes; the first (`first`) only edits.
+Each writes inside its own predicted region, so `asks` and `waits` hold
+disjoint leases and run together at width 2.
+
+## `fn a_schema_4_question_is_announced_before_its_sibling_is_released() {`
+
+J11 (regression review 2, finding 2): a question a schema-4 run raises is
+announced through the configured notifier while an independent task is still
+held, under both drivers and after a resume. Four cells: a fresh run and a
+resumed one, each under the step loop (width 1, a source that cannot be shared)
+and the coordinator (width 2). The config is `mode = "never"` and `notify =
+["cli"]`. For a resumed cell the first run, in this process, stops at a $0.015
+budget once `first` has spent, before `asks` or `waits` runs, and the child
+resumes it with a $10 budget.
+
+The run itself is a child of this test binary (`topology_announcing_child`)
+because the CLI notifier writes to the process's stderr, which the child sends
+to a file. The test reads that file until it holds the notifier's line for
+`asks` (`question … — parking asks; the run continues`) and `waits-started`
+exists. Only then does it release `waits`, which the run cannot finish without,
+so the announcement is shown to arrive before the sibling is released and while
+the run is still going. The child must then end successfully. Under the step
+loop `asks` runs before `waits` by key order, so the announcement precedes the
+sibling's start; under the coordinator the two run together.
+
+At the reviewed head nothing was announced: with the announcement removed from
+`RunEmitter::emit`, the first cell fails at its 90-second bound with an empty
+stderr.
+
+## `fn topology_announcing_child() {`
+
+The child of the test above: the fresh run (`run_with`), or the resume through
+the recorded locator with today's config and a raised budget (`resume_with`),
+under the driver the parent names, with a 600-second attempt timeout so the
+held sibling is never timed out. It asserts the run ends parked on `asks` alone,
+with `first` and `waits` committed.
+
+## `const UNSPELLABLE_HOME_REPO: &str = "UPSTROKE_UNSPELLABLE_HOME_REPO";`
+
+The variable that hands the J14 child its repository.
+
+## `struct TreeSnapshot {`
+
+What `every_path_under` saw: `entries`, every entry it listed, as a path
+relative to the root, sorted; and `unread`, the entries it listed and could not
+read, a directory it could not open by its listed name or an entry whose type
+could not be read because it was gone. The J14 tests compare the entries and
+carry the unread ones in their messages (K7).
+
+## `fn every_path_under(root: &Path) -> TreeSnapshot {`
+
+Every file, directory and link under `root`, by the names the platform lists
+and the types its listing reports (`DirEntry::file_type`, which reads the
+directory entry's own type and looks nothing up by name where the platform
+reports one); a link is listed and not followed. A directory is descended by
+its listed name; one that cannot be opened by it, or an entry gone before its
+type was read, is noted in `unread` rather than ending the walk. A root that
+cannot be read is noted the same way, as the empty path.
+
+Until K7 each listed entry was `lstat`ed by its listed path, with `.expect`.
+On CI's macOS leg (run 41724856814, job 126229500908, macOS 26 arm64, APFS, git
+2.56.0) the J14 test panicked inside this walk with `an entry's own metadata:
+NotFound`: an entry the listing had just named could not be found by its path.
+The job log does not say which entry, or which of the test's walks: the panic
+names neither. Two mechanisms fit it, and the repair holds against both:
+- a name the platform lists but cannot look up by the bytes it listed (the
+  coordinator's reading of a home named `private-\xff` on APFS). The walk no
+  longer looks a listed entry up to learn its type, notes a directory it cannot
+  open, and the J14 test also walks the home by the path it holds, so whatever
+  the run might create under it, the include included, is still compared;
+- an entry that existed when the directory was listed and was gone a moment
+  later: git 2.47 and later detach `git maintenance run --auto` after a commit,
+  and it holds `.git/objects/maintenance.lock` while it decides, so a walk
+  begun just after the fixture's commit could list that lock and miss it. The
+  fixture's repository now turns automatic maintenance off before its commit
+  (`temp_engine_repo`), and an entry gone before its type is read is noted
+  rather than fatal.
+
+## `fn a_schema_4_run_refuses_an_unspellable_default_private_root_before_it_creates_anything() {`
+
+J14 (regular review 3, finding 3; regression review 2, finding 5): a fresh
+schema-4 run with no explicit private root and a home no string spells is
+refused before anything is created, the recorded-objects include included.
+`HOME` is process-wide, so the run is a child of this test binary
+(`unspellable_default_root_child`, through `run_test_isolated`, whose output
+files live in a scratch tree of their own), with `HOME` and `USERPROFILE` set to
+`<tree>/private-\xff`. Two cells: that home exists and is empty, and it does not
+exist. A host that refuses the name (`EILSEQ`) cannot hold the first, which is
+then skipped; the second needs no such name on disk. Every path under the
+scratch tree, the repository and the home included, is the same after the
+child as before it, and there is no `.upstroke` under the home. The comparison
+comes first, so a regression shows what it left. With the read-only check
+removed from `prepare_fresh`, the first cell fails on exactly the reviewers'
+witness: `private-\xff/.upstroke`, its `git` directory and
+`recorded-objects.gitconfig` appear, and the run is refused later, by
+`authorize`.
+
+Since K7 (CI's macOS leg) each snapshot is two walks: the scratch tree, by the
+names the platform lists, and the home, by the path the test holds, which is
+the path the child's `HOME` names. What is compared is every entry listed; the
+entries a walk listed and could not read are carried in the message, before and
+after, as the record of what the platform would not show. On a host that can
+name the home, the home's own walk is the one that sees inside it however the
+tree's listing spells it; on one that refuses the name, the first cell is
+skipped as before.
+
+## `fn the_tree_snapshot_lists_by_the_platforms_own_names_and_types_and_notes_what_it_cannot_read() {`
+
+K7: the snapshot lists a directory, a file in it, a link to nothing and a link
+to the directory, by their names, without following either link, and notes a
+root it cannot read as the empty path rather than panicking. The macOS case
+itself (a listed name or entry that cannot then be found) is not reproducible
+on this box; this pins the walk's own rules.
+
+## `fn unspellable_default_root_child() {`
+
+The child of the test above: a fresh run through `run_with` with no private
+root, so the root is the default one under the child's `HOME`. It asserts the
+refusal is the default root's own, says the root is not valid UTF-8 and that
+nothing was locked or created, and that no run directory exists.
+
+## `fn the_default_root_check_judges_the_path_the_root_will_resolve_to() {`
+
+`prelock::refuse_unspellable_default_root` judges the path the default root
+will resolve to, not its spelling: a missing root under a home text spells and
+an existing root text spells pass; a missing root under a missing home no
+string spells is refused, saying nothing was locked or created; a link no
+string spells that resolves to the home text spells passes (where the host can
+hold the link's name). The checks create nothing: the tree holds the home and
+the link only.
+
+## `fn a_frontier_escalation_over_the_threshold_parks_for_approval_then_runs_it() {`
+
+Since J16 it also asserts that the approval question names its task (`t1`)
+and that its context opens with the task line, `` Task `t1` — One ``: the
+question is built by `build_question` and described from the plan task it
+names, and must read as it did when `build_spend_approval` indexed the plan
+itself.
+
+## `const INHERITED_COMMON_IMAGE: &str = "upstroke-tests/inherited-common:1";`
+
+The image reference J10's guard configures and records. No runtime holds it,
+and none is asked: the guard's stub runtime fails every command it is given.
+
+## `const INHERITED_COMMON_REFUSALS: &str = "UPSTROKE_INHERITED_COMMON_REFUSALS";`
+
+The variable that names, to J10's child, the file it writes both refusals to.
+
+## `fn run_directory_names(repo: &Path) -> Vec<String> {`
+
+The names under the repository's runs root, sorted: what J10's guard compares
+before and after its children, so a refused run that left a run directory
+fails it.
+
+## `fn record_a_container_runner_mounting(repo: &Path, run_id: &str, mounts: &[(&Path, &str)]) {`
+
+Makes the parked run's committed `run_started` record a container runner whose
+mounts are `mounts`, each source writable at its target, with the canonical
+spelling and the identity a resolution would record, in the order given. The
+runner's JSON is replaced in the first
+line, which must spell it exactly once, and every other byte of the log is
+kept, so a second call replaces the first one's runner. It stands for the
+record a container run would have written: the public
+fresh path cannot create one here without a container runtime, and a resume
+reads nothing of the run but `run_started`, its frozen plan and its private
+half before it refuses. J10 records one mount at `/data`; K1 records the
+targets a fresh run refuses, which no resolution would write.
+
+## `fn a_mount_inside_an_inherited_common_directory_is_refused_by_run_and_resume_before_the_runtime_is_asked()`
+
+J10 (regression review 2, finding 1). A parked schema-4 run, then the
+repository's `.git` copied to `common`, a sibling of the checkout, as the
+reviewer's layout places it. A configuration selects the container runner with
+a writable mount of `common/refs`, and the parked run's record is made to name
+the same mount. A stub `docker`, first on the children's `PATH`, appends what
+it is asked to a file and exits 93, so no real runtime can be reached.
+
+For `GIT_COMMON_DIR` set absolute and set relative (`../common`, from the
+checkout), a child of this test binary whose environment alone carries it
+(`inherited_common_dir_mount_child`, under `run_test_isolated`) runs a fresh
+run and a resume and records both refusals; the parent requires the child's
+success and libtest's `1 passed`, and that both recorded refusals name the
+canonical common directory as the source's container. Afterwards the stub
+was never asked anything, so no image was inspected, no runner was built and
+no launch plan was made; the recorded log is byte-identical; and the runs
+root holds what it held.
+
+With the fix removed (`MountContext` bound from the checkout's `.git`, the
+pre-J10 entry), the absolute cell fails: the fresh run accepts the mount, and
+its first runtime question, the probe, reaches the stub ("the container runtime
+refused `probe`"). Even then only the stub could be asked.
+
+## `fn inherited_common_dir_mount_child() {`
+
+The child of the test above. `run_with` over the container configuration is
+refused with `[runner] the mount … is refused`, its source lying inside the
+canonical common directory, authoritative Git; `resume_with` on the parked run
+is refused as recording that mount, for the same reason, with nothing
+published, locked or written. It then writes both refusals to the file its
+parent names, the evidence that it ran.
+
+## `const RECORDED_TARGET_REFUSAL: &str = "UPSTROKE_RECORDED_TARGET_REFUSAL";`
+
+The variable that names, to K1's child, the file it writes its refusal to.
+
+## `fn a_recorded_mount_whose_target_a_fresh_run_refuses_is_refused_by_the_resume_before_the_runtime_is_asked()`
+
+K1 (regular review 4: recorded mounts bypass target validation), through the
+public resume, `engine::resume_with`. A parked schema-4 run; a stub `docker`,
+first on the children's `PATH`, appends what it is asked to a file and exits
+93, as in J10's guard, so no real runtime can be reached. For each set of
+`resolve::fixtures::REFUSED_RECORDED_TARGETS` (the container's root,
+`/upstroke/settings`, `/cache/../upstroke/settings`, and `/cache` with
+`/cache/inner`), the parked run's `run_started` is made to record a
+container runner mounting a real directory at those targets
+(`record_a_container_runner_mounting`), a complete record that a resume
+reads back from the log. A child of this test binary
+(`recorded_target_resume_child`, under `run_test_isolated`) resumes it and
+records the refusal; the parent requires the child's success and libtest's
+`1 passed`, a refusal that names the run, the mount, the target rule's words
+and that nothing was published, locked or written, and a log byte-identical
+to the one the child was given. Afterwards the stub was never asked
+anything, so the image's environment was not read, no runner was built and
+nothing was recovered; and the runs root holds what it held.
+
+The public resume asks the runtime before recovery does: `prepare_resume`
+reads the recorded image's environment. With
+`resolve::refuse_recorded_targets` bypassed, the child's resume reaches
+the stub ("the container runtime refused `inspect-image-by-id`") and the
+test fails on the root cell (measured before the commit). Recovery's own
+check, which a resume reaches only after that question, is the subject of
+`engine::topology::recover::tests`' K1 guard.
+
+## `fn recorded_target_resume_child() {`
+
+The child of the test above: `resume_with` on the parked run is refused, and
+the refusal is written to the file its parent names, the evidence that it
+ran.
+
+## `fn plant_census_husks(repo: &Path) -> (String, String, PathBuf) {`
+
+===========================================================================
+PR12-INV8-STARTUP-CENSUS-REPORT-DROPPED: the startup census reaches the operator
+===========================================================================
+
+## `fn plant_census_husks(repo: &Path) -> (String, String, PathBuf) {`
+
+Two husks a write command's census cannot reclaim, planted beside the repository's real runs: one
+whose `.creating` marker is not a marker (retained, nothing private touched), and one a creator
+left after publishing its execution root, whose retirement cannot complete because something
+already stands where the root would be retired to (unreclaimable, both halves and the root kept).
+Returns their run ids and the second one's private half.
+
+## `fn assert_census_reported(said: &str, repo: &Path, malformed: &str, blocked: &str, private: &Path) {`
+
+The census's own sentences for the two planted husks, as an operator must see them: each names the
+run, its public locator and why it was kept, and the second its private locator too.
+
+## `fn assert_census_kept(repo: &Path, malformed: &str, blocked: &str, private: &Path) {`
+
+What the census kept is still exactly there: the malformed marker's bytes, and the blocked husk's
+halves, location record and token-bearing root.
+
+## `struct RefusingProbe;`
+
+An adapter whose probe refuses: the startup work after the census fails.
+
+## `fn a_public_fresh_run_reports_what_its_startup_census_kept_and_why() {`
+
+PR12-INV8-STARTUP-CENSUS-REPORT-DROPPED, the fresh composition: a public schema-4 run reports, in
+the report the operator reads, every run directory its startup census retained or could not
+reclaim, with locator and reason — a malformed husk and a proved husk whose cleanup cannot
+complete — and the census's keeping is unchanged by the reporting. When the startup work after the
+census fails, here a pre-flight probe that refuses, the error the command ends with carries the
+same report. `status` asked for the malformed husk reports the same disposition.
+
+Between the two runs it waits for the first run's release (`until_released`). `run_with` can return
+while that run's agent-cleanup reapers still hold its cleanup lease, and the second run's worktree
+admission would then refuse for that settlement rather than reach the refusing probe
+(`PR12-R16-CENSUS-REPORT-LEASE-PREMISE`, FINAL23 R03).
+
+## `fn a_public_fresh_run_keeps_and_reports_a_husk_whose_private_target_cannot_be_observed() {`
+
+Repair16's public composition guard for `PR12-INV9-UNREADABLE-PRIVATE-LOCATOR`. A husk whose
+marker names a private target that the filesystem will not describe -- the test build's
+`rundir::LocatorMetadataFault` makes its metadata read fail with a permission error -- is kept,
+both halves untouched, and the fresh run reports it with the `locator-unreadable` retain reason:
+only a confirmed `NotFound` of the target is absence, and an unreadable target proves nothing
+either way.
+
+## `fn a_public_fresh_run_whose_run_directory_census_fails_reports_the_container_census() {`
+
+The same report when the census's own second half fails, the fresh composition (amendment 5 of
+the repair): the container census has already kept another owner's torn staged intent and said
+so, and the run-directory census then cannot enumerate the runs root, planted as a file. The
+command ends with the run-directory census's error, naming the runs root, carrying the container
+census's line; it creates no run and removes nothing. An error of the container census itself has
+no report to carry and ends the command bare (`startup`'s
+`a_refusal_in_half_a_leaves_half_b_untouched`).
+
+## `fn a_public_resume_reports_what_its_startup_census_kept_and_why() {`
+
+The resume composition of the same: a public resume of a parked schema-4 run reports the census
+of the husks beside it, and a resume whose pre-flight then refuses ends with an error carrying that
+report. A resume's run-directory census cannot fail to enumerate a runs root that holds the run
+itself except on a transient read error, so the resume form of the second-half error is held one
+level down, on the composition `ResumeCensused::census` itself (`recover`'s
+`a_resume_census_whose_run_directory_half_fails_keeps_the_container_halfs_report`).
+
+## `fn a_schema_4_follow_prints_one_line_per_event_and_no_raw_control_whatever_the_plan_or_the_record_holds()`
+
+L1 (regression review 3, finding 1; DESIGN §18). A schema-4 run of one task
+annotated `id=t1` followed by ESC `[2J` completes, and `status --follow`, through
+the public `status::load` and `status::follow`, prints exactly one physical line
+per committed event, with no control character but the line breaks, and the
+`attempt_started` and `task_merged` lines name the task as `t1\u{1b}[2J`. Then
+`Observed::describe` is given that run's `attempt_started` with controls in
+three recorded fields, its timestamp, its agent and its model: the line holds no
+control, and the agent and model appear with theirs made visible. With
+`describe`'s `one_line` removed, the follow assertion fails on the raw ESC bytes.
+
+## `fn a_fresh_schema_4_run_refuses_a_staged_an_unstaged_or_an_untracked_change_before_any_worker_or_log()`
+
+L2 (regression review 3, finding 2; DESIGN §20). Through the production entry
+(`run_with` with the topology active), three repositories with one kind of dirt
+each: a staged edit of `README.md`, an unstaged edit of it, and an untracked
+file. Each run is refused with "working tree is not clean", before any worker or
+reviewer is built (`ObservedStub` records none) and before any run directory, and
+so any run log, exists; the operator's change is untouched. The control: one
+clean repository is admitted twice in a row, its workers running each time, so
+the first run's public directory does not make the second run's tree dirty.
+Measured before commit: with the schema-4 dispatch's refusal removed the staged
+case runs to completion and the test fails; with the exclusion removed from
+`refuse_dirty_tree` the second clean run is refused and the test fails.
+
+## `fn stub_pool_file(tree: &ScratchTree) -> PathBuf {`
+
+One pool, `claude-max`, for the topology stub's agent (`claude-code`), so a run's attempts and
+review passes are attributed to it. The file is in the scratch tree, outside the checkout: a
+schema-4 run refuses a dirty tree (L2), and an untracked pools file would be dirt.
+
+## `fn cut_log_after(`
+
+A coordinator that died just after appending an event leaves exactly the committed prefix that
+ends with it, because the log only grows at its end. This cuts a finished run's log back to that
+prefix after the first matching line. The run is released before the cut, so `status` reads it
+as interrupted, not running.
+
+## `fn upstroke_status(repo: &Path, run_id: &str) -> String {`
+
+What `upstroke status <run>` prints, through the public `status::load` and `status::render`.
+
+## `fn ledger_cells(status: &str, id: &str) -> Vec<String> {`
+
+The cells of the ledger row `status` prints for one task, split on whitespace. A trail with
+several words spreads over several cells, so callers count the amounts from the end.
+
+## `fn a_schema_4_status_prints_the_ledger_run_reports_for_a_completed_and_an_interrupted_run() {`
+
+L3 (regression review 3, finding 3; DESIGN §18). Two dependent tasks on one pool, completed.
+- `status` prints, byte for byte, the ledger the run returned (`RunReport::render_ledger`): the
+  task rows, the known total, the per-pool drain.
+- Both fast integration rows end `(0 review(s), cost none)`.
+
+The same log cut just after the second task's `attempt_started`:
+- `status` reads the run as interrupted. The first task's row shows its exact known spend.
+- The second task's row counts the cut-off attempt and knows no amount (`—`).
+- The total and the pool drain carry `?`, and the floor legend is printed.
+
+Measured before commit, each mutation failing this test:
+- with the ledger removed from `Observed::render`, on the completed comparison;
+- with the interrupted view's settlement removed, on the cut-off row (`t2 0 — — — —`, no floor);
+- with `ran_no_review` removed, on the fast rows.
+
+## `fn a_schema_4_status_prints_the_integration_review_spend_run_reports_and_its_floor_once_cut_off()`
+
+L3, the integration reviews (Unix: the worker writes a file named by its own process). Two
+independent tasks at width 2 make the second merge a stale candidate's re-verification, with one
+priced review pass that the verified task pays for. Completed:
+- `status` prints the ledger the run returned; the verified task's review cell includes that
+  pass.
+- The `stale_clean` row ends `(1 review(s), cost $X)` and the fast row `(0 review(s), cost none)`.
+
+The log cut just after `merge_verification_started`:
+- The verified task's review cell is its attempt's known pass with `?`, and the run's total is a
+  floor.
+- The integration row is `open` with `cost ? (unknown)`.
+
+The ledger and settlement mutations above fail it too.
+
+## `fn a_completed_schema_4_run_leaves_no_generated_file_for_an_ordinary_git_add_to_take() {`
+
+L4 (regression review 3, finding 4). A real schema-4 run, through `run_with`, completes in a
+repository that has no `.upstroke` exclusion before it (the premise is asserted). Its public
+directory holds the run's log and report. Afterwards `git status` lists nothing, and an ordinary
+`git add -A` stages nothing (`git diff --cached --name-only` is empty). With the exclusion removed
+from `coordinator::refuse_dirty_tree`, it fails on `?? .upstroke/`.
+
+## `fn a_schema_4_resume_restores_a_missing_run_exclusion() {`
+
+L4, the resume. A schema-4 run parks on its one question, the answer is recorded, and the
+exclusion its fresh run made is deleted. The premise is asserted: `git status` now lists
+`.upstroke/`. The resume, through `resume_with`, completes the run. Afterwards the exclusion is
+back and `git status` lists nothing. With the schema-4 branch's `ensure_run_exclusions` removed
+from `resume_harness`, it fails on "the resume made the exclusion again".
+
+## `enum ExclusionState {`
+
+The two run-exclusion states the lease guards hold a refusal to, beside [`IncludeState`]'s two.
+
+## `fn put_exclusion(repo: &Path, state: ExclusionState) {`
+
+`Absent` removes `.upstroke/.gitignore`, and `.upstroke` itself when nothing else is in it, so a
+premature exclusion would have to create the directory too; `Changed` leaves a file holding bytes
+with no `*`, which `Workspace::ensure_run_exclusions` rewrites, so a premature one would show as
+changed bytes.
+
+## `fn public_snapshot(repo: &Path) -> std::collections::BTreeMap<PathBuf, PrivateEntry> {`
+
+[`private_snapshot`]'s walk over the checkout, without its Git directory: every operator file and
+everything under `.upstroke` — the exclusion, every run's public half, its log, `run.lock` and
+`cleanup.lock` — by path, kind, mode and bytes. `.git` is left out because its refs are
+[`every_ref`]'s, and the lease file in it is created by whoever takes the lease first; the guards
+below compare refs instead.
+
+## `fn public_snapshot_in(repo: &Path, case: &str) -> std::collections::BTreeMap<PathBuf, PrivateEntry> {`
+
+[`public_snapshot`] whose failures also name the case.
+
+## `fn assert_refused_under_a_held_lease<H>(`
+
+The held-lease controls of PR12-R9-PUBLIC-PUBLICATION-BEFORE-WORKTREE-LOCK,
+PR12-REG7-PRELOCK-WRITES and PR12-N4-PRELOCK-PUBLICATION (one defect), shared by the fresh and
+resume guards below. For each of the four exclusion and include states (absent or changed, each)
+it puts the states, takes the hold, snapshots the checkout outside `.git`, the private root and
+every ref, runs the public command, snapshots again, and only then releases the hold: so whatever
+taking the hold itself creates (a lease file, a reaper's open of `cleanup.lock`) is in both
+snapshots and nothing is attributed to the command that it did not do. Each run must be refused
+with the holder's own words, build no worker or reviewer, and leave every path, kind, mode and
+byte in both roots, and every ref, as it found them.
+
+## `fn assert_admitted_and_published(`
+
+The positive control, run once the hold is released: with the exclusion and the include both
+absent, the same public command is admitted, and afterwards the exclusion holds its fixed `*\n`,
+the include its fixed bytes, and on Unix the include's directory is `0700`. It returns the report,
+whose run is released before it returns.
+
+## `fn a_surviving_reaper_holding(`
+
+A surviving reaper's shared hold on one run's cleanup lease (R28), by the suite's own holder,
+`rundir::tests::cleanup_hold_child`, through `workspace_manager::fixture::spawn_ready_helper`: a
+child of this test, bounded by its 30-second `await_line` and by its own sleep, and killed and
+reaped when the returned `Producer` drops. The premise — that the hold is observed — is asserted
+before it is returned. Unix only, as the helper and the hold are.
+
+## `fn a_fresh_schema_4_run_that_loses_the_worktree_lease_publishes_no_exclusion_and_no_include() {`
+
+The fresh half of the one defect, through `run_with` with the topology active. A pristine
+repository (the premise: no `.upstroke`) and its explicit private root; the run is refused under
+the lease this test takes in-process (the conductor's case, "is already driving worktree") in all
+four states, with nothing published in either root and no ref moved. Released, the same run is
+admitted and completes, and makes the exclusion and the include from absent. On Unix, beside a
+surviving reaper of that first run (R28's case, "still has a process of its own alive"), the four
+refusals again publish nothing; released, a second run is admitted and makes both again.
+
+Measured before commit as negative control A1 (the old ordering restored in `run_harness`, the
+exclusion, the dirty-tree refusal and the include before `FreshPrepared::lease`): it fails at the
+first case on "created .upstroke", "created .upstroke/.gitignore".
+
+## `fn a_schema_4_resume_that_loses_the_worktree_lease_restores_no_exclusion_and_writes_no_include() {`
+
+The resume half of the one defect, through `resume_with` with no `--private-root`, so the committed
+locator is the only root authority. A run parks on its one question; its log's bytes are kept.
+Under the lease this test holds, and on Unix beside a surviving reaper of the parked run, each of
+the four states' resume is refused with nothing written in either root, no ref moved and no worker
+or reviewer built; the log is the parked run's, byte for byte. Released, the resume is admitted,
+appends `run_resumed`, and makes the exclusion and the include from absent. The owner and commit
+proof before the include stays `a_schema_4_resume_proves_its_owner_and_commit_records_before_it_writes_its_include`'s.
+
+Measured before commit as negative control A1 (`resume_harness` making the exclusion before
+`ResumePrepared::verify`, byte for byte the file at `eceed606`): it fails at the first case on
+"created .upstroke/.gitignore".
+
+## `const DEFAULT_ROOT_LEASE_REPO: &str = "UPSTROKE_DEFAULT_ROOT_LEASE_REPO";`
+
+The repository the default-root lease child runs in, named by its parent.
+
+## `fn a_fresh_schema_4_run_over_the_default_root_that_loses_the_worktree_lease_creates_nothing_under_home()`
+
+The same defect over the default private root (Unix, as `run_test_isolated` is). The default root
+is `$HOME/.upstroke`, which no test may touch in the operator's home, so the parent makes a
+directory of its own fixture tree the child's `HOME` and `USERPROFILE`, as
+`a_schema_4_run_refuses_an_unspellable_default_private_root_before_it_creates_anything` does, runs
+`default_root_lease_child` under `run_test_isolated` with a 300-second bound, and requires its
+success and `1 passed`. The default root is the one branch whose root the include's publication
+creates, and whose authorization (`RunnerResolved::authorize`) therefore follows the lease; this
+is its witness that losing the lease creates no root, and that winning it creates and authorizes
+one.
+
+## `fn default_root_lease_child() {`
+
+The child of the test above, with no `--private-root`. Its premises: the default root resolves
+under the child's home and does not exist yet. Under the lease it holds in-process, a fresh run
+through `run_with` is refused as already driven, builds nothing, and leaves the home (the would-be
+root's parent, walked by [`private_snapshot`]), the checkout outside `.git` and every ref exactly as
+they were. Released, the same run is admitted and completes: the include is under the root it
+created, the run's recorded private half is under that root canonicalized
+(`run_started(4).private_dir`), and the run exclusion is made.
+
+Measured before commit as supplementary negative control A1b (A1's old ordering, applied again):
+the refused run created the default root itself, its `git` directory and the include under the
+home ("created .upstroke", "created .upstroke/git", "created
+.upstroke/git/recorded-objects.gitconfig"), and the child and this test fail.
+
+## `fn with_initial_read_failing<T>(log: &Path, call: impl FnOnce() -> T) -> (T, usize) {`
+
+`call`'s result with every initial complete read of `log` failing on this thread
+(`entry::initial_log_read_fault`), and how many such reads it attempted. The fault is disarmed
+when this returns, and on unwinding.
+
+## `fn assert_the_initial_read_refused(refused: Option<UpstrokeError>, log: &Path, case: &str) {`
+
+The refusal the guards below require: `UpstrokeError::Io` naming `log`, whose source is the
+injected failure's own message, so neither another read's error nor another refusal stands in
+for it.
+
+## `fn a_schema_4_resume_whose_router_cannot_read_its_log_refuses_before_publishing_anything() {`
+
+PR12-INV5-RESUME-READ-ERROR-LEGACY-PUBLICATION and PR12-REG8-RESUME-READ-ERROR-LEGACY-PUBLICATION
+(one defect), through `resume_with` with the explicit private root the run recorded. A run parks
+on its one question, and the premises are read first: the census classifies its committed header,
+its id resolves, and read normally its header routes the resume to the topology. Then, for each
+of the four exclusion and include states (absent or changed, each), under the worktree lease this
+test holds and with the router's initial read of the run's log failing, the resume is refused with
+that read's own error after exactly one attempt at the read, and nothing was published: every
+path, kind, mode and byte of the checkout outside `.git` and of the private root, and every ref,
+as they were, and no worker or reviewer built. The no-publication comparison is asserted before
+the refusal's identity, so it is the assertion the old fold fails.
+
+The controls follow. With the run's owner record naming another run, and then with its commit
+record digesting another first line, the unread resume is refused with the read's error and writes
+nothing, and the same resume read normally is refused by the record (`records run id`, `says the
+committed first line digests`) and writes nothing either: the read's refusal comes first, and the
+proof still stands behind it. Read normally under the held lease, the resume is refused as already
+driven and publishes nothing, and the log is the parked run's, byte for byte. Released, the resume
+is admitted, appends `run_resumed`, and makes the exclusion and the include from absent
+(`assert_admitted_and_published`). A genuine legacy run (`parked_run`) routes to the legacy lines
+when read; with its log unreadable to the router it is refused with the read's error and nothing is
+published under its root either; read again, `resume_answering` takes it to completion and the
+legacy lines publish its include as before.
+
+Measured before commit as negative control B1 (`route_resume` folding the failed read into
+`Ok(None)` again, as at `8b7b22d4`, over the same read): it fails at the first case, exclusion and
+include absent, on "created git", "created git/recorded-objects.gitconfig" under the private root.
+
+## `const DEFAULT_ROOT_UNREAD_REPO: &str = "UPSTROKE_DEFAULT_ROOT_UNREAD_REPO";`
+
+The repository the default-root unread child resumes in, named by its parent.
+
+## `const DEFAULT_ROOT_UNREAD_RUN: &str = "UPSTROKE_DEFAULT_ROOT_UNREAD_RUN";`
+
+The parked run that child resumes.
+
+## `const DEFAULT_ROOT_UNREAD_DONE: &str =`
+
+The line the child says on stderr once its last assertion has passed. The child returns early,
+and still reports `1 passed`, when its parent's variables are absent (an `--ignored` run of the
+whole suite), so its parent requires this line as well: a child that skipped cannot produce it.
+
+## `fn a_schema_4_resume_over_the_default_root_whose_router_cannot_read_its_log_creates_nothing_under_home()`
+
+The same defect with no `--private-root` (Unix, as `run_test_isolated` is). The legacy lines'
+include goes under today's default root, `$HOME/.upstroke`, which no test may touch in the
+operator's home; so, as
+`a_fresh_schema_4_run_over_the_default_root_that_loses_the_worktree_lease_creates_nothing_under_home`
+does, the parent parks a run under its explicit fixture root, makes a directory of its own fixture
+tree the child's `HOME` and `USERPROFILE`, runs `default_root_unread_resume_child` under
+`run_test_isolated` with a 300-second bound, and requires its success, `1 passed` and
+`DEFAULT_ROOT_UNREAD_DONE`.
+
+## `fn default_root_unread_resume_child() {`
+
+The child of the test above, resuming with no `--private-root`. Its premises: the default root
+resolves under the child's home and does not exist yet. With no default root, and then with one
+holding an include of other bytes in a directory the writer would tighten, under the lease it holds
+in-process and with the router's initial read failing, the resume is refused with the read's own
+error after one attempt, builds nothing, and leaves the home (walked by [`private_snapshot`]), the
+checkout outside `.git` and every ref exactly as they were. Read again and released, the resume is
+the topology's: it is admitted and publishes under the root the run recorded
+(`assert_admitted_and_published`), and it leaves the home, today's default root included, exactly
+as it was, since today's default is not a resume's authority.
+
+Measured before commit under the same negative control B1: with no default root, the refused
+resume created the default root, its `git` directory and the include under the home ("created
+.upstroke", "created .upstroke/git", "created .upstroke/git/recorded-objects.gitconfig"), and the
+child and its parent fail.
+
+## `const RETAINED_HUSK_PRODUCER: &str = "engine::topology::create::tests::create_kill_child";`
+
+The producer of the retained schema-4 husk the guards below resume: `create`'s own kill child,
+whose `p5b` site is the one `kill_between_commit_record_and_run_started_retained_as_possibly_committed`
+measures.
+
+## `fn retained_p5b_husk(root: &Path) -> String {`
+
+The retained husk P5b leaves, made by the actual producer rather than written by hand:
+`create_run`, driven by `create`'s tests' driver, killed after `RunDir.PublishCommitRecord` and
+before its first append, in the child [`RETAINED_HUSK_PRODUCER`] names, under the production
+`HostRunner` with a 120-second bound (`create`'s own `spawn_and_wait` shape). The child lays out
+`create`'s fixture under `root`: `root/repo`, which here is the Git checkout `temp_engine_repo`
+already made (`create_private_dir` is `create_dir_all`), so the legacy lines' prelude would find a
+repository there, and `root/private`, the husk's creation private root. It then asserts the shape
+the producer's own test asserts: one run directory, `committed.json` in the private half, an empty
+log, the census's `Husk`, and the disposition `Retained(PossiblyCommitted)` under that fixture's
+own repository key. Returns the husk's id. It produces the P5b shape only. A failed first append
+that `create`'s append-error protocol answers `RetainedPossiblyCommittedHusk` leaves, as that
+protocol reads, the same two halves (its torn line truncated by `Event.OpenLog`); that producer is
+not run here.
+
+## `const WORKTREE_LEASE_CONTENDER: &str = "engine::tests::worktree_lease_contender";`
+
+The helper [`contend_for_the_worktree_lease`] runs in a process of its own.
+
+## `const CONTENDER_REPO: &str = "UPSTROKE_TEST_CONTENDER_REPO";`
+
+The checkout whose lease the contender asks for.
+
+## `const CONTENDER_GIT_DIR: &str = "UPSTROKE_TEST_CONTENDER_GIT_DIR";`
+
+Its worktree Git directory, so the contender asks with `WorktreeLock::acquire_in` and runs no Git
+command of its own: nothing it does can change `.git`.
+
+## `const CONTENDER_TOOK: &str = "worktree lease contender: took the lease and gave it back";`
+
+What the contender says when the lease was free.
+
+## `const CONTENDER_REFUSED: &str = "worktree lease contender: refused: ";`
+
+What it says, followed by the refusal, when it was not.
+
+## `enum Contended {`
+
+The contender's answer.
+
+## `fn contend_for_the_worktree_lease(`
+
+Ask another process for `repo`'s worktree lease, and say what it found. The process is this test
+binary running [`worktree_lease_contender`] alone, `--ignored`, under the production `HostRunner`
+with a 120-second bound — the runner owns, bounds and reaps it, as it does the husk producer's — and
+it must run to its end (`1 passed`) and say one of its two lines, or the guard fails. A process of
+its own, because the lease's two holds differ inside one process: the in-process claim refuses a
+second acquisition here whatever the operating system lock is doing, and a POSIX `F_SETLK` lock
+never excludes the process that holds it. Only another process sees whether the physical lock is
+held.
+
+## `fn assert_the_lease_is(held: bool, repo: &Path, git_dir: &Path, scratch: &Path, case: &str) {`
+
+The physical premise, asked of another process. Free: the contender takes the lease and gives it
+back. Held: it is refused as by another engine driving the worktree, and on Unix the refusal names
+this process's pid — `F_GETLK`'s holder — so the lock is this test's and is still held. Windows'
+`LockFileEx` reports no holder, so there the refusal alone is the answer.
+
+## `fn worktree_lease_contender() {`
+
+The contender: `WorktreeLock::acquire_in` on the named checkout and Git directory, then drops what it
+took. Returns at once when its parent's variables are absent.
+
+## `fn a_retained_schema_4_husk_is_refused_before_any_root_is_published() {`
+
+PR12-REG9-HUSK-REFUSAL-LEGACY-PUBLICATION through `resume_with` naming an explicit root
+(`private_root_for`, the fixture's `home`) that is not the husk's creation root. The positive
+control runs first: a genuine legacy run (`parked_run`) still routes to the legacy lines and, with
+its include absent, `resume_answering` takes it to completion and the legacy lines publish the
+include as before. Then the husk is produced, the premises are read (the two roots differ; the
+resolver refuses the exact id with its husk sentence naming the run), and for each of the eight
+cases — the worktree lease free and held by this test, each exclusion and include state — the
+resume changes nothing under the root it names, under the creation root, in the checkout outside
+`.git` or in `.git` (every path, kind, mode and byte), builds nothing, and is refused with the
+resolver's own refusal, byte for byte. The no-write comparisons precede the refusal's identity, so
+they are what the old fold fails.
+
+**The held lease is held, physically, throughout.** PR12-R12-WINDOWS-HUSK-SNAPSHOT-LOCK,
+PR12-REG10-HUSK-SNAPSHOT-LOCK and PR12-INV7-HELD-LEASE-SNAPSHOT-WINDOWS (one defect, first in
+`fbdd3e69`): the guard took the lease and then snapshotted `.git`, which reads
+`.git/upstroke-worktree.lock` through a handle of its own. On Windows that read meets the
+holder's `LockFileEx` range lock — Native16's `test (winguest)` failed in the snapshot's `fs::read`
+with `os error 33`, though the log names no file, case or holder — and on Unix closing that
+second descriptor released this process's `F_SETLK` lock (`rundir`'s lock notes: a holder must
+never open its own lock file again), so the resume ran against a lease the operating system no
+longer held, with only the in-process claim left. Now `.git` is snapshotted only outside the held
+interval — before the lease is taken and after it drops — so nothing in this process opens the
+lease file while it holds it; the lease file is created once before the loop and asserted present
+(R25: created on first acquisition, never removed), so no acquisition below creates anything in
+`.git`; and in every case [`assert_the_lease_is`] asks another process: before the resume (held:
+refused, naming this process; free: taken and given back) and, held, again after the resume and
+every observation made under the lease. Nothing is skipped on any platform, no production lock
+changes, and every assertion the guard made it still makes, failures naming their case and path.
+
+Measured before commit as negative control A13 (the router's three lines folding the resolver's
+refusal into `Ok(None)` again, exactly as at `328ee6dd`): the legacy control passed, and the first
+case failed on "created git", "created git/recorded-objects.gitconfig" under the named root. A
+compiled and executed failure on the unwanted write, not a compile error or a timeout.
+
+## `const DEFAULT_ROOT_HUSK_REPO: &str = "UPSTROKE_DEFAULT_ROOT_HUSK_REPO";`
+
+The checkout holding the husk the default-root child resumes, named by its parent.
+
+## `const DEFAULT_ROOT_HUSK_RUN: &str = "UPSTROKE_DEFAULT_ROOT_HUSK_RUN";`
+
+The husk's id.
+
+## `const DEFAULT_ROOT_HUSK_CREATION_ROOT: &str = "UPSTROKE_DEFAULT_ROOT_HUSK_CREATION_ROOT";`
+
+The husk's creation private root, which the child snapshots.
+
+## `const DEFAULT_ROOT_HUSK_DONE: &str =`
+
+The line the child says once its last assertion has passed; its parent requires it, as
+`DEFAULT_ROOT_UNREAD_DONE`'s does, since the child returns early, and still reports `1 passed`,
+when its parent's variables are absent.
+
+## `fn a_retained_schema_4_husk_resumed_over_the_default_root_creates_nothing_under_home() {`
+
+The same defect with no `--private-root` (Unix, as `run_test_isolated` is): the case the finding
+names, where today's default root is not the husk's creation root. The parent produces the husk,
+makes a directory of its own fixture tree the child's `HOME` and `USERPROFILE`, runs
+`default_root_husk_resume_child` under `run_test_isolated` with a 300-second bound, and requires its
+success, `1 passed` and [`DEFAULT_ROOT_HUSK_DONE`]. No variable of this process changes.
+
+## `fn default_root_husk_resume_child() {`
+
+The same physical treatment as the explicit-root guard above: `.git` outside the held interval,
+the lease file accounted for before the first snapshot, and the contender — spawned from this child
+— before the resume in each case and, held, after it.
+
+The child of the test above. Its premises: the default root resolves under the child's home and
+does not exist yet, the husk's creation root is outside that home, and the resolver refuses the
+husk. With no default root, and then with one holding an include of other bytes in a directory the
+writer would tighten, each with the lease free and held, the resume changes nothing under the home,
+under the creation root, in the checkout or in `.git`, builds nothing, and is refused with the
+resolver's own refusal, byte for byte.
+
+Measured before commit under negative control A13: with no default root and the lease free, the
+resume created the default root, its `git` directory and the include under the home ("created
+.upstroke", "created .upstroke/git", "created .upstroke/git/recorded-objects.gitconfig"), and the
+child and its parent fail.
+
+## `fn recorded_execution_root(repo: &Path, run_id: &str) -> PathBuf {`
+
+The execution root a schema-4 run's committed first line records, as text, for comparison with the
+root a manager derives: both are the workspace manager's spelling, so neither side is a spelling
+this test makes up.
+
+## `fn execution_namespaces(repo: &Path) -> Vec<String> {`
+
+The repository keys the fixture's private root holds execution roots under, sorted; empty before
+any run made one.
+
+## `fn a_budget_stopped_schema_4_resume_recreates_its_pruned_execution_root_where_it_recorded_it() {`
+
+The positive control of PR12-INV6-RESUME-COMMON-DIR-REBIND for a root that finalization legitimately
+pruned, on every platform. A run stopped at its budget (S9's fixture: one attempt per task, a
+`0.015` run budget) is closed and finalized, and its emptied execution root is pruned; the premise
+reads the recorded root absent. Resumed with a larger budget under the same Git environment, the
+run is admitted although its root does not exist — the binding compares paths and requires no
+existence — and recovery recreates the root, saying so ("the execution root was pruned when the run
+last ended and has been recreated"), with no other namespace made under the private root.
+
+## `fn manager_today(repo: &Path, run_id: &str) -> crate::workspace_manager::WorkspaceManager {`
+
+`run_id`'s workspace manager as a resume derives it in this process: `WorkspaceManager::derive`
+over the private root `RootDerived` reads from the run's record and the incarnation it recorded,
+under this process's Git environment. Read-only.
+
+## `fn retain_execution_root(repo: &Path, run_id: &str) {`
+
+Leaves a finished run's execution root as a run keeps it when it ends before finalization's last
+step: the scaffolding `WorkspaceManager::create_execution_root` makes, through [`manager_today`],
+after asserting that this manager derives the root the run recorded.
+
+## `fn copy_common_dir(from: &Path, to: &Path) {`
+
+A second common directory this test owns: the checkout's Git directory copied file by file
+(objects, refs, packed refs, logs and configuration) without its linked-worktree registry and
+without the worktree lease's file. With `GIT_COMMON_DIR` naming it, Git keeps the checkout's own
+`--absolute-git-dir` and answers this directory for `--git-common-dir`, which is the split the
+finding needs, and nothing outside the fixture is copied or touched. A plain-Git fact the test
+relies on, not a reproduction of anything by Git alone.
+
+## `type Places = Vec<(`
+
+What [`common_dir_fixture`] returns: each place by name with its snapshot.
+
+## `fn common_dir_fixture(repo: &Path, other: &Path) -> Places {`
+
+Every place a resume under another common directory could write: the checkout outside `.git`
+(`public_snapshot`: every run's log, report and lock files, the exclusion), the checkout's Git
+directory whole (refs, packed refs, reflogs, objects, the worktree registry, the lease's file), the
+private root (the include, every private half, every execution root and its intents, task, merge
+and snapshot directories, every namespace), and the other common directory whole.
+
+## `fn moved_in(before: &Places, after: &Places) -> Vec<String> {`
+
+Every moved entry of every place, each prefixed with its place, so one assertion reports the whole
+of what a resume wrote.
+
+## `fn assert_admitted_at_the_recorded_roots(repo: &Path, open: &str, finished: &str) {`
+
+The positive controls under the Git environment of the process that calls it: its manager of each
+run derives the root that run recorded; the open run's resume is admitted and makes the exclusion
+and the include from absent (`assert_admitted_and_published`); the finished run's resume is
+finalized and refused as already finished, and finalization reclaims the scaffolding retained at the
+root it recorded; and no other namespace appears under the private root.
+
+## `const COMMON_DIR_REPO: &str = "UPSTROKE_COMMON_DIR_REPO";`
+
+The checkout the common-directory children resume in, named by their parent.
+
+## `const COMMON_DIR_OPEN_RUN: &str = "UPSTROKE_COMMON_DIR_OPEN_RUN";`
+
+The parked run a child resumes.
+
+## `const COMMON_DIR_FINISHED_RUN: &str = "UPSTROKE_COMMON_DIR_FINISHED_RUN";`
+
+The finished run, its execution root retained, that a child resumes.
+
+## `const COMMON_DIR_REFUSED: &str =`
+
+The line the refusing child says once its last assertion has passed.
+
+## `const COMMON_DIR_ADMITTED: &str =`
+
+The line an admitting child says once its last assertion has passed.
+
+## `fn a_schema_4_resume_under_another_effective_common_directory_refuses_before_any_effect() {`
+
+PR12-INV6-RESUME-COMMON-DIR-REBIND through `resume_with` on the host runner (Unix, as
+`run_test_isolated` is; `GIT_COMMON_DIR` changes only in the children's environments, never in this
+process's). In one checkout with no `GIT_COMMON_DIR`, four runs park on their one question (open,
+resumable prefixes) and one completes, its pruned root then retained ([`retain_execution_root`]),
+a valid terminal prefix with execution-root residue. Their owner, commit and log bytes are the
+engine's own. The positive controls run first: a child with `GIT_COMMON_DIR` naming the checkout's
+own common directory absolute, then one naming it relative (`.git`, given its meaning at the
+checkout), then this process with none, each admitting its own open run and finalizing the finished
+run at the root it recorded ([`assert_admitted_at_the_recorded_roots`]; the residue retained again
+after each). Then [`copy_common_dir`] makes the other common directory, and the refusing child runs
+with `GIT_COMMON_DIR` naming it. Each child has a 300-second bound and a completion sentinel.
+
+Measured before commit as negative control B13 (`ResumePrepared::verify` discarding the binding's
+answer with `let _ =`, so today's manager is adopted as at `328ee6dd`): the three positive controls
+passed, and the refusing child failed at its first case on the wrong-root admission's writes — the
+exclusion and the include published, the open run's log and report changed, and a namespace
+`workspaces/<key>` of the other common directory created under the private root.
+
+## `fn common_dir_refused_resume_child() {`
+
+The refusing child. Its premises: `GIT_COMMON_DIR` names another directory, absolute and outside the
+checkout; the checkout's Git directory and its physical repository key are unchanged, and each run's
+owner record names that key, so the owner and commit proofs still pass; and for each run, today's
+manager takes the other common directory and derives another execution root than the run recorded.
+For the open run and then the finished run, in each exclusion and include state, the resume changes
+nothing in any place of [`common_dir_fixture`], builds nothing, and is refused naming the run, the
+root it recorded, the root derived today, the canonical private root and the effective common
+directory.
+
+## `fn common_dir_admitted_resume_child() {`
+
+An admitting child: with `GIT_COMMON_DIR` set by its parent to a spelling of the checkout's own
+common directory, [`assert_admitted_at_the_recorded_roots`] for the open run its parent names and
+the finished run.
+
+## `fn a_schema_4_run_and_its_resume_leave_the_checkout_and_print_no_way_back_from_it() {`
+
+PR12-REG6-TOPOLOGY-RETURN-HINT, through the public entry points. A schema-4 run, through
+`run_with`, parks on its one question; the answer is recorded through `answer::answer`; the
+resume, through `resume_with`, completes the run onto its integration branch. The operator's
+checkout is read before and after each: `symbolic-ref HEAD` stays `refs/heads/main` and HEAD's
+commit does not move. Each summary (`RunReport::render`, which `main::finish` prints) has the line
+`branch: <run branch>` and no `return with` or `git switch`, and the completed run's edit is on
+that branch. The legacy control, a schema-1..3 run through the legacy writer, does check its branch
+out, prints `branch: <run branch> (return with: git switch -)`, and running that `git switch -`
+takes the repository back to `main`: the instruction is true where it is printed. With the render
+printing the instruction unconditionally, as before repair9, the test fails at the fresh summary's
+assertion, the first it reaches; the resumed summary's identical assertion is not reached then.
+
+## `fn a_run_whose_initial_log_read_fails_after_the_census_keeps_a_shared_prefix_from_answering() {`
+
+PR12-REG10-INITIAL-LOG-READ-IS-ABSENCE and PR12-REG8-INITIAL-LOG-READ-IS-ABSENCE (one defect),
+through `answer::answer`, `answer::show` and `status::load`. Two schema-4 runs park, each on one
+question; the two ids share a proper prefix (ULIDs drawn moments apart share their time digits),
+and each id's prefix one character longer is its own. Both runs classify `Committed` in the census.
+The first run's initial complete read then fails (`entry::initial_log_read_fault`), while the
+census, which reads only the first line, still classifies it.
+
+With that read failing, `answer` and `show` of the shared prefix are refused, each naming the
+survivor's question as the one match among the runs that could be read and the first run as the
+one whose log could not be read; each made exactly one attempt at the read, and the checkout
+outside `.git` is unchanged: no answer file, nothing else. That comparison is asserted before the
+refusals' sentences, so it is the assertion the old fold fails. `status` of the first run is
+refused with the read's own error. The survivor's full id still shows its question; the first
+run's full id is not found, and the refusal names the run that could not be read.
+
+Read again, the shared prefix is ambiguous ("matches 2 questions", naming both), and each run's
+own prefix shows its own question. Then a legacy run (`00LEGACY`) holds a question whose id is the
+first run's own prefix followed by `LEGACY` (`L` is not a Crockford digit, so no minted id
+continues it). With the first run's read failing, `answer` and `show` of that prefix are refused,
+naming the legacy question as the one match among the runs that could be read and the first run as
+unread, and nothing is written: the old fold dropped the run, found the topology silent and handed
+the prefix to the legacy finder, which answered it. The legacy question's full id still shows it;
+read again, the prefix is ambiguous between the legacy question and the first run's. Last, each
+full id is answered, the survivor's and the legacy question's with the first run still unreadable
+and the first run's once it reads, and the answer files are exactly those three.
+
+Measured before commit as negative control A1 (`observe` folding the failed read into `Ok(None)`
+again, as at `8b7b22d4`, over the same read): it fails at the first comparison, on "created
+.upstroke/runs/<survivor>/answers" and "created .upstroke/runs/<survivor>/answers/<its
+question>.json": `answer` wrote the survivor's answer to the shared prefix.
+
+## `fn blocked_closure_plan() -> String {`
+
+Four tasks: `t1`, whose body carries [`ESCALATES`] so its workers below the frontier end without an
+edit; `t2` on `t1`; `t3` on `t2`; and `t4` on nothing.
+
+## `fn dependent_rows(rendered: &str) -> Vec<&str> {`
+
+The rendered rows of `t2` and `t3`, the direct and the transitive dependent.
+
+## `fn declined_failure_run(repo: &Path, stub: &ObservedStub) -> RunReport {`
+
+A schema-4 run through the public `run_harness` whose end-of-ladder question is declined by the
+harness's scripted answer, so `t1` fails after its one attempt, under whatever `on_task_failure`
+the repository's config holds.
+
+## `fn a_completed_schema_4_run_reports_its_failed_tasks_dependents_blocked_live_and_replayed() {`
+
+PR12-INV7-BLOCKED-TASK-REPORTED-QUEUED. With `on_task_failure = "continue"` the run completes with
+`t1` failed and `t4` committed, and its final summary prints ``t2: blocked by `t1` `` and
+``t3: blocked by `t2` ``, never `queued`: the derived Blocked view of the canonical completion rule.
+The run's committed log, replayed through the fold's checked transitions with the frozen plan read
+as `entry::frozen_inputs` reads it, is `Complete` with `t2` and `t3` still structurally `Pending`
+— the run's own `report.json` says `pending` too — and projects the same rows. On the same log, the
+prefix before the event that fails `t1` reports them `queued`, and the prefix ending with it
+reports them blocked: that event, and nothing else, is what blocks them.
+
+## `fn a_schema_4_report_keeps_queued_behind_a_parked_task_and_skipped_behind_a_halting_failure() {`
+
+The controls. A task behind one parked on an unanswered question is `queued`: a question is not a
+failure. And the same failing chain under the default `on_task_failure = halt` ends `Halted` at
+`t1`, with `t2` and `t3` `skipped (run halted)`: a halted run keeps skipping what it did not reach.
+
+## `fn execution_roots_under(private_root: &Path) -> Vec<String> {`
+
+The run ids of every execution root under a private root's `workspaces/`, by name, so a root
+spelled through a canonicalized private root compares equal.
+
+## `fn a_fresh_run_on_an_unborn_branch_is_refused_before_it_creates_anything_and_a_born_one_runs() {`
+
+PR12-INV7-PREPUBLICATION-EXECUTION-ROOT-ORPHAN through the public entry, on the route the finding
+names: a clean repository on an unborn branch, its plan outside the worktree. The run is refused by
+`git rev-parse HEAD` — the base commit it cannot record — and leaves no execution root of its own,
+no run directory, no private half and no build, with the lease free; another run's root in the same
+namespace, content included, is untouched. Before the repair the root was made before that read,
+and stayed with no record naming it. Then the branch is born, and a fresh run on it completes and
+records the root it created; the other run's root is still untouched.
+
+## `fn a_configured_reviewer_whose_cli_is_absent_fails_creation_before_p5b_and_commits_nothing() {`
+
+P12-W17 (D9). A configured reviewer whose CLI is absent fails creation before P5b, and nothing is
+committed. Every recorded reviewer is probed at P4, so `run_with` refuses there, naming the
+reviewer's program, after P3c claimed the run's execution root. The creator's cleanup leaves no run
+directory, no private half holding `committed.json`, no execution root and no integration ref, and
+no run was made without the reviewer. The control: the same configuration, with the reviewer's CLI
+present, creates the run, records both agents as probed, and completes it.
+
+This prose sat above the test in the source until the execution root moved into the create protocol
+at P3c; the refusal used to be reported after P3b, and the root was made before creation began.

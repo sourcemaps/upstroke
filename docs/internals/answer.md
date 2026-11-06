@@ -64,7 +64,9 @@ Whether a live engine is expected to pick this up on its own.
 
 ## `pub fn answer(repo_root: &Path, wanted: &str, reply: Reply) -> Result<Answered, UpstrokeError> {`
 
-Record an answer to a question, found by id or unambiguous prefix.
+Record an answer to a question, found by id or unambiguous prefix. Since
+PR12 the question is found in a legacy run's question file or in a schema-4
+run's fold (`locate`); a schema-4 question is answered by `answer_open`.
 
 ## `pub fn answer(repo_root: &Path, wanted: &str, reply: Reply) -> Result<Answered, UpstrokeError> {` › `if let Some(existing) = &record.answer {`
 
@@ -72,12 +74,12 @@ Answering twice is a mistake worth catching rather than a last-write-
 wins race: the first answer may already have driven a retry, and the
 second would look like it had an effect it cannot have.
 
-## `pub fn answer(repo_root: &Path, wanted: &str, reply: Reply) -> Result<Answered, UpstrokeError> {` › `format!("1-{}", record.question.options.len())`
+## `fn reply_answer(question: &Question, reply: Reply) -> Result<Answer, UpstrokeError> {` › `format!("1-{}", question.options.len())`
 
 Not `1..N`: every operator of this tool reads
 Rust, where that is the range that excludes N.
 
-## `pub fn answer(repo_root: &Path, wanted: &str, reply: Reply) -> Result<Answered, UpstrokeError> {` › `if answer == Answer::Unanswered {`
+## `fn reply_answer(question: &Question, reply: Reply) -> Result<Answer, UpstrokeError> {` › `if answer == Answer::Unanswered {`
 
 An empty reply means "leave it parked" at a prompt (§12), and typing
 nothing into this command almost certainly means the same — but here it
@@ -118,3 +120,71 @@ would instead be ingested as an answer that changes nothing.
 
 Simulate the engine having ingested the first answer and rewritten
 the payload with it.
+
+## `fn reply_answer(question: &Question, reply: Reply) -> Result<Answer, UpstrokeError> {`
+
+Today's reply validation, shared by both kinds of run: an option number
+names an option, free text is interpreted, an empty answer refuses.
+
+## `fn locate(repo_root: &Path, wanted: &str) -> Result<Located, UpstrokeError> {`
+
+D3 (PR12), as root corrected it (PR12-ANSWER-CROSS-SCHEMA-PREFIX, 7021b42d):
+one census of the run directories, both finders' candidates from it, then one
+decision (`decide`). The composition it replaces took each finder's verdict
+and let a lone schema-4 match stand where the legacy finder had refused, so a
+short prefix two legacy questions shared with one schema-4 question selected
+the schema-4 one, and a legacy finder's refusal for a directory it could not
+classify was dropped the same way.
+
+When no schema-4 run answers to the id and every directory classified, today's
+finder decides, sentence for sentence: `rundir::find_question`, which takes its
+own census. Otherwise `decide` does, from this one.
+
+The lookup decides from what it read. Nothing here holds a run still while it
+reads: a question raised, or a run created, after the read is not among the
+candidates, as it is not for the legacy finder either.
+
+## `fn census(repo_root: &Path) -> Census {`
+
+`SWEEP-CLASSIFY-001`'s rule, applied to the composed lookup: every directory
+classified once, and every candidate and refusal `decide` produces taken from
+that one classification. A directory that did not classify is carried rather
+than dropped, because it may hold a question of either schema.
+
+## `fn legacy_candidates(repo_root: &Path, runs: &[String], wanted: &str) -> LegacyCandidates {`
+
+`rundir::find_question`'s walk over the census above: every question file of
+every committed run, open or answered (an answered one is refused after the
+lookup, as today), by full id or prefix, ASCII case-insensitive.
+
+## `fn decide(`
+
+The decision, a function of the candidates alone, so its unit tests reach the
+class no fixture can build (a directory that did not classify) beside the ones
+a fixture can.
+
+1. A full id answers, whatever else matches or went unread: the legacy
+   finder's rule ("a full question id still answers: it names one file"),
+   across both schemas. A full id that both schemas hold refuses, because an
+   answer to one id cannot say which run it is for.
+2. A settled schema-4 question's full id refuses as no longer open.
+3. A prefix answers only when exactly one question of either schema answers to
+   it, a settled schema-4 question included, and every directory classified
+   and every schema-4 log was observed. A lone settled question refuses as no
+   longer open.
+4. Every other refusal is the legacy finder's sentence with what went unread
+   appended: its own note, word for word, for a directory that did not
+   classify, and a note naming a schema-4 log that could not be observed.
+   `the_composed_refusals_are_the_legacy_finders_sentences_where_only_legacy_runs_answer`
+   checks the sentences against `rundir::find_question` where a fixture can
+   reach them.
+
+## `fn answer_open(open: FoundOpen, reply: Reply) -> Result<Answered, UpstrokeError> {`
+
+A schema-4 question has no question file: it is the fold's open question,
+frozen in `question_raised`. The answer is single-use through the file the run
+polls (`<public>/answers/<id>.json`, through the `Answer.StageWrite` and
+`Answer.PublishRename` funnels that `interaction::write_answer` reaches): one
+already there refuses, whether or not the run has ingested it yet. A
+question that binds an agent accepts only one of its options
+(`observe::check_reply`).

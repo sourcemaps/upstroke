@@ -102,6 +102,24 @@ path that failure takes.
 
 Everything but the paths at its documented default.
 
+## `pub struct RunOptions` › `pub(crate) legacy_writer: bool,`
+
+The test configuration's way to the schema-1..3 writer. Since PR12
+`upstroke run` creates a schema-4 run ([`RunOptions::writes_topology`]); the
+legacy suite still drives the sequential coordinator, so its fixtures set
+this (`engine::tests::options`, and the legacy cell of
+`runner::container::resolve::tests::legacy_container_selection_refused_before_effects`).
+`#[cfg(test)]`, like the two hooks above it: no production caller can name it,
+so a released binary has exactly one fresh writer.
+
+## `impl RunOptions` › `pub(super) fn writes_topology(&self) -> bool {`
+
+Whether `run_harness` creates this run with the schema-4 topology. True
+exactly when [`crate::topology::schema::fresh_writer_schema`] answers
+[`crate::topology::schema::TOPOLOGY_SCHEMA`] for the production selector —
+the one activation switch, read rather than restated — unless the test
+configuration asked for the legacy writer.
+
 ## `pub struct Harness<'a> {`
 
 Injectable collaborators. `None` means "use the real one", chosen from

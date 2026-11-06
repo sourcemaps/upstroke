@@ -756,6 +756,7 @@ fn temp_engine_repo(tag: &str) -> (ScratchTree, PathBuf) {
     git_in(&dir, &["init", "-q", "-b", "main"]);
     git_in(&dir, &["config", "user.email", "test@upstroke.local"]);
     git_in(&dir, &["config", "user.name", "upstroke tests"]);
+    git_in(&dir, &["config", "maintenance.auto", "false"]);
     fs::write(dir.join("README.md"), "seed\n").expect("seed");
     fs::write(
         dir.join("plan.md"),
@@ -785,6 +786,7 @@ fn options(repo: &Path) -> RunOptions {
     opts.defer_backoff = Duration::ZERO;
     opts.wait_on_block = Some(Duration::ZERO);
     opts.private_root = Some(private_root_for(repo));
+    opts.legacy_writer = true;
     opts
 }
 
@@ -4609,8 +4611,20 @@ fn unreported_cost_stays_unreported_rather_than_zero() {
     );
 }
 
-fn replay_of(repo: &Path, run_id: &str) -> crate::status::RunStatus {
+fn replay_of(repo: &Path, run_id: &str) -> crate::status::Status {
     crate::status::load(repo, Some(run_id)).expect("the run reads back")
+}
+
+fn legacy_status(status: &crate::status::Status) -> &crate::status::RunStatus {
+    match status {
+        crate::status::Status::Legacy(run) => run.as_ref(),
+        crate::status::Status::Topology(run) => {
+            panic!(
+                "run `{}` read back as schema 4, not as a legacy run",
+                run.run_id
+            )
+        }
+    }
 }
 
 struct Scenario {
@@ -4658,7 +4672,8 @@ impl Scenario {
 fn assert_live_equals_replay(repo: &Path, live: &RunState, report: &RunReport) {
     let replayed = replay_of(repo, &report.run_id);
     assert_eq!(
-        &replayed.state, live,
+        &legacy_status(&replayed).state,
+        live,
         "replaying the log produced different state than the run that wrote it"
     );
 
@@ -4670,7 +4685,7 @@ fn assert_live_equals_replay(repo: &Path, live: &RunState, report: &RunReport) {
         value
     };
     assert_eq!(
-        strip(&replayed.report()),
+        strip(&legacy_status(&replayed).report()),
         strip(report),
         "the report derived from the log differs from the one the run wrote"
     );
@@ -4835,12 +4850,16 @@ fn an_aborting_error_still_leaves_a_replayable_log() {
     fs::write(paths.events(), format!("{}\n", lines[..cut].join("\n"))).expect("truncate");
 
     let replayed = replay_of(&repo, &report.run_id);
-    assert_eq!(replayed.interrupted, 1, "the dangling attempt is settled");
+    assert_eq!(
+        legacy_status(&replayed).interrupted,
+        1,
+        "the dangling attempt is settled"
+    );
     assert!(
-        replayed.interrupted_run(),
+        legacy_status(&replayed).interrupted_run(),
         "and the run reads as interrupted rather than finished"
     );
-    assert_eq!(replayed.state.states[0], TaskState::Pending);
+    assert_eq!(legacy_status(&replayed).state.states[0], TaskState::Pending);
 }
 
 #[test]
@@ -4902,7 +4921,7 @@ fn a_live_run_reads_as_running_rather_than_halted() {
     fs::write(paths.events(), format!("{}\n", lines[..cut].join("\n"))).expect("truncate");
 
     let stopped = replay_of(&repo, &report.run_id);
-    assert!(stopped.interrupted_run());
+    assert!(legacy_status(&stopped).interrupted_run());
     let out = crate::status::render(&stopped);
     assert!(out.contains("skipped (run interrupted)"), "{out}");
     assert!(out.contains("t2: blocked by `t1`"), "{out}");
@@ -4910,9 +4929,13 @@ fn a_live_run_reads_as_running_rather_than_halted() {
     let lock = RunLock::acquire(&paths.public).expect("simulate a live engine");
 
     let live = replay_of(&repo, &report.run_id);
-    assert!(live.running, "a held lock means an engine is driving this");
+    assert!(
+        legacy_status(&live).running,
+        "a held lock means an engine is driving this"
+    );
     assert_eq!(
-        live.interrupted, 0,
+        legacy_status(&live).interrupted,
+        0,
         "an attempt in flight has not been interrupted"
     );
     let out = crate::status::render(&live);
@@ -5061,8 +5084,11 @@ fn killing_a_run_mid_attempt_leaves_a_resumable_record() {
     );
 
     let before = replay_of(&repo, &run_id);
-    assert!(before.interrupted_run(), "status calls it interrupted");
-    assert_eq!(before.interrupted, 1);
+    assert!(
+        legacy_status(&before).interrupted_run(),
+        "status calls it interrupted"
+    );
+    assert_eq!(legacy_status(&before).interrupted, 1);
     assert!(
         crate::status::render(&before).contains(&format!("upstroke resume {run_id}")),
         "and tells the operator how to continue it"
@@ -6068,7 +6094,7 @@ fn the_report_labels_gates_from_the_record_not_todays_config() {
         "and is labelled as the record has it, not as today's config would"
     );
 
-    let replayed = replay_of(&repo, &run_id).report();
+    let replayed = legacy_status(&replay_of(&repo, &run_id)).report();
     assert_eq!(replayed.gates, resumed.gates);
     assert_eq!(replayed.gates_from_config, resumed.gates_from_config);
 }
@@ -6345,8 +6371,11 @@ fn status_reports_a_live_run_and_the_ledger_reads_from_the_log() {
     let report = run_with(&options(&repo), &source).expect("run");
 
     let loaded = replay_of(&repo, &report.run_id);
-    assert!(!loaded.running, "nothing holds a finished run");
-    assert!(!loaded.interrupted_run());
+    assert!(
+        !legacy_status(&loaded).running,
+        "nothing holds a finished run"
+    );
+    assert!(!legacy_status(&loaded).interrupted_run());
 
     let rendered = crate::status::render(&loaded);
     assert!(rendered.contains("ledger:"), "{rendered}");
@@ -6356,22 +6385,25 @@ fn status_reports_a_live_run_and_the_ledger_reads_from_the_log() {
         "{rendered}"
     );
     assert!(
-        rendered.contains(&loaded.paths.private.display().to_string()),
+        rendered.contains(&legacy_status(&loaded).paths.private.display().to_string()),
         "and points at where the transcripts actually are"
     );
 
     assert!(
-        (loaded.report().total_cost_usd - report.total_cost_usd).abs() < 1e-9,
+        (legacy_status(&loaded).report().total_cost_usd - report.total_cost_usd).abs() < 1e-9,
         "{} vs {}",
-        loaded.report().total_cost_usd,
+        legacy_status(&loaded).report().total_cost_usd,
         report.total_cost_usd
     );
 
     let paths = paths_of(&repo, &report.run_id);
     let _held = RunLock::acquire(&paths.public).expect("claim the finished run");
     let claimed = replay_of(&repo, &report.run_id);
-    assert!(!claimed.running, "a finished run is not running");
-    assert!(claimed.held, "but something does hold it");
+    assert!(
+        !legacy_status(&claimed).running,
+        "a finished run is not running"
+    );
+    assert!(legacy_status(&claimed).held, "but something does hold it");
     let rendered = crate::status::render(&claimed);
     assert!(
         rendered.contains("another process holds this run"),
@@ -7763,6 +7795,12 @@ fn a_frontier_escalation_over_the_threshold_parks_for_approval_then_runs_it() {
         "and quotes reported spend to date: {}",
         asked[0].question.context
     );
+    assert!(
+        asked[0].question.affected_tasks == [TaskId::from("t1")]
+            && asked[0].question.context.starts_with("Task `t1` — One\n"),
+        "and it names and describes the task it holds: {:?}",
+        asked[0].question
+    );
 
     let tiers: Vec<&str> = task(&report, "t1")
         .attempts
@@ -8281,6 +8319,8 @@ fn empty_report() -> RunReport {
         pool_drain: Vec::new(),
         running: false,
         interrupted: false,
+        questions_in_log: false,
+        unattributed_cost_incomplete: false,
     }
 }
 
@@ -8449,10 +8489,10 @@ fn a_budget_stop_keeps_its_outcome_while_a_resume_holds_the_lock() {
 
     let seen = replay_of(&repo, &stopped.run_id);
     assert!(
-        !seen.running,
+        !legacy_status(&seen).running,
         "a run that recorded its finish is not running"
     );
-    assert!(seen.held, "though a resume does hold it");
+    assert!(legacy_status(&seen).held, "though a resume does hold it");
     let out = crate::status::render(&seen);
     assert!(out.contains("run stopped at its budget"), "{out}");
     assert!(out.contains("upstroke resume"), "{out}");
@@ -9072,9 +9112,9 @@ fn every_public_write_coordinator_entry_point_establishes_containment() {
     let (_tree, repo) = temp_engine_repo("containment-facade");
     let mut run_opts = options(&repo);
     run_opts.plan_path = repo.join("absent-plan.md");
-    let mut resume_opts = ResumeOptions::new("01ABSENTRUN".to_owned(), repo.clone());
-    resume_opts.pools_path = Some(no_pools());
-    resume_opts.private_root = Some(private_root_for(&repo));
+    let (_legacy_tree, legacy_repo, legacy_run) = parked_run("containment-facade-resume");
+    fs::remove_file(legacy_repo.join("plan.md")).expect("the recorded run's plan, removed");
+    let resume_opts = resume_options(&legacy_repo, &legacy_run);
     let adapters = BuiltinAdapters;
 
     type Call<'a> = Box<dyn Fn() -> Result<RunReport, UpstrokeError> + 'a>;
@@ -9125,6 +9165,36 @@ fn every_public_write_coordinator_entry_point_establishes_containment() {
         assert!(
             crate::agent::proc::ambient_job_established(),
             "`engine::{name}` returned without this process joining its ambient Job Object"
+        );
+    }
+
+    let mut unknown = ResumeOptions::new("01ABSENTRUN".to_owned(), repo.clone());
+    unknown.pools_path = Some(no_pools());
+    unknown.private_root = Some(private_root_for(&repo));
+    let says = rundir::resolve_run_id(&repo, "01ABSENTRUN")
+        .expect_err("no run has that id")
+        .to_string();
+    let refused_by_the_router: Vec<(&str, Call<'_>)> = vec![
+        ("resume", Box::new(|| resume(&unknown))),
+        ("resume_with", Box::new(|| resume_with(&unknown, &adapters))),
+        (
+            "resume_harness",
+            Box::new(|| resume_harness(&unknown, &Harness::new(&adapters))),
+        ),
+    ];
+    for (name, call) in &refused_by_the_router {
+        let before = crate::runner::host::containment_establishments();
+        let refused = call().expect_err("an id the router refuses");
+        assert_eq!(
+            crate::runner::host::containment_establishments(),
+            before,
+            "`engine::{name}`: an id the router refuses is refused read-only, before any \
+             containment, so the caller never becomes a write coordinator"
+        );
+        assert_eq!(
+            refused.to_string(),
+            says,
+            "`engine::{name}`: the resolver's own refusal"
         );
     }
 }
@@ -9414,10 +9484,10 @@ fn question_payload_kill_child() {
     );
     let run_id = rundir::latest_run(&repo).expect("the parent's run");
     let replayed = replay_of(&repo, &run_id);
-    let [record] = replayed.state.questions.as_slice() else {
+    let [record] = legacy_status(&replayed).state.questions.as_slice() else {
         panic!(
             "the parking settlement records one question: {:?}",
-            replayed.state.questions
+            legacy_status(&replayed).state.questions
         );
     };
     let mut hooks = QuestionPayloadKilledAt {
@@ -9484,10 +9554,10 @@ fn a_run_killed_once_its_parking_settlement_is_durable(
         "{tag}: the log ends at the parking settlement: {last}"
     );
     let replayed = replay_of(&repo, &run_id);
-    let [record] = replayed.state.questions.as_slice() else {
+    let [record] = legacy_status(&replayed).state.questions.as_slice() else {
         panic!(
             "{tag}: the settlement parks one question: {:?}",
-            replayed.state.questions
+            legacy_status(&replayed).state.questions
         );
     };
     assert!(record.is_open(), "{tag}: nothing answered it");
@@ -12906,7 +12976,6 @@ fn real_git() -> String {
 
 #[cfg(unix)]
 fn git_shim(beside: &Path, label: &str, rules: &[ShimRule<'_>]) -> GitShim {
-    use std::os::unix::fs::PermissionsExt;
     let dir = beside.with_file_name(format!("{label}-shim"));
     fs::create_dir_all(&dir).expect("the shim's directory");
     let log = dir.join("calls.log");
@@ -12940,8 +13009,13 @@ fn git_shim(beside: &Path, label: &str, rules: &[ShimRule<'_>]) -> GitShim {
         script.push_str("exit $status\n");
     }
     let shim = dir.join("git");
-    fs::write(&shim, script).expect("the shim");
-    fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).expect("an executable shim");
+    // Written by a process of its own, never through a descriptor of this
+    // test process: a fork another test thread makes while this process held
+    // the shim open for writing keeps that writer until it execs, and the
+    // child engine's exec of the shim then fails with ETXTBSY. The helper and
+    // its witness are `runner::container::write_program_in_its_own_process`
+    // and `the_reaper_relay_writer_leaves_no_writer_in_another_threads_fork`.
+    crate::runner::container::write_program_in_its_own_process(&shim, &script);
     GitShim { dir, log }
 }
 
@@ -14517,9 +14591,19 @@ fn a_run_that_dies_between_its_pins_commit_and_its_ref_loses_nothing_on_resume()
         .env("UPSTROKE_KEPT_ENGINE_REPORT", &child.report)
         .env("PATH", shim.path());
     let (status, log) = bounded_child("the run killed at its pin's ref", command, &child.log);
-    assert!(
-        shim.fired(0),
-        "the shim killed the run at the pin's update-ref: {log}"
+    assert_the_shim_fired(
+        &shim,
+        &child,
+        "a sentinel, not the child's report: this test reads no report bytes of its own, and \
+         the report's actual bytes are in the bounded observation of the report file's path below",
+        std::slice::from_ref(&child.report),
+        format_args!(
+            "the shim killed the run at the pin's update-ref. The child ended {status:?}; its \
+             stdout and stderr, {} B when it ended, are the child's log, observed below by its \
+             path, not the engine's report; the report file is observed below by its path, and \
+             the child's report line holds a sentinel, not report bytes",
+            log.len()
+        ),
     );
     assert!(
         status.code().is_none(),
@@ -17186,7 +17270,8 @@ fn a_tracked_filtered_path_moved_out_stays_refused_and_is_pinned_once_its_attrib
 const INHERITED_RUN_ROOT: &str = "UPSTROKE_INHERITED_RUN_ROOT";
 #[cfg(unix)]
 const INHERITED_RUN_PRIVATE: &str = "UPSTROKE_INHERITED_RUN_PRIVATE";
-#[cfg(unix)]
+// Not `cfg(unix)`: the portable J7 test
+// `a_schema_4_resume_runs_the_recorded_gates_and_names_how_todays_differ` seeds it too.
 const WORKER_ONLY_PLAN: &str = "## Implement the widget\n<!-- upstroke: id=t1 depends= -->\n";
 #[cfg(unix)]
 const WORKER_ONLY_CONFIG: &str = "[routing]\nreview = { enabled = false }\n";
@@ -17480,4 +17565,8099 @@ fn a_gated_legacy_run_under_a_relative_common_dir_through_a_linked_registry_keep
 #[ignore = "subprocess helper"]
 fn relative_common_dir_run_helper() {
     gated_run_under_an_inherited_common_dir();
+}
+
+// ===========================================================================
+// PR12: a schema-4 run through the public entry points
+// ===========================================================================
+//
+// The stub agent is a real CLI as far as the runner is concerned: every probe,
+// worker and reviewer is a native-shell process the production `HostRunner`
+// starts in the run's own worktrees. Nothing here replaces the runner, the
+// workspace manager, the loop or the event log.
+
+const TOPOLOGY_STUB: &str = "claude-code";
+const TOPOLOGY_STUB_REVIEW: &str = "UPSTROKE-TOPOLOGY-STUB-REVIEW";
+const TOPOLOGY_STUB_VERDICT: &str = "```json\n{\"pass\": true, \"reasons\": [\"meets the \
+                                     acceptance criteria\"], \"required_changes\": []}\n```";
+const TOPOLOGY_STUB_QUESTION: &str =
+    "UPSTROKE-QUESTION: which of the two widget formats does the spec mean?";
+const TOPOLOGY_STUB_ASKS: &str = "UPSTROKE-TOPOLOGY-STUB-ASKS";
+/// The worker's edit: one line appended to `agent-output.txt`, spelled so that
+/// both shells `shell_spec` picks run it alike, `cmd /C` on Windows and `sh -c`
+/// elsewhere (`gates::ShellKind::native`). `echo` is a builtin of both and `>>`
+/// appends in both; with no space before `>>`, `cmd` writes no trailing blank.
+/// `cmd` ends the line with CRLF and `sh` with LF, and every assertion over the
+/// file reads it by content. The `printf '…\n'` spelling this replaces was a
+/// `sh` command: `cmd` does not quote with `'`, has no `printf` builtin, and
+/// opens a redirection's file before it looks the program up.
+const TOPOLOGY_STUB_EDIT: &str = "echo edited by the topology stub>> agent-output.txt";
+
+struct TopologyStub {
+    worker_script: String,
+    questions_left: Mutex<usize>,
+}
+
+impl TopologyStub {
+    fn new(worker_script: &str, questions: usize) -> Self {
+        Self {
+            worker_script: worker_script.to_owned(),
+            questions_left: Mutex::new(questions),
+        }
+    }
+}
+
+impl AgentAdapter for TopologyStub {
+    fn id(&self) -> &'static str {
+        TOPOLOGY_STUB
+    }
+
+    fn probe(&self, runner: &dyn crate::runner::Runner) -> Result<Caps, UpstrokeError> {
+        let request = crate::agent::probe_request(
+            TOPOLOGY_STUB,
+            shell_spec("exit 0"),
+            0,
+            Duration::from_secs(60),
+        )?;
+        let output = runner.run_blocking(&request)?;
+        if output.code != Some(0) {
+            return Err(UpstrokeError::Agent {
+                message: format!("the topology stub's probe exited {:?}", output.code),
+            });
+        }
+        Ok(Caps {
+            version: "0.0.0-topology-stub".to_owned(),
+            json_output: true,
+            session_resume: false,
+            cost_reporting: true,
+            read_only_mode: true,
+            acp: false,
+            model_list: false,
+        })
+    }
+
+    fn build(&self, run: &TaskRun) -> Result<CommandSpec, UpstrokeError> {
+        if run.profile.permissions == PermissionMode::ReadOnly {
+            return Ok(shell_spec(&format!("echo {TOPOLOGY_STUB_REVIEW}")));
+        }
+        Ok(shell_spec(&self.worker_script))
+    }
+
+    fn parse(&self, out: &ProcessOutput) -> Result<Outcome, UpstrokeError> {
+        // Only a worker that exited cleanly completed, as a real adapter reads
+        // its end (`agent::claude`'s `parse_output`): a timeout is a timeout,
+        // and any other end is an agent error whose stderr the attempt reports.
+        // Read as `Completed`, a failed edit was reported as an empty diff.
+        if out.timed_out || out.output_limited || out.code != Some(0) {
+            return Ok(Outcome {
+                status: if out.timed_out {
+                    OutcomeStatus::Timeout
+                } else {
+                    OutcomeStatus::AgentError
+                },
+                diff: String::new(),
+                detail: None,
+                session_id: None,
+                usage: None,
+                cost_usd: Some(0.01),
+                transcript_path: PathBuf::new(),
+                duration: out.duration,
+            });
+        }
+        let detail = if out.stdout.contains(TOPOLOGY_STUB_REVIEW) {
+            TOPOLOGY_STUB_VERDICT
+        } else if out.stdout.contains(TOPOLOGY_STUB_ASKS) {
+            TOPOLOGY_STUB_QUESTION
+        } else {
+            let mut left = self
+                .questions_left
+                .lock()
+                .map_err(|_| UpstrokeError::Agent {
+                    message: "topology stub lock poisoned".to_owned(),
+                })?;
+            if *left > 0 {
+                *left -= 1;
+                TOPOLOGY_STUB_QUESTION
+            } else {
+                "done"
+            }
+        };
+        Ok(Outcome {
+            status: OutcomeStatus::Completed,
+            diff: String::new(),
+            detail: Some(detail.to_owned()),
+            session_id: None,
+            usage: None,
+            cost_usd: Some(0.01),
+            transcript_path: PathBuf::new(),
+            duration: out.duration,
+        })
+    }
+}
+
+/// The stub's edit is a real append under the shell `shell_spec` picks on this
+/// platform, run by the production `HostRunner`: each run adds one line, so a
+/// task whose base already holds an earlier task's output still leaves a diff
+/// of its own. A second task's empty diff on the Windows guest (CI run
+/// 41529099549) is what an edit that left the file as it was looks like. Only
+/// a Windows host runs the edit under `cmd`, so only there does this
+/// discriminate between the spellings.
+#[test]
+fn the_topology_stubs_edit_appends_one_line_per_run_under_the_native_shell() {
+    let tree = temp_engine_scratch("topology-stub-edit");
+    let workspace = tree.path().to_path_buf();
+    let runner = crate::runner::host::HostRunner::new();
+    for runs in 1..=2 {
+        let request = crate::runner::gate_request(
+            shell_spec(TOPOLOGY_STUB_EDIT),
+            workspace.clone(),
+            Duration::from_secs(60),
+            crate::runner::InvocationId::attempt(
+                crate::topology::registry::TaskKey(0),
+                crate::topology::events::GenerationId(0),
+                crate::topology::events::AttemptNumber(1),
+                crate::runner::invocation::AttemptRole::Gate(0),
+                0,
+            ),
+        );
+        let output = crate::runner::Runner::run_blocking(&runner, &request)
+            .expect("the native shell runs the stub's edit");
+        assert_eq!(output.code, Some(0), "run {runs}: {output:?}");
+        let text = fs::read_to_string(workspace.join("agent-output.txt")).expect("the edit's file");
+        assert_eq!(
+            text.lines().collect::<Vec<_>>(),
+            vec!["edited by the topology stub"; runs],
+            "run {runs} appends exactly one line: {text:?}"
+        );
+    }
+}
+
+/// The stub reads a worker's end as a real adapter does: only a clean exit
+/// completes, a timeout is a timeout, and any other end is an agent error, so
+/// a failed edit is reported with its own exit and stderr, not as an empty
+/// diff. This holds and discriminates on every platform.
+#[test]
+fn the_topology_stub_completes_only_a_worker_that_exited_cleanly() {
+    let stub = TopologyStub::new(TOPOLOGY_STUB_EDIT, 0);
+    let status = |code: Option<i32>, timed_out: bool| {
+        stub.parse(&ProcessOutput {
+            code,
+            stdout: String::new(),
+            stderr: "the edit did not run".to_owned(),
+            duration: Duration::from_millis(1),
+            timed_out,
+            output_limited: false,
+        })
+        .expect("the stub reads every end")
+        .status
+    };
+    assert_eq!(status(Some(0), false), OutcomeStatus::Completed);
+    assert_eq!(status(Some(1), false), OutcomeStatus::AgentError);
+    assert_eq!(status(None, false), OutcomeStatus::AgentError);
+    assert_eq!(status(None, true), OutcomeStatus::Timeout);
+}
+
+/// The stub, shareable across the coordinator's pipeline threads.
+struct SharedTopologyStubs(std::sync::Arc<TopologyStub>);
+
+impl AdapterSource for SharedTopologyStubs {
+    fn get(&self, id: &str) -> Option<&dyn AgentAdapter> {
+        (id == TOPOLOGY_STUB).then_some(&*self.0 as &dyn AgentAdapter)
+    }
+
+    fn shared(&self) -> Option<std::sync::Arc<dyn AdapterSource + Send + Sync>> {
+        Some(std::sync::Arc::new(Self(std::sync::Arc::clone(&self.0))))
+    }
+}
+
+/// The same stub behind a source that cannot be shared: the step loop.
+struct BorrowedTopologyStub<'a>(&'a TopologyStub);
+
+impl AdapterSource for BorrowedTopologyStub<'_> {
+    fn get(&self, id: &str) -> Option<&dyn AgentAdapter> {
+        (id == TOPOLOGY_STUB).then_some(self.0 as &dyn AgentAdapter)
+    }
+}
+
+fn topology_options(repo: &Path) -> RunOptions {
+    let mut opts = options(repo);
+    opts.legacy_writer = false;
+    fs::create_dir_all(private_root_for(repo)).expect("the explicit private root");
+    opts
+}
+
+/// Waits, bounded, until nothing holds the run: neither its lock nor its cleanup
+/// lease. A run's agent-cleanup reapers keep its cleanup lease until every agent
+/// process is gone (`rundir::WorktreeLock`'s acquisition says so where it refuses),
+/// so a resume issued the instant `run_with` returns can meet a reaper still
+/// settling and refuse overlapping ownership, as it should.
+fn until_released(repo: &Path, run_id: &str) {
+    let public = rundir::public_dir(repo, run_id);
+    for _ in 0..1000 {
+        if !rundir::is_running(&public) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("run `{run_id}` was still held ten seconds after its command returned");
+}
+
+fn first_line_of_the_log(repo: &Path, run_id: &str) -> serde_json::Value {
+    let log = fs::read_to_string(rundir::public_dir(repo, run_id).join("events.jsonl"))
+        .expect("the run's event log");
+    serde_json::from_str(log.lines().next().expect("a committed first line"))
+        .expect("the first line is an event")
+}
+
+fn assert_merged_on_the_integration_branch(repo: &Path, report: &RunReport) {
+    let merged = git_in(
+        repo,
+        &[
+            "show",
+            &format!("refs/heads/{}:agent-output.txt", report.branch),
+        ],
+    );
+    assert!(
+        merged.contains("edited by the topology stub"),
+        "the integration branch holds the stub's edit: {merged}"
+    );
+}
+
+#[test]
+fn a_schema_4_run_is_created_driven_and_merged_through_the_public_entry_point() {
+    let (_tree, repo) = temp_engine_repo("topology-fresh");
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        0,
+    )));
+    let report = run_with(&topology_options(&repo), &source).expect("the schema-4 run completes");
+
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:#?}");
+    assert!(
+        committed(&report, "t1") && committed(&report, "t2"),
+        "{report:#?}"
+    );
+    let first = first_line_of_the_log(&repo, &report.run_id);
+    assert_eq!(first["event"], "run_started");
+    assert_eq!(first["data"]["schema"], 4, "`upstroke run` wrote schema 4");
+    assert_eq!(first["data"]["runner"]["kind"], "host");
+    assert_eq!(report.branch, format!("upstroke/run-{}", report.run_id));
+    assert_merged_on_the_integration_branch(&repo, &report);
+
+    until_released(&repo, &report.run_id);
+    let mut resume = resume_options(&repo, &report.run_id);
+    resume.private_root = None;
+    let refused =
+        resume_with(&resume, &source).expect_err("a finished run has nothing to continue");
+    assert!(
+        refused.to_string().contains("already finished"),
+        "the topology recovery order refused continuation: {refused}"
+    );
+}
+
+#[test]
+fn a_schema_4_run_on_an_unshareable_source_is_driven_by_the_step_loop() {
+    let (_tree, repo) = temp_engine_repo("topology-step");
+    let stub = TopologyStub::new(TOPOLOGY_STUB_EDIT, 0);
+    let report = run_with(&topology_options(&repo), &BorrowedTopologyStub(&stub))
+        .expect("the schema-4 run completes at width 1");
+
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:#?}");
+    assert!(
+        committed(&report, "t1") && committed(&report, "t2"),
+        "{report:#?}"
+    );
+    assert_eq!(
+        first_line_of_the_log(&repo, &report.run_id)["data"]["schema"],
+        4
+    );
+    assert_merged_on_the_integration_branch(&repo, &report);
+}
+
+#[test]
+fn a_schema_4_run_wider_than_one_refuses_an_unshareable_source_before_any_lock() {
+    let (_tree, repo) = temp_engine_repo("topology-unshareable");
+    seed(
+        &repo,
+        "## Implement the widget\n<!-- upstroke: id=t1 depends= -->\nMake it.\n",
+        Some("[engine]\nmax_parallel = 2\n"),
+    );
+    let stub = TopologyStub::new(TOPOLOGY_STUB_EDIT, 0);
+    let refused = run_with(&topology_options(&repo), &BorrowedTopologyStub(&stub))
+        .expect_err("width 2 needs a shareable adapter source");
+    assert!(
+        refused.to_string().contains("cannot be shared"),
+        "{refused}"
+    );
+    assert!(
+        !rundir::runs_root(&repo).exists()
+            || fs::read_dir(rundir::runs_root(&repo))
+                .expect("the runs root")
+                .next()
+                .is_none(),
+        "the refused run created a run directory"
+    );
+}
+
+/// Two tasks whose path hints are disjoint. Without hints each would take the
+/// global dispatch lease (design 26: "an absent or repo-wide hint takes a global
+/// lease"), and the two would never be admitted together.
+#[cfg(unix)]
+const TWO_INDEPENDENT_TASKS: &str = "## Implement the widget\n\
+                                     <!-- upstroke: id=t1 depends= paths=widget/** -->\n\
+                                     Make it.\n\n## Implement the gadget\n\
+                                     <!-- upstroke: id=t2 depends= paths=gadget/** -->\n\
+                                     Make that.\n";
+
+/// A worker that notes, for about five seconds, whether another stub worker is
+/// running beside it, then writes a file of its own and leaves. `overlap.*` in
+/// `markers` is the evidence two workers ran at once. Each attempt writes a
+/// different file, so two candidates never conflict at the merge.
+///
+/// Five seconds, not one: in V139's full suite, beside a guest VM, two
+/// dispatches at `max_parallel = 2` started more than a second apart, and the
+/// premise that two workers ran at once failed, while the test alone passed
+/// (V140). A longer look makes the premise robust to load, and it gives the
+/// bounded arms (`max_per_agent = 1`, a one-slot pool) longer in which a
+/// forbidden overlap would be seen, so their zero-overlap assertions are only
+/// stronger for it.
+#[cfg(unix)]
+fn overlap_observing_worker(markers: &Path) -> String {
+    format!(
+        "d='{}'; me=$$; : > \"$d/run.$me\"; i=0; while [ $i -lt 50 ]; do \
+         n=$(ls \"$d\" | grep -c '^run\\.'); if [ \"$n\" -gt 1 ]; then : > \"$d/overlap.$me\"; fi; \
+         i=$((i+1)); sleep 0.1; done; printf 'edited by the topology stub\\n' > \"out.$me.txt\"; \
+         rm -f \"$d/run.$me\"",
+        markers.display()
+    )
+}
+
+#[cfg(unix)]
+fn overlaps_in(markers: &Path) -> usize {
+    fs::read_dir(markers)
+        .expect("the marker directory")
+        .filter(|entry| {
+            entry
+                .as_ref()
+                .is_ok_and(|entry| entry.file_name().to_string_lossy().starts_with("overlap."))
+        })
+        .count()
+}
+
+/// A fresh run at `max_parallel = 2` over two independent tasks, under `[engine]`
+/// `extra`: whether two workers overlapped.
+#[cfg(unix)]
+fn fresh_overlap(tag: &str, extra: &str, pools: Option<&str>) -> usize {
+    let (tree, repo) = temp_engine_repo(tag);
+    seed(
+        &repo,
+        TWO_INDEPENDENT_TASKS,
+        Some(&format!("[engine]\nmax_parallel = 2\n{extra}")),
+    );
+    let markers = tree.path().join("markers");
+    fs::create_dir(&markers).expect("the marker directory");
+    let mut opts = topology_options(&repo);
+    if let Some(pools) = pools {
+        let path = tree.path().join("pools.toml");
+        fs::write(&path, pools).expect("the pools file");
+        opts.pools_path = Some(path);
+    }
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        &overlap_observing_worker(&markers),
+        0,
+    )));
+    let report = run_with(&opts, &source).expect("the run completes");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{tag}: {report:#?}");
+    assert!(
+        committed(&report, "t1") && committed(&report, "t2"),
+        "{tag}: {report:#?}"
+    );
+    overlaps_in(&markers)
+}
+
+#[cfg(unix)]
+#[test]
+fn a_schema_4_run_runs_two_workers_at_once_and_the_configured_slot_limits_bound_them() {
+    assert!(
+        fresh_overlap("topology-overlap", "", None) > 0,
+        "two independent tasks at `max_parallel = 2` never ran at once, so the bounds below \
+         would prove nothing"
+    );
+    assert_eq!(
+        fresh_overlap("topology-agent-bound", "max_per_agent = 1\n", None),
+        0,
+        "`max_per_agent = 1` let two invocations of one agent run at once"
+    );
+    assert_eq!(
+        fresh_overlap(
+            "topology-pool-bound",
+            "max_per_pool = 1\n",
+            Some("[pools.claude-max]\nkind = \"subscription-window\"\nagent = \"claude-code\"\n"),
+        ),
+        0,
+        "`max_per_pool = 1` let two invocations in one pool run at once"
+    );
+}
+
+/// A schema-4 run whose two tasks both park on a question, resumed with both
+/// answers delivered under today's `[engine]` `extra`: whether the resumed
+/// workers overlapped. The answers are written where the run's own answer
+/// source polls for them before every selection, so both tasks are ready
+/// together when the resumed loop starts.
+#[cfg(unix)]
+fn resumed_overlap(tag: &str, extra: &str) -> usize {
+    let (tree, repo) = temp_engine_repo(tag);
+    seed(
+        &repo,
+        TWO_INDEPENDENT_TASKS,
+        Some("[engine]\nmax_parallel = 2\n"),
+    );
+    let markers = tree.path().join("markers");
+    fs::create_dir(&markers).expect("the marker directory");
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        &overlap_observing_worker(&markers),
+        2,
+    )));
+    let parked = run_with(&topology_options(&repo), &source).expect("the run parks");
+    assert_eq!(parked.outcome(), RunOutcome::Parked, "{tag}: {parked:#?}");
+    for entry in fs::read_dir(&markers).expect("the marker directory") {
+        fs::remove_file(entry.expect("a marker").path()).expect("a clean marker directory");
+    }
+
+    assert_eq!(
+        parked.questions.len(),
+        2,
+        "{tag}: both tasks asked: {parked:#?}"
+    );
+    let answers = rundir::public_dir(&repo, &parked.run_id).join("answers");
+    fs::create_dir_all(&answers).expect("the run's answers directory");
+    for asked in &parked.questions {
+        interaction::write_answer(
+            &answers,
+            &asked.question.id,
+            &interaction::AnswerRecord::unattributed(Answer::Answered {
+                text: "the first".to_owned(),
+            }),
+        )
+        .expect("the answer is delivered");
+    }
+
+    let today = tree.path().join("today.toml");
+    fs::write(&today, format!("[engine]\nmax_parallel = 2\n{extra}")).expect("today's config");
+    until_released(&repo, &parked.run_id);
+    let mut resume = resume_options(&repo, &parked.run_id);
+    resume.private_root = None;
+    resume.config_path = Some(today);
+    let report = resume_with(&resume, &source).expect("the resume completes the run");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{tag}: {report:#?}");
+    assert!(
+        committed(&report, "t1") && committed(&report, "t2"),
+        "{tag}: {report:#?}"
+    );
+    overlaps_in(&markers)
+}
+
+#[cfg(unix)]
+#[test]
+fn a_resumed_schema_4_run_acts_on_todays_slot_limits() {
+    assert!(
+        resumed_overlap("topology-resume-overlap", "") > 0,
+        "the resumed workers never ran at once at the recorded `max_parallel = 2`, so the bound \
+         below would prove nothing"
+    );
+    assert_eq!(
+        resumed_overlap("topology-resume-agent-bound", "max_per_agent = 1\n"),
+        0,
+        "the resume dropped today's `max_per_agent = 1`"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// PR12: the remaining public-path witnesses (P12-W1, W2, W3, W5, W14, W16; the
+// resume refusals and the recorded-limits warning)
+// ---------------------------------------------------------------------------
+
+fn private_dir_of(repo: &Path, run_id: &str) -> PathBuf {
+    PathBuf::from(
+        first_line_of_the_log(repo, run_id)["data"]["private_dir"]
+            .as_str()
+            .expect("run_started names its private half"),
+    )
+}
+
+fn event_kinds(repo: &Path, run_id: &str) -> Vec<String> {
+    fs::read_to_string(rundir::public_dir(repo, run_id).join("events.jsonl"))
+        .expect("the run's event log")
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<serde_json::Value>(line).expect("an event")["event"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned()
+        })
+        .collect()
+}
+
+/// The topology stub, also noting at every probe whether the run's owner record
+/// was already published under the private root.
+struct OwnerWitness {
+    stub: TopologyStub,
+    private_root: PathBuf,
+    owner_at_probe: Mutex<Vec<bool>>,
+}
+
+impl AgentAdapter for OwnerWitness {
+    fn id(&self) -> &'static str {
+        self.stub.id()
+    }
+
+    fn probe(&self, runner: &dyn crate::runner::Runner) -> Result<Caps, UpstrokeError> {
+        let published = fs::read_dir(self.private_root.join("runs")).is_ok_and(|runs| {
+            runs.flatten()
+                .any(|run| run.path().join("owner.json").is_file())
+        });
+        self.owner_at_probe
+            .lock()
+            .map_err(|_| UpstrokeError::Agent {
+                message: "owner witness lock poisoned".to_owned(),
+            })?
+            .push(published);
+        self.stub.probe(runner)
+    }
+
+    fn build(&self, run: &TaskRun) -> Result<CommandSpec, UpstrokeError> {
+        self.stub.build(run)
+    }
+
+    fn parse(&self, out: &ProcessOutput) -> Result<Outcome, UpstrokeError> {
+        self.stub.parse(out)
+    }
+}
+
+struct BorrowedOwnerWitness<'a>(&'a OwnerWitness);
+
+impl AdapterSource for BorrowedOwnerWitness<'_> {
+    fn get(&self, id: &str) -> Option<&dyn AgentAdapter> {
+        (id == TOPOLOGY_STUB).then_some(self.0 as &dyn AgentAdapter)
+    }
+}
+
+/// P12-W1's rest and P12-W5. Through `engine::run_with`: the owner record was
+/// published before the first probe (P3b before P4); its runner is the one
+/// `run_started(4)` records, byte for byte; the commit record names the digest of
+/// the committed first line; the log begins with `run_started` and ends with
+/// `run_finished`; the integration ref holds the last merge; and `report.json` is
+/// the projection of the committed log.
+#[test]
+fn a_schema_4_run_publishes_its_records_in_order_and_records_one_runner() {
+    let (_tree, repo) = temp_engine_repo("topology-records");
+    let witness = OwnerWitness {
+        stub: TopologyStub::new(TOPOLOGY_STUB_EDIT, 0),
+        private_root: private_root_for(&repo),
+        owner_at_probe: Mutex::new(Vec::new()),
+    };
+    let report = run_with(&topology_options(&repo), &BorrowedOwnerWitness(&witness))
+        .expect("the run completes");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:#?}");
+    let seen = witness
+        .owner_at_probe
+        .lock()
+        .expect("owner witness")
+        .clone();
+    assert!(
+        !seen.is_empty() && seen.iter().all(|published| *published),
+        "every probe, the first included, ran after owner.json was published: {seen:?}"
+    );
+
+    let private = private_dir_of(&repo, &report.run_id);
+    let owner: serde_json::Value =
+        serde_json::from_slice(&fs::read(private.join("owner.json")).expect("owner.json"))
+            .expect("owner.json parses");
+    let first = first_line_of_the_log(&repo, &report.run_id);
+    assert_eq!(
+        serde_json::to_vec(&owner["runner"]).expect("the owner's runner"),
+        serde_json::to_vec(&first["data"]["runner"]).expect("run_started's runner"),
+        "owner.json records the runner run_started(4) records"
+    );
+    assert_eq!(owner["run_id"], first["data"]["run_id"]);
+
+    let public = rundir::public_dir(&repo, &report.run_id);
+    let log = fs::read(public.join("events.jsonl")).expect("the log");
+    let first_line = &log[..log
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .expect("a first line")];
+    let digest = format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(first_line));
+    let committed: serde_json::Value =
+        serde_json::from_slice(&fs::read(private.join("committed.json")).expect("committed.json"))
+            .expect("committed.json parses");
+    let recorded = committed["run_started_sha256"]
+        .as_str()
+        .expect("committed.json names the first line's digest");
+    assert!(
+        recorded == digest || recorded == format!("sha256:{digest}"),
+        "committed.json names {recorded}, and the first line digests {digest}"
+    );
+
+    let kinds = event_kinds(&repo, &report.run_id);
+    assert_eq!(kinds.first().map(String::as_str), Some("run_started"));
+    assert_eq!(kinds.last().map(String::as_str), Some("run_finished"));
+    let last_merge = fs::read_to_string(public.join("events.jsonl"))
+        .expect("the log")
+        .lines()
+        .filter_map(|line| {
+            let event: serde_json::Value = serde_json::from_str(line).expect("an event");
+            (event["event"] == "task_merged").then(|| {
+                event["data"]["merged_sha"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned()
+            })
+        })
+        .next_back()
+        .expect("a task merged");
+    assert_eq!(
+        git_in(
+            &repo,
+            &[
+                "rev-parse",
+                &format!("refs/heads/upstroke/run-{}", report.run_id)
+            ]
+        )
+        .trim(),
+        last_merge,
+        "the integration ref holds the last merge the log records"
+    );
+    let projected = crate::engine::topology::observe::observe(&repo, &report.run_id)
+        .expect("observes")
+        .expect("a schema-4 log")
+        .report()
+        .expect("projects");
+    assert!(
+        projected.is_fresh_against(&fs::read(public.join("report.json")).expect("report.json")),
+        "report.json is the projection of the committed log"
+    );
+}
+
+/// P12-W14 (D4). At width 1 the production composition through the step loop
+/// (an adapter source that cannot be shared) and through `run_concurrently` (one
+/// that can) give the same canonical projection of the same plan.
+#[test]
+fn at_width_one_the_step_loop_and_the_concurrent_driver_project_alike() {
+    let projection = |repo: &Path, run_id: &str| {
+        let report = crate::engine::topology::observe::observe(repo, run_id)
+            .expect("observes")
+            .expect("a schema-4 log")
+            .report()
+            .expect("projects");
+        let tasks: Vec<(String, String, u32, u32, u32, usize)> = report
+            .tasks
+            .iter()
+            .map(|task| {
+                (
+                    task.display_id.clone(),
+                    task.state.clone(),
+                    task.rung,
+                    task.attempts_on_rung,
+                    task.defers,
+                    task.generations.len(),
+                )
+            })
+            .collect();
+        let ledger: Vec<(String, String)> = report
+            .integration_ledger
+            .iter()
+            .map(|row| (row.basis.clone(), row.terminal.clone()))
+            .collect();
+        let mut kinds = event_kinds(repo, run_id);
+        kinds.sort();
+        (report.outcome, tasks, ledger, kinds)
+    };
+
+    let (_step_tree, step_repo) = temp_engine_repo("topology-width-one-step");
+    let stub = TopologyStub::new(TOPOLOGY_STUB_EDIT, 0);
+    let stepped = run_with(&topology_options(&step_repo), &BorrowedTopologyStub(&stub))
+        .expect("the step loop completes");
+
+    let (_shared_tree, shared_repo) = temp_engine_repo("topology-width-one-shared");
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        0,
+    )));
+    let concurrent = run_with(&topology_options(&shared_repo), &source)
+        .expect("the concurrent driver completes");
+
+    assert_eq!(stepped.outcome(), RunOutcome::Complete, "{stepped:#?}");
+    assert_eq!(
+        projection(&step_repo, &stepped.run_id),
+        projection(&shared_repo, &concurrent.run_id),
+        "the two drivers' canonical projections differ"
+    );
+}
+
+/// P12-W3, the dispatch matrix on the resume path: schemas 1 to 3 are legacy, 4 is
+/// the topology's, 5 refuses as newer before any lock, and a log whose header did
+/// not commit is no run at all.
+#[test]
+fn a_resume_selects_its_reader_by_the_logs_header_and_refuses_before_any_lock() {
+    use crate::engine::topology::entry::route_resume;
+
+    let (_tree, repo) = temp_engine_repo("topology-dispatch-matrix");
+    let legacy = run_with(&options(&repo), &fake(Effect::EditFile)).expect("a legacy run");
+    let legacy_log = rundir::public_dir(&repo, &legacy.run_id).join("events.jsonl");
+    let original = fs::read_to_string(&legacy_log).expect("the legacy log");
+    assert!(
+        original
+            .lines()
+            .next()
+            .is_some_and(|line| line.contains("\"schema\":3")),
+        "the legacy writer wrote schema 3"
+    );
+    for schema in [1, 2, 3] {
+        let (first, rest) = original.split_once('\n').expect("a first line");
+        let mut header: serde_json::Value = serde_json::from_str(first).expect("the header");
+        header["data"]["schema"] = serde_json::json!(schema);
+        fs::write(
+            &legacy_log,
+            format!(
+                "{}\n{rest}",
+                serde_json::to_string(&header).expect("a header")
+            ),
+        )
+        .expect("a schema-{schema} header");
+        assert!(
+            route_resume(&resume_options(&repo, &legacy.run_id))
+                .expect("a legacy header routes")
+                .is_none(),
+            "schema {schema} resumes on the legacy lines"
+        );
+    }
+    fs::write(&legacy_log, &original).expect("the legacy log restored");
+
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        0,
+    )));
+    let topology = run_with(&topology_options(&repo), &source).expect("a schema-4 run");
+    until_released(&repo, &topology.run_id);
+    let mut resume = resume_options(&repo, &topology.run_id);
+    resume.private_root = None;
+    assert!(
+        route_resume(&resume)
+            .expect("a schema-4 header routes")
+            .is_some(),
+        "schema 4 resumes on the topology's lines"
+    );
+
+    let log = rundir::public_dir(&repo, &topology.run_id).join("events.jsonl");
+    let bytes = fs::read_to_string(&log).expect("the schema-4 log");
+    let (first, rest) = bytes.split_once('\n').expect("a first line");
+    let mut header: serde_json::Value = serde_json::from_str(first).expect("the header");
+    header["data"]["schema"] = serde_json::json!(crate::topology::schema::MAX_READABLE_SCHEMA + 1);
+    let newer = format!(
+        "{}\n{rest}",
+        serde_json::to_string(&header).expect("a header")
+    );
+    fs::write(&log, &newer).expect("a newer header");
+    let held = WorktreeLock::acquire(&repo).expect("the held-lock control");
+    let refused = resume_with(&resume, &source).expect_err("a newer schema refuses");
+    drop(held);
+    assert!(
+        refused.to_string().contains("written by a newer upstroke")
+            && !refused.to_string().contains("already driving worktree"),
+        "with the worktree lock held, the newer-schema refusal came before any lock: {refused}"
+    );
+    assert_eq!(
+        fs::read_to_string(&log).expect("the log"),
+        newer,
+        "the refused resume wrote nothing"
+    );
+    drop(WorktreeLock::acquire(&repo).expect("no-leak check: no worktree lock is left held"));
+    fs::write(&log, &bytes).expect("the schema-4 log restored");
+
+    let torn_id = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    let torn = rundir::public_dir(&repo, torn_id);
+    fs::create_dir_all(&torn).expect("a run directory");
+    fs::write(
+        torn.join("events.jsonl"),
+        "{\"ts\":\"2026-11-02T00:00:00Z\",\"ev",
+    )
+    .expect("a header that never committed");
+    let held = WorktreeLock::acquire(&repo).expect("the held-lock control");
+    let refused = resume_with(&resume_options(&repo, torn_id), &source)
+        .expect_err("a log whose header did not commit is no run");
+    drop(held);
+    assert!(
+        refused
+            .to_string()
+            .contains("never recorded a committed run_started")
+            && refused.to_string().contains(torn_id)
+            && !refused.to_string().contains("already driving worktree"),
+        "with the worktree lock held, the uncommitted-header refusal came before any lock: \
+         {refused}"
+    );
+    assert_eq!(
+        fs::read_to_string(torn.join("events.jsonl")).expect("the torn log"),
+        "{\"ts\":\"2026-11-02T00:00:00Z\",\"ev",
+        "the refused resume changed the torn log"
+    );
+    drop(WorktreeLock::acquire(&repo).expect("no-leak check: no worktree lock is left held"));
+}
+
+/// The resume refusals `prepare_resume` owns, and its recorded-limits warning,
+/// through `engine::resume_with` on a parked schema-4 run: a private half that is
+/// not a directory refuses and is never created; a frozen plan whose digest no
+/// longer matches the record refuses; and today's `max_parallel` that differs
+/// from the record warns while the run keeps its own.
+#[test]
+fn a_schema_4_resume_refuses_a_missing_private_half_or_a_changed_plan_and_warns_on_limits() {
+    let (tree, repo) = temp_engine_repo("topology-resume-refusals");
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        1,
+    )));
+    let parked = run_with(&topology_options(&repo), &source).expect("the run parks");
+    assert_eq!(parked.outcome(), RunOutcome::Parked, "{parked:#?}");
+    until_released(&repo, &parked.run_id);
+    let public = rundir::public_dir(&repo, &parked.run_id);
+    let log = public.join("events.jsonl");
+    let before = fs::read(&log).expect("the log");
+    let mut resume = resume_options(&repo, &parked.run_id);
+    resume.private_root = None;
+
+    let private = private_dir_of(&repo, &parked.run_id);
+    let away = private.with_extension("away");
+    fs::rename(&private, &away).expect("the private half moved away");
+    let refused = resume_with(&resume, &source).expect_err("no private half");
+    assert!(
+        refused
+            .to_string()
+            .contains("which is not a directory here"),
+        "{refused}"
+    );
+    assert!(
+        !private.exists(),
+        "the resume created the missing private half"
+    );
+    assert_eq!(
+        fs::read(&log).expect("the log"),
+        before,
+        "the refused resume wrote"
+    );
+    fs::rename(&away, &private).expect("the private half restored");
+
+    let plan = public.join("plan.normalized.json");
+    let frozen = fs::read(&plan).expect("the frozen plan");
+    let mut altered = frozen.clone();
+    altered.extend_from_slice(b" ");
+    fs::write(&plan, &altered).expect("an altered frozen plan");
+    let refused = resume_with(&resume, &source).expect_err("an altered frozen plan");
+    assert!(refused.to_string().contains("digests to"), "{refused}");
+    assert_eq!(
+        fs::read(&log).expect("the log"),
+        before,
+        "the refused resume wrote"
+    );
+    fs::write(&plan, &frozen).expect("the frozen plan restored");
+
+    let today = tree.path().join("today.toml");
+    fs::write(&today, "[engine]\nmax_parallel = 3\n").expect("today's config");
+    resume.config_path = Some(today);
+    let resumed = resume_with(&resume, &source).expect("the resume runs");
+    assert!(
+        resumed
+            .warnings
+            .iter()
+            .any(|warning| warning
+                .contains("`max_parallel = 3` differs from the `max_parallel = 1`")),
+        "{:?}",
+        resumed.warnings
+    );
+}
+
+/// What one path under a private root is: its kind, its permission bits and its bytes or target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PrivateEntry {
+    Directory { mode: u32 },
+    File { mode: u32, bytes: Vec<u8> },
+    Link { target: PathBuf },
+}
+
+/// Everything persistent under `root`, the root itself included, by path relative to it.
+fn private_snapshot(root: &Path) -> std::collections::BTreeMap<PathBuf, PrivateEntry> {
+    snapshot_under(root, false, "")
+}
+
+fn private_snapshot_in(
+    root: &Path,
+    case: &str,
+) -> std::collections::BTreeMap<PathBuf, PrivateEntry> {
+    snapshot_under(root, false, case)
+}
+
+fn snapshot_under(
+    top: &Path,
+    outside_git: bool,
+    case: &str,
+) -> std::collections::BTreeMap<PathBuf, PrivateEntry> {
+    fn mode(metadata: &fs::Metadata) -> u32 {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            metadata.permissions().mode()
+        }
+        #[cfg(not(unix))]
+        {
+            u32::from(metadata.permissions().readonly())
+        }
+    }
+    let at = if case.is_empty() {
+        String::new()
+    } else {
+        format!("{case}: ")
+    };
+    let failed = |what: &str, path: &Path, error: &std::io::Error| {
+        format!(
+            "{at}the snapshot of {}: {what} {}: {error}",
+            top.display(),
+            path.display()
+        )
+    };
+    let mut entries = std::collections::BTreeMap::new();
+    let first = fs::symlink_metadata(top)
+        .unwrap_or_else(|error| panic!("{}", failed("the metadata of", top, &error)));
+    entries.insert(
+        PathBuf::new(),
+        PrivateEntry::Directory { mode: mode(&first) },
+    );
+    let mut pending = vec![top.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        let listed = fs::read_dir(&directory)
+            .unwrap_or_else(|error| panic!("{}", failed("listing", &directory, &error)));
+        for entry in listed {
+            let path = entry
+                .unwrap_or_else(|error| panic!("{}", failed("an entry of", &directory, &error)))
+                .path();
+            let relative = path
+                .strip_prefix(top)
+                .expect("under the snapshot's top")
+                .to_path_buf();
+            if outside_git && relative == Path::new(".git") {
+                continue;
+            }
+            let metadata = fs::symlink_metadata(&path)
+                .unwrap_or_else(|error| panic!("{}", failed("the metadata of", &path, &error)));
+            let found = if metadata.file_type().is_symlink() {
+                PrivateEntry::Link {
+                    target: fs::read_link(&path).unwrap_or_else(|error| {
+                        panic!("{}", failed("the target of", &path, &error))
+                    }),
+                }
+            } else if metadata.is_dir() {
+                pending.push(path.clone());
+                PrivateEntry::Directory {
+                    mode: mode(&metadata),
+                }
+            } else {
+                PrivateEntry::File {
+                    mode: mode(&metadata),
+                    bytes: fs::read(&path)
+                        .unwrap_or_else(|error| panic!("{}", failed("reading", &path, &error))),
+                }
+            };
+            entries.insert(relative, found);
+        }
+    }
+    entries
+}
+
+/// The paths whose entry differs between two snapshots, each with how, and never its bytes.
+fn moved_entries(
+    before: &std::collections::BTreeMap<PathBuf, PrivateEntry>,
+    after: &std::collections::BTreeMap<PathBuf, PrivateEntry>,
+) -> Vec<String> {
+    let mut moved = Vec::new();
+    for (path, entry) in after {
+        match before.get(path) {
+            None => moved.push(format!("created {}", path.display())),
+            Some(earlier) if earlier != entry => moved.push(format!("changed {}", path.display())),
+            Some(_) => {}
+        }
+    }
+    for path in before.keys().filter(|path| !after.contains_key(*path)) {
+        moved.push(format!("removed {}", path.display()));
+    }
+    moved
+}
+
+fn every_ref(repo: &Path) -> String {
+    git_in(repo, &["for-each-ref", "--format=%(refname) %(objectname)"])
+}
+
+#[derive(Debug, Clone, Copy)]
+enum IncludeState {
+    Absent,
+    Changed,
+}
+
+/// Leaves `root`'s include absent — its whole `git` directory gone — or holding other bytes in
+/// a directory a writer would tighten, so that publishing it is visible in every path, byte and
+/// mode it touches.
+fn put_include(root: &Path, state: IncludeState) {
+    let directory = root.join("git");
+    match state {
+        IncludeState::Absent => {
+            if directory.exists() {
+                fs::remove_dir_all(&directory).expect("the include's directory, removed");
+            }
+        }
+        IncludeState::Changed => {
+            fs::create_dir_all(&directory).expect("the include's directory");
+            fs::write(
+                directory.join("recorded-objects.gitconfig"),
+                "[core]\n\tuseReplaceRefs = true\n",
+            )
+            .expect("an include holding other bytes");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                fs::set_permissions(&directory, fs::Permissions::from_mode(0o755))
+                    .expect("a directory the include's writer would tighten");
+            }
+        }
+    }
+}
+
+/// PR12-CI-01 (P1) and, the same defect, PR12-RESUME-INCLUDE-BEFORE-RECORD-VERIFICATION
+/// (INV-15, O18): through `engine::resume_with`, a parked schema-4 run whose private half is
+/// present refuses before any private write when its owner or commit record is missing,
+/// malformed or another's, or when its public locator names another conforming root, with the
+/// include absent or changed; a provable run's resume still writes the include again.
+#[test]
+fn a_schema_4_resume_proves_its_owner_and_commit_records_before_it_writes_its_include() {
+    let (tree, repo) = temp_engine_repo("topology-resume-include-after-proof");
+    let witness = OwnerWitness {
+        stub: TopologyStub::new(TOPOLOGY_STUB_EDIT, 1),
+        private_root: private_root_for(&repo),
+        owner_at_probe: Mutex::new(Vec::new()),
+    };
+    let source = BorrowedOwnerWitness(&witness);
+    let probes = || {
+        witness
+            .owner_at_probe
+            .lock()
+            .expect("the probe witness")
+            .len()
+    };
+    let parked = run_with(&topology_options(&repo), &source).expect("the run parks");
+    assert_eq!(parked.outcome(), RunOutcome::Parked, "{parked:#?}");
+    until_released(&repo, &parked.run_id);
+
+    let home = private_root_for(&repo);
+    let private = private_dir_of(&repo, &parked.run_id);
+    let root = fs::canonicalize(&home).expect("the private root resolves");
+    assert_eq!(
+        private,
+        root.join("runs").join(&parked.run_id),
+        "the premise: the run's private half is present under the root its locator names"
+    );
+    let log = rundir::public_dir(&repo, &parked.run_id).join(rundir::EVENT_LOG);
+    let committed = fs::read(&log).expect("the parked run's log");
+    let owner_path = private.join(rundir::OWNER_RECORD);
+    let commit_path = private.join(rundir::COMMIT_RECORD);
+    let owner = fs::read(&owner_path).expect("owner.json");
+    let commit = fs::read(&commit_path).expect("committed.json");
+    let mut resume = resume_options(&repo, &parked.run_id);
+    resume.private_root = None;
+
+    let with_field = |record: &[u8], field: &str, value: &str| {
+        let mut parsed: serde_json::Value = serde_json::from_slice(record).expect("a record");
+        parsed[field] = serde_json::Value::from(value);
+        serde_json::to_vec(&parsed).expect("the damaged record")
+    };
+    let mut other_runner: serde_json::Value = serde_json::from_slice(&owner).expect("a record");
+    other_runner["runner"]["kind"] = serde_json::Value::from("container");
+    let other_runner = serde_json::to_vec(&other_runner).expect("the damaged record");
+    let damages: Vec<(&str, &Path, Option<Vec<u8>>, &str)> = vec![
+        (
+            "a missing owner record",
+            &owner_path,
+            None,
+            "private half has no",
+        ),
+        (
+            "an owner record that is not JSON",
+            &owner_path,
+            Some(b"{\"run_id\":".to_vec()),
+            "is not the record this build understands",
+        ),
+        (
+            "another run's owner record",
+            &owner_path,
+            Some(with_field(&owner, "run_id", "01FOREIGNRUN00000000000000")),
+            "records run id",
+        ),
+        (
+            "another repository's owner record",
+            &owner_path,
+            Some(with_field(&owner, "repo_key", "0000000000000000")),
+            "records repo key",
+        ),
+        (
+            "another run directory's owner record",
+            &owner_path,
+            Some(with_field(
+                &owner,
+                "public_dir",
+                "/elsewhere/.upstroke/runs/01FOREIGN",
+            )),
+            "records public directory",
+        ),
+        (
+            "another incarnation's owner record",
+            &owner_path,
+            Some(with_field(
+                &owner,
+                "incarnation",
+                "01FOREIGNINC00000000000000",
+            )),
+            "records incarnation",
+        ),
+        (
+            "an owner record of another runner",
+            &owner_path,
+            Some(other_runner),
+            "records a different runner",
+        ),
+        (
+            "a missing commit record",
+            &commit_path,
+            None,
+            "private half has no",
+        ),
+        (
+            "a commit record that is not JSON",
+            &commit_path,
+            Some(b"not json".to_vec()),
+            "is not the record this build understands",
+        ),
+        (
+            "a commit record of another first line",
+            &commit_path,
+            Some(with_field(
+                &commit,
+                "run_started_sha256",
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            )),
+            "says the committed first line digests",
+        ),
+    ];
+    for state in [IncludeState::Absent, IncludeState::Changed] {
+        for (what, path, damaged, says) in &damages {
+            put_include(&home, state);
+            match damaged {
+                None => fs::remove_file(path).expect("the record, removed"),
+                Some(bytes) => fs::write(path, bytes).expect("the record, damaged"),
+            }
+            let before = private_snapshot(&home);
+            let refs = every_ref(&repo);
+            let probed = probes();
+            let refused = resume_with(&resume, &source)
+                .expect_err("a run whose records do not prove it is refused");
+            assert!(
+                refused.to_string().contains(says),
+                "{what}, include {state:?}: {refused}"
+            );
+            let moved = moved_entries(&before, &private_snapshot(&home));
+            assert!(
+                moved.is_empty(),
+                "{what}, include {state:?}: the refused resume wrote under the private root: \
+                 {moved:?}"
+            );
+            assert!(
+                fs::read(&log).expect("the log") == committed,
+                "{what}, include {state:?}: the refused resume wrote the log"
+            );
+            assert_eq!(
+                every_ref(&repo),
+                refs,
+                "{what}, include {state:?}: the refs moved"
+            );
+            assert_eq!(probes(), probed, "{what}, include {state:?}: a probe ran");
+            let original = if *path == owner_path.as_path() {
+                &owner
+            } else {
+                &commit
+            };
+            fs::write(path, original).expect("the record, restored");
+            until_released(&repo, &parked.run_id);
+        }
+    }
+
+    let foreign = tree.path().join("another-home");
+    let foreign_half = foreign.join("runs").join(&parked.run_id);
+    let first_end = committed
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .expect("a committed first line");
+    let first = std::str::from_utf8(committed.get(..first_end).expect("the first line"))
+        .expect("a UTF-8 first line");
+    let spelled = |path: &Path| {
+        format!(
+            "\"private_dir\":{}",
+            serde_json::to_string(path.to_str().expect("a UTF-8 path")).expect("a JSON string")
+        )
+    };
+    assert_eq!(
+        first.matches(&spelled(&private)).count(),
+        1,
+        "the premise: the first line spells its locator once"
+    );
+    let mut retargeted = first
+        .replacen(&spelled(&private), &spelled(&foreign_half), 1)
+        .into_bytes();
+    retargeted.extend_from_slice(committed.get(first_end..).expect("the rest of the log"));
+    for (what, copies, says) in [
+        (
+            "a conforming root holding no records",
+            false,
+            "private half has no",
+        ),
+        (
+            "a conforming root holding copies of this run's records",
+            true,
+            "says the committed first line digests",
+        ),
+    ] {
+        for state in [IncludeState::Absent, IncludeState::Changed] {
+            fs::create_dir_all(&foreign_half).expect("a conforming private half elsewhere");
+            for (name, bytes) in [
+                (rundir::OWNER_RECORD, &owner),
+                (rundir::COMMIT_RECORD, &commit),
+            ] {
+                let copy = foreign_half.join(name);
+                if copies {
+                    fs::write(&copy, bytes).expect("a copied record");
+                } else if copy.exists() {
+                    fs::remove_file(&copy).expect("no record");
+                }
+            }
+            put_include(&foreign, state);
+            fs::write(&log, &retargeted).expect("the locator, retargeted");
+            let mine = private_snapshot(&home);
+            let theirs = private_snapshot(&foreign);
+            let refs = every_ref(&repo);
+            let probed = probes();
+            let refused = resume_with(&resume, &source)
+                .expect_err("a locator naming another root is not proof of it");
+            assert!(
+                refused.to_string().contains(says),
+                "{what}, include {state:?}: {refused}"
+            );
+            for (root, snapshot) in [(&home, &mine), (&foreign, &theirs)] {
+                let moved = moved_entries(snapshot, &private_snapshot(root));
+                assert!(
+                    moved.is_empty(),
+                    "{what}, include {state:?}: the refused resume wrote under {}: {moved:?}",
+                    root.display()
+                );
+            }
+            assert!(
+                fs::read(&log).expect("the log") == retargeted,
+                "{what}, include {state:?}: the refused resume wrote the log"
+            );
+            assert_eq!(
+                every_ref(&repo),
+                refs,
+                "{what}, include {state:?}: the refs moved"
+            );
+            assert_eq!(probes(), probed, "{what}, include {state:?}: a probe ran");
+            fs::write(&log, &committed).expect("the locator, restored");
+            until_released(&repo, &parked.run_id);
+        }
+    }
+
+    for state in [IncludeState::Absent, IncludeState::Changed] {
+        put_include(&home, state);
+        let resumed_before = event_kinds(&repo, &parked.run_id)
+            .iter()
+            .filter(|kind| *kind == "run_resumed")
+            .count();
+        let probed = probes();
+        resume_with(&resume, &source).expect("a run its records prove resumes");
+        assert_eq!(
+            fs::read(include_for(&repo)).expect("the include the resume wrote again"),
+            crate::runner::host::RECORDED_OBJECTS_INCLUDE,
+            "include {state:?}"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = fs::metadata(home.join("git"))
+                .expect("the include's directory")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o700, "include {state:?}: {mode:o}");
+        }
+        assert!(
+            probes() > probed,
+            "include {state:?}: the resume reached its probes after writing the include"
+        );
+        let resumed_after = event_kinds(&repo, &parked.run_id)
+            .iter()
+            .filter(|kind| *kind == "run_resumed")
+            .count();
+        assert_eq!(resumed_after, resumed_before + 1, "include {state:?}");
+        until_released(&repo, &parked.run_id);
+    }
+}
+
+/// Whether `program` is a file in one of the directories of this process's `PATH`.
+#[cfg(unix)]
+fn on_this_path(program: &str) -> bool {
+    std::env::var_os("PATH").is_some_and(|path| {
+        std::env::split_paths(&path).any(|directory| directory.join(program).is_file())
+    })
+}
+
+/// A `cmd` that exits 0, in a directory of its own, for a process whose `PATH` it leads.
+#[cfg(unix)]
+fn a_fake_cmd(tree: &ScratchTree) -> PathBuf {
+    let directory = tree.path().join("fake-shells");
+    fs::create_dir(&directory).expect("the fake shells' directory");
+    crate::runner::container::write_program_in_its_own_process(
+        &directory.join("cmd"),
+        "#!/bin/sh\nexit 0\n",
+    );
+    directory
+}
+
+/// Runs [`recorded_shell_helper`] in a process of its own whose `PATH` starts with `shells`.
+#[cfg(unix)]
+fn with_shells_on_path(
+    shells: &Path,
+    repo: &Path,
+    config: &Path,
+    mode: &str,
+) -> crate::agent::proc::test_support::Isolated {
+    let mut directories = vec![shells.to_path_buf()];
+    directories.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    let tree = temp_engine_scratch("recorded-shell-child");
+    let stdout = tree.path().join("stdout");
+    let stderr = tree.path().join("stderr");
+    let mut helper = Command::new(std::env::current_exe().expect("this test binary"));
+    helper
+        .args([
+            "--exact",
+            "engine::tests::recorded_shell_helper",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env("PATH", std::env::join_paths(directories).expect("a PATH"))
+        .env("UPSTROKE_RECORDED_SHELL_REPO", repo)
+        .env("UPSTROKE_RECORDED_SHELL_CONFIG", config)
+        .env("UPSTROKE_RECORDED_SHELL_MODE", mode)
+        .stdin(std::process::Stdio::null())
+        .stdout(fs::File::create(&stdout).expect("the helper's stdout file"))
+        .stderr(fs::File::create(&stderr).expect("the helper's stderr file"));
+    let status = RecordedShellScope::start(helper).wait(Duration::from_secs(300));
+    crate::agent::proc::test_support::Isolated {
+        status,
+        stdout: fs::read_to_string(&stdout).unwrap_or_default(),
+        stderr: fs::read_to_string(&stderr).unwrap_or_default(),
+    }
+}
+
+#[cfg(unix)]
+struct RecordedShellScope {
+    anchor: std::process::Child,
+    group: libc::pid_t,
+    helper: Option<std::process::Child>,
+    settled: bool,
+}
+
+#[cfg(unix)]
+impl RecordedShellScope {
+    fn start(mut helper: Command) -> Self {
+        use std::os::unix::process::CommandExt as _;
+
+        let mut anchor = Command::new("/bin/sleep")
+            .arg("600")
+            .process_group(0)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("the recorded-shell helper's group anchor");
+        let Ok(group) = libc::pid_t::try_from(anchor.id()) else {
+            let _ = anchor.kill();
+            let _ = anchor.wait();
+            panic!("the group anchor's pid {} is not a process id", anchor.id());
+        };
+        let mut scope = Self {
+            anchor,
+            group,
+            helper: None,
+            settled: false,
+        };
+        scope.helper = Some(
+            helper
+                .process_group(group)
+                .spawn()
+                .expect("the helper process"),
+        );
+        scope
+    }
+
+    fn wait(&mut self, bound: Duration) -> Option<std::process::ExitStatus> {
+        let deadline = std::time::Instant::now() + bound;
+        let ended = loop {
+            match self.helper.as_mut().map(std::process::Child::try_wait) {
+                Some(Ok(Some(status))) => break Some(status),
+                Some(Err(error)) => {
+                    let settled = self.settle();
+                    panic!("poll the recorded-shell helper: {error}; its group: {settled:?}");
+                }
+                Some(Ok(None)) | None => {}
+            }
+            if std::time::Instant::now() >= deadline {
+                break None;
+            }
+            crate::workspace_manager::fixture::rest(Duration::from_millis(10));
+        };
+        if let Err(error) = self.settle() {
+            panic!("the recorded-shell helper's group: {error}");
+        }
+        ended
+    }
+
+    fn settle(&mut self) -> Result<(), String> {
+        self.settled = true;
+        let mut problems = Vec::new();
+        // SAFETY: `group` is the pid of `anchor`, this scope's own child, which leads the group and
+        // is collected only below, after this signal; until then the id is this child's and
+        // cannot be reused, so the signal reaches the anchor and every process still in its group
+        // (the helper, if it has not ended, and whatever of its descendants stayed in the group)
+        // and nothing else.
+        if unsafe { libc::kill(-self.group, libc::SIGKILL) } != 0 {
+            problems.push(format!(
+                "SIGKILL to group {}: {}",
+                self.group,
+                std::io::Error::last_os_error()
+            ));
+        }
+        let bound = crate::agent::proc::test_support::ISOLATED_CHILD_COLLECTION_BOUND;
+        let deadline = std::time::Instant::now() + bound;
+        let mut helper = self.helper.is_none();
+        let mut anchor = false;
+        while !(helper && anchor) {
+            for (what, child, done) in [
+                ("helper", self.helper.as_mut(), &mut helper),
+                ("group anchor", Some(&mut self.anchor), &mut anchor),
+            ] {
+                let Some(child) = child.filter(|_| !*done) else {
+                    continue;
+                };
+                match child.try_wait() {
+                    Ok(Some(_)) => *done = true,
+                    Ok(None) => {}
+                    Err(error) => {
+                        problems.push(format!("collect the {what}: {error}"));
+                        *done = true;
+                    }
+                }
+            }
+            if helper && anchor {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                problems.push(format!(
+                    "helper collected {helper}, group anchor collected {anchor}, {bound:?} after \
+                     the SIGKILL"
+                ));
+                break;
+            }
+            crate::workspace_manager::fixture::rest(Duration::from_millis(10));
+        }
+        if problems.is_empty() {
+            Ok(())
+        } else {
+            Err(problems.join("; "))
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for RecordedShellScope {
+    fn drop(&mut self) {
+        if self.settled {
+            return;
+        }
+        if let Err(error) = self.settle() {
+            crate::workspace_manager::fixture::say(&format!(
+                "the recorded-shell helper's group, settled on unwind: {error}"
+            ));
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "spawned by the recorded-shell guards, in a process whose PATH holds a fake shell"]
+fn recorded_shell_helper() {
+    let Some(repo) = std::env::var_os("UPSTROKE_RECORDED_SHELL_REPO") else {
+        return;
+    };
+    let repo = PathBuf::from(repo);
+    let config = PathBuf::from(
+        std::env::var_os("UPSTROKE_RECORDED_SHELL_CONFIG").expect("the helper's config"),
+    );
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        1,
+    )));
+    match std::env::var("UPSTROKE_RECORDED_SHELL_MODE").as_deref() {
+        Ok("create") => {
+            let mut opts = topology_options(&repo);
+            opts.config_path = Some(config);
+            let parked = run_with(&opts, &source).expect("the run is created and parks");
+            assert_eq!(parked.outcome(), RunOutcome::Parked, "{parked:#?}");
+        }
+        Ok("resume") => {
+            let run_id = rundir::latest_run(&repo).expect("the parked run");
+            let resumed =
+                |kinds: Vec<String>| kinds.iter().filter(|kind| *kind == "run_resumed").count();
+            let before = resumed(event_kinds(&repo, &run_id));
+            let mut resume = resume_options(&repo, &run_id);
+            resume.config_path = Some(config);
+            resume_with(&resume, &source)
+                .expect("the recorded shell runs again, so the run resumes");
+            assert_eq!(resumed(event_kinds(&repo, &run_id)), before + 1);
+        }
+        other => panic!("the recorded-shell helper has no mode {other:?}"),
+    }
+}
+
+/// PR12-CI-03 (INV-23), today's config moved to a shell this host cannot run: a zero-gate
+/// schema-4 run created under `sh` resumes, through `engine::resume_with`, probing `sh`, and
+/// warns that today's `[engine] shell = "cmd"` is not the run's.
+#[cfg(unix)]
+#[test]
+fn a_zero_gate_schema_4_resume_probes_its_recorded_shell_when_todays_config_names_an_unavailable_one()
+ {
+    assert!(!on_this_path("cmd"), "the premise: this host has no `cmd`");
+    let (tree, repo) = temp_engine_repo("topology-resume-recorded-shell-kept");
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        1,
+    )));
+    let parked = run_with(&topology_options(&repo), &source).expect("the run parks");
+    assert_eq!(parked.outcome(), RunOutcome::Parked, "{parked:#?}");
+    until_released(&repo, &parked.run_id);
+    let first = first_line_of_the_log(&repo, &parked.run_id);
+    assert_eq!(
+        first["data"]["gate_cmds"],
+        serde_json::json!([]),
+        "the premise: no gates"
+    );
+    assert_eq!(
+        first["data"]["shell"], "sh",
+        "the run records the shell it probed"
+    );
+
+    let today = tree.path().join("today.toml");
+    fs::write(&today, "[engine]\nshell = \"cmd\"\n").expect("today's config");
+    let mut resume = resume_options(&repo, &parked.run_id);
+    resume.config_path = Some(today);
+    let resumed = resume_with(&resume, &source)
+        .expect("the resume probes the recorded `sh`, not today's `cmd`");
+    assert!(
+        resumed.warnings.iter().any(|warning| warning
+            .contains("`shell = cmd` differs from the `shell = sh` run")
+            && warning.ends_with("pre-flight probes `sh`")),
+        "{:?}",
+        resumed.warnings
+    );
+    assert_eq!(
+        event_kinds(&repo, &parked.run_id)
+            .iter()
+            .filter(|kind| *kind == "run_resumed")
+            .count(),
+        1,
+        "the resume passed its pre-flight and recovered"
+    );
+}
+
+/// PR12-CI-03 (INV-23), the recorded shell gone: a zero-gate schema-4 run created under `cmd`
+/// (a fake one on its creator's `PATH`) refuses its resume at the pre-flight, naming `cmd`,
+/// although today's `[engine] shell = "sh"` would run, and appends nothing; once `cmd` is back,
+/// the same resume continues.
+#[cfg(unix)]
+#[test]
+fn a_zero_gate_schema_4_resume_refuses_its_unavailable_recorded_shell_whatever_todays_config_names()
+{
+    assert!(!on_this_path("cmd"), "the premise: this host has no `cmd`");
+    let (tree, repo) = temp_engine_repo("topology-resume-recorded-shell-gone");
+    let shells = a_fake_cmd(&tree);
+    fs::write(repo.join("upstroke.toml"), "[engine]\nshell = \"cmd\"\n").expect("the config");
+    git_in(&repo, &["add", "upstroke.toml"]);
+    git_in(&repo, &["commit", "-q", "-m", "a run under cmd"]);
+    let created = with_shells_on_path(&shells, &repo, &repo.join("upstroke.toml"), "create");
+    assert!(
+        created.status.is_some_and(|status| status.success())
+            && created.stdout.contains("1 passed"),
+        "the run is created where `cmd` runs: {created}"
+    );
+    let run_id = rundir::latest_run(&repo).expect("the created run");
+    until_released(&repo, &run_id);
+    let first = first_line_of_the_log(&repo, &run_id);
+    assert_eq!(
+        first["data"]["gate_cmds"],
+        serde_json::json!([]),
+        "the premise: no gates"
+    );
+    assert_eq!(
+        first["data"]["shell"], "cmd",
+        "the run records the shell it probed"
+    );
+
+    let today = tree.path().join("today.toml");
+    fs::write(&today, "[engine]\nshell = \"sh\"\n").expect("today's config");
+    let mut resume = resume_options(&repo, &run_id);
+    resume.config_path = Some(today.clone());
+    let log = rundir::public_dir(&repo, &run_id).join(rundir::EVENT_LOG);
+    let before = fs::read(&log).expect("the log");
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        1,
+    )));
+    let refused = resume_with(&resume, &source)
+        .expect_err("the recorded `cmd` cannot run here, whatever today's config names");
+    assert!(
+        refused.to_string().contains("the recorded shell `cmd`"),
+        "{refused}"
+    );
+    assert!(
+        fs::read(&log).expect("the log") == before,
+        "the refused resume appended a recovery event"
+    );
+    until_released(&repo, &run_id);
+
+    let continued = with_shells_on_path(&shells, &repo, &today, "resume");
+    assert!(
+        continued.status.is_some_and(|status| status.success())
+            && continued.stdout.contains("1 passed"),
+        "the run stayed resumable: {continued}"
+    );
+}
+
+/// PR12-CI-03, the record's compatibility: `run_started(4).shell` is required, so a schema-4 log
+/// whose first line predates it is refused at its committed first line, through
+/// `engine::resume_with`, before any lock or private write, and is never resumed under a shell
+/// it does not record.
+#[test]
+fn a_schema_4_log_without_a_recorded_shell_is_refused_and_never_resumed_under_another() {
+    let (_tree, repo) = temp_engine_repo("topology-resume-no-recorded-shell");
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        1,
+    )));
+    let parked = run_with(&topology_options(&repo), &source).expect("the run parks");
+    assert_eq!(parked.outcome(), RunOutcome::Parked, "{parked:#?}");
+    until_released(&repo, &parked.run_id);
+    let log = rundir::public_dir(&repo, &parked.run_id).join(rundir::EVENT_LOG);
+    let text = fs::read_to_string(&log).expect("the log");
+    let (first, rest) = text.split_once('\n').expect("a committed first line");
+    let mut line: serde_json::Value = serde_json::from_str(first).expect("the first line");
+    assert!(
+        line["data"]
+            .as_object_mut()
+            .expect("run_started's data")
+            .remove("shell")
+            .is_some(),
+        "the premise: the run recorded its shell"
+    );
+    let predates = format!(
+        "{}\n{rest}",
+        serde_json::to_string(&line).expect("the older first line")
+    );
+    fs::write(&log, &predates).expect("a log written before the field");
+    let home = private_root_for(&repo);
+    let before = private_snapshot(&home);
+
+    let refused = resume_with(&resume_options(&repo, &parked.run_id), &source)
+        .expect_err("a schema-4 run_started without its shell is refused");
+    let refused = refused.to_string();
+    assert!(
+        refused.contains("is not a topology event") && refused.contains("shell"),
+        "{refused}"
+    );
+    assert!(
+        fs::read_to_string(&log).expect("the log") == predates,
+        "the refused resume wrote the log"
+    );
+    let moved = moved_entries(&before, &private_snapshot(&home));
+    assert!(moved.is_empty(), "the refused resume wrote: {moved:?}");
+}
+
+/// P12-W2 and P12-W16 (D6): a schema-4 run whose process dies by SIGKILL,
+/// SIGTERM or SIGINT inside an attempt leaves a log that ends mid-attempt; the
+/// resume settles that attempt as interrupted, appends `run_resumed`, and
+/// continues to the end. No graceful drain is claimed: the signal ends the
+/// command.
+#[cfg(unix)]
+#[test]
+fn a_schema_4_run_ended_by_a_signal_mid_attempt_resumes_and_settles_the_attempt() {
+    for signal in ["KILL", "TERM", "INT"] {
+        let (_tree, repo) = temp_engine_repo(&format!("topology-signal-{signal}"));
+        let helper = std::sync::atomic::AtomicU32::new(0);
+        signal_mid_attempt(&repo, signal, SignalFault::None, &helper);
+    }
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SignalFault {
+    None,
+    Readiness,
+    Signal,
+    DeliveryNeverExits,
+}
+
+/// The file the signal helper's workers write their pids to, beside the repository.
+#[cfg(unix)]
+fn signalled_workers(repo: &Path) -> PathBuf {
+    repo.with_file_name("worker-pids")
+}
+
+/// The pids the signal helper's workers wrote, one a line. Each leads a process group of its
+/// own: the process funnel puts every agent it starts in one.
+#[cfg(unix)]
+fn worker_pids(repo: &Path) -> Vec<u32> {
+    fs::read_to_string(signalled_workers(repo))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| line.trim().parse().ok())
+        .collect()
+}
+
+#[cfg(unix)]
+fn stalled_delivery_pid(repo: &Path) -> PathBuf {
+    repo.with_file_name("stalled-delivery.pid")
+}
+
+#[cfg(unix)]
+fn delivery_program(repo: &Path, fault: SignalFault) -> PathBuf {
+    if fault != SignalFault::DeliveryNeverExits {
+        return PathBuf::from("kill");
+    }
+    let stalled = repo.with_file_name("kill-that-never-exits");
+    crate::runner::container::write_program_in_its_own_process(
+        &stalled,
+        &format!(
+            "#!/bin/sh\necho $$ > '{0}.tmp' && mv '{0}.tmp' '{0}'\nexec sleep 600\n",
+            stalled_delivery_pid(repo).display()
+        ),
+    );
+    stalled
+}
+
+#[cfg(unix)]
+fn deliver_within_its_bound(program: &Path, signal: &str, pid: &str, repo: &Path) -> bool {
+    use crate::workspace_manager::fixture::{COLLECT_BOUND, LinkedChild};
+    use std::ffi::OsStr;
+
+    let (delivery, _said) = LinkedChild::spawn_program(
+        program.as_os_str(),
+        &[OsStr::new("-s"), OsStr::new(signal), OsStr::new(pid)],
+        &repo.with_file_name("signal-delivery.stderr"),
+    );
+    delivery
+        .wait_within(COLLECT_BOUND)
+        .unwrap_or_else(|| {
+            panic!(
+                "`{} -s {signal} {pid}` had not exited {COLLECT_BOUND:?} after it was started",
+                program.display()
+            )
+        })
+        .success()
+}
+
+#[cfg(unix)]
+fn signal_mid_attempt(
+    repo: &Path,
+    signal: &str,
+    fault: SignalFault,
+    helper: &std::sync::atomic::AtomicU32,
+) {
+    use crate::workspace_manager::fixture::{COLLECT_BOUND, LinkedChild, await_group_end};
+    use std::sync::atomic::Ordering;
+
+    let (child, _lines) = LinkedChild::spawn_with(
+        "engine::tests::topology_signalled_child",
+        &[("UPSTROKE_TOPOLOGY_SIGNAL_REPO", repo.as_os_str())],
+        &repo.with_file_name("signalled-child.stderr"),
+        |pid| {
+            helper.store(pid, Ordering::SeqCst);
+            std::thread::Builder::new()
+        },
+    );
+    let mut run_id = None;
+    for _ in 0..600 {
+        if let Some(id) = rundir::latest_run(repo) {
+            let log = rundir::public_dir(repo, &id).join("events.jsonl");
+            let started =
+                fs::read_to_string(&log).is_ok_and(|text| text.contains("\"attempt_started\""));
+            let working = worker_pids(repo)
+                .into_iter()
+                .any(crate::workspace_manager::fixture::process_exists);
+            if started && working {
+                run_id = Some(id);
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let run_id = run_id
+        .filter(|_| fault != SignalFault::Readiness)
+        .expect("the child reached an attempt within a minute");
+    let pid = helper.load(Ordering::SeqCst).to_string();
+    let delivered = fault != SignalFault::Signal
+        && deliver_within_its_bound(&delivery_program(repo, fault), signal, &pid, repo);
+    assert!(delivered, "kill -s {signal}");
+    let ended = child
+        .wait_within(COLLECT_BOUND)
+        .unwrap_or_else(|| panic!("the child outlived SIG{signal} by {COLLECT_BOUND:?}"));
+    assert!(!ended.success(), "SIG{signal} ended the child: {ended:?}");
+
+    let log = rundir::public_dir(repo, &run_id).join("events.jsonl");
+    let killed = fs::read_to_string(&log).expect("the log");
+    assert!(
+        !killed.contains("\"run_finished\"") && !killed.contains("\"attempt_finished\""),
+        "SIG{signal}: the log ends inside the attempt:\n{killed}"
+    );
+    until_released(repo, &run_id);
+    for worker in worker_pids(repo) {
+        let group = i32::try_from(worker).expect("a pid");
+        await_group_end(group).unwrap_or_else(|outlived| panic!("SIG{signal}: {outlived}"));
+    }
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        0,
+    )));
+    let mut resume = resume_options(repo, &run_id);
+    resume.private_root = None;
+    let report = resume_with(&resume, &source).expect("the resume continues the run");
+    assert_eq!(
+        report.outcome(),
+        RunOutcome::Complete,
+        "SIG{signal}: {report:#?}"
+    );
+    let resumed = fs::read_to_string(&log).expect("the log");
+    assert!(
+        resumed.starts_with(&killed),
+        "SIG{signal}: the resume rewrote the log it adopted"
+    );
+    let appended: Vec<String> = resumed[killed.len()..]
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<serde_json::Value>(line).expect("an event")["event"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned()
+        })
+        .collect();
+    let at = |kind: &str| appended.iter().position(|seen| seen == kind);
+    let (Some(resumed_at), Some(interrupted_at), Some(finished_at)) = (
+        at("run_resumed"),
+        at("attempt_interrupted"),
+        at("run_finished"),
+    ) else {
+        panic!("SIG{signal}: the resume appended {appended:?}");
+    };
+    assert!(
+        interrupted_at < resumed_at && resumed_at < finished_at,
+        "SIG{signal}: the interrupted attempt settled (recovery's step C), then \
+         run_resumed (its step G), then the end: {appended:?}"
+    );
+    assert!(
+        report.total_is_floor(),
+        "SIG{signal}: the interrupted attempt's unknown spend makes the total a floor: \
+         {report:#?}"
+    );
+    let interrupted: Vec<&events::AttemptRecord> = report
+        .tasks
+        .iter()
+        .flat_map(|task| task.attempts.iter())
+        .filter(|record| {
+            record
+                .failure
+                .as_ref()
+                .is_some_and(|failure| failure.kind == FailureKind::Interrupted)
+        })
+        .collect();
+    let [kept] = interrupted.as_slice() else {
+        panic!("SIG{signal}: the report keeps the one interrupted attempt: {report:#?}");
+    };
+    let logged: Vec<serde_json::Value> = resumed
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("an event"))
+        .collect();
+    let identity = |event: &serde_json::Value| {
+        ["key", "generation", "attempt"].map(|field| event["data"][field].as_u64())
+    };
+    let settled = logged
+        .iter()
+        .find(|event| event["event"] == "attempt_interrupted")
+        .expect("the interrupted settlement");
+    let started = logged
+        .iter()
+        .find(|event| event["event"] == "attempt_started" && identity(event) == identity(settled))
+        .expect("the start of the attempt the resume settled interrupted");
+    assert_eq!(
+        (kept.cost_usd, kept.model.as_str()),
+        (
+            None,
+            started["data"]["binding"]["model"]
+                .as_str()
+                .unwrap_or_default()
+        ),
+        "SIG{signal}: its spend is unknown and its model is the one its start recorded: \
+         {kept:#?}"
+    );
+}
+
+/// J8, PR12 regression review #5: the signal test owns its helper from the spawn, so neither a
+/// readiness that fails nor a signal that cannot be delivered leaves the helper, or the worker
+/// it started, running. The reviewer's witness was a `kill` that exited 1: the parent failed
+/// at its assertion, and seven of the helper's processes outlived it. Each fault is injected
+/// into the driver once the helper's worker runs. The driver fails as the test would, and
+/// then the helper has been reaped, the worker's group is gone, and nothing holds the run,
+/// each within its bound.
+#[cfg(unix)]
+#[test]
+fn the_signal_tests_helper_is_settled_when_its_readiness_or_its_signal_fails() {
+    use crate::workspace_manager::fixture::{await_group_end, process_exists};
+
+    for (fault, says) in [
+        (
+            SignalFault::Readiness,
+            "the child reached an attempt within a minute",
+        ),
+        (SignalFault::Signal, "kill -s TERM"),
+    ] {
+        let (_tree, repo) = temp_engine_repo(&format!("topology-signal-{fault:?}"));
+        let helper = std::sync::atomic::AtomicU32::new(0);
+        let payload = std::panic::catch_unwind(|| {
+            signal_mid_attempt(&repo, "TERM", fault, &helper);
+        })
+        .expect_err("the injected fault fails the driver");
+        let Some(message) = payload.downcast_ref::<String>() else {
+            panic!("{fault:?}: the driver's message is not a String");
+        };
+        assert!(message.contains(says), "{fault:?}: {message}");
+
+        let child = helper.load(std::sync::atomic::Ordering::SeqCst);
+        assert_ne!(child, 0, "{fault:?}: the driver spawned its helper");
+        assert!(
+            !process_exists(child),
+            "{fault:?}: the helper {child} was reaped"
+        );
+        let workers = worker_pids(&repo);
+        assert!(!workers.is_empty(), "{fault:?}: the premise, a worker ran");
+        for worker in workers {
+            let group = i32::try_from(worker).expect("a pid");
+            await_group_end(group).unwrap_or_else(|outlived| panic!("{fault:?}: {outlived}"));
+        }
+        let run_id = rundir::latest_run(&repo).expect("the helper's run");
+        until_released(&repo, &run_id);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn the_signal_tests_helper_is_settled_when_the_command_delivering_its_signal_never_exits() {
+    use crate::workspace_manager::fixture::{await_group_end, process_exists};
+
+    let (_tree, repo) = temp_engine_repo("topology-signal-stalled-delivery");
+    let helper = std::sync::atomic::AtomicU32::new(0);
+    let payload = std::panic::catch_unwind(|| {
+        signal_mid_attempt(&repo, "TERM", SignalFault::DeliveryNeverExits, &helper);
+    })
+    .expect_err("a delivery that never exits fails the driver");
+    let Some(message) = payload.downcast_ref::<String>() else {
+        panic!("the driver's message is not a String");
+    };
+    assert!(message.contains("had not exited"), "{message}");
+
+    let stalled: u32 = fs::read_to_string(stalled_delivery_pid(&repo))
+        .expect("the stalled delivery recorded its pid")
+        .trim()
+        .parse()
+        .expect("a pid");
+    assert!(
+        !process_exists(stalled),
+        "the stalled delivery {stalled} was killed and reaped"
+    );
+    let child = helper.load(std::sync::atomic::Ordering::SeqCst);
+    assert_ne!(child, 0, "the driver spawned its helper");
+    assert!(!process_exists(child), "the helper {child} was reaped");
+    let workers = worker_pids(&repo);
+    assert!(!workers.is_empty(), "the premise, a worker ran");
+    for worker in workers {
+        let group = i32::try_from(worker).expect("a pid");
+        await_group_end(group).unwrap_or_else(|outlived| panic!("{outlived}"));
+    }
+    let run_id = rundir::latest_run(&repo).expect("the helper's run");
+    until_released(&repo, &run_id);
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "subprocess helper"]
+fn topology_signalled_child() {
+    let Some(repo) = std::env::var_os("UPSTROKE_TOPOLOGY_SIGNAL_REPO").map(PathBuf::from) else {
+        return;
+    };
+    // Each worker writes its pid where the parent finds it, then sleeps as before.
+    let workers = signalled_workers(&repo);
+    let stub = TopologyStub::new(&format!("echo $$ >> '{}'; sleep 30", workers.display()), 0);
+    let _ = run_with(&topology_options(&repo), &BorrowedTopologyStub(&stub));
+}
+
+#[cfg(unix)]
+const ANNOUNCE_PLAN: &str = "## Lay the first stone\n\
+                             <!-- upstroke: id=first depends= paths=first/** -->\n\
+                             Lay it.\n\n## Ask about the widget\n\
+                             <!-- upstroke: id=asks depends=first paths=asks/** -->\n\
+                             Ask which of the two formats the spec means.\n\n\
+                             ## Wait for the release\n\
+                             <!-- upstroke: id=waits depends=first paths=waits/** -->\n\
+                             Wait until the test releases this task.\n";
+
+#[cfg(unix)]
+fn announcing_worker(gate: &Path) -> String {
+    let gate = gate.display();
+    format!(
+        "case \"$(basename \"$PWD\")\" in \
+         k1-*) d=asks; echo {TOPOLOGY_STUB_ASKS} ;; \
+         k2-*) d=waits; : > '{gate}/waits-started'; i=0; \
+         while [ ! -e '{gate}/release' ] && [ \"$i\" -lt 4800 ]; do sleep 0.05; i=$((i+1)); done; \
+         [ -e '{gate}/release' ] || exit 7 ;; \
+         *) d=first ;; \
+         esac; mkdir -p \"$d\" && echo edited by the topology stub>> \"$d/out.txt\""
+    )
+}
+
+#[cfg(unix)]
+#[test]
+fn a_schema_4_question_is_announced_before_its_sibling_is_released() {
+    use crate::workspace_manager::fixture::LinkedChild;
+    use std::ffi::OsStr;
+
+    for (resumed, step) in [(false, true), (false, false), (true, true), (true, false)] {
+        let cell = format!(
+            "{} run, {} driver",
+            if resumed { "resumed" } else { "fresh" },
+            if step { "step" } else { "concurrent" }
+        );
+        let (tree, repo) = temp_engine_repo(&format!(
+            "topology-announce-{}{}",
+            u8::from(resumed),
+            u8::from(step)
+        ));
+        seed(
+            &repo,
+            ANNOUNCE_PLAN,
+            Some(&format!(
+                "[engine]\nmax_parallel = {}\n\n[interaction]\nmode = \"never\"\n\
+                 notify = [\"cli\"]\n",
+                if step { 1 } else { 2 }
+            )),
+        );
+        let gate = tree.path().join("gate");
+        fs::create_dir(&gate).expect("the gate");
+        let run_id = if resumed {
+            let stub = TopologyStub::new(&announcing_worker(&gate), 0);
+            let mut opts = topology_options(&repo);
+            opts.config_path = Some(repo.join("upstroke.toml"));
+            opts.budget_usd = Some(0.015);
+            let stopped = if step {
+                run_with(&opts, &BorrowedTopologyStub(&stub))
+            } else {
+                run_with(&opts, &SharedTopologyStubs(std::sync::Arc::new(stub)))
+            }
+            .expect("the first run ends");
+            assert_eq!(
+                stopped.outcome(),
+                RunOutcome::BudgetExceeded,
+                "{cell}: {stopped:#?}"
+            );
+            assert!(
+                !gate.join("waits-started").exists(),
+                "{cell}: the premise, the budget stopped the run before the sibling ran"
+            );
+            until_released(&repo, &stopped.run_id);
+            stopped.run_id
+        } else {
+            String::new()
+        };
+        let stderr = tree.path().join("announcing-child.stderr");
+        let (child, _lines) = LinkedChild::spawn(
+            "engine::tests::topology_announcing_child",
+            &[
+                ("UPSTROKE_ANNOUNCE_REPO", repo.as_os_str()),
+                ("UPSTROKE_ANNOUNCE_GATE", gate.as_os_str()),
+                (
+                    "UPSTROKE_ANNOUNCE_DRIVER",
+                    OsStr::new(if step { "step" } else { "concurrent" }),
+                ),
+                ("UPSTROKE_ANNOUNCE_RUN", OsStr::new(&run_id)),
+            ],
+            &stderr,
+        );
+        let announced = |said: &str| {
+            said.lines().any(|line| {
+                line.starts_with("question ") && line.ends_with("— parking asks; the run continues")
+            })
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(90);
+        loop {
+            let said = fs::read_to_string(&stderr).unwrap_or_default();
+            if announced(&said) && gate.join("waits-started").exists() {
+                break;
+            }
+            if let Some(ended) = child.wait_within(Duration::ZERO) {
+                panic!(
+                    "{cell}: the run ended ({ended:?}) before it announced the question while \
+                     the sibling was held:\n{said}"
+                );
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{cell}: no announcement of the question while the sibling was held, within \
+                 90 s:\n{said}"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        fs::write(gate.join("release"), b"").expect("the sibling's release");
+        let ended = child
+            .wait_within(Duration::from_secs(300))
+            .unwrap_or_else(|| panic!("{cell}: the run outlived its release by 300 s"));
+        assert!(
+            ended.success(),
+            "{cell}: {ended:?}\n{}",
+            fs::read_to_string(&stderr).unwrap_or_default()
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "subprocess helper"]
+fn topology_announcing_child() {
+    let Some(repo) = std::env::var_os("UPSTROKE_ANNOUNCE_REPO").map(PathBuf::from) else {
+        return;
+    };
+    let gate = std::env::var_os("UPSTROKE_ANNOUNCE_GATE")
+        .map(PathBuf::from)
+        .expect("the parent names the gate");
+    let step = std::env::var("UPSTROKE_ANNOUNCE_DRIVER").is_ok_and(|driver| driver == "step");
+    let run_id = std::env::var("UPSTROKE_ANNOUNCE_RUN").unwrap_or_default();
+    let stub = TopologyStub::new(&announcing_worker(&gate), 0);
+    let shared = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        &announcing_worker(&gate),
+        0,
+    )));
+    let borrowed = BorrowedTopologyStub(&stub);
+    let source: &dyn AdapterSource = if step { &borrowed } else { &shared };
+    let report = if run_id.is_empty() {
+        let mut opts = topology_options(&repo);
+        opts.config_path = Some(repo.join("upstroke.toml"));
+        opts.attempt_timeout = Duration::from_secs(600);
+        run_with(&opts, source)
+    } else {
+        let mut resume = resume_options(&repo, &run_id);
+        resume.private_root = None;
+        resume.config_path = Some(repo.join("upstroke.toml"));
+        resume.budget_usd = Some(10.0);
+        resume.attempt_timeout = Duration::from_secs(600);
+        resume_with(&resume, source)
+    }
+    .expect("the run ends");
+    assert_eq!(report.outcome(), RunOutcome::Parked, "{report:#?}");
+    assert_eq!(report.parked_tasks(), ["asks"], "{report:#?}");
+    assert!(
+        committed(&report, "first") && committed(&report, "waits"),
+        "{report:#?}"
+    );
+}
+
+/// A gate that builds a repository of its own in a temporary directory, installs
+/// a blob replacement there, and passes only if Git honours it. Under a
+/// process-wide replacement setting (`ObjectGraph::Recorded`, the old schema-4
+/// host composition) it fails; under the managed repository's conditional
+/// include (`ObjectGraph::RecordedIn`) it passes.
+#[cfg(unix)]
+const UNRELATED_REPOSITORY_GATE: &str = "\n[[gates]]\nname = \"unrelated-replacement\"\n\
+     cmd = 'd=$(mktemp -d) && git -C \"$d\" init -q && printf \"one\\n\" > \"$d/f\" && \
+     git -C \"$d\" add f && git -C \"$d\" -c user.name=gate -c user.email=gate@upstroke.local \
+     commit -qm one && a=$(git -C \"$d\" rev-parse HEAD:f) && \
+     b=$(printf \"replaced\\n\" | git -C \"$d\" hash-object -w --stdin) && \
+     git -C \"$d\" replace \"$a\" \"$b\" && test \"$(git -C \"$d\" show HEAD:f)\" = replaced; \
+     s=$?; rm -rf \"$d\"; exit $s'\n";
+
+/// P12-W6 (with P12-W19's composition half): both public paths run their roles
+/// on the managed repository's recorded graph and leave every other repository's
+/// replacements alone. The managed repository pins `core.useReplaceRefs = true`
+/// and replaces the committed probe blob; one gate reads the snapshot's bytes,
+/// one reads through the object graph, and one builds an unrelated repository
+/// whose replacement must hold, which a process-wide setting would defeat.
+#[cfg(unix)]
+#[test]
+fn a_schema_4_run_and_resume_read_the_recorded_graph_and_leave_other_repositories_theirs() {
+    let status = crate::workspace_manager::fixture::run_replacement_witness_child(
+        "engine::tests::topology_object_graph_helper",
+    );
+    assert!(
+        status.success(),
+        "the child drives a schema-4 `engine::run_with` and `engine::resume_with` over a \
+         repository whose committed probe blob carries a replacement, and ended {status:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "subprocess helper"]
+fn topology_object_graph_helper() {
+    if std::env::var_os(crate::workspace_manager::fixture::REPLACEMENT_WITNESS).is_none() {
+        return;
+    }
+    crate::workspace_manager::fixture::assert_replacement_controls_pinned("topology-object-graph");
+    let config = format!(
+        "[interaction]\nmode = \"never\"\n\n{V1_OBJECT_GRAPH_GATES}{UNRELATED_REPOSITORY_GATE}"
+    );
+
+    let (_tree, repo) = replaced_probe_repo("topographrun", WORKER_ONLY_PLAN, &config);
+    let mut opts = topology_options(&repo);
+    opts.config_path = Some(repo.join("upstroke.toml"));
+    let stub = TopologyStub::new(TOPOLOGY_STUB_EDIT, 0);
+    let report = run_with(&opts, &BorrowedTopologyStub(&stub)).expect("the fresh run");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:?}");
+    assert!(committed(&report, "t1"), "{report:?}");
+
+    let (_tree, repo) = replaced_probe_repo("topographresume", WORKER_ONLY_PLAN, &config);
+    let mut opts = topology_options(&repo);
+    opts.config_path = Some(repo.join("upstroke.toml"));
+    let stub = TopologyStub::new(TOPOLOGY_STUB_EDIT, 1);
+    let parked = run_with(&opts, &BorrowedTopologyStub(&stub)).expect("the first run");
+    assert_eq!(parked.outcome(), RunOutcome::Parked, "{parked:?}");
+    until_released(&repo, &parked.run_id);
+    let question = parked
+        .questions
+        .first()
+        .expect("a question was raised")
+        .question
+        .id
+        .to_string();
+    crate::answer::answer(
+        &repo,
+        &question,
+        crate::answer::Reply::Text("the first".to_owned()),
+    )
+    .expect("the answer");
+    let mut resume = resume_options(&repo, &parked.run_id);
+    resume.private_root = None;
+    resume.config_path = Some(repo.join("upstroke.toml"));
+    let resumed = resume_with(&resume, &BorrowedTopologyStub(&stub)).expect("the resume");
+    assert_eq!(resumed.outcome(), RunOutcome::Complete, "{resumed:?}");
+    assert!(committed(&resumed, "t1"), "{resumed:?}");
+}
+
+#[cfg(unix)]
+const INHERITED_RUN_ID: &str = "UPSTROKE_INHERITED_RUN_ID";
+
+/// P12-W7: a schema-4 run in a checkout whose environment carries a relative
+/// `GIT_COMMON_DIR`, through a linked registry, completes, and its gate sees the
+/// run's common directory as the absolute path it names.
+#[cfg(unix)]
+#[test]
+fn a_schema_4_run_under_a_relative_common_dir_completes_and_its_roles_see_the_absolute_one() {
+    let tree = temp_engine_scratch("topology-relative-common");
+    let root = tree.path();
+    let repo = root.join("source/a/b/c/d/repo");
+    fs::create_dir_all(&repo).expect("the repository, six levels below the scratch root");
+    git_in(&repo, &["init", "-q", "-b", "main"]);
+    git_in(&repo, &["config", "user.email", "test@upstroke.local"]);
+    git_in(&repo, &["config", "user.name", "upstroke tests"]);
+    git_in(&repo, &["config", "maintenance.auto", "false"]);
+    fs::write(repo.join("README.md"), "seed\n").expect("seed");
+    git_in(&repo, &["add", "-A"]);
+    git_in(&repo, &["commit", "-q", "-m", "seed"]);
+    let common = root.join("common");
+    let expected = fs::canonicalize(root)
+        .expect("the scratch root canonicalizes")
+        .join("common");
+    seed(
+        &repo,
+        WORKER_ONLY_PLAN,
+        Some(&format!(
+            "[[gates]]\nname = \"common-dir\"\n\
+             cmd = 'case \"$GIT_COMMON_DIR\" in /*) ;; *) exit 1 ;; esac; \
+             test \"$(cd \"$GIT_COMMON_DIR\" && pwd -P)\" = \"{}\"'\n",
+            expected.display()
+        )),
+    );
+    copy_tree_for_a_layout(&repo.join(".git"), &common);
+    let other = root.join("other");
+    link_the_registry_into(&common.join("worktrees"), &repo, &other);
+    let private = root.join("private");
+    fs::create_dir(&private).expect("the private root, one level below the scratch root");
+    let before = other_repository_bytes(&other);
+    let ended = crate::agent::proc::test_support::run_test_isolated(
+        "engine::tests::relative_common_dir_topology_helper",
+        &[
+            (
+                "GIT_COMMON_DIR",
+                std::ffi::OsStr::new("../../../../../../common"),
+            ),
+            (INHERITED_RUN_ROOT, repo.as_os_str()),
+            (INHERITED_RUN_PRIVATE, private.as_os_str()),
+        ],
+        Duration::from_secs(300),
+    );
+    assert!(
+        ended.status.is_some_and(|status| status.success()) && ended.stdout.contains("1 passed"),
+        "the schema-4 run under a relative GIT_COMMON_DIR completed: {ended}"
+    );
+    assert!(
+        other_repository_bytes(&other) == before,
+        "the other repository's objects and refs are byte-identical"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "subprocess helper"]
+fn relative_common_dir_topology_helper() {
+    let Some(repo) = std::env::var_os(INHERITED_RUN_ROOT).map(PathBuf::from) else {
+        return;
+    };
+    let private = PathBuf::from(std::env::var_os(INHERITED_RUN_PRIVATE).expect("the private root"));
+    let mut opts = options(&repo);
+    opts.legacy_writer = false;
+    opts.config_path = Some(repo.join("upstroke.toml"));
+    opts.private_root = Some(private);
+    let stub = TopologyStub::new(TOPOLOGY_STUB_EDIT, 0);
+    let report = run_with(&opts, &BorrowedTopologyStub(&stub)).expect("the run");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:?}");
+    assert!(committed(&report, "t1"), "{report:?}");
+    assert_eq!(
+        first_line_of_the_log(&repo, &report.run_id)["data"]["schema"],
+        4,
+        "a schema-4 run"
+    );
+}
+
+/// P12-W8: a relative `GIT_OBJECT_DIRECTORY` refuses a schema-4 run and the
+/// resume of a schema-4 run before any lock. The parent holds the worktree lock
+/// across the child, so a command that reached the lock would refuse as the
+/// lock's, not as the relative name's.
+#[cfg(unix)]
+#[test]
+fn a_relative_object_directory_refuses_a_schema_4_run_and_its_resume_before_any_lock() {
+    let (_tree, repo) = temp_engine_repo("topology-relative-objects");
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        1,
+    )));
+    let parked = run_with(&topology_options(&repo), &source).expect("the run parks");
+    until_released(&repo, &parked.run_id);
+    let held = WorktreeLock::acquire(&repo).expect("the held-lock control");
+    let ended = crate::agent::proc::test_support::run_test_isolated(
+        "engine::tests::relative_object_directory_topology_helper",
+        &[
+            (
+                "GIT_OBJECT_DIRECTORY",
+                std::ffi::OsStr::new("relative/objects"),
+            ),
+            (INHERITED_RUN_ROOT, repo.as_os_str()),
+            (INHERITED_RUN_ID, std::ffi::OsStr::new(&parked.run_id)),
+        ],
+        Duration::from_secs(300),
+    );
+    drop(held);
+    assert!(
+        ended.status.is_some_and(|status| status.success()) && ended.stdout.contains("1 passed"),
+        "both public paths refused the relative GIT_OBJECT_DIRECTORY before the lock: {ended}"
+    );
+    drop(WorktreeLock::acquire(&repo).expect("no-leak check: no worktree lock is left held"));
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "subprocess helper"]
+fn relative_object_directory_topology_helper() {
+    let Some(repo) = std::env::var_os(INHERITED_RUN_ROOT).map(PathBuf::from) else {
+        return;
+    };
+    let run_id = std::env::var_os(INHERITED_RUN_ID)
+        .and_then(|id| id.into_string().ok())
+        .expect("the parked run's id");
+    let names = |repo: &Path| {
+        let mut names: Vec<String> = fs::read_dir(rundir::runs_root(repo))
+            .expect("the runs root")
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    };
+    let runs = names(&repo);
+    let log = rundir::public_dir(&repo, &run_id).join("events.jsonl");
+    let before = fs::read(&log).expect("the parked run's log");
+    let stub = TopologyStub::new(TOPOLOGY_STUB_EDIT, 0);
+
+    let refused = run_with(&topology_options(&repo), &BorrowedTopologyStub(&stub))
+        .expect_err("a relative GIT_OBJECT_DIRECTORY refuses a fresh schema-4 run");
+    let said = refused.to_string();
+    assert!(
+        said.contains("GIT_OBJECT_DIRECTORY") && !said.contains("already driving worktree"),
+        "{said}"
+    );
+    assert_eq!(
+        names(&repo),
+        runs,
+        "the refused run created a run directory"
+    );
+
+    let mut resume = resume_options(&repo, &run_id);
+    resume.private_root = None;
+    let refused = resume_with(&resume, &BorrowedTopologyStub(&stub))
+        .expect_err("a relative GIT_OBJECT_DIRECTORY refuses the schema-4 resume");
+    let said = refused.to_string();
+    assert!(
+        said.contains("GIT_OBJECT_DIRECTORY") && !said.contains("already driving worktree"),
+        "{said}"
+    );
+    assert_eq!(
+        fs::read(&log).expect("the log"),
+        before,
+        "the refused resume wrote"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// PR12 S10: the read commands over a schema-4 log (D1, D3, D10)
+// ---------------------------------------------------------------------------
+
+/// P12-W12. `status` on a schema-4 run reads the committed prefix only: its
+/// projection equals the barrier's replay and the run's own `report.json`; with
+/// a writer holding the run and a torn tail at the end of the log, it reports
+/// both, names the runner identity, and leaves the log's bytes and mtime as it
+/// found them; `--follow` prints the run's events and stops once it finished.
+#[test]
+fn a_schema_4_status_reads_the_committed_prefix_and_leaves_the_log_as_it_found_it() {
+    let (_tree, repo) = temp_engine_repo("topology-status");
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        0,
+    )));
+    let report = run_with(&topology_options(&repo), &source).expect("the schema-4 run completes");
+    until_released(&repo, &report.run_id);
+    let public = rundir::public_dir(&repo, &report.run_id);
+    let log = public.join("events.jsonl");
+
+    let projected = crate::engine::topology::observe::observe(&repo, &report.run_id)
+        .expect("the observer reads the run")
+        .expect("a schema-4 log")
+        .report()
+        .expect("the projection derives");
+    let written: crate::engine::topology::report::TopologyReport =
+        serde_json::from_slice(&fs::read(public.join("report.json")).expect("report.json"))
+            .expect("report.json is a topology report");
+    assert_eq!(
+        projected, written,
+        "status's projection is the one the live run wrote at its finish"
+    );
+    let plan_bytes = fs::read(public.join("plan.normalized.json")).expect("the frozen plan");
+    let inputs = crate::topology::fold::FrozenInputs {
+        plan: serde_json::from_slice(&plan_bytes).expect("the frozen plan parses"),
+        normalized_plan_digest: events::normalized_plan_digest(&plan_bytes),
+    };
+    let mut warnings = Vec::new();
+    let barrier = crate::events::log::establish_stable_prefix(
+        &log,
+        inputs,
+        None,
+        &mut warnings,
+        &mut crate::events::log::NoEventHooks,
+    )
+    .expect("the barrier proves the finished run's prefix");
+    assert_eq!(
+        crate::engine::topology::report::topology_status(&report.run_id, &barrier)
+            .expect("the barrier's replay projects"),
+        projected,
+        "and the one the barrier's replay derives"
+    );
+    drop(barrier);
+
+    let mut torn = fs::read(&log).expect("the log");
+    torn.extend_from_slice(b"{\"ts\":\"2026-11-02T09:00:00Z\",\"event\":\"capacity_snap");
+    fs::write(&log, &torn).expect("a writer interrupted mid-line");
+    let mtime = fs::metadata(&log)
+        .and_then(|metadata| metadata.modified())
+        .expect("the log's mtime");
+    let held = RunLock::acquire(&public).expect("a live writer's lock");
+    let status = crate::status::load(&repo, Some(&report.run_id)).expect("status reads a held run");
+    let rendered = crate::status::render(&status);
+    drop(held);
+    for expected in [
+        format!("run {}: complete", report.run_id),
+        "runner: host (host-v1)".to_owned(),
+        "log: schema 4".to_owned(),
+        "state: running now".to_owned(),
+        "byte(s) after its last commit marker".to_owned(),
+    ] {
+        assert!(rendered.contains(&expected), "`{expected}` in:\n{rendered}");
+    }
+    assert_eq!(
+        fs::read(&log).expect("the log"),
+        torn,
+        "status changed the log's bytes"
+    );
+    assert_eq!(
+        fs::metadata(&log)
+            .and_then(|metadata| metadata.modified())
+            .expect("the log's mtime"),
+        mtime,
+        "status changed the log's mtime"
+    );
+    assert_eq!(
+        crate::engine::topology::observe::observe(&repo, &report.run_id)
+            .expect("observes")
+            .expect("a schema-4 log")
+            .report()
+            .expect("projects"),
+        projected,
+        "a torn tail is not part of the projection"
+    );
+
+    let sleeper = RecordingSleeper::default();
+    let mut out: Vec<u8> = Vec::new();
+    crate::status::follow(&status, &sleeper, Duration::ZERO, 2, &mut out).expect("follow");
+    let followed = String::from_utf8(out).expect("utf8");
+    let first = followed.lines().next().unwrap_or_default();
+    assert!(first.contains("run_started"), "{followed}");
+    assert!(
+        followed
+            .lines()
+            .last()
+            .is_some_and(|last| last.contains("run_finished complete")),
+        "{followed}"
+    );
+}
+
+#[test]
+fn a_schema_4_follow_prints_one_line_per_event_and_no_raw_control_whatever_the_plan_or_the_record_holds()
+ {
+    let (_tree, repo) = temp_engine_repo("topology-follow-controls");
+    seed(
+        &repo,
+        "## One\n<!-- upstroke: id=t1\u{1b}[2J kind=implement depends= -->\nMake it.\n",
+        None,
+    );
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        0,
+    )));
+    let report = run_with(&topology_options(&repo), &source).expect("the run completes");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:#?}");
+    until_released(&repo, &report.run_id);
+    let committed = log_events(&repo, &report.run_id);
+
+    let loaded = crate::status::load(&repo, Some(&report.run_id)).expect("status reads the run");
+    let mut out: Vec<u8> = Vec::new();
+    crate::status::follow(
+        &loaded,
+        &RecordingSleeper::default(),
+        Duration::ZERO,
+        2,
+        &mut out,
+    )
+    .expect("follow");
+    let followed = String::from_utf8(out).expect("utf8");
+    assert_eq!(
+        followed.lines().count(),
+        committed.len(),
+        "one physical line per committed event:\n{followed}"
+    );
+    assert!(
+        !followed.chars().any(|c| c.is_control() && c != '\n'),
+        "no raw control reaches the terminal: {followed:?}"
+    );
+    for kind in ["attempt_started", "task_merged"] {
+        assert!(
+            followed
+                .lines()
+                .any(|line| line.contains(kind) && line.contains("t1\\u{1b}[2J")),
+            "the `{kind}` line names the task with its control made visible:\n{followed}"
+        );
+    }
+
+    let observed = crate::engine::topology::observe::observe(&repo, &report.run_id)
+        .expect("observes")
+        .expect("a schema-4 log");
+    let mut hostile = observed
+        .events()
+        .iter()
+        .find(|event| event.body.kind() == "attempt_started")
+        .expect("the run started an attempt")
+        .clone();
+    hostile.ts = "2026-11-04T00:00:00Z\r\u{1b}[2K".to_owned();
+    if let crate::topology::events::TopologyEventBody::AttemptStarted { data } = &mut hostile.body {
+        data.binding.agent = "agent\n\u{1b}[31m".to_owned();
+        data.binding.model = "model\t\u{7}".to_owned();
+    }
+    let line = observed.describe(&hostile);
+    assert!(
+        !line.chars().any(char::is_control),
+        "a recorded field's controls never reach the line: {line:?}"
+    );
+    assert!(
+        line.contains("agent \\u{1b}[31m") && line.contains("model \\u{7}"),
+        "{line:?}"
+    );
+}
+
+#[test]
+fn a_fresh_schema_4_run_refuses_a_staged_an_unstaged_or_an_untracked_change_before_any_worker_or_log()
+ {
+    for dirt in ["staged", "unstaged", "untracked"] {
+        let (_tree, repo) = temp_engine_repo(&format!("topology-dirty-{dirt}"));
+        match dirt {
+            "staged" => {
+                fs::write(repo.join("README.md"), "a staged edit\n").expect("an edit");
+                git_in(&repo, &["add", "README.md"]);
+            }
+            "unstaged" => fs::write(repo.join("README.md"), "an unstaged edit\n").expect("an edit"),
+            _ => fs::write(repo.join("notes.txt"), "an untracked file\n").expect("a new file"),
+        }
+        let stub = ObservedStub::new(0);
+        let refused = run_with(&topology_options(&repo), &BorrowedObserved(&stub))
+            .expect_err("a dirty tree is refused");
+        assert!(
+            refused.to_string().contains("working tree is not clean"),
+            "{dirt}: {refused}"
+        );
+        assert!(
+            stub.built().is_empty(),
+            "{dirt}: no worker or reviewer was built"
+        );
+        assert!(
+            rundir::run_dir_names(&repo).is_empty(),
+            "{dirt}: no run directory, so no run log, exists"
+        );
+        let kept = match dirt {
+            "staged" => git_in(&repo, &["diff", "--cached", "--name-only"]).contains("README.md"),
+            "unstaged" => {
+                fs::read_to_string(repo.join("README.md")).expect("README.md")
+                    == "an unstaged edit\n"
+            }
+            _ => repo.join("notes.txt").exists(),
+        };
+        assert!(
+            kept,
+            "{dirt}: the change is the operator's and is untouched"
+        );
+    }
+
+    let (_tree, repo) = temp_engine_repo("topology-clean-twice");
+    for run in ["first", "second"] {
+        let stub = ObservedStub::new(0);
+        let report = run_with(&topology_options(&repo), &BorrowedObserved(&stub))
+            .unwrap_or_else(|error| panic!("the {run} run of a clean tree is admitted: {error}"));
+        assert_eq!(report.outcome(), RunOutcome::Complete, "{run}: {report:#?}");
+        assert!(!stub.workers().is_empty(), "{run}: its workers ran");
+        until_released(&repo, &report.run_id);
+    }
+}
+
+/// One pool, `claude-max`, for the topology stub's agent, in a file outside the checkout.
+fn stub_pool_file(tree: &ScratchTree) -> PathBuf {
+    let path = tree.path().join("pools.toml");
+    fs::write(
+        &path,
+        "[pools.claude-max]\nkind = \"subscription-window\"\nagent = \"claude-code\"\n",
+    )
+    .expect("the pools file");
+    path
+}
+
+/// Cuts a run's log after the first committed line whose event is `kind` and that `matches`,
+/// as a coordinator that died just after appending it leaves the log: a committed prefix.
+fn cut_log_after(
+    repo: &Path,
+    run_id: &str,
+    kind: &str,
+    matches: impl Fn(&serde_json::Value) -> bool,
+) {
+    let log = rundir::public_dir(repo, run_id).join("events.jsonl");
+    let text = fs::read_to_string(&log).expect("the run's event log");
+    let mut kept = String::new();
+    for line in text.split_inclusive('\n') {
+        kept.push_str(line);
+        let event: serde_json::Value =
+            serde_json::from_str(line.trim_end()).expect("a committed event");
+        if event["event"] == kind && matches(&event) {
+            fs::write(&log, kept).expect("the log, cut where its coordinator died");
+            return;
+        }
+    }
+    panic!("the premise: the log commits a matching `{kind}`:\n{text}");
+}
+
+/// The `status` a reader gets for `run_id`, through the public load and render.
+fn upstroke_status(repo: &Path, run_id: &str) -> String {
+    crate::status::render(&crate::status::load(repo, Some(run_id)).expect("status reads the run"))
+}
+
+/// The ledger row `status` prints for task `id`, split into its cells.
+fn ledger_cells(status: &str, id: &str) -> Vec<String> {
+    let ledger = status
+        .split_once("\nledger:\n")
+        .map(|(_, ledger)| ledger)
+        .unwrap_or_else(|| panic!("status prints a ledger:\n{status}"));
+    ledger
+        .lines()
+        .find(|line| line.split_whitespace().next() == Some(id))
+        .unwrap_or_else(|| panic!("the ledger has a row for `{id}`:\n{status}"))
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// L3 (regression review 3, finding 3; DESIGN §18, "the report and its ledger (§13)"). A
+/// schema-4 `status` prints the accounting projection `run` reports: the task ledger, the
+/// known total, its floors and the per-pool drain. A completed run of two tasks on one pool
+/// prints, byte for byte, the ledger the run itself returned, and its two fast merges say
+/// they spent nothing on review. The same log cut just after the second task's
+/// `attempt_started`, as a coordinator that died there leaves it, prints the first task's
+/// known spend and marks everything the cut-off attempt reaches as a floor: its row, the
+/// total and the pool, with the legend that says what `?` means.
+#[test]
+fn a_schema_4_status_prints_the_ledger_run_reports_for_a_completed_and_an_interrupted_run() {
+    let (tree, repo) = temp_engine_repo("topology-status-ledger");
+    let mut opts = topology_options(&repo);
+    opts.pools_path = Some(stub_pool_file(&tree));
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        0,
+    )));
+    let report = run_with(&opts, &source).expect("the schema-4 run completes");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:#?}");
+    until_released(&repo, &report.run_id);
+    let ledger = report.render_ledger();
+    assert!(
+        !report.total_is_floor() && report.total_cost_usd > 0.0 && ledger.contains("claude-max"),
+        "the premise: every amount is known and the pool paid for it:\n{ledger}"
+    );
+
+    let status = upstroke_status(&repo, &report.run_id);
+    assert!(
+        status.contains(&ledger),
+        "status prints the ledger the run reported:\n{status}\n--- the run's ledger:\n{ledger}"
+    );
+    let fast: Vec<&str> = status
+        .lines()
+        .filter(|line| line.contains(" fast expected "))
+        .collect();
+    assert_eq!(
+        fast.len(),
+        2,
+        "the premise: both merges were fast:\n{status}"
+    );
+    assert!(
+        fast.iter()
+            .all(|line| line.ends_with("(0 review(s), cost none)")),
+        "a fast merge runs no review, so its spend is known to be none:\n{status}"
+    );
+
+    let first = task(&report, "t1")
+        .total_cost_usd()
+        .expect("the first task's spend is known");
+    let second = crate::engine::topology::observe::observe(&repo, &report.run_id)
+        .expect("observes")
+        .expect("a schema-4 log")
+        .registry()
+        .and_then(|registry| {
+            registry
+                .entries()
+                .iter()
+                .find(|entry| entry.display_id.as_str() == "t2")
+        })
+        .map(|entry| entry.key.0)
+        .expect("t2 is registered");
+    cut_log_after(&repo, &report.run_id, "attempt_started", |event| {
+        event["data"]["key"] == second
+    });
+    let status = upstroke_status(&repo, &report.run_id);
+    assert!(status.contains("state: interrupted"), "{status}");
+    let known = ledger_cells(&status, "t1");
+    assert_eq!(
+        known.last().map(String::as_str),
+        Some(format!("${first:.4}").as_str()),
+        "the first task's spend is known and exact: {known:?}\n{status}"
+    );
+    let cut = ledger_cells(&status, "t2");
+    assert!(
+        cut.get(1).map(String::as_str) == Some("1")
+            && cut.len() > 3
+            && cut.iter().rev().take(3).all(|cell| cell == "—"),
+        "the cut-off attempt is counted, and nothing it spent is known: {cut:?}\n{status}"
+    );
+    for floor in [
+        format!("  total ${first:.4}? (api-equivalent"),
+        "  `?` marks a figure missing an attempt".to_owned(),
+        format!("    claude-max: 3 attempt(s), ${first:.4}?"),
+    ] {
+        assert!(
+            status.contains(&floor),
+            "the known spend is a floor, not a total: no `{floor}` in\n{status}"
+        );
+    }
+}
+
+/// L3, the integration reviews. Two independent tasks at width 2 make the second merge a stale
+/// candidate's re-verification, whose review pass is paid for by the verified task. A completed
+/// run's `status` prints the ledger the run reported, that pass's cost on the integration row
+/// and "none" on the fast one. The same log cut just after `merge_verification_started` leaves
+/// the verification in flight: the verified task's review is a floor, and so is the total.
+#[cfg(unix)]
+#[test]
+fn a_schema_4_status_prints_the_integration_review_spend_run_reports_and_its_floor_once_cut_off() {
+    let (tree, repo) = temp_engine_repo("topology-status-integration");
+    seed(
+        &repo,
+        TWO_INDEPENDENT_TASKS,
+        Some("[engine]\nmax_parallel = 2\n"),
+    );
+    let mut opts = topology_options(&repo);
+    opts.pools_path = Some(stub_pool_file(&tree));
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        "printf 'edited by the topology stub\\n' > \"out.$$.txt\"",
+        0,
+    )));
+    let report = run_with(&opts, &source).expect("the schema-4 run completes");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:#?}");
+    until_released(&repo, &report.run_id);
+    let observed = crate::engine::topology::observe::observe(&repo, &report.run_id)
+        .expect("observes")
+        .expect("a schema-4 log");
+    let projected = observed.report().expect("projects");
+    let stale = projected
+        .integration_ledger
+        .iter()
+        .find(|row| row.basis == "stale_clean")
+        .unwrap_or_else(|| {
+            panic!(
+                "the premise: one merge was a stale candidate's re-verification: {:#?}",
+                projected.integration_ledger
+            )
+        });
+    let paid = match (stale.reviews, stale.review_cost_usd) {
+        (1.., Some(cost)) if !stale.review_cost_incomplete => cost,
+        _ => panic!("the premise: the re-verification ran a priced review pass: {stale:#?}"),
+    };
+    let verified = observed.display_id(stale.candidate.key);
+
+    let ledger = report.render_ledger();
+    let status = upstroke_status(&repo, &report.run_id);
+    assert!(
+        status.contains(&ledger),
+        "status prints the ledger the run reported:\n{status}\n--- the run's ledger:\n{ledger}"
+    );
+    for (basis, cost) in [
+        (
+            "stale_clean",
+            format!("({} review(s), cost ${paid:.4})", stale.reviews),
+        ),
+        ("fast", "(0 review(s), cost none)".to_owned()),
+    ] {
+        assert!(
+            status
+                .lines()
+                .any(|line| line.contains(&format!(" {basis} expected ")) && line.ends_with(&cost)),
+            "the {basis} integration row ends `{cost}`:\n{status}"
+        );
+    }
+
+    cut_log_after(&repo, &report.run_id, "merge_verification_started", |_| {
+        true
+    });
+    let status = upstroke_status(&repo, &report.run_id);
+    assert!(status.contains("state: interrupted"), "{status}");
+    let cells = ledger_cells(&status, &verified);
+    let review = cells
+        .get(cells.len().saturating_sub(2))
+        .map_or("", String::as_str);
+    assert!(
+        review.starts_with('$') && review.ends_with('?'),
+        "the verified task's review is what its attempt's pass cost, and a floor: {cells:?}\n{status}"
+    );
+    assert!(
+        status
+            .lines()
+            .any(|line| line.trim_start().starts_with("total $")
+                && line.contains("? (api-equivalent")),
+        "the run's total is a floor:\n{status}"
+    );
+    assert!(
+        status
+            .lines()
+            .any(|line| line.contains(" -> open ")
+                && line.ends_with("(0 review(s), cost ? (unknown))")),
+        "the verification in flight is unknown on its integration row:\n{status}"
+    );
+}
+
+/// L4 (regression review 3, finding 4). A completed production run in a repository with no
+/// `.upstroke` exclusion leaves its generated public files (its log, frozen plan, report and
+/// locks) where Git ignores them: `git status` lists nothing, and an ordinary `git add -A`
+/// stages nothing.
+#[test]
+fn a_completed_schema_4_run_leaves_no_generated_file_for_an_ordinary_git_add_to_take() {
+    let (_tree, repo) = temp_engine_repo("topology-run-exclusion");
+    assert!(
+        !repo.join(".upstroke").exists(),
+        "the premise: the repository has no exclusion before its first run"
+    );
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        0,
+    )));
+    let report = run_with(&topology_options(&repo), &source).expect("the schema-4 run completes");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:#?}");
+    until_released(&repo, &report.run_id);
+    let generated: Vec<String> = fs::read_dir(rundir::public_dir(&repo, &report.run_id))
+        .expect("the run's public directory")
+        .map(|entry| {
+            entry
+                .expect("a public entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    assert!(
+        ["events.jsonl", "report.json"]
+            .iter()
+            .all(|name| generated.iter().any(|file| file == name)),
+        "the premise: the run generated its public files: {generated:?}"
+    );
+    let listed = status_of(&repo);
+    assert!(
+        listed.trim().is_empty(),
+        "`git status` lists none of the run's files: {listed}"
+    );
+    git_in(&repo, &["add", "-A"]);
+    let staged = git_in(&repo, &["diff", "--cached", "--name-only"]);
+    assert!(
+        staged.trim().is_empty(),
+        "an ordinary `git add -A` stages none of them: {staged}"
+    );
+}
+
+/// L4, the resume. A schema-4 resume makes the run exclusion, as the sequential resume does, so
+/// a run whose `.upstroke/.gitignore` went missing while it was parked is ignored by Git again
+/// once it is resumed.
+#[test]
+fn a_schema_4_resume_restores_a_missing_run_exclusion() {
+    let (_tree, repo) = temp_engine_repo("topology-resume-exclusion");
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        1,
+    )));
+    let parked = run_with(&topology_options(&repo), &source).expect("the run parks");
+    assert_eq!(parked.outcome(), RunOutcome::Parked, "{parked:#?}");
+    until_released(&repo, &parked.run_id);
+    let [asked] = parked.questions.as_slice() else {
+        panic!("one question: {parked:#?}");
+    };
+    crate::answer::answer(
+        &repo,
+        &asked.question.id.to_string(),
+        crate::answer::Reply::Text("the first".to_owned()),
+    )
+    .expect("the answer is recorded");
+    let exclusion = repo.join(".upstroke").join(".gitignore");
+    fs::remove_file(&exclusion).expect("the fresh run made the exclusion");
+    let exposed = status_of(&repo);
+    assert!(
+        exposed.contains(".upstroke/"),
+        "the premise: without the exclusion the run's files are exposed: {exposed}"
+    );
+
+    let mut resume = resume_options(&repo, &parked.run_id);
+    resume.private_root = None;
+    let report = resume_with(&resume, &source).expect("the resume completes the run");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:#?}");
+    until_released(&repo, &parked.run_id);
+    assert!(exclusion.exists(), "the resume made the exclusion again");
+    let listed = status_of(&repo);
+    assert!(
+        listed.trim().is_empty(),
+        "`git status` lists none of the run's files after the resume: {listed}"
+    );
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ExclusionState {
+    Absent,
+    Changed,
+}
+
+/// Leaves the checkout's run exclusion absent — `.upstroke` itself gone when nothing else is in
+/// it — or holding bytes that exclude nothing, so that making it is visible in every path and
+/// byte it touches.
+fn put_exclusion(repo: &Path, state: ExclusionState) {
+    let namespace = repo.join(".upstroke");
+    let exclusion = namespace.join(".gitignore");
+    match state {
+        ExclusionState::Absent => {
+            if exclusion.exists() {
+                fs::remove_file(&exclusion).expect("the exclusion, removed");
+            }
+            if namespace.exists()
+                && fs::read_dir(&namespace)
+                    .expect("the namespace")
+                    .next()
+                    .is_none()
+            {
+                fs::remove_dir(&namespace).expect("the empty namespace, removed");
+            }
+        }
+        ExclusionState::Changed => {
+            fs::create_dir_all(&namespace).expect("the namespace");
+            fs::write(&exclusion, "# excludes nothing\n").expect("an exclusion of other bytes");
+        }
+    }
+}
+
+/// Everything persistent in the checkout but its Git directory, the checkout itself included,
+/// by path relative to it: the operator's files and the engine's `.upstroke` namespace, its
+/// exclusion and every run's public half with its log. [`private_snapshot`]'s walk, without
+/// `.git`, whose refs [`every_ref`] reads and whose lease file belongs to the lease's holder.
+fn public_snapshot(repo: &Path) -> std::collections::BTreeMap<PathBuf, PrivateEntry> {
+    snapshot_under(repo, true, "")
+}
+
+fn public_snapshot_in(
+    repo: &Path,
+    case: &str,
+) -> std::collections::BTreeMap<PathBuf, PrivateEntry> {
+    snapshot_under(repo, true, case)
+}
+
+/// Runs `command` once for each exclusion and include state while `hold` keeps the checkout's
+/// worktree lease from it. Each run must be refused with `says`, build no worker or reviewer,
+/// and leave the checkout outside `.git`, the private root and every ref exactly as they were:
+/// every path, kind, mode and byte. Both snapshots are taken while the hold is held, so whatever
+/// taking it creates is in both.
+fn assert_refused_under_a_held_lease<H>(
+    repo: &Path,
+    what: &str,
+    says: &str,
+    hold: impl Fn() -> H,
+    command: impl Fn() -> Result<RunReport, UpstrokeError>,
+    built: impl Fn() -> usize,
+) {
+    let home = private_root_for(repo);
+    for exclusion in [ExclusionState::Absent, ExclusionState::Changed] {
+        for include in [IncludeState::Absent, IncludeState::Changed] {
+            put_exclusion(repo, exclusion);
+            put_include(&home, include);
+            let held = hold();
+            let public = public_snapshot(repo);
+            let private = private_snapshot(&home);
+            let refs = every_ref(repo);
+            let calls = built();
+            let refused = command().expect_err("the lease is held, so the command is refused");
+            let public_after = public_snapshot(repo);
+            let private_after = private_snapshot(&home);
+            let refs_after = every_ref(repo);
+            drop(held);
+            let case = format!("{what}, exclusion {exclusion:?}, include {include:?}");
+            assert!(refused.to_string().contains(says), "{case}: {refused}");
+            assert_eq!(built(), calls, "{case}: a worker or reviewer was built");
+            let moved = moved_entries(&public, &public_after);
+            assert!(
+                moved.is_empty(),
+                "{case}: the refused command wrote in the checkout: {moved:?}"
+            );
+            let moved = moved_entries(&private, &private_after);
+            assert!(
+                moved.is_empty(),
+                "{case}: the refused command wrote under the private root: {moved:?}"
+            );
+            assert_eq!(refs_after, refs, "{case}: the refs moved");
+        }
+    }
+}
+
+/// With nothing holding the lease, `command` is admitted and makes the run exclusion and the
+/// include from their absent states: the exclusion's fixed `*`, the include's fixed bytes, and
+/// on Unix the include's directory at `0700`.
+fn assert_admitted_and_published(
+    repo: &Path,
+    command: impl Fn() -> Result<RunReport, UpstrokeError>,
+) -> RunReport {
+    let home = private_root_for(repo);
+    put_exclusion(repo, ExclusionState::Absent);
+    put_include(&home, IncludeState::Absent);
+    let report = command().expect("with the lease free the command is admitted");
+    until_released(repo, &report.run_id);
+    assert_eq!(
+        fs::read(repo.join(".upstroke").join(".gitignore")).expect("the run exclusion"),
+        b"*\n",
+        "the admitted command made the run exclusion"
+    );
+    assert_eq!(
+        fs::read(include_for(repo)).expect("the include"),
+        crate::runner::host::RECORDED_OBJECTS_INCLUDE,
+        "the admitted command published the include"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = fs::metadata(home.join("git"))
+            .expect("the include's directory")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o700, "{mode:o}");
+    }
+    report
+}
+
+/// A surviving reaper's shared hold on `public`'s cleanup lease (R28): the suite's own holder,
+/// `rundir::tests::cleanup_hold_child`, in a child this test owns, which is killed and reaped
+/// when the returned value drops.
+#[cfg(unix)]
+fn a_surviving_reaper_holding(
+    public: &Path,
+) -> crate::agent::proc::test_support::readiness::Producer {
+    let mut reaper = crate::workspace_manager::fixture::spawn_ready_helper(
+        "rundir::tests::cleanup_hold_child",
+        &[("UPSTROKE_TEST_CLEANUP_DIR", public.as_os_str())],
+    );
+    reaper
+        .await_line("held", Duration::from_secs(30))
+        .or_fail("the surviving reaper never took its hold");
+    assert!(
+        rundir::observe_cleanup_hold(public, &mut rundir::NoHooks),
+        "the premise: a surviving reaper holds the run's cleanup lease"
+    );
+    reaper
+}
+
+/// PR12-R9-PUBLIC-PUBLICATION-BEFORE-WORKTREE-LOCK, PR12-REG7-PRELOCK-WRITES and
+/// PR12-N4-PRELOCK-PUBLICATION, one defect, the fresh half: through `run_with`, a fresh schema-4
+/// run that loses the worktree lease publishes nothing first, and the same run admitted makes
+/// both the exclusion and the include.
+#[test]
+fn a_fresh_schema_4_run_that_loses_the_worktree_lease_publishes_no_exclusion_and_no_include() {
+    let (_tree, repo) = temp_engine_repo("topology-fresh-lease-first");
+    let opts = topology_options(&repo);
+    assert!(
+        !repo.join(".upstroke").exists(),
+        "the premise: the checkout has no `.upstroke` before its first run"
+    );
+    let stub = ObservedStub::new(0);
+    let source = BorrowedObserved(&stub);
+    assert_refused_under_a_held_lease(
+        &repo,
+        "a fresh run under another conductor's lease",
+        "is already driving worktree",
+        || WorktreeLock::acquire(&repo).expect("the test's lease"),
+        || run_with(&opts, &source),
+        || stub.built().len(),
+    );
+    let first = assert_admitted_and_published(&repo, || run_with(&opts, &source));
+    assert_eq!(first.outcome(), RunOutcome::Complete, "{first:#?}");
+    #[cfg(unix)]
+    {
+        let public = rundir::public_dir(&repo, &first.run_id);
+        assert_refused_under_a_held_lease(
+            &repo,
+            "a fresh run beside a surviving reaper of the first",
+            "still has a process of its own alive",
+            || a_surviving_reaper_holding(&public),
+            || run_with(&opts, &source),
+            || stub.built().len(),
+        );
+        let second = assert_admitted_and_published(&repo, || run_with(&opts, &source));
+        assert_eq!(second.outcome(), RunOutcome::Complete, "{second:#?}");
+    }
+}
+
+/// The same defect, the resume half: through `resume_with`, a parked schema-4 run's resume that
+/// loses the worktree lease restores no exclusion and writes no include, its log and refs
+/// unmoved, and the same resume admitted makes both.
+#[test]
+fn a_schema_4_resume_that_loses_the_worktree_lease_restores_no_exclusion_and_writes_no_include() {
+    let (_tree, repo) = temp_engine_repo("topology-resume-lease-first");
+    let stub = ObservedStub::new(1);
+    let source = BorrowedObserved(&stub);
+    let parked = run_with(&topology_options(&repo), &source).expect("the run parks");
+    assert_eq!(parked.outcome(), RunOutcome::Parked, "{parked:#?}");
+    until_released(&repo, &parked.run_id);
+    let mut resume = resume_options(&repo, &parked.run_id);
+    resume.private_root = None;
+    let log = rundir::public_dir(&repo, &parked.run_id).join(rundir::EVENT_LOG);
+    let committed = fs::read(&log).expect("the parked run's log");
+
+    assert_refused_under_a_held_lease(
+        &repo,
+        "a resume under another conductor's lease",
+        "is already driving worktree",
+        || WorktreeLock::acquire(&repo).expect("the test's lease"),
+        || resume_with(&resume, &source),
+        || stub.built().len(),
+    );
+    #[cfg(unix)]
+    {
+        let public = rundir::public_dir(&repo, &parked.run_id);
+        assert_refused_under_a_held_lease(
+            &repo,
+            "a resume beside its run's surviving reaper",
+            "still has a process of its own alive",
+            || a_surviving_reaper_holding(&public),
+            || resume_with(&resume, &source),
+            || stub.built().len(),
+        );
+    }
+    assert!(
+        fs::read(&log).expect("the log") == committed,
+        "the refused resumes wrote the log"
+    );
+
+    let resumed = || {
+        event_kinds(&repo, &parked.run_id)
+            .iter()
+            .filter(|kind| *kind == "run_resumed")
+            .count()
+    };
+    let before = resumed();
+    let report = assert_admitted_and_published(&repo, || resume_with(&resume, &source));
+    assert_eq!(report.run_id, parked.run_id);
+    assert_eq!(
+        resumed(),
+        before + 1,
+        "the admitted resume appended `run_resumed`"
+    );
+}
+
+#[cfg(unix)]
+const DEFAULT_ROOT_LEASE_REPO: &str = "UPSTROKE_DEFAULT_ROOT_LEASE_REPO";
+
+/// The same defect over the default private root, which only the include's publication creates:
+/// in a child whose home is a directory of this fixture, so the default root it resolves is the
+/// fixture's and nobody else's.
+#[cfg(unix)]
+#[test]
+fn a_fresh_schema_4_run_over_the_default_root_that_loses_the_worktree_lease_creates_nothing_under_home()
+ {
+    let (tree, repo) = temp_engine_repo("topology-default-root-lease");
+    let home = tree.path().join("child-home");
+    fs::create_dir(&home).expect("the child's home");
+    let ended = crate::agent::proc::test_support::run_test_isolated(
+        "engine::tests::default_root_lease_child",
+        &[
+            ("HOME", home.as_os_str()),
+            ("USERPROFILE", home.as_os_str()),
+            (DEFAULT_ROOT_LEASE_REPO, repo.as_os_str()),
+        ],
+        Duration::from_secs(300),
+    );
+    assert!(
+        ended.status.is_some_and(|status| status.success()) && ended.stdout.contains("1 passed"),
+        "the default-root run, refused under a held lease and then admitted: {ended}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "subprocess helper"]
+fn default_root_lease_child() {
+    let Some(repo) = std::env::var_os(DEFAULT_ROOT_LEASE_REPO).map(PathBuf::from) else {
+        return;
+    };
+    let home = PathBuf::from(std::env::var_os("HOME").expect("the parent names the home"));
+    let root = rundir::default_private_root();
+    assert_eq!(
+        root,
+        home.join(".upstroke"),
+        "the premise: the default root hangs from this home"
+    );
+    assert!(
+        fs::symlink_metadata(&root).is_err(),
+        "the premise: no default root exists yet"
+    );
+    let mut opts = options(&repo);
+    opts.legacy_writer = false;
+    opts.private_root = None;
+    let stub = ObservedStub::new(0);
+    let source = BorrowedObserved(&stub);
+
+    let lease = WorktreeLock::acquire(&repo).expect("the test's lease");
+    let checkout = public_snapshot(&repo);
+    let homes = private_snapshot(&home);
+    let refs = every_ref(&repo);
+    let refused = run_with(&opts, &source).expect_err("the lease is held");
+    let checkout_after = public_snapshot(&repo);
+    let homes_after = private_snapshot(&home);
+    let refs_after = every_ref(&repo);
+    drop(lease);
+    assert!(
+        refused.to_string().contains("is already driving worktree"),
+        "{refused}"
+    );
+    assert!(stub.built().is_empty(), "no worker or reviewer was built");
+    let moved = moved_entries(&homes, &homes_after);
+    assert!(
+        moved.is_empty(),
+        "the refused run created under the home: {moved:?}"
+    );
+    let moved = moved_entries(&checkout, &checkout_after);
+    assert!(
+        moved.is_empty(),
+        "the refused run wrote in the checkout: {moved:?}"
+    );
+    assert_eq!(refs_after, refs, "the refs moved");
+
+    let report = run_with(&opts, &source).expect("with the lease free the run is admitted");
+    until_released(&repo, &report.run_id);
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:#?}");
+    assert_eq!(
+        fs::read(root.join("git").join("recorded-objects.gitconfig")).expect("the include"),
+        crate::runner::host::RECORDED_OBJECTS_INCLUDE,
+        "the admitted run created the default root through the include's publication"
+    );
+    assert_eq!(
+        private_dir_of(&repo, &report.run_id),
+        fs::canonicalize(&root)
+            .expect("the default root, created")
+            .join("runs")
+            .join(&report.run_id),
+        "the run's private half is under the default root it authorized once it existed"
+    );
+    assert_eq!(
+        fs::read(repo.join(".upstroke").join(".gitignore")).expect("the run exclusion"),
+        b"*\n"
+    );
+}
+
+fn with_initial_read_failing<T>(log: &Path, call: impl FnOnce() -> T) -> (T, usize) {
+    let fault = crate::engine::topology::entry::initial_log_read_fault::arm(log);
+    let result = call();
+    (result, fault.hits())
+}
+
+fn assert_the_initial_read_refused(refused: Option<UpstrokeError>, log: &Path, case: &str) {
+    match refused {
+        Some(UpstrokeError::Io { path, source }) => {
+            assert_eq!(path, log, "{case}: the refusal names another path");
+            assert_eq!(
+                source.to_string(),
+                crate::engine::topology::entry::initial_log_read_fault::INJECTED,
+                "{case}: the refusal is not the failed read's own"
+            );
+        }
+        other => panic!("{case}: not the failed initial read's own refusal: {other:?}"),
+    }
+}
+
+#[test]
+fn a_schema_4_resume_whose_router_cannot_read_its_log_refuses_before_publishing_anything() {
+    use crate::engine::topology::entry::route_resume;
+
+    let (_tree, repo) = temp_engine_repo("topology-resume-unread-route");
+    let stub = ObservedStub::new(1);
+    let source = BorrowedObserved(&stub);
+    let parked = run_with(&topology_options(&repo), &source).expect("the run parks");
+    assert_eq!(parked.outcome(), RunOutcome::Parked, "{parked:#?}");
+    until_released(&repo, &parked.run_id);
+    let public = rundir::public_dir(&repo, &parked.run_id);
+    let log = public.join(rundir::EVENT_LOG);
+    let committed = fs::read(&log).expect("the parked run's log");
+    let home = private_root_for(&repo);
+    let resume = resume_options(&repo, &parked.run_id);
+    assert_eq!(
+        rundir::classify_run_dir(&public),
+        rundir::RunDirClass::Committed,
+        "the premise: the census classifies the run's committed header"
+    );
+    assert_eq!(
+        rundir::resolve_run_id(&repo, &parked.run_id)
+            .ok()
+            .as_deref(),
+        Some(parked.run_id.as_str()),
+        "the premise: the run's id resolves"
+    );
+    assert!(
+        route_resume(&resume)
+            .expect("a readable schema-4 log routes")
+            .is_some(),
+        "the control: read, its header routes the resume to the topology"
+    );
+
+    for exclusion in [ExclusionState::Absent, ExclusionState::Changed] {
+        for include in [IncludeState::Absent, IncludeState::Changed] {
+            put_exclusion(&repo, exclusion);
+            put_include(&home, include);
+            let lease = WorktreeLock::acquire(&repo).expect("the test's lease");
+            let checkout = public_snapshot(&repo);
+            let private = private_snapshot(&home);
+            let refs = every_ref(&repo);
+            let calls = stub.built().len();
+            let (refused, reads) =
+                with_initial_read_failing(&log, || resume_with(&resume, &source));
+            let checkout_after = public_snapshot(&repo);
+            let private_after = private_snapshot(&home);
+            let refs_after = every_ref(&repo);
+            drop(lease);
+            let case = format!("exclusion {exclusion:?}, include {include:?}");
+            let moved = moved_entries(&private, &private_after);
+            assert!(
+                moved.is_empty(),
+                "{case}: the unread resume wrote under the private root: {moved:?}"
+            );
+            let moved = moved_entries(&checkout, &checkout_after);
+            assert!(
+                moved.is_empty(),
+                "{case}: the unread resume wrote in the checkout: {moved:?}"
+            );
+            assert_eq!(refs_after, refs, "{case}: the refs moved");
+            assert_eq!(
+                stub.built().len(),
+                calls,
+                "{case}: a worker or reviewer was built"
+            );
+            assert_eq!(reads, 1, "{case}: the router's initial read failed once");
+            assert_the_initial_read_refused(refused.err(), &log, &case);
+        }
+    }
+
+    let private_dir = private_dir_of(&repo, &parked.run_id);
+    let owner_path = private_dir.join(rundir::OWNER_RECORD);
+    let commit_path = private_dir.join(rundir::COMMIT_RECORD);
+    let owner = fs::read(&owner_path).expect("owner.json");
+    let commit = fs::read(&commit_path).expect("committed.json");
+    let with_field = |record: &[u8], field: &str, value: &str| {
+        let mut parsed: serde_json::Value = serde_json::from_slice(record).expect("a record");
+        parsed[field] = serde_json::Value::from(value);
+        serde_json::to_vec(&parsed).expect("the damaged record")
+    };
+    for (what, path, original, damaged, says) in [
+        (
+            "another run's owner record",
+            &owner_path,
+            &owner,
+            with_field(&owner, "run_id", "01FOREIGNRUN00000000000000"),
+            "records run id",
+        ),
+        (
+            "a commit record of another first line",
+            &commit_path,
+            &commit,
+            with_field(
+                &commit,
+                "run_started_sha256",
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            ),
+            "says the committed first line digests",
+        ),
+    ] {
+        fs::write(path, &damaged).expect("the record, damaged");
+        put_include(&home, IncludeState::Absent);
+        let private = private_snapshot(&home);
+        let (refused, reads) = with_initial_read_failing(&log, || resume_with(&resume, &source));
+        let moved = moved_entries(&private, &private_snapshot(&home));
+        assert!(
+            moved.is_empty(),
+            "{what}, its log unread: the resume wrote under the private root: {moved:?}"
+        );
+        assert_eq!(reads, 1, "{what}: the router's initial read failed once");
+        assert_the_initial_read_refused(refused.err(), &log, what);
+        let refused = resume_with(&resume, &source)
+            .expect_err("read, a run whose records do not prove it is refused");
+        let moved = moved_entries(&private, &private_snapshot(&home));
+        assert!(
+            moved.is_empty(),
+            "{what}, its log read: the resume wrote under the private root: {moved:?}"
+        );
+        assert!(refused.to_string().contains(says), "{what}: {refused}");
+        fs::write(path, original).expect("the record, restored");
+    }
+
+    put_include(&home, IncludeState::Changed);
+    let lease = WorktreeLock::acquire(&repo).expect("the test's lease");
+    let checkout = public_snapshot(&repo);
+    let private = private_snapshot(&home);
+    let refused = resume_with(&resume, &source).expect_err("read, the resume meets the lease");
+    let checkout_after = public_snapshot(&repo);
+    let private_after = private_snapshot(&home);
+    drop(lease);
+    assert!(
+        refused.to_string().contains("is already driving worktree"),
+        "{refused}"
+    );
+    let moved = moved_entries(&private, &private_after);
+    assert!(
+        moved.is_empty(),
+        "read, the refused resume wrote under the private root: {moved:?}"
+    );
+    let moved = moved_entries(&checkout, &checkout_after);
+    assert!(
+        moved.is_empty(),
+        "read, the refused resume wrote in the checkout: {moved:?}"
+    );
+    assert!(
+        fs::read(&log).expect("the log") == committed,
+        "a refused resume wrote the log"
+    );
+    let resumed = || {
+        event_kinds(&repo, &parked.run_id)
+            .iter()
+            .filter(|kind| *kind == "run_resumed")
+            .count()
+    };
+    let before = resumed();
+    let report = assert_admitted_and_published(&repo, || resume_with(&resume, &source));
+    assert_eq!(report.run_id, parked.run_id);
+    assert_eq!(
+        resumed(),
+        before + 1,
+        "the admitted resume appended `run_resumed`"
+    );
+
+    let (_legacy_tree, legacy_repo, legacy_run) = parked_run("topology-resume-unread-legacy");
+    let legacy_resume = resume_options(&legacy_repo, &legacy_run);
+    let legacy_log = rundir::public_dir(&legacy_repo, &legacy_run).join(rundir::EVENT_LOG);
+    let legacy_home = private_root_for(&legacy_repo);
+    assert!(
+        route_resume(&legacy_resume)
+            .expect("a readable legacy log routes")
+            .is_none(),
+        "the control: read, a legacy header routes the resume to the legacy lines"
+    );
+    put_include(&legacy_home, IncludeState::Absent);
+    let checkout = public_snapshot(&legacy_repo);
+    let private = private_snapshot(&legacy_home);
+    let (refused, reads) = with_initial_read_failing(&legacy_log, || {
+        resume_with(&legacy_resume, &fake(Effect::EditFile))
+    });
+    let moved = moved_entries(&private, &private_snapshot(&legacy_home));
+    assert!(
+        moved.is_empty(),
+        "a legacy run's unread log: the resume wrote under the private root: {moved:?}"
+    );
+    let moved = moved_entries(&checkout, &public_snapshot(&legacy_repo));
+    assert!(
+        moved.is_empty(),
+        "a legacy run's unread log: the resume wrote in the checkout: {moved:?}"
+    );
+    assert_eq!(reads, 1, "the legacy router's initial read failed once");
+    assert_the_initial_read_refused(
+        refused.err(),
+        &legacy_log,
+        "a legacy run whose log the router cannot read",
+    );
+    let report = resume_answering(&legacy_repo, &legacy_run, Effect::EditFile);
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:#?}");
+    assert_eq!(
+        fs::read(include_for(&legacy_repo)).expect("the include"),
+        crate::runner::host::RECORDED_OBJECTS_INCLUDE,
+        "read, the legacy lines published the include as before"
+    );
+}
+
+#[cfg(unix)]
+const DEFAULT_ROOT_UNREAD_REPO: &str = "UPSTROKE_DEFAULT_ROOT_UNREAD_REPO";
+
+#[cfg(unix)]
+const DEFAULT_ROOT_UNREAD_RUN: &str = "UPSTROKE_DEFAULT_ROOT_UNREAD_RUN";
+
+#[cfg(unix)]
+const DEFAULT_ROOT_UNREAD_DONE: &str =
+    "default-root unread resume: refused in both default-root states, then admitted";
+
+#[cfg(unix)]
+#[test]
+fn a_schema_4_resume_over_the_default_root_whose_router_cannot_read_its_log_creates_nothing_under_home()
+ {
+    let (tree, repo) = temp_engine_repo("topology-default-root-unread");
+    let stub = ObservedStub::new(1);
+    let parked =
+        run_with(&topology_options(&repo), &BorrowedObserved(&stub)).expect("the run parks");
+    assert_eq!(parked.outcome(), RunOutcome::Parked, "{parked:#?}");
+    until_released(&repo, &parked.run_id);
+    let home = tree.path().join("child-home");
+    fs::create_dir(&home).expect("the child's home");
+    let ended = crate::agent::proc::test_support::run_test_isolated(
+        "engine::tests::default_root_unread_resume_child",
+        &[
+            ("HOME", home.as_os_str()),
+            ("USERPROFILE", home.as_os_str()),
+            (DEFAULT_ROOT_UNREAD_REPO, repo.as_os_str()),
+            (
+                DEFAULT_ROOT_UNREAD_RUN,
+                std::ffi::OsStr::new(parked.run_id.as_str()),
+            ),
+        ],
+        Duration::from_secs(300),
+    );
+    assert!(
+        ended.status.is_some_and(|status| status.success())
+            && ended.stdout.contains("1 passed")
+            && ended.stderr.contains(DEFAULT_ROOT_UNREAD_DONE),
+        "the default-root resume, refused on its unread log and then admitted: {ended}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "subprocess helper"]
+fn default_root_unread_resume_child() {
+    let (Some(repo), Some(run_id)) = (
+        std::env::var_os(DEFAULT_ROOT_UNREAD_REPO).map(PathBuf::from),
+        std::env::var(DEFAULT_ROOT_UNREAD_RUN).ok(),
+    ) else {
+        return;
+    };
+    let home = PathBuf::from(std::env::var_os("HOME").expect("the parent names the home"));
+    let root = rundir::default_private_root();
+    assert_eq!(
+        root,
+        home.join(".upstroke"),
+        "the premise: the default root hangs from this home"
+    );
+    assert!(
+        fs::symlink_metadata(&root).is_err(),
+        "the premise: no default root exists yet"
+    );
+    let log = rundir::public_dir(&repo, &run_id).join(rundir::EVENT_LOG);
+    let mut resume = resume_options(&repo, &run_id);
+    resume.private_root = None;
+    let stub = ObservedStub::new(0);
+    let source = BorrowedObserved(&stub);
+
+    for state in ["no default root", "a default root holding another include"] {
+        if state != "no default root" {
+            put_include(&root, IncludeState::Changed);
+        }
+        let lease = WorktreeLock::acquire(&repo).expect("the test's lease");
+        let homes = private_snapshot(&home);
+        let checkout = public_snapshot(&repo);
+        let refs = every_ref(&repo);
+        let (refused, reads) = with_initial_read_failing(&log, || resume_with(&resume, &source));
+        let homes_after = private_snapshot(&home);
+        let checkout_after = public_snapshot(&repo);
+        let refs_after = every_ref(&repo);
+        drop(lease);
+        let moved = moved_entries(&homes, &homes_after);
+        assert!(
+            moved.is_empty(),
+            "{state}: the unread resume wrote under the home: {moved:?}"
+        );
+        let moved = moved_entries(&checkout, &checkout_after);
+        assert!(
+            moved.is_empty(),
+            "{state}: the unread resume wrote in the checkout: {moved:?}"
+        );
+        assert_eq!(refs_after, refs, "{state}: the refs moved");
+        assert!(
+            stub.built().is_empty(),
+            "{state}: a worker or reviewer was built"
+        );
+        assert_eq!(reads, 1, "{state}: the router's initial read failed once");
+        assert_the_initial_read_refused(refused.err(), &log, state);
+    }
+
+    let homes = private_snapshot(&home);
+    let report = assert_admitted_and_published(&repo, || resume_with(&resume, &source));
+    assert_eq!(report.run_id, run_id);
+    let moved = moved_entries(&homes, &private_snapshot(&home));
+    assert!(
+        moved.is_empty(),
+        "read, the schema-4 resume wrote under today's default root, which is not its authority: \
+         {moved:?}"
+    );
+    crate::workspace_manager::fixture::say(DEFAULT_ROOT_UNREAD_DONE);
+}
+
+const RETAINED_HUSK_PRODUCER: &str = "engine::topology::create::tests::create_kill_child";
+
+fn retained_p5b_husk(root: &Path) -> String {
+    let exe = std::env::current_exe().expect("the test binary");
+    let mut command = CommandSpec::new(exe.to_string_lossy().into_owned());
+    command.args = [
+        "--exact",
+        RETAINED_HUSK_PRODUCER,
+        "--ignored",
+        "--nocapture",
+        "--test-threads",
+        "1",
+    ]
+    .map(str::to_owned)
+    .to_vec();
+    command.env = vec![
+        (
+            "UPSTROKE_TEST_KILL_DIR".to_owned(),
+            root.to_string_lossy().into_owned(),
+        ),
+        ("UPSTROKE_TEST_KILL_SITE".to_owned(), "p5b".to_owned()),
+    ];
+    let request = crate::runner::gate_request(
+        command,
+        root.to_path_buf(),
+        Duration::from_secs(120),
+        crate::runner::InvocationId::attempt(
+            crate::topology::registry::TaskKey(0),
+            crate::topology::events::GenerationId(0),
+            crate::topology::events::AttemptNumber(1),
+            crate::runner::invocation::AttemptRole::Gate(0),
+            0,
+        ),
+    );
+    let output =
+        crate::runner::Runner::run_blocking(&crate::runner::host::HostRunner::new(), &request)
+            .expect("the producer starts");
+    assert!(
+        !output.timed_out,
+        "the producer outlived its bound: {output:?}"
+    );
+    assert_ne!(
+        output.code,
+        Some(0),
+        "the producer must have died at P5b: {output:?}"
+    );
+
+    let repo = root.join("repo");
+    let [husk]: [String; 1] =
+        rundir::run_dir_names(&repo)
+            .try_into()
+            .unwrap_or_else(|names: Vec<String>| {
+                panic!("the producer made one run directory: {names:?}")
+            });
+    let public = rundir::public_dir(&repo, &husk);
+    let private = fs::canonicalize(root.join("private"))
+        .expect("the creation private root")
+        .join("runs")
+        .join(&husk);
+    assert!(
+        private.join(rundir::COMMIT_RECORD).is_file(),
+        "the commit record is what makes this the P5b prefix"
+    );
+    assert!(
+        fs::read(public.join(rundir::EVENT_LOG))
+            .expect("the log exists")
+            .is_empty(),
+        "nothing was appended"
+    );
+    assert_eq!(rundir::classify_run_dir(&public), rundir::RunDirClass::Husk);
+    let report = rundir::husk_report(
+        &repo,
+        &husk,
+        &rundir::RepoKey::v1(&root.join("git-dir")),
+        &root.join("private"),
+    );
+    assert!(
+        matches!(
+            report.disposition,
+            rundir::HuskDisposition::Retained(rundir::RetainReason::PossiblyCommitted)
+        ),
+        "{:?}",
+        report.disposition
+    );
+    husk
+}
+
+const WORKTREE_LEASE_CONTENDER: &str = "engine::tests::worktree_lease_contender";
+
+const CONTENDER_REPO: &str = "UPSTROKE_TEST_CONTENDER_REPO";
+
+const CONTENDER_GIT_DIR: &str = "UPSTROKE_TEST_CONTENDER_GIT_DIR";
+
+const CONTENDER_TOOK: &str = "worktree lease contender: took the lease and gave it back";
+
+const CONTENDER_REFUSED: &str = "worktree lease contender: refused: ";
+
+#[derive(Debug, PartialEq, Eq)]
+enum Contended {
+    Took,
+    Refused(String),
+}
+
+fn contend_for_the_worktree_lease(
+    repo: &Path,
+    git_dir: &Path,
+    scratch: &Path,
+    case: &str,
+) -> Contended {
+    let exe = std::env::current_exe().expect("the test binary");
+    let mut command = CommandSpec::new(exe.to_string_lossy().into_owned());
+    command.args = [
+        "--exact",
+        WORKTREE_LEASE_CONTENDER,
+        "--ignored",
+        "--nocapture",
+        "--test-threads",
+        "1",
+    ]
+    .map(str::to_owned)
+    .to_vec();
+    command.env = vec![
+        (
+            CONTENDER_REPO.to_owned(),
+            repo.to_string_lossy().into_owned(),
+        ),
+        (
+            CONTENDER_GIT_DIR.to_owned(),
+            git_dir.to_string_lossy().into_owned(),
+        ),
+    ];
+    let request = crate::runner::gate_request(
+        command,
+        scratch.to_path_buf(),
+        Duration::from_secs(120),
+        crate::runner::InvocationId::attempt(
+            crate::topology::registry::TaskKey(0),
+            crate::topology::events::GenerationId(0),
+            crate::topology::events::AttemptNumber(1),
+            crate::runner::invocation::AttemptRole::Gate(0),
+            0,
+        ),
+    );
+    let output =
+        crate::runner::Runner::run_blocking(&crate::runner::host::HostRunner::new(), &request)
+            .unwrap_or_else(|error| panic!("{case}: the lease contender did not run: {error}"));
+    assert!(
+        !output.timed_out && output.code == Some(0) && output.stdout.contains("1 passed"),
+        "{case}: the lease contender did not run to its end: {output:?}"
+    );
+    if output.stderr.contains(CONTENDER_TOOK) {
+        return Contended::Took;
+    }
+    let refused = output
+        .stderr
+        .lines()
+        .find_map(|line| line.strip_prefix(CONTENDER_REFUSED))
+        .unwrap_or_else(|| panic!("{case}: the lease contender said neither: {output:?}"));
+    Contended::Refused(refused.to_owned())
+}
+
+fn assert_the_lease_is(held: bool, repo: &Path, git_dir: &Path, scratch: &Path, case: &str) {
+    let contended = contend_for_the_worktree_lease(repo, git_dir, scratch, case);
+    if !held {
+        assert_eq!(
+            contended,
+            Contended::Took,
+            "{case}: another process could not take the free worktree lease"
+        );
+        return;
+    }
+    let Contended::Refused(refusal) = &contended else {
+        panic!("{case}: another process took the worktree lease this test holds");
+    };
+    assert!(
+        refusal.contains("is already driving worktree"),
+        "{case}: the contender was refused for another reason: {refusal}"
+    );
+    if cfg!(unix) {
+        let holder = format!("(pid {})", std::process::id());
+        assert!(
+            refusal.contains(&holder),
+            "{case}: the lease's holder is not this process {holder}: {refusal}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "subprocess helper"]
+fn worktree_lease_contender() {
+    let (Some(repo), Some(git_dir)) = (
+        std::env::var_os(CONTENDER_REPO).map(PathBuf::from),
+        std::env::var_os(CONTENDER_GIT_DIR).map(PathBuf::from),
+    ) else {
+        return;
+    };
+    match WorktreeLock::acquire_in(&repo, &git_dir) {
+        Ok(lease) => {
+            drop(lease);
+            crate::workspace_manager::fixture::say(CONTENDER_TOOK);
+        }
+        Err(refused) => {
+            crate::workspace_manager::fixture::say(&format!("{CONTENDER_REFUSED}{refused}"));
+        }
+    }
+}
+
+#[test]
+fn a_retained_schema_4_husk_is_refused_before_any_root_is_published() {
+    use crate::engine::topology::entry::route_resume;
+
+    let (_legacy_tree, legacy_repo, legacy_run) = parked_run("topology-husk-legacy");
+    assert!(
+        route_resume(&resume_options(&legacy_repo, &legacy_run))
+            .expect("a resolved legacy run routes")
+            .is_none(),
+        "the control: a resolved legacy run routes to the legacy lines"
+    );
+    put_include(&private_root_for(&legacy_repo), IncludeState::Absent);
+    let report = resume_answering(&legacy_repo, &legacy_run, Effect::EditFile);
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:#?}");
+    assert_eq!(
+        fs::read(include_for(&legacy_repo)).expect("the include"),
+        crate::runner::host::RECORDED_OBJECTS_INCLUDE,
+        "the control: the legacy lines published the include as before"
+    );
+
+    let (tree, repo) = temp_engine_repo("topology-husk-refusal");
+    let husk = retained_p5b_husk(tree.path());
+    let creation_root = tree.path().join("private");
+    let named = private_root_for(&repo);
+    fs::create_dir_all(&named).expect("the root the resume names");
+    assert_ne!(
+        fs::canonicalize(&creation_root).expect("the creation root"),
+        fs::canonicalize(&named).expect("the named root"),
+        "the premise: the resume names a root the husk was not created under"
+    );
+    let says = rundir::resolve_run_id(&repo, &husk)
+        .expect_err("the premise: the resolver refuses the husk's exact id")
+        .to_string();
+    assert!(
+        says.contains(&format!("`{husk}` never recorded a committed run_started")),
+        "the premise: the resolver's husk sentence names this run: {says}"
+    );
+    let resume = resume_options(&repo, &husk);
+    let stub = ObservedStub::new(0);
+    let source = BorrowedObserved(&stub);
+    let git_dir = repo.join(".git");
+    drop(WorktreeLock::acquire(&repo).expect("the lease, taken once so that its file exists"));
+    assert!(
+        git_dir.join("upstroke-worktree.lock").is_file(),
+        "the premise: the lease's own file exists before the first snapshot of .git, so no lease \
+         taken below creates anything there"
+    );
+
+    for held in [false, true] {
+        for exclusion in [ExclusionState::Absent, ExclusionState::Changed] {
+            for include in [IncludeState::Absent, IncludeState::Changed] {
+                put_exclusion(&repo, exclusion);
+                put_include(&named, include);
+                let case =
+                    format!("lease held {held}, exclusion {exclusion:?}, include {include:?}");
+                let git = private_snapshot_in(&git_dir, &case);
+                let lease = held.then(|| WorktreeLock::acquire(&repo).expect("the test's lease"));
+                assert_the_lease_is(
+                    held,
+                    &repo,
+                    &git_dir,
+                    tree.path(),
+                    &format!("{case}, before the resume"),
+                );
+                let selected = private_snapshot_in(&named, &case);
+                let created = private_snapshot_in(&creation_root, &case);
+                let checkout = public_snapshot_in(&repo, &case);
+                let refused = resume_with(&resume, &source);
+                let selected_after = private_snapshot_in(&named, &case);
+                let created_after = private_snapshot_in(&creation_root, &case);
+                let checkout_after = public_snapshot_in(&repo, &case);
+                if held {
+                    assert_the_lease_is(
+                        true,
+                        &repo,
+                        &git_dir,
+                        tree.path(),
+                        &format!("{case}, after the resume and every observation under the lease"),
+                    );
+                }
+                drop(lease);
+                let git_after = private_snapshot_in(&git_dir, &case);
+                for (place, before, after) in [
+                    ("under the root it names", &selected, &selected_after),
+                    ("under the husk's creation root", &created, &created_after),
+                    ("in the checkout", &checkout, &checkout_after),
+                    ("in the checkout's Git directory", &git, &git_after),
+                ] {
+                    let moved = moved_entries(before, after);
+                    assert!(
+                        moved.is_empty(),
+                        "{case}: the husk's resume wrote {place}: {moved:?}"
+                    );
+                }
+                assert!(
+                    stub.built().is_empty(),
+                    "{case}: a worker or reviewer was built"
+                );
+                let refused = refused.expect_err("a husk has no run to open");
+                assert_eq!(
+                    refused.to_string(),
+                    says,
+                    "{case}: not the resolver's own refusal"
+                );
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+const DEFAULT_ROOT_HUSK_REPO: &str = "UPSTROKE_DEFAULT_ROOT_HUSK_REPO";
+
+#[cfg(unix)]
+const DEFAULT_ROOT_HUSK_RUN: &str = "UPSTROKE_DEFAULT_ROOT_HUSK_RUN";
+
+#[cfg(unix)]
+const DEFAULT_ROOT_HUSK_CREATION_ROOT: &str = "UPSTROKE_DEFAULT_ROOT_HUSK_CREATION_ROOT";
+
+#[cfg(unix)]
+const DEFAULT_ROOT_HUSK_DONE: &str =
+    "default-root husk resume: refused in both default-root states, the lease free and held";
+
+#[cfg(unix)]
+#[test]
+fn a_retained_schema_4_husk_resumed_over_the_default_root_creates_nothing_under_home() {
+    let (tree, repo) = temp_engine_repo("topology-husk-default-root");
+    let husk = retained_p5b_husk(tree.path());
+    let creation_root = tree.path().join("private");
+    let home = tree.path().join("child-home");
+    fs::create_dir(&home).expect("the child's home");
+    let ended = crate::agent::proc::test_support::run_test_isolated(
+        "engine::tests::default_root_husk_resume_child",
+        &[
+            ("HOME", home.as_os_str()),
+            ("USERPROFILE", home.as_os_str()),
+            (DEFAULT_ROOT_HUSK_REPO, repo.as_os_str()),
+            (DEFAULT_ROOT_HUSK_RUN, std::ffi::OsStr::new(husk.as_str())),
+            (DEFAULT_ROOT_HUSK_CREATION_ROOT, creation_root.as_os_str()),
+        ],
+        Duration::from_secs(300),
+    );
+    assert!(
+        ended.status.is_some_and(|status| status.success())
+            && ended.stdout.contains("1 passed")
+            && ended.stderr.contains(DEFAULT_ROOT_HUSK_DONE),
+        "the default-root husk resume, refused before anything was published: {ended}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "subprocess helper"]
+fn default_root_husk_resume_child() {
+    let (Some(repo), Some(run_id), Some(creation_root)) = (
+        std::env::var_os(DEFAULT_ROOT_HUSK_REPO).map(PathBuf::from),
+        std::env::var(DEFAULT_ROOT_HUSK_RUN).ok(),
+        std::env::var_os(DEFAULT_ROOT_HUSK_CREATION_ROOT).map(PathBuf::from),
+    ) else {
+        return;
+    };
+    let home = PathBuf::from(std::env::var_os("HOME").expect("the parent names the home"));
+    let root = rundir::default_private_root();
+    assert_eq!(
+        root,
+        home.join(".upstroke"),
+        "the premise: the default root hangs from this home"
+    );
+    assert!(
+        fs::symlink_metadata(&root).is_err(),
+        "the premise: no default root exists yet"
+    );
+    assert!(
+        !creation_root.starts_with(&home),
+        "the premise: the husk was created under a root outside this home"
+    );
+    let says = rundir::resolve_run_id(&repo, &run_id)
+        .expect_err("the premise: the resolver refuses the husk's exact id")
+        .to_string();
+    let mut resume = resume_options(&repo, &run_id);
+    resume.private_root = None;
+    let stub = ObservedStub::new(0);
+    let source = BorrowedObserved(&stub);
+    let git_dir = repo.join(".git");
+    let scratch = repo.parent().expect("the checkout's fixture tree");
+    drop(WorktreeLock::acquire(&repo).expect("the lease, taken once so that its file exists"));
+    assert!(
+        git_dir.join("upstroke-worktree.lock").is_file(),
+        "the premise: the lease's own file exists before the first snapshot of .git, so no lease \
+         taken below creates anything there"
+    );
+
+    for state in ["no default root", "a default root holding another include"] {
+        if state != "no default root" {
+            put_include(&root, IncludeState::Changed);
+        }
+        for held in [false, true] {
+            let case = format!("{state}, lease held {held}");
+            let git = private_snapshot_in(&git_dir, &case);
+            let lease = held.then(|| WorktreeLock::acquire(&repo).expect("the test's lease"));
+            assert_the_lease_is(
+                held,
+                &repo,
+                &git_dir,
+                scratch,
+                &format!("{case}, before the resume"),
+            );
+            let homes = private_snapshot_in(&home, &case);
+            let created = private_snapshot_in(&creation_root, &case);
+            let checkout = public_snapshot_in(&repo, &case);
+            let refused = resume_with(&resume, &source);
+            let homes_after = private_snapshot_in(&home, &case);
+            let created_after = private_snapshot_in(&creation_root, &case);
+            let checkout_after = public_snapshot_in(&repo, &case);
+            if held {
+                assert_the_lease_is(
+                    true,
+                    &repo,
+                    &git_dir,
+                    scratch,
+                    &format!("{case}, after the resume and every observation under the lease"),
+                );
+            }
+            drop(lease);
+            let git_after = private_snapshot_in(&git_dir, &case);
+            for (place, before, after) in [
+                ("under the home", &homes, &homes_after),
+                ("under the husk's creation root", &created, &created_after),
+                ("in the checkout", &checkout, &checkout_after),
+                ("in the checkout's Git directory", &git, &git_after),
+            ] {
+                let moved = moved_entries(before, after);
+                assert!(
+                    moved.is_empty(),
+                    "{case}: the husk's resume wrote {place}: {moved:?}"
+                );
+            }
+            assert!(
+                stub.built().is_empty(),
+                "{case}: a worker or reviewer was built"
+            );
+            let refused = refused.expect_err("a husk has no run to open");
+            assert_eq!(
+                refused.to_string(),
+                says,
+                "{case}: not the resolver's own refusal"
+            );
+        }
+    }
+    crate::workspace_manager::fixture::say(DEFAULT_ROOT_HUSK_DONE);
+}
+
+fn execution_roots_under(private_root: &Path) -> Vec<String> {
+    let workspaces = private_root.join("workspaces");
+    let keys = match fs::read_dir(&workspaces) {
+        Ok(keys) => keys,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(error) => panic!("list {}: {error}", workspaces.display()),
+    };
+    let mut roots = Vec::new();
+    for key in keys {
+        let key = key.expect("a repository namespace").path();
+        for root in
+            fs::read_dir(&key).unwrap_or_else(|error| panic!("list {}: {error}", key.display()))
+        {
+            roots.push(
+                root.expect("an execution root")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+    }
+    roots.sort();
+    roots
+}
+
+fn recorded_execution_root(repo: &Path, run_id: &str) -> PathBuf {
+    PathBuf::from(
+        first_line_of_the_log(repo, run_id)["data"]["execution_root"]
+            .as_str()
+            .expect("the run records its execution root"),
+    )
+}
+
+fn execution_namespaces(repo: &Path) -> Vec<String> {
+    let workspaces = private_root_for(repo).join("workspaces");
+    let mut keys: Vec<String> = match fs::read_dir(&workspaces) {
+        Ok(listed) => listed
+            .map(|entry| {
+                entry
+                    .expect("an entry of the workspaces directory")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => panic!("list {}: {error}", workspaces.display()),
+    };
+    keys.sort();
+    keys
+}
+
+#[test]
+fn a_budget_stopped_schema_4_resume_recreates_its_pruned_execution_root_where_it_recorded_it() {
+    let (_tree, repo) = temp_engine_repo("topology-pruned-root");
+    seed(&repo, ONE_ATTEMPT_PLAN, Some(ONE_ATTEMPT_ROUTING));
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        0,
+    )));
+    let mut opts = topology_options(&repo);
+    opts.budget_usd = Some(0.015);
+    let stopped = run_with(&opts, &source).expect("the run ends");
+    assert_eq!(
+        stopped.outcome(),
+        RunOutcome::BudgetExceeded,
+        "{stopped:#?}"
+    );
+    until_released(&repo, &stopped.run_id);
+    let recorded = recorded_execution_root(&repo, &stopped.run_id);
+    assert!(
+        fs::symlink_metadata(&recorded).is_err(),
+        "the premise: finalization pruned the stopped run's emptied root"
+    );
+    let namespaces = execution_namespaces(&repo);
+
+    let mut resume = resume_options(&repo, &stopped.run_id);
+    resume.private_root = None;
+    resume.budget_usd = Some(1.0);
+    let resumed = resume_with(&resume, &source).expect("a budget-stopped run resumes");
+    until_released(&repo, &stopped.run_id);
+    assert!(
+        resumed.warnings.iter().any(|warning| warning.contains(
+            "the execution root was pruned when the run last ended and has been recreated"
+        )),
+        "the resume recreated the pruned root: {:?}",
+        resumed.warnings
+    );
+    assert_eq!(
+        execution_namespaces(&repo),
+        namespaces,
+        "the resume made no other namespace"
+    );
+}
+
+#[cfg(unix)]
+fn manager_today(repo: &Path, run_id: &str) -> crate::workspace_manager::WorkspaceManager {
+    let root = crate::engine::topology::recover::chain::RootDerived::derive(repo, run_id, None)
+        .expect("the run's recorded root");
+    let first = first_line_of_the_log(repo, run_id);
+    let incarnation = first["data"]["incarnation"]
+        .as_str()
+        .expect("the run records its incarnation");
+    crate::workspace_manager::WorkspaceManager::derive(
+        repo,
+        root.private_root(),
+        run_id,
+        incarnation,
+    )
+    .expect("the run's workspace manager")
+}
+
+#[cfg(unix)]
+fn retain_execution_root(repo: &Path, run_id: &str) {
+    let manager = manager_today(repo, run_id);
+    assert_eq!(
+        manager.execution_root(),
+        recorded_execution_root(repo, run_id),
+        "the premise: the run's own namespace derives the root it recorded"
+    );
+    manager
+        .create_execution_root(&mut crate::workspace_manager::NoHooks)
+        .expect("the retained scaffolding");
+}
+
+#[cfg(unix)]
+fn copy_common_dir(from: &Path, to: &Path) {
+    let mut pending = vec![(from.to_path_buf(), to.to_path_buf())];
+    while let Some((source, target)) = pending.pop() {
+        fs::create_dir(&target).expect("a directory of the copy");
+        for entry in fs::read_dir(&source).expect("a directory of the common directory") {
+            let entry = entry.expect("a directory entry");
+            let name = entry.file_name();
+            if source == from && (name == "worktrees" || name == "upstroke-worktree.lock") {
+                continue;
+            }
+            let kind = entry.file_type().expect("the entry's type");
+            if kind.is_dir() {
+                pending.push((entry.path(), target.join(&name)));
+            } else if kind.is_file() {
+                fs::copy(entry.path(), target.join(&name)).expect("a file of the copy");
+            } else {
+                panic!(
+                    "{} is neither a file nor a directory",
+                    entry.path().display()
+                );
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+type Places = Vec<(
+    &'static str,
+    std::collections::BTreeMap<PathBuf, PrivateEntry>,
+)>;
+
+#[cfg(unix)]
+fn common_dir_fixture(repo: &Path, other: &Path) -> Places {
+    vec![
+        ("in the checkout", public_snapshot(repo)),
+        (
+            "in the checkout's Git directory",
+            private_snapshot(&repo.join(".git")),
+        ),
+        (
+            "under the private root",
+            private_snapshot(&private_root_for(repo)),
+        ),
+        ("in the other common directory", private_snapshot(other)),
+    ]
+}
+
+#[cfg(unix)]
+fn moved_in(before: &Places, after: &Places) -> Vec<String> {
+    before
+        .iter()
+        .zip(after)
+        .flat_map(|((place, earlier), (_, later))| {
+            moved_entries(earlier, later)
+                .into_iter()
+                .map(move |moved| format!("{place}: {moved}"))
+        })
+        .collect()
+}
+
+#[cfg(unix)]
+fn assert_admitted_at_the_recorded_roots(repo: &Path, open: &str, finished: &str) {
+    for run_id in [open, finished] {
+        assert_eq!(
+            manager_today(repo, run_id).execution_root(),
+            recorded_execution_root(repo, run_id),
+            "the premise: this Git environment derives the root `{run_id}` recorded"
+        );
+    }
+    let namespaces = execution_namespaces(repo);
+    let stub = ObservedStub::new(0);
+    let source = BorrowedObserved(&stub);
+
+    let mut resume = resume_options(repo, open);
+    resume.private_root = None;
+    let report = assert_admitted_and_published(repo, || resume_with(&resume, &source));
+    assert_eq!(report.run_id, open);
+
+    let residue = recorded_execution_root(repo, finished);
+    assert!(
+        residue.is_dir(),
+        "the premise: the finished run's root is retained"
+    );
+    let mut resume = resume_options(repo, finished);
+    resume.private_root = None;
+    let refused = resume_with(&resume, &source).expect_err("a finished run does not continue");
+    assert!(
+        refused.to_string().contains("already finished"),
+        "the finished run was finalized: {refused}"
+    );
+    assert!(
+        fs::symlink_metadata(&residue).is_err(),
+        "finalization reclaimed the root the run recorded: {refused}"
+    );
+    assert_eq!(
+        execution_namespaces(repo),
+        namespaces,
+        "the admitted resumes made no other namespace"
+    );
+}
+
+#[cfg(unix)]
+const COMMON_DIR_REPO: &str = "UPSTROKE_COMMON_DIR_REPO";
+
+#[cfg(unix)]
+const COMMON_DIR_OPEN_RUN: &str = "UPSTROKE_COMMON_DIR_OPEN_RUN";
+
+#[cfg(unix)]
+const COMMON_DIR_FINISHED_RUN: &str = "UPSTROKE_COMMON_DIR_FINISHED_RUN";
+
+#[cfg(unix)]
+const COMMON_DIR_REFUSED: &str =
+    "common-dir resume: both runs refused under another common directory, nothing changed";
+
+#[cfg(unix)]
+const COMMON_DIR_ADMITTED: &str =
+    "common-dir resume: admitted and finalized at the roots the runs recorded";
+
+#[cfg(unix)]
+#[test]
+fn a_schema_4_resume_under_another_effective_common_directory_refuses_before_any_effect() {
+    let (tree, repo) = temp_engine_repo("topology-common-dir");
+    let park = || {
+        let stub = ObservedStub::new(1);
+        let parked =
+            run_with(&topology_options(&repo), &BorrowedObserved(&stub)).expect("the run parks");
+        assert_eq!(parked.outcome(), RunOutcome::Parked, "{parked:#?}");
+        until_released(&repo, &parked.run_id);
+        parked.run_id
+    };
+    let open = park();
+    let open_absolute = park();
+    let open_relative = park();
+    let open_unchanged = park();
+    let finished = {
+        let stub = ObservedStub::new(0);
+        let report = run_with(&topology_options(&repo), &BorrowedObserved(&stub))
+            .expect("the run completes");
+        assert_eq!(report.outcome(), RunOutcome::Complete, "{report:#?}");
+        until_released(&repo, &report.run_id);
+        report.run_id
+    };
+    assert!(
+        fs::symlink_metadata(recorded_execution_root(&repo, &finished)).is_err(),
+        "the premise: finalization pruned the finished run's root"
+    );
+    retain_execution_root(&repo, &finished);
+    let isolated = |test: &str, common: &std::ffi::OsStr, open: &str| {
+        crate::agent::proc::test_support::run_test_isolated(
+            test,
+            &[
+                ("GIT_COMMON_DIR", common),
+                (COMMON_DIR_REPO, repo.as_os_str()),
+                (COMMON_DIR_OPEN_RUN, std::ffi::OsStr::new(open)),
+                (
+                    COMMON_DIR_FINISHED_RUN,
+                    std::ffi::OsStr::new(finished.as_str()),
+                ),
+            ],
+            Duration::from_secs(300),
+        )
+    };
+
+    let checkout_common =
+        fs::canonicalize(repo.join(".git")).expect("the checkout's common directory");
+    for (spelling, value, run_id) in [
+        ("absolute", checkout_common.as_os_str(), &open_absolute),
+        ("relative", std::ffi::OsStr::new(".git"), &open_relative),
+    ] {
+        let admitted = isolated(
+            "engine::tests::common_dir_admitted_resume_child",
+            value,
+            run_id,
+        );
+        assert!(
+            admitted.status.is_some_and(|status| status.success())
+                && admitted.stdout.contains("1 passed")
+                && admitted.stderr.contains(COMMON_DIR_ADMITTED),
+            "the control: the checkout's own common directory, spelled {spelling}: {admitted}"
+        );
+        retain_execution_root(&repo, &finished);
+    }
+    assert_admitted_at_the_recorded_roots(&repo, &open_unchanged, &finished);
+    retain_execution_root(&repo, &finished);
+
+    let other = tree.path().join("common-b");
+    copy_common_dir(&repo.join(".git"), &other);
+    let other = fs::canonicalize(&other).expect("the other common directory");
+    let refused = isolated(
+        "engine::tests::common_dir_refused_resume_child",
+        other.as_os_str(),
+        &open,
+    );
+    assert!(
+        refused.status.is_some_and(|status| status.success())
+            && refused.stdout.contains("1 passed")
+            && refused.stderr.contains(COMMON_DIR_REFUSED),
+        "under another common directory both resumes refuse before any effect: {refused}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "subprocess helper"]
+fn common_dir_refused_resume_child() {
+    let (Some(repo), Some(open), Some(finished), Some(other)) = (
+        std::env::var_os(COMMON_DIR_REPO).map(PathBuf::from),
+        std::env::var(COMMON_DIR_OPEN_RUN).ok(),
+        std::env::var(COMMON_DIR_FINISHED_RUN).ok(),
+        std::env::var_os("GIT_COMMON_DIR").map(PathBuf::from),
+    ) else {
+        return;
+    };
+    assert!(
+        other.is_absolute() && !other.starts_with(&repo),
+        "the premise: this process's Git environment names another common directory, absolute \
+         and outside the checkout: {}",
+        other.display()
+    );
+    let git_dir = Workspace::open(&repo)
+        .expect("the checkout")
+        .worktree_git_dir()
+        .expect("its Git directory");
+    let physical = rundir::RepoKey::for_worktree_git_dir(&git_dir)
+        .expect("the checkout's physical repository key");
+    assert!(
+        recorded_execution_root(&repo, &finished).is_dir(),
+        "the premise: the finished run's root is retained"
+    );
+    let stub = ObservedStub::new(0);
+    let source = BorrowedObserved(&stub);
+
+    for (what, run_id) in [("the open run", &open), ("the finished run", &finished)] {
+        let owner: serde_json::Value = serde_json::from_slice(
+            &fs::read(private_dir_of(&repo, run_id).join(rundir::OWNER_RECORD))
+                .expect("the owner record"),
+        )
+        .expect("an owner record");
+        assert_eq!(
+            owner["repo_key"].as_str(),
+            Some(physical.as_str()),
+            "the premise: {what}'s owner record names the checkout's physical key"
+        );
+        let recorded = recorded_execution_root(&repo, run_id);
+        let manager = manager_today(&repo, run_id);
+        assert_eq!(
+            manager.common_git_dir(),
+            other.as_path(),
+            "the premise: today's manager of {what} takes the other common directory"
+        );
+        assert_ne!(
+            manager.execution_root(),
+            recorded.as_path(),
+            "the premise: and derives another execution root than {what} recorded"
+        );
+        let mut resume = resume_options(&repo, run_id);
+        resume.private_root = None;
+        for exclusion in [ExclusionState::Absent, ExclusionState::Changed] {
+            for include in [IncludeState::Absent, IncludeState::Changed] {
+                put_exclusion(&repo, exclusion);
+                put_include(&private_root_for(&repo), include);
+                let before = common_dir_fixture(&repo, &other);
+                let refused = resume_with(&resume, &source);
+                let after = common_dir_fixture(&repo, &other);
+                let case = format!("{what}, exclusion {exclusion:?}, include {include:?}");
+                let moved = moved_in(&before, &after);
+                assert!(
+                    moved.is_empty(),
+                    "{case}: the resume under another common directory wrote {moved:?}"
+                );
+                assert!(
+                    stub.built().is_empty(),
+                    "{case}: a worker or reviewer was built"
+                );
+                let refused = refused
+                    .expect_err("a resume never adopts another root")
+                    .to_string();
+                for named in [
+                    format!(
+                        "run `{run_id}` records its execution root as {}",
+                        recorded.display()
+                    ),
+                    format!(
+                        "derives {} for it today",
+                        manager.execution_root().display()
+                    ),
+                    format!(
+                        "canonical private root {}",
+                        manager.private_root().display()
+                    ),
+                    format!(
+                        "effective common directory {}",
+                        manager.common_git_dir().display()
+                    ),
+                ] {
+                    assert!(
+                        refused.contains(&named),
+                        "{case}: the refusal names `{named}`: {refused}"
+                    );
+                }
+            }
+        }
+    }
+    crate::workspace_manager::fixture::say(COMMON_DIR_REFUSED);
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "subprocess helper"]
+fn common_dir_admitted_resume_child() {
+    let (Some(repo), Some(open), Some(finished)) = (
+        std::env::var_os(COMMON_DIR_REPO).map(PathBuf::from),
+        std::env::var(COMMON_DIR_OPEN_RUN).ok(),
+        std::env::var(COMMON_DIR_FINISHED_RUN).ok(),
+    ) else {
+        return;
+    };
+    assert!(
+        std::env::var_os("GIT_COMMON_DIR").is_some(),
+        "the premise: this process's Git environment names a common directory"
+    );
+    assert_admitted_at_the_recorded_roots(&repo, &open, &finished);
+    crate::workspace_manager::fixture::say(COMMON_DIR_ADMITTED);
+}
+
+/// P12-W13. A parked schema-4 question has no payload file: `status` names it,
+/// `show` renders it from the fold by an id prefix, `answer` records it once and
+/// refuses a second, the resume ingests it from the file the run polls, and an
+/// answer after that refuses the settled question as no longer open.
+#[test]
+fn a_parked_schema_4_question_is_shown_answered_once_and_ingested_on_resume() {
+    let (_tree, repo) = temp_engine_repo("topology-answer");
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        1,
+    )));
+    let parked = run_with(&topology_options(&repo), &source).expect("the run parks");
+    assert_eq!(parked.outcome(), RunOutcome::Parked, "{parked:#?}");
+    until_released(&repo, &parked.run_id);
+    let [asked] = parked.questions.as_slice() else {
+        panic!("one question: {parked:#?}");
+    };
+    let id = asked.question.id.to_string();
+    let public = rundir::public_dir(&repo, &parked.run_id);
+    assert!(
+        !public.join("questions").exists(),
+        "a schema-4 run writes no question payload file"
+    );
+    let summary = parked.render();
+    assert!(
+        !summary.contains("payloads:"),
+        "and its summary names no payload directory: {summary}"
+    );
+    assert!(
+        summary.contains("upstroke answer <question id>"),
+        "{summary}"
+    );
+
+    let rendered = crate::status::render(
+        &crate::status::load(&repo, Some(&parked.run_id)).expect("status reads the parked run"),
+    );
+    assert!(
+        rendered.contains(&format!("upstroke answer {id}")),
+        "{rendered}"
+    );
+    let prefix = &id[..id.len() - 6];
+    let shown = crate::answer::show(&repo, prefix).expect("show finds it by prefix");
+    assert!(shown.contains("widget formats"), "{shown}");
+
+    let recorded = crate::answer::answer(
+        &repo,
+        &id,
+        crate::answer::Reply::Text("the first".to_owned()),
+    )
+    .expect("the answer is recorded");
+    assert_eq!(recorded.run_id, parked.run_id);
+    assert_eq!(recorded.question_id, id);
+    assert!(!recorded.run_is_live, "nothing drives the parked run");
+    let again = crate::answer::answer(&repo, &id, crate::answer::Reply::Text("again".to_owned()))
+        .expect_err("a question is answered once");
+    assert!(again.to_string().contains("already answered"), "{again}");
+
+    let mut resume = resume_options(&repo, &parked.run_id);
+    resume.private_root = None;
+    let report = resume_with(&resume, &source).expect("the resume completes the run");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:#?}");
+    let log = fs::read_to_string(public.join("events.jsonl")).expect("the log");
+    assert!(
+        log.lines()
+            .any(|line| line.contains("\"question_answered\"") && line.contains(&id)),
+        "the resume ingested the answer"
+    );
+    until_released(&repo, &parked.run_id);
+    let late = crate::answer::answer(&repo, &id, crate::answer::Reply::Text("late".to_owned()))
+        .expect_err("the settled question takes no answer");
+    assert!(late.to_string().contains("no longer open"), "{late}");
+}
+
+#[test]
+fn a_schema_4_run_and_its_resume_leave_the_checkout_and_print_no_way_back_from_it() {
+    let checkout = |repo: &Path| {
+        (
+            git_in(repo, &["symbolic-ref", "HEAD"]).trim().to_owned(),
+            git_in(repo, &["rev-parse", "HEAD"]).trim().to_owned(),
+        )
+    };
+    let names_the_branch_alone = |summary: &str, branch: &str, when: &str| {
+        assert!(
+            summary
+                .lines()
+                .any(|line| line == format!("branch: {branch}")),
+            "{when}: the summary names the run's branch: {summary}"
+        );
+        assert!(
+            !summary.contains("return with") && !summary.contains("git switch"),
+            "{when}: nothing switched the checkout, so nothing is returned from: {summary}"
+        );
+    };
+
+    let (_tree, repo) = temp_engine_repo("topology-no-return");
+    let before = checkout(&repo);
+    assert_eq!(
+        before.0, "refs/heads/main",
+        "the premise: the operator is on `main`"
+    );
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        1,
+    )));
+    let parked = run_with(&topology_options(&repo), &source).expect("the run parks");
+    assert_eq!(parked.outcome(), RunOutcome::Parked, "{parked:#?}");
+    assert_eq!(
+        checkout(&repo),
+        before,
+        "the fresh run left the checkout where it was"
+    );
+    names_the_branch_alone(&parked.render(), &parked.branch, "fresh");
+
+    until_released(&repo, &parked.run_id);
+    let [asked] = parked.questions.as_slice() else {
+        panic!("one question: {parked:#?}");
+    };
+    crate::answer::answer(
+        &repo,
+        &asked.question.id.to_string(),
+        crate::answer::Reply::Text("the first".to_owned()),
+    )
+    .expect("the answer is recorded");
+    let mut resume = resume_options(&repo, &parked.run_id);
+    resume.private_root = None;
+    let resumed = resume_with(&resume, &source).expect("the resume completes the run");
+    assert_eq!(resumed.outcome(), RunOutcome::Complete, "{resumed:#?}");
+    assert_eq!(
+        checkout(&repo),
+        before,
+        "the resume left the checkout where it was"
+    );
+    names_the_branch_alone(&resumed.render(), &resumed.branch, "resumed");
+    assert_merged_on_the_integration_branch(&repo, &resumed);
+
+    let (_legacy_tree, legacy) = temp_engine_repo("legacy-return-hint");
+    let report =
+        run_with(&options(&legacy), &fake(Effect::EditFile)).expect("the legacy run completes");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:#?}");
+    assert_eq!(
+        git_in(&legacy, &["rev-parse", "--abbrev-ref", "HEAD"]).trim(),
+        report.branch,
+        "the control: a legacy run checks its branch out"
+    );
+    let summary = report.render();
+    assert!(
+        summary
+            .lines()
+            .any(|line| line == format!("branch: {} (return with: git switch -)", report.branch)),
+        "{summary}"
+    );
+    git_in(&legacy, &["switch", "-"]);
+    assert_eq!(
+        git_in(&legacy, &["rev-parse", "--abbrev-ref", "HEAD"]).trim(),
+        "main",
+        "and the instruction it prints takes the operator back to where the run began"
+    );
+}
+
+/// A committed legacy (schema-3) run whose public half holds one open question
+/// file, as `answer`'s own suite seeds one: the first line is written by hand, so
+/// the fixture pins the wire rather than agreeing with the writer.
+fn legacy_question_run(repo: &Path, run_id: &str, question_id: &str) {
+    let public = rundir::public_dir(repo, run_id);
+    let questions = public.join("questions");
+    fs::create_dir_all(&questions).expect("the legacy run's questions directory");
+    fs::write(
+        public.join("events.jsonl"),
+        format!(
+            "{{\"ts\":\"2026-08-20T00:00:00Z\",\"event\":\"run_started\",\
+             \"data\":{{\"schema\":3,\"run_id\":\"{run_id}\"}}}}\n"
+        ),
+    )
+    .expect("the legacy run's committed first line");
+    let record = QuestionRecord::open(Question {
+        id: QuestionId::from(question_id),
+        kind: QuestionKind::Unblock,
+        affected_tasks: vec![TaskId::from("t1")],
+        context: format!("the legacy question {question_id}"),
+        options: vec!["retry".to_owned(), interaction::GIVE_UP_OPTION.to_owned()],
+    });
+    interaction::write_question(&questions, &record).expect("the legacy question file");
+}
+
+/// Every answer file under every run directory of `repo`.
+fn answer_files(repo: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    for run_id in rundir::run_dir_names(repo) {
+        let Ok(entries) = fs::read_dir(rundir::public_dir(repo, &run_id).join("answers")) else {
+            continue;
+        };
+        files.extend(entries.flatten().map(|entry| entry.path()));
+    }
+    files
+}
+
+/// `answer` and `show` for one typed id, as the one result both refuse with.
+fn answer_and_show(repo: &Path, wanted: &str) -> [Result<String, UpstrokeError>; 2] {
+    [
+        crate::answer::answer(
+            repo,
+            wanted,
+            crate::answer::Reply::Text("the first".to_owned()),
+        )
+        .map(|answered| answered.question_id),
+        crate::answer::show(repo, wanted),
+    ]
+}
+
+/// PR12-ANSWER-CROSS-SCHEMA-PREFIX (root, 7021b42d). A prefix two legacy
+/// questions share with a parked schema-4 question selects none of them:
+/// `answer` and `show` refuse it, naming all three, and write nothing; so does a
+/// prefix one legacy question shares with it. Each full id still answers, and a
+/// prefix only one question carries is still that question's.
+///
+/// `L` is not a Crockford base32 digit, so no question id a run mints continues
+/// a prefix with it: each legacy id below leaves the schema-4 id exactly where
+/// its `LEGACY` begins.
+#[test]
+fn a_prefix_two_legacy_questions_share_with_a_schema_4_question_selects_none_of_them() {
+    let (_tree, repo) = temp_engine_repo("topology-answer-cross-prefix");
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        1,
+    )));
+    let parked = run_with(&topology_options(&repo), &source).expect("the run parks");
+    assert_eq!(parked.outcome(), RunOutcome::Parked, "{parked:#?}");
+    until_released(&repo, &parked.run_id);
+    let [asked] = parked.questions.as_slice() else {
+        panic!("one question: {parked:#?}");
+    };
+    let id = asked.question.id.to_string();
+    let prefix = &id[..id.len() - 6];
+    let first = format!("{prefix}LEGACY-A");
+    let second = format!("{prefix}LEGACY-B");
+    let near = &id[..id.len() - 2];
+    let third = format!("{near}LEGACY-C");
+    legacy_question_run(&repo, "00LEGACYA", &first);
+    legacy_question_run(&repo, "00LEGACYB", &second);
+
+    for refused in answer_and_show(&repo, prefix) {
+        let message = refused
+            .expect_err("a prefix three questions share selects none")
+            .to_string();
+        assert!(message.contains("matches 3 questions"), "{message}");
+        for named in [&id, &first, &second] {
+            assert!(message.contains(named.as_str()), "{named}: {message}");
+        }
+    }
+    legacy_question_run(&repo, "00LEGACYC", &third);
+    for refused in answer_and_show(&repo, near) {
+        let message = refused
+            .expect_err("a prefix a legacy and a schema-4 question share selects neither")
+            .to_string();
+        assert!(message.contains("matches 2 questions"), "{message}");
+        for named in [&id, &third] {
+            assert!(message.contains(named.as_str()), "{named}: {message}");
+        }
+    }
+    for refused in answer_and_show(&repo, &format!("{prefix}LEGACY-")) {
+        let message = refused
+            .expect_err("two legacy questions, as today")
+            .to_string();
+        assert!(message.contains("matches 2 questions"), "{message}");
+    }
+    assert_eq!(
+        answer_files(&repo),
+        Vec::<PathBuf>::new(),
+        "a refused id wrote an answer"
+    );
+
+    let shown = crate::answer::show(&repo, &id[..id.len() - 1])
+        .expect("a prefix only the schema-4 question carries");
+    assert!(shown.contains("widget formats"), "{shown}");
+    let shown = crate::answer::show(&repo, &id).expect("the schema-4 question by its full id");
+    assert!(shown.contains("widget formats"), "{shown}");
+    for legacy in [&first, &second, &third] {
+        let shown = crate::answer::show(&repo, legacy).expect("a legacy question by its full id");
+        assert!(
+            shown.contains(&format!("the legacy question {legacy}")),
+            "{shown}"
+        );
+    }
+    let recorded = crate::answer::answer(
+        &repo,
+        &first,
+        crate::answer::Reply::Text("the first".to_owned()),
+    )
+    .expect("a legacy question answered by its full id");
+    assert_eq!(
+        (recorded.run_id.as_str(), recorded.question_id.as_str()),
+        ("00LEGACYA", first.as_str())
+    );
+    let recorded = crate::answer::answer(
+        &repo,
+        &id,
+        crate::answer::Reply::Text("the first".to_owned()),
+    )
+    .expect("the schema-4 question answered by its full id");
+    assert_eq!(
+        (recorded.run_id.as_str(), recorded.question_id.as_str()),
+        (parked.run_id.as_str(), id.as_str())
+    );
+    let message = crate::answer::show(&repo, prefix)
+        .expect_err("an answered question is still a candidate")
+        .to_string();
+    assert!(message.contains("matches 4 questions"), "{message}");
+    for named in [&id, &first, &second, &third] {
+        assert!(message.contains(named.as_str()), "{named}: {message}");
+    }
+}
+
+/// PR12-ANSWER-CROSS-SCHEMA-PREFIX, the inverse: a prefix two parked schema-4
+/// questions share selects neither, and once a legacy question shares it too it
+/// selects none of the three. Each full id still answers.
+#[cfg(unix)]
+#[test]
+fn a_prefix_one_legacy_question_shares_with_two_schema_4_questions_selects_none_of_them() {
+    let (_tree, repo) = temp_engine_repo("topology-answer-cross-inverse");
+    seed(
+        &repo,
+        TWO_INDEPENDENT_TASKS,
+        Some("[engine]\nmax_parallel = 2\n"),
+    );
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        2,
+    )));
+    let parked = run_with(&topology_options(&repo), &source).expect("the run parks");
+    assert_eq!(parked.outcome(), RunOutcome::Parked, "{parked:#?}");
+    until_released(&repo, &parked.run_id);
+    let [one, two] = parked.questions.as_slice() else {
+        panic!("both tasks asked: {parked:#?}");
+    };
+    let (one, two) = (one.question.id.to_string(), two.question.id.to_string());
+    let shared: String = one
+        .chars()
+        .zip(two.chars())
+        .take_while(|(left, right)| left == right)
+        .map(|(left, _)| left)
+        .collect();
+    assert!(
+        shared.starts_with("q-") && shared.len() < one.len().min(two.len()),
+        "the fixture's premise: two ids that share a proper prefix ({one}, {two})"
+    );
+
+    for refused in answer_and_show(&repo, &shared) {
+        let message = refused
+            .expect_err("a prefix two schema-4 questions share selects neither")
+            .to_string();
+        assert!(message.contains("matches 2 questions"), "{message}");
+    }
+    let legacy = format!("{shared}LEGACY");
+    legacy_question_run(&repo, "00LEGACY", &legacy);
+    for refused in answer_and_show(&repo, &shared) {
+        let message = refused
+            .expect_err("a prefix three questions share selects none")
+            .to_string();
+        assert!(message.contains("matches 3 questions"), "{message}");
+        for named in [&one, &two, &legacy] {
+            assert!(message.contains(named.as_str()), "{named}: {message}");
+        }
+    }
+    assert_eq!(
+        answer_files(&repo),
+        Vec::<PathBuf>::new(),
+        "a refused id wrote an answer"
+    );
+    for full in [&one, &two] {
+        let shown = crate::answer::show(&repo, full).expect("a schema-4 question by its full id");
+        assert!(shown.contains("widget formats"), "{shown}");
+    }
+    let shown = crate::answer::show(&repo, &legacy).expect("the legacy question by its full id");
+    assert!(
+        shown.contains(&format!("the legacy question {legacy}")),
+        "{shown}"
+    );
+}
+
+/// PR12-ANSWER-CROSS-SCHEMA-PREFIX, the unread census: a schema-4 run whose log
+/// cannot be observed is carried into the decision rather than dropped from it,
+/// so a prefix that only a legacy question carries among the runs that could be
+/// read is refused, naming the run that could not, and nothing is written. The
+/// legacy question's full id still answers. The log is made unobservable the way
+/// a resume's refusal witness makes it unresumable: the frozen plan no longer
+/// digests to what the record says.
+#[test]
+fn a_schema_4_run_that_cannot_be_read_keeps_a_lone_legacy_prefix_from_answering() {
+    let (_tree, repo) = temp_engine_repo("topology-answer-cross-unread");
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        1,
+    )));
+    let parked = run_with(&topology_options(&repo), &source).expect("the run parks");
+    assert_eq!(parked.outcome(), RunOutcome::Parked, "{parked:#?}");
+    until_released(&repo, &parked.run_id);
+    let [asked] = parked.questions.as_slice() else {
+        panic!("one question: {parked:#?}");
+    };
+    let id = asked.question.id.to_string();
+    let legacy = "q-LEGACY-ONLY";
+    legacy_question_run(&repo, "00LEGACY", legacy);
+    let shown =
+        crate::answer::show(&repo, "q-LEGACY").expect("a lone legacy prefix, every run read");
+    assert!(
+        shown.contains("the legacy question q-LEGACY-ONLY"),
+        "{shown}"
+    );
+
+    let plan = rundir::public_dir(&repo, &parked.run_id).join("plan.normalized.json");
+    let frozen = fs::read(&plan).expect("the frozen plan");
+    let mut altered = frozen.clone();
+    altered.extend_from_slice(b" ");
+    fs::write(&plan, &altered).expect("an altered frozen plan");
+    assert!(
+        crate::engine::topology::observe::observe(&repo, &parked.run_id).is_err(),
+        "the premise: the schema-4 log cannot be observed"
+    );
+    for refused in answer_and_show(&repo, "q-LEGACY") {
+        let message = refused
+            .expect_err("a lone legacy prefix beside a run that could not be read")
+            .to_string();
+        assert!(
+            message
+                .contains("matches one question (q-LEGACY-ONLY) among the runs that could be read"),
+            "{message}"
+        );
+        assert!(
+            message.contains(&format!(
+                "the log of run `{}` could not be read",
+                parked.run_id
+            )),
+            "{message}"
+        );
+    }
+    let message = crate::answer::show(&repo, &id)
+        .expect_err("a question in a run that could not be read is not found")
+        .to_string();
+    assert!(message.contains("no question with that id"), "{message}");
+    assert!(message.contains(&parked.run_id), "{message}");
+    assert_eq!(
+        answer_files(&repo),
+        Vec::<PathBuf>::new(),
+        "a refused id wrote an answer"
+    );
+    let recorded = crate::answer::answer(
+        &repo,
+        legacy,
+        crate::answer::Reply::Text("the first".to_owned()),
+    )
+    .expect("the legacy question's full id still answers");
+    assert_eq!(recorded.run_id, "00LEGACY");
+
+    fs::write(&plan, &frozen).expect("the frozen plan restored");
+    let shown = crate::answer::show(&repo, &id[..id.len() - 6])
+        .expect("read again, the schema-4 question answers to its prefix");
+    assert!(shown.contains("widget formats"), "{shown}");
+}
+
+#[test]
+fn a_run_whose_initial_log_read_fails_after_the_census_keeps_a_shared_prefix_from_answering() {
+    let (_tree, repo) = temp_engine_repo("topology-answer-unread-initial");
+    let mut parked = Vec::new();
+    for _ in 0..2 {
+        let stub = ObservedStub::new(1);
+        let report =
+            run_with(&topology_options(&repo), &BorrowedObserved(&stub)).expect("the run parks");
+        assert_eq!(report.outcome(), RunOutcome::Parked, "{report:#?}");
+        until_released(&repo, &report.run_id);
+        let [asked] = report.questions.as_slice() else {
+            panic!("one question: {report:#?}");
+        };
+        let id = asked.question.id.to_string();
+        parked.push((report.run_id, id));
+    }
+    let [(unread_run, unread_id), (survivor_run, survivor_id)] = parked.as_slice() else {
+        panic!("two parked runs: {parked:?}");
+    };
+    let shared: String = unread_id
+        .chars()
+        .zip(survivor_id.chars())
+        .take_while(|(left, right)| left == right)
+        .map(|(left, _)| left)
+        .collect();
+    assert!(
+        shared.starts_with("q-") && shared.len() < unread_id.len().min(survivor_id.len()),
+        "the fixture's premise: two ids that share a proper prefix ({unread_id}, {survivor_id})"
+    );
+    let unread_own = &unread_id[..=shared.len()];
+    let survivor_own = &survivor_id[..=shared.len()];
+    for run in [unread_run, survivor_run] {
+        assert_eq!(
+            rundir::classify_run_dir(&rundir::public_dir(&repo, run)),
+            rundir::RunDirClass::Committed,
+            "the premise: the census classifies run {run}'s committed header"
+        );
+    }
+    let log = rundir::public_dir(&repo, unread_run).join(rundir::EVENT_LOG);
+    let lone = |only: &str| {
+        format!(
+            "that prefix matches one question ({only}) among the runs that could be read, and a \
+             run that could not may hold another; use the full question id; and the log of run \
+             `{unread_run}` could not be read"
+        )
+    };
+    let question = |id: &str| format!("question {id} ");
+
+    let checkout = public_snapshot(&repo);
+    let (refused, reads) = with_initial_read_failing(&log, || answer_and_show(&repo, &shared));
+    let moved = moved_entries(&checkout, &public_snapshot(&repo));
+    assert!(
+        moved.is_empty(),
+        "a prefix an unread run's question shares wrote in the checkout: {moved:?}"
+    );
+    assert_eq!(
+        reads, 2,
+        "answer and show each failed the unread run's initial read"
+    );
+    for refused in refused {
+        let message = refused
+            .expect_err("a prefix an unread run may share selects nothing")
+            .to_string();
+        assert!(message.contains(&lone(survivor_id)), "{message}");
+    }
+    let (status, reads) = with_initial_read_failing(&log, || {
+        crate::status::load(&repo, Some(unread_run.as_str()))
+    });
+    assert_eq!(reads, 1, "status failed the unread run's initial read");
+    assert_the_initial_read_refused(status.err(), &log, "status of the unread run");
+    let (shown, _) = with_initial_read_failing(&log, || crate::answer::show(&repo, survivor_id));
+    let shown = shown.expect("the survivor's full id answers whatever went unread");
+    assert!(shown.contains(&question(survivor_id)), "{shown}");
+    let (missing, _) = with_initial_read_failing(&log, || crate::answer::show(&repo, unread_id));
+    let message = missing
+        .expect_err("the unread run's question is not found while its log cannot be read")
+        .to_string();
+    assert!(message.contains("no question with that id"), "{message}");
+    assert!(
+        message.contains(&format!("the log of run `{unread_run}` could not be read")),
+        "{message}"
+    );
+
+    for refused in answer_and_show(&repo, &shared) {
+        let message = refused
+            .expect_err("read again, a prefix two questions share selects neither")
+            .to_string();
+        assert!(
+            message.contains("that prefix matches 2 questions"),
+            "{message}"
+        );
+        for id in [unread_id, survivor_id] {
+            assert!(message.contains(id.as_str()), "{id}: {message}");
+        }
+        assert!(!message.contains("could not be read"), "{message}");
+    }
+    for (own, id) in [(unread_own, unread_id), (survivor_own, survivor_id)] {
+        let shown = crate::answer::show(&repo, own)
+            .expect("read again, a prefix one question carries is that question's");
+        assert!(shown.contains(&question(id)), "{own}: {shown}");
+    }
+    let moved = moved_entries(&checkout, &public_snapshot(&repo));
+    assert!(
+        moved.is_empty(),
+        "a lookup wrote in the checkout: {moved:?}"
+    );
+
+    let legacy = format!("{unread_own}LEGACY");
+    legacy_question_run(&repo, "00LEGACY", &legacy);
+    let checkout = public_snapshot(&repo);
+    let (refused, reads) = with_initial_read_failing(&log, || answer_and_show(&repo, unread_own));
+    let moved = moved_entries(&checkout, &public_snapshot(&repo));
+    assert!(
+        moved.is_empty(),
+        "a prefix a legacy question shares with an unread run's question wrote in the \
+         checkout: {moved:?}"
+    );
+    assert_eq!(
+        reads, 2,
+        "answer and show each failed the unread run's initial read"
+    );
+    for refused in refused {
+        let message = refused
+            .expect_err("a lone legacy match beside an unread run selects nothing")
+            .to_string();
+        assert!(message.contains(&lone(&legacy)), "{message}");
+    }
+    let (shown, _) = with_initial_read_failing(&log, || crate::answer::show(&repo, &legacy));
+    let shown = shown.expect("the legacy question's full id answers whatever went unread");
+    assert!(
+        shown.contains(&format!("the legacy question {legacy}")),
+        "{shown}"
+    );
+    for refused in answer_and_show(&repo, unread_own) {
+        let message = refused
+            .expect_err(
+                "read again, a prefix a legacy and a schema-4 question share selects neither",
+            )
+            .to_string();
+        assert!(
+            message.contains("that prefix matches 2 questions"),
+            "{message}"
+        );
+        for id in [legacy.as_str(), unread_id.as_str()] {
+            assert!(message.contains(id), "{id}: {message}");
+        }
+    }
+    let moved = moved_entries(&checkout, &public_snapshot(&repo));
+    assert!(
+        moved.is_empty(),
+        "a lookup wrote in the checkout: {moved:?}"
+    );
+
+    let (recorded, _) = with_initial_read_failing(&log, || {
+        crate::answer::answer(
+            &repo,
+            survivor_id,
+            crate::answer::Reply::Text("the first".to_owned()),
+        )
+    });
+    let recorded = recorded.expect("the survivor's full id is answered whatever went unread");
+    assert_eq!(
+        (recorded.run_id.as_str(), recorded.question_id.as_str()),
+        (survivor_run.as_str(), survivor_id.as_str())
+    );
+    let (recorded, _) = with_initial_read_failing(&log, || {
+        crate::answer::answer(
+            &repo,
+            &legacy,
+            crate::answer::Reply::Text("the first".to_owned()),
+        )
+    });
+    let recorded =
+        recorded.expect("the legacy question's full id is answered whatever went unread");
+    assert_eq!(
+        (recorded.run_id.as_str(), recorded.question_id.as_str()),
+        ("00LEGACY", legacy.as_str())
+    );
+    let recorded = crate::answer::answer(
+        &repo,
+        unread_id,
+        crate::answer::Reply::Text("the first".to_owned()),
+    )
+    .expect("read again, the once-unread run's question is answered by its full id");
+    assert_eq!(
+        (recorded.run_id.as_str(), recorded.question_id.as_str()),
+        (unread_run.as_str(), unread_id.as_str())
+    );
+    let mut written = answer_files(&repo);
+    written.sort();
+    let mut expected = vec![
+        rundir::public_dir(&repo, "00LEGACY")
+            .join("answers")
+            .join(format!("{legacy}.json")),
+        rundir::public_dir(&repo, survivor_run)
+            .join("answers")
+            .join(format!("{survivor_id}.json")),
+        rundir::public_dir(&repo, unread_run)
+            .join("answers")
+            .join(format!("{unread_id}.json")),
+    ];
+    expected.sort();
+    assert_eq!(
+        written, expected,
+        "each full id wrote its own question's answer, and nothing else was written"
+    );
+}
+
+/// PR12-ANSWER-CROSS-SCHEMA-PREFIX, settled questions: a schema-4 question its
+/// log has settled stays a candidate for a prefix, as a legacy question's file
+/// stays one once answered, so a prefix it shares with a legacy question selects
+/// neither; alone, or by its full id, it refuses as no longer open.
+#[test]
+fn a_settled_schema_4_question_still_counts_against_a_prefix_and_takes_no_answer() {
+    let (_tree, repo) = temp_engine_repo("topology-answer-cross-settled");
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        1,
+    )));
+    let parked = run_with(&topology_options(&repo), &source).expect("the run parks");
+    assert_eq!(parked.outcome(), RunOutcome::Parked, "{parked:#?}");
+    until_released(&repo, &parked.run_id);
+    let [asked] = parked.questions.as_slice() else {
+        panic!("one question: {parked:#?}");
+    };
+    let id = asked.question.id.to_string();
+    crate::answer::answer(
+        &repo,
+        &id,
+        crate::answer::Reply::Text("the first".to_owned()),
+    )
+    .expect("the answer is recorded");
+    let mut resume = resume_options(&repo, &parked.run_id);
+    resume.private_root = None;
+    let report = resume_with(&resume, &source).expect("the resume completes the run");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:#?}");
+    until_released(&repo, &parked.run_id);
+
+    let prefix = &id[..id.len() - 6];
+    let legacy = format!("{prefix}LEGACY");
+    legacy_question_run(&repo, "00LEGACY", &legacy);
+    for refused in answer_and_show(&repo, prefix) {
+        let message = refused
+            .expect_err("a prefix a settled question shares selects neither")
+            .to_string();
+        assert!(message.contains("matches 2 questions"), "{message}");
+        for named in [&id, &legacy] {
+            assert!(message.contains(named.as_str()), "{named}: {message}");
+        }
+    }
+    for wanted in [&id[..id.len() - 1], id.as_str()] {
+        for refused in answer_and_show(&repo, wanted) {
+            let message = refused
+                .expect_err("the settled question takes no answer")
+                .to_string();
+            assert!(message.contains("no longer open"), "{wanted}: {message}");
+        }
+    }
+    assert!(
+        !rundir::public_dir(&repo, "00LEGACY")
+            .join("answers")
+            .exists(),
+        "a refused id wrote an answer"
+    );
+    let shown = crate::answer::show(&repo, &legacy).expect("the legacy question by its full id");
+    assert!(
+        shown.contains(&format!("the legacy question {legacy}")),
+        "{shown}"
+    );
+}
+
+/// Two implementation tasks, the second on top of the first, each held to one
+/// attempt on one rung.
+const ONE_ATTEMPT_PLAN: &str = "## Implement the widget\n\
+                                <!-- upstroke: id=t1 kind=implement depends= -->\n\
+                                Make it.\n\n## Implement the gadget\n\
+                                <!-- upstroke: id=t2 kind=implement depends=t1 -->\n\
+                                Make that, on top of the widget.\n";
+
+const ONE_ATTEMPT_ROUTING: &str =
+    "[routing]\nimplement = { chain = [\"small\"], attempts_per = 1 }\n";
+
+fn log_events(repo: &Path, run_id: &str) -> Vec<serde_json::Value> {
+    fs::read_to_string(rundir::public_dir(repo, run_id).join("events.jsonl"))
+        .expect("the run's event log")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("a committed event"))
+        .collect()
+}
+
+fn settled_attempts(events: &[serde_json::Value]) -> usize {
+    events
+        .iter()
+        .filter(|event| {
+            event["event"] == "attempt_finished"
+                || event["event"] == "candidate_prepared"
+                || event["event"] == "attempt_interrupted"
+        })
+        .count()
+}
+
+/// The display id finalize's projection gives a task key.
+fn display_of(projected: &crate::engine::topology::report::TopologyReport, key: u64) -> String {
+    projected
+        .tasks
+        .iter()
+        .find(|task| u64::from(task.key) == key)
+        .map(|task| task.display_id.clone())
+        .unwrap_or_else(|| panic!("no task k{key} in the projection"))
+}
+
+/// S9, a halted run. A task whose gate fails on its one attempt reaches the end of
+/// its ladder, and the run asks before failing it: it parks on the task's
+/// question (V109 found this, against the first draft's premise of a run that
+/// halts at once). The operator gives the task up through the public `answer
+/// --decline`, and under the default `on_task_failure = halt` the resume halts.
+/// The `RunReport` that `engine::resume_with` returns projects what the fold
+/// says: `outcome()` is `Halted`, `halted_at` names the task the log's
+/// `run_finished` names, the task behind it is skipped, and nothing claims a
+/// budget stop. A fresh observation of the log and finalize's `report.json` say
+/// the same. `main.rs` turns this outcome into its exit status; the command-line
+/// scenario's case E runs that.
+#[cfg(unix)]
+#[test]
+fn a_halted_schema_4_run_projects_where_it_halted_and_its_outcome() {
+    let (_tree, repo) = temp_engine_repo("topology-halted");
+    seed(
+        &repo,
+        ONE_ATTEMPT_PLAN,
+        Some(
+            format!(
+                "{ONE_ATTEMPT_ROUTING}\n[[gates]]\nname = \"refuses-the-edit\"\n\
+                 cmd = \"test ! -e agent-output.txt\"\n"
+            )
+            .as_str(),
+        ),
+    );
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        0,
+    )));
+    let parked = run_with(&topology_options(&repo), &source).expect("the run ends");
+    assert_eq!(
+        parked.outcome(),
+        RunOutcome::Parked,
+        "the end of the ladder asks before the task fails: {parked:#?}"
+    );
+    until_released(&repo, &parked.run_id);
+    let [asked] = parked.questions.as_slice() else {
+        panic!("one question: {parked:#?}");
+    };
+    assert_eq!(
+        asked.question.affected_tasks,
+        vec![TaskId::from("t1")],
+        "{asked:#?}"
+    );
+    crate::answer::answer(
+        &repo,
+        &asked.question.id.to_string(),
+        crate::answer::Reply::Decline,
+    )
+    .expect("the task is given up");
+    let mut resume = resume_options(&repo, &parked.run_id);
+    resume.private_root = None;
+    let report = resume_with(&resume, &source).expect("the resume ends");
+    until_released(&repo, &report.run_id);
+
+    let events = log_events(&repo, &report.run_id);
+    let finished = events.last().expect("a log");
+    assert_eq!(finished["event"], "run_finished", "{finished}");
+    assert_eq!(finished["data"]["outcome"], "halted", "{finished}");
+    let halted_key = finished["data"]["halted_at"]
+        .as_u64()
+        .expect("a halted run names the task it halted at");
+    let projected = crate::engine::topology::observe::observe(&repo, &report.run_id)
+        .expect("observes")
+        .expect("a schema-4 log")
+        .report()
+        .expect("projects");
+    let halted_task = display_of(&projected, halted_key);
+    assert_eq!(
+        halted_task, "t1",
+        "the fixture's premise: the first task halts the run"
+    );
+
+    assert_eq!(report.outcome(), RunOutcome::Halted, "{report:#?}");
+    assert_eq!(report.halted_at.as_deref(), Some(halted_task.as_str()));
+    assert!(report.budget_stop.is_none(), "{report:#?}");
+    let status = |id: &str| {
+        &report
+            .tasks
+            .iter()
+            .find(|task| task.id == id)
+            .unwrap_or_else(|| panic!("task {id} in {report:#?}"))
+            .status
+    };
+    assert!(
+        matches!(
+            status("t1"),
+            TaskRunStatus::Failed {
+                kind: FailureKind::GateFailed,
+                ..
+            }
+        ),
+        "{report:#?}"
+    );
+    assert!(
+        matches!(status("t2"), TaskRunStatus::Skipped),
+        "{report:#?}"
+    );
+    assert_eq!(
+        report
+            .tasks
+            .iter()
+            .map(|task| task.attempts.len())
+            .sum::<usize>(),
+        settled_attempts(&events),
+        "every attempt the log settles is in the report: {report:#?}"
+    );
+
+    assert_eq!(projected.outcome, Some(crate::events::RunOutcome::Halted));
+    assert_eq!(projected.halted_at.map(u64::from), Some(halted_key));
+    assert!(projected.budget_stop.is_none());
+    let finalized: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(rundir::public_dir(&repo, &report.run_id).join("report.json"))
+            .expect("finalize's report"),
+    )
+    .expect("json");
+    assert_eq!(finalized["outcome"], "halted", "{finalized}");
+    assert_eq!(finalized["halted_at"], halted_key, "{finalized}");
+}
+
+fn blocked_closure_plan() -> String {
+    format!(
+        "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n\
+         Its workers below the frontier end without an edit: {ESCALATES}.\n\n\
+         ## Implement the gadget\n<!-- upstroke: id=t2 kind=implement depends=t1 -->\n\
+         Make it on top of the widget.\n\n\
+         ## Implement the gizmo\n<!-- upstroke: id=t3 kind=implement depends=t2 -->\n\
+         Make it on top of the gadget.\n\n\
+         ## Implement the sprocket\n<!-- upstroke: id=t4 kind=implement depends= -->\n\
+         Make it on its own.\n"
+    )
+}
+
+fn dependent_rows(rendered: &str) -> Vec<&str> {
+    rendered
+        .lines()
+        .filter(|line| line.starts_with("  t2:") || line.starts_with("  t3:"))
+        .collect()
+}
+
+fn declined_failure_run(repo: &Path, stub: &ObservedStub) -> RunReport {
+    let answers = ScriptedAnswers::new(vec![Answer::Declined]);
+    let report = run_harness(
+        &topology_options(repo),
+        &Harness {
+            adapters: &BorrowedObserved(stub),
+            answers: Some(&answers),
+            sleeper: None,
+        },
+    )
+    .expect("the run ends");
+    until_released(repo, &report.run_id);
+    report
+}
+
+#[test]
+fn a_completed_schema_4_run_reports_its_failed_tasks_dependents_blocked_live_and_replayed() {
+    use crate::topology::fold::{FrozenInputs, TaskState as Structural, TopologyFold};
+
+    let (_tree, repo) = temp_engine_repo("topology-blocked-closure");
+    seed(
+        &repo,
+        &blocked_closure_plan(),
+        Some(&format!(
+            "[engine]\non_task_failure = \"continue\"\n\n{ONE_ATTEMPT_ROUTING}"
+        )),
+    );
+    let stub = ObservedStub::new(0);
+    let report = declined_failure_run(&repo, &stub);
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:#?}");
+    assert!(
+        matches!(task(&report, "t1").status, TaskRunStatus::Failed { .. }),
+        "the premise: t1 failed: {report:#?}"
+    );
+    assert!(
+        committed(&report, "t4"),
+        "the premise: the independent task merged: {report:#?}"
+    );
+    let rendered = report.render();
+    assert_eq!(
+        dependent_rows(&rendered),
+        ["  t2: blocked by `t1`", "  t3: blocked by `t2`"],
+        "the failed t1's direct and transitive dependents, as the completed run's final summary \
+         prints them:\n{rendered}"
+    );
+    for (id, by) in [("t2", "t1"), ("t3", "t2")] {
+        assert!(
+            matches!(&task(&report, id).status, TaskRunStatus::Blocked { by: blocker } if blocker == by),
+            "{id} is blocked by {by}: {report:#?}"
+        );
+    }
+    assert!(
+        rendered.contains(&format!(
+            "run complete: 1 task(s) committed on {}",
+            report.branch
+        )),
+        "{rendered}"
+    );
+
+    let log = fs::read(rundir::public_dir(&repo, &report.run_id).join(rundir::EVENT_LOG))
+        .expect("the run's log");
+    let events = TopologyFold::parse_log(&log).expect("the committed log parses");
+    let frozen = fs::read(paths_of(&repo, &report.run_id).plan_json()).expect("the frozen plan");
+    let inputs = || FrozenInputs {
+        plan: serde_json::from_slice(&frozen).expect("the frozen plan parses"),
+        normalized_plan_digest: crate::events::normalized_plan_digest(&frozen),
+    };
+    let replay = |end: usize| {
+        TopologyFold::replay(inputs(), events.get(..end).unwrap_or_default()).unwrap_or_else(
+            |error| panic!("the log's first {end} event(s) replay through the fold: {error}"),
+        )
+    };
+    let replayed = replay(events.len());
+    assert_eq!(
+        replayed.finished(),
+        Some(&crate::events::RunOutcome::Complete)
+    );
+    let key = |id: &str| {
+        replayed
+            .registry()
+            .and_then(|registry| registry.key_of(id))
+            .unwrap_or_else(|| panic!("task {id} in the registry"))
+    };
+    assert_eq!(
+        ["t1", "t2", "t3", "t4"].map(|id| replayed.task_state(key(id))),
+        [
+            Some(Structural::Failed),
+            Some(Structural::Pending),
+            Some(Structural::Pending),
+            Some(Structural::Merged),
+        ],
+        "the durable states the projection reads: t2 and t3 stay Pending"
+    );
+    let projected = RunReport::from_topology(&replayed, &events, Vec::new()).render();
+    assert_eq!(
+        dependent_rows(&projected),
+        dependent_rows(&rendered),
+        "the replayed log's projection:\n{projected}"
+    );
+    let finalized: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(rundir::public_dir(&repo, &report.run_id).join("report.json"))
+            .expect("finalize's report"),
+    )
+    .expect("json");
+    for id in ["t2", "t3"] {
+        let state = finalized["tasks"]
+            .as_array()
+            .and_then(|tasks| tasks.iter().find(|task| task["display_id"] == id))
+            .map(|task| task["state"].clone());
+        assert_eq!(
+            state,
+            Some(serde_json::Value::from("pending")),
+            "the run's own report keeps {id}'s durable state: {finalized}"
+        );
+    }
+
+    let fails_t1 = (1..=events.len())
+        .find(|&end| replay(end).task_state(key("t1")) == Some(Structural::Failed))
+        .expect("an event of the log fails t1");
+    let before = RunReport::from_topology(
+        &replay(fails_t1 - 1),
+        events.get(..fails_t1 - 1).unwrap_or_default(),
+        Vec::new(),
+    )
+    .render();
+    assert_eq!(
+        dependent_rows(&before),
+        ["  t2: queued", "  t3: queued"],
+        "before the event that fails t1, its dependents wait on a task that has not failed:\n{before}"
+    );
+    let at = RunReport::from_topology(
+        &replay(fails_t1),
+        events.get(..fails_t1).unwrap_or_default(),
+        Vec::new(),
+    )
+    .render();
+    assert_eq!(
+        dependent_rows(&at),
+        ["  t2: blocked by `t1`", "  t3: blocked by `t2`"],
+        "the event that fails t1 is the one that blocks its dependents:\n{at}"
+    );
+}
+
+#[test]
+fn a_schema_4_report_keeps_queued_behind_a_parked_task_and_skipped_behind_a_halting_failure() {
+    let (_parked_tree, parked_repo) = temp_engine_repo("topology-queued-parked");
+    let asking = ObservedStub::new(1);
+    let parked = run_with(&topology_options(&parked_repo), &BorrowedObserved(&asking))
+        .expect("the run parks");
+    until_released(&parked_repo, &parked.run_id);
+    assert_eq!(parked.outcome(), RunOutcome::Parked, "{parked:#?}");
+    assert!(
+        matches!(task(&parked, "t1").status, TaskRunStatus::Parked { .. }),
+        "the premise: t1 is parked on its question: {parked:#?}"
+    );
+    let rendered = parked.render();
+    assert_eq!(
+        dependent_rows(&rendered),
+        ["  t2: queued"],
+        "t2 waits on a question, not behind a failure:\n{rendered}"
+    );
+
+    let (_halted_tree, halted_repo) = temp_engine_repo("topology-skipped-halted");
+    seed(
+        &halted_repo,
+        &blocked_closure_plan(),
+        Some(ONE_ATTEMPT_ROUTING),
+    );
+    let stub = ObservedStub::new(0);
+    let halted = declined_failure_run(&halted_repo, &stub);
+    assert_eq!(halted.outcome(), RunOutcome::Halted, "{halted:#?}");
+    assert_eq!(halted.halted_at.as_deref(), Some("t1"), "{halted:#?}");
+    let rendered = halted.render();
+    assert_eq!(
+        dependent_rows(&rendered),
+        ["  t2: skipped (run halted)", "  t3: skipped (run halted)"],
+        "a halted run skips the failed task's dependents, as it always has:\n{rendered}"
+    );
+}
+
+/// S9, a budget stop. A run budget the first task's spend crosses stops the run
+/// before the next attempt. The `RunReport` projects the stop the log records:
+/// `outcome()` is `BudgetExceeded`, and `budget_stop` carries the log's
+/// `budget_exceeded` budget, limit and spend, and the task it stopped at, by its
+/// display id. Nothing claims a halt, and a fresh observation of the log and
+/// finalize's `report.json` say the same. `main.rs`'s exit status 3 is the
+/// command-line scenario's case F.
+#[test]
+fn a_schema_4_run_stopped_at_its_budget_projects_the_stop_and_its_outcome() {
+    let (_tree, repo) = temp_engine_repo("topology-budget");
+    seed(&repo, ONE_ATTEMPT_PLAN, Some(ONE_ATTEMPT_ROUTING));
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        0,
+    )));
+    let mut opts = topology_options(&repo);
+    opts.budget_usd = Some(0.015);
+    let report = run_with(&opts, &source).expect("the run ends");
+    until_released(&repo, &report.run_id);
+
+    let events = log_events(&repo, &report.run_id);
+    let finished = events.last().expect("a log");
+    assert_eq!(finished["event"], "run_finished", "{finished}");
+    assert_eq!(finished["data"]["outcome"], "budget_exceeded", "{finished}");
+    let stops: Vec<&serde_json::Value> = events
+        .iter()
+        .filter(|event| event["event"] == "budget_exceeded")
+        .collect();
+    let [exceeded] = stops.as_slice() else {
+        panic!("one budget_exceeded event: {events:#?}");
+    };
+    let data = &exceeded["data"];
+    assert_eq!(data["budget"], "run", "{data}");
+    let projected = crate::engine::topology::observe::observe(&repo, &report.run_id)
+        .expect("observes")
+        .expect("a schema-4 log")
+        .report()
+        .expect("projects");
+    let stopped_at = data["key"]
+        .as_u64()
+        .map(|key| display_of(&projected, key))
+        .unwrap_or_default();
+
+    assert_eq!(report.outcome(), RunOutcome::BudgetExceeded, "{report:#?}");
+    assert_eq!(
+        report.budget_stop,
+        Some(crate::events::BudgetExceeded {
+            budget: crate::events::BudgetKind::Run,
+            limit_usd: data["limit_usd"].as_f64().expect("a limit"),
+            spent_usd: data["spent_usd"].as_f64().expect("a spend"),
+            task: stopped_at,
+        }),
+        "{data}"
+    );
+    assert!(
+        (data["limit_usd"].as_f64().expect("a limit") - 0.015).abs() < 1e-9,
+        "the limit is the one the run was given: {data}"
+    );
+    assert!(
+        data["spent_usd"].as_f64().expect("a spend") > 0.0,
+        "the fixture's premise: the first task spent before the stop: {data}"
+    );
+    assert!(report.halted_at.is_none(), "{report:#?}");
+    assert_eq!(
+        report
+            .tasks
+            .iter()
+            .map(|task| task.attempts.len())
+            .sum::<usize>(),
+        settled_attempts(&events),
+        "every attempt the log settles is in the report, successful ones included: \
+         {report:#?}"
+    );
+    assert!(
+        (report.total_cost_usd - data["spent_usd"].as_f64().expect("a spend")).abs() < 1e-9,
+        "the report's total is the spend the stop records: {} against {data}",
+        report.total_cost_usd
+    );
+    for task in report
+        .tasks
+        .iter()
+        .filter(|task| matches!(task.status, TaskRunStatus::Committed { .. }))
+    {
+        assert!(
+            !task.model.is_empty() && task.cost_usd.is_some(),
+            "a committed task carries its successful attempt: {task:#?}"
+        );
+    }
+    assert_eq!(
+        projected.outcome,
+        Some(crate::events::RunOutcome::BudgetExceeded)
+    );
+    assert_eq!(
+        projected.budget_stop.map(|stop| stop.budget),
+        Some(crate::events::BudgetKind::Run)
+    );
+    assert!(projected.halted_at.is_none());
+    let finalized: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(rundir::public_dir(&repo, &report.run_id).join("report.json"))
+            .expect("finalize's report"),
+    )
+    .expect("json");
+    assert_eq!(finalized["outcome"], "budget_exceeded", "{finalized}");
+    assert_eq!(finalized["budget_stop"]["budget"], "run", "{finalized}");
+}
+
+/// S9, a task-budget stop. `[budgets] task_usd` refuses a task's retry once the
+/// task's own spend reaches it, and the log's `budget_exceeded` names that
+/// task's key. The `RunReport` projects the stop to the task's display id. The
+/// run-wide stop above, refused at integration, names no task and projects to
+/// an empty one; both semantics stand side by side.
+///
+/// The gate fails the first candidate that carries the stub's output, once,
+/// so the task's first attempt is spent and its retry is what the task budget
+/// refuses.
+#[cfg(unix)]
+#[test]
+fn a_task_budget_stop_projects_the_task_it_names() {
+    let (tree, repo) = temp_engine_repo("topology-task-budget");
+    let failed_once = tree.path().join("gate-failed-once");
+    seed(
+        &repo,
+        "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\nMake it.\n",
+        Some(
+            format!(
+                "[routing]\nimplement = {{ chain = [\"small\"], attempts_per = 2 }}\n\n\
+                 [budgets]\ntask_usd = 0.01\n\n\
+                 [[gates]]\nname = \"fails-once\"\n\
+                 cmd = \"if [ -e agent-output.txt ] && [ ! -e '{}' ]; then : > '{}'; exit 1; fi\"\n",
+                failed_once.display(),
+                failed_once.display()
+            )
+            .as_str(),
+        ),
+    );
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        0,
+    )));
+    let report = run_with(&topology_options(&repo), &source).expect("the run ends");
+    until_released(&repo, &report.run_id);
+    assert!(
+        failed_once.exists(),
+        "the fixture's premise: the gate failed the first attempt"
+    );
+
+    let events = log_events(&repo, &report.run_id);
+    let stops: Vec<&serde_json::Value> = events
+        .iter()
+        .filter(|event| event["event"] == "budget_exceeded")
+        .collect();
+    let [exceeded] = stops.as_slice() else {
+        panic!("one budget_exceeded event: {events:#?}");
+    };
+    let data = &exceeded["data"];
+    assert_eq!(data["budget"], "task", "{data}");
+    let key = data["key"]
+        .as_u64()
+        .expect("a task-budget stop names the task it refused");
+    let projected = crate::engine::topology::observe::observe(&repo, &report.run_id)
+        .expect("observes")
+        .expect("a schema-4 log")
+        .report()
+        .expect("projects");
+    let task = display_of(&projected, key);
+    assert_eq!(
+        task, "t1",
+        "the fixture's premise: the one task's retry was refused"
+    );
+
+    assert_eq!(report.outcome(), RunOutcome::BudgetExceeded, "{report:#?}");
+    assert_eq!(
+        report.budget_stop,
+        Some(crate::events::BudgetExceeded {
+            budget: crate::events::BudgetKind::Task,
+            limit_usd: data["limit_usd"].as_f64().expect("a limit"),
+            spent_usd: data["spent_usd"].as_f64().expect("a spend"),
+            task: task.clone(),
+        }),
+        "{data}"
+    );
+    assert!(
+        report.render_ledger().contains(&format!("before `{task}`")),
+        "the ledger names the task the stop was for: {}",
+        report.render_ledger()
+    );
+    assert_eq!(
+        projected.budget_stop.map(|stop| stop.budget),
+        Some(crate::events::BudgetKind::Task)
+    );
+    assert_eq!(
+        report
+            .tasks
+            .iter()
+            .map(|task| task.attempts.len())
+            .sum::<usize>(),
+        settled_attempts(&events),
+        "every attempt the log settles is in the report: {report:#?}"
+    );
+}
+
+fn recorded_case_fold(repo: &Path, run_id: &str) -> (String, bool) {
+    let line = fs::read_to_string(rundir::public_dir(repo, run_id).join("events.jsonl"))
+        .expect("the run's event log")
+        .lines()
+        .next()
+        .expect("a committed first line")
+        .to_owned();
+    let first: serde_json::Value = serde_json::from_str(&line).expect("an event");
+    let fold = first["data"]["path_policy"]["case_fold"]
+        .as_bool()
+        .expect("run_started(4) records a case policy");
+    (line, fold)
+}
+
+/// P12-W11 (D7). A public fresh run records the case-fold resolver's answer in
+/// `run_started(4)`'s `path_policy`, and a resume never changes it, even where
+/// the resolver would now answer differently. The managed repository's
+/// `core.ignorecase` changes between each run's creation and its resume, and a
+/// fresh run made after each change shows what the resolver answers then.
+///
+/// The namespace is observed the way the resolver observes it (one name, looked
+/// up in the other case, beside the private root). Where it folds, every answer
+/// is `true`, so only "a resume never changes it" can be shown there.
+///
+/// On a case-sensitive namespace, the run that recorded `true` resumes over a
+/// root that does not fold. The resume continues on the record and warns (D7's
+/// resume side), while the run that recorded `false` resumes without a word.
+#[test]
+fn a_fresh_run_records_the_case_policy_and_a_resume_never_changes_it() {
+    let (tree, repo) = temp_engine_repo("topology-case-record");
+    let probe = tree.path().join("case-probe");
+    fs::write(&probe, b"lower case\n").expect("the case probe");
+    let folds_here = tree.path().join("CASE-PROBE").exists();
+    let answer = |run: &RunReport| {
+        let [asked] = run.questions.as_slice() else {
+            panic!("one question: {run:#?}");
+        };
+        crate::answer::answer(
+            &repo,
+            &asked.question.id.to_string(),
+            crate::answer::Reply::Text("the first".to_owned()),
+        )
+        .expect("the answer is recorded");
+    };
+    let resumed = |run: &RunReport, stub: &TopologyStub| {
+        let mut resume = resume_options(&repo, &run.run_id);
+        resume.private_root = None;
+        let report = resume_with(&resume, &BorrowedTopologyStub(stub)).expect("the resume");
+        assert_eq!(report.outcome(), RunOutcome::Complete, "{report:#?}");
+        until_released(&repo, &run.run_id);
+        report
+    };
+    let warns_of_a_sensitive_root = |report: &RunReport| {
+        report.warnings.iter().any(|warning| {
+            warning.contains("recorded `case_fold = true`")
+                && warning.contains("case-sensitive now")
+        })
+    };
+    let parked = |stub: &TopologyStub| {
+        let run =
+            run_with(&topology_options(&repo), &BorrowedTopologyStub(stub)).expect("the run parks");
+        assert_eq!(run.outcome(), RunOutcome::Parked, "{run:#?}");
+        until_released(&repo, &run.run_id);
+        run
+    };
+
+    git_in(&repo, &["config", "core.ignorecase", "false"]);
+    let sensitive_stub = TopologyStub::new(TOPOLOGY_STUB_EDIT, 1);
+    let recorded_off = parked(&sensitive_stub);
+    let (off_line, off_fold) = recorded_case_fold(&repo, &recorded_off.run_id);
+    assert_eq!(
+        off_fold, folds_here,
+        "with `core.ignorecase = false` the record is the namespace's own answer"
+    );
+
+    git_in(&repo, &["config", "core.ignorecase", "true"]);
+    let union_stub = TopologyStub::new(TOPOLOGY_STUB_EDIT, 1);
+    let recorded_on = parked(&union_stub);
+    let (on_line, on_fold) = recorded_case_fold(&repo, &recorded_on.run_id);
+    assert!(on_fold, "`core.ignorecase = true` joins the union");
+    if !folds_here {
+        assert_ne!(
+            off_fold, on_fold,
+            "the premise on a case-sensitive namespace: the resolver now answers differently"
+        );
+    }
+
+    answer(&recorded_off);
+    let resumed_off = resumed(&recorded_off, &sensitive_stub);
+    assert!(
+        !warns_of_a_sensitive_root(&resumed_off),
+        "a record of `false` that the root agrees with says nothing: {:?}",
+        resumed_off.warnings
+    );
+    assert_eq!(
+        recorded_case_fold(&repo, &recorded_off.run_id).0,
+        off_line,
+        "the resume under `core.ignorecase = true` left the record byte for byte"
+    );
+    let observed = crate::engine::topology::observe::observe(&repo, &recorded_off.run_id)
+        .expect("observes")
+        .expect("a schema-4 log");
+    assert_eq!(
+        observed
+            .started()
+            .expect("a started run")
+            .path_policy
+            .case_fold,
+        off_fold,
+        "the resumed run's fold reads the recorded policy"
+    );
+
+    git_in(&repo, &["config", "core.ignorecase", "false"]);
+    let today_stub = TopologyStub::new(TOPOLOGY_STUB_EDIT, 0);
+    let today = run_with(&topology_options(&repo), &BorrowedTopologyStub(&today_stub))
+        .expect("a fresh run today");
+    until_released(&repo, &today.run_id);
+    assert_eq!(
+        recorded_case_fold(&repo, &today.run_id).1,
+        folds_here,
+        "with `core.ignorecase = false` again, a fresh run records the namespace's answer"
+    );
+    answer(&recorded_on);
+    let resumed_on = resumed(&recorded_on, &union_stub);
+    assert_eq!(
+        warns_of_a_sensitive_root(&resumed_on),
+        !folds_here,
+        "a record of `true` over a root that does not fold continues and warns: {:?}",
+        resumed_on.warnings
+    );
+    assert_eq!(
+        recorded_case_fold(&repo, &recorded_on.run_id).0,
+        on_line,
+        "the resume under `core.ignorecase = false` left the record byte for byte"
+    );
+}
+
+/// The program a configured reviewer's adapter asks the runner for in P12-W17.
+/// Nothing installs it.
+const ABSENT_REVIEWER_CLI: &str = "upstroke-p12-w17-absent-reviewer-cli";
+
+/// A `copilot` adapter whose CLI is not installed: its probe asks the run's own
+/// runner to start a program that is not on `PATH`, and refuses the way
+/// `CopilotAdapter` does when its CLI is absent (`agent::bin::boundary_refused`).
+struct AbsentReviewerCli;
+
+impl AgentAdapter for AbsentReviewerCli {
+    fn id(&self) -> &'static str {
+        crate::agent::copilot::ADAPTER_ID
+    }
+
+    fn probe(&self, runner: &dyn crate::runner::Runner) -> Result<Caps, UpstrokeError> {
+        let request = crate::agent::probe_request(
+            crate::agent::copilot::ADAPTER_ID,
+            CommandSpec::new(ABSENT_REVIEWER_CLI).arg("--version"),
+            0,
+            Duration::from_secs(60),
+        )?;
+        let output = runner.run_blocking(&request).map_err(|cause| {
+            crate::agent::bin::boundary_refused(
+                ABSENT_REVIEWER_CLI,
+                "nothing installs it",
+                &UpstrokeError::from(cause),
+            )
+        })?;
+        Err(UpstrokeError::Agent {
+            message: format!(
+                "`{ABSENT_REVIEWER_CLI}` answered with {:?}, so the witness's premise, an absent \
+                 CLI, does not hold",
+                output.code
+            ),
+        })
+    }
+
+    fn build(&self, _run: &TaskRun) -> Result<CommandSpec, UpstrokeError> {
+        Err(UpstrokeError::Agent {
+            message: "an absent CLI is never built".to_owned(),
+        })
+    }
+
+    fn parse(&self, _out: &ProcessOutput) -> Result<Outcome, UpstrokeError> {
+        Err(UpstrokeError::Agent {
+            message: "an absent CLI is never parsed".to_owned(),
+        })
+    }
+}
+
+/// The same `copilot` reviewer with its CLI present: it probes the shell and
+/// reviews as the topology stub does.
+struct PresentReviewerCli<'a>(&'a TopologyStub);
+
+impl AgentAdapter for PresentReviewerCli<'_> {
+    fn id(&self) -> &'static str {
+        crate::agent::copilot::ADAPTER_ID
+    }
+
+    fn probe(&self, runner: &dyn crate::runner::Runner) -> Result<Caps, UpstrokeError> {
+        let request = crate::agent::probe_request(
+            crate::agent::copilot::ADAPTER_ID,
+            shell_spec("exit 0"),
+            0,
+            Duration::from_secs(60),
+        )?;
+        let output = runner.run_blocking(&request)?;
+        if output.code != Some(0) {
+            return Err(UpstrokeError::Agent {
+                message: format!("the present reviewer's probe exited {:?}", output.code),
+            });
+        }
+        Ok(Caps {
+            version: "0.0.0-present-reviewer".to_owned(),
+            json_output: true,
+            session_resume: false,
+            cost_reporting: true,
+            read_only_mode: true,
+            acp: false,
+            model_list: false,
+        })
+    }
+
+    fn build(&self, run: &TaskRun) -> Result<CommandSpec, UpstrokeError> {
+        self.0.build(run)
+    }
+
+    fn parse(&self, out: &ProcessOutput) -> Result<Outcome, UpstrokeError> {
+        self.0.parse(out)
+    }
+}
+
+/// The topology stub for the chain, and one reviewer adapter beside it.
+struct StubAndReviewer<'a> {
+    stub: &'a TopologyStub,
+    reviewer: &'a dyn AgentAdapter,
+}
+
+impl AdapterSource for StubAndReviewer<'_> {
+    fn get(&self, id: &str) -> Option<&dyn AgentAdapter> {
+        if id == TOPOLOGY_STUB {
+            Some(self.stub as &dyn AgentAdapter)
+        } else {
+            (id == self.reviewer.id()).then_some(self.reviewer)
+        }
+    }
+}
+
+/// The review tier pinned to `copilot`, and the chain held to a rung the stub
+/// serves, so `copilot` is a configured reviewer and nothing else.
+const COPILOT_REVIEWER_CONFIG: &str = "[routing]\n\
+                                       implement = { chain = [\"small\"], attempts_per = 1 }\n\
+                                       review = { tier = \"frontier\" }\n\n\
+                                       [[pins]]\ntier = \"frontier\"\nagent = \"copilot\"\n\
+                                       model = \"gpt-5.3-codex\"\n";
+
+#[test]
+fn a_configured_reviewer_whose_cli_is_absent_fails_creation_before_p5b_and_commits_nothing() {
+    let (_tree, repo) = temp_engine_repo("topology-absent-reviewer");
+    seed(&repo, ONE_ATTEMPT_PLAN, Some(COPILOT_REVIEWER_CONFIG));
+    let stub = TopologyStub::new(TOPOLOGY_STUB_EDIT, 0);
+    let refused = run_with(
+        &topology_options(&repo),
+        &StubAndReviewer {
+            stub: &stub,
+            reviewer: &AbsentReviewerCli,
+        },
+    )
+    .expect_err("an absent reviewer CLI refuses creation");
+    let said = refused.to_string();
+    assert!(
+        said.contains("stopped at P3c"),
+        "after the execution root's claim, before P4 certified: {said}"
+    );
+    assert!(said.contains(ABSENT_REVIEWER_CLI), "{said}");
+    assert_eq!(
+        execution_roots_under(&private_root_for(&repo)),
+        Vec::<String>::new(),
+        "the creator settled the root it claimed before it reclaimed either half: {said}"
+    );
+    assert!(said.contains("could not be executed"), "{said}");
+
+    assert_eq!(
+        rundir::run_dir_names(&repo),
+        Vec::<String>::new(),
+        "no run directory is left behind"
+    );
+    let private_runs = private_root_for(&repo).join("runs");
+    let mut committed_records = Vec::new();
+    let mut stack = vec![private_runs];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path
+                .file_name()
+                .is_some_and(|name| name == "committed.json")
+            {
+                committed_records.push(path);
+            }
+        }
+    }
+    assert_eq!(
+        committed_records,
+        Vec::<PathBuf>::new(),
+        "no private half carries a commit record"
+    );
+    assert_eq!(
+        git_in(
+            &repo,
+            &[
+                "for-each-ref",
+                "--format=%(refname)",
+                "refs/heads/upstroke/"
+            ]
+        ),
+        "",
+        "no integration ref"
+    );
+
+    let present = PresentReviewerCli(&stub);
+    let report = run_with(
+        &topology_options(&repo),
+        &StubAndReviewer {
+            stub: &stub,
+            reviewer: &present,
+        },
+    )
+    .expect("with its CLI present, the same configuration creates the run");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:#?}");
+    let first = first_line_of_the_log(&repo, &report.run_id);
+    assert_eq!(
+        first["data"]["probed_agents"],
+        serde_json::json!(["claude-code", "copilot"]),
+        "{first}"
+    );
+    until_released(&repo, &report.run_id);
+}
+
+#[test]
+fn a_fresh_run_on_an_unborn_branch_is_refused_before_it_creates_anything_and_a_born_one_runs() {
+    let tree = temp_engine_scratch("topology-unborn");
+    let repo = tree.path().join("repo");
+    fs::create_dir(&repo).expect("the repository, a child of the guarded tree");
+    git_in(&repo, &["init", "-q", "-b", "main"]);
+    git_in(&repo, &["config", "user.email", "test@upstroke.local"]);
+    git_in(&repo, &["config", "user.name", "upstroke tests"]);
+    git_in(&repo, &["config", "maintenance.auto", "false"]);
+    assert!(
+        !repo
+            .join(".git")
+            .join("refs")
+            .join("heads")
+            .join("main")
+            .exists()
+            && !repo.join(".git").join("packed-refs").exists(),
+        "the premise: the branch is unborn"
+    );
+    let plan = "## Implement the widget\n<!-- upstroke: id=t1 depends= -->\nMake it.\n";
+    let outside = tree.path().join("plan.md");
+    fs::write(&outside, plan).expect("the plan, outside the worktree, which stays clean");
+    let mut opts = topology_options(&repo);
+    opts.plan_path = outside;
+    let home = private_root_for(&repo);
+
+    let foreign_id = crate::ulid::ulid();
+    let foreign = crate::workspace_manager::WorkspaceManager::derive(
+        &repo,
+        &home,
+        &foreign_id,
+        &crate::ulid::ulid(),
+    )
+    .expect("another run's manager");
+    foreign
+        .create_execution_root(&mut crate::workspace_manager::NoHooks)
+        .expect("another run's root, in the same namespace");
+    fs::write(
+        foreign.execution_root().join("theirs.txt"),
+        b"another run's bytes",
+    )
+    .expect("another run's content");
+    let foreign_before = private_snapshot(foreign.execution_root());
+
+    let stub = ObservedStub::new(0);
+    let refused = run_with(&opts, &BorrowedObserved(&stub))
+        .expect_err("an unborn branch has no base commit to record");
+    let said = refused.to_string();
+    assert!(
+        said.contains("rev-parse") && said.contains("HEAD"),
+        "the refusal is the base commit's: {said}"
+    );
+    assert_eq!(
+        execution_roots_under(&home),
+        vec![foreign_id.clone()],
+        "the refused run left an execution root behind: {said}"
+    );
+    assert!(
+        rundir::run_dir_names(&repo).is_empty(),
+        "no run directory was published"
+    );
+    assert!(!home.join("runs").exists(), "no private half was made");
+    assert!(stub.built().is_empty(), "nothing was built");
+    assert_eq!(
+        private_snapshot(foreign.execution_root()),
+        foreign_before,
+        "another run's root changed"
+    );
+    drop(WorktreeLock::acquire(&repo).expect("the lease is free after the refusal"));
+
+    fs::write(repo.join("README.md"), "seed\n").expect("seed");
+    fs::write(repo.join("plan.md"), plan).expect("the plan, now in the repository");
+    git_in(&repo, &["add", "-A"]);
+    git_in(&repo, &["commit", "-q", "-m", "seed"]);
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        0,
+    )));
+    let report =
+        run_with(&topology_options(&repo), &source).expect("a fresh run on the born branch");
+    until_released(&repo, &report.run_id);
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:#?}");
+    assert_eq!(
+        recorded_execution_root(&repo, &report.run_id)
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned()),
+        Some(report.run_id.clone()),
+        "the run created and recorded its own root"
+    );
+    assert_eq!(
+        private_snapshot(foreign.execution_root()),
+        foreign_before,
+        "another run's root changed"
+    );
+}
+
+/// Where `no_committer_identity_helper` records that it ran.
+#[cfg(unix)]
+const NO_IDENTITY_MARKER: &str = "UPSTROKE_FINDINGS2_NO_IDENTITY_MARKER";
+
+/// FINDINGS2_3, the committer-identity parity check (root's checkpoint-3
+/// disposition). At `b9d15bdb` the legacy engine asked the operator for no
+/// identity: every commit it put on a run's branch was `commit-tree` with
+/// `upstroke`'s (`Workspace::commit_tree_with_upstroke_identity`). The schema-4
+/// integration's proposal cherry-pick took the committer from the operator's
+/// configuration, so a repository without one stopped there (the CLI
+/// scenario's case C at `ad513bdf`). That was an activation regression, and the
+/// cherry-pick now carries the engine's committer identity.
+///
+/// The child runs with every ambient Git control taken away. In it, the
+/// repository's own identity is removed and `user.useConfigOnly` is set, so Git
+/// can find no committer identity at all, which is checked first. Two
+/// independent tasks at width 2 make the second merge a stale candidate's
+/// cherry-pick, which is checked too.
+#[cfg(unix)]
+#[test]
+fn a_schema_4_run_integrates_where_git_has_no_committer_identity() {
+    let tree = temp_engine_scratch("no-committer-identity");
+    let marker = tree.path().join("ran");
+    let status = crate::workspace_manager::fixture::run_challenged_replacement_witness_child(
+        "engine::tests::no_committer_identity_helper",
+        &[(NO_IDENTITY_MARKER, marker.clone().into_os_string())],
+    );
+    assert!(
+        status.success(),
+        "a schema-4 run in a repository and environment without a committer identity, \
+         ended {status:?}"
+    );
+    assert!(
+        marker.exists(),
+        "the child never reached the helper, so it measured nothing"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "subprocess helper"]
+fn no_committer_identity_helper() {
+    if std::env::var_os(crate::workspace_manager::fixture::REPLACEMENT_WITNESS).is_none() {
+        return;
+    }
+    let marker = PathBuf::from(std::env::var_os(NO_IDENTITY_MARKER).expect("the marker"));
+    fs::write(&marker, b"ran\n").expect("the marker");
+    let (_tree, repo) = temp_engine_repo("no-identity");
+    seed(
+        &repo,
+        TWO_INDEPENDENT_TASKS,
+        Some("[engine]\nmax_parallel = 2\n\n[routing]\nreview = { enabled = false }\n"),
+    );
+    git_in(&repo, &["config", "--unset", "user.name"]);
+    git_in(&repo, &["config", "--unset", "user.email"]);
+    git_in(&repo, &["config", "user.useConfigOnly", "true"]);
+    let ident = Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["var", "GIT_COMMITTER_IDENT"])
+        .output()
+        .expect("run git var");
+    assert!(
+        !ident.status.success(),
+        "the premise: Git finds no committer identity in this repository and environment"
+    );
+
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        "printf 'edited by the topology stub\\n' > \"out.$$.txt\"",
+        0,
+    )));
+    let report = run_with(&topology_options(&repo), &source)
+        .expect("the run integrates without an operator identity");
+    until_released(&repo, &report.run_id);
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:#?}");
+    assert!(
+        committed(&report, "t1") && committed(&report, "t2"),
+        "{report:#?}"
+    );
+    let projected = crate::engine::topology::observe::observe(&repo, &report.run_id)
+        .expect("observes")
+        .expect("a schema-4 log")
+        .report()
+        .expect("projects");
+    let picked = projected
+        .integration_ledger
+        .iter()
+        .find(|row| row.basis == "stale_clean")
+        .and_then(|row| row.proposed_sha.clone())
+        .unwrap_or_else(|| {
+            panic!(
+                "the premise: one merge was a stale candidate's cherry-pick: {:#?}",
+                projected.integration_ledger
+            )
+        });
+    assert_eq!(
+        git_in(&repo, &["log", "-1", "--format=%cn <%ce>", &picked]).trim(),
+        "upstroke <upstroke@upstroke.local>",
+        "the cherry-picked proposal carries the engine's committer identity"
+    );
+}
+
+/// Three tasks in flight from one base. The two in slots `k0` and `k1` both
+/// create `shared.txt` with different contents, and the one in `k2` writes a file
+/// of its own: whichever merges first, a later candidate is stale and clean (a
+/// merge verification) and another conflicts (a merge rejection, which spawns a
+/// merge-repair task).
+#[cfg(unix)]
+const THREE_INDEPENDENT_TASKS: &str = "## Implement the widget\n\
+                                       <!-- upstroke: id=t1 depends= paths=widget/** -->\n\
+                                       Make it.\n\n## Implement the gadget\n\
+                                       <!-- upstroke: id=t2 depends= paths=gadget/** -->\n\
+                                       Make that.\n\n## Implement the gizmo\n\
+                                       <!-- upstroke: id=t3 depends= paths=gizmo/** -->\n\
+                                       Make the third.\n";
+
+#[cfg(unix)]
+const CONFLICTING_WORKER: &str = "case \"$(basename \"$PWD\")\" in k2-*) f=own.txt ;; *) f=shared.txt ;; \
+                                  esac; sleep 1; printf 'written by %s\\n' \"$$\" > \"$f\"";
+
+/// P12-W18. `export-decisions` over a schema-4 run with a merge-repair task:
+/// one row per attempt, in today's columns, the repair task's attempts joined to
+/// the frozen registry by its display id, and no verification or merge event as
+/// a row. Each row is settled as the log settles its attempt: one that
+/// succeeded, by `candidate_prepared`, is `passed`, with its finish and cost.
+#[cfg(unix)]
+#[test]
+fn a_schema_4_export_keeps_todays_rows_and_joins_a_repair_task_to_the_registry() {
+    let (_tree, repo) = temp_engine_repo("topology-export");
+    seed(
+        &repo,
+        THREE_INDEPENDENT_TASKS,
+        Some("[engine]\nmax_parallel = 3\nmax_merge_repairs = 2\n"),
+    );
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        CONFLICTING_WORKER,
+        0,
+    )));
+    let report = run_with(&topology_options(&repo), &source).expect("the run ends");
+    until_released(&repo, &report.run_id);
+    let log = fs::read_to_string(rundir::public_dir(&repo, &report.run_id).join("events.jsonl"))
+        .expect("the log");
+    let kinds: Vec<String> = log
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<serde_json::Value>(line).expect("an event")["event"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned()
+        })
+        .collect();
+    assert!(
+        kinds.iter().any(|kind| kind == "merge_rejected"),
+        "the fixture's premise: a candidate's merge was rejected ({kinds:?})"
+    );
+    assert!(
+        kinds
+            .iter()
+            .any(|kind| kind == "merge_verification_started"),
+        "and verifications ran ({kinds:?})"
+    );
+    let starts = kinds
+        .iter()
+        .filter(|kind| *kind == "attempt_started")
+        .count();
+
+    let loaded = crate::export::load(&repo, &report.run_id).expect("the schema-4 export loads");
+    assert_eq!(
+        loaded.rows.len(),
+        starts,
+        "one row per attempt, and nothing else becomes a row"
+    );
+    let mut jsonl = Vec::new();
+    crate::export::write(&loaded.rows, crate::export::Format::Jsonl, &mut jsonl).expect("jsonl");
+    let rows: Vec<serde_json::Value> = String::from_utf8(jsonl)
+        .expect("utf8")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("a row"))
+        .collect();
+    let task_ids: Vec<&str> = rows
+        .iter()
+        .map(|row| row["task_id"].as_str().unwrap_or_default())
+        .collect();
+    assert!(
+        task_ids
+            .iter()
+            .any(|id| *id != "t1" && *id != "t2" && *id != "t3"),
+        "a repair task's attempts are rows, joined by its display id: {task_ids:?}"
+    );
+    let passed = kinds
+        .iter()
+        .filter(|kind| *kind == "candidate_prepared")
+        .count();
+    let settled_as = |outcome: &str| {
+        rows.iter()
+            .filter(|row| row["outcome"] == outcome)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        settled_as("passed").len(),
+        passed,
+        "every attempt the log settles by `candidate_prepared` is exported as passed: {rows:#?}"
+    );
+    assert!(
+        settled_as("interrupted").is_empty(),
+        "the log interrupts no attempt, and a finished run leaves none dangling: {rows:#?}"
+    );
+    for row in settled_as("passed") {
+        assert!(
+            row["attempt_finished_at"].is_string() && row["cost_usd"].is_number(),
+            "a passed row carries its settlement's finish and cost: {row}"
+        );
+    }
+    let keys: Vec<String> = rows[0]
+        .as_object()
+        .expect("a row is an object")
+        .keys()
+        .cloned()
+        .collect();
+    for row in &rows {
+        let these: Vec<String> = row
+            .as_object()
+            .expect("a row is an object")
+            .keys()
+            .cloned()
+            .collect();
+        assert_eq!(these, keys, "every row has today's columns");
+    }
+    let mut csv = Vec::new();
+    crate::export::write(&loaded.rows, crate::export::Format::Csv, &mut csv).expect("csv");
+    let csv = String::from_utf8(csv).expect("utf8");
+    assert!(
+        csv.starts_with("schema_version,run_id,upstroke_version,run_started_at,"),
+        "{csv}"
+    );
+    assert_eq!(
+        csv.lines().count(),
+        starts + 1,
+        "a header and one line per attempt"
+    );
+}
+
+/// A directory name no string spells: a byte UTF-8 never produces on Unix, an unpaired
+/// surrogate on Windows.
+#[cfg(unix)]
+fn a_root_name_no_string_can_spell() -> std::ffi::OsString {
+    use std::os::unix::ffi::OsStringExt as _;
+    std::ffi::OsString::from_vec(b"private-\xff".to_vec())
+}
+
+#[cfg(windows)]
+fn a_root_name_no_string_can_spell() -> std::ffi::OsString {
+    use std::os::windows::ffi::OsStringExt as _;
+    let mut units: Vec<u16> = "private-".encode_utf16().collect();
+    units.push(0xD800);
+    std::ffi::OsString::from_wide(&units)
+}
+
+/// J4, `PR12-NONUTF8-PRIVATE-ROOT-LOSSY-IDENTITY`. A schema-4 run records its private half and
+/// execution root as text. At the reviewed head a private root holding a byte UTF-8 never
+/// produces was recorded lossily, and the resume then looked for another directory. The root
+/// is now refused before any lock, and afterwards nothing of the run exists: no run directory
+/// in the repository and nothing under the root. A filesystem that refuses such a name
+/// (`EILSEQ`, APFS) cannot hold the root at all. There the run is refused earlier, where the
+/// root is first read, and the test asserts that refusal and that nothing of the run exists,
+/// under a label naming the assertions such a host cannot reach, as the `EILSEQ` cell of
+/// `runner/container/resolve/tests.rs` does.
+#[test]
+fn a_schema_4_run_refuses_a_private_root_no_string_can_spell_before_any_state() {
+    let (tree, repo) = temp_engine_repo("topology-unspellable-root");
+    let private = tree.path().join(a_root_name_no_string_can_spell());
+    // Where the name exists, the run reaches the UTF-8 guard, and its refusal and the empty root
+    // are asserted. Where creating it fails with `EILSEQ`, no such root can exist: the run is
+    // refused where the root is first read (`prelock::authorized_private_root`), before the
+    // UTF-8 guard, and the root is asserted to be still absent. Any other outcome fails.
+    let (label, needle, created) = match fs::create_dir(&private) {
+        Ok(()) => ("not UTF-8", "is not valid UTF-8".to_owned(), true),
+        #[cfg(unix)]
+        Err(error) if error.raw_os_error() == Some(libc::EILSEQ) => (
+            "not UTF-8, refused by this host with EILSEQ: refused where the root is read, before \
+             the UTF-8 guard, so the UTF-8 refusal and the empty-root check are not reached",
+            format!("failed to read {}", private.display()),
+            false,
+        ),
+        Err(error) => panic!("a private root UTF-8 cannot spell: {error}"),
+    };
+    let mut opts = topology_options(&repo);
+    opts.private_root = Some(private.clone());
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        0,
+    )));
+    let refused = run_with(&opts, &source).expect_err("an unspellable private root is refused");
+    assert!(
+        refused.to_string().contains(&needle),
+        "{label}: the refusal says why: {refused}"
+    );
+    assert!(
+        rundir::run_dir_names(&repo).is_empty(),
+        "{label}: no run directory exists after the refusal"
+    );
+    if created {
+        assert!(
+            fs::read_dir(&private)
+                .expect("the refused root is still readable")
+                .next()
+                .is_none(),
+            "{label}: nothing was created under the refused root"
+        );
+    } else {
+        assert!(
+            fs::symlink_metadata(&private).is_err(),
+            "{label}: the root this host refused was not created by the run"
+        );
+    }
+}
+
+/// J4's other side: a private root whose name holds U+FFFD is valid UTF-8, so it is not
+/// refused, and the run records both paths that hang from it exactly. The resume finds the
+/// run's private half through the recorded locator alone, and refuses only because the run
+/// has finished. Each recorded path is spelled as the code that derives it spells it: the
+/// private half from the root as `fs::canonicalize` resolves it (`prelock`), and the execution
+/// root as the workspace manager spells the paths it derives, without Windows' verbatim prefix
+/// (`fixture::canonical`). Native Windows CI run 41579577562 failed when this test compared the
+/// execution root with the first spelling.
+#[test]
+fn a_private_root_named_with_the_replacement_character_is_recorded_exactly() {
+    let (tree, repo) = temp_engine_repo("topology-replacement-root");
+    let private = tree.path().join("private-\u{FFFD}");
+    fs::create_dir(&private).expect("a private root whose name is valid UTF-8");
+    let mut opts = topology_options(&repo);
+    opts.private_root = Some(private.clone());
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        0,
+    )));
+    let report = run_with(&opts, &source).expect("the run completes");
+    until_released(&repo, &report.run_id);
+    let canonical = fs::canonicalize(&private).expect("the private root canonicalizes");
+    let recorded = first_line_of_the_log(&repo, &report.run_id);
+    assert_eq!(
+        recorded["data"]["private_dir"].as_str(),
+        canonical.join("runs").join(&report.run_id).to_str(),
+        "the private half is recorded exactly"
+    );
+    // The root as the workspace manager spells it: `fs::canonicalize` above, through
+    // `strip_verbatim` on Windows and unchanged elsewhere.
+    let managed_root = crate::workspace_manager::fixture::canonical(&private);
+    let execution_root = recorded["data"]["execution_root"]
+        .as_str()
+        .expect("the execution root is recorded");
+    assert!(
+        Path::new(execution_root).starts_with(managed_root.join("workspaces")),
+        "the execution root is recorded exactly under the root: {execution_root}"
+    );
+    let mut resume = resume_options(&repo, &report.run_id);
+    resume.private_root = None;
+    let refused =
+        resume_with(&resume, &source).expect_err("a finished run has nothing to continue");
+    assert!(
+        refused.to_string().contains("already finished"),
+        "the recorded locator names the run's private half: {refused}"
+    );
+}
+
+#[cfg(unix)]
+const UNSPELLABLE_HOME_REPO: &str = "UPSTROKE_UNSPELLABLE_HOME_REPO";
+
+#[cfg(unix)]
+#[derive(Debug, Default, PartialEq, Eq)]
+struct TreeSnapshot {
+    entries: Vec<PathBuf>,
+    unread: Vec<PathBuf>,
+}
+
+#[cfg(unix)]
+fn every_path_under(root: &Path) -> TreeSnapshot {
+    let not_found = |error: &std::io::Error| error.kind() == std::io::ErrorKind::NotFound;
+    let relative = |path: &Path| {
+        path.strip_prefix(root)
+            .expect("an entry under the root")
+            .to_path_buf()
+    };
+    let mut snapshot = TreeSnapshot::default();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        let listed = match fs::read_dir(&directory) {
+            Ok(listed) => listed,
+            Err(error) if not_found(&error) => {
+                snapshot.unread.push(relative(&directory));
+                continue;
+            }
+            Err(error) => panic!("list {}: {error}", directory.display()),
+        };
+        for entry in listed {
+            let entry = entry
+                .unwrap_or_else(|error| panic!("an entry of {}: {error}", directory.display()));
+            let path = entry.path();
+            match entry.file_type() {
+                Ok(kind) => {
+                    if kind.is_dir() {
+                        pending.push(path.clone());
+                    }
+                    snapshot.entries.push(relative(&path));
+                }
+                Err(error) if not_found(&error) => snapshot.unread.push(relative(&path)),
+                Err(error) => panic!("the type of {}: {error}", path.display()),
+            }
+        }
+    }
+    snapshot.entries.sort();
+    snapshot.unread.sort();
+    snapshot
+}
+
+#[cfg(unix)]
+#[test]
+fn the_tree_snapshot_lists_by_the_platforms_own_names_and_types_and_notes_what_it_cannot_read() {
+    let tree = temp_engine_scratch("tree-snapshot");
+    let directory = tree.path().join("d");
+    fs::create_dir(&directory).expect("a directory");
+    fs::write(directory.join("f"), "a file\n").expect("a file");
+    std::os::unix::fs::symlink(tree.path().join("absent"), tree.path().join("dangling"))
+        .expect("a link to nothing");
+    std::os::unix::fs::symlink(&directory, tree.path().join("linked"))
+        .expect("a link to the directory");
+    assert_eq!(
+        every_path_under(tree.path()),
+        TreeSnapshot {
+            entries: ["d", "d/f", "dangling", "linked"]
+                .into_iter()
+                .map(PathBuf::from)
+                .collect(),
+            unread: Vec::new(),
+        },
+        "every entry by its listed name, links not followed"
+    );
+    assert_eq!(
+        every_path_under(&tree.path().join("absent")),
+        TreeSnapshot {
+            entries: Vec::new(),
+            unread: vec![PathBuf::new()],
+        },
+        "a root that cannot be read is noted, not a panic"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_schema_4_run_refuses_an_unspellable_default_private_root_before_it_creates_anything() {
+    for home_exists in [true, false] {
+        let (tree, repo) = temp_engine_repo(&format!(
+            "topology-unspellable-home-{}",
+            u8::from(home_exists)
+        ));
+        let home = tree.path().join(a_root_name_no_string_can_spell());
+        if home_exists {
+            match fs::create_dir(&home) {
+                Ok(()) => {}
+                Err(error) if error.raw_os_error() == Some(libc::EILSEQ) => continue,
+                Err(error) => panic!("a home directory UTF-8 cannot spell: {error}"),
+            }
+        }
+        let snapshot = || (every_path_under(tree.path()), every_path_under(&home));
+        let before = snapshot();
+        let ended = crate::agent::proc::test_support::run_test_isolated(
+            "engine::tests::unspellable_default_root_child",
+            &[
+                ("HOME", home.as_os_str()),
+                ("USERPROFILE", home.as_os_str()),
+                (UNSPELLABLE_HOME_REPO, repo.as_os_str()),
+            ],
+            Duration::from_secs(300),
+        );
+        let after = snapshot();
+        assert_eq!(
+            (&after.0.entries, &after.1.entries),
+            (&before.0.entries, &before.1.entries),
+            "home exists: {home_exists}: the refusal created nothing, the recorded-objects \
+             include included. Listed and not read, under the tree and the home: before {:?}, \
+             after {:?}: {ended}",
+            (&before.0.unread, &before.1.unread),
+            (&after.0.unread, &after.1.unread)
+        );
+        assert!(
+            ended.status.is_some_and(|status| status.success())
+                && ended.stdout.contains("1 passed"),
+            "home exists: {home_exists}: the run is refused for its default root: {ended}"
+        );
+        assert!(
+            fs::symlink_metadata(home.join(".upstroke")).is_err(),
+            "home exists: {home_exists}: no default root under the home"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "subprocess helper"]
+fn unspellable_default_root_child() {
+    let Some(repo) = std::env::var_os(UNSPELLABLE_HOME_REPO).map(PathBuf::from) else {
+        return;
+    };
+    let mut opts = options(&repo);
+    opts.legacy_writer = false;
+    opts.private_root = None;
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        0,
+    )));
+    let refused = run_with(&opts, &source).expect_err("an unspellable default root is refused");
+    let said = refused.to_string();
+    assert!(
+        said.contains("the default private root") && said.contains("is not valid UTF-8"),
+        "{said}"
+    );
+    assert!(said.contains("Nothing was locked or created"), "{said}");
+    assert!(
+        rundir::run_dir_names(&repo).is_empty(),
+        "no run directory exists after the refusal"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn the_default_root_check_judges_the_path_the_root_will_resolve_to() {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let check = crate::engine::topology::prelock::refuse_unspellable_default_root;
+    let tree = temp_engine_scratch("default-root-spelling");
+    let home = tree.path().join("home");
+    fs::create_dir(&home).expect("a home text spells");
+    check(&home.join(".upstroke")).expect("a missing root under a home text spells");
+    check(&home).expect("an existing root text spells");
+
+    let unspellable = tree.path().join(std::ffi::OsStr::from_bytes(b"home-\xff"));
+    let refused = check(&unspellable.join(".upstroke"))
+        .expect_err("a missing root under a missing home no string spells");
+    assert!(
+        refused.to_string().contains("is not valid UTF-8")
+            && refused
+                .to_string()
+                .contains("Nothing was locked or created"),
+        "{refused}"
+    );
+    let linked = match std::os::unix::fs::symlink(&home, &unspellable) {
+        Ok(()) => {
+            check(&unspellable.join(".upstroke"))
+                .expect("a link no string spells that resolves to a home text spells");
+            true
+        }
+        Err(error) if error.raw_os_error() == Some(libc::EILSEQ) => false,
+        Err(error) => panic!("a link whose name no string spells: {error}"),
+    };
+    let mut expected = vec![PathBuf::from("home")];
+    if linked {
+        expected.push(PathBuf::from(std::ffi::OsStr::from_bytes(b"home-\xff")));
+    }
+    expected.sort();
+    assert_eq!(
+        every_path_under(tree.path()),
+        TreeSnapshot {
+            entries: expected,
+            unread: Vec::new(),
+        },
+        "the checks created nothing"
+    );
+}
+
+/// J3, `PR12-REPORT-OMITS-INTEGRATION-REVIEW-SPEND` (both reviews). Three tasks in flight from
+/// one base: a later candidate is stale and clean, so its integration verification runs a
+/// review the run's spend ledger charges. At the reviewed head the CLI report collected
+/// attempt records only and its total missed that charge ($0.10 against $0.11 recorded; the
+/// second witness, $0.0400 against $0.0500). The report now carries those passes on the
+/// candidate's task, once, and its total, and the tasks' own totals, are the ledger's, with no
+/// mismatch warning.
+#[cfg(unix)]
+#[test]
+fn a_schema_4_report_counts_every_integration_review_once() {
+    let (_tree, repo) = temp_engine_repo("topology-integration-spend");
+    seed(
+        &repo,
+        THREE_INDEPENDENT_TASKS,
+        Some("[engine]\nmax_parallel = 3\nmax_merge_repairs = 2\n"),
+    );
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        CONFLICTING_WORKER,
+        0,
+    )));
+    let report = run_with(&topology_options(&repo), &source).expect("the run ends");
+    until_released(&repo, &report.run_id);
+    let log = fs::read(rundir::public_dir(&repo, &report.run_id).join("events.jsonl"))
+        .expect("the run's log");
+    let events = crate::topology::fold::TopologyFold::parse_log(&log).expect("the log parses");
+    let ledger = crate::engine::topology::select::Spend::replay(&events).run_total();
+    let integration = crate::engine::topology::select::IntegrationReviews::replay(&events);
+    let integration_cost: f64 = integration.all().filter_map(|review| review.cost_usd).sum();
+    assert!(
+        integration_cost > 0.0,
+        "the premise: an integration verification charged a review"
+    );
+    assert!(
+        (report.total_cost_usd - ledger).abs() < 1e-9,
+        "the report's total {} is the ledger's {ledger}",
+        report.total_cost_usd
+    );
+    let tasks: f64 = report
+        .tasks
+        .iter()
+        .filter_map(TaskReport::total_cost_usd)
+        .sum();
+    assert!(
+        (tasks - ledger).abs() < 1e-9,
+        "the tasks' own totals {tasks} add up to the ledger's {ledger}"
+    );
+    assert!(
+        !report
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("differs from")),
+        "no cost mismatch is reported: {:?}",
+        report.warnings
+    );
+}
+
+/// J7, PR12 regression review #4: a schema-4 resume runs the gates its run recorded and says
+/// how today's config differs, as `resume_runs_the_gates_the_run_recorded_not_todays` pins for
+/// the sequential engine (DESIGN §17). At the reviewed head the resume restored the recorded
+/// gates without comparing them, so an edited gate passed unremarked. Today's config here edits
+/// one gate's command and another's timeout, renames a third, and changes the shell: the
+/// warning names every edit, and the recorded gates, not today's failing command, decide the
+/// run.
+#[test]
+fn a_schema_4_resume_runs_the_recorded_gates_and_names_how_todays_differ() {
+    let config = |shell: &str, check: &str, lint_secs: u64, third: &str| {
+        format!(
+            "[interaction]\nmode = \"never\"\n\n{shell}\
+             [[gates]]\nname = \"check\"\ncmd = \"{check}\"\ntimeout_secs = 600\n\n\
+             [[gates]]\nname = \"lint\"\ncmd = \"git --version\"\ntimeout_secs = {lint_secs}\n\n\
+             [[gates]]\nname = \"{third}\"\ncmd = \"git --version\"\ntimeout_secs = 600\n"
+        )
+    };
+    let (tree, repo) = temp_engine_repo("topology-gates-recorded");
+    seed(
+        &repo,
+        WORKER_ONLY_PLAN,
+        Some(&config("", "git --version", 600, "old")),
+    );
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        1,
+    )));
+    let parked = run_with(&topology_options(&repo), &source).expect("the run parks");
+    assert_eq!(parked.outcome(), RunOutcome::Parked, "{parked:#?}");
+    until_released(&repo, &parked.run_id);
+    let [asked] = parked.questions.as_slice() else {
+        panic!("one question: {parked:#?}");
+    };
+    crate::answer::answer(
+        &repo,
+        &asked.question.id.to_string(),
+        crate::answer::Reply::Text("the first".to_owned()),
+    )
+    .expect("the answer is recorded");
+
+    let today = tree.path().join("today.toml");
+    fs::write(
+        &today,
+        config(
+            "[engine]\nshell = \"pwsh\"\n\n",
+            "git frobnicate-not-a-command",
+            900,
+            "new",
+        ),
+    )
+    .expect("today's config");
+    let mut resume = resume_options(&repo, &parked.run_id);
+    resume.private_root = None;
+    resume.config_path = Some(today);
+    let resumed = resume_with(&resume, &source).expect("the resume completes the run");
+
+    assert_eq!(resumed.outcome(), RunOutcome::Complete, "{resumed:#?}");
+    assert!(
+        committed(&resumed, "t1"),
+        "the recorded `check` ran, not today's failing command: {resumed:#?}"
+    );
+    assert_eq!(resumed.gates, ["check", "lint", "old"]);
+    let warning = resumed
+        .warnings
+        .iter()
+        .find(|warning| warning.contains("the gates in today's config differ"))
+        .unwrap_or_else(|| panic!("no gate-difference warning: {:?}", resumed.warnings));
+    let native = crate::gates::ShellKind::native().program();
+    for edit in [
+        format!(
+            "`check` runs `git --version` and today's config says `git frobnicate-not-a-command`, \
+             and runs under `{native}` and today's config says `pwsh`"
+        ),
+        format!(
+            "`lint` runs under `{native}` and today's config says `pwsh`, and has 600s to finish \
+             and today's config allows 900s"
+        ),
+        "`old` (`git --version`) is in the record and not in today's config".to_owned(),
+        "`new` (`git --version`) is in today's config and not in the record".to_owned(),
+        "Start a new run to adopt them".to_owned(),
+    ] {
+        assert!(warning.contains(&edit), "names `{edit}`: {warning}");
+    }
+}
+
+/// The model the default bindings give the frontier tier (`catalog::example_binding`).
+const FRONTIER_MODEL: &str = "claude-opus-5";
+
+/// The mark a task's body carries to make its workers below the frontier end without an
+/// edit, so that its ladder must escalate onto the frontier.
+const ESCALATES: &str = "UPSTROKE-ESCALATES";
+
+/// A ladder from the mid tier onto the frontier for implementation tasks, an approval once the
+/// run has reported half a cent of spend, and nobody at a terminal.
+const SPEND_APPROVAL_CONFIG: &str = "[routing]\n\
+     implement = { chain = [\"mid\", \"frontier\"], attempts_per = 1 }\n\n\
+     [interaction]\nmode = \"never\"\nask_before = { frontier_escalation_over_usd = 0.005 }\n";
+
+/// What [`ObservedStub`] was asked to build.
+#[derive(Debug, Clone)]
+struct Built {
+    model: String,
+    reviewer: bool,
+    prompt: String,
+}
+
+/// The topology stub, recording every worker and reviewer it is asked to build: the model, whether
+/// it reviews, and the prompt it was handed. A worker below the frontier tier whose prompt
+/// carries [`ESCALATES`] ends without an edit.
+struct ObservedStub {
+    stub: TopologyStub,
+    built: Mutex<Vec<Built>>,
+}
+
+impl ObservedStub {
+    fn new(questions: usize) -> Self {
+        Self {
+            stub: TopologyStub::new(TOPOLOGY_STUB_EDIT, questions),
+            built: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn built(&self) -> Vec<Built> {
+        self.built
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// The model each worker ran on, in order.
+    fn workers(&self) -> Vec<String> {
+        self.built()
+            .into_iter()
+            .filter(|built| !built.reviewer)
+            .map(|built| built.model)
+            .collect()
+    }
+}
+
+impl AgentAdapter for ObservedStub {
+    fn id(&self) -> &'static str {
+        self.stub.id()
+    }
+
+    fn probe(&self, runner: &dyn crate::runner::Runner) -> Result<Caps, UpstrokeError> {
+        self.stub.probe(runner)
+    }
+
+    fn build(&self, run: &TaskRun) -> Result<CommandSpec, UpstrokeError> {
+        let reviewer = run.profile.permissions == PermissionMode::ReadOnly;
+        self.built
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(Built {
+                model: run.profile.model.clone(),
+                reviewer,
+                prompt: run.prompt.clone(),
+            });
+        if !reviewer && run.profile.model != FRONTIER_MODEL && run.prompt.contains(ESCALATES) {
+            return Ok(shell_spec("exit 0"));
+        }
+        self.stub.build(run)
+    }
+
+    fn parse(&self, out: &ProcessOutput) -> Result<Outcome, UpstrokeError> {
+        self.stub.parse(out)
+    }
+}
+
+/// [`ObservedStub`], shareable across the coordinator's pipeline threads.
+struct SharedObserved(std::sync::Arc<ObservedStub>);
+
+impl AdapterSource for SharedObserved {
+    fn get(&self, id: &str) -> Option<&dyn AgentAdapter> {
+        (id == TOPOLOGY_STUB).then_some(&*self.0 as &dyn AgentAdapter)
+    }
+
+    fn shared(&self) -> Option<std::sync::Arc<dyn AdapterSource + Send + Sync>> {
+        Some(std::sync::Arc::new(Self(std::sync::Arc::clone(&self.0))))
+    }
+}
+
+/// [`ObservedStub`] behind a source that cannot be shared: the step loop.
+struct BorrowedObserved<'a>(&'a ObservedStub);
+
+impl AdapterSource for BorrowedObserved<'_> {
+    fn get(&self, id: &str) -> Option<&dyn AgentAdapter> {
+        (id == TOPOLOGY_STUB).then_some(self.0 as &dyn AgentAdapter)
+    }
+}
+
+/// One task whose ladder escalates from the mid tier onto the frontier.
+fn escalating_plan() -> String {
+    format!("## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n{ESCALATES}\n")
+}
+
+/// J1, PR12 regression review #1 (P1). A schema-4 ladder that escalates onto the frontier once
+/// the run's reported spend has reached `ask_before.frontier_escalation_over_usd` asks first,
+/// as the sequential engine's `should_approve_spend` does (DESIGN §12). At the reviewed head the
+/// schema-4 entry never supplied the control and the frontier ran unasked. Here, under the
+/// coordinator, the question parks the run before any frontier worker starts, a resume with no
+/// answer parks again and starts nothing, and the approval then runs the frontier attempt.
+#[test]
+fn a_schema_4_frontier_escalation_over_the_threshold_waits_for_its_approval() {
+    let (_tree, repo) = temp_engine_repo("topology-approve-spend");
+    seed(&repo, &escalating_plan(), Some(SPEND_APPROVAL_CONFIG));
+    let stub = std::sync::Arc::new(ObservedStub::new(0));
+    let source = SharedObserved(std::sync::Arc::clone(&stub));
+    let parked = run_with(&topology_options(&repo), &source).expect("the run parks");
+    assert_eq!(parked.outcome(), RunOutcome::Parked, "{parked:#?}");
+    let [asked] = parked.questions.as_slice() else {
+        panic!("one question: {parked:#?}");
+    };
+    assert_eq!(asked.question.kind, QuestionKind::ApproveSpend);
+    for named in ["frontier", "$0.0100"] {
+        assert!(
+            asked.question.context.contains(named),
+            "the question names `{named}`: {}",
+            asked.question.context
+        );
+    }
+    assert_eq!(
+        stub.workers(),
+        ["claude-sonnet-5"],
+        "no frontier worker ran unapproved"
+    );
+    until_released(&repo, &parked.run_id);
+
+    let mut resume = resume_options(&repo, &parked.run_id);
+    resume.private_root = None;
+    let again = resume_with(&resume, &source).expect("an unanswered resume parks again");
+    assert_eq!(again.outcome(), RunOutcome::Parked, "{again:#?}");
+    assert_eq!(
+        stub.workers(),
+        ["claude-sonnet-5"],
+        "and still runs nothing on the frontier"
+    );
+    until_released(&repo, &parked.run_id);
+
+    crate::answer::answer(
+        &repo,
+        &asked.question.id.to_string(),
+        crate::answer::Reply::Option(1),
+    )
+    .expect("the approval is recorded");
+    let report = resume_with(&resume, &source).expect("the approved run completes");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:#?}");
+    assert!(committed(&report, "t1"), "{report:#?}");
+    assert_eq!(stub.workers(), ["claude-sonnet-5", FRONTIER_MODEL]);
+    let events = log_events(&repo, &parked.run_id);
+    let at = |kind: &str| events.iter().position(|event| event["event"] == kind);
+    let raised = at("question_raised").expect("the question");
+    let answered = at("question_answered").expect("its answer");
+    let frontier = events
+        .iter()
+        .position(|event| event["event"] == "attempt_started" && event["data"]["rung"] == 1)
+        .expect("the frontier attempt");
+    assert!(
+        raised < answered && answered < frontier,
+        "asked, then approved, then run: {raised}, {answered}, {frontier}"
+    );
+}
+
+/// J1: a declined spend approval fails the task through the halt policy with nothing spent on
+/// the frontier, here through the step loop (the sequential engine's
+/// `a_declined_spend_approval_fails_the_task_through_the_halt_policy`).
+#[test]
+fn a_schema_4_declined_spend_approval_fails_the_task_before_the_frontier_runs() {
+    let (_tree, repo) = temp_engine_repo("topology-decline-spend");
+    seed(&repo, &escalating_plan(), Some(SPEND_APPROVAL_CONFIG));
+    let stub = ObservedStub::new(0);
+    let source = BorrowedObserved(&stub);
+    let parked = run_with(&topology_options(&repo), &source).expect("the run parks");
+    assert_eq!(parked.outcome(), RunOutcome::Parked, "{parked:#?}");
+    until_released(&repo, &parked.run_id);
+    let [asked] = parked.questions.as_slice() else {
+        panic!("one question: {parked:#?}");
+    };
+    crate::answer::answer(
+        &repo,
+        &asked.question.id.to_string(),
+        crate::answer::Reply::Decline,
+    )
+    .expect("the decline is recorded");
+
+    let mut resume = resume_options(&repo, &parked.run_id);
+    resume.private_root = None;
+    let report = resume_with(&resume, &source).expect("the declined run ends");
+    assert_eq!(report.outcome(), RunOutcome::Halted, "{report:#?}");
+    assert!(
+        matches!(task(&report, "t1").status, TaskRunStatus::Failed { .. }),
+        "{report:#?}"
+    );
+    assert_eq!(
+        stub.workers(),
+        ["claude-sonnet-5"],
+        "declining spent nothing on the frontier"
+    );
+}
+
+/// J1: while one task's escalation waits for its approval, an unrelated task runs to its merge
+/// under the coordinator, and the run ends parked on the one question with nothing run on the
+/// frontier.
+#[test]
+fn a_schema_4_spend_approval_parks_only_its_own_task() {
+    let (_tree, repo) = temp_engine_repo("topology-approve-spend-alongside");
+    seed(
+        &repo,
+        &format!(
+            "{}\n## Two\n<!-- upstroke: id=t2 kind=implement depends= -->\nMake it.\n",
+            escalating_plan()
+        ),
+        Some(&format!(
+            "{SPEND_APPROVAL_CONFIG}\n[engine]\nmax_parallel = 2\n"
+        )),
+    );
+    let stub = std::sync::Arc::new(ObservedStub::new(0));
+    let source = SharedObserved(std::sync::Arc::clone(&stub));
+    let parked = run_with(&topology_options(&repo), &source).expect("the run parks");
+    assert_eq!(parked.outcome(), RunOutcome::Parked, "{parked:#?}");
+    assert!(
+        committed(&parked, "t2"),
+        "the unrelated task merged: {parked:#?}"
+    );
+    assert!(
+        matches!(task(&parked, "t1").status, TaskRunStatus::Parked { .. }),
+        "{parked:#?}"
+    );
+    let [asked] = parked.questions.as_slice() else {
+        panic!("one question: {parked:#?}");
+    };
+    assert_eq!(asked.question.kind, QuestionKind::ApproveSpend);
+    assert!(
+        !stub.workers().iter().any(|model| model == FRONTIER_MODEL),
+        "{:?}",
+        stub.workers()
+    );
+}
+
+/// J1: under the threshold an escalation onto the frontier needs no approval, and its attempt
+/// runs unasked.
+#[test]
+fn a_schema_4_frontier_escalation_under_the_threshold_runs_unasked() {
+    let (_tree, repo) = temp_engine_repo("topology-spend-under-threshold");
+    let config = SPEND_APPROVAL_CONFIG.replace("0.005", "1.0");
+    seed(&repo, &escalating_plan(), Some(&config));
+    let stub = ObservedStub::new(0);
+    let report =
+        run_with(&topology_options(&repo), &BorrowedObserved(&stub)).expect("the run completes");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:#?}");
+    assert!(committed(&report, "t1"), "{report:#?}");
+    assert_eq!(stub.workers(), ["claude-sonnet-5", FRONTIER_MODEL]);
+    assert!(
+        !event_kinds(&repo, &report.run_id)
+            .iter()
+            .any(|kind| kind == "question_raised"),
+        "nothing was asked"
+    );
+}
+
+/// The words the J2 test answers with: an instruction no prompt holds unless the answer reached
+/// it.
+const UNIQUE_ANSWER: &str = "Use UNIQUE_ZEBRA_FORMAT_739 for the widget.";
+
+/// J2, PR12 regression review #2 (P1), `PR249-ANSWER-TEXT-NOT-CARRIED`: a person's answer in their
+/// own words reaches the resumed worker as an instruction and its reviewer as a decision, under
+/// the coordinator and under the step loop, and the log keeps the words. At the reviewed head the
+/// answer un-parked the task and reached no agent: `question_answered` kept only an option index
+/// and the entry gave every review an empty list of decisions. Each mode parks on the worker's
+/// question, takes `upstroke answer --text` and resumes.
+#[test]
+fn a_schema_4_answer_in_words_reaches_the_next_worker_and_its_reviewer() {
+    for shared in [true, false] {
+        let (_tree, repo) = temp_engine_repo(&format!("topology-answer-words-{shared}"));
+        let stub = std::sync::Arc::new(ObservedStub::new(1));
+        let shared_source = SharedObserved(std::sync::Arc::clone(&stub));
+        let borrowed_source = BorrowedObserved(&stub);
+        let source: &dyn AdapterSource = if shared {
+            &shared_source
+        } else {
+            &borrowed_source
+        };
+        let parked = run_with(&topology_options(&repo), source).expect("the run parks");
+        assert_eq!(parked.outcome(), RunOutcome::Parked, "{parked:#?}");
+        until_released(&repo, &parked.run_id);
+        let [asked] = parked.questions.as_slice() else {
+            panic!("one question: {parked:#?}");
+        };
+        crate::answer::answer(
+            &repo,
+            &asked.question.id.to_string(),
+            crate::answer::Reply::Text(UNIQUE_ANSWER.to_owned()),
+        )
+        .expect("the answer is recorded");
+        let before = stub.built().len();
+
+        let mut resume = resume_options(&repo, &parked.run_id);
+        resume.private_root = None;
+        let report = resume_with(&resume, source).expect("the resume completes the run");
+        assert_eq!(report.outcome(), RunOutcome::Complete, "{report:#?}");
+        let resumed = stub.built().split_off(before);
+        let worker = resumed
+            .iter()
+            .find(|built| !built.reviewer)
+            .expect("a resumed worker");
+        assert!(
+            worker.prompt.contains(UNIQUE_ANSWER)
+                && worker
+                    .prompt
+                    .contains("This is an instruction from a person"),
+            "shared {shared}: the worker is told:\n{}",
+            worker.prompt
+        );
+        let reviewer = resumed
+            .iter()
+            .find(|built| built.reviewer)
+            .expect("its reviewer");
+        assert!(
+            reviewer.prompt.contains(UNIQUE_ANSWER)
+                && reviewer.prompt.contains("This is a decision from a person"),
+            "shared {shared}: the reviewer is told:\n{}",
+            reviewer.prompt
+        );
+        let answered = log_events(&repo, &parked.run_id)
+            .into_iter()
+            .find(|event| event["event"] == "question_answered")
+            .expect("the answer's record");
+        assert_eq!(
+            answered["data"]["text"], UNIQUE_ANSWER,
+            "shared {shared}: the log keeps the words"
+        );
+    }
+}
+
+#[cfg(unix)]
+const INHERITED_COMMON_IMAGE: &str = "upstroke-tests/inherited-common:1";
+#[cfg(unix)]
+const INHERITED_COMMON_REFUSALS: &str = "UPSTROKE_INHERITED_COMMON_REFUSALS";
+
+#[cfg(unix)]
+fn run_directory_names(repo: &Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(rundir::runs_root(repo))
+        .expect("the runs root")
+        .map(|entry| {
+            entry
+                .expect("an entry of the runs root")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+#[cfg(unix)]
+fn record_a_container_runner_mounting(repo: &Path, run_id: &str, mounts: &[(&Path, &str)]) {
+    use crate::topology::events::{
+        ImageIdentity, MountSourceIdentity, MountSourceKind, RecordedMount, RunnerContract,
+        RunnerKind, RunnerPolicy, TopologyEvent, TopologyEventBody,
+    };
+    use std::os::unix::fs::MetadataExt as _;
+
+    let runner = RunnerPolicy {
+        kind: RunnerKind::Container,
+        policy: RunnerContract::ContainerV1,
+        image: Some(ImageIdentity {
+            reference: INHERITED_COMMON_IMAGE.to_owned(),
+            id: format!("sha256:{}", "a".repeat(64)),
+            digest: None,
+        }),
+        credential_volumes: Some(std::collections::BTreeMap::new()),
+        mounts: mounts
+            .iter()
+            .map(|(source, target)| {
+                let canonical = fs::canonicalize(source).expect("the mounted directory resolves");
+                let metadata = fs::metadata(&canonical).expect("the mounted directory");
+                RecordedMount {
+                    source: canonical.to_str().expect("a UTF-8 source").to_owned(),
+                    target: (*target).to_owned(),
+                    read_only: false,
+                    source_identity: MountSourceIdentity::Unix {
+                        kind: MountSourceKind::Directory,
+                        device: metadata.dev(),
+                        inode: metadata.ino(),
+                    },
+                }
+            })
+            .collect(),
+    };
+    let log = rundir::public_dir(repo, run_id).join("events.jsonl");
+    let bytes = fs::read(&log).expect("the parked run's log");
+    let end = bytes
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .expect("a committed first line");
+    let (first, rest) = bytes.split_at(end);
+    let first = std::str::from_utf8(first).expect("a UTF-8 first line");
+    let event: TopologyEvent = serde_json::from_str(first).expect("the first line is an event");
+    let TopologyEventBody::RunStarted { data } = event.body else {
+        panic!("the first line is not `run_started`: {first}");
+    };
+    let recorded = serde_json::to_string(&data.runner).expect("the recorded runner serializes");
+    assert_eq!(
+        first.matches(&recorded).count(),
+        1,
+        "the first line spells its runner `{recorded}` exactly once: {first}"
+    );
+    let mut planted = first
+        .replacen(
+            &recorded,
+            &serde_json::to_string(&runner).expect("the container runner serializes"),
+            1,
+        )
+        .into_bytes();
+    planted.extend_from_slice(rest);
+    fs::write(&log, planted).expect("the container runner recorded");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_mount_inside_an_inherited_common_directory_is_refused_by_run_and_resume_before_the_runtime_is_asked()
+ {
+    let (tree, repo) = temp_engine_repo("inherited-common-mount");
+    git_in(&repo, &["config", "maintenance.auto", "false"]);
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        1,
+    )));
+    let parked = run_with(&topology_options(&repo), &source).expect("the run parks");
+    assert_eq!(parked.outcome(), RunOutcome::Parked, "{parked:#?}");
+    until_released(&repo, &parked.run_id);
+
+    let common = repo.with_file_name("common");
+    copy_tree_for_a_layout(&repo.join(".git"), &common);
+    let refs = common.join("refs");
+    fs::write(
+        repo.with_file_name("container.toml"),
+        format!(
+            "[runner]\nkind = \"container\"\nimage = \"{INHERITED_COMMON_IMAGE}\"\n\
+             mounts = [{{ source = \"{}\", target = \"/data\", read_only = false }}]\n",
+            refs.display()
+        ),
+    )
+    .expect("a container configuration mounting the common directory's refs");
+    record_a_container_runner_mounting(&repo, &parked.run_id, &[(refs.as_path(), "/data")]);
+
+    let bin = tree.path().join("bin");
+    fs::create_dir(&bin).expect("the stub runtime's directory");
+    let asked = tree.path().join("runtime-asked");
+    crate::runner::container::write_program_in_its_own_process(
+        &bin.join(crate::runner::container::DOCKER_PROGRAM),
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nexit 93\n",
+            asked.display()
+        ),
+    );
+    let inherited = std::env::var_os("PATH").unwrap_or_default();
+    let path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&inherited)))
+        .expect("a PATH with the stub runtime first");
+
+    let log = rundir::public_dir(&repo, &parked.run_id).join("events.jsonl");
+    let before = fs::read(&log).expect("the recorded log");
+    let runs = run_directory_names(&repo);
+    for (spelling, value) in [
+        ("absolute", common.as_os_str()),
+        ("relative", std::ffi::OsStr::new("../common")),
+    ] {
+        let refusals = tree.path().join(format!("refusals-{spelling}"));
+        let ended = crate::agent::proc::test_support::run_test_isolated(
+            "engine::tests::inherited_common_dir_mount_child",
+            &[
+                ("GIT_COMMON_DIR", value),
+                ("PATH", path.as_os_str()),
+                (INHERITED_RUN_ROOT, repo.as_os_str()),
+                (INHERITED_RUN_ID, std::ffi::OsStr::new(&parked.run_id)),
+                (INHERITED_COMMON_REFUSALS, refusals.as_os_str()),
+            ],
+            Duration::from_secs(300),
+        );
+        assert!(
+            ended.status.is_some_and(|status| status.success())
+                && ended.stdout.contains("1 passed"),
+            "under the {spelling} GIT_COMMON_DIR the run and the resume refused the mount: {ended}"
+        );
+        let said = fs::read_to_string(&refusals).unwrap_or_else(|error| {
+            panic!("the {spelling} cell's child recorded no refusals ({error}): {ended}")
+        });
+        let canonical = fs::canonicalize(&common).expect("the relocated common directory");
+        assert_eq!(
+            said.matches(&format!("lies inside `{}`", canonical.display()))
+                .count(),
+            2,
+            "the {spelling} GIT_COMMON_DIR: both refusals name the common directory:\n{said}"
+        );
+    }
+    assert!(
+        !asked.exists(),
+        "the container runtime was asked: {}",
+        fs::read_to_string(&asked).unwrap_or_default()
+    );
+    assert_eq!(
+        fs::read(&log).expect("the recorded log"),
+        before,
+        "a refused command wrote the recorded log"
+    );
+    assert_eq!(
+        run_directory_names(&repo),
+        runs,
+        "a refused run created a run directory"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "subprocess helper"]
+fn inherited_common_dir_mount_child() {
+    let Some(repo) = std::env::var_os(INHERITED_RUN_ROOT).map(PathBuf::from) else {
+        return;
+    };
+    let run_id = std::env::var_os(INHERITED_RUN_ID)
+        .and_then(|id| id.into_string().ok())
+        .expect("the recorded run's id");
+    let common =
+        fs::canonicalize(repo.with_file_name("common")).expect("the relocated common directory");
+    let names_the_common_directory = |said: &str| {
+        said.contains(&format!("lies inside `{}`", common.display()))
+            && said.contains("authoritative Git")
+    };
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        0,
+    )));
+
+    let mut opts = topology_options(&repo);
+    opts.config_path = Some(repo.with_file_name("container.toml"));
+    let refused = run_with(&opts, &source).expect_err("a fresh run refuses the configured mount");
+    let said = refused.to_string();
+    assert!(
+        said.contains("[runner] the mount") && names_the_common_directory(&said),
+        "the fresh run: {said}"
+    );
+
+    let refused = resume_with(&resume_options(&repo, &run_id), &source)
+        .expect_err("a resume refuses the recorded mount");
+    let resumed = refused.to_string();
+    assert!(
+        resumed.contains(&format!("run `{run_id}` records the mount"))
+            && names_the_common_directory(&resumed)
+            && resumed.contains("nothing was published, locked or written"),
+        "the resume: {resumed}"
+    );
+    let refusals =
+        std::env::var_os(INHERITED_COMMON_REFUSALS).expect("the parent names the refusals' file");
+    fs::write(refusals, format!("{said}\n{resumed}\n")).expect("the refusals recorded");
+}
+
+#[cfg(unix)]
+const RECORDED_TARGET_REFUSAL: &str = "UPSTROKE_RECORDED_TARGET_REFUSAL";
+
+#[cfg(unix)]
+#[test]
+fn a_recorded_mount_whose_target_a_fresh_run_refuses_is_refused_by_the_resume_before_the_runtime_is_asked()
+ {
+    use crate::runner::container::resolve::fixtures::REFUSED_RECORDED_TARGETS;
+
+    let (tree, repo) = temp_engine_repo("recorded-target-resume");
+    git_in(&repo, &["config", "maintenance.auto", "false"]);
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        1,
+    )));
+    let parked = run_with(&topology_options(&repo), &source).expect("the run parks");
+    assert_eq!(parked.outcome(), RunOutcome::Parked, "{parked:#?}");
+    until_released(&repo, &parked.run_id);
+
+    let shared = tree.path().join("shared");
+    fs::create_dir(&shared).expect("a directory the record mounts");
+    let bin = tree.path().join("bin");
+    fs::create_dir(&bin).expect("the stub runtime's directory");
+    let asked = tree.path().join("runtime-asked");
+    crate::runner::container::write_program_in_its_own_process(
+        &bin.join(crate::runner::container::DOCKER_PROGRAM),
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nexit 93\n",
+            asked.display()
+        ),
+    );
+    let inherited = std::env::var_os("PATH").unwrap_or_default();
+    let path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&inherited)))
+        .expect("a PATH with the stub runtime first");
+
+    let log = rundir::public_dir(&repo, &parked.run_id).join("events.jsonl");
+    let runs = run_directory_names(&repo);
+    for (index, (targets, needle)) in REFUSED_RECORDED_TARGETS.iter().enumerate() {
+        let mounts: Vec<(&Path, &str)> = targets
+            .iter()
+            .map(|target| (shared.as_path(), *target))
+            .collect();
+        record_a_container_runner_mounting(&repo, &parked.run_id, &mounts);
+        let before = fs::read(&log).expect("the log recording the container runner");
+        let refusal = tree.path().join(format!("refusal-{index}"));
+        let ended = crate::agent::proc::test_support::run_test_isolated(
+            "engine::tests::recorded_target_resume_child",
+            &[
+                ("PATH", path.as_os_str()),
+                (INHERITED_RUN_ROOT, repo.as_os_str()),
+                (INHERITED_RUN_ID, std::ffi::OsStr::new(&parked.run_id)),
+                (RECORDED_TARGET_REFUSAL, refusal.as_os_str()),
+            ],
+            Duration::from_secs(300),
+        );
+        assert!(
+            ended.status.is_some_and(|status| status.success())
+                && ended.stdout.contains("1 passed"),
+            "{targets:?}: an isolated child resumed the run under the stub runtime: {ended}"
+        );
+        let said = fs::read_to_string(&refusal).unwrap_or_else(|error| {
+            panic!("{targets:?}: the child recorded no refusal ({error}): {ended}")
+        });
+        assert!(
+            said.contains(&format!("run `{}` records the mount", parked.run_id))
+                && said.contains(needle)
+                && said.contains("A fresh run refuses that target")
+                && said.contains("nothing was published, locked or written"),
+            "{targets:?}: the resume refuses the recorded target by the rule a fresh run \
+             applies: {said}"
+        );
+        assert_eq!(
+            fs::read(&log).expect("the recorded log"),
+            before,
+            "{targets:?}: a refused resume wrote the recorded log"
+        );
+    }
+    assert!(
+        !asked.exists(),
+        "the container runtime was asked: {}",
+        fs::read_to_string(&asked).unwrap_or_default()
+    );
+    assert_eq!(
+        run_directory_names(&repo),
+        runs,
+        "a refused resume created a run directory"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "subprocess helper"]
+fn recorded_target_resume_child() {
+    let repo = PathBuf::from(
+        std::env::var_os(INHERITED_RUN_ROOT).expect("the parent names the recorded repository"),
+    );
+    let run_id = std::env::var(INHERITED_RUN_ID).expect("the recorded run's UTF-8 id");
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        0,
+    )));
+    let refused = resume_with(&resume_options(&repo, &run_id), &source)
+        .expect_err("a resume refuses the recorded target");
+    let refusal =
+        std::env::var_os(RECORDED_TARGET_REFUSAL).expect("the parent names the refusal's file");
+    fs::write(refusal, refused.to_string()).expect("the refusal recorded");
+}
+
+fn plant_census_husks(repo: &Path) -> (String, String, PathBuf) {
+    let malformed = crate::ulid::ulid();
+    let public = rundir::public_dir(repo, &malformed);
+    fs::create_dir_all(&public).expect("a husk's public directory");
+    fs::write(public.join(rundir::MARKER), b"not a marker").expect("an unparseable marker");
+
+    let blocked = crate::ulid::ulid();
+    let incarnation = crate::ulid::ulid();
+    let private_root = fs::canonicalize(private_root_for(repo)).expect("the private root");
+    let public = rundir::public_dir(repo, &blocked);
+    let private = private_root.join("runs").join(&blocked);
+    let repo_key = rundir::RepoKey::for_repo(repo).expect("the repository's key");
+    let policy = crate::runner::policy::host_policy();
+    fs::create_dir_all(&public).expect("the husk's public directory");
+    let marker = rundir::CreatingMarker {
+        run_id: blocked.clone(),
+        repo_key: repo_key.as_str().to_owned(),
+        private_dir: private.to_string_lossy().into_owned(),
+        incarnation: incarnation.clone(),
+        pid: 4242,
+        runner_policy_sha256: crate::runner::policy::runner_policy_sha256(&policy),
+    };
+    rundir::stage_marker(&public, &marker, &mut rundir::NoHooks).expect("P1a");
+    rundir::publish_marker(&public, &mut rundir::NoHooks).expect("P1b");
+    rundir::create_private_dir(&private, &mut rundir::NoHooks).expect("P3a");
+    let owner = rundir::OwnerRecord {
+        run_id: blocked.clone(),
+        repo_key: repo_key.as_str().to_owned(),
+        public_dir: fs::canonicalize(&public)
+            .expect("the public directory")
+            .to_string_lossy()
+            .into_owned(),
+        incarnation: incarnation.clone(),
+        runner: policy,
+    };
+    rundir::stage_owner_record(&private, &owner, &mut rundir::NoHooks).expect("P3a staged");
+    rundir::publish_owner_record(&private, &mut rundir::NoHooks).expect("P3b");
+    let manager = crate::workspace_manager::WorkspaceManager::derive(
+        repo,
+        &private_root,
+        &blocked,
+        &incarnation,
+    )
+    .expect("the husk's manager");
+    rundir::create_private_dir(
+        &private.join(format!("execution-root.v1.{}", manager.repo_key())),
+        &mut rundir::NoHooks,
+    )
+    .expect("the location record");
+    crate::workspace_manager::FreshExecutionRoot(&manager)
+        .create_execution_root(
+            &mut crate::workspace_manager::NoHooks,
+            &private.join(crate::engine::topology::create::STAGED_ROOT),
+            &crate::engine::topology::create::claim_token(&incarnation),
+        )
+        .expect("the publication");
+    fs::create_dir(private.join(crate::engine::topology::create::RETIRED_ROOT))
+        .expect("an obstruction where the root would be retired to");
+    (malformed, blocked, private)
+}
+
+fn assert_census_reported(said: &str, repo: &Path, malformed: &str, blocked: &str, private: &Path) {
+    for (id, why) in [
+        (malformed, "its .creating marker cannot be read"),
+        (blocked, "could not be retired into its private half"),
+    ] {
+        let public = rundir::public_dir(repo, id);
+        let line = format!("startup census: run directory {id} at {}", public.display());
+        assert!(
+            said.contains(&line),
+            "the operator is not told of {id}: {said}"
+        );
+        assert!(said.contains(why), "the reason for {id} is missing: {said}");
+    }
+    assert!(
+        said.contains(&format!("(private locator {})", private.display())),
+        "the private locator is missing: {said}"
+    );
+    assert!(
+        said.contains("already there"),
+        "the cause is missing: {said}"
+    );
+}
+
+fn assert_census_kept(repo: &Path, malformed: &str, blocked: &str, private: &Path) {
+    assert_eq!(
+        fs::read(rundir::public_dir(repo, malformed).join(rundir::MARKER)).expect("the marker"),
+        b"not a marker",
+        "the retained husk is byte-identical"
+    );
+    assert!(
+        rundir::public_dir(repo, blocked)
+            .join(rundir::MARKER)
+            .is_file()
+    );
+    assert!(private.join(rundir::OWNER_RECORD).is_file());
+    assert!(
+        fs::read_dir(private)
+            .expect("the private half")
+            .flatten()
+            .any(|entry| entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("execution-root.v1.")),
+        "the location record is kept"
+    );
+}
+
+struct RefusingProbe;
+
+impl AgentAdapter for RefusingProbe {
+    fn id(&self) -> &'static str {
+        TOPOLOGY_STUB
+    }
+
+    fn probe(&self, _runner: &dyn crate::runner::Runner) -> Result<Caps, UpstrokeError> {
+        Err(UpstrokeError::Agent {
+            message: "the refusing stub's probe refuses".to_owned(),
+        })
+    }
+
+    fn build(&self, _run: &TaskRun) -> Result<CommandSpec, UpstrokeError> {
+        Ok(shell_spec("exit 1"))
+    }
+
+    fn parse(&self, out: &ProcessOutput) -> Result<Outcome, UpstrokeError> {
+        Err(UpstrokeError::Agent {
+            message: format!("the refusing stub never runs a worker: {out:?}"),
+        })
+    }
+}
+
+struct RefusingProbes;
+
+impl AdapterSource for RefusingProbes {
+    fn get(&self, id: &str) -> Option<&dyn AgentAdapter> {
+        (id == TOPOLOGY_STUB).then_some(&RefusingProbe as &dyn AgentAdapter)
+    }
+}
+
+#[test]
+fn a_public_fresh_run_reports_what_its_startup_census_kept_and_why() {
+    let (_tree, repo) = temp_engine_repo("census-report-fresh");
+    let opts = topology_options(&repo);
+    let (malformed, blocked, private) = plant_census_husks(&repo);
+
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        0,
+    )));
+    let report = run_with(&opts, &source).expect("the schema-4 run completes");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:#?}");
+    let rendered = report.render();
+    assert_census_reported(&rendered, &repo, &malformed, &blocked, &private);
+    assert_census_kept(&repo, &malformed, &blocked, &private);
+    until_released(&repo, &report.run_id);
+
+    let refused = run_with(&opts, &RefusingProbes).expect_err("the refusing probe stops the run");
+    let said = refused.to_string();
+    assert!(said.contains("refusing stub's probe refuses"), "{said}");
+    assert_census_reported(&said, &repo, &malformed, &blocked, &private);
+    assert_census_kept(&repo, &malformed, &blocked, &private);
+
+    let Err(status) = crate::status::load(&repo, Some(&malformed)) else {
+        panic!("a husk is not a run and status must not load one");
+    };
+    let status = status.to_string();
+    assert!(
+        status.contains("its .creating marker cannot be read"),
+        "status gives the census's reason: {status}"
+    );
+}
+
+/// `PR12-INV9-UNREADABLE-PRIVATE-LOCATOR`, the public composition: a
+/// prepublication husk -- marker published, private half created with its owner
+/// record, no execution root anywhere -- whose marker's private target the
+/// filesystem will not describe (`EACCES`, through the test build's fault for
+/// exactly that locator). A public fresh run's startup census keeps both halves,
+/// the run completes, and its report names the husk, the locator and the reason;
+/// `status` for the husk id says the same. Until repair16 the failed observation
+/// read as an absent target and the census removed the public husk, the private
+/// half's only locator.
+#[test]
+fn a_public_fresh_run_keeps_and_reports_a_husk_whose_private_target_cannot_be_observed() {
+    let (_tree, repo) = temp_engine_repo("census-locator-unreadable");
+    let opts = topology_options(&repo);
+    let husk = crate::ulid::ulid();
+    let incarnation = crate::ulid::ulid();
+    let private_root = fs::canonicalize(private_root_for(&repo)).expect("the private root");
+    let public = rundir::public_dir(&repo, &husk);
+    let private = private_root.join("runs").join(&husk);
+    let repo_key = rundir::RepoKey::for_repo(&repo).expect("the repository's key");
+    let policy = crate::runner::policy::host_policy();
+    fs::create_dir_all(&public).expect("the husk's public directory");
+    let marker = rundir::CreatingMarker {
+        run_id: husk.clone(),
+        repo_key: repo_key.as_str().to_owned(),
+        private_dir: private.to_string_lossy().into_owned(),
+        incarnation: incarnation.clone(),
+        pid: 4242,
+        runner_policy_sha256: crate::runner::policy::runner_policy_sha256(&policy),
+    };
+    rundir::stage_marker(&public, &marker, &mut rundir::NoHooks).expect("P1a");
+    rundir::publish_marker(&public, &mut rundir::NoHooks).expect("P1b");
+    rundir::create_private_dir(&private, &mut rundir::NoHooks).expect("P3a");
+    let owner = rundir::OwnerRecord {
+        run_id: husk.clone(),
+        repo_key: repo_key.as_str().to_owned(),
+        public_dir: fs::canonicalize(&public)
+            .expect("the public directory")
+            .to_string_lossy()
+            .into_owned(),
+        incarnation,
+        runner: policy,
+    };
+    rundir::stage_owner_record(&private, &owner, &mut rundir::NoHooks).expect("P3a staged");
+    rundir::publish_owner_record(&private, &mut rundir::NoHooks).expect("P3b");
+    let _fault = rundir::LocatorMetadataFault::arm(&private, std::io::ErrorKind::PermissionDenied);
+
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        0,
+    )));
+    let report = run_with(&opts, &source).expect("the schema-4 run completes");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:#?}");
+    let rendered = report.render();
+    for said in [
+        format!(
+            "startup census: run directory {husk} at {}",
+            public.display()
+        ),
+        "cannot be inspected".to_owned(),
+        format!("(private locator {})", private.display()),
+    ] {
+        assert!(
+            rendered.contains(&said),
+            "the operator is not told `{said}`: {rendered}"
+        );
+    }
+    assert!(
+        public.join(rundir::MARKER).is_file() && private.join(rundir::OWNER_RECORD).is_file(),
+        "neither half is deleted: the marker still locates the private half"
+    );
+
+    let Err(status) = crate::status::load(&repo, Some(&husk)) else {
+        panic!("a husk is not a run and status must not load one");
+    };
+    let status = status.to_string();
+    assert!(
+        status.contains("cannot be inspected") && status.contains(&private.display().to_string()),
+        "status gives the census's reason and the locator: {status}"
+    );
+}
+
+#[test]
+fn a_public_fresh_run_whose_run_directory_census_fails_reports_the_container_census() {
+    let (_tree, repo) = temp_engine_repo("census-report-half-b");
+    let opts = topology_options(&repo);
+    let invocation = crate::runner::InvocationId::probe(
+        crate::runner::ProbeTarget::Agent(crate::runner::AgentId::new(TOPOLOGY_STUB)),
+        0,
+    )
+    .expect("a probe's identity");
+    let name = crate::runner::container::container_name_for(
+        "0123456789abcdef",
+        &crate::ulid::ulid(),
+        &crate::ulid::ulid(),
+        &invocation,
+    );
+    let file_name = format!(
+        "{name}{}",
+        crate::runner::container::intent::INTENT_STAGED_SUFFIX
+    );
+    let staged = crate::runner::container::intent_path_for(&private_root_for(&repo), &name)
+        .expect("the intent's path")
+        .with_file_name(&file_name);
+    fs::create_dir_all(staged.parent().expect("the container namespace"))
+        .expect("the container namespace");
+    fs::write(&staged, b"").expect("a torn staged intent");
+    let runs = rundir::runs_root(&repo);
+    fs::create_dir_all(runs.parent().expect("`.upstroke`")).expect("the `.upstroke` directory");
+    fs::write(&runs, b"not a directory").expect("a file where the runs root would be");
+
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        0,
+    )));
+    let refused = run_with(&opts, &source).expect_err("the runs root cannot be enumerated");
+    let UpstrokeError::WithWarnings(warned) = &refused else {
+        panic!("the container census's report was dropped: {refused:?}");
+    };
+    assert!(
+        matches!(warned.error.as_ref(), UpstrokeError::Io { path, .. } if path == &runs),
+        "the command ends with the run-directory census's own error: {:?}",
+        warned.error
+    );
+    let said = refused.to_string();
+    assert!(
+        said.contains(&format!(
+            "{file_name} for {name}: another owner's, so nothing was removed"
+        )),
+        "the operator is not told what the container census kept: {said}"
+    );
+    assert!(staged.is_file(), "the intent is kept");
+    assert_eq!(
+        fs::read(&runs).expect("the planted file"),
+        b"not a directory",
+        "no run was created"
+    );
+}
+
+#[test]
+fn a_public_resume_reports_what_its_startup_census_kept_and_why() {
+    let (_tree, repo) = temp_engine_repo("census-report-resume");
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        1,
+    )));
+    let parked = run_with(&topology_options(&repo), &source).expect("the run parks");
+    assert_eq!(parked.outcome(), RunOutcome::Parked, "{parked:#?}");
+    until_released(&repo, &parked.run_id);
+    let (malformed, blocked, private) = plant_census_husks(&repo);
+    let resume = resume_options(&repo, &parked.run_id);
+
+    let refused =
+        resume_with(&resume, &RefusingProbes).expect_err("the refusing probe stops the resume");
+    let said = refused.to_string();
+    assert_census_reported(&said, &repo, &malformed, &blocked, &private);
+    assert_census_kept(&repo, &malformed, &blocked, &private);
+    until_released(&repo, &parked.run_id);
+
+    let resumed = resume_with(&resume, &source).expect("the resume runs");
+    let rendered = resumed.render();
+    assert_census_reported(&rendered, &repo, &malformed, &blocked, &private);
+    assert_census_kept(&repo, &malformed, &blocked, &private);
 }

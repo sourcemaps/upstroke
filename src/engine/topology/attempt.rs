@@ -68,6 +68,9 @@ pub struct PlanRequest<'a> {
 pub struct InputsRequest<'a> {
     pub entry: &'a crate::topology::registry::TaskEntry,
     pub diff: String,
+    /// The person's decisions about this task its review is given: what the operator answered
+    /// in words (`run::Brief::decisions`, J2).
+    pub decisions: &'a [String],
 }
 
 pub struct VerificationRequest<'a> {
@@ -702,6 +705,8 @@ pub struct AttemptJob {
     pub worktree: PathBuf,
     pub plan: AttemptPlan,
     pub entry: crate::topology::registry::TaskEntry,
+    /// The task's human decisions when the attempt was prepared, for its review (J2).
+    pub decisions: Vec<String>,
 }
 
 impl AttemptJob {
@@ -776,6 +781,7 @@ pub fn attempt_body(work: &mut Work<'_>, job: &AttemptJob) -> Result<Judged, Ups
     let inputs = work.plans.inputs(&InputsRequest {
         entry: &job.entry,
         diff,
+        decisions: &job.decisions,
     })?;
     let identities = run.identities;
     let judgement = work.judge().judge_attempt(

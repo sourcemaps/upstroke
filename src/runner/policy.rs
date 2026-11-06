@@ -9,9 +9,13 @@
 use sha2::{Digest, Sha256};
 
 use crate::error::UpstrokeError;
-use crate::topology::events::{RunnerContract, RunnerKind, RunnerPolicy};
+use crate::topology::events::{
+    MountSourceIdentity, MountSourceKind, RunnerContract, RunnerKind, RunnerPolicy,
+};
 
 pub const CANONICAL_VERSION: &str = "upstroke.runner-policy.v1";
+
+pub const CANONICAL_VERSION_WITH_MOUNTS: &str = "upstroke.runner-policy.v2";
 
 #[must_use]
 pub fn host_policy() -> RunnerPolicy {
@@ -20,6 +24,7 @@ pub fn host_policy() -> RunnerPolicy {
         policy: RunnerContract::HostV1,
         image: None,
         credential_volumes: None,
+        mounts: Vec::new(),
     }
 }
 
@@ -36,7 +41,14 @@ pub fn resolve_host() -> Result<RunnerPolicy, UpstrokeError> {
 #[must_use]
 pub fn canonical_bytes(policy: &RunnerPolicy) -> Vec<u8> {
     let mut out = Vec::new();
-    field(&mut out, CANONICAL_VERSION);
+    field(
+        &mut out,
+        if policy.mounts.is_empty() {
+            CANONICAL_VERSION
+        } else {
+            CANONICAL_VERSION_WITH_MOUNTS
+        },
+    );
     field(&mut out, kind_tag(policy.kind));
     field(&mut out, contract_tag(policy.policy));
     match &policy.image {
@@ -65,6 +77,36 @@ pub fn canonical_bytes(policy: &RunnerPolicy) -> Vec<u8> {
         }
         None => flag(&mut out, false),
     }
+    if !policy.mounts.is_empty() {
+        field(&mut out, &policy.mounts.len().to_string());
+        for mount in &policy.mounts {
+            field(&mut out, &mount.source);
+            field(&mut out, &mount.target);
+            flag(&mut out, mount.read_only);
+            match &mount.source_identity {
+                MountSourceIdentity::Unix {
+                    kind,
+                    device,
+                    inode,
+                } => {
+                    field(&mut out, "unix");
+                    field(&mut out, source_kind_tag(*kind));
+                    field(&mut out, &device.to_string());
+                    field(&mut out, &inode.to_string());
+                }
+                MountSourceIdentity::Windows {
+                    kind,
+                    volume_serial,
+                    file_id,
+                } => {
+                    field(&mut out, "windows");
+                    field(&mut out, source_kind_tag(*kind));
+                    field(&mut out, &volume_serial.to_string());
+                    field(&mut out, file_id);
+                }
+            }
+        }
+    }
     out
 }
 
@@ -77,6 +119,13 @@ const fn kind_tag(kind: RunnerKind) -> &'static str {
     match kind {
         RunnerKind::Host => "host",
         RunnerKind::Container => "container",
+    }
+}
+
+const fn source_kind_tag(kind: MountSourceKind) -> &'static str {
+    match kind {
+        MountSourceKind::Directory => "directory",
+        MountSourceKind::File => "file",
     }
 }
 
@@ -139,6 +188,7 @@ mod tests {
                 digest: Some("sha256:b".to_owned()),
             }),
             credential_volumes: Some(volumes),
+            mounts: Vec::new(),
         }
     }
 
@@ -197,6 +247,213 @@ mod tests {
             CONTAINER_CANONICAL,
             "container encoding drifted from the documented field list"
         );
+    }
+
+    fn mount(
+        source: &str,
+        target: &str,
+        read_only: bool,
+        source_identity: MountSourceIdentity,
+    ) -> crate::topology::events::RecordedMount {
+        crate::topology::events::RecordedMount {
+            source: source.to_owned(),
+            target: target.to_owned(),
+            read_only,
+            source_identity,
+        }
+    }
+
+    fn mounted_fixture() -> RunnerPolicy {
+        let mut policy = container_fixture();
+        policy.mounts = vec![
+            mount(
+                "/srv/cache",
+                "/cache",
+                true,
+                MountSourceIdentity::Unix {
+                    kind: MountSourceKind::Directory,
+                    device: 2049,
+                    inode: 131_074,
+                },
+            ),
+            mount(
+                "/opt/cc",
+                "/opt/cc",
+                false,
+                MountSourceIdentity::Unix {
+                    kind: MountSourceKind::File,
+                    device: 2049,
+                    inode: 7,
+                },
+            ),
+        ];
+        policy
+    }
+
+    const FILE_ID: &str = "00112233445566778899aabbccddeeff";
+
+    fn windows_fixture() -> RunnerPolicy {
+        let mut policy = container_fixture();
+        policy.mounts = vec![mount(
+            r"C:\srv\cache",
+            "/cache",
+            true,
+            MountSourceIdentity::Windows {
+                kind: MountSourceKind::Directory,
+                volume_serial: 4660,
+                file_id: FILE_ID.to_owned(),
+            },
+        )];
+        policy
+    }
+
+    const MOUNTED_CANONICAL: &[u8] = b"25:upstroke.runner-policy.v2;9:container;12:container-v1;\
+                                       1:1;15:upstroke/ci:3.2;8:sha256:a;1:1;8:sha256:b;1:1;1:2;\
+                                       11:claude-code;8:creds-cc;5:codex;8:creds-cx;1:2;\
+                                       10:/srv/cache;6:/cache;1:1;4:unix;9:directory;4:2049;\
+                                       6:131074;7:/opt/cc;7:/opt/cc;1:0;4:unix;4:file;4:2049;1:7;";
+
+    const WINDOWS_CANONICAL: &[u8] = b"25:upstroke.runner-policy.v2;9:container;12:container-v1;\
+                                       1:1;15:upstroke/ci:3.2;8:sha256:a;1:1;8:sha256:b;1:1;1:2;\
+                                       11:claude-code;8:creds-cc;5:codex;8:creds-cx;1:1;\
+                                       12:C:\\srv\\cache;6:/cache;1:1;7:windows;9:directory;\
+                                       4:4660;32:00112233445566778899aabbccddeeff;";
+
+    #[test]
+    fn an_empty_mount_list_keeps_the_v1_bytes_and_a_mounted_record_hashes_in_v2() {
+        let mut unmounted = mounted_fixture();
+        unmounted.mounts.clear();
+        assert_eq!(
+            canonical_bytes(&unmounted),
+            CONTAINER_CANONICAL,
+            "a record without mounts left the v1 encoding"
+        );
+        assert_eq!(canonical_bytes(&host_policy()), HOST_CANONICAL);
+        for (name, policy, golden) in [
+            ("Unix", mounted_fixture(), MOUNTED_CANONICAL),
+            ("Windows", windows_fixture(), WINDOWS_CANONICAL),
+        ] {
+            assert_eq!(
+                canonical_bytes(&policy),
+                golden,
+                "the {name} v2 encoding drifted from the documented field list"
+            );
+            assert_eq!(
+                runner_policy_sha256(&policy),
+                format!("sha256:{:x}", Sha256::digest(golden))
+            );
+            assert!(
+                golden.starts_with(b"25:upstroke.runner-policy.v2;"),
+                "a mounted {name} record is not in its own hash domain"
+            );
+            assert_eq!(
+                &golden[b"25:upstroke.runner-policy.v2;".len()..CONTAINER_CANONICAL.len()],
+                &CONTAINER_CANONICAL[b"25:upstroke.runner-policy.v1;".len()..],
+                "the {name} v2 encoding does not carry the v1 fields unchanged before its mounts"
+            );
+        }
+    }
+
+    #[test]
+    fn the_digest_separates_every_field_of_every_mount() {
+        type Mover = fn(&mut RunnerPolicy);
+        fn unix_fields(
+            p: &mut RunnerPolicy,
+            index: usize,
+        ) -> (&mut MountSourceKind, &mut u64, &mut u64) {
+            match &mut p.mounts[index].source_identity {
+                MountSourceIdentity::Unix {
+                    kind,
+                    device,
+                    inode,
+                } => (kind, device, inode),
+                MountSourceIdentity::Windows { .. } => {
+                    panic!("the Unix fixture holds a Windows identity")
+                }
+            }
+        }
+        fn windows_fields(p: &mut RunnerPolicy) -> (&mut MountSourceKind, &mut u64, &mut String) {
+            match &mut p.mounts[0].source_identity {
+                MountSourceIdentity::Windows {
+                    kind,
+                    volume_serial,
+                    file_id,
+                } => (kind, volume_serial, file_id),
+                MountSourceIdentity::Unix { .. } => {
+                    panic!("the Windows fixture holds a Unix identity")
+                }
+            }
+        }
+        let unix_movers: [(&str, Mover); 12] = [
+            ("a source byte", |p| p.mounts[0].source.push('x')),
+            ("a target byte", |p| p.mounts[1].target.push('x')),
+            ("read-only", |p| p.mounts[0].read_only = false),
+            ("read-write", |p| p.mounts[1].read_only = true),
+            ("the kind", |p| *unix_fields(p, 0).0 = MountSourceKind::File),
+            ("the device", |p| *unix_fields(p, 1).1 += 1),
+            ("the inode", |p| *unix_fields(p, 0).2 += 1),
+            ("the order", |p| p.mounts.swap(0, 1)),
+            ("one mount fewer", |p| {
+                p.mounts.pop();
+            }),
+            ("a boundary moved between source and target", |p| {
+                p.mounts[0].source = "/srv/cache/".to_owned();
+                p.mounts[0].target = "cache".to_owned();
+            }),
+            ("a boundary moved between device and inode", |p| {
+                let (_, device, inode) = unix_fields(p, 0);
+                *device = 20_491;
+                *inode = 31_074;
+            }),
+            ("the same numbers under the other platform", |p| {
+                p.mounts[0].source_identity = MountSourceIdentity::Windows {
+                    kind: MountSourceKind::Directory,
+                    volume_serial: 2049,
+                    file_id: "131074".to_owned(),
+                };
+            }),
+        ];
+        let windows_movers: [(&str, Mover); 5] = [
+            ("the spelling's case", |p| {
+                p.mounts[0].source = p.mounts[0].source.to_ascii_lowercase();
+            }),
+            ("the kind", |p| *windows_fields(p).0 = MountSourceKind::File),
+            ("the volume", |p| *windows_fields(p).1 += 1),
+            ("one byte of the file id", |p| {
+                windows_fields(p).2.replace_range(30.., "ee");
+            }),
+            ("a boundary moved between volume and file id", |p| {
+                let (_, volume, file_id) = windows_fields(p);
+                *volume = 46_600;
+                file_id.remove(0);
+            }),
+        ];
+        let mut seen = std::collections::BTreeSet::new();
+        let mut unmounted = mounted_fixture();
+        unmounted.mounts.clear();
+        seen.insert(runner_policy_sha256(&unmounted));
+        let mut moved = 0_usize;
+        for (base, movers) in [
+            (mounted_fixture(), &unix_movers[..]),
+            (windows_fixture(), &windows_movers[..]),
+        ] {
+            assert!(
+                seen.insert(runner_policy_sha256(&base)),
+                "two fixtures share a digest"
+            );
+            for (name, mover) in movers {
+                let mut other = base.clone();
+                mover(&mut other);
+                assert_ne!(other, base, "moving {name} moved nothing");
+                assert!(
+                    seen.insert(runner_policy_sha256(&other)),
+                    "moving {name} gave a digest another record already has"
+                );
+                moved += 1;
+            }
+        }
+        assert_eq!(moved, 17);
+        assert_eq!(seen.len(), 1 + 2 + 17);
     }
 
     #[test]
@@ -401,6 +658,7 @@ mod tests {
                 digest: None,
             }),
             credential_volumes: None,
+            mounts: Vec::new(),
         };
         assert_eq!(
             canonical_bytes(&upper_host),
@@ -696,6 +954,7 @@ mod tests {
                         policy: contract,
                         image: has_image.then(image).flatten(),
                         credential_volumes: has_volumes.then(BTreeMap::new),
+                        mounts: Vec::new(),
                     };
                     outcomes.insert(
                         format!("{kind:?}/image={has_image}/volumes={has_volumes}"),
@@ -754,6 +1013,7 @@ mod tests {
                 digest: None,
             }),
             credential_volumes: Some(BTreeMap::new()),
+            mounts: Vec::new(),
         };
         let plain = RunnerPolicy {
             image: Some(ImageIdentity {

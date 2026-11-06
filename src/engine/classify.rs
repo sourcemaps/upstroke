@@ -134,6 +134,10 @@ pub(crate) fn attempt_record(attempt: u32, facts: AttemptFacts<'_>) -> AttemptRe
     }
 }
 
+pub(crate) fn interrupted_failure(detail: String) -> AttemptFailure {
+    AttemptFailure::new(FailureKind::Interrupted, detail)
+}
+
 pub(crate) fn review_input_failure(problem: String) -> AttemptFailure {
     AttemptFailure::new(FailureKind::ReviewInputOpaque, problem).from_reviewer()
 }

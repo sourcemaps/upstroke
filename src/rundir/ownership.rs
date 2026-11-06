@@ -65,6 +65,7 @@ pub struct PrivateHalfProof {
     target: PathBuf,
     public: PathBuf,
     run_id: String,
+    incarnation: String,
 }
 
 impl PrivateHalfProof {
@@ -84,6 +85,16 @@ impl PrivateHalfProof {
     #[must_use]
     pub fn run_id(&self) -> &str {
         &self.run_id
+    }
+
+    /// The incarnation both halves agree created them: the marker's, which
+    /// the owner record's had to equal for this proof to exist. A root's claim
+    /// token names an incarnation, so a retirement bound to this proof takes
+    /// the token from here rather than from its caller
+    /// (`PR12-INV9-RECORDED-ROOT-CONTEXT-CONVERGENCE`).
+    #[must_use]
+    pub fn incarnation(&self) -> &str {
+        &self.incarnation
     }
 }
 
@@ -161,8 +172,26 @@ pub fn prove_private_half_ownership(
     // alone is reclaimed". Existence is asked of the link itself, so a
     // dangling symlink counts as present and is refused below rather than
     // reclaimed past.
-    if fs::symlink_metadata(&locator).is_err() {
-        return PrivateHalfOwnership::NothingBound(UnboundShape::TargetAbsent);
+    //
+    // **Only a confirmed `NotFound` is "does not exist".** A stat the
+    // filesystem declined to answer -- `EACCES` under an unreadable
+    // `<R>/runs`, `EIO`, a Windows sharing violation -- says nothing about
+    // whether the private half is there, and reclaiming the public husk past
+    // it would delete the marker, the private half's only locator, while the
+    // private half may still exist (`PR12-INV9-UNREADABLE-PRIVATE-LOCATOR`).
+    // So every other answer retains the husk and reports the locator and the
+    // error, exactly as conjunct 12 answers an unreadable commit record.
+    match locator_fault::locator_metadata(&locator) {
+        Ok(_) => {}
+        Err(absent) if absent.kind() == io::ErrorKind::NotFound => {
+            return PrivateHalfOwnership::NothingBound(UnboundShape::TargetAbsent);
+        }
+        Err(unread) => {
+            return PrivateHalfOwnership::Retained(RetainReason::LocatorUnreadable {
+                locator,
+                detail: unread.to_string(),
+            });
+        }
     }
 
     // Conjunct 4: no symlink or reparse point below the runs directory.
@@ -250,6 +279,7 @@ pub fn prove_private_half_ownership(
         target: locator,
         public: public.to_path_buf(),
         run_id: basename,
+        incarnation: marker.incarnation,
     })
 }
 
@@ -281,6 +311,24 @@ pub fn prove_private_half_ownership(
 /// whole proof.
 pub(super) fn commit_record_proves_absence(stat: &io::Result<fs::Metadata>) -> bool {
     matches!(stat, Err(error) if error.kind() == io::ErrorKind::NotFound)
+}
+
+/// The marker's private target, asked of the link itself and never followed:
+/// the observation the census's target-absent step reads.
+///
+/// A module of its own, twinned by configuration as
+/// `engine::topology::entry`'s initial-log fault is, so that a test can fail
+/// this one observation for one path: the `#[cfg(test)]` twin is this file's
+/// last item, so the first test-gated item of the file is a module and no
+/// production item stands below it.
+#[cfg(not(test))]
+mod locator_fault {
+    use super::{Path, fs, io};
+
+    #[inline]
+    pub(super) fn locator_metadata(locator: &Path) -> io::Result<fs::Metadata> {
+        fs::symlink_metadata(locator)
+    }
 }
 
 /// A husk with no marker: `startup_census` (i) reclaims "a bare directory
@@ -340,5 +388,69 @@ fn is_reparse_point(path: &Path) -> bool {
     #[cfg(not(windows))]
     {
         metadata.file_type().is_symlink()
+    }
+}
+
+// ===========================================================================
+// The test build's locator-observation fault: the test-only tail
+// ===========================================================================
+
+/// The test build's twin of the production `locator_fault` above: the same
+/// observation, failed for exactly the path an armed [`LocatorMetadataFault`]
+/// names. The last item of this file.
+#[cfg(test)]
+pub(crate) mod locator_fault {
+    use super::{Path, PathBuf, fs, io};
+
+    /// An armed [`LocatorMetadataFault`] for exactly `locator` answers its
+    /// error kind in place of the filesystem; every other path is observed as
+    /// production observes it.
+    pub(super) fn locator_metadata(locator: &Path) -> io::Result<fs::Metadata> {
+        let armed = FAULTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .find(|(path, _)| path == locator)
+            .map(|(_, kind)| *kind);
+        match armed {
+            Some(kind) => Err(io::Error::new(
+                kind,
+                "the locator's metadata could not be observed (an armed test fault)",
+            )),
+            None => fs::symlink_metadata(locator),
+        }
+    }
+
+    /// The armed faults, keyed by the exact locator path a test's husk
+    /// records, so a fault one test arms reaches no other test's husk.
+    static FAULTS: std::sync::Mutex<Vec<(PathBuf, io::ErrorKind)>> =
+        std::sync::Mutex::new(Vec::new());
+
+    /// While this guard lives, the ownership proof's observation of `locator`
+    /// fails with the armed kind; the fault is removed when the guard drops,
+    /// on a panicking assertion as on a normal return.
+    pub(crate) struct LocatorMetadataFault {
+        locator: PathBuf,
+    }
+
+    impl LocatorMetadataFault {
+        pub(crate) fn arm(locator: &Path, kind: io::ErrorKind) -> Self {
+            FAULTS
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((locator.to_path_buf(), kind));
+            Self {
+                locator: locator.to_path_buf(),
+            }
+        }
+    }
+
+    impl Drop for LocatorMetadataFault {
+        fn drop(&mut self) {
+            FAULTS
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .retain(|(path, _)| path != &self.locator);
+        }
     }
 }

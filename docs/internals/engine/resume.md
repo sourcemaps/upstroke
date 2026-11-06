@@ -23,6 +23,49 @@ than the facade, whose allow covered whatever else was written in it
 (`PR306-FACADE-INLINE-ESCAPE`). All five are `effectful` rows of
 `effects/wrappers.toml` and denied by path in `clippy.toml`.
 
+## `if let Some(root) = super::topology::entry::route_resume(opts)? {`
+
+PR12's dispatch: the run's committed first line decides the engine
+(`selection`: "schemas 1-3 always run the legacy engine; schema 4 always runs
+TopologyRun"). [`crate::engine::topology::entry::route_resume`] reads it,
+read-only and without starting a process, and answers `None` for a legacy
+log or one whose header does not parse, so every sequential resume, and
+every refusal it raises, runs the lines below exactly as before — with one
+containment establishment, as every public entry point has. A log it cannot
+read at all it refuses itself, with the read's own error, and an id
+`rundir::resolve_run_id` refuses — a retained schema-4 husk's among them — it
+refuses with the resolver's own refusal, which the lines below would raise
+unchanged after their prelude: `None` would send such a run down the lines
+below, whose include is published under the selected or default root before
+they resolve the id or read the log
+(PR12-INV5-RESUME-READ-ERROR-LEGACY-PUBLICATION,
+PR12-REG8-RESUME-READ-ERROR-LEGACY-PUBLICATION,
+PR12-REG9-HUSK-REFUSAL-LEGACY-PUBLICATION; the router's notes). A topology log
+is resumed by the topology order: containment, the read-only half
+(`prepare_resume`, which may read a recorded container image's environment,
+a `docker` child), the proof (`ResumePrepared::verify`: both locks, the
+command's first effects, then `owner.json` and `committed.json` against the
+committed first line, then the recorded mounts, then the workspace manager
+held to the execution root that line records,
+PR12-INV6-RESUME-COMMON-DIR-REBIND — recovery step (a)), the run
+exclusion, the include under the root that proof verified (never today's
+default, never a fabricated private half, and never a root the public locator
+merely names), then `ResumeVerified::run`. Both publications are made with both
+locks held.
+
+The include is the resume's first private write, so it follows the proof
+(INV-15, O18: the owner and commit records are verified before any private
+write). Until PR12-CI-01 (P1, and the regression lens's
+PR12-RESUME-INCLUDE-BEFORE-RECORD-VERIFICATION, the same defect) it was
+published before `ResumePrepared::run` took the locks, so a run whose private
+half was present but whose owner or commit record was missing, malformed or
+another's — or whose public locator had been retargeted to another root of the
+same shape — created `<root>/git`, staged a file there and renamed the include
+into place before the recovery order refused it.
+`ResumePrepared` no longer answers a private root at all: the only root this
+body can publish under is `ResumeVerified::private_root`, the one the records
+proved.
+
 ## `pub fn resume_harness(`
 
 §15: replay, verify the run branch still matches the record, re-probe, and
@@ -43,7 +86,32 @@ gates this run has been using all along is exactly right.
 builds the same `ManagedRepository` [`run_harness`](coordinator.md) does, through
 `Workspace::recorded_objects_scope`, so an include that went missing or was
 altered between the run and its resume is whole again before a resumed worker,
-gate or reviewer starts; the runner refuses any role while it is not.
+gate or reviewer starts; the runner refuses any role while it is not. On the
+schema-4 branch that is after the proof and before the first role, which is the
+step-(c) shell probe: the runner is built over the `ManagedRepository` only once
+the include has been written.
+
+**Every resume makes the run exclusion.** The sequential resume calls
+`Workspace::ensure_run_exclusions` after `ensure_execution_prerequisites`, under
+its locks. The schema-4 branch calls it after the proof
+(`ResumePrepared::verify`, which holds both locks and has verified the run's
+owner and commit records), just before the include (L4, regression review 3,
+finding 4). The topology tree cannot call it itself (`clippy.toml` denies it to
+every topology module). Until L4 a schema-4 resume never made it. So a run
+whose `.upstroke/.gitignore` had gone missing, or one created before the fresh
+entry made it (L2), exposed its log, report and locks to an ordinary `git add
+-A` after the resume as before it. The call is the exclusion alone: it refuses
+nothing, and a resume adds no dirty-tree refusal.
+
+L4 placed it before the proof, so before any lock: a resume the proof then
+refused — a conductor holding the worktree lease, a surviving reaper's cleanup
+hold, records that do not prove the run — had already created or rewritten
+`.upstroke/.gitignore` (PR12-R9-PUBLIC-PUBLICATION-BEFORE-WORKTREE-LOCK,
+PR12-REG7-PRELOCK-WRITES, PR12-N4-PRELOCK-PUBLICATION, one defect). Since
+repair10 the proof comes first, and the include still follows the exclusion,
+so neither publication precedes the locks or the owner and commit proof. The
+guard is
+`engine::tests::a_schema_4_resume_that_loses_the_worktree_lease_restores_no_exclusion_and_writes_no_include`.
 
 The refusal off the run branch names `git --no-replace-objects -c
 core.useReplaceRefs=false status`: both controls, because on Git 2.41 a

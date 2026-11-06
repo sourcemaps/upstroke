@@ -172,6 +172,7 @@ pub(super) fn refuse_legacy_container_selection(
         return Ok(());
     }
     let reading = match limits {
+        EngineLimits::Topology | EngineLimits::TopologyResume => return Ok(()),
         EngineLimits::Fresh => "this run is being created by the schema-1..3 engine",
         EngineLimits::SequentialResumeWithRecordedGates | EngineLimits::SequentialResume => {
             "this run was recorded by the schema-1..3 engine and keeps the boundary it started \
@@ -240,8 +241,12 @@ pub(super) fn parse_gates(
     warnings: &mut Vec<String>,
 ) -> Result<Option<Vec<GateConfig>>, UpstrokeError> {
     let reading = match limits {
-        EngineLimits::Fresh | EngineLimits::SequentialResume => GatesReading::Governs,
-        EngineLimits::SequentialResumeWithRecordedGates => GatesReading::ComparedOnly,
+        EngineLimits::Fresh | EngineLimits::Topology | EngineLimits::SequentialResume => {
+            GatesReading::Governs
+        }
+        EngineLimits::TopologyResume | EngineLimits::SequentialResumeWithRecordedGates => {
+            GatesReading::ComparedOnly
+        }
     };
     let Some(value) = raw else { return Ok(None) };
     let toml::Value::Array(entries) = value else {
@@ -436,6 +441,8 @@ pub(super) fn parse_engine(
             max_merge_repairs: DEFAULT_MAX_MERGE_REPAIRS,
             max_per_agent: DEFAULT_MAX_PARALLEL,
             max_per_pool: DEFAULT_MAX_PARALLEL,
+            explicit_max_per_agent: None,
+            explicit_max_per_pool: None,
         });
     };
     let engine: RawEngine = value.try_into().map_err(|e| {
@@ -500,16 +507,17 @@ pub(super) fn parse_engine(
     let configured_parallel = limit("max_parallel", engine.max_parallel, DEFAULT_MAX_PARALLEL)?;
 
     let max_parallel = match (limits, configured_parallel > DEFAULT_MAX_PARALLEL) {
-        (_, false) => configured_parallel,
+        (_, false) | (EngineLimits::Topology | EngineLimits::TopologyResume, true) => {
+            configured_parallel
+        }
         (EngineLimits::Fresh, true) => {
             return Err(config_error(
                 repo_path,
                 format!(
-                    "[engine] `max_parallel = {configured_parallel}` is refused: this engine runs \
-                     one attempt at a time, so the run would cost and take what one worker costs \
-                     and takes while the config claims {configured_parallel} — set \
-                     `max_parallel = {DEFAULT_MAX_PARALLEL}` or omit it until parallel execution \
-                     ships"
+                    "[engine] `max_parallel = {configured_parallel}` is refused: the schema-1..3 \
+                     engine runs one attempt at a time, so the run would cost and take what one \
+                     worker costs and takes while the config claims {configured_parallel} — set \
+                     `max_parallel = {DEFAULT_MAX_PARALLEL}` or omit it; a schema-4 run accepts it"
                 ),
             ));
         }
@@ -521,8 +529,8 @@ pub(super) fn parse_engine(
                 "[engine] `max_parallel = {configured_parallel}` in {} is parsed but not acted on \
                  by this resume: this run was recorded by an engine that runs one attempt at a \
                  time, and a run keeps the execution shape it started with, so it continues at \
-                 `max_parallel = {DEFAULT_MAX_PARALLEL}`. A fresh run refuses this value outright \
-                 until parallel execution ships.",
+                 `max_parallel = {DEFAULT_MAX_PARALLEL}`. A new run created with this value runs \
+                 its tasks in parallel.",
                 repo_path.display()
             ));
             DEFAULT_MAX_PARALLEL
@@ -537,6 +545,13 @@ pub(super) fn parse_engine(
     let max_per_agent = limit("max_per_agent", engine.max_per_agent, configured_parallel)?;
     let max_per_pool = limit("max_per_pool", engine.max_per_pool, configured_parallel)?;
 
+    // A schema-4 run acts on all three: the merge-repair ceiling is recorded
+    // in `run_started` and the slot limits bound the parallel scheduler. Only
+    // the sequential engine leaves them inert.
+    let acts_on_topology_limits = matches!(
+        limits,
+        EngineLimits::Topology | EngineLimits::TopologyResume
+    );
     for (key, configured, default) in [
         (
             "max_merge_repairs",
@@ -546,7 +561,7 @@ pub(super) fn parse_engine(
         ("max_per_agent", max_per_agent, configured_parallel),
         ("max_per_pool", max_per_pool, configured_parallel),
     ] {
-        if configured != default {
+        if configured != default && !acts_on_topology_limits {
             warnings.push(format!(
                 "[engine] `{key} = {configured}` in {} is parsed but not acted on by this engine, \
                  which runs one attempt and merges one candidate at a time (default {default})",
@@ -561,6 +576,8 @@ pub(super) fn parse_engine(
         max_merge_repairs,
         max_per_agent,
         max_per_pool,
+        explicit_max_per_agent: engine.max_per_agent,
+        explicit_max_per_pool: engine.max_per_pool,
     })
 }
 

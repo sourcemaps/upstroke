@@ -66,9 +66,34 @@ is the refusal, carrying which of the three kinds of husk this is, its
 reason and its private locator. The authorized private root is the default
 one, which is the root a read-only command is configured with.
 
-## `pub fn load(repo_root: &Path, run_id: Option<&str>) -> Result<RunStatus, UpstrokeError> {`
+What it says about the husk's execution root is the census's own decision,
+from `engine::topology::startup::husk_root_view` — the planning function the
+census acts on, called read-only: a root the next write command retires before
+both halves, a directory it keeps with its real path and the reason, or
+directories of the run's name it leaves alone. So `status` and the next census
+cannot give two answers about one root (repair15). A husk created under an
+explicit `--private-root` is read under the default root here, as before, and
+is then reported retained with its locator outside that root.
 
-Load a run: the newest one, or any unambiguous id prefix.
+## `pub enum Status {`
+
+What `load` returns since PR12: a legacy run's `RunStatus`, unchanged, or a
+schema-4 run's `TopologyStatus`. `render` and `follow` take either; the
+legacy view is untouched.
+
+## `pub struct TopologyStatus {`
+
+A schema-4 run as `status` sees it: its view rendered at load time (so a
+report that cannot be derived refuses the command rather than printing
+half of one), and the repository it was read from, which `follow` observes
+again on every poll.
+
+## `pub fn load(repo_root: &Path, run_id: Option<&str>) -> Result<Status, UpstrokeError> {`
+
+Load a run: the newest one, or any unambiguous id prefix. A run whose log
+reads as schema 4 is observed read-only by `engine::topology::observe`
+(complete lines only, a stable reread, a checked replay; no truncation,
+sync or run lock); every other log takes the legacy path below, unchanged.
 
 ## `Err(error) => return Err(husk_answer(repo_root, wanted).unwrap_or(error)),`
 
@@ -107,7 +132,7 @@ would report a running attempt as a failure and the whole run as halted.
 `status` is the only window into a run that holds its own terminal, so
 that reading is worse than no reading at all.
 
-## `pub fn render(status: &RunStatus) -> String {`
+## `pub fn render(status: &Status) -> String {`
 
 The whole view: what happened, what it cost, and what it is waiting for.
 

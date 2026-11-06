@@ -3147,6 +3147,9 @@ struct BoundHusk {
     private: PathBuf,
     marker: CreatingMarker,
     owner: OwnerRecord,
+    /// A locator-observation fault a case arms for this husk's locator,
+    /// dropped (and so removed) with the husk.
+    _fault: Option<super::LocatorMetadataFault>,
 }
 
 impl BoundHusk {
@@ -3203,6 +3206,7 @@ impl BoundHusk {
             private,
             marker,
             owner,
+            _fault: None,
         }
     }
 
@@ -3364,6 +3368,22 @@ fn proof_cases() -> Vec<ProofCase> {
             },
             after: nothing_after,
             expect: Expect::Retained("locator-through-reparse-point", None),
+        },
+        ProofCase {
+            // `PR12-INV9-UNREADABLE-PRIVATE-LOCATOR`: only a confirmed
+            // `NotFound` is a target that does not exist. A stat the
+            // filesystem refuses, here `EACCES` through the test build's
+            // fault for exactly this locator, is a private half whose
+            // existence is unknown, retained with its locator.
+            name: "a locator whose metadata the filesystem will not give",
+            before: |husk| {
+                husk._fault = Some(super::LocatorMetadataFault::arm(
+                    &husk.private,
+                    std::io::ErrorKind::PermissionDenied,
+                ));
+            },
+            after: nothing_after,
+            expect: Expect::Retained("locator-unreadable", None),
         },
         ProofCase {
             name: "private target without an owner record",
@@ -12107,6 +12127,7 @@ fn build_refusals() -> Vec<BuildRefusal> {
                 target: PathBuf::new(),
                 public: PathBuf::new(),
                 run_id: String::new(),
+                incarnation: String::new(),
             }
         }
 "#,

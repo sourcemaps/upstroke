@@ -515,19 +515,44 @@ inspection, so it is not a site and performs no effect — and it runs before
 
 **Fail-closed in both directions**: a volume that is absent refuses, and a
 runtime that will not answer *whether* it is present refuses too. "The
-runtime did not say" is not "the volume is there".
+runtime did not say" is not "the volume is there". A question whose process
+could not be established gone refuses with that fate kept
+([`expect_mounted_volumes_present`]).
 
 ### Errors
 
 [`UpstrokeError::Refused`] when `site` does not name this operation, when
 `intent` does not name the covered spec's name, when a named volume the spec mounts is
 absent or cannot be inspected, or when the runtime refuses.
+`UpstrokeError::Runner` with `ProcessFate::Unresolved` when the volume
+inspection or the runtime's create reports a process it could not establish
+gone (`RuntimeError::Unresolved`): the inspection keeps its contextual refusal
+as the source, and the create's answer goes through `refused`.
 
 ## `fn expect_mounted_volumes_present(`
 
 Refuse a create whose named volumes are not already there.
 
 See [`create_container`] for why this is here and not only at resolution.
+
+**A question that could not establish its process gone keeps that fate**
+(PR12-R8-VOLUME-INSPECTION-FATE and PR12-REG6-VOLUME-INSPECTION-FATE, two
+reports of one defect). `volume_present` answers `RuntimeError::Unresolved`
+when the bounded `docker volume inspect` behind it ended its supervision
+without establishing its process gone, and `DockerCli` holds that fact under
+the *volume's* name (`unanswered`, `hold_unresolved`), which no settlement of
+the container reads. The typed error is therefore the only thing that carries
+it to the launch: the refusal stays the contextual R20 one, as the source of
+an `UpstrokeError::Runner` with `ProcessFate::Unresolved`, the conversion
+`refused` makes of any other runtime answer. Until repair9 every error here
+became a plain `Refused`, so the launch's cancel settled `NeverStarted`, the
+cover counted the invocation settled, `InvocationLedger::end` released its
+registration and slot pair, and verification could settle a
+`RunnerSpawnFailure` outage over a process that may still be running.
+`Unreachable` and `Failed` stay the plain refusal: a question its supervisor
+never started, or whose process it saw gone, leaves nothing running. The
+absent-volume refusal is unchanged, and nothing here creates or prunes a
+volume.
 
 ## `pub struct StartFailure {`
 
@@ -766,6 +791,9 @@ The answer is a list of descriptions rather than a `Result`, because the
 caller must return the refusal it already has: this function's failure is
 never the thing to report *instead of* an integrity violation.
 
+It passes [`CauseFate::Settled`]: its one caller is the uncovered launch's
+image-id refusal, which started no process.
+
 ## `pub enum ContainerToRelease {`
 
 What the caller already knows about the container a cancel or a release is
@@ -778,10 +806,23 @@ say — an observed exit is process-fate evidence in its own right, and the
 review of `79ddbffb` found it thrown away the moment a later step failed
 (`PR8-R3-CONTAINER-EVIDENCE`).
 
+## `pub enum CauseFate {`
+
+What the failed step a cancel follows established about the processes it
+started, as [`cancel_reached`] is told it. `Settled`: it started none, or
+established every one it started gone — what a refusal leaves, and a runtime
+answer other than `RuntimeError::Unresolved`. `Unresolved`: it reported one it
+could not establish gone (`UpstrokeError::Runner` with
+`ProcessFate::Unresolved`, which `refused` and
+[`expect_mounted_volumes_present`] make of `RuntimeError::Unresolved`). An
+enum rather than a `bool` because the call site has to say which (standards
+§5).
+
 ## `pub struct CancelResidue {`
 
-What a cancel or a release could not do, and one fact beside the messages:
-whether the runtime established that no process of the container survives.
+What a cancel or a release could not do, and two facts beside the messages:
+whether the runtime established that no process of the container survives,
+and whether a process the invocation started is known unresolved.
 The messages are for the operator; the fact is for `ContainerRunner::run`
 and `cancelled`, which classify the process by it — a container the runtime
 never confirmed stopped or removed may still be running its process, and
@@ -809,6 +850,21 @@ fate `Gone`, survivor `Running`, view and intent pruned
 (`PR8-R4-REMOVAL-IN-PROGRESS`). The runtime now says which of the two it
 established, and only `ProcessGone` counts.
 
+`process_unresolved` is **the typed cleanup fact, kept apart from both**
+(PR12-R8-PRESTART-CLEANUP-FATE). It is true when the removal answered
+`RuntimeError::Unresolved` — a process the runtime started for the container,
+a question or an attached client, could not be established gone — and when the
+step the cancel follows did ([`CauseFate::Unresolved`]). `cancelled` reads it
+whatever the launch reached: a container that was only created holds no
+process of its own, and that says nothing about a cleanup question the runtime
+started for it, so `Created` with this fact is `Unresolved`, never
+`NeverStarted`. Until repair9 the cancel kept the view and the intent for that
+fact and then reported `NeverStarted` anyway, which the cover, the ledger and
+verification read as settled. An ordinary cleanup failure — a stop or a
+removal that failed without that type, a removal another reclaimer holds, a
+view that could not be pruned — never sets it: that is residue for the census,
+not evidence about a process.
+
 ## `pub fn cancel_reached(`
 
 The one exhaustive cleanup in this tree: stop, remove, unmount, remove the
@@ -818,6 +874,33 @@ Answers a [`CancelResidue`]. A stop or a removal counts as evidence only
 when the runtime answered [`Settled::ProcessGone`]; a
 [`Settled::RemovalInProgress`] answer is named in the residue as
 establishing nothing, and a failure is named as a failure.
+
+A removal the runtime answers with `RuntimeError::Unresolved`, which `refused`
+turns into `UpstrokeError::Runner` with `ProcessFate::Unresolved`, means a
+process it started for the container, its attached client, could not be
+established gone (root's DELIVERY-OWNERSHIP follow-through). Then nothing
+counts as established: `container_gone` is false even for a container the
+supervisor observed exited, so the invocation's fate is `Unresolved` and
+never `Gone`, and the view and the intent are kept for the next census.
+
+**`cause` is the fate of the step the cancel follows** ([`CauseFate`]). An
+`Unresolved` cause is a process this invocation started that the container's
+own stop and removal establish nothing about: the credential-volume
+inspection's process is held under the volume's name, which no settlement of
+the container reads (`DockerCli::hold_unresolved`). So the stop and the
+removal still run — a container the step may have created is still removed —
+and then the view and the intent are kept for the census exactly as after an
+unresolved removal, the residue says why, `process_unresolved` is set, and
+`container_gone` stays whatever the stop and the removal established.
+Releasing them would authorize the destructive half of the cleanup over a
+process nobody established gone; relabelling the fate alone left exactly that
+(PR12-REG6-VOLUME-INSPECTION-FATE).
+
+Eight parameters — the funnel's three handles, the container's root and name,
+what the launch reached (the container and its view), and the cause — so the
+count stands under `#[expect(clippy::too_many_arguments)]` naming them, rather
+than behind a request type whose only constructors would be these three
+callers.
 
 #### Why the view and the intent outlive an unconfirmed container (`PR8-R3-CONTAINER-RETAIN`)
 
@@ -907,6 +990,15 @@ be running or only a view or an intent for the census.
 running because its stop then failed; `release` is the same call, assuming
 `MayBeRunning`, for a caller that has nothing to classify.
 
+It passes [`CauseFate::Settled`]: a release follows a supervision, not a failed
+step, and `ContainerRunner::run` reads that supervision's own fate beside the
+release's. Every question a started invocation asks — its observations, its
+collection, the release's own stop and removal — is about its container, so
+`DockerCli` holds any it leaves unresolved under the container's name and the
+release's removal reports it (`settle_removed_client`), keeping the view and
+the intent by that path. Only the pre-create volume inspection asks about
+another name, and it fails a launch, never a release.
+
 ## `pub const TERMINATION_OBSERVATIONS: usize = 8;`
 
 How many times reclaim asks whether a container has terminated.
@@ -941,7 +1033,10 @@ returns.
 ## `pub fn observe_terminated(`
 
 "wait until observed exited/removed" — a read-only observation, and so not
-a site.
+a site. Each observation is asked under the runtime's own bound
+(`QuestionBound::Runtime`, K2): a reclaim belongs to no invocation, so no
+deadline or cancellation of one applies, and a daemon that stops answering
+ends each question at that bound rather than holding the census.
 
 ### Errors
 
@@ -1158,7 +1253,10 @@ Primitives
 
 ## `fn refused(error: RuntimeError) -> UpstrokeError {`
 
-A runtime failure, as the engine's error type.
+A runtime failure, as the engine's error type. An `Unresolved` one keeps its
+meaning: it becomes `UpstrokeError::Runner` with `ProcessFate::Unresolved`,
+which `cancel_reached` reads, so a removal that left a process unresolved
+cannot be counted as a removal.
 
 ## `fn staged_path(path: &Path) -> PathBuf {`
 
@@ -1217,9 +1315,41 @@ how the boundary is *built*, so it cannot execute inside it.
 `runner::contract::tests::every_production_process_start_is_classified` carries the
 row that says so.
 
+`deliveries` holds, by container name, each attached client a start
+began and nothing has settled yet (`start_attached`, `settle_delivery`,
+`settle_removed_client`). Shared by every clone, so the client a start
+began is the one its collection or removal settles, whichever clone does it.
+
+`unresolved_questions` holds, by container name, every process a bounded
+question about that container (`answer_within`, `unanswered`) started and could
+not establish gone (`hold_unresolved`, root's PR12-J6-OBSERVATION-FATE-DROPPED).
+Shared by every clone in the same way, never cleared, and read by every
+settlement of that container (`settle_client_of`).
+
+`question_bound` is how long one question that no invocation bounds may take
+(`own_bound`): `None`, which `new` and `Default` give, is [`QUESTION_BOUND`].
+Only a test sets another (`with_question_bound`), so a witness of a stalled
+cleanup question ends in seconds rather than in a minute. It is a `Duration`
+behind an `Option` so that the derived `Default`, which production builds the
+CLI with, stays the production bound.
+
+## `const QUESTION_BOUND: Duration = Duration::from_secs(60);`
+
+The runtime's own bound for one `docker` question that no invocation bounds:
+the collection's `container inspect` and `docker logs`, the release's and a
+reclaim's `stop`, `kill`, `rm` and the observations that settle them, a
+census's listing, the probe, the image and volume inspections and `docker
+create` (K2, regular review 4, finding 2). Sixty seconds is a bound on a
+daemon that has stopped answering, not a timing of one that answers: `docker
+stop` alone may take its ten-second grace before it kills, and a healthy
+daemon answers the rest in milliseconds. A question that reaches the bound is
+killed and reaped by the funnel and fails like any question that ended before
+it answered.
+
 ## `impl DockerCli` › `pub fn new(trace: ContainerTrace) -> Self {`
 
-A CLI whose operations are recorded in `trace`.
+A CLI whose operations are recorded in `trace`, with no stdin delivery in
+flight.
 
 ## `impl DockerCli` › `pub fn available() -> bool {`
 
@@ -1232,15 +1362,39 @@ disagree.
 
 ## `impl DockerCli` › `fn exec(&self, op: RuntimeOp, target: &str, args: &[&str]) -> Result<String, RuntimeError> {`
 
-Run one `docker` subcommand and capture it.
+Run one `docker` subcommand and capture its stdout, bounded by the runtime's
+own bound (`own_bound`, [`QUESTION_BOUND`]) and read as every bounded question
+is read (`answer_within`).
 
 `target` is what the call log names — the container, image or volume the
 operation is about, rather than the subcommand, so the trace of a real
 run and the trace of a fake one are the same shape.
 
+**Every question is bounded** (K2, regular review 4, finding 2; prior
+PR7-STD-CONTAINER-EXEC-UNBOUNDED). Until K2 this and `exec_streams` waited on
+an unbounded `Command::output()`, so a `docker` that stopped answering held
+the supervision, the collection and the cleanup that asked it for as long as
+it stalled: an invocation with a 100 ms timeout took 1.063 s against a stub
+whose observation slept one second (the reviewer's witness). Every question
+now runs under the process funnel (`question`), which ends it at its bound,
+kills and reaps what it started and keeps the fate it established. One
+consequence on Unix: the funnel refuses a launch once a termination signal is
+pending, so a release asked during a shutdown fails rather than waits, and
+the container is the container reaper's and the next census's to reclaim,
+as for any release that could not finish.
+
 ## `impl DockerCli` › `fn exec_streams(`
 
-The same call, keeping **both** streams.
+The same bounded call, keeping **both** streams, for `docker logs`, and saying
+whether the funnel ended it at its output limit. A limited answer is not a
+failure: the collection keeps what was read and reports it limited
+(`ContainerExecution::output_limited`), as the runner's own bound did before
+K2, so a gate whose output overran the limit still fails as one. Otherwise an
+answer that ended before it answered fails (`unfinished`), a nonzero exit is
+classified (`classify_docker_failure`), and a question its supervisor did not
+answer keeps that supervisor's fate (`unanswered`). The funnel captures at
+most its own limit of each stream, so a stream that reached it ends the
+question, and the other stream is what had been read by then.
 
 `PR6A-DOCKERCLI-MERGES-STDERR-INTO-STDOUT`: [`Self::exec`] returns only
 stdout and drops the child's stderr on success, so every container
@@ -1253,13 +1407,375 @@ container's stdout and `2>&1 >/dev/null` gives its stderr — so there was
 never anything to merge and the previous comment's premise was wrong as
 well as its consequence.
 
+## `impl DockerCli` › `fn own_bound(&self) -> Duration {`
+
+The bound of a question no invocation bounds: [`QUESTION_BOUND`] unless a test
+shortened it (`question_bound`).
+
+## `impl DockerCli` › `fn question(`
+
+The one `docker` question the runtime asks, under the process funnel
+(`agent::proc::run_with_timeout_classified`) with `timeout` and `stop` as the
+caller chooses them: the invocation's remaining time and its cancellation for
+`exec_within`, the runtime's own bound and no stop for `exec` and
+`exec_streams`. The funnel ends the question at either, kills and reaps what
+it started, and bounds what it captures. Every container operation but the
+attached client reaches the daemon through here, which is one of the two
+`run_with_timeout` mentions `every_production_process_start_is_classified`
+counts in this file; the other is `attach_client`.
+
+It passes no cleanup lease (R28) itself: the helper's Unix reaper takes the asking thread's
+cleanup scope, and a container invocation enters its carried leases as that scope for its
+whole duration (`exec::ContainerRunner::invoke`), so a question about a container, a credential
+volume or an image holds the asking invocation's leases and no other's
+(`PR12-INV9-CONTAINER-HELPER-CLEANUP-LEASE`). Repair16 first carried them here through a
+per-container-name map filled at create and start; the credential volume's inspection, asked
+before any create and about a volume, found nothing in it, and the map is gone.
+
 ## `impl DockerCli` › `fn inspect(`
 
 `docker inspect` a thing, tolerating "no such object" as absence.
 
+## `impl DockerCli` › `fn listing_within(`
+
+[`Self::listing`] bounded by the invocation (`exec_within`): the attached
+start's wait for its container to leave `created`, and the supervision's
+observations (`observe` under `QuestionBound::Invocation`, K2).
+
+## `impl DockerCli` › `fn exec_within(`
+
+A `docker` question bounded by the invocation's deadline and its cancellation:
+the start's (the attached start's state observations and its diagnostic after
+a client ended, and the detached `docker start`; root's
+PR12-ATTACHED-START-UNBOUNDED-DOCKER-OBSERVATION finding, J6), and since K2 the
+supervision's observations of the started container. It runs under the process
+funnel (`question`) with the time left as its timeout and the cancellation as
+its stop. A question whose deadline has passed, or whose invocation was
+cancelled, is not asked.
+
+## `impl DockerCli` › `fn answer_within(`
+
+What one bounded question answered, read with its supervisor's fate kept
+(PR12-J6-OBSERVATION-FATE-DROPPED), whichever bound it was asked under:
+- a question its supervisor did not answer is read by `unanswered`;
+- a question its bound or a cancellation ended, which the funnel killed and
+  reaped, an answer longer than the runner reads, or a nonzero exit: `Failed`,
+  a nonzero exit through `classify_docker_failure`.
+
+## `impl DockerCli` › `fn unanswered(`
+
+A question whose supervisor returned no answer, by the fate the supervisor
+established:
+- it never started the question: `RuntimeError::Unreachable`;
+- it established the process gone and still failed: `Failed`;
+- it could not establish the process gone: `Unresolved`. The fact is held under
+  the container the question was about (`hold_unresolved`) before the error is
+  returned. A caller that drops the error, as the diagnostic after a client
+  ended does, or one that reads a deadline or a cancellation at the same
+  moment, cannot lose it. A question about something other than a container,
+  an image or a volume, holds its fact under that name, which no settlement
+  reads; its error is unresolved all the same.
+
+## `impl DockerCli` › `fn hold_unresolved(&self, name: &str, fact: &str) {`
+
+Hold one unresolved question under container `name`. Nothing removes it: a
+later clean removal establishes the container gone, not this process, and no
+process scan looks for it.
+
 ## `impl DockerCli` › `fn image(`
 
 An image inspection from `docker image inspect`'s Go-template output.
+
+## `impl DockerCli` › `fn start_attached(`
+
+Start a container whose command has input, and deliver that input exactly
+once, then EOF (PR12's D-C, carried by the coordinator, authorized in
+root's prompt follow-through, and reworked by root's START-DEADLINE and
+DELIVERY-OWNERSHIP findings).
+
+The host runner writes a worker's prompt to the child's stdin
+(`CommandSpec::stdin`). A container created without stdin read none:
+measured with a stub on real Docker, a containerized process read 0 bytes
+(the coordinator's `debug-3`). What a real CLI does with an empty stdin was
+not executed.
+
+The path, given that `create` passed `--interactive`:
+- the client, `docker start --attach --interactive <name>`, runs under the
+  process funnel (`agent::proc::run_with_timeout_classified`) on a thread of
+  its own (`attach_client`). The funnel is the owner: it spawns the client in
+  a process group of its own, so a terminal's interrupt never reaches it and
+  is never forwarded to the container; it writes the payload and closes the
+  pipe, which is the EOF, with its own broken-pipe rule; it bounds the
+  client's output, which nothing reads, since the run's output is `docker
+  logs`'; and it stops, terminates and reaps the client when asked to stop
+  or at its backstop, the invocation's deadline plus two `CLIENT_GRACE`s;
+- the call waits for the container to leave `created` (`await_started`),
+  bounded by the invocation's deadline and its cancellation, which the start
+  proof carries. It never waits for the workload or for the write;
+- if the container never leaves `created` — the client ended, the deadline
+  passed, the invocation was cancelled, the state could not be read or the
+  container is gone — the client is settled (`settle_client_of`) and the
+  start fails, saying how the client ended. A client that cannot be
+  established gone fails the start as `RuntimeError::Unresolved`, and its
+  record stays for the removal the failed launch's cancel then performs.
+  So does a question of the wait or of the diagnostic whose process could not
+  be established gone: `await_started` reports such an observation as itself,
+  even at the deadline or on a cancellation, and the settlement reads the
+  fact `answer_within` held;
+- once the container has started, the client is kept, owned, by name, until
+  its collection or its removal settles it.
+
+So a start never waits for the workload or for an unbounded write; the
+runner's supervision, timeout and cancellation proceed as before; and no
+client is ever detached while something reports success.
+
+**The diagnostic after an early client exit is bounded by the invocation**
+(J13, regular review 3, finding 2; DESIGN §26). When the client ended while
+the container was still `created`, the start asks `docker container inspect
+--format {{.State.Error}}` for the daemon's reason and appends it to the
+failure. The question runs under the invocation's own deadline and
+cancellation (`exec_within`), the bounds the wait before it had, so a
+diagnostic that stalls ends where the invocation does and adds nothing to the
+reason. It is best-effort by design: its answer only enriches a failure that
+is already decided, so its error is dropped (`.ok()`), and what that could
+hide is kept instead: a question whose process could not be established gone
+is held under the container (`answer_within`, `hold_unresolved`) and makes
+the settlement unresolved. Until J13 the question took a fresh `CLIENT_GRACE`
+from the moment it was asked: a 200 ms invocation took 1.64 s against a stub
+diagnostic that slept 1.5 s (the reviewer's stub witness).
+
+The prompt reaches the client's stdin and nothing else: not argv, not the
+environment, not a mount, not a log. The trace records the operation and the
+container's name only.
+
+`RuntimeOp::Start` is the operation `start` hands it, so the domination
+census sees that name in `start` alone.
+
+## `impl DockerCli` › `fn own_client(&self, name: &str, client: AttachedClient) {`
+
+Keep `name`'s client, owned, until something settles it.
+
+## `impl DockerCli` › `fn client_record(&self, name: &str) -> Option<ClientRecord> {`
+
+Take `name`'s record to settle it. Whoever takes it settles it or keeps it
+again.
+
+## `impl DockerCli` › `fn keep_client_record(&self, name: &str, record: ClientRecord) {`
+
+Keep a record: an owned client, or an unresolved fact.
+
+## `impl DockerCli` › `fn settle_client_of(&self, name: &str) -> ClientSettlement {`
+
+The one settlement of `name`'s processes, for the start's failure, the
+collection and the removal alike (root's DELIVERY-OWNERSHIP follow-through).
+A container with a held unresolved question (`hold_unresolved`) settles
+`Unresolved` whatever its client did, naming the client's settlement and the
+held facts both (PR12-J6-OBSERVATION-FATE-DROPPED). The client's own
+settlement (`settle_attached_client_of`):
+- no record: `Absent`;
+- an unresolved fact: `Unresolved`, and the fact stays, so repeated
+  settlement keeps reporting it;
+- an owned client: `settle_client` gives it `CLIENT_GRACE`, asks it to stop
+  and gives it another. One that still has not ended stays owned, live, and
+  is `Unresolved`. One that ended is classified by its typed end: a
+  supervision that ended with `ProcessFate::Unresolved` becomes an
+  unresolved fact, kept in place of the finished thread's handle, which is
+  dropped; any other end, an exit, a verified stop, or a failure whose
+  process was established gone, is `Ended`.
+
+A finished supervising thread alone never counts as a settled client: only
+its typed result does.
+
+## `impl DockerCli` › `fn settle_delivery(&self, name: &str, exit_code: Option<i32>) -> Result<(), RuntimeError> {`
+
+How a container's input went, settled when its output is collected.
+
+Nothing to settle without a record. An owned client whose container still
+runs was collected because it timed out: it stays owned, and the removal that
+follows settles it. Otherwise the client is settled: an `Ended` client is
+judged by `delivery_verdict`, and an `Unresolved` one fails the collection as
+`RuntimeError::Unresolved`, its fact kept for the removal, which reports it
+again.
+
+## `impl DockerCli` › `fn settle_removed_client(&self, name: &str) -> Result<(), RuntimeError> {`
+
+The removal's settlement of `name`'s client, whatever path reached it: the
+timeout's, the cancellation's, the failed launch's or the completed
+invocation's. `Absent` and `Ended` settle the removal: the client's process
+is established gone, and its delivery is judged only where a result is
+reported, at collection. `Unresolved`, a live client or a kept fact, fails
+the removal as `RuntimeError::Unresolved`, so the release cannot count it, and
+the invocation's fate is `Unresolved`.
+
+## `const ATTACHED_START_POLL: Duration = Duration::from_millis(25);`
+
+How often a waiting start looks at the container's state, and a settlement
+at its client.
+
+## `const CLIENT_GRACE: Duration = Duration::from_secs(5);`
+
+How long a client is given to end on its own, and then again after it is
+asked to stop.
+
+## `enum ClientRecord {`
+
+What the runtime keeps for a container's client: the owned client while its
+end is unknown, or, once its supervision ended without establishing its
+process gone, only that fact. A fact is never resolved by this runtime: it
+has no process left to observe.
+
+## `enum ClientSettlement {`
+
+What one settlement established: no client, a client's end, or an
+unresolved client.
+
+## `struct AttachedClient {`
+
+One attached start's client: the funnel's stop flag, and the thread that
+runs the funnel, whose result is the client's terminal state. Kept until
+that result is taken (`into_end`).
+
+It has no `Drop` of its own: `src/runner/container.rs` is a classified
+module, a `drop` would be one more externally reachable name for
+`effects/wrappers.toml`, and the funnel already bounds the client without
+one. A client whose runtime is dropped before anything settles it is
+stopped by its funnel at its backstop, the invocation's deadline plus two
+`CLIENT_GRACE`s, and reaped there; nothing reports success meanwhile.
+
+## `impl AttachedClient` › `fn has_ended(&self) -> bool {`
+
+Whether the client's supervision has finished: the thread that runs the funnel
+has returned, or its result was already taken, so the result is there for
+`into_end` to read. That says nothing about the client's process. The funnel
+can return a `ProcessFailure` whose fate is `Unresolved`, and the thread can
+have panicked; in either case the client may still be running. `into_end`
+reads the typed fate that says which, and `settle_attached_client_of` keeps an
+unresolved one (PR12-REG6-ATTACHED-END-NOTES).
+
+## `impl AttachedClient` › `fn ask_to_stop(&self) {`
+
+Ask the funnel to stop the client: it terminates the client's process group
+and reaps it on its next poll.
+
+## `impl AttachedClient` › `fn into_end(mut self) -> ClientEnd {`
+
+The client's terminal state, from the funnel's own result: exited with a
+code, stopped (asked to, or at its backstop), or failed, which carries the
+funnel's error and, typed, the process fate it established. A wait, a write
+or an attach that failed is a failure here, never an exit with no code. A
+supervising thread that panicked, or an end already taken, is a failure
+whose fate is `Unresolved`: nothing established the process gone.
+
+## `enum ClientEnd {`
+
+How an attached client ended.
+
+## `enum NotStarted {`
+
+Why an attached start's container never left `created`.
+
+## `fn attach_client(`
+
+Start the client under the process funnel, on a thread of its own. The
+funnel is called with `ProcessSite::Spawn` and `ProcessSite::Terminate` and
+no hooks, like the host runner's, and with the cleanup reaper it arms for
+every supervised child. If the thread cannot start, no client was spawned,
+so none can reach EOF with an empty input.
+
+`leases` (repair16) are the cleanup lease paths the starting invocation carried
+(`CoveredStart::leases`), moved to the thread by value: a new OS thread is inside no cleanup
+scope -- not the one the invocation entered on its own thread -- so without them the client's
+reaper would hold no `cleanup.lock` and could outlive a killed coordinator while the next writer
+passed admission.
+
+## `fn await_started(`
+
+Wait for the container to leave `created`, polling its listed state: started
+when it is anything else, gone when it is not listed. Not started when the
+client ended while it was still `created`, when the invocation was
+cancelled, or when the deadline passed. A state that cannot be read ends
+the wait too. Each is checked on every poll, so the wait is bounded by the
+deadline plus one poll and one listing. A failed reading is the cancellation
+or the deadline when either has fired, except an unresolved one, which is
+always reported as itself (`NotStarted::Unobserved`).
+
+## `fn settle_client(`
+
+Settle a client: wait up to `grace` for it to end, then ask it to stop and
+wait up to `grace` again. True once it has ended; false when it still has
+not, which is an unresolved client and never a success.
+
+## `fn delivery_verdict(`
+
+Judge a settled client against its container's exit:
+- a client that exited with the container's own code ended with it. The
+  input was delivered, or the program stopped reading early; either way the
+  program's own exit and output are its result, as the host funnel's broken
+  pipe is (`agent::proc::input`);
+- a client that exited with another code: the attach broke while the
+  container ran, and the input may not have been delivered. An error;
+- a client that had to be stopped did not end with the container: an error;
+- a client whose funnel failed — a wait, a write other than to a broken
+  pipe, or the attach — is an error that carries the failure.
+
+A client that died with the container's own code would read as the first
+case; that residue is accepted and named here.
+
+## `fn combined_removal(`
+
+One removal's answer from its two outcomes, the container's and its attached
+client's (root's combined-removal follow-through). A settled client leaves
+the container's answer as it was, success or ordinary failure. An unresolved
+client is never masked: after a successful removal it is the answer, and
+after a failed one it is still `RuntimeError::Unresolved`, carrying both
+diagnostics. So `cancel_reached` sees an unresolved process even when the
+container's own removal failed after a stop or an observed exit, and keeps
+the view and the intent.
+
+## `fn docker_command(args: &[&str]) -> Command {`
+
+The one builder of a `docker` child. Every container operation's
+`Command` comes from here: the bounded questions the process funnel runs
+(`question`) and the attached client it runs (`attach_client`), the things
+`every_production_process_start_is_classified` counts.
+
+## `fn exit_status_of(name: &str, status: &str) -> Result<i32, RuntimeError> {`
+
+The exit status `docker container inspect --format {{.State.ExitCode}}`
+reported, as a number, or a `Failed` collection that quotes what it reported.
+Until K2 the collection read it with `.parse().ok()`, so an answer that was not
+a number became a missing exit code, which the runner reports as a process a
+signal ended: an ambiguous answer read as a fact (standards §9), and a
+discarded error that §7 binds in a body K2 changed. A free function, as
+[`classify_docker_failure`] is, so the reading is testable without a daemon
+(`tests::an_exit_status_the_runtime_reports_is_read_as_a_number_or_refused`).
+
+## `fn spelled(args: &[&str]) -> String {`
+
+A question as its diagnostics name it: `` `docker <args>` ``.
+
+## `fn unfinished(op: RuntimeOp, args: &[&str]) -> RuntimeError {`
+
+The failure of a question that ended before it answered: its bound passed, its
+invocation was cancelled, or a signal ended it. The funnel killed and reaped
+it, so it is `Failed`, not unresolved.
+
+## `fn exit_text(exit: Option<i32>) -> String {`
+
+An exit status for a diagnostic.
+
+## `fn docker_create_arguments(spec: &CreateSpec) -> Result<Vec<String>, String> {`
+
+The `docker create` argument vector for `spec`, a pure function so the
+argv is assertable with no daemon
+(`tests::the_docker_create_arguments_carry_a_user_and_an_open_stdin_only_when_the_spec_does`).
+`--user <uid>:<gid>` when the spec names a user, and `--interactive` when
+its command has input, both options before the image id. It refuses, with
+`mount_argument`'s reason, a spec holding a mount the `--mount` option
+cannot carry exactly; `DockerCli::create` turns that into
+`RuntimeError::Failed { operation: Create }` before `docker` runs. The plan
+already refused such a mount before any effect, so this is the backstop,
+not the first check.
 
 ## `struct ImageInspectionRaw {`
 
@@ -1492,13 +2008,59 @@ this question. The rebuild path's refusal is "the recorded image id
 is absent from the runtime", and a different id present is exactly
 that.
 
-## `fn collect(&self, name: &str) -> Result<ContainerExecution, RuntimeError> {` › `let (stdout, stderr) = self.exec_streams(RuntimeOp::Collect, name, &["logs", name])?;`
+## `fn image_environment(&self, id: &str) -> Result<Option<Vec<(String, String)>>, RuntimeError> {`
+
+`docker image inspect <id> --format '{{.Id}}<US>{{json .Config.Env}}'`
+through `inspect`, so a daemon that says the object does not exist is
+`Ok(None)` exactly as for `image_by_id`. The reported id rides along for
+the reason `image_by_id` compares it: `docker image inspect` resolves a
+prefix of an id and a tag alike, and an answer about another image is no
+answer about the recorded one. `image_environment_of` reads the answer.
+
+## `fn image_environment_of(`
+
+The answer of `image_environment`, read strictly. The first line must hold
+the reported id and the JSON environment separated by U+001F. A reported id
+other than the one asked for is `Ok(None)`. `null` is an image that declares
+no environment: `Some(vec![])`. Anything else that is not a JSON list of
+strings, and any entry without `=`, is `RuntimeError::Failed` naming what
+could not be read — the runner never guesses an environment it was not
+given.
+
+## `fn collect(&self, name: &str) -> Result<ContainerExecution, RuntimeError> {` › `let (stdout, stderr, output_limited) =`
 
 Both streams, separately. `docker logs` writes the container's stdout
 to its own stdout and the container's stderr to its own stderr
-(measured, docker 29.7.2) — see [`Self::exec_streams`].
+(measured, docker 29.7.2) — see [`Self::exec_streams`]. Whether the funnel
+ended `docker logs` at its output limit is carried as
+`ContainerExecution::output_limited` (K2): the funnel keeps at most its limit
+of each stream, so the runner's own truncation (`exec::bounded`) could no
+longer see that a stream was cut, and a gate's verdict depends on it.
 
-## `fn create(&self, covered: exec::CoveredCreate<'_>) -> Result<CreatedContainer, RuntimeError> {` › `args.push("--read-only".to_owned());`
+## `fn collect(&self, name: &str) -> Result<ContainerExecution, RuntimeError> {` › `self.settle_delivery(name, exit_code)?;`
+
+A container that was given input reports how the input went before its
+output is returned (`settle_delivery`). The streams are the ones `docker
+logs` gave, still separate and still bounded by the runner as before: the
+attached client's own output went nowhere.
+
+## `fn start(&self, covered: exec::CoveredStart<'_>) -> Result<(), RuntimeError> {`
+
+A plain `docker start` when the command has no input, as before. With
+input, the attached start delivers it (`start_attached`).
+
+`RuntimeOp::Start` is named here once, and handed to the helper: the
+domination census in `exec::tests` pins every `RuntimeOp::Start` in
+production to this method, and this keeps that true while the attached
+path lives in a function of its own.
+
+## `fn remove(&self, name: &str) -> Result<Settled, RuntimeError> {` › `combined_removal(removed, self.settle_removed_client(name))`
+
+After the container is removed, its attached client, if one is still owned,
+is settled, and the two outcomes are combined (`combined_removal`). A
+removal that could not settle the client is not a success.
+
+## `fn docker_create_arguments(spec: &CreateSpec) -> Result<Vec<String>, String> {` › `args.push("--read-only".to_owned());`
 
 `expected_failures_refusals[5]`. Measured against `docker`
 29.7.2: without it `sh -c 'printf owned >/outside-role-mount'`
@@ -1507,7 +2069,7 @@ so a gate's write outside every declared mount succeeds and only
 the weaker "the host is unharmed" holds. With it the same command
 answers `Read-only file system` and exits non-zero.
 
-## `fn create(&self, covered: exec::CoveredCreate<'_>) -> Result<CreatedContainer, RuntimeError> {` › `args.push(spec.image_id.clone());`
+## `fn docker_create_arguments(spec: &CreateSpec) -> Result<Vec<String>, String> {` › `args.push(spec.image_id.clone());`
 
 The **image id**, never a reference (INV-23).
 
@@ -1522,7 +2084,7 @@ The id the runtime says it used, read back from the created
 container. Never `spec.image_id`: the whole point of the check the
 caller then performs is that these two can differ.
 
-## `fn remove(&self, name: &str) -> Result<Settled, RuntimeError>` › `settle_remove(`
+## `fn remove(&self, name: &str) -> Result<Settled, RuntimeError>` › `let removed = settle_remove(`
 
 `--volumes` (`PR6A-ANONYMOUS-VOLUMES-LEAK`). An image declaring
 `VOLUME` gets an **anonymous** volume per container, and `docker rm`
@@ -1705,18 +2267,57 @@ succeeded is the daemon speaking, and the container's presence is a value in
 that listing rather than a phrase in a diagnostic. An absent container is an
 exit of **0** with no output, which no local failure can produce.
 
-## `fn observe(&self, name: &str) -> Result<Liveness, RuntimeError> {`
+## `fn observe(&self, name: &str, bound: QuestionBound<'_>) -> Result<Liveness, RuntimeError> {`
 
 Absence is read out of a listing that had to succeed, never out of a failed
 `container inspect`'s stderr: the phrase a diagnostic carries is text the
 environment shapes, and this is the observation every other settlement in the
 runtime is established against (round six, finding 1).
 
-## `fn mount_argument(mount: &runtime::Mount) -> String {`
+The listing is asked under the bound the caller names (K2): the invocation's
+deadline and cancellation for the supervision (`listing_within`), the
+runtime's own bound for everything else (`listing`), among them the
+settlements of a stop, a removal and a delivery and a reclaim's
+`observe_terminated`, which run after the invocation's bounds may have passed
+and must not be cut short by its cancellation.
 
-One `--mount` argument.
+## `fn mount_option_refusal(value: &str) -> Option<&'static str> {`
 
-## `fn mount_argument(mount: &runtime::Mount) -> String` › `parts.push("type=tmpfs".to_owned());`
+Why `value` cannot be carried exactly as one field of a `--mount` option,
+or `None`. The CLI splits the option as CSV: `,` separates fields and `"`
+quotes one, so either in a path would let the path rewrite the mount's
+options; a control character (a newline above all) cannot ride a CSV
+field intact; edge whitespace is what an option parser may trim; and an
+empty value names nothing. Each is refused rather than escaped or
+rewritten. `exec.rs`'s plan and `resolve.rs`'s resolution and target
+check use this same predicate, so a value that resolves and plans is one
+this function will carry.
+
+## `fn mount_argument(mount: &runtime::Mount) -> Result<String, String> {`
+
+One `--mount` argument, carrying each value exactly or refusing it
+(root's recorded-mounts disposition: the earlier
+`to_string_lossy().replace('\\', "/")` silently altered a non-UTF-8 path
+and a Unix path holding a backslash, and joined fields with commas a path
+could carry). A bind source must be UTF-8 (`to_str`, never lossy) and pass
+`mount_option_refusal`; so must every target and volume name. A backslash
+is an ordinary byte of a Unix name and is carried as written; only a
+Windows build rewrites it to `/` (`host_spelling`), for every bind source it
+mounts: the generated paths and the configured mounts. A Windows build accepts
+configured mounts once `resolve.rs` has recorded each source's volume serial
+and full 128-bit file id; only a platform that is neither Unix nor Windows
+refuses `[runner] mounts`. `exec.rs` plans an accepted configured mount as the
+same `Mount::Path` a generated path is.
+`tests::a_mount_argument_carries_each_value_exactly_or_refuses_it` holds
+both halves.
+
+## `fn host_spelling(path: &str) -> String {`
+
+The host path as `docker` on this platform takes it: unchanged on Unix,
+`\` as `/` on Windows, for every bind source `mount_argument` writes, a
+generated path or an accepted configured mount alike.
+
+## `fn mount_argument(mount: &runtime::Mount) -> Result<String, String>` › `parts.push("type=tmpfs".to_owned());`
 
 No source and no name: the surface exists only inside this
 container and dies with it.

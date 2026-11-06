@@ -1,6 +1,5 @@
 //! Extended notes: `docs/internals/engine/assembly.md`
 
-#![cfg_attr(not(test), allow(dead_code))]
 #![forbid(
     clippy::disallowed_methods,
     clippy::disallowed_types,
@@ -8,6 +7,7 @@
 )]
 
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::agent::{AdapterSource, AgentAdapter, TaskRun};
@@ -92,7 +92,8 @@ impl WorkerAssembly<'_> {
         Ok(self
             .adapter
             .build(&task_run)?
-            .stdin(self.adapter.stdin_payload(&task_run).as_bytes().to_vec()))
+            .stdin(self.adapter.stdin_payload(&task_run).as_bytes().to_vec())
+            .settings_file(task_run.settings_path.clone()))
     }
 }
 
@@ -217,7 +218,12 @@ impl AttemptPlans for FrozenPlans<'_> {
                 &self.paths.artifacts(),
                 WorkerSubject::of_frozen(&entry.spec),
             ),
-            decisions: self.decisions.to_vec(),
+            decisions: self
+                .decisions
+                .iter()
+                .chain(request.decisions)
+                .cloned()
+                .collect(),
             stem: crate::util::filename_component(entry.display_id.as_str()),
         })
     }
@@ -289,5 +295,50 @@ impl AttemptPlans for FrozenPlans<'_> {
             gates,
             reviewers,
         })
+    }
+}
+
+pub struct SharedPlans {
+    pub adapters: Arc<dyn AdapterSource + Send + Sync>,
+    pub paths: RunPaths,
+    pub gates: Vec<crate::gates::ShellGate>,
+    pub pools: Vec<crate::capacity::Pool>,
+    pub caps: Vec<(String, crate::agent::Caps)>,
+    pub worker_timeout: Duration,
+    pub decisions: Vec<String>,
+}
+
+impl SharedPlans {
+    fn frozen(&self) -> FrozenPlans<'_> {
+        FrozenPlans {
+            adapters: &*self.adapters,
+            paths: &self.paths,
+            gates: &self.gates,
+            pools: &self.pools,
+            caps: &self.caps,
+            worker_timeout: self.worker_timeout,
+            decisions: &self.decisions,
+        }
+    }
+}
+
+impl AttemptPlans for SharedPlans {
+    fn pool_for(&self, agent: &str) -> Option<String> {
+        self.frozen().pool_for(agent)
+    }
+
+    fn inputs(&self, request: &InputsRequest<'_>) -> Result<ReviewInputs, UpstrokeError> {
+        self.frozen().inputs(request)
+    }
+
+    fn verification(
+        &self,
+        request: &super::topology::attempt::VerificationRequest<'_>,
+    ) -> Result<super::topology::attempt::VerificationPlan, UpstrokeError> {
+        self.frozen().verification(request)
+    }
+
+    fn plan(&self, request: &PlanRequest<'_>) -> Result<AttemptPlan, UpstrokeError> {
+        self.frozen().plan(request)
     }
 }

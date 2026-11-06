@@ -24,6 +24,15 @@ identity". Enforced by "PermitBroker try_reserve", "atomic slot pairs granted
 by the coordinator loop", "head-reservation FIFO", "InvocationId protocol",
 "provisional reservation rules".
 
+**What the log's attempt events say about slots.** The run appends
+`attempt_started` when it admits an attempt, and the attempt acquires its
+{agent, pool?} pair after that, through the ledger below. So the log's attempt
+intervals include any wait for a pair, and overlapping intervals are not
+overlapping workers. With `max_per_agent = 1` the command-line scenario's case
+B shows both: overlapping intervals, serialized workers. Worker concurrency is
+measured from the role processes' own lifetimes (root's D4). The order is
+described here, not changed.
+
 ### Where each rule lives
 
 - **R1, R2** are the fold's, and are read, not stored:

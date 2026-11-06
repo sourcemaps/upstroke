@@ -170,6 +170,12 @@ plain delegation — and what makes the sibling assertions in
 statements about the production helper rather than about the
 fixture.
 
+The repository's Git it is given, like every runner and mount context
+the fixtures here build, is `resolve::fixtures::plain_checkout` over the
+repository's `.git`: what Git reports for an ordinary checkout, whose
+`.git` is both its Git directory and its common directory. A test about
+a relocated common directory names that directory itself.
+
 ## `impl Fixture` › `fn withheld(&self) -> Vec<(Withheld, PathBuf)> {`
 
 The concrete host paths this run withholds, as a table a test can
@@ -273,6 +279,82 @@ The control: the same check over a mount set that *does* reach the
 coordinator finds every category. Without it a `violations` that
 always returned an empty vector would pass the assertion above.
 
+## `fn an_agents_own_settings_file_is_bound_read_only_and_named_by_its_container_path() {`
+
+PR12-CONTAINER-CLAUDE-SETTINGS-HOST-PATH, narrowed by root's D-A. A worker
+and a reviewer each record their own materialized settings file as
+`CommandSpec::settings_file`, and name it in their arguments. Each receives
+exactly that file, bound read-only at `/upstroke/settings/<name>`, and its
+argument names that container path instead of the host's. The two files stay
+distinct: each container has one settings mount, its own.
+
+Nothing else changes:
+- the role's own mounts are those of the census above, with the
+  coordinator's user set on every one of these containers;
+- every withheld path stays withheld: the run's private half, the settings
+  directory included, is mounted nowhere.
+
+## `fn only_the_invocations_own_settings_file_is_bound_and_no_argument_grants_another() {`
+
+Root's D-A negative cases. Another invocation's settings file named in a
+worker's argv gets no mount, and its argument stays the host path it was:
+only the intended argument is rewritten. Nor does any of these get a
+settings mount, and each keeps its own argv:
+- an argument naming a settings file with no metadata, the shape the first
+  version of the bind (`b87af4f6`) mounted;
+- metadata that no argument names, as a `codex` or `copilot` command has;
+- a gate, and an agent probe, carrying both.
+
+## `fn an_own_settings_file_that_is_not_a_regular_file_of_the_runs_settings_directory_is_refused() {`
+
+The file identity root's D-A keeps. Recorded metadata naming a directory in
+the settings directory, a link there to a private transcript (Unix), or a
+file elsewhere in the private half refuses the plan, each for its reason, and
+before any effect. The control is the regular file the invocation
+materialized, which plans. The link case is built on Unix only and chained in
+as an `Option`, so a Windows build compiles the list without a mutable binding
+it never mutates (V225 found the `unused_mut` the earlier spelling left there).
+
+## `#[cfg(target_os = "linux")]` › `fn effective_ids() -> ContainerUser {`
+
+The oracle for the coordinator's user on Linux, read another way than
+production reads it: the effective field of `/proc/self/status`' `Uid:` and
+`Gid:` lines, where `coordinator_user` asks `geteuid` and `getegid`.
+
+## `#[cfg(all(unix, not(target_os = "linux")))]` › `fn effective_ids() -> ContainerUser {`
+
+On the other Unix targets the oracle is the same two queries production
+makes, so there the test shows that every role and probe carries the
+effective ids and that the argv says so, not that the queries are right. It
+runs only where those targets build, in native CI: a Linux run is no macOS
+result.
+
+## `#[cfg(unix)]` › `fn every_container_is_created_as_the_coordinators_user() {`
+
+Root's D-B, focused. Both probes, the worker, the gate and the reviewer are
+each created as the coordinator's effective uid and gid, in the spec and in
+the `docker create` argv, where `--user` comes before the image. The mount
+census and the confinement above hold with the user set.
+
+## `#[cfg(not(unix))]` › `fn every_container_keeps_the_images_user_off_unix() {`
+
+On Windows nothing is mapped, and no container is given `--user`.
+
+## `fn prompt(tag: &str, bytes: usize) -> Vec<u8> {`
+
+A payload of `bytes` bytes that starts with a marker and its tag and goes on
+with xorshift bytes, so two prompts differ and a payload larger than a pipe
+buffer is not a run of one byte.
+
+## `fn a_commands_stdin_reaches_its_own_container_exactly_and_through_nothing_else() {`
+
+Root's D-C on the fake. A worker's 200 KiB payload, larger than a pipe
+buffer, and a reviewer's own reach their containers byte for byte, each its
+own. Each container is created with stdin open, and the marker the prompts
+carry is in no argv, environment entry, label, mount or `docker create`
+argument. A gate and both probes, which carry no input, keep a closed stdin,
+and their starts are fed nothing.
+
 ## `fn a_workspace_that_contains_a_withheld_path_is_refused_before_any_effect() {`
 
 A workspace that contains a withheld path is refused, by name, before
@@ -318,6 +400,76 @@ binding each role takes in production; what varies is the role.
 ## `fn only_the_reviewer_receives_a_read_only_worktree()` › `assert_eq!(`
 
 The two probe roles receive no worktree at all — a probe has none.
+
+## `fn every_role_and_probe_gets_the_recorded_mounts_and_review_and_probes_get_them_read_only() {`
+
+The per-role census for configured mounts, over all five roles of
+`requests()`. Each gets both recorded mounts with the recorded source and
+target. The read-write one is read-only for exactly `probe(claude-code)`,
+`probe(shell)` and `review`, and as recorded for `implement` and `gate`:
+a gate is given an explicitly read-write mount. Each role's own mounts are
+exactly what the same request plans without configured mounts, and the
+confinement finds nothing.
+
+## `fn the_docker_argument_names_exactly_the_recorded_mount() {`
+
+For every role, the `--mount` arguments `docker create` receives contain
+exactly one per planned mount. For each configured mount the argument is
+`type=bind,source=<the recorded source>,target=<the recorded
+target>[,readonly]`, character for character, so the record and the
+runtime's argument cannot name different things.
+
+## `fn a_recorded_mount_that_moved_or_reaches_a_withheld_path_refuses_the_plan_before_any_effect() {`
+
+The plan-time recheck. The recorded source moved away refuses the plan
+(`is gone`) and the invocation; moved back, the plan succeeds again. A
+record whose mount names the private root, with that root's true
+identity, refuses against the bound exclusions. No intent and no
+container exists afterwards.
+
+## `fn a_recorded_policy_whose_targets_a_fresh_run_refuses_starts_no_container() {`
+
+K1 (regular review 4: recorded mounts bypass target validation), at the
+launch plan. The mounted policy's first mount, read back through
+`serde_json` at `/data` (`resolve::fixtures::with_recorded_targets`), plans:
+the control. Each set of `resolve::fixtures::REFUSED_RECORDED_TARGETS` (the
+container's root, `/upstroke/settings`, `/cache/../upstroke/settings`, and
+`/cache` with `/cache/inner`) is planted the same way and is a complete
+record. A gate invocation over each ends `NeverStarted`, refused for this
+container with the words of the target rule. Afterwards the runtime's
+journal holds no create, no intent was written and no container exists:
+the plan refuses before `Reaping::cover`, so no reaper is armed either.
+
+With the shared `resolve::refuse_recorded_targets` validator bypassed, the root cell's invocation
+runs to exit 0 and the test fails (measured before the commit).
+
+## `fn a_recorded_mount_inside_the_common_directory_the_runner_is_given_refuses_the_plan() {`
+
+J10 (regression review 2, finding 1), at the runner: the common directory
+is relocated outside the checkout, and the mounted policy's first mount is
+re-recorded at its `refs`. Over the checkout's own Git
+(`resolve::fixtures::plain_checkout`, as before the repair) the gate plans: the
+source is an ordinary directory there. Given that relocated directory as
+the run's common directory, as the entry gives the managed repository's,
+the same policy refuses the plan, naming the directory as authoritative
+Git, with no intent and no container.
+
+## `fn a_configured_mount_that_lies_inside_a_withheld_directory_is_refused_and_a_roles_own_is_not() {`
+
+J10's second half, at the confinement, with no runner and no repository:
+a confinement withholding a common directory outside the checkout reports
+a configured mount that is it, contains it or lies inside it, once each,
+naming the relation and the authoritative-Git passage. The rule for a
+role's own mounts stays one-directional: `violations` refuses the first
+two and not the third, which is how a role's object store lies inside the
+common directory. A directory beside every withheld path is neither.
+
+## `fn a_mount_the_runtimes_option_cannot_carry_exactly_refuses_the_plan_before_any_effect() {`
+
+Generated mounts too: a workspace whose path holds a comma, a quote or a
+trailing space cannot be spelled in a `--mount` option exactly, and the
+plan refuses naming the mount, where the earlier code would have bound a
+different path or failed inside `docker create`. No intent, no container.
 
 ## `fn the_credential_volume_is_mounted_exactly_when_its_location_is_supplied() {`
 
@@ -623,10 +775,23 @@ because the two bases are *supposed* to differ (the Upstroke environment
 and the image environment) and a comparison of those would be a
 comparison of two fixtures rather than of two composition rules.
 
-The one place they legitimately differ is stated as an assertion rather
+One place they legitimately differ is stated as an assertion rather
 than skipped: a credential *location* is a path at the boundary that
 executes, so the host names a host directory and the container names its
-mount target. Both are supplied for exactly the same three roles.
+mount target. Both are supplied for exactly the same three roles. Since
+PR12's Q2 there is a second, stated the same way: the host environment's
+default object graph (`Recorded`) composes the process-wide
+`GIT_NO_REPLACE_OBJECTS`, and the container composes no process-wide
+replacement setting, because the role's projected view states that policy
+in its own `config`.
+
+## `fn host_and_container_compose_the_same_environment_for_ever…` › `.remove(crate::workspace_manager::NO_REPLACEMENT_OBJECTS.0)`
+
+The replacement-objects delta (PR12, Q2), named rather than skipped: the
+host's entry is taken out of the comparison and its value asserted (`1`),
+and the container's composed vector is asserted to carry no such key.
+Every other key is still compared exactly below (`env.md`, "No
+process-wide replacement setting since PR12").
 
 ## `fn host_and_container_compose_the_same_environment_for_ever…` › `let withheld: BTreeMap<String, String> = container_env`
 
@@ -716,6 +881,12 @@ loop with a real timeout would be one.
 Second field held constant: everything except whether the container
 terminates — the same image, the same role, the same workspace as the
 completing case above.
+
+## `fn a_container_that_outlives_its_timeout_is_stopped_and_rem…` › `let payload = prompt("timeout", 128 * 1024);`
+
+Since PR12's D-C the timed-out command carries input, more than a pipe
+buffer of it, and the timeout path is the same: the payload went to the
+container at its start, and the stop and removal follow in their order.
 
 ## `fn a_container_that_outlives_its_timeout_is_stopped_and_rem…` › `let rendered = fixture.trace.rendered();`
 
@@ -1145,7 +1316,7 @@ varies is only which directory of the worktree namespace is offered.
 `decisions.workspace_candidates.manager`: "tasks/k<key>-g<gen>,
 merge/s<seq>", plus `snapshots`.
 
-## `fn the_execution_root_and_its_worktree_namespaces_are_withh…` › `let confinement = Confinement::of_run(&fixture.identity, &fixture.repo);`
+## `fn the_execution_root_and_its_worktree_namespaces_are_withh…` › `let confinement = Confinement::of_run(`
 
 (a) `of_run` names each of them, under the sibling-worktree category.
 
@@ -1606,6 +1777,79 @@ container without a TTY. Recorded as
 `PR6A-DOCKERCLI-MERGES-STDERR-INTO-STDOUT`; the assertion is
 written so it holds either way rather than pinning the residual.
 
+## `fn real_docker_a_containerized_agent_reads_its_own_settings_and_cannot_write_them() {`
+
+PR12-CONTAINER-CLAUDE-SETTINGS-HOST-PATH on a real runtime, as root's D-A
+narrowed it. A containerized agent reads its own settings, which its command
+records as `settings_file`, byte for byte, at the container path it is given.
+It cannot write them, and the host file is unchanged. Another attempt's
+settings file sits beside its own on the host: the container's
+`/upstroke/settings` lists only its own, the other is absent, and the run's
+private directory is not there. A filesystem witness, registered in
+`DOCKER_GATED_TESTS`; it accepts no real CLI's policy.
+
+## `#[cfg(target_os = "linux")]` › `fn real_docker_a_container_runs_as_the_coordinators_user_and_leaves_what_it_can_reclaim() {`
+
+Root's D-B on a real runtime. A worker container reports the coordinator's
+effective uid and gid from `id`, and makes a nested directory and a file in
+its worktree. The host sees all three as the coordinator's, and the
+coordinator removes them. A gate then runs Git in the same worktree,
+through the role view, with no `safe.directory` at all: it succeeds, reads
+the exact HEAD and finds the worktree clean. What the test establishes is
+the observed ownership, the reclamation and the gate's success, for this
+fixture's image; a rootless or remapped daemon is not covered.
+
+## `fn real_docker_a_containerized_program_reads_its_exact_stdin_then_eof() {`
+
+Root's D-C on a real runtime, three containers:
+- a 300 KiB payload, past any pipe buffer, read by `cat` to its end, which
+  `cat` reaches only at EOF: the byte count and the SHA-256 match what was
+  sent;
+- a program that reads 16 bytes of a mebibyte and exits 7: the run reports
+  exit 7, promptly, and the undelivered rest holds nothing;
+- a program that never reads a mebibyte of input, with a three-second
+  timeout: the timeout path stops and removes it, with the write still
+  pending, within a bound.
+
+## `struct MountedReal {`
+
+The real-runtime fixture for the three mount witnesses: a canonical
+scratch root, a real repository, the run identity of the witness's own
+gated run id, and the image discovered without a pull. `resolve` binds the
+production mount context (`MountContext::bind`, the coordinator's
+credential locations included) and resolves the configured mounts against
+the real runtime, so each witness exercises resolution, the record and the
+runner end to end, not a hand-built policy.
+
+## `fn real_docker_a_read_only_configured_mount_is_readable_and_not_writable() {`
+
+A read-only operator mount, given to a gate (a role that is *not* forced
+read-only, so the disposition is the record's): the container reads the
+host marker through it, a write through it fails with the runtime's
+read-only error, and the host directory holds no new file.
+
+## `fn real_docker_a_read_write_configured_mount_is_writable_as_the_coordinators_user() {`
+
+A read-write operator mount, given to an implementer: the container
+creates a directory and a file through it, the host sees the content, and
+both are owned by the coordinator's effective uid and gid (D-B's `--user`),
+so the coordinator can reclaim them, which it does. The same recorded
+mount given to a reviewer is forced read-only and its write fails. Linux
+only, like the D-B witness it extends.
+
+## `fn real_docker_a_resume_with_changed_mount_config_keeps_the_recorded_mounts() {`
+
+Record-wins on a real runtime. A record with one read-only mount is
+rebuilt by `rebuild_by_inspection`, the resume's own rebuild, under a
+config that moves the mount to another source, makes it writable and adds
+a second. The rebuild returns the record and warns that the configured
+mount set is ignored. The resumed container sees the recorded source at
+the recorded target, not today's source and not the extra target, and its
+write is refused read-only. With the recorded source moved away, the
+rebuild refuses as `MountSourceMoved` and no container of the run exists.
+This is the runner-level resume path (the rebuild and the runner it
+feeds), not a whole `upstroke resume` of a parked run.
+
 ## `fn real_docker_confines_a_gate_to_its_mount() {`
 
 `expected_failures_refusals`: "**gate write outside mount fails**", and
@@ -1791,11 +2035,15 @@ running inside the boundary: the exact detached HEAD, the exact index
 objects that resolve. The coordinator's refs are re-read afterwards, so
 "without exposing **or mutating**" is both halves.
 
-## `fn real_docker_a_git_dependent_gate_sees_only_the_role_view…` › `let git = "git -c safe.directory='*' -C /upstroke/workspace";`
+## `fn real_docker_a_git_dependent_gate_sees_only_the_role_view…` › `let git = "git -C /upstroke/workspace";`
 
-`safe.directory` because the host paths are owned by the coordinator's
-user and the container's process is not it — an ownership check, not a
-confinement one.
+No `safe.directory`. This line carried `-c safe.directory='*'` until PR12's
+D-B, because the host paths are owned by the coordinator's user and the
+container's process was the image's user: an ownership check, not a
+confinement one. Every container now runs as the coordinator's numeric
+uid and gid, so Git inside it reads a worktree and a view its own user owns,
+and this test drops the wildcard. It is the second witness of that, beside
+`real_docker_a_container_runs_as_the_coordinators_user_and_leaves_what_it_can_reclaim`.
 
 ## `fn real_docker_a_git_dependent_gate_sees_only_the_role_view…` › `for name in &planted {`
 
@@ -1931,6 +2179,24 @@ Repair round R1.
 
 Repair round R3b.
 
+## `fn every_gated_test_of_this_lane_is_counted()` › `"real_docker_a_containerized_agent_reads_its_own_settings_and_cannot_write_them",`
+
+PR12-CONTAINER-CLAUDE-SETTINGS-HOST-PATH.
+
+## `fn every_gated_test_of_this_lane_is_counted()` › `"real_docker_a_container_runs_as_the_coordinators_user_and_leaves_what_it_can_reclaim",`
+
+PR12's D-B.
+
+## `fn every_gated_test_of_this_lane_is_counted()` › `"real_docker_a_containerized_program_reads_its_exact_stdin_then_eof",`
+
+PR12's D-C.
+
+## `fn every_gated_test_of_this_lane_is_counted()` › `"real_docker_a_read_only_configured_mount_is_readable_and_not_writable",`
+
+Root's recorded-mounts disposition (2026-11-02): the three mount witnesses
+it requires, registered here, in `GATED_RUNS` (`mountro`, `mountrw`,
+`mountresume`) and in `DOCKER_GATED_TESTS`. Sixteen in all.
+
 ## `fn removal_in_progress_diagnostic(name: &str) -> String {`
 
 The daemon's answer names the container it is about, and since round six nothing
@@ -1955,6 +2221,93 @@ leaves no container, intent or view; it is not collected, and only then does the
 its process or container". The same assertions as
 `a_container_that_outlives_its_timeout_is_stopped_and_removed`, which is the disposition's other
 cause.
+
+Since PR12's D-C the cancelled command carries input, and the cancellation path is the same: the
+payload went to the container at its start, and the release follows in its order.
+
+## `fn a_launch_that_fails_after_a_cancellation_reports_the_cancellation() {`
+
+Root's START-DEADLINE finding, at the runner. A cancellation requested after
+the create, and a start that then fails, as an attached start fails when it
+is cancelled while its container is still `created`: the invocation reports
+`RunnerError::cancelled`, with the fate the reclaim established, and leaves
+no container and no intent.
+
+## `fn an_invocation_whose_removal_leaves_a_process_unresolved_is_never_reported_gone() {`
+
+Root's DELIVERY-OWNERSHIP follow-through, at the runner. A removal that
+leaves a process unresolved, as an attached client whose supervision ended
+`Unresolved` does, yields an invocation whose fate is `Unresolved` with that
+fact as its error: on the cancellation path, not a plain cancellation, and on
+the completed path, not a success, even though the container was observed
+exited. The assertions are `assert_unresolved_removal_fate`'s. Unix runs each
+path through `unresolved_removal_in_an_owned_helper`; Windows, which has no
+Unix container reaper, runs the same assertions directly.
+
+PR12-R9-REMOVAL-GUARD-RETAINS-UNOWNED-REAPER and PR12-REG7-REMOVAL-GUARD-REAPER,
+two records of one defect: from `c08d9935`, which introduced this guard, until
+repair10 both paths ran in libtest's own process. Each built a real
+`ContainerRunner`, whose `Reaping::cover` forks a real Unix reaper, and its
+deliberately unresolved removal left that reaper to the production
+retained-reaper backstop (`Armed::kept_until_the_process_exits`) when the
+runner dropped, with no owner in the test's scope, on ordinary return and on
+unwinding alike. The backstop is production's and intentional; what was
+missing was the test's ownership, the lifecycle L5 gave J6's and K2's guards
+and R6-N1 the stalled observation's. No historical failure, hang or residue is
+attributed to it.
+
+## `fn assert_unresolved_removal_fate(fixture: &Fixture, cancelled: bool) {`
+
+The guard's assertions for one path, unchanged: a worker request whose
+container the fake leaves a process unresolved at removal
+(`leave_a_process_unresolved_at_removal`), cancelled at the container's start
+or once the container exited and its intent is being removed. The invocation
+is not a plain cancellation, its fate is `Unresolved`, and its error says it
+could not establish every process. Its runner drops when it returns, which is
+what hands the reaper to the backstop.
+
+## `fn unresolved_removal_in_an_owned_helper(cancelled: bool) {`
+
+Runs `unresolved_removal_child` for one path (`cancelled` or `completed`,
+through `UNRESOLVED_REMOVAL_PATH`) under `run_test_isolated` and
+`FIXTURE_CHILD_BOUND`, twice: ordinary return and deliberate unwinding after
+the runner dropped (`UNRESOLVED_REMOVAL_ENDING`). As
+`unresolved_process_in_an_owned_helper` does for the start, observation,
+pre-start-cleanup and volume-inspection cases, which stay as they are, the
+outer assertion requires the helper's successful exit, libtest's `1 passed`,
+exactly one retained-mock-reaper collection marker and one job-control-guard
+collection marker, and the final ECHILD marker, all arriving on captured
+stderr through the fixture's `say` funnel, which also reports the successful
+output. A failed fate assertion, an uncollected reaper or probe, or failed
+unwind cleanup cannot pass.
+
+## `fn unresolved_removal_child() {`
+
+Ignored because only the owner above supplies its path and ending. The shape
+is `unresolved_process_child`'s: `IsolatedJobControl` before the fixture,
+whose setup starts the process-global job-control guard and its probe;
+`RetainedMockReaper` for the runner's exact scope (`private_root`,
+`INCARNATION_1`) before the invocation; the completed path's fixture exits its
+container on start, as the in-process guard's did. After
+`assert_unresolved_removal_fate` returns, the runner has dropped through the
+unchanged production backstop, and the helper requires the scoped reaper
+still armed. On ordinary return it collects the reaper and the guard
+explicitly; on the deliberate panic their Drops collect them. The catch accepts
+only that exact panic. Finally `assert_no_children_in_isolated_test` requires
+ECHILD before the owner collects the helper.
+
+ECHILD is a direct-child claim, as for `unresolved_process_child`: this
+retained fake-runtime reaper has no supervised command group or anchor,
+receives no cleanup command while the helper lives, and is killed and reaped
+before the helper's exit could start its runtime cleanup, so the
+no-grandchildren argument in `agent/proc.md` is the same one. It says nothing
+about arbitrary descendants.
+
+Measured before commit as negative control B1 (the scoped `RetainedMockReaper`
+and its collection removed from this helper, which is the guard's state before
+repair10): the first path, `cancelled/return`, fails at the helper's
+direct-child census (`waitpid=0`) with no collection marker, and the owner's
+assertion fails on it.
 
 ## `fn a_container_call_cancelled_before_it_starts_writes_no_intent() {`
 
@@ -2062,11 +2415,14 @@ does), five checks:
 3. in every production module whose effective `clippy::disallowed_methods` level is `allow` —
    stated in its header or inherited from a parent that states it, twenty-seven modules today —
    where clippy therefore cannot refuse `ContainerRuntime::create` or `::start`, each call, path,
-   field or macro-argument occurrence of `create` or `start` is one of twenty-one pinned namings:
-   `runtime.create(` and `runtime.start(` inside the two funnels, and nineteen others none of
+   field or macro-argument occurrence of `create` or `start` is one of twenty-four pinned namings:
+   `runtime.create(` and `runtime.start(` inside the two funnels, and twenty-two others none of
    which is a container runtime's (`File::create(`, `Drain::start(`, `PrivateHooksDir::create(`,
-   the parameters `create:` and `start:`, `util::tail`'s local `start` inside `format!` and the
-   like); and `RuntimeOp::Create`/`RuntimeOp::Start` occur only inside the real runtime's own
+   the parameters `create:` and `start:`, `util::tail`'s local `start` inside `format!`, the
+   three `create(` calls in `workspace_manager.rs`'s `publish_staged_root`, which name its local
+   `create` closure — `fs::create_dir` and nothing else — for a fresh root's staging directory,
+   its claim token and each scaffolding directory, and the like); and
+   `RuntimeOp::Create`/`RuntimeOp::Start` occur only inside the real runtime's own
    `create` and `start`;
 4. in `exec.rs`, `fn launch(`'s signature names both proofs, `CoveredCreate<` and
    `CoveredStart<`; `self.launch(` occurs once, in `contain`, after `contain`'s one `.cover(`;
@@ -2182,3 +2538,586 @@ which the gates' `-D warnings` makes an error.
 The walk over a written tree: a stated allowance, a silent child that inherits it, a production
 forbid beneath it, and an allowance that holds in tests alone.
 
+
+## `struct Scripted {` › `observation_unresolved: std::sync::atomic::AtomicBool,`
+
+Set by `Runtime::leaves_its_observation_unresolved`: every later observation
+answers `RuntimeError::Unresolved` before it reaches the fake, as a bounded
+observation whose supervisor could not reap its process does. The fake's own
+trace therefore records no `Observe` for it.
+
+## `struct Scripted {` › `volume_inspection_unresolved: std::sync::atomic::AtomicBool,`
+
+Set by `Runtime::leaves_its_volume_inspections_unresolved`: every later
+credential-volume inspection is still asked of the fake, which records it in
+the trace, and then answers `RuntimeError::Unresolved` whatever the fake said,
+as a bounded `docker volume inspect` whose supervisor could not reap its process
+does. The flag wins over a failure the fake was armed with, so one fixture can
+run the failed-inspection control before it.
+
+## `fn an_observation_that_leaves_a_process_unresolved_keeps_the_invocation_unresolved_after_a_clean_release()`
+
+K2, "preserved process fate" (regular review 4, finding 2). A started
+container's first observation reports a process it could not establish gone;
+the release then stops and removes the container cleanly. The invocation
+reports `ProcessFate::Unresolved`, with that description in its message: the
+release established the container gone, not the observation's process. The
+runtime is the scripted fake, whose removal knows nothing of the observation,
+so only `contain`'s own rule can keep the fate. With `contain`'s fate read from
+the release alone (the rule before K2) this reports `Gone` and fails.
+
+L5 includes this companion guard because it has the same retained-reaper
+lifecycle as J6's unresolved-start guard. Its assertions now live in
+`assert_unresolved_observation_fate`. Unix executes them through
+`unresolved_process_in_an_owned_helper`; Windows, which has no Unix container
+reaper, executes the same assertions directly.
+
+## `fn a_prestart_failure_whose_cleanup_leaves_a_process_unresolved_keeps_the_invocation_unresolved()`
+
+PR12-R8-PRESTART-CLEANUP-FATE (regular review 8, P2). An ordinary failure
+before `docker start` — a reported image id that differs from the record, then
+a create the runtime refuses — whose cancel's removal answers
+`RuntimeError::Unresolved` (the fake's `leave_a_process_unresolved_at_removal`,
+as an unresolved question or attached client would). Each invocation must
+report `ProcessFate::Unresolved`, not a plain cancellation, with the R19 view
+and the R26 intent kept, the ledger's registration and slot pair kept, and no
+`RunnerSpawnFailure` verdict; its message carries both the primary failure and
+the removal's own fact, and the container the runtime created is removed. The
+same-shape control runs first on the same runner: a mismatch whose cleanup is
+clean reports `NeverStarted` and releases all four. The fate matrix
+(`the_runner_reports_what_it_established_about_the_process_when_it_fails`)
+keeps the other controls: a create the runtime refuses and a created container
+that reports another image (clean pre-start, `NeverStarted`), a runtime down
+before create and a funnel refusal before `docker start` whose cancel cannot
+reach the runtime (ordinary cleanup failures, still `NeverStarted`), and a
+refused start whose cancel completes (confirmed post-start `Gone`).
+`an_invocation_whose_removal_leaves_a_process_unresolved_is_never_reported_gone`
+remains the started-path guard. With `cancelled` reading the cause's fate
+alone, the rule before repair9, the first unresolved case reports
+`NeverStarted` and this fails.
+
+Unix runs the assertions through `unresolved_process_in_an_owned_helper` (case
+`prestart-cleanup`): the unresolved fates leave the runner's reaper to the
+production retained-reaper backstop, the lifecycle L5 gave J6's and K2's
+guards. Windows runs them directly.
+
+## `fn an_unresolved_credential_volume_inspection_keeps_the_invocation_unresolved_and_held() {`
+
+PR12-R8-VOLUME-INSPECTION-FATE and PR12-REG6-VOLUME-INSPECTION-FATE, two
+reports of one defect. The run's initial resolution
+(`resolve::resolve_container` over the scripted runtime, whose
+`inspect_volumes` is the preflight's own question) finds every recorded
+credential volume. Then an agent probe, which mounts its agent's volume, meets
+an invocation-time inspection that answers `RuntimeError::Unresolved`, and its
+cancel's stop and removal are answered cleanly for a container that was never
+created. It must report `Unresolved` with the R19 view and the R26 intent kept,
+the registration and the slot pair held, no `RunnerSpawnFailure` verdict, and
+the contextual R20 refusal in its message, and no create may have been asked.
+Controls on the same runner run first: an absent volume (the R20 refusal; the
+volume is never created) and an inspection the fake fails, both `NeverStarted`
+with everything released. `a_create_whose_named_volume_is_absent_is_refused_before_any_effect`
+stays the create-level absent and unreachable control. With the blanket
+`Refused` the inspection had before repair9 the fate is `NeverStarted` and
+this fails; with the fate typed but the cancel told `CauseFate::Settled` the
+view and the intent are released and the retained-resources assertion fails,
+so a relabelled fate alone does not pass. Unix runs through the owned helper
+(case `volume-inspection`); Windows runs directly.
+
+## `struct ProbeEnd {`
+
+What one admitted agent probe's failed launch left: its fate, whether it was a
+plain cancellation, its message, whether its R19 view and R26 intent exist,
+whether `InvocationLedger` kept its registration and its slot pair after `end`,
+and whether verification's classifier (`run::verified`) would settle a
+`RunnerSpawnFailure` outage over it.
+
+## `fn agent_probe_named(ordinal: u32) -> (RunnerRequest, ContainerName) {`
+
+An agent probe for `claude-code`, which receives a credential volume and a slot
+pair, and its container's name. Distinct ordinals are distinct containers on
+one runner, so one runner (one retained reaper) carries a guard's controls and
+its cases.
+
+## `fn run_admitted(`
+
+One probe, accounted for by the production decisions rather than copies of
+them. `InvocationLedger::register_slotted` under `Standing::preflight()` admits
+it with its pair, and the premise asserts the slot is held while it runs; the
+runner runs it; `InvocationEnd::of` hands the outcome to
+`InvocationLedger::end` as `RegisteringRunner::settle` does; and `run::verified`
+classifies the runner's error as an integration verification would. The R19
+view and the R26 intent are read from the fixture afterwards.
+
+## `fn assert_settled_and_released(case: &str, end: &ProbeEnd) {`
+
+A settled pre-start failure: `NeverStarted`, the view and the intent released,
+the registration and the slot released, and the `RunnerSpawnFailure` outage
+verification settles over it. The controls make the ledger and verifier probes
+discriminating.
+
+## `fn assert_unresolved_and_held(case: &str, end: &ProbeEnd) {`
+
+An unresolved one: `Unresolved` and no plain cancellation; the view and the
+intent kept; the registration and the slot kept; no spawn outage; and a message
+naming the fate and the deliberately retained residue. The resource assertions
+come before the message so that a cancel which releases them fails at them.
+
+## `fn assert_unresolved_prestart_cleanup_fate(fixture: &Fixture) {`
+
+The assertions of
+`a_prestart_failure_whose_cleanup_leaves_a_process_unresolved_keeps_the_invocation_unresolved`:
+the clean control, the two unresolved cases, and no `docker start` anywhere.
+
+## `fn assert_unresolved_volume_inspection_fate(fixture: &Fixture) {`
+
+The assertions of
+`an_unresolved_credential_volume_inspection_keeps_the_invocation_unresolved_and_held`:
+the initial resolution, the absent and failed controls, the unresolved case,
+and the trace (no `Create`; each cancel's `Stop` and `Remove` asked; no
+container left).
+
+## `const STALLED_OBSERVATION_DEADLINE: Duration = Duration::from_secs(10);`
+
+The timeout the deadline and cleanup modes give their invocation (R6-N2,
+regular review 6, P2; the concurrency lens's PR12-CI-02 and the regression
+lens's PR12-K2-OBSERVATION-PREMISE-DEADLINE are the same defect).
+It was 300 ms, chosen without counting what a deadline here covers. `contain`
+starts the deadline before reaper coverage and the launch, and
+`DockerCli::exec_within` asks nothing once it has passed, so a launch that
+spent the 300 ms never asked the observation this witness stalls, and the
+child failed its premise instead of testing it. Native10's macOS deadline child
+failed exactly there, at `observed.exists()` (run 41904743958, job
+126836335262; its whole test, fixture included, took 2.94 s). That run does not
+say which phase was slow, and no failure rate was measured; what the repair
+removes is the budget. On the idle build box the observation is asked about
+171 ms after the helper calls `run_blocking_with`, a moment before `contain`
+starts the deadline, so roughly half the old deadline was spent before the
+stub was reached.
+
+What the deadline covers before the first observation, read from the source:
+
+- arming the runner's container reaper (`Reaping::cover`, `arm_container_reaper`):
+  a fork and its READY handshake, which production lets take
+  `HELPER_READY_BUDGET` (2 s) before it gives up;
+- writing the intent and materializing the Git view: file work, no process;
+- three supervised questions, `docker create`, `docker container inspect` and
+  `docker start`: each starts its own cleanup reaper, under the same 2 s
+  budget, and the stub's `sh`;
+- the observation's own cleanup reaper and `sh`, up to the marker.
+
+The job-control guard is not among them: the fixture's setup started it. Five
+helper starts that production tolerates up to 2 s each make 10 s, and the four
+shell starts and the file work are small beside them. That is the stated
+assumption: a launch whose helpers each start within their own production
+budget reaches the observation inside the deadline. A slower launch fails the
+premise with the invocation's result, its elapsed time and its timeout, and is
+a slow or wedged launch, never a deadline or fate defect.
+
+No clock seam can force the interleaving instead: `contain` and `supervise`
+read `Instant::now()` directly, and this repair leaves `exec.rs` byte-for-byte
+unchanged. A witness of the production deadline over the production `contain`
+therefore needs its launch to fit inside the deadline it was given; the repair
+makes that a budget with stated phases rather than a narrow interval, and
+establishes readiness at the observation boundary itself, the stub's marker,
+reporting on every run how long it took to reach it.
+
+## `const STALLED_OBSERVATION_SETTLES: Duration = Duration::from_secs(20);`
+
+How long an invocation may take to settle after what ends it: after the
+deadline in the deadline and cleanup modes, whose bound is the deadline plus
+this, and after its start in the cancel mode, whose cancellation follows the
+stub's marker. It is K2's 20 s bound with its meaning unchanged: far above what
+a loaded runner needs for the bounded questions a mode asks after its end (the
+cleanup mode's stalled stop and removal take about 2.2 s on the build box),
+and far below the minute the stub stalls, so an observation that neither the
+deadline nor the cancellation ended fails it.
+
+## `const STALLED_OBSERVATION_DOCKER: &str = "#!/bin/sh\n\`
+
+The stub `docker` of the stalled-observation witness, written by a process of
+its own (`write_program_in_its_own_process`, so no fork of this process holds
+it open for writing when the child executes it). A `ps` filtered by name,
+which only the supervision asks, records that it was asked in the file
+`UPSTROKE_TEST_OBSERVED` names and then sleeps a minute; a `ps` filtered by
+label, the container reaper's, lists nothing. `create` and `logs` answer at
+once, `start` at once or after the whole seconds `UPSTROKE_TEST_START_HELD`
+names, `container inspect` answers the recorded image id or an exit status
+of 0, and `stop` and `rm` answer at once, or sleep a minute when
+`UPSTROKE_TEST_CLEANUP_STALLS` is set. Anything else exits 93.
+
+Nothing else asks the name-filtered `ps` here. The release's stop and removal
+either answer, or stall and end at the question bound with no daemon answer
+for `settle` to confirm by observation, and the collection lists nothing. So
+the marker exists only if the supervision asked its observation, which
+`exec_within` does only before the deadline. Each stall `exec`s into `sleep`,
+so it stays the supervised process itself.
+
+## `fn a_running_container_whose_observation_stalls_settles_at_its_deadline_or_cancellation_and_keeps_its_fate()`
+
+K2, regular review 4, finding 2 (P2, liveness; prior
+PR7-STD-CONTAINER-EXEC-UNBOUNDED). The reviewer's witness: an invocation with a
+100 ms timeout took 1.063 s against a stub whose observation slept one second.
+Here the stub's observation sleeps a minute, and the whole production path
+runs, `ContainerRunner` over the real `DockerCli`, in an isolated child of
+this test binary whose `PATH` alone carries the stub
+(`run_test_isolated`, which keeps the child's output for the failure message
+and kills its process group at two minutes). Three modes, a shell probe each:
+- `deadline`: a `STALLED_OBSERVATION_DEADLINE` (10 s) timeout. The observation
+  ends at the deadline, the invocation is collected as timed out (no exit
+  code) and released, within `STALLED_OBSERVATION_SETTLES` of the deadline;
+- `cancel`: a ten-minute timeout and a cancellation once the stub records the
+  observation. The invocation reports the cancellation with fate `Gone`
+  within `STALLED_OBSERVATION_SETTLES`: the release's stop and removal
+  answered;
+- `cleanup`: the deadline mode with `stop` and `rm` stalled too and the
+  runtime's own bound shortened to one second (`with_question_bound`). Each
+  cleanup question ends at that bound, and the invocation reports fate
+  `Unresolved`, with its intent kept for the census: neither the stop nor the
+  removal was confirmed, and the bound does not turn that into `Gone`. Its
+  `docker start` is also held for 2 s (`UPSTROKE_TEST_START_HELD`): the
+  in-suite setup-delay case the concurrency lens (PR12-CI-02) and the
+  regression lens (PR12-K2-OBSERVATION-PREMISE-DEADLINE) asked for. Every run
+  shows a launch delayed far past the former 300 ms deadline still reaching
+  the stalled observation, and the helper requires the observation to come
+  after the hold, so a hold that never happened cannot pass as one. The hold
+  costs no time: this mode's length is its deadline's.
+
+Each mode runs in two helpers (R6-N1), one ending in an ordinary return and
+one in a deliberate unwind after its runner dropped. The parent requires the
+helper's successful exit, libtest's `1 passed`, exactly one job-control-guard
+collection marker and one ECHILD marker, and the mode's reaper evidence: in
+the cleanup mode exactly one `collected retained stub reaper` marker and no
+disarm marker; in the deadline and cancel modes exactly one `disarmed its
+container reaper on drop` marker and no retained-reaper collection. A helper
+that settled with another fate, kept a reaper it should have dropped, dropped
+one it should have kept, or left a direct child cannot pass. Each helper's
+captured output is reported through the fixture's `say` funnel.
+
+Measured on the build box before commit (K2): with the supervision's
+observation asked under the runtime's own bound instead of the invocation's,
+the deadline mode took 60.4 s and failed; with the cleanup questions given ten
+minutes, the cleanup mode was killed at the parent's two-minute bound and
+failed. Repair7, same box (Linux; not macOS evidence): all six helpers pass.
+The deadline and cancel modes asked their observation about 171 ms after the
+invocation began, the cleanup mode, its start held 2 s, after 2.14 s; the
+deadline mode settled after 10.26 s, the cleanup mode after 12.19 s and the
+cancel mode after 0.34 s; the parent took 49 s.
+
+Bounded controls on the same box, each one exact replacement restored
+byte-for-byte. Replacing the cleanup mode's `reaper.collect()` with
+`std::mem::forget(reaper)` (R6-N1's omission witness) fails `cleanup/return`
+at the helper's direct-child census (`waitpid=0`), and so the parent, while
+the deadline and cancel helpers still pass. Holding the stub's `docker start`
+5 s in every mode still reaches the stalled observation in all six helpers,
+about 5.15 s in. Holding it 12 s, past the deadline, fails `deadline/return`
+at the premise, whose message names the start that ended at the deadline
+(`ended before it answered`), 10.16 s and the 10 s timeout; nothing hangs.
+Two temporary controls of `container.rs` answer the regression lens's
+proposed guard; `exec.rs` is never touched. Asking the supervision's
+observation under the runtime's own bound instead of the invocation's fails
+`deadline/return` at the settle bound after 60.39 s (K2's original bypass
+took 60.4 s). A release that reports its container gone fails
+`cleanup/return` with fate `Gone` where `Unresolved` is required.
+
+## `fn stalled_observation_child() {`
+
+Ignored because only the parent above supplies its mode, ending, marker and
+stub. R6-N1 (regular review 6, P2): until repair7 this helper returned with
+its cleanup mode's container reaper, which `Reaping::drop` deliberately keeps
+(`kept_until_the_process_exits`), left to outlive the helper, and in every
+mode with the job-control guard its fixture's setup started left to the
+helper's exit; `run_test_isolated` collects the helper, not the helper's
+children. It now owns both, as L5's `unresolved_process_child` does.
+`IsolatedJobControl` is constructed before the fixture, whose setup starts the
+process-global guard and its probe. `RetainedStubReaper` is constructed
+before the invocation, for the runner's exact scope, with the `DockerCli`'s
+own `reaper_program()` and the stub the parent wrote.
+`assert_a_stalled_observation_settles` runs the invocation and drops its
+runner. The cleanup mode then requires the scope still registered, the
+production backstop having kept the reaper; the deadline and cancel modes
+require it disarmed, their runners having settled `Gone` and cancelled and
+waited for their own reapers on drop, and say so. On ordinary return the helper
+collects the retained reaper (cleanup) and the guard explicitly; on the
+deliberate unwind their Drops do, and in the other modes the reaper owner finds
+nothing registered. The catch accepts only that exact deliberate panic; any
+other failure still fails the helper. Finally
+`assert_no_children_in_isolated_test` requires ECHILD before the parent
+collects the helper.
+
+ECHILD is a direct-child claim. It covers the helper's own children: the
+job-control guard, the container reaper, and each cleanup reaper and stub
+process the `docker` questions started, which their supervisions end and
+collect before the questions return; the guard's collection requires that no
+command group is still registered. It is not proof about arbitrary
+descendants. The retained reaper's no-grandchildren argument is in
+`agent/proc.md` (`RetainedStubReaper`), and the guard's distinct collected
+status proves its probe reaped. The environment keys select the mode, ending,
+marker, image and stub, the cleanup stalls and the start hold; the scratch
+trees and output files keep their RAII owners.
+
+## `fn assert_a_stalled_observation_settles(`
+
+One mode's invocation: the runner over the real `DockerCli` (its question bound
+shortened to one second in the cleanup mode), the shell probe with the mode's
+timeout, a watcher, and the assertions; the runner drops when this returns or
+unwinds, before the helper looks at its reaper. The watcher polls for the
+marker every 10 ms until it appears, the invocation ends or a minute passes,
+records how long after the invocation began it appeared, and in the cancel
+mode then cancels (at the minute if the marker never came). The premise is
+the unchanged `observed.exists()`; when it fails, it names the invocation's
+result, elapsed time and timeout, which tell a launch refused or ended at the
+deadline (`docker start` not asked, or ended before it answered) from one that
+started and was never observed. A launch the parent held at `docker start`
+must have reached its observation after the hold. Then the bound, `took`
+under the deadline plus `STALLED_OBSERVATION_SETTLES`
+(`STALLED_OBSERVATION_SETTLES` alone in the cancel mode), and the unchanged
+outcomes: timed out with no exit code; cancelled with fate `Gone`; fate
+`Unresolved` with the intent kept. Every run says how long the observation
+took to reach and the invocation to settle.
+
+## `fn review_timeouts_obey_the_platform_deadline_range() {`
+
+The K3 regression runs `review_deadline_child` through `HostRunner` and its existing
+cross-platform process supervisor with a two-minute bound. It requires a non-timeout exit, code zero and libtest's
+`1 passed`, so a wedged helper, failed assertion or misnamed test fails the parent. The bound
+covers fixture setup and the whole helper lifecycle, independently of the review timeout.
+
+K3 originally named this guard
+`a_review_timeout_the_configuration_accepts_and_no_deadline_can_hold_is_refused_before_anything_is_written`.
+That test assumed every platform rejects `i64::MAX` seconds. Its fake never exited after
+start and its zero-delay watch kept recording observations on platforms that could represent
+the deadline. Repair6 corrects the premise and bounds that lifecycle; it does not attribute
+the historical native Windows allocation failure to this test.
+
+## `fn review_deadline_child() {`
+
+An owned helper, ignored in the default suite and always invoked by the parent above. The
+original configuration, `[routing] review = { tier = "frontier", timeout_secs =
+9223372036854775807 }`, still passes through `config::load`, `review::plan_for` and
+`ReviewPlan::pass_timeout`; the exact accepted duration is asserted. That duration is sent
+unchanged to the runner, with the outcome selected by the platform's `Instant::checked_add`
+range. Two additional cases assert their premises before invoking the runner: sixty seconds
+is representable, and `Duration::MAX` is not. Both outcomes therefore run on every platform;
+the overflowing case cannot silently become an untested branch.
+
+Each case has its own fixture, whose fake exits immediately when started. Its ten-millisecond
+poll prevents a non-exiting regression from accumulating an unbounded rate of trace entries
+while the parent's supervisor enforces the helper bound. No sleep establishes readiness.
+The request owns a copy of the task path while the fixture retains its cleanup paths.
+
+All invocations remain under `catch_unwind`. An unrepresentable deadline must return a
+non-cancellation `NeverStarted` refusal naming the supplied seconds, with an empty funnel
+and runtime trace, no intent and no container. A representable deadline must complete with
+code zero, without timing out, and with start, collection and removal recorded. Every case
+finishes with no intent or container. Restoring unchecked addition fails the overflow case;
+requiring refusal independently of the platform range fails the representable control.
+
+## `fn a_start_that_left_a_process_unresolved_stays_unresolved_after_a_clean_cancel() {`
+
+`PR12-J6-OBSERVATION-FATE-DROPPED`: a start that reports a process of its own
+unresolved keeps that fate when cancellation stops and removes the container.
+The removal establishes the container gone, not the other process. DockerCli
+also holds such a process under the container, so its removal reports it;
+this scripted runtime's removal does not. `assert_unresolved_start_fate`
+retains the original fate, message, Start/Remove and empty-container assertions.
+
+L5 moves this invocation into an owned, bounded helper on Unix. The original
+test dropped a temporary runner in libtest's process; its unresolved fate
+selected the production retained-reaper backstop, leaving the reaper beyond
+that test executable's exit. Windows retains the direct assertion because that
+Unix reaper does not exist there.
+
+## `fn unresolved_process_in_an_owned_helper(case: &str) {`
+
+J6's start case, K2's observation case, and repair9's pre-start-cleanup and
+volume-inspection cases run `unresolved_process_child`
+under `run_test_isolated` and `FIXTURE_CHILD_BOUND`. Each runs twice: ordinary
+return and deliberate unwinding after the runner dropped. The outer assertion
+requires the collected helper's successful exit, libtest's `1 passed`, and
+exactly one retained-mock-reaper collection marker and one job-control-guard
+collection marker, plus the final ECHILD marker. These markers arrive on captured
+stderr through the fixture's `say` funnel. The successful captured output,
+including the collected pids, is reported through that same funnel for the
+guard's evidence. A wrong helper name, failed fate assertion, uncollected
+reaper/probe or failed unwind cleanup cannot pass.
+
+## `fn unresolved_process_child() {`
+
+Ignored because only the owner above supplies its case and ending.
+`IsolatedJobControl` is constructed before scratch-fixture setup, which starts
+the process-global job-control guard and its probe. `RetainedMockReaper` is
+constructed before the invocation; the runner's temporary then drops through
+the unchanged production backstop. The helper
+requires the scoped reaper to remain armed. On ordinary return it explicitly
+collects both owners; on the deliberate panic their Drops collect their
+children. The catch accepts only that exact deliberate panic; other failures
+still fail the child. Finally `assert_no_children_in_isolated_test` requires
+ECHILD, before the outer owner collects this helper.
+
+ECHILD is a direct-child claim. The separate no-grandchildren argument is in
+`agent/proc.md`: this retained fake-runtime reaper has no supervised command
+process group or anchor,
+receives no cleanup command while the helper lives, and is killed and reaped
+before helper exit can trigger the runtime-cleanup fork path. No real container
+is started. The separate job-control probe is reaped by its own guard using a
+test-only shutdown command, and only that successful wait earns the guard's
+distinct exit status, which its owner requires. The two environment keys only
+select the fixture and return/unwind mode. Scratch trees and output files retain
+their existing RAII owners.
+
+Measured omission witness: replacing the explicit `reaper.collect()` with
+`std::mem::forget(reaper)` in the return case fails both guards at the helper's
+direct-child census (`waitpid=0`). The job-control guard and probe have already
+been collected, so that check sees the retained reaper omitted by the mutation.
+The unchanged fate assertions still run. The witness covers omitted normal
+collection; the same collection routine is exercised during the deliberate
+unwind, not separately mutation-tested there.
+
+## `const LEASE_KILL_SETTLEMENT_DELAY_MS: &str = "3000";`
+
+The killed coordinator's reapers' own test-build settlement delay. `cleanup_reaper_group` ends its
+registered group first and only then waits this out before it confirms the group gone and collects
+its anchor, so what a helper's lease covers after its coordinator dies is its reaper's settlement,
+not a helper kept alive (repair16's PROTOCOL-5 and PROTOCOL-6).
+
+## `fn lease_kill_stub(case: &str) -> String {`
+
+The `docker` on the killed coordinator's `PATH`. It pauses at the case's acknowledged boundary by
+writing its pid and becoming a long `sleep`: the worker's synchronous `docker create`
+(`worker-create`); the attached client's `docker start --attach`, on the attached start's own thread
+(`attached-start`); the credential volume's `docker volume inspect`, which `create_container` asks
+before any create and so before any container name exists (`credential-volume`); or the `docker
+stop` of the cancellation that follows a create refused before it was asked (`pre-create-cancel`,
+whose volume inspection it will not answer). Otherwise it answers just enough for the launch to
+reach that boundary. No daemon object exists.
+
+## `struct Identified {`
+
+A process of a fixture as the harness first identified it: pid, start time, command name, process
+group. A reused pid would not share the start time.
+
+## `fn stat_of(pid: libc::pid_t) -> Result<(Identified, char), String> {`
+
+`/proc/<pid>/stat` of a process the harness reached through its own children lists, or one the
+kernel named ended (a zombie keeps its record until it is collected). The command name is read
+between the first `(` and the last `)`.
+
+## `fn children_of(pid: &str) -> Result<Vec<libc::pid_t>, String> {`
+
+The children lists of each task of one process. Scoped discovery only -- the harness's own, or a
+process it already reached -- and never evidence that no child remains: an unreadable list is an
+error, and a list read empty proves nothing.
+
+## `enum Observed {` and `fn observed(who: &Identified, owned: &OwnedDescendants) -> Observed {`
+
+What is established about an identified process, three ways (repair16's PROTOCOL-7, after
+REPAIR16-AMENDMENT-7): `Live` (its pid answers the identified start time in a state neither `Z`
+nor `X`), `Ended` only by an owned fact (collected by this harness with that identity, or an exited
+zombie with that identity), and `Unknown` for an observation that could not be read or a pid now
+naming another process. `Live` is the only positive premise of liveness and `Ended` the only
+evidence of an ending; `Unknown` fails as either.
+
+## `enum Waited {` and `fn wait_now(pid: libc::pid_t) -> Waited {`
+
+One `waitpid(pid, WNOHANG)` and every answer it can give, kept apart: collected with its status,
+still running, interrupted, not a child (`ECHILD`), or another error.
+
+## `enum Pending {` and `fn pending_now() -> Pending {`
+
+The kernel's own account of the harness's children, collecting none:
+`waitid(P_ALL, WEXITED | WNOHANG | WNOWAIT)`. A named ended child; children remaining with none
+ended (`si_pid` zero); no child at all (`ECHILD`); interrupted; or an error.
+
+## `struct OwnedDescendants {`
+
+Every process a killed coordinator leaves, owned by the harness. The harness makes itself a child
+subreaper before it starts the coordinator, so everything the coordinator forked or spawned is
+re-parented to it when its own parent dies. It forks nothing of its own -- its parent test builds
+the fixture, and the coordinator is started with `std::process::Command`, not the process funnel --
+and asks the kernel so before the coordinator starts (`has_no_child`), so a later "no child
+remains" is about the coordinator's processes alone. It collects only children the kernel names
+ended, reconciling the identity each zombie answers with the one it was first listed with, and
+makes no wait before the coordinator's own handle has collected the coordinator. It signals a
+process only while it is listed as its own unreaped child with its identified start time, by pid,
+never a group. A collection -- natural settlement or the final cleanup -- is complete only when the
+kernel answers `ECHILD`, every child ever listed was collected here, and nothing failed.
+
+## `struct OwnedCollection {`
+
+The collector, ended at its drop on a pass, a failing assertion, a panic, an internal deadline and
+the B1 reversal alike: it ends and collects every descendant within 20 s and prints
+`lease-kill collection: complete: ...`. The parent removes the fixture only on a complete
+collection and otherwise keeps it and says so.
+
+## `fn lease_kill_coordinator_child() {`
+
+The coordinator a lease-kill harness kills. It takes its run lock, enters its cleanup scope and
+hands a worker thread -- inside no scope of its own -- the `Carried` call a pipeline is given; the
+worker runs a real `ContainerRunner` over `DockerCli` and the process funnel (a gate, a gate with
+stdin, or an implementer invocation with its credential volume) until the stub pauses it. A second
+thread reports, once the helper has paused, the container-label backstops the invocation armed.
+
+## `fn pids_at(path: &Path) -> Option<Vec<libc::pid_t>> {`
+
+The pids a report holds, once it exists; possibly none.
+
+## `fn lease_kill_harness_child() {`
+
+The owned, bounded harness. While the coordinator lives it identifies the covered processes through
+the coordinator's children lists: the paused helper, the command reaper that registered its group,
+and the container-label backstop. It kills and collects the coordinator, requires run admission
+refused while the helper's reaper is `Live` before and after the ask, asks until admitted and
+requires every covered process `Ended` by then, and lets every process the coordinator left end on
+its own to the kernel's own account. The refusal, the admission and the collection are three
+separate facts, none inferred from another.
+
+## `fn the_lease_kill_guard(case: &str) {`
+
+The parent of each kill guard. It builds the fixture in a bounded child of its own and the stub in
+it, runs the harness isolated within 300 s, and requires the complete-collection line before
+anything else -- an incomplete one keeps the fixture -- then each of the harness's witness lines.
+
+## `fn a_killed_coordinators_paused_docker_create_keeps_run_admission_refused_until_it_is_settled() {`
+
+`worker-create`: a worker's invocation carries its run's cleanup lease through the
+`ContainerRunner` and `DockerCli`'s bounded question.
+
+## `fn a_killed_coordinators_paused_attached_start_keeps_run_admission_refused_until_it_is_settled() {`
+
+`attached-start`: the attached start's own thread takes the invocation's leases by value.
+
+## `fn a_killed_coordinators_paused_credential_volume_inspection_keeps_run_admission_refused_until_it_is_settled()`
+
+`credential-volume`: the credential volume's inspection, asked through a runtime method that takes
+no lease and before any container exists, holds the invocation's leases through its thread's scope.
+
+## `fn a_killed_coordinators_paused_pre_create_cancellation_keeps_run_admission_refused_until_it_is_settled()`
+
+`pre-create-cancel`: the cancellation after a create refused before it was asked asks about a
+container no create ever named, and holds the invocation's leases the same way.
+
+## `fn dormant_backstop_coordinator_child() {`
+
+The coordinator a dormant-backstop harness kills. It arms a container-label backstop over its run's
+lease paths and lock file through the production arming (`BackstopHold::BeforeActing`), lets go of
+its run lock and scope, keeps the backstop armed as an unsettled runner does, and waits, at most
+300 s, to be killed.
+
+## `fn dormant_backstop_harness_child() {`
+
+Under the same owned collection: admission is granted while the coordinator lives, the backstop
+holding nothing. In `free`, it lets go, kills the coordinator, waits for the backstop's label listing
+to start, and requires admission refused while the backstop is `Live` before and after the ask and
+granted only once its ending is established. In `newer-engine`, it keeps that admission -- a newer
+engine holding the run -- across the kill, and requires the backstop to end on its own without
+starting its listing.
+
+## `fn a_dormant_label_backstop_holds_its_runs_cleanup_lease_while_it_acts_after_its_coordinators_death()`
+
+The backstop holds no lease while its coordinator lives and takes its run's lease itself, before it
+acts, at its coordinator's death.
+
+## `fn a_dormant_label_backstop_acts_on_nothing_while_a_newer_engine_holds_the_run() {`
+
+With a newer engine holding the run at its coordinator's death, the backstop stands down: no
+listing, no reclaim, an ending of its own.

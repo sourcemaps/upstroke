@@ -1042,6 +1042,7 @@ fn a_probe_child_and_an_execution_child_of_one_adapter_carry_the_same_environmen
             ),
         ],
         stdin: Vec::new(),
+        settings_file: None,
     };
     let probe = crate::agent::probe_request(
         claude::ADAPTER_ID,
@@ -1106,6 +1107,7 @@ fn dump_command(overlay: &[(&str, &str)]) -> CommandSpec {
         ],
         env,
         stdin: Vec::new(),
+        settings_file: None,
     }
 }
 
@@ -1323,6 +1325,7 @@ fn every_credential_supplied_role_composes_one_environment_per_binding() {
             ),
         ],
         stdin: Vec::new(),
+        settings_file: None,
     };
 
     let bound: Vec<ExecutionRole> = ExecutionRole::all()
@@ -1833,6 +1836,7 @@ fn supervision_parity_tests() {
                 .collect(),
             env: Vec::new(),
             stdin: fixture.stdin.as_bytes().to_vec(),
+            settings_file: None,
         };
         let request = RunnerRequest {
             command,
@@ -2004,6 +2008,7 @@ fn the_runner_returns_the_childs_whole_output_for_every_production_request_shape
                 args: args.clone(),
                 env: Vec::new(),
                 stdin: b"the materialized prompt\n".to_vec(),
+                settings_file: None,
             };
             for (role_name, request) in [
                 (
@@ -2048,6 +2053,7 @@ fn the_runner_returns_the_childs_whole_output_for_every_production_request_shape
                 args: vec!["--version".to_owned()],
                 env: Vec::new(),
                 stdin: Vec::new(),
+                settings_file: None,
             },
             0,
             AGENT_PROBE_TIMEOUT,
@@ -2190,6 +2196,7 @@ fn the_runner_bounds_output_at_the_same_allowance_the_direct_funnel_does() {
                 budget.clone(),
             )],
             stdin: Vec::new(),
+            settings_file: None,
         },
         workspace: workspace.clone(),
         role: ExecutionRole::Gate,
@@ -2249,6 +2256,7 @@ fn the_runner_executes_in_the_requested_workspace() {
                 .collect(),
             env: Vec::new(),
             stdin: Vec::new(),
+            settings_file: None,
         },
         workspace: workspace.clone(),
         role: ExecutionRole::Gate,
@@ -2280,6 +2288,7 @@ fn the_overlay_reaches_the_child_and_a_reserved_key_never_gets_that_far() {
             .collect(),
         env: vec![("UPSTROKE_OVERLAY_PROBE".to_owned(), "reached".to_owned())],
         stdin: Vec::new(),
+        settings_file: None,
     };
     let request = RunnerRequest {
         command: spec.clone(),
@@ -2327,6 +2336,7 @@ fn a_gate_child_is_told_where_no_agents_credentials_live() {
             .collect(),
         env: Vec::new(),
         stdin: Vec::new(),
+        settings_file: None,
     };
     let runner = HostRunner::new().with_environment(HostEnvironment::with_base(
         synthetic_base()
@@ -2774,6 +2784,7 @@ fn observed_points(runner_hooks: HarnessHooks) -> BTreeSet<SubEffectPoint> {
                 .collect(),
             env: Vec::new(),
             stdin: Vec::new(),
+            settings_file: None,
         },
         workspace: workspace.clone(),
         role: ExecutionRole::Gate,
@@ -2822,6 +2833,7 @@ fn point_order() -> Vec<SubEffectPoint> {
                 .collect(),
             env: Vec::new(),
             stdin: Vec::new(),
+            settings_file: None,
         },
         workspace: workspace.clone(),
         role: ExecutionRole::Gate,
@@ -3061,6 +3073,7 @@ fn agent_cli_command_at(program: &str, stdin: &[u8]) -> CommandSpec {
         args: vec!["--exact".to_owned(), NO_SUCH_TEST.to_owned()],
         env: Vec::new(),
         stdin: stdin.to_vec(),
+        settings_file: None,
     }
 }
 
@@ -4101,6 +4114,7 @@ fn the_pre_exec_containment_step_runs_in_the_forked_child() {
                 .collect(),
             env: Vec::new(),
             stdin: Vec::new(),
+            settings_file: None,
         },
         workspace: workspace.clone(),
         role: ExecutionRole::Gate,
@@ -4537,6 +4551,7 @@ fn windows_ambient_coordinator_helper() {
                 .collect(),
             env: Vec::new(),
             stdin: Vec::new(),
+            settings_file: None,
         },
         workspace: std::env::temp_dir(),
         role: ExecutionRole::Gate,
@@ -5042,6 +5057,7 @@ fn named_request(program: &str, argument: &str, workspace: &Path) -> RunnerReque
             args: vec![argument.to_owned()],
             env: Vec::new(),
             stdin: Vec::new(),
+            settings_file: None,
         },
         workspace.to_path_buf(),
         Duration::from_secs(60),
@@ -5818,6 +5834,7 @@ fn role_request_for(
         args: vec![argument.to_owned()],
         env: Vec::new(),
         stdin: Vec::new(),
+        settings_file: None,
     };
     let timeout = Duration::from_secs(60);
     match role {
@@ -6119,13 +6136,14 @@ fn a_refused_name_is_refused_identically_without_asking_the_filesystem_again() {
 
 #[test]
 fn production_reaches_a_spawn_through_one_host_runner_per_run() {
-    const SITES: [(&str, usize); 6] = [
+    const SITES: [(&str, usize); 7] = [
         ("src/engine/mod.rs", 0),
         ("src/engine/coordinator.rs", 1),
         ("src/engine/resume.rs", 1),
         ("src/engine/attempt.rs", 0),
         ("src/engine/preflight.rs", 0),
         ("src/engine/options.rs", 0),
+        ("src/engine/topology/entry.rs", 1),
     ];
     let sources = [
         ("src/engine/mod.rs", include_str!("../../engine/mod.rs")),
@@ -6148,6 +6166,10 @@ fn production_reaches_a_spawn_through_one_host_runner_per_run() {
         (
             "src/engine/options.rs",
             include_str!("../../engine/options.rs"),
+        ),
+        (
+            "src/engine/topology/entry.rs",
+            include_str!("../../engine/topology/entry.rs"),
         ),
     ];
     assert_eq!(
@@ -6215,11 +6237,18 @@ fn production_control() {
         ),
         (include_str!("../../engine/resume.rs"), "fn resume_harness("),
     ];
+    // Each conductor's body, to the first `}` that closes an item at column 0: since
+    // PR12 the legacy construction follows the schema-4 dispatch in the same body,
+    // and the schema-4 run's one construction is `engine/topology/entry.rs`'s, which
+    // the table above counts. `include_str!` holds the bytes the checkout wrote, and
+    // a checkout with `core.autocrlf` on ends every line with CRLF, so the lines are
+    // made LF first and the cut finds the same closing `}` under either ending.
     for (conductor, facade) in conductors {
-        let engine = crate::effects::production_code(conductor);
+        let engine = crate::effects::production_code(conductor).replace("\r\n", "\n");
         let after = engine
             .split_once(facade)
-            .map(|(_, rest)| rest.lines().take(8).collect::<Vec<_>>().join("\n"))
+            .and_then(|(_, rest)| rest.split_once("\n}\n"))
+            .map(|(body, _)| body.to_owned())
             .unwrap_or_default();
         assert!(
             CONSTRUCTORS
@@ -7163,6 +7192,7 @@ fn rendezvous_request(
             ],
             env,
             stdin: Vec::new(),
+            settings_file: None,
         },
         dir.to_path_buf(),
         Duration::from_secs(180),
@@ -7451,6 +7481,7 @@ fn context_dump_request(
         ],
         env,
         stdin: Vec::new(),
+        settings_file: None,
     };
     role_request(role, workspace, command, Duration::from_secs(120))
 }

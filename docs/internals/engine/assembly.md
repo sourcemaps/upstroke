@@ -41,25 +41,16 @@ over data [`crate::gates::ShellGate`] already owns, so it lives on that type
 as `ShellGate::command`. Putting it here would make `gates.rs` — which sits
 below the engine — depend upward on the engine.
 
-## `#![cfg_attr(not(test), allow(dead_code))]`
+### The module-level dead-code allow, removed (PR12)
 
-**`dead_code` is allowed here for a lib build only, and the shape is the
-point.** With `engine::topology` narrowed to `pub(crate)`, this subsystem has
-no non-`#[cfg(test)]` caller — which is exactly what
-`production_effect = "none"` asserts, and `pub` was what kept the compiler
-from saying so. Narrowing it made rustc report **328 items** across this
-module tree as never used.
-
-`cfg_attr(not(test), …)` rather than a bare allow, deliberately. A blanket
-`#![allow(dead_code)]` would hide a genuinely dead item added later, which is
-the class this slice's own review rounds kept finding. Under this form the
-**test** build carries no allow, so anything not reached even by a test is
-still an error at `-D warnings`. What is silenced is precisely the one true
-fact — the production binary does not drive schema 4 yet.
-
-**Remove this when PR12 activates the driver.** At that point the items have
-production callers and the allow stops being true rather than stops being
-convenient.
+Until PR12 this file carried `#![cfg_attr(not(test), allow(dead_code))]`,
+for the reason `engine::topology`'s notes give: no non-`#[cfg(test)]`
+caller. With it removed, the compiler reported no dead-code diagnostic in
+this file in that build (validation run V045, `cargo check` at
+`d1c0a7de`), so it stays removed (root's checkpoint-2 disposition, S11, and
+its S11 diagnostic disposition). That observation is compiler evidence
+only: it does not show that every item here has a runtime production
+caller, and it is not evidence of activation.
 
 ## `#![forbid(`
 
@@ -309,7 +300,27 @@ How long one worker invocation may take.
 ## `pub struct FrozenPlans<'a>` › `pub decisions: &'a [String],`
 
 The operator decisions a judge must honour, as the worker was given
-them.
+them: run-wide ones here, which the schema-4 entry leaves empty, and after
+them, per review, the task's own (`InputsRequest::decisions`, J2). `inputs`
+gives the review both, run-wide first and then the task's, in that order.
+
+## `pub struct SharedPlans {`
+
+[`FrozenPlans`] with every borrow owned, for the schema-4 coordinator.
+
+`engine::topology::coordinator::PipelineSeams` hands each pipeline thread
+an `Arc<dyn AttemptPlans + Send + Sync>`, and a `FrozenPlans<'a>` borrows
+the adapters, the run paths and four slices, so it cannot be one. This owns
+the same seven values (the adapters as the `Arc` that
+`AdapterSource::shared` returns) and answers every [`AttemptPlans`] method
+by building a `FrozenPlans` over them and asking it, so there is one plan
+builder, one gate rule, one reviewer rule and one pool resolution — the
+`run::tests::the_frozen_pool_table_is_read_through_one_seam` count stays
+one, because this file still resolves a pool in one place.
+
+## `impl SharedPlans` › `fn frozen(&self) -> FrozenPlans<'_> {`
+
+The borrowed view every answer is delegated to.
 
 ## `impl FrozenPlans<'_>` › `fn cli_version(&self, agent: &str) -> Option<String> {`
 

@@ -138,6 +138,65 @@ Reported spend across the whole run.
 
 Reported spend attributed to one task.
 
+## `pub struct IntegrationReviews {`
+
+The review passes integration verifications charged, attributed as [`Spend::replay`]
+attributes them: to the task whose candidate was verified when the log names it, and to the
+run alone otherwise. The fold admits a sequence's passes once (`check_spend_unrecorded`), so
+each pass appears here exactly once. The run's report reads its integration spend from this
+(J3).
+
+It also keeps which verifications ended `merge_verification_interrupted` (K4, regular review
+4, finding 4): the task whose candidate each one verified (`interrupted`), or that one no
+start paired with (`interrupted_unattributed`). DESIGN §26 makes that terminal the
+unknown-spend terminal: "a coordinator that died holding a verification recorded no cost for
+anything it was running", and what no record carries stays unknown spend, so a ledger that
+includes it states a lower bound. The terminal carries no passes, so nothing is added to any
+sum; the passes a `merge_verification_charged` recorded before it are kept and counted once,
+as before.
+
+## `impl IntegrationReviews` › `pub fn replay(events: &[TopologyEvent]) -> Self {`
+
+One pass over the log, pairing each terminal with the start of its sequence, as
+[`Spend::replay`] pairs them. `merge_verification_interrupted` closes the pairing, as
+`merge_verification_unavailable` does, and records the interruption against the paired
+task, or as unattributed when no start pairs with it. Until K4 the replay ignored that
+terminal, so after a coordinator died mid-verification and the candidate was verified again,
+the report printed the known charges as the whole total and `RunReport::total_is_floor` was
+false, with a $2.50 charge and without one alike (the reviewer's focused guards; the
+uncharged case printed `$0.0000` with no qualification).
+
+## `impl IntegrationReviews` › `pub fn of_task(&self, key: TaskKey) -> &[ReviewRecord] {`
+
+The passes charged to `key`'s task.
+
+## `impl IntegrationReviews` › `pub fn unattributed(&self) -> &[ReviewRecord] {`
+
+The passes the log attributes to no task. A valid log has none: the fold admits a
+verification's terminal only after its start.
+
+## `impl IntegrationReviews` › `pub fn all(&self) -> impl Iterator<Item = &ReviewRecord> {`
+
+Every pass, attributed or not.
+
+## `impl IntegrationReviews` › `pub fn spend_unknown(&self, key: TaskKey) -> bool {`
+
+Whether some of `key`'s integration review spend is unknown: one of its passes reported no
+cost, or a verification of its candidate was interrupted. The report's per-task
+`review_cost_incomplete` reads this (K4), so its `?` and its total's floor follow.
+
+## `impl IntegrationReviews` › `pub const fn interrupted_unattributed(&self) -> bool {`
+
+Whether an interruption no start paired with is in the log. A valid log has none, as for
+unattributed passes; the report says so in a warning when it does.
+
+## `impl IntegrationReviews` › `pub fn unattributed_spend_unknown(&self) -> bool {`
+
+Whether integration spend the log attributes to no task is unknown: an unattributed pass
+that reported no cost, or an unattributed interruption. The report's run-level
+`unattributed_cost_incomplete` is this, so `RunReport::total_is_floor` covers what no task
+row can carry (K4).
+
 ## `pub struct Ceiling {`
 
 ---------------------------------------------------------------------------
@@ -336,8 +395,10 @@ checkpoint refuses continuation, quoting the outcome.
 
 The branches an **intermediate build** is entitled to perform.
 
-[`Step`] has **eleven** variants and this has **eight**, so **three** do
-not cross: `Poisoned`, `NotStarted` and `Finished`. None of the three is a
+[`Step`] has **eleven** variants and this has **nine**: **eight** cross
+from it, and the ninth, `ApproveSpend`, is not a selection at all but the
+run's own hold on one (below). So **three** do not cross: `Poisoned`,
+`NotStarted` and `Finished`. None of the three is a
 refusal of a *branch* any more. `Closure` was, for PR7 through PR9 — the
 whole of `checkpoint_refusals`, made unrepresentable rather than remembered:
 no value of this type could carry a run end — and it crossed when PR10
@@ -363,7 +424,7 @@ Both counts are computed, per §22:
 $ awk '/^pub enum Step \{/,/^\}/'     src/engine/topology/select.rs | grep -cE '^    [A-Z]'
 11
 $ awk '/^pub enum Admitted \{/,/^\}/' src/engine/topology/select.rs | grep -cE '^    [A-Z]'
-8
+9
 ```
 
 ## `pub enum Admitted` › `BudgetExceeded(Box<BudgetExceeded4>),`
@@ -426,6 +487,21 @@ closure procedure and terminal finalization (`closure.md`, `finalize.md`).
 The `DerivedOutcome` it carries is the fold's derivation at selection; the
 closure reads the ending outcome again for itself, because a budget stop or
 a halt outranks a derivation that a retained generation still blocks.
+
+## `pub enum Admitted` › `ApproveSpend {`
+
+Not a selection. `TopologyRun::admitted` turns a fresh `Dispatch` or
+`RepairDispatch` into this when that dispatch would start an attempt on a
+frontier rung that `ask_before.frontier_escalation_over_usd` holds for a
+person's approval (regression review #1, J1; DESIGN §12). Both drivers raise
+the approval question (`TopologyRun::ask_to_approve_spend`) instead of
+dispatching, so no such attempt starts unapproved. `select` itself is
+unchanged: the hold reads the run's configured threshold and its log, which
+selection never sees.
+
+## `pub enum Admitted` › `key: TaskKey,`
+
+The task whose escalation waits for approval.
 
 ## `pub fn select(fold: &TopologyFold, ceiling: &Ceiling, spend: &Spend) -> Step {`
 

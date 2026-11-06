@@ -74,6 +74,32 @@
 //!   second constructor would buy nothing and would cost the field privacy six
 //!   compile-fail fixtures rest on.
 //!
+//! # The execution root (R18)
+//!
+//! `resource_accounting[R18]` accounts for a root only through its run, so
+//! this module publishes one only once its run is located and authenticated:
+//! **P3c**, after the marker (P1) and the owner record (P3b), before P4. The
+//! path is admitted before P0, so a directory already there when this
+//! invocation began never gets a husk, and P3c **publishes** the root
+//! (`workspace_manager::FreshExecutionRoot`): it writes the location record
+//! naming the root's key, builds the whole root in the private half with this
+//! run's claim token inside it, makes both durable, and renames it onto the
+//! root's path with a rename that never replaces anything. So the root
+//! appears at its path once, whole, carrying the token, and one that appeared
+//! there since the admission — empty scaffolding included — is refused, never
+//! adopted, and left alone.
+//!
+//! Before P5b, cleanup **settles a root this creator published before it
+//! deletes either half** ([`settle_unpublished_root`]), and deletes neither
+//! when it cannot ([`Disposition::ExecutionRootRetained`]). Settling
+//! **retires** the root — its scaffolding removed, then the root itself, token
+//! inside, renamed into the private half — so no cut ever leaves it at its path
+//! without the token. A census after a kill does the same for the creator: the
+//! location record names where the root is, whatever the census's own context
+//! derives, and the token proves it is this run's
+//! (`engine::topology::startup`). From P5b on, the root is the committed run's,
+//! and nothing here deletes it.
+//!
 //! # The boundary's scope, stated
 //!
 //! The boundary is a rule about **run-lifecycle paths** — every path in this
@@ -108,7 +134,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use crate::agent::AdapterSource;
+use crate::agent::{AdapterSource, Caps};
 use crate::error::UpstrokeError;
 use crate::events::log::{
     BarrierStep, EventLog, TopologyLine, establish_stable_prefix, first_line_digest,
@@ -126,12 +152,431 @@ use crate::runner::{InvocationId, RunFuture, Runner, RunnerCall, RunnerError, Ru
 use crate::topology::effects::EventSite;
 use crate::topology::events::{RunStarted4, TopologyEvent, TopologyEventBody};
 use crate::topology::fold::{FrozenInputs, TopologyDelta, TopologyFold};
+use crate::workspace_manager::{EffectHooks, FreshRootFailure, WorkspaceManager};
 
 use super::identity::{InvocationLedger, PreflightIdentities};
 use super::prelock::PreLockChecked;
 use super::seams::{TimeSource, TopologyHooks};
 
 pub use steps::Started;
+
+// ---------------------------------------------------------------------------
+// The execution root (R18), and the one rule that settles it
+// ---------------------------------------------------------------------------
+
+/// One run's execution root (R18) while its run has not committed: what the
+/// creator's abort settles.
+///
+/// `resource_accounting[R18]` accounts for a root only through its run: pruned
+/// by finalization, or resumably open while the run has no `run_finished`. A
+/// root no run directory names is in no class, which is why P3c publishes it
+/// only once the marker (P1) locates the run, the owner record (P3b)
+/// authenticates its halves and the location record (P3c) names its key, and
+/// why nothing deletes either half while a root this run owns is still at its
+/// path ([`settle_unpublished_root`]). Neither half's record proves who made a
+/// directory at the root's path; the claim token the root was published with
+/// does (`workspace_manager::FreshExecutionRoot`).
+pub trait UnpublishedRoot {
+    /// The root's path: the current repository's `WorkspaceManager`'s
+    /// `<authorized private root>/workspaces/<repository key>/<run id>`.
+    fn path(&self) -> &Path;
+
+    /// `Worktree.RemoveExecutionRoot` in its retiring form
+    /// (`WorkspaceManager::retire_execution_root`): when the root holds
+    /// `token`, the empty scaffolding, then the root itself, token still
+    /// inside, renamed to `into` in the run's private half for the private
+    /// half's removal to take; and in every case the barrier that makes the
+    /// root's absence from its path durable before that removal.
+    ///
+    /// # Errors
+    ///
+    /// The remover's containment refusals and I/O errors.
+    fn retire(
+        &self,
+        hooks: &mut dyn EffectHooks,
+        into: &Path,
+        token: &str,
+    ) -> Result<bool, UpstrokeError>;
+}
+
+/// What P3c creates the root through.
+///
+/// The functions that settle a root are generic over `R: UnpublishedRoot +
+/// ?Sized` rather than taking `&dyn UnpublishedRoot`, so a `&dyn RootCreation`
+/// is passed as it is: coercing it to `&dyn UnpublishedRoot` is trait
+/// upcasting, which Rust stabilized in 1.86, after this crate's MSRV.
+pub trait RootCreation: UnpublishedRoot {
+    /// The repository key the root hangs under: the `<repo_key>` of
+    /// `<authorized private root>/workspaces/<repo_key>/<run id>`, sixteen
+    /// lowercase hex characters. P3c writes it in the location record, so a
+    /// later census finds the root this run published without deriving it from
+    /// the context it runs in.
+    fn key(&self) -> &str;
+
+    /// `Worktree.CreateExecutionRoot`, publishing the root
+    /// (`workspace_manager::FreshExecutionRoot`): built complete at `staging`
+    /// with the claim `token` inside it, then renamed onto the root's path, so
+    /// the root never exists there without the token. A root already at the
+    /// path is refused, never adopted.
+    ///
+    /// # Errors
+    ///
+    /// [`FreshRootFailure::Unclaimed`] when nothing at the path is this
+    /// creator's — whatever was staged stays at `staging`, in the private
+    /// half; [`FreshRootFailure::Claimed`] when the rename published the root
+    /// and something after it failed, so the root is its own.
+    fn create(
+        &self,
+        hooks: &mut dyn EffectHooks,
+        staging: &Path,
+        token: &str,
+    ) -> Result<(), FreshRootFailure>;
+
+    /// The run's case policy, observed at the root just created.
+    fn case_fold(&self, warnings: &mut Vec<String>) -> bool;
+}
+
+impl UnpublishedRoot for WorkspaceManager {
+    fn path(&self) -> &Path {
+        self.execution_root()
+    }
+
+    fn retire(
+        &self,
+        hooks: &mut dyn EffectHooks,
+        into: &Path,
+        token: &str,
+    ) -> Result<bool, UpstrokeError> {
+        self.retire_execution_root(hooks, into, token)
+    }
+}
+
+/// The directories `Worktree.CreateExecutionRoot` makes inside a root, and —
+/// with the run's own claim token — the only content a root of a run that
+/// never committed may hold for [`settle_unpublished_root`] to settle it.
+const SCAFFOLDING: [&str; 5] = ["intents", "tasks", "merge", "snapshots", "hooks-none"];
+
+/// Where, in the private half, P3c builds the root before publishing it
+/// (`workspace_manager::FreshExecutionRoot`). Private content: a tree left
+/// here was never published and goes only with the private half.
+pub(crate) const STAGED_ROOT: &str = "staged-execution-root";
+
+/// Where, in the private half, a root that never committed is retired to,
+/// token inside, before the private half goes
+/// (`WorkspaceManager::retire_execution_root`).
+pub(crate) const RETIRED_ROOT: &str = "retired-execution-root";
+
+/// The claim token a root is published with: `claim.<incarnation>`, the
+/// incarnation the marker and the owner record carry.
+pub(crate) fn claim_token(incarnation: &str) -> String {
+    format!("claim.{incarnation}")
+}
+
+/// What [`settle_unpublished_root`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RootSettled {
+    /// Nothing is at the root's path.
+    Absent,
+    /// It was removed through `Worktree.RemoveExecutionRoot`.
+    Pruned,
+    /// It is still there, and why: the records that locate it, and
+    /// authenticate its run, stay.
+    Kept(String),
+}
+
+/// Settle the execution root of a run that never committed, **before** either
+/// record that locates it and authenticates its run is deleted.
+///
+/// The caller holds the authority: the creator whose publication at P3c made
+/// this root, or a census that proved it by `token` (`engine::topology::startup`).
+/// This adds a second, conservative bound, the content condition: the root is
+/// settled only while it holds nothing but the empty scaffolding the create
+/// site makes and this run's own empty claim `token` — every entry read with
+/// `symlink_metadata` and never followed — so a root holding anything else,
+/// slot-shaped or not, is kept and the remover, whose first step sweeps slot
+/// instances of other incarnations, is not called.
+///
+/// The root is **retired**, not emptied in place: the remover renames it,
+/// token inside, to `into` in the run's private half, so no cut leaves it at
+/// its path without the token that proves it. The remover is called even when
+/// nothing is at the path, for its barrier: the private half goes only after
+/// the root's absence from its path is durable, whoever removed it and
+/// whenever. What the remover leaves at the path is read again rather than
+/// inferred from its answer: gone is [`RootSettled::Pruned`] when this call
+/// retired it and [`RootSettled::Absent`] when it was not there, and present
+/// or unreadable is [`RootSettled::Kept`].
+pub fn settle_unpublished_root<R: UnpublishedRoot + ?Sized>(
+    root: &R,
+    token: &str,
+    into: &Path,
+    hooks: &mut dyn EffectHooks,
+) -> RootSettled {
+    let path = root.path();
+    if let Err(why) = holding(path, token) {
+        return RootSettled::Kept(why);
+    }
+    let retired = root.retire(hooks, into, token);
+    match (retired, std::fs::symlink_metadata(path)) {
+        (Err(error), _) => RootSettled::Kept(format!(
+            "retiring it through `Worktree.RemoveExecutionRoot` failed: {error}"
+        )),
+        (Ok(true), Err(gone)) if gone.kind() == std::io::ErrorKind::NotFound => RootSettled::Pruned,
+        (Ok(false), Err(gone)) if gone.kind() == std::io::ErrorKind::NotFound => {
+            RootSettled::Absent
+        }
+        (Ok(_), Ok(_)) => RootSettled::Kept(
+            "it is still there after `Worktree.RemoveExecutionRoot` retired what it could"
+                .to_owned(),
+        ),
+        (Ok(_), Err(unread)) => RootSettled::Kept(format!(
+            "whether `Worktree.RemoveExecutionRoot` retired it cannot be read: {unread}"
+        )),
+    }
+}
+
+enum Holding {
+    Nothing,
+    Scaffolding,
+}
+
+fn holding(root: &Path, token: &str) -> Result<Holding, String> {
+    match std::fs::symlink_metadata(root) {
+        Err(absent) if absent.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Holding::Nothing);
+        }
+        Err(error) => return Err(format!("it cannot be read: {error}")),
+        Ok(found) if !found.is_dir() => {
+            return Err("it is not a directory this run made".to_owned());
+        }
+        Ok(_) => {}
+    }
+    let listed =
+        std::fs::read_dir(root).map_err(|error| format!("it cannot be listed: {error}"))?;
+    for entry in listed {
+        let entry = entry.map_err(|error| format!("it cannot be listed: {error}"))?;
+        let path = entry.path();
+        let named = entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| SCAFFOLDING.contains(&name) || name == token);
+        let directory = std::fs::symlink_metadata(&path)
+            .map_err(|error| format!("{} cannot be read: {error}", path.display()))?
+            .is_dir();
+        if !named || !directory {
+            return Err(format!(
+                "it holds {}, which is neither scaffolding nor the claim token this run made",
+                path.display()
+            ));
+        }
+        let mut inside = std::fs::read_dir(&path)
+            .map_err(|error| format!("{} cannot be listed: {error}", path.display()))?;
+        if let Some(first) = inside.next() {
+            let first =
+                first.map_err(|error| format!("{} cannot be listed: {error}", path.display()))?;
+            return Err(format!(
+                "it holds {}, which this run did not create",
+                first.path().display()
+            ));
+        }
+    }
+    Ok(Holding::Scaffolding)
+}
+
+/// [`settle_unpublished_root`]'s content rule, read-only: `None` when nothing
+/// is at `root` or it holds nothing but empty scaffolding and this run's claim
+/// `token`, otherwise why a settlement would keep it. The census decides with
+/// this before it reaches for the remover, so a root it will not touch is
+/// reported as kept rather than as a removal that failed.
+pub(crate) fn unsettleable(root: &Path, token: &str) -> Option<String> {
+    holding(root, token).err()
+}
+
+// ---------------------------------------------------------------------------
+// The location record: the key a creator's root is published under
+// ---------------------------------------------------------------------------
+
+/// What every location record's name starts with.
+const LOCATION_RECORD_PREFIX: &str = "execution-root.";
+
+/// The one version of the location record this module writes and reads.
+const LOCATION_RECORD_VERSION: &str = "v1";
+
+/// The location record P3c writes in the private half before anything of the
+/// root exists: `<private>/execution-root.v1.<key>`, an empty directory.
+///
+/// **Why it exists.** A census after a kill has the marker and the owner
+/// record, which authenticate the run's two halves, and a context — the
+/// effective common directory, `HOME`, the configured private root — that may
+/// not be the one the run was created in. The record carries the one fact the
+/// context could get wrong: the key the root was published under, so the root
+/// it names is `<authorized private root>/workspaces/<key>/<run id>` whatever
+/// the reader's context derives. It proves nothing about who made a directory
+/// there; the claim token inside the root does
+/// (`workspace_manager::FreshExecutionRoot`).
+///
+/// **Its shape, stated.** One directory, created through
+/// `RunDir.CreatePrivateDir` (the site that owns private directory creation,
+/// row R21) after the owner record and the private skeleton, so the owner
+/// record is still the first private content, and made durable by the
+/// publication's own barrier on the private half before the root can appear.
+/// A directory create is atomic, so the record is there or it is not; it is
+/// read strictly ([`read_location_record`]) and is trusted only inside a
+/// private half whose reciprocal proof holds and that carries no commit
+/// record. It goes only with the private half, through the proof token. A husk
+/// written before this record existed has none, and its root — wherever a
+/// census finds one — is never proven to be its run's.
+fn location_record_name(key: &str) -> String {
+    format!("{LOCATION_RECORD_PREFIX}{LOCATION_RECORD_VERSION}.{key}")
+}
+
+/// Whether `key` is a repository key as a root's path carries it: sixteen
+/// lowercase hex characters (`workspace_manager::repo_key_v1`).
+pub(crate) fn is_root_key(key: &str) -> bool {
+    key.len() == 16
+        && key
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// What a private half's location records say.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LocationRecord {
+    /// No entry of the record's name family: no location was recorded.
+    Absent,
+    /// Exactly one well-formed record: the key the root is published under.
+    Keyed(String),
+    /// Anything else — a name this version does not write, an entry that is
+    /// not an empty real directory, two records, an unreadable listing — and
+    /// why. It proves nothing.
+    Unreadable(String),
+}
+
+/// The location records in `private`, read strictly and never followed.
+pub(crate) fn read_location_record(private: &Path) -> LocationRecord {
+    let listed = match std::fs::read_dir(private) {
+        Ok(listed) => listed,
+        Err(error) => {
+            return LocationRecord::Unreadable(format!(
+                "{} cannot be listed: {error}",
+                private.display()
+            ));
+        }
+    };
+    let mut keys = Vec::new();
+    for entry in listed {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                return LocationRecord::Unreadable(format!(
+                    "{} cannot be listed: {error}",
+                    private.display()
+                ));
+            }
+        };
+        let name = entry.file_name();
+        if !name
+            .as_encoded_bytes()
+            .starts_with(LOCATION_RECORD_PREFIX.as_bytes())
+        {
+            continue;
+        }
+        let path = entry.path();
+        let key = name
+            .to_str()
+            .and_then(|name| name.strip_prefix(LOCATION_RECORD_PREFIX))
+            .and_then(|rest| rest.strip_prefix(LOCATION_RECORD_VERSION))
+            .and_then(|rest| rest.strip_prefix('.'))
+            .filter(|key| is_root_key(key));
+        let Some(key) = key else {
+            return LocationRecord::Unreadable(format!(
+                "{} is not a location record this version writes",
+                path.display()
+            ));
+        };
+        match std::fs::symlink_metadata(&path) {
+            Ok(found) if found.is_dir() => {}
+            Ok(_) => {
+                return LocationRecord::Unreadable(format!(
+                    "{} is not a directory",
+                    path.display()
+                ));
+            }
+            Err(error) => {
+                return LocationRecord::Unreadable(format!(
+                    "{} cannot be read: {error}",
+                    path.display()
+                ));
+            }
+        }
+        match std::fs::read_dir(&path).map(|mut inside| inside.next().is_none()) {
+            Ok(true) => {}
+            Ok(false) => {
+                return LocationRecord::Unreadable(format!("{} is not empty", path.display()));
+            }
+            Err(error) => {
+                return LocationRecord::Unreadable(format!(
+                    "{} cannot be listed: {error}",
+                    path.display()
+                ));
+            }
+        }
+        keys.push(key.to_owned());
+    }
+    match keys.as_slice() {
+        [] => LocationRecord::Absent,
+        [key] => LocationRecord::Keyed(key.clone()),
+        _ => LocationRecord::Unreadable(format!(
+            "{} holds {} location records, and one creator publishes one root",
+            private.display(),
+            keys.len()
+        )),
+    }
+}
+
+/// `Ok` when the location record P3c is about to write will locate `root`: the
+/// key is a repository key, and the root is `<private root>/workspaces/<key>/<run
+/// id>` under the very private root this run's private half hangs from, which
+/// is where a census looks for it.
+fn locatable(
+    root: &Path,
+    key: &str,
+    run_id: &str,
+    private_root: &Path,
+) -> Result<(), UpstrokeError> {
+    let refused = |why: String| UpstrokeError::Refused {
+        message: format!(
+            "the execution root {} cannot be claimed: {why}, so no record could locate it",
+            root.display()
+        ),
+    };
+    if !is_root_key(key) {
+        return Err(refused(format!("`{key}` is not a repository key")));
+    }
+    let keyed = root.parent();
+    let namespace = keyed.and_then(Path::parent);
+    let shaped = root.file_name() == Some(std::ffi::OsStr::new(run_id))
+        && keyed.and_then(Path::file_name) == Some(std::ffi::OsStr::new(key))
+        && namespace.and_then(Path::file_name) == Some(std::ffi::OsStr::new("workspaces"));
+    let Some(hangs_from) = namespace.and_then(Path::parent).filter(|_| shaped) else {
+        return Err(refused(format!(
+            "it is not `<private root>/workspaces/{key}/{run_id}`"
+        )));
+    };
+    match (
+        std::fs::canonicalize(hangs_from),
+        std::fs::canonicalize(private_root),
+    ) {
+        (Ok(found), Ok(expected)) if found == expected => Ok(()),
+        (Ok(found), Ok(expected)) => Err(refused(format!(
+            "it hangs from {} and this run's private half from {}",
+            found.display(),
+            expected.display()
+        ))),
+        (Err(error), _) | (_, Err(error)) => Err(refused(format!(
+            "its private root cannot be resolved: {error}"
+        ))),
+    }
+}
 
 // ---------------------------------------------------------------------------
 // The two seams P4 and P8 need
@@ -396,6 +841,43 @@ pub struct RunnerProbes<'a> {
     pub adapters: &'a dyn AdapterSource,
     /// The digest of the policy `runner` executes under.
     pub policy_digest: String,
+    /// What each agent's probe reported, in probe order.
+    ///
+    /// P4's probe *is* the capability read: `AgentAdapter::probe` returns the
+    /// agent's `Caps`, and a run that discarded them would have to probe
+    /// again — another set of processes P4's ledger never accounted — to learn
+    /// whether the CLI can resume a session or report its cost. They are kept
+    /// here, beside the probe, so the loop's attempt plans read what P4
+    /// certified. A value, not a boundary: nothing here can run anything.
+    probed: Mutex<Vec<(String, Caps)>>,
+}
+
+impl<'a> RunnerProbes<'a> {
+    /// The production probes over `adapters`, with nothing probed yet.
+    #[must_use]
+    pub fn new(
+        shell: ShellKind,
+        workspace: PathBuf,
+        adapters: &'a dyn AdapterSource,
+        policy_digest: String,
+    ) -> Self {
+        Self {
+            shell,
+            workspace,
+            adapters,
+            policy_digest,
+            probed: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Each probed agent's capabilities, in the order P4 probed them.
+    #[must_use]
+    pub fn probed_caps(&self) -> Vec<(String, Caps)> {
+        self.probed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
 }
 
 impl sealed::Sealed for RunnerProbes<'_> {}
@@ -431,7 +913,12 @@ impl Probes for RunnerProbes<'_> {
         // Handing a raw runner here is what made the creation ledger account one
         // logical probe instead of the processes it ran — and there is no raw
         // runner here to hand.
-        adapter.probe(through).map(|_caps| ())
+        let caps = adapter.probe(through)?;
+        self.probed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((agent.to_owned(), caps));
+        Ok(())
     }
 }
 
@@ -530,6 +1017,10 @@ pub enum Prefix {
     P3aStaged,
     /// P3b: the owner record published, then the private skeleton.
     P3b,
+    /// P3c: the execution root (R18) claimed by this creator's exclusive
+    /// create, under the marker that locates the run and the owner record that
+    /// authenticates it, and the run's case policy observed at the root.
+    P3c,
     /// P4: the `RunnerPreflight` certified.
     P4,
     /// P5: the plan written and the log open, with no committed first line.
@@ -555,6 +1046,7 @@ impl Prefix {
         Self::P3a,
         Self::P3aStaged,
         Self::P3b,
+        Self::P3c,
         Self::P4,
         Self::P5,
         Self::P5b,
@@ -575,6 +1067,7 @@ impl Prefix {
             Self::P3a => "P3a",
             Self::P3aStaged => "P3a (staged)",
             Self::P3b => "P3b",
+            Self::P3c => "P3c",
             Self::P4 => "P4",
             Self::P5 => "P5",
             Self::P5b => "P5b",
@@ -616,7 +1109,29 @@ struct Aborted {
     repo_key: RepoKey,
     private_root: PathBuf,
     run_id: String,
+    /// Whether this creator owns an execution root that cleanup must settle.
+    root: RootClaim,
+    /// The claim token a root this creator published carries
+    /// ([`claim_token`]), which is what cleanup's content rule admits besides
+    /// the scaffolding.
+    token: String,
     error: UpstrokeError,
+}
+
+/// What this creator knows of the execution root when it stops.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RootClaim {
+    /// P3c was not reached: this creator made no root.
+    NotCreated,
+    /// P3c's rename published the root, whatever failed after it: this
+    /// creator owns the root, token and all, and cleanup settles it before
+    /// either half.
+    Owned,
+    /// P3c stopped before its rename published anything — the path was
+    /// occupied, or a refusal or failure came first: nothing at the path is
+    /// this creator's, and nothing there is touched. Whatever it staged is
+    /// private content and goes with the private half.
+    NotOurs,
 }
 
 /// The P0–P8 witnesses.
@@ -634,8 +1149,8 @@ struct Aborted {
 /// refuses that unlink outright.
 mod steps {
     use super::{
-        Aborted, CommitRecord, EventLog, OwnerRecord, PreLockChecked, Prefix, RepoKey, RunLock,
-        RunPaths, RunStarted4, TopologyEvent, TopologyFold, TopologyLine, UpstrokeError,
+        Aborted, CommitRecord, EventLog, OwnerRecord, PreLockChecked, Prefix, RepoKey, RootClaim,
+        RunLock, RunPaths, RunStarted4, TopologyEvent, TopologyFold, TopologyLine, UpstrokeError,
     };
 
     /// What every prefix from P0 on carries unchanged.
@@ -663,15 +1178,18 @@ mod steps {
             self,
             reached: Prefix,
             lock: Option<RunLock>,
+            root: RootClaim,
             error: UpstrokeError,
         ) -> Box<Aborted> {
             Box::new(Aborted {
                 reached,
                 run_id: self.checked.run_id().to_owned(),
                 private_root: self.checked.private_root().to_path_buf(),
+                token: super::claim_token(&self.checked.incarnation().0),
                 paths: self.paths,
                 lock,
                 repo_key: self.repo_key,
+                root,
                 error,
             })
         }
@@ -701,7 +1219,8 @@ mod steps {
         }
 
         pub(super) fn abort(self, reached: Prefix, error: UpstrokeError) -> Box<Aborted> {
-            self.facts.abort(reached, None, error)
+            self.facts
+                .abort(reached, None, RootClaim::NotCreated, error)
         }
     }
 
@@ -723,7 +1242,8 @@ mod steps {
         }
 
         pub(super) fn abort(self, reached: Prefix, error: UpstrokeError) -> Box<Aborted> {
-            self.facts.abort(reached, None, error)
+            self.facts
+                .abort(reached, None, RootClaim::NotCreated, error)
         }
     }
 
@@ -747,7 +1267,8 @@ mod steps {
         }
 
         pub(super) fn abort(self, reached: Prefix, error: UpstrokeError) -> Box<Aborted> {
-            self.facts.abort(reached, Some(self.lock), error)
+            self.facts
+                .abort(reached, Some(self.lock), RootClaim::NotCreated, error)
         }
     }
 
@@ -771,7 +1292,8 @@ mod steps {
         }
 
         pub(super) fn abort(self, reached: Prefix, error: UpstrokeError) -> Box<Aborted> {
-            self.facts.abort(reached, Some(self.lock), error)
+            self.facts
+                .abort(reached, Some(self.lock), RootClaim::NotCreated, error)
         }
     }
 
@@ -796,6 +1318,42 @@ mod steps {
             &self.facts
         }
 
+        /// P3c's refusals, which say whether the root is this creator's.
+        pub(super) fn abort(
+            self,
+            reached: Prefix,
+            root: RootClaim,
+            error: UpstrokeError,
+        ) -> Box<Aborted> {
+            self.facts.abort(reached, Some(self.lock), root, error)
+        }
+    }
+
+    /// P3c — the execution root published, its location recorded and its claim
+    /// token inside it, under the marker that locates the run and the owner
+    /// record that authenticates it, and the case policy observed at the root.
+    #[derive(Debug)]
+    pub struct ExecutionRootCreated {
+        facts: Facts,
+        lock: RunLock,
+        owner: OwnerRecord,
+        case_fold: bool,
+    }
+
+    impl ExecutionRootCreated {
+        pub(super) fn new(previous: OwnerRecordPublished, case_fold: bool) -> Self {
+            Self {
+                facts: previous.facts,
+                lock: previous.lock,
+                owner: previous.owner,
+                case_fold,
+            }
+        }
+
+        pub(super) fn facts(&self) -> &Facts {
+            &self.facts
+        }
+
         /// The record this run published, so P4's refusal can name the boundary
         /// it is about to probe under.
         pub(super) fn owner(&self) -> &OwnerRecord {
@@ -811,7 +1369,8 @@ mod steps {
         }
 
         pub(super) fn abort(self, reached: Prefix, error: UpstrokeError) -> Box<Aborted> {
-            self.facts.abort(reached, Some(self.lock), error)
+            self.facts
+                .abort(reached, Some(self.lock), RootClaim::Owned, error)
         }
     }
 
@@ -822,14 +1381,16 @@ mod steps {
         facts: Facts,
         lock: RunLock,
         probed: Vec<String>,
+        case_fold: bool,
     }
 
     impl ProbesCertified {
-        pub(super) fn new(previous: OwnerRecordPublished, probed: Vec<String>) -> Self {
+        pub(super) fn new(previous: ExecutionRootCreated, probed: Vec<String>) -> Self {
             Self {
                 facts: previous.facts,
                 lock: previous.lock,
                 probed,
+                case_fold: previous.case_fold,
             }
         }
 
@@ -838,7 +1399,8 @@ mod steps {
         }
 
         pub(super) fn abort(self, reached: Prefix, error: UpstrokeError) -> Box<Aborted> {
-            self.facts.abort(reached, Some(self.lock), error)
+            self.facts
+                .abort(reached, Some(self.lock), RootClaim::Owned, error)
         }
     }
 
@@ -849,6 +1411,7 @@ mod steps {
         lock: RunLock,
         log: EventLog,
         probed: Vec<String>,
+        case_fold: bool,
     }
 
     impl LogOpened {
@@ -858,6 +1421,7 @@ mod steps {
                 lock: previous.lock,
                 log,
                 probed: previous.probed,
+                case_fold: previous.case_fold,
             }
         }
 
@@ -869,11 +1433,17 @@ mod steps {
             &self.probed
         }
 
+        /// P3c's observation at the root this run created.
+        pub(super) fn case_fold(&self) -> bool {
+            self.case_fold
+        }
+
         /// The handle is dropped with the witness: an abort here has not
         /// crossed P5b, and cleanup removes the log with the public half.
         pub(super) fn abort(self, reached: Prefix, error: UpstrokeError) -> Box<Aborted> {
             drop(self.log);
-            self.facts.abort(reached, Some(self.lock), error)
+            self.facts
+                .abort(reached, Some(self.lock), RootClaim::Owned, error)
         }
     }
 
@@ -1119,8 +1689,9 @@ mod steps {
 }
 
 use steps::{
-    CommitRecordPublished, LogOpened, MarkerPublished, MarkerRemoved, OwnerRecordPublished,
-    PrivateDirCreated, ProbesCertified, PublicDirCreated, RunLockHeld, RunStartedDurable,
+    CommitRecordPublished, ExecutionRootCreated, LogOpened, MarkerPublished, MarkerRemoved,
+    OwnerRecordPublished, PrivateDirCreated, ProbesCertified, PublicDirCreated, RunLockHeld,
+    RunStartedDurable,
 };
 
 // ---------------------------------------------------------------------------
@@ -1185,6 +1756,25 @@ pub enum Disposition {
     /// The proven prefix does not contain it: a retained, possibly committed
     /// husk that the deferred prune removes.
     RetainedPossiblyCommittedHusk { locator: PathBuf },
+    /// The execution root this creator published at P3c could not be settled,
+    /// so nothing was deleted: the public run directory stays with whatever
+    /// marker is in it, and so does the private half with its owner record and
+    /// location record when the proof found one. The location record names the
+    /// root's key and the claim token inside the root proves it is this run's,
+    /// so the next census settles it first and then reclaims both halves once
+    /// whatever stopped this settlement has cleared.
+    ExecutionRootRetained {
+        /// The root: still on disk, or a path whose state cannot be read.
+        root: PathBuf,
+        /// The public run directory, kept.
+        public: PathBuf,
+        /// The private half, kept with the public one; `None` when no private
+        /// half was bound to the public directory any more
+        /// ([`PrivateHalfOwnership::NothingBound`]).
+        locator: Option<PathBuf>,
+        /// Why the root could not be settled.
+        detail: String,
+    },
     /// The barrier's sync failed, the reread was unstable, or the replay
     /// refused: undetermined and retained, nothing deleted.
     Undetermined {
@@ -1320,6 +1910,37 @@ impl Disposition {
                  committed husk with its private half at {}; nothing was deleted",
                 locator.display()
             ),
+            Self::ExecutionRootRetained {
+                root,
+                public,
+                locator,
+                detail,
+            } => {
+                let kept = match locator {
+                    Some(private) => format!(
+                        "the public run directory at {} with its `.creating` marker and the \
+                         private half at {} with its owner record and location record are kept. \
+                         The location record names the root's key and the claim token inside the \
+                         root proves it is this run's, so the next write command settles the \
+                         root first and then reclaims both halves, once whatever stopped this \
+                         settlement has cleared",
+                        public.display(),
+                        private.display()
+                    ),
+                    None => format!(
+                        "the public run directory at {} is kept with whatever marker is still in \
+                         it. No private half is bound to it any more, so no location record \
+                         says whose the root is, and a census keeps this husk as the root's \
+                         locator and reports it",
+                        public.display()
+                    ),
+                };
+                format!(
+                    "the execution root {} this run published could not be settled ({detail}), \
+                     so nothing was deleted: {kept}",
+                    root.display()
+                )
+            }
             Self::Undetermined { step, detail } => format!(
                 "the outcome is undetermined and the run is retained as possibly committed{}: \
                  {detail}. Nothing was deleted; the next write command establishes the barrier \
@@ -1400,7 +2021,11 @@ impl Refused {
 /// reclaimed container's boundary from its intent. A creator that killed them
 /// here would be a second reclaim authority for the same rows, and would have to
 /// re-derive the boundary the census already reports.
-fn stat_after_error(aborted: &mut Aborted, hooks: &mut dyn TopologyHooks) -> Disposition {
+fn stat_after_error<R: UnpublishedRoot + ?Sized>(
+    aborted: &mut Aborted,
+    root: &R,
+    hooks: &mut dyn TopologyHooks,
+) -> Disposition {
     if aborted.reached == Prefix::Nothing {
         return Disposition::NothingCreated;
     }
@@ -1448,6 +2073,26 @@ fn stat_after_error(aborted: &mut Aborted, hooks: &mut dyn TopologyHooks) -> Dis
     // kill inside the removal leaves a husk the next census completes.
     match proof {
         PrivateHalfOwnership::Proven(token) => {
+            // **The execution root goes first, or nothing goes.** A root this
+            // creator published at P3c is retired into the private half while
+            // the marker, the owner record and the location record that locate
+            // it are still here. One it cannot settle keeps them all: the proof
+            // token is dropped unspent and the husk is reported and kept.
+            if aborted.root == RootClaim::Owned {
+                if let RootSettled::Kept(detail) = settle_unpublished_root(
+                    root,
+                    &aborted.token,
+                    &private.join(RETIRED_ROOT),
+                    hooks.effects(),
+                ) {
+                    return Disposition::ExecutionRootRetained {
+                        root: root.path().to_path_buf(),
+                        public,
+                        locator: Some(private),
+                        detail,
+                    };
+                }
+            }
             let target = token.target().to_path_buf();
             // **The public half goes only if the private one went.**
             // `remove_public_husk` deletes `<public>` including `.creating`, and
@@ -1483,6 +2128,25 @@ fn stat_after_error(aborted: &mut Aborted, hooks: &mut dyn TopologyHooks) -> Dis
             Disposition::BothHalvesRemoved { private: target }
         }
         PrivateHalfOwnership::NothingBound(shape) => {
+            // No private half is bound any more, so there is nowhere to
+            // retire a root this creator published: the settlement keeps it,
+            // and with it the public directory and whatever marker still names
+            // the run, which a census then reports.
+            if aborted.root == RootClaim::Owned {
+                if let RootSettled::Kept(detail) = settle_unpublished_root(
+                    root,
+                    &aborted.token,
+                    &private.join(RETIRED_ROOT),
+                    hooks.effects(),
+                ) {
+                    return Disposition::ExecutionRootRetained {
+                        root: root.path().to_path_buf(),
+                        public,
+                        locator: None,
+                        detail,
+                    };
+                }
+            }
             let _ = remove_public_husk(&public, hooks.rundir());
             Disposition::PublicHalfRemoved(shape)
         }
@@ -1513,9 +2177,12 @@ pub struct Request<'a> {
     /// What the fold is derived against — and what the append-error protocol's
     /// checked replay replays the surviving prefix through.
     pub inputs: FrozenInputs,
-    /// The record P6 appends. Five fields are **stamped** from the witnesses:
+    /// The record P6 appends. Six fields are **stamped** from the witnesses:
     /// see [`create_run`].
     pub record: RunStarted4,
+    /// The execution root P3c creates, and cleanup settles before either half
+    /// while the run has not committed.
+    pub root: &'a dyn RootCreation,
     /// The agents P4 probes, in the order they are recorded.
     pub agents: &'a [String],
     /// P4's `RunnerPreflight`.
@@ -1555,13 +2222,22 @@ pub struct Request<'a> {
 /// precedes creation" stays a fact about the call site rather than something two
 /// modules could each believe the other did.
 ///
-/// **Five fields of `request.record` are stamped from the witnesses**: `run_id`,
-/// `incarnation`, `runner`, `private_dir` and `probed_agents`. Not checked —
-/// stamped. INV-23 requires `run_started(4).runner` to be the policy "resolved
-/// once by read-only inspection **before the worktree lock**", and a check would
-/// leave a caller able to pass a policy that disagrees and get a refusal *after*
-/// P0–P5 had run; taking the value from the witness makes the disagreement
-/// inexpressible.
+/// **Six fields of `request.record` are stamped from the witnesses**: `run_id`,
+/// `incarnation`, `runner`, `private_dir`, `probed_agents` and
+/// `path_policy.case_fold`. Not checked — stamped. INV-23 requires
+/// `run_started(4).runner` to be the policy "resolved once by read-only
+/// inspection **before the worktree lock**", and a check would leave a caller
+/// able to pass a policy that disagrees and get a refusal *after* P0–P5 had run;
+/// taking the value from the witness makes the disagreement inexpressible. The
+/// case policy is the same argument one step later: it is observed at the
+/// execution root P3c creates, which does not exist when the caller builds the
+/// record, so what the caller passed there is never what is committed.
+///
+/// **P3c, the execution root (R18).** Claimed after the marker that locates
+/// this run (P1) and the owner record that authenticates it (P3b), and before
+/// P4, so a creator claims a root only once both are published. Cleanup before
+/// P5b settles a root this creator owns **before** it deletes either half
+/// ([`stat_after_error`]); a root it cannot settle keeps them.
 ///
 /// # Errors
 ///
@@ -1581,7 +2257,7 @@ pub fn create_run(
             match $step {
                 Ok(reached) => reached,
                 Err(mut aborted) => {
-                    let disposition = stat_after_error(&mut aborted, hooks);
+                    let disposition = stat_after_error(&mut aborted, request.root, hooks);
                     return Err(Refused {
                         reached: aborted.reached,
                         disposition: Box::new(disposition),
@@ -1593,12 +2269,21 @@ pub fn create_run(
         };
     }
 
+    if let Err(error) = admit_execution_root(request.root) {
+        return Err(Refused {
+            reached: Prefix::Nothing,
+            disposition: Box::new(Disposition::NothingCreated),
+            error: Box::new(error),
+            run_id: checked.run_id().to_owned(),
+        });
+    }
     let p0 = before_the_boundary!(p0_create_public_dir(checked, &request, hooks));
     let p1 = before_the_boundary!(p1_publish_marker(p0, hooks));
     let p2 = before_the_boundary!(p2_acquire_run_lock(p1, hooks));
     let p3a = before_the_boundary!(p3a_create_private_dir(p2, hooks));
     let p3b = before_the_boundary!(p3b_publish_owner_record(p3a, hooks));
-    let p4 = before_the_boundary!(p4_run_preflight(p3b, &mut request, hooks));
+    let p3c = before_the_boundary!(p3c_create_execution_root(p3b, &request, hooks, warnings));
+    let p4 = before_the_boundary!(p4_run_preflight(p3c, &mut request, hooks));
     let p5 = before_the_boundary!(p5_write_plan_and_open_log(p4, &request, hooks, warnings));
     let (p5b, fold, delta) = before_the_boundary!(p5b_publish_commit_record(p5, &request, hooks));
 
@@ -1718,6 +2403,97 @@ fn p3b_publish_owner_record(
     Ok(OwnerRecordPublished::new(p3a, owner))
 }
 
+/// P3c — `Worktree.CreateExecutionRoot`, under the marker that locates this run
+/// and the owner record that authenticates it, in three steps.
+///
+/// 1. **The location record** ([`location_record_name`]), through
+///    `RunDir.CreatePrivateDir`: the key the root will be published under,
+///    after the path is checked to be the one the record will name
+///    ([`locatable`]). It claims nothing.
+/// 2. **The publication** (`workspace_manager::FreshExecutionRoot`, one
+///    funnel call): the whole root is built in the private half at
+///    [`STAGED_ROOT`] with this run's claim token ([`claim_token`]) and the
+///    scaffolding inside it; the staged tree and the private half are made
+///    durable, which makes the location record durable too; then the tree is
+///    renamed onto the root's path by a rename that never replaces anything,
+///    so the root appears there once, whole, with its token. An occupied path
+///    is refused and untouched ([`RootClaim::NotOurs`]), and so is anything
+///    that stops the publication before its rename: what was staged is private
+///    content, and goes with the private half.
+/// 3. **The case policy**, observed at the root just published, never at an
+///    ancestor: the witness carries it to P5b, which stamps it into the record.
+///
+/// A publication whose rename succeeded is carried into every later abort —
+/// its own barriers and after-phase included — so cleanup settles exactly the
+/// root this creator published ([`RootClaim::Owned`]). No cut leaves a
+/// directory this creator made at the root's path without its token, so a
+/// later census can always tell this run's root from another actor's.
+fn p3c_create_execution_root(
+    p3b: OwnerRecordPublished,
+    request: &Request<'_>,
+    hooks: &mut dyn TopologyHooks,
+    warnings: &mut Vec<String>,
+) -> Result<ExecutionRootCreated, Box<Aborted>> {
+    let key = request.root.key();
+    let (located, token) = {
+        let checked = p3b.facts().checked();
+        (
+            locatable(
+                request.root.path(),
+                key,
+                checked.run_id(),
+                checked.private_root(),
+            ),
+            claim_token(&checked.incarnation().0),
+        )
+    };
+    if let Err(error) = located {
+        return Err(p3b.abort(Prefix::P3b, RootClaim::NotOurs, error));
+    }
+    let private = p3b.facts().paths().private.clone();
+    if let Err(error) = create_private_dir(&private.join(location_record_name(key)), hooks.rundir())
+    {
+        return Err(p3b.abort(Prefix::P3b, RootClaim::NotOurs, error));
+    }
+    match request
+        .root
+        .create(hooks.effects(), &private.join(STAGED_ROOT), &token)
+    {
+        Ok(()) => {}
+        Err(FreshRootFailure::Unclaimed(error)) => {
+            return Err(p3b.abort(Prefix::P3b, RootClaim::NotOurs, error));
+        }
+        Err(FreshRootFailure::Claimed(error)) => {
+            return Err(p3b.abort(Prefix::P3b, RootClaim::Owned, error));
+        }
+    }
+    let case_fold = request.root.case_fold(warnings);
+    Ok(ExecutionRootCreated::new(p3b, case_fold))
+}
+
+/// `Ok` when nothing is at the execution root's path, read with
+/// `symlink_metadata` and never followed: the admission before P0, so a path
+/// already occupied when this invocation begins never gets a husk that could
+/// lead a census to it. It decides nothing about ownership; P3c's publication
+/// does.
+fn admit_execution_root<R: UnpublishedRoot + ?Sized>(root: &R) -> Result<(), UpstrokeError> {
+    let path = root.path();
+    match std::fs::symlink_metadata(path) {
+        Err(absent) if absent.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Ok(_) => Err(UpstrokeError::Refused {
+            message: format!(
+                "the execution root {} already exists, and a fresh run creates its own: nothing \
+                 there was made by this run, so nothing there is touched",
+                path.display()
+            ),
+        }),
+        Err(source) => Err(UpstrokeError::Io {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
 /// Whether a probe executed through the pair creation granted it.
 ///
 /// INV-23 requires each probe to be "a registered invocation **through the
@@ -1748,18 +2524,18 @@ fn used_the_grant(before: usize, after: usize, what: &str) -> Result<(), Upstrok
 /// run `exit 0` cannot certify anything about a CLI, and asking anyway would
 /// spend a slot and a container to learn nothing.
 fn p4_run_preflight(
-    p3b: OwnerRecordPublished,
+    p3c: ExecutionRootCreated,
     request: &mut Request<'_>,
     hooks: &mut dyn TopologyHooks,
 ) -> Result<ProbesCertified, Box<Aborted>> {
     let _ = hooks;
-    let _cleanup_scope = p3b.cleanup_scope();
-    let expected = p3b.facts().checked().runner_policy_sha256().to_owned();
+    let _cleanup_scope = p3c.cleanup_scope();
+    let expected = p3c.facts().checked().runner_policy_sha256().to_owned();
 
     if request.probes.policy_digest() != expected {
-        let recorded = crate::runner::policy::runner_policy_sha256(&p3b.owner().runner);
-        return Err(p3b.abort(
-            Prefix::P3b,
+        let recorded = crate::runner::policy::runner_policy_sha256(&p3c.owner().runner);
+        return Err(p3c.abort(
+            Prefix::P3c,
             UpstrokeError::Refused {
                 message: format!(
                     "the pre-flight probes execute under `{}`, and this run's recorded \
@@ -1779,7 +2555,7 @@ fn p4_run_preflight(
     // for `ProbeTarget::Shell`.
     let shell_id = match PreflightIdentities::shell(0) {
         Ok(id) => id,
-        Err(error) => return Err(p3b.abort(Prefix::P3b, error)),
+        Err(error) => return Err(p3c.abort(Prefix::P3c, error)),
     };
     // Same boundary as the agent probes below: the shell probe's own request
     // registers itself through `Registering`, so there is nothing to settle
@@ -1798,10 +2574,10 @@ fn p4_run_preflight(
     let shell_through = request.pair.shell_probe(request.runner);
     let before = request.pair.accounted();
     if let Err(error) = request.probes.shell(shell_id.clone(), &shell_through) {
-        return Err(p3b.abort(Prefix::P3b, error));
+        return Err(p3c.abort(Prefix::P3c, error));
     }
     if let Err(error) = used_the_grant(before, request.pair.accounted(), "the shell probe") {
-        return Err(p3b.abort(Prefix::P3b, error));
+        return Err(p3c.abort(Prefix::P3c, error));
     }
 
     // **No outer registration around the adapter call.** This wrapped one
@@ -1827,18 +2603,18 @@ fn p4_run_preflight(
         let agent_through = request.pair.agent_probe(request.runner);
         let before = request.pair.accounted();
         if let Err(error) = request.probes.agent(agent, &agent_through) {
-            return Err(p3b.abort(Prefix::P3b, error));
+            return Err(p3c.abort(Prefix::P3c, error));
         }
         if let Err(error) = used_the_grant(
             before,
             request.pair.accounted(),
             &format!("the probe of agent `{agent}`"),
         ) {
-            return Err(p3b.abort(Prefix::P3b, error));
+            return Err(p3c.abort(Prefix::P3c, error));
         }
         probed.push(agent.clone());
     }
-    Ok(ProbesCertified::new(p3b, probed))
+    Ok(ProbesCertified::new(p3c, probed))
 }
 
 /// P5 — `RunDir.WritePlan`, then `Event.OpenLog` (create, fsync the directory).
@@ -1889,6 +2665,7 @@ fn p5b_publish_commit_record(
     stamped.runner = facts.checked().runner_policy().clone();
     stamped.private_dir = private.to_string_lossy().into_owned();
     stamped.probed_agents = p5.probed().to_vec();
+    stamped.path_policy.case_fold = p5.case_fold();
 
     let event = TopologyEvent {
         ts: request.clock.now_rfc3339(),

@@ -132,7 +132,9 @@ How often the supervisor asks whether the container has finished.
 `decisions.tests_acceptance.determinism` forbids sleeps in the suite, so
 this is a value and every test sets it to zero. A container that finishes
 between two observations is observed at the second; a container that does
-not finish by the request's deadline is stopped and removed.
+not finish by the request's deadline is stopped and removed. The rest between
+two observations never runs past the deadline: it is the poll or the time
+left, whichever is less (K2).
 
 ## `pub struct RunIdentity {`
 
@@ -170,6 +172,15 @@ lock file.
 ## `pub struct RunIdentity` › `pub repo_key: String,`
 
 The repo key.
+
+## `pub const fn forces_configured_mounts_read_only(role: &ExecutionRole) -> bool {`
+
+Whether this role gets every recorded operator mount read-only, whatever
+the record says: review and both probes. A reviewer writes nothing, and a
+probe certifies a CLI rather than doing work. Implement and gate get each
+recorded mount as recorded, so **a gate can write through an explicitly
+read-write configured mount**: a gate is repository-controlled code, and
+an operator who writes `read_only = false` gives that code the directory.
 
 ## `pub const fn receives_a_worktree(role: &ExecutionRole) -> bool {`
 
@@ -231,6 +242,12 @@ worktree.
 logs — and `<R>/containers`, which is every container's ownership
 evidence.
 
+One file of it reaches one container: the permission-settings file the
+engine materialized for that invocation, which its command carries as
+`CommandSpec::settings_file` and one of its arguments names. It is bound
+read-only at its container path (`settings_for`). The directory around it,
+every other attempt's settings and every other file stay withheld.
+
 ## `pub enum Withheld` › `AuthoritativeGit,`
 
 The repository's shared Git directory: every engine ref, and the
@@ -261,7 +278,7 @@ this module can produce. The shape is `PR4-CONF-003`'s — the property is
 established by the function that derives it from the layout, not asserted by
 a caller who remembered to call a builder.
 
-## `impl Confinement` › `pub fn of_run(identity: &RunIdentity, repo_root: &Path) -> Self {`
+## `impl Confinement` › `pub fn of_run(identity: &RunIdentity, repo_root: &Path, git: RepositoryGit<'_>) -> Self {`
 
 Everything `identity`'s run withholds.
 
@@ -272,6 +289,15 @@ set moves when the layout moves. `run` adds one more per invocation: the
 workspace's **resolved** common Git directory, which is where a linked
 worktree's refs really are rather than where an assumed `<repo>/.git`
 would be.
+
+`git` adds the repository's Git directory and its effective common
+directory, as the coordinator holds them (`resolve::RepositoryGit`), as
+authoritative Git beside `<repo>/.git`, each once. J10 (regression
+review 2, finding 1): only `<repo>/.git` was withheld, so a probe, which
+has no worktree whose common directory `plan` could add, withheld nothing
+of a common directory an inherited `GIT_COMMON_DIR` placed outside the
+checkout. The execution root moves into the set after its namespaces are
+derived from it, rather than being copied (§6).
 
 #### The sibling-worktree namespace (`PR6-CORRECTNESS-013`)
 
@@ -319,6 +345,63 @@ list" — passes on both.
 ## `pub fn violations(&self, mounts: &[Mount]) -> Vec<String>` › `let Mount::Path { source, target, .. } = mount else {`
 
 A named volume has no host path, so it can carry none of these.
+
+## `impl Confinement` › `pub fn configured_violations(&self, configured: &[Mount]) -> Vec<String> {`
+
+Which of the operator's configured mounts reach a withheld path, in both
+directions: a source that **is**, **contains** or **lies inside** one, the
+relation `resolve::overlap` names. Each withheld path is compared as
+spelled and, failing that, in its canonical spelling, because a configured
+source is recorded canonical while a withheld path is spelled as the run's
+layout spells it.
+
+The role's own mounts keep `violations`' one direction, because they
+legitimately lie inside withheld directories (its worktree inside the
+execution root, its object store inside the common directory). A
+configured source never may: DESIGN §26 refuses one that "is, contains or
+lies inside the repository root, its Git or common directory, the private
+root". J10 (regression review 2, finding 1): `plan` checked configured
+mounts with `violations` alone, so a source inside the task worktree's
+resolved common directory, its `refs` say, was accepted.
+
+## `#[cfg(unix)]` › `fn coordinator_user() -> Option<ContainerUser> {`
+
+The coordinator's effective numeric uid and gid. On a Unix host every
+container this runner creates runs as them: work, review, gate and probe
+alike, through `CreateSpec::user` and `docker create --user <uid>:<gid>`
+(PR12's D-B, root's option u1, and its UID-scope follow-through).
+
+Why: a container ran as its image's user, uid 0 in the real-Docker
+preparation (`debug-2`), and what it wrote into the role's worktree was then
+owned by a user the coordinator is not. That preparation's self-tests
+reported task-workspace removals failing with `EACCES`. Those observations
+support this repair; they do not establish it as the cause of every failure
+there. The coordinator owns every host path a role receives. A container
+that runs as the coordinator's numeric identity writes files the coordinator
+can manage and reclaim, and Git inside it reads a worktree and a view its own
+user owns, with no wildcard `safe.directory`.
+
+Read with `geteuid` and `getegid`, the effective-ID queries every Unix target
+has, once, when the runner is built. They cannot fail. The two are
+classified as reads, not effects, in `effects/wrappers.toml`'s `[libc]`
+section. The `SAFETY:` comment stays beside the call (CODING_STANDARDS §11).
+
+What this does not cover, and does not claim:
+- rootless Docker and user-namespace remapping, where a numeric id inside the
+  container is not the same id on the host;
+- Docker Desktop, whose file sharing maps ownership itself.
+
+The image and the credential volumes must be usable by this uid and gid:
+`HOME`, the CLI's own directories, a credential volume's files. Nothing
+here changes their ownership. There is no `chown` of a volume, no global
+`safe.directory` and no privileged cleanup. Nor does any probe establish
+writability before a run: an executed `--version` or `--help` shows only
+that the CLI started.
+
+## `#[cfg(not(unix))]` › `const fn coordinator_user() -> Option<ContainerUser> {`
+
+Windows keeps the image's user, as before: no SID is mapped to a uid, pending
+native evidence. That is a limit, not coverage.
 
 ## `fn worktree_namespaces(execution_root: &Path) -> Vec<PathBuf> {`
 
@@ -449,6 +532,28 @@ end, and a caller that builds a second runner for the same incarnation gets a se
 over the same scope, each covering its own launches. `ContainerRunner` is not `Clone`, so a
 reaper cannot be duplicated with it.
 
+## `pub struct ContainerRunner` › `mount_exclusions: Vec<(MountExclusion, PathBuf)>,`
+
+The configured-mount exclusions bound when the runner is built (repository
+root, the Git directory and effective common directory it is given, the
+private root, the coordinator's credential locations;
+`resolve::MountContext::bind`), and only when the record has mounts: a
+runner without them binds nothing and reads nothing.
+`configured_mounts` refuses a recorded source that is, contains or lies
+inside any of them. This is the configured-mount rule, in both directions;
+the role's own mounts keep `Confinement`'s one-directional check.
+
+## `pub struct ContainerRunner` › `settings_directory: PathBuf,`
+
+The run's private `settings` directory, from `RunPaths::settings` when the
+runner is built: the one directory whose files `settings_for` may bind, one
+at a time.
+
+## `pub struct ContainerRunner` › `user: Option<ContainerUser>,`
+
+The numeric identity every container is created as (`coordinator_user`):
+`Some` on a Unix host, `None` on Windows.
+
 ## `pub struct ContainerRunner` › `view_is_explicit: bool,`
 
 Whether [`ContainerRunner::with_view`] replaced the default projection.
@@ -468,15 +573,34 @@ while a container runs, and `Covered`'s drop takes it only to count down.
 
 ## `struct ReapingState {`
 
-`armed`: the reaper and the scope it lists, once the first cover armed it. `in_flight`: the
-covers not yet ended. `unsettled`: sticky — set once any cover ended with a fate other than
+`armed`: the backstops and the scope they list, once the first cover armed them. `in_flight`:
+the covers not yet ended. `unsettled`: sticky — set once any cover ended with a fate other than
 `Gone` or `NeverStarted`, or with none at all (an invocation that unwound).
 
 ## `struct Armed {`
 
-The scope is kept beside the reaper so every later cover compares its container's labels
-with the scope the reaper actually lists. On Windows there is no reaper (ST-16 (e); the
+The scope is kept beside the backstops so every later cover compares its container's labels
+with the scope they actually list. On Windows there is no reaper (ST-16 (e); the
 `os_matrix`): the scope alone is kept, and the label check runs the same way.
+
+`dormant` is PR11 follow-up A's backstop, one per distinct lease set the runner's invocations
+carried (in practice one, armed at the first launch), kept for the runner's life and past an
+unsettled drop until the process exits. Since repair16 (`PR12-INV9-CONTAINER-HELPER-CLEANUP-LEASE`)
+it is armed `BackstopHold::BeforeActing` with those lease paths and the run's lock file, because an
+invocation whose container's fate is unknown and a process that can act on the run's resources are
+different things: the backstop can act only after its coordinator has died, so it holds nothing
+while its coordinator lives -- a same-process successor is never refused for it, as the in-process
+resume `engine::topology::recover::tests::a_lost_gate_container_is_reclaimed_by_the_next_resume_before_the_verification_is_settled`
+requires -- and at that death it takes the run's cleanup lease itself before it may act, standing
+down when another engine holds the run lock (`agent::proc`'s `excluded_before_acting`). Every helper
+of an invocation holds the invocation's leases through its own reaper for its whole life, so over
+the in-flight window no survivor that can act is unexcluded. An invocation without an established
+end stays recorded as such -- `Unresolved`, its intent retained -- for the next incarnation's census.
+
+## `struct DormantBackstop {`
+
+Keeps the lease paths it was armed with, which it can never widen: a later invocation whose
+paths it does not all hold is covered by another.
 
 ## `pub(super) mod cover {`
 
@@ -520,6 +644,8 @@ established for the invocation, recorded by `settle`; the drop reads it.
 ## `mod cover` › `pub struct CoveredCreate<'a> {`
 
 The proof that one container's create is covered: it carries **the spec `cover` validated**,
+and nothing else -- the create's helpers take the invocation's leases from its thread's scope,
+as every bounded question does (`invoke`),
 borrowed, and the create is made from that spec — `create_container` and every
 `ContainerRuntime::create` read `covered.spec()` and take no spec of their own — so a proof
 minted for one container cannot create another. Its lifetime is the cover's single `'a`,
@@ -534,10 +660,26 @@ for any other name before the runtime is asked (`expect_intent_for`, attempted `
 `tests::a_start_cover_starts_only_the_container_it_was_minted_for`), and the runtime's
 `start` starts `covered.name()`.
 
+It also carries the invocation's stdin payload, borrowed from the request's `CommandSpec`
+(PR12's D-C). The runtime's `start` delivers exactly `covered.stdin()` to the container it
+starts, then EOF; an empty payload starts the container as before.
+
+And it carries the invocation's deadline and a handle on its cancellation (root's
+START-DEADLINE finding): a start that has to wait, as the attached start waits for its
+container to leave `created`, waits no longer than the invocation may, and stops waiting
+when the invocation is cancelled.
+
+And the invocation's cleanup lease paths (`leases()`, repair16): the attached start's
+`docker start --attach` runs on a supervisor thread of its own, inside no cleanup scope, so
+`DockerCli::start_attached` hands them to that thread by value.
+
 ## `mod cover` › `pub(in crate::runner::container::exec) fn cover<'a>(`
 
-Validates, arms on the first cover, counts the invocation, and mints the three values:
-`Covered`, and the two proofs over `spec`. The order is the point (`FUA-D1-DES-2`, the design review's correction): the scope this
+Validates, arms, counts the invocation, and mints the three values: `Covered`, and the two
+proofs over `spec`. Arming, before anything of the invocation launches: a backstop for the
+invocation's lease paths if none covers them, with the run's lock file (`rundir::lock_file` of
+the identity's run directory; `Armed::cover_dormant`). The start's also carries `stdin`, which `contain`
+passes as `request.command.stdin`, and the invocation's `deadline` and `cancellation`. The order is the point (`FUA-D1-DES-2`, the design review's correction): the scope this
 runner would hold — the armed one, or, on the arming cover, the one it is about to arm,
 built from the runtime's `reaper_program` and the runner's own `RunIdentity` — is compared
 with the container's two label values **first**, and a difference refuses the launch before
@@ -574,12 +716,28 @@ marks the runner unsettled. A cover dropped without a settle is an invocation th
 The validated spec, with the proof's own lifetime rather than the borrow of the proof, so a
 funnel can read it and still move the proof into the runtime's `create`.
 
+## `mod cover` › `impl<'a> CoveredStart<'a>` › `pub fn stdin(&self) -> &'a [u8] {`
+
+The payload the start delivers.
+
+## `mod cover` › `impl<'a> CoveredStart<'a>` › `pub const fn deadline(&self) -> Instant {`
+
+When the invocation's time runs out: `contain` fixes it before the cover.
+
+## `mod cover` › `impl<'a> CoveredStart<'a>` › `pub const fn cancellation(&self) -> &Cancellation {`
+
+The invocation's cancellation, which a waiting start checks on every poll.
+
 ## `mod cover` › `mod without_a_reaper {`
 
 `CoveredCreate::without_a_reaper` and `CoveredStart::without_a_reaper`: proofs minted with no
 reaper armed, for tests that drive a primitive directly — the test-only free
 `container::launch` (so the frozen `recover/tests.rs` that calls it compiles unchanged) and
 the container suites' direct calls of the funnels and of a runtime's `create` and `start`.
+`CoveredStart::without_a_reaper` gives the start a day's deadline;
+`CoveredStart::without_a_reaper_until` is the same proof with the deadline a test names, for one
+that holds a start to a short invocation
+(`runner::container::tests::attached_start_early_exit_child`).
 `#[cfg(test)]`: no production build has them (`r2-p3`, `error[E0599]`), and the census refuses
 a production region that names them in a test build.
 
@@ -594,9 +752,10 @@ lint. Test doubles outside the tree name them through `container.rs`'s test-only
 
 ## `impl Armed` › `fn kept_until_the_process_exits(self) {`
 
-`mem::forget` of the reaper on Unix: its `Drop` does not run, so it is not cancelled, and
-its descriptors stay open until the process exits; the reaper then kills and removes every
-container its scope labels. On Windows there is nothing to keep.
+`mem::forget` of the backstops on Unix: their `Drop` does not run, so they are not cancelled,
+and their descriptors stay open until the process exits; each then takes its exclusion and,
+unless a newer engine holds the run, kills and removes every container its scope labels. On
+Windows there is nothing to keep.
 
 ## `impl Drop for Reaping {`
 
@@ -631,10 +790,28 @@ bare program name resolved to (`PR6-CORRECTNESS-006`). DESIGN.md:260
 says the runner "supplies role-scoped `HOME`, `PATH`, and credential
 locations"; a runner that read no base could supply none of them.
 
+It also fixes the run's settings directory and reads the coordinator's
+numeric identity (`coordinator_user`), once.
+
+`git` is the repository's Git directory and its effective common
+directory as the coordinator holds them, and a parameter for the same
+reason as `repo_root`: the schema-4 entry passes its worktree Git
+directory and the common directory of the `ManagedRepository` it hands
+the host runner as `ObjectGraph::RecordedIn`, so the container runner and
+the host runner take the repository's Git from one value. The confinement's
+authoritative-Git entries and the configured-mount exclusions both come
+from it, and the runner reads no `.git` of its own. J10 (regression
+review 2, finding 1): the exclusions came from `view::resolve` over the
+checkout's `.git`, which an inherited `GIT_COMMON_DIR` does not change.
+The bound exclusions are moved out of the context
+(`MountContext::into_excluded`), not copied (§6).
+
 ### Errors
 
 [`UpstrokeError::Refused`] when `policy` is not a usable container policy
-— see [`recorded_image_id`].
+— see [`recorded_image_id`] — or when it records mounts and a Git
+directory in `git` is not absolute. [`UpstrokeError::Io`] when the
+repository root cannot be canonicalized for those exclusions.
 
 ## `impl ContainerRunner` › `pub fn with_layout(mut self, layout: BoundaryLayout) -> Self {`
 
@@ -704,11 +881,28 @@ it and so does every test that inspects a mount set, so a mount or an
 environment key that pre-flight sees and the spending invocation does
 not is not expressible.
 
+The spec also carries who the container runs as (`user`, from
+`coordinator_user`) and whether its command has input (`open_stdin`). A
+command with a non-empty `CommandSpec::stdin` is created with stdin open,
+and its payload travels to the start in the cover's start proof, never into
+argv, the environment, a label or a mount (PR12's D-C).
+
+Every mount is also passed through `container.rs`'s `mount_argument`, the
+function `docker create` uses, before the plan exists. A mount whose
+source or target the runtime's `--mount` option cannot carry exactly (not
+UTF-8, a `,`, a `"`, a control character, edge whitespace) refuses here,
+before any intent, view or container. The recorded mount and the argument
+therefore name the same path, target and disposition by construction.
+
 ### Errors
 
 [`UpstrokeError::Refused`] when the overlay names a reserved key, when the
-container name cannot be built from the request's identity, or when the
-mount plan would hand the container a withheld path.
+container name cannot be built from the request's identity, when the
+mount plan would hand the container a withheld path, when the settings
+file the command records is not a regular file of the run's settings
+directory, when a recorded mount fails its recheck or its exclusions or
+meets the role's own targets, or when a mount cannot be carried exactly.
+[`UpstrokeError::Io`] when the settings file cannot be read.
 
 ## `pub fn plan(&self, request: &RunnerRequest) -> Result<Invoc…` › `let intent = ContainerIntent::new(`
 
@@ -724,7 +918,18 @@ container. `intent::path_label` carries the argument.
 
 The worktree's *resolved* common directory, which is where a
 linked worktree's refs really are — rather than an assumed
-`<repo>/.git`.
+`<repo>/.git`. It goes on the invocation's own copy of the
+runner's confinement: `plan` takes `&self`, so the runner's set
+is never changed by one invocation (§6, an owned snapshot).
+
+## `pub fn plan(&self, request: &RunnerRequest) -> Result<Invoc…` › `violations.extend(confinement.configured_violations(&configured));`
+
+The role's own mounts against that copy one way
+(`Confinement::violations`), the configured mounts both ways
+(`Confinement::configured_violations`), before the configured
+mounts join the plan. Before J10 (regression review 2,
+finding 1) both went through `violations`, which let a
+configured source lie inside the resolved common directory.
 
 ## `pub fn plan(&self, request: &RunnerRequest) -> Result<Invoc…` › `image_id: self.image_id.clone(),`
 
@@ -760,6 +965,85 @@ that is not a worktree, which is what the projection
 already treats as "no repository here". Recorded as a
 seam note rather than worked around silently.
 
+## `impl ContainerRunner` › `fn configured_mounts(`
+
+The run's recorded operator mounts, as this role receives them, after its
+own. Every role and probe gets the recorded list, the same list probe and
+execution compose; review and probes get it read-only
+(`forces_configured_mounts_read_only`). First, the whole list is held to
+the target rules a fresh run applies (`resolve::refuse_recorded_targets`:
+each target in normal form, never `/`, never at or under `/upstroke` or
+`/tmp`, spellable in the mount option, and no two the same or nested), so a
+record that carries a target a fresh run refuses plans nothing: no intent,
+no reaper and no container (K1, regular review 4; Docker normalizes
+`/cache/../upstroke/settings` into the reserved `/upstroke/settings`).
+Then, before each is given:
+
+- `resolve::recheck_recorded_source`: the recorded path still canonicalizes
+  to itself and names the recorded object;
+- the bound exclusions, in both directions;
+- its target against every target the role is given, so a configured
+  mount can never shadow or be shadowed by the worktree, the Git view, the
+  objects, the credential volume, the settings file or the scratch, under
+  any layout.
+
+The window between this recheck and the runtime's own bind remains, as for
+every path the runtime is handed; nothing here claims an atomic bind.
+
+## `impl ContainerRunner` › `fn settings_for(`
+
+An agent's own settings file, given to its container and nothing else
+(PR12-CONTAINER-CLAUDE-SETTINGS-HOST-PATH, the coordinator's real-Docker
+finding `CONTAINER-SETTINGS-FINDING-1`; root's option (a), narrowed by its
+D-A).
+
+`materialize_permissions` writes each worker's and reviewer's permission
+settings to a file in the run's private `settings` directory
+(`RunPaths::settings`): `engine::assembly` for a worker, `review` for a
+reviewer. `ClaudeCodeAdapter` then passes `--settings <that host path>`.
+The container withholds the run's private half (`Withheld::PrivateArtifacts`),
+so a containerized agent was given a path it could not open (observed: the
+real-Docker preparation's `debug-2` recorded the host-path argument). What a
+real CLI does then was not executed; that it fails, or runs without its allow
+list and deny rules, is untested.
+
+The invocation's own file is the one its command records as
+`CommandSpec::settings_file`, set by the engine from the path it
+materialized. For an implement or review request whose command records one,
+and when an argument is that path exactly:
+- the file must be a file of this run's settings directory, by its exact
+  path, and a regular file: a directory or a link is refused, so a name in
+  the directory cannot redirect the bind to another private artifact;
+- exactly that file is bound read-only at `BoundaryLayout::settings(<name>)`,
+  that is `/upstroke/settings/<name>`;
+- only the argument that is that path is rewritten to the container path.
+
+Nothing else is given or changed:
+- an argument naming any other file, another attempt's settings included, is
+  left as the host path it was, and gets no mount;
+- a gate or a probe gets no settings, whatever its command records, since no
+  agent permission surface bounds a gate and a probe passes none;
+- a command that records no settings file, or records one no argument names
+  (`codex` and `copilot` write one and do not pass it), is unchanged;
+- the adapter, the host runner and every host path are unchanged.
+
+The confinement check is unchanged and still passes. It refuses a mount
+whose source holds a withheld path, and a file below the withheld directory
+holds none. So the settings directory, the private half around it and every
+other settings file stay mounted nowhere.
+
+The witnesses:
+- the mount census for a worker's and a reviewer's own files is
+  `exec::tests::an_agents_own_settings_file_is_bound_read_only_and_named_by_its_container_path`;
+- the negative cases are
+  `exec::tests::only_the_invocations_own_settings_file_is_bound_and_no_argument_grants_another`;
+- the identity checks are
+  `exec::tests::an_own_settings_file_that_is_not_a_regular_file_of_the_runs_settings_directory_is_refused`;
+- the real-runtime witness is the gated
+  `exec::tests::real_docker_a_containerized_agent_reads_its_own_settings_and_cannot_write_them`,
+  registered in `DOCKER_GATED_TESTS`. It is a filesystem witness, not an
+  acceptance of a real CLI's policy.
+
 ## `impl ContainerRunner` › `fn mounts(`
 
 The mounts this request's role receives, and no others.
@@ -782,9 +1066,11 @@ here:
 
 (2) and (3) are absent when the workspace is not a worktree — a probe's
 scratch directory — and (4) is absent for a role
-[`supplies_credential_location`] refuses. Nothing else is ever added,
-which is the positive half of the confinement claim; the negative half
-is [`Confinement::violations`].
+[`supplies_credential_location`] refuses. Nothing else of the role's own
+is ever added, which is the positive half of the confinement claim; the
+negative half is [`Confinement::violations`]. The operator's recorded
+mounts are added after these by `configured_mounts`, which is the only
+other source of a mount.
 
 ## `impl ContainerRunner` › `let source = if layout.dot_git_is_file {`
 
@@ -926,7 +1212,8 @@ Release what a failed launch reached and answer `cause` with whatever
 could not be released appended, as a `RunnerError` whose fate is decided
 by how far the launch got and by what the cancel established — two facts
 kept apart. Before `docker start` was attempted (`NotCreated`, `Created`)
-the fate is `NeverStarted` whatever the cancel achieved: a created but
+the fate is `NeverStarted` whatever the cancel achieved for the container,
+unless a process is known unresolved (below): a created but
 never started container holds no process, and a `docker create` whose
 answer was lost cannot have started one either. Whether the start was
 attempted is the funnel's to say ([`super::StartFailure`]): a refusal at
@@ -940,6 +1227,29 @@ confirmed neither, and an answer that another reclaimer's removal is in
 progress confirms neither (`Settled::RemovalInProgress`, the daemon sets
 that flag before it kills) — because at this seam a start the daemon
 refused cannot be told from a start whose acknowledgement was lost.
+A `cause` that itself reports a process it could not establish gone
+(`UpstrokeError::Runner` with `ProcessFate::Unresolved`, which `refused`
+makes of a `RuntimeError::Unresolved`) keeps that fate whatever the launch
+reached and whatever the cancel established: the cancel's evidence is about
+the container, not about that process (PR12-J6-OBSERVATION-FATE-DROPPED).
+
+Repair9 keeps two more facts. **The cancel's own typed cleanup fact**
+(`CancelResidue::process_unresolved`, PR12-R8-PRESTART-CLEANUP-FATE): a
+removal that answered `RuntimeError::Unresolved` left a process the runtime
+started for the container unresolved, so after an ordinary pre-start failure —
+a create the runtime refused, a reported image id that differs from the record
+— the fate is `Unresolved`, not `NeverStarted`. That the container never
+started says nothing about its cleanup's process. Until repair9 the cancel
+kept the R19 view and the R26 intent for that fact and this mapping still
+answered `NeverStarted`, which `Covered`, `RegisteringRunner`'s ledger and
+verification read as settled. An ordinary cleanup failure is not that fact and
+leaves `NeverStarted`. **The cause's fate reaches the cancel**
+(`super::CauseFate`): an unresolved cause makes the cancel keep the view and
+the intent for the census even when the container's stop and removal are
+clean, because they establish nothing about the cause's process; the
+credential-volume inspection's is held under the volume's name
+(PR12-REG6-VOLUME-INSPECTION-FATE). The cause's fate is read before the cancel
+so that it can be passed.
  A refused start whose
 cancel completes therefore settles as an `Infrastructure{Other}` outage
 with the refusal in its detail rather than as `RunnerSpawnFailure`; both
@@ -953,7 +1263,8 @@ substituted image" has been handed the symptom and not the diagnosis.
 ## `impl ContainerRunner` › `fn cancel(`
 
 Stop, remove, unmount and remove-intent for whatever `reached` says
-exists, **attempting every step even after one fails**.
+exists, **attempting every step even after one fails**. `cause`, the fate of
+the step being cancelled, is passed through to [`super::cancel_reached`].
 
 `PR6-LANEF-006`'s shape, applied to the runner's own launch rather than
 to `super::launch`: with `?` in place a failing `Container.Stop` left
@@ -995,6 +1306,23 @@ Wait for the container, bounded by the request's own timeout and by the
 call's cancellation, and say which of the three ended the wait
 ([`Watched`]).
 
+**Each observation is bounded by the same two** (K2, regular review 4,
+finding 2; prior PR7-STD-CONTAINER-EXEC-UNBOUNDED). The observation is asked
+under `QuestionBound::Invocation`, so the runtime ends it at the deadline and
+on the cancellation (`DockerCli::listing_within`, the bound J6 and J13 gave the
+start's questions). Until K2 it was asked with no bound: `docker ps` stalled
+inside `Command::output`, the deadline and the cancellation were checked only
+after it answered, and an invocation with a 100 ms timeout took 1.063 s
+against a stub whose observation slept one second (the reviewer's witness);
+one that never answered held the invocation for ever. An observation that
+fails once the deadline has passed is the timeout, and one that fails once
+the call was cancelled is the cancellation, the deadline first, as for an
+observation that answered: that is what ended it, not a state the runtime
+could not give. An observation whose process its supervisor could not
+establish gone is reported as itself, whatever else coincided with it, with
+its `Unresolved` fate kept (`super::refused`), and `contain` keeps that fate.
+Any other failure ends the supervision as before.
+
 "timeout or shutdown stops and removes the container"
 (`slice_contract.cancellation`); PR11's cancellation is the same
 disposition: "a granted or non-slotted running invocation is cancelled after
@@ -1017,10 +1345,33 @@ happens"). It takes the call apart and picks the observer: the call's own,
 with no lock; otherwise the runner-level one under its guard; otherwise a
 local `NoHooks`.
 
+It also binds the cleanup lease paths (R28) the call carried (`CallParts::leases`, which a
+worker or pipeline's `Carried` call fills from its coordinator's scope) and, on Unix, enters
+them as this thread's own cleanup scope for the whole invocation
+(`rundir::enter_carried_cleanup_scope`, repair16, `PR12-INV9-CONTAINER-HELPER-CLEANUP-LEASE`).
+Every helper a bounded runtime question forks on this thread -- the credential volume's
+inspection inside `create_container` before any create, the create, every observation, stop
+and removal, and the cancellation after a failed launch -- therefore has a reaper that takes
+the invocation's leases through `spawn_reaper`, whatever runtime method asks it, the ones that
+take no lease argument included. What runs elsewhere takes them explicitly: the backstop
+(`cover`), at its coordinator's death, and the attached start's thread (`CoveredStart::leases`). The scope ends
+with the invocation and is this thread's alone; nothing is keyed by a container or volume name.
+
+## `fn invocation_cleanup_leases(carried: &[PathBuf]) -> Vec<PathBuf> {`
+
+The paths the invocation's explicit carriage hands on: the thread's scope joined with the
+carried ones, without repetition, and on Windows only the carried ones (unused there: no
+reaper, no lease).
+
 ## `impl ContainerRunner` › `fn contain(`
 
 One invocation under one observer: the pre-launch cancellation check, the
-plan, the cover, the launch, supervision, collection and the release, in that order. A call
+plan, the cover, the launch, supervision, collection and the release, in that order.
+Every wait among them is bounded: the start's questions and the supervision's
+observations by the invocation's deadline and its cancellation, and the
+collection's and the release's questions by the runtime's own bound
+(`DockerCli`'s `QUESTION_BOUND`, K2), which a cancellation does not shorten:
+what the invocation started is released whether or not it was cancelled. A call
 cancelled before anything is written is refused as
 `RunnerError::cancelled(.., NeverStarted)` with no intent, view or container
 (`a_container_call_cancelled_before_it_starts_writes_no_intent`). A call
@@ -1148,6 +1499,37 @@ WriteIntent -> MountGitView -> Create (+ verify the reported image
 id) -> Start, in that order and in one place. A launch that fails settles the cover with
 the fate its cancel established.
 
+A launch that fails once a cancellation was requested reports the cancellation,
+`RunnerError::cancelled` with that same fate. Since PR12's D-C a start can see the
+cancellation itself: an attached start whose container is still `created` stops waiting and
+fails, and the invocation was cancelled, not broken
+(`a_launch_that_fails_after_a_cancellation_reports_the_cancellation`).
+
+## `fn contain(` › `let started = Instant::now();`
+
+The invocation's clock starts before the cover, so the deadline the start proof carries is
+the one supervision later enforces.
+
+The deadline is constructed checked (`Instant::checked_add`, K3, regular review 4,
+finding 3; standards §7, MUST NOT panic on configuration). A timeout that puts the deadline
+past every instant the platform's clock can hold is refused as
+`RunnerError::never_started` (`unrepresentable_deadline`), before the cover and so before
+anything is written or launched. Until K3 the deadline was `started + request.timeout`,
+and the configuration accepts such a timeout: `[routing] review = { tier = "frontier",
+timeout_secs = 9223372036854775807 }` passes `config::load` and
+`ReviewPlan::pass_timeout`, and the runner then panicked with "overflow when adding
+duration to instant" on the reviewer's platform. The host runner compares elapsed time with
+its timeout and adds nothing to an instant, so it never had the defect.
+
+Representability is a platform property, not a configuration limit. The
+[standard-library contract](https://doc.rust-lang.org/std/time/struct.Instant.html#os-specific-behaviors)
+permits different ranges. Rust 1.97.1's
+[Windows implementation](https://github.com/rust-lang/rust/blob/1.97.1/library/std/src/sys/time/windows.rs)
+stores the instant as a `Duration`, so `i64::MAX` seconds can fit there. A representable
+timeout proceeds normally; no arbitrary cap or substitute timeout is imposed. The bounded
+`review_timeouts_obey_the_platform_deadline_range` guard preserves the original configuration
+case and independently tests a representable duration and an asserted unrepresentable one.
+
 ## `fn contain(` › `covered.settle(fate);`
 
 The fate the release established, recorded for the disarm rule before the result is
@@ -1189,6 +1571,12 @@ container be reclaimed before the verification is settled.
 Collect after the supervision, which `run` performs itself so it knows
 whether the exit was observed before it releases.
 
+The output is limited when the runtime says it read only part of it
+(`ContainerExecution::output_limited`, which `DockerCli` sets when the process
+funnel ended `docker logs` at its output limit, K2) or when a stream is longer
+than this runner reads (`bounded`). A runtime failure keeps an `Unresolved`
+fate (`super::refused`), as the supervision's does.
+
 ## `impl ContainerRunner` › `let execution = self`
 
 Collected **before** the release: `docker logs` answers for a running
@@ -1201,9 +1589,29 @@ A container the supervisor stopped did not exit on its own,
 whatever status the runtime reports afterwards — the same
 disposition `agent::proc` gives a killed tree.
 
-## `fn refused_by_runtime(error: RuntimeError) -> UpstrokeError {`
+## `fn contain(` › `let fate = match (&outcome, &released) {`
 
-A runtime failure, as the engine's error type.
+The fate the invocation reports. An outcome whose error carries a process its
+runtime could not establish gone (`UpstrokeError::Runner` with
+`ProcessFate::Unresolved`, which `super::refused` makes of a
+`RuntimeError::Unresolved` from the supervision or the collection) keeps that
+fate whatever the release established, as `cancelled` keeps a launch's (K2,
+"preserved process fate"): the release's evidence is about the container, not
+about that process. Otherwise the release decides, as below. Until K2 the
+supervision's and the collection's failures were turned into
+`UpstrokeError::Refused` (`refused_by_runtime`, removed), so an unresolved
+observation followed by a clean release reported `Gone`; `DockerCli` held
+the fact under the container and its removal reported it, but a runtime that
+does not hold such a fact lost it
+(`an_observation_that_leaves_a_process_unresolved_keeps_the_invocation_unresolved_after_a_clean_release`).
+
+## `fn unrepresentable_deadline(request: &RunnerRequest) -> UpstrokeError {`
+
+The refusal of an invocation whose deadline no instant can hold: it names the invocation
+and the timeout in seconds, and says nothing of it was written or launched. A refusal
+rather than a clamp to the latest representable instant: a timeout configured that long is
+one no supervisor could enforce, and the runner says so rather than run it under a bound
+it did not configure.
 
 ## `fn bounded(bytes: &[u8], limit: usize) -> (String, bool) {`
 

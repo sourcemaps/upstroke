@@ -112,3 +112,12 @@ rather than suppressed, so the set stays asserted on every host.
 Found by CI, not locally: this project has a Windows guest and no
 macOS host, and `PR5-MACOS-CLIPPY-NEVER-RUN` predicted this exact test
 would be the one to see it.
+
+`libc::renamex_np` is the mirror case, Darwin-only: the `libc` crate
+defines it for Apple targets and not for Linux, so on a Linux host the
+denial does not resolve, and on macOS it does and is enforced. It is in
+this list for the Linux branch alone; Windows does not link `libc`, and
+clippy is silent about a crate it does not link. The macOS-only call it
+denies is `workspace_manager::rename_no_clobber`'s, which publishes and
+retires a fresh execution root without ever replacing what is at the
+destination (repair15).

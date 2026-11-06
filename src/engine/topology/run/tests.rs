@@ -1205,6 +1205,7 @@ mod scaffold_runner {
                 digest: None,
             }),
             credential_volumes: None,
+            mounts: Vec::new(),
         };
         let container = RecordingRunner::new().declaring(declared.clone());
         container.run_blocking(&gate(1)).expect("runs");
@@ -1264,6 +1265,171 @@ mod scaffold_runner {
             runner.ran().len(),
             3,
             "failed probes are recorded like any request"
+        );
+    }
+}
+
+/// J2, `PR249-ANSWER-TEXT-NOT-CARRIED`: the brief takes a person's words from
+/// `question_answered`, live and on replay alike. Words that name none of the question's options
+/// become an instruction from a person, which is also the review's decision. A chosen option, a
+/// spend approval, a decline, and an older record with no words add nothing.
+#[test]
+fn the_brief_takes_an_answers_words_from_the_log_live_and_on_replay() {
+    use crate::topology::events::{QuestionAnswered4, QuestionRaised4};
+
+    let words = "Use UNIQUE_ZEBRA_FORMAT_739 for the widget.";
+    let ask = |id: &str, kind: QuestionKind| FrozenQuestion {
+        id: QuestionId(id.to_owned()),
+        key: TaskKey(0),
+        kind,
+        context: "a person is asked".to_owned(),
+        options: crate::engine::coordinator::topology_question_options(kind),
+    };
+    let answered = |id: &str, answer: Answer4, text: Option<&str>| QuestionAnswered4 {
+        key: TaskKey(0),
+        question: QuestionId(id.to_owned()),
+        answer,
+        via: "event-log".to_owned(),
+        text: text.map(str::to_owned),
+    };
+    let chosen = Answer4::Answered {
+        option_index: 0,
+        binding_override: None,
+    };
+    let declined = Answer4::Declined {
+        decline_halts_run: false,
+    };
+    let options = crate::engine::coordinator::topology_question_options(QuestionKind::Clarify);
+    let retry = &options[0];
+    let cases = [
+        (
+            ask("q-words", QuestionKind::Clarify),
+            answered("q-words", chosen.clone(), Some(words)),
+        ),
+        (
+            ask("q-option", QuestionKind::Clarify),
+            answered("q-option", chosen.clone(), Some(retry)),
+        ),
+        (
+            ask("q-spend", QuestionKind::ApproveSpend),
+            answered("q-spend", chosen.clone(), Some("spend it")),
+        ),
+        (
+            ask("q-older", QuestionKind::Unblock),
+            answered("q-older", chosen, None),
+        ),
+        (
+            ask("q-declined", QuestionKind::Continue),
+            answered("q-declined", declined, None),
+        ),
+    ];
+
+    let mut live = Brief::new();
+    let mut events = Vec::new();
+    for (question, answer) in &cases {
+        live.record_answer(question.kind, &question.options, answer);
+        for body in [
+            TopologyEventBody::QuestionRaised {
+                data: QuestionRaised4 {
+                    question: question.clone(),
+                },
+            },
+            TopologyEventBody::QuestionAnswered {
+                data: answer.clone(),
+            },
+        ] {
+            events.push(TopologyEvent {
+                ts: "2026-11-03T00:00:00.000Z".to_owned(),
+                body,
+            });
+        }
+    }
+    let replayed = Brief::replay(&events);
+    assert_eq!(replayed, live, "the replay reaches the live brief");
+    let lines = replayed.lines(TaskKey(0));
+    let [line] = lines.as_slice() else {
+        panic!("one instruction from a person: {lines:?}");
+    };
+    assert!(line.human, "{line:?}");
+    assert_eq!(line.detail.as_deref(), Some(words));
+    assert_eq!(replayed.decisions(TaskKey(0)), [words]);
+}
+
+fn escalated_log(interrupted_first: bool) -> (TopologyFold, Vec<TopologyEvent>) {
+    use crate::engine::topology::settle::tests::{
+        ALEPH, apply, attempt_started, dispatch, ev, finished, settle_into, started,
+    };
+    use crate::topology::events::{AttemptInterrupted4, LeaseDisposition};
+
+    let mut fold = started();
+    let mut events = Vec::new();
+    let mut generation = 0;
+    if interrupted_first {
+        for event in [
+            dispatch(ALEPH, 0),
+            attempt_started(&fold, ALEPH, 0, 1),
+            ev(TopologyEventBody::AttemptInterrupted {
+                data: AttemptInterrupted4 {
+                    key: ALEPH,
+                    generation: GenerationId(0),
+                    attempt: AttemptNumber(1),
+                    lease: LeaseDisposition::PredictedReleased,
+                    detail: "the coordinator that started this attempt did not survive it"
+                        .to_owned(),
+                },
+            }),
+        ] {
+            apply(&mut fold, &event);
+            events.push(event);
+        }
+        generation = 1;
+    }
+    let dispatched = dispatch(ALEPH, generation);
+    apply(&mut fold, &dispatched);
+    events.push(dispatched);
+    let start = attempt_started(&fold, ALEPH, generation, 1);
+    apply(&mut fold, &start);
+    events.push(start);
+    let settled = settle_into(
+        &mut fold,
+        &finished(ALEPH, generation, 1, crate::ladder::Next::Escalate),
+    );
+    events.push(ev(TopologyEventBody::AttemptFinished {
+        data: Box::new(settled),
+    }));
+    (fold, events)
+}
+
+#[test]
+fn a_spend_approval_after_an_interrupted_attempt_calls_its_reported_spend_a_floor_as_the_report_does()
+ {
+    use crate::engine::topology::settle::tests::ALEPH;
+
+    for (interrupted_first, floor) in [(true, true), (false, false)] {
+        let (fold, events) = escalated_log(interrupted_first);
+        let spent = Spend::replay(&events).run_usd();
+        let context = spend_approval_context(&fold, &events, ALEPH, spent, 0.005)
+            .expect("the approval question's context");
+        assert!(
+            context.contains("Reported spend so far: $0.5000"),
+            "{interrupted_first}: the priced escalation's spend is reported: {context}"
+        );
+        assert_eq!(
+            context.contains("a floor, not a total")
+                && context.contains("This is at least what the run has already cost"),
+            floor,
+            "interrupted first: {interrupted_first}: {context}"
+        );
+        assert_eq!(
+            context.contains("This is what the run has already cost"),
+            !floor,
+            "interrupted first: {interrupted_first}: {context}"
+        );
+        assert_eq!(
+            crate::engine::RunReport::from_topology(&fold, &events, Vec::new()).total_is_floor(),
+            floor,
+            "interrupted first: {interrupted_first}: the report and the approval treat the \
+             run's unknown spend alike"
         );
     }
 }

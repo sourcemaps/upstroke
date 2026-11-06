@@ -624,7 +624,11 @@ pub mod chain {
                     },
                 )?;
 
-                let run_dirs = census_run_dirs(hooks.rundir(), &inputs, Some(&run_id))?;
+                let run_dirs = census_run_dirs(hooks, &inputs, Some(&run_id)).map_err(|error| {
+                    error.with_warnings(crate::engine::topology::startup::container_lines(
+                        containers.report(),
+                    ))
+                })?;
 
                 Ok(Self {
                     barrier,
@@ -655,6 +659,14 @@ pub mod chain {
             #[must_use]
             pub const fn run_dirs(&self) -> &RunDirCensusReport {
                 &self.run_dirs
+            }
+
+            #[must_use]
+            pub fn operator_lines(&self) -> Vec<String> {
+                let mut lines =
+                    crate::engine::topology::startup::container_lines(self.containers.report());
+                lines.extend(self.run_dirs.operator_lines());
+                lines
             }
         }
     }
@@ -907,6 +919,7 @@ pub struct Recovered {
     pub steps: Vec<RecoveryStep>,
     pub resumed: Resumed,
     pub warnings: Vec<String>,
+    pub census: Vec<String>,
 }
 
 pub fn run_recovery_order(
@@ -915,14 +928,43 @@ pub fn run_recovery_order(
     hooks: &mut dyn TopologyHooks,
     warnings: &mut Vec<String>,
 ) -> Result<(Recovered, RunHandle), UpstrokeError> {
-    let locks = LocksHeld::take(
+    let records = verify_for_recovery(
         root,
         seams.repo_root,
         seams.worktree_git_dir,
-        hooks.rundir(),
+        seams.repo_key,
+        hooks,
     )?;
+    recover_verified(records, seams, hooks, warnings)
+}
+
+pub fn verify_for_recovery(
+    root: RootDerived,
+    repo_root: &Path,
+    worktree_git_dir: &Path,
+    repo_key: &RepoKey,
+    hooks: &mut dyn TopologyHooks,
+) -> Result<RecordsVerified, UpstrokeError> {
+    let locks = LocksHeld::take(root, repo_root, worktree_git_dir, hooks.rundir())?;
     let _cleanup_scope = locks.cleanup_scope();
-    let records = RecordsVerified::verify(locks, seams.repo_key)?;
+    let records = RecordsVerified::verify(locks, repo_key)?;
+    // DESIGN §26: a missing or rebound recorded mount source refuses before any recovery. The
+    // check reads the records just verified and stats each source, changing nothing, so it
+    // precedes the stable-prefix barrier and the census, which would otherwise truncate a torn
+    // tail and reclaim a stale marker of a run that cannot continue. The rebuild checks again.
+    crate::runner::container::resolve::recheck_recorded_mounts(
+        &records.locks().root().started().runner,
+    )?;
+    Ok(records)
+}
+
+pub fn recover_verified(
+    records: RecordsVerified,
+    seams: &ResumeSeams<'_>,
+    hooks: &mut dyn TopologyHooks,
+    warnings: &mut Vec<String>,
+) -> Result<(Recovered, RunHandle), UpstrokeError> {
+    let _cleanup_scope = records.locks().cleanup_scope();
     let mut steps = vec![RecoveryStep::A];
 
     let log_path = records.locks().root().log_path();
@@ -949,7 +991,24 @@ pub fn run_recovery_order(
         },
         hooks,
     )?;
+    let census = censused.operator_lines();
+    warnings.extend(census.iter().cloned());
+    match recover_censused(censused, steps, seams, hooks, warnings) {
+        Ok((mut recovered, handle)) => {
+            recovered.census = census;
+            Ok((recovered, handle))
+        }
+        Err(error) => Err(error.with_warnings(census)),
+    }
+}
 
+fn recover_censused(
+    censused: ResumeCensused,
+    mut steps: Vec<RecoveryStep>,
+    seams: &ResumeSeams<'_>,
+    hooks: &mut dyn TopologyHooks,
+    warnings: &mut Vec<String>,
+) -> Result<(Recovered, RunHandle), UpstrokeError> {
     let censused = finalize_if_finished(censused, seams.manager, hooks)?;
     steps.push(RecoveryStep::B);
 
@@ -1040,6 +1099,7 @@ pub fn run_recovery_order(
             steps,
             resumed,
             warnings: drift,
+            census: Vec::new(),
         },
         handle,
     ))

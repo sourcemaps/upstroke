@@ -1636,3 +1636,289 @@ fn the_integration_ledger_reads_a_charged_record_as_a_lower_bound() {
         );
     }
 }
+
+/// J3, `PR12-REPORT-OMITS-INTEGRATION-REVIEW-SPEND`. Every integration verification outcome
+/// that carries review passes, read by the report through `IntegrationReviews`: a prepared
+/// (successful) verification, a code rejection, an unavailable terminal and a charged record,
+/// each attributed to the verified candidate's task, and an unpaired terminal attributed to no
+/// task. Each pass appears once, and the attributed and unattributed sums are exactly what the
+/// spend ledger replays, per task and for the run.
+///
+/// The passes draw on one named pool, and three of them report no cost. The report itself is
+/// then read, as `RunReport::from_topology` projects it from the same log: each task's row
+/// carries its own known amounts once and says when one of its passes reported none, the
+/// pool's row counts every pass once with its known amounts summed and its unpriced passes
+/// counted, and the total is every known amount once, the unattributed pass's included, so the
+/// report's only warning is that its total is a floor.
+#[test]
+fn integration_reviews_attribute_every_pass_once_as_the_spend_ledger_does() {
+    let pooled = |cost: Option<f64>| crate::events::ReviewRecord {
+        pool: Some("reviewer-pool".to_owned()),
+        ..review_costing(cost)
+    };
+    let verification = |costs: [Option<f64>; 2]| crate::topology::events::VerificationRecord {
+        verdict: crate::topology::events::VerificationVerdict::Passed,
+        gates_passed: true,
+        reviews: costs.into_iter().map(pooled).collect(),
+        detail: "judged".to_owned(),
+    };
+    let prepared = ev(TopologyEventBody::MergePrepared {
+        data: Box::new(crate::topology::events::MergePrepared {
+            sequence: crate::topology::events::SequenceId(1),
+            disposition: crate::topology::events::PreparedDisposition::StaleClean,
+            expected_head: sha("head"),
+            proposed_sha: sha("proposal"),
+            key: ALEPH,
+            generation: GenerationId(0),
+            candidate_sha: candidate_of(ALEPH, 0).commit_sha,
+            candidate_ref: candidate_of(ALEPH, 0).candidate_ref,
+            prepared_ref: Some(GitRef("refs/upstroke/select/prepared/1".to_owned())),
+            verification_source: crate::topology::events::VerificationSource::Verification {
+                sequence: crate::topology::events::SequenceId(1),
+            },
+            verification: Some(verification([Some(2.5), None])),
+            satisfies: vec![ALEPH],
+        }),
+    });
+    let mut rejected = verification([Some(1.0), None]);
+    rejected.verdict = crate::topology::events::VerificationVerdict::Rejected;
+    let repair_entry = {
+        let fold = started();
+        let mut entry = fold
+            .registry()
+            .expect("started")
+            .get(ALEPH)
+            .expect("aleph is registered")
+            .clone();
+        entry.key = GIMEL;
+        entry
+    };
+    let rejection = ev(TopologyEventBody::MergeRejected {
+        data: Box::new(crate::topology::events::MergeRejected {
+            sequence: crate::topology::events::SequenceId(2),
+            candidate: candidate_of(BET, 0),
+            rejecting_head: sha("head"),
+            disposition: crate::topology::events::RejectionDisposition::CodeRejected {
+                verification: rejected,
+            },
+            repair: crate::topology::events::FrozenSpawn {
+                key: GIMEL,
+                entry: repair_entry,
+                admission: crate::topology::events::SpawnAdmission::Runnable,
+            },
+            lease_effect: crate::topology::events::RejectionLeaseEffect::CreatesLineage {
+                root: BET,
+                paths: region(BET),
+            },
+        }),
+    });
+    let unavailable = |sequence: u32, reviews: Vec<crate::events::ReviewRecord>| {
+        ev(TopologyEventBody::MergeVerificationUnavailable {
+            data: crate::topology::events::MergeVerificationUnavailable {
+                sequence: crate::topology::events::SequenceId(sequence),
+                cause: crate::topology::events::UnavailableCause::Infrastructure {
+                    kind: crate::topology::events::InfrastructureKind::ReviewerTimeout,
+                },
+                outcome: crate::topology::events::UnavailableOutcome::Deferred { defers: 1 },
+                reviews,
+            },
+        })
+    };
+    let events = vec![
+        prepared,
+        rejection,
+        verification_started_at(3, GIMEL),
+        unavailable(3, vec![pooled(Some(0.5))]),
+        verification_started_at(4, ALEPH),
+        verification_charged(4, vec![pooled(Some(0.25))]),
+        unavailable(9, vec![pooled(Some(0.125)), pooled(None)]),
+    ];
+
+    let integration = IntegrationReviews::replay(&events);
+    let spend = Spend::replay(&events);
+    let report = crate::engine::RunReport::from_topology(&started(), &events, Vec::new());
+    let priced = |passes: &[crate::events::ReviewRecord]| -> f64 {
+        passes.iter().filter_map(|review| review.cost_usd).sum()
+    };
+    for (key, expected, unpriced) in [(ALEPH, 2.75, 1), (BET, 1.0, 1), (GIMEL, 0.5, 0)] {
+        let passes = integration.of_task(key);
+        assert!(
+            (priced(passes) - expected).abs() < f64::EPSILON,
+            "{key:?}: {passes:?}"
+        );
+        assert!(
+            (priced(passes) - spend.task_usd(key)).abs() < f64::EPSILON,
+            "{key:?}: the task's passes are what the ledger charges it"
+        );
+        assert_eq!(
+            passes
+                .iter()
+                .filter(|review| review.cost_usd.is_none())
+                .count(),
+            unpriced,
+            "{key:?}: an unpriced pass is kept, so the report can say its cost is unknown"
+        );
+        let row = report
+            .tasks
+            .iter()
+            .find(|task| task.id == label(key))
+            .expect("the report has a row for every registered task");
+        assert_eq!(
+            (row.review_cost_usd, row.review_cost_incomplete),
+            (Some(expected), unpriced > 0),
+            "{key:?}: the task's row has its known amounts once, and says whether one is unknown"
+        );
+    }
+    assert_eq!(
+        integration.unattributed().len(),
+        2,
+        "an unpaired terminal names no task"
+    );
+    assert_eq!(integration.all().count(), 8, "every pass once");
+    let total: f64 = integration.all().filter_map(|review| review.cost_usd).sum();
+    assert!(
+        (total - spend.run_usd()).abs() < f64::EPSILON,
+        "the run's passes are what the ledger replays: {total} against {}",
+        spend.run_usd()
+    );
+
+    assert_eq!(
+        report.pool_drain,
+        [crate::engine::PoolDrainRow {
+            pool: "reviewer-pool".to_owned(),
+            attempts: 8,
+            cost_usd: Some(4.375),
+            unpriced: 3,
+        }],
+        "the named pool counts every pass once, its known amounts summed and its unpriced counted"
+    );
+    assert!(
+        (report.total_cost_usd - 4.375).abs() < f64::EPSILON,
+        "the report's total is every known amount once, the unattributed pass's included: {}",
+        report.total_cost_usd
+    );
+    assert!(
+        report.total_is_floor(),
+        "a task's pass that reported no cost makes the report's total a floor"
+    );
+    assert_eq!(
+        report.warnings,
+        [
+            "an integration review pass the log attributes to no task reported no cost, so this \
+             report's total is a floor"
+        ],
+        "the unattributed pass's missing cost is said, and the total is the ledger's: no mismatch"
+    );
+}
+
+#[test]
+fn an_interrupted_integration_verification_keeps_its_known_charges_and_makes_the_total_a_floor() {
+    let interrupted = |sequence: u32| {
+        ev(TopologyEventBody::MergeVerificationInterrupted {
+            data: crate::topology::events::MergeVerificationInterrupted {
+                sequence: crate::topology::events::SequenceId(sequence),
+                detail: "the coordinator that held this verification did not survive it".to_owned(),
+            },
+        })
+    };
+    let prepared = |sequence: u32, reviews: Vec<crate::events::ReviewRecord>| {
+        ev(TopologyEventBody::MergePrepared {
+            data: Box::new(crate::topology::events::MergePrepared {
+                sequence: crate::topology::events::SequenceId(sequence),
+                disposition: crate::topology::events::PreparedDisposition::StaleClean,
+                expected_head: sha("head"),
+                proposed_sha: sha("proposal"),
+                key: ALEPH,
+                generation: GenerationId(0),
+                candidate_sha: candidate_of(ALEPH, 0).commit_sha,
+                candidate_ref: candidate_of(ALEPH, 0).candidate_ref,
+                prepared_ref: Some(GitRef(format!("refs/upstroke/select/prepared/{sequence}"))),
+                verification_source: crate::topology::events::VerificationSource::Verification {
+                    sequence: crate::topology::events::SequenceId(sequence),
+                },
+                verification: Some(crate::topology::events::VerificationRecord {
+                    verdict: crate::topology::events::VerificationVerdict::Passed,
+                    gates_passed: true,
+                    reviews,
+                    detail: "judged".to_owned(),
+                }),
+                satisfies: vec![ALEPH],
+            }),
+        })
+    };
+    for (charged, later, total) in [
+        (Some(2.5), vec![review_costing(Some(0.75))], 3.25),
+        (None, Vec::new(), 0.0),
+    ] {
+        let mut events = vec![verification_started_at(1, ALEPH)];
+        if let Some(cost) = charged {
+            events.push(verification_charged(1, vec![review_costing(Some(cost))]));
+        }
+        events.extend([
+            interrupted(1),
+            verification_started_at(2, ALEPH),
+            prepared(2, later),
+        ]);
+
+        let integration = IntegrationReviews::replay(&events);
+        assert!(
+            integration.spend_unknown(ALEPH) && !integration.spend_unknown(BET),
+            "{charged:?}: the interrupted verification's task, and only it, has unknown spend"
+        );
+        assert!(
+            !integration.unattributed_spend_unknown(),
+            "{charged:?}: the interruption is attributed"
+        );
+        let report = crate::engine::RunReport::from_topology(&started(), &events, Vec::new());
+        let row = report
+            .tasks
+            .iter()
+            .find(|task| task.id == label(ALEPH))
+            .expect("the report has a row for every registered task");
+        let known = (total > 0.0).then_some(total);
+        assert_eq!(
+            (row.review_cost_usd, row.review_cost_incomplete),
+            (known, true),
+            "{charged:?}: the task keeps every known amount once and says one is unknown"
+        );
+        assert!(
+            (report.total_cost_usd - total).abs() < f64::EPSILON
+                && (report.total_cost_usd - Spend::replay(&events).run_usd()).abs() < f64::EPSILON,
+            "{charged:?}: the total is the known amounts, the ledger's: {}",
+            report.total_cost_usd
+        );
+        assert!(
+            report.total_is_floor(),
+            "{charged:?}: an interrupted verification makes the total a floor"
+        );
+        assert!(
+            report.warnings.is_empty(),
+            "{charged:?}: {:?}",
+            report.warnings
+        );
+        let rendered = report.render();
+        assert!(
+            rendered.contains(&format!("total: ${total:.4}? (api-equivalent)")),
+            "{charged:?}: the total is printed as a floor:\n{rendered}"
+        );
+        let ledger = report.render_ledger();
+        assert!(
+            ledger.contains(&format!("total ${total:.4}?"))
+                && ledger.contains("a floor, not a total"),
+            "{charged:?}: the ledger says so too:\n{ledger}"
+        );
+    }
+
+    let orphan = crate::engine::RunReport::from_topology(&started(), &[interrupted(7)], Vec::new());
+    assert!(
+        orphan.unattributed_cost_incomplete && orphan.total_is_floor(),
+        "an interruption no start pairs with makes the total a floor: {orphan:#?}"
+    );
+    assert_eq!(
+        orphan.warnings,
+        [
+            "an integration verification the log attributes to no task was interrupted, so what \
+             its review passes cost is unknown and this report's total is a floor"
+        ],
+    );
+}

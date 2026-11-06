@@ -144,6 +144,7 @@ fn runner_policy() -> RunnerPolicy {
         policy: RunnerContract::HostV1,
         image: None,
         credential_volumes: None,
+        mounts: Vec::new(),
     }
 }
 
@@ -158,6 +159,7 @@ fn container_runner_policy() -> RunnerPolicy {
             digest: None,
         }),
         credential_volumes: None,
+        mounts: Vec::new(),
     }
 }
 
@@ -169,6 +171,7 @@ fn run_started_unauthenticated() -> RunStarted4 {
         incarnation: IncarnationId("01SETTLEINCARNATION0000001".to_owned()),
         runner: runner_policy(),
         probed_agents: probed_agents(),
+        shell: ShellKind::Bash,
         branch: format!("upstroke/run-{RUN_ID}"),
         integration_ref: git_ref("integration"),
         base_sha: sha("base"),

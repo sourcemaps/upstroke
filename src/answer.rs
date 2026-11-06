@@ -6,10 +6,11 @@
 
 use std::path::Path;
 
+use crate::engine::topology::observe::{self, FoundOpen};
 use crate::error::UpstrokeError;
 use crate::interaction::{self, QuestionRecord};
-use crate::ir::{Answer, QuestionId};
-use crate::rundir;
+use crate::ir::{Answer, Question, QuestionId};
+use crate::rundir::{self, FoundQuestion, RunDirClass};
 
 #[derive(Debug, Clone)]
 pub enum Reply {
@@ -27,7 +28,10 @@ pub struct Answered {
 }
 
 pub fn answer(repo_root: &Path, wanted: &str, reply: Reply) -> Result<Answered, UpstrokeError> {
-    let found = rundir::find_question(repo_root, wanted)?;
+    let found = match locate(repo_root, wanted)? {
+        Located::Legacy(found) => found,
+        Located::Topology(open) => return answer_open(open, reply),
+    };
     let id = QuestionId(found.question_id.clone());
     let questions = found.public.join("questions");
 
@@ -51,29 +55,7 @@ pub fn answer(repo_root: &Path, wanted: &str, reply: Reply) -> Result<Answered, 
         });
     }
 
-    let answer = match reply {
-        Reply::Decline => Answer::Declined,
-        Reply::Text(text) => interaction::interpret(&record.question, &text),
-        Reply::Option(choice) => interaction::answer_for_option(&record.question, choice)
-            .ok_or_else(|| UpstrokeError::Refused {
-                message: format!(
-                    "there is no option {choice} on this question; it offers {}",
-                    if record.question.options.is_empty() {
-                        "none (answer it in your own words instead)".to_owned()
-                    } else {
-                        format!("1-{}", record.question.options.len())
-                    }
-                ),
-            })?,
-    };
-
-    if answer == Answer::Unanswered {
-        return Err(UpstrokeError::Refused {
-            message: "an empty answer would leave the task exactly as it is; pass --text with \
-                      the guidance, --option N, or --decline to give up on the task"
-                .to_owned(),
-        });
-    }
+    let answer = reply_answer(&record.question, reply)?;
 
     let answers = found.public.join("answers");
     std::fs::create_dir_all(&answers).map_err(|source| UpstrokeError::Io {
@@ -93,7 +75,10 @@ pub fn answer(repo_root: &Path, wanted: &str, reply: Reply) -> Result<Answered, 
 }
 
 pub fn show(repo_root: &Path, wanted: &str) -> Result<String, UpstrokeError> {
-    let found = rundir::find_question(repo_root, wanted)?;
+    let found = match locate(repo_root, wanted)? {
+        Located::Legacy(found) => found,
+        Located::Topology(open) => return Ok(interaction::render_question(&open.asked.question)),
+    };
     let path = found
         .public
         .join("questions")
@@ -106,6 +91,260 @@ pub fn show(repo_root: &Path, wanted: &str) -> Result<String, UpstrokeError> {
         message: format!("{}: {e}", path.display()),
     })?;
     Ok(interaction::render_question(&record.question))
+}
+
+fn reply_answer(question: &Question, reply: Reply) -> Result<Answer, UpstrokeError> {
+    let answer = match reply {
+        Reply::Decline => Answer::Declined,
+        Reply::Text(text) => interaction::interpret(question, &text),
+        Reply::Option(choice) => {
+            interaction::answer_for_option(question, choice).ok_or_else(|| {
+                UpstrokeError::Refused {
+                    message: format!(
+                        "there is no option {choice} on this question; it offers {}",
+                        if question.options.is_empty() {
+                            "none (answer it in your own words instead)".to_owned()
+                        } else {
+                            format!("1-{}", question.options.len())
+                        }
+                    ),
+                }
+            })?
+        }
+    };
+    if answer == Answer::Unanswered {
+        return Err(UpstrokeError::Refused {
+            message: "an empty answer would leave the task exactly as it is; pass --text with \
+                      the guidance, --option N, or --decline to give up on the task"
+                .to_owned(),
+        });
+    }
+    Ok(answer)
+}
+
+enum Located {
+    Legacy(FoundQuestion),
+    Topology(FoundOpen),
+}
+
+struct Census {
+    committed: Vec<String>,
+    unclassified: Vec<String>,
+}
+
+fn census(repo_root: &Path) -> Census {
+    let mut census = Census {
+        committed: Vec::new(),
+        unclassified: Vec::new(),
+    };
+    for run_id in rundir::run_dir_names(repo_root) {
+        match rundir::classify_run_dir(&rundir::public_dir(repo_root, &run_id)) {
+            RunDirClass::Committed => census.committed.push(run_id),
+            RunDirClass::Husk => {}
+            RunDirClass::Indeterminate => census.unclassified.push(run_id),
+        }
+    }
+    census
+}
+
+struct LegacyCandidates {
+    exact: Option<FoundQuestion>,
+    prefixed: Vec<FoundQuestion>,
+}
+
+fn legacy_candidates(repo_root: &Path, runs: &[String], wanted: &str) -> LegacyCandidates {
+    let wanted_upper = wanted.to_ascii_uppercase();
+    let mut candidates = LegacyCandidates {
+        exact: None,
+        prefixed: Vec::new(),
+    };
+    for run_id in runs {
+        let public = rundir::public_dir(repo_root, run_id);
+        let Ok(entries) = std::fs::read_dir(public.join("questions")) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let Some(question_id) = name.strip_suffix(".json") else {
+                continue;
+            };
+            let found = FoundQuestion {
+                run_id: run_id.clone(),
+                public: public.clone(),
+                question_id: question_id.to_owned(),
+            };
+            if question_id.eq_ignore_ascii_case(wanted) {
+                candidates.exact = Some(found);
+            } else if question_id.to_ascii_uppercase().starts_with(&wanted_upper) {
+                candidates.prefixed.push(found);
+            }
+        }
+    }
+    candidates
+}
+
+fn locate(repo_root: &Path, wanted: &str) -> Result<Located, UpstrokeError> {
+    let census = census(repo_root);
+    let topology = observe::open_question_candidates(repo_root, &census.committed, wanted);
+    if topology.is_silent() && census.unclassified.is_empty() {
+        return rundir::find_question(repo_root, wanted).map(Located::Legacy);
+    }
+    let legacy = legacy_candidates(repo_root, &census.committed, wanted);
+    decide(
+        wanted,
+        &rundir::runs_root(repo_root),
+        legacy,
+        topology,
+        &census.unclassified,
+    )
+}
+
+fn decide(
+    wanted: &str,
+    runs_root: &Path,
+    mut legacy: LegacyCandidates,
+    mut topology: observe::OpenCandidates,
+    unclassified: &[String],
+) -> Result<Located, UpstrokeError> {
+    let refused = |message: String| UpstrokeError::Refused { message };
+    match (legacy.exact, topology.exact) {
+        (Some(found), None) => return Ok(Located::Legacy(found)),
+        (None, Some(open)) => return Ok(Located::Topology(open)),
+        (Some(found), Some(open)) => {
+            return Err(refused(format!(
+                "`{wanted}` is the id of question {} in run {} and of question {} in run {}; an \
+                 answer to one id cannot say which run it is for, so nothing was written",
+                found.question_id, found.run_id, open.asked.question.id, open.run_id
+            )));
+        }
+        (None, None) => {}
+    }
+    if let Some(settled) = topology
+        .settled
+        .iter()
+        .find(|settled| settled.question_id.eq_ignore_ascii_case(wanted))
+    {
+        return Err(refused(no_longer_open(settled)));
+    }
+    let matched = legacy.prefixed.len() + topology.prefixed.len() + topology.settled.len();
+    if matched == 1 && unclassified.is_empty() && topology.unread.is_empty() {
+        if let Some(found) = legacy.prefixed.pop() {
+            return Ok(Located::Legacy(found));
+        }
+        if let Some(open) = topology.prefixed.pop() {
+            return Ok(Located::Topology(open));
+        }
+        if let Some(settled) = topology.settled.first() {
+            return Err(refused(no_longer_open(settled)));
+        }
+    }
+    let note = unread_note(unclassified, &topology.unread);
+    let mut named: Vec<&str> = legacy
+        .prefixed
+        .iter()
+        .map(|found| found.question_id.as_str())
+        .collect();
+    named.extend(
+        topology
+            .prefixed
+            .iter()
+            .map(|open| open.asked.question.id.as_str()),
+    );
+    named.extend(
+        topology
+            .settled
+            .iter()
+            .map(|settled| settled.question_id.as_str()),
+    );
+    Err(refused(match named.as_slice() {
+        [] => format!(
+            "no question with that id under {}{note}",
+            runs_root.display()
+        ),
+        [only] if topology.unread.is_empty() => format!(
+            "that prefix matches one question ({only}) among the runs that classified, and a \
+             run that did not may hold another; use the full question id{note}"
+        ),
+        [only] => format!(
+            "that prefix matches one question ({only}) among the runs that could be read, and a \
+             run that could not may hold another; use the full question id{note}"
+        ),
+        several => format!(
+            "that prefix matches {} questions ({}); use more characters{note}",
+            several.len(),
+            several.join(", ")
+        ),
+    }))
+}
+
+fn no_longer_open(settled: &observe::SettledQuestion) -> String {
+    format!(
+        "question {} of run {} is no longer open: the run's log has settled it, so an answer \
+         now would be applied to nothing. Nothing was written",
+        settled.question_id, settled.run_id
+    )
+}
+
+fn unread_note(unclassified: &[String], unobserved: &[String]) -> String {
+    let unclassified = match unclassified {
+        [] => String::new(),
+        [only] => format!(
+            "; and `{only}` could not be classified, so whether a run committed there is \
+             unknown — nothing has been deleted, and the next command classifies it again from \
+             its own read"
+        ),
+        several => format!(
+            "; and {} directories could not be classified ({}), so whether a run committed in \
+             them is unknown — nothing has been deleted, and the next command classifies them \
+             again from its own read",
+            several.len(),
+            several.join(", ")
+        ),
+    };
+    let unobserved = match unobserved {
+        [] => String::new(),
+        [only] => format!(
+            "; and the log of run `{only}` could not be read, so whether it holds a question \
+             with that id is unknown"
+        ),
+        several => format!(
+            "; and the logs of {} runs could not be read ({}), so whether one of them holds a \
+             question with that id is unknown",
+            several.len(),
+            several.join(", ")
+        ),
+    };
+    format!("{unclassified}{unobserved}")
+}
+
+fn answer_open(open: FoundOpen, reply: Reply) -> Result<Answered, UpstrokeError> {
+    let question = &open.asked.question;
+    let answers = open.paths.answers();
+    if let Some(existing) = interaction::read_answer(&answers, &question.id)? {
+        return Err(UpstrokeError::Refused {
+            message: format!(
+                "question {} was already answered ({}). Answers are applied once; if the task \
+                 needs different guidance it will raise a new question.",
+                question.id,
+                describe(&existing)
+            ),
+        });
+    }
+    let answer = reply_answer(question, reply)?;
+    observe::check_reply(&open.asked, &answer)?;
+    std::fs::create_dir_all(&answers).map_err(|source| UpstrokeError::Io {
+        path: answers.clone(),
+        source,
+    })?;
+    let record = interaction::AnswerRecord::unattributed(answer);
+    interaction::write_answer(&answers, &question.id, &record)?;
+    let run_is_live = rundir::is_running(&open.paths.public);
+    Ok(Answered {
+        run_id: open.run_id.clone(),
+        question_id: question.id.as_str().to_owned(),
+        answer: record.answer,
+        run_is_live,
+    })
 }
 
 fn describe(answer: &Answer) -> String {
@@ -280,5 +519,283 @@ mod tests {
         let rendered = show(&repo, "q-1").expect("show");
         assert!(rendered.contains("1) retry on frontier"), "{rendered}");
         assert!(rendered.contains("t1"), "names what parked: {rendered}");
+    }
+
+    fn legacy_at(run_id: &str, question_id: &str) -> FoundQuestion {
+        FoundQuestion {
+            run_id: run_id.to_owned(),
+            public: std::path::PathBuf::from("/nonexistent").join(run_id),
+            question_id: question_id.to_owned(),
+        }
+    }
+
+    fn open_at(run_id: &str, question_id: &str) -> FoundOpen {
+        FoundOpen {
+            run_id: run_id.to_owned(),
+            paths: rundir::RunPaths::from_parts(
+                std::path::PathBuf::from("/nonexistent/public").join(run_id),
+                std::path::PathBuf::from("/nonexistent/private").join(run_id),
+            ),
+            asked: observe::OpenAsked {
+                question: Question {
+                    id: QuestionId::from(question_id),
+                    kind: QuestionKind::Unblock,
+                    affected_tasks: vec![TaskId::from("t1")],
+                    context: String::new(),
+                    options: Vec::new(),
+                },
+                binds_an_agent: false,
+            },
+        }
+    }
+
+    fn settled_at(run_id: &str, question_id: &str) -> observe::SettledQuestion {
+        observe::SettledQuestion {
+            run_id: run_id.to_owned(),
+            question_id: question_id.to_owned(),
+        }
+    }
+
+    fn legacy(exact: Option<FoundQuestion>, prefixed: Vec<FoundQuestion>) -> LegacyCandidates {
+        LegacyCandidates { exact, prefixed }
+    }
+
+    fn schema_4(
+        exact: Option<FoundOpen>,
+        prefixed: Vec<FoundOpen>,
+        settled: Vec<observe::SettledQuestion>,
+        unread: &[&str],
+    ) -> observe::OpenCandidates {
+        observe::OpenCandidates {
+            exact,
+            prefixed,
+            settled,
+            unread: unread.iter().map(|run_id| (*run_id).to_owned()).collect(),
+        }
+    }
+
+    /// What `decide` chose, as a value a test can compare: the schema and the
+    /// question, or the refusal's sentence.
+    fn decided(
+        wanted: &str,
+        legacy: LegacyCandidates,
+        topology: observe::OpenCandidates,
+        unclassified: &[&str],
+    ) -> Result<(&'static str, String), String> {
+        let unclassified: Vec<String> = unclassified
+            .iter()
+            .map(|run_id| (*run_id).to_owned())
+            .collect();
+        match decide(
+            wanted,
+            Path::new("/repo/.upstroke/runs"),
+            legacy,
+            topology,
+            &unclassified,
+        ) {
+            Ok(Located::Legacy(found)) => Ok(("legacy", found.question_id)),
+            Ok(Located::Topology(open)) => Ok(("schema 4", open.asked.question.id.to_string())),
+            Err(refused) => Err(refused.to_string()),
+        }
+    }
+
+    #[test]
+    fn a_prefix_is_accepted_only_when_both_schemas_and_every_unread_run_leave_one_candidate() {
+        let refused = |result: Result<(&'static str, String), String>| match result {
+            Ok(chosen) => panic!("chose {chosen:?}"),
+            Err(message) => message,
+        };
+
+        let message = refused(decided(
+            "q-1",
+            legacy(
+                None,
+                vec![legacy_at("01A", "q-1A"), legacy_at("01B", "q-1B")],
+            ),
+            schema_4(None, vec![open_at("01T", "q-1T")], Vec::new(), &[]),
+            &[],
+        ));
+        assert!(
+            message.contains(
+                "that prefix matches 3 questions (q-1A, q-1B, q-1T); use more characters"
+            ),
+            "{message}"
+        );
+        let message = refused(decided(
+            "q-1",
+            legacy(None, vec![legacy_at("01A", "q-1A")]),
+            schema_4(
+                None,
+                vec![open_at("01T", "q-1T"), open_at("01T", "q-1V")],
+                Vec::new(),
+                &[],
+            ),
+            &[],
+        ));
+        assert!(
+            message.contains("that prefix matches 3 questions (q-1A, q-1T, q-1V)"),
+            "{message}"
+        );
+        let message = refused(decided(
+            "q-1",
+            legacy(None, vec![legacy_at("01A", "q-1A")]),
+            schema_4(None, vec![open_at("01T", "q-1T")], Vec::new(), &[]),
+            &[],
+        ));
+        assert!(
+            message.contains("that prefix matches 2 questions (q-1A, q-1T)"),
+            "{message}"
+        );
+
+        assert_eq!(
+            decided(
+                "q-1",
+                legacy(None, vec![legacy_at("01A", "q-1A")]),
+                schema_4(None, Vec::new(), Vec::new(), &[]),
+                &[],
+            ),
+            Ok(("legacy", "q-1A".to_owned()))
+        );
+        assert_eq!(
+            decided(
+                "q-1",
+                legacy(None, Vec::new()),
+                schema_4(None, vec![open_at("01T", "q-1T")], Vec::new(), &[]),
+                &[],
+            ),
+            Ok(("schema 4", "q-1T".to_owned()))
+        );
+
+        let message = refused(decided(
+            "q-1",
+            legacy(None, Vec::new()),
+            schema_4(None, vec![open_at("01T", "q-1T")], Vec::new(), &[]),
+            &["01DIR"],
+        ));
+        assert!(
+            message.contains(
+                "that prefix matches one question (q-1T) among the runs that classified, and a \
+                 run that did not may hold another; use the full question id; and `01DIR` could \
+                 not be classified"
+            ),
+            "the census's unclassified directory reaches a schema-4 prefix: {message}"
+        );
+        let message = refused(decided(
+            "q-1",
+            legacy(None, vec![legacy_at("01A", "q-1A")]),
+            schema_4(None, Vec::new(), Vec::new(), &["01RUN4"]),
+            &[],
+        ));
+        assert!(
+            message.contains(
+                "that prefix matches one question (q-1A) among the runs that could be read, and \
+                 a run that could not may hold another; use the full question id; and the log \
+                 of run `01RUN4` could not be read"
+            ),
+            "a schema-4 log that could not be read reaches a legacy prefix: {message}"
+        );
+
+        let message = refused(decided(
+            "q-1",
+            legacy(None, vec![legacy_at("01A", "q-1A")]),
+            schema_4(None, Vec::new(), vec![settled_at("01T", "q-1S")], &[]),
+            &[],
+        ));
+        assert!(
+            message.contains("that prefix matches 2 questions (q-1A, q-1S)"),
+            "a settled question is still a candidate: {message}"
+        );
+        let message = refused(decided(
+            "q-1",
+            legacy(None, Vec::new()),
+            schema_4(None, Vec::new(), vec![settled_at("01T", "q-1S")], &[]),
+            &[],
+        ));
+        assert!(
+            message.contains("question q-1S of run 01T is no longer open"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn a_full_id_answers_whatever_else_matches_or_went_unread() {
+        assert_eq!(
+            decided(
+                "q-1A",
+                legacy(Some(legacy_at("01A", "q-1A")), Vec::new()),
+                schema_4(
+                    None,
+                    vec![open_at("01T", "q-1AT"), open_at("01T", "q-1AV")],
+                    Vec::new(),
+                    &["01RUN4"],
+                ),
+                &["01DIR"],
+            ),
+            Ok(("legacy", "q-1A".to_owned()))
+        );
+        assert_eq!(
+            decided(
+                "q-1T",
+                legacy(
+                    None,
+                    vec![legacy_at("01A", "q-1TA"), legacy_at("01B", "q-1TB")]
+                ),
+                schema_4(Some(open_at("01T", "q-1T")), Vec::new(), Vec::new(), &[]),
+                &["01DIR"],
+            ),
+            Ok(("schema 4", "q-1T".to_owned()))
+        );
+        let both = decided(
+            "q-1",
+            legacy(Some(legacy_at("01A", "q-1")), Vec::new()),
+            schema_4(Some(open_at("01T", "q-1")), Vec::new(), Vec::new(), &[]),
+            &[],
+        );
+        assert!(
+            both.as_ref()
+                .is_err_and(|message| message.contains("cannot say which run it is for")),
+            "{both:?}"
+        );
+        let settled = decided(
+            "q-1S",
+            legacy(None, vec![legacy_at("01A", "q-1SA")]),
+            schema_4(None, Vec::new(), vec![settled_at("01T", "q-1S")], &[]),
+            &[],
+        );
+        assert!(
+            settled
+                .as_ref()
+                .is_err_and(|message| message.contains("q-1S of run 01T is no longer open")),
+            "{settled:?}"
+        );
+    }
+
+    /// Where only legacy runs answer, the composed path refuses in the legacy
+    /// finder's own sentences: checked against `rundir::find_question` itself for
+    /// the two refusals a fixture can reach (no fixture classifies a directory
+    /// `Indeterminate`; see `RunDirClass`).
+    #[test]
+    fn the_composed_refusals_are_the_legacy_finders_sentences_where_only_legacy_runs_answer() {
+        let tree = scratch("composed");
+        let repo = tree.path().join("repo");
+        seed(&repo, "01RUN", "q-1A");
+        seed(&repo, "02RUN", "q-1B");
+        for wanted in ["q-1", "q-nope"] {
+            let committed = census(&repo).committed;
+            let composed = decide(
+                wanted,
+                &rundir::runs_root(&repo),
+                legacy_candidates(&repo, &committed, wanted),
+                schema_4(None, Vec::new(), Vec::new(), &[]),
+                &[],
+            )
+            .err()
+            .map(|refused| refused.to_string());
+            let today = rundir::find_question(&repo, wanted)
+                .err()
+                .map(|refused| refused.to_string());
+            assert!(composed.is_some(), "{wanted}: refused");
+            assert_eq!(composed, today, "{wanted}");
+        }
     }
 }

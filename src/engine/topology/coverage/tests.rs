@@ -961,8 +961,10 @@ fn witness_run_started() -> crate::topology::events::RunStarted4 {
             policy: RunnerContract::HostV1,
             image: None,
             credential_volumes: None,
+            mounts: Vec::new(),
         },
         probed_agents: vec!["claude-code".to_owned()],
+        shell: ShellKind::Sh,
         branch: "upstroke/run-st07".to_owned(),
         integration_ref: GitRef::from("refs/upstroke/integration"),
         base_sha: CommitSha::from("0f5c1c4"),
@@ -1427,6 +1429,8 @@ fn the_container_launch_funnels_execute_both_phases_under_the_production_adapter
         command: vec!["/bin/sh".to_owned(), "-c".to_owned(), "exit 0".to_owned()],
         workdir: Some("/work".to_owned()),
         read_only_root: true,
+        user: None,
+        open_stdin: false,
     };
     let plan = LaunchPlan {
         private_root: root.clone(),

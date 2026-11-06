@@ -72,7 +72,9 @@ Per-agent credential volume names (R20, operator-owned).
 
 ## `mounts: Option<Vec<RawRunnerMount>>,`
 
-Extra mounts the boundary receives beyond the ones the runner composes.
+Extra mounts the boundary receives beyond the ones the runner composes,
+recorded as part of the run's execution identity (see `RunnerSelection`'s
+`mounts`).
 
 ## `#[serde(flatten)]`
 
@@ -333,8 +335,45 @@ recorded sequential ceiling, and continues.
 
 ## `Fresh,`
 
-A run about to be created, or a preview of one (`upstroke validate`).
-Today's config is the whole truth: every section governs.
+A sequential (schema 1–3) run about to be created. Today's config is the
+whole truth: every section governs, and what the sequential engine cannot
+perform — `max_parallel` above 1, a container selection — refuses. Since
+PR12 no production command creates such a run (`upstroke run` creates a
+schema-4 one), so only the legacy writer the test configuration keeps
+reaches this reading.
+
+## `Topology,`
+
+A schema-4 run about to be created, or a preview of one (`upstroke
+validate`, `upstroke run --dry-run`, `upstroke capacity`, and
+[`load`]'s default). Today's config is the whole truth and every section
+governs, as under [`EngineLimits::Fresh`] — the gate shapes refuse alike —
+but the parallel keys are what this engine performs: `max_parallel` above 1
+is accepted, `max_merge_repairs`, `max_per_agent` and `max_per_pool` are
+acted on without the "not acted on" warning, and `[runner] kind =
+"container"` is a selection rather than a refusal.
+
+## `TopologyResume,`
+
+A resume of a schema-4 run. The run's own record governs what it
+recorded — the runner, the gates, `max_parallel` and `max_merge_repairs` —
+so today's `[runner]` and `[[gates]]` are read to be compared, and a
+well-formed selection that differs from the record is warned about while the
+record is what runs (the recorded runner is rebuilt and the configured one
+ignored). The gates take the compare-only reading
+[`EngineLimits::SequentialResumeWithRecordedGates`] has, because a schema-4
+log always records its gates, so today's `[[gates]]` is never refused over:
+even a shape a fresh run refuses is announced instead (`refuse_or_announce`).
+**`[runner]` is still read strictly first.** `parse_runner` runs `read_runner`
+under every reading, and only the legacy container refusal
+(`refuse_legacy_container_selection`) is skipped here, so a malformed runner
+section — not a table of the accepted keys and types, an unknown key, an
+unrecognized `kind`, `kind = "container"` without `image`, an empty `image`,
+`image`, `credential_volumes` or `mounts` on the host runner, an empty
+credential-volume entry, a mount with an empty `source` or `target` —
+refuses this resume as it would a fresh run, before anything is compared
+(PR12-REG6-RESUME-CONFIG-NOTES). The parallel keys parse as under
+[`EngineLimits::Topology`]. Chosen only by [`EngineLimits::for_resume`].
 
 ## `SequentialResume,`
 
@@ -368,10 +407,8 @@ whose log does (`gates_recorded`) or does not record its gates —
 any earlier resume that established them.
 
 Anything past [`LAST_SEQUENTIAL_SCHEMA`] is not a sequential run's
-resume, so it gets the ordinary reading rather than the legacy one.
-Today that path is unreachable — no schema above it exists — and what it
-should do once one does is the activation question, which is not this
-slice's to answer.
+resume: it is a schema-4 run's, and gets [`EngineLimits::TopologyResume`]
+(PR12's answer to what had been the activation question).
 
 ## `#[derive(Debug, Clone, PartialEq, Eq)]`
 
@@ -422,10 +459,21 @@ Per-agent credential volume names (R20).
 
 ## `pub mounts: Vec<RunnerMount>,`
 
-Extra mounts, parsed and carried. Nothing in this slice acts on them —
-`production_effect` is "none" — and, more durably, they are **not part of
-the recorded execution identity**: INV-23's `RunnerPolicy` has four
-fields and none of them is a mount list.
+Extra mounts, parsed and carried here, and since root's recorded-mounts
+disposition (2026-11-02) acted on: a fresh container run resolves them
+before any lock (`runner::container::resolve`) into the recorded
+`RunnerPolicy.mounts`, which is part of the execution identity, digested
+into the marker, recorded in the owner record and `run_started`, and given
+to every role and probe. The parse below still accepts any non-empty
+source and target, relative ones included; resolution is what refuses a
+relative source, a target outside the container's normal form, a reserved
+or nested target, and a source that reaches the repository, its Git, the
+private root or a credential location. On a resume today's mounts are only
+compared, by meaning, and warned about: the record wins.
+
+Earlier this section said they were not part of the recorded execution
+identity, because INV-23's `RunnerPolicy` had four fields and no mount list
+(`PR6B-MOUNTS-ARE-NOT-EXECUTION-IDENTITY`). That gap is closed.
 
 ## `pub from_config: bool,`
 
@@ -507,6 +555,20 @@ Validated and kept, acted on by the topology engine.
 
 `[engine] max_per_pool` (§17); defaults to the configured
 `max_parallel`. Validated and kept, acted on by the topology engine.
+
+## `pub explicit_max_per_agent: Option<u32>,`
+
+`[engine] max_per_agent` as written, `None` when the key is absent. The two
+`explicit_` fields exist for a schema-4 resume, which runs at its recorded
+`max_parallel` rather than today's: `permits.agent_pool_slots` gives both slot
+limits "default max_parallel", and on a resume that default is the recorded
+width, which the resolved `max_per_agent` (defaulted to *today's*
+`max_parallel`) cannot express. A value that is written governs either way
+(`engine::topology::entry`).
+
+## `pub explicit_max_per_pool: Option<u32>,`
+
+`[engine] max_per_pool` as written; see `explicit_max_per_agent`.
 
 ## `pub interaction_mode: InteractionMode,`
 

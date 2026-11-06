@@ -152,7 +152,10 @@ The §13 ceiling that stopped the run, if one did.
 
 ## `#[serde(default)]`
 
-What each pool drained, folded from this run's own attempts (§13).
+What each pool drained (§13), folded from this run's own attempts: each
+attempt record, and each review pass it carries, in the pool it names
+(`capacity::drain_of`). A schema-4 report also counts each integration review
+pass that names a pool, once (`from_topology`, below).
 
 ## `#[serde(default)]`
 
@@ -172,6 +175,31 @@ rather than derived, exactly as `running` is.
 
 Not to be confused with `RunStatus::interrupted`, which is a `u32`
 counting the attempts that were cut off mid-flight. This is the yes/no.
+
+## `#[serde(default, skip_serializing_if = "std::ops::Not::not")]`
+
+`questions_in_log`: whether this run keeps its questions in its log rather
+than in payload files. A schema-1..3 run writes one file per question under
+`.upstroke/runs/<id>/questions`, and `render` points at that directory. A
+schema-4 run writes none, so its summary says to use `upstroke answer <question
+id>` instead (`from_topology` sets it). Until brief 3's S9 witness, `upstroke
+run` and `resume` on a schema-4 run named a directory that is not there
+(V129, case E).
+
+False, the legacy value, is the default and is never serialized, so a
+legacy report's JSON is byte-for-byte what it was.
+
+## `pub unattributed_cost_incomplete: bool,`
+
+Whether review spend the log attributes to no task is unknown: an
+integration review pass that no verification start pairs with reported no
+cost, or a `merge_verification_interrupted` that no start pairs with (K4,
+`select::IntegrationReviews::unattributed_spend_unknown`). No task row can
+carry it, so it is carried here and [`RunReport::total_is_floor`] reads it.
+A valid log has neither: the fold admits a verification's terminal only
+after its start. Only `from_topology` sets it; `build_report` leaves it
+false. Defaulted and never serialized when false, as `questions_in_log` is,
+so a legacy report's JSON is unchanged.
 
 ## `#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]`
 
@@ -200,7 +228,14 @@ than no ledger.
 Both halves count. The review side has been marked since step 9; the
 worker side became reachable the moment an implementer could report
 tokens without dollars, and is now the *normal* case for a
-codex-implemented run rather than an edge one.
+codex-implemented run rather than an edge one. A schema-4 report also
+counts the review spend no task row carries (`unattributed_cost_incomplete`,
+K4).
+
+For a schema-4 run this is the one treatment of unknown spend: the spend
+approval asks it of the report of the same log (`engine::topology::run`'s
+`spend_is_a_floor`, K5), so what the ledger marks `?` and what the approval calls
+a floor cannot differ.
 
 ## `fn committed_count(&self) -> usize {`
 
@@ -225,6 +260,186 @@ Build a report from a replayed log.
 function, so what an operator sees mid-run and what the file says
 afterwards cannot drift into disagreeing.
 
+## `pub(crate) fn from_topology(`
+
+The schema-4 run's [`RunReport`], projected from the finished fold and the
+run's events (PR12's S9), so that `upstroke run` and `upstroke resume` print
+and exit as they always have. The run's own `report.json`
+(`engine::topology::finalize`, a `TopologyReport`) is written by the loop and
+stays the authority; this is the command's summary of the same run.
+
+- Tasks are the registry's entries, original and repair alike, in key order.
+  A merged task is committed at the `merged_sha` of the `task_merged` that
+  satisfied it; a failed one carries the failure of its last attempt that was
+  not interrupted (an interrupted attempt returns its task to pending and never
+  fails it, so a failed task's reason is read past one); a task an open
+  question names is parked on it; anything else is queued, or skipped when the
+  run halted or stopped at a budget — except that a pending task with a failed
+  task in its transitive dependency closure is blocked ([`derived_blocked`])
+  when the run completed, parked or has no `run_finished`.
+
+  That exception is the canonical derived Blocked view
+  (`decisions.run_end_policy.derived_outcome`, "Pending with a Failed task in
+  its transitive dependency closure (derived Blocked)", and
+  `decisions.repairs.terminal_failure`, "dependents Blocked as a derived
+  view"). The durable state stays `Pending`: the fold keeps it, completes the
+  run over it (`complete_shape`), and its own `report.json` still names it
+  pending. Only this summary reads it. Until PR12-INV7-BLOCKED-TASK-REPORTED-QUEUED
+  (first in `fffa73fa`) every such task at `Complete` was `Queued`, and
+  `upstroke run` and `upstroke resume` ended a finished run by printing work
+  that could never run as "queued", hiding why it had not. A halted or
+  budget-stopped run keeps `Skipped` for every task it did not reach, failed
+  ancestor or not, as it always has (the S9 halted guard,
+  `engine::tests::a_halted_schema_4_run_projects_where_it_halted_and_its_outcome`,
+  holds its failed task's dependent skipped); a pending task behind a parked
+  one, or behind any task that has not failed, is still queued.
+- Each task's attempts are the records the log holds for it, in log order:
+  `attempt_finished` for an attempt that did not succeed, `candidate_prepared`
+  for one that did, and `attempt_interrupted` for one whose coordinator did not
+  see it end. The fold allows no other successful settlement (`check_attempt`),
+  and `select::Spend::replay` counts the same first two events. So the trail,
+  the model, the duration, the worker cost and the session are the legacy
+  report's derivations over the same record type, and the review cost, the
+  review models and the unknown-cost flag start from them.
+
+  Until brief 3's S9 witness this read `attempt_finished` alone. A committed
+  task then showed no model, duration or cost, and the total left out every
+  successful attempt: the CLI's case F printed `total: $0.0000` beside a
+  budget stop that recorded $0.02.
+- An interrupted attempt is recorded with unknown spend (DESIGN §15, INV-14).
+  `attempt_interrupted` carries no attempt record, so `interrupted_record`
+  builds one from the `attempt_started` of the same identity: task key,
+  generation and attempt number, which is how the fold names an attempt in
+  flight (`check_attempt_interrupted`) and how `export` pairs a start with its
+  settlement. The fold admits `attempt_interrupted` only for the identity in
+  flight, so an interrupted attempt is never also finished or prepared and is
+  counted once. Its record has no cost, so its task's `cost_incomplete`, and
+  `RunReport::total_is_floor`, say the total is a floor, and its pool's drain
+  row counts it as unpriced; nothing is added to the total and no price is
+  invented, so the total still equals `Spend::replay`'s and no mismatch
+  warning appears. An interrupted settlement whose start the log does not hold
+  (a valid log has none) is still kept, naming no tier or model, and a warning
+  says so.
+
+  Until J12 (regular review 3, finding 1) this read `attempt_finished` and
+  `candidate_prepared` alone. After a coordinator was killed mid-attempt and
+  the run resumed, the report held only the attempts that completed, with no
+  warning, and printed its known spend, `$0.04`, as the whole total.
+- Every clone here copies a value the borrowed log or fold holds into the
+  owned report: the report is an owned snapshot, returned to a caller that
+  outlives neither input's borrow (§6).
+- Merge verifications charge review passes that belong to no attempt record.
+  `select::IntegrationReviews::replay` collects them from `merge_prepared`'s
+  verification, a `merge_rejected` whose disposition is `CodeRejected`,
+  `merge_verification_unavailable` and `merge_verification_charged`. It
+  attributes each pass as `Spend::replay` charges it: to the task whose
+  candidate the log names, or to no task for a terminal that no start pairs
+  with. The fold admits a sequence's passes once (`check_spend_unrecorded`),
+  so each pass is counted once:
+  - a task's passes join its review cost, its review models and its
+    unknown-cost flag (`review_cost_incomplete`);
+  - an unattributed pass's known cost joins the total, and if one of them has
+    no cost, a warning says the total is a floor;
+  - every pass that names a pool counts in that pool's drain row: in
+    `attempts`, with its known cost in `cost_usd` and an unknown one in
+    `unpriced`.
+
+  The total is the tasks' own totals plus the unattributed passes' known
+  costs. A warning names any difference of more than 1e-9 from
+  `Spend::replay`'s run total; the log is the authority.
+  Until K4, `RunReport::total_is_floor` read the task rows only, so a total
+  whose only unknown cost was an unattributed pass printed without its `?`,
+  and only that warning said it was a floor. It also reads
+  `unattributed_cost_incomplete` now. A valid log has no unattributed pass:
+  the fold admits a verification's terminal only after its start.
+- A merge verification that ended `merge_verification_interrupted` has
+  unknown spend (DESIGN §26: the coordinator that died holding it recorded no
+  cost for anything it was running, and what no record carries stays unknown
+  spend). `IntegrationReviews` keeps the interruption against the task whose
+  candidate it verified (K4, regular review 4, finding 4), and that task's
+  `review_cost_incomplete` reads `IntegrationReviews::spend_unknown`, so its
+  row and the total read as floors. The passes a `merge_verification_charged`
+  recorded before the interruption stay in the task's review cost, the total
+  and the pool drain, once each. An interruption no start pairs with sets
+  `unattributed_cost_incomplete` and adds a warning saying so.
+
+  Until K4 the replay ignored that terminal. After a coordinator died
+  mid-verification and the candidate was verified again, the report printed
+  the known charges as the whole total and `total_is_floor` was false, with a
+  $2.50 charge and without one alike; the uncharged run printed `$0.0000`
+  with no qualification (the reviewer's focused guards).
+
+  Until J3 (`PR12-REPORT-OMITS-INTEGRATION-REVIEW-SPEND`) this read attempt
+  records alone, so its review costs, its total and its pool drain all missed
+  the review passes merge verifications charge.
+- `halted_at` and `budget_stop` are set only as the fold's own outcome says,
+  so [`RunReport::outcome`] agrees with it; the entry compares the two and
+  warns if they ever disagree.
+
+## `fn derived_blocked(`
+
+The derived Blocked view of a schema-4 run, for [`RunReport::from_topology`]:
+every task the fold holds `Pending` with a `Failed` task in its transitive
+dependency closure, each mapped to the dependency it is blocked by.
+
+The closure is the one the fold's completion rule computes
+(`RunState::blocked_tasks`, behind `complete_shape`), from the same facts —
+the registry's dependency keys (`TaskEntry::deps`) and the fold's task
+states — read here through `TopologyFold::registry` and
+`TopologyFold::task_state`, because the fold's own function is private to it.
+It grows until a pass adds nothing, so a plan that lists a dependent before
+the task it waits on is still closed.
+
+The dependency it names is the first of the task's own dependencies, in
+`deps` order, that is failed or itself blocked: the legacy [`settle`]'s
+naming, so a direct dependent of a failed task names that task, and a
+transitive one names the blocked dependency it waits on, whose own row names
+the next link. The answer is the same whatever order the passes found the
+closure in. A fold with no registry (no `run_started`) blocks nothing.
+
+## `fn interrupted_record(`
+
+The attempt record of an interrupted attempt, from its `attempt_interrupted`
+and, when the log holds it, the `attempt_started` of the same identity. What
+the start recorded is kept: the attempt number, the tier and model it was bound
+to, its pool, and whether it resumed a session. What nobody observed is not
+invented: no cost, no usage, no reviews and no session of its own, and a zero
+duration, as the sequential engine's interrupted record has. Its failure is
+`Interrupted`, from the worker, and its reason is the event's own detail, which
+says why the attempt was settled interrupted (a coordinator that did not
+survive it, or a halt that cancelled it).
+
+It is built by `classify::attempt_record`, the one production construction of
+an attempt's ledger line (`runner::contract`'s
+`an_attempts_ledger_line_is_constructed_in_one_production_place`), classified
+by `classify::interrupted_failure`. Until the J12 follow-up (regular review 3,
+finding 1) it was a second `AttemptRecord` literal here, and that census failed
+on it.
+
+`attempt_record` reads `duration`, `cost_usd`, `session_id` and `usage` from the
+outcome it is given, and `unobserved` gives it a zero duration and none of the
+other three, so the record says what the literal said. Its `status`, `diff`,
+`detail` and `transcript_path` are placeholders that `attempt_record` does not
+read: they reach neither the record nor the report. `OutcomeStatus` has no
+variant for an attempt nobody saw end, so `AgentError` there stands for nothing
+observed. The feedback carrier is schema 4's, `AttemptRecord`, as the schema-4
+driver's own settlement passes; the failure carries no feedback, so the
+record's failure detail is empty under either carrier.
+
+`AttemptFacts::tier` is a `crate::ir::Tier`, which has no unknown value. With no
+start, the record is built with `Tier::Small` as a placeholder and its tier is
+cleared before it is returned, so it names no tier the log does not hold; the
+model is passed empty, the pool as none and the attempt as not resumed. That is
+the narrowest place to remove the placeholder: `attempt_record`, `AttemptFacts`
+and every other caller stay as they are, and a record with a start is exactly
+what `attempt_record` built. The report's tests pin both records whole
+(`an_interrupted_attempts_record_comes_from_the_one_record_builder_and_names_nothing_it_lacks`).
+
+Its copies are the event's detail into the failure's owned reason, which
+`attempt_record` copies again into the record, and the start's pool into the
+owned record: owned snapshots of the borrowed log, as the rest of
+`from_topology` takes (§6).
+
 ## `pub(super) struct ReportHeader<'a> {`
 
 Everything a report needs that is not the plan or the state, kept together
@@ -237,6 +452,25 @@ Whether an engine is driving this run right now.
 ## `pub(super) interrupted: bool,`
 
 Whether this run stopped without ever recording that it finished.
+
+## `pub(super) fn build_report(header: ReportHeader<'_>, plan: &Plan, state: &RunState) -> RunReport {`
+
+The legacy report, from a header, the plan and a replayed state.
+
+Each task position is read with checked access: the plan's task, its settled
+state and its progress row. A position that one of them does not hold gets no
+row and a warning that names it and says its spend, if any, is not in the
+total, rather than a panic, a row dropped without a word or one invented to
+fill the gap. A valid state has none: `RunState` holds one row per plan task,
+and the log orders only positions it found by id. A function-local
+`#[deny(clippy::indexing_slicing)]` holds the function to this (J17, regular
+review 3, finding 5). Until J17 it read `plan.tasks[index]`,
+`settled[index]` and `state.progress[index]`. Those reads were older than the
+standard, and `questions_in_log` (a87d2439) brought the whole body under §7
+when it changed the function.
+
+The state's halt, questions and budget stop are cloned into the report, which
+is an owned snapshot of a state the caller keeps (§6).
 
 ## `.chain((0..plan.tasks.len()).filter(|i| !state.order.contains(i)))`
 
@@ -363,17 +597,46 @@ step instead, so parked work can be skipped past.
 
 Unreachable on a validated plan; degrade to plan order.
 
+## `fn switched_the_checkout(&self) -> bool {`
+
+Whether this run checked its branch out over the operator's checkout, which
+is what the summary's `git switch -` returns from. A schema-1..3 run does: the
+coordinator's `create_branch` switches to the run branch when it starts, and a
+resume's `switch_branch` does when the operator is elsewhere. A schema-4 run
+never does: it integrates onto its branch through refs and leaves the user's
+checkout untouched (DESIGN §14, INV-12), so a `git switch -` printed after it
+moves the operator to whatever branch they last left, or fails when there is
+none (PR12-REG6-TOPOLOGY-RETURN-HINT; the regression lens read the line in the
+C1 and C2 cell streams).
+
+The distinction is the existing projection one rather than a new field:
+`from_topology`, the one projection of a schema-4 run, is the only construction
+that sets `questions_in_log`, and every legacy one — `build_report`,
+`from_state`, a deserialized `report.json` — leaves it false. A field of its
+own would change the serialized `RunReport` and every literal that spells it,
+for a fact the projection already carries.
+
 ## `pub fn render(&self) -> String {`
 
 Human-readable report with one sanitized payload per layout line.
 Control characters in recorded fields cannot add terminal commands or
 lines. Rendering leaves the report's serializable values unchanged.
 
+The branch line keeps `(return with: git switch -)` only for a run that
+switched the checkout ([`switched_the_checkout`]); a schema-4 summary, fresh
+or resumed, names the branch alone. The legacy wording is unchanged.
+
 ## `let partial = if task.review_cost_incomplete { "?" } else { "" };`
 
 `?` marks a total with unreported components — the
 Copilot route bills nothing back, so a two-pass review
 shows one reviewer's spend and must not read as both.
+
+## `([], _) if task.review_cost_incomplete => " + review $?".to_owned(),`
+
+A committed task with no review pass on record whose review spend is still
+unknown: its candidate's verification was interrupted before any pass was
+charged (K4). Saying nothing would read as an unreviewed, free task.
 
 ## `(models, None) => format!(" + review {} $?", models.join(", ")),`
 
