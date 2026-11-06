@@ -338,9 +338,44 @@ struct ReapingState {
 }
 
 struct Armed {
+    /// The runner's dormant container-label backstops (PR11 follow-up A's):
+    /// one per distinct set of lease paths its invocations carried -- in
+    /// practice one, armed at its first launch -- each holding nothing while
+    /// its coordinator lives and taking those paths itself at its
+    /// coordinator's death, before it may act
+    /// ([`crate::agent::proc::BackstopHold::BeforeActing`]); kept for the
+    /// runner's life, and past an unsettled drop until the process exits.
     #[cfg(unix)]
-    reaper: crate::agent::proc::ContainerReaper,
+    dormant: Vec<DormantBackstop>,
     scope: ReaperContainerScope,
+}
+
+#[cfg(unix)]
+struct DormantBackstop {
+    leases: Vec<PathBuf>,
+    _reaper: crate::agent::proc::ContainerReaper,
+}
+
+#[cfg(unix)]
+impl DormantBackstop {
+    fn arm(
+        scope: &ReaperContainerScope,
+        leases: &[PathBuf],
+        run_lock: &Path,
+    ) -> Result<Self, UpstrokeError> {
+        Ok(Self {
+            leases: leases.to_vec(),
+            _reaper: crate::agent::proc::arm_container_reaper(
+                crate::topology::effects::ProcessSite::Terminate,
+                scope,
+                crate::agent::proc::BackstopHold::BeforeActing { leases, run_lock },
+            )?,
+        })
+    }
+
+    fn covers(&self, leases: &[PathBuf]) -> bool {
+        leases.iter().all(|path| self.leases.contains(path))
+    }
 }
 
 fn refuse_unless_selected(
@@ -364,9 +399,29 @@ fn refuse_unless_selected(
 }
 
 impl Armed {
+    const fn new(scope: ReaperContainerScope) -> Self {
+        Self {
+            #[cfg(unix)]
+            dormant: Vec::new(),
+            scope,
+        }
+    }
+
+    /// A dormant backstop whose lease paths include all of `leases`, armed
+    /// now if none does, before anything of the invocation launches.
+    #[cfg(unix)]
+    fn cover_dormant(&mut self, leases: &[PathBuf], run_lock: &Path) -> Result<(), UpstrokeError> {
+        if self.dormant.iter().any(|backstop| backstop.covers(leases)) {
+            return Ok(());
+        }
+        self.dormant
+            .push(DormantBackstop::arm(&self.scope, leases, run_lock)?);
+        Ok(())
+    }
+
     fn kept_until_the_process_exits(self) {
         #[cfg(unix)]
-        std::mem::forget(self.reaper);
+        std::mem::forget(self.dormant);
     }
 }
 
@@ -1110,13 +1165,26 @@ impl ContainerRunner {
         call: RunnerCall<'_>,
     ) -> Result<ProcessOutput, RunnerError> {
         let parts = call.into_parts();
+        // The cleanup lease paths (R28) the call carried across a thread
+        // boundary. Entered as this thread's own cleanup scope for the whole
+        // invocation, so every bounded runtime question it asks here -- the
+        // credential-volume inspection before the create, the create, every
+        // observation, stop and removal, and the cancellation after a failed
+        // launch alike -- forks its helper's reaper holding them; and handed
+        // explicitly to what runs elsewhere: the container-label backstop,
+        // which takes them at its coordinator's death before it may act, and
+        // the attached start's own thread (`PR12-INV9-CONTAINER-HELPER-CLEANUP-LEASE`).
+        let carried: &[PathBuf] = parts.leases;
+        #[cfg(unix)]
+        let _carried_scope = crate::rundir::enter_carried_cleanup_scope(carried);
+        let leases = invocation_cleanup_leases(carried);
         match (parts.container, &self.hooks) {
-            (Some(observer), _) => self.contain(request, &parts.cancellation, observer),
+            (Some(observer), _) => self.contain(request, &parts.cancellation, observer, &leases),
             (None, Some(hooks)) => {
                 let mut hooks = hooks.lock().unwrap_or_else(PoisonError::into_inner);
-                self.contain(request, &parts.cancellation, &mut **hooks)
+                self.contain(request, &parts.cancellation, &mut **hooks, &leases)
             }
-            (None, None) => self.contain(request, &parts.cancellation, &mut NoHooks),
+            (None, None) => self.contain(request, &parts.cancellation, &mut NoHooks, &leases),
         }
     }
 
@@ -1125,6 +1193,7 @@ impl ContainerRunner {
         request: &RunnerRequest,
         cancellation: &Cancellation,
         hooks: &mut dyn ContainerHooks,
+        leases: &[PathBuf],
     ) -> Result<ProcessOutput, RunnerError> {
         if cancellation.is_cancelled() {
             return Err(RunnerError::cancelled(
@@ -1147,6 +1216,7 @@ impl ContainerRunner {
                 &request.command.stdin,
                 deadline,
                 cancellation,
+                leases,
             )
             .map_err(never_started)?;
 
@@ -1245,6 +1315,31 @@ fn unrepresentable_deadline(request: &RunnerRequest) -> UpstrokeError {
     }
 }
 
+/// The cleanup lease paths (R28) this invocation's helpers hold: the paths
+/// its call carries across a thread boundary (`CallParts.leases`, which a
+/// worker or integration pipeline's `Carried` call fills from the
+/// coordinator's scope), joined with the scope the invoking thread is itself
+/// inside (a serial caller's), in that order and without repetition. Nothing
+/// else is leased: no other run's paths, and no process-wide lock.
+///
+/// Every boundary below the runner takes them explicitly: the container-label
+/// backstop the launch is covered by, the runtime's create and start, and
+/// through them every bounded question about the container and the attached
+/// start's own supervisor thread, which inherits no thread's scope
+/// (`PR12-INV9-CONTAINER-HELPER-CLEANUP-LEASE`).
+fn invocation_cleanup_leases(carried: &[PathBuf]) -> Vec<PathBuf> {
+    #[cfg(unix)]
+    let mut leases = crate::rundir::active_cleanup_lease_paths();
+    #[cfg(not(unix))]
+    let mut leases: Vec<PathBuf> = Vec::new();
+    for path in carried {
+        if !leases.contains(path) {
+            leases.push(path.clone());
+        }
+    }
+    leases
+}
+
 fn bounded(bytes: &[u8], limit: usize) -> (String, bool) {
     if bytes.len() <= limit {
         return (String::from_utf8_lossy(bytes).into_owned(), false);
@@ -1257,6 +1352,7 @@ fn bounded(bytes: &[u8], limit: usize) -> (String, bool) {
 }
 
 pub(super) mod cover {
+    use std::path::PathBuf;
     use std::sync::PoisonError;
     use std::time::Instant;
 
@@ -1281,9 +1377,14 @@ pub(super) mod cover {
         stdin: &'a [u8],
         deadline: Instant,
         cancellation: Cancellation,
+        leases: &'a [PathBuf],
     }
 
     impl Reaping {
+        #[expect(
+            clippy::too_many_arguments,
+            reason = "the cover's inputs are each the invocation's own: the runtime and identity the backstop lists with, the spec and stdin it launches, the deadline and cancellation it is bounded by, and the cleanup leases its helpers hold"
+        )]
         pub(in crate::runner::container::exec) fn cover<'a>(
             &'a self,
             runtime: &dyn ContainerRuntime,
@@ -1292,26 +1393,31 @@ pub(super) mod cover {
             stdin: &'a [u8],
             deadline: Instant,
             cancellation: &Cancellation,
+            leases: &'a [PathBuf],
         ) -> Result<(Covered<'a>, CoveredCreate<'a>, CoveredStart<'a>), UpstrokeError> {
             let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-            if let Some(armed) = &state.armed {
-                refuse_unless_selected(&armed.scope, &spec.labels)?;
-            } else {
-                let scope = ReaperContainerScope::new(
-                    runtime.reaper_program(),
-                    &identity.private_root,
-                    &identity.incarnation,
-                )?;
-                refuse_unless_selected(&scope, &spec.labels)?;
-                state.armed = Some(Armed {
-                    #[cfg(unix)]
-                    reaper: crate::agent::proc::arm_container_reaper(
-                        crate::topology::effects::ProcessSite::Terminate,
-                        &scope,
-                    )?,
-                    scope,
-                });
-            }
+            let armed = match &mut state.armed {
+                Some(armed) => {
+                    refuse_unless_selected(&armed.scope, &spec.labels)?;
+                    armed
+                }
+                unarmed @ None => {
+                    let scope = ReaperContainerScope::new(
+                        runtime.reaper_program(),
+                        &identity.private_root,
+                        &identity.incarnation,
+                    )?;
+                    refuse_unless_selected(&scope, &spec.labels)?;
+                    unarmed.insert(Armed::new(scope))
+                }
+            };
+            // Before anything of the invocation launches, a backstop for its
+            // lease paths: it holds nothing while this coordinator lives, and
+            // takes them itself at the coordinator's death before it may act.
+            #[cfg(unix)]
+            armed.cover_dormant(leases, &crate::rundir::lock_file(&identity.run_dir))?;
+            #[cfg(not(unix))]
+            let _ = armed;
             state.in_flight = state.in_flight.saturating_add(1);
             Ok((
                 Covered {
@@ -1324,6 +1430,7 @@ pub(super) mod cover {
                     stdin,
                     deadline,
                     cancellation: cancellation.clone(),
+                    leases,
                 },
             ))
         }
@@ -1337,16 +1444,17 @@ pub(super) mod cover {
 
     impl Drop for Covered<'_> {
         fn drop(&mut self) {
+            let established = matches!(
+                self.fate,
+                Some(ProcessFate::Gone | ProcessFate::NeverStarted)
+            );
             let mut state = self
                 .reaping
                 .state
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
             state.in_flight = state.in_flight.saturating_sub(1);
-            if !matches!(
-                self.fate,
-                Some(ProcessFate::Gone | ProcessFate::NeverStarted)
-            ) {
+            if !established {
                 state.unsettled = true;
             }
         }
@@ -1379,6 +1487,14 @@ pub(super) mod cover {
         pub const fn cancellation(&self) -> &Cancellation {
             &self.cancellation
         }
+
+        /// The cleanup lease paths (R28) the invocation carried, for the
+        /// attached start's own supervisor thread, which is inside no cleanup
+        /// scope of its own.
+        #[must_use]
+        pub const fn leases(&self) -> &'a [PathBuf] {
+            self.leases
+        }
     }
 
     #[cfg(test)]
@@ -1407,6 +1523,7 @@ pub(super) mod cover {
                     stdin: &[],
                     deadline,
                     cancellation: Cancellation::new(),
+                    leases: &[],
                 }
             }
         }

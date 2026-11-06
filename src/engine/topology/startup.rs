@@ -13,7 +13,7 @@ use crate::runner::container::census::{
     run_startup_census,
 };
 use crate::runner::container::runtime::{ContainerRuntime, OwnerLiveness};
-use crate::workspace_manager::WorkspaceManager;
+use crate::workspace_manager::{EffectHooks, WorkspaceManager};
 
 use super::create::{
     LocationRecord, RETIRED_ROOT, claim_token, read_location_record, unsettleable,
@@ -513,7 +513,7 @@ enum Planned {
     ReclaimPublicOnly(UnboundShape),
     ReclaimBothHalves(PrivateHalfProof),
     SettleRootThenBothHalves {
-        manager: Box<WorkspaceManager>,
+        root: RootToSettle,
         token: String,
         into: PathBuf,
         ours: bool,
@@ -598,14 +598,14 @@ fn scan_classified(
                                     (Planned::ReclaimBothHalves(proof), left_alone)
                                 }
                                 RootPlan::Settle {
-                                    manager,
+                                    root,
                                     token,
                                     into,
                                     ours,
                                     left_alone,
                                 } => (
                                     Planned::SettleRootThenBothHalves {
-                                        manager,
+                                        root,
                                         token,
                                         into,
                                         ours,
@@ -651,14 +651,14 @@ fn apply(hooks: &mut dyn TopologyHooks, public: &Path, plan: Planned) -> RunDirO
         }
         Planned::ReclaimBothHalves(proof) => reclaim_both_halves(hooks, public, proof, None),
         Planned::SettleRootThenBothHalves {
-            manager,
+            root: settle,
             token,
             into,
             ours,
             proof,
         } => {
-            let root = manager.execution_root().to_path_buf();
-            match manager.retire_execution_root(hooks.effects(), &into, &token) {
+            let root = settle.path().to_path_buf();
+            match settle.retire(hooks.effects(), &proof, &into, &token) {
                 Err(error) => unreclaimable(FailedStep::ExecutionRoot, &error),
                 Ok(true) => reclaim_both_halves(hooks, public, proof, Some(root)),
                 Ok(false) if !ours => reclaim_both_halves(hooks, public, proof, None),
@@ -704,7 +704,7 @@ pub(crate) enum RootPlan {
         left_alone: Vec<PathBuf>,
     },
     Settle {
-        manager: Box<WorkspaceManager>,
+        root: RootToSettle,
         token: String,
         into: PathBuf,
         ours: bool,
@@ -714,6 +714,75 @@ pub(crate) enum RootPlan {
         root: Option<PathBuf>,
         detail: String,
     },
+}
+
+/// The root a [`RootPlan::Settle`] retires, and through which funnel.
+///
+/// **Derived**: this command's effective common directory derives the key the
+/// location record names, so the root is the manager's own execution root and
+/// `WorkspaceManager::retire_execution_root` settles it, as since repair15.
+///
+/// **Recorded**: this command's context is legal (the manager derived) but
+/// derives another key — `GIT_COMMON_DIR` set to another absolute common
+/// directory, say — and the root is the one the location record names under the
+/// key it recorded, `<authorized private root>/workspaces/<key>/<run id>`. It is
+/// settled through `WorkspaceManager::retire_recorded_execution_root`, the
+/// authenticated historical-root retirement, which takes the key from the
+/// ownership proof's own location record and the claim token from the
+/// incarnation that proof authenticated, re-checks the proof's private half,
+/// its absent commit record, the run's free lock and lease and a link-free
+/// chain below the authorized root before it acts, and never touches the root
+/// today's context derives. Until repair16 this case was kept for good, telling
+/// the operator to return to the creating context, so a census in a changed
+/// context never converged a proven husk
+/// (`PR12-INV9-RECORDED-ROOT-CONTEXT-CONVERGENCE`).
+#[derive(Debug)]
+pub(crate) enum RootToSettle {
+    Derived(Box<WorkspaceManager>),
+    Recorded {
+        manager: Box<WorkspaceManager>,
+        key: String,
+        path: PathBuf,
+    },
+}
+
+impl RootToSettle {
+    /// The root's path, in the manager's own spelling.
+    #[must_use]
+    pub(crate) fn path(&self) -> &Path {
+        match self {
+            Self::Derived(manager) => manager.execution_root(),
+            Self::Recorded { path, .. } => path,
+        }
+    }
+
+    /// The location record's key, when the root is the recorded one.
+    #[must_use]
+    pub(crate) fn recorded_key(&self) -> Option<&str> {
+        match self {
+            Self::Derived(_) => None,
+            Self::Recorded { key, .. } => Some(key),
+        }
+    }
+
+    fn retire(
+        &self,
+        hooks: &mut dyn EffectHooks,
+        proof: &PrivateHalfProof,
+        into: &Path,
+        token: &str,
+    ) -> Result<bool, UpstrokeError> {
+        match self {
+            Self::Derived(manager) => manager.retire_execution_root(hooks, into, token),
+            // Inside the funnel the recorded root's key is read again from the
+            // location record of the proof's own private half, and its claim
+            // token is derived from the incarnation the proof authenticated;
+            // the plan's copies only named the root to report and to check.
+            Self::Recorded { manager, .. } => {
+                manager.retire_recorded_execution_root(hooks, proof, into)
+            }
+        }
+    }
 }
 
 pub(crate) fn plan_root(
@@ -856,19 +925,24 @@ pub(crate) fn plan_root_at(
             };
         }
     };
-    if manager.repo_key() != key {
-        return RootPlan::Keep {
-            root: Some(root),
-            detail: format!(
-                "this run published its execution root under repository key {key}, and this \
-                 command's effective common directory gives key {}: a write command in the \
-                 repository context the run was created in settles it",
-                manager.repo_key()
-            ),
-        };
-    }
+    // A legal context that derives another key settles the root the record
+    // names, under the key it recorded, through the authenticated
+    // historical-root retirement; it never settles the root today's key
+    // derives, which the scan above has already named in `left_alone` if
+    // anything is there.
+    let settle = if manager.repo_key() == key {
+        RootToSettle::Derived(Box::new(manager))
+    } else {
+        let path =
+            crate::workspace_manager::execution_root_of(manager.private_root(), &key, run_id);
+        RootToSettle::Recorded {
+            manager: Box::new(manager),
+            key,
+            path,
+        }
+    };
     if ours {
-        if let Some(why) = unsettleable(manager.execution_root(), &token) {
+        if let Some(why) = unsettleable(settle.path(), &token) {
             return RootPlan::Keep {
                 root: Some(root),
                 detail: why,
@@ -876,7 +950,7 @@ pub(crate) fn plan_root_at(
         }
     }
     RootPlan::Settle {
-        manager: Box::new(manager),
+        root: settle,
         token,
         into: private.join(RETIRED_ROOT),
         ours,
@@ -920,13 +994,16 @@ pub(crate) fn husk_root_view(
                 RootPlan::Keep { root, detail } => Some(kept(root, detail)),
                 RootPlan::Settle {
                     ours: true,
-                    manager,
+                    root,
                     left_alone,
                     ..
                 } => Some(format!(
                     "an unstarted husk that the next write command reclaims: it first retires \
-                     the execution root {} this run published, then both halves{}",
-                    manager.execution_root().display(),
+                     the execution root {} this run published{}, then both halves{}",
+                    root.path().display(),
+                    root.recorded_key().map_or_else(String::new, |key| format!(
+                        " under repository key {key}, which its location record names"
+                    )),
                     if left_alone.is_empty() {
                         String::new()
                     } else {

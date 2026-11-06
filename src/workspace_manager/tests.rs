@@ -24897,3 +24897,92 @@ fn core_ignorecase_helper() {
         other => panic!("no scope `{other}`"),
     }
 }
+
+/// `PR12-INV9-RECORDED-ROOT-CONTEXT-CONVERGENCE`: the recorded-root retirement
+/// walks the chain from the authorized private root down to the root a proven
+/// husk's location record names without following a link, so a key directory
+/// that is a symlink refuses the retirement and the directory it reaches --
+/// holding the run's own claim token -- is untouched. (The census suite may not
+/// plant a link; this module may.)
+#[cfg(unix)]
+#[test]
+fn the_recorded_root_retirement_refuses_a_link_on_its_chain() {
+    let tree = scratch("recorded-root-link");
+    let top = tree.path();
+    let repo = top.join("repo");
+    create_dir(&repo);
+    git(&repo, &["init", "-q", "-b", "main"]);
+    create_dir(&top.join("private").join("runs"));
+    let private_root = fs::canonicalize(top.join("private")).expect("the private root");
+    let run_id = crate::ulid::ulid();
+    let incarnation = "01KZTRECORDEDLINK000000001";
+    let public = crate::rundir::public_dir(&repo, &run_id);
+    let private = private_root.join("runs").join(&run_id);
+    let repo_key = crate::rundir::RepoKey::v1(&repo.join(".git"));
+    let policy = crate::runner::policy::host_policy();
+    let hooks = &mut crate::rundir::NoHooks;
+    crate::rundir::create_public_dir(&public, hooks).expect("P0");
+    let marker = crate::rundir::CreatingMarker {
+        run_id: run_id.clone(),
+        repo_key: repo_key.as_str().to_owned(),
+        private_dir: private.to_string_lossy().into_owned(),
+        incarnation: incarnation.to_owned(),
+        pid: 1,
+        runner_policy_sha256: crate::runner::policy::runner_policy_sha256(&policy),
+    };
+    crate::rundir::stage_marker(&public, &marker, hooks).expect("P1a");
+    crate::rundir::publish_marker(&public, hooks).expect("P1b");
+    crate::rundir::create_private_dir(&private, hooks).expect("P3a");
+    let owner = crate::rundir::OwnerRecord {
+        run_id: run_id.clone(),
+        repo_key: repo_key.as_str().to_owned(),
+        public_dir: fs::canonicalize(&public)
+            .expect("the public half")
+            .to_string_lossy()
+            .into_owned(),
+        incarnation: incarnation.to_owned(),
+        runner: policy,
+    };
+    crate::rundir::stage_owner_record(&private, &owner, hooks).expect("P3a staged");
+    crate::rundir::publish_owner_record(&private, hooks).expect("P3b");
+    let key = "0123456789abcdef";
+    crate::rundir::create_private_dir(&private.join(format!("execution-root.v1.{key}")), hooks)
+        .expect("the location record");
+    let elsewhere = top.join("elsewhere");
+    let reached = elsewhere
+        .join(&run_id)
+        .join(crate::engine::topology::create::claim_token(incarnation));
+    create_dir(&reached);
+    create_dir(&private_root.join("workspaces"));
+    std::os::unix::fs::symlink(&elsewhere, private_root.join("workspaces").join(key))
+        .expect("the key directory is a link");
+    let crate::rundir::PrivateHalfOwnership::Proven(proof) =
+        crate::rundir::prove_private_half_ownership(&public, &repo_key, &private_root)
+    else {
+        panic!("the husk proves");
+    };
+    let manager = WorkspaceManager::derive(&repo, &private_root, &run_id, incarnation)
+        .expect("this command's manager");
+    assert_ne!(manager.repo_key(), key, "the premise: another key");
+
+    let refused = manager
+        .retire_recorded_execution_root(
+            &mut NoHooks,
+            &proof,
+            &private.join(crate::engine::topology::create::RETIRED_ROOT),
+        )
+        .expect_err("a link on the chain is refused");
+    assert!(
+        refused
+            .to_string()
+            .contains("is a symlink or reparse point"),
+        "{refused}"
+    );
+    assert!(reached.is_dir(), "what the link reaches is untouched");
+    assert!(
+        !private
+            .join(crate::engine::topology::create::RETIRED_ROOT)
+            .exists(),
+        "nothing was retired"
+    );
+}

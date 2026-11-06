@@ -1031,6 +1031,11 @@ impl DockerCli {
         stop: &dyn Fn() -> bool,
     ) -> Result<ProcessOutput, ProcessFailure> {
         self.trace.runtime(op, target);
+        // No lease is passed here: the helper's Unix reaper takes the asking thread's cleanup
+        // scope, which a container invocation enters for its whole duration with the leases its
+        // call carried (`ContainerRunner::invoke`), so whatever this question is about -- a
+        // container, a credential volume, an image -- it holds that invocation's leases and no
+        // other's (`PR12-INV9-CONTAINER-HELPER-CLEANUP-LEASE`).
         proc::run_with_timeout_classified(
             ProcessSite::Spawn,
             ProcessSite::Terminate,
@@ -1246,12 +1251,11 @@ impl DockerCli {
     ) -> Result<(), RuntimeError> {
         let name = covered.name();
         self.trace.runtime(op, name);
-        let client = attach_client(name, payload, covered.deadline()).map_err(|detail| {
-            RuntimeError::Failed {
+        let client = attach_client(name, payload, covered.deadline(), covered.leases().to_vec())
+            .map_err(|detail| RuntimeError::Failed {
                 operation: op,
                 detail,
-            }
-        })?;
+            })?;
         let waited =
             self.await_attached_start(name, covered.deadline(), covered.cancellation(), || {
                 client.has_ended()
@@ -1523,7 +1527,19 @@ enum NotStarted {
     Cancelled,
 }
 
-fn attach_client(name: &str, payload: &[u8], deadline: Instant) -> Result<AttachedClient, String> {
+/// Start `docker start --attach --interactive` for `name` on a supervisor thread of its own.
+///
+/// `leases` are the cleanup lease paths the starting invocation carried (`CoveredStart::leases`),
+/// moved to that thread by value: a new OS thread is inside no cleanup scope -- not the one the
+/// invocation entered on its own thread -- so without them the attached client's Unix reaper
+/// would hold no `cleanup.lock` and could outlive a killed coordinator while the next writer
+/// passed admission (`PR12-INV9-CONTAINER-HELPER-CLEANUP-LEASE`).
+fn attach_client(
+    name: &str,
+    payload: &[u8],
+    deadline: Instant,
+    leases: Vec<PathBuf>,
+) -> Result<AttachedClient, String> {
     let command = docker_command(&["start", "--attach", "--interactive", name]);
     let stop = Arc::new(AtomicBool::new(false));
     let stopping = Arc::clone(&stop);
@@ -1538,7 +1554,7 @@ fn attach_client(name: &str, payload: &[u8], deadline: Instant) -> Result<Attach
                 command,
                 &payload,
                 backstop,
-                &[],
+                &leases,
                 &|| stopping.load(Ordering::SeqCst),
                 &mut proc::NoHooks,
             )

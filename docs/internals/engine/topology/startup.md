@@ -863,10 +863,24 @@ marker last; `retired` names the root a retirement just took, for the outcome.
 ## `pub(crate) enum RootPlan {`
 
 What [`plan_root_at`] decided for a proven husk's root: `Nothing` (no record and
-nothing of the run's name anywhere), `Settle` (a valid record whose key this
-command derives; `ours` when the recorded root carries the run's token), or
-`Keep` (the real path and the reason). `left_alone` lists the directories of
-the run's name that are not its own.
+nothing of the run's name anywhere), `Settle` (a valid record; `ours` when the
+recorded root carries the run's token), or `Keep` (the real path and the
+reason). `left_alone` lists the directories of the run's name that are not its
+own. `Settle` carries a [`RootToSettle`].
+
+## `pub(crate) enum RootToSettle {`
+
+How a settled root is retired (repair16, `PR12-INV9-RECORDED-ROOT-CONTEXT-CONVERGENCE`).
+`Derived` when the record's key is the one this command derives -- the manager's own
+retirement, as before. `Recorded` when the record names another key (the run was created
+under a different Git context, a common directory this command no longer sees): the root is
+`<R>/workspaces/<recorded key>/<run id>`, and its retirement goes through
+`WorkspaceManager::retire_recorded_execution_root`, which takes the key from the proven private
+half's own location record and the token from the incarnation that same proof authenticated,
+never from a caller's string, and refuses what that proof does not bind (another run, another
+incarnation, a committed husk, a held run, a path that is not under the private root's
+`runs/<run id>`, a reparse point on the chain). `path()` is the root either way; `retire` takes
+the proof.
 
 ## `pub(crate) fn plan_root_at(`
 
@@ -888,9 +902,11 @@ to end, and the one `status` asks too ([`husk_root_view`]).
    other directories found are left alone. Whether it is the run's is its
    token, `claim.<marker incarnation>`, as a real directory.
 5. This command's `WorkspaceManager` is derived (the marker's incarnation, the
-   authorized root, the current repository). A derive error or a key other
-   than `k` is `Keep` whether or not the root is present: this command can
-   neither settle that root nor make its key directory's state durable.
+   authorized root, the current repository). A derive error is `Keep`. A key
+   other than `k` was `Keep` until repair16; it is now `Settle` with
+   `RootToSettle::Recorded` over the recorded root, so a husk created under
+   another Git context converges like one created here
+   (`PR12-INV9-RECORDED-ROOT-CONTEXT-CONVERGENCE`).
 6. A root of the run's holding anything but empty scaffolding and the token is
    `Keep`. Otherwise `Settle`.
 
@@ -907,7 +923,9 @@ earlier retirement that may have been cut before its own barrier.
 ## `pub(crate) fn husk_root_view(`
 
 `status <husk id>`'s view of a husk's root, from the same [`plan_root_at`] and
-[`unbound_root`] the census acts on, so the two cannot disagree about a root.
+[`unbound_root`] the census acts on, so the two cannot disagree about a root. A
+recorded root under another key says so ("under repository key `k`, which its
+location record names").
 Read-only: the proof token is dropped unspent and nothing is created, removed
 or synced. `None` leaves `status`'s own sentence (`HuskDisposition::describe`).
 `status` asks under the default private root, as it always has.

@@ -114,9 +114,18 @@ sub-effect point, so `Container.Start`'s two phases are the only
 coordinates a fault can be placed at and `HookHarness::arm` reaches
 neither.
 
+## `struct ArmedEffects {`
+
+The workspace effects of [`TestHooks`]: every phase recorded on the shared harness exactly as
+`HarnessEffects` records it, and answered by the phase faults the test armed. `HarnessEffects`
+proceeds at every `Before` and `After`, so before repair16 a fault armed through `faults()` on a
+`Worktree` site was never consulted; this makes the recorded-root retirement's post-rename error
+window (`Worktree.RemoveExecutionRoot`'s `After`, the rename and its barrier performed, then `Err`)
+armable as a `RunDir` site's phases are (`PR12-INV9-RECORDED-ROOT-CONTEXT-CONVERGENCE`).
+
 ## `struct TestHooks {`
 
-All five families on one harness, four of them armable.
+All five families on one harness, all five of them armable at their phases.
 
 ## `impl TestHooks` › `fn container_double(&self) -> ArmedContainer {`
 
@@ -1529,6 +1538,13 @@ be, which asks Git for the common directory, and a census of a directory Git can
 the husk as undecidable rather than reclaiming it. A census runs inside a repository in
 production; this fixture is a plain directory until then.
 
+Once the repository exists it asserts the fixture's identity premise
+([`Fixture::assert_no_root_is_what_production_derives`]): the key and the path `NoRoot` gives are
+the ones `WorkspaceManager::derive` gives. Without it, a census that settles a recorded root under
+another key could converge a husk whose location record a mistaken fixture wrote, and a guard of
+the creating context would pass while exercising a changed one (Native18,
+`REGULAR14-NATIVE18-NOROOT-KEY`, `PR12-REGRESSION12-WINDOWS-NOROOT-KEY`).
+
 ## `fn a_kill_while_the_first_line_is_written_leaves_a_retained_husk_whose_next_open_truncates_it() {`
 
 Gate 5's audit, row 103: `Event.AppendFirst`'s `Written` kill, recovered. The `p5btorn` arm of
@@ -1604,6 +1620,21 @@ The [`NoRoot`] of this fixture: no execution root, at the path a manager of this
 repository would derive, under the key it would derive. P3c records that key, and a census of the
 husk derives the same one, so a husk this leaves is the shape a creator cut before its publication
 leaves.
+
+The key and the path are spelt as production spells them: `workspace_manager::fixture::canonical`
+is `fs::canonicalize` followed by `strip_verbatim`, which is what `common_git_dir` hashes and what
+`canonical_prefix` hangs a root from. Until repair16 the key hashed `fs::canonicalize`'s own
+spelling, so on Windows the verbatim prefix entered the hash and the plan-written kill guard's
+census derived another key and kept the husk (Native18's first Windows failure, keys
+`064f39f4c917ef4e` and `bf4079bd6704aa5a`). The repository is not yet initialized when a kill child
+records this key, so `.git` is joined to the canonical repository; [`census_of`] checks the premise
+once it is.
+
+## `impl Fixture` › `fn assert_no_root_is_what_production_derives(&self) {`
+
+The identity premise at the initialized-repository boundary: `WorkspaceManager::derive` for this
+fixture's run gives exactly `NoRoot`'s key and path, or the census guard that relies on them fails
+here rather than passing over a changed context.
 
 ## `struct NoRoot {`
 
@@ -1706,8 +1737,11 @@ is kept, and one holding only its scaffolding and token is retired
 The arm of `stat_after_error` where the proof finds no private half bound (`NothingBound`) to a
 creator that published its root: a marker naming an absent private half, a root published through
 [`RealRoot`], and an `Aborted` at P3c built by hand, because the protocol itself makes the private
-half before it publishes a root, so only an outside actor removing it reaches this arm. A root is
-retired only into its run's private half, and there is none, so the root stays at its path with
+half before it publishes a root. `NothingBound` says that no private half is bound to the husk --
+since repair16 only a confirmed `NotFound` of the marker's private target answers it, and a target
+whose metadata cannot be read is retained as `LocatorUnreadable` -- and it is not proof that an
+outside actor deleted anything; this fixture reaches the arm because it has no private half. A
+root is retired only into its run's private half, and there is none, so the root stays at its path with
 the token that proves it — untouched when it holds content the run did not make — and the public
 directory, the root's only locator, is kept with its marker: `ExecutionRootRetained` naming no
 private half, the run lock released through `Lock.Release`, the public remover never called, and a
@@ -1776,16 +1810,77 @@ another common directory, where an init would act on that directory.
 
 ## `fn census_under_another_common_dir_child() {`
 
-The subprocess half of the guard below, run under its parent's `GIT_COMMON_DIR`: the location
-record names a key other than the one this process derives, and the census keeps the husk and the
-root published under the recorded key, `RootRetained` naming that root and key. Spawned with
-neither variable, it has nothing to census and returns.
+The census half of every changed-context guard (`PR12-INV9-RECORDED-ROOT-CONTEXT-CONVERGENCE`), run
+under its parent's `GIT_COMMON_DIR` naming another bare repository's common directory: the manager it
+derives gives a key other than the one the husk's location record names, and nothing of the
+creating context is restored. `UPSTROKE_TEST_CENSUS_CASE` names the husk's durable stage and what
+the census does with it: `published` retires the recorded root and reclaims both halves; `absent`,
+`staged` and `retired-replay` take the recorded root's barrier and reclaim both halves; `retired-cut`
+dies at the cut after the retirement's rename; `error-replay` arms the `After` phase of
+`Worktree.RemoveExecutionRoot` ([`ArmedEffects`]) and requires both halves and the retired tree
+kept, then converges in a second census; `foreign` leaves a tokenless directory at the recorded
+root untouched and named; `lookalike` plants a directory of the run's name under this context's
+own key holding the run's own token and leaves it untouched and named. Every converging case
+censuses again in the same changed context and requires nothing left. Spawned with neither
+variable, it has nothing to census and returns.
 
-## `fn a_census_under_another_common_directory_keeps_the_husk_and_its_published_root() {`
+## `fn in_another_common_directory(`
 
-PR12-REGRESSION11-PRECOMMIT-R18-RECOVERY, sequence B: a run created under one effective common
-directory, censused by a command whose valid absolute `GIT_COMMON_DIR` names another. The location
-record, not the census's own context, names the root, so the census keeps the husk and the root
-with its real locator rather than reclaiming the halves because the root it would derive is
-absent. The census in the creating context then converges. The other context runs in an owned,
-bounded child process (`run_test_isolated`), so no environment of this test process is changed.
+Runs the child above for one case over a fixture, with another bare repository's common directory
+in the child's environment alone: the changed context lives only inside an owned, bounded child
+(`run_test_isolated`), and this test process's environment is never changed.
+
+## `fn converged_in_another_common_directory(`
+
+The child above, required to pass, and then neither half of the run left, with no census in the
+creating context.
+
+## `fn a_census_under_another_common_directory_converges_the_husk_and_its_published_root() {`
+
+PR12-REGRESSION11-PRECOMMIT-R18-RECOVERY's sequence B, completed (repair16's Group C): a run
+created under one effective common directory and killed after P3c published its root, censused
+only by commands whose valid absolute `GIT_COMMON_DIR` names another. The location record, not the
+census's own context, names the root; the census settles it through the authenticated recorded-root
+retirement (`WorkspaceManager::retire_recorded_execution_root`, its key read from the proof's own
+private half and its token from the incarnation the proof authenticated), reclaims both halves,
+and a repeated census in that context finds nothing -- without restoring the creating context, a
+manual deletion or a prune. Until repair16 this guard required the census to keep the husk there
+and converge only back in the creating context.
+
+## `fn a_census_under_another_common_directory_converges_a_husk_that_published_no_root() {`
+
+Stage S0, an absent external root: the plan-written kill with `NoRoot` (whose location record names
+the creating context's key, the identity premise asserted after `git init`), censused in the
+changed context. Nothing is at the recorded root; the census takes its barrier and reclaims both
+halves.
+
+## `fn a_census_under_another_common_directory_converges_a_husk_whose_root_was_only_staged() {`
+
+Stage S1, private staging: a creator killed at the `staged` cut, its root built in the private half
+and never renamed. In the changed context the staged tree goes with the private half.
+
+## `fn a_census_under_another_common_directory_cut_after_the_retirement_rename_converges_next() {`
+
+Stage S3 by interruption: a census in the changed context killed at the `retired` cut, after the
+recorded root's rename into the private half and before its barrier; the next census in the same
+context repeats the barrier, because a root read as absent is not a durable retirement, and then
+reclaims both halves.
+
+## `fn a_census_under_another_common_directory_that_errs_after_the_rename_converges_next() {`
+
+The post-rename error window: an error at the `After` phase of the recorded root's
+`Worktree.RemoveExecutionRoot` -- the rename and its barrier performed, then `Err` -- leaves both
+halves, the marker and the owner record, with the retired tree in the private half
+(`Unreclaimable` at `ExecutionRoot`); the next census in the same context converges. This is an
+injected error after the effect, not an injected barrier failure, which the tree has no seam for.
+
+## `fn a_census_under_another_common_directory_leaves_a_foreign_directory_at_the_recorded_root() {`
+
+The foreign control: a directory at the recorded root without the run's claim token is another
+actor's, named in `left_alone` and left exactly as it is; the run's own proven halves converge.
+
+## `fn a_census_under_another_common_directory_leaves_a_lookalike_under_its_own_key() {`
+
+The current-context lookalike control: a directory of the run's name under the key the changed
+context derives, holding the run's own claim token, is not the root the location record names. The
+census retires the recorded root and leaves the lookalike, token and all.

@@ -573,15 +573,34 @@ while a container runs, and `Covered`'s drop takes it only to count down.
 
 ## `struct ReapingState {`
 
-`armed`: the reaper and the scope it lists, once the first cover armed it. `in_flight`: the
-covers not yet ended. `unsettled`: sticky — set once any cover ended with a fate other than
+`armed`: the backstops and the scope they list, once the first cover armed them. `in_flight`:
+the covers not yet ended. `unsettled`: sticky — set once any cover ended with a fate other than
 `Gone` or `NeverStarted`, or with none at all (an invocation that unwound).
 
 ## `struct Armed {`
 
-The scope is kept beside the reaper so every later cover compares its container's labels
-with the scope the reaper actually lists. On Windows there is no reaper (ST-16 (e); the
+The scope is kept beside the backstops so every later cover compares its container's labels
+with the scope they actually list. On Windows there is no reaper (ST-16 (e); the
 `os_matrix`): the scope alone is kept, and the label check runs the same way.
+
+`dormant` is PR11 follow-up A's backstop, one per distinct lease set the runner's invocations
+carried (in practice one, armed at the first launch), kept for the runner's life and past an
+unsettled drop until the process exits. Since repair16 (`PR12-INV9-CONTAINER-HELPER-CLEANUP-LEASE`)
+it is armed `BackstopHold::BeforeActing` with those lease paths and the run's lock file, because an
+invocation whose container's fate is unknown and a process that can act on the run's resources are
+different things: the backstop can act only after its coordinator has died, so it holds nothing
+while its coordinator lives -- a same-process successor is never refused for it, as the in-process
+resume `engine::topology::recover::tests::a_lost_gate_container_is_reclaimed_by_the_next_resume_before_the_verification_is_settled`
+requires -- and at that death it takes the run's cleanup lease itself before it may act, standing
+down when another engine holds the run lock (`agent::proc`'s `excluded_before_acting`). Every helper
+of an invocation holds the invocation's leases through its own reaper for its whole life, so over
+the in-flight window no survivor that can act is unexcluded. An invocation without an established
+end stays recorded as such -- `Unresolved`, its intent retained -- for the next incarnation's census.
+
+## `struct DormantBackstop {`
+
+Keeps the lease paths it was armed with, which it can never widen: a later invocation whose
+paths it does not all hold is covered by another.
 
 ## `pub(super) mod cover {`
 
@@ -625,6 +644,8 @@ established for the invocation, recorded by `settle`; the drop reads it.
 ## `mod cover` › `pub struct CoveredCreate<'a> {`
 
 The proof that one container's create is covered: it carries **the spec `cover` validated**,
+and nothing else -- the create's helpers take the invocation's leases from its thread's scope,
+as every bounded question does (`invoke`),
 borrowed, and the create is made from that spec — `create_container` and every
 `ContainerRuntime::create` read `covered.spec()` and take no spec of their own — so a proof
 minted for one container cannot create another. Its lifetime is the cover's single `'a`,
@@ -648,10 +669,16 @@ START-DEADLINE finding): a start that has to wait, as the attached start waits f
 container to leave `created`, waits no longer than the invocation may, and stops waiting
 when the invocation is cancelled.
 
+And the invocation's cleanup lease paths (`leases()`, repair16): the attached start's
+`docker start --attach` runs on a supervisor thread of its own, inside no cleanup scope, so
+`DockerCli::start_attached` hands them to that thread by value.
+
 ## `mod cover` › `pub(in crate::runner::container::exec) fn cover<'a>(`
 
-Validates, arms on the first cover, counts the invocation, and mints the three values:
-`Covered`, and the two proofs over `spec`. The start's also carries `stdin`, which `contain`
+Validates, arms, counts the invocation, and mints the three values: `Covered`, and the two
+proofs over `spec`. Arming, before anything of the invocation launches: a backstop for the
+invocation's lease paths if none covers them, with the run's lock file (`rundir::lock_file` of
+the identity's run directory; `Armed::cover_dormant`). The start's also carries `stdin`, which `contain`
 passes as `request.command.stdin`, and the invocation's `deadline` and `cancellation`. The order is the point (`FUA-D1-DES-2`, the design review's correction): the scope this
 runner would hold — the armed one, or, on the arming cover, the one it is about to arm,
 built from the runtime's `reaper_program` and the runner's own `RunIdentity` — is compared
@@ -725,9 +752,10 @@ lint. Test doubles outside the tree name them through `container.rs`'s test-only
 
 ## `impl Armed` › `fn kept_until_the_process_exits(self) {`
 
-`mem::forget` of the reaper on Unix: its `Drop` does not run, so it is not cancelled, and
-its descriptors stay open until the process exits; the reaper then kills and removes every
-container its scope labels. On Windows there is nothing to keep.
+`mem::forget` of the backstops on Unix: their `Drop` does not run, so they are not cancelled,
+and their descriptors stay open until the process exits; each then takes its exclusion and,
+unless a newer engine holds the run, kills and removes every container its scope labels. On
+Windows there is nothing to keep.
 
 ## `impl Drop for Reaping {`
 
@@ -1316,6 +1344,24 @@ polling thread (`docs/internals/runner/contract.md`, "Where the work
 happens"). It takes the call apart and picks the observer: the call's own,
 with no lock; otherwise the runner-level one under its guard; otherwise a
 local `NoHooks`.
+
+It also binds the cleanup lease paths (R28) the call carried (`CallParts::leases`, which a
+worker or pipeline's `Carried` call fills from its coordinator's scope) and, on Unix, enters
+them as this thread's own cleanup scope for the whole invocation
+(`rundir::enter_carried_cleanup_scope`, repair16, `PR12-INV9-CONTAINER-HELPER-CLEANUP-LEASE`).
+Every helper a bounded runtime question forks on this thread -- the credential volume's
+inspection inside `create_container` before any create, the create, every observation, stop
+and removal, and the cancellation after a failed launch -- therefore has a reaper that takes
+the invocation's leases through `spawn_reaper`, whatever runtime method asks it, the ones that
+take no lease argument included. What runs elsewhere takes them explicitly: the backstop
+(`cover`), at its coordinator's death, and the attached start's thread (`CoveredStart::leases`). The scope ends
+with the invocation and is this thread's alone; nothing is keyed by a container or volume name.
+
+## `fn invocation_cleanup_leases(carried: &[PathBuf]) -> Vec<PathBuf> {`
+
+The paths the invocation's explicit carriage hands on: the thread's scope joined with the
+carried ones, without repetition, and on Windows only the carried ones (unused there: no
+reaper, no lease).
 
 ## `impl ContainerRunner` › `fn contain(`
 

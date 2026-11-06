@@ -3981,6 +3981,15 @@ complete — and the census's keeping is unchanged by the reporting. When the st
 census fails, here a pre-flight probe that refuses, the error the command ends with carries the
 same report. `status` asked for the malformed husk reports the same disposition.
 
+## `fn a_public_fresh_run_keeps_and_reports_a_husk_whose_private_target_cannot_be_observed() {`
+
+Repair16's public composition guard for `PR12-INV9-UNREADABLE-PRIVATE-LOCATOR`. A husk whose
+marker names a private target that the filesystem will not describe -- the test build's
+`rundir::LocatorMetadataFault` makes its metadata read fail with a permission error -- is kept,
+both halves untouched, and the fresh run reports it with the `locator-unreadable` retain reason:
+only a confirmed `NotFound` of the target is absence, and an unreadable target proves nothing
+either way.
+
 ## `fn a_public_fresh_run_whose_run_directory_census_fails_reports_the_container_census() {`
 
 The same report when the census's own second half fails, the fresh composition (amendment 5 of

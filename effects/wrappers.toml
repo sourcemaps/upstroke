@@ -129,6 +129,12 @@ funnel = [
     # run never committed, renaming it, claim token inside, into the run's
     # private half rather than emptying it in place (repair15, PROTOCOL-4).
     "retire_execution_root",
+    # The same retirement at the root a proven husk's own location record names under a
+    # key other than this manager's: `Worktree.RemoveExecutionRoot` with the key freshly read,
+    # inside the funnel, from the location record of the ownership proof's private half, and
+    # the claim token derived from the incarnation that proof authenticated and checked at
+    # the execution root (repair16, PR12-INV9-RECORDED-ROOT-CONTEXT-CONVERGENCE).
+    "retire_recorded_execution_root",
     "snapshot_commit_tree",
     "verify_worktree",
     "write_intent_site",
@@ -494,6 +500,15 @@ effect_free = [
     # was already performed and answers whether it *proves* the private commit
     # record absent. Only `NotFound` does.
     "commit_record_proves_absence",
+    # The incarnation the proof authenticated (the marker's, which the owner
+    # record's equals), read by the recorded-root retirement for its claim
+    # token (repair16, PR12-INV9-RECORDED-ROOT-CONTEXT-CONVERGENCE).
+    "incarnation",
+    # The target-absent step's one observation of the marker's private
+    # target, `symlink_metadata` and never followed, in the production twin of
+    # the configuration-twinned `locator_fault` module whose test twin a test
+    # fails for one path (repair16, PR12-INV9-UNREADABLE-PRIVATE-LOCATOR).
+    "locator_metadata",
     "prove_private_half_ownership",
     "public_dir",
     "run_id",
@@ -602,6 +617,13 @@ effect_free = [
     "drop",
     "durability_ledger",
     "enter",
+    # Enters, on the calling thread and for as long as the returned guards live,
+    # the cleanup scope of each lease path a `RunnerCall` carried across a thread
+    # boundary, so every reaper `spawn_reaper` forks there holds them: a
+    # container invocation's every bounded runtime question on its own thread
+    # (repair16, PR12-INV9-CONTAINER-HELPER-CLEANUP-LEASE). The thread's scope
+    # registry only; no file, lock or process.
+    "enter_carried_cleanup_scope",
     "enter_cleanup_scope",
     "events",
     "fmt",
@@ -1447,8 +1469,9 @@ shared = { deref = 2, drop = 6 }
 funnel = [
     # PR11 follow-up A (`PR11-REAPER-CONTAINER-SCOPE-UNREGISTERED`): `arm_container_reaper` takes
     # `ProcessSite::Terminate` by value, refuses any other site, and forks one cleanup reaper through the
-    # Terminate site's own fork, holding no cleanup lease and no process group, for a container runner's
-    # incarnation; `ContainerReaper`'s `Drop` (the sixth `drop` below) cancels it.
+    # Terminate site's own fork, holding the cleanup leases (R28) of the invocation it covers and no
+    # process group, for a container runner's incarnation (repair16, PR12-INV9-CONTAINER-HELPER-
+    # CLEANUP-LEASE); `ContainerReaper`'s `Drop` (the sixth `drop` below) cancels it.
     "arm_container_reaper",
     "run_with_timeout_at",
     # The same funnel keeping the process fate it established
@@ -1505,7 +1528,7 @@ effectful_unnameable = [
     # One name, six `Drop` impls: `Job`'s, `OpenHandle`'s and `Snapshot`'s
     # close a Win32 handle (a job's with KILL_ON_JOB_CLOSE, which terminates
     # whatever is still in it); `Supervisor`'s cancels the reaper or finishes
-    # the group; `ContainerReaper`'s cancels its container reaper, with a
+    # the group; `ContainerReaper`'s cancels its container reaper, leased or not, with a
     # bounded wait for its exit; `GroupSnapshot`'s is test-only bookkeeping.
     "drop",
 ]
@@ -2097,6 +2120,11 @@ not_an_effect = [
     "POLLIN",
     "POLLNVAL",
     "PROC_PIDT_SHORTBSDINFO",
+    # The prctl option the Group B lease-kill harness (runner::container::exec::tests)
+    # sets on itself so that a killed coordinator's helpers, reapers and anchors are
+    # re-parented to it and collected there; the effect is `syscall` with
+    # `SYS_prctl` (repair16, PR12-INV9-CONTAINER-HELPER-CLEANUP-LEASE).
+    "PR_SET_CHILD_SUBREAPER",
     "PR_SET_NO_NEW_PRIVS",
     "PR_SET_SECCOMP",
     "P_ALL",

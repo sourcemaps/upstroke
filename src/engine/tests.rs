@@ -25497,6 +25497,87 @@ fn a_public_fresh_run_reports_what_its_startup_census_kept_and_why() {
     );
 }
 
+/// `PR12-INV9-UNREADABLE-PRIVATE-LOCATOR`, the public composition: a
+/// prepublication husk -- marker published, private half created with its owner
+/// record, no execution root anywhere -- whose marker's private target the
+/// filesystem will not describe (`EACCES`, through the test build's fault for
+/// exactly that locator). A public fresh run's startup census keeps both halves,
+/// the run completes, and its report names the husk, the locator and the reason;
+/// `status` for the husk id says the same. Until repair16 the failed observation
+/// read as an absent target and the census removed the public husk, the private
+/// half's only locator.
+#[test]
+fn a_public_fresh_run_keeps_and_reports_a_husk_whose_private_target_cannot_be_observed() {
+    let (_tree, repo) = temp_engine_repo("census-locator-unreadable");
+    let opts = topology_options(&repo);
+    let husk = crate::ulid::ulid();
+    let incarnation = crate::ulid::ulid();
+    let private_root = fs::canonicalize(private_root_for(&repo)).expect("the private root");
+    let public = rundir::public_dir(&repo, &husk);
+    let private = private_root.join("runs").join(&husk);
+    let repo_key = rundir::RepoKey::for_repo(&repo).expect("the repository's key");
+    let policy = crate::runner::policy::host_policy();
+    fs::create_dir_all(&public).expect("the husk's public directory");
+    let marker = rundir::CreatingMarker {
+        run_id: husk.clone(),
+        repo_key: repo_key.as_str().to_owned(),
+        private_dir: private.to_string_lossy().into_owned(),
+        incarnation: incarnation.clone(),
+        pid: 4242,
+        runner_policy_sha256: crate::runner::policy::runner_policy_sha256(&policy),
+    };
+    rundir::stage_marker(&public, &marker, &mut rundir::NoHooks).expect("P1a");
+    rundir::publish_marker(&public, &mut rundir::NoHooks).expect("P1b");
+    rundir::create_private_dir(&private, &mut rundir::NoHooks).expect("P3a");
+    let owner = rundir::OwnerRecord {
+        run_id: husk.clone(),
+        repo_key: repo_key.as_str().to_owned(),
+        public_dir: fs::canonicalize(&public)
+            .expect("the public directory")
+            .to_string_lossy()
+            .into_owned(),
+        incarnation,
+        runner: policy,
+    };
+    rundir::stage_owner_record(&private, &owner, &mut rundir::NoHooks).expect("P3a staged");
+    rundir::publish_owner_record(&private, &mut rundir::NoHooks).expect("P3b");
+    let _fault = rundir::LocatorMetadataFault::arm(&private, std::io::ErrorKind::PermissionDenied);
+
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        0,
+    )));
+    let report = run_with(&opts, &source).expect("the schema-4 run completes");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:#?}");
+    let rendered = report.render();
+    for said in [
+        format!(
+            "startup census: run directory {husk} at {}",
+            public.display()
+        ),
+        "cannot be inspected".to_owned(),
+        format!("(private locator {})", private.display()),
+    ] {
+        assert!(
+            rendered.contains(&said),
+            "the operator is not told `{said}`: {rendered}"
+        );
+    }
+    assert!(
+        public.join(rundir::MARKER).is_file() && private.join(rundir::OWNER_RECORD).is_file(),
+        "neither half is deleted: the marker still locates the private half"
+    );
+
+    let Err(status) = crate::status::load(&repo, Some(&husk)) else {
+        panic!("a husk is not a run and status must not load one");
+    };
+    let status = status.to_string();
+    assert!(
+        status.contains("cannot be inspected") && status.contains(&private.display().to_string()),
+        "status gives the census's reason and the locator: {status}"
+    );
+}
+
 #[test]
 fn a_public_fresh_run_whose_run_directory_census_fails_reports_the_container_census() {
     let (_tree, repo) = temp_engine_repo("census-report-half-b");

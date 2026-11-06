@@ -3727,133 +3727,174 @@ impl WorkspaceManager {
                         ),
                     });
                 };
-                let retired = self.retire_if_ours(into, token)?;
+                let retired = retire_root_if_ours(&self.execution_root, into, token)?;
                 // The barrier, whatever was found: the root's absence from its
                 // key directory and the retired name in the private half are
                 // durable before any caller discards the private half.
-                let key_directory = self.execution_root.parent();
-                match key_directory.map(fs::symlink_metadata) {
-                    Some(Ok(_)) => {
-                        if let Some(key_directory) = key_directory {
-                            sync_directory(key_directory, &ledger)?;
-                        }
-                    }
-                    Some(Err(absent)) if absent.kind() == std::io::ErrorKind::NotFound => {
-                        let workspaces = key_directory.and_then(Path::parent);
-                        if let Some(workspaces) =
-                            workspaces.filter(|workspaces| workspaces.is_dir())
-                        {
-                            sync_directory(workspaces, &ledger)?;
-                        }
-                    }
-                    Some(Err(source)) => {
-                        return Err(UpstrokeError::Io {
-                            path: key_directory
-                                .map_or_else(|| self.execution_root.clone(), Path::to_path_buf),
-                            source,
-                        });
-                    }
-                    None => {}
-                }
-                sync_directory(&private, &ledger)?;
+                retirement_barrier(&self.execution_root, &private, &ledger)?;
                 Ok(retired)
             },
         )
     }
 
-    /// [`Self::retire_execution_root`]'s decision and rename, before its
-    /// barrier: `Ok(true)` when the root was this run's (it holds `token`),
-    /// held nothing but empty scaffolding and claim tokens, and was renamed to
-    /// `into`; `Ok(false)` when there was nothing to retire.
-    fn retire_if_ours(&self, into: &Path, token: &str) -> Result<bool, UpstrokeError> {
-        match fs::symlink_metadata(&self.execution_root) {
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-            Err(source) => {
-                return Err(UpstrokeError::Io {
-                    path: self.execution_root.clone(),
-                    source,
-                });
-            }
+    /// `Worktree.RemoveExecutionRoot` (R18) for the root a run's **location
+    /// record** names under a repository key other than this manager's: the
+    /// authenticated historical-root retirement a census in a changed, legal
+    /// effective common directory uses to converge a proven, uncommitted husk
+    /// without the context the run was created in
+    /// (`PR12-INV9-RECORDED-ROOT-CONTEXT-CONVERGENCE`).
+    ///
+    /// **Everything that picks the root is read from the proof's own private
+    /// half, inside the funnel, adjacent to the effect, and nothing from the
+    /// caller** ([`Self::authenticate_recorded_root`]): the key is the strict
+    /// location record of `proof`'s private half, and the claim token is that
+    /// of the incarnation `proof` authenticated, so a valid proof confers no
+    /// authority over a root of any other key or incarnation. Around those:
+    /// this manager was derived in this command's own context, so the context
+    /// is legal and `private_root` is the authorized private root; the key is
+    /// not this manager's own (that root is [`Self::retire_execution_root`]'s);
+    /// the root is exactly `<private_root>/workspaces/<key>/<run id>`, its
+    /// chain below the private root walked without following a link; the
+    /// proven private half is `<private_root>/runs/<run id>`, still carries no
+    /// commit record, and is where `into` lies; and neither the run's lock nor
+    /// its cleanup lease is held. The location record only says where to look:
+    /// the claim token inside the root is what makes it the run's.
+    ///
+    /// **What it does is [`Self::retire_execution_root`]'s, at that root**:
+    /// nothing at the path, a directory there without the token, or this
+    /// run's root holding anything but empty scaffolding and claim tokens
+    /// retires nothing; otherwise the scaffolding goes and the root is renamed,
+    /// token inside, onto `into` without replacing anything. And the barrier
+    /// runs on every answer that is not an error, an absent root included --
+    /// the recorded key directory (or, when it is gone, the workspaces
+    /// directory) and the private half -- because a root read as absent is not
+    /// proof that an earlier retirement of it is durable.
+    ///
+    /// # Errors
+    ///
+    /// The command's own revalidation, any refusal of the authentication, a
+    /// retirement destination already present or unreadable, the rename's
+    /// refusal, a failed barrier, or an I/O error.
+    pub fn retire_recorded_execution_root(
+        &self,
+        hooks: &mut dyn EffectHooks,
+        proof: &crate::rundir::PrivateHalfProof,
+        into: &Path,
+    ) -> Result<bool, UpstrokeError> {
+        self.revalidate_pausing(hooks)?;
+        let ledger = hooks.durability_ledger();
+        funnel(
+            hooks,
+            EffectSiteId::Worktree(WorktreeSite::RemoveExecutionRoot),
+            || {
+                let recorded = self.authenticate_recorded_root(proof, into)?;
+                let retired = retire_root_if_ours(&recorded.root, into, &recorded.token)?;
+                retirement_barrier(&recorded.root, &recorded.private, &ledger)?;
+                Ok(retired)
+            },
+        )
+    }
+
+    /// [`Self::retire_recorded_execution_root`]'s authentication: the root
+    /// `proof`'s own location record names, the claim token of the
+    /// incarnation `proof` authenticated, and the canonical proven private
+    /// half the root may be retired into -- or why none of it may be touched.
+    fn authenticate_recorded_root(
+        &self,
+        proof: &crate::rundir::PrivateHalfProof,
+        into: &Path,
+    ) -> Result<RecordedRoot, UpstrokeError> {
+        let refused = |why: String| UpstrokeError::Refused {
+            message: format!(
+                "the execution root that run `{}`'s location record names is not retired: {why}",
+                self.run_id
+            ),
+        };
+        refuse_unreal_directory(&self.base)?;
+        if proof.run_id() != self.run_id {
+            return Err(refused(format!(
+                "the ownership proof is run `{}`'s",
+                proof.run_id()
+            )));
         }
-        let token_path = self.execution_root.join(token);
-        match fs::symlink_metadata(&token_path) {
-            Ok(found) if found.is_dir() => {}
-            Ok(_) => return Ok(false),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-            Err(source) => {
-                return Err(UpstrokeError::Io {
-                    path: token_path,
-                    source,
-                });
+        let key = match crate::engine::topology::create::read_location_record(proof.target()) {
+            crate::engine::topology::create::LocationRecord::Keyed(key) => key,
+            crate::engine::topology::create::LocationRecord::Absent => {
+                return Err(refused(
+                    "its proven private half records no location for an execution root".to_owned(),
+                ));
             }
+            crate::engine::topology::create::LocationRecord::Unreadable(why) => {
+                return Err(refused(format!(
+                    "its proven private half's location record proves nothing: {why}"
+                )));
+            }
+        };
+        if key == self.repo_key {
+            return Err(refused(format!(
+                "its location record names `{key}`, this command's own repository key, whose \
+                 root this manager's own retirement settles"
+            )));
         }
-        for name in ROOT_SCAFFOLDING {
-            let scaffolding = self.execution_root.join(name);
-            if !directory_is_empty(&scaffolding)? {
-                continue;
-            }
-            match fs::remove_dir(&scaffolding) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(source) => {
-                    return Err(UpstrokeError::Filesystem {
-                        operation: "remove",
-                        path: scaffolding,
-                        source,
-                    });
-                }
-            }
+        if proof.incarnation() != self.incarnation {
+            return Err(refused(format!(
+                "the ownership proof authenticates incarnation {}, and this manager was derived \
+                 for incarnation {}",
+                proof.incarnation(),
+                self.incarnation
+            )));
         }
-        let tokens = self.claim_tokens()?;
-        for entry in fs::read_dir(&self.execution_root).map_err(|source| UpstrokeError::Io {
-            path: self.execution_root.clone(),
-            source,
-        })? {
-            let path = entry
-                .map_err(|source| UpstrokeError::Io {
-                    path: self.execution_root.clone(),
-                    source,
-                })?
-                .path();
-            if !(tokens.contains(&path) && directory_is_empty(&path)?) {
-                return Ok(false);
-            }
+        let token = format!("{CLAIM_TOKEN_PREFIX}{}", proof.incarnation());
+        if !is_claim_token(&token) {
+            return Err(refused(format!(
+                "incarnation {} does not spell a claim token",
+                proof.incarnation()
+            )));
         }
-        note_root_publication(&self.execution_root, RootPublicationPoint::Emptied);
-        // The destination is the run's own, and still nothing there is
-        // overwritten or used: present, of any kind, or unreadable, the
-        // retirement refuses and the root stays at its path with the token
-        // that proves it.
-        match fs::symlink_metadata(into) {
+        let private = canonical_prefix(proof.target())?;
+        let runs = self.private_root.join("runs");
+        if private.parent() != Some(runs.as_path())
+            || private.file_name() != Some(std::ffi::OsStr::new(&self.run_id))
+        {
+            return Err(refused(format!(
+                "the proven private half {} is not {}",
+                private.display(),
+                runs.join(&self.run_id).display()
+            )));
+        }
+        if into.parent().map(canonical_prefix).transpose()?.as_deref() != Some(private.as_path()) {
+            return Err(refused(format!(
+                "{} is not inside the proven private half {}",
+                into.display(),
+                private.display()
+            )));
+        }
+        match fs::symlink_metadata(private.join(crate::rundir::COMMIT_RECORD)) {
             Err(absent) if absent.kind() == std::io::ErrorKind::NotFound => {}
             Ok(_) => {
-                return Err(UpstrokeError::Refused {
-                    message: format!(
-                        "the execution root {} is not retired: {} is already there, and a \
-                         retirement neither replaces nor reuses it, so the root stays at its path \
-                         with its claim token",
-                        self.execution_root.display(),
-                        into.display()
-                    ),
-                });
+                return Err(refused(
+                    "its private half carries a commit record, so the run may have started"
+                        .to_owned(),
+                ));
             }
-            Err(source) => {
-                return Err(UpstrokeError::Io {
-                    path: into.to_path_buf(),
-                    source,
-                });
+            Err(unread) => {
+                return Err(refused(format!(
+                    "whether its private half carries a commit record cannot be read: {unread}"
+                )));
             }
         }
-        rename_no_clobber(&self.execution_root, into).map_err(|source| {
-            UpstrokeError::Filesystem {
-                operation: "retire",
-                path: self.execution_root.clone(),
-                source,
-            }
-        })?;
-        note_root_publication(&self.execution_root, RootPublicationPoint::Retired);
-        Ok(true)
+        if crate::rundir::is_running(proof.public_dir()) {
+            return Err(refused(
+                "the run's lock, or its cleanup lease, is held by a live process".to_owned(),
+            ));
+        }
+        let root = execution_root_of(&self.private_root, &key, &self.run_id);
+        refuse_reparse_points(&self.private_root, &root, Leaf::Directory)?;
+        Ok(RecordedRoot {
+            root,
+            private,
+            token,
+        })
     }
 
     /// `Worktree.RemoveExecutionRoot` (R18).
@@ -4002,41 +4043,7 @@ impl WorkspaceManager {
     /// `symlink_metadata` and never followed. Anything else of that name stays
     /// where it is, and so keeps the root.
     fn claim_tokens(&self) -> Result<Vec<PathBuf>, UpstrokeError> {
-        let listed = match fs::read_dir(&self.execution_root) {
-            Ok(listed) => listed,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(Vec::new());
-            }
-            Err(source) => {
-                return Err(UpstrokeError::Io {
-                    path: self.execution_root.clone(),
-                    source,
-                });
-            }
-        };
-        let mut tokens = Vec::new();
-        for entry in listed {
-            let entry = entry.map_err(|source| UpstrokeError::Io {
-                path: self.execution_root.clone(),
-                source,
-            })?;
-            let named = entry.file_name().to_str().is_some_and(is_claim_token);
-            if !named {
-                continue;
-            }
-            let path = entry.path();
-            let directory = fs::symlink_metadata(&path)
-                .map_err(|source| UpstrokeError::Io {
-                    path: path.clone(),
-                    source,
-                })?
-                .is_dir();
-            if directory {
-                tokens.push(path);
-            }
-        }
-        tokens.sort();
-        Ok(tokens)
+        claim_tokens_in(&self.execution_root)
     }
 
     // -----------------------------------------------------------------------
@@ -9379,6 +9386,189 @@ fn sync_slot_directory_absent(
         path: root.to_path_buf(),
         source,
     })
+}
+
+/// What [`WorkspaceManager::retire_recorded_execution_root`] authenticated
+/// from one ownership proof: the root its location record names, the claim
+/// token of the incarnation it proved, and its canonical private half. Built
+/// only by that authentication and read only by that funnel.
+struct RecordedRoot {
+    root: PathBuf,
+    private: PathBuf,
+    token: String,
+}
+
+/// The retirement's decision and rename at `root`, before its barrier: the
+/// shared step of [`WorkspaceManager::retire_execution_root`] (the manager's
+/// own root) and [`WorkspaceManager::retire_recorded_execution_root`] (the
+/// root a location record names). `Ok(true)` when the root was this run's (it
+/// holds `token`), held nothing but empty scaffolding and claim tokens, and was
+/// renamed to `into`; `Ok(false)` when there was nothing to retire.
+fn retire_root_if_ours(root: &Path, into: &Path, token: &str) -> Result<bool, UpstrokeError> {
+    match fs::symlink_metadata(root) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(source) => {
+            return Err(UpstrokeError::Io {
+                path: root.to_path_buf(),
+                source,
+            });
+        }
+    }
+    let token_path = root.join(token);
+    match fs::symlink_metadata(&token_path) {
+        Ok(found) if found.is_dir() => {}
+        Ok(_) => return Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(source) => {
+            return Err(UpstrokeError::Io {
+                path: token_path,
+                source,
+            });
+        }
+    }
+    for name in ROOT_SCAFFOLDING {
+        let scaffolding = root.join(name);
+        if !directory_is_empty(&scaffolding)? {
+            continue;
+        }
+        match fs::remove_dir(&scaffolding) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(UpstrokeError::Filesystem {
+                    operation: "remove",
+                    path: scaffolding,
+                    source,
+                });
+            }
+        }
+    }
+    let tokens = claim_tokens_in(root)?;
+    for entry in fs::read_dir(root).map_err(|source| UpstrokeError::Io {
+        path: root.to_path_buf(),
+        source,
+    })? {
+        let path = entry
+            .map_err(|source| UpstrokeError::Io {
+                path: root.to_path_buf(),
+                source,
+            })?
+            .path();
+        if !(tokens.contains(&path) && directory_is_empty(&path)?) {
+            return Ok(false);
+        }
+    }
+    note_root_publication(root, RootPublicationPoint::Emptied);
+    // The destination is the run's own, and still nothing there is
+    // overwritten or used: present, of any kind, or unreadable, the
+    // retirement refuses and the root stays at its path with the token
+    // that proves it.
+    match fs::symlink_metadata(into) {
+        Err(absent) if absent.kind() == std::io::ErrorKind::NotFound => {}
+        Ok(_) => {
+            return Err(UpstrokeError::Refused {
+                message: format!(
+                    "the execution root {} is not retired: {} is already there, and a \
+                     retirement neither replaces nor reuses it, so the root stays at its path \
+                     with its claim token",
+                    root.display(),
+                    into.display()
+                ),
+            });
+        }
+        Err(source) => {
+            return Err(UpstrokeError::Io {
+                path: into.to_path_buf(),
+                source,
+            });
+        }
+    }
+    rename_no_clobber(root, into).map_err(|source| UpstrokeError::Filesystem {
+        operation: "retire",
+        path: root.to_path_buf(),
+        source,
+    })?;
+    note_root_publication(root, RootPublicationPoint::Retired);
+    Ok(true)
+}
+
+/// The retirement's barrier, run on every answer that is not an error: the
+/// root's key directory (or, when it is gone, the workspaces directory above
+/// it) and the private half `private` that the root is retired into are
+/// synced, so a caller that discards the private half after `Ok` does so after
+/// the root's absence from its path, and a retired tree's presence in the
+/// private half, are durable — whether this call retired the root, an earlier
+/// call did and was cut before its own barrier, or no root was ever published.
+fn retirement_barrier(
+    root: &Path,
+    private: &Path,
+    ledger: &crate::util::DurabilityLedger,
+) -> Result<(), UpstrokeError> {
+    let key_directory = root.parent();
+    match key_directory.map(fs::symlink_metadata) {
+        Some(Ok(_)) => {
+            if let Some(key_directory) = key_directory {
+                sync_directory(key_directory, ledger)?;
+            }
+        }
+        Some(Err(absent)) if absent.kind() == std::io::ErrorKind::NotFound => {
+            let workspaces = key_directory.and_then(Path::parent);
+            if let Some(workspaces) = workspaces.filter(|workspaces| workspaces.is_dir()) {
+                sync_directory(workspaces, ledger)?;
+            }
+        }
+        Some(Err(source)) => {
+            return Err(UpstrokeError::Io {
+                path: key_directory.map_or_else(|| root.to_path_buf(), Path::to_path_buf),
+                source,
+            });
+        }
+        None => {}
+    }
+    sync_directory(private, ledger)
+}
+
+/// The claim tokens at `root`'s top level ([`FreshExecutionRoot`]): each
+/// entry named `claim.<incarnation>` that is a real directory, read with
+/// `symlink_metadata` and never followed. Anything else of that name stays
+/// where it is, and so keeps the root.
+fn claim_tokens_in(root: &Path) -> Result<Vec<PathBuf>, UpstrokeError> {
+    let listed = match fs::read_dir(root) {
+        Ok(listed) => listed,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Vec::new());
+        }
+        Err(source) => {
+            return Err(UpstrokeError::Io {
+                path: root.to_path_buf(),
+                source,
+            });
+        }
+    };
+    let mut tokens = Vec::new();
+    for entry in listed {
+        let entry = entry.map_err(|source| UpstrokeError::Io {
+            path: root.to_path_buf(),
+            source,
+        })?;
+        let named = entry.file_name().to_str().is_some_and(is_claim_token);
+        if !named {
+            continue;
+        }
+        let path = entry.path();
+        let directory = fs::symlink_metadata(&path)
+            .map_err(|source| UpstrokeError::Io {
+                path: path.clone(),
+                source,
+            })?
+            .is_dir();
+        if directory {
+            tokens.push(path);
+        }
+    }
+    tokens.sort();
+    Ok(tokens)
 }
 
 fn directory_is_empty(path: &Path) -> Result<bool, UpstrokeError> {

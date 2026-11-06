@@ -1424,6 +1424,14 @@ attached client reaches the daemon through here, which is one of the two
 `run_with_timeout` mentions `every_production_process_start_is_classified`
 counts in this file; the other is `attach_client`.
 
+It passes no cleanup lease (R28) itself: the helper's Unix reaper takes the asking thread's
+cleanup scope, and a container invocation enters its carried leases as that scope for its
+whole duration (`exec::ContainerRunner::invoke`), so a question about a container, a credential
+volume or an image holds the asking invocation's leases and no other's
+(`PR12-INV9-CONTAINER-HELPER-CLEANUP-LEASE`). Repair16 first carried them here through a
+per-container-name map filled at create and start; the credential volume's inspection, asked
+before any create and about a volume, found nothing in it, and the map is gone.
+
 ## `impl DockerCli` › `fn inspect(`
 
 `docker inspect` a thing, tolerating "no such object" as absence.
@@ -1666,13 +1674,19 @@ How an attached client ended.
 
 Why an attached start's container never left `created`.
 
-## `fn attach_client(name: &str, payload: &[u8], deadline: Instant) -> Result<AttachedClient, String> {`
+## `fn attach_client(` 
 
 Start the client under the process funnel, on a thread of its own. The
 funnel is called with `ProcessSite::Spawn` and `ProcessSite::Terminate` and
 no hooks, like the host runner's, and with the cleanup reaper it arms for
 every supervised child. If the thread cannot start, no client was spawned,
 so none can reach EOF with an empty input.
+
+`leases` (repair16) are the cleanup lease paths the starting invocation carried
+(`CoveredStart::leases`), moved to the thread by value: a new OS thread is inside no cleanup
+scope -- not the one the invocation entered on its own thread -- so without them the client's
+reaper would hold no `cleanup.lock` and could outlive a killed coordinator while the next writer
+passed admission.
 
 ## `fn await_started(`
 

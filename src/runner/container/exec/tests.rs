@@ -8028,6 +8028,7 @@ fn a_scope_that_does_not_select_its_containers_labels_is_refused_with_no_reaper_
             &[],
             Instant::now() + Duration::from_secs(60),
             &crate::runner::Cancellation::new(),
+            &[],
         )
         .err()
         .expect("a container its runner's scope does not select is refused");
@@ -8057,6 +8058,7 @@ fn a_scope_that_does_not_select_its_containers_labels_is_refused_with_no_reaper_
             &[],
             Instant::now() + Duration::from_secs(60),
             &crate::runner::Cancellation::new(),
+            &[],
         )
         .expect("the runner's own container is covered");
     assert!(
@@ -8090,6 +8092,7 @@ fn a_container_whose_labels_differ_from_the_armed_scope_is_refused_before_its_in
             &[],
             Instant::now() + Duration::from_secs(60),
             &crate::runner::Cancellation::new(),
+            &[],
         )
         .expect("a reaper armed for another incarnation, as a caller-built one would have been");
     covered.settle(ProcessFate::NeverStarted);
@@ -9260,4 +9263,1373 @@ fn review_deadline_child() {
             "{case}: no container remains"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// `PR12-INV9-CONTAINER-HELPER-CLEANUP-LEASE`: a killed coordinator's Docker
+// helpers keep run admission refused until they are settled
+// ---------------------------------------------------------------------------
+
+#[cfg(target_os = "linux")]
+const LEASE_KILL_CASE: &str = "UPSTROKE_TEST_LEASE_KILL_CASE";
+
+#[cfg(target_os = "linux")]
+const LEASE_KILL_ROOT: &str = "UPSTROKE_TEST_LEASE_KILL_ROOT";
+
+#[cfg(target_os = "linux")]
+const LEASE_KILL_ACK: &str = "UPSTROKE_TEST_LEASE_KILL_ACK";
+
+/// How long each Unix reaper of the killed coordinator takes over its
+/// settlement after it has ended its group (the reaper's own test-build delay,
+/// `UPSTROKE_TEST_CLEANUP_DELAY_MS`): the window in which the contender must
+/// find admission refused while the killed coordinator's reapers are still
+/// settling.
+#[cfg(target_os = "linux")]
+const LEASE_KILL_SETTLEMENT_DELAY_MS: &str = "3000";
+
+/// The `docker` on the killed coordinator's `PATH`. It pauses at an
+/// acknowledged boundary of one bounded runtime question of the worker's
+/// invocation -- the synchronous `docker create` (`worker-create`); the
+/// attached client's `docker start --attach`, on the thread the attached start
+/// spawns (`attached-start`); the credential volume's `docker volume inspect`,
+/// which `create_container` asks before any create and so before any
+/// container name exists (`credential-volume`); or the `docker stop` of the
+/// cancellation that follows a create refused before it was asked
+/// (`pre-create-cancel`, whose volume inspection the stub will not answer) --
+/// by writing its pid to the acknowledgement path (a temporary name, then
+/// `mv`) and becoming a long `sleep`. Otherwise `container inspect` answers the
+/// recorded image id, `ps` answers `created` for the observed name and nothing
+/// for a backstop's label listing, and every other verb succeeds with nothing
+/// to say.
+#[cfg(target_os = "linux")]
+fn lease_kill_stub(case: &str) -> String {
+    let pause = "printf '%s' \"$$\" > \"$UPSTROKE_TEST_LEASE_KILL_ACK.tmp\" && \
+                 mv \"$UPSTROKE_TEST_LEASE_KILL_ACK.tmp\" \"$UPSTROKE_TEST_LEASE_KILL_ACK\" && \
+                 exec sleep 600";
+    let unanswered = "printf '%s\\n' 'Error response from daemon: the lease-kill stub does not \
+                      answer this question' >&2; exit 1";
+    let (volume, create, start, stop) = match case {
+        "worker-create" => ("exit 0", pause, "exit 0", "exit 0"),
+        "attached-start" => ("exit 0", "exit 0", pause, "exit 0"),
+        "credential-volume" => (pause, "exit 0", "exit 0", "exit 0"),
+        "pre-create-cancel" => (unanswered, "exit 0", "exit 0", pause),
+        other => panic!("unknown lease-kill case `{other}`"),
+    };
+    format!(
+        "#!/bin/sh\n\
+         case \"$1\" in\n\
+         volume) {volume} ;;\n\
+         create) {create} ;;\n\
+         start) {start} ;;\n\
+         stop) {stop} ;;\n\
+         container) printf '%s\\n' '{IMAGE_ID}' ;;\n\
+         ps) for argument in \"$@\"; do case \"$argument\" in name=*) printf '%s\\037created\\n' \"${{argument#name=}}\" ;; esac; done ;;\n\
+         *) exit 0 ;;\n\
+         esac\n"
+    )
+}
+
+/// One process of the lease-kill fixture, as it was identified when this
+/// harness first found it: its pid, its start time (the clock ticks
+/// `/proc/<pid>/stat` records, which a reused pid would not share), its
+/// command name, and its process group.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Identified {
+    pid: libc::pid_t,
+    start: u64,
+    comm: String,
+    pgrp: libc::pid_t,
+}
+
+/// `/proc/<pid>/stat` of a process this harness found through its own
+/// children lists, or one the kernel named ended: its identity and its state
+/// letter. A zombie keeps its record, start time included, until collected.
+#[cfg(target_os = "linux")]
+fn stat_of(pid: libc::pid_t) -> Result<(Identified, char), String> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .map_err(|error| format!("/proc/{pid}/stat: {error}"))?;
+    let open = stat
+        .find('(')
+        .ok_or_else(|| format!("/proc/{pid}/stat: no `(`"))?;
+    let (comm, rest) = stat
+        .get(open + 1..)
+        .and_then(|after| after.rsplit_once(')'))
+        .ok_or_else(|| format!("/proc/{pid}/stat: no `)`"))?;
+    let fields: Vec<&str> = rest.split_whitespace().collect();
+    // After the command: state(0) ppid(1) pgrp(2) ... starttime(19).
+    let field = |index: usize| {
+        fields
+            .get(index)
+            .copied()
+            .ok_or_else(|| format!("/proc/{pid}/stat: field {index} is missing"))
+    };
+    let state = field(0)?.chars().next().unwrap_or('?');
+    let pgrp = field(2)?
+        .parse::<libc::pid_t>()
+        .map_err(|error| format!("/proc/{pid}/stat: pgrp: {error}"))?;
+    let start = field(19)?
+        .parse::<u64>()
+        .map_err(|error| format!("/proc/{pid}/stat: starttime: {error}"))?;
+    Ok((
+        Identified {
+            pid,
+            start,
+            comm: comm.to_owned(),
+            pgrp,
+        },
+        state,
+    ))
+}
+
+/// The children of `pid`, read from the children list of each of its tasks
+/// (`/proc/<pid>/task/<tid>/children`). An unreadable list is an error, never
+/// an answer of "no children"; and a list read empty is discovery only, never
+/// evidence that no child remains.
+#[cfg(target_os = "linux")]
+fn children_of(pid: &str) -> Result<Vec<libc::pid_t>, String> {
+    let tasks = std::fs::read_dir(format!("/proc/{pid}/task"))
+        .map_err(|error| format!("/proc/{pid}/task: {error}"))?;
+    let mut children = Vec::new();
+    for task in tasks {
+        let task = task.map_err(|error| format!("/proc/{pid}/task: {error}"))?;
+        let list = task.path().join("children");
+        let text = std::fs::read_to_string(&list)
+            .map_err(|error| format!("{}: {error}", list.display()))?;
+        for child in text.split_whitespace() {
+            children.push(
+                child
+                    .parse::<libc::pid_t>()
+                    .map_err(|error| format!("{}: {child}: {error}", list.display()))?,
+            );
+        }
+    }
+    children.sort_unstable();
+    children.dedup();
+    Ok(children)
+}
+
+/// What is established about a process this harness identified. Only
+/// [`Observed::Live`] is a positive premise of liveness, and only
+/// [`Observed::Ended`] is evidence of an ending; [`Observed::Unknown`] is
+/// neither, and as evidence that something ended it fails.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Observed {
+    /// Its pid answers the start time it was identified with, in a state that
+    /// is neither a zombie nor dead.
+    Live,
+    /// Its ending is an owned fact: this harness collected it with that
+    /// identity, or it has exited (a zombie answering that identity) and waits
+    /// for this harness to collect it.
+    Ended(String),
+    /// Nothing establishes either: an observation that could not be read, or
+    /// a pid now naming another process.
+    Unknown(String),
+}
+
+#[cfg(target_os = "linux")]
+fn observed(who: &Identified, owned: &OwnedDescendants) -> Observed {
+    if let Some((_, status)) = owned
+        .collected
+        .iter()
+        .find(|(collected, _)| collected.pid == who.pid && collected.start == who.start)
+    {
+        return Observed::Ended(format!("collected here, status {status:#x}"));
+    }
+    match stat_of(who.pid) {
+        Ok((now, state)) if now.start == who.start && matches!(state, 'Z' | 'X') => {
+            Observed::Ended(format!("exited (state {state}) and not yet collected"))
+        }
+        Ok((now, _)) if now.start == who.start => Observed::Live,
+        Ok((now, state)) => Observed::Unknown(format!(
+            "pid {} now names another process: {} started at {} (state {state})",
+            who.pid, now.comm, now.start
+        )),
+        Err(error) => Observed::Unknown(error),
+    }
+}
+
+/// What one `waitpid(pid, WNOHANG)` answered.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Waited {
+    Collected(libc::c_int),
+    StillRunning,
+    Interrupted,
+    NotAChild,
+    Failed(i32),
+}
+
+#[cfg(target_os = "linux")]
+fn wait_now(pid: libc::pid_t) -> Waited {
+    let mut status = 0;
+    // SAFETY: `status` is writable and `WNOHANG` blocks on nothing; `pid` is a
+    // child the kernel named ended, and this harness is the only waiter for its
+    // descendants.
+    let answered = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+    if answered == pid {
+        return Waited::Collected(status);
+    }
+    if answered == 0 {
+        return Waited::StillRunning;
+    }
+    match std::io::Error::last_os_error().raw_os_error() {
+        Some(libc::EINTR) => Waited::Interrupted,
+        Some(libc::ECHILD) => Waited::NotAChild,
+        Some(errno) => Waited::Failed(errno),
+        None => Waited::Failed(0),
+    }
+}
+
+/// What `waitid(P_ALL, WEXITED | WNOHANG | WNOWAIT)` answered about this
+/// harness's children, collecting none of them: the kernel's own account.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pending {
+    /// This child has ended and waits to be collected.
+    Ended(libc::pid_t),
+    /// Children remain and none of them has ended.
+    Running,
+    /// No child remains (`ECHILD`).
+    NoChildren,
+    Interrupted,
+    Failed(i32),
+}
+
+#[cfg(target_os = "linux")]
+fn pending_now() -> Pending {
+    // SAFETY: `siginfo_t` is plain data for which zeroes are a valid value, and
+    // a zero `si_pid` is how `WNOHANG` reports that no child has ended.
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    // SAFETY: `info` outlives the call; `WNOWAIT` leaves an ended child
+    // waitable and `WNOHANG` blocks on nothing.
+    let answered = unsafe {
+        libc::waitid(
+            libc::P_ALL,
+            0,
+            &raw mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    };
+    if answered == 0 {
+        // SAFETY: `waitid` returned zero, so `info` is the record it filled,
+        // or the zeroes it left when no child has ended.
+        let pid = unsafe { info.si_pid() };
+        return if pid == 0 {
+            Pending::Running
+        } else {
+            Pending::Ended(pid)
+        };
+    }
+    match std::io::Error::last_os_error().raw_os_error() {
+        Some(libc::EINTR) => Pending::Interrupted,
+        Some(libc::ECHILD) => Pending::NoChildren,
+        Some(errno) => Pending::Failed(errno),
+        None => Pending::Failed(0),
+    }
+}
+
+/// What the kernel's account established when a collection pass stopped.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Accounted {
+    /// `ECHILD`: this harness has no child left, ended or running.
+    NoneRemain,
+    /// Children remain and none of them has ended.
+    SomeRemain,
+    /// The account could not be completed; the reason is recorded.
+    Unaccountable,
+}
+
+/// Every process the killed coordinator leaves, owned by the harness.
+///
+/// The harness makes itself a child subreaper (`PR_SET_CHILD_SUBREAPER`)
+/// before it starts the coordinator, so each process the coordinator forked or
+/// spawned -- the paused stub, every command reaper and its group anchor, the
+/// container-label backstops and any `docker` child a reaper runs -- is
+/// re-parented to the harness when its own parent dies. The harness forks
+/// nothing of its own (its fixture is built by its parent; the coordinator is
+/// started with `std::process::Command`, not the process funnel), and asserts
+/// as much with the kernel before the coordinator starts, so the kernel's later
+/// answer that no child remains is about the coordinator's processes alone.
+/// It finds its children only through its own tasks' children lists -- for
+/// identification and signalling, never as evidence that none remains --
+/// records each one's identity when it first sees it, and collects only
+/// children the kernel names ended (`waitid(P_ALL, ..., WNOWAIT)`), each with
+/// its own `waitpid(pid, WNOHANG)`, reconciling the identity its zombie
+/// answers with the one it was first listed with. It signals a process only
+/// while it is listed as its own unreaped child with the start time it was
+/// identified with, never a process group. It is the only waiter for its
+/// descendants, and makes no wait before its coordinator has been collected
+/// by the coordinator's own handle.
+#[cfg(target_os = "linux")]
+struct OwnedDescendants {
+    /// Every child listed here and not yet collected, as first identified.
+    known: BTreeMap<libc::pid_t, Identified>,
+    /// Every child collected here: the identity its zombie answered, and its
+    /// wait status.
+    collected: Vec<(Identified, libc::c_int)>,
+    errors: Vec<String>,
+}
+
+/// What [`OwnedDescendants::end_and_collect_all`] established.
+#[cfg(target_os = "linux")]
+struct Collection {
+    complete: bool,
+    collected_now: usize,
+    left: Vec<String>,
+}
+
+#[cfg(target_os = "linux")]
+impl OwnedDescendants {
+    fn adopt() -> Self {
+        // SAFETY: `prctl` takes its five arguments by value and reads through
+        // no pointer for `PR_SET_CHILD_SUBREAPER`, which marks only this
+        // isolated harness process.
+        let set = unsafe {
+            libc::syscall(
+                libc::SYS_prctl,
+                libc::c_long::from(libc::PR_SET_CHILD_SUBREAPER),
+                1_i64,
+                0_i64,
+                0_i64,
+                0_i64,
+            )
+        };
+        assert_eq!(
+            set,
+            0,
+            "PR_SET_CHILD_SUBREAPER: {}",
+            std::io::Error::last_os_error()
+        );
+        Self {
+            known: BTreeMap::new(),
+            collected: Vec::new(),
+            errors: Vec::new(),
+        }
+    }
+
+    /// Record `error` once.
+    fn note(&mut self, error: String) {
+        if !self.errors.contains(&error) {
+            self.errors.push(error);
+        }
+    }
+
+    /// The premise of every collection here, asked of the kernel before the
+    /// coordinator starts: this harness has no child at all.
+    fn has_no_child(&mut self) -> bool {
+        loop {
+            match pending_now() {
+                Pending::NoChildren => return true,
+                Pending::Interrupted => {}
+                other => {
+                    self.note(format!(
+                        "before its coordinator started this harness already had a child of its \
+                         own (waitid answered {other:?}), so the kernel's account could not tell \
+                         the coordinator's processes from it"
+                    ));
+                    return false;
+                }
+            }
+        }
+    }
+
+    /// This harness's own children, each identified on first sight -- for
+    /// identification and signalling only; `None` (and an error recorded) when
+    /// a list cannot be read.
+    fn own_children(&mut self) -> Option<Vec<libc::pid_t>> {
+        match children_of("self") {
+            Ok(children) => {
+                for pid in &children {
+                    if !self.known.contains_key(pid) {
+                        match stat_of(*pid) {
+                            Ok((identified, _)) => {
+                                self.known.insert(*pid, identified);
+                            }
+                            Err(error) => self.note(error),
+                        }
+                    }
+                }
+                Some(children)
+            }
+            Err(error) => {
+                self.note(error);
+                None
+            }
+        }
+    }
+
+    /// Collect every child of this harness that the kernel names ended, and
+    /// stop at the kernel's next answer: that children remain and none has
+    /// ended, that none remains, or that the account cannot be made.
+    fn collect_ended(&mut self) -> Accounted {
+        loop {
+            match pending_now() {
+                Pending::Ended(pid) => {
+                    let identity = match stat_of(pid) {
+                        Ok((identity, _)) => identity,
+                        Err(error) => {
+                            self.note(format!("the ended child {pid}: {error}"));
+                            Identified {
+                                pid,
+                                start: 0,
+                                comm: "?".to_owned(),
+                                pgrp: 0,
+                            }
+                        }
+                    };
+                    if let Some(first) = self.known.remove(&pid) {
+                        if first.start != identity.start {
+                            self.note(format!(
+                                "child {pid} was listed with start time {} and ended with {}",
+                                first.start, identity.start
+                            ));
+                        }
+                    }
+                    loop {
+                        match wait_now(pid) {
+                            Waited::Collected(status) => {
+                                self.collected.push((identity, status));
+                                break;
+                            }
+                            Waited::Interrupted => {}
+                            other => {
+                                self.note(format!(
+                                    "the kernel named {pid} ended and waitpid({pid}, WNOHANG) \
+                                     answered {other:?}"
+                                ));
+                                return Accounted::Unaccountable;
+                            }
+                        }
+                    }
+                }
+                Pending::Running => return Accounted::SomeRemain,
+                Pending::NoChildren => return Accounted::NoneRemain,
+                Pending::Interrupted => {}
+                Pending::Failed(errno) => {
+                    self.note(format!("waitid(P_ALL) failed with errno {errno}"));
+                    return Accounted::Unaccountable;
+                }
+            }
+        }
+    }
+
+    /// `true` when every child ever listed here was collected here.
+    fn reconciled(&mut self) -> bool {
+        if self.known.is_empty() {
+            return true;
+        }
+        let never: Vec<String> = self
+            .known
+            .values()
+            .map(|who| format!("{}:{}", who.pid, who.comm))
+            .collect();
+        self.note(format!(
+            "listed here and never collected, though the kernel reports no child: {never:?}"
+        ));
+        false
+    }
+
+    /// Let every process the killed coordinator left end on its own within
+    /// `bound`, sending none a signal, and collect each; `true` only when the
+    /// kernel reports that no child remains, every listed child was collected
+    /// with its identity, and nothing failed.
+    fn settle_naturally_within(&mut self, bound: Duration) -> bool {
+        let deadline = Instant::now() + bound;
+        loop {
+            let _ = self.own_children();
+            match self.collect_ended() {
+                Accounted::NoneRemain => return self.reconciled() && self.errors.is_empty(),
+                Accounted::Unaccountable => return false,
+                Accounted::SomeRemain => {}
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            crate::workspace_manager::fixture::rest(Duration::from_millis(10));
+        }
+    }
+
+    /// End and collect every own child within `bound`: each one still listed
+    /// as this harness's unreaped child, alive and with the start time it was
+    /// identified with, is sent `SIGKILL` by its pid, and every ended one is
+    /// collected, again as grandchildren are re-parented here, until the
+    /// kernel reports that no child remains.
+    fn end_and_collect_all(&mut self, bound: Duration) -> Collection {
+        let deadline = Instant::now() + bound;
+        let before = self.collected.len();
+        loop {
+            let listed = self.own_children();
+            if self.collect_ended() == Accounted::NoneRemain {
+                let reconciled = self.reconciled();
+                return Collection {
+                    complete: reconciled && self.errors.is_empty(),
+                    collected_now: self.collected.len().saturating_sub(before),
+                    left: Vec::new(),
+                };
+            }
+            if Instant::now() >= deadline {
+                let left = self
+                    .own_children()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|pid| {
+                        stat_of(pid).map_or_else(
+                            |error| format!("{pid}: {error}"),
+                            |(who, state)| format!("{pid}:{}:{state}", who.comm),
+                        )
+                    })
+                    .collect();
+                return Collection {
+                    complete: false,
+                    collected_now: self.collected.len().saturating_sub(before),
+                    left,
+                };
+            }
+            for pid in listed.unwrap_or_default() {
+                let Some(known) = self.known.get(&pid) else {
+                    continue;
+                };
+                if stat_of(pid).is_ok_and(|(now, state)| {
+                    now.start == known.start && !matches!(state, 'Z' | 'X')
+                }) {
+                    // SAFETY: `pid` is listed as this harness's own unreaped
+                    // child and still has the start time it was identified
+                    // with, so it names that process and no other: only this
+                    // harness can collect it, so its pid cannot have been
+                    // reused.
+                    let _ = unsafe { libc::kill(pid, libc::SIGKILL) };
+                }
+            }
+            crate::workspace_manager::fixture::rest(Duration::from_millis(10));
+        }
+    }
+}
+
+/// The collector, ended at its drop: on a pass, a failing assertion, a panic,
+/// an internal deadline and the B1 reversal alike, it ends and collects every
+/// descendant within its bound and reports what it did on the harness's
+/// stderr. The fixture belongs to the parent test, which removes it only on a
+/// report of a complete collection and otherwise keeps it: an incomplete
+/// collection is never success.
+#[cfg(target_os = "linux")]
+struct OwnedCollection {
+    owned: OwnedDescendants,
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for OwnedCollection {
+    fn drop(&mut self) {
+        let collection = self.owned.end_and_collect_all(Duration::from_secs(20));
+        let statuses: Vec<String> = self
+            .owned
+            .collected
+            .iter()
+            .map(|(who, status)| format!("{}:{}:{status:#x}", who.pid, who.comm))
+            .collect();
+        crate::workspace_manager::fixture::say(&format!(
+            "lease-kill collection: complete: {}; collected at the drop: {}; collected in all: {} \
+             [{}]; errors: {:?}; left: {:?}",
+            collection.complete,
+            collection.collected_now,
+            self.owned.collected.len(),
+            statuses.join(" "),
+            self.owned.errors,
+            collection.left
+        ));
+    }
+}
+
+/// Where the coordinator writes the pids of the container-label backstops it
+/// armed (`armed_container_reaper_pids`), once its helper has paused, for its
+/// harness to identify them.
+#[cfg(target_os = "linux")]
+const LEASE_KILL_BACKSTOPS: &str = "UPSTROKE_TEST_LEASE_KILL_BACKSTOPS";
+
+/// The coordinator a lease-kill harness kills. As `TopologyRun::run_concurrently`
+/// does, it takes its run lock and enters its cleanup scope, captures the
+/// scope's paths and hands a worker thread -- inside no scope of its own -- the
+/// `Carried` call a pipeline is given (`engine::topology::preflight::Carried`).
+/// The worker invokes a real `ContainerRunner` over `DockerCli` and the process
+/// funnel, whose stub `docker` pauses at the case's boundary, so this never
+/// returns: its harness kills it there. A second thread reports, once the
+/// helper has paused, the backstops the worker's invocation armed.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "the coordinator a lease-kill harness kills at its acknowledged boundary"]
+fn lease_kill_coordinator_child() {
+    let case = std::env::var(LEASE_KILL_CASE).expect("the harness names the case");
+    let root =
+        PathBuf::from(std::env::var_os(LEASE_KILL_ROOT).expect("the harness names the fixture"));
+    let ack = PathBuf::from(std::env::var_os(LEASE_KILL_ACK).expect("the harness names the pause"));
+    let backstops = PathBuf::from(
+        std::env::var_os(LEASE_KILL_BACKSTOPS).expect("the harness names the report"),
+    );
+    let layout = Layout::of(&root);
+    let lock =
+        crate::rundir::RunLock::acquire(&layout.paths.public).expect("the coordinator's run lock");
+    let _scope = lock.enter_cleanup_scope();
+    let carried = crate::engine::topology::preflight::Carried::new(
+        crate::runner::Cancellation::new(),
+        crate::rundir::active_cleanup_lease_paths(),
+    );
+    let report = |path: &Path, pids: &[libc::pid_t]| {
+        let text: Vec<String> = pids.iter().map(ToString::to_string).collect();
+        let staged = path.with_extension("tmp");
+        std::fs::write(&staged, format!("{}\n", text.join(" "))).expect("the backstop report");
+        std::fs::rename(&staged, path).expect("the backstop report");
+    };
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let deadline = Instant::now() + Duration::from_secs(60);
+            while Instant::now() < deadline {
+                if ack.exists() {
+                    report(
+                        &backstops,
+                        &crate::agent::proc::test_support::armed_container_reaper_pids(),
+                    );
+                    return;
+                }
+                crate::workspace_manager::fixture::rest(Duration::from_millis(5));
+            }
+        });
+        scope.spawn(|| {
+            let identity = RunIdentity {
+                private_root: layout.private_root.clone(),
+                run_id: RUN_ID.to_owned(),
+                run_dir: layout.paths.public.clone(),
+                incarnation: INCARNATION_1.to_owned(),
+                repo_key: repo_key().to_owned(),
+            };
+            let runner = ContainerRunner::new(
+                container_policy(),
+                identity,
+                &layout.repo,
+                fixtures::plain_checkout(&layout.repo.join(".git")),
+                image_environment(),
+                Box::new(crate::runner::container::DockerCli::default()),
+            )
+            .expect("a container runner over DockerCli")
+            .with_view(Box::new(crate::runner::container::DisposableDirView::new(
+                ContainerTrace::off(),
+            )))
+            .with_poll(Duration::from_millis(25));
+            let request = match case.as_str() {
+                "worker-create" | "attached-start" => {
+                    let mut request = gate_request(
+                        ShellKind::Sh.spec("exit 0"),
+                        layout.task_a.clone(),
+                        Duration::from_secs(600),
+                        gate_id(0),
+                    );
+                    if case == "attached-start" {
+                        request.command.stdin = b"the attached start's stdin\n".to_vec();
+                    }
+                    request
+                }
+                // An implementer's invocation mounts its agent's credential
+                // volume, which `create_container` asks the runtime about
+                // before anything is created.
+                "credential-volume" | "pre-create-cancel" => worker_request(
+                    ShellKind::Sh.spec("exit 0"),
+                    layout.task_a.clone(),
+                    AgentId::new("claude-code"),
+                    Duration::from_secs(600),
+                    worker_id(0),
+                ),
+                other => panic!("unknown lease-kill case `{other}`"),
+            };
+            let ended = runner.run_blocking_with(&request, carried.call());
+            panic!(
+                "the paused helper was to hold this worker until its coordinator was killed: \
+                 {ended:?}"
+            );
+        });
+    });
+}
+
+/// The pids written at `path`, once it is there: possibly none.
+#[cfg(target_os = "linux")]
+fn pids_at(path: &Path) -> Option<Vec<libc::pid_t>> {
+    let text = std::fs::read_to_string(path).ok()?;
+    Some(
+        text.split_whitespace()
+            .filter_map(|pid| pid.parse().ok())
+            .collect(),
+    )
+}
+
+/// The owned, bounded harness of the lease-kill guards.
+///
+/// It adopts every process the coordinator will leave ([`OwnedDescendants`],
+/// ended at the drop of [`OwnedCollection`]) and has the kernel confirm it has
+/// no child of its own; starts the coordinator over the fixture its parent
+/// built, with the stub `docker` first on its `PATH`; and waits for the paused
+/// helper's acknowledgement and the backstop reports. While the coordinator is
+/// alive it identifies, through the coordinator's children lists, the covered
+/// processes: the paused helper, the command reaper that registered the
+/// helper's process group (the parent of the group's anchor), and the
+/// container-label backstop, which takes the run's lease itself at its
+/// coordinator's death before it may act. Then it kills the coordinator and collects it, and asks for run
+/// admission -- the exclusive cleanup probe of `RunLock::acquire` -- requiring
+/// it refused while the helper's reaper is live, owing its settlement, both
+/// before and after the ask; asks again until admitted, requiring every covered
+/// process's ending established by then by an owned fact; and lets every
+/// process the coordinator left end on its own and collects it, to the kernel's
+/// own account that none remains. Every wait has its own deadline inside the
+/// parent's isolation bound.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "the isolated harness of the cleanup-lease kill guards"]
+fn lease_kill_harness_child() {
+    use crate::agent::proc::test_support::RunningTestChild;
+    use std::ffi::OsStr;
+
+    let case = std::env::var(LEASE_KILL_CASE).expect("the parent names the case");
+    let root =
+        PathBuf::from(std::env::var_os(LEASE_KILL_ROOT).expect("the parent names the fixture"));
+    let public = Layout::of(&root).paths.public;
+    let bin = root.join("bin");
+    let ack = root.join("paused-helper.pid");
+    let backstops = root.join("backstops.pid");
+    let inherited = std::env::var_os("PATH").unwrap_or_default();
+    let path =
+        std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(&inherited)))
+            .expect("a PATH with the stub first");
+    let (out, err) = (
+        root.join("coordinator.stdout"),
+        root.join("coordinator.stderr"),
+    );
+    let mut owned = OwnedCollection {
+        owned: OwnedDescendants::adopt(),
+    };
+    assert!(
+        owned.owned.has_no_child(),
+        "{case}: before its coordinator starts this harness has no child of its own: {:?}",
+        owned.owned.errors
+    );
+    let mut coordinator = RunningTestChild::start(
+        "runner::container::exec::tests::lease_kill_coordinator_child",
+        &[
+            ("PATH", path.as_os_str()),
+            (LEASE_KILL_CASE, OsStr::new(&case)),
+            (LEASE_KILL_ROOT, root.as_os_str()),
+            (LEASE_KILL_ACK, ack.as_os_str()),
+            (LEASE_KILL_BACKSTOPS, backstops.as_os_str()),
+            (
+                "UPSTROKE_TEST_CLEANUP_DELAY_MS",
+                OsStr::new(LEASE_KILL_SETTLEMENT_DELAY_MS),
+            ),
+        ],
+        &out,
+        &err,
+    );
+    let told = || {
+        format!(
+            "stdout:\n{}\nstderr:\n{}",
+            std::fs::read_to_string(&out).unwrap_or_default(),
+            std::fs::read_to_string(&err).unwrap_or_default()
+        )
+    };
+    let paused_by = Instant::now() + Duration::from_secs(60);
+    let (helper, backstop_pids) = loop {
+        if let (Some(helper), Some(armed)) = (pids_at(&ack), pids_at(&backstops)) {
+            if let Some(helper) = helper.first() {
+                break (*helper, armed);
+            }
+        }
+        if let Some(status) = coordinator.exited() {
+            panic!(
+                "{case}: the coordinator ended ({status:?}) before its helper paused: {}",
+                told()
+            );
+        }
+        assert!(
+            Instant::now() < paused_by,
+            "{case}: the helper never acknowledged its pause, or the backstops were not reported: \
+             {}",
+            told()
+        );
+        crate::workspace_manager::fixture::rest(Duration::from_millis(10));
+    };
+
+    // The covered processes, identified while the coordinator still lives.
+    let coordinator_pid = coordinator
+        .pid()
+        .expect("the coordinator's pid")
+        .to_string();
+    let forks = children_of(&coordinator_pid).expect("the coordinator's children lists");
+    let (helper_id, _) = stat_of(helper).expect("the paused helper's identity");
+    assert!(
+        forks.contains(&helper),
+        "{case}: the paused helper is the coordinator's child"
+    );
+    let mut helper_reaper = None;
+    for fork in &forks {
+        for grandchild in children_of(&fork.to_string()).unwrap_or_default() {
+            if stat_of(grandchild).is_ok_and(|(anchor, _)| anchor.pgrp == helper) {
+                helper_reaper = Some(stat_of(*fork).expect("the helper's reaper's identity").0);
+            }
+        }
+    }
+    let helper_reaper = helper_reaper.unwrap_or_else(|| {
+        panic!("{case}: no child of the coordinator anchors the paused helper's group: {forks:?}")
+    });
+    for pid in &backstop_pids {
+        assert!(
+            forks.contains(pid),
+            "{case}: the backstop {pid} is the coordinator's child"
+        );
+    }
+    let backstop_ids: Vec<Identified> = backstop_pids
+        .iter()
+        .map(|pid| stat_of(*pid).expect("the backstop's identity").0)
+        .collect();
+    let covered: Vec<Identified> = std::iter::once(helper_id.clone())
+        .chain(std::iter::once(helper_reaper.clone()))
+        .chain(backstop_ids.iter().cloned())
+        .collect();
+
+    assert!(
+        coordinator.kill_and_collect().is_some(),
+        "{case}: the coordinator was killed and collected"
+    );
+    let before = observed(&helper_reaper, &owned.owned);
+    let refused = crate::rundir::RunLock::acquire(&public).err();
+    let after = observed(&helper_reaper, &owned.owned);
+    let owing = before == Observed::Live && after == Observed::Live;
+    crate::workspace_manager::fixture::say(&format!(
+        "{case}: admission refused while the paused helper's reaper still owed its settlement: \
+         {} (reaper {} before the ask {before:?}, after it {after:?}; refused {})",
+        owing && refused.is_some(),
+        helper_reaper.pid,
+        refused.is_some()
+    ));
+    assert!(
+        owing && refused.is_some(),
+        "{case}: with the killed coordinator's helper reaper still settling, run admission \
+         refused (before {before:?}, after {after:?}, refusal {refused:?})"
+    );
+
+    let admitted_by = Instant::now() + Duration::from_secs(60);
+    let admitted = loop {
+        let _ = owned.owned.collect_ended();
+        match crate::rundir::RunLock::acquire(&public) {
+            Ok(lock) => break lock,
+            Err(error) => {
+                assert!(
+                    Instant::now() < admitted_by,
+                    "{case}: admission never came once the settlement ended: {error}"
+                );
+                crate::workspace_manager::fixture::rest(Duration::from_millis(20));
+            }
+        }
+    };
+    let at_admission: Vec<(libc::pid_t, String, Observed)> = covered
+        .iter()
+        .map(|who| (who.pid, who.comm.clone(), observed(who, &owned.owned)))
+        .collect();
+    drop(admitted);
+    let not_ended: Vec<&(libc::pid_t, String, Observed)> = at_admission
+        .iter()
+        .filter(|(_, _, observed)| !matches!(observed, Observed::Ended(_)))
+        .collect();
+    crate::workspace_manager::fixture::say(&format!(
+        "{case}: admitted only after every covered helper, reaper and backstop had ended: {} \
+         (at admission {at_admission:?})",
+        not_ended.is_empty()
+    ));
+    assert!(
+        not_ended.is_empty(),
+        "{case}: at admission a covered process was live, or its ending was not established: \
+         {not_ended:?}"
+    );
+
+    let settled = owned.owned.settle_naturally_within(Duration::from_secs(30));
+    let remaining: Vec<String> = owned
+        .owned
+        .own_children()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|pid| {
+            stat_of(pid).map_or_else(
+                |error| format!("{pid}: {error}"),
+                |(who, state)| format!("{pid} {} {state} pgrp {}", who.comm, who.pgrp),
+            )
+        })
+        .collect();
+    crate::workspace_manager::fixture::say(&format!(
+        "{case}: every process the killed coordinator left ended on its own and was collected \
+         here: {settled} ({} collected; remaining {remaining:?}; errors {:?})",
+        owned.owned.collected.len(),
+        owned.owned.errors
+    ));
+    assert!(
+        settled,
+        "{case}: after admission every process the killed coordinator left ended on its own and \
+         this harness collected it, to the kernel's own account (remaining {remaining:?})"
+    );
+}
+
+#[cfg(target_os = "linux")]
+fn the_lease_kill_guard(case: &str) {
+    let fixture = Fixture::built_in_a_bounded_child(&format!("lease-kill-{case}"), false);
+    let bin = fixture.root.join("bin");
+    std::fs::create_dir(&bin).expect("the stub's directory");
+    let stub = bin.join("docker");
+    std::fs::write(&stub, lease_kill_stub(case)).expect("the stub");
+    crate::workspace_manager::fixture::set_mode(&stub, 0o755);
+    let ended = crate::agent::proc::test_support::run_test_isolated(
+        "runner::container::exec::tests::lease_kill_harness_child",
+        &[
+            (LEASE_KILL_CASE, std::ffi::OsStr::new(case)),
+            (LEASE_KILL_ROOT, fixture.root.as_os_str()),
+        ],
+        Duration::from_secs(300),
+    );
+    let said = format!("{}{}", ended.stdout, ended.stderr);
+    let complete = said.contains("lease-kill collection: complete: true;");
+    if !complete {
+        crate::workspace_manager::fixture::say(&format!(
+            "lease-kill collection FAILED: the fixture at {} is kept for what may still need it",
+            fixture.root.display()
+        ));
+        std::mem::forget(fixture);
+    }
+    assert!(
+        complete,
+        "{case}: the harness ended and collected every process the killed coordinator left, \
+         whatever else it found: {ended}"
+    );
+    assert!(
+        ended.status.is_some_and(|status| status.success()) && ended.stdout.contains("1 passed"),
+        "{case}: the bounded harness ended: {ended}"
+    );
+    for line in [
+        format!(
+            "{case}: admission refused while the paused helper's reaper still owed its \
+             settlement: true"
+        ),
+        format!(
+            "{case}: admitted only after every covered helper, reaper and backstop had ended: \
+             true"
+        ),
+        format!(
+            "{case}: every process the killed coordinator left ended on its own and was \
+             collected here: true"
+        ),
+        "lease-kill collection: complete: true;".to_owned(),
+    ] {
+        assert!(said.contains(&line), "{case}: missing `{line}`: {ended}");
+    }
+}
+
+/// A worker's invocation carries its run's cleanup lease (R28) through the
+/// `ContainerRunner` and `DockerCli`'s bounded question to the process funnel:
+/// with the coordinator killed while the worker's synchronous `docker create`
+/// is paused, run admission refuses while that helper's reaper still owes its
+/// settlement, and is admitted only once it, the helper and the
+/// container-label backstop have ended; every process the coordinator left is
+/// then collected by the harness that owns it.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_killed_coordinators_paused_docker_create_keeps_run_admission_refused_until_it_is_settled() {
+    the_lease_kill_guard("worker-create");
+}
+
+/// The attached start's supervisor thread is inside no cleanup scope, so the
+/// invocation's leases reach its `docker start --attach` by value: with the
+/// coordinator killed while that client is paused, run admission refuses while
+/// its reaper still owes its settlement, and is admitted only once it has
+/// ended.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_killed_coordinators_paused_attached_start_keeps_run_admission_refused_until_it_is_settled() {
+    the_lease_kill_guard("attached-start");
+}
+
+/// The credential volume's inspection is asked before any container is
+/// created, through a runtime method that takes no lease, on the worker's own
+/// thread: the invocation's cleanup scope there is what its helper's reaper
+/// holds. With the coordinator killed while that `docker volume inspect` is
+/// paused, run admission refuses while its reaper still owes its settlement,
+/// and is admitted only once it has ended.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_killed_coordinators_paused_credential_volume_inspection_keeps_run_admission_refused_until_it_is_settled()
+ {
+    the_lease_kill_guard("credential-volume");
+}
+
+/// A create refused before it was asked -- here, because the runtime would not
+/// answer whether the credential volume exists -- is followed by the
+/// invocation's cancellation, whose `docker stop` asks about a container no
+/// create ever named. With the coordinator killed while that stop is paused,
+/// run admission refuses while its reaper still owes its settlement, and is
+/// admitted only once it has ended.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_killed_coordinators_paused_pre_create_cancellation_keeps_run_admission_refused_until_it_is_settled()
+ {
+    the_lease_kill_guard("pre-create-cancel");
+}
+
+// ---------------------------------------------------------------------------
+// `PR12-INV9-CONTAINER-HELPER-CLEANUP-LEASE`: the runner's dormant label
+// backstop takes its run's cleanup lease itself before it acts
+// ---------------------------------------------------------------------------
+
+#[cfg(target_os = "linux")]
+const DORMANT_CASE: &str = "UPSTROKE_TEST_DORMANT_BACKSTOP_CASE";
+
+#[cfg(target_os = "linux")]
+const DORMANT_READY: &str = "UPSTROKE_TEST_DORMANT_BACKSTOP_READY";
+
+/// The `docker` a dormant backstop runs when it acts: its label listing (`ps`)
+/// acknowledges that it has started -- its pid written to the
+/// acknowledgement path, a temporary name then `mv` -- and lists nothing after
+/// two seconds; every other verb succeeds with nothing to say. The backstop
+/// runs that listing only once it has taken its exclusion.
+#[cfg(target_os = "linux")]
+fn dormant_backstop_stub() -> String {
+    "#!/bin/sh\n\
+     case \"$1\" in\n\
+     ps) printf '%s' \"$$\" > \"$UPSTROKE_TEST_LEASE_KILL_ACK.tmp\" && \
+     mv \"$UPSTROKE_TEST_LEASE_KILL_ACK.tmp\" \"$UPSTROKE_TEST_LEASE_KILL_ACK\" && exec sleep 2 ;;\n\
+     *) exit 0 ;;\n\
+     esac\n"
+        .to_owned()
+}
+
+/// The coordinator a dormant-backstop harness kills. It takes its run lock
+/// and enters its cleanup scope, arms a dormant label backstop over its run's
+/// lease paths and lock file through the production arming
+/// (`arm_container_reaper` with `BackstopHold::BeforeActing`), then lets go of
+/// its run lock and scope and keeps the backstop armed, as a runner left with
+/// an unsettled container does, and reports the backstop's pid. It then waits
+/// to be killed, for at most 300 s.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "the coordinator a dormant-backstop harness kills"]
+fn dormant_backstop_coordinator_child() {
+    let root =
+        PathBuf::from(std::env::var_os(LEASE_KILL_ROOT).expect("the harness names the fixture"));
+    let ready =
+        PathBuf::from(std::env::var_os(DORMANT_READY).expect("the harness names the report"));
+    let layout = Layout::of(&root);
+    let lock =
+        crate::rundir::RunLock::acquire(&layout.paths.public).expect("the coordinator's run lock");
+    let scope = lock.enter_cleanup_scope();
+    let leases = crate::rundir::active_cleanup_lease_paths();
+    let labels = crate::runner::container::census::ReaperContainerScope::new(
+        "docker",
+        &layout.private_root,
+        INCARNATION_1,
+    )
+    .expect("the runner's label scope");
+    let backstop = crate::agent::proc::arm_container_reaper(
+        crate::topology::effects::ProcessSite::Terminate,
+        &labels,
+        crate::agent::proc::BackstopHold::BeforeActing {
+            leases: &leases,
+            run_lock: &crate::rundir::lock_file(&layout.paths.public),
+        },
+    )
+    .expect("arm the dormant label backstop");
+    let armed = crate::agent::proc::test_support::armed_container_reaper_pids();
+    drop(scope);
+    drop(lock);
+    std::mem::forget(backstop);
+    let text: Vec<String> = armed.iter().map(ToString::to_string).collect();
+    let staged = ready.with_extension("tmp");
+    std::fs::write(&staged, format!("{}\n", text.join(" "))).expect("the backstop report");
+    std::fs::rename(&staged, &ready).expect("the backstop report");
+    let until = Instant::now() + Duration::from_secs(300);
+    while Instant::now() < until {
+        crate::workspace_manager::fixture::rest(Duration::from_millis(100));
+    }
+}
+
+/// The owned, bounded harness of the dormant-backstop guards, under the same
+/// collection as the lease-kill harness ([`OwnedDescendants`]): it starts the
+/// coordinator over the fixture its parent built, identifies the dormant
+/// backstop among the coordinator's children, and asks for run admission while
+/// the coordinator still lives -- granted, since the backstop holds nothing
+/// then. In the `free` case it lets go of that admission, kills the
+/// coordinator and collects it, waits for the backstop's listing to start,
+/// requires admission refused while the backstop is live, both before and
+/// after the ask, then asks until admitted and requires the backstop's ending
+/// established by an owned fact by then. In the `newer-engine` case it keeps
+/// that admission -- a newer engine holding the run -- across the kill, and
+/// requires the backstop to end on its own without ever starting its listing.
+/// Either way every process the coordinator left ends on its own and is
+/// collected here, to the kernel's own account.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "the isolated harness of the dormant-backstop guards"]
+fn dormant_backstop_harness_child() {
+    use crate::agent::proc::test_support::RunningTestChild;
+
+    let case = std::env::var(DORMANT_CASE).expect("the parent names the case");
+    let root =
+        PathBuf::from(std::env::var_os(LEASE_KILL_ROOT).expect("the parent names the fixture"));
+    let public = Layout::of(&root).paths.public;
+    let bin = root.join("bin");
+    let ack = root.join("listing.pid");
+    let ready = root.join("dormant-backstop.pid");
+    let inherited = std::env::var_os("PATH").unwrap_or_default();
+    let path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&inherited)))
+        .expect("a PATH with the stub first");
+    let (out, err) = (
+        root.join("coordinator.stdout"),
+        root.join("coordinator.stderr"),
+    );
+    let mut owned = OwnedCollection {
+        owned: OwnedDescendants::adopt(),
+    };
+    assert!(
+        owned.owned.has_no_child(),
+        "{case}: before its coordinator starts this harness has no child of its own: {:?}",
+        owned.owned.errors
+    );
+    let mut coordinator = RunningTestChild::start(
+        "runner::container::exec::tests::dormant_backstop_coordinator_child",
+        &[
+            ("PATH", path.as_os_str()),
+            (LEASE_KILL_ROOT, root.as_os_str()),
+            (LEASE_KILL_ACK, ack.as_os_str()),
+            (DORMANT_READY, ready.as_os_str()),
+        ],
+        &out,
+        &err,
+    );
+    let told = || {
+        format!(
+            "stdout:\n{}\nstderr:\n{}",
+            std::fs::read_to_string(&out).unwrap_or_default(),
+            std::fs::read_to_string(&err).unwrap_or_default()
+        )
+    };
+    let armed_by = Instant::now() + Duration::from_secs(60);
+    let reported = loop {
+        if let Some(pids) = pids_at(&ready) {
+            break pids;
+        }
+        if let Some(status) = coordinator.exited() {
+            panic!(
+                "{case}: the coordinator ended ({status:?}) before it armed its backstop: {}",
+                told()
+            );
+        }
+        assert!(
+            Instant::now() < armed_by,
+            "{case}: the coordinator never reported its backstop: {}",
+            told()
+        );
+        crate::workspace_manager::fixture::rest(Duration::from_millis(10));
+    };
+    let coordinator_pid = coordinator
+        .pid()
+        .expect("the coordinator's pid")
+        .to_string();
+    let forks = children_of(&coordinator_pid).expect("the coordinator's children lists");
+    let [backstop_pid] = reported.as_slice() else {
+        panic!("{case}: exactly one backstop was armed: {reported:?}");
+    };
+    assert!(
+        forks.contains(backstop_pid),
+        "{case}: the backstop {backstop_pid} is the coordinator's child"
+    );
+    let (backstop, _) = stat_of(*backstop_pid).expect("the backstop's identity");
+
+    let admitted_while_dormant = crate::rundir::RunLock::acquire(&public);
+    crate::workspace_manager::fixture::say(&format!(
+        "{case}: the dormant backstop held nothing while its coordinator lived: {} ({:?})",
+        admitted_while_dormant.is_ok(),
+        admitted_while_dormant.as_ref().err()
+    ));
+    let newer_engine = admitted_while_dormant
+        .unwrap_or_else(|error| panic!("{case}: while its coordinator lived: {error}"));
+    let newer_engine = match case.as_str() {
+        "free" => {
+            drop(newer_engine);
+            None
+        }
+        "newer-engine" => Some(newer_engine),
+        other => panic!("unknown dormant-backstop case `{other}`"),
+    };
+
+    assert!(
+        coordinator.kill_and_collect().is_some(),
+        "{case}: the coordinator was killed and collected"
+    );
+    if newer_engine.is_none() {
+        let listed_by = Instant::now() + Duration::from_secs(60);
+        while pids_at(&ack).is_none() {
+            assert!(
+                Instant::now() < listed_by,
+                "{case}: the dormant backstop never started its listing: {}",
+                told()
+            );
+            crate::workspace_manager::fixture::rest(Duration::from_millis(5));
+        }
+        let before = observed(&backstop, &owned.owned);
+        let refused = crate::rundir::RunLock::acquire(&public).err();
+        let after = observed(&backstop, &owned.owned);
+        let holding = before == Observed::Live && after == Observed::Live && refused.is_some();
+        crate::workspace_manager::fixture::say(&format!(
+            "{case}: admission refused while the dormant backstop acted under its own hold: \
+             {holding} (backstop {} before the ask {before:?}, after it {after:?}; refused {})",
+            backstop.pid,
+            refused.is_some()
+        ));
+        assert!(
+            holding,
+            "{case}: the acting backstop held its run's cleanup lease (before {before:?}, after \
+             {after:?}, refusal {refused:?})"
+        );
+        let admitted_by = Instant::now() + Duration::from_secs(60);
+        let admitted = loop {
+            let _ = owned.owned.collect_ended();
+            match crate::rundir::RunLock::acquire(&public) {
+                Ok(lock) => break lock,
+                Err(error) => {
+                    assert!(
+                        Instant::now() < admitted_by,
+                        "{case}: admission never came once the backstop had acted: {error}"
+                    );
+                    crate::workspace_manager::fixture::rest(Duration::from_millis(20));
+                }
+            }
+        };
+        let at_admission = observed(&backstop, &owned.owned);
+        drop(admitted);
+        crate::workspace_manager::fixture::say(&format!(
+            "{case}: admitted only after the dormant backstop had ended: {} ({at_admission:?})",
+            matches!(at_admission, Observed::Ended(_))
+        ));
+        assert!(
+            matches!(at_admission, Observed::Ended(_)),
+            "{case}: at admission the backstop's ending was established: {at_admission:?}"
+        );
+    } else {
+        let ended_by = Instant::now() + Duration::from_secs(30);
+        let ending = loop {
+            let _ = owned.owned.collect_ended();
+            let now = observed(&backstop, &owned.owned);
+            if matches!(now, Observed::Ended(_)) || Instant::now() >= ended_by {
+                break now;
+            }
+            crate::workspace_manager::fixture::rest(Duration::from_millis(10));
+        };
+        let listed = pids_at(&ack).is_some();
+        crate::workspace_manager::fixture::say(&format!(
+            "{case}: the dormant backstop ended without acting while a newer engine held the run: \
+             {} ({ending:?}; listing started {listed})",
+            matches!(ending, Observed::Ended(_)) && !listed
+        ));
+        assert!(
+            matches!(ending, Observed::Ended(_)) && !listed,
+            "{case}: with a newer engine holding the run the backstop ended ({ending:?}) and ran \
+             no listing (started {listed})"
+        );
+        drop(newer_engine);
+    }
+
+    let settled = owned.owned.settle_naturally_within(Duration::from_secs(30));
+    crate::workspace_manager::fixture::say(&format!(
+        "{case}: every process the killed coordinator left ended on its own and was collected \
+         here: {settled} ({} collected; errors {:?})",
+        owned.owned.collected.len(),
+        owned.owned.errors
+    ));
+    assert!(
+        settled,
+        "{case}: every process the killed coordinator left ended on its own and this harness \
+         collected it, to the kernel's own account"
+    );
+}
+
+#[cfg(target_os = "linux")]
+fn the_dormant_backstop_guard(case: &str, acted: &[&str]) {
+    let fixture = Fixture::built_in_a_bounded_child(&format!("dormant-backstop-{case}"), false);
+    let bin = fixture.root.join("bin");
+    std::fs::create_dir(&bin).expect("the stub's directory");
+    let stub = bin.join("docker");
+    std::fs::write(&stub, dormant_backstop_stub()).expect("the stub");
+    crate::workspace_manager::fixture::set_mode(&stub, 0o755);
+    let ended = crate::agent::proc::test_support::run_test_isolated(
+        "runner::container::exec::tests::dormant_backstop_harness_child",
+        &[
+            (DORMANT_CASE, std::ffi::OsStr::new(case)),
+            (LEASE_KILL_ROOT, fixture.root.as_os_str()),
+        ],
+        Duration::from_secs(300),
+    );
+    let said = format!("{}{}", ended.stdout, ended.stderr);
+    let complete = said.contains("lease-kill collection: complete: true;");
+    if !complete {
+        crate::workspace_manager::fixture::say(&format!(
+            "dormant-backstop collection FAILED: the fixture at {} is kept for what may still \
+             need it",
+            fixture.root.display()
+        ));
+        std::mem::forget(fixture);
+    }
+    assert!(
+        complete,
+        "{case}: the harness ended and collected every process the killed coordinator left, \
+         whatever else it found: {ended}"
+    );
+    assert!(
+        ended.status.is_some_and(|status| status.success()) && ended.stdout.contains("1 passed"),
+        "{case}: the bounded harness ended: {ended}"
+    );
+    let required = std::iter::once(format!(
+        "{case}: the dormant backstop held nothing while its coordinator lived: true"
+    ))
+    .chain(acted.iter().map(|line| format!("{case}: {line}: true")))
+    .chain([
+        format!(
+            "{case}: every process the killed coordinator left ended on its own and was \
+             collected here: true"
+        ),
+        "lease-kill collection: complete: true;".to_owned(),
+    ]);
+    for line in required {
+        assert!(said.contains(&line), "{case}: missing `{line}`: {ended}");
+    }
+}
+
+/// The runner's dormant label backstop holds no cleanup lease while its
+/// coordinator lives, so a same-process successor is not refused for it; at
+/// its coordinator's death, with no engine holding the run, it takes its run's
+/// cleanup lease itself before it acts -- run admission refuses while its label
+/// listing runs -- and admission comes once it has ended.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_dormant_label_backstop_holds_its_runs_cleanup_lease_while_it_acts_after_its_coordinators_death()
+ {
+    the_dormant_backstop_guard(
+        "free",
+        &[
+            "admission refused while the dormant backstop acted under its own hold",
+            "admitted only after the dormant backstop had ended",
+        ],
+    );
+}
+
+/// With a newer engine holding the run when its coordinator dies, the dormant
+/// label backstop stands down: it starts no listing and reclaims nothing --
+/// the newer engine's census owns the dead incarnation's containers -- and
+/// ends on its own.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_dormant_label_backstop_acts_on_nothing_while_a_newer_engine_holds_the_run() {
+    the_dormant_backstop_guard(
+        "newer-engine",
+        &["the dormant backstop ended without acting while a newer engine held the run"],
+    );
 }

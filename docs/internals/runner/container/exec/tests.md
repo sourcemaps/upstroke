@@ -2972,3 +2972,152 @@ been collected, so that check sees the retained reaper omitted by the mutation.
 The unchanged fate assertions still run. The witness covers omitted normal
 collection; the same collection routine is exercised during the deliberate
 unwind, not separately mutation-tested there.
+
+## `const LEASE_KILL_SETTLEMENT_DELAY_MS: &str = "3000";`
+
+The killed coordinator's reapers' own test-build settlement delay. `cleanup_reaper_group` ends its
+registered group first and only then waits this out before it confirms the group gone and collects
+its anchor, so what a helper's lease covers after its coordinator dies is its reaper's settlement,
+not a helper kept alive (repair16's PROTOCOL-5 and PROTOCOL-6).
+
+## `fn lease_kill_stub(case: &str) -> String {`
+
+The `docker` on the killed coordinator's `PATH`. It pauses at the case's acknowledged boundary by
+writing its pid and becoming a long `sleep`: the worker's synchronous `docker create`
+(`worker-create`); the attached client's `docker start --attach`, on the attached start's own thread
+(`attached-start`); the credential volume's `docker volume inspect`, which `create_container` asks
+before any create and so before any container name exists (`credential-volume`); or the `docker
+stop` of the cancellation that follows a create refused before it was asked (`pre-create-cancel`,
+whose volume inspection it will not answer). Otherwise it answers just enough for the launch to
+reach that boundary. No daemon object exists.
+
+## `struct Identified {`
+
+A process of a fixture as the harness first identified it: pid, start time, command name, process
+group. A reused pid would not share the start time.
+
+## `fn stat_of(pid: libc::pid_t) -> Result<(Identified, char), String> {`
+
+`/proc/<pid>/stat` of a process the harness reached through its own children lists, or one the
+kernel named ended (a zombie keeps its record until it is collected). The command name is read
+between the first `(` and the last `)`.
+
+## `fn children_of(pid: &str) -> Result<Vec<libc::pid_t>, String> {`
+
+The children lists of each task of one process. Scoped discovery only -- the harness's own, or a
+process it already reached -- and never evidence that no child remains: an unreadable list is an
+error, and a list read empty proves nothing.
+
+## `enum Observed {` and `fn observed(who: &Identified, owned: &OwnedDescendants) -> Observed {`
+
+What is established about an identified process, three ways (repair16's PROTOCOL-7, after
+REPAIR16-AMENDMENT-7): `Live` (its pid answers the identified start time in a state neither `Z`
+nor `X`), `Ended` only by an owned fact (collected by this harness with that identity, or an exited
+zombie with that identity), and `Unknown` for an observation that could not be read or a pid now
+naming another process. `Live` is the only positive premise of liveness and `Ended` the only
+evidence of an ending; `Unknown` fails as either.
+
+## `enum Waited {` and `fn wait_now(pid: libc::pid_t) -> Waited {`
+
+One `waitpid(pid, WNOHANG)` and every answer it can give, kept apart: collected with its status,
+still running, interrupted, not a child (`ECHILD`), or another error.
+
+## `enum Pending {` and `fn pending_now() -> Pending {`
+
+The kernel's own account of the harness's children, collecting none:
+`waitid(P_ALL, WEXITED | WNOHANG | WNOWAIT)`. A named ended child; children remaining with none
+ended (`si_pid` zero); no child at all (`ECHILD`); interrupted; or an error.
+
+## `struct OwnedDescendants {`
+
+Every process a killed coordinator leaves, owned by the harness. The harness makes itself a child
+subreaper before it starts the coordinator, so everything the coordinator forked or spawned is
+re-parented to it when its own parent dies. It forks nothing of its own -- its parent test builds
+the fixture, and the coordinator is started with `std::process::Command`, not the process funnel --
+and asks the kernel so before the coordinator starts (`has_no_child`), so a later "no child
+remains" is about the coordinator's processes alone. It collects only children the kernel names
+ended, reconciling the identity each zombie answers with the one it was first listed with, and
+makes no wait before the coordinator's own handle has collected the coordinator. It signals a
+process only while it is listed as its own unreaped child with its identified start time, by pid,
+never a group. A collection -- natural settlement or the final cleanup -- is complete only when the
+kernel answers `ECHILD`, every child ever listed was collected here, and nothing failed.
+
+## `struct OwnedCollection {`
+
+The collector, ended at its drop on a pass, a failing assertion, a panic, an internal deadline and
+the B1 reversal alike: it ends and collects every descendant within 20 s and prints
+`lease-kill collection: complete: ...`. The parent removes the fixture only on a complete
+collection and otherwise keeps it and says so.
+
+## `fn lease_kill_coordinator_child() {`
+
+The coordinator a lease-kill harness kills. It takes its run lock, enters its cleanup scope and
+hands a worker thread -- inside no scope of its own -- the `Carried` call a pipeline is given; the
+worker runs a real `ContainerRunner` over `DockerCli` and the process funnel (a gate, a gate with
+stdin, or an implementer invocation with its credential volume) until the stub pauses it. A second
+thread reports, once the helper has paused, the container-label backstops the invocation armed.
+
+## `fn pids_at(path: &Path) -> Option<Vec<libc::pid_t>> {`
+
+The pids a report holds, once it exists; possibly none.
+
+## `fn lease_kill_harness_child() {`
+
+The owned, bounded harness. While the coordinator lives it identifies the covered processes through
+the coordinator's children lists: the paused helper, the command reaper that registered its group,
+and the container-label backstop. It kills and collects the coordinator, requires run admission
+refused while the helper's reaper is `Live` before and after the ask, asks until admitted and
+requires every covered process `Ended` by then, and lets every process the coordinator left end on
+its own to the kernel's own account. The refusal, the admission and the collection are three
+separate facts, none inferred from another.
+
+## `fn the_lease_kill_guard(case: &str) {`
+
+The parent of each kill guard. It builds the fixture in a bounded child of its own and the stub in
+it, runs the harness isolated within 300 s, and requires the complete-collection line before
+anything else -- an incomplete one keeps the fixture -- then each of the harness's witness lines.
+
+## `fn a_killed_coordinators_paused_docker_create_keeps_run_admission_refused_until_it_is_settled() {`
+
+`worker-create`: a worker's invocation carries its run's cleanup lease through the
+`ContainerRunner` and `DockerCli`'s bounded question.
+
+## `fn a_killed_coordinators_paused_attached_start_keeps_run_admission_refused_until_it_is_settled() {`
+
+`attached-start`: the attached start's own thread takes the invocation's leases by value.
+
+## `fn a_killed_coordinators_paused_credential_volume_inspection_keeps_run_admission_refused_until_it_is_settled()`
+
+`credential-volume`: the credential volume's inspection, asked through a runtime method that takes
+no lease and before any container exists, holds the invocation's leases through its thread's scope.
+
+## `fn a_killed_coordinators_paused_pre_create_cancellation_keeps_run_admission_refused_until_it_is_settled()`
+
+`pre-create-cancel`: the cancellation after a create refused before it was asked asks about a
+container no create ever named, and holds the invocation's leases the same way.
+
+## `fn dormant_backstop_coordinator_child() {`
+
+The coordinator a dormant-backstop harness kills. It arms a container-label backstop over its run's
+lease paths and lock file through the production arming (`BackstopHold::BeforeActing`), lets go of
+its run lock and scope, keeps the backstop armed as an unsettled runner does, and waits, at most
+300 s, to be killed.
+
+## `fn dormant_backstop_harness_child() {`
+
+Under the same owned collection: admission is granted while the coordinator lives, the backstop
+holding nothing. In `free`, it lets go, kills the coordinator, waits for the backstop's label listing
+to start, and requires admission refused while the backstop is `Live` before and after the ask and
+granted only once its ending is established. In `newer-engine`, it keeps that admission -- a newer
+engine holding the run -- across the kill, and requires the backstop to end on its own without
+starting its listing.
+
+## `fn a_dormant_label_backstop_holds_its_runs_cleanup_lease_while_it_acts_after_its_coordinators_death()`
+
+The backstop holds no lease while its coordinator lives and takes its run's lease itself, before it
+acts, at its coordinator's death.
+
+## `fn a_dormant_label_backstop_acts_on_nothing_while_a_newer_engine_holds_the_run() {`
+
+With a newer engine holding the run at its coordinator's death, the backstop stands down: no
+listing, no reclaim, an ending of its own.
