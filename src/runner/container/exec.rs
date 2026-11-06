@@ -323,6 +323,7 @@ pub struct ContainerRunner {
     poll: Duration,
     output_limit: usize,
     reaping: Reaping,
+    worktree_lock: PathBuf,
 }
 
 #[derive(Default)]
@@ -339,8 +340,41 @@ struct ReapingState {
 
 struct Armed {
     #[cfg(unix)]
-    reaper: crate::agent::proc::ContainerReaper,
+    dormant: Vec<DormantBackstop>,
     scope: ReaperContainerScope,
+}
+
+#[cfg(unix)]
+struct DormantBackstop {
+    leases: Vec<PathBuf>,
+    _reaper: crate::agent::proc::ContainerReaper,
+}
+
+#[cfg(unix)]
+impl DormantBackstop {
+    fn arm(
+        scope: &ReaperContainerScope,
+        leases: &[PathBuf],
+        run_lock: &Path,
+        worktree_lock: &Path,
+    ) -> Result<Self, UpstrokeError> {
+        Ok(Self {
+            leases: leases.to_vec(),
+            _reaper: crate::agent::proc::arm_container_reaper(
+                crate::topology::effects::ProcessSite::Terminate,
+                scope,
+                crate::agent::proc::BackstopHold::BeforeActing {
+                    leases,
+                    run_lock,
+                    worktree_lock,
+                },
+            )?,
+        })
+    }
+
+    fn covers(&self, leases: &[PathBuf]) -> bool {
+        leases.iter().all(|path| self.leases.contains(path))
+    }
 }
 
 fn refuse_unless_selected(
@@ -364,9 +398,36 @@ fn refuse_unless_selected(
 }
 
 impl Armed {
+    const fn new(scope: ReaperContainerScope) -> Self {
+        Self {
+            #[cfg(unix)]
+            dormant: Vec::new(),
+            scope,
+        }
+    }
+
+    #[cfg(unix)]
+    fn cover_dormant(
+        &mut self,
+        leases: &[PathBuf],
+        run_lock: &Path,
+        worktree_lock: &Path,
+    ) -> Result<(), UpstrokeError> {
+        if self.dormant.iter().any(|backstop| backstop.covers(leases)) {
+            return Ok(());
+        }
+        self.dormant.push(DormantBackstop::arm(
+            &self.scope,
+            leases,
+            run_lock,
+            worktree_lock,
+        )?);
+        Ok(())
+    }
+
     fn kept_until_the_process_exits(self) {
         #[cfg(unix)]
-        std::mem::forget(self.reaper);
+        std::mem::forget(self.dormant);
     }
 }
 
@@ -420,6 +481,7 @@ impl ContainerRunner {
             RunPaths::with_private_root(repo_root, &identity.run_id, &identity.private_root)
                 .settings();
         let user = coordinator_user();
+        let worktree_lock = crate::rundir::worktree_lock_file(git.git_dir);
         Ok(Self {
             policy,
             image_id,
@@ -439,6 +501,7 @@ impl ContainerRunner {
             poll: SUPERVISION_POLL,
             output_limit: OUTPUT_LIMIT_BYTES,
             reaping: Reaping::default(),
+            worktree_lock,
         })
     }
 
@@ -1110,13 +1173,17 @@ impl ContainerRunner {
         call: RunnerCall<'_>,
     ) -> Result<ProcessOutput, RunnerError> {
         let parts = call.into_parts();
+        let carried: &[PathBuf] = parts.leases;
+        #[cfg(unix)]
+        let _carried_scope = crate::rundir::enter_carried_cleanup_scope(carried);
+        let leases = invocation_cleanup_leases(carried);
         match (parts.container, &self.hooks) {
-            (Some(observer), _) => self.contain(request, &parts.cancellation, observer),
+            (Some(observer), _) => self.contain(request, &parts.cancellation, observer, &leases),
             (None, Some(hooks)) => {
                 let mut hooks = hooks.lock().unwrap_or_else(PoisonError::into_inner);
-                self.contain(request, &parts.cancellation, &mut **hooks)
+                self.contain(request, &parts.cancellation, &mut **hooks, &leases)
             }
-            (None, None) => self.contain(request, &parts.cancellation, &mut NoHooks),
+            (None, None) => self.contain(request, &parts.cancellation, &mut NoHooks, &leases),
         }
     }
 
@@ -1125,6 +1192,7 @@ impl ContainerRunner {
         request: &RunnerRequest,
         cancellation: &Cancellation,
         hooks: &mut dyn ContainerHooks,
+        leases: &[PathBuf],
     ) -> Result<ProcessOutput, RunnerError> {
         if cancellation.is_cancelled() {
             return Err(RunnerError::cancelled(
@@ -1147,6 +1215,8 @@ impl ContainerRunner {
                 &request.command.stdin,
                 deadline,
                 cancellation,
+                leases,
+                &self.worktree_lock,
             )
             .map_err(never_started)?;
 
@@ -1245,6 +1315,19 @@ fn unrepresentable_deadline(request: &RunnerRequest) -> UpstrokeError {
     }
 }
 
+fn invocation_cleanup_leases(carried: &[PathBuf]) -> Vec<PathBuf> {
+    #[cfg(unix)]
+    let mut leases = crate::rundir::active_cleanup_lease_paths();
+    #[cfg(not(unix))]
+    let mut leases: Vec<PathBuf> = Vec::new();
+    for path in carried {
+        if !leases.contains(path) {
+            leases.push(path.clone());
+        }
+    }
+    leases
+}
+
 fn bounded(bytes: &[u8], limit: usize) -> (String, bool) {
     if bytes.len() <= limit {
         return (String::from_utf8_lossy(bytes).into_owned(), false);
@@ -1257,6 +1340,7 @@ fn bounded(bytes: &[u8], limit: usize) -> (String, bool) {
 }
 
 pub(super) mod cover {
+    use std::path::{Path, PathBuf};
     use std::sync::PoisonError;
     use std::time::Instant;
 
@@ -1281,9 +1365,14 @@ pub(super) mod cover {
         stdin: &'a [u8],
         deadline: Instant,
         cancellation: Cancellation,
+        leases: &'a [PathBuf],
     }
 
     impl Reaping {
+        #[expect(
+            clippy::too_many_arguments,
+            reason = "the cover's inputs are each the invocation's own: the runtime and identity its backstop lists with, the spec and stdin it launches, the deadline and cancellation it is bounded by, the cleanup leases its helpers hold, and the worktree lock its backstop asks before it may act"
+        )]
         pub(in crate::runner::container::exec) fn cover<'a>(
             &'a self,
             runtime: &dyn ContainerRuntime,
@@ -1292,26 +1381,33 @@ pub(super) mod cover {
             stdin: &'a [u8],
             deadline: Instant,
             cancellation: &Cancellation,
+            leases: &'a [PathBuf],
+            worktree_lock: &Path,
         ) -> Result<(Covered<'a>, CoveredCreate<'a>, CoveredStart<'a>), UpstrokeError> {
             let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-            if let Some(armed) = &state.armed {
-                refuse_unless_selected(&armed.scope, &spec.labels)?;
-            } else {
-                let scope = ReaperContainerScope::new(
-                    runtime.reaper_program(),
-                    &identity.private_root,
-                    &identity.incarnation,
-                )?;
-                refuse_unless_selected(&scope, &spec.labels)?;
-                state.armed = Some(Armed {
-                    #[cfg(unix)]
-                    reaper: crate::agent::proc::arm_container_reaper(
-                        crate::topology::effects::ProcessSite::Terminate,
-                        &scope,
-                    )?,
-                    scope,
-                });
-            }
+            let armed = match &mut state.armed {
+                Some(armed) => {
+                    refuse_unless_selected(&armed.scope, &spec.labels)?;
+                    armed
+                }
+                unarmed @ None => {
+                    let scope = ReaperContainerScope::new(
+                        runtime.reaper_program(),
+                        &identity.private_root,
+                        &identity.incarnation,
+                    )?;
+                    refuse_unless_selected(&scope, &spec.labels)?;
+                    unarmed.insert(Armed::new(scope))
+                }
+            };
+            #[cfg(unix)]
+            armed.cover_dormant(
+                leases,
+                &crate::rundir::lock_file(&identity.run_dir),
+                worktree_lock,
+            )?;
+            #[cfg(not(unix))]
+            let _ = (armed, worktree_lock);
             state.in_flight = state.in_flight.saturating_add(1);
             Ok((
                 Covered {
@@ -1324,6 +1420,7 @@ pub(super) mod cover {
                     stdin,
                     deadline,
                     cancellation: cancellation.clone(),
+                    leases,
                 },
             ))
         }
@@ -1379,6 +1476,11 @@ pub(super) mod cover {
         pub const fn cancellation(&self) -> &Cancellation {
             &self.cancellation
         }
+
+        #[must_use]
+        pub const fn leases(&self) -> &'a [PathBuf] {
+            self.leases
+        }
     }
 
     #[cfg(test)]
@@ -1407,6 +1509,7 @@ pub(super) mod cover {
                     stdin: &[],
                     deadline,
                     cancellation: Cancellation::new(),
+                    leases: &[],
                 }
             }
         }

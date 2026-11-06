@@ -1289,7 +1289,9 @@ child rather than a released lease.
 
 The container reaper's acknowledged CANCEL (`cancel_unleased`), PR11 follow-up A's
 `FUA-D1-CONC-1`. It acknowledged, so it is exiting, and it holds **no** cleanup lease
-(`arm_container_reaper` forks it with none), so nothing downstream depends on its exit:
+(`arm_container_reaper` forks it with none, and a `BackstopHold::BeforeActing` backstop
+takes its exclusion only at its coordinator's death, which a CANCEL from that coordinator
+precedes), so nothing downstream depends on its exit:
 the reason `AcknowledgedExit` is unbounded does not apply. Its wait is
 `wait_for_an_ended_helper` (or, with the identity path on,
 `wait_for_an_ended_helper_through_identity`) within `HELPER_END_BUDGET`; a reaper still
@@ -2442,13 +2444,22 @@ does. Then, in this order:
   fail-closed termination a missed CANCEL acknowledgement arms (`cancel_unleased`) would
   set `PENDING_TERMINATION` with nothing reading it.
 - **One reaper is forked through `fork_reaper` with no cleanup lease** and the rendered
-  scope. No lease, by construction, for the reasons the follow-up's record gives (§1.3):
-  a held R28 would refuse the in-process resume the frozen
+  scope. No lease while its coordinator lives, by construction, for the reasons the
+  follow-up's record gives (§1.3): a held R28 would refuse the in-process resume the frozen
   `a_lost_gate_container_is_reclaimed_by_the_next_resume_before_the_verification_is_settled`
   requires, the census reclaims the same containers and the two converge, and "disarming
   never leaves R28 held" becomes structural. No launch claim and no `REGISTER` either: the
   reaper's `pgid` stays 0, so it never settles a group and never forks an anchor; when its
   parent dies it runs only `reclaim_labeled_containers` over its scope.
+- **The hold it takes at that death is the caller's `BackstopHold`**
+  (`PR12-INV9-CONTAINER-HELPER-CLEANUP-LEASE`). `Unleased` -- the reaper's own mechanics
+  tests -- asks nothing and reclaims. `BeforeActing { leases, run_lock, worktree_lock }` --
+  what a container runner arms -- is rendered before the fork (`render_exclusion`) and is
+  established, in `reclaim_labeled_containers`, before anything is killed or removed: the
+  backstop takes the physical worktree's lock itself, as `WorktreeLock` admission does, and
+  only then asks the run's lock and takes its own share of the run's leases. Whoever holds
+  the worktree lock owns the dead incarnation's cleanup there, so a backstop never holds a
+  lease an admitted engine's census could see and then stands down.
 - **It rests once** (`EndingRest::SingleAttempt`, `FUA-I2-EINTR`): its exit wait after CANCEL
   and the abandonment a READY failure takes pause with one `nanosleep` between polls, so their
   deadlines hold under a stream of interruptions.
@@ -2537,6 +2548,19 @@ What a reaper about to be forked should carry.
 ## `mod termination` › `fn reclaim_labeled_containers(containers: &ReaperContainers) {`
 
 Kill and remove every labeled container of the dead coordinator.
+
+For a `BackstopHold::BeforeActing` backstop, the exclusion comes between the first
+non-empty listing and the first kill, so the reaper's calls when it acts are unchanged (list,
+kill and rm per container, list again) and a backstop that lists nothing ends having taken
+nothing -- it never makes its run look live (`rundir::is_running`) when it has nothing to
+remove. Before the first kill it must hold, in this order: the physical worktree's lock
+(`take_the_worktree`: the existing lock file, opened for writing without creating it, locked
+whole with a non-blocking exclusive `F_SETLK`; held by another process, absent or failing,
+it stands down having taken nothing); no holder of its run's lock (`lock_has_no_holder`,
+`F_GETLK`; an absent file has none); and its own shared `flock` on every lease path
+(`hold_leases`, bounded retries over momentary exclusive probes; no lease path to take is a
+stand-down). Its exit releases all of them. The test build can park it at three points
+(`GatePoint`, `BackstopGate`); the production twin of that gate does nothing.
 
 `T-CONTAINER.resume_action`: "on Unix the cleanup reaper performs
 **kill/rm** earlier when the coordinator dies". Only kill and rm: the

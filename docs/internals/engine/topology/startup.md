@@ -789,18 +789,89 @@ Whether reclaiming a husk could delete the only record that locates an
 execution root: `Some` when the root path of the husk's run is occupied,
 unreadable or underivable, `None` only when it is empty.
 
-The path is the one a creator of the run would have claimed at P3c:
-`WorkspaceManager::derive` over the current repository (its common
-directory's key), the authorized root, the husk's run id and the incarnation
-its marker records — the root found through its own husk, never by scanning
-`workspaces/`. A namespace scan could not be safe: linked worktrees share one
-repository key and hold separate worktree leases, so under this census's lease
-another worktree's live run can have a root in the same namespace. The marker
-is read again for its incarnation; an unreadable marker is an undecidable
-answer, and kept.
+The path is the one a creator of the run would have claimed at P3c in this
+command's context: `WorkspaceManager::derive` over the current repository (the
+key of its effective common directory), the authorized root, the husk's run id
+and the incarnation its marker records. The marker is read again for its
+incarnation; an unreadable marker is an undecidable answer, and kept.
 
-Nothing here deletes: the census only observes whether the path is occupied
-(`symlink_metadata`, never followed), and keeps the husk when it is.
+That path is not the only place the run's root can be. A creating context with
+another legal `GIT_COMMON_DIR` derived another key, and its root is at
+`workspaces/<that key>/<run id>`; reclaiming the husk because *this* context's
+path is empty would delete the marker, the only linkage to that root
+(`PR12-REGRESSION11-PRECOMMIT-R18-RECOVERY`). So where the derived path is
+absent the answer is [`another_contexts_root`]'s, which can only keep the husk.
+
+Nothing here deletes, and no scan is ever deletion authority: a namespace look
+cannot say whose a root is -- linked worktrees share one repository key and
+hold separate worktree leases, so under this census's lease another worktree's
+live run can have a root in the same namespace -- so what it finds, or cannot
+read, only keeps the husk, and only a complete link-free view with no entry for
+this run leaves the answer `None` that reclaims as before. The census observes
+(`symlink_metadata` and `read_dir`, never following a link) and keeps the husk
+when anything is, or may be, there.
+
+## `fn another_contexts_root(`
+
+Whether this run may have a root this command's context did not derive, asked
+only once this context's own derived root path is absent; `Some` keeps the
+husk (`Planned::KeepForRoot`, reported `root-retained`), and nothing here
+deletes or follows a link.
+
+First the marker: its recorded locator must be `<authorized root>/runs/<run
+id>` -- spelt as the census's authorized root spells it, as the manager spells
+it, or naming the same entry once its parent is canonicalized ([`names_the_same_entry`];
+creation records the root as `fs::canonicalize` spells it, verbatim on Windows,
+and the manager strips the verbatim prefix). A marker that locates its private
+half anywhere else names a creator whose root would hang from another private
+root, outside this command's authorized namespace, which this census does not
+read: kept.
+
+Then the namespace, `<private root>/workspaces`, read without following: absent
+(`NotFound`) is no root anywhere; a link, a reparse point, a non-directory or
+an unreadable entry there keeps the husk; each key entry is read with
+`symlink_metadata` -- a link or reparse point keeps the husk, a regular file is
+no key and is passed, an unreadable one keeps the husk -- and `<key>/<run id>`
+is asked the same way: anything there, a link included, or an error other than
+`NotFound`, keeps the husk and names the path. Only a complete, link-free view
+with no entry for this run answers `None`. A run id is a ULID, so an entry under
+another key with this run's id is this run's root, made in another repository
+context; it is kept, never claimed or removed.
+
+**What this leaves, and where (the accepted PR-fit deferral).** A husk kept for
+a root stays as it is until an operator, or a later convergence this pull
+request does not add, removes the root: the public husk
+`<repo>/.upstroke/runs/<run id>` with its `.creating` marker, whose
+`private_dir` names the private half `<private root>/runs/<run id>` (and its
+`owner.json`, when the run got that far), and the root
+`<private root>/workspaces/<key>/<run id>`. The private root is the one the run
+was created under: `~/.upstroke` unless configured otherwise. The census reports
+the entry as `root-retained` with the root's path in its `describe()`, but that
+report is not delivered by every public command (the census-report delivery is
+a separate accepted deferral). `upstroke status <run id>` is unchanged and does
+not ask this question: for a husk it reports the husk's disposition and the
+marker's recorded private locator -- for a husk whose private half is gone,
+"an unstarted husk (its recorded private half is gone) that the next write
+command reclaims"; for a proven one, "an unstarted husk, bound to a private half
+that never committed, that the next write command reclaims" -- even where the
+next census keeps it for its root. To find retained state, read it directly and
+read-only: `cat <repo>/.upstroke/runs/<run id>/.creating` for the locator, `cat
+<private root>/runs/<run id>/owner.json` for the run's record, and `ls -la
+<private root>/workspaces/*/<run id>` for its roots under every key.
+
+## `fn is_a_link(metadata: &std::fs::Metadata) -> bool {`
+
+Whether a namespace component is something the look must not follow. On
+Windows any reparse point (`FILE_ATTRIBUTE_REPARSE_POINT`, `0x400`), a junction
+included, as the ownership proof's `is_reparse_point` answers; elsewhere a
+symbolic link.
+
+## `fn names_the_same_entry(recorded: &Path, runs: &Path, run_id: &str) -> bool {`
+
+Whether a marker's recorded locator names `<runs>/<run id>` in another spelling:
+its last component is the run id and its parent canonicalizes to what `runs`
+canonicalizes to. Either canonicalization failing is not the same entry, and
+the husk is kept.
 
 ## `fn could_have_a_root(run_id: &str) -> bool {`
 

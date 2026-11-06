@@ -1579,6 +1579,17 @@ keeping the trait's `docker` default, which would arm a reaper over the real CLI
 A fresh run's creation with production `RunnerProbes` (the shell and one agent) over a
 `ContainerRunner`.
 
+## `fn fresh_p4_probe_child() {` › `let _worktree =`
+
+The creator holds the physical worktree's lock, as production's creator does: a fresh run takes
+`WorktreeLock` before its census and `create_run`, and never creates a container without it. The
+child drives `create_run` directly, so it takes that lock itself (the fixture's `.git` directory
+first, through the `RunDir` funnel, since the lock file lives there). The runner's container-label
+backstop needs it at its coordinator's death: it owns the dead incarnation's cleanup only by
+taking that same lock, and stands down when it cannot (`PR12-INV9-CONTAINER-HELPER-CLEANUP-LEASE`).
+Before this change the child held no worktree lock; the parent's oracle -- list, kill, remove,
+list -- is unchanged.
+
 ## `fn a_fresh_runs_p4_probe_container_is_killed_by_its_reaper_before_run_started() {`
 
 `R7-D1`: the creator, in a child over the parent's fake, is killed inside its first P4 probe

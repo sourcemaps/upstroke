@@ -1246,12 +1246,11 @@ impl DockerCli {
     ) -> Result<(), RuntimeError> {
         let name = covered.name();
         self.trace.runtime(op, name);
-        let client = attach_client(name, payload, covered.deadline()).map_err(|detail| {
-            RuntimeError::Failed {
+        let client = attach_client(name, payload, covered.deadline(), covered.leases().to_vec())
+            .map_err(|detail| RuntimeError::Failed {
                 operation: op,
                 detail,
-            }
-        })?;
+            })?;
         let waited =
             self.await_attached_start(name, covered.deadline(), covered.cancellation(), || {
                 client.has_ended()
@@ -1523,7 +1522,12 @@ enum NotStarted {
     Cancelled,
 }
 
-fn attach_client(name: &str, payload: &[u8], deadline: Instant) -> Result<AttachedClient, String> {
+fn attach_client(
+    name: &str,
+    payload: &[u8],
+    deadline: Instant,
+    leases: Vec<PathBuf>,
+) -> Result<AttachedClient, String> {
     let command = docker_command(&["start", "--attach", "--interactive", name]);
     let stop = Arc::new(AtomicBool::new(false));
     let stopping = Arc::clone(&stop);
@@ -1538,7 +1542,7 @@ fn attach_client(name: &str, payload: &[u8], deadline: Instant) -> Result<Attach
                 command,
                 &payload,
                 backstop,
-                &[],
+                &leases,
                 &|| stopping.load(Ordering::SeqCst),
                 &mut proc::NoHooks,
             )

@@ -490,6 +490,11 @@ effect_free = [
     # was already performed and answers whether it *proves* the private commit
     # record absent. Only `NotFound` does.
     "commit_record_proves_absence",
+    # The target-absent step's one observation of the marker's private target,
+    # `symlink_metadata` and never followed, in the production twin of the
+    # configuration-twinned `locator_fault` module whose test twin a test fails
+    # for one path (PR12-INV9-UNREADABLE-PRIVATE-LOCATOR).
+    "locator_metadata",
     "prove_private_half_ownership",
     "public_dir",
     "run_id",
@@ -598,6 +603,12 @@ effect_free = [
     "drop",
     "durability_ledger",
     "enter",
+    # Enters, on the calling thread and for as long as the returned guards live,
+    # the cleanup scope of each lease path a `RunnerCall` carried across a thread
+    # boundary, so every reaper `spawn_reaper` forks there holds them
+    # (PR12-INV9-CONTAINER-HELPER-CLEANUP-LEASE). The thread's scope registry
+    # only; no file, lock or process.
+    "enter_carried_cleanup_scope",
     "enter_cleanup_scope",
     "events",
     "fmt",
@@ -635,6 +646,11 @@ effect_free = [
     "unrecorded_report_staging",
     "v1",
     "with_private_root",
+    # The physical worktree's lock-file path, joined from the worktree git dir:
+    # what `WorktreeLock` takes, and what a container runner's dormant backstop
+    # takes itself before it may act (PR12-INV9-CONTAINER-HELPER-CLEANUP-LEASE).
+    # A path; nothing is opened.
+    "worktree_lock_file",
 ]
 
 [[module]]
@@ -2087,6 +2103,12 @@ not_an_effect = [
     "POLLIN",
     "POLLNVAL",
     "PROC_PIDT_SHORTBSDINFO",
+    # The prctl option the Group A owned-collection harnesses
+    # (runner::container::exec::tests) set on themselves, so that a killed
+    # coordinator's helpers, reapers and backstops are re-parented to them and
+    # collected there; the effect is `syscall` with `SYS_prctl`
+    # (PR12-INV9-CONTAINER-HELPER-CLEANUP-LEASE).
+    "PR_SET_CHILD_SUBREAPER",
     "PR_SET_NO_NEW_PRIVS",
     "PR_SET_SECCOMP",
     "P_ALL",

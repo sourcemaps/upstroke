@@ -523,6 +523,12 @@ read-only inspection before the worktree lock"), and a runner that resolved
 its own policy could not be rebuilt from a record — which is what every
 later incarnation does.
 
+## `pub struct ContainerRunner` › `worktree_lock: PathBuf,`
+
+The physical worktree's lock file (`rundir::worktree_lock_file` of the `RepositoryGit`
+`git_dir` the runner was built with -- the worktree git dir `WorktreeLock` admission locks),
+handed to every backstop the runner arms.
+
 ## `pub struct ContainerRunner` › `reaping: Reaping,`
 
 The runner's container reaper and the bookkeeping that decides when it may be disarmed.
@@ -579,9 +585,32 @@ covers not yet ended. `unsettled`: sticky — set once any cover ended with a fa
 
 ## `struct Armed {`
 
-The scope is kept beside the reaper so every later cover compares its container's labels
-with the scope the reaper actually lists. On Windows there is no reaper (ST-16 (e); the
+The scope is kept beside the backstops so every later cover compares its container's labels
+with the scope they actually list. On Windows there is no reaper (ST-16 (e); the
 `os_matrix`): the scope alone is kept, and the label check runs the same way.
+
+## `struct Armed` › `dormant: Vec<DormantBackstop>,`
+
+The runner's container-label backstops (`PR12-INV9-CONTAINER-HELPER-CLEANUP-LEASE`): one per
+distinct set of cleanup lease paths its invocations carried -- in practice one, armed at its
+first launch -- each `agent::proc::BackstopHold::BeforeActing`. A backstop holds nothing
+while its coordinator lives, so it never refuses a same-process successor and is never a
+permanent hold. At its coordinator's death it lists its labels holding nothing and, finding
+nothing, ends having taken nothing; otherwise it takes the physical worktree's lock itself,
+exactly as `WorktreeLock` admission takes it, and only then asks the run's lock and takes
+its own share of the run's cleanup leases before it may kill or remove anything. Whoever
+holds that worktree lock owns the dead incarnation's cleanup in the worktree: an engine
+admitted first (a fresh run, a different run, the run's own successor) leaves the backstop
+nothing to take, and its own census, seeing the dead run hold nothing, reclaims; a backstop
+first refuses every admission until it ends, and the next admission's census reclaims the
+intent and view it never touches.
+
+## `#[cfg(unix)]` › `struct DormantBackstop {`
+
+One armed backstop and the lease paths it covers. `arm` hands the reaper the run's lock
+file (`rundir::lock_file` of the identity's run directory) and the worktree lock file the
+runner was constructed with; `covers` answers whether every path of an invocation is one of
+this backstop's.
 
 ## `pub(super) mod cover {`
 
@@ -652,7 +681,10 @@ when the invocation is cancelled.
 
 Validates, arms on the first cover, counts the invocation, and mints the three values:
 `Covered`, and the two proofs over `spec`. The start's also carries `stdin`, which `contain`
-passes as `request.command.stdin`, and the invocation's `deadline` and `cancellation`. The order is the point (`FUA-D1-DES-2`, the design review's correction): the scope this
+passes as `request.command.stdin`, the invocation's `deadline` and `cancellation`, and its
+cleanup `leases`, which the attached start's own thread holds. Before anything of the
+invocation launches it makes sure a dormant backstop covers the invocation's lease paths
+(`Armed::cover_dormant`), with the run's lock file and the `worktree_lock` it is handed. The order is the point (`FUA-D1-DES-2`, the design review's correction): the scope this
 runner would hold — the armed one, or, on the arming cover, the one it is about to arm,
 built from the runtime's `reaper_program` and the runner's own `RunIdentity` — is compared
 with the container's two label values **first**, and a difference refuses the launch before
@@ -725,9 +757,15 @@ lint. Test doubles outside the tree name them through `container.rs`'s test-only
 
 ## `impl Armed` › `fn kept_until_the_process_exits(self) {`
 
-`mem::forget` of the reaper on Unix: its `Drop` does not run, so it is not cancelled, and
-its descriptors stay open until the process exits; the reaper then kills and removes every
-container its scope labels. On Windows there is nothing to keep.
+`mem::forget` of the backstops on Unix: their `Drop` does not run, so they are not
+cancelled, and their descriptors stay open until the process exits; at that death each
+backstop then takes its exclusion and kills and removes every container its scope labels,
+or stands down for an engine that holds the worktree. On Windows there is nothing to keep.
+
+## `impl Armed` › `fn cover_dormant(`
+
+A dormant backstop for these lease paths, armed now if no armed one covers them all, before
+anything of the invocation launches.
 
 ## `impl Drop for Reaping {`
 
@@ -1316,6 +1354,23 @@ polling thread (`docs/internals/runner/contract.md`, "Where the work
 happens"). It takes the call apart and picks the observer: the call's own,
 with no lock; otherwise the runner-level one under its guard; otherwise a
 local `NoHooks`.
+
+It also carries the call's cleanup lease paths (R28; `CallParts::leases`, which a worker or
+integration pipeline's `Carried` call fills from its coordinator's scope) into the
+invocation (`PR12-INV9-CONTAINER-HELPER-CLEANUP-LEASE`). They are entered as this thread's
+own cleanup scope for the whole invocation (`rundir::enter_carried_cleanup_scope`, Unix), so
+every bounded runtime question it asks here -- the credential-volume inspection before the
+create, the create, every observation, stop and removal, and the cancellation after a failed
+launch alike -- forks its helper's reaper holding them, taken before that helper launches.
+What runs elsewhere gets them explicitly: the backstop the cover arms, and the attached
+start's supervisor thread, which inherits no thread's scope. Deadlines, cancellation and
+fates are untouched.
+
+## `fn invocation_cleanup_leases(carried: &[PathBuf]) -> Vec<PathBuf> {`
+
+The invocation's lease paths: the scope the invoking thread is itself inside (a serial
+caller's), joined with the paths the call carried, in that order and without repetition.
+No other run's paths and no process-wide lock.
 
 ## `impl ContainerRunner` › `fn contain(`
 

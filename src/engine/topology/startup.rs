@@ -591,10 +591,170 @@ fn root_in_the_way(
     };
     let root = manager.execution_root().to_path_buf();
     match std::fs::symlink_metadata(&root) {
-        Err(absent) if absent.kind() == std::io::ErrorKind::NotFound => None,
+        Err(absent) if absent.kind() == std::io::ErrorKind::NotFound => another_contexts_root(
+            &marker,
+            run_id,
+            inputs.authorized_root,
+            manager.private_root(),
+        ),
         Ok(_) => Some((Some(root), "something is there".to_owned())),
         Err(error) => Some((Some(root), format!("it cannot be read: {error}"))),
     }
+}
+
+fn another_contexts_root(
+    marker: &rundir::CreatingMarker,
+    run_id: &str,
+    authorized_root: &Path,
+    private_root: &Path,
+) -> Option<(Option<PathBuf>, String)> {
+    let runs = private_root.join("runs");
+    let expected = runs.join(run_id);
+    let recorded = PathBuf::from(&marker.private_dir);
+    if recorded != expected
+        && recorded != authorized_root.join("runs").join(run_id)
+        && !names_the_same_entry(&recorded, &runs, run_id)
+    {
+        return Some((
+            None,
+            format!(
+                "its marker locates its private half at {}, not at {}, so a root its creator made \
+                 lies outside this command's authorized private root and cannot be ruled out",
+                recorded.display(),
+                expected.display()
+            ),
+        ));
+    }
+    let workspaces = private_root.join("workspaces");
+    match std::fs::symlink_metadata(&workspaces) {
+        Err(absent) if absent.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => {
+            return Some((
+                None,
+                format!(
+                    "the execution-root namespace {} cannot be inspected ({error}), so a root this \
+                     run made in another repository context cannot be ruled out",
+                    workspaces.display()
+                ),
+            ));
+        }
+        Ok(metadata) if is_a_link(&metadata) || !metadata.is_dir() => {
+            return Some((
+                None,
+                format!(
+                    "the execution-root namespace {} is a link, a reparse point or not a \
+                     directory, and this look follows none, so a root this run made in another \
+                     repository context cannot be ruled out",
+                    workspaces.display()
+                ),
+            ));
+        }
+        Ok(_) => {}
+    }
+    let keys = match std::fs::read_dir(&workspaces) {
+        Ok(keys) => keys,
+        Err(error) => {
+            return Some((
+                None,
+                format!(
+                    "the execution roots under {} cannot be listed ({error}), so a root this run \
+                     made in another repository context cannot be ruled out",
+                    workspaces.display()
+                ),
+            ));
+        }
+    };
+    for key in keys {
+        let key = match key {
+            Ok(key) => key.path(),
+            Err(error) => {
+                return Some((
+                    None,
+                    format!(
+                        "the execution roots under {} cannot all be listed ({error}), so a root \
+                         this run made in another repository context cannot be ruled out",
+                        workspaces.display()
+                    ),
+                ));
+            }
+        };
+        match std::fs::symlink_metadata(&key) {
+            Ok(metadata) if is_a_link(&metadata) => {
+                return Some((
+                    None,
+                    format!(
+                        "the execution-root namespace entry {} is a link or a reparse point, and \
+                         this look does not follow it, so a root this run made in another \
+                         repository context cannot be ruled out",
+                        key.display()
+                    ),
+                ));
+            }
+            Ok(metadata) if !metadata.is_dir() => continue,
+            Ok(_) => {}
+            Err(error) => {
+                return Some((
+                    None,
+                    format!(
+                        "the execution-root namespace entry {} cannot be inspected ({error}), so \
+                         a root this run made in another repository context cannot be ruled out",
+                        key.display()
+                    ),
+                ));
+            }
+        }
+        let candidate = key.join(run_id);
+        let named = key
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        match std::fs::symlink_metadata(&candidate) {
+            Err(absent) if absent.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(_) => {
+                return Some((
+                    Some(candidate),
+                    format!(
+                        "something is there, under repository key `{named}`, which this \
+                         command's effective common directory does not derive: the root of a \
+                         creating context other than this command's"
+                    ),
+                ));
+            }
+            Err(error) => {
+                return Some((
+                    Some(candidate),
+                    format!(
+                        "it cannot be read ({error}), under repository key `{named}`, which this \
+                         command's effective common directory does not derive"
+                    ),
+                ));
+            }
+        }
+    }
+    None
+}
+
+#[cfg(windows)]
+fn is_a_link(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt as _;
+    const REPARSE_POINT: u32 = 0x0000_0400;
+    metadata.file_attributes() & REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn is_a_link(metadata: &std::fs::Metadata) -> bool {
+    metadata.file_type().is_symlink()
+}
+
+fn names_the_same_entry(recorded: &Path, runs: &Path, run_id: &str) -> bool {
+    recorded.file_name() == Some(std::ffi::OsStr::new(run_id))
+        && match (
+            recorded.parent().map(std::fs::canonicalize),
+            std::fs::canonicalize(runs),
+        ) {
+            (Some(Ok(recorded_runs)), Ok(runs)) => recorded_runs == runs,
+            _ => false,
+        }
 }
 
 fn could_have_a_root(run_id: &str) -> bool {

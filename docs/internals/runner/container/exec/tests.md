@@ -2969,3 +2969,76 @@ been collected, so that check sees the retained reaper omitted by the mutation.
 The unchanged fate assertions still run. The witness covers omitted normal
 collection; the same collection routine is exercised during the deliberate
 unwind, not separately mutation-tested there.
+
+## `#[cfg(target_os = "linux")]` › `const LEASE_KILL_CASE: &str = "UPSTROKE_TEST_LEASE_KILL_CASE";`
+
+`PR12-INV9-CONTAINER-HELPER-CLEANUP-LEASE`, the carriage: a killed coordinator's Docker
+helpers keep admission refused until they are settled. Four cases, each a real
+`ContainerRunner` over `DockerCli` and the process funnel, invoked from a worker thread inside
+no cleanup scope with the `Carried` call a pipeline is given, by a coordinator that holds its
+worktree lock and run lock as an admitted run does: the synchronous `docker create`, the
+attached start's `docker start --attach` (its own thread), the credential volume's
+`docker volume inspect` (asked before any create) and the `docker stop` of the cancellation
+after a refused create. The stub pauses the case's question; the harness kills the
+coordinator and requires both the run's admission (`RunLock`, the exclusive cleanup probe)
+and a different run's worktree admission (`WorktreeLock`'s scan of every run's cleanup hold)
+refused while the paused helper's reaper is live, then admission only once every covered
+helper, reaper and backstop has ended, then every descendant collected. The harness, its
+collector and the coordinator handle are adapted from an earlier candidate's: the
+coordinator now also takes its worktree lock, the admission asks include the different
+run's, and the handle fails closed (below).
+
+## `#[cfg(target_os = "linux")]` › `struct OwnedDescendants {`
+
+The collector every Group A harness ends with. It makes the harness a child subreaper, so
+everything a killed coordinator (or a contender) leaves is re-parented to it; it identifies
+children by pid and start time, collects only children the kernel names ended, and signals
+only its own listed, unreaped children. **One waiter per child:** a direct child a
+`RunningTestChild` handle owns is collected by that handle, and no harness calls the
+collector while a handle still owns a child; the collector reaps only adopted descendants,
+once every handle has collected its own.
+
+## `#[cfg(target_os = "linux")]` › `fn handoff_stub() -> String {`
+
+The handoff guards' shared `docker`: the killed coordinator's runner, its backstop and the
+contender's census all see one set of containers, kept as files with their labels, and every
+call is logged with its caller's pid so each removal is attributed to its owner.
+
+## `#[cfg(target_os = "linux")]` › `fn handoff_coordinator_child() {`
+
+The coordinator a handoff harness kills between two helper questions: a real
+`ContainerRunner` invocation from a worker thread with the `Carried` call, paused by its
+observer at `Container.Start`'s `Before` -- after the intent, the view and the container
+exist and every earlier question has returned, so none is in flight. The backstop it armed
+renders the test gate the harness names.
+
+## `#[cfg(target_os = "linux")]` › `fn handoff_contender_child() {`
+
+The distinct fresh run a harness admits to the same physical worktree, as a process of its
+own so the harness forks nothing itself: it takes `WorktreeLock` (admission and its cleanup
+scan), runs the real startup container census as a fresh run of another incarnation on the
+harness's word, reports what it reclaimed, and lets the lock go on the harness's word.
+
+## `#[cfg(target_os = "linux")]` › `fn handoff_harness_child() {`
+
+`PR12-INV9-CONTAINER-HELPER-CLEANUP-LEASE`, the handoff: who owns a dead coordinator's
+container cleanup when an engine is admitted to the same worktree around its backstop's
+ending. The backstop is parked at test-build gates; three schedules: **early** (the contender
+is admitted before the backstop lists), **middle** (admitted after the backstop has listed,
+at the point where a backstop that took its cleanup hold before the worktree's lock would
+take it; released, the backstop is parked again before it ends, and the contender's census
+runs inside that interval -- the run shows no hold, the census classifies the container a
+dead owner's and reclaims it with its intent and view, and the backstop then ends having
+removed nothing) and **late** (the backstop holds the worktree and its lease; a distinct
+run's admission and the run's own are refused; it removes the container and ends; the
+contender then reclaims the intent and view). Exclusive responsibility is read from the
+stub's per-caller log; convergence from the stub's containers, the intents and the view;
+collection from the kernel's own account.
+
+## `#[cfg(target_os = "linux")]` › `fn a_running_test_child_whose_status_another_waiter_took_is_neither_signalled_nor_credited() {`
+
+The focused check of `RunningTestChild`'s fail-closed cleanup: when another waiter has
+already collected the handle's child, ending the handle must send no signal -- its own
+`try_wait` answers `ECHILD`, so the group it would signal is not known to be its own --
+record `running test child collection: not established`, and answer `None`. The parent
+tests refuse collection credit and keep their fixture whenever that record appears.

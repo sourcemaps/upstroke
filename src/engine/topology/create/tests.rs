@@ -4907,6 +4907,11 @@ fn fresh_p4_probe_child() {
     let parent = crate::engine::topology::scaffold::ParentSide::attach();
     let root = PathBuf::from(std::env::var_os("UPSTROKE_TEST_FRESH_ROOT").expect("the root"));
     let fixture = Fixture::at(&root);
+    create_private_dir(&fixture.repo.join(".git"), &mut NoRunDirHooks)
+        .expect("the checkout's git directory");
+    let _worktree =
+        crate::rundir::WorktreeLock::acquire_in(&fixture.repo, &fixture.repo.join(".git"))
+            .expect("the worktree lock a fresh run's creator holds");
     let runtime = parent.runtime();
     let created = create_over_containers(&fixture, &runtime, Box::new(parent.runtime()));
     panic!("the parent kills this creator inside its first P4 probe; it returned {created:?}");
