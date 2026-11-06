@@ -2415,11 +2415,14 @@ does), five checks:
 3. in every production module whose effective `clippy::disallowed_methods` level is `allow` —
    stated in its header or inherited from a parent that states it, twenty-seven modules today —
    where clippy therefore cannot refuse `ContainerRuntime::create` or `::start`, each call, path,
-   field or macro-argument occurrence of `create` or `start` is one of twenty-one pinned namings:
-   `runtime.create(` and `runtime.start(` inside the two funnels, and nineteen others none of
+   field or macro-argument occurrence of `create` or `start` is one of twenty-four pinned namings:
+   `runtime.create(` and `runtime.start(` inside the two funnels, and twenty-two others none of
    which is a container runtime's (`File::create(`, `Drain::start(`, `PrivateHooksDir::create(`,
-   the parameters `create:` and `start:`, `util::tail`'s local `start` inside `format!` and the
-   like); and `RuntimeOp::Create`/`RuntimeOp::Start` occur only inside the real runtime's own
+   the parameters `create:` and `start:`, `util::tail`'s local `start` inside `format!`, the
+   three `create(` calls in `workspace_manager.rs`'s `publish_staged_root`, which name its local
+   `create` closure — `fs::create_dir` and nothing else — for a fresh root's staging directory,
+   its claim token and each scaffolding directory, and the like); and
+   `RuntimeOp::Create`/`RuntimeOp::Start` occur only inside the real runtime's own
    `create` and `start`;
 4. in `exec.rs`, `fn launch(`'s signature names both proofs, `CoveredCreate<` and
    `CoveredStart<`; `self.launch(` occurs once, in `contain`, after `contain`'s one `.cover(`;

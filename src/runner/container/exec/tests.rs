@@ -7842,6 +7842,9 @@ fn every_container_start_in_production_is_reached_only_through_a_covered_launch(
             "run_git_with_private_hooks",
         ),
         ("src/workspace.rs", "builder.create(", "create_private_dir"),
+        ("src/workspace_manager.rs", "create(", "publish_staged_root"),
+        ("src/workspace_manager.rs", "create(", "publish_staged_root"),
+        ("src/workspace_manager.rs", "create(", "publish_staged_root"),
     ]
     .into_iter()
     .map(|(file, spelled, function)| {
