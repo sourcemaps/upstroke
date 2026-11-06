@@ -738,6 +738,13 @@ stable-prefix barrier of recovery step (a1), **then** censuses". The
 constructor consuming [`BarrierHeld`] by value is that ordering, as
 a call.
 
+## `impl ResumeCensused` › `pub fn operator_lines(&self) -> Vec<String> {`
+
+The census of step (a) as the operator reads it: the container half's lines and
+the run-directory half's ([`super::startup::RunDirCensusReport::operator_lines`]).
+`ResumeCensused::into_barrier` drops the reports with the census, so they are
+read here first.
+
 ## `impl ResumeCensused` › `pub fn census(`
 
 Census under `barrier`: containers first, then the run
@@ -777,7 +784,12 @@ unreachable runtime with intents present, an intent naming this
 process's own incarnation, an unreclaimable dead owner — or
 [`UpstrokeError::Io`] when `<repo>/.upstroke/runs` exists and
 cannot be enumerated, which is the run-directory half reporting
-that it did not happen rather than that it found nothing.
+that it did not happen rather than that it found nothing. That
+error carries the container half's lines
+([`crate::engine::topology::startup::container_lines`]) as its
+warnings: the container half has run by then, and what it
+reclaimed is reported, not dropped with the census. A refusal of
+the container half itself has no report to carry.
 
 ## `impl ResumeCensused` › `let inputs = CensusInputs {`
 
@@ -792,14 +804,17 @@ run under `<R>/containers`. The start value carries the
 barrier this module derived, so `CensusStart::Resume` cannot
 be built here without one.
 
-## `impl ResumeCensused` › `let run_dirs = census_run_dirs(hooks.rundir(), &inputs, Some(&run_id))?;`
+## `impl ResumeCensused` › `let run_dirs = census_run_dirs(hooks, &inputs, Some(&run_id)).map_err(|error| {`
 
 (ii) Run directories: classified, then reclaimed under the
 ownership proof — private half through the proof-token funnel
 first, public directory with the marker last — and this run's
 own stale marker repaired by its owner. `own_run` is also what
 guarantees this run's directory is walked at all, whatever the
-enumeration of the runs tree returned.
+enumeration of the runs tree returned. The whole hook bundle is
+passed, not its run-directory part: a husk whose execution root
+is retired first goes through the worktree funnel too. An `Err`
+carries (i)'s lines, as **Errors** above says.
 
 ## `impl ResumeCensused` › `pub fn barrier(&self) -> &BarrierHeld {`
 
@@ -1429,6 +1444,17 @@ run before (h): `run_resumed` consumes the witness this step reads.
 ## `let (resumed, handle) = run_resumed(certified, &mut context, seams.incarnation)?;`
 
 (h) — and the witness is consumed here.
+
+## `fn recover_censused(`
+
+Recovery after the census, steps (b) to (h), split from [`recover_verified`] so
+the census's report reaches the operator whatever happens next
+(PR12-INV8-STARTUP-CENSUS-REPORT-DROPPED): `recover_verified` adds the census's
+lines to the warnings the run's report renders, attaches them to any error this
+returns — a finished run's refusal to continue, a runner that cannot be
+rebuilt, a pre-flight that refuses, a recovery step that fails — and hands them
+out as `Recovered::census`, which `entry::ResumeVerified::run` attaches to an
+error the run itself ends with.
 
 ## `pub fn finalize_if_finished(`
 

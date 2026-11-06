@@ -1478,6 +1478,17 @@ RUN`. The suppression is what keeps the `lint (macos)` job green;
 `host_conditional_paths` still asserts the path is unresolved there,
 because that test strips `allow-invalid` before it probes.
 
+## `fn every_platform_conditional_denial_names_something_real()` › `"libc::renamex_np",`
+
+Real on Darwin, no item on Linux: `libc` defines `renamex_np` only for
+Apple targets, and `workspace_manager::rename_no_clobber` calls it only
+there, to publish and retire a fresh execution root without replacing
+anything (repair15, the no-replace rename). The suppression keeps the
+Linux `lint` job green; `host_conditional_paths` still asserts the path
+is unresolved on Linux, because that test strips `allow-invalid` before
+it probes, and the macOS `lint` job resolves and enforces it. On Windows
+`libc` is not linked, and clippy reports nothing for an unlinked crate.
+
 ## `fn every_declared_effect_denial_refuses_for_the_reason_it_declares() {`
 
 ---------------------------------------------------------------------------

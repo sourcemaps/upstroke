@@ -77,22 +77,28 @@
 //! # The execution root (R18)
 //!
 //! `resource_accounting[R18]` accounts for a root only through its run, so
-//! this module creates one only once its run is located and authenticated:
+//! this module publishes one only once its run is located and authenticated:
 //! **P3c**, after the marker (P1) and the owner record (P3b), before P4. The
 //! path is admitted before P0, so a directory already there when this
-//! invocation began never gets a husk, and P3c **claims** the root with an
-//! exclusive create of its leaf (`workspace_manager::FreshExecutionRoot`), so
-//! one that appeared since — empty scaffolding included — is refused, never
+//! invocation began never gets a husk, and P3c **publishes** the root
+//! (`workspace_manager::FreshExecutionRoot`): it writes the location record
+//! naming the root's key, builds the whole root in the private half with this
+//! run's claim token inside it, makes both durable, and renames it onto the
+//! root's path with a rename that never replaces anything. So the root
+//! appears at its path once, whole, carrying the token, and one that appeared
+//! there since the admission — empty scaffolding included — is refused, never
 //! adopted, and left alone.
 //!
-//! Before P5b, cleanup **settles a root this creator claimed before it deletes
-//! either half** ([`settle_unpublished_root`]), and deletes neither when it
-//! cannot ([`Disposition::ExecutionRootRetained`]). Only this creator removes
-//! such a root, and only one its own exclusive create made. The census does
-//! not — a husk's proof authenticates its two halves, not who made a directory
-//! at its root's path, so a census keeps a husk whose root path is occupied as
-//! that root's locator (PR12-INV7, repair14). From P5b on, the root is the
-//! committed run's, and nothing here deletes it.
+//! Before P5b, cleanup **settles a root this creator published before it
+//! deletes either half** ([`settle_unpublished_root`]), and deletes neither
+//! when it cannot ([`Disposition::ExecutionRootRetained`]). Settling
+//! **retires** the root — its scaffolding removed, then the root itself, token
+//! inside, renamed into the private half — so no cut ever leaves it at its path
+//! without the token. A census after a kill does the same for the creator: the
+//! location record names where the root is, whatever the census's own context
+//! derives, and the token proves it is this run's
+//! (`engine::topology::startup`). From P5b on, the root is the committed run's,
+//! and nothing here deletes it.
 //!
 //! # The boundary's scope, stated
 //!
@@ -163,24 +169,34 @@ pub use steps::Started;
 ///
 /// `resource_accounting[R18]` accounts for a root only through its run: pruned
 /// by finalization, or resumably open while the run has no `run_finished`. A
-/// root no run directory names is in no class, which is why P3c creates it only
-/// once the marker (P1) locates the run and the owner record (P3b)
-/// authenticates its halves, and why nothing deletes either of those while a
-/// root this run owns is still there ([`settle_unpublished_root`]). Neither
-/// record proves who made a directory at the root's path; the creator's
-/// exclusive claim does.
+/// root no run directory names is in no class, which is why P3c publishes it
+/// only once the marker (P1) locates the run, the owner record (P3b)
+/// authenticates its halves and the location record (P3c) names its key, and
+/// why nothing deletes either half while a root this run owns is still at its
+/// path ([`settle_unpublished_root`]). Neither half's record proves who made a
+/// directory at the root's path; the claim token the root was published with
+/// does (`workspace_manager::FreshExecutionRoot`).
 pub trait UnpublishedRoot {
     /// The root's path: the current repository's `WorkspaceManager`'s
     /// `<authorized private root>/workspaces/<repository key>/<run id>`.
     fn path(&self) -> &Path;
 
-    /// `Worktree.RemoveExecutionRoot`: the empty scaffolding, then the root
-    /// itself if it is empty.
+    /// `Worktree.RemoveExecutionRoot` in its retiring form
+    /// (`WorkspaceManager::retire_execution_root`): when the root holds
+    /// `token`, the empty scaffolding, then the root itself, token still
+    /// inside, renamed to `into` in the run's private half for the private
+    /// half's removal to take; and in every case the barrier that makes the
+    /// root's absence from its path durable before that removal.
     ///
     /// # Errors
     ///
     /// The remover's containment refusals and I/O errors.
-    fn remove(&self, hooks: &mut dyn EffectHooks) -> Result<bool, UpstrokeError>;
+    fn retire(
+        &self,
+        hooks: &mut dyn EffectHooks,
+        into: &Path,
+        token: &str,
+    ) -> Result<bool, UpstrokeError>;
 }
 
 /// What P3c creates the root through.
@@ -190,16 +206,31 @@ pub trait UnpublishedRoot {
 /// is passed as it is: coercing it to `&dyn UnpublishedRoot` is trait
 /// upcasting, which Rust stabilized in 1.86, after this crate's MSRV.
 pub trait RootCreation: UnpublishedRoot {
-    /// `Worktree.CreateExecutionRoot`, claiming the root exclusively
-    /// (`workspace_manager::FreshExecutionRoot`): a root already at the path is
-    /// refused, never adopted.
+    /// The repository key the root hangs under: the `<repo_key>` of
+    /// `<authorized private root>/workspaces/<repo_key>/<run id>`, sixteen
+    /// lowercase hex characters. P3c writes it in the location record, so a
+    /// later census finds the root this run published without deriving it from
+    /// the context it runs in.
+    fn key(&self) -> &str;
+
+    /// `Worktree.CreateExecutionRoot`, publishing the root
+    /// (`workspace_manager::FreshExecutionRoot`): built complete at `staging`
+    /// with the claim `token` inside it, then renamed onto the root's path, so
+    /// the root never exists there without the token. A root already at the
+    /// path is refused, never adopted.
     ///
     /// # Errors
     ///
     /// [`FreshRootFailure::Unclaimed`] when nothing at the path is this
-    /// creator's; [`FreshRootFailure::Claimed`] when it made the root and then
-    /// failed, so the root, whole or in part, is its own.
-    fn create(&self, hooks: &mut dyn EffectHooks) -> Result<(), FreshRootFailure>;
+    /// creator's — whatever was staged stays at `staging`, in the private
+    /// half; [`FreshRootFailure::Claimed`] when the rename published the root
+    /// and something after it failed, so the root is its own.
+    fn create(
+        &self,
+        hooks: &mut dyn EffectHooks,
+        staging: &Path,
+        token: &str,
+    ) -> Result<(), FreshRootFailure>;
 
     /// The run's case policy, observed at the root just created.
     fn case_fold(&self, warnings: &mut Vec<String>) -> bool;
@@ -210,15 +241,36 @@ impl UnpublishedRoot for WorkspaceManager {
         self.execution_root()
     }
 
-    fn remove(&self, hooks: &mut dyn EffectHooks) -> Result<bool, UpstrokeError> {
-        self.remove_execution_root(hooks)
+    fn retire(
+        &self,
+        hooks: &mut dyn EffectHooks,
+        into: &Path,
+        token: &str,
+    ) -> Result<bool, UpstrokeError> {
+        self.retire_execution_root(hooks, into, token)
     }
 }
 
-/// The directories `Worktree.CreateExecutionRoot` makes inside a root, and the
-/// only content a root of a run that never committed may hold for
-/// [`settle_unpublished_root`] to remove it.
+/// The directories `Worktree.CreateExecutionRoot` makes inside a root, and —
+/// with the run's own claim token — the only content a root of a run that
+/// never committed may hold for [`settle_unpublished_root`] to settle it.
 const SCAFFOLDING: [&str; 5] = ["intents", "tasks", "merge", "snapshots", "hooks-none"];
+
+/// Where, in the private half, P3c builds the root before publishing it
+/// (`workspace_manager::FreshExecutionRoot`). Private content: a tree left
+/// here was never published and goes only with the private half.
+pub(crate) const STAGED_ROOT: &str = "staged-execution-root";
+
+/// Where, in the private half, a root that never committed is retired to,
+/// token inside, before the private half goes
+/// (`WorkspaceManager::retire_execution_root`).
+pub(crate) const RETIRED_ROOT: &str = "retired-execution-root";
+
+/// The claim token a root is published with: `claim.<incarnation>`, the
+/// incarnation the marker and the owner record carry.
+pub(crate) fn claim_token(incarnation: &str) -> String {
+    format!("claim.{incarnation}")
+}
 
 /// What [`settle_unpublished_root`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -235,37 +287,49 @@ pub enum RootSettled {
 /// Settle the execution root of a run that never committed, **before** either
 /// record that locates it and authenticates its run is deleted.
 ///
-/// The caller holds the authority: the creator whose exclusive create at P3c
-/// made this root, which is the only party that knows who made it. This adds a
-/// second, conservative bound, the content condition: the root is removed only
-/// while it holds nothing but the empty scaffolding the create site makes —
-/// every entry read with `symlink_metadata` and never followed — so a root
-/// holding anything else, slot-shaped or not, is kept and the remover, whose
-/// first step sweeps slot instances of other incarnations, is not called. What
-/// the remover leaves is read again rather than inferred from its answer: gone
-/// is [`RootSettled::Pruned`], present or unreadable is [`RootSettled::Kept`].
+/// The caller holds the authority: the creator whose publication at P3c made
+/// this root, or a census that proved it by `token` (`engine::topology::startup`).
+/// This adds a second, conservative bound, the content condition: the root is
+/// settled only while it holds nothing but the empty scaffolding the create
+/// site makes and this run's own empty claim `token` — every entry read with
+/// `symlink_metadata` and never followed — so a root holding anything else,
+/// slot-shaped or not, is kept and the remover, whose first step sweeps slot
+/// instances of other incarnations, is not called.
+///
+/// The root is **retired**, not emptied in place: the remover renames it,
+/// token inside, to `into` in the run's private half, so no cut leaves it at
+/// its path without the token that proves it. The remover is called even when
+/// nothing is at the path, for its barrier: the private half goes only after
+/// the root's absence from its path is durable, whoever removed it and
+/// whenever. What the remover leaves at the path is read again rather than
+/// inferred from its answer: gone is [`RootSettled::Pruned`] when this call
+/// retired it and [`RootSettled::Absent`] when it was not there, and present
+/// or unreadable is [`RootSettled::Kept`].
 pub fn settle_unpublished_root<R: UnpublishedRoot + ?Sized>(
     root: &R,
+    token: &str,
+    into: &Path,
     hooks: &mut dyn EffectHooks,
 ) -> RootSettled {
     let path = root.path();
-    match holding(path) {
-        Ok(Holding::Nothing) => return RootSettled::Absent,
-        Ok(Holding::Scaffolding) => {}
-        Err(why) => return RootSettled::Kept(why),
+    if let Err(why) = holding(path, token) {
+        return RootSettled::Kept(why);
     }
-    let removed = root.remove(hooks);
-    match (removed, std::fs::symlink_metadata(path)) {
+    let retired = root.retire(hooks, into, token);
+    match (retired, std::fs::symlink_metadata(path)) {
         (Err(error), _) => RootSettled::Kept(format!(
-            "removing it through `Worktree.RemoveExecutionRoot` failed: {error}"
+            "retiring it through `Worktree.RemoveExecutionRoot` failed: {error}"
         )),
-        (Ok(_), Err(gone)) if gone.kind() == std::io::ErrorKind::NotFound => RootSettled::Pruned,
+        (Ok(true), Err(gone)) if gone.kind() == std::io::ErrorKind::NotFound => RootSettled::Pruned,
+        (Ok(false), Err(gone)) if gone.kind() == std::io::ErrorKind::NotFound => {
+            RootSettled::Absent
+        }
         (Ok(_), Ok(_)) => RootSettled::Kept(
-            "it is still there after `Worktree.RemoveExecutionRoot` removed what it could"
+            "it is still there after `Worktree.RemoveExecutionRoot` retired what it could"
                 .to_owned(),
         ),
         (Ok(_), Err(unread)) => RootSettled::Kept(format!(
-            "whether `Worktree.RemoveExecutionRoot` removed it cannot be read: {unread}"
+            "whether `Worktree.RemoveExecutionRoot` retired it cannot be read: {unread}"
         )),
     }
 }
@@ -275,7 +339,7 @@ enum Holding {
     Scaffolding,
 }
 
-fn holding(root: &Path) -> Result<Holding, String> {
+fn holding(root: &Path, token: &str) -> Result<Holding, String> {
     match std::fs::symlink_metadata(root) {
         Err(absent) if absent.kind() == std::io::ErrorKind::NotFound => {
             return Ok(Holding::Nothing);
@@ -294,13 +358,13 @@ fn holding(root: &Path) -> Result<Holding, String> {
         let named = entry
             .file_name()
             .to_str()
-            .is_some_and(|name| SCAFFOLDING.contains(&name));
+            .is_some_and(|name| SCAFFOLDING.contains(&name) || name == token);
         let directory = std::fs::symlink_metadata(&path)
             .map_err(|error| format!("{} cannot be read: {error}", path.display()))?
             .is_dir();
         if !named || !directory {
             return Err(format!(
-                "it holds {}, which is not scaffolding this run made",
+                "it holds {}, which is neither scaffolding nor the claim token this run made",
                 path.display()
             ));
         }
@@ -316,6 +380,202 @@ fn holding(root: &Path) -> Result<Holding, String> {
         }
     }
     Ok(Holding::Scaffolding)
+}
+
+/// [`settle_unpublished_root`]'s content rule, read-only: `None` when nothing
+/// is at `root` or it holds nothing but empty scaffolding and this run's claim
+/// `token`, otherwise why a settlement would keep it. The census decides with
+/// this before it reaches for the remover, so a root it will not touch is
+/// reported as kept rather than as a removal that failed.
+pub(crate) fn unsettleable(root: &Path, token: &str) -> Option<String> {
+    holding(root, token).err()
+}
+
+// ---------------------------------------------------------------------------
+// The location record: the key a creator's root is published under
+// ---------------------------------------------------------------------------
+
+/// What every location record's name starts with.
+const LOCATION_RECORD_PREFIX: &str = "execution-root.";
+
+/// The one version of the location record this module writes and reads.
+const LOCATION_RECORD_VERSION: &str = "v1";
+
+/// The location record P3c writes in the private half before anything of the
+/// root exists: `<private>/execution-root.v1.<key>`, an empty directory.
+///
+/// **Why it exists.** A census after a kill has the marker and the owner
+/// record, which authenticate the run's two halves, and a context — the
+/// effective common directory, `HOME`, the configured private root — that may
+/// not be the one the run was created in. The record carries the one fact the
+/// context could get wrong: the key the root was published under, so the root
+/// it names is `<authorized private root>/workspaces/<key>/<run id>` whatever
+/// the reader's context derives. It proves nothing about who made a directory
+/// there; the claim token inside the root does
+/// (`workspace_manager::FreshExecutionRoot`).
+///
+/// **Its shape, stated.** One directory, created through
+/// `RunDir.CreatePrivateDir` (the site that owns private directory creation,
+/// row R21) after the owner record and the private skeleton, so the owner
+/// record is still the first private content, and made durable by the
+/// publication's own barrier on the private half before the root can appear.
+/// A directory create is atomic, so the record is there or it is not; it is
+/// read strictly ([`read_location_record`]) and is trusted only inside a
+/// private half whose reciprocal proof holds and that carries no commit
+/// record. It goes only with the private half, through the proof token. A husk
+/// written before this record existed has none, and its root — wherever a
+/// census finds one — is never proven to be its run's.
+fn location_record_name(key: &str) -> String {
+    format!("{LOCATION_RECORD_PREFIX}{LOCATION_RECORD_VERSION}.{key}")
+}
+
+/// Whether `key` is a repository key as a root's path carries it: sixteen
+/// lowercase hex characters (`workspace_manager::repo_key_v1`).
+pub(crate) fn is_root_key(key: &str) -> bool {
+    key.len() == 16
+        && key
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// What a private half's location records say.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LocationRecord {
+    /// No entry of the record's name family: no location was recorded.
+    Absent,
+    /// Exactly one well-formed record: the key the root is published under.
+    Keyed(String),
+    /// Anything else — a name this version does not write, an entry that is
+    /// not an empty real directory, two records, an unreadable listing — and
+    /// why. It proves nothing.
+    Unreadable(String),
+}
+
+/// The location records in `private`, read strictly and never followed.
+pub(crate) fn read_location_record(private: &Path) -> LocationRecord {
+    let listed = match std::fs::read_dir(private) {
+        Ok(listed) => listed,
+        Err(error) => {
+            return LocationRecord::Unreadable(format!(
+                "{} cannot be listed: {error}",
+                private.display()
+            ));
+        }
+    };
+    let mut keys = Vec::new();
+    for entry in listed {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                return LocationRecord::Unreadable(format!(
+                    "{} cannot be listed: {error}",
+                    private.display()
+                ));
+            }
+        };
+        let name = entry.file_name();
+        if !name
+            .as_encoded_bytes()
+            .starts_with(LOCATION_RECORD_PREFIX.as_bytes())
+        {
+            continue;
+        }
+        let path = entry.path();
+        let key = name
+            .to_str()
+            .and_then(|name| name.strip_prefix(LOCATION_RECORD_PREFIX))
+            .and_then(|rest| rest.strip_prefix(LOCATION_RECORD_VERSION))
+            .and_then(|rest| rest.strip_prefix('.'))
+            .filter(|key| is_root_key(key));
+        let Some(key) = key else {
+            return LocationRecord::Unreadable(format!(
+                "{} is not a location record this version writes",
+                path.display()
+            ));
+        };
+        match std::fs::symlink_metadata(&path) {
+            Ok(found) if found.is_dir() => {}
+            Ok(_) => {
+                return LocationRecord::Unreadable(format!(
+                    "{} is not a directory",
+                    path.display()
+                ));
+            }
+            Err(error) => {
+                return LocationRecord::Unreadable(format!(
+                    "{} cannot be read: {error}",
+                    path.display()
+                ));
+            }
+        }
+        match std::fs::read_dir(&path).map(|mut inside| inside.next().is_none()) {
+            Ok(true) => {}
+            Ok(false) => {
+                return LocationRecord::Unreadable(format!("{} is not empty", path.display()));
+            }
+            Err(error) => {
+                return LocationRecord::Unreadable(format!(
+                    "{} cannot be listed: {error}",
+                    path.display()
+                ));
+            }
+        }
+        keys.push(key.to_owned());
+    }
+    match keys.as_slice() {
+        [] => LocationRecord::Absent,
+        [key] => LocationRecord::Keyed(key.clone()),
+        _ => LocationRecord::Unreadable(format!(
+            "{} holds {} location records, and one creator publishes one root",
+            private.display(),
+            keys.len()
+        )),
+    }
+}
+
+/// `Ok` when the location record P3c is about to write will locate `root`: the
+/// key is a repository key, and the root is `<private root>/workspaces/<key>/<run
+/// id>` under the very private root this run's private half hangs from, which
+/// is where a census looks for it.
+fn locatable(
+    root: &Path,
+    key: &str,
+    run_id: &str,
+    private_root: &Path,
+) -> Result<(), UpstrokeError> {
+    let refused = |why: String| UpstrokeError::Refused {
+        message: format!(
+            "the execution root {} cannot be claimed: {why}, so no record could locate it",
+            root.display()
+        ),
+    };
+    if !is_root_key(key) {
+        return Err(refused(format!("`{key}` is not a repository key")));
+    }
+    let keyed = root.parent();
+    let namespace = keyed.and_then(Path::parent);
+    let shaped = root.file_name() == Some(std::ffi::OsStr::new(run_id))
+        && keyed.and_then(Path::file_name) == Some(std::ffi::OsStr::new(key))
+        && namespace.and_then(Path::file_name) == Some(std::ffi::OsStr::new("workspaces"));
+    let Some(hangs_from) = namespace.and_then(Path::parent).filter(|_| shaped) else {
+        return Err(refused(format!(
+            "it is not `<private root>/workspaces/{key}/{run_id}`"
+        )));
+    };
+    match (
+        std::fs::canonicalize(hangs_from),
+        std::fs::canonicalize(private_root),
+    ) {
+        (Ok(found), Ok(expected)) if found == expected => Ok(()),
+        (Ok(found), Ok(expected)) => Err(refused(format!(
+            "it hangs from {} and this run's private half from {}",
+            found.display(),
+            expected.display()
+        ))),
+        (Err(error), _) | (_, Err(error)) => Err(refused(format!(
+            "its private root cannot be resolved: {error}"
+        ))),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -851,6 +1111,10 @@ struct Aborted {
     run_id: String,
     /// Whether this creator owns an execution root that cleanup must settle.
     root: RootClaim,
+    /// The claim token a root this creator published carries
+    /// ([`claim_token`]), which is what cleanup's content rule admits besides
+    /// the scaffolding.
+    token: String,
     error: UpstrokeError,
 }
 
@@ -859,13 +1123,14 @@ struct Aborted {
 enum RootClaim {
     /// P3c was not reached: this creator made no root.
     NotCreated,
-    /// P3c's exclusive create of the root succeeded, whatever failed after it:
-    /// this creator owns the root, whole or in part, and cleanup settles it
-    /// before either half.
+    /// P3c's rename published the root, whatever failed after it: this
+    /// creator owns the root, token and all, and cleanup settles it before
+    /// either half.
     Owned,
-    /// P3c's claim failed before the root was made — something was already
-    /// at the path, or a refusal came first: never this creator's, and nothing
-    /// at the path is touched.
+    /// P3c stopped before its rename published anything — the path was
+    /// occupied, or a refusal or failure came first: nothing at the path is
+    /// this creator's, and nothing there is touched. Whatever it staged is
+    /// private content and goes with the private half.
     NotOurs,
 }
 
@@ -920,6 +1185,7 @@ mod steps {
                 reached,
                 run_id: self.checked.run_id().to_owned(),
                 private_root: self.checked.private_root().to_path_buf(),
+                token: super::claim_token(&self.checked.incarnation().0),
                 paths: self.paths,
                 lock,
                 repo_key: self.repo_key,
@@ -1048,6 +1314,10 @@ mod steps {
             }
         }
 
+        pub(super) fn facts(&self) -> &Facts {
+            &self.facts
+        }
+
         /// P3c's refusals, which say whether the root is this creator's.
         pub(super) fn abort(
             self,
@@ -1059,9 +1329,9 @@ mod steps {
         }
     }
 
-    /// P3c — the execution root claimed under the marker that locates the run
-    /// and the owner record that authenticates it, and the case policy
-    /// observed at the root.
+    /// P3c — the execution root published, its location recorded and its claim
+    /// token inside it, under the marker that locates the run and the owner
+    /// record that authenticates it, and the case policy observed at the root.
     #[derive(Debug)]
     pub struct ExecutionRootCreated {
         facts: Facts,
@@ -1486,13 +1756,13 @@ pub enum Disposition {
     /// The proven prefix does not contain it: a retained, possibly committed
     /// husk that the deferred prune removes.
     RetainedPossiblyCommittedHusk { locator: PathBuf },
-    /// The execution root this creator claimed at P3c could not be settled, so
-    /// nothing was deleted: the public run directory stays with whatever marker
-    /// is in it, and so does the private half with its owner record when the
-    /// proof found one. The marker locates the root, through the run it names;
-    /// the husk's proof authenticates the run's two halves, not who made the
-    /// root — that was this creator's exclusive claim, which ends with this
-    /// process.
+    /// The execution root this creator published at P3c could not be settled,
+    /// so nothing was deleted: the public run directory stays with whatever
+    /// marker is in it, and so does the private half with its owner record and
+    /// location record when the proof found one. The location record names the
+    /// root's key and the claim token inside the root proves it is this run's,
+    /// so the next census settles it first and then reclaims both halves once
+    /// whatever stopped this settlement has cleared.
     ExecutionRootRetained {
         /// The root: still on disk, or a path whose state cannot be read.
         root: PathBuf,
@@ -1649,26 +1919,25 @@ impl Disposition {
                 let kept = match locator {
                     Some(private) => format!(
                         "the public run directory at {} with its `.creating` marker and the \
-                         private half at {} with its owner record are kept. The marker is what \
-                         locates that root, through the run it names, and the two records \
-                         authenticate the run, not who made the root: that was this run's \
-                         exclusive claim",
+                         private half at {} with its owner record and location record are kept. \
+                         The location record names the root's key and the claim token inside the \
+                         root proves it is this run's, so the next write command settles the \
+                         root first and then reclaims both halves, once whatever stopped this \
+                         settlement has cleared",
                         public.display(),
                         private.display()
                     ),
                     None => format!(
                         "the public run directory at {} is kept with whatever marker is still in \
-                         it. No private half was bound to it any more, so nothing authenticates \
-                         the run, and only this run's exclusive claim, which ends with it, made \
-                         the root its own",
+                         it. No private half is bound to it any more, so no location record \
+                         says whose the root is, and a census keeps this husk as the root's \
+                         locator and reports it",
                         public.display()
                     ),
                 };
                 format!(
-                    "the execution root {} this run claimed could not be settled ({detail}), so \
-                     nothing was deleted: {kept}. A census reports the husk and deletes no \
-                     execution root; the deferred `upstroke runs prune` is the only path that \
-                     removes a retained husk",
+                    "the execution root {} this run published could not be settled ({detail}), \
+                     so nothing was deleted: {kept}",
                     root.display()
                 )
             }
@@ -1805,13 +2074,17 @@ fn stat_after_error<R: UnpublishedRoot + ?Sized>(
     match proof {
         PrivateHalfOwnership::Proven(token) => {
             // **The execution root goes first, or nothing goes.** A root this
-            // creator claimed at P3c is its own by that exclusive claim, and is
-            // found afterwards only through the marker that names its run, so
-            // it is settled while the marker and the owner record are still
-            // here. One it cannot settle keeps them: the token is dropped
-            // unspent and the husk is reported and kept.
+            // creator published at P3c is retired into the private half while
+            // the marker, the owner record and the location record that locate
+            // it are still here. One it cannot settle keeps them all: the proof
+            // token is dropped unspent and the husk is reported and kept.
             if aborted.root == RootClaim::Owned {
-                if let RootSettled::Kept(detail) = settle_unpublished_root(root, hooks.effects()) {
+                if let RootSettled::Kept(detail) = settle_unpublished_root(
+                    root,
+                    &aborted.token,
+                    &private.join(RETIRED_ROOT),
+                    hooks.effects(),
+                ) {
                     return Disposition::ExecutionRootRetained {
                         root: root.path().to_path_buf(),
                         public,
@@ -1855,13 +2128,17 @@ fn stat_after_error<R: UnpublishedRoot + ?Sized>(
             Disposition::BothHalvesRemoved { private: target }
         }
         PrivateHalfOwnership::NothingBound(shape) => {
-            // No private half is bound any more, but a root this creator
-            // claimed at P3c is its own by that claim, never by the husk's
-            // proof: it is settled first, as in the proven arm, and one it
-            // cannot settle keeps the public directory and whatever marker
-            // still names the run.
+            // No private half is bound any more, so there is nowhere to
+            // retire a root this creator published: the settlement keeps it,
+            // and with it the public directory and whatever marker still names
+            // the run, which a census then reports.
             if aborted.root == RootClaim::Owned {
-                if let RootSettled::Kept(detail) = settle_unpublished_root(root, hooks.effects()) {
+                if let RootSettled::Kept(detail) = settle_unpublished_root(
+                    root,
+                    &aborted.token,
+                    &private.join(RETIRED_ROOT),
+                    hooks.effects(),
+                ) {
                     return Disposition::ExecutionRootRetained {
                         root: root.path().to_path_buf(),
                         public,
@@ -2127,26 +2404,61 @@ fn p3b_publish_owner_record(
 }
 
 /// P3c — `Worktree.CreateExecutionRoot`, under the marker that locates this run
-/// and the owner record that authenticates it.
+/// and the owner record that authenticates it, in three steps.
 ///
-/// The root is **claimed**, not checked and then made: the create site makes
-/// it with one exclusive create of the leaf, so a root that appeared at the
-/// path since the admission before P0 ([`admit_execution_root`]) — empty
-/// scaffolding included — is refused rather than adopted, and nothing at it is
-/// touched ([`RootClaim::NotOurs`]). A claim that succeeded is carried into
-/// every later abort, the create site's own later failures (a scaffolding
-/// directory, the barrier, the after-phase hook) included, so cleanup settles
-/// exactly the root this creator made ([`RootClaim::Owned`]).
+/// 1. **The location record** ([`location_record_name`]), through
+///    `RunDir.CreatePrivateDir`: the key the root will be published under,
+///    after the path is checked to be the one the record will name
+///    ([`locatable`]). It claims nothing.
+/// 2. **The publication** (`workspace_manager::FreshExecutionRoot`, one
+///    funnel call): the whole root is built in the private half at
+///    [`STAGED_ROOT`] with this run's claim token ([`claim_token`]) and the
+///    scaffolding inside it; the staged tree and the private half are made
+///    durable, which makes the location record durable too; then the tree is
+///    renamed onto the root's path by a rename that never replaces anything,
+///    so the root appears there once, whole, with its token. An occupied path
+///    is refused and untouched ([`RootClaim::NotOurs`]), and so is anything
+///    that stops the publication before its rename: what was staged is private
+///    content, and goes with the private half.
+/// 3. **The case policy**, observed at the root just published, never at an
+///    ancestor: the witness carries it to P5b, which stamps it into the record.
 ///
-/// The case policy is observed at the root just made, never at an ancestor:
-/// the witness carries it to P5b, which stamps it into the record.
+/// A publication whose rename succeeded is carried into every later abort —
+/// its own barriers and after-phase included — so cleanup settles exactly the
+/// root this creator published ([`RootClaim::Owned`]). No cut leaves a
+/// directory this creator made at the root's path without its token, so a
+/// later census can always tell this run's root from another actor's.
 fn p3c_create_execution_root(
     p3b: OwnerRecordPublished,
     request: &Request<'_>,
     hooks: &mut dyn TopologyHooks,
     warnings: &mut Vec<String>,
 ) -> Result<ExecutionRootCreated, Box<Aborted>> {
-    match request.root.create(hooks.effects()) {
+    let key = request.root.key();
+    let (located, token) = {
+        let checked = p3b.facts().checked();
+        (
+            locatable(
+                request.root.path(),
+                key,
+                checked.run_id(),
+                checked.private_root(),
+            ),
+            claim_token(&checked.incarnation().0),
+        )
+    };
+    if let Err(error) = located {
+        return Err(p3b.abort(Prefix::P3b, RootClaim::NotOurs, error));
+    }
+    let private = p3b.facts().paths().private.clone();
+    if let Err(error) = create_private_dir(&private.join(location_record_name(key)), hooks.rundir())
+    {
+        return Err(p3b.abort(Prefix::P3b, RootClaim::NotOurs, error));
+    }
+    match request
+        .root
+        .create(hooks.effects(), &private.join(STAGED_ROOT), &token)
+    {
         Ok(()) => {}
         Err(FreshRootFailure::Unclaimed(error)) => {
             return Err(p3b.abort(Prefix::P3b, RootClaim::NotOurs, error));
@@ -2162,8 +2474,8 @@ fn p3c_create_execution_root(
 /// `Ok` when nothing is at the execution root's path, read with
 /// `symlink_metadata` and never followed: the admission before P0, so a path
 /// already occupied when this invocation begins never gets a husk that could
-/// lead a census to it. It decides nothing about ownership; P3c's exclusive
-/// claim does.
+/// lead a census to it. It decides nothing about ownership; P3c's publication
+/// does.
 fn admit_execution_root<R: UnpublishedRoot + ?Sized>(root: &R) -> Result<(), UpstrokeError> {
     let path = root.path();
     match std::fs::symlink_metadata(path) {

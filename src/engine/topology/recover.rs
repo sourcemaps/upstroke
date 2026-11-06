@@ -624,7 +624,11 @@ pub mod chain {
                     },
                 )?;
 
-                let run_dirs = census_run_dirs(hooks.rundir(), &inputs, Some(&run_id))?;
+                let run_dirs = census_run_dirs(hooks, &inputs, Some(&run_id)).map_err(|error| {
+                    error.with_warnings(crate::engine::topology::startup::container_lines(
+                        containers.report(),
+                    ))
+                })?;
 
                 Ok(Self {
                     barrier,
@@ -655,6 +659,14 @@ pub mod chain {
             #[must_use]
             pub const fn run_dirs(&self) -> &RunDirCensusReport {
                 &self.run_dirs
+            }
+
+            #[must_use]
+            pub fn operator_lines(&self) -> Vec<String> {
+                let mut lines =
+                    crate::engine::topology::startup::container_lines(self.containers.report());
+                lines.extend(self.run_dirs.operator_lines());
+                lines
             }
         }
     }
@@ -907,6 +919,7 @@ pub struct Recovered {
     pub steps: Vec<RecoveryStep>,
     pub resumed: Resumed,
     pub warnings: Vec<String>,
+    pub census: Vec<String>,
 }
 
 pub fn run_recovery_order(
@@ -978,7 +991,24 @@ pub fn recover_verified(
         },
         hooks,
     )?;
+    let census = censused.operator_lines();
+    warnings.extend(census.iter().cloned());
+    match recover_censused(censused, steps, seams, hooks, warnings) {
+        Ok((mut recovered, handle)) => {
+            recovered.census = census;
+            Ok((recovered, handle))
+        }
+        Err(error) => Err(error.with_warnings(census)),
+    }
+}
 
+fn recover_censused(
+    censused: ResumeCensused,
+    mut steps: Vec<RecoveryStep>,
+    seams: &ResumeSeams<'_>,
+    hooks: &mut dyn TopologyHooks,
+    warnings: &mut Vec<String>,
+) -> Result<(Recovered, RunHandle), UpstrokeError> {
     let censused = finalize_if_finished(censused, seams.manager, hooks)?;
     steps.push(RecoveryStep::B);
 
@@ -1069,6 +1099,7 @@ pub fn recover_verified(
             steps,
             resumed,
             warnings: drift,
+            census: Vec::new(),
         },
         handle,
     ))

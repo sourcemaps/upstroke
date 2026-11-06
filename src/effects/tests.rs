@@ -3519,6 +3519,7 @@ fn every_platform_conditional_denial_names_something_real() {
         suppressed,
         BTreeSet::from([
             "libc::pipe2",
+            "libc::renamex_np",
             "std::os::unix::fs::symlink",
             "std::os::windows::fs::symlink_dir",
             "std::os::windows::fs::symlink_file",

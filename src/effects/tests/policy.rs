@@ -70,6 +70,7 @@ pub(super) fn host_conditional_paths() -> Vec<&'static str> {
         vec![
             "std::os::windows::fs::symlink_dir",
             "std::os::windows::fs::symlink_file",
+            "libc::renamex_np",
         ]
     }
 }

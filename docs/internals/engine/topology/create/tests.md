@@ -1600,14 +1600,17 @@ whose scope selects their labels.
 
 ## `impl Fixture` › `fn no_root(&self) -> NoRoot {`
 
-The [`NoRoot`] of this fixture, under its tree and never made.
+The [`NoRoot`] of this fixture: no execution root, at the path a manager of this fixture's
+repository would derive, under the key it would derive. P3c records that key, and a census of the
+husk derives the same one, so a husk this leaves is the shape a creator cut before its publication
+leaves.
 
-## `struct NoRoot(PathBuf);`
+## `struct NoRoot {`
 
-An execution root for the tests whose subject is not R18: its `create` makes nothing and claims,
-its case policy is `false`, its `remove` removes nothing, and its path never exists — so the
-admission before P0 passes, and a cleanup that settles it finds nothing there. Those tests drive
-P0–P8 exactly as before P3c existed.
+An execution root for the tests whose subject is not R18: its `create` publishes nothing and
+answers as if it had, its case policy is `false`, its `retire` retires nothing, and its path never
+exists — so the admission before P0 passes, P3c writes a location record naming its key, and a
+cleanup that settles it finds nothing there. Those tests drive P0–P8 exactly as before P3c existed.
 
 ## `impl Fixture` › `fn manager(&self) -> WorkspaceManager {`
 
@@ -1622,23 +1625,29 @@ Effect hooks that fail one phase of one site and let everything else proceed. Th
 ## `enum Twist {`
 
 At most one departure from the production capability per guard: a capability answering `true`
-for the case policy (`Folding`), another actor making a root at the path just before the claim
-(`AnotherActorFirst`), the create site failing after its claim (`FailAfterClaim`), content
-appearing in the claimed root (`ContentAfterClaim`), and the R18 remover refusing
-(`RemovalFails`).
+for the case policy (`Folding`), another actor making a root at the path just before the
+publication (`AnotherActorFirst`), the create site failing after the publication's rename
+(`FailAfterClaim`), content appearing in the published root (`ContentAfterClaim`), and the R18
+retirement funnel refusing (`RemovalFails`).
 
 ## `struct RealRoot {`
 
-The production root capability on a real manager — `FreshExecutionRoot`'s exclusive claim, the
-case policy observed at the created root (the same function `entry` uses), and the R18 remover —
-with its [`Twist`]. Every twist goes through the real funnels: another actor's root is the
-idempotent `create_execution_root`, a failure after the claim is the claim's own after-phase
-refusing, content is made through `RunDir.CreatePrivateDir`, and a failing removal is the remover
-refusing at its before phase.
+The production root capability on a real manager — `FreshExecutionRoot`'s publication of a
+staged root, token inside, by a rename that never replaces anything; the case policy observed at
+the created root (the same function `entry` uses); and the R18 retirement funnel — with its
+[`Twist`]. Every twist goes through the real funnels: another actor's root is the idempotent
+`create_execution_root`, a failure after the publication is the publication's own after-phase
+refusing, content is made through `RunDir.CreatePrivateDir`, and a failing retirement is the
+retirement funnel refusing at its before phase.
 
 ## `fn names_of(dir: &Path) -> Vec<String> {`
 
 A directory's entries, sorted.
+
+## `fn published_with_token(root: &Path) -> bool {`
+
+The root a publication leaves: the five empty scaffolding directories and this run's empty claim
+token, and nothing else.
 
 ## `fn scaffolding_only(root: &Path) -> bool {`
 
@@ -1651,51 +1660,63 @@ One creation over a [`RealRoot`], with the shell probe refusing or not.
 
 ## `fn p3c_claims_the_execution_root_after_the_owner_record_and_the_record_carries_its_case_policy() {`
 
-PR12-INV7-PREPUBLICATION-EXECUTION-ROOT-ORPHAN, the order. A run creates its execution root at
+PR12-INV7-PREPUBLICATION-EXECUTION-ROOT-ORPHAN, the order. A run publishes its execution root at
 P3c: after the marker that locates the run and the owner record that authenticates it, before the
-plan and the commit record — first executions on the harness, in that order. The committed record
+plan and the commit record — first executions on the harness, in that order. The published root
+carries its claim token and its scaffolding, the private half carries the location record naming
+the key the root was published under, and the staged tree is gone, renamed onto the root's path.
+The committed record
 carries the case policy the created root shows (its `TASKS` resolves on a case-insensitive
 filesystem and not on a sensitive one). A second run whose capability answers `true` commits
 `true`: P5b stamps P3c's observation over whatever the caller's record held.
 
 ## `fn a_refusal_after_p3c_settles_the_claimed_root_before_either_half() {`
 
-A P4 refusal after the claim: the run stops at P3c, both halves are reclaimed, and the claimed
-root is gone — `Worktree.RemoveExecutionRoot` before `RunDir.RemovePrivateHusk` and
-`RunDir.RemovePublicHusk`, so the root is settled while the marker that locates it and the owner
-record that authenticates the run are still there.
+A P4 refusal after the publication: the run stops at P3c, both halves are reclaimed, and the
+published root is gone — retired into the private half by `Worktree.RemoveExecutionRoot`, its
+barrier run, before `RunDir.RemovePrivateHusk` and `RunDir.RemovePublicHusk`, so the root is
+settled while the marker that locates it and the owner record that authenticates the run are still
+there.
 
 ## `fn a_failure_after_the_claim_leaves_a_root_that_is_this_creators_to_settle() {`
 
-The create site fails after it made the root (its after phase): the claim answers `Claimed`, the
-run stops at P3b, and cleanup settles the whole root before it reclaims both halves.
+The create site fails after the publication's rename (its after phase): the publication answers
+`Claimed`, the run stops at P3b, and cleanup retires the whole root before it reclaims both halves.
 
 ## `fn a_root_another_actor_puts_at_the_claim_boundary_is_refused_and_untouched() {`
 
 Another actor makes a root — exactly the scaffolding a run's own has — at the path after the
-admission before P0 and immediately before the claim. The exclusive create refuses it
+admission before P0 and immediately before the publication. The publication refuses it
 (`Unclaimed`): the run stops at P3b naming the root, the halves this run made are reclaimed, the
-other actor's root is exactly as it made it, and the remover's site is never even reached.
+other actor's root is exactly as it made it, and the retirement funnel's site is never even
+reached.
 
 ## `fn a_claimed_root_the_creator_cannot_settle_keeps_the_husk_that_locates_it() {`
 
-A claimed root the creator cannot settle — one holding content it did not make, and one whose
-removal the R18 remover refuses — keeps everything: `Disposition::ExecutionRootRetained` names the
-root, the public directory and the private half, the root and the marker that locates it stay, and
-the husk's proof still authenticates the run's halves. That proof does not show who made the root;
-the creator's claim did, and a later census keeps the husk rather than reclaiming it.
+A published root the creator cannot settle — one holding content it did not make, and one whose
+retirement the R18 funnel refuses — keeps everything: `Disposition::ExecutionRootRetained` names
+the root, the public directory and the private half, the root and the marker that locates it stay,
+and the husk's proof still authenticates the run's halves. What a later census does with the root
+is its token's and its location record's to decide: a root holding content its run did not make
+is kept, and one holding only its scaffolding and token is retired
+(`a_kill_after_p3c_converges_in_the_next_census_without_manual_removal`).
 
-## `fn a_claimed_root_whose_private_half_is_gone_is_settled_before_the_public_husk_goes() {`
+## `fn a_published_root_whose_private_half_is_gone_keeps_the_public_husk_that_locates_it() {`
 
 The arm of `stat_after_error` where the proof finds no private half bound (`NothingBound`) to a
-creator that owns its root: a marker naming an absent private half, a root claimed through
+creator that published its root: a marker naming an absent private half, a root published through
 [`RealRoot`], and an `Aborted` at P3c built by hand, because the protocol itself makes the private
-half before it claims a root, so only an outside actor removing it reaches this arm. The creator's
-authority over the root is its own claim, not the husk's proof, so the root is settled first here
-too. Scaffolding alone is pruned and then the public husk goes, in that order
-(`PublicHalfRemoved(TargetAbsent)`); a root holding content the run did not make is kept, with the
-public directory and its marker, `ExecutionRootRetained` naming no private half, neither remover
-called, and a sentence that does not claim an owner record was kept.
+half before it publishes a root, so only an outside actor removing it reaches this arm. A root is
+retired only into its run's private half, and there is none, so the root stays at its path with
+the token that proves it — untouched when it holds content the run did not make — and the public
+directory, the root's only locator, is kept with its marker: `ExecutionRootRetained` naming no
+private half, the run lock released through `Lock.Release`, the public remover never called, and a
+sentence that does not claim an owner record was kept.
+
+## `fn a_published_root_whose_private_half_is_gone_keeps_the_public_husk_that_locates_it() {` › `let elsewhere = fixture.private_root_canonical().join("elsewhere");`
+
+Staged somewhere under the private root other than the run's private half, which this shape has
+none of.
 
 ## `fn a_root_already_there_before_the_run_is_refused_before_anything_is_published() {`
 
@@ -1703,14 +1724,68 @@ A root already at the path when the run begins is refused by the admission befor
 `NothingCreated`, no public directory — so no husk can lead a census to that root — no
 `RunDir.CreatePublicDir` reached, and the root exactly as it was.
 
+## `const ROOT_KILLS: &[(&str, &str)] = &[`
+
+Where the real-root grid cuts the creator, and what the next census must do with what it leaves:
+`both` when nothing of this run is at the root's path (the publication was cut before its rename),
+`root` when the published root is there with its token.
+
 ## `fn create_root_kill_child() {`
 
-The subprocess half of the guard below: a creation over a [`RealRoot`] killed in P4's shell
-probe, after P3c claimed the root.
+The subprocess half of the real-root grids: a creation over a [`RealRoot`] killed at the named
+cut — `staged` and `published` at the publication's own cut points (`RootPublicationCut`, before
+and after its rename), `shell` and `agent` in P4's probes, `plan` after the plan is written,
+`commit` before the commit record is staged.
 
-## `fn a_kill_after_p3c_leaves_a_husk_the_census_keeps_with_its_root() {`
+## `fn census_root_kill_child() {`
 
-A creator killed after its claim leaves a husk and the root it claimed. The next census keeps
-both — `RootRetained` naming that root — and changes nothing in the root: from the husk it cannot
-tell who made the directory at the root's path, because the husk's proof authenticates the run's
-halves, and only the creator's claim, which ended with it, made the root its own.
+The census, cut inside a published root's retirement: `emptied` (the scaffolding removed, the
+token-bearing root still at its path) or `retired` (renamed into the private half, its barrier not
+run).
+
+## `fn assert_left_by_the_kill(`
+
+What a killed creator left, read before any census: the location record, the marker and the owner
+record are there, and so is either the published root with its token (`root`) or, at the root's
+path, nothing (`both`).
+
+## `fn a_kill_after_p3c_converges_in_the_next_census_without_manual_removal() {`
+
+REGULAR13-R18-PRECOMMIT-CONVERGENCE, PR12-REGRESSION11-PRECOMMIT-R18-RECOVERY and
+PR12-INV8-PRECOMMIT-EXECUTION-ROOT-UNRECLAIMED, sequence A: a real creator killed anywhere from its
+root's publication to the commit record — the publication cut before and after its rename, the
+shell and agent probes, the plan written, the commit record about to be staged — leaves a husk the
+**next census converges** without anyone removing the root: the root, proven by its token and
+located by its record, is retired into the private half first, and then the two halves go, private
+first and the marker last. A second census finds nothing. This replaces the guard that required
+the root and the husk to be kept (`a_kill_after_p3c_leaves_a_husk_the_census_keeps_with_its_root`).
+
+## `fn an_interrupted_retirement_converges_in_the_next_census() {`
+
+The removal half of the same obligation: a census cut inside the root's retirement — after the
+scaffolding went with the token-bearing root still at its path, or after the rename put it in the
+private half and before its barrier ran — leaves a shape the next census still converges, and
+before the private half goes the retirement funnel runs its barrier again: a root absent from its
+path a moment after an interrupted retirement is not taken as proof that the retirement is
+durable.
+
+## `fn census_without_init(`
+
+The census of [`census_of`] without its `git init`: run in a process whose Git environment names
+another common directory, where an init would act on that directory.
+
+## `fn census_under_another_common_dir_child() {`
+
+The subprocess half of the guard below, run under its parent's `GIT_COMMON_DIR`: the location
+record names a key other than the one this process derives, and the census keeps the husk and the
+root published under the recorded key, `RootRetained` naming that root and key. Spawned with
+neither variable, it has nothing to census and returns.
+
+## `fn a_census_under_another_common_directory_keeps_the_husk_and_its_published_root() {`
+
+PR12-REGRESSION11-PRECOMMIT-R18-RECOVERY, sequence B: a run created under one effective common
+directory, censused by a command whose valid absolute `GIT_COMMON_DIR` names another. The location
+record, not the census's own context, names the root, so the census keeps the husk and the root
+with its real locator rather than reclaiming the halves because the root it would derive is
+absent. The census in the creating context then converges. The other context runs in an owned,
+bounded child process (`run_test_isolated`), so no environment of this test process is changed.

@@ -125,6 +125,10 @@ funnel = [
     "remove_site",
     "remove_staging_leftovers",
     "repair_materialize",
+    # A fresh root's retirement: `Worktree.RemoveExecutionRoot` for a root whose
+    # run never committed, renaming it, claim token inside, into the run's
+    # private half rather than emptying it in place (repair15, PROTOCOL-4).
+    "retire_execution_root",
     "snapshot_commit_tree",
     "verify_worktree",
     "write_intent_site",
@@ -2015,6 +2019,9 @@ effect = [
     "pipe2",
     "pthread_sigmask",
     "raise",
+    # macOS's no-replace rename, which `workspace_manager::rename_no_clobber`
+    # publishes and retires a fresh execution root with (`RENAME_EXCL`).
+    "renamex_np",
     "rmdir",
     "setpgid",
     "setrlimit",
@@ -2029,6 +2036,9 @@ effect = [
     "write",
 ]
 not_an_effect = [
+    # The "relative to the working directory" descriptor `renameat2` is handed
+    # by `workspace_manager::rename_no_clobber`; the effect is `syscall`.
+    "AT_FDCWD",
     "BPF_ABS",
     "BPF_JEQ",
     # The jump on a set bit, with which the rundir tests' policy that refuses
@@ -2092,6 +2102,11 @@ not_an_effect = [
     "P_ALL",
     "P_PID",
     "P_PIDFD",
+    # The no-replace flags of `renamex_np` (macOS) and `renameat2` (Linux) in
+    # `workspace_manager::rename_no_clobber`; the effects are `renamex_np` and
+    # `syscall`.
+    "RENAME_EXCL",
+    "RENAME_NOREPLACE",
     "RLIMIT_CORE",
     "RLIMIT_NOFILE",
     "SA_RESTART",
@@ -2151,6 +2166,10 @@ not_an_effect = [
     "SYS_pidfd_open",
     "SYS_pidfd_send_signal",
     "SYS_prctl",
+    # The number of `renameat2`, the no-replace rename
+    # `workspace_manager::rename_no_clobber` reaches on Linux; the effect is
+    # `syscall`.
+    "SYS_renameat2",
     # The number of `sendto`, the call a Unix-socket write makes, which the
     # rundir tests hand a seccomp policy so that a parked fork's release
     # answers `EINTR` (`PR320-R5-MAIN-003`); the effect is `syscall`.

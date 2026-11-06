@@ -25324,3 +25324,253 @@ fn recorded_target_resume_child() {
         std::env::var_os(RECORDED_TARGET_REFUSAL).expect("the parent names the refusal's file");
     fs::write(refusal, refused.to_string()).expect("the refusal recorded");
 }
+
+fn plant_census_husks(repo: &Path) -> (String, String, PathBuf) {
+    let malformed = crate::ulid::ulid();
+    let public = rundir::public_dir(repo, &malformed);
+    fs::create_dir_all(&public).expect("a husk's public directory");
+    fs::write(public.join(rundir::MARKER), b"not a marker").expect("an unparseable marker");
+
+    let blocked = crate::ulid::ulid();
+    let incarnation = crate::ulid::ulid();
+    let private_root = fs::canonicalize(private_root_for(repo)).expect("the private root");
+    let public = rundir::public_dir(repo, &blocked);
+    let private = private_root.join("runs").join(&blocked);
+    let repo_key = rundir::RepoKey::for_repo(repo).expect("the repository's key");
+    let policy = crate::runner::policy::host_policy();
+    fs::create_dir_all(&public).expect("the husk's public directory");
+    let marker = rundir::CreatingMarker {
+        run_id: blocked.clone(),
+        repo_key: repo_key.as_str().to_owned(),
+        private_dir: private.to_string_lossy().into_owned(),
+        incarnation: incarnation.clone(),
+        pid: 4242,
+        runner_policy_sha256: crate::runner::policy::runner_policy_sha256(&policy),
+    };
+    rundir::stage_marker(&public, &marker, &mut rundir::NoHooks).expect("P1a");
+    rundir::publish_marker(&public, &mut rundir::NoHooks).expect("P1b");
+    rundir::create_private_dir(&private, &mut rundir::NoHooks).expect("P3a");
+    let owner = rundir::OwnerRecord {
+        run_id: blocked.clone(),
+        repo_key: repo_key.as_str().to_owned(),
+        public_dir: fs::canonicalize(&public)
+            .expect("the public directory")
+            .to_string_lossy()
+            .into_owned(),
+        incarnation: incarnation.clone(),
+        runner: policy,
+    };
+    rundir::stage_owner_record(&private, &owner, &mut rundir::NoHooks).expect("P3a staged");
+    rundir::publish_owner_record(&private, &mut rundir::NoHooks).expect("P3b");
+    let manager = crate::workspace_manager::WorkspaceManager::derive(
+        repo,
+        &private_root,
+        &blocked,
+        &incarnation,
+    )
+    .expect("the husk's manager");
+    rundir::create_private_dir(
+        &private.join(format!("execution-root.v1.{}", manager.repo_key())),
+        &mut rundir::NoHooks,
+    )
+    .expect("the location record");
+    crate::workspace_manager::FreshExecutionRoot(&manager)
+        .create_execution_root(
+            &mut crate::workspace_manager::NoHooks,
+            &private.join(crate::engine::topology::create::STAGED_ROOT),
+            &crate::engine::topology::create::claim_token(&incarnation),
+        )
+        .expect("the publication");
+    fs::create_dir(private.join(crate::engine::topology::create::RETIRED_ROOT))
+        .expect("an obstruction where the root would be retired to");
+    (malformed, blocked, private)
+}
+
+fn assert_census_reported(said: &str, repo: &Path, malformed: &str, blocked: &str, private: &Path) {
+    for (id, why) in [
+        (malformed, "its .creating marker cannot be read"),
+        (blocked, "could not be retired into its private half"),
+    ] {
+        let public = rundir::public_dir(repo, id);
+        let line = format!("startup census: run directory {id} at {}", public.display());
+        assert!(
+            said.contains(&line),
+            "the operator is not told of {id}: {said}"
+        );
+        assert!(said.contains(why), "the reason for {id} is missing: {said}");
+    }
+    assert!(
+        said.contains(&format!("(private locator {})", private.display())),
+        "the private locator is missing: {said}"
+    );
+    assert!(
+        said.contains("already there"),
+        "the cause is missing: {said}"
+    );
+}
+
+fn assert_census_kept(repo: &Path, malformed: &str, blocked: &str, private: &Path) {
+    assert_eq!(
+        fs::read(rundir::public_dir(repo, malformed).join(rundir::MARKER)).expect("the marker"),
+        b"not a marker",
+        "the retained husk is byte-identical"
+    );
+    assert!(
+        rundir::public_dir(repo, blocked)
+            .join(rundir::MARKER)
+            .is_file()
+    );
+    assert!(private.join(rundir::OWNER_RECORD).is_file());
+    assert!(
+        fs::read_dir(private)
+            .expect("the private half")
+            .flatten()
+            .any(|entry| entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("execution-root.v1.")),
+        "the location record is kept"
+    );
+}
+
+struct RefusingProbe;
+
+impl AgentAdapter for RefusingProbe {
+    fn id(&self) -> &'static str {
+        TOPOLOGY_STUB
+    }
+
+    fn probe(&self, _runner: &dyn crate::runner::Runner) -> Result<Caps, UpstrokeError> {
+        Err(UpstrokeError::Agent {
+            message: "the refusing stub's probe refuses".to_owned(),
+        })
+    }
+
+    fn build(&self, _run: &TaskRun) -> Result<CommandSpec, UpstrokeError> {
+        Ok(shell_spec("exit 1"))
+    }
+
+    fn parse(&self, out: &ProcessOutput) -> Result<Outcome, UpstrokeError> {
+        Err(UpstrokeError::Agent {
+            message: format!("the refusing stub never runs a worker: {out:?}"),
+        })
+    }
+}
+
+struct RefusingProbes;
+
+impl AdapterSource for RefusingProbes {
+    fn get(&self, id: &str) -> Option<&dyn AgentAdapter> {
+        (id == TOPOLOGY_STUB).then_some(&RefusingProbe as &dyn AgentAdapter)
+    }
+}
+
+#[test]
+fn a_public_fresh_run_reports_what_its_startup_census_kept_and_why() {
+    let (_tree, repo) = temp_engine_repo("census-report-fresh");
+    let opts = topology_options(&repo);
+    let (malformed, blocked, private) = plant_census_husks(&repo);
+
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        0,
+    )));
+    let report = run_with(&opts, &source).expect("the schema-4 run completes");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:#?}");
+    let rendered = report.render();
+    assert_census_reported(&rendered, &repo, &malformed, &blocked, &private);
+    assert_census_kept(&repo, &malformed, &blocked, &private);
+
+    let refused = run_with(&opts, &RefusingProbes).expect_err("the refusing probe stops the run");
+    let said = refused.to_string();
+    assert!(said.contains("refusing stub's probe refuses"), "{said}");
+    assert_census_reported(&said, &repo, &malformed, &blocked, &private);
+    assert_census_kept(&repo, &malformed, &blocked, &private);
+
+    let Err(status) = crate::status::load(&repo, Some(&malformed)) else {
+        panic!("a husk is not a run and status must not load one");
+    };
+    let status = status.to_string();
+    assert!(
+        status.contains("its .creating marker cannot be read"),
+        "status gives the census's reason: {status}"
+    );
+}
+
+#[test]
+fn a_public_fresh_run_whose_run_directory_census_fails_reports_the_container_census() {
+    let (_tree, repo) = temp_engine_repo("census-report-half-b");
+    let opts = topology_options(&repo);
+    let name = crate::runner::container::intent::ContainerName::from_parts(
+        "0123456789abcdef",
+        &crate::ulid::ulid(),
+        &crate::ulid::ulid(),
+        "feedface",
+    )
+    .expect("a container name");
+    let containers = crate::runner::container::intent::containers_dir(&private_root_for(&repo));
+    fs::create_dir_all(&containers).expect("the container namespace");
+    let file_name = format!(
+        "{}{}",
+        name.as_str(),
+        crate::runner::container::intent::INTENT_STAGED_SUFFIX
+    );
+    fs::write(containers.join(&file_name), b"").expect("a torn staged intent");
+    let runs = rundir::runs_root(&repo);
+    fs::create_dir_all(runs.parent().expect("`.upstroke`")).expect("the `.upstroke` directory");
+    fs::write(&runs, b"not a directory").expect("a file where the runs root would be");
+
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        0,
+    )));
+    let refused = run_with(&opts, &source).expect_err("the runs root cannot be enumerated");
+    let UpstrokeError::WithWarnings(warned) = &refused else {
+        panic!("the container census's report was dropped: {refused:?}");
+    };
+    assert!(
+        matches!(warned.error.as_ref(), UpstrokeError::Io { path, .. } if path == &runs),
+        "the command ends with the run-directory census's own error: {:?}",
+        warned.error
+    );
+    let said = refused.to_string();
+    assert!(
+        said.contains(&format!(
+            "{file_name} for {}: another owner's, so nothing was removed",
+            name.as_str()
+        )),
+        "the operator is not told what the container census kept: {said}"
+    );
+    assert!(containers.join(&file_name).is_file(), "the intent is kept");
+    assert_eq!(
+        fs::read(&runs).expect("the planted file"),
+        b"not a directory",
+        "no run was created"
+    );
+}
+
+#[test]
+fn a_public_resume_reports_what_its_startup_census_kept_and_why() {
+    let (_tree, repo) = temp_engine_repo("census-report-resume");
+    let source = SharedTopologyStubs(std::sync::Arc::new(TopologyStub::new(
+        TOPOLOGY_STUB_EDIT,
+        1,
+    )));
+    let parked = run_with(&topology_options(&repo), &source).expect("the run parks");
+    assert_eq!(parked.outcome(), RunOutcome::Parked, "{parked:#?}");
+    until_released(&repo, &parked.run_id);
+    let (malformed, blocked, private) = plant_census_husks(&repo);
+    let resume = resume_options(&repo, &parked.run_id);
+
+    let refused =
+        resume_with(&resume, &RefusingProbes).expect_err("the refusing probe stops the resume");
+    let said = refused.to_string();
+    assert_census_reported(&said, &repo, &malformed, &blocked, &private);
+    assert_census_kept(&repo, &malformed, &blocked, &private);
+    until_released(&repo, &parked.run_id);
+
+    let resumed = resume_with(&resume, &source).expect("the resume runs");
+    let rendered = resumed.render();
+    assert_census_reported(&rendered, &repo, &malformed, &blocked, &private);
+    assert_census_kept(&repo, &malformed, &blocked, &private);
+}

@@ -2763,13 +2763,33 @@ impl<'p> Destination<'p> {
 
 /// How `Worktree.CreateExecutionRoot` makes the root itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RootLeaf {
-    /// `create_dir_all`: a root already there is reused.
+enum RootLeaf<'a> {
+    /// `create_dir_all`, then the scaffolding: a root already there is reused.
     Reused,
-    /// The parent chain with `create_dir_all`, then the root with one
-    /// exclusive `create_dir`: a root already there — empty scaffolding, a
-    /// link, anything — is refused, never adopted.
-    Exclusive,
+    /// Built complete at `staging`, carrying the claim `token`, then published
+    /// at the root's path by one `rename`: see [`FreshExecutionRoot`].
+    Published { staging: &'a Path, token: &'a str },
+}
+
+/// The scaffolding `Worktree.CreateExecutionRoot` makes inside a root, by name.
+const ROOT_SCAFFOLDING: [&str; 5] = ["intents", "tasks", "merge", "snapshots", "hooks-none"];
+
+/// What a claim token's name starts with: `claim.<incarnation>`.
+const CLAIM_TOKEN_PREFIX: &str = "claim.";
+
+/// Whether `name` is a claim token's: `claim.` and an incarnation spelled as a
+/// plain path component — one to sixty-four ASCII letters, digits, `-` or `_`.
+/// A production incarnation is a ULID; what makes a token this run's is that
+/// it names the incarnation the run's marker and owner record carry, which the
+/// caller compares, not its alphabet.
+fn is_claim_token(name: &str) -> bool {
+    name.strip_prefix(CLAIM_TOKEN_PREFIX)
+        .is_some_and(|incarnation| {
+            (1..=64).contains(&incarnation.len())
+                && incarnation
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+        })
 }
 
 /// A manager's execution root, as a **fresh** run claims it.
@@ -2783,30 +2803,68 @@ enum RootLeaf {
 ///
 /// Its one method is the same `Worktree.CreateExecutionRoot` funnel under the
 /// same name — the same revalidation, containment and reparse checks,
-/// scaffolding, durability barrier and hook phases — differing only in the
-/// leaf ([`RootLeaf::Exclusive`]), so the site, its inventory row and its
-/// classification are the ones already there.
+/// durability barrier and hook phases — so the site, its inventory row and its
+/// classification are the ones already there. What differs is how the root
+/// comes to be at its path ([`RootLeaf::Published`]):
+///
+/// 1. the whole root is built at a **staging** path the caller names — the
+///    caller's own private half, so a staged tree nothing published is
+///    private content that goes only with that half — with one exclusive
+///    create of the staging directory, then the caller's **claim token**
+///    (`claim.<incarnation>`, an empty directory), then the five scaffolding
+///    directories; then the staged tree's barrier and its private half's,
+///    which also makes the caller's location record in that half durable
+///    before any root can appear;
+/// 2. the root's parent chain is made and the staged tree is **published** at
+///    the root's path by a rename that never replaces anything
+///    ([`rename_no_clobber`]) — the one step at which a root appears at the
+///    path, and it appears with the token already inside;
+/// 3. the barriers of the root's parent, of the private half the staged name
+///    left, and of the root.
+///
+/// **Why a rename.** A root made in place exists, empty, for as long as it
+/// takes to write anything that says whose it is, and a creator cut in that
+/// interval leaves a directory no later reader can attribute. A rename has no
+/// such interval: before it, nothing of this run is at the path; after it, the
+/// root carries the token, and the token is what a census proves the root by
+/// (`engine::topology::startup`). Its retirement is a rename too
+/// ([`WorkspaceManager::retire_execution_root`]), so the token never leaves
+/// the root while the root is at its path.
+///
+/// **Never adopted, never replaced.** A root's path that is occupied is
+/// refused and left as it is, however and whenever it came to be occupied: the
+/// rename itself refuses ([`rename_no_clobber`]). The absence check before it
+/// only gives the refusal a plainer sentence; it is not what keeps another
+/// actor's directory safe.
 #[derive(Debug, Clone, Copy)]
 pub struct FreshExecutionRoot<'a>(pub &'a WorkspaceManager);
 
 impl FreshExecutionRoot<'_> {
-    /// `Worktree.CreateExecutionRoot` (R18), claiming the root exclusively.
+    /// `Worktree.CreateExecutionRoot` (R18): build the root at `staging` with
+    /// the claim `token` inside it, then publish it at the root's path by one
+    /// rename.
+    ///
+    /// `staging` must not exist and must lie under this manager's private root;
+    /// `token` must be `claim.` followed by a plain incarnation.
     ///
     /// # Errors
     ///
     /// [`FreshRootFailure::Unclaimed`] when nothing at the root's path is this
-    /// call's: it was already there, a containment or reparse refusal or the
-    /// before-phase hook stopped it, or the parent chain or the root could not
-    /// be made. [`FreshRootFailure::Claimed`] when this call made the root and
-    /// then failed — a scaffolding directory, the durability barrier, or the
-    /// after-phase hook — so the root, whole or in part, is the caller's.
+    /// call's: the staging or token was refused, a containment or reparse
+    /// refusal or the before-phase hook stopped it, the staged tree could not
+    /// be built, the root's path was occupied, or the rename failed — whatever
+    /// was staged stays at `staging`, the caller's to remove. [`FreshRootFailure::Claimed`]
+    /// when the rename published the root and something after it failed — a
+    /// barrier or the after-phase hook — so the root is the caller's.
     pub fn create_execution_root(
         &self,
         hooks: &mut dyn EffectHooks,
+        staging: &Path,
+        token: &str,
     ) -> Result<(), FreshRootFailure> {
         let mut claimed = false;
         self.0
-            .create_execution_root_as(hooks, RootLeaf::Exclusive, &mut claimed)
+            .create_execution_root_as(hooks, RootLeaf::Published { staging, token }, &mut claimed)
             .map_err(|error| {
                 if claimed {
                     FreshRootFailure::Claimed(error)
@@ -3450,7 +3508,8 @@ impl WorkspaceManager {
     ///
     /// Idempotent: a root that is already there is reused, which is what a
     /// resume recreating its recorded root, recovery and the fixtures rely on.
-    /// A fresh run claims its root with [`FreshExecutionRoot`] instead.
+    /// A fresh run publishes its root with [`FreshExecutionRoot`] instead, and
+    /// never adopts one.
     ///
     /// # Errors
     ///
@@ -3460,16 +3519,15 @@ impl WorkspaceManager {
     }
 
     /// The one primitive behind both forms of `Worktree.CreateExecutionRoot`:
-    /// the same revalidation, funnel, scaffolding and barrier, and only the
-    /// leaf's creation differs. `claimed` is set in the statement after an
-    /// [`RootLeaf::Exclusive`] create of the leaf succeeds, inside the funnel,
-    /// so a caller reads it after any error the funnel returns — a scaffolding
-    /// directory, the barrier or the after-phase hook — and knows the root is
-    /// its own.
+    /// the same revalidation, funnel and barrier, and only how the root comes
+    /// to be at its path differs. `claimed` is set in the statement after a
+    /// [`RootLeaf::Published`] rename succeeds, inside the funnel, so a caller
+    /// reads it after any error the funnel returns — a barrier or the
+    /// after-phase hook — and knows the root is its own.
     fn create_execution_root_as(
         &self,
         hooks: &mut dyn EffectHooks,
-        leaf: RootLeaf,
+        leaf: RootLeaf<'_>,
         claimed: &mut bool,
     ) -> Result<(), UpstrokeError> {
         self.revalidate_pausing(hooks)?;
@@ -3487,44 +3545,315 @@ impl WorkspaceManager {
                                 path: self.execution_root.clone(),
                                 source,
                             }
-                        })?
-                    }
-                    RootLeaf::Exclusive => {
-                        if let Some(parent) = self.execution_root.parent() {
-                            fs::create_dir_all(parent).map_err(|source| {
+                        })?;
+                        for name in ROOT_SCAFFOLDING {
+                            let directory = self.execution_root.join(name);
+                            fs::create_dir_all(&directory).map_err(|source| {
                                 UpstrokeError::Filesystem {
                                     operation: "create",
-                                    path: parent.to_path_buf(),
+                                    path: directory,
                                     source,
                                 }
                             })?;
                         }
-                        fs::create_dir(&self.execution_root).map_err(|source| {
-                            UpstrokeError::Filesystem {
-                                operation: "create",
-                                path: self.execution_root.clone(),
-                                source,
-                            }
-                        })?;
-                        *claimed = true;
+                        sync_directory(&self.execution_root, &ledger)
+                    }
+                    RootLeaf::Published { staging, token } => {
+                        self.publish_staged_root(staging, token, claimed, &ledger)
                     }
                 }
-                for directory in [
-                    self.execution_root.join("intents"),
-                    self.execution_root.join("tasks"),
-                    self.execution_root.join("merge"),
-                    self.execution_root.join("snapshots"),
-                    self.hooks_dir(),
-                ] {
-                    fs::create_dir_all(&directory).map_err(|source| UpstrokeError::Filesystem {
-                        operation: "create",
-                        path: directory,
-                        source,
-                    })?;
-                }
-                sync_directory(&self.execution_root, &ledger)
             },
         )
+    }
+
+    /// [`RootLeaf::Published`], inside the funnel: build the root at
+    /// `staging`, then rename it onto the root's path.
+    fn publish_staged_root(
+        &self,
+        staging: &Path,
+        token: &str,
+        claimed: &mut bool,
+        ledger: &DurabilityLedger,
+    ) -> Result<(), UpstrokeError> {
+        let refused = |message: String| UpstrokeError::Refused { message };
+        if !is_claim_token(token) {
+            return Err(refused(format!(
+                "`{token}` is not a claim token (`{CLAIM_TOKEN_PREFIX}` and a plain incarnation)"
+            )));
+        }
+        let staged_under = staging.parent().map(canonical_prefix).transpose()?;
+        if !staged_under.is_some_and(|parent| parent.starts_with(&self.private_root)) {
+            return Err(refused(format!(
+                "the staged root {} is not under the private root {}",
+                staging.display(),
+                self.private_root.display()
+            )));
+        }
+        let create = |path: PathBuf| {
+            fs::create_dir(&path).map_err(|source| UpstrokeError::Filesystem {
+                operation: "create",
+                path,
+                source,
+            })
+        };
+        create(staging.to_path_buf())?;
+        create(staging.join(token))?;
+        for name in ROOT_SCAFFOLDING {
+            create(staging.join(name))?;
+        }
+        // B3: the staged tree, then the private half that holds it and the
+        // caller's location record, durable before any root can appear.
+        sync_directory(staging, ledger)?;
+        let private = staging.parent().unwrap_or(staging);
+        sync_directory(private, ledger)?;
+        note_root_publication(&self.execution_root, RootPublicationPoint::Staged);
+        match fs::symlink_metadata(&self.execution_root) {
+            Err(absent) if absent.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(_) => {
+                return Err(UpstrokeError::Filesystem {
+                    operation: "create",
+                    path: self.execution_root.clone(),
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::AlreadyExists,
+                        "something is already at the execution root's path, and a fresh run's \
+                         root is never adopted",
+                    ),
+                });
+            }
+            Err(source) => {
+                return Err(UpstrokeError::Io {
+                    path: self.execution_root.clone(),
+                    source,
+                });
+            }
+        }
+        let parent = self.execution_root.parent();
+        if let Some(parent) = parent {
+            fs::create_dir_all(parent).map_err(|source| UpstrokeError::Filesystem {
+                operation: "create",
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+        rename_no_clobber(staging, &self.execution_root).map_err(|source| {
+            UpstrokeError::Filesystem {
+                operation: "publish",
+                path: self.execution_root.clone(),
+                source,
+            }
+        })?;
+        *claimed = true;
+        note_root_publication(&self.execution_root, RootPublicationPoint::Published);
+        // B4: the root's entry, the staged name's removal, the root.
+        if let Some(parent) = parent {
+            sync_directory(parent, ledger)?;
+        }
+        sync_directory(private, ledger)?;
+        sync_directory(&self.execution_root, ledger)
+    }
+
+    /// `Worktree.RemoveExecutionRoot` (R18) for a root its run never
+    /// committed: the empty scaffolding goes, and then the root itself is
+    /// **renamed into the run's private half** at `into`, its claim `token`
+    /// still inside, for the private half's removal to take.
+    ///
+    /// [`Self::remove_execution_root`] empties a root in place, token and all,
+    /// and then removes it, which is right for a committed run, whose root is
+    /// its own by `run_started`: a cut between the token's removal and the
+    /// root's leaves a directory that a re-run finalization still removes. A
+    /// root that has not committed has nothing but its token to say whose it
+    /// is ([`FreshExecutionRoot`]), so it is never left at its path without
+    /// it: the rename takes the root off the path in one step, token inside,
+    /// and a cut before it leaves the token where a census proves it.
+    ///
+    /// **Nothing that is not this run's is touched.** A root at the path
+    /// without `token` inside it is another actor's: nothing in it is read
+    /// beyond that, nothing is removed, and no slot instance is swept — a root
+    /// this may retire holds nothing but empty scaffolding and the token, so it
+    /// holds no instance to sweep.
+    ///
+    /// **The barrier runs on every answer that is not an error**: the root's
+    /// key directory (or, when it is gone, the workspaces directory) and the
+    /// private half `into` lies in are synced, whatever this call found. So a
+    /// caller that removes the private half after `Ok` removes it after the
+    /// root's absence from its path, and a retired tree's presence in the
+    /// private half, are durable — whether this call retired the root, an
+    /// earlier call did and was cut before its own barrier, or no root was ever
+    /// published. An absent path read a moment ago is not that.
+    ///
+    /// `Ok(true)` when this call retired the root; `Ok(false)` when it retired
+    /// nothing — nothing at the path, another actor's directory there, or this
+    /// run's root holding something other than empty scaffolding and claim
+    /// tokens, which is left where it is.
+    ///
+    /// # Errors
+    ///
+    /// The containment refusals, a refused `into` or `token`, a retirement
+    /// destination already present or unreadable, the rename's refusal, a
+    /// failed barrier, or an I/O error.
+    pub fn retire_execution_root(
+        &self,
+        hooks: &mut dyn EffectHooks,
+        into: &Path,
+        token: &str,
+    ) -> Result<bool, UpstrokeError> {
+        self.revalidate_pausing(hooks)?;
+        let ledger = hooks.durability_ledger();
+        funnel(
+            hooks,
+            EffectSiteId::Worktree(WorktreeSite::RemoveExecutionRoot),
+            || {
+                self.revalidate_acted_through(Primitive::RemoveExecutionRoot, None, None)?;
+                if !is_claim_token(token) {
+                    return Err(UpstrokeError::Refused {
+                        message: format!(
+                            "`{token}` is not a claim token (`{CLAIM_TOKEN_PREFIX}` and a \
+                             plain incarnation)"
+                        ),
+                    });
+                }
+                let retired_under = into.parent().map(canonical_prefix).transpose()?;
+                let Some(private) = retired_under.filter(|parent| {
+                    parent.starts_with(&self.private_root)
+                        && parent.as_path() != self.private_root.as_path()
+                }) else {
+                    return Err(UpstrokeError::Refused {
+                        message: format!(
+                            "the execution root {} cannot be retired to {}, which is not inside \
+                             a run's private half under {}",
+                            self.execution_root.display(),
+                            into.display(),
+                            self.private_root.display()
+                        ),
+                    });
+                };
+                let retired = self.retire_if_ours(into, token)?;
+                // The barrier, whatever was found: the root's absence from its
+                // key directory and the retired name in the private half are
+                // durable before any caller discards the private half.
+                let key_directory = self.execution_root.parent();
+                match key_directory.map(fs::symlink_metadata) {
+                    Some(Ok(_)) => {
+                        if let Some(key_directory) = key_directory {
+                            sync_directory(key_directory, &ledger)?;
+                        }
+                    }
+                    Some(Err(absent)) if absent.kind() == std::io::ErrorKind::NotFound => {
+                        let workspaces = key_directory.and_then(Path::parent);
+                        if let Some(workspaces) =
+                            workspaces.filter(|workspaces| workspaces.is_dir())
+                        {
+                            sync_directory(workspaces, &ledger)?;
+                        }
+                    }
+                    Some(Err(source)) => {
+                        return Err(UpstrokeError::Io {
+                            path: key_directory
+                                .map_or_else(|| self.execution_root.clone(), Path::to_path_buf),
+                            source,
+                        });
+                    }
+                    None => {}
+                }
+                sync_directory(&private, &ledger)?;
+                Ok(retired)
+            },
+        )
+    }
+
+    /// [`Self::retire_execution_root`]'s decision and rename, before its
+    /// barrier: `Ok(true)` when the root was this run's (it holds `token`),
+    /// held nothing but empty scaffolding and claim tokens, and was renamed to
+    /// `into`; `Ok(false)` when there was nothing to retire.
+    fn retire_if_ours(&self, into: &Path, token: &str) -> Result<bool, UpstrokeError> {
+        match fs::symlink_metadata(&self.execution_root) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(source) => {
+                return Err(UpstrokeError::Io {
+                    path: self.execution_root.clone(),
+                    source,
+                });
+            }
+        }
+        let token_path = self.execution_root.join(token);
+        match fs::symlink_metadata(&token_path) {
+            Ok(found) if found.is_dir() => {}
+            Ok(_) => return Ok(false),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(source) => {
+                return Err(UpstrokeError::Io {
+                    path: token_path,
+                    source,
+                });
+            }
+        }
+        for name in ROOT_SCAFFOLDING {
+            let scaffolding = self.execution_root.join(name);
+            if !directory_is_empty(&scaffolding)? {
+                continue;
+            }
+            match fs::remove_dir(&scaffolding) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(source) => {
+                    return Err(UpstrokeError::Filesystem {
+                        operation: "remove",
+                        path: scaffolding,
+                        source,
+                    });
+                }
+            }
+        }
+        let tokens = self.claim_tokens()?;
+        for entry in fs::read_dir(&self.execution_root).map_err(|source| UpstrokeError::Io {
+            path: self.execution_root.clone(),
+            source,
+        })? {
+            let path = entry
+                .map_err(|source| UpstrokeError::Io {
+                    path: self.execution_root.clone(),
+                    source,
+                })?
+                .path();
+            if !(tokens.contains(&path) && directory_is_empty(&path)?) {
+                return Ok(false);
+            }
+        }
+        note_root_publication(&self.execution_root, RootPublicationPoint::Emptied);
+        // The destination is the run's own, and still nothing there is
+        // overwritten or used: present, of any kind, or unreadable, the
+        // retirement refuses and the root stays at its path with the token
+        // that proves it.
+        match fs::symlink_metadata(into) {
+            Err(absent) if absent.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(_) => {
+                return Err(UpstrokeError::Refused {
+                    message: format!(
+                        "the execution root {} is not retired: {} is already there, and a \
+                         retirement neither replaces nor reuses it, so the root stays at its path \
+                         with its claim token",
+                        self.execution_root.display(),
+                        into.display()
+                    ),
+                });
+            }
+            Err(source) => {
+                return Err(UpstrokeError::Io {
+                    path: into.to_path_buf(),
+                    source,
+                });
+            }
+        }
+        rename_no_clobber(&self.execution_root, into).map_err(|source| {
+            UpstrokeError::Filesystem {
+                operation: "retire",
+                path: self.execution_root.clone(),
+                source,
+            }
+        })?;
+        note_root_publication(&self.execution_root, RootPublicationPoint::Retired);
+        Ok(true)
     }
 
     /// `Worktree.RemoveExecutionRoot` (R18).
@@ -3538,7 +3867,8 @@ impl WorkspaceManager {
     /// incarnation's writer that recreated its instance after its kind's scrub
     /// would otherwise keep the root with no walk left to reach it (the
     /// follow-up C record, §5.4). The R18 site itself still removes only the
-    /// scaffolding and the root.
+    /// scaffolding, the claim token a fresh run published its root with
+    /// ([`FreshExecutionRoot`]), and the root — each only when it is empty.
     ///
     /// # Errors
     ///
@@ -3566,26 +3896,31 @@ impl WorkspaceManager {
                         });
                     }
                 }
-                for scaffolding in [
+                // The claim token goes last of the root's contents, after the
+                // scaffolding and before the root: a removal cut part-way
+                // leaves the token that proves whose the root is, so the next
+                // census still settles it.
+                let scaffolding = [
                     self.hooks_dir(),
                     self.execution_root.join("intents"),
                     self.execution_root.join("tasks"),
                     self.execution_root.join("merge"),
                     self.execution_root.join("snapshots"),
-                ] {
-                    if !directory_is_empty(&scaffolding)? {
+                ];
+                for removable in scaffolding.into_iter().chain(self.claim_tokens()?) {
+                    if !directory_is_empty(&removable)? {
                         continue;
                     }
                     // Empty a moment ago, so a failure to remove it is a
                     // failure to report, not a race to swallow: a scaffolding
                     // directory nothing can remove is what keeps the root.
-                    match fs::remove_dir(&scaffolding) {
+                    match fs::remove_dir(&removable) {
                         Ok(()) => {}
                         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                         Err(source) => {
                             return Err(UpstrokeError::Filesystem {
                                 operation: "remove",
-                                path: scaffolding,
+                                path: removable,
                                 source,
                             });
                         }
@@ -3660,6 +3995,48 @@ impl WorkspaceManager {
     /// effect no site accounts for.
     fn hooks_dir(&self) -> PathBuf {
         self.execution_root.join("hooks-none")
+    }
+
+    /// The claim tokens at the root's top level ([`FreshExecutionRoot`]): each
+    /// entry named `claim.<incarnation>` that is a real directory, read with
+    /// `symlink_metadata` and never followed. Anything else of that name stays
+    /// where it is, and so keeps the root.
+    fn claim_tokens(&self) -> Result<Vec<PathBuf>, UpstrokeError> {
+        let listed = match fs::read_dir(&self.execution_root) {
+            Ok(listed) => listed,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Vec::new());
+            }
+            Err(source) => {
+                return Err(UpstrokeError::Io {
+                    path: self.execution_root.clone(),
+                    source,
+                });
+            }
+        };
+        let mut tokens = Vec::new();
+        for entry in listed {
+            let entry = entry.map_err(|source| UpstrokeError::Io {
+                path: self.execution_root.clone(),
+                source,
+            })?;
+            let named = entry.file_name().to_str().is_some_and(is_claim_token);
+            if !named {
+                continue;
+            }
+            let path = entry.path();
+            let directory = fs::symlink_metadata(&path)
+                .map_err(|source| UpstrokeError::Io {
+                    path: path.clone(),
+                    source,
+                })?
+                .is_dir();
+            if directory {
+                tokens.push(path);
+            }
+        }
+        tokens.sort();
+        Ok(tokens)
     }
 
     // -----------------------------------------------------------------------
@@ -9015,6 +9392,171 @@ fn directory_is_empty(path: &Path) -> Result<bool, UpstrokeError> {
     }
 }
 
+/// The points inside a fresh root's publication and retirement at which a
+/// test cuts the process ([`note_root_publication`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum RootPublicationPoint {
+    /// The staged tree and its private half are durable; nothing is at the
+    /// root's path yet.
+    Staged,
+    /// The rename returned; none of its barriers has run.
+    Published,
+    /// The retirement removed the scaffolding; the root, token inside, is
+    /// still at its path.
+    Emptied,
+    /// The retirement's rename returned; none of its barriers has run.
+    Retired,
+}
+
+/// Record that a fresh root's publication or retirement reached `point`. A
+/// no-op in a production build; the `#[cfg(test)]` twin, at the bottom of this
+/// file for the reason [`note_removal_attempt`] gives, lets a bounded child
+/// test process die exactly there.
+#[cfg(not(test))]
+#[inline]
+fn note_root_publication(_root: &Path, _point: RootPublicationPoint) {}
+
+/// Rename `from` onto `to` only if nothing is at `to`: the step that publishes
+/// a fresh root ([`FreshExecutionRoot`]) and the step that retires one
+/// ([`WorkspaceManager::retire_execution_root`]).
+///
+/// `std::fs::rename` cannot be used: its own documentation (Rust 1.85) says
+/// that on Unix, and on Windows 10 1607 and later, a directory replaces an
+/// existing **empty** directory at the destination, so an empty directory
+/// another actor made there would be taken over. Each platform's no-replace
+/// rename is used instead, and each refuses an occupied destination with an
+/// error and moves nothing:
+///
+/// * Linux: `renameat2(RENAME_NOREPLACE)`, through `libc::syscall` (the
+///   crate's existing raw-syscall path);
+/// * macOS: `renamex_np(RENAME_EXCL)`;
+/// * Windows: `MoveFileExW` with no flags — not `MOVEFILE_REPLACE_EXISTING`,
+///   not `MOVEFILE_COPY_ALLOWED`, not `MOVEFILE_DELAY_UNTIL_REBOOT`.
+///
+/// **Every error refuses.** A filesystem or kernel that cannot rename without
+/// replacing, a destination on another device, or anything else answers an
+/// error, and nothing retries with a rename that could replace, a copy and a
+/// delete, or a cleanup of the destination. A target with no no-replace
+/// rename here refuses outright: any Unix but Linux and macOS (Android
+/// included), and any target that is neither Unix nor Windows. Neither is a
+/// platform this crate ships, and the split is the `unix` / `windows` /
+/// otherwise one with Linux and macOS nested under `unix`, so each refusing
+/// arm sits under a predicate the CI census already accounts for as no
+/// runner's (`effects::tests::cfg`'s `NO_CI_RUNNER_COMPILES`).
+fn rename_no_clobber(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::ffi::OsStrExt as _;
+            let spelled = |path: &Path| {
+                std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("{} holds a NUL byte", path.display()),
+                    )
+                })
+            };
+            let (from, to) = (spelled(from)?, spelled(to)?);
+            // SAFETY: renameat2 reads two NUL-terminated paths that live until the
+            // call returns; AT_FDCWD makes the kernel resolve them as the process
+            // would, and RENAME_NOREPLACE is a flag value. The call writes no memory
+            // of this process.
+            let answered = unsafe {
+                libc::syscall(
+                    libc::SYS_renameat2,
+                    libc::AT_FDCWD,
+                    from.as_ptr(),
+                    libc::AT_FDCWD,
+                    to.as_ptr(),
+                    libc::RENAME_NOREPLACE,
+                )
+            };
+            if answered == 0 {
+                Ok(())
+            } else {
+                Err(no_replace_refused(std::io::Error::last_os_error()))
+            }
+        }
+        #[cfg(target_os = "macos")]
+        {
+            use std::os::unix::ffi::OsStrExt as _;
+            let spelled = |path: &Path| {
+                std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("{} holds a NUL byte", path.display()),
+                    )
+                })
+            };
+            let (from, to) = (spelled(from)?, spelled(to)?);
+            // SAFETY: renamex_np reads two NUL-terminated paths that live until the
+            // call returns, and RENAME_EXCL is a flag value. The call writes no
+            // memory of this process.
+            let answered =
+                unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_EXCL) };
+            if answered == 0 {
+                Ok(())
+            } else {
+                Err(no_replace_refused(std::io::Error::last_os_error()))
+            }
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            let _ = (from, to);
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "this Unix has no rename that refuses to replace, and a fresh run's root is \
+                 never moved by one that could",
+            ))
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt as _;
+        let wide = |path: &Path| -> Vec<u16> {
+            path.as_os_str()
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect()
+        };
+        let (from, to) = (wide(from), wide(to));
+        // SAFETY: both buffers are NUL-terminated UTF-16 paths that live until
+        // the call returns; flags 0 asks for a move on the same volume that
+        // never replaces, never copies and is never delayed.
+        let moved = unsafe {
+            windows_sys::Win32::Storage::FileSystem::MoveFileExW(from.as_ptr(), to.as_ptr(), 0)
+        };
+        if moved == 0 {
+            Err(no_replace_refused(std::io::Error::last_os_error()))
+        } else {
+            Ok(())
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (from, to);
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "this platform has no rename that refuses to replace, and a fresh run's root is \
+             never moved by one that could",
+        ))
+    }
+}
+
+/// [`rename_no_clobber`]'s error, kept as the platform reported it and said
+/// in a sentence: nothing was moved, and nothing will be moved any other way.
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
+fn no_replace_refused(error: std::io::Error) -> std::io::Error {
+    std::io::Error::new(
+        error.kind(),
+        format!(
+            "the no-replace rename refused ({error}); nothing was moved, and nothing is moved by \
+             a rename that could replace, a copy, or a removal of the destination"
+        ),
+    )
+}
+
 /// A failed Git command as the error every caller of [`WorkspaceManager::git_ok`]
 /// and [`WorkspaceManager::update_ref`] reports: the argv, the directory, and
 /// what Git said.
@@ -9650,6 +10192,69 @@ impl Drop for RegistryClock {
                 table.remove(&self.common_git_dir);
             }
         }
+    }
+}
+
+/// The cuts tests have armed in a fresh root's publication or retirement,
+/// keyed by the root's path exactly as its manager holds it, so a cut one test
+/// arms reaches no other test's root ([`RootPublicationCut`]).
+#[cfg(test)]
+static ROOT_PUBLICATION_CUTS: std::sync::Mutex<
+    std::collections::BTreeMap<PathBuf, RootPublicationPoint>,
+> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// The `#[cfg(test)]` half of the publication cut seam: the process aborts at
+/// the armed point of the armed root, and nothing happens anywhere else. See
+/// the `#[cfg(not(test))]` twin beside [`rename_no_clobber`].
+#[cfg(test)]
+fn note_root_publication(root: &Path, point: RootPublicationPoint) {
+    let armed = ROOT_PUBLICATION_CUTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(root)
+        .copied();
+    if armed == Some(point) {
+        std::process::abort();
+    }
+}
+
+/// While this guard lives, a publication or retirement of the root at its
+/// path aborts the process at the armed point: for a bounded child test
+/// process that a parent then censuses, never for a test's own process. The
+/// entry goes when the guard drops.
+#[cfg(test)]
+pub(crate) struct RootPublicationCut {
+    root: PathBuf,
+}
+
+#[cfg(test)]
+impl RootPublicationCut {
+    /// Arm `point` — `staged`, `published`, `emptied` or `retired` — for `root`.
+    pub(crate) fn arm(root: &Path, point: &str) -> Option<Self> {
+        let point = match point {
+            "staged" => RootPublicationPoint::Staged,
+            "published" => RootPublicationPoint::Published,
+            "emptied" => RootPublicationPoint::Emptied,
+            "retired" => RootPublicationPoint::Retired,
+            _ => return None,
+        };
+        ROOT_PUBLICATION_CUTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(root.to_path_buf(), point);
+        Some(Self {
+            root: root.to_path_buf(),
+        })
+    }
+}
+
+#[cfg(test)]
+impl Drop for RootPublicationCut {
+    fn drop(&mut self) {
+        ROOT_PUBLICATION_CUTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.root);
     }
 }
 

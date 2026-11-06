@@ -328,12 +328,27 @@ fn root_state(top: &Path) -> Vec<(PathBuf, String)> {
 
 const SCAFFOLDING: [&str; 5] = ["intents", "tasks", "merge", "snapshots", "hooks-none"];
 
-/// `FreshExecutionRoot`, PR12-INV7-PREPUBLICATION-EXECUTION-ROOT-ORPHAN: a fresh
-/// run claims its root with one exclusive create of the leaf, inside the same
-/// `Worktree.CreateExecutionRoot` funnel. The claim makes the root and its
-/// scaffolding; a second claim of the same path is refused as unclaimed and
-/// leaves it exactly as it was; and the idempotent form every other caller uses
-/// still reuses it.
+/// The claim token the fixture's fresh roots are published with: `claim.` and
+/// an incarnation, as `engine::topology::create::claim_token` builds one from
+/// the run's.
+const TOKEN: &str = "claim.01KZSWEEPC1A1M000000000001";
+
+/// Where the fixture's fresh root is staged: inside a private half under the
+/// manager's private root, as P3c stages one, the private half made here.
+fn staging_of(fixture: &Fixture, name: &str) -> PathBuf {
+    let private = fixture.private.join("runs").join(super::fixture::RUN_ID);
+    fs::create_dir_all(&private).expect("the run's private half");
+    private.join(name)
+}
+
+/// `FreshExecutionRoot`, PR12-INV7-PREPUBLICATION-EXECUTION-ROOT-ORPHAN and
+/// repair15: a fresh run publishes its root whole — built at a staging path in
+/// its private half with its claim token inside, then renamed onto the root's
+/// path by a rename that never replaces anything. The published root holds the
+/// token and the scaffolding and the staging name is gone; a second
+/// publication onto the same path is refused as unclaimed, leaves the root
+/// exactly as it was, and leaves its own staged tree where it was staged; and
+/// the idempotent form every other caller uses still reuses the root.
 #[test]
 fn a_fresh_execution_root_is_claimed_exclusively_and_a_claimed_one_is_never_claimed_twice() {
     let fixture = Fixture::new("fresh-root-claim");
@@ -342,15 +357,28 @@ fn a_fresh_execution_root_is_claimed_exclusively_and_a_claimed_one_is_never_clai
         fs::symlink_metadata(&root).is_err(),
         "the premise: no root exists yet"
     );
+    let staging = staging_of(&fixture, "staged-execution-root");
     FreshExecutionRoot(&fixture.manager)
-        .create_execution_root(&mut NoHooks)
-        .expect("a fresh claim of an empty path");
+        .create_execution_root(&mut NoHooks, &staging, TOKEN)
+        .expect("a fresh publication onto an empty path");
+    assert!(
+        root.join(TOKEN).is_dir(),
+        "the published root carries its token"
+    );
     for directory in SCAFFOLDING {
-        assert!(root.join(directory).is_dir(), "the claim makes {directory}");
+        assert!(
+            root.join(directory).is_dir(),
+            "the publication makes {directory}"
+        );
     }
+    assert!(
+        fs::symlink_metadata(&staging).is_err(),
+        "the staged tree is what was renamed onto the root's path"
+    );
 
     let before = root_state(&root);
-    match FreshExecutionRoot(&fixture.manager).create_execution_root(&mut NoHooks) {
+    let again = staging_of(&fixture, "staged-again");
+    match FreshExecutionRoot(&fixture.manager).create_execution_root(&mut NoHooks, &again, TOKEN) {
         Err(FreshRootFailure::Unclaimed(UpstrokeError::Filesystem { path, source, .. })) => {
             assert_eq!(path, root, "the refusal names the root");
             assert_eq!(source.kind(), std::io::ErrorKind::AlreadyExists, "{source}");
@@ -360,7 +388,11 @@ fn a_fresh_execution_root_is_claimed_exclusively_and_a_claimed_one_is_never_clai
     assert_eq!(
         root_state(&root),
         before,
-        "the refused claim changed the root"
+        "the refused publication changed the root"
+    );
+    assert!(
+        again.join(TOKEN).is_dir(),
+        "the refused publication's staged tree stays where it was staged, private content"
     );
 
     fixture
@@ -370,15 +402,17 @@ fn a_fresh_execution_root_is_claimed_exclusively_and_a_claimed_one_is_never_clai
 }
 
 /// The claim boundary: a root another actor puts at the path after every check
-/// a caller can make and before the leaf is created — here at the funnel's
+/// a caller can make and before the publication — here at the funnel's
 /// `Before` phase, the last point before the primitive — is refused as
 /// unclaimed, and nothing in it changes: not the five empty scaffolding
-/// directories that look exactly like a run's own, not its modes, not a file
-/// beside them. And a link at the leaf is refused without being followed.
+/// directories that look exactly like a run's own, not an empty directory, not
+/// its modes, not a file beside them. And a link at the leaf is refused without
+/// being followed.
 #[test]
 fn a_root_that_appears_at_the_claim_boundary_is_refused_and_left_as_it_was() {
     struct PlantAtBefore {
         root: PathBuf,
+        scaffolding: bool,
         with_a_file: bool,
         planted: Option<Vec<(PathBuf, String)>>,
     }
@@ -389,8 +423,12 @@ fn a_root_that_appears_at_the_claim_boundary_is_refused_and_left_as_it_was() {
                 && phase == HookPhase::Before
                 && self.planted.is_none()
             {
-                for directory in SCAFFOLDING {
-                    fs::create_dir_all(self.root.join(directory)).expect("another actor's root");
+                fs::create_dir_all(&self.root).expect("another actor's root");
+                if self.scaffolding {
+                    for directory in SCAFFOLDING {
+                        fs::create_dir_all(self.root.join(directory))
+                            .expect("another actor's scaffolding");
+                    }
                 }
                 if self.with_a_file {
                     fs::write(self.root.join("theirs.txt"), b"another actor's bytes")
@@ -412,19 +450,22 @@ fn a_root_that_appears_at_the_claim_boundary_is_refused_and_left_as_it_was() {
         }
     }
 
-    for (tag, with_a_file) in [
-        ("fresh-root-foreign", false),
-        ("fresh-root-foreign-file", true),
+    for (tag, scaffolding, with_a_file) in [
+        ("fresh-root-foreign", true, false),
+        ("fresh-root-foreign-file", true, true),
+        ("fresh-root-foreign-empty", false, false),
     ] {
         let fixture = Fixture::new(tag);
         let root = fixture.manager.execution_root().to_path_buf();
+        let staging = staging_of(&fixture, "staged-execution-root");
         let mut hooks = PlantAtBefore {
             root: root.clone(),
+            scaffolding,
             with_a_file,
             planted: None,
         };
         let failure = FreshExecutionRoot(&fixture.manager)
-            .create_execution_root(&mut hooks)
+            .create_execution_root(&mut hooks, &staging, TOKEN)
             .expect_err("a root already at the path is refused");
         assert!(
             matches!(failure, FreshRootFailure::Unclaimed(_)),
@@ -445,8 +486,9 @@ fn a_root_that_appears_at_the_claim_boundary_is_refused_and_left_as_it_was() {
         fs::create_dir_all(&target).expect("the link's target");
         fs::create_dir_all(root.parent().expect("a parent")).expect("the namespace");
         std::os::unix::fs::symlink(&target, &root).expect("a link at the leaf");
+        let staging = staging_of(&fixture, "staged-execution-root");
         let failure = FreshExecutionRoot(&fixture.manager)
-            .create_execution_root(&mut NoHooks)
+            .create_execution_root(&mut NoHooks, &staging, TOKEN)
             .expect_err("a link at the leaf is refused");
         assert!(
             matches!(failure, FreshRootFailure::Unclaimed(_)),
@@ -464,10 +506,11 @@ fn a_root_that_appears_at_the_claim_boundary_is_refused_and_left_as_it_was() {
     }
 }
 
-/// The claim carried: a failure after the exclusive create — the after-phase
-/// hook here, standing for a scaffolding directory or the durability barrier —
-/// answers `Claimed`, so its caller knows the root, whole or in part, is its
-/// own. A failure before it answers `Unclaimed` and leaves no root.
+/// The claim carried: a failure after the publication's rename — the
+/// after-phase hook here, standing for the durability barrier after it —
+/// answers `Claimed`, so its caller knows the root at the path, token and
+/// scaffolding, is its own, and nothing is left staged. A failure before the
+/// primitive answers `Unclaimed` and leaves no root and no staged tree.
 #[test]
 fn a_failure_after_the_claim_leaves_the_root_claimed_and_one_before_it_leaves_none() {
     struct ErrorAt(HookPhase);
@@ -489,12 +532,17 @@ fn a_failure_after_the_claim_leaves_the_root_claimed_and_one_before_it_leaves_no
 
     let fixture = Fixture::new("fresh-root-after");
     let root = fixture.manager.execution_root().to_path_buf();
+    let staging = staging_of(&fixture, "staged-execution-root");
     let failure = FreshExecutionRoot(&fixture.manager)
-        .create_execution_root(&mut ErrorAt(HookPhase::After))
+        .create_execution_root(&mut ErrorAt(HookPhase::After), &staging, TOKEN)
         .expect_err("the after phase fails");
     assert!(
         matches!(failure, FreshRootFailure::Claimed(_)),
-        "made, then failed: {failure:?}"
+        "published, then failed: {failure:?}"
+    );
+    assert!(
+        root.join(TOKEN).is_dir(),
+        "the claimed root carries its token"
     );
     for directory in SCAFFOLDING {
         assert!(
@@ -502,17 +550,138 @@ fn a_failure_after_the_claim_leaves_the_root_claimed_and_one_before_it_leaves_no
             "the claimed root holds {directory}"
         );
     }
+    assert!(
+        fs::symlink_metadata(&staging).is_err(),
+        "the staged tree is the published root"
+    );
 
     let fixture = Fixture::new("fresh-root-before");
     let root = fixture.manager.execution_root().to_path_buf();
+    let staging = staging_of(&fixture, "staged-execution-root");
     let failure = FreshExecutionRoot(&fixture.manager)
-        .create_execution_root(&mut ErrorAt(HookPhase::Before))
+        .create_execution_root(&mut ErrorAt(HookPhase::Before), &staging, TOKEN)
         .expect_err("the before phase fails");
     assert!(
         matches!(failure, FreshRootFailure::Unclaimed(_)),
-        "nothing was made: {failure:?}"
+        "nothing was published: {failure:?}"
     );
     assert!(fs::symlink_metadata(&root).is_err(), "and there is no root");
+    assert!(fs::symlink_metadata(&staging).is_err(), "nor a staged tree");
+}
+
+/// The publication's rename is the no-replace one on every supported
+/// platform, so an occupied destination is refused **by the rename itself**,
+/// not only by a check before it: an empty directory, which `std::fs::rename`
+/// would replace on Unix and on Windows 10 1607 and later (Rust 1.85's own
+/// documentation), stays exactly as it was, and so does the tree that was to be
+/// moved. No hook phase falls between the publication's absence check and its
+/// rename, so this is where the rename's own refusal is witnessed.
+#[test]
+fn the_publication_rename_never_replaces_an_empty_directory() {
+    let tree = scratch("no-replace-rename");
+    let from = tree.path().join("staged");
+    let onto = tree.path().join("occupied");
+    fs::create_dir_all(from.join(TOKEN)).expect("a staged tree");
+    fs::create_dir_all(&onto).expect("another actor's empty directory");
+    let staged_before = root_state(&from);
+    let occupied_before = root_state(&onto);
+
+    let refused = super::rename_no_clobber(&from, &onto)
+        .expect_err("an occupied destination is refused, empty or not");
+    assert!(
+        matches!(
+            refused.kind(),
+            std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::DirectoryNotEmpty
+        ) || cfg!(windows),
+        "{refused}"
+    );
+    assert_eq!(
+        root_state(&onto),
+        occupied_before,
+        "the destination changed"
+    );
+    assert_eq!(root_state(&from), staged_before, "the source moved");
+
+    let fresh = tree.path().join("fresh");
+    super::rename_no_clobber(&from, &fresh).expect("an absent destination is published to");
+    assert!(fresh.join(TOKEN).is_dir() && fs::symlink_metadata(&from).is_err());
+}
+
+/// A fresh root's retirement (repair15): a root holding its token and empty
+/// scaffolding is renamed, token inside, to the destination in its private
+/// half; a root without that token is another actor's and nothing in it is
+/// touched; an occupied destination refuses and leaves the root at its path
+/// with its token; and an absent root retires nothing. Every answer that is
+/// not an error ran the barrier first.
+#[test]
+fn a_fresh_root_is_retired_into_its_private_half_only_when_it_carries_the_token() {
+    let fixture = Fixture::new("fresh-root-retire");
+    let root = fixture.manager.execution_root().to_path_buf();
+    let into = staging_of(&fixture, "retired-execution-root");
+
+    assert!(
+        !fixture
+            .manager
+            .retire_execution_root(&mut NoHooks, &into, TOKEN)
+            .expect("an absent root retires nothing"),
+        "nothing was at the path"
+    );
+
+    fs::create_dir_all(&root).expect("another actor's root");
+    for directory in SCAFFOLDING {
+        fs::create_dir_all(root.join(directory)).expect("another actor's scaffolding");
+    }
+    let foreign = root_state(&root);
+    assert!(
+        !fixture
+            .manager
+            .retire_execution_root(&mut NoHooks, &into, TOKEN)
+            .expect("a root without the token retires nothing"),
+        "another actor's root is not retired"
+    );
+    assert_eq!(
+        root_state(&root),
+        foreign,
+        "another actor's root was touched"
+    );
+    fs::remove_dir_all(&root).expect("the other actor's root goes, by its own hand");
+
+    let staging = staging_of(&fixture, "staged-execution-root");
+    FreshExecutionRoot(&fixture.manager)
+        .create_execution_root(&mut NoHooks, &staging, TOKEN)
+        .expect("a fresh publication");
+    fs::create_dir_all(&into).expect("an occupied retirement destination");
+    let published = root_state(&root);
+    let refused = fixture
+        .manager
+        .retire_execution_root(&mut NoHooks, &into, TOKEN)
+        .expect_err("an occupied destination refuses the retirement");
+    assert!(refused.to_string().contains("already there"), "{refused}");
+    assert!(
+        root.join(TOKEN).is_dir(),
+        "the root stays at its path with the token that proves it"
+    );
+    assert!(
+        root_state(&root).len() <= published.len(),
+        "nothing was added to the root"
+    );
+    fs::remove_dir(&into).expect("the obstruction goes");
+
+    assert!(
+        fixture
+            .manager
+            .retire_execution_root(&mut NoHooks, &into, TOKEN)
+            .expect("a token-bearing root is retired"),
+        "the root was retired"
+    );
+    assert!(
+        fs::symlink_metadata(&root).is_err(),
+        "nothing is at the root's path"
+    );
+    assert!(
+        into.join(TOKEN).is_dir(),
+        "the retired tree carries the token into the private half"
+    );
 }
 
 // -----------------------------------------------------------------------

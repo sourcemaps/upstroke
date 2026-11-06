@@ -3944,6 +3944,62 @@ The child of the test above: `resume_with` on the parked run is refused, and
 the refusal is written to the file its parent names, the evidence that it
 ran.
 
+## `fn plant_census_husks(repo: &Path) -> (String, String, PathBuf) {`
+
+===========================================================================
+PR12-INV8-STARTUP-CENSUS-REPORT-DROPPED: the startup census reaches the operator
+===========================================================================
+
+## `fn plant_census_husks(repo: &Path) -> (String, String, PathBuf) {`
+
+Two husks a write command's census cannot reclaim, planted beside the repository's real runs: one
+whose `.creating` marker is not a marker (retained, nothing private touched), and one a creator
+left after publishing its execution root, whose retirement cannot complete because something
+already stands where the root would be retired to (unreclaimable, both halves and the root kept).
+Returns their run ids and the second one's private half.
+
+## `fn assert_census_reported(said: &str, repo: &Path, malformed: &str, blocked: &str, private: &Path) {`
+
+The census's own sentences for the two planted husks, as an operator must see them: each names the
+run, its public locator and why it was kept, and the second its private locator too.
+
+## `fn assert_census_kept(repo: &Path, malformed: &str, blocked: &str, private: &Path) {`
+
+What the census kept is still exactly there: the malformed marker's bytes, and the blocked husk's
+halves, location record and token-bearing root.
+
+## `struct RefusingProbe;`
+
+An adapter whose probe refuses: the startup work after the census fails.
+
+## `fn a_public_fresh_run_reports_what_its_startup_census_kept_and_why() {`
+
+PR12-INV8-STARTUP-CENSUS-REPORT-DROPPED, the fresh composition: a public schema-4 run reports, in
+the report the operator reads, every run directory its startup census retained or could not
+reclaim, with locator and reason — a malformed husk and a proved husk whose cleanup cannot
+complete — and the census's keeping is unchanged by the reporting. When the startup work after the
+census fails, here a pre-flight probe that refuses, the error the command ends with carries the
+same report. `status` asked for the malformed husk reports the same disposition.
+
+## `fn a_public_fresh_run_whose_run_directory_census_fails_reports_the_container_census() {`
+
+The same report when the census's own second half fails, the fresh composition (amendment 5 of
+the repair): the container census has already kept another owner's torn staged intent and said
+so, and the run-directory census then cannot enumerate the runs root, planted as a file. The
+command ends with the run-directory census's error, naming the runs root, carrying the container
+census's line; it creates no run and removes nothing. An error of the container census itself has
+no report to carry and ends the command bare (`startup`'s
+`a_refusal_in_half_a_leaves_half_b_untouched`).
+
+## `fn a_public_resume_reports_what_its_startup_census_kept_and_why() {`
+
+The resume composition of the same: a public resume of a parked schema-4 run reports the census
+of the husks beside it, and a resume whose pre-flight then refuses ends with an error carrying that
+report. A resume's run-directory census cannot fail to enumerate a runs root that holds the run
+itself except on a transient read error, so the resume form of the second-half error is held one
+level down, on the composition `ResumeCensused::census` itself (`recover`'s
+`a_resume_census_whose_run_directory_half_fails_keeps_the_container_halfs_report`).
+
 ## `fn a_schema_4_follow_prints_one_line_per_event_and_no_raw_control_whatever_the_plan_or_the_record_holds()`
 
 L1 (regression review 3, finding 1; DESIGN §18). A schema-4 run of one task

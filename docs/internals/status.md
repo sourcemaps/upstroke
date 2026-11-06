@@ -66,6 +66,15 @@ is the refusal, carrying which of the three kinds of husk this is, its
 reason and its private locator. The authorized private root is the default
 one, which is the root a read-only command is configured with.
 
+What it says about the husk's execution root is the census's own decision,
+from `engine::topology::startup::husk_root_view` — the planning function the
+census acts on, called read-only: a root the next write command retires before
+both halves, a directory it keeps with its real path and the reason, or
+directories of the run's name it leaves alone. So `status` and the next census
+cannot give two answers about one root (repair15). A husk created under an
+explicit `--private-root` is read under the default root here, as before, and
+is then reported retained with its locator outside that root.
+
 ## `pub enum Status {`
 
 What `load` returns since PR12: a legacy run's `RunStatus`, unchanged, or a

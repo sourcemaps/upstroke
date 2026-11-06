@@ -346,18 +346,23 @@ impl FreshLeased {
                 view: &view,
             },
         )?;
-        let (locked, _census) = census.into_parts();
+        let (locked, census) = census.into_parts();
+        let reported = census.operator_lines();
+        warnings.extend(reported.iter().cloned());
+        let carried = |error: UpstrokeError| error.with_warnings(reported.clone());
 
         let manager = WorkspaceManager::derive(
             &opts.repo_root,
             checked.private_root(),
             checked.run_id(),
             &checked.incarnation().0,
-        )?;
-        one_spelling(&include_spelling, &manager)?;
-        let base_sha = workspace.head_sha_full()?;
+        )
+        .map_err(carried)?;
+        one_spelling(&include_spelling, &manager).map_err(carried)?;
+        let base_sha = workspace.head_sha_full().map_err(carried)?;
 
-        let normalized_plan = normalized_plan_bytes(&analysis.plan, &opts.plan_path)?;
+        let normalized_plan =
+            normalized_plan_bytes(&analysis.plan, &opts.plan_path).map_err(carried)?;
         let inputs = FrozenInputs {
             plan: analysis.plan.clone(),
             normalized_plan_digest: events::normalized_plan_digest(&normalized_plan),
@@ -373,7 +378,8 @@ impl FreshLeased {
             mode,
             base_sha,
             normalized_plan_digest: &inputs.normalized_plan_digest,
-        })?;
+        })
+        .map_err(carried)?;
 
         let probes = RunnerProbes::new(
             analysis.config.shell,
@@ -397,7 +403,8 @@ impl FreshLeased {
             pair: ProbePair::grant(&ledger),
         };
         let started = create_run(checked, request, &mut hooks, &mut warnings)
-            .map_err(super::create::Refused::into_error)?;
+            .map_err(super::create::Refused::into_error)
+            .map_err(carried)?;
 
         let paths = started.paths().clone();
         let handle = started.into_handle(locked.into_lock());
@@ -417,7 +424,7 @@ impl FreshLeased {
         let run = TopologyRun::resumed(handle, inputs, ceiling)
             .with_spend_approval(analysis.config.ask_before.frontier_escalation_over_usd)
             .with_notifiers(notifiers);
-        finish(run, &driving, harness, warnings)
+        finish(run, &driving, harness, warnings).map_err(carried)
     }
 }
 
@@ -672,7 +679,7 @@ impl ResumeVerified {
             &crate::agent::probe_workspace(),
             started.probed_agents,
         );
-        let (_recovered, handle) = recover_verified(
+        let (recovered, handle) = recover_verified(
             records,
             &ResumeSeams {
                 repo_root: &opts.repo_root,
@@ -719,6 +726,7 @@ impl ResumeVerified {
             .with_spend_approval(config.ask_before.frontier_escalation_over_usd)
             .with_notifiers(notifiers);
         finish(run, &driving, harness, warnings)
+            .map_err(|error| error.with_warnings(recovered.census))
     }
 }
 
@@ -811,11 +819,18 @@ fn recorded_path(path: &Path, what: &str) -> Result<String, UpstrokeError> {
 }
 
 impl super::create::RootCreation for WorkspaceManager {
+    fn key(&self) -> &str {
+        self.repo_key()
+    }
+
     fn create(
         &self,
         hooks: &mut dyn EffectHooks,
+        staging: &Path,
+        token: &str,
     ) -> Result<(), crate::workspace_manager::FreshRootFailure> {
-        crate::workspace_manager::FreshExecutionRoot(self).create_execution_root(hooks)
+        crate::workspace_manager::FreshExecutionRoot(self)
+            .create_execution_root(hooks, staging, token)
     }
 
     fn case_fold(&self, warnings: &mut Vec<String>) -> bool {

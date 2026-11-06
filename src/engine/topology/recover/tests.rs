@@ -2542,6 +2542,16 @@ fn chain_to_census_with(
     runtime: &dyn ContainerRuntime,
     incarnation: &IncarnationId,
 ) -> Result<ResumeCensused, UpstrokeError> {
+    chain_to_census_over(fixture, hooks, runtime, incarnation, &fixture.repo_root)
+}
+
+fn chain_to_census_over(
+    fixture: &Fixture,
+    hooks: &mut dyn TopologyHooks,
+    runtime: &dyn ContainerRuntime,
+    incarnation: &IncarnationId,
+    census_repo_root: &Path,
+) -> Result<ResumeCensused, UpstrokeError> {
     let liveness = FakeOwnerLiveness::new();
     let view = DisposableDirView::new(ContainerTrace::default());
     let mut warnings = Vec::new();
@@ -2562,7 +2572,7 @@ fn chain_to_census_with(
         barrier,
         &CensusSeams {
             incarnation,
-            repo_root: &fixture.repo_root,
+            repo_root: census_repo_root,
             repo_key: &fixture.repo_key,
             runtime,
             liveness: &liveness,
@@ -2572,12 +2582,10 @@ fn chain_to_census_with(
     )
 }
 
-#[test]
-fn resume_of_nondefault_root_run_reclaims_earlier_incarnation_intents_in_recorded_root() {
-    let fixture = Fixture::healthy("earlier-incarnation");
-    let harness = harness();
-    let runtime = runtime_holding_the_record();
-
+fn plant_creator_container(
+    fixture: &Fixture,
+    runtime: &FakeRuntime,
+) -> crate::runner::container::intent::ContainerName {
     let invocation = crate::runner::InvocationId::probe(
         crate::runner::ProbeTarget::Agent(crate::runner::AgentId::new(AGENT)),
         0,
@@ -2614,6 +2622,15 @@ fn resume_of_nondefault_root_run_reclaims_earlier_incarnation_intents_in_recorde
         IMAGE_ID,
         crate::runner::container::runtime::Liveness::Running,
     );
+    name
+}
+
+#[test]
+fn resume_of_nondefault_root_run_reclaims_earlier_incarnation_intents_in_recorded_root() {
+    let fixture = Fixture::healthy("earlier-incarnation");
+    let harness = harness();
+    let runtime = runtime_holding_the_record();
+    let name = plant_creator_container(&fixture, &runtime);
 
     let censused = chain_to_census(
         &fixture,
@@ -2641,6 +2658,61 @@ fn resume_of_nondefault_root_run_reclaims_earlier_incarnation_intents_in_recorde
             .container_names()
             .contains(&name.as_str().to_owned()),
         "and it is gone from the runtime"
+    );
+}
+
+#[test]
+fn a_resume_census_whose_run_directory_half_fails_keeps_the_container_halfs_report() {
+    let fixture = Fixture::healthy("half-b-fails");
+    let harness = harness();
+    let runtime = runtime_holding_the_record();
+    let name = plant_creator_container(&fixture, &runtime);
+
+    let elsewhere = fixture.root.join("elsewhere");
+    mkdir(&elsewhere);
+    mkdir(&elsewhere.join(".upstroke"));
+    let runs = rundir::runs_root(&elsewhere);
+    let mut warnings = Vec::new();
+    drop(
+        EventLog::open(EventSite::OpenLog, &runs, &mut warnings)
+            .expect("the Event funnel creates a file where the runs root would be"),
+    );
+    assert!(runs.is_file(), "the runs root must be a file for this test");
+
+    let mut hooks = HarnessTopologyHooks::new(Arc::clone(&harness));
+    let error = chain_to_census_over(
+        &fixture,
+        &mut hooks,
+        &runtime,
+        &IncarnationId(RESUMER.to_owned()),
+        &elsewhere,
+    )
+    .expect_err("the run-directory half cannot enumerate the runs root");
+    let UpstrokeError::WithWarnings(warned) = &error else {
+        panic!("the container half's report was dropped with the later error: {error:?}");
+    };
+    assert!(
+        matches!(warned.error.as_ref(), UpstrokeError::Io { path, .. } if path == &runs),
+        "the error is the run-directory half's own: {:?}",
+        warned.error
+    );
+    let reclaimed = format!(
+        "startup census: reclaimed container {} of run {RUN_ID} (incarnation {CREATOR})",
+        name.as_str()
+    );
+    assert!(
+        warned
+            .warnings
+            .iter()
+            .any(|warning| warning.starts_with(&reclaimed)),
+        "the reclamation is reported: {:?}",
+        warned.warnings
+    );
+    assert!(
+        !runtime
+            .container_names()
+            .contains(&name.as_str().to_owned()),
+        "the report is of a container the census really removed"
     );
 }
 

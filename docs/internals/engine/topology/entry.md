@@ -306,13 +306,25 @@ commit (`head_sha_full`, which an unborn branch refuses), the normalized plan,
 the frozen inputs and [`fresh_record`] — runs before `create_run`, and none of
 it creates R18, so an ordinary refusal there leaves nothing to account for: no
 public run directory, no private half, no execution root. The root is
-`create_run`'s, at P3c: claimed exclusively, after the marker that locates
-the run and the owner record that authenticates it, and settled by the
-creator's own cleanup before either half, or kept with both when it cannot be
+`create_run`'s, at P3c: published, after the marker that locates the run and
+the owner record that authenticates it, with its location record in the
+private half and its claim token inside it, and settled by the creator's own
+cleanup before either half, or kept with both when it cannot be
 (`engine::topology::create`'s module notes). The manager is handed to the
 request as `root` (its `RootCreation` implementation is below), and a refusal
 from `create_run` is its `Refused::into_error`, the disposition already
 settled.
+
+**The census reaches the operator (PR12-INV8-STARTUP-CENSUS-REPORT-DROPPED).**
+The census's [`super::startup::StartupCensus::operator_lines`] — every run
+directory it retained or could not reclaim, with locator and reason, and the
+containers it reclaimed or left to another owner — are added to the run's
+warnings, which the report renders, and every error after the census is
+returned with them attached (`UpstrokeError::with_warnings`): the manager's
+derive, [`one_spelling`], the base commit, the normalized plan, the record,
+`create_run`'s refusal (a pre-flight probe that refuses is one) and the run
+itself. A census that refused in its container half has no run-directory
+report yet, and none is made up.
 
 Until PR12-INV7-PREPUBLICATION-EXECUTION-ROOT-ORPHAN (first in `fffa73fa`)
 this body made the root itself, before `head_sha_full`, the normalized plan
@@ -515,15 +527,18 @@ a run with gates it equals each recorded gate's.
 
 ## `impl super::create::RootCreation for WorkspaceManager {`
 
-The capability `create_run`'s P3c creates R18 through. `create` is
+The capability `create_run`'s P3c publishes R18 through. `key` is the
+manager's repository key, which P3c writes in the location record. `create` is
 `workspace_manager::FreshExecutionRoot`'s `create_execution_root`: the
-`Worktree.CreateExecutionRoot` funnel claiming the root with one exclusive
-create of its leaf, so a root already at the path — empty scaffolding
-included — is refused and never adopted, and its answer says whether the claim
-happened (`FreshRootFailure::Claimed` or `Unclaimed`). `case_fold` is this
-module's observation at the root just made: [`observe_case_at`] on its `tasks`
+`Worktree.CreateExecutionRoot` funnel building the root at the staging path in
+the private half with the claim token and the scaffolding inside it, and
+publishing it by a rename that never replaces anything, so a root already at
+the path — empty scaffolding, an empty directory, a link — is refused and never
+adopted, and its answer says whether the publication happened
+(`FreshRootFailure::Claimed` or `Unclaimed`). `case_fold` is this module's
+observation at the root just published: [`observe_case_at`] on its `tasks`
 directory, resolved with the repository's `core.ignorecase`
-([`resolve_case_fold`]), never at an ancestor. `path` and `remove` are the
+([`resolve_case_fold`]), never at an ancestor. `path` and `retire` are the
 manager's own (`impl UnpublishedRoot for WorkspaceManager`, in
 `engine::topology::create`).
 

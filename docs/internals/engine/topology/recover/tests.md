@@ -1219,11 +1219,28 @@ found. The full order consumes the witness at (h) and nothing survives it.
 
 [`chain_to_census`], with the hook bundle supplied — so a test can arm one.
 
-## `fn resume_of_nondefault_root_run_reclaims_earlier_incarnation_intents_in_recorded_root() {`
+## `fn chain_to_census_over(`
+
+[`chain_to_census_with`], the run-directory half censusing the runs under `census_repo_root`
+rather than the fixture's.
+
+## `fn plant_creator_container(`
 
 ===========================================================================
 (a) — the census, in the recorded root
 ===========================================================================
+
+## `fn plant_creator_container(`
+
+The creator incarnation's agent container, its intent in the recorded root and the container
+itself running in `runtime`: dead by construction to any later incarnation, whose census reclaims
+it.
+
+## `fn plant_creator_container(` › `let invocation = crate::runner::InvocationId::probe(`
+
+An intent this run's *creator* incarnation left behind, in the recorded
+root. It is dead by construction: the run lock is exclusive, so only one
+incarnation of a run is ever live, and this process is a different one.
 
 ## `fn resume_of_nondefault_root_run_reclaims_earlier_incarnation_intents_in_recorded_root() {`
 
@@ -1237,11 +1254,20 @@ census's own report has to name the recorded root. A build that censused
 perfectly successful report — so "the container was reclaimed" alone is not
 enough; the root the census scanned is part of the claim.
 
-## `fn resume_of_nondefault_root_run_reclaims_earlier_incarnation_intents_in_recorded_root() {` › `let invocation = crate::runner::InvocationId::probe(`
+## `fn a_resume_census_whose_run_directory_half_fails_keeps_the_container_halfs_report() {`
 
-An intent this run's *creator* incarnation left behind, in the recorded
-root. It is dead by construction: the run lock is exclusive, so only one
-incarnation of a run is ever live, and this process is a different one.
+PR12-INV8-STARTUP-CENSUS-REPORT-DROPPED, amendment 5 of the repair, the resume composition: what
+the container half reclaimed is reported even when the run-directory half then fails.
+
+The container half reclaims the creator incarnation's container, as in
+[`resume_of_nondefault_root_run_reclaims_earlier_incarnation_intents_in_recorded_root`]. The
+run-directory half cannot enumerate its runs root. A resume's own run directory is in that root,
+so with the fixture's repository the enumeration fails only on a transient read error this suite
+cannot inject; the half is pointed instead at a repository whose runs root is a file, the shape of
+`startup`'s `an_unreadable_runs_directory_refuses_rather_than_censusing_nothing`. The error is the
+run-directory half's own, naming that root, and it carries the reclamation line — a container
+really removed, as the runtime shows, is not dropped from the operator's view because a later step
+failed.
 
 ## `struct ProbeDiesLeaving<'a> {`
 

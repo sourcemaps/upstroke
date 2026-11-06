@@ -72,10 +72,17 @@ fn husk_answer(repo_root: &Path, wanted: &str) -> Option<UpstrokeError> {
         || " It records no private locator.".to_owned(),
         |path| format!(" Its private locator is {}.", path.display()),
     );
+    let disposition = crate::engine::topology::startup::husk_root_view(
+        repo_root,
+        &husk_id,
+        &repo_key,
+        &rundir::default_private_root(),
+        &report.disposition,
+    )
+    .unwrap_or_else(|| report.disposition.describe());
     Some(UpstrokeError::Refused {
         message: format!(
-            "run `{husk_id}` never recorded a committed run_started: it is {}.{locator}",
-            report.disposition.describe()
+            "run `{husk_id}` never recorded a committed run_started: it is {disposition}.{locator}"
         ),
     })
 }
