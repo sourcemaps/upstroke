@@ -25501,21 +25501,27 @@ fn a_public_fresh_run_reports_what_its_startup_census_kept_and_why() {
 fn a_public_fresh_run_whose_run_directory_census_fails_reports_the_container_census() {
     let (_tree, repo) = temp_engine_repo("census-report-half-b");
     let opts = topology_options(&repo);
-    let name = crate::runner::container::intent::ContainerName::from_parts(
+    let invocation = crate::runner::InvocationId::probe(
+        crate::runner::ProbeTarget::Agent(crate::runner::AgentId::new(TOPOLOGY_STUB)),
+        0,
+    )
+    .expect("a probe's identity");
+    let name = crate::runner::container::container_name_for(
         "0123456789abcdef",
         &crate::ulid::ulid(),
         &crate::ulid::ulid(),
-        "feedface",
-    )
-    .expect("a container name");
-    let containers = crate::runner::container::intent::containers_dir(&private_root_for(&repo));
-    fs::create_dir_all(&containers).expect("the container namespace");
+        &invocation,
+    );
     let file_name = format!(
-        "{}{}",
-        name.as_str(),
+        "{name}{}",
         crate::runner::container::intent::INTENT_STAGED_SUFFIX
     );
-    fs::write(containers.join(&file_name), b"").expect("a torn staged intent");
+    let staged = crate::runner::container::intent_path_for(&private_root_for(&repo), &name)
+        .expect("the intent's path")
+        .with_file_name(&file_name);
+    fs::create_dir_all(staged.parent().expect("the container namespace"))
+        .expect("the container namespace");
+    fs::write(&staged, b"").expect("a torn staged intent");
     let runs = rundir::runs_root(&repo);
     fs::create_dir_all(runs.parent().expect("`.upstroke`")).expect("the `.upstroke` directory");
     fs::write(&runs, b"not a directory").expect("a file where the runs root would be");
@@ -25536,12 +25542,11 @@ fn a_public_fresh_run_whose_run_directory_census_fails_reports_the_container_cen
     let said = refused.to_string();
     assert!(
         said.contains(&format!(
-            "{file_name} for {}: another owner's, so nothing was removed",
-            name.as_str()
+            "{file_name} for {name}: another owner's, so nothing was removed"
         )),
         "the operator is not told what the container census kept: {said}"
     );
-    assert!(containers.join(&file_name).is_file(), "the intent is kept");
+    assert!(staged.is_file(), "the intent is kept");
     assert_eq!(
         fs::read(&runs).expect("the planted file"),
         b"not a directory",

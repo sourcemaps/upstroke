@@ -2532,26 +2532,38 @@ fn a_refusal_in_half_a_leaves_half_b_untouched() {
 /// written through the one funnel that writes an arbitrary path here). Half
 /// (a) keeps it — a torn record names no run directory, so no census can
 /// establish that its owner is dead — and reports it, with no runtime.
-/// Returns its path and the line half (a) reports it under.
+/// Returns its path and the line half (a) reports it under. The name and the
+/// path come from the container runner's own test support
+/// (`container_name_for`, `intent_path_for`): no module outside the runner
+/// names the intent writer's types (`runner::container::resolve`'s census).
 fn foreign_staged_intent(private_root: &Path) -> (PathBuf, String) {
-    use crate::runner::container::intent::{ContainerName, INTENT_STAGED_SUFFIX, containers_dir};
-
-    let name = ContainerName::from_parts(
+    let invocation = crate::runner::InvocationId::probe(
+        crate::runner::ProbeTarget::Agent(crate::runner::AgentId::new("claude-code")),
+        0,
+    )
+    .expect("a probe's identity");
+    let name = crate::runner::container::container_name_for(
         "0123456789abcdef",
         "01FOREIGNRUN00000000000000",
         "01FOREIGNINC00000000000000",
-        "feedface",
+        &invocation,
+    );
+    let staged = crate::runner::container::intent_path_for(private_root, &name)
+        .expect("the intent's path")
+        .with_file_name(format!(
+            "{name}{}",
+            crate::runner::container::intent::INTENT_STAGED_SUFFIX
+        ));
+    rundir::create_private_dir(
+        staged.parent().expect("the container namespace"),
+        &mut rundir::NoHooks,
     )
-    .expect("a container name");
-    let containers = containers_dir(private_root);
-    rundir::create_private_dir(&containers, &mut rundir::NoHooks).expect("the container namespace");
-    let staged = containers.join(format!("{}{INTENT_STAGED_SUFFIX}", name.as_str()));
+    .expect("the container namespace");
     append_line(&staged, run_started("01FOREIGNRUN00000000000000"));
     let line = format!(
-        "startup census: retained staged container intent {} for {}: another owner's, so \
+        "startup census: retained staged container intent {} for {name}: another owner's, so \
          nothing was removed",
-        staged.display(),
-        name.as_str()
+        staged.display()
     );
     (staged, line)
 }
