@@ -1997,12 +1997,16 @@ the run it adopts, so the run is dropped first and the guard then reclaims what 
 
 How long a witness waits for a dead coordinator's reaper to finish its calls. The reaper notices
 the death within one of its 10-millisecond polls; the bound exists so a mutation that arms nothing
-fails the test instead of hanging it.
+fails the test instead of hanging it. It also bounds each wait `KeptForItsBackstop` makes on the
+first-probe guards' backstop: its arrival at its gate, its passage, and the end of every hold of
+the run's cleanup lease.
 
 ## `mod tests` › `fn reaper_finished(`
 
 Polls the relay until the reaper's calls are a listing, a kill and a removal per expected
-container, and a final listing, or the bound passes.
+container, and a final listing, or the bound passes. That is relay completion — the calls the
+relay recorded the reaper making — and not the reaper's collection: the reaper is an orphan of
+the killed coordinator, and no test process waits for it.
 
 ## `mod tests` › `fn reclaimed_by_its_reaper(reclaimed: &Reclaimed<'_>) {`
 
@@ -2011,24 +2015,155 @@ listing argv, one `kill` and one `rm --force --volumes` per container, nothing e
 to the fake, each was stopped and removed by the actor `reaper`, none is left, and no census
 listed the runtime after the death.
 
+## `mod tests` › `enum ProbeSchedule {`
+
+How a first-probe guard schedules its dead coordinator's backstop around the helper's return.
+`Free` names no gate, so the backstop goes through its ending on its own schedule.
+`HeldAtItsListing` — Linux only, because the gate's name, `agent::proc`'s `BACKSTOP_GATE`, is
+re-exported for Linux test builds only — names the backstop's test gate in the resuming
+coordinator child's environment and nowhere else, so the backstop that child arms holds after it
+has listed the probe and before it takes its worktree's lock, until the caller lets it go, which
+the caller does only after the helper has returned. That forces, every run, the schedule the three
+reviews found the old helper could not survive: the helper returns, and only then does the
+backstop, having listed, take the physical worktree lock. By platform:
+
+- Linux: `the_reapers_scope_is_the_runners_identity_and_selects_its_first_probe` runs
+  `HeldAtItsListing`, the forced schedule;
+  `a_resuming_incarnations_pre_flight_probe_container_is_killed_by_its_reaper_when_the_coordinator_dies_inside_it`
+  runs `Free`.
+- macOS and every other Unix: both run `Free`; no schedule is forced there.
+- Windows: neither is compiled (`cfg(unix)`).
+
+Neither guard is skipped anywhere it compiles. Both keep every original assertion, bound and call
+vector, and both assert after the helper's return that the real fixture still has the paths the
+backstop opens (`its_lawful_paths_are_present`).
+
+## `mod tests` › `enum GateState {`
+
+Where a held gate stands: `Unarmed` until the helper arms it, `Armed` from just before the kill,
+`LetGo` once its release is written. Kept in a `Cell`, so letting go takes a shared borrow.
+
+## `mod tests` › `struct KeptForItsBackstop {`
+
+The one owner of everything a dead first-probe coordinator's backstop may still open: the real
+fixture — the `WideEnv` itself, whose repository holds the worktree lock and whose run directory
+holds the run lock and the cleanup lease — the kill directory (the relay's program, listing and
+call log; the coordinator child's stderr and temporary directory; the gate's files), the schedule
+and, on Linux, the gate's path and state. The helper makes it from the `WideEnv` and the kill
+directory before it spawns the coordinator child and returns it inside `DiedInItsProbe`, so no path
+out of the helper or out of its caller lets the fixture go except through this owner's drop.
+
+Before, the helper returned a clone of the private root's path and let its `WideEnv` drop at its
+return, and the fixture's scratch tree removed the repository and the run directory while the
+backstop forked at the coordinator's death might not yet have opened them. Since `47fad28c` that
+backstop opens the existing worktree lock, and then the lease paths, only after its listing, so
+under that schedule it stood down, failing closed as it should, and the guard waited for a
+reclamation that could not come. Native20's Ubuntu job failed the scope guard at `the probe was
+reclaimed: []`, and its macOS job the other guard's call vector (one listing, no kill or removal);
+those logs do not record the backstop's failed opens, so they are consistent with this schedule
+without proving it. Three reviews named the one issue: `REGULAR16-FIRST-PROBE-FIXTURE-LIFETIME`,
+`PR12-REGRESSION14-BACKSTOP-PROBE-FIXTURE-LIFETIME` and `PR12-INV11-PROBE-REAPER-FIXTURE-LIFETIME`.
+
+## `mod tests` › `impl KeptForItsBackstop` › `fn child_environment(&self) -> Vec<(&'static str, &std::ffi::OsStr)> {`
+
+The resuming child's role, root and incarnation, and under `HeldAtItsListing` the gate's name and
+path: that child's environment only. This process's own environment is never changed.
+
+## `mod tests` › `impl KeptForItsBackstop` › `fn arm(&self) {`
+
+`HeldAtItsListing` only, right before the kill. At each point whose arrival file exists, the
+backstop writes one byte there and then waits, at most 120 s (the gate's own bound, in
+`agent::proc`), for the point's release file. This marks the gate armed and then writes the Decided
+release, the Decided arrival file and the Listed arrival file, in that order, so a failure partway
+still leaves the drop a gate to let go. Decided is armed with its release already present: it
+never holds, and the byte the backstop writes there is the passage `let_the_backstop_go` waits for.
+Through `workspace_manager::fixture::write_file`: a topology module names no `std::fs` write.
+
+## `mod tests` › `impl KeptForItsBackstop` › `fn let_the_backstop_go(&self) -> Result<(), String> {`
+
+For an armed gate, once: writes the Listed release on a thread of its own, which it joins — a
+write that fails panics that thread and becomes this `Err`, never a panic on a thread already
+unwinding — then waits up to `REAPER_BOUND` for the Decided arrival byte. That is gate passage:
+the backstop has decided its exclusion and opens no fixture path after it. It is a byte the
+backstop wrote, not its collection. A release that could not be written leaves the gate armed, so
+the drop tries it again.
+
+## `mod tests` › `impl Drop for KeptForItsBackstop` › `fn drop(&mut self) {`
+
+The order, on every path, is the body's: `let_the_backstop_go` (an armed gate not yet let go is
+released and its passage waited for); then `no_cleanup_hold_is_left` over the run directory; then
+the real fixture is dropped; then the kill directory; and only then is a failed wait reported,
+said on stderr while the thread unwinds and a panic otherwise. On the positive path the guard has
+already let the gate go and seen relay completion, so the drop confirms that no hold is left and
+lets go. After a panic inside the helper, the coordinator's `Served` handle, declared after this
+owner, drops first, killing and collecting the coordinator. On the `Free` schedule, a backstop
+that has not yet taken its exclusion when a failed test lets the fixture go stands down, as it
+must.
+
+## `mod tests` › `fn no_cleanup_hold_is_left(public: &std::path::Path) -> Result<(), String> {`
+
+Waits up to `REAPER_BOUND` until `rundir::observe_cleanup_hold` reports no hold of the run's
+cleanup lease: the backstop, which takes its shared hold once its exclusion is established and
+keeps it until it exits, and every other holder have let it go. A released hold says that no lock
+is held, not that any process was collected.
+
+## `mod tests` › `fn the_backstop_reached(arrival: &std::path::Path) -> bool {`
+
+Whether the backstop has written its byte to a gate point's arrival file.
+
+## `mod tests` › `struct DiedInItsProbe {`
+
+What the helper returns: the owner of the real fixture, the kill directory and the gate
+(`KeptForItsBackstop`), the fake the coordinator child was served by, the relay and its program,
+the private root, the probe's container name, and how many census listings the fake had answered
+before the death.
+
+## `mod tests` › `impl DiedInItsProbe` › `fn its_lawful_paths_are_present(&self) {`
+
+After the helper's return, on every schedule: the worktree lock
+(`<repository>/.git/upstroke-worktree.lock`, `rundir::worktree_lock_file`), the run lock
+(`rundir::lock_file`) and the run's cleanup lease are still files of the real fixture — the paths
+the dead coordinator's backstop takes, asks `F_GETLK` of, and holds, after its listing.
+
+## `mod tests` › `impl DiedInItsProbe` › `fn held_at_its_listing(&self) {`
+
+Linux, `HeldAtItsListing`: waits up to `REAPER_BOUND` for the backstop's arrival at its Listed
+point, then asserts that the relay has recorded exactly one call, the scope's listing. The
+backstop has listed the probe, killed and removed nothing, and holds where it would next take its
+worktree's lock.
+
+## `mod tests` › `impl DiedInItsProbe` › `fn let_its_backstop_go(&self) {`
+
+Linux, `HeldAtItsListing`: `let_the_backstop_go` on the positive path; its failure is the test's.
+
 ## `mod tests` › `fn a_resume_killed_inside_its_pre_flight_probe(`
 
 A durable run, then a resuming incarnation in a child over the parent's fake — the frozen
 recovery order with a `RunPreflight` over a `ContainerRunner` — killed while its shell probe's
 container runs. The relay is installed on the fake the child is served by, so the child's
-runner arms over it with nothing passed in the environment.
+runner arms over it with nothing passed in the environment; under `HeldAtItsListing` the child's
+environment also names the backstop's gate, which is armed after the relay's listing is published
+and before the kill. The child is killed and collected, a wait status this process reaps; its
+backstop is not this process's child. The real fixture and the kill directory leave the helper
+inside its `KeptForItsBackstop`.
 
 ## `mod tests` › `fn a_resuming_incarnations_pre_flight_probe_container_is_killed_by_its_reaper_when_the_coordinator_dies_inside_it()`
 
 `R6-C2`: the incarnation's first container — a pre-flight probe inside the frozen `recover.rs` —
-is covered; its reaper reclaims it before any census.
+is covered; its reaper reclaims it before any census. `Free` on every Unix: with the real fixture
+kept, the paths its backstop opens are present after the helper's return, and the exact call
+vector holds whichever of the helper's return and the backstop's worktree lock comes first.
 
 ## `mod tests` › `fn the_reapers_scope_is_the_runners_identity_and_selects_its_first_probe() {`
 
 `R7-D2`, two-process: the reaper's first listing carries exactly the probe's
 `upstroke.private_root` and `upstroke.incarnation` labels as the daemon recorded them, and a
 container of another incarnation under the same private root, running beside it, is neither
-listed nor killed.
+listed nor killed. On Linux it runs `HeldAtItsListing`: after the helper has returned, the
+backstop is seen held at its listing with only that listing recorded, the real fixture's lawful
+paths are seen present, and only then is the backstop let go, so the original assertions hold,
+every run, over the schedule the old helper could not survive. On macOS and every other Unix it
+runs `Free`, with the lawful-path assertion after the helper's return.
 
 ## `mod tests` › `fn stranded_child(parent: &crate::engine::topology::scaffold::ParentSide) {`
 
