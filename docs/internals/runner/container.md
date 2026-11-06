@@ -1674,7 +1674,7 @@ How an attached client ended.
 
 Why an attached start's container never left `created`.
 
-## `fn attach_client(` 
+## `fn attach_client(`
 
 Start the client under the process funnel, on a thread of its own. The
 funnel is called with `ProcessSite::Spawn` and `ProcessSite::Terminate` and
