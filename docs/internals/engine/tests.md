@@ -3981,6 +3981,11 @@ complete — and the census's keeping is unchanged by the reporting. When the st
 census fails, here a pre-flight probe that refuses, the error the command ends with carries the
 same report. `status` asked for the malformed husk reports the same disposition.
 
+Between the two runs it waits for the first run's release (`until_released`). `run_with` can return
+while that run's agent-cleanup reapers still hold its cleanup lease, and the second run's worktree
+admission would then refuse for that settlement rather than reach the refusing probe
+(`PR12-R16-CENSUS-REPORT-LEASE-PREMISE`, FINAL23 R03).
+
 ## `fn a_public_fresh_run_keeps_and_reports_a_husk_whose_private_target_cannot_be_observed() {`
 
 Repair16's public composition guard for `PR12-INV9-UNREADABLE-PRIVATE-LOCATOR`. A husk whose

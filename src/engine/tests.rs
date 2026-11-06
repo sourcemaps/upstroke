@@ -25480,6 +25480,7 @@ fn a_public_fresh_run_reports_what_its_startup_census_kept_and_why() {
     let rendered = report.render();
     assert_census_reported(&rendered, &repo, &malformed, &blocked, &private);
     assert_census_kept(&repo, &malformed, &blocked, &private);
+    until_released(&repo, &report.run_id);
 
     let refused = run_with(&opts, &RefusingProbes).expect_err("the refusing probe stops the run");
     let said = refused.to_string();
