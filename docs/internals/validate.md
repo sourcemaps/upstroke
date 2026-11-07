@@ -461,6 +461,13 @@ is the difference between a plan and a promise.
 The per-task decision belongs in the row that explains what this
 task's paths bought it — and only on the task whose paths matched.
 
+## `fn the_preview_binds_an_explicit_opus_5_5_worker_to_an_astra_6_reviewer_at_max() {`
+
+The self-host binding as the public command prints it, on the registry
+this build ships: an Opus 5.5 pin implements at `max`, and the work it
+writes would be judged by Astra 6 at `max`. Exact lines, because "some
+other family" is not the binding that was asked for.
+
 ## `assert!(`
 
 D2's seam is echoed even though nothing acts on it.

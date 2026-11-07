@@ -10,8 +10,10 @@
   only up to schema 3 refuses a schema-4 log before any lock. A schema-4 run probes every agent
   its chains and its review plan name before anything is committed, and a configured reviewer
   whose CLI is missing fails its creation where the sequential engine dropped that reviewer. With
-  no pins, the review plan names GitHub Copilot's CLI beside Claude Code's, so both must be
-  installed (`design/17`, "Which CLIs a schema-4 run needs"). This
+  no pins and the default `frontier` review tier, the review plan names Codex's CLI beside Claude
+  Code's, so both must be installed, and Codex's local model catalog must list every catalogued
+  Codex model (`gpt-6-astra`, `gpt-5.6-sol`) with all five efforts
+  (`design/17`, "Which CLIs a schema-4 run needs"). This
   supersedes the entries below that call schema 4 "unreleased and inert by default": it is still
   unreleased, and no longer inert.
 - The container runner now gives a worker or reviewer its own permission-settings file, read-only,

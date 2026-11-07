@@ -184,6 +184,14 @@ actually happens to people. A real build always ships the Copilot
 adapter, so resolution alone would never fire this — the warning would
 have been dead code in every shipped binary.
 
+Its remedy names no vendor and no override. In a shipped binary the warning
+follows a pre-flight drop, and pre-flight's own warning names the reviewer it
+could not probe. Only that reviewer's CLI, working where the run executes,
+brings an independent review back, for a plan resolved after it works.
+Installing a different CLI cannot move the catalog's first match. A
+`second_opinion` override would bind the same reviewer, make it required, and
+refuse the run instead.
+
 ## `impl ReviewPlan` › `pub fn passes_for(&self, index: usize, implementer: &PassBinding) -> Vec<ReviewPass> {`
 
 The ordered passes for the task at `index`. See [`passes_for`].
@@ -763,6 +771,27 @@ the operator meant.
 
 A pin fixes the primary; the second opinion is chosen relative to
 whatever the pin landed on, not to the catalog's default.
+
+## `fn an_explicit_opus_5_5_worker_is_reviewed_by_astra_6_alone_at_max() {` › `crate::validate::builtin_adapter,`
+
+The self-host binding, resolved the way the public commands resolve it:
+the operator's own config through `config::load`, `route::resolve` and this
+function, against the adapter registry `validate` passes and the one `run`
+hands its pre-flight. A closure naming only Claude and Codex would prove a
+build nobody ships. On the shipped build it is the catalog order that makes
+Astra 6 the partner, not the absence of Copilot.
+
+## `fn an_explicit_opus_5_5_worker_is_reviewed_by_astra_6_alone_at_max() {` › `assert_eq!(passes.len(), 1, "one independent pass: {passes:?}");`
+
+One pass, by the other family, at the review effort. No override asks for a
+second opinion here, so the primary-equals-implementer rebind applies. With
+`second_opinion` set, the Opus primary would judge its own work and Astra
+would only add a second pass.
+
+## `fn an_explicit_opus_5_5_worker_is_reviewed_by_astra_6_alone_at_max() {` › `let mut lonely = Vec::new();`
+
+Without another family nothing is claimed: the existing same-model review
+and its warning, exactly as before.
 
 ## `fn the_recorded_plan_survives_the_wire()` › `let mut plan = plan_with(Some(binding("copilot", "gpt-5.3-codex")));`
 

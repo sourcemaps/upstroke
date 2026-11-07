@@ -194,9 +194,9 @@ impl ReviewPlan {
         at_risk.sort();
         Some(format!(
             "task(s) {} can run on {}, which is also the reviewer — a model reviewing its own work \
-             is a weak check. No {tier}-tier model from another family is usable here; install the \
-             GitHub Copilot CLI, or set `second_opinion = \"different-vendor\"` on a \
-             [[routing.overrides]] covering these paths (§11.3).",
+             is a weak check. No {tier}-tier model from another family is usable here; independent \
+             review needs the other-family {tier}-tier reviewer this build selects, with its CLI \
+             installed and passing its probe where the run executes (§11.3).",
             at_risk.join(", "),
             primary.describe()
         ))
@@ -2105,6 +2105,98 @@ mod tests {
             resolved.second_opinion[0],
             Some(binding("claude-code", "claude-opus-5")),
             "the partner crosses back to the other family using its preferred frontier model"
+        );
+    }
+
+    const OPUS_ASTRA_PROFILE: &str = "[routing]\n\
+         implement = { chain = [\"frontier\"] }\n\
+         review = { tier = \"frontier\" }\n\n\
+         [routing.effort]\nimplementation = \"max\"\nreview = \"max\"\n\n\
+         [[pins]]\ntier = \"frontier\"\nagent = \"claude-code\"\nmodel = \"claude-opus-5-5\"\n";
+
+    #[test]
+    fn an_explicit_opus_5_5_worker_is_reviewed_by_astra_6_alone_at_max() {
+        let cfg = scratch_config("opus55-astra6.toml", OPUS_ASTRA_PROFILE);
+        let (plan, chains) = auth_plan(&cfg);
+        assert_eq!(chains[0].rungs.len(), 1, "{:?}", chains[0].rungs);
+        let rung = &chains[0].rungs[0];
+        assert_eq!(
+            (
+                rung.tier,
+                rung.binding.agent.as_str(),
+                rung.binding.model.as_str()
+            ),
+            (Tier::Frontier, "claude-code", "claude-opus-5-5")
+        );
+        assert!(rung.binding.pinned, "the worker is the explicit pin");
+        let effort = cfg.resolved_effort_policy();
+        assert_eq!(effort.implementation_for(rung.tier), Effort::Max);
+        assert_eq!(effort.review, Effort::Max);
+
+        let implementer = binding(&rung.binding.agent, &rung.binding.model);
+        let mut warnings = Vec::new();
+        let resolved = plan_for(
+            &plan,
+            &chains,
+            &cfg,
+            crate::validate::builtin_adapter,
+            &mut warnings,
+        )
+        .expect("resolves on the shipped adapter registry");
+        assert!(warnings.is_empty(), "warnings: {warnings:?}");
+        assert_eq!(
+            resolved.primary,
+            Some(binding("claude-code", "claude-opus-5-5"))
+        );
+        assert_eq!(resolved.alternative, Some(binding("codex", "gpt-6-astra")));
+        assert_eq!(resolved.second_opinion, [None::<PassBinding>]);
+        assert_eq!(resolved.agents(), ["claude-code", "codex"]);
+
+        let passes = resolved.passes_for(0, &implementer);
+        assert_eq!(passes.len(), 1, "one independent pass: {passes:?}");
+        assert_eq!(passes[0].lens, Lens::Acceptance);
+        assert_eq!(passes[0].binding, binding("codex", "gpt-6-astra"));
+        let reviewer = passes[0].profile(effort.review);
+        assert_eq!(
+            (
+                reviewer.agent.as_str(),
+                reviewer.model.as_str(),
+                reviewer.effort,
+                reviewer.permissions
+            ),
+            (
+                "codex",
+                "gpt-6-astra",
+                Some(Effort::Max),
+                PermissionMode::ReadOnly
+            )
+        );
+
+        let harness = |id: &str| {
+            crate::agent::AdapterSource::get(&crate::agent::BuiltinAdapters, id).is_some()
+        };
+        let claude_and_codex = |agent: &str| matches!(agent, "claude-code" | "codex");
+        let mut quiet = Vec::new();
+        let via_harness = plan_for(&plan, &chains, &cfg, harness, &mut quiet)
+            .expect("resolves on run's built-in harness");
+        assert_eq!(via_harness, resolved, "run's built-in harness");
+        let restricted = plan_for(&plan, &chains, &cfg, claude_and_codex, &mut quiet)
+            .expect("resolves on a Claude and Codex build");
+        assert_eq!(restricted, resolved, "a Claude and Codex build");
+        assert!(quiet.is_empty(), "warnings: {quiet:?}");
+
+        let mut lonely = Vec::new();
+        let single = plan_for(&plan, &chains, &cfg, claude_only, &mut lonely)
+            .expect("a Claude-only build still resolves");
+        assert_eq!(single.alternative, None);
+        assert_eq!(
+            single.passes_for(0, &implementer)[0].binding,
+            implementer,
+            "no other family: the same-model review stands, and says so"
+        );
+        assert!(
+            lonely.iter().any(|w| w.contains("also the reviewer")),
+            "warnings: {lonely:?}"
         );
     }
 

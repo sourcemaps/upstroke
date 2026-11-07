@@ -1300,6 +1300,101 @@ model = "claude-opus-4-8"
     }
 
     #[test]
+    fn the_requested_frontier_pins_load_exactly_with_their_catalogued_family() {
+        for (agent, model, family) in [
+            ("claude-code", "claude-opus-5-5", catalog::Family::Anthropic),
+            ("codex", "gpt-6-astra", catalog::Family::OpenAI),
+        ] {
+            let path = scratch(
+                &format!("requestedpin-{agent}.toml"),
+                &format!(
+                    "[[pins]]\ntier = \"frontier\"\nagent = \"{agent}\"\nmodel = \"{model}\"\n\
+                     effort = \"max\"\n"
+                ),
+            );
+            let mut warnings = Vec::new();
+            let cfg = load(Some(&path), &hermetic(), Some(&missing()), &mut warnings)
+                .unwrap_or_else(|error| panic!("{agent}/{model} must load: {error}"));
+            assert_eq!(cfg.pins.len(), 1, "{agent}/{model}");
+            let pin = &cfg.pins[0];
+            assert_eq!(
+                (pin.tier, pin.agent.as_str(), pin.model.as_str(), pin.effort),
+                (Tier::Frontier, agent, model, Some(Effort::Max)),
+                "the pin keeps the exact pair it was given"
+            );
+            assert_eq!(
+                catalog::lookup(&pin.agent, &pin.model).map(|entry| (entry.tier, entry.family)),
+                Some((Tier::Frontier, family))
+            );
+            assert_eq!(cfg.implementation_effort(Tier::Frontier), Effort::Max);
+            assert_eq!(cfg.review_effort(), Effort::Max);
+            assert!(warnings.is_empty(), "{agent}/{model}: {warnings:?}");
+        }
+    }
+
+    #[test]
+    fn every_catalogued_model_still_loads_as_an_explicit_pin() {
+        for (index, entry) in catalog::CATALOG.iter().enumerate() {
+            let path = scratch(
+                &format!("catalogpin-{index}.toml"),
+                &format!(
+                    "[[pins]]\ntier = \"{}\"\nagent = \"{}\"\nmodel = \"{}\"\n",
+                    entry.tier, entry.agent, entry.model
+                ),
+            );
+            let mut warnings = Vec::new();
+            let cfg = load(Some(&path), &hermetic(), Some(&missing()), &mut warnings)
+                .unwrap_or_else(|error| {
+                    panic!("{}/{} must load: {error}", entry.agent, entry.model)
+                });
+            assert_eq!(cfg.pins.len(), 1);
+            let pin = &cfg.pins[0];
+            assert_eq!(
+                (pin.tier, pin.agent.as_str(), pin.model.as_str()),
+                (entry.tier, entry.agent, entry.model)
+            );
+            assert!(warnings.is_empty(), "{}: {warnings:?}", entry.model);
+        }
+    }
+
+    #[test]
+    fn a_near_miss_of_the_requested_pair_is_still_an_unknown_pin() {
+        for (agent, model, spelling) in [
+            ("claude-code", "claude-opus-5.5", "claude-opus-5-5"),
+            ("claude-code", "gpt-6-astra", "claude-opus-5-5"),
+            ("codex", "gpt-6", "gpt-6-astra"),
+            ("codex", "claude-opus-5-5", "gpt-6-astra"),
+        ] {
+            let path = scratch(
+                &format!("nearmiss-{agent}-{model}.toml"),
+                &format!(
+                    "[[pins]]\ntier = \"frontier\"\nagent = \"{agent}\"\nmodel = \"{model}\"\n"
+                ),
+            );
+            let mut warnings = Vec::new();
+            let error = load(Some(&path), &hermetic(), Some(&missing()), &mut warnings)
+                .expect_err("a near miss must not load");
+            match error {
+                UpstrokeError::UnknownPinnedModel {
+                    agent: refused_agent,
+                    model: refused_model,
+                    known,
+                } => {
+                    assert_eq!(
+                        (refused_agent.as_str(), refused_model.as_str()),
+                        (agent, model)
+                    );
+                    assert!(
+                        known.split(", ").any(|offered| offered == spelling),
+                        "the refusal offers the exact `{spelling}`: {known}"
+                    );
+                }
+                other => panic!("{agent}/{model} refused for the wrong reason: {other}"),
+            }
+        }
+    }
+
+    #[test]
     fn misspelled_pin_effort_key_is_a_hard_error() {
         let path = scratch(
             "misspelledpineffort.toml",
