@@ -13,15 +13,17 @@ use yaml_rust2::{Yaml, YamlLoader};
 
 use super::ci_model::{
     ACTION_INPUTS, AGGREGATE_JOB, AGGREGATE_JOB_FIELDS, AGGREGATE_SCRIPT, AGGREGATE_SHELL,
-    AGGREGATE_STEP_FIELDS, CI_TARGETS, CI_WORKFLOW, CLIPPY_GATE, CiTarget, DEFAULTS_FIELDS,
-    DEFAULTS_RUN_FIELDS, ENCODED_RUSTFLAGS_KEY, GATE_JOB_FIELDS, GATE_SCRIPTS,
-    GOLDEN_IMAGE_TOOLCHAIN, HOST_ACCEPTANCE_CAPTURE, HOST_ACCEPTANCE_WINDOWS_CAPTURE, KNOWN_SHELLS,
-    MSRV_COMMAND, MSRV_JOB, MSRV_JOB_FIELDS, OPTIONAL_DEFAULTS_FIELD, PINNED_ACTIONS,
-    REQUIRED_CONTEXT, RUSTFLAGS_KEY, RUSTFLAGS_VALUE, STABLE_TOOLCHAIN, STEP_FIELDS, TEST_COMMAND,
-    TEST_JOB_FIELDS, TEST_SCRIPTS, TEST_STEP_ENV, TEST_STEP_FIELDS, TEST_WINDOWS_JOB,
-    TEST_WINDOWS_JOB_FIELDS, TEST_WINDOWS_LABELS, TEST_WINDOWS_PLATFORM, TEST_WINDOWS_SCRIPTS,
-    TEST_WINDOWS_STEP_ENV, TOOLCHAIN_ACTION, TOOLCHAIN_COMPONENTS, WINDOWS_BUILD_WITNESS,
-    WINDOWS_TEST_WITNESS, WORKFLOW_ENV, WORKFLOW_FIELDS, WORKFLOW_PERMISSIONS,
+    AGGREGATE_STEP_FIELDS, CAPABILITY_OBSERVATION, CAPABILITY_STEP_FIELDS,
+    CAPABILITY_STEP_TIMEOUT_MINUTES, CAPABILITY_WINDOWS_OBSERVATION, CI_TARGETS, CI_WORKFLOW,
+    CLIPPY_GATE, CiTarget, DEFAULTS_FIELDS, DEFAULTS_RUN_FIELDS, ENCODED_RUSTFLAGS_KEY,
+    GATE_JOB_FIELDS, GATE_SCRIPTS, GOLDEN_IMAGE_TOOLCHAIN, HOST_ACCEPTANCE_CAPTURE,
+    HOST_ACCEPTANCE_WINDOWS_CAPTURE, KNOWN_SHELLS, MSRV_COMMAND, MSRV_JOB, MSRV_JOB_FIELDS,
+    OPTIONAL_DEFAULTS_FIELD, PINNED_ACTIONS, REQUIRED_CONTEXT, RUSTFLAGS_KEY, RUSTFLAGS_VALUE,
+    STABLE_TOOLCHAIN, STEP_FIELDS, TEST_COMMAND, TEST_JOB_FIELDS, TEST_SCRIPTS, TEST_STEP_ENV,
+    TEST_STEP_FIELDS, TEST_WINDOWS_JOB, TEST_WINDOWS_JOB_FIELDS, TEST_WINDOWS_LABELS,
+    TEST_WINDOWS_PLATFORM, TEST_WINDOWS_SCRIPTS, TEST_WINDOWS_STEP_ENV, TOOLCHAIN_ACTION,
+    TOOLCHAIN_COMPONENTS, WINDOWS_BUILD_WITNESS, WINDOWS_TEST_WITNESS, WORKFLOW_ENV,
+    WORKFLOW_FIELDS, WORKFLOW_PERMISSIONS,
 };
 use super::repo_root;
 
@@ -451,8 +453,11 @@ pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {
     for (index, step) in steps_of(job).iter().enumerate() {
         let runs_the_suite = scalar(step, "run") == Some(TEST_COMMAND);
         let runs_the_capture = scalar(step, "run") == Some(HOST_ACCEPTANCE_CAPTURE);
+        let runs_the_observation = scalar(step, "run") == Some(CAPABILITY_OBSERVATION);
         let allowed: &[&str] = if runs_the_suite || runs_the_capture {
             &TEST_STEP_FIELDS
+        } else if runs_the_observation {
+            &CAPABILITY_STEP_FIELDS
         } else {
             &STEP_FIELDS
         };
@@ -476,6 +481,19 @@ pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {
                 &format!("`test` step {index}"),
                 "test-capture-step-env",
                 &TEST_STEP_ENV,
+            ));
+        }
+        if runs_the_observation {
+            out.extend(step_env_complaints(
+                step,
+                &format!("`test` step {index}"),
+                "test-capability-step-env",
+                &TEST_STEP_ENV,
+            ));
+            out.extend(observation_step_complaints(
+                step,
+                &format!("`test` step {index}"),
+                "test-capability-step",
             ));
         }
         if scalar(step, "run").is_some() {
@@ -509,6 +527,13 @@ pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {
         "test-capture-command",
         TEST_COMMAND,
         HOST_ACCEPTANCE_CAPTURE,
+    ));
+    out.extend(observation_complaints(
+        job,
+        "test",
+        "test-capability-command",
+        HOST_ACCEPTANCE_CAPTURE,
+        CAPABILITY_OBSERVATION,
     ));
     out.extend(checkout_complaints(job, "test", "test-job-checkout"));
     out.extend(step_pin_complaints(
@@ -649,8 +674,11 @@ pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {
     for (index, step) in steps_of(job).iter().enumerate() {
         let runs_the_suite = scalar(step, "run") == Some(WINDOWS_TEST_WITNESS);
         let runs_the_capture = scalar(step, "run") == Some(HOST_ACCEPTANCE_WINDOWS_CAPTURE);
+        let runs_the_observation = scalar(step, "run") == Some(CAPABILITY_WINDOWS_OBSERVATION);
         let allowed: &[&str] = if runs_the_suite || runs_the_capture {
             &TEST_STEP_FIELDS
+        } else if runs_the_observation {
+            &CAPABILITY_STEP_FIELDS
         } else {
             &STEP_FIELDS
         };
@@ -678,6 +706,19 @@ pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {
                 &format!("`{TEST_WINDOWS_JOB}` step {index}"),
                 "test-windows-capture-step-env",
                 &TEST_WINDOWS_STEP_ENV,
+            ));
+        }
+        if runs_the_observation {
+            out.extend(step_env_complaints(
+                step,
+                &format!("`{TEST_WINDOWS_JOB}` step {index}"),
+                "test-windows-capability-step-env",
+                &TEST_WINDOWS_STEP_ENV,
+            ));
+            out.extend(observation_step_complaints(
+                step,
+                &format!("`{TEST_WINDOWS_JOB}` step {index}"),
+                "test-windows-capability-step",
             ));
         }
         if scalar(step, "run").is_some() {
@@ -745,6 +786,13 @@ pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {
         WINDOWS_TEST_WITNESS,
         HOST_ACCEPTANCE_WINDOWS_CAPTURE,
     ));
+    out.extend(observation_complaints(
+        job,
+        TEST_WINDOWS_JOB,
+        "test-windows-capability-command",
+        HOST_ACCEPTANCE_WINDOWS_CAPTURE,
+        CAPABILITY_WINDOWS_OBSERVATION,
+    ));
     out.extend(checkout_complaints(
         job,
         TEST_WINDOWS_JOB,
@@ -791,6 +839,61 @@ fn capture_complaints(
              tree the capture runs after the suite ran."
         )],
     }
+}
+
+/// Exactly one step of `job` runs the pinned container capability `observation`, and it is
+/// the step immediately after the one step that runs the pinned host acceptance `capture`.
+fn observation_complaints(
+    job: &Yaml,
+    named: &str,
+    code: &str,
+    capture: &str,
+    observation: &str,
+) -> Vec<String> {
+    let at = |script: &str| -> Vec<usize> {
+        steps_of(job)
+            .iter()
+            .enumerate()
+            .filter(|(_, step)| scalar(step, "run") == Some(script))
+            .map(|(index, _)| index)
+            .collect()
+    };
+    let captures = at(capture);
+    let observations = at(observation);
+    match (captures.as_slice(), observations.as_slice()) {
+        ([capture_at], [observation_at]) if *observation_at == capture_at + 1 => Vec::new(),
+        _ => vec![format!(
+            "[{code}] `{named}` runs the pinned container capability observation at steps \
+             {observations:?} and its pinned host acceptance capture at steps {captures:?}, not \
+             one observation immediately after one capture. The observation is the platform's \
+             container capability record: deleted, filtered to another or no test, echoed, or \
+             with its exit, its zero-test refusal or its frame check edited out, it is no step \
+             this contract pins, and a job that reports success leaves no record or a record \
+             nothing refused. Immediately after the capture, because a step between them -- a \
+             cache restore, a checkout -- changes the harness or the tree the observation runs \
+             after the suite and the capture ran, and above the capture it would run before \
+             the record that step makes."
+        )],
+    }
+}
+
+/// The observation step's own fields: exactly `env`, `name`, `run` and `timeout-minutes`,
+/// the bound exactly [`CAPABILITY_STEP_TIMEOUT_MINUTES`].
+fn observation_step_complaints(step: &Yaml, named: &str, code: &str) -> Vec<String> {
+    let mut out: Vec<String> = field_complaints(step, &CAPABILITY_STEP_FIELDS, &[])
+        .into_iter()
+        .map(|complaint| format!("[{code}] {named} {complaint}"))
+        .collect();
+    let minutes = field(step, "timeout-minutes").and_then(Yaml::as_i64);
+    if minutes != Some(CAPABILITY_STEP_TIMEOUT_MINUTES) {
+        out.push(format!(
+            "[{code}] {named} bounds the container capability observation at {minutes:?} \
+             minutes, not exactly {CAPABILITY_STEP_TIMEOUT_MINUTES}. The bound covers the \
+             questions' requested 135 s with Cargo's start; without it a stalled question is \
+             held by the job's own timeout, and a wider one spends the leg's headroom."
+        ));
+    }
+    out
 }
 
 fn checkout_complaints(job: &Yaml, named: &str, code: &str) -> Vec<String> {
@@ -2664,6 +2767,446 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: \"1\"\n",
         replacement: "      - name: Capture the native host acceptance record\n",
         refused_as: "test-windows-capture-step-env",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-CAPABILITY-STEP-DELETED",
+        escape: "the hosted observation step is gone (omitted). Both legs run the suite and the \
+                 host capture, report success and leave no container capability record, and \
+                 nothing else here asks for one.",
+        job: Some("test"),
+        anchor: r##"      - name: Capture the container capability observation
+        timeout-minutes: 4
+        env:
+          UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}
+        run: |
+          set -eo pipefail
+          log="$RUNNER_TEMP/container-capability-record.log"
+          cargo test --all-features --lib runner::container::tests::container_capability_record -- --ignored --exact --nocapture | tee "$log"
+          if ! grep -qx 'test runner::container::tests::container_capability_record \.\.\. ok' "$log" || ! grep -q '^test result: ok\. 1 passed; 0 failed; 0 ignored; ' "$log"; then echo "the observation did not run exactly the one container capability test to a pass" >&2; exit 1; fi
+          awk '
+            $1 == "UPSTROKE-CONTAINER-CAPABILITY-RECORD" { f[++m] = $0 }
+            END {
+              nb = split(f[1], b, " "); ne = split(f[m], e, " ")
+              ok = m >= 3 && nb == 7 && ne == 7 && b[2] == "v1" && b[3] == "BEGIN" && e[2] == "v1" && e[3] == "END"
+              ok = ok && b[4] " " b[5] " " b[6] " " b[7] == e[4] " " e[5] " " e[6] " " e[7] && b[5] "" == (m - 2) ""
+              for (k = 2; ok && k < m; k++) ok = split(f[k], c, " ") == 5 && c[2] == "v1" && c[3] "" == b[4] "" && c[4] "" == (k - 1) "" && length(c[5]) == (k < m - 1 ? 192 : 2 * (b[6] - (b[5] - 1) * 96))
+              exit !ok
+            }' "$log" || { echo "the container capability record is missing or its framing is incomplete" >&2; exit 1; }
+"##,
+        replacement: "",
+        refused_as: "test-capability-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-CAPABILITY-STEP-DISABLED",
+        escape: "a step-level `if: false` on the hosted observation (conditional): the job \
+                 reports success with the record never made",
+        job: Some("test"),
+        anchor: "      - name: Capture the container capability observation\n",
+        replacement: "      - name: Capture the container capability observation\n\
+                      \x20       if: false\n",
+        refused_as: "unexpected-step-field",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-CAPABILITY-STEP-RUN-WHEN-NOT-CANCELLED",
+        escape: "the observation runs under `if: ${{ !cancelled() }}` (conditional). It then \
+                 runs after a failed suite or capture, so its record no longer stands on a \
+                 harness the suite passed, and the contract places it success-only",
+        job: Some("test"),
+        anchor: "      - name: Capture the container capability observation\n",
+        replacement: "      - name: Capture the container capability observation\n\
+                      \x20       if: ${{ !cancelled() }}\n",
+        refused_as: "unexpected-step-field",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-CAPABILITY-STEP-ABSOLVED",
+        escape: "`continue-on-error` on the hosted observation (failure-swallowing): an unresolved \
+                 process, a refused record or a missing frame ends the step red and the job green",
+        job: Some("test"),
+        anchor: "      - name: Capture the container capability observation\n",
+        replacement: "      - name: Capture the container capability observation\n\
+                      \x20       continue-on-error: true\n",
+        refused_as: "unexpected-step-field",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-CAPABILITY-IGNORED-NOT-RUN",
+        escape: "`--ignored` dropped (no-op): libtest reports the test ignored, `0 passed; 0 \
+                 failed; 1 ignored`, and Cargo exits zero having asked nothing",
+        job: Some("test"),
+        anchor: "          cargo test --all-features --lib runner::container::tests::container_capability_record -- --ignored --exact --nocapture | tee \"$log\"\n",
+        replacement: "          cargo test --all-features --lib runner::container::tests::container_capability_record -- --exact --nocapture | tee \"$log\"\n",
+        refused_as: "test-capability-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-CAPABILITY-FILTER-MOVED",
+        escape: "the filter names a test that does not exist (filtered): `running 0 tests`, exit \
+                 zero, no record",
+        job: Some("test"),
+        anchor: "          cargo test --all-features --lib runner::container::tests::container_capability_record -- --ignored --exact --nocapture | tee \"$log\"\n",
+        replacement: "          cargo test --all-features --lib runner::container::tests::container_capability_records -- --ignored --exact --nocapture | tee \"$log\"\n",
+        refused_as: "test-capability-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-CAPABILITY-FILTER-WIDENED",
+        escape: "`--exact` dropped (filtered): the name becomes a substring filter, so any ignored \
+                 test whose path contains it runs beside the observation",
+        job: Some("test"),
+        anchor: "          cargo test --all-features --lib runner::container::tests::container_capability_record -- --ignored --exact --nocapture | tee \"$log\"\n",
+        replacement: "          cargo test --all-features --lib runner::container::tests::container_capability_record -- --ignored --nocapture | tee \"$log\"\n",
+        refused_as: "test-capability-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-CAPABILITY-ECHOED",
+        escape: "the Cargo line is echoed (no-op): the step prints the command, asks nothing, and \
+                 only its own pass-line check would notice",
+        job: Some("test"),
+        anchor: "          cargo test --all-features --lib runner::container::tests::container_capability_record -- --ignored --exact --nocapture | tee \"$log\"\n",
+        replacement: "          echo cargo test --all-features --lib runner::container::tests::container_capability_record -- --ignored --exact --nocapture | tee \"$log\"\n",
+        refused_as: "test-capability-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-CAPABILITY-EXIT-SWALLOWED",
+        escape: "`set -eo pipefail` dropped (failure-swallowing). Under the default `bash -e` the \
+                 pipeline takes its status from `tee`, so a failing observation that still \
+                 printed a pass line and a frame goes green",
+        job: Some("test"),
+        anchor: "          set -eo pipefail\n",
+        replacement: "",
+        refused_as: "test-capability-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-CAPABILITY-ZERO-TESTS-ADMITTED",
+        escape: "the pass-line and `1 passed; 0 failed; 0 ignored` check is gone, so a run of no \
+                 test or of another is judged by its frame alone",
+        job: Some("test"),
+        anchor: "          if ! grep -qx 'test runner::container::tests::container_capability_record \\.\\.\\. ok' \"$log\" || ! grep -q '^test result: ok\\. 1 passed; 0 failed; 0 ignored; ' \"$log\"; then echo \"the observation did not run exactly the one container capability test to a pass\" >&2; exit 1; fi\n",
+        replacement: "",
+        refused_as: "test-capability-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-CAPABILITY-FRAMING-UNCHECKED",
+        escape: "the frame check is gone: a record cut short, a chunk lost or doubled, or no \
+                 record at all passes the step",
+        job: Some("test"),
+        anchor: r##"          awk '
+            $1 == "UPSTROKE-CONTAINER-CAPABILITY-RECORD" { f[++m] = $0 }
+            END {
+              nb = split(f[1], b, " "); ne = split(f[m], e, " ")
+              ok = m >= 3 && nb == 7 && ne == 7 && b[2] == "v1" && b[3] == "BEGIN" && e[2] == "v1" && e[3] == "END"
+              ok = ok && b[4] " " b[5] " " b[6] " " b[7] == e[4] " " e[5] " " e[6] " " e[7] && b[5] "" == (m - 2) ""
+              for (k = 2; ok && k < m; k++) ok = split(f[k], c, " ") == 5 && c[2] == "v1" && c[3] "" == b[4] "" && c[4] "" == (k - 1) "" && length(c[5]) == (k < m - 1 ? 192 : 2 * (b[6] - (b[5] - 1) * 96))
+              exit !ok
+            }' "$log" || { echo "the container capability record is missing or its framing is incomplete" >&2; exit 1; }
+"##,
+        replacement: "",
+        refused_as: "test-capability-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-CAPABILITY-SEPARATED-FROM-THE-CAPTURE",
+        escape: "a pinned cache step between the host capture and the observation (misplaced): \
+                 every script and action still matches its pin, and the observation runs a \
+                 harness the cache may have replaced after the suite ran",
+        job: Some("test"),
+        anchor: "      - name: Capture the container capability observation\n",
+        replacement: "      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2\n\
+                      \x20     - name: Capture the container capability observation\n",
+        refused_as: "test-capability-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-CAPABILITY-ABOVE-THE-CAPTURE",
+        escape: "the observation moved above the host capture (misplaced): both scripts still \
+                 match their pins and each runs once, but the observation no longer follows \
+                 the record the capture makes",
+        job: Some("test"),
+        anchor: r##"      - name: Capture the native host acceptance record
+        env:
+          UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}
+        run: |
+          set -o pipefail
+          log="$RUNNER_TEMP/host-acceptance-record.log"
+          cargo test --all-features --lib engine::tests::host_acceptance_record -- --ignored --exact --nocapture | tee "$log"
+          if ! grep -qx 'test engine::tests::host_acceptance_record \.\.\. ok' "$log" || ! grep -q '^test result: ok\. 1 passed; 0 failed; 0 ignored; ' "$log"; then echo "the capture did not run exactly the one host acceptance test to a pass" >&2; exit 1; fi
+          awk '
+            $1 == "UPSTROKE-HOST-ACCEPTANCE-RECORD" { f[++m] = $0 }
+            END {
+              nb = split(f[1], b, " "); ne = split(f[m], e, " ")
+              ok = m >= 3 && nb == 7 && ne == 7 && b[2] == "v1" && b[3] == "BEGIN" && e[2] == "v1" && e[3] == "END"
+              ok = ok && b[4] " " b[5] " " b[6] " " b[7] == e[4] " " e[5] " " e[6] " " e[7] && b[5] "" == (m - 2) ""
+              for (k = 2; ok && k < m; k++) ok = split(f[k], c, " ") == 5 && c[2] == "v1" && c[3] "" == b[4] "" && c[4] "" == (k - 1) "" && length(c[5]) == (k < m - 1 ? 192 : 2 * (b[6] - (b[5] - 1) * 96))
+              exit !ok
+            }' "$log" || { echo "the host acceptance record is missing or its framing is incomplete" >&2; exit 1; }
+
+      # The container capability observation for this platform (Gate7 M2's
+      # runtime question, contract version 2 under its root audit).
+      # `runner::container::tests::container_capability_record` is ignored by
+      # the suite and selected here by its exact name. It asks the CLI the
+      # contract's bounded read-only questions -- the endpoint the CLI
+      # resolved, the daemon's version, selected version fields and three
+      # local image inspections, never a pull -- through the product's
+      # process path, reduces every endpoint-sensitive answer in memory, and
+      # prints the reduced record as numbered hex lines between BEGIN and END
+      # (`docs/internals/runner/container/tests.md`). Every capability class
+      # passes, an absent Docker included; an unresolved process, a binding
+      # failure or a record its own decoder refuses fails the test.
+      # `pipefail` carries Cargo's exit through `tee`; the step then refuses
+      # unless exactly that test ran and passed, and refuses a missing or
+      # incomplete frame. A class is an observation, not M2 acceptance, and
+      # the Linux row is a control. Four minutes bound the 135 s the
+      # questions may request, with Cargo's start. The step adds no
+      # environment of its own; the workflow oracle pins it whole,
+      # immediately after the host acceptance capture.
+      - name: Capture the container capability observation
+        timeout-minutes: 4
+        env:
+          UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}
+        run: |
+          set -eo pipefail
+          log="$RUNNER_TEMP/container-capability-record.log"
+          cargo test --all-features --lib runner::container::tests::container_capability_record -- --ignored --exact --nocapture | tee "$log"
+          if ! grep -qx 'test runner::container::tests::container_capability_record \.\.\. ok' "$log" || ! grep -q '^test result: ok\. 1 passed; 0 failed; 0 ignored; ' "$log"; then echo "the observation did not run exactly the one container capability test to a pass" >&2; exit 1; fi
+          awk '
+            $1 == "UPSTROKE-CONTAINER-CAPABILITY-RECORD" { f[++m] = $0 }
+            END {
+              nb = split(f[1], b, " "); ne = split(f[m], e, " ")
+              ok = m >= 3 && nb == 7 && ne == 7 && b[2] == "v1" && b[3] == "BEGIN" && e[2] == "v1" && e[3] == "END"
+              ok = ok && b[4] " " b[5] " " b[6] " " b[7] == e[4] " " e[5] " " e[6] " " e[7] && b[5] "" == (m - 2) ""
+              for (k = 2; ok && k < m; k++) ok = split(f[k], c, " ") == 5 && c[2] == "v1" && c[3] "" == b[4] "" && c[4] "" == (k - 1) "" && length(c[5]) == (k < m - 1 ? 192 : 2 * (b[6] - (b[5] - 1) * 96))
+              exit !ok
+            }' "$log" || { echo "the container capability record is missing or its framing is incomplete" >&2; exit 1; }
+"##,
+        replacement: r##"      - name: Capture the container capability observation
+        timeout-minutes: 4
+        env:
+          UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}
+        run: |
+          set -eo pipefail
+          log="$RUNNER_TEMP/container-capability-record.log"
+          cargo test --all-features --lib runner::container::tests::container_capability_record -- --ignored --exact --nocapture | tee "$log"
+          if ! grep -qx 'test runner::container::tests::container_capability_record \.\.\. ok' "$log" || ! grep -q '^test result: ok\. 1 passed; 0 failed; 0 ignored; ' "$log"; then echo "the observation did not run exactly the one container capability test to a pass" >&2; exit 1; fi
+          awk '
+            $1 == "UPSTROKE-CONTAINER-CAPABILITY-RECORD" { f[++m] = $0 }
+            END {
+              nb = split(f[1], b, " "); ne = split(f[m], e, " ")
+              ok = m >= 3 && nb == 7 && ne == 7 && b[2] == "v1" && b[3] == "BEGIN" && e[2] == "v1" && e[3] == "END"
+              ok = ok && b[4] " " b[5] " " b[6] " " b[7] == e[4] " " e[5] " " e[6] " " e[7] && b[5] "" == (m - 2) ""
+              for (k = 2; ok && k < m; k++) ok = split(f[k], c, " ") == 5 && c[2] == "v1" && c[3] "" == b[4] "" && c[4] "" == (k - 1) "" && length(c[5]) == (k < m - 1 ? 192 : 2 * (b[6] - (b[5] - 1) * 96))
+              exit !ok
+            }' "$log" || { echo "the container capability record is missing or its framing is incomplete" >&2; exit 1; }
+      - name: Capture the native host acceptance record
+        env:
+          UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}
+        run: |
+          set -o pipefail
+          log="$RUNNER_TEMP/host-acceptance-record.log"
+          cargo test --all-features --lib engine::tests::host_acceptance_record -- --ignored --exact --nocapture | tee "$log"
+          if ! grep -qx 'test engine::tests::host_acceptance_record \.\.\. ok' "$log" || ! grep -q '^test result: ok\. 1 passed; 0 failed; 0 ignored; ' "$log"; then echo "the capture did not run exactly the one host acceptance test to a pass" >&2; exit 1; fi
+          awk '
+            $1 == "UPSTROKE-HOST-ACCEPTANCE-RECORD" { f[++m] = $0 }
+            END {
+              nb = split(f[1], b, " "); ne = split(f[m], e, " ")
+              ok = m >= 3 && nb == 7 && ne == 7 && b[2] == "v1" && b[3] == "BEGIN" && e[2] == "v1" && e[3] == "END"
+              ok = ok && b[4] " " b[5] " " b[6] " " b[7] == e[4] " " e[5] " " e[6] " " e[7] && b[5] "" == (m - 2) ""
+              for (k = 2; ok && k < m; k++) ok = split(f[k], c, " ") == 5 && c[2] == "v1" && c[3] "" == b[4] "" && c[4] "" == (k - 1) "" && length(c[5]) == (k < m - 1 ? 192 : 2 * (b[6] - (b[5] - 1) * 96))
+              exit !ok
+            }' "$log" || { echo "the host acceptance record is missing or its framing is incomplete" >&2; exit 1; }
+"##,
+        refused_as: "test-capability-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-CAPABILITY-TIMEOUT-DROPPED",
+        escape: "the observation's 4-minute bound is gone: a stalled question is held by the \
+                 job's own timeout, past the step's budget",
+        job: Some("test"),
+        anchor: "        timeout-minutes: 4\n",
+        replacement: "",
+        refused_as: "test-capability-step",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-CAPABILITY-TIMEOUT-WIDENED",
+        escape: "the observation's bound widened to 30 minutes: every field still present, and a \
+                 stalled question spends the leg's headroom",
+        job: Some("test"),
+        anchor: "        timeout-minutes: 4\n",
+        replacement: "        timeout-minutes: 30\n",
+        refused_as: "test-capability-step",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-CAPABILITY-DOCKER-HOST-INJECTED",
+        escape: "the observation's admitted `env:` gains `DOCKER_HOST`: the step no longer \
+                 observes the leg's own environment but one this file chose, with its script \
+                 still on its pin",
+        job: Some("test"),
+        anchor: "      - name: Capture the container capability observation\n\
+                 \x20       timeout-minutes: 4\n\
+                 \x20       env:\n\
+                 \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}\n",
+        replacement: "      - name: Capture the container capability observation\n\
+                      \x20       timeout-minutes: 4\n\
+                      \x20       env:\n\
+                      \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}\n\
+                      \x20         DOCKER_HOST: tcp://127.0.0.1:2375\n",
+        refused_as: "test-capability-step-env",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-CAPABILITY-REQUIRE-DOCKER-INJECTED",
+        escape: "the observation's admitted `env:` gains `UPSTROKE_REQUIRE_DOCKER`: the contract \
+                 runs it in the leg's environment unchanged, and the variable is the suite's \
+                 Docker requirement, not this record's",
+        job: Some("test"),
+        anchor: "      - name: Capture the container capability observation\n\
+                 \x20       timeout-minutes: 4\n\
+                 \x20       env:\n\
+                 \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}\n",
+        replacement: "      - name: Capture the container capability observation\n\
+                      \x20       timeout-minutes: 4\n\
+                      \x20       env:\n\
+                      \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}\n\
+                      \x20         UPSTROKE_REQUIRE_DOCKER: \"1\"\n",
+        refused_as: "test-capability-step-env",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-CAPABILITY-CASEFOLD-DROPPED",
+        escape: "the hosted observation no longer carries its leg's case-fold declaration, so it \
+                 runs under an environment the suite step did not",
+        job: Some("test"),
+        anchor: "        timeout-minutes: 4\n\
+                 \x20       env:\n\
+                 \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}\n",
+        replacement: "        timeout-minutes: 4\n",
+        refused_as: "test-capability-step-env",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-CAPABILITY-STEP-DELETED",
+        escape: "the guest's observation step is gone (omitted): the Windows suite is witnessed \
+                 and captured, and no Windows container capability record is made",
+        job: Some("test-windows"),
+        anchor: r##"      - name: Capture the container capability observation
+        timeout-minutes: 4
+        env:
+          UPSTROKE_TEST_TEMP_FOLDS_CASE: "1"
+        run: |
+          cargo test --all-features --lib runner::container::tests::container_capability_record -- --ignored --exact --nocapture | Tee-Object -Variable capture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not ($capture -ccontains 'test runner::container::tests::container_capability_record ... ok') -or -not ($capture -cmatch '^test result: ok\. 1 passed; 0 failed; 0 ignored; ')) { throw "the observation did not run exactly the one container capability test to a pass" }
+          $f = @($capture | Where-Object { $_ -cmatch '^UPSTROKE-CONTAINER-CAPABILITY-RECORD ' } | ForEach-Object { ,($_ -split ' ') })
+          $ok = $f.Count -ge 3 -and $f[0].Count -eq 7 -and $f[-1].Count -eq 7 -and $f[0][1] -ceq 'v1' -and $f[0][2] -ceq 'BEGIN' -and $f[-1][1] -ceq 'v1' -and $f[-1][2] -ceq 'END' -and ($f[0][3..6] -join ' ') -ceq ($f[-1][3..6] -join ' ') -and $f[0][4] -ceq "$($f.Count - 2)"
+          for ($k = 1; $ok -and $k -lt $f.Count - 1; $k++) { $ok = $f[$k].Count -eq 5 -and $f[$k][1] -ceq 'v1' -and $f[$k][2] -ceq $f[0][3] -and $f[$k][3] -ceq "$k" -and $f[$k][4].Length -eq $(if ($k -lt $f.Count - 2) { 192 } else { 2 * ([long]$f[0][5] - ([long]$f[0][4] - 1) * 96) }) }
+          if (-not $ok) { throw "the container capability record is missing or its framing is incomplete" }
+"##,
+        replacement: "",
+        refused_as: "test-windows-capability-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-CAPABILITY-DISABLED",
+        escape: "a step-level `if: false` on the guest's observation (conditional): no step of \
+                 this job may carry one",
+        job: Some("test-windows"),
+        anchor: "      - name: Capture the container capability observation\n",
+        replacement: "      - name: Capture the container capability observation\n\
+                      \x20       if: false\n",
+        refused_as: "unexpected-step-field",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-CAPABILITY-ABSOLVED",
+        escape: "`continue-on-error` on the guest's observation (failure-swallowing): a failed \
+                 observation ends the step red and the Windows leg green",
+        job: Some("test-windows"),
+        anchor: "      - name: Capture the container capability observation\n",
+        replacement: "      - name: Capture the container capability observation\n\
+                      \x20       continue-on-error: true\n",
+        refused_as: "unexpected-step-field",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-CAPABILITY-IGNORED-NOT-RUN",
+        escape: "`--ignored` dropped on the guest (no-op): the test is reported ignored and Cargo \
+                 exits zero having asked nothing",
+        job: Some("test-windows"),
+        anchor: "          cargo test --all-features --lib runner::container::tests::container_capability_record -- --ignored --exact --nocapture | Tee-Object -Variable capture\n",
+        replacement: "          cargo test --all-features --lib runner::container::tests::container_capability_record -- --exact --nocapture | Tee-Object -Variable capture\n",
+        refused_as: "test-windows-capability-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-CAPABILITY-FILTER-MOVED",
+        escape: "the guest's filter names a test that does not exist (filtered): `running 0 \
+                 tests`, exit zero, no record",
+        job: Some("test-windows"),
+        anchor: "          cargo test --all-features --lib runner::container::tests::container_capability_record -- --ignored --exact --nocapture | Tee-Object -Variable capture\n",
+        replacement: "          cargo test --all-features --lib runner::container::tests::container_capability_records -- --ignored --exact --nocapture | Tee-Object -Variable capture\n",
+        refused_as: "test-windows-capability-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-CAPABILITY-EXIT-SWALLOWED",
+        escape: "the explicit propagation of the observation's Cargo exit is gone \
+                 (failure-swallowing): a failed Cargo whose output still holds a pass line and a \
+                 frame fails the step only by an accident of order",
+        job: Some("test-windows"),
+        anchor: "          cargo test --all-features --lib runner::container::tests::container_capability_record -- --ignored --exact --nocapture | Tee-Object -Variable capture\n\
+                 \x20         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n",
+        replacement: "          cargo test --all-features --lib runner::container::tests::container_capability_record -- --ignored --exact --nocapture | Tee-Object -Variable capture\n",
+        refused_as: "test-windows-capability-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-CAPABILITY-ZERO-TESTS-ADMITTED",
+        escape: "the guest's pass-line and `1 passed; 0 failed; 0 ignored` check is gone, so a \
+                 run of no test or of another is judged by its frame alone",
+        job: Some("test-windows"),
+        anchor: "          if (-not ($capture -ccontains 'test runner::container::tests::container_capability_record ... ok') -or -not ($capture -cmatch '^test result: ok\\. 1 passed; 0 failed; 0 ignored; ')) { throw \"the observation did not run exactly the one container capability test to a pass\" }\n",
+        replacement: "",
+        refused_as: "test-windows-capability-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-CAPABILITY-FRAMING-UNENFORCED",
+        escape: "the guest computes the frame check and never acts on it: the line that throws is \
+                 gone, so every frame passes",
+        job: Some("test-windows"),
+        anchor: "          if (-not $ok) { throw \"the container capability record is missing or its framing is incomplete\" }\n",
+        replacement: "",
+        refused_as: "test-windows-capability-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-CAPABILITY-SEPARATED-FROM-THE-CAPTURE",
+        escape: "a pinned cache step between the guest's host capture and its observation \
+                 (misplaced): the record need not come from the harness the witness counted",
+        job: Some("test-windows"),
+        anchor: "      - name: Capture the container capability observation\n",
+        replacement: "      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2\n\
+                      \x20     - name: Capture the container capability observation\n",
+        refused_as: "test-windows-capability-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-CAPABILITY-TIMEOUT-DROPPED",
+        escape: "the guest's 4-minute bound is gone: a stalled question is held by the guest's \
+                 20-minute job, the tightest leg",
+        job: Some("test-windows"),
+        anchor: "        timeout-minutes: 4\n",
+        replacement: "",
+        refused_as: "test-windows-capability-step",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-CAPABILITY-DOCKER-CONTEXT-INJECTED",
+        escape: "the guest's observation gains `DOCKER_CONTEXT` in its admitted `env:`: a \
+                 selector this file chose, not the leg's",
+        job: Some("test-windows"),
+        anchor: "      - name: Capture the container capability observation\n\
+                 \x20       timeout-minutes: 4\n\
+                 \x20       env:\n\
+                 \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: \"1\"\n",
+        replacement: "      - name: Capture the container capability observation\n\
+                      \x20       timeout-minutes: 4\n\
+                      \x20       env:\n\
+                      \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: \"1\"\n\
+                      \x20         DOCKER_CONTEXT: desktop-linux\n",
+        refused_as: "test-windows-capability-step-env",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-CAPABILITY-CASEFOLD-DROPPED",
+        escape: "the guest's observation no longer declares that NTFS folds case, so it runs \
+                 under an environment its suite step did not",
+        job: Some("test-windows"),
+        anchor: "        timeout-minutes: 4\n\
+                 \x20       env:\n\
+                 \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: \"1\"\n",
+        replacement: "        timeout-minutes: 4\n",
+        refused_as: "test-windows-capability-step-env",
     },
 ];
 

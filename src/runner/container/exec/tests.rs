@@ -9966,6 +9966,40 @@ fn pids_at(path: &Path) -> Option<Vec<libc::pid_t>> {
     )
 }
 
+/// Every candidate for the command reaper that registered the paused
+/// `helper`'s process group, each paired with the group anchor it forked into
+/// that group: a child of the coordinator (`forks`) that is neither the helper
+/// nor a member of the helper's group, and a child of that candidate's own in
+/// the helper's group that is not the helper. The helper is never its own
+/// candidate: until it execs its `sleep`, the stub's `mv` that publishes its
+/// acknowledgement is a child of the helper in the helper's group. Each is
+/// identified by pid and start time; the caller requires exactly one.
+#[cfg(target_os = "linux")]
+fn helper_reaper_candidates(
+    helper: libc::pid_t,
+    forks: &[libc::pid_t],
+) -> Vec<(Identified, Identified)> {
+    let mut candidates = Vec::new();
+    for fork in forks.iter().copied().filter(|fork| *fork != helper) {
+        let Ok((reaper, _)) = stat_of(fork) else {
+            continue;
+        };
+        if reaper.pgrp == helper {
+            continue;
+        }
+        candidates.extend(
+            children_of(&fork.to_string())
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|anchor| *anchor != helper)
+                .filter_map(|anchor| stat_of(anchor).ok())
+                .filter(|(anchor, _)| anchor.pgrp == helper)
+                .map(|(anchor, _)| (reaper.clone(), anchor)),
+        );
+    }
+    candidates
+}
+
 /// The owned, bounded harness of the lease-kill guards.
 ///
 /// It adopts every process the coordinator will leave ([`OwnedDescendants`],
@@ -10077,17 +10111,36 @@ fn lease_kill_harness_child() {
         forks.contains(&helper),
         "{case}: the paused helper is the coordinator's child"
     );
-    let mut helper_reaper = None;
-    for fork in &forks {
-        for grandchild in children_of(&fork.to_string()).unwrap_or_default() {
-            if stat_of(grandchild).is_ok_and(|(anchor, _)| anchor.pgrp == helper) {
-                helper_reaper = Some(stat_of(*fork).expect("the helper's reaper's identity").0);
-            }
-        }
-    }
-    let helper_reaper = helper_reaper.unwrap_or_else(|| {
-        panic!("{case}: no child of the coordinator anchors the paused helper's group: {forks:?}")
-    });
+    // The helper's reaper: the one child of the coordinator, neither the helper
+    // nor in its group, whose own child anchors the helper's group, found alike
+    // by a second scan. None or several is refused, never resolved by the order
+    // of a scan.
+    let candidates = helper_reaper_candidates(helper, &forks);
+    let [(helper_reaper, anchor)] = candidates.as_slice() else {
+        panic!(
+            "{case}: not exactly one child of the coordinator other than the paused helper \
+             {helper}, and outside its group, anchors the helper's group: {candidates:?} among \
+             {forks:?}"
+        );
+    };
+    let rescanned = helper_reaper_candidates(
+        helper,
+        &children_of(&coordinator_pid).expect("the coordinator's children lists"),
+    );
+    assert_eq!(
+        rescanned, candidates,
+        "{case}: a second scan did not find the same reaper and anchor of the paused helper"
+    );
+    crate::workspace_manager::fixture::say(&format!(
+        "{case}: the paused helper {} ({}) is anchored by {} ({}), a child of its reaper {} ({})",
+        helper_id.pid,
+        helper_id.comm,
+        anchor.pid,
+        anchor.comm,
+        helper_reaper.pid,
+        helper_reaper.comm
+    ));
+    let helper_reaper = helper_reaper.clone();
     for pid in &backstop_pids {
         assert!(
             forks.contains(pid),

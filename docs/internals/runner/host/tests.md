@@ -3501,6 +3501,87 @@ commit then holds exactly the user's paths and the user's change. At
 is lost from it, because the slot add and the worker wrote the index the
 commit is being made from.
 
+**An unexplained macOS red.** CI run `42400918861`, attempt 1, job
+`128488261776` (`test (macos-latest)`), which checked out merge `134fdd30` of
+head `bb084ac8`, failed this test with `a plain commit in a linked checkout:
+the commit failed`, at the assertion on line 8591 of that head. The commit's
+`ProcessOutput` had code `None`, `timed_out` and `output_limited` both false,
+empty stdout and a duration of about 428 ms. Its stderr held the hook's
+`hook_started_slot_worker_helper` run passing (`1 passed`). On Unix,
+`ExitStatus::code` is `None` for an end by signal, but the stored output does
+not keep a signal number. Which signal, what sent it, and the cause are
+unknown, and so is any connection to the change set under test.
+
+**The Trace2 diagnostic.** Each case gives `GIT_TRACE2_EVENT` to the outer
+commit's `Command` alone, through that `Command`'s own environment. The value
+is a fresh absolute file directly under the case's scratch root:
+`trace2-main.event` or `trace2-linked.event`. It lies outside `M`, `L`, the
+hooks directory and the private root. The process environment and Git's
+configuration are unchanged. Git normally passes the variable on to the hook
+and to the Git commands started under it, so their events can share the file.
+That widens what the trace covers, but it does not prove which process wrote
+which event.
+
+When the funnel returns, the report is printed before the exit code is
+checked, while the scratch tree still exists. The printing is done by
+[`report_hook_commit_trace`], into the test's captured output. A passing run
+discards it; a failing run or a `--nocapture` run shows it.
+
+These are unchanged:
+- the command, the funnel and its 180 s bound;
+- both cases, the hook and its helper;
+- every assertion and the control flow.
+
+**Limits.**
+- An `Err` from `run_with_timeout` still panics at once with no report,
+  because covering that path would change its control flow.
+- Git writes a `signal` event only for the signals it handles, and nothing for
+  `SIGKILL`, so a trace without one rules nothing out.
+- The report is a snapshot taken when the funnel returns.
+
+This is a diagnostic. It is not a fix, and it does not claim the red is
+explained or closed.
+
+## `const HOOK_COMMIT_TRACE_HEAD: u64 = 64 * 1024;`
+
+The read bound of [`report_hook_commit_trace`], together with
+`HOOK_COMMIT_TRACE_TAIL` (192 KiB). A trace of at most 256 KiB is read whole. A
+longer one is read only in its first 64 KiB and its last 192 KiB, and the
+bytes between them are counted and skipped by a seek. The ends are the parts
+kept because the outer commit's first events open the file, and its last
+ones, if it wrote any, normally come after the hook's.
+
+## `fn report_hook_commit_trace(label: &str, trace: &Path) {`
+
+Prints one case's trace with `eprintln!`, so that libtest captures it. The
+output, in order:
+1. A line naming the case (`label`), the path, the size when the file was
+   opened, and the number of bytes omitted.
+2. Each newline-ended piece of the bytes read, as `  | ` followed by the piece
+   escaped by `<[u8]>::escape_ascii`.
+3. For a long file only: a line giving the number of bytes omitted, followed
+   by the tail's pieces in the same form.
+4. A closing line with the number of bytes shown, or the error that stopped
+   the read.
+
+The escaping turns quotes, backslashes, control bytes and non-ASCII bytes into
+escapes, and shows a record's newline as `\n`. No trace byte then reaches a
+terminal as a control character, and the bytes read can be recovered exactly. The
+output is at most nine characters per byte read: four for an escape, plus the
+prefix and line end of a piece that can be a single byte long. Three framing
+lines come on top of that.
+
+It reports and never asserts:
+- a path that is not absolute was never given to Git, and is reported as
+  such;
+- a missing file is reported as `missing`;
+- an open or size error is reported as `unreadable`;
+- a read error is reported after whatever was read before it.
+
+It reads only that one file. It does not panic on a read problem and returns
+nothing to the test, so it can neither replace the commit's `ProcessOutput`
+and failure nor make a failing case pass.
+
 ## `fn hook_started_slot_worker_helper() {`
 
 The coordinator the hook starts, under exactly the names Git handed the hook.
