@@ -53,10 +53,15 @@ Preview default per tier when no pin applies (also listed in [`CATALOG`]).
 
 ## `pub const CATALOG: &[CatalogEntry] = &[`
 
-Snapshot of Claude Code and Copilot CLI rosters as of Aug 2026.
+Snapshot of the Claude Code, Copilot and Codex CLI rosters as of Aug 2026,
+plus the two exact frontier slugs added in Nov 2026 for the self-host
+binding (`claude-opus-5-5`, `gpt-6-astra`).
 
 **Table order is preference order.** [`different_family_at`] returns the
 first match, so moving an entry up promotes it for cross-family review.
+Other readers follow the same order: the topology repair ladder's
+`catalogued_model` takes an agent's first entry at its floor, and the
+Codex probe checks the Codex entries in this order.
 
 The Copilot half was checked against GitHub's supported-models reference on
 2026-08-09; plain `gpt-5` and `gemini-2.5-pro` had already left the roster
@@ -68,11 +73,21 @@ local `debug models` catalog is validated during its probe.
 
 ## `EXAMPLE_FRONTIER,`
 
-Keep the current frontier model ahead of retained older slugs: this
+Keep the default frontier model ahead of retained older slugs: this
 order is the binding preference used by `different_family_at`, not just
 display order. Exact model names keep frozen runs reproducible; the
 moving `opus` alias must not decide which model a run meant after the
 fact.
+
+## `"claude-opus-5-5",`
+
+Registered for explicit pins, and deliberately placed behind Opus 5
+rather than ahead of it. Promoting it would change the preview binding
+and the Anthropic partner of every OpenAI-family review primary, including
+this repository's own `codex/gpt-5.6-sol` pin, and the self-host binding
+needs none of that: its worker is pinned. So `example_binding(Frontier)`,
+`different_family_at(Frontier, OpenAI, _)` and the repair ladder's
+`claude-code` frontier pick all still resolve to `claude-opus-5`.
 
 ## `entry("copilot", "gemini-3.1-pro", Tier::Mid, Family::Google),`
 
@@ -82,13 +97,46 @@ Slug pattern-derived, not verbatim: GitHub's reference lists the model as
 confidence than the entries around it — the `connect` cross-check is what
 is meant to catch it once a CLI can enumerate models.
 
+## `entry("codex", "gpt-6-astra", Tier::Frontier, Family::OpenAI),`
+
+The exact slug the self-host review binding names. It was registered on
+request and not read from a CLI by the change that added it. The Codex probe
+refuses a CLI whose local `debug models` catalog lacks it, or lacks any of
+the five efforts for it, before anything is spent.
+
+It sits ahead of `copilot/gpt-5.3-codex` because that is the only position
+that makes it the partner. Every public caller of `different_family_at`
+(`validate`, `run` and the sequential pre-flight) passes the build's
+adapter registry, which ships all three agents. No public caller passes
+the pools file or the CLIs that are installed. Below Copilot, an Opus
+frontier primary would still be partnered with `copilot/gpt-5.3-codex`.
+
+What moved, on a shipped build:
+
+- **Partner pick.** The frontier partner of every Anthropic-family review
+  primary changed from `copilot/gpt-5.3-codex` to `codex/gpt-6-astra`. That
+  covers the default `claude-opus-5` and the self-review alternative and
+  second opinion of every Opus pin.
+- **Pre-flight probe.** A schema-4 run now probes `codex` for that
+  alternative instead of `copilot`, and it refuses the run when the probe
+  fails. That is unchanged behaviour, now about a different CLI.
+- **Codex entry order.** It now leads the Codex entries, so the repair
+  ladder's `codex` pick at frontier is this slug, not `gpt-5.6-sol`.
+
+What did not move: a build without the Codex adapter still pairs with
+`copilot/gpt-5.3-codex`, OpenAI-family primaries still pair with
+`claude-opus-5`, and every pick at mid and small is unchanged. Review plans
+already recorded in a run's log replay as they were recorded.
+
 ## `entry("copilot", "gpt-5.3-codex", Tier::Frontier, Family::OpenAI),`
 
 Verbatim from GitHub's CLI programmatic reference, where it appears as a
 `--model` example — the highest exact-slug confidence available without
-enumeration. It is also load-bearing: `different_family_at` picks it for
-every cross-vendor second opinion at frontier, so a wrong name here fails
-§11.3 reviews at runtime on exactly the paths blast radius protects.
+enumeration. It is load-bearing wherever the build has no Codex adapter:
+`different_family_at` picks it for every cross-vendor second opinion at
+frontier there (and did on every build until `gpt-6-astra` was placed
+ahead of it), so a wrong name here fails §11.3 reviews at runtime on
+exactly the paths blast radius protects.
 
 ## `entry("codex", "gpt-5.6-sol", Tier::Frontier, Family::OpenAI),`
 
@@ -111,7 +159,10 @@ different training family, and an agent this build can actually drive.
 First match in [`CATALOG`] order wins, so the choice is deterministic and
 the table is where the preference is expressed. `has_adapter` is injected
 rather than read from the registry so the engine can ask about the adapters
-its own harness holds — which, under test, is not the built-in set.
+its own harness holds — which, under test, is not the built-in set. In the
+shipped binary it is the built-in set: neither the pools file nor which
+CLIs are installed narrows the choice. An uninstalled partner surfaces later,
+as a probe failure.
 
 `None` means this build cannot second-opinion that tier at all. Callers
 decide what that costs: a configured `second_opinion` refuses the run, while
@@ -124,7 +175,7 @@ Catalog entries for `agent` that the installed CLI does not advertise.
 The guard the step-9 review asked for, and the reason `Discovery.models`
 exists: this table is hand-maintained point-in-time data, and two of its
 entries had already gone stale by Aug 2026 — including the one
-[`different_family_at`] picks for every frontier second opinion, where a
+[`different_family_at`] then picked for every frontier second opinion, where a
 wrong slug fails §11.3 review at runtime on exactly the blast-radius paths
 the second opinion exists to protect.
 
@@ -166,9 +217,27 @@ AGENT at the same tier, so an agent-id comparison would happily pick
 it — and the "different families share fewer blind spots" claim
 (§11.3) would be silently untrue.
 
+## `fn a_second_opinion_crosses_families_not_merely_vendors()` › `let without_codex = |agent: &str| agent != "codex";`
+
+The pick every build made before `gpt-6-astra` was registered, and the one
+a build without the Codex adapter still makes: the promotion moved the
+partner only where Codex can be driven.
+
 ## `fn a_second_opinion_crosses_families_not_merely_vendors()` › `let picked = different_family_at(Tier::Frontier, Family::OpenAI, everything)`
 
 Asked from the other side, it comes back to Anthropic.
+
+## `fn the_requested_frontier_pair_is_registered_exactly_and_nothing_near_it_is()` › `for (agent, model) in [`
+
+Exact slugs only. No dotted spelling, no moving alias, and no other agent
+claims either name. A pin that misses by one character must stay a hard
+error, never a near match.
+
+## `fn the_requested_frontier_pair_is_registered_exactly_and_nothing_near_it_is()` › `let claude_and_codex = |agent: &str| matches!(agent, "claude-code" | "codex");`
+
+The restricted build is a control. The `everything` assertion after it is
+the claim the shipped binary depends on, since its registry also carries
+Copilot.
 
 ## `fn a_tier_with_no_reachable_other_family_resolves_to_nothing` › `let claude_only = |agent: &str| agent == "claude-code";`
 

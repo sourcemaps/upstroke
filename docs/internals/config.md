@@ -869,6 +869,23 @@ the config says two — a verification layer deleted in silence.
 Indistinguishable from one whose only key was misspelled into a
 section serde ignores, so it cannot be waved through.
 
+## `fn the_requested_frontier_pins_load_exactly_with_their_catalogued_family() {`
+
+The two frontier slugs registered for the self-host binding, through the same
+`[[pins]]` path every operator uses: the pair is kept exactly as written, and
+its tier and family are the catalog's, not inferred from the name.
+
+## `fn every_catalogued_model_still_loads_as_an_explicit_pin() {`
+
+Registering a model must not retire one: every roster entry, old or new, is
+still a valid explicit pin at its own tier.
+
+## `fn a_near_miss_of_the_requested_pair_is_still_an_unknown_pin() {`
+
+The pin check stays exact. A dotted version, a shortened slug or the right
+model under the wrong agent is still `UnknownPinnedModel` at load, and the
+refusal offers the spelling that would have loaded.
+
 ## `let path = scratch(`
 
 What makes a tier mean something to an agent with an effort axis: a

@@ -80,6 +80,12 @@ pub const CATALOG: &[CatalogEntry] = &[
     EXAMPLE_FRONTIER,
     entry(
         "claude-code",
+        "claude-opus-5-5",
+        Tier::Frontier,
+        Family::Anthropic,
+    ),
+    entry(
+        "claude-code",
         "claude-opus-4-8",
         Tier::Frontier,
         Family::Anthropic,
@@ -87,6 +93,7 @@ pub const CATALOG: &[CatalogEntry] = &[
     entry("copilot", "gpt-5-mini", Tier::Small, Family::OpenAI),
     entry("copilot", "gemini-3.1-pro", Tier::Mid, Family::Google),
     entry("copilot", "claude-sonnet-5", Tier::Mid, Family::Anthropic),
+    entry("codex", "gpt-6-astra", Tier::Frontier, Family::OpenAI),
     entry("copilot", "gpt-5.3-codex", Tier::Frontier, Family::OpenAI),
     entry(
         "copilot",
@@ -205,7 +212,20 @@ mod tests {
         let picked = different_family_at(Tier::Frontier, Family::Anthropic, everything)
             .expect("an openai frontier model exists");
         assert_eq!(picked.family, Family::OpenAI);
-        assert_eq!((picked.agent, picked.model), ("copilot", "gpt-5.3-codex"));
+        assert_eq!(
+            (picked.agent, picked.model),
+            ("codex", "gpt-6-astra"),
+            "Astra 6 is the preferred OpenAI frontier partner wherever codex is driveable"
+        );
+
+        let without_codex = |agent: &str| agent != "codex";
+        let picked = different_family_at(Tier::Frontier, Family::Anthropic, without_codex)
+            .expect("copilot still serves an openai frontier model");
+        assert_eq!(
+            (picked.agent, picked.model),
+            ("copilot", "gpt-5.3-codex"),
+            "a build without codex keeps the partner it had before Astra 6 was registered"
+        );
 
         let picked = different_family_at(Tier::Mid, Family::Anthropic, everything)
             .expect("a non-anthropic mid model exists");
@@ -217,7 +237,51 @@ mod tests {
         assert_eq!(
             (picked.agent, picked.model),
             ("claude-code", "claude-opus-5"),
-            "the current Opus model must remain ahead of retained legacy slugs"
+            "the default Opus binding stays ahead of the pin-only Opus 5.5 and retained legacy slugs"
+        );
+    }
+
+    #[test]
+    fn the_requested_frontier_pair_is_registered_exactly_and_nothing_near_it_is() {
+        let opus = lookup("claude-code", "claude-opus-5-5").expect("Opus 5.5 is catalogued");
+        assert_eq!(
+            (opus.tier, opus.family),
+            (Tier::Frontier, Family::Anthropic)
+        );
+        let astra = lookup("codex", "gpt-6-astra").expect("Astra 6 is catalogued");
+        assert_eq!((astra.tier, astra.family), (Tier::Frontier, Family::OpenAI));
+
+        for (agent, model) in [
+            ("claude-code", "claude-opus-5.5"),
+            ("claude-code", "opus"),
+            ("copilot", "claude-opus-5-5"),
+            ("codex", "claude-opus-5-5"),
+            ("codex", "gpt-6"),
+            ("codex", "gpt-6-astra-latest"),
+            ("claude-code", "gpt-6-astra"),
+            ("copilot", "gpt-6-astra"),
+        ] {
+            assert!(
+                lookup(agent, model).is_none(),
+                "{agent}/{model} must stay unknown"
+            );
+        }
+
+        let claude_and_codex = |agent: &str| matches!(agent, "claude-code" | "codex");
+        assert_eq!(
+            different_family_at(Tier::Frontier, opus.family, claude_and_codex),
+            Some(astra),
+            "an Opus 5.5 primary crosses to Astra 6 on a Claude and Codex build"
+        );
+        assert_eq!(
+            different_family_at(Tier::Frontier, opus.family, everything),
+            Some(astra),
+            "and on the shipped build, which also carries the copilot adapter"
+        );
+        assert_eq!(
+            example_binding(Tier::Frontier),
+            EXAMPLE_FRONTIER,
+            "registering the pair changes no default binding"
         );
     }
 

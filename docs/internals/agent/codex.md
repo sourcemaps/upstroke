@@ -448,6 +448,18 @@ reached through the concrete type.
 Flags that would hand the agent the machine. §20 says none is ever
 passed, so the list exists to be asserted against.
 
+## `mod tests` › `fn debug_models_json(levels: &[&str]) -> String {`
+
+Advertises every Codex model the catalog knows, not one hard-coded slug:
+the probe checks them all, so a complete catalog must list them all.
+
+## `fn model_catalog_requires_every_effort_for_each_known_codex_model()` › `for slug in &known {`
+
+Every catalogued slug, old and new, gets its own refusals: missing, listed
+only under a wrong spelling, and short of each required effort in turn. So
+a local catalog that predates `gpt-6-astra` is refused by name before spend,
+even for a run that only pins `gpt-5.6-sol`.
+
 ## `fn a_fresh_attempt_sets_its_sandbox_and_a_resumed_one_must_not` › `let fresh = build_args(&run(PermissionMode::Edit, None));`
 
 The CLI's two shapes, which are not one shape with a flag swapped.
