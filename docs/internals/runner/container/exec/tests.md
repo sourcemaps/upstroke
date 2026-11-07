@@ -2988,6 +2988,64 @@ collector and the coordinator handle are adapted from an earlier candidate's: th
 coordinator now also takes its worktree lock, the admission asks include the different
 run's, and the handle fails closed (below).
 
+## `#[cfg(target_os = "linux")]` › `fn helper_reaper_candidates(`
+
+Which process the lease-kill harness calls the paused helper's reaper (finding
+`PR356-LEASE-KILL-REAPER-SELECTION`, a test-fixture identity fix). The process funnel
+forks the command reaper before it spawns the command. The reaper takes a process group of
+its own and holds the run's cleanup leases. The command, the stub that pauses, takes its own
+group and registers it with the reaper, which forks the group's anchor into that group. When
+the coordinator dies, the reaper kills the group and then settles under its leases for the
+test-build delay. That reaper is the process whose liveness the refusal assertions require,
+before and after the admission asks.
+
+**The ambiguity.** Through 5008aaac the harness took any child of the coordinator that had a
+child of its own in the helper's group, and when several matched it silently kept the last.
+The helper is a child of the coordinator too. It publishes its acknowledgement with an
+external `mv` before it execs `sleep`, and until that `mv` is gone it is a child of the
+helper, in the helper's group. So by construction the helper could be named its own reaper.
+The real reaper would then not be the one watched.
+
+**The selection now:**
+
+- A candidate is a child of the coordinator that is neither the helper nor a member of the
+  helper's group.
+- The candidate's anchor is a child of the candidate's own that is in the helper's group and
+  is not the helper.
+- Both are identified by pid and start time.
+- Exactly one pair must exist, and a second scan must find the same pair. None or several
+  fails the case with the candidates listed, never resolved by the order of a scan.
+- A line names the helper, the anchor and the reaper with their command names.
+
+Everything after the selection is as before:
+
+- both refusals and the before/after `Live` witness of the chosen reaper;
+- the admission loop, and its ending check over the same covered set (helper, reaper,
+  backstops);
+- the natural settlement to the kernel's account, and the collection accounting;
+- the four cases and every bound.
+
+**The native red this answers** (raw, not regraded). In CI run 42390677121, attempt 1, job
+128457402436 `test (ubuntu-latest)` at 5008aaac, the `pre-create-cancel` case failed at the
+live-reaper premise. Two facts were recorded:
+
+- The chosen reaper, pid 307163 with recorded command name `sleep`, was already
+  `Ended("exited (state Z) and not yet collected")` before and after the ask.
+- Both the run's admission and a different run's worktree admission were refused.
+
+The drop then reported `complete: true`, 5 collected, no errors and none left. That is the
+bounded cleanup after a failed assertion. The natural-settlement path never ran, so it is
+not a natural-settlement success. The test file is byte-identical to PR355's landing. The
+coordinator's fingerprint records the same test passing in PR355's three Linux runs, as
+history only.
+
+**What this does and does not claim.** The recorded command name `sleep` is consistent with
+the helper having been chosen as its own reaper. The trace holds neither the helper's
+acknowledged pid nor a parent/anchor snapshot, so that self-selection is not established. No
+runtime cause is claimed, and the failure is not called flaky. The change removes the
+ambiguity from the source by construction. No focused or repeated run was made for it; the
+four cases run as ordinary tests in the suite.
+
 ## `#[cfg(target_os = "linux")]` › `struct OwnedDescendants {`
 
 The collector every Group A harness ends with. It makes the harness a child subreaper, so
