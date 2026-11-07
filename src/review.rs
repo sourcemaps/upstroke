@@ -194,9 +194,9 @@ impl ReviewPlan {
         at_risk.sort();
         Some(format!(
             "task(s) {} can run on {}, which is also the reviewer — a model reviewing its own work \
-             is a weak check. No {tier}-tier model from another family is usable here; install the \
-             GitHub Copilot CLI, or set `second_opinion = \"different-vendor\"` on a \
-             [[routing.overrides]] covering these paths (§11.3).",
+             is a weak check. No {tier}-tier model from another family is usable here; independent \
+             review needs the other-family {tier}-tier reviewer this build selects, with its CLI \
+             installed and passing its probe where the run executes (§11.3).",
             at_risk.join(", "),
             primary.describe()
         ))

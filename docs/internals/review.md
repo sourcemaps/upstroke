@@ -184,6 +184,14 @@ actually happens to people. A real build always ships the Copilot
 adapter, so resolution alone would never fire this — the warning would
 have been dead code in every shipped binary.
 
+Its remedy names no vendor and no override. In a shipped binary the warning
+follows a pre-flight drop, and pre-flight's own warning names the reviewer it
+could not probe. Only that reviewer's CLI, working where the run executes,
+brings an independent review back, for a plan resolved after it works.
+Installing a different CLI cannot move the catalog's first match. A
+`second_opinion` override would bind the same reviewer, make it required, and
+refuse the run instead.
+
 ## `impl ReviewPlan` › `pub fn passes_for(&self, index: usize, implementer: &PassBinding) -> Vec<ReviewPass> {`
 
 The ordered passes for the task at `index`. See [`passes_for`].

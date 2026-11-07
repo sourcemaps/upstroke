@@ -81,13 +81,22 @@ fact.
 
 ## `"claude-opus-5-5",`
 
-Registered for explicit pins, and deliberately placed behind Opus 5
-rather than ahead of it. Promoting it would change the preview binding
-and the Anthropic partner of every OpenAI-family review primary, including
-this repository's own `codex/gpt-5.6-sol` pin, and the self-host binding
-needs none of that: its worker is pinned. So `example_binding(Frontier)`,
-`different_family_at(Frontier, OpenAI, _)` and the repair ladder's
-`claude-code` frontier pick all still resolve to `claude-opus-5`.
+Registered for explicit pins. The self-host binding needs nothing more,
+because its worker is pinned. Two separate things keep every default where
+it was:
+
+- **The constant.** `EXAMPLE_FRONTIER` is untouched. `example_binding(Frontier)`
+  returns it directly, so the unpinned preview, the unpinned worker and the
+  unpinned review primary are still `claude-opus-5`. Table order has no say
+  in that.
+- **The row's place.** This row sits behind Opus 5, so the picks that follow
+  table order are unchanged as well. `different_family_at(Frontier, OpenAI, _)`
+  is the Anthropic partner of every OpenAI-family review primary, including
+  this repository's own `codex/gpt-5.6-sol` pin. That pick and the repair
+  ladder's `claude-code` frontier pick both still resolve to `claude-opus-5`.
+
+Moving this row ahead of Opus 5 would move those two picks and leave the
+preview where it is. Changing the default means changing `EXAMPLE_FRONTIER`.
 
 ## `entry("copilot", "gemini-3.1-pro", Tier::Mid, Family::Google),`
 
