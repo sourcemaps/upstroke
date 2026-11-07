@@ -8551,6 +8551,14 @@ fn a_hook_started_runs_slot_worker_leaves_the_users_commit_as_the_user_made_it()
         } else {
             ["commit", "-q", "-a", "-m", "user"].as_slice()
         });
+        let trace = root.join(if linked {
+            "trace2-linked.event"
+        } else {
+            "trace2-main.event"
+        });
+        if trace.is_absolute() {
+            commit.env("GIT_TRACE2_EVENT", &trace);
+        }
         let label = if linked {
             "a plain commit in a linked checkout"
         } else {
@@ -8558,6 +8566,7 @@ fn a_hook_started_runs_slot_worker_leaves_the_users_commit_as_the_user_made_it()
         };
         let output = proc::test_support::run_with_timeout(commit, "", Duration::from_secs(180))
             .unwrap_or_else(|error| panic!("{label}: the commit ran: {error}"));
+        report_hook_commit_trace(label, &trace);
         if output.code != Some(0) {
             failures.push(format!("{label}: the commit failed: {output:?}"));
             continue;
@@ -8594,6 +8603,80 @@ fn a_hook_started_runs_slot_worker_leaves_the_users_commit_as_the_user_made_it()
         failures.len(),
         failures.join("\n")
     );
+}
+
+#[cfg(unix)]
+const HOOK_COMMIT_TRACE_HEAD: u64 = 64 * 1024;
+
+#[cfg(unix)]
+const HOOK_COMMIT_TRACE_TAIL: u64 = 192 * 1024;
+
+#[cfg(unix)]
+fn report_hook_commit_trace(label: &str, trace: &Path) {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let shown = trace.display();
+    if !trace.is_absolute() {
+        eprintln!("{label}: no Git Trace2: {shown} is not an absolute path");
+        return;
+    }
+    let mut file = match std::fs::File::open(trace) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("{label}: Git Trace2 {shown}: missing");
+            return;
+        }
+        Err(error) => {
+            eprintln!("{label}: Git Trace2 {shown}: unreadable: {error}");
+            return;
+        }
+    };
+    let size = match file.metadata() {
+        Ok(metadata) => metadata.len(),
+        Err(error) => {
+            eprintln!("{label}: Git Trace2 {shown}: size unreadable: {error}");
+            return;
+        }
+    };
+    let omitted = size.saturating_sub(HOOK_COMMIT_TRACE_HEAD + HOOK_COMMIT_TRACE_TAIL);
+    let bound = if omitted == 0 {
+        HOOK_COMMIT_TRACE_HEAD + HOOK_COMMIT_TRACE_TAIL
+    } else {
+        HOOK_COMMIT_TRACE_HEAD
+    };
+    let mut first = Vec::new();
+    let mut last = Vec::new();
+    let mut read = (&mut file).take(bound).read_to_end(&mut first);
+    if omitted > 0 && read.is_ok() {
+        read = file
+            .seek(SeekFrom::Start(HOOK_COMMIT_TRACE_HEAD + omitted))
+            .and_then(|_| {
+                (&mut file)
+                    .take(HOOK_COMMIT_TRACE_TAIL)
+                    .read_to_end(&mut last)
+            });
+    }
+    eprintln!(
+        "{label}: Git Trace2 {shown}: {size} bytes, {omitted} omitted between its first \
+         {HOOK_COMMIT_TRACE_HEAD} and last {HOOK_COMMIT_TRACE_TAIL}; each `  | ` line is one \
+         piece up to a newline byte, escaped by escape_ascii"
+    );
+    for piece in first.split_inclusive(|byte| *byte == b'\n') {
+        eprintln!("  | {}", piece.escape_ascii());
+    }
+    if omitted > 0 {
+        eprintln!("{label}: Git Trace2 {shown}: {omitted} bytes omitted here");
+        for piece in last.split_inclusive(|byte| *byte == b'\n') {
+            eprintln!("  | {}", piece.escape_ascii());
+        }
+    }
+    let shown_bytes = first.len() + last.len();
+    match read {
+        Ok(_) => eprintln!("{label}: Git Trace2 {shown}: end, {shown_bytes} bytes shown"),
+        Err(error) => eprintln!(
+            "{label}: Git Trace2 {shown}: read stopped after {shown_bytes} bytes: {error}"
+        ),
+    }
 }
 
 #[cfg(unix)]
