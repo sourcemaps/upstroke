@@ -317,7 +317,7 @@ pools file that says something else entirely.
 History first, then live events: dropping a reader into the
 middle of a run tells them less than showing how it got here.
 
-## `fn execute(command: Command, _contained: Contained) -> anyhow::Result<ExitCode> {` › `let settled = status::load(&repo_root, Some(&run.run_id))?;`
+## `fn execute(command: Command, _contained: Contained) -> anyhow::Result<ExitCode> {` › `let settled = status::load(&repo_root, Some(&followed))?;`
 
 Re-read: the run has moved since the summary would have been
 computed, and the closing summary is the useful one.

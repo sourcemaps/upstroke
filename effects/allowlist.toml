@@ -1429,7 +1429,39 @@ In the third, a relative `GIT_COMMON_DIR` names a copy of the repository's Git \
 directory, whose `worktrees` directory is a symbolic link into another \
 repository, from the repository and from the store the run's gate snapshot is \
 made in, and a configured gate makes the run take a gate snapshot; the test \
-asserts the same as the second. All three run under the same allow."""
+asserts the same as the second. All three run under the same allow.
+
+AMENDED THRICE, for PR12, on its root's direction of 2026-11-03 (`e0df36c4…`) \
+under the owner's delegation, as text only: no lint name, path or other field \
+of this entry changes, and no allow is added. PR12 makes a fresh run write \
+schema 4 behind the same entry points, and the file gains appended tests that \
+drive that path. They start runs through `run_with` with the test-only legacy \
+writer off (`topology_options`), continue them through `resume_with`, and \
+read, answer and export them through `crate::status`, `crate::answer` and \
+`crate::export`, as the existing tests do. Some start the test binary as a \
+child running an ignored helper, as the existing interrupted-run tests do; the \
+signal test owns its child through `crate::workspace_manager`'s `LinkedChild` \
+fixture and signals it with `kill`. PR12's review repairs append more of the \
+same kind: a frontier escalation's spend approval, an answer's words reaching \
+the next worker and its reviewer, a report that counts each integration review \
+once, a resume that names how today's gates differ from the recorded ones, a \
+private root no string can spell and one named with the replacement character, \
+the signal test's helper settled when its readiness or its signal fails or when \
+the command delivering its signal never exits (a stub the test writes, run as a \
+`LinkedChild` and waited for within its bound), and a mount inside an inherited \
+common directory refused by `run_with` and `resume_with` before the container \
+runtime is asked, in a child whose environment alone carries `GIT_COMMON_DIR`, \
+with a stub `docker` first on its `PATH` and a parked run's committed \
+`run_started` made to record that mount. \
+Existing tests and helpers change only so: the shared `options` helper selects \
+the legacy writer, so they still drive schemas 1..3; `empty_report` sets the \
+report's new `questions_in_log`; they read a legacy run's status through a \
+`legacy_status` helper, now that `crate::status::load` reads schema 4 too; the \
+Git shim is written by a process of its own \
+(`crate::runner::container::write_program_in_its_own_process`); and \
+`a_run_that_dies_between_its_pins_commit_and_its_ref_loses_nothing_on_resume` \
+asserts its shim through the file's `assert_the_shim_fired`. All of them run \
+under the same allows."""
 shrinks_when = "the legacy engine goes; these tests go with it."
 
 [[legacy]]

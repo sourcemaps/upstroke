@@ -1,10 +1,10 @@
 //! Extended notes: `docs/internals/engine/topology/select.md`
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::error::UpstrokeError;
 use crate::events::RunOutcome;
-use crate::events::{AttemptRecord, BudgetKind};
+use crate::events::{AttemptRecord, BudgetKind, ReviewRecord};
 use crate::ir::QuestionId;
 use crate::runner::InvocationId;
 use crate::topology::events::{
@@ -115,6 +115,117 @@ impl Spend {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct IntegrationReviews {
+    by_task: BTreeMap<TaskKey, Vec<ReviewRecord>>,
+    unattributed: Vec<ReviewRecord>,
+    interrupted: BTreeSet<TaskKey>,
+    interrupted_unattributed: bool,
+}
+
+impl IntegrationReviews {
+    #[must_use]
+    pub fn replay(events: &[TopologyEvent]) -> Self {
+        let mut reviews = Self::default();
+        let mut verifying: Option<(SequenceId, TaskKey)> = None;
+        for event in events {
+            match &event.body {
+                TopologyEventBody::MergeVerificationStarted { data } => {
+                    verifying = Some((data.sequence, data.candidate.key));
+                }
+                TopologyEventBody::MergeVerificationUnavailable { data } => {
+                    let key = verifying
+                        .take()
+                        .filter(|(sequence, _)| *sequence == data.sequence)
+                        .map(|(_, key)| key);
+                    reviews.add(key, &data.reviews);
+                }
+                TopologyEventBody::MergeVerificationCharged { data } => {
+                    let key = verifying
+                        .as_ref()
+                        .filter(|(sequence, _)| *sequence == data.sequence)
+                        .map(|(_, key)| *key);
+                    reviews.add(key, &data.reviews);
+                }
+                TopologyEventBody::MergePrepared { data } => {
+                    if let Some(verification) = &data.verification {
+                        reviews.add(Some(data.key), &verification.reviews);
+                    }
+                }
+                TopologyEventBody::MergeRejected { data } => {
+                    if let crate::topology::events::RejectionDisposition::CodeRejected {
+                        verification,
+                    } = &data.disposition
+                    {
+                        reviews.add(Some(data.candidate.key), &verification.reviews);
+                    }
+                }
+                TopologyEventBody::MergeVerificationInterrupted { data } => {
+                    match verifying
+                        .take()
+                        .filter(|(sequence, _)| *sequence == data.sequence)
+                    {
+                        Some((_, key)) => {
+                            reviews.interrupted.insert(key);
+                        }
+                        None => reviews.interrupted_unattributed = true,
+                    }
+                }
+                _ => {}
+            }
+        }
+        reviews
+    }
+
+    fn add(&mut self, key: Option<TaskKey>, passes: &[ReviewRecord]) {
+        match key {
+            Some(key) => self
+                .by_task
+                .entry(key)
+                .or_default()
+                .extend(passes.iter().cloned()),
+            None => self.unattributed.extend(passes.iter().cloned()),
+        }
+    }
+
+    #[must_use]
+    pub fn of_task(&self, key: TaskKey) -> &[ReviewRecord] {
+        self.by_task.get(&key).map_or(&[][..], Vec::as_slice)
+    }
+
+    #[must_use]
+    pub fn unattributed(&self) -> &[ReviewRecord] {
+        &self.unattributed
+    }
+
+    pub fn all(&self) -> impl Iterator<Item = &ReviewRecord> {
+        self.by_task.values().flatten().chain(&self.unattributed)
+    }
+
+    #[must_use]
+    pub fn spend_unknown(&self, key: TaskKey) -> bool {
+        self.interrupted.contains(&key)
+            || self
+                .of_task(key)
+                .iter()
+                .any(|review| review.cost_usd.is_none())
+    }
+
+    #[must_use]
+    pub const fn interrupted_unattributed(&self) -> bool {
+        self.interrupted_unattributed
+    }
+
+    #[must_use]
+    pub fn unattributed_spend_unknown(&self) -> bool {
+        self.interrupted_unattributed
+            || self
+                .unattributed
+                .iter()
+                .any(|review| review.cost_usd.is_none())
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Ceiling {
     pub run_usd: Option<f64>,
@@ -221,6 +332,9 @@ pub enum Admitted {
         questions: Vec<QuestionId>,
     },
     Closure(DerivedOutcome),
+    ApproveSpend {
+        key: TaskKey,
+    },
 }
 
 #[must_use]

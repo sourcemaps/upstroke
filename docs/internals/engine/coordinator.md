@@ -36,6 +36,39 @@ leaving this file) and denied by path in `clippy.toml` like the conductors
 below. The bodies are what they were; the call in `run_contained` lost its
 `coordinator::` prefix and the two seams became `pub(super)`.
 
+## `if opts.writes_topology() {`
+
+PR12's dispatch: since the topology is active, `upstroke run` creates a
+schema-4 run, and this branch is it. The order is the read-only half
+([`crate::engine::topology::entry::prepare_fresh`], after containment), then
+the physical worktree lease (`FreshPrepared::lease`), the command's first
+effect, then — under that lease — the legacy admission of the checkout
+(`refuse_dirty_tree`: the run exclusion, then the refusal of a dirty tree; L2),
+then the include publication, written here because `recorded_objects_scope` is
+denied to every topology module, then the effectful half (`FreshLeased::run`),
+which keeps the same lease through the startup census and the run. The
+admission is here for the same reason: `Workspace::ensure_run_exclusions` is an
+effectful wrapper no topology module may call, so the schema-4 entry cannot
+make it, and this is the first point on the path where the legacy entry's rule
+can run as written once the lease is held, before anything of the run exists.
+The include goes under the root the read-only half authorized, or under the
+default root, which it creates when missing (root's Q4: only after the runtime,
+image and credential-volume refusals, and only after the read-only half has
+refused a default root that would resolve to a path no string spells, J14, so
+that refusal leaves nothing behind). The legacy body below runs only for the
+test configuration's legacy writer ([`RunOptions::writes_topology`](options.md)).
+
+Until repair10 the exclusion and the include came before the lease, so a fresh
+run that lost it — to a conductor holding it, or to a surviving reaper's
+cleanup hold on a run of the checkout — had already written both: one defect,
+reported three times (PR12-R9-PUBLIC-PUBLICATION-BEFORE-WORKTREE-LOCK,
+PR12-REG7-PRELOCK-WRITES, PR12-N4-PRELOCK-PUBLICATION) against the canonical
+rule that a write command's first effect is the worktree lock. The ordering is
+in `engine/topology/entry.md`; the guards are
+`engine::tests::a_fresh_schema_4_run_that_loses_the_worktree_lease_publishes_no_exclusion_and_no_include`
+and, for the default private root (Unix),
+`engine::tests::a_fresh_schema_4_run_over_the_default_root_that_loses_the_worktree_lease_creates_nothing_under_home`.
+
 ## `run_harness_on(opts, harness, &HostRunner::for_legacy_workspace(repository))`
 
 The v0.1 conductor's runner, and the same call in [`resume_harness`](resume.md).
@@ -67,7 +100,40 @@ the private root. That write happens even for a run refused later, and is
 harmless: the file's bytes never vary, it lives in the private root, and no Git
 configuration names it; only the environment of a role this runner starts does.
 
-## `if !workspace.is_clean()? {`
+## `fn refuse_dirty_tree(workspace: &Workspace) -> Result<(), UpstrokeError> {`
+
+The checkout's admission, one definition for both entries (L2, regression
+review 3, finding 2; DESIGN §20, "the engine refuses dirty trees"): first
+`Workspace::ensure_run_exclusions`, so the engine's own `.upstroke/` (its public
+run directories) is ignored by Git, then `Workspace::is_clean`, refusing any
+staged, unstaged or untracked change with the message below. The order is the
+legacy entry's and it is load-bearing: without the exclusion, a repository that
+already holds a run's public directory reads as dirty, and its next run is
+refused for the engine's own files (measured with the exclusion removed: the
+second fresh schema-4 run in one repository was refused).
+
+Both entries call it under the worktree lease. The legacy entry
+(`run_harness_inner_with_id`) calls it after `ensure_execution_prerequisites`,
+where these two steps were written inline, and the schema-4 dispatch in
+`run_harness` calls it after `FreshPrepared::lease` and before the include
+publication. Until L2 the schema-4 path made no such check: a fresh `upstroke
+run` over a modified tracked file ran its worker and reviewer against the
+committed tree, recorded a completed run and exited 0 (the reviewer's executed
+comparison; the base refused with this message and created no run log). From
+L2 until repair10 the schema-4 dispatch called it before any lease, so a run
+that went on to lose the lease had written the exclusion first. A refused run
+leaves the exclusion (`.upstroke/.gitignore`) and, as every command that took
+the lease does, the worktree lock file (R25, which spans runs), and nothing
+else, as the legacy entry always has.
+
+The exclusion is also what keeps an admitted fresh run's generated public files
+out of Git (L4, regression review 3, finding 4). Before L2 a schema-4 run made no
+exclusion, so a completed run left `?? .upstroke/` in `git status`, and an
+ordinary `git add -A` took its log, frozen plan, report and locks.
+`engine::tests::a_completed_schema_4_run_leaves_no_generated_file_for_an_ordinary_git_add_to_take`
+pins that. The schema-4 resume makes the exclusion itself (`resume.md`).
+
+## `refuse_dirty_tree` › `if !workspace.is_clean()? {`
 
 The dirty-tree refusal names the command that shows what upstroke found,
 `git --no-replace-objects -c core.useReplaceRefs=false status`, and `git replace
@@ -776,6 +842,18 @@ and write the payload where a UI or `upstroke answer` can read it.
 frontier rung, and the run has already reported enough spend that the
 operator asked to be consulted first.
 
+The question names its task through `build_question`, as every question this
+engine raises does, and its context describes the plan task that question
+names (`SpendSubject`). So the function reads no row of the plan or of the
+run's state by position; a function-local `#[deny(clippy::indexing_slicing)]`
+holds that (J16, regular review 3, finding 4; regression review 2, finding 6).
+A question that names no task of the plan, which `build_question` cannot
+produce, would carry the spend facts without the task line and the acceptance
+list rather than invented ones. Until J16 the function built a `ParkSubject`
+from `plan.tasks[index]` and `state.progress[index]`; J1 had added the second
+read for an attempt count and rungs spent that the spend question never
+prints.
+
 ## `impl Run<'_>` › `fn unpriced_attempts(&self) -> u32 {`
 
 Attempts whose route reported no spend at all (§13), so the figures this
@@ -930,13 +1008,16 @@ attempt.
 
 The schema-4 driver's options for the same kinds, worded for what that
 engine does with an answer. `question_answered(schema 4)` records an option
-index and, for a binding, an override; it has no field for typed text, so a
-typed answer un-parks the task and reaches no agent
-(`PR249-ANSWER-TEXT-NOT-CARRIED`). PR8's fourteenth review found the
-`Clarify` list promising delivery the driver does not make; this list
-promises nothing it cannot keep, and its give-up option is the shared
-constant, so `answer_for_option` reads it as a decline. `ApproveSpend` is
-not a kind this driver raises and keeps the legacy pair for totality.
+index, for a binding an override, and since J2 the person's words (`text`).
+Typed text un-parks the task and reaches its next attempt as an instruction
+and its review as a decision (`run::Brief::record_answer`). The retry
+option says so. It promised the opposite while the vocabulary had no field
+for the words (`PR249-ANSWER-TEXT-NOT-CARRIED`). PR8's fourteenth review
+had found the `Clarify` list promising a delivery the driver did not make.
+The give-up option is the shared constant, so `answer_for_option` reads it
+as a decline. `ApproveSpend` keeps
+the legacy pair, approve or the shared decline constant. The schema-4 driver
+raises it since J1 (`TopologyRun::ask_to_approve_spend`).
 
 ## `pub(super) fn question_context(`
 
@@ -948,10 +1029,26 @@ plan. Naming them lets the schema-4 driver, which holds a `FrozenTaskSpec`
 and no `Task`, raise the same question the legacy engine does rather than
 wording its own.
 
-## `fn spend_question_context(`
+## `pub(super) struct SpendSubject<'a> {`
+
+The task a spend approval describes: its display id, its title and its
+acceptance list, the three things the question prints. A [`ParkSubject`]
+also carries the attempts and rungs a park question quotes, which a spend
+question does not, so neither engine needs a task's progress to word one.
+
+## `impl<'a> SpendSubject<'a>` › `fn from_task(task: &'a Task) -> Self {`
+
+The subject of a schema-3 plan task.
+
+## `pub(super) fn spend_question_context(`
 
 §12's spend approval, in the operator's terms: what is about to happen, what
-it has cost so far, and how confident that figure is.
+it has cost so far, and how confident that figure is. The task comes as a
+[`SpendSubject`], so the schema-4 driver words its approval question the same
+way, including for a repair task the plan never named (J1). Without a subject
+the task line and the acceptance list are left out and the rest is unchanged.
+Each `let _ = writeln!` writes into a `String`, whose `fmt::Write` cannot
+fail, so nothing but `Ok` is discarded.
 
 The threshold is a **spend-to-date** reading rather than a forward
 projection, and the text says so — see [`crate::config::AskBefore`] for why.
@@ -959,6 +1056,16 @@ The figure itself is quoted with the ledger's own `?` honesty: a run whose
 Copilot attempts report nothing has a reported total that is a floor, and
 presenting a floor as a total is how someone approves a number they did not
 actually see.
+
+`floor` is the caller's: the sequential engine's `unpriced_attempts` (a record
+with no cost or an incomplete review cost, an interrupted attempt among them),
+and the schema-4 driver's `spend_is_a_floor`, which is the schema-4 report's own
+`total_is_floor` (K5). A floor is worded for every cause either can find, not
+only a route that reports no spend: "some of the run's spend was never reported,
+by an attempt or a review pass on a route that reports none, or by one the engine
+was killed inside", and the figure is "at least what the run has already cost".
+Until K5 the qualifier named routes that report no spend alone, and the sentence
+after it said the figure was what the run had cost even when it was a floor.
 
 ## `run_harness_inner_with_id` › `path: plan_path.clone(),`
 

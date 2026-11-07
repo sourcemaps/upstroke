@@ -136,6 +136,15 @@ a `Mount::Tmpfs` and therefore has **no host source**, so "gate write
 outside mount fails" stays a statement about a mount list every entry of
 which is either the role's own or unreachable from the coordinator.
 
+## `impl BoundaryLayout` › `pub const DEFAULT_SETTINGS: &'static str = "/upstroke/settings";`
+
+Where an agent's own settings file is bound, read-only. It is the one file
+of the run's private half a container receives: the file the engine
+materialized for that invocation, which its `CommandSpec::settings_file`
+records and an argument names (`exec::ContainerRunner`'s `settings_for`,
+PR12-CONTAINER-CLAUDE-SETTINGS-HOST-PATH). `with_roots` keeps the default,
+since nothing has needed to move it.
+
 ## `impl BoundaryLayout` › `pub fn new() -> Self {`
 
 The default layout.
@@ -177,6 +186,12 @@ Where this agent's credential volume is mounted.
 ## `impl BoundaryLayout` › `pub fn credential_root(&self) -> &str {`
 
 The credential root itself.
+
+## `impl BoundaryLayout` › `pub fn settings(&self, file_name: &str) -> String {`
+
+The container path of the settings file `file_name`, under
+[`Self::DEFAULT_SETTINGS`]: the mount target and the argument the agent
+receives come from this one place.
 
 ## `pub const fn supplies_credential_location(role: &ExecutionRole) -> bool {`
 
@@ -428,43 +443,52 @@ carry in a gate's environment, and would make this step
 output-equivalent to deleting it, because [`Self::reserved_values`]
 reads its values back out of the same base.
 
-[`NO_REPLACEMENT_OBJECTS`](../../../../src/workspace_manager.rs) last, after the
-overlay, for the reason `host-v1` states in its own notes. The base here is an
-image's `ENV`, which this runner did not write, so an image declaring the key is
-one more reason the runner's own write comes last.
+**No process-wide replacement setting since PR12 (Q2).** Until PR12 this step
+composed [`NO_REPLACEMENT_OBJECTS`](../../../../src/workspace_manager.rs) last, after
+the overlay, for every role: "which object graph a schema-4 role reads" — and the
+variable is process-wide, so every repository a container role touched lost its
+replacements too (the container half of
+`PR326-SCHEMA4-ROLE-ENVIRONMENT-REFUSES-REPLACEMENTS-EVERYWHERE`). The managed
+repository's guarantee now lives where only the managed repository can read it:
+the role's projected Git view, which the runner generates, carries
+`core.useReplaceRefs = false` in its own `config` (`view::config_for`). Git reads a
+repository's config for that repository under whatever spelling names it, so the
+view refuses replacements under any path spelling; a repository a role creates,
+clones or is given through `[runner] mounts` keeps Git's own semantics; and nothing
+is written into the user's repository. An image's own `GIT_NO_REPLACE_OBJECTS`
+passes through as the image declared it.
 
-**The Git view a container receives carries no `refs/replace/*` — and no refs at
-all** (PR #271, round 2's P3; the claim that stood here said the opposite).
-`RoleGitView::project` writes `HEAD`, `config`, `index`,
-`objects/info/alternates`, `objects/pack`, the worktree gitfile, and **empty**
-`refs/heads` and `refs/tags` directories; `packed-refs` is in
-`WITHHELD_ENTRIES`. Measured through production `RoleGitView::materialize`, with
-one `refs/replace/<HEAD> -> <HEAD~1>` installed in the source and raw `git`
-children at both ends: the source enumerates that ref and answers `git show
-HEAD:second.txt` with `128`, `fatal: path 'second.txt' exists on disk, but not
-in 'HEAD'`; through the projection `for-each-ref` returns nothing at all — for
-`refs/replace/` and for every namespace — and the same read answers `0`,
-`two\n`. `the_role_view_carries_no_engine_refs_and_no_link_back_into_the_repository`
-in `src/runner/container/view.rs` is that boundary's own guard.
+**What the projection already did, and still does.** The Git view a container
+receives carries no `refs/replace/*` — and no refs at all (PR #271, round 2's P3).
+`RoleGitView::project` writes `HEAD`, `config`, `index`, `objects/info/alternates`,
+`objects/pack`, the worktree gitfile, and **empty** `refs/heads` and `refs/tags`
+directories; `packed-refs` is in `WITHHELD_ENTRIES`. Measured through production
+`RoleGitView::materialize`, with one `refs/replace/<HEAD> -> <HEAD~1>` installed in
+the source and raw `git` children at both ends: the source enumerates that ref and
+answers `git show HEAD:second.txt` with `128`, and through the projection
+`for-each-ref` returns nothing and the same read answers `0`, `two\n`. That
+containment decision is free to change without the object-graph statement
+changing, which is why the view's config states the policy itself.
 
-So the isolation composed here is not what stops a container role reading a
-replacement today; the projection is. It is composed anyway because the two are
-independent facts with independent reasons. This one states **which object graph
-a schema-4 role reads**, and it is the same sentence `design/15` writes for the
-host; the projection's ref list is a *containment* decision — nothing that links
-back into the engine's repository — taken for a different reason and free to
-change without this one changing. Resting the object-graph guarantee on it would
-mean the day a namespace is projected, or `packed-refs` stops being withheld, the
-isolation is silently gone and nothing says so. The objects themselves are
-reachable either way: `objects/info/alternates` points at the repository's own
-store, so what a replacement would point *at* is already in scope; only the ref
-that would activate it is not.
-
-The pair also outranks a relocated namespace, so no second key is owed here:
-`GIT_REPLACE_REF_BASE` moves where Git looks for replacements, and with
-`GIT_NO_REPLACE_OBJECTS` set Git does not look (measured on git 2.43.0 —
-`GIT_REPLACE_REF_BASE=refs/elsewhere/` alone reads the replacing blob, and with
-the pair it reads the recorded one).
+**Scope limit, stated plainly.** The view is writable (only the objects mount is
+read-only), and configuration is not an enforcement boundary: a role can install a
+replacement in its own disposable view, and a higher-precedence setting — an
+image's or overlay's `GIT_CONFIG_*` pair or `GIT_CONFIG_PARAMETERS`, or a
+`git -c core.useReplaceRefs=true` — outranks a repository's config, where the
+process-wide variable was final on Git 2.42 and later. A role can therefore read a
+replacement only of its own making, in its own view, for its own process tree; no
+other role's view, and nothing the engine captures (the engine's Git reads the
+recorded graph itself), sees it.
+`view::tests::the_view_config_refuses_replacements_and_an_unrelated_repository_keeps_them`
+is the bounded witness, with real Git reads under a gate's **composed** container
+environment (a controlled image base: this host's `PATH`, a scratch `HOME`, an empty
+global config, no system config; `GIT_NO_REPLACE_OBJECTS`, `GIT_REPLACE_REF_BASE`,
+`GIT_CONFIG_PARAMETERS` and `GIT_CONFIG_COUNT` checked absent by name): a
+replacement installed in the view and read through two spellings of the view
+reads the recorded object exactly; an unrelated repository's own blob replacement
+is read positively (`replaced`), beside its recorded control under
+`--no-replace-objects` (`two`); the source repository's config is unchanged. It
+runs on the host, so it is not the real-container acceptance, which remains owed.
 
 ### Errors
 
@@ -485,29 +509,16 @@ ones and before the overlay, so the two sets cannot collide (a key in
 one is by construction not in the other) and the overlay's own
 reserved-key refusal still governs.
 
-## `fn every_composed_environment_disables_replacement_objects() {`
+## `fn no_composed_environment_disables_replacement_objects_process_wide() {`
 
-The container boundary composes the replacement isolation too, from an
-image base it did not write, under any overlay, and under **both** name
-rules (PR #130, pass 3's P1; the second name rule, PR #271 round 1's P3).
-An image is free to declare `ENV GIT_NO_REPLACE_OBJECTS=` and this
-boundary has to outrank it.
-
-`from_image` selects `CONTAINER_KEY_CASE` alone, so this grid builds its
-environments with `with_base` and walks `KeyCase::ALL`: the host witness
-covers both rules and the claim that both boundaries do had to be made
-true rather than narrowed. The image's own entry is spelled in lower case
-and the assertion collects *every* entry the rule in force calls this
-name, so a case-insensitive compose that appended a second entry instead
-of overwriting the image's is a failure here rather than a duplicate key
-in a container's environment.
-
-Witnessed failing with the upsert removed from `compose`: `[]` against
-`["1"]` for every role and both rules — the image's own empty value the
-only entry. Witnessed failing on the `Insensitive` rows alone with the
-upsert's `self.case` replaced by `KeyCase::Sensitive`, which is the
-mutation the single-rule grid could not see: `["", "1"]` against
-`["1"]`.
+Since PR12 (Q2) the boundary composes **no** replacement setting: for every
+role, under both name rules, an environment whose image declares none carries
+none, and an image's own entry — set or empty — passes through exactly as the
+image declared it. The managed repository's view refuses replacements in its
+own config (`view::config_for`, witnessed by
+`view::tests::the_view_config_refuses_replacements_and_an_unrelated_repository_keeps_them`).
+Until PR12 this test was `every_composed_environment_disables_replacement_objects`,
+asserting the process-wide variable on every composed environment.
 
 ## `impl ContainerEnvironment` › `pub fn certify_path(&self, composed: &[(String, String)]) -> Result<(), UpstrokeError> {`
 

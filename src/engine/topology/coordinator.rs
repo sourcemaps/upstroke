@@ -622,6 +622,10 @@ impl Coordinator<'_> {
                         super::run::begin_dispatch(self, manager, key, generation, continuing)?;
                     self.spawn_attempt(job);
                 }
+                Admitted::ApproveSpend { key } => {
+                    self.open_gate();
+                    self.run.ask_to_approve_spend(key, self.seams, self.hooks)?;
+                }
                 Admitted::Backoff | Admitted::HardBlock { .. } | Admitted::Closure(_) => {
                     self.open_gate();
                     return Ok(());
@@ -11931,6 +11935,7 @@ mod tests {
                     decline_halts_run: false,
                 },
                 via: "the scheduler declines the sibling's question".to_owned(),
+                text: None,
             },
         });
         events
@@ -21051,9 +21056,185 @@ git cat-file -e 'HEAD^{tree}'
     }
 
     #[cfg(unix)]
+    #[derive(Clone, Copy, Debug)]
+    enum ProbeSchedule {
+        Free,
+        #[cfg(target_os = "linux")]
+        HeldAtItsListing,
+    }
+
+    #[cfg(target_os = "linux")]
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum GateState {
+        Unarmed,
+        Armed,
+        LetGo,
+    }
+
+    #[cfg(unix)]
+    struct KeptForItsBackstop {
+        env: Option<crate::engine::topology::scaffold::WideEnv>,
+        logs: Option<crate::rundir::scratch_tree::ScratchTree>,
+        schedule: ProbeSchedule,
+        #[cfg(target_os = "linux")]
+        gate: std::path::PathBuf,
+        #[cfg(target_os = "linux")]
+        gate_state: std::cell::Cell<GateState>,
+    }
+
+    #[cfg(unix)]
+    impl KeptForItsBackstop {
+        fn new(
+            env: crate::engine::topology::scaffold::WideEnv,
+            logs: crate::rundir::scratch_tree::ScratchTree,
+            schedule: ProbeSchedule,
+        ) -> Self {
+            #[cfg(target_os = "linux")]
+            let gate = logs.path().join("backstop-gate");
+            Self {
+                env: Some(env),
+                logs: Some(logs),
+                schedule,
+                #[cfg(target_os = "linux")]
+                gate,
+                #[cfg(target_os = "linux")]
+                gate_state: std::cell::Cell::new(GateState::Unarmed),
+            }
+        }
+
+        fn env(&self) -> &crate::engine::topology::scaffold::WideEnv {
+            self.env
+                .as_ref()
+                .expect("the real fixture is kept until its owner drops")
+        }
+
+        fn logs(&self) -> &std::path::Path {
+            self.logs
+                .as_ref()
+                .expect("the kill directory is kept until its owner drops")
+                .path()
+        }
+
+        fn child_environment(&self) -> Vec<(&'static str, &std::ffi::OsStr)> {
+            let named = [
+                ("UPSTROKE_TEST_CHILD_ROLE", std::ffi::OsStr::new("resume")),
+                (
+                    "UPSTROKE_TEST_CHILD_ROOT",
+                    self.env().fixture.root.as_os_str(),
+                ),
+                (
+                    "UPSTROKE_TEST_CHILD_INCARNATION",
+                    std::ffi::OsStr::new(INC_2),
+                ),
+            ];
+            #[cfg(target_os = "linux")]
+            let gate = matches!(self.schedule, ProbeSchedule::HeldAtItsListing)
+                .then_some((crate::agent::proc::BACKSTOP_GATE, self.gate.as_os_str()));
+            #[cfg(not(target_os = "linux"))]
+            let gate = None;
+            named.into_iter().chain(gate).collect()
+        }
+
+        fn arm(&self) {
+            #[cfg(target_os = "linux")]
+            if matches!(self.schedule, ProbeSchedule::HeldAtItsListing) {
+                self.gate_state.set(GateState::Armed);
+                for point in ["decided", "decided.arrived", "listed.arrived"] {
+                    crate::workspace_manager::fixture::write_file(&self.gate_point(point), b"");
+                }
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        fn gate_point(&self, point: &str) -> std::path::PathBuf {
+            let mut name = self.gate.clone().into_os_string();
+            name.push(".");
+            name.push(point);
+            std::path::PathBuf::from(name)
+        }
+
+        fn let_the_backstop_go(&self) -> Result<(), String> {
+            #[cfg(target_os = "linux")]
+            if self.gate_state.get() == GateState::Armed {
+                let release = self.gate_point("listed");
+                let shown = release.display().to_string();
+                std::thread::Builder::new()
+                    .name("backstop-gate-release".to_owned())
+                    .spawn(move || crate::workspace_manager::fixture::write_file(&release, b""))
+                    .map_err(|error| {
+                        format!("no thread could release the backstop's gate at {shown}: {error}")
+                    })?
+                    .join()
+                    .map_err(|_| format!("the backstop's gate at {shown} could not be released"))?;
+                self.gate_state.set(GateState::LetGo);
+                let passed = self.gate_point("decided.arrived");
+                let started = std::time::Instant::now();
+                while !the_backstop_reached(&passed) {
+                    if started.elapsed() >= REAPER_BOUND {
+                        return Err(format!(
+                            "the backstop let go at its listing was not past its gate ({}) \
+                             within {REAPER_BOUND:?}",
+                            passed.display()
+                        ));
+                    }
+                    crate::workspace_manager::fixture::rest_within(
+                        Duration::from_millis(20),
+                        REAPER_BOUND.saturating_sub(started.elapsed()),
+                    );
+                }
+            }
+            Ok(())
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for KeptForItsBackstop {
+        fn drop(&mut self) {
+            let released = self.let_the_backstop_go();
+            let unheld = match &self.env {
+                Some(env) => no_cleanup_hold_is_left(&env.paths.public),
+                None => Ok(()),
+            };
+            drop(self.env.take());
+            drop(self.logs.take());
+            for why in [released, unheld].into_iter().filter_map(Result::err) {
+                if std::thread::panicking() {
+                    crate::workspace_manager::fixture::say(&why);
+                } else {
+                    panic!("{why}");
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn no_cleanup_hold_is_left(public: &std::path::Path) -> Result<(), String> {
+        let started = std::time::Instant::now();
+        while crate::rundir::observe_cleanup_hold(public, &mut crate::rundir::NoHooks) {
+            if started.elapsed() >= REAPER_BOUND {
+                return Err(format!(
+                    "the cleanup lease of {} was still held after {REAPER_BOUND:?}, so the real \
+                     fixture was let go under a holder",
+                    public.display()
+                ));
+            }
+            crate::workspace_manager::fixture::rest_within(
+                Duration::from_millis(20),
+                REAPER_BOUND.saturating_sub(started.elapsed()),
+            );
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn the_backstop_reached(arrival: &std::path::Path) -> bool {
+        std::fs::metadata(arrival).is_ok_and(|metadata| metadata.len() > 0)
+    }
+
+    #[cfg(unix)]
     struct DiedInItsProbe {
+        kept: KeptForItsBackstop,
         host: crate::runner::container::FakeRuntime,
-        _logs: crate::rundir::scratch_tree::ScratchTree,
         relay: std::path::PathBuf,
         program: std::path::PathBuf,
         private: std::path::PathBuf,
@@ -21062,11 +21243,55 @@ git cat-file -e 'HEAD^{tree}'
     }
 
     #[cfg(unix)]
+    impl DiedInItsProbe {
+        fn its_lawful_paths_are_present(&self) {
+            let env = self.kept.env();
+            let lawful = [
+                crate::rundir::worktree_lock_file(&env.fixture.base.join(".git")),
+                crate::rundir::lock_file(&env.paths.public),
+                env.paths.public.join("cleanup.lock"),
+            ];
+            let missing: Vec<&std::path::PathBuf> =
+                lawful.iter().filter(|path| !path.is_file()).collect();
+            assert!(
+                missing.is_empty(),
+                "after its helper returned ({:?}), the dead coordinator's real fixture still has \
+                 the worktree lock, the run lock and the cleanup lease its backstop opens after \
+                 its listing; missing: {missing:?}",
+                self.kept.schedule
+            );
+        }
+
+        #[cfg(target_os = "linux")]
+        fn held_at_its_listing(&self) {
+            let arrived = self.kept.gate_point("listed.arrived");
+            within(
+                REAPER_BOUND,
+                "the dead coordinator's backstop held at its listing after its helper returned",
+                || the_backstop_reached(&arrived),
+            );
+            assert_eq!(
+                crate::runner::container::FakeRuntime::reaper_calls(&self.relay),
+                vec![reaper_listing(&self.program, &self.private, INC_2)],
+                "held at its listing, the backstop has listed the probe once and has killed and \
+                 removed nothing"
+            );
+        }
+
+        #[cfg(target_os = "linux")]
+        fn let_its_backstop_go(&self) {
+            if let Err(why) = self.kept.let_the_backstop_go() {
+                panic!("{why}");
+            }
+        }
+    }
+
+    #[cfg(unix)]
     fn a_resume_killed_inside_its_pre_flight_probe(
         tag: &str,
+        schedule: ProbeSchedule,
         beside: impl FnOnce(&crate::runner::container::FakeRuntime, &std::path::Path),
     ) -> DiedInItsProbe {
-        use std::ffi::OsStr;
         let tasks = three();
         let Wide { run, env } = Wide::durable_contained(
             tag,
@@ -21082,14 +21307,11 @@ git cat-file -e 'HEAD^{tree}'
         let logs = crate::engine::topology::scaffold::kill_dir(tag);
         let relay = logs.path().join("relay");
         let program = host.install_reaper_relay(&relay);
+        let kept = KeptForItsBackstop::new(env, logs, schedule);
         let child = served(
-            logs.path(),
+            kept.logs(),
             "resume",
-            &[
-                ("UPSTROKE_TEST_CHILD_ROLE", OsStr::new("resume")),
-                ("UPSTROKE_TEST_CHILD_ROOT", env.fixture.root.as_os_str()),
-                ("UPSTROKE_TEST_CHILD_INCARNATION", OsStr::new(INC_2)),
-            ],
+            &kept.child_environment(),
             host.acting_as(INC_2),
         );
         await_starts(&host, INC_2, 1);
@@ -21104,21 +21326,23 @@ git cat-file -e 'HEAD^{tree}'
             crate::runner::container::FakeRuntime::reaper_calls(&relay).is_empty(),
             "the reaper acts on nothing while its coordinator lives"
         );
-        beside(&host, &env.fixture.private);
+        beside(&host, &kept.env().fixture.private);
         host.publish_for_reaper(&relay);
         let censused_before_the_death = censused(&host);
+        kept.arm();
         let died = child.kill();
         assert!(
             !died.success(),
             "the resuming coordinator was killed: {died:?}"
         );
         drop(child);
+        let private = kept.env().fixture.private.clone();
         DiedInItsProbe {
+            kept,
             host,
-            _logs: logs,
             relay,
             program,
-            private: env.fixture.private.clone(),
+            private,
             probe,
             censused_before_the_death,
         }
@@ -21128,7 +21352,12 @@ git cat-file -e 'HEAD^{tree}'
     #[test]
     fn a_resuming_incarnations_pre_flight_probe_container_is_killed_by_its_reaper_when_the_coordinator_dies_inside_it()
      {
-        let died = a_resume_killed_inside_its_pre_flight_probe("reaper-pre-flight", |_, _| {});
+        let died = a_resume_killed_inside_its_pre_flight_probe(
+            "reaper-pre-flight",
+            ProbeSchedule::Free,
+            |_, _| {},
+        );
+        died.its_lawful_paths_are_present();
         reclaimed_by_its_reaper(&Reclaimed {
             host: &died.host,
             relay: &died.relay,
@@ -21146,8 +21375,13 @@ git cat-file -e 'HEAD^{tree}'
         use crate::runner::container::FakeRuntime;
         use crate::runner::container::intent::{LABEL_INCARNATION, LABEL_PRIVATE_ROOT};
         let foreign = "upstroke-foreign-incarnation-beside-the-probe".to_owned();
+        #[cfg(target_os = "linux")]
+        let schedule = ProbeSchedule::HeldAtItsListing;
+        #[cfg(not(target_os = "linux"))]
+        let schedule = ProbeSchedule::Free;
         let died = a_resume_killed_inside_its_pre_flight_probe(
             "reaper-pre-flight-scope",
+            schedule,
             |host, private| {
                 host.seed_container(
                     &foreign,
@@ -21166,6 +21400,11 @@ git cat-file -e 'HEAD^{tree}'
                 );
             },
         );
+        #[cfg(target_os = "linux")]
+        died.held_at_its_listing();
+        died.its_lawful_paths_are_present();
+        #[cfg(target_os = "linux")]
+        died.let_its_backstop_go();
         let labels = died
             .host
             .container(&died.probe)

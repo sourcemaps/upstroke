@@ -349,7 +349,9 @@ fn copy_shared_indexes(git_dir: &Path, view: &Path) -> Result<Vec<String>, Upstr
 }
 
 fn config_for(layout: &GitLayout) -> Result<String, UpstrokeError> {
-    let mut config = String::from("[core]\n\tbare = false\n\tlogallrefupdates = false\n");
+    let mut config = String::from(
+        "[core]\n\tbare = false\n\tlogallrefupdates = false\n\tuseReplaceRefs = false\n",
+    );
     let source = match fs::read_to_string(layout.common_dir.join("config")) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
@@ -786,6 +788,193 @@ mod tests {
                 "the projection is missing `{entry}`"
             );
         }
+    }
+
+    /// `git` under exactly a gate's composed container environment, run on this
+    /// host: a controlled environment, not one inherited from this process.
+    #[cfg(unix)]
+    struct RoleGit {
+        runner: crate::runner::host::HostRunner,
+    }
+
+    #[cfg(unix)]
+    impl RoleGit {
+        /// The gate's environment over an image base that names this host's
+        /// `PATH`, a scratch `HOME`, an empty global config and no system config,
+        /// and no Git setting of its own. The named keys that could decide
+        /// replacements for Git are checked absent by name; nothing is printed.
+        fn composed(root: &Path) -> Self {
+            let home = root.join("role-home");
+            std::fs::create_dir_all(&home).expect("a role home");
+            let global = root.join("role-global.gitconfig");
+            std::fs::write(&global, "").expect("an empty global config");
+            let path = std::env::var("PATH").expect("this host names a PATH");
+            let base = vec![
+                ("PATH".to_owned(), path),
+                ("HOME".to_owned(), home.to_string_lossy().into_owned()),
+                (
+                    "GIT_CONFIG_GLOBAL".to_owned(),
+                    global.to_string_lossy().into_owned(),
+                ),
+                ("GIT_CONFIG_NOSYSTEM".to_owned(), "1".to_owned()),
+            ];
+            let volumes = std::collections::BTreeMap::new();
+            let layout = crate::runner::container::env::BoundaryLayout::new();
+            let role = crate::runner::ExecutionRole::Gate;
+            let composed = crate::runner::container::env::ContainerEnvironment::from_image(base)
+                .compose(
+                    &crate::runner::container::env::RoleScope {
+                        role: &role,
+                        agent: None,
+                        volumes: &volumes,
+                        layout: &layout,
+                    },
+                    &[],
+                )
+                .expect("the gate's environment composes");
+            for key in [
+                "GIT_NO_REPLACE_OBJECTS",
+                "GIT_REPLACE_REF_BASE",
+                "GIT_CONFIG_PARAMETERS",
+                "GIT_CONFIG_COUNT",
+            ] {
+                assert!(
+                    !composed.iter().any(|(name, _)| name == key),
+                    "the composed gate environment names `{key}`"
+                );
+            }
+            let base = composed
+                .into_iter()
+                .map(|(key, value)| (key.into(), value.into()))
+                .collect();
+            Self {
+                runner: crate::runner::host::HostRunner::new().with_environment(
+                    crate::runner::host::HostEnvironment::with_base(
+                        base,
+                        crate::runner::container::env::CONTAINER_KEY_CASE,
+                    )
+                    .reading(crate::runner::host::ObjectGraph::AsReplaced),
+                ),
+            }
+        }
+
+        fn git(&self, cwd: &Path, args: &[&str]) -> crate::agent::ProcessOutput {
+            use crate::runner::Runner as _;
+            let mut spec = crate::runner::CommandSpec::new("git");
+            for arg in args {
+                spec = spec.arg(*arg);
+            }
+            self.runner
+                .run_blocking(&crate::runner::gate_request(
+                    spec,
+                    cwd.to_path_buf(),
+                    std::time::Duration::from_secs(60),
+                    crate::runner::InvocationId::attempt(
+                        crate::topology::registry::TaskKey(0),
+                        crate::topology::events::GenerationId(0),
+                        crate::topology::events::AttemptNumber(1),
+                        crate::runner::invocation::AttemptRole::Gate(0),
+                        0,
+                    ),
+                ))
+                .expect("git runs under the gate's environment")
+        }
+
+        fn ok(&self, cwd: &Path, args: &[&str]) -> String {
+            let output = self.git(cwd, args);
+            assert_eq!(output.code, Some(0), "`git {args:?}`: {output:?}");
+            output.stdout.trim().to_owned()
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_view_config_refuses_replacements_and_an_unrelated_repository_keeps_them() {
+        let tree = scratch("view-replacements");
+        let root = tree.path();
+        let role = RoleGit::composed(root);
+        let repo = root.join("repo");
+        let (head, previous) = repository(&repo);
+        let config_before =
+            std::fs::read(repo.join(".git").join("config")).expect("the repository's config");
+        let workspace = root.join("tasks").join("k0-g0");
+        worktree(&repo, &workspace, &head);
+
+        let view_path = root.join("view");
+        RoleGitView::new(ContainerTrace::off())
+            .materialize(&GitViewRequest {
+                path: view_path.clone(),
+                workspace: workspace.clone(),
+                head: None,
+            })
+            .expect("materializes");
+        let config = std::fs::read_to_string(view_path.join("config")).expect("the view's config");
+        assert!(
+            config.contains("useReplaceRefs = false"),
+            "the generated view config: {config}"
+        );
+
+        let work = workspace.to_string_lossy().into_owned();
+        let in_view = |git_dir: &Path, args: &[&str]| -> crate::agent::ProcessOutput {
+            let dir = git_dir.to_string_lossy().into_owned();
+            let mut all = vec!["--git-dir", dir.as_str(), "--work-tree", work.as_str()];
+            all.extend_from_slice(args);
+            role.git(&workspace, &all)
+        };
+        // The view is writable, so a role can install a replacement inside it.
+        let planted = in_view(&view_path, &["replace", &head, &previous]);
+        assert_eq!(planted.code, Some(0), "the role's replacement: {planted:?}");
+        assert!(
+            in_view(&view_path, &["for-each-ref", "--format=%(refname)"])
+                .stdout
+                .contains("refs/replace/"),
+            "the control: the replacement is in the view"
+        );
+
+        let alias = root.join("view-alias");
+        std::os::unix::fs::symlink(&view_path, &alias).expect("another spelling of the view");
+        for spelling in [&view_path, &alias] {
+            let read = in_view(spelling, &["show", "HEAD:second.txt"]);
+            assert_eq!(
+                (read.code, read.stdout.as_str()),
+                (Some(0), "two\n"),
+                "{}: the managed repository's view read the replacement: {read:?}",
+                spelling.display()
+            );
+        }
+
+        // An unrelated repository, under the same gate environment: its own blob
+        // replacement is honoured, read positively, beside the recorded control.
+        let other = root.join("other");
+        repository(&other);
+        let recorded = role.ok(&other, &["rev-parse", "HEAD:second.txt"]);
+        let replacing_file = other.join("replacing.txt");
+        std::fs::write(&replacing_file, "replaced\n").expect("the replacing content");
+        let replacing = role.ok(
+            &other,
+            &["hash-object", "-w", &replacing_file.to_string_lossy()],
+        );
+        assert_ne!(recorded, replacing, "the two blobs are one blob");
+        role.ok(&other, &["replace", &recorded, &replacing]);
+        let honoured = role.git(&other, &["show", "HEAD:second.txt"]);
+        assert_eq!(
+            (honoured.code, honoured.stdout.as_str()),
+            (Some(0), "replaced\n"),
+            "an unrelated repository's own replacement was not honoured under the gate's \
+             environment: {honoured:?}"
+        );
+        let control = role.git(&other, &["--no-replace-objects", "show", "HEAD:second.txt"]);
+        assert_eq!(
+            (control.code, control.stdout.as_str()),
+            (Some(0), "two\n"),
+            "the control: the unrelated repository records `two`: {control:?}"
+        );
+
+        assert_eq!(
+            std::fs::read(repo.join(".git").join("config")).expect("the repository's config"),
+            config_before,
+            "the user's repository configuration changed"
+        );
     }
 
     #[test]

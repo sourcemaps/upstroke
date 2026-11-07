@@ -1979,3 +1979,31 @@ rather than the open transaction's `satisfies`, the join's state 53 is a
 dead end at the bound holding the transaction of r4's publication at
 sequence 3, and only the transaction assertion catches it (#302's second
 review, M12).
+
+## `mod tests` › `fn census_mount(target: &str, read_only: bool, object: u64) -> RecordedMount {`
+
+A recorded mount for the census fixture's container runner, its source
+`/srv/census<target>`. The fold never opens a path, so these need not
+exist.
+
+## `mod tests` › `fn a_run_resumed_whose_mounts_moved_is_refused_by_the_existing_runner_equality() {`
+
+Root's recorded-mounts disposition: "use the existing fold's RunnerPolicy
+difference/equality enforcement" and prove it. A run that recorded two
+mounts admits a `run_resumed` that re-established them, and refuses, as
+`RunnerMoved` naming the configured mount set, each of five moves: the
+mounts dropped, a source rebound (another object), a mount made writable,
+a target moved, one mount more. A run recorded without mounts refuses a
+resume that brings some. No fold code changed: `check_run_resumed` was
+already `started.runner.difference(&resumed.runner)`.
+
+## `mod tests` › `fn the_report_projects_the_recorded_mounts_and_an_unmounted_record_projects_as_before() {`
+
+`report.json.runner` is derived from the record, never from today's
+config. For the mounted record it carries the recorded mounts, the digest
+covers them, the rendering names their count and each mount, and a stored
+report that lost them under the same digest is not fresh. For the
+unmounted record the runner projects exactly the four historical keys and
+the rendering has no mount line, so a historical report keeps its bytes.
+Both read back fresh. A record with a Windows identity renders its drive
+path, its volume serial and its full file id.

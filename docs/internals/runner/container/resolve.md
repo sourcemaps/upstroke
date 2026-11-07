@@ -31,7 +31,25 @@ runtime must already hold the image and the volumes must exist)"*.
 
 Every function here takes a [`ContainerRuntime`] and values, and nothing
 else: no run directory, no lock, no [`crate::runner::Runner`], no path it
-could write. `ContainerSite` — the frozen effect inventory's eight container
+could write. Configured mounts (root's recorded-mounts disposition,
+2026-11-02) add filesystem *observation* and nothing more: `fs::canonicalize`,
+`fs::symlink_metadata` and `MetadataExt`'s device and inode. The repository's
+Git directories are not read here at all: the caller hands them in
+([`RepositoryGit`]), because only the caller knows which ones Git takes for
+this checkout. Until J10 this module read them from the checkout's `.git`
+through `view::resolve`. None of these is a governed
+primitive on the clippy denylist; they are recorded here as read-only API
+use, not as an effect exemption, and
+`tests::the_resolution_module_names_no_lock_no_write_and_no_spawn` admits
+exactly those three `fs::` spellings and no other. On Windows the identity
+is read through `windows_sys`, also read-only: `CreateFileW` with
+`FILE_READ_ATTRIBUTES` access, the `OPEN_EXISTING` disposition and
+`FILE_FLAG_OPEN_REPARSE_POINT`, then `GetFileInformationByHandle` and
+`GetFileInformationByHandleEx(FileIdInfo)`, the handle closed by
+`OwnedHandle`. None of these is on the clippy denylist either; the same
+census admits each call exactly once, requires those three flags, and
+refuses every write, create, truncate and delete-on-close constant, so this
+classification is recorded where it is enforced. `ContainerSite` — the frozen effect inventory's eight container
 sites — has **no inspection variant** and this slice may not add one, so an
 inspection is not a funnel call and a funnel call is not an inspection. That
 is why `probe`, `image_by_reference`, `image_by_id` and `volume_present` are
@@ -138,6 +156,29 @@ does not ask for a container.
 
 A guard: a container selection with no image reference to look up.
 
+## `pub enum InspectionRefusal` › `MountRefused { mount: String, reason: String },`
+
+A configured mount resolution refuses, before any lock: the mount as the
+operator wrote it and the first rule it breaks.
+
+## `pub enum InspectionRefusal` › `MountSourceMoved { mount: String, reason: String },`
+
+A recorded mount whose source is gone, rebound or another object: the
+rebuild's refusal, before any spawn.
+
+## `pub enum InspectionRefusal` › `RecordedTargetRefused { mount: String, reason: String },`
+
+A recorded mount whose target a fresh run refuses: the mount as the record
+spells it and the first target rule it breaks, in the words
+`refuse_target` or the nesting rule gives a fresh run
+(`refuse_recorded_targets`). A different decision from `MountSourceMoved`:
+a moved source can come back and the run resume, while a target is the
+record's own and never changes, so a run whose record carries one cannot
+continue. K1 (regular review 4): until it, a record that completeness
+accepted reached recovery and the launch plan with `/`, a reserved target
+or `/cache/../upstroke/settings`, which Docker normalizes into the reserved
+`/upstroke/settings`.
+
 ## `pub enum InspectionRefusal` › `RecordIncomplete(RunnerRecordDefect),`
 
 The record this resolution produced is one PR3's fold would refuse.
@@ -213,6 +254,249 @@ which three of the four rebuild behaviours it holds; a no-op `RunnerPreflight`
 would let the same caller call [`rebuild_from_record`] and appear to have all
 four.
 
+## `pub const BOUNDARY_ROOT: &str = "/upstroke";`
+
+---------------------------------------------------------------------------
+Configured mounts
+---------------------------------------------------------------------------
+
+The container path under which the runner composes every role's own
+mounts: workspace, Git view, objects, `.git` pointer, credentials and
+settings (`BoundaryLayout`'s defaults; the resolve tests check each one
+lies under it). A configured target may not be it, under it or above it;
+`/tmp`, the role's scratch, is reserved the same way.
+
+## `pub const DEFAULT_CREDENTIAL_HOMES: [&str; 4] = [".claude", ".claude.json", ".codex", ".copilot"];`
+
+The agents' default host credential homes under `$HOME`. They are
+withheld from configured mounts as paths only, with no content opened and
+no directory scanned, together with whatever `CLAUDE_CONFIG_DIR`,
+`COPILOT_HOME` and `CODEX_HOME` name in the coordinator's environment. A
+per-agent credential volume stays the only credential channel into a
+container.
+
+## `pub enum MountExclusion {`
+
+What a configured mount source may not be, contain or lie inside:
+
+- `RepositoryRoot`: the canonical repository root, which also covers its
+  public run directories and, for an ordinary checkout, its `.git`;
+- `AuthoritativeGit`: the checkout's Git directory and the effective common
+  directory, as the caller hands them in ([`RepositoryGit`]), so a linked
+  worktree's common directory elsewhere, and one an inherited
+  `GIT_COMMON_DIR` places outside the checkout, are withheld too;
+- `PrivateRoot`: the authorized private root, which holds every run's
+  private half, the execution roots and their worktrees, the container
+  intents and the recorded-objects include. A run's worktrees are under
+  it, so they are refused with it;
+- `CredentialLocation`: see `DEFAULT_CREDENTIAL_HOMES`.
+
+All in both directions. The generated own-role mounts keep their own,
+one-directional `Confinement::violations` check in `exec.rs`: a worktree
+legitimately lies inside the private root, and a configured source never
+may, which `Confinement::configured_violations` holds there in both
+directions too.
+
+## `pub struct RepositoryGit<'a> {`
+
+The two Git directories of the checkout a run integrates into, as the
+caller resolved them: `git_dir`, where Git keeps this checkout's `HEAD`
+and index, and `common_dir`, the effective common directory, where its
+refs and objects are. This module never derives them. The schema-4 entry
+builds the value twice, from two sources:
+
+- before any lock (`entry::checkout_mount_context`): the Git directory
+  Git reports and the common directory Git's precedence gives (an
+  inherited `GIT_COMMON_DIR` as the checkout names it, else the Git
+  directory's `commondir`, else the Git directory);
+- for the container runner: the same Git directory and the common
+  directory of the `ManagedRepository` the coordinator holds, the one the
+  host runner reads as `ObjectGraph::RecordedIn`.
+
+J10 (regression review 2, finding 1): `bind_with` built its
+`AuthoritativeGit` exclusions from `view::resolve` over the checkout's own
+`.git`, which an inherited `GIT_COMMON_DIR` does not change. With the
+common directory relocated outside the checkout and selected that way,
+a writable mount of its `refs` was accepted, and a gate's launch plan
+received it. DESIGN §26 refuses a source that is, contains or lies
+inside "the repository root, its Git or common directory", and the common
+directory Git uses is the one that checkout resolved (§26, the runner
+contracts). Both are now named by the caller, and nothing here reads
+`.git`.
+
+## `pub struct MountContext {`
+
+The read-only context `resolve_container` lacked: the exclusion list
+above, bound once before any lock. `unbound()` binds nothing and accepts
+no configured mount; the entry binds a context only when mounts are
+configured, so a run without mounts reads nothing it did not read before.
+`bind` reads the coordinator's credential locations; `bind_with` takes
+them explicitly, for tests. `excluded` lends the list and
+`into_excluded` gives it up (the runner keeps it without a copy); both
+are empty for an unbound context, which no caller asks.
+
+### Errors
+
+`bind` and `bind_with` fail when the repository root cannot be
+canonicalized, and refuse when either Git directory they are given is not
+an absolute path: a relative one would be resolved against whatever the
+process's directory is, and the comparison would then withhold some other
+directory while accepting a mount of the real one.
+
+## `pub fn canonical_spelling(path: &Path) -> PathBuf {`
+
+A path as the filesystem resolves it, for comparison: the longest
+existing ancestor canonicalized, the rest appended as written. A private
+root or credential location need not exist yet to be withheld.
+
+## `pub fn canonical(path: &Path) -> io::Result<PathBuf> {`
+
+`fs::canonicalize`, with one Windows rewrite: a verbatim drive path
+(`\\?\C:\...`), which is what canonicalization returns there, loses its
+`\\?\` prefix, so every canonical path this module compares or records is
+the drive-letter spelling. The two name the same path; keeping one of them
+everywhere is what makes `Path` comparisons (component by component, the
+prefix included) and the recorded string exact. A verbatim path that is
+not a drive path (a network share, a volume GUID) keeps its prefix and is
+then refused as a mount source. Elsewhere this is `fs::canonicalize`.
+
+## `pub fn overlap(source: &Path, excluded: &Path) -> Option<&'static str> {`
+
+`is`, `contains` or `lies inside`, by component (`Path::starts_with`), so
+`/srv/ab` is not inside `/srv/a`.
+
+## `pub fn refuse_target(target: &str) -> Result<(), String> {`
+
+A target is a container path on every host, so it is checked as a string
+with `/` separators, never as a host `Path`: it must be spellable in the
+runtime's mount option (see `container.rs`'s `mount_option_refusal`),
+absolute, not `/`, in normal form (no empty, `.` or `..` component, no
+trailing `/`; a non-normal spelling is refused, never rewritten), and not
+at or under `/upstroke` or `/tmp`.
+
+## `pub fn nested_targets(first: &str, second: &str) -> bool {`
+
+Two targets that are the same path or where one holds the other. Two
+such configured mounts would make what the container sees there depend
+on mount order, so resolution, every use of a record
+(`refuse_recorded_targets`) and the plan refuse them, the plan also
+against the role's own targets.
+
+## `pub fn refuse_recorded_targets(mounts: &[RecordedMount]) -> Result<(), (&RecordedMount, String)> {`
+
+The target rules a fresh run applies, applied to a recorded mount list:
+each target through `refuse_target`, then every pair through
+`refuse_nested_targets`. These are the two functions `resolve_mounts`
+applies, so a recorded policy is refused for every target a fresh
+configuration is refused for, by the same rule and in the same words, and
+there is no second copy of a rule to drift (K1, regular review 4). It
+answers the first mount that breaks one and the reason; each caller labels
+the refusal in its own terms.
+
+Completeness (`RunnerPolicy::completeness` in `topology::events`) checks
+the record's shape only: an absolute-looking target, a well-formed source,
+targets strictly ordered. It accepted `/`, `/upstroke/settings` and
+`/cache/../upstroke/settings`, which Docker normalizes into the reserved
+`/upstroke/settings`, so the record is held to the target rules where it
+is used, not where it is folded; the topology layer does not reach into
+this module. The uses, each before its effect:
+
+- the public resume, read-only, before Git or the runtime is asked
+  anything (`engine::topology::entry`'s `refuse_recorded_mount_targets`);
+- recovery, before any recovery effect, and every rebuild of the runner,
+  before the runtime is asked (`recheck_recorded_mounts`);
+- every container plan, before any intent, reaper or container
+  (`exec`'s `configured_mounts`).
+
+Pure: it reads the strings and nothing else, so it can run first at each.
+
+## `fn refuse_nested_targets(mounts: &[RecordedMount]) -> Result<(), (&RecordedMount, String)> {`
+
+The nesting rule over a mount list: every pair, in list order, and the
+later mount of the first pair that `nested_targets` joins, with the
+earlier one named in the reason. `resolve_mounts` applies it to the
+resolved list sorted by target, so its refusal names what it named when
+the loop was inline there; a recorded list is applied as recorded.
+
+## `fn resolve_source(source: &Path) -> Result<(String, MountSourceIdentity), String> {`
+
+The source as recorded: absolute (a relative one would depend on the
+directory `upstroke` was started from), existing, canonicalized
+(symlinks resolved at selection), on Windows a drive-letter path (a
+network share or device path is refused), spellable exactly in the
+runtime's mount option, and a directory or regular file with its
+identity.
+
+Canonicalizing does not make later replacement impossible, and nothing
+here claims an atomic bind. The rebuild and every plan recheck the
+recorded path and identity before use (`recheck_recorded_source`); the
+window between that recheck and the runtime's own bind remains, as it does
+for any path the runtime is handed.
+
+## `fn source_identity(canonical: &Path) -> Result<MountSourceIdentity, String> {`
+
+Unix: `symlink_metadata` of the canonical path, so a path that turned into
+a link since it was resolved is refused rather than followed; directory or
+regular file; device and inode from `MetadataExt`.
+
+Windows (root's `PR12-MOUNT-WINDOWS-IDENTITY` follow-through, adapting
+`rundir::scratch_tree`'s read-only directory-identity precedent, which is
+left unchanged): one handle opened on the object itself with
+`FILE_READ_ATTRIBUTES` access, `OPEN_EXISTING`, `FILE_FLAG_BACKUP_SEMANTICS`
+(so a directory opens) and `FILE_FLAG_OPEN_REPARSE_POINT` (so a reparse
+point is opened as itself and refused, never followed). Its attributes
+refuse a reparse point (a link, a junction, or a path that became one
+since it was resolved) and a device; the kind is directory or file.
+`GetFileInformationByHandleEx(FileIdInfo)` then gives the volume serial
+number and the full 128-bit file id, recorded as 32 lowercase hex digits,
+never truncated. Unreadable attributes or id refuse. The handle is an
+`OwnedHandle`, closed once on every path. std has no stable API for this,
+and `fs::OpenOptions` is a denied type here, hence the direct calls, each
+with its `SAFETY:` obligation in the source.
+
+Other targets, neither Unix nor Windows, refuse configured mounts rather
+than record a guessed identity.
+
+## `pub fn described(identity: &MountSourceIdentity) -> String {`
+
+An identity as a refusal names it: the kind, then device and inode, or
+volume and file id.
+
+## `pub fn resolve_mounts(`
+
+The recorded list for today's configured mounts, or the first refusal.
+It is called by `resolve_container` before the runtime is asked
+anything, so a refused mount reaches no runtime operation, no lock and no
+probe. Every configured mount is checked; the list is sorted by target
+and refused if two targets are the same or nested
+(`refuse_nested_targets`, which every use of a record applies too).
+
+## `pub fn recheck_recorded_source(mount: &RecordedMount) -> Result<(), String> {`
+
+Before every use of a recorded mount: the rebuild of a resumed run, and
+each container plan. The recorded path must still exist, still
+canonicalize to itself (a link or a move rebinds it otherwise) and still
+name the recorded object (kind, device, object). A failure refuses: the
+record is the boundary, and a different object at the same path is not
+it.
+
+## `pub fn recheck_recorded_mounts(record: &RunnerPolicy) -> Result<(), InspectionRefusal> {`
+
+Every recorded mount of `record` has a target a fresh run accepts, and
+still names the object the run recorded (DESIGN §26).
+
+Read-only: the targets are checked first, as strings
+(`refuse_recorded_targets`), then each source is resolved and identified;
+nothing changes. So recovery asks it before any recovery effect, and every
+rebuild of the runner asks it again.
+
+### Errors
+
+`InspectionRefusal::RecordedTargetRefused` for the first mount whose target
+a fresh run refuses, before any source is looked at; otherwise
+`InspectionRefusal::MountSourceMoved` for the first source that is gone,
+rebound or another object.
+
 ## `pub fn resolve_container(`
 
 ---------------------------------------------------------------------------
@@ -248,6 +532,10 @@ the record's `reference` from there would make the record its own oracle and
 
 The first [`InspectionRefusal`] the inspection produces.
 
+## `let mounts = resolve_mounts(&selection.mounts, context)?;`
+
+(0) configured mounts, which ask the runtime nothing.
+
 ## `runtime.probe().map_err(InspectionRefusal::from_runtime)?;`
 
 (1) runtime reachable.
@@ -263,7 +551,7 @@ The first [`InspectionRefusal`] the inspection produces.
 ## `let policy = RunnerPolicy {`
 
 (4) the record: policy `container-v1`, the operator's reference, the
-runtime's id, and its digest when it reported one.
+runtime's id, its digest when it reported one, and the resolved mounts.
 
 ## `fn reported_digest(inspection: &ImageInspection) -> Option<String> {`
 
@@ -309,7 +597,7 @@ From `decisions.sequential_substrate.runner` and INV-23:
 |---|---|
 | today's `[runner]` config **differs** | warn **naming the difference**, and ignore it — the record wins |
 | the recorded reference **now names another image** | warn, and use the recorded id |
-| the record cannot be re-established (runtime / recorded id / volume) | **refuse, before any spawn** |
+| the record cannot be re-established (runtime / recorded id / volume / a recorded mount source gone or rebound / a recorded mount target a fresh run refuses) | **refuse, before any spawn** |
 
 The fourth — a recorded shell or CLI that fails inside the image — is not
 here and cannot be: it is observed only by spawns. See
@@ -330,8 +618,23 @@ warnings at all.
 
 ### Errors
 
-The first [`InspectionRefusal`] — an unavailable runtime, a recorded image id
-the runtime no longer holds, or an absent credential volume.
+The first [`InspectionRefusal`] — an incomplete record, a recorded mount
+target a fresh run refuses, a recorded mount source that moved, an
+unavailable runtime, a recorded image id the runtime no longer holds, or an
+absent credential volume.
+
+## `for mount in &record.mounts {`
+
+`recheck_recorded_mounts`, which the rebuild asks before the runtime is
+asked anything. A recorded target a fresh run refuses is refused first,
+as `RecordedTargetRefused`: the record is not one this run may continue
+from, whatever its sources. Then a recorded mount source that is gone,
+rebound or another object refuses. Both refusals are `Inspection` ones, so
+they come before any spawn; a moved source leaves the run resumable: put
+the source back and the next resume re-establishes the record. Only the
+recorded targets and identities are inspected; nothing today's config
+names is opened, so a source configured today that does not exist cannot
+refuse or replace the record.
 
 ## `runtime.probe().map_err(InspectionRefusal::from_runtime)?;`
 
@@ -417,6 +720,22 @@ So the comparison is unconditional and the *rendering* carries the rule:
 absent means host-default, and a host record with no section still produces
 no warning because there is genuinely no difference.
 
+#### Mounts are compared by meaning
+
+`RunnerField::Mounts` is the fourth field a config can move. Today's
+mounts cannot be put into the record's shape and compared whole: they
+carry no identity, so every config would differ. `today_in_record_shape`
+copies the recorded mounts instead, and `same_configured_mounts` compares
+what the operator wrote, by meaning: each source canonicalized where it
+resolves today (spelled as written where it does not), the target, and
+`read_only`, ordered by target. An unchanged config, however its sources
+are spelled, does not warn; a moved target, disposition or source, or a
+mount added or removed, warns `configured mount set` and is ignored.
+
+## `fn same_configured_mounts(recorded: &[RecordedMount], configured: &[RunnerMount]) -> bool {`
+
+See `configured_difference`.
+
 ## `fn today_in_record_shape(record: &RunnerPolicy, today: &RunnerSelection) -> RunnerPolicy {`
 
 Today's `[runner]` selection, expressed in the recorded record's shape.
@@ -424,3 +743,29 @@ Today's `[runner]` selection, expressed in the recorded record's shape.
 ## `fn today_in_record_shape(record: &RunnerPolicy, today: &Run…` › `id: record`
 
 From the record: see `configured_difference`.
+
+## `#[cfg(test)]` › `pub(crate) mod fixtures {`
+
+Test-only, after every production item, and a module so that the first
+`#[cfg(test)]` of the file is one (`effects::tests::every_production_region_that_stops_early_stops_at_a_module`).
+`plain_checkout` is what Git reports for an ordinary checkout, whose `.git`
+directory is both its Git directory and its common directory: the shape of
+every fixture that builds a runner or a context over one repository. A test
+about any other layout names the two directories itself.
+
+`REFUSED_RECORDED_TARGETS` is K1's guard set, the four kinds of recorded
+target regular review 4 named: the container's root, a reserved target
+(`/upstroke/settings`), a target not in normal form
+(`/cache/../upstroke/settings`, which Docker normalizes into the reserved
+one) and two nested targets, each with the words its refusal carries. Each
+is a self-consistent record: absolute, strictly ordered, so completeness
+accepts it and only the target rule can refuse it. The resolve, exec,
+recover and engine guards share it, so the four uses are tested against
+one set.
+
+`with_recorded_targets` is a record as a run's files hold it with the given
+targets: one copy of the record's first mount per target (its source and
+identity, so the source recheck passes), the policy written with
+`serde_json` and read back, and the read required to equal what was
+written. A recorded policy deserializes whatever its targets are; the
+refusal has to come from where the record is used.

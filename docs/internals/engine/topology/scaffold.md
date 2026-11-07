@@ -1374,7 +1374,9 @@ parent through handles (`acting_as`), each child through its daemon.
 ## `pub(super) fn container_runner(`
 
 The production `ContainerRunner` for a run identity over a runtime, with a
-disposable Git view and the supervision poll given. No runner-level observer is
+disposable Git view and the supervision poll given. It is given the base's
+`.git` as both its Git directories (`resolve::fixtures::plain_checkout`), what Git
+reports for the fixture's ordinary checkout. No runner-level observer is
 installed, since one would take the runner's `hooks` lock across every
 invocation and serialize the pipelines.
 

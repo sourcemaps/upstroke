@@ -283,6 +283,238 @@ fn the_execution_root_is_pruned_only_when_it_is_empty() {
     assert!(!fixture.manager.execution_root().exists());
 }
 
+/// Every entry under `top`, by path relative to it: its kind, its permission
+/// bits, and a file's bytes or a link's target. What "untouched" is measured by.
+fn root_state(top: &Path) -> Vec<(PathBuf, String)> {
+    fn mode(metadata: &fs::Metadata) -> u32 {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            metadata.permissions().mode()
+        }
+        #[cfg(not(unix))]
+        {
+            u32::from(metadata.permissions().readonly())
+        }
+    }
+    let mut state = Vec::new();
+    let mut pending = vec![top.to_path_buf()];
+    while let Some(path) = pending.pop() {
+        let metadata = fs::symlink_metadata(&path)
+            .unwrap_or_else(|error| panic!("the state of {}: {error}", path.display()));
+        let relative = path.strip_prefix(top).expect("under the top").to_path_buf();
+        let kind = if metadata.file_type().is_symlink() {
+            format!(
+                "link to {}",
+                fs::read_link(&path).expect("the link").display()
+            )
+        } else if metadata.is_dir() {
+            for entry in fs::read_dir(&path).expect("list the directory") {
+                pending.push(entry.expect("an entry").path());
+            }
+            format!("directory {:o}", mode(&metadata))
+        } else {
+            format!(
+                "file {:o} {:?}",
+                mode(&metadata),
+                fs::read(&path).expect("the file's bytes")
+            )
+        };
+        state.push((relative, kind));
+    }
+    state.sort();
+    state
+}
+
+const SCAFFOLDING: [&str; 5] = ["intents", "tasks", "merge", "snapshots", "hooks-none"];
+
+/// `FreshExecutionRoot`, PR12-INV7-PREPUBLICATION-EXECUTION-ROOT-ORPHAN: a fresh
+/// run claims its root with one exclusive create of the leaf, inside the same
+/// `Worktree.CreateExecutionRoot` funnel. The claim makes the root and its
+/// scaffolding; a second claim of the same path is refused as unclaimed and
+/// leaves it exactly as it was; and the idempotent form every other caller uses
+/// still reuses it.
+#[test]
+fn a_fresh_execution_root_is_claimed_exclusively_and_a_claimed_one_is_never_claimed_twice() {
+    let fixture = Fixture::new("fresh-root-claim");
+    let root = fixture.manager.execution_root().to_path_buf();
+    assert!(
+        fs::symlink_metadata(&root).is_err(),
+        "the premise: no root exists yet"
+    );
+    FreshExecutionRoot(&fixture.manager)
+        .create_execution_root(&mut NoHooks)
+        .expect("a fresh claim of an empty path");
+    for directory in SCAFFOLDING {
+        assert!(root.join(directory).is_dir(), "the claim makes {directory}");
+    }
+
+    let before = root_state(&root);
+    match FreshExecutionRoot(&fixture.manager).create_execution_root(&mut NoHooks) {
+        Err(FreshRootFailure::Unclaimed(UpstrokeError::Filesystem { path, source, .. })) => {
+            assert_eq!(path, root, "the refusal names the root");
+            assert_eq!(source.kind(), std::io::ErrorKind::AlreadyExists, "{source}");
+        }
+        other => panic!("a root already there is refused, not adopted: {other:?}"),
+    }
+    assert_eq!(
+        root_state(&root),
+        before,
+        "the refused claim changed the root"
+    );
+
+    fixture
+        .manager
+        .create_execution_root(&mut NoHooks)
+        .expect("the idempotent form still reuses the root");
+}
+
+/// The claim boundary: a root another actor puts at the path after every check
+/// a caller can make and before the leaf is created — here at the funnel's
+/// `Before` phase, the last point before the primitive — is refused as
+/// unclaimed, and nothing in it changes: not the five empty scaffolding
+/// directories that look exactly like a run's own, not its modes, not a file
+/// beside them. And a link at the leaf is refused without being followed.
+#[test]
+fn a_root_that_appears_at_the_claim_boundary_is_refused_and_left_as_it_was() {
+    struct PlantAtBefore {
+        root: PathBuf,
+        with_a_file: bool,
+        planted: Option<Vec<(PathBuf, String)>>,
+    }
+
+    impl EffectHooks for PlantAtBefore {
+        fn phase(&mut self, site: EffectSiteId, phase: HookPhase) -> Injection {
+            if site == EffectSiteId::Worktree(WorktreeSite::CreateExecutionRoot)
+                && phase == HookPhase::Before
+                && self.planted.is_none()
+            {
+                for directory in SCAFFOLDING {
+                    fs::create_dir_all(self.root.join(directory)).expect("another actor's root");
+                }
+                if self.with_a_file {
+                    fs::write(self.root.join("theirs.txt"), b"another actor's bytes")
+                        .expect("another actor's file");
+                }
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt as _;
+                    fs::set_permissions(&self.root, fs::Permissions::from_mode(0o750))
+                        .expect("its own mode");
+                }
+                self.planted = Some(root_state(&self.root));
+            }
+            Injection::Proceed
+        }
+
+        fn refusal_cause(&self) -> Option<String> {
+            None
+        }
+    }
+
+    for (tag, with_a_file) in [
+        ("fresh-root-foreign", false),
+        ("fresh-root-foreign-file", true),
+    ] {
+        let fixture = Fixture::new(tag);
+        let root = fixture.manager.execution_root().to_path_buf();
+        let mut hooks = PlantAtBefore {
+            root: root.clone(),
+            with_a_file,
+            planted: None,
+        };
+        let failure = FreshExecutionRoot(&fixture.manager)
+            .create_execution_root(&mut hooks)
+            .expect_err("a root already at the path is refused");
+        assert!(
+            matches!(failure, FreshRootFailure::Unclaimed(_)),
+            "{tag}: not this caller's: {failure:?}"
+        );
+        assert_eq!(
+            Some(root_state(&root)),
+            hooks.planted,
+            "{tag}: the other actor's root changed"
+        );
+    }
+
+    #[cfg(unix)]
+    {
+        let fixture = Fixture::new("fresh-root-link");
+        let root = fixture.manager.execution_root().to_path_buf();
+        let target = fixture.root.join("link-target");
+        fs::create_dir_all(&target).expect("the link's target");
+        fs::create_dir_all(root.parent().expect("a parent")).expect("the namespace");
+        std::os::unix::fs::symlink(&target, &root).expect("a link at the leaf");
+        let failure = FreshExecutionRoot(&fixture.manager)
+            .create_execution_root(&mut NoHooks)
+            .expect_err("a link at the leaf is refused");
+        assert!(
+            matches!(failure, FreshRootFailure::Unclaimed(_)),
+            "not this caller's: {failure:?}"
+        );
+        assert_eq!(
+            fs::read_link(&root).expect("the link is still there"),
+            target
+        );
+        assert_eq!(
+            fs::read_dir(&target).expect("the target").count(),
+            0,
+            "nothing was made through the link"
+        );
+    }
+}
+
+/// The claim carried: a failure after the exclusive create — the after-phase
+/// hook here, standing for a scaffolding directory or the durability barrier —
+/// answers `Claimed`, so its caller knows the root, whole or in part, is its
+/// own. A failure before it answers `Unclaimed` and leaves no root.
+#[test]
+fn a_failure_after_the_claim_leaves_the_root_claimed_and_one_before_it_leaves_none() {
+    struct ErrorAt(HookPhase);
+
+    impl EffectHooks for ErrorAt {
+        fn phase(&mut self, site: EffectSiteId, phase: HookPhase) -> Injection {
+            if site == EffectSiteId::Worktree(WorktreeSite::CreateExecutionRoot) && phase == self.0
+            {
+                Injection::Error
+            } else {
+                Injection::Proceed
+            }
+        }
+
+        fn refusal_cause(&self) -> Option<String> {
+            None
+        }
+    }
+
+    let fixture = Fixture::new("fresh-root-after");
+    let root = fixture.manager.execution_root().to_path_buf();
+    let failure = FreshExecutionRoot(&fixture.manager)
+        .create_execution_root(&mut ErrorAt(HookPhase::After))
+        .expect_err("the after phase fails");
+    assert!(
+        matches!(failure, FreshRootFailure::Claimed(_)),
+        "made, then failed: {failure:?}"
+    );
+    for directory in SCAFFOLDING {
+        assert!(
+            root.join(directory).is_dir(),
+            "the claimed root holds {directory}"
+        );
+    }
+
+    let fixture = Fixture::new("fresh-root-before");
+    let root = fixture.manager.execution_root().to_path_buf();
+    let failure = FreshExecutionRoot(&fixture.manager)
+        .create_execution_root(&mut ErrorAt(HookPhase::Before))
+        .expect_err("the before phase fails");
+    assert!(
+        matches!(failure, FreshRootFailure::Unclaimed(_)),
+        "nothing was made: {failure:?}"
+    );
+    assert!(fs::symlink_metadata(&root).is_err(), "and there is no root");
+}
+
 // -----------------------------------------------------------------------
 // The containment refusals — real temp repositories, one test per reason
 // -----------------------------------------------------------------------
@@ -8809,6 +9041,7 @@ fn gate_in(runner: &HostRunner, workspace: &Path, args: &[&str]) -> ProcessOutpu
             args: args.iter().map(|arg| (*arg).to_owned()).collect(),
             env: Vec::new(),
             stdin: Vec::new(),
+            settings_file: None,
         },
         workspace.to_path_buf(),
         std::time::Duration::from_secs(120),
@@ -24319,5 +24552,179 @@ fn relative_name_derive_helper() {
                 let _ = slot_run_writing_a_file(&manager, &base, "relative");
             }
         }
+    }
+}
+
+/// The scope a `core_ignorecase_helper` child measures, and where it records
+/// that it ran.
+const IGNORECASE_SCOPE: &str = "UPSTROKE_D7_IGNORECASE_SCOPE";
+const IGNORECASE_MARKER: &str = "UPSTROKE_D7_IGNORECASE_MARKER";
+
+/// D7_CONFIG_REPAIR (root's checkpoint-3 disposition). `core_ignorecase` is
+/// Git's effective answer, through the manager's builder, at every scope Git
+/// reads, and a result Git cannot give cleanly is an error, never a guess.
+///
+/// Each child runs with every ambient Git control taken away and only its own
+/// configuration added (`run_challenged_replacement_witness_child`), so no
+/// user's repository or global file is read or written. In the `global`
+/// child, the global file is a fixture file named by `GIT_CONFIG_GLOBAL` for
+/// that child only. In the `environment` child, the pair is
+/// `GIT_CONFIG_COUNT`/`KEY_0`/`VALUE_0`, again for that child only. Each child
+/// writes a marker before it asserts, so a child that ran no test cannot pass
+/// for one that did.
+///
+/// The controls are across children: the `neutral` child reads an untouched
+/// repository as unset, and its repository-level `false` as false. That is
+/// what makes the `global` child's `true` the global file's, and the
+/// `environment` child's `true` over a repository-level `false` the
+/// environment's.
+#[test]
+fn core_ignorecase_is_gits_effective_answer_at_every_scope() {
+    let tree = scratch("d7-ignorecase-scopes");
+    let global = tree.path().join("global.gitconfig");
+    write_file(&global, b"[core]\n\tignorecase = true\n");
+    let challenges: [(&str, Vec<(&str, OsString)>); 3] = [
+        ("neutral", Vec::new()),
+        (
+            "global",
+            vec![("GIT_CONFIG_GLOBAL", global.clone().into_os_string())],
+        ),
+        (
+            "environment",
+            vec![
+                ("GIT_CONFIG_COUNT", OsString::from("1")),
+                ("GIT_CONFIG_KEY_0", OsString::from("core.ignorecase")),
+                ("GIT_CONFIG_VALUE_0", OsString::from("true")),
+            ],
+        ),
+    ];
+    for (scope, mut challenge) in challenges {
+        let marker = tree.path().join(format!("ran-{scope}"));
+        challenge.push((IGNORECASE_SCOPE, OsString::from(scope)));
+        challenge.push((IGNORECASE_MARKER, marker.clone().into_os_string()));
+        let status = super::fixture::run_challenged_replacement_witness_child(
+            "workspace_manager::tests::core_ignorecase_helper",
+            &challenge,
+        );
+        assert!(status.success(), "the `{scope}` child ended {status:?}");
+        assert!(
+            marker.exists(),
+            "the `{scope}` child never reached the helper, so it measured nothing"
+        );
+    }
+}
+
+#[test]
+#[ignore = "subprocess helper"]
+fn core_ignorecase_helper() {
+    if std::env::var_os(REPLACEMENT_WITNESS).is_none() {
+        return;
+    }
+    let scope = std::env::var(IGNORECASE_SCOPE).expect("the scope this child measures");
+    let marker = PathBuf::from(std::env::var_os(IGNORECASE_MARKER).expect("the marker"));
+    write_file(&marker, b"ran\n");
+    let read = |configure: &dyn Fn(&Fixture)| {
+        let fixture = Fixture::new("d7-ignorecase");
+        // The fixture-local unset baseline (root's
+        // PR12-D7-UNSET-FIXTURE-PRECONDITION). `git init` writes
+        // `core.ignorecase = true` into a repository it creates on a folding
+        // filesystem, and neither the neutral environment nor the pinned
+        // global file reaches that. So the key is taken out of this fixture's
+        // own file, and its absence there is checked, before the case applies
+        // its configuration. Only the new fixture's file is written, and the
+        // child's global or environment challenge is left as it was.
+        let unset = git_out(
+            &fixture.base,
+            &["config", "--local", "--unset-all", "core.ignorecase"],
+        );
+        assert!(
+            matches!(unset.status.code(), Some(0 | 5)),
+            "clearing the fixture's own core.ignorecase: {unset:?}"
+        );
+        let left = git_out(
+            &fixture.base,
+            &["config", "--local", "--get-all", "core.ignorecase"],
+        );
+        assert_eq!(
+            left.status.code(),
+            Some(1),
+            "the baseline: the fixture's own file sets no core.ignorecase: {left:?}"
+        );
+        configure(&fixture);
+        fixture.manager.core_ignorecase()
+    };
+    let local = |value: &'static str| {
+        move |fixture: &Fixture| {
+            git(&fixture.base, &["config", "core.ignorecase", value]);
+        }
+    };
+    let included = |value: Option<&'static str>| {
+        move |fixture: &Fixture| {
+            let file = fixture.root.join("included.gitconfig");
+            let text = value.map_or_else(String::new, |value| {
+                format!("[core]\n\tignorecase = {value}\n")
+            });
+            write_file(&file, text.as_bytes());
+            write_include_path(&fixture.base.join(".git").join("config"), &file);
+        }
+    };
+    match scope.as_str() {
+        "neutral" => {
+            assert_eq!(read(&|_| {}).expect("an unset key reads"), None);
+            assert_eq!(read(&local("true")).expect("reads"), Some(true));
+            assert_eq!(read(&local("false")).expect("reads"), Some(false));
+            assert_eq!(
+                read(&local("yes")).expect("reads"),
+                Some(true),
+                "Git's own boolean spellings"
+            );
+            assert_eq!(
+                read(&included(Some("true"))).expect("reads"),
+                Some(true),
+                "a file the repository's config includes"
+            );
+            assert_eq!(
+                read(&included(None)).expect("reads"),
+                None,
+                "the control: the same include, without the key"
+            );
+            let malformed = read(&local("sometimes")).expect_err("a value that is not a boolean");
+            assert!(
+                malformed.to_string().contains("core.ignorecase"),
+                "{malformed}"
+            );
+            let unparseable = read(&|fixture: &Fixture| {
+                let config = fixture.base.join(".git").join("config");
+                let mut text = fs::read_to_string(&config).expect("the repository's config");
+                text.push_str("[core\n");
+                write_file(&config, text.as_bytes());
+            })
+            .expect_err("a configuration file Git cannot parse");
+            assert!(
+                unparseable.to_string().contains("ended Some("),
+                "{unparseable}"
+            );
+        }
+        "global" => {
+            assert_eq!(
+                read(&|_| {}).expect("reads"),
+                Some(true),
+                "the fixture's global file sets it, and nothing outranks it"
+            );
+            assert_eq!(
+                read(&local("false")).expect("reads"),
+                Some(false),
+                "the repository's own file outranks the global one"
+            );
+        }
+        "environment" => {
+            assert_eq!(read(&|_| {}).expect("reads"), Some(true));
+            assert_eq!(
+                read(&local("false")).expect("reads"),
+                Some(true),
+                "the environment's pair outranks the repository's own file"
+            );
+        }
+        other => panic!("no scope `{other}`"),
     }
 }

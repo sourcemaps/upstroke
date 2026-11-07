@@ -6723,3 +6723,25 @@ The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-
 ## `fn t_pres_9_a_registration_repaired_by_the_operator_is_reclaimed_with_what_it_holds() {`
 
 The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-PRES-9 (G-1, G-2, rule (d)): `gitdir` removed, kept at the first resume; `git worktree repair` writes it again; the next resume's guard answers `Ok` and the reclaim removes the slot with its contents.
+
+## `fn a_recorded_target_a_fresh_run_refuses_refuses_the_resume_before_any_recovery_or_runtime_question()`
+
+K1 (regular review 4: recorded mounts bypass target validation), through
+`run_recovery_order`. For each set of
+`resolve::fixtures::REFUSED_RECORDED_TARGETS` (the container's root,
+`/upstroke/settings`, `/cache/../upstroke/settings`, and `/cache` with
+`/cache/inner`), a source is recorded as a fresh run records one
+(`mount_source`), its record is planted at those targets and read back
+through `serde_json` (`resolve::fixtures::with_recorded_targets`), and the
+fixture's run records it in `run_started` and the owner record, the
+container runner's digest moving with it. Each record is complete, so only
+the target rule can refuse it. As J5's cases do, each leaves a torn tail
+and the reclaimable marker in place. The resume refuses with the target
+rule's words; the log, torn tail included, and the marker are as they
+were; the stable-prefix barrier never opened the log and the census never
+removed the marker; and the runtime, a fake over a recording trace, was
+asked nothing.
+
+With the shared target validator `resolve::refuse_recorded_targets` bypassed, the
+resume of the root cell recovers through every step, A to H, and the test
+fails (measured before the commit).

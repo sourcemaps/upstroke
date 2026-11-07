@@ -35,6 +35,7 @@
 #[cfg(test)]
 mod this_file_is_test_only {}
 
+use crate::runner::container::runtime::QuestionBound;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -115,6 +116,10 @@ impl Fixture {
         let private_root = root.join("private");
         rundir::create_public_dir(&repo, hooks).expect("the scratch repository");
         rundir::create_private_dir(&git_dir, hooks).expect("the worktree git dir");
+        // A repository, because a census that would reclaim a husk with a
+        // marker first derives where its run's execution root would be, and
+        // that derivation asks Git for the common directory.
+        crate::workspace_manager::fixture::git(&repo, &["init", "-q", "-b", "main"]);
         // `runs` must exist before the proof canonicalizes it, and every
         // private half is created under it.
         rundir::create_private_dir(&private_root.join("runs"), hooks).expect("the private root");
@@ -1110,6 +1115,10 @@ fn every_retain_reason() -> Vec<RetainReason> {
         RetainReason::LocatorThroughReparsePoint {
             component: PathBuf::from("a"),
         },
+        RetainReason::LocatorUnreadable {
+            locator: PathBuf::from("a"),
+            detail: "b".to_owned(),
+        },
         RetainReason::OwnerRecordMissing,
         RetainReason::OwnerRecordUnparseable,
         RetainReason::OwnerRecordDisagrees {
@@ -1613,6 +1622,14 @@ fn the_census_answer_is_total_and_covers_every_outcome_kind() {
     // every other row of this test.
     let stuck = "010000STUCK000000000000000";
     let stuck_husk = Husk::at_p0(&fixture, stuck);
+    // root-retained: a proven husk whose run's execution-root path is occupied.
+    let rooted = "01GGGG00000000000000000000";
+    Husk::at_p0(&fixture, rooted)
+        .stage_marker()
+        .publish_marker()
+        .create_private()
+        .publish_owner();
+    root_at_the_husks_path(&fixture, rooted);
 
     let (report, _) =
         fixture.run_census_armed(None, (RunDirSite::RemovePublicHusk, HookPhase::Before, 1));
@@ -1624,7 +1641,9 @@ fn the_census_answer_is_total_and_covers_every_outcome_kind() {
         .collect();
     assert_eq!(
         ids,
-        vec![stuck, bare, bound, retained, repaired, committed, skipped],
+        vec![
+            stuck, bare, bound, retained, repaired, committed, skipped, rooted
+        ],
         "one entry per directory, in run-id order"
     );
     assert_eq!(
@@ -2484,7 +2503,7 @@ impl ContainerRuntime for UnreachableRuntime {
         Err(unreachable_for(RuntimeOp::ListByLabel))
     }
 
-    fn observe(&self, _: &str) -> Result<Liveness, RuntimeError> {
+    fn observe(&self, _: &str, _: QuestionBound<'_>) -> Result<Liveness, RuntimeError> {
         Err(unreachable_for(RuntimeOp::Observe))
     }
 
@@ -2551,7 +2570,7 @@ impl ContainerRuntime for RefusingRuntime {
         })
     }
 
-    fn observe(&self, _: &str) -> Result<Liveness, RuntimeError> {
+    fn observe(&self, _: &str, _: QuestionBound<'_>) -> Result<Liveness, RuntimeError> {
         Err(unreachable_for(RuntimeOp::Observe))
     }
 
@@ -2595,5 +2614,599 @@ impl GitView for NeverView {
 
     fn discard(&self, _: &Path) -> Result<(), UpstrokeError> {
         panic!("no fixture in this suite has a Git view");
+    }
+}
+
+/// Every entry under `top`, relative to it, with whether it is a directory:
+/// enough to show a directory tree untouched. Read-only.
+fn tree_of(top: &Path) -> Vec<(PathBuf, bool)> {
+    let mut entries = Vec::new();
+    let mut pending = vec![top.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(&directory).expect("list the tree") {
+            let path = entry.expect("an entry").path();
+            let is_dir = fs::symlink_metadata(&path).expect("its metadata").is_dir();
+            if is_dir {
+                pending.push(path.clone());
+            }
+            entries.push((
+                path.strip_prefix(top).expect("under the top").to_path_buf(),
+                is_dir,
+            ));
+        }
+    }
+    entries.sort();
+    entries
+}
+
+/// The execution root a creator of `run_id` would claim at P3c, made here by the
+/// idempotent create site: whoever made a root at that path — the husk's own
+/// creator after P3c, or another actor while the creator was stopped before it
+/// — the census cannot tell, and deletes neither.
+fn root_at_the_husks_path(fixture: &Fixture, run_id: &str) -> PathBuf {
+    let manager = crate::workspace_manager::WorkspaceManager::derive(
+        &fixture.repo,
+        &fixture.private_root,
+        run_id,
+        INCARNATION,
+    )
+    .expect("the husk's run's manager");
+    manager
+        .create_execution_root(&mut crate::workspace_manager::NoHooks)
+        .expect("a root at the husk's path");
+    manager.execution_root().to_path_buf()
+}
+
+/// PR12-INV7-PREPUBLICATION-EXECUTION-ROOT-ORPHAN, the census's half. A husk's
+/// proof authenticates its two halves, not who made a directory at its run's
+/// execution-root path, so a census deletes no execution root: a proven husk
+/// whose root path is occupied is retained — both halves, the marker that
+/// locates the root and the owner record that authenticates the run — and reported
+/// with the root's path, and the root is left exactly as it is. Once the path
+/// is empty, the same husk is reclaimed as before.
+#[test]
+fn a_proven_husk_whose_execution_root_path_is_occupied_is_kept_until_the_path_is_empty() {
+    let fixture = Fixture::new("root-occupied");
+    let run_id = crate::ulid::ulid();
+    let husk = Husk::at_p0(&fixture, &run_id)
+        .stage_marker()
+        .publish_marker()
+        .create_private()
+        .publish_owner();
+    let root = root_at_the_husks_path(&fixture, &run_id);
+    let before = tree_of(&root);
+
+    let report = fixture.run_census();
+    let entry = only(&report);
+    let RunDirOutcome::RootRetained {
+        root: Some(kept), ..
+    } = &entry.outcome
+    else {
+        panic!("{:?}", entry.outcome);
+    };
+    assert_eq!(kept, &root);
+    assert_eq!(entry.outcome.kind(), "root-retained");
+    assert!(
+        !entry.outcome.reclaimed_anything() && !entry.outcome.may_have_deleted_a_private_half()
+    );
+    assert!(
+        exists(&husk.public().join(MARKER)) && exists(&husk.private().join(OWNER_RECORD)),
+        "the marker that locates the root and the owner record that authenticates the run stay"
+    );
+    assert_eq!(tree_of(&root), before, "the root is untouched");
+    assert!(
+        entry.describe().contains(&root.display().to_string()),
+        "{}",
+        entry.describe()
+    );
+
+    crate::workspace_manager::WorkspaceManager::derive(
+        &fixture.repo,
+        &fixture.private_root,
+        &run_id,
+        INCARNATION,
+    )
+    .expect("the manager")
+    .remove_execution_root(&mut crate::workspace_manager::NoHooks)
+    .expect("the root goes, by an authority that is not the census's");
+    let report = fixture.run_census();
+    assert_eq!(
+        only(&report).outcome,
+        RunDirOutcome::ReclaimedBothHalves,
+        "with the path empty the husk is reclaimed as before"
+    );
+}
+
+/// The same for a husk whose marker names a private half that is gone: nothing
+/// proves the root is the run's, and the marker is all that locates it, so the
+/// public husk stays while the path is occupied, and goes once it is empty.
+#[test]
+fn a_target_absent_husk_whose_execution_root_path_is_occupied_keeps_its_marker() {
+    let fixture = Fixture::new("root-target-absent");
+    let run_id = crate::ulid::ulid();
+    let husk = Husk::at_p0(&fixture, &run_id)
+        .stage_marker()
+        .publish_marker();
+    let root = root_at_the_husks_path(&fixture, &run_id);
+    let before = tree_of(&root);
+
+    let report = fixture.run_census();
+    assert!(
+        matches!(only(&report).outcome, RunDirOutcome::RootRetained { .. }),
+        "{:?}",
+        only(&report).outcome
+    );
+    assert!(exists(&husk.public().join(MARKER)), "the marker stays");
+    assert_eq!(tree_of(&root), before, "the root is untouched");
+
+    crate::workspace_manager::WorkspaceManager::derive(
+        &fixture.repo,
+        &fixture.private_root,
+        &run_id,
+        INCARNATION,
+    )
+    .expect("the manager")
+    .remove_execution_root(&mut crate::workspace_manager::NoHooks)
+    .expect("the root goes");
+    let report = fixture.run_census();
+    assert_eq!(
+        only(&report).outcome,
+        RunDirOutcome::ReclaimedPublicOnly(UnboundShape::TargetAbsent)
+    );
+}
+
+/// The census asks whether a run id could have an execution root at all before
+/// it derives where one would be: P3c creates a root only through a manager
+/// derived for its run id. Its answer is held to `WorkspaceManager::derive`'s,
+/// over a canonical id and every way of not being one.
+#[test]
+fn the_censuss_run_id_shape_is_the_one_the_workspace_manager_derives_roots_for() {
+    let fixture = Fixture::new("root-run-id-shape");
+    let canonical = crate::ulid::ulid();
+    let head: String = canonical.chars().take(25).collect();
+    let tail: String = canonical.chars().skip(1).collect();
+    for id in [
+        canonical.clone(),
+        canonical.to_lowercase(),
+        format!("8{tail}"),
+        format!("{head}O"),
+        format!("{head}U"),
+        head.clone(),
+        format!("{canonical}0"),
+        "01BOUND0000000000000000000".to_owned(),
+        "01ABSENT000000000000000000".to_owned(),
+    ] {
+        let derived = crate::workspace_manager::WorkspaceManager::derive(
+            &fixture.repo,
+            &fixture.private_root,
+            &id,
+            INCARNATION,
+        )
+        .is_ok();
+        assert_eq!(super::could_have_a_root(&id), derived, "`{id}`");
+    }
+}
+
+// ===========================================================================
+// PR12-INV9-UNREADABLE-PRIVATE-LOCATOR: an unreadable locator is retained
+// ===========================================================================
+
+/// A husk whose recorded private locator the filesystem will not describe --
+/// `EACCES` here, through the test build's fault for exactly that locator -- is
+/// retained with both halves untouched and reported with the locator and the
+/// error, through the census entry and through the disposition `status`
+/// renders; beside it, in the same census, a husk whose locator is genuinely
+/// `NotFound` is still nothing bound and reclaimed public-only.
+#[test]
+fn a_husk_whose_private_locator_cannot_be_inspected_is_retained_and_reported_beside_a_missing_one()
+{
+    let fixture = Fixture::new("locator-unreadable");
+    let unreadable_id = crate::ulid::ulid();
+    let absent_id = crate::ulid::ulid();
+    let unreadable = Husk::at_p0(&fixture, &unreadable_id)
+        .stage_marker()
+        .publish_marker()
+        .create_private()
+        .publish_owner();
+    let absent = Husk::at_p0(&fixture, &absent_id)
+        .stage_marker()
+        .publish_marker();
+    let public_before = tree_bytes(&unreadable.public());
+    let private_before = tree_bytes(&unreadable.private());
+    assert!(
+        !private_before.is_empty(),
+        "the private half carries content"
+    );
+
+    let report = {
+        let _fault = rundir::LocatorMetadataFault::arm(
+            &unreadable.private(),
+            std::io::ErrorKind::PermissionDenied,
+        );
+        fixture.run_census()
+    };
+
+    let entry = report
+        .of(&unreadable_id)
+        .expect("the unreadable husk is reported");
+    let Some(RetainReason::LocatorUnreadable { locator, detail }) = entry.retain_reason() else {
+        panic!(
+            "an unreadable locator is retained and reported: {}",
+            entry.describe()
+        );
+    };
+    assert_eq!(
+        locator,
+        &unreadable.private(),
+        "the report names the locator"
+    );
+    assert!(
+        detail.contains("could not be observed"),
+        "and the error: {detail}"
+    );
+    assert!(
+        !entry.outcome.reclaimed_anything() && !entry.outcome.may_have_deleted_a_private_half(),
+        "nothing is deleted: {:?}",
+        entry.outcome
+    );
+    assert!(
+        exists(&unreadable.public().join(MARKER)),
+        "the marker, the private half's only locator, stays"
+    );
+    assert_eq!(tree_bytes(&unreadable.public()), public_before);
+    assert_eq!(tree_bytes(&unreadable.private()), private_before);
+    let described = entry.describe();
+    assert!(
+        described.contains("retained, nothing deleted")
+            && described.contains("cannot be inspected")
+            && described.contains(&unreadable.private().display().to_string()),
+        "{described}"
+    );
+
+    let shown = {
+        let _fault = rundir::LocatorMetadataFault::arm(
+            &unreadable.private(),
+            std::io::ErrorKind::PermissionDenied,
+        );
+        rundir::husk_report(
+            &fixture.repo,
+            &unreadable_id,
+            &fixture.repo_key,
+            &fixture.private_root,
+        )
+    };
+    assert!(
+        matches!(
+            shown.disposition,
+            rundir::HuskDisposition::Retained(RetainReason::LocatorUnreadable { .. })
+        ) && shown.disposition.describe().contains("cannot be inspected"),
+        "status's disposition says the same: {}",
+        shown.disposition.describe()
+    );
+
+    assert_eq!(
+        report
+            .of(&absent_id)
+            .expect("the missing husk is reported")
+            .outcome,
+        RunDirOutcome::ReclaimedPublicOnly(UnboundShape::TargetAbsent),
+        "a locator that is genuinely NotFound is still nothing bound"
+    );
+    assert!(!exists(&absent.public()));
+}
+
+// ===========================================================================
+// PR12-REGRESSION11-PRECOMMIT-R18-RECOVERY: a root another context made
+// ===========================================================================
+
+/// Where a run's root would be under a repository key this command's effective
+/// common directory does not derive -- a creating context with another legal
+/// `GIT_COMMON_DIR` -- spelt from this command's manager, so the census reports
+/// it in the same spelling.
+fn root_under_another_key(fixture: &Fixture, run_id: &str) -> PathBuf {
+    let manager = crate::workspace_manager::WorkspaceManager::derive(
+        &fixture.repo,
+        &fixture.private_root,
+        run_id,
+        INCARNATION,
+    )
+    .expect("this command's manager");
+    let another = crate::workspace_manager::repo_key_v1(Path::new(
+        "/a/creating/context/with/another/common/dir/.git",
+    ));
+    assert_ne!(
+        another,
+        manager.repo_key(),
+        "a key this command does not derive"
+    );
+    assert!(
+        !exists(manager.execution_root()),
+        "this command's own derived root path is absent"
+    );
+    crate::workspace_manager::execution_root_of(manager.private_root(), &another, run_id)
+}
+
+/// Make the root another context made: a directory with work in it.
+fn plant_root(root: &Path) {
+    crate::workspace_manager::fixture::write_file(
+        &root.join("tasks").join("work.txt"),
+        b"a root another repository context made\n",
+    );
+}
+
+/// Remove [`plant_root`]'s root, by an authority that is not the census's.
+fn unplant_root(root: &Path) {
+    crate::workspace_manager::fixture::remove_file(&root.join("tasks").join("work.txt"));
+    crate::workspace_manager::fixture::remove_dir(&root.join("tasks"));
+    crate::workspace_manager::fixture::remove_dir(root);
+}
+
+/// The changed-context case for a proven husk: this command's derived root path
+/// is absent, the run's root exists under the key its creating context derived,
+/// and the census keeps both halves -- the marker that locates that root and the
+/// owner record that authenticates the run -- and the root, byte for byte, and
+/// reports the root's path. Once that root is gone the same husk is reclaimed
+/// as before.
+#[test]
+fn a_proven_husk_whose_root_another_repository_context_made_keeps_both_halves_and_the_root() {
+    let fixture = Fixture::new("root-another-context");
+    let run_id = crate::ulid::ulid();
+    let husk = Husk::at_p0(&fixture, &run_id)
+        .stage_marker()
+        .publish_marker()
+        .create_private()
+        .publish_owner();
+    let root = root_under_another_key(&fixture, &run_id);
+    plant_root(&root);
+    let root_before = tree_of(&root);
+    let public_before = tree_bytes(&husk.public());
+    let private_before = tree_bytes(&husk.private());
+
+    let report = fixture.run_census();
+    let entry = only(&report);
+    let RunDirOutcome::RootRetained {
+        root: Some(kept),
+        detail,
+    } = &entry.outcome
+    else {
+        panic!(
+            "a root another context made keeps the husk: {:?}",
+            entry.outcome
+        );
+    };
+    assert_eq!(kept, &root, "the report names that root");
+    assert!(detail.contains("repository key"), "{detail}");
+    assert!(
+        !entry.outcome.reclaimed_anything() && !entry.outcome.may_have_deleted_a_private_half()
+    );
+    assert_eq!(
+        tree_bytes(&husk.public()),
+        public_before,
+        "the marker stays"
+    );
+    assert_eq!(
+        tree_bytes(&husk.private()),
+        private_before,
+        "the owner record stays"
+    );
+    assert_eq!(tree_of(&root), root_before, "the root is untouched");
+    assert!(
+        entry.describe().contains(&root.display().to_string()),
+        "{}",
+        entry.describe()
+    );
+
+    unplant_root(&root);
+    let report = fixture.run_census();
+    assert_eq!(
+        only(&report).outcome,
+        RunDirOutcome::ReclaimedBothHalves,
+        "with no root anywhere the husk is reclaimed as before"
+    );
+}
+
+/// The same for a husk whose marker names a private half that is gone: the
+/// marker is the only linkage to the root another context made, so it stays
+/// while that root exists, and the husk is reclaimed public-only once it does
+/// not.
+#[test]
+fn a_target_absent_husk_whose_root_another_repository_context_made_keeps_its_marker() {
+    let fixture = Fixture::new("root-another-context-absent");
+    let run_id = crate::ulid::ulid();
+    let husk = Husk::at_p0(&fixture, &run_id)
+        .stage_marker()
+        .publish_marker();
+    let root = root_under_another_key(&fixture, &run_id);
+    plant_root(&root);
+    let root_before = tree_of(&root);
+
+    let report = fixture.run_census();
+    assert!(
+        matches!(
+            &only(&report).outcome,
+            RunDirOutcome::RootRetained { root: Some(kept), .. } if kept == &root
+        ),
+        "{:?}",
+        only(&report).outcome
+    );
+    assert!(exists(&husk.public().join(MARKER)), "the marker stays");
+    assert_eq!(tree_of(&root), root_before, "the root is untouched");
+
+    unplant_root(&root);
+    let report = fixture.run_census();
+    assert_eq!(
+        only(&report).outcome,
+        RunDirOutcome::ReclaimedPublicOnly(UnboundShape::TargetAbsent)
+    );
+    assert!(!exists(&husk.public()));
+}
+
+/// A target-absent husk whose marker locates its private half under another
+/// private root: a root its creator made would hang from that other root,
+/// outside this command's authorized namespace, which this census does not
+/// read; so nothing proves it absent and the marker stays.
+#[test]
+fn a_target_absent_husk_whose_marker_locates_it_outside_the_authorized_root_keeps_its_marker() {
+    let fixture = Fixture::new("root-locator-elsewhere");
+    let run_id = crate::ulid::ulid();
+    let mut husk = Husk::at_p0(&fixture, &run_id);
+    husk.marker.private_dir = fixture
+        .root
+        .join("another-private-root")
+        .join("runs")
+        .join(&run_id)
+        .to_string_lossy()
+        .into_owned();
+    let husk = husk.stage_marker().publish_marker();
+
+    let report = fixture.run_census();
+    let entry = only(&report);
+    assert!(
+        matches!(&entry.outcome, RunDirOutcome::RootRetained { root: None, detail } if detail.contains("outside")),
+        "{:?}",
+        entry.outcome
+    );
+    assert!(exists(&husk.public().join(MARKER)), "the marker stays");
+}
+
+/// The namespace look follows no link and reads no unreadable component into
+/// absence: a key entry under `workspaces` that is a link, and a `workspaces`
+/// that is not a directory, each keep a target-absent husk's marker, as an
+/// uninspectable view must.
+#[test]
+fn an_ambiguous_execution_root_namespace_keeps_a_target_absent_husks_marker() {
+    for shape in ["key-link", "not-a-directory"] {
+        let fixture = Fixture::new(&format!("root-namespace-{shape}"));
+        let run_id = crate::ulid::ulid();
+        let husk = Husk::at_p0(&fixture, &run_id)
+            .stage_marker()
+            .publish_marker();
+        let root = root_under_another_key(&fixture, &run_id);
+        let key = root.parent().expect("the key directory").to_path_buf();
+        let workspaces = key.parent().expect("the namespace").to_path_buf();
+        match shape {
+            "key-link" => {
+                let elsewhere = fixture.root.join("a-key-elsewhere");
+                crate::workspace_manager::fixture::create_dir(&elsewhere);
+                crate::workspace_manager::fixture::create_dir(&workspaces);
+                crate::workspace_manager::fixture::link_directory(&elsewhere, &key);
+            }
+            _ => crate::workspace_manager::fixture::write_file(&workspaces, b"not a namespace\n"),
+        }
+
+        let report = fixture.run_census();
+        assert!(
+            matches!(&only(&report).outcome, RunDirOutcome::RootRetained { .. }),
+            "{shape}: {:?}",
+            only(&report).outcome
+        );
+        assert!(
+            exists(&husk.public().join(MARKER)),
+            "{shape}: the marker stays"
+        );
+        if shape == "key-link" {
+            crate::workspace_manager::fixture::unlink_directory(&key);
+        }
+    }
+}
+
+/// Every shape the census already keeps or skips keeps doing so with a root
+/// another context made present, and that root is never touched: a malformed
+/// marker, a foreign marker, an unreadable locator, an owner record of another
+/// incarnation, a live run and a committed run.
+#[test]
+fn a_root_another_context_made_is_untouched_whatever_the_husk_beside_it() {
+    for shape in [
+        "malformed",
+        "foreign",
+        "unreadable-locator",
+        "other-incarnation",
+        "live",
+        "committed",
+    ] {
+        let fixture = Fixture::new(&format!("root-another-context-{shape}"));
+        let run_id = crate::ulid::ulid();
+        let mut husk = Husk::at_p0(&fixture, &run_id);
+        match shape {
+            "foreign" => husk.marker.repo_key = "ffffffffffffffff".to_owned(),
+            "other-incarnation" => {
+                husk.owner.incarnation = "01ANOTHERINCARNATION000000".to_owned();
+            }
+            _ => {}
+        }
+        let husk = husk
+            .stage_marker()
+            .publish_marker()
+            .create_private()
+            .publish_owner();
+        let husk = if shape == "committed" {
+            husk.commit_log()
+        } else {
+            husk
+        };
+        if shape == "malformed" {
+            crate::workspace_manager::fixture::write_file(
+                &husk.public().join(MARKER),
+                b"{ not json at all",
+            );
+        }
+        let root = root_under_another_key(&fixture, &run_id);
+        plant_root(&root);
+        let root_before = tree_of(&root);
+        let private_before = tree_bytes(&husk.private());
+        let live =
+            (shape == "live").then(|| RunLock::acquire(&husk.public()).expect("the run's lock"));
+        let fault = (shape == "unreadable-locator").then(|| {
+            rundir::LocatorMetadataFault::arm(&husk.private(), std::io::ErrorKind::PermissionDenied)
+        });
+
+        let report = fixture.run_census();
+        drop(fault);
+        drop(live);
+        let outcome = &only(&report).outcome;
+        let expected = match shape {
+            "malformed" => matches!(
+                outcome,
+                RunDirOutcome::Retained(RetainReason::MarkerUnparseable)
+            ),
+            "foreign" => matches!(
+                outcome,
+                RunDirOutcome::Retained(RetainReason::MarkerRepoKeyMismatch { .. })
+            ),
+            "unreadable-locator" => matches!(
+                outcome,
+                RunDirOutcome::Retained(RetainReason::LocatorUnreadable { .. })
+            ),
+            "other-incarnation" => matches!(
+                outcome,
+                RunDirOutcome::Retained(RetainReason::OwnerRecordDisagrees {
+                    field: OwnerField::Incarnation,
+                    ..
+                })
+            ),
+            "live" => matches!(outcome, RunDirOutcome::Skipped),
+            _ => matches!(outcome, RunDirOutcome::RepairedStaleMarker),
+        };
+        assert!(expected, "{shape}: {outcome:?}");
+        assert!(
+            !outcome.may_have_deleted_a_private_half(),
+            "{shape}: {outcome:?}"
+        );
+        assert_eq!(
+            tree_of(&root),
+            root_before,
+            "{shape}: the root is untouched"
+        );
+        assert_eq!(
+            tree_bytes(&husk.private()),
+            private_before,
+            "{shape}: the private half is untouched"
+        );
+        if shape != "committed" {
+            assert!(
+                exists(&husk.public().join(MARKER)),
+                "{shape}: the marker stays"
+            );
+        }
     }
 }

@@ -89,7 +89,13 @@ Task and merge worktrees are detached checkouts under a stable execution root
 recorded by `run_started` (default `~/.upstroke/workspaces/<repo-key>/<run-id>`).
 They are separate from private transcripts and from the user's checkout. A
 container sees only the one workspace mounted for its role; sibling worktrees,
-the event log, and private artifacts are not mounted.
+the event log, and private artifacts are not mounted. The single exception is a
+worker's or reviewer's own permission-settings file: the one the engine
+materialized for that invocation, which its command records and its arguments
+name. That one file is bound read-only; the directory holding it, and every other
+attempt's settings, are not. Beyond these, a container receives the operator's
+configured `[runner]` mounts as the run recorded them (§6), none of which may reach
+the repository, its Git, the private root or a host credential location.
 
 A task branches from the integration SHA observed at **dispatch**, after all of
 its declared dependencies are `Merged`. Independent tasks may therefore begin
@@ -463,11 +469,51 @@ before spend.
 Every process capable of executing repository-controlled code goes through the
 runner. In particular, gates do not remain a host-side escape hatch while agents
 move into containers. Reviewer workspaces mount read-only; implementation/gate
-workspaces mount read-write; private run artifacts and the event log are absent.
+workspaces mount read-write; private run artifacts and the event log are absent,
+apart from that one read-only settings file for a worker or reviewer.
 Persistent per-agent credential volumes survive token rotation. Codex retains
 the already-decided `external-sandbox` exception only inside a standard-hardened
 container. Host runner behavior remains available and honestly provides no OS
 boundary around gate code.
+
+On a Unix host every container, for work, review, gates and probes alike, runs
+as the coordinator's effective numeric uid and gid, so what a role writes into
+its worktree the coordinator can manage and reclaim, and Git inside the
+container needs no wildcard `safe.directory`. The image and the credential
+volumes must therefore be usable by that uid and gid: nothing changes their
+ownership, and no global Git setting or privileged cleanup stands in for it.
+Rootless and user-namespace-remapped daemons and Docker Desktop's file sharing
+are not covered by that mapping, and on Windows a container keeps its image's
+user. A command's stdin reaches its container exactly as the host runner delivers
+it: the container is created with stdin open, and an attached start, run and
+owned by the process funnel, writes the payload once, then EOF. The start waits
+for the container to start no longer than the invocation's deadline and stops at
+its cancellation; the attached client is kept until its end is established, and
+one that cannot be settled is reported unresolved. The prompt never enters
+argv, the environment, a mount or a log.
+
+Operator-configured `[runner]` mounts are execution identity, like the image. A
+fresh run resolves them before any lock or probe: each source must be an absolute
+path to an existing directory or regular file (on Windows, on a drive letter), and is
+recorded canonicalized (links resolved), with its identity (the device and inode on
+Unix; on Windows the volume serial number and the full 128-bit file id, read from the
+object itself, a reparse point refused), as the `mounts` of the run's `RunnerPolicy`; each target is a container path in normal form, never `/`, never at
+or under `/upstroke` or `/tmp`, and no two targets are the same or nested. A source
+that is, contains or lies inside the repository root, its Git or common directory,
+the private root (and so every run's worktrees and private artifacts) or a host
+credential location (`CLAUDE_CONFIG_DIR`, `COPILOT_HOME`, `CODEX_HOME`, and
+`~/.claude`, `~/.claude.json`, `~/.codex`, `~/.copilot`, compared as paths, never
+opened) is refused, as is a path the runtime's `--mount` option cannot carry exactly.
+A build for a platform that is neither Unix nor Windows refuses configured mounts.
+The record is digested (a separate v2
+domain, so a record without mounts keeps its v1 digest and its exact bytes), written
+to the owner record and `run_started`, and every role and probe gets the recorded
+list: read-only for review and probes, as recorded for implement and gate, so a gate
+can write through a mount the operator made read-write. Each use, and every resume,
+re-checks that the recorded path still names the recorded object; a missing or
+rebound source refuses before any recovery or work spawn and the run stays
+resumable. Today's differing `mounts` only warn and are ignored, and `report.json`'s
+`runner`, read from the record, names them.
 
 A linked worktree's `.git` file points back into the authoritative repository,
 which must not simply be mounted into an agent container: that would expose all

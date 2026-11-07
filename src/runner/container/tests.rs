@@ -6,6 +6,7 @@
 #![forbid(clippy::disallowed_types, clippy::disallowed_macros)]
 
 use super::runtime::Settled;
+use crate::runner::container::runtime::QuestionBound;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -18,8 +19,8 @@ use super::intent::{
     invocation_hash, private_root_label,
 };
 use super::runtime::{
-    ContainerExecution, ContainerRuntime, ContainerTrace, CreateSpec, ImageInspection, Liveness,
-    Mount, OwnerLiveness, RuntimeError, RuntimeOp, StopMode, TracePhase,
+    ContainerExecution, ContainerRuntime, ContainerTrace, ContainerUser, CreateSpec,
+    ImageInspection, Liveness, Mount, OwnerLiveness, RuntimeError, RuntimeOp, StopMode, TracePhase,
 };
 use super::{
     CoveredCreate, CoveredStart, DOCKER_GATED_TESTS, DisposableDirView, DockerCli,
@@ -302,6 +303,8 @@ fn spec_for(
         command: vec!["/bin/sh".to_owned(), "-c".to_owned(), "exit 0".to_owned()],
         workdir: Some("/work".to_owned()),
         read_only_root: true,
+        user: None,
+        open_stdin: false,
     }
 }
 
@@ -538,6 +541,1104 @@ fn a_reference_can_be_moved_to_another_id_and_the_old_id_stays() {
 }
 
 #[test]
+fn an_unresolved_attached_client_stays_unresolved_through_every_settlement() {
+    use super::{AttachedClient, ClientEnd, ClientRecord, ClientSettlement, refused};
+    use crate::agent::ProcessOutput;
+    use crate::agent::proc::ProcessFailure;
+    use crate::error::ProcessFate;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+
+    fn ended(
+        stop: Arc<AtomicBool>,
+        result: Result<ProcessOutput, ProcessFailure>,
+    ) -> AttachedClient {
+        let handle = std::thread::spawn(move || result);
+        while !handle.is_finished() {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        AttachedClient {
+            stop,
+            supervisor: Some(handle),
+        }
+    }
+    let output = |code| ProcessOutput {
+        code,
+        stdout: String::new(),
+        stderr: String::new(),
+        duration: Duration::ZERO,
+        timed_out: false,
+        output_limited: false,
+    };
+    let docker = DockerCli::default();
+
+    docker.own_client(
+        "unresolved",
+        ended(
+            Arc::new(AtomicBool::new(false)),
+            Err(ProcessFailure {
+                fate: ProcessFate::Unresolved,
+                error: UpstrokeError::Agent {
+                    message: "the client's process group could not be established gone".to_owned(),
+                },
+            }),
+        ),
+    );
+    assert!(
+        matches!(
+            docker.settle_client_of("unresolved"),
+            ClientSettlement::Unresolved(fact) if fact.contains("may still be running")
+        ),
+        "a supervision that ended Unresolved is unresolved at collection, not an end"
+    );
+    for removal in 0..2 {
+        let removed = docker.settle_removed_client("unresolved");
+        assert!(
+            matches!(
+                removed,
+                Err(RuntimeError::Unresolved {
+                    operation: RuntimeOp::Remove,
+                    ..
+                })
+            ),
+            "removal {removal}: the unresolved fact survives, never an Ok: {removed:?}"
+        );
+    }
+    assert!(
+        matches!(
+            docker.client_record("unresolved"),
+            Some(ClientRecord::Unresolved(_))
+        ),
+        "what is kept is the fact, not a finished thread's handle"
+    );
+    assert!(
+        matches!(
+            refused(RuntimeError::Unresolved {
+                operation: RuntimeOp::Remove,
+                detail: "unresolved".to_owned(),
+            }),
+            UpstrokeError::Runner {
+                fate: ProcessFate::Unresolved,
+                ..
+            }
+        ),
+        "the funnel's mapping keeps the fate the release reads"
+    );
+
+    docker.own_client(
+        "exited",
+        ended(Arc::new(AtomicBool::new(false)), Ok(output(Some(0)))),
+    );
+    assert!(
+        docker.settle_removed_client("exited").is_ok(),
+        "the control: a client that exited is settled"
+    );
+    assert!(docker.client_record("exited").is_none());
+
+    docker.own_client(
+        "stopped",
+        ended(Arc::new(AtomicBool::new(true)), Ok(output(None))),
+    );
+    assert!(
+        matches!(
+            docker.settle_client_of("stopped"),
+            ClientSettlement::Ended(ClientEnd::Stopped)
+        ),
+        "the control: a verified requested stop is cleanup"
+    );
+
+    docker.own_client(
+        "gone",
+        ended(
+            Arc::new(AtomicBool::new(false)),
+            Err(ProcessFailure {
+                fate: ProcessFate::Gone,
+                error: UpstrokeError::Agent {
+                    message: "supervising agent input: broken".to_owned(),
+                },
+            }),
+        ),
+    );
+    assert!(
+        matches!(
+            docker.settle_client_of("gone"),
+            ClientSettlement::Ended(ClientEnd::Failed {
+                fate: ProcessFate::Gone,
+                ..
+            })
+        ),
+        "a supervision failure whose process is established gone is an end, judged by the \
+         verdict where a result is reported"
+    );
+}
+
+#[test]
+fn a_removal_that_leaves_a_process_unresolved_releases_nothing_as_gone() {
+    use super::{ContainerToRelease, release_classified};
+
+    for unresolved in [true, false] {
+        let fixture = Fixture::new(
+            &format!("release-unresolved-{unresolved}"),
+            RUN_A,
+            INCARNATION_1,
+            &shell_probe(),
+        );
+        let mut hooks = fixture.hooks();
+        let launched =
+            launch(&mut hooks, &fixture.runtime, &fixture.view, &fixture.plan).expect("launched");
+        if unresolved {
+            fixture
+                .runtime
+                .leave_a_process_unresolved_at_removal(launched.name.as_str());
+        }
+        let released = release_classified(
+            &mut hooks,
+            &fixture.runtime,
+            &fixture.view,
+            &fixture.root,
+            &launched,
+            ContainerToRelease::ObservedExited,
+        );
+        if !unresolved {
+            assert!(
+                released.is_ok(),
+                "the control: a removal that establishes everything gone releases"
+            );
+            continue;
+        }
+        let failure = released.expect_err("an unresolved process is not a release");
+        assert!(
+            !failure.container_gone,
+            "even with the container observed exited, an unresolved process means the \
+             invocation's processes are not established gone"
+        );
+        let message = failure.error.to_string();
+        assert!(
+            message.contains("could not establish every process"),
+            "{message}"
+        );
+        assert!(
+            launched.view_path.exists() && launched.intent_path.exists(),
+            "the view and the intent are kept for the next census"
+        );
+    }
+}
+
+#[test]
+fn a_removal_keeps_an_unresolved_client_over_an_ordinary_removal_failure() {
+    use super::combined_removal;
+
+    let removal_failed = || {
+        Err(RuntimeError::Failed {
+            operation: RuntimeOp::Remove,
+            detail: "the daemon refused the removal".to_owned(),
+        })
+    };
+    let client_unresolved = || {
+        Err(RuntimeError::Unresolved {
+            operation: RuntimeOp::Remove,
+            detail: "the attached client may still be running".to_owned(),
+        })
+    };
+
+    let both = combined_removal(removal_failed(), client_unresolved());
+    assert!(
+        matches!(
+            &both,
+            Err(RuntimeError::Unresolved { detail, .. })
+                if detail.contains("may still be running")
+                    && detail.contains("the daemon refused the removal")
+        ),
+        "the stronger unresolved fact survives, and both diagnostics stay: {both:?}"
+    );
+    assert!(
+        matches!(
+            combined_removal(Ok(Settled::ProcessGone), client_unresolved()),
+            Err(RuntimeError::Unresolved { .. })
+        ),
+        "a removal that succeeded does not settle an unresolved client"
+    );
+    assert_eq!(
+        combined_removal(removal_failed(), Ok(())),
+        removal_failed(),
+        "the control: a settled client keeps the ordinary removal error"
+    );
+    assert_eq!(
+        combined_removal(Ok(Settled::ProcessGone), Ok(())),
+        Ok(Settled::ProcessGone)
+    );
+}
+
+#[test]
+fn an_ordinary_removal_failure_never_masks_an_unresolved_client() {
+    use super::{ContainerToRelease, release_classified};
+
+    for (case, released_from, unresolved) in [
+        ("observed exited", ContainerToRelease::ObservedExited, true),
+        ("after a stop", ContainerToRelease::MayBeRunning, true),
+        ("control", ContainerToRelease::ObservedExited, false),
+    ] {
+        let fixture = Fixture::new(
+            &format!("removal-masks-{}", case.replace(' ', "-")),
+            RUN_A,
+            INCARNATION_1,
+            &shell_probe(),
+        );
+        let mut hooks = fixture.hooks();
+        let launched =
+            launch(&mut hooks, &fixture.runtime, &fixture.view, &fixture.plan).expect("launched");
+        fixture.runtime.set_failing(RuntimeOp::Remove);
+        if unresolved {
+            fixture
+                .runtime
+                .leave_a_process_unresolved_at_removal(launched.name.as_str());
+        }
+        let failure = release_classified(
+            &mut hooks,
+            &fixture.runtime,
+            &fixture.view,
+            &fixture.root,
+            &launched,
+            released_from,
+        )
+        .expect_err("a removal that failed is not a release");
+        let message = failure.error.to_string();
+        if unresolved {
+            assert!(
+                !failure.container_gone,
+                "{case}: the unresolved client is not masked by the removal's own failure"
+            );
+            assert!(
+                message.contains("could not establish every process")
+                    && message.contains("the container's own removal failed"),
+                "{case}: both diagnostics: {message}"
+            );
+            assert!(
+                launched.view_path.exists() && launched.intent_path.exists(),
+                "{case}: the view and the intent stay for the next census"
+            );
+        } else {
+            assert!(
+                failure.container_gone,
+                "{case}: with the exit observed and no client unresolved, the release keeps \
+                 its established fate"
+            );
+            assert!(
+                message.contains("the container could not be removed")
+                    && !message.contains("could not establish every process"),
+                "{case}: the ordinary removal error: {message}"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_docker_create_arguments_carry_a_user_and_an_open_stdin_only_when_the_spec_does() {
+    let mut spec = CreateSpec {
+        name: "upstroke-a-b-c-d".to_owned(),
+        image_id: IMAGE_ID.to_owned(),
+        labels: BTreeMap::new(),
+        mounts: Vec::new(),
+        env: Vec::new(),
+        command: vec!["cat".to_owned()],
+        workdir: None,
+        read_only_root: true,
+        user: None,
+        open_stdin: false,
+    };
+    assert_eq!(
+        super::docker_create_arguments(&spec).expect("nothing to refuse"),
+        [
+            "create",
+            "--name",
+            "upstroke-a-b-c-d",
+            "--read-only",
+            IMAGE_ID,
+            "cat"
+        ],
+        "a spec with no user and no input asks for neither"
+    );
+    spec.user = Some(ContainerUser {
+        uid: 1000,
+        gid: 1001,
+    });
+    spec.open_stdin = true;
+    assert_eq!(
+        super::docker_create_arguments(&spec).expect("nothing to refuse"),
+        [
+            "create",
+            "--name",
+            "upstroke-a-b-c-d",
+            "--read-only",
+            "--user",
+            "1000:1001",
+            "--interactive",
+            IMAGE_ID,
+            "cat"
+        ],
+        "the numeric user and the open stdin are options of the create, before the image"
+    );
+}
+
+#[test]
+fn a_mount_argument_carries_each_value_exactly_or_refuses_it() {
+    let bind = |source: &str, target: &str| Mount::Path {
+        source: PathBuf::from(source),
+        target: target.to_owned(),
+        read_only: true,
+    };
+    for (source, expected) in [
+        (
+            "/srv/Shared Cache/Ünicode",
+            "type=bind,source=/srv/Shared Cache/Ünicode,target=/data,readonly",
+        ),
+        (
+            "/srv/a=b",
+            "type=bind,source=/srv/a=b,target=/data,readonly",
+        ),
+        (
+            "/srv/semi;colon:x",
+            "type=bind,source=/srv/semi;colon:x,target=/data,readonly",
+        ),
+    ] {
+        assert_eq!(
+            super::mount_argument(&bind(source, "/data")),
+            Ok(expected.to_owned()),
+            "`{source}` was not carried as written"
+        );
+    }
+    #[cfg(not(windows))]
+    assert_eq!(
+        super::mount_argument(&bind("/srv/back\\slash", "/data")),
+        Ok("type=bind,source=/srv/back\\slash,target=/data,readonly".to_owned()),
+        "a backslash is a byte of a Unix name and is carried as written, not turned into `/`"
+    );
+    assert_eq!(
+        super::mount_argument(&Mount::Volume {
+            name: "upstroke-creds-codex".to_owned(),
+            target: "/upstroke/credentials/codex".to_owned(),
+            read_only: false,
+        }),
+        Ok("type=volume,source=upstroke-creds-codex,target=/upstroke/credentials/codex".to_owned())
+    );
+    assert_eq!(
+        super::mount_argument(&Mount::Tmpfs {
+            target: "/tmp".to_owned()
+        }),
+        Ok("type=tmpfs,target=/tmp".to_owned())
+    );
+
+    let refusals: [(&str, &str); 7] = [
+        ("/srv/a,readonly=false", "contains `,`"),
+        ("/srv/q\"uote", "contains `\"`"),
+        ("/srv/new\nline", "control character"),
+        ("/srv/tab\tbed", "control character"),
+        ("/srv/trailing ", "whitespace"),
+        (" /srv/leading", "whitespace"),
+        ("", "is empty"),
+    ];
+    for (value, needle) in refusals {
+        for mount in [
+            bind(value, "/data"),
+            bind("/srv/plain", value),
+            Mount::Volume {
+                name: value.to_owned(),
+                target: "/data".to_owned(),
+                read_only: false,
+            },
+            Mount::Tmpfs {
+                target: value.to_owned(),
+            },
+        ] {
+            let refused = super::mount_argument(&mount)
+                .expect_err("a value the option cannot carry is refused, never altered");
+            assert!(refused.contains(needle), "{mount:?}: {refused}");
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt as _;
+        let refused = super::mount_argument(&Mount::Path {
+            source: PathBuf::from(std::ffi::OsStr::from_bytes(b"/srv/bad\xff")),
+            target: "/data".to_owned(),
+            read_only: false,
+        })
+        .expect_err("a source that is not UTF-8 is refused, never converted lossily");
+        assert!(refused.contains("not valid UTF-8"), "{refused}");
+    }
+
+    let spec = CreateSpec {
+        name: "upstroke-a-b-c-d".to_owned(),
+        image_id: IMAGE_ID.to_owned(),
+        labels: BTreeMap::new(),
+        mounts: vec![bind("/srv/a,b", "/data")],
+        env: Vec::new(),
+        command: vec!["cat".to_owned()],
+        workdir: None,
+        read_only_root: true,
+        user: None,
+        open_stdin: false,
+    };
+    assert!(
+        super::docker_create_arguments(&spec).is_err(),
+        "a create whose mount cannot be carried exactly is refused before `docker` runs"
+    );
+}
+
+#[test]
+fn an_attached_start_held_at_created_ends_at_its_deadline_or_its_cancellation() {
+    use super::{NotStarted, await_started};
+    use crate::runner::Cancellation;
+    use std::cell::Cell;
+
+    let poll = Duration::from_millis(5);
+    let created = || Ok(Some("created".to_owned()));
+    let alive = || false;
+
+    let declared = Duration::from_millis(200);
+    let began = Instant::now();
+    let waited = await_started(began + declared, &Cancellation::new(), poll, created, alive);
+    let took = began.elapsed();
+    assert!(
+        matches!(waited, Err(NotStarted::DeadlinePassed)),
+        "held at created, the wait ends at the invocation's deadline: {waited:?}"
+    );
+    assert!(
+        took >= declared && took < declared + Duration::from_secs(2),
+        "within the declared bound: {took:?}"
+    );
+
+    let cancellation = Cancellation::new();
+    let polls = Cell::new(0_u32);
+    let cancelling = || {
+        polls.set(polls.get() + 1);
+        if polls.get() == 3 {
+            cancellation.cancel();
+        }
+        Ok(Some("created".to_owned()))
+    };
+    let began = Instant::now();
+    let waited = await_started(
+        began + Duration::from_secs(600),
+        &cancellation,
+        poll,
+        cancelling,
+        alive,
+    );
+    assert!(
+        matches!(waited, Err(NotStarted::Cancelled)),
+        "a cancellation ends the wait on the poll that sees it: {waited:?}"
+    );
+    assert_eq!(polls.get(), 3);
+    assert!(
+        began.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        began.elapsed()
+    );
+
+    let far = Instant::now() + Duration::from_secs(600);
+    let never = Cancellation::new();
+    assert!(
+        matches!(
+            await_started(far, &never, poll, created, || true),
+            Err(NotStarted::ClientEnded)
+        ),
+        "a client that ended while the container is still created is a start that failed"
+    );
+    assert!(
+        matches!(
+            await_started(far, &never, poll, || Ok(None), alive),
+            Err(NotStarted::Gone)
+        ),
+        "a container that disappeared while starting"
+    );
+    assert!(
+        matches!(
+            await_started(
+                far,
+                &never,
+                poll,
+                || Err(RuntimeError::Unreachable {
+                    operation: RuntimeOp::Observe,
+                    detail: "down".to_owned(),
+                }),
+                alive,
+            ),
+            Err(NotStarted::Unobserved(_))
+        ),
+        "a state that cannot be read is not a start"
+    );
+    for (state, client_ended) in [("running", false), ("exited", false), ("exited", true)] {
+        assert!(
+            matches!(
+                await_started(
+                    far,
+                    &never,
+                    poll,
+                    || Ok(Some(state.to_owned())),
+                    || client_ended
+                ),
+                Ok(())
+            ),
+            "the control: a container that left `created` started ({state}, client ended: \
+             {client_ended})"
+        );
+    }
+}
+
+/// J6, `PR12-ATTACHED-START-UNBOUNDED-DOCKER-OBSERVATION`. An attached start waits for its
+/// container to leave `created` by asking `docker ps`. At the reviewed head each question was
+/// an unbounded `Command::output`, so a stalled `docker` held the start past its deadline (a
+/// 50 ms deadline took 1.001 s against a one-second stub) and past its cancellation. The
+/// questions now run through the process funnel. A child of this test binary, whose `PATH`
+/// alone carries a `docker` that never answers `ps`, waits once to its deadline and once to
+/// its cancellation, and each wait ends promptly.
+#[cfg(unix)]
+#[test]
+fn the_attached_starts_observation_ends_at_its_deadline_and_on_its_cancellation() {
+    let tree = scratch("attached-start-observation");
+    let bin = tree.path().join("bin");
+    fs::create_dir(&bin).expect("the stub's directory");
+    let stub = bin.join("docker");
+    fs::write(
+        &stub,
+        "#!/bin/sh\ncase \"$1\" in\nps) exec sleep 60 ;;\n*) exit 93 ;;\nesac\n",
+    )
+    .expect("the stub");
+    crate::workspace_manager::fixture::set_mode(&stub, 0o755);
+    let inherited = std::env::var_os("PATH").unwrap_or_default();
+    let path =
+        std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(&inherited)))
+            .expect("a PATH with the stub first");
+    for mode in ["deadline", "cancel"] {
+        let began = Instant::now();
+        let status = crate::workspace_manager::fixture::run_kill_child_within(
+            "runner::container::tests::attached_start_observation_child",
+            &[
+                ("PATH", path.as_os_str()),
+                ("UPSTROKE_TEST_OBSERVATION", std::ffi::OsStr::new(mode)),
+            ],
+            Duration::from_secs(120),
+        )
+        .expect("the child ends within its bound");
+        assert!(
+            status.success(),
+            "{mode}: the child's bounded wait failed ({status:?})"
+        );
+        assert!(
+            began.elapsed() < Duration::from_secs(60),
+            "{mode}: the stalled `ps` held the child {:?}",
+            began.elapsed()
+        );
+    }
+}
+
+/// The child of `the_attached_starts_observation_ends_at_its_deadline_and_on_its_cancellation`:
+/// the production wait of an attached start, against the stalling `docker` on its `PATH`.
+#[cfg(unix)]
+#[test]
+#[ignore = "spawned by the attached start's bounded-observation witness"]
+fn attached_start_observation_child() {
+    use super::NotStarted;
+    use crate::runner::Cancellation;
+
+    let mode = std::env::var("UPSTROKE_TEST_OBSERVATION").expect("the parent names the mode");
+    let cli = DockerCli::default();
+    let cancellation = Cancellation::new();
+    let began = Instant::now();
+    let deadline = if mode == "deadline" {
+        began + Duration::from_millis(50)
+    } else {
+        began + Duration::from_secs(600)
+    };
+    let waited = std::thread::scope(|scope| {
+        if mode == "cancel" {
+            scope.spawn(|| {
+                std::thread::sleep(Duration::from_millis(50));
+                cancellation.cancel();
+            });
+        }
+        cli.await_attached_start("upstroke-observed", deadline, &cancellation, || false)
+    });
+    let took = began.elapsed();
+    if mode == "deadline" {
+        assert!(
+            matches!(waited, Err(NotStarted::DeadlinePassed)),
+            "{waited:?}"
+        );
+    } else {
+        assert!(matches!(waited, Err(NotStarted::Cancelled)), "{waited:?}");
+    }
+    assert!(
+        took < Duration::from_secs(10),
+        "{mode}: the stalled observation held the start {took:?}"
+    );
+}
+
+#[cfg(unix)]
+const EARLY_EXIT_DEADLINE: Duration = Duration::from_secs(3);
+
+#[cfg(unix)]
+const EARLY_EXIT_SLACK: Duration = Duration::from_millis(1500);
+
+#[cfg(unix)]
+#[test]
+fn an_attached_start_whose_client_ended_early_asks_its_diagnostic_within_its_own_bounds() {
+    assert!(
+        EARLY_EXIT_DEADLINE + EARLY_EXIT_SLACK < super::CLIENT_GRACE,
+        "the deadline mode's bound must stay below a fresh client grace, or the diagnostic \
+         this witness exists to hold to its invocation could take one and pass"
+    );
+    let tree = scratch("attached-start-early-exit");
+    let bin = tree.path().join("bin");
+    fs::create_dir(&bin).expect("the stub's directory");
+    let stub = bin.join("docker");
+    super::write_program_in_its_own_process(
+        &stub,
+        "#!/bin/sh\ncase \"$1\" in\nstart) exit 0 ;;\nps) printf 'upstroke-early\\037created\\n' ;;\n\
+         container) : > \"$UPSTROKE_TEST_INSPECTED\"; exec sleep 60 ;;\n*) exit 93 ;;\nesac\n",
+    );
+    let inherited = std::env::var_os("PATH").unwrap_or_default();
+    let path =
+        std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(&inherited)))
+            .expect("a PATH with the stub first");
+    for mode in ["deadline", "cancel"] {
+        let inspected = tree.path().join(format!("inspected-{mode}"));
+        let ended = crate::agent::proc::test_support::run_test_isolated(
+            "runner::container::tests::attached_start_early_exit_child",
+            &[
+                ("PATH", path.as_os_str()),
+                ("UPSTROKE_TEST_EARLY_EXIT", std::ffi::OsStr::new(mode)),
+                ("UPSTROKE_TEST_INSPECTED", inspected.as_os_str()),
+            ],
+            Duration::from_secs(120),
+        );
+        assert!(
+            ended.status.is_some_and(|status| status.success())
+                && ended.stdout.contains("1 passed"),
+            "{mode}: the early-exit start was not held to its own invocation: {ended}"
+        );
+        assert!(
+            inspected.exists(),
+            "{mode}: the premise, the start asked its diagnostic"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "spawned by the attached start's early-exit diagnostic witness"]
+fn attached_start_early_exit_child() {
+    use crate::runner::container::CoveredStart;
+
+    let mode = std::env::var("UPSTROKE_TEST_EARLY_EXIT").expect("the parent names the mode");
+    let inspected = std::env::var_os("UPSTROKE_TEST_INSPECTED")
+        .map(PathBuf::from)
+        .expect("the parent names the diagnostic's marker");
+    let cli = DockerCli::default();
+    let began = Instant::now();
+    let (deadline, bound) = if mode == "deadline" {
+        (
+            began + EARLY_EXIT_DEADLINE,
+            EARLY_EXIT_DEADLINE + EARLY_EXIT_SLACK,
+        )
+    } else {
+        (began + Duration::from_secs(600), Duration::from_secs(10))
+    };
+    let covered = CoveredStart::without_a_reaper_until("upstroke-early", deadline);
+    let started = std::thread::scope(|scope| {
+        if mode == "cancel" {
+            scope.spawn(|| {
+                let until = Instant::now() + Duration::from_secs(60);
+                while !inspected.exists() && Instant::now() < until {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                covered.cancellation().cancel();
+            });
+        }
+        cli.start_attached(RuntimeOp::Start, &covered, b"")
+    });
+    let took = began.elapsed();
+    let Err(RuntimeError::Failed { detail, .. }) = &started else {
+        panic!("{mode}: the start fails with its client settled: {started:?}");
+    };
+    assert!(
+        detail.contains("ended while the container was still created, so it never started;"),
+        "{mode}: the early-exit branch, to which the stalled diagnostic added nothing: {detail}"
+    );
+    assert!(inspected.exists(), "{mode}: the diagnostic was asked");
+    assert!(
+        took < bound,
+        "{mode}: the stalled diagnostic held the start {took:?}, past its bound {bound:?}"
+    );
+    if mode == "deadline" {
+        assert!(
+            took >= EARLY_EXIT_DEADLINE,
+            "deadline: the start ended {took:?}, before its {EARLY_EXIT_DEADLINE:?} deadline, so \
+             something other than the deadline ended the stalled diagnostic"
+        );
+    }
+}
+
+/// `PR12-J6-OBSERVATION-FATE-DROPPED` (root's source finding on J6). A bounded docker question
+/// keeps its supervisor's fate. Each result below is synthetic: a supervisor that never
+/// started the question, one that saw its process gone, one that could not establish it gone,
+/// and ordinary ends. Only the unresolved one is unresolved, and only it is held under the
+/// container it was about.
+#[test]
+fn a_bounded_docker_question_keeps_its_supervisors_fate() {
+    use super::ClientSettlement;
+    use crate::agent::proc::ProcessFailure;
+    use crate::error::ProcessFate;
+
+    let cli = DockerCli::default();
+    let ask = |name: &str, outcome| cli.answer_within(RuntimeOp::Observe, name, &["ps"], outcome);
+    let failure = |fate| {
+        Err(ProcessFailure {
+            fate,
+            error: UpstrokeError::Agent {
+                message: "the supervisor's account".to_owned(),
+            },
+        })
+    };
+    let output = |code: Option<i32>, timed_out: bool| {
+        Ok(crate::agent::ProcessOutput {
+            code,
+            stdout: "answer".to_owned(),
+            stderr: "the daemon refused".to_owned(),
+            duration: Duration::from_millis(1),
+            timed_out,
+            output_limited: false,
+        })
+    };
+
+    let never = ask("upstroke-never", failure(ProcessFate::NeverStarted));
+    assert!(
+        matches!(never, Err(RuntimeError::Unreachable { .. })),
+        "a question its supervisor never started found no runtime: {never:?}"
+    );
+    let gone = ask("upstroke-gone", failure(ProcessFate::Gone));
+    assert!(
+        matches!(gone, Err(RuntimeError::Failed { .. })),
+        "a question whose process its supervisor saw gone failed: {gone:?}"
+    );
+    let held = ask("upstroke-held", failure(ProcessFate::Unresolved));
+    assert!(
+        matches!(held, Err(RuntimeError::Unresolved { .. })),
+        "a question whose process could not be established gone is unresolved: {held:?}"
+    );
+    assert_eq!(
+        ask("upstroke-ok", output(Some(0), false)),
+        Ok("answer".to_owned())
+    );
+    let refused = ask("upstroke-ok", output(Some(1), false));
+    assert!(
+        refused.is_err() && !matches!(refused, Err(RuntimeError::Unresolved { .. })),
+        "an ordinary nonzero exit is not an unresolved process: {refused:?}"
+    );
+    let ended = ask("upstroke-ok", output(None, true));
+    assert!(
+        matches!(ended, Err(RuntimeError::Failed { .. })),
+        "a question the deadline or a cancellation killed and reaped is not unresolved: {ended:?}"
+    );
+
+    match cli.settle_client_of("upstroke-held") {
+        ClientSettlement::Unresolved(fact) => assert!(
+            fact.contains("without establishing its process gone"),
+            "{fact}"
+        ),
+        other => panic!("{other:?}"),
+    }
+    for name in ["upstroke-never", "upstroke-gone", "upstroke-ok"] {
+        assert!(
+            matches!(cli.settle_client_of(name), ClientSettlement::Absent),
+            "{name}: only an unresolved question is held"
+        );
+    }
+}
+
+/// An attached client whose supervisor ended cleanly, as a synthetic result.
+fn an_attached_client_that_ended() -> super::AttachedClient {
+    let supervisor = std::thread::spawn(|| {
+        Ok::<_, crate::agent::proc::ProcessFailure>(crate::agent::ProcessOutput {
+            code: Some(0),
+            stdout: String::new(),
+            stderr: String::new(),
+            duration: Duration::from_millis(1),
+            timed_out: false,
+            output_limited: false,
+        })
+    });
+    super::AttachedClient {
+        stop: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        supervisor: Some(supervisor),
+    }
+}
+
+/// The held fact belongs to its container and outlives every later settlement of it. The
+/// attached start's optional diagnostic (`container inspect`) fails unresolved, and the start
+/// drops that error with `.ok()` as before. Yet the container's attached client ending cleanly,
+/// a removal, and a second removal all still settle unresolved, while another container's clean
+/// end stays clean.
+#[test]
+fn an_unresolved_question_stays_with_its_container_through_every_later_settlement() {
+    use super::ClientSettlement;
+    use crate::error::ProcessFate;
+
+    let cli = DockerCli::default();
+    let name = "upstroke-held";
+    let diagnostic = cli.answer_within(
+        RuntimeOp::Start,
+        name,
+        &["container", "inspect", name, "--format", "{{.State.Error}}"],
+        Err(crate::agent::proc::ProcessFailure {
+            fate: ProcessFate::Unresolved,
+            error: UpstrokeError::Agent {
+                message: "the inspect's supervision ended".to_owned(),
+            },
+        }),
+    );
+    assert!(
+        matches!(diagnostic, Err(RuntimeError::Unresolved { .. })),
+        "the start drops this diagnostic's error and keeps its reason: {diagnostic:?}"
+    );
+
+    cli.own_client(name, an_attached_client_that_ended());
+    match cli.settle_client_of(name) {
+        ClientSettlement::Unresolved(fact) => assert!(
+            fact.contains("its attached client ended") && fact.contains("container inspect"),
+            "the clean client end does not clear the held question: {fact}"
+        ),
+        other => panic!("{other:?}"),
+    }
+    for removal in 1..=2 {
+        assert!(
+            matches!(
+                cli.settle_removed_client(name),
+                Err(RuntimeError::Unresolved { .. })
+            ),
+            "removal {removal}: the container's removal reports the held question"
+        );
+    }
+
+    cli.own_client("upstroke-other", an_attached_client_that_ended());
+    assert!(
+        matches!(
+            cli.settle_client_of("upstroke-other"),
+            ClientSettlement::Ended(_)
+        ),
+        "another container's settlement is its own"
+    );
+}
+
+#[test]
+fn an_unresolved_credential_volume_question_is_held_under_the_volume_where_no_container_reads_it() {
+    use super::ClientSettlement;
+    use crate::agent::proc::ProcessFailure;
+    use crate::error::ProcessFate;
+
+    let cli = DockerCli::default();
+    let ask = |volume: &str, fate| {
+        cli.answer_within(
+            RuntimeOp::InspectVolume,
+            volume,
+            &["volume", "inspect", volume, "--format", "{{.Name}}"],
+            Err(ProcessFailure {
+                fate,
+                error: UpstrokeError::Agent {
+                    message: "the supervisor's account".to_owned(),
+                },
+            }),
+        )
+    };
+
+    let never = ask("upstroke-creds-never", ProcessFate::NeverStarted);
+    assert!(
+        matches!(never, Err(RuntimeError::Unreachable { .. })),
+        "{never:?}"
+    );
+    let gone = ask("upstroke-creds-gone", ProcessFate::Gone);
+    assert!(matches!(gone, Err(RuntimeError::Failed { .. })), "{gone:?}");
+    let held = ask("upstroke-creds-held", ProcessFate::Unresolved);
+    assert!(
+        matches!(
+            held,
+            Err(RuntimeError::Unresolved {
+                operation: RuntimeOp::InspectVolume,
+                ..
+            })
+        ),
+        "a volume question whose process could not be established gone is unresolved: {held:?}"
+    );
+
+    let container = "upstroke-mounts-the-held-volume";
+    assert!(
+        matches!(cli.settle_client_of(container), ClientSettlement::Absent),
+        "the container that mounts the volume holds no fact of the volume's question"
+    );
+    assert!(
+        cli.settle_removed_client(container).is_ok(),
+        "so that container's clean removal reports nothing unresolved"
+    );
+    assert!(
+        matches!(
+            cli.settle_client_of("upstroke-creds-held"),
+            ClientSettlement::Unresolved(_)
+        ),
+        "the fact is held under the volume the question was about"
+    );
+    for settled in ["upstroke-creds-never", "upstroke-creds-gone"] {
+        assert!(
+            matches!(cli.settle_client_of(settled), ClientSettlement::Absent),
+            "{settled}: a question whose fate was established holds nothing"
+        );
+    }
+}
+
+/// An observation that could not establish its process gone is reported as itself even when the
+/// deadline has passed or a cancellation fired at the same moment: that fact must reach the
+/// start's settlement. An ordinary failed observation at the deadline is still the deadline.
+#[test]
+fn an_unresolved_observation_is_reported_as_itself_at_a_deadline_or_a_cancellation() {
+    use super::{NotStarted, await_started};
+    use crate::runner::Cancellation;
+
+    let poll = Duration::from_millis(1);
+    let unresolved = || {
+        Err(RuntimeError::Unresolved {
+            operation: RuntimeOp::Observe,
+            detail: "the question's process could not be established gone".to_owned(),
+        })
+    };
+    let never = Cancellation::new();
+    let cancelled = Cancellation::new();
+    cancelled.cancel();
+    let far = Instant::now() + Duration::from_secs(600);
+    let waited = await_started(far, &cancelled, poll, unresolved, || false);
+    assert!(
+        matches!(
+            waited,
+            Err(NotStarted::Unobserved(RuntimeError::Unresolved { .. }))
+        ),
+        "with a cancellation: {waited:?}"
+    );
+    let waited = await_started(Instant::now(), &never, poll, unresolved, || false);
+    assert!(
+        matches!(
+            waited,
+            Err(NotStarted::Unobserved(RuntimeError::Unresolved { .. }))
+        ),
+        "at the deadline: {waited:?}"
+    );
+    let failed = || {
+        Err(RuntimeError::Failed {
+            operation: RuntimeOp::Observe,
+            detail: "ended before it answered".to_owned(),
+        })
+    };
+    let waited = await_started(Instant::now(), &never, poll, failed, || false);
+    assert!(
+        matches!(waited, Err(NotStarted::DeadlinePassed)),
+        "an ordinary failed observation at the deadline is the deadline: {waited:?}"
+    );
+}
+
+#[test]
+fn an_attached_client_is_settled_or_reported_unresolved_within_its_bound() {
+    use super::settle_client;
+    use std::cell::Cell;
+
+    let grace = Duration::from_millis(100);
+    let poll = Duration::from_millis(5);
+
+    let asked = Cell::new(false);
+    assert!(
+        settle_client(|| true, || asked.set(true), grace, poll),
+        "a client that ended with its container is settled"
+    );
+    assert!(!asked.get(), "and is never asked to stop");
+
+    let delayed = Instant::now() + Duration::from_millis(40);
+    let asked = Cell::new(false);
+    assert!(
+        settle_client(
+            || Instant::now() >= delayed,
+            || asked.set(true),
+            grace,
+            poll
+        ),
+        "a client whose feeding and exit end a little later, within the grace, is settled"
+    );
+    assert!(!asked.get(), "without being stopped");
+
+    let asked = Cell::new(false);
+    let began = Instant::now();
+    assert!(
+        settle_client(|| asked.get(), || asked.set(true), grace, poll),
+        "a client that outlives its container ends when it is asked to stop, and is settled"
+    );
+    assert!(asked.get());
+    assert!(began.elapsed() < grace * 2 + Duration::from_secs(1));
+
+    let asked = Cell::new(false);
+    let began = Instant::now();
+    assert!(
+        !settle_client(|| false, || asked.set(true), grace, poll),
+        "a client that does not end even when asked is reported unresolved, not settled"
+    );
+    assert!(asked.get(), "it was asked to stop first");
+    let took = began.elapsed();
+    assert!(
+        took >= grace * 2 && took < grace * 2 + Duration::from_secs(1),
+        "within the declared bound of two graces: {took:?}"
+    );
+}
+
+#[test]
+fn the_delivery_verdict_tells_an_early_exit_from_a_broken_attach() {
+    use super::{ClientEnd, delivery_verdict};
+
+    assert!(
+        delivery_verdict("c", &ClientEnd::Exited(Some(0)), Some(0)).is_ok(),
+        "the attach ended with the container: the input was delivered"
+    );
+    assert!(
+        delivery_verdict("c", &ClientEnd::Exited(Some(7)), Some(7)).is_ok(),
+        "a program that stopped reading early and exited 7: its own result, as on the host"
+    );
+    for (end, exited, why) in [
+        (ClientEnd::Exited(Some(1)), Some(0), "the attach broke"),
+        (ClientEnd::Exited(None), Some(0), "the attach broke"),
+        (ClientEnd::Stopped, Some(0), "was stopped"),
+        (
+            ClientEnd::Failed {
+                fate: crate::error::ProcessFate::Gone,
+                error: "writing its input: Input/output error".to_owned(),
+            },
+            Some(0),
+            "failed (its process is gone): writing its input",
+        ),
+        (
+            ClientEnd::Failed {
+                fate: crate::error::ProcessFate::Unresolved,
+                error: "waiting on agent process: interrupted".to_owned(),
+            },
+            Some(0),
+            "failed (a process of it may still be running): waiting",
+        ),
+    ] {
+        let verdict = delivery_verdict("c", &end, exited);
+        assert!(
+            verdict
+                .as_ref()
+                .is_err_and(|error| error.to_string().contains(why)),
+            "{end:?} with the container exiting {exited:?} is an error naming `{why}`: \
+             {verdict:?}"
+        );
+    }
+}
+
+#[test]
 fn the_fake_can_report_an_image_id_that_differs_from_the_one_create_asked_for() {
     let trace = ContainerTrace::recording();
     let runtime = FakeRuntime::new(trace);
@@ -551,6 +1652,8 @@ fn the_fake_can_report_an_image_id_that_differs_from_the_one_create_asked_for() 
         command: Vec::new(),
         workdir: None,
         read_only_root: true,
+        user: None,
+        open_stdin: false,
     };
 
     let honest = runtime
@@ -611,6 +1714,8 @@ fn volume_presence_is_a_toggle_and_absence_refuses_a_create() {
         command: Vec::new(),
         workdir: None,
         read_only_root: true,
+        user: None,
+        open_stdin: false,
     };
     let refused = runtime
         .create(CoveredCreate::without_a_reaper(&spec))
@@ -652,7 +1757,7 @@ fn the_availability_toggle_is_per_operation_so_ps_can_answer_while_inspect_canno
             RuntimeOp::InspectImageById => runtime.image_by_id("x").is_err(),
             RuntimeOp::InspectVolume => runtime.volume_present("x").is_err(),
             RuntimeOp::ListByLabel => runtime.containers_with_label("k", "v").is_err(),
-            RuntimeOp::Observe => runtime.observe("x").is_err(),
+            RuntimeOp::Observe => runtime.observe("x", QuestionBound::Runtime).is_err(),
             RuntimeOp::Collect => runtime.collect("x").is_err(),
             RuntimeOp::Create => runtime
                 .create(CoveredCreate::without_a_reaper(&CreateSpec {
@@ -664,6 +1769,8 @@ fn the_availability_toggle_is_per_operation_so_ps_can_answer_while_inspect_canno
                     command: Vec::new(),
                     workdir: None,
                     read_only_root: true,
+                    user: None,
+                    open_stdin: false,
                 }))
                 .is_err(),
             RuntimeOp::Start => runtime.start(CoveredStart::without_a_reaper("x")).is_err(),
@@ -761,6 +1868,8 @@ fn the_call_log_is_ordered_and_holds_every_operation() {
         command: Vec::new(),
         workdir: None,
         read_only_root: true,
+        user: None,
+        open_stdin: false,
     };
     runtime.probe().expect("reachable");
     runtime
@@ -770,7 +1879,9 @@ fn the_call_log_is_ordered_and_holds_every_operation() {
         .start(CoveredStart::without_a_reaper(&spec.name))
         .expect("started");
     runtime.stop(&spec.name, StopMode::Kill).expect("stopped");
-    runtime.observe(&spec.name).expect("observed");
+    runtime
+        .observe(&spec.name, QuestionBound::Runtime)
+        .expect("observed");
     runtime.remove(&spec.name).expect("removed");
 
     assert_eq!(
@@ -2436,8 +3547,8 @@ impl ContainerRuntime for DockerLikeStop<'_> {
     ) -> Result<Vec<super::runtime::DiscoveredContainer>, RuntimeError> {
         self.inner.containers_with_label(key, value)
     }
-    fn observe(&self, name: &str) -> Result<Liveness, RuntimeError> {
-        self.inner.observe(name)
+    fn observe(&self, name: &str, bound: QuestionBound<'_>) -> Result<Liveness, RuntimeError> {
+        self.inner.observe(name, bound)
     }
     fn collect(&self, name: &str) -> Result<ContainerExecution, RuntimeError> {
         self.inner.collect(name)
@@ -2453,7 +3564,7 @@ impl ContainerRuntime for DockerLikeStop<'_> {
     }
 
     fn stop(&self, name: &str, mode: StopMode) -> Result<Settled, RuntimeError> {
-        let outcome = match self.inner.observe(name)? {
+        let outcome = match self.inner.observe(name, QuestionBound::Runtime)? {
             Liveness::Running => {
                 self.inner.stop(name, mode)?;
                 Ok(format!("{name}\n"))
@@ -2474,7 +3585,9 @@ impl ContainerRuntime for DockerLikeStop<'_> {
                 Ok(text) => format!("ok:{}", text.trim()),
                 Err(error) => format!("err:{error}"),
             });
-        super::settle_stop(name, outcome, |target| self.inner.observe(target))
+        super::settle_stop(name, outcome, |target| {
+            self.inner.observe(target, QuestionBound::Runtime)
+        })
     }
 
     fn remove(&self, name: &str) -> Result<Settled, RuntimeError> {
@@ -2669,6 +3782,7 @@ fn a_containers_exit_status_and_streams_come_back_through_the_seam() {
                 exit_code: code,
                 stdout: b"out".to_vec(),
                 stderr: b"err".to_vec(),
+                output_limited: false,
             },
         );
         let collected = runtime.collect("upstroke-a-b-c-d").expect("collected");
@@ -2685,7 +3799,9 @@ fn a_containers_exit_status_and_streams_come_back_through_the_seam() {
 
     runtime.set_container_state("upstroke-a-b-c-d", Liveness::Exited);
     assert_eq!(
-        runtime.observe("upstroke-a-b-c-d").expect("observed"),
+        runtime
+            .observe("upstroke-a-b-c-d", QuestionBound::Runtime)
+            .expect("observed"),
         Liveness::Exited
     );
     assert!(!Liveness::Running.is_terminated());
@@ -2696,7 +3812,9 @@ fn a_containers_exit_status_and_streams_come_back_through_the_seam() {
          concurrent reclaimers block each other"
     );
     assert_eq!(
-        runtime.observe("never-existed").expect("observed"),
+        runtime
+            .observe("never-existed", QuestionBound::Runtime)
+            .expect("observed"),
         Liveness::Gone
     );
 }
@@ -2738,8 +3856,8 @@ impl ContainerRuntime for NeverTerminates<'_> {
     ) -> Result<Vec<super::runtime::DiscoveredContainer>, RuntimeError> {
         self.0.containers_with_label(key, value)
     }
-    fn observe(&self, name: &str) -> Result<Liveness, RuntimeError> {
-        self.0.observe(name).map(|_| Liveness::Running)
+    fn observe(&self, name: &str, bound: QuestionBound<'_>) -> Result<Liveness, RuntimeError> {
+        self.0.observe(name, bound).map(|_| Liveness::Running)
     }
     fn collect(&self, name: &str) -> Result<ContainerExecution, RuntimeError> {
         self.0.collect(name)
@@ -3526,7 +4644,9 @@ fn wait_until_terminated_within(
     let mut observations = 0_u32;
     loop {
         observations += 1;
-        let state = docker.observe(name).expect("reachable");
+        let state = docker
+            .observe(name, QuestionBound::Runtime)
+            .expect("reachable");
         if state.is_terminated() {
             return Ok(state);
         }
@@ -3581,8 +4701,8 @@ impl<F: Fn(Liveness) -> Liveness + Send + Sync> ContainerRuntime for Scripted<'_
     ) -> Result<Vec<super::runtime::DiscoveredContainer>, RuntimeError> {
         self.0.containers_with_label(key, value)
     }
-    fn observe(&self, name: &str) -> Result<Liveness, RuntimeError> {
-        self.0.observe(name).map(&self.1)
+    fn observe(&self, name: &str, bound: QuestionBound<'_>) -> Result<Liveness, RuntimeError> {
+        self.0.observe(name, bound).map(&self.1)
     }
     fn collect(&self, name: &str) -> Result<ContainerExecution, RuntimeError> {
         self.0.collect(name)
@@ -3862,6 +4982,8 @@ fn real_docker_creates_from_an_id_reports_it_and_reclaims_idempotently() {
             command: vec!["/bin/sh".to_owned(), "-c".to_owned(), "exit 0".to_owned()],
             workdir: None,
             read_only_root: true,
+            user: None,
+            open_stdin: false,
         },
         view: GitViewRequest {
             path: view_path.clone(),
@@ -3946,6 +5068,8 @@ fn real_docker_kill_on_an_already_exited_container_is_tolerated() {
         command: vec!["/bin/sh".to_owned(), "-c".to_owned(), "exit 0".to_owned()],
         workdir: None,
         read_only_root: true,
+        user: None,
+        open_stdin: false,
     };
     let _ = docker.remove(name);
     docker
@@ -3981,7 +5105,12 @@ fn real_docker_kill_on_an_already_exited_container_is_tolerated() {
         .expect("a reclaimer arriving second converges on an already-stopped container");
 
     docker.remove(name).expect("removed");
-    assert_eq!(docker.observe(name).expect("reachable"), Liveness::Gone);
+    assert_eq!(
+        docker
+            .observe(name, QuestionBound::Runtime)
+            .expect("reachable"),
+        Liveness::Gone
+    );
 }
 
 #[test]
@@ -4013,6 +5142,8 @@ fn real_docker_returns_both_streams_of_a_container_separately() {
         ],
         workdir: None,
         read_only_root: true,
+        user: None,
+        open_stdin: false,
     };
     let _ = docker.remove(name);
     docker
@@ -4403,6 +5534,8 @@ fn real_docker_renders_a_comma_bearing_label_value_whole() {
         command: vec!["/bin/sh".to_owned(), "-c".to_owned(), "exit 0".to_owned()],
         workdir: None,
         read_only_root: true,
+        user: None,
+        open_stdin: false,
     };
     docker
         .create(CoveredCreate::without_a_reaper(&spec))
@@ -4665,13 +5798,17 @@ fn real_docker_lists_the_state_the_settlement_observation_reads() {
         command: vec!["/bin/sh".to_owned(), "-c".to_owned(), "sleep 30".to_owned()],
         workdir: None,
         read_only_root: true,
+        user: None,
+        open_stdin: false,
     };
     for existing in [&name, &longer] {
         let _ = docker.remove(existing);
     }
 
     assert_eq!(
-        docker.observe(&name).expect("reachable"),
+        docker
+            .observe(&name, QuestionBound::Runtime)
+            .expect("reachable"),
         Liveness::Gone,
         "a listing that succeeded and holds nothing is the daemon saying the container is gone"
     );
@@ -4708,24 +5845,38 @@ fn real_docker_lists_the_state_the_settlement_observation_reads() {
     assert_eq!(super::listed_state(&listing, &name), Some("created"));
     assert_eq!(super::listed_state(&listing, &longer), Some("running"));
     assert_eq!(
-        docker.observe(&name).expect("reachable"),
+        docker
+            .observe(&name, QuestionBound::Runtime)
+            .expect("reachable"),
         Liveness::Exited,
         "a created container holds no process"
     );
     assert_eq!(
-        docker.observe(&longer).expect("reachable"),
+        docker
+            .observe(&longer, QuestionBound::Runtime)
+            .expect("reachable"),
         Liveness::Running
     );
 
     docker
         .start(CoveredStart::without_a_reaper(&name))
         .expect("started");
-    assert_eq!(docker.observe(&name).expect("reachable"), Liveness::Running);
+    assert_eq!(
+        docker
+            .observe(&name, QuestionBound::Runtime)
+            .expect("reachable"),
+        Liveness::Running
+    );
     assert_eq!(
         docker.stop(&name, StopMode::Kill).expect("killed"),
         Settled::ProcessGone
     );
-    assert_eq!(docker.observe(&name).expect("reachable"), Liveness::Exited);
+    assert_eq!(
+        docker
+            .observe(&name, QuestionBound::Runtime)
+            .expect("reachable"),
+        Liveness::Exited
+    );
     assert_eq!(
         docker.stop(&name, StopMode::Kill).expect(
             "a second kill is the daemon's `is not running`, established against its own listing"
@@ -4738,7 +5889,12 @@ fn real_docker_lists_the_state_the_settlement_observation_reads() {
             docker.remove(existing).expect("removed"),
             Settled::ProcessGone
         );
-        assert_eq!(docker.observe(existing).expect("reachable"), Liveness::Gone);
+        assert_eq!(
+            docker
+                .observe(existing, QuestionBound::Runtime)
+                .expect("reachable"),
+            Liveness::Gone
+        );
     }
 }
 
@@ -5695,4 +6851,98 @@ fn runtime_notes_rustdoc_shortcuts_resolve_to_links() {
         broken.is_empty(),
         "unresolved Rustdoc shortcut reference(s) with no Markdown link target: {broken:?}"
     );
+}
+
+#[test]
+fn the_image_environment_is_read_strictly_from_the_inspection_of_the_recorded_id() {
+    const ID: &str = "sha256:0123456789abcdef";
+    assert_eq!(
+        super::image_environment_of(
+            ID,
+            "sha256:0123456789abcdef\u{1f}[\"PATH=/usr/bin:/bin\",\"LANG=C.UTF-8\",\"EMPTY=\"]\n",
+        ),
+        Ok(Some(vec![
+            ("PATH".to_owned(), "/usr/bin:/bin".to_owned()),
+            ("LANG".to_owned(), "C.UTF-8".to_owned()),
+            ("EMPTY".to_owned(), String::new()),
+        ])),
+        "every entry, in the image's order, split at its first `=`"
+    );
+    assert_eq!(
+        super::image_environment_of(ID, "sha256:0123456789abcdef\u{1f}null\n"),
+        Ok(Some(Vec::new())),
+        "an image that declares no environment has an empty one, not an unreadable one"
+    );
+    assert_eq!(
+        super::image_environment_of(ID, "sha256:fedcba9876543210\u{1f}[\"PATH=/bin\"]\n"),
+        Ok(None),
+        "an answer about another image is no answer about the recorded id"
+    );
+    for (text, why) in [
+        ("sha256:0123456789abcdef\n", "no environment field"),
+        (
+            "sha256:0123456789abcdef\u{1f}{\"PATH\":\"/bin\"}\n",
+            "not a JSON list",
+        ),
+        (
+            "sha256:0123456789abcdef\u{1f}[\"PATH\"]\n",
+            "names no value",
+        ),
+    ] {
+        let error = super::image_environment_of(ID, text).expect_err(why);
+        assert!(
+            matches!(
+                &error,
+                RuntimeError::Failed {
+                    operation: RuntimeOp::InspectImageById,
+                    detail,
+                } if detail.contains(why)
+            ),
+            "{why}: {error:?}"
+        );
+    }
+}
+
+#[test]
+fn the_fake_runtime_reports_the_environment_its_image_declares() {
+    let runtime = FakeRuntime::new(ContainerTrace::off());
+    runtime.add_image("sha256:abc", None);
+    assert_eq!(
+        runtime.image_environment("sha256:abc"),
+        Ok(Some(Vec::new())),
+        "an image starts with no environment"
+    );
+    runtime.set_image_environment("sha256:abc", &[("PATH", "/usr/bin")]);
+    assert_eq!(
+        runtime.image_environment("sha256:abc"),
+        Ok(Some(vec![("PATH".to_owned(), "/usr/bin".to_owned())]))
+    );
+    assert_eq!(
+        runtime.image_environment("sha256:absent"),
+        Ok(None),
+        "an id the runtime does not hold is absent"
+    );
+}
+
+#[test]
+fn an_exit_status_the_runtime_reports_is_read_as_a_number_or_refused() {
+    for (status, code) in [("0\n", 0), ("137", 137), (" -1 ", -1)] {
+        assert_eq!(
+            super::exit_status_of("upstroke-collected", status),
+            Ok(code),
+            "{status:?}"
+        );
+    }
+    for status in ["", "\n", "running", "0x1", "137 1"] {
+        let refused = super::exit_status_of("upstroke-collected", status)
+            .expect_err("an exit status that is not a number is not a missing one");
+        let RuntimeError::Failed { operation, detail } = &refused else {
+            panic!("{status:?}: {refused:?}");
+        };
+        assert_eq!(*operation, RuntimeOp::Collect, "{status:?}");
+        assert!(
+            detail.contains("upstroke-collected") && detail.contains("not a number"),
+            "{status:?}: {detail}"
+        );
+    }
 }

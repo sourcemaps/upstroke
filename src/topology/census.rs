@@ -367,14 +367,16 @@ pub(crate) mod tests {
         CandidateLeaseEffect, CandidatePrepared, CandidateRef, CommitSha, DeferWaitElapsed4,
         GenerationCloseReason, GenerationClosed, GenerationId, GitRef, ImageIdentity,
         IncarnationId, InfrastructureKind, LeaseDisposition, LeaseGrant, MergeLeaseRelease,
-        MergePrepared, MergeVerificationStarted, MergeVerificationUnavailable, PreparedDisposition,
-        RunStarted4, RungBinding, RunnerContract, RunnerKind, RunnerPolicy, SequenceId,
-        SettlementTransition, TaskCandidateCreated, TaskDispatched, TaskMerged, TopologyEvent,
-        TopologyEventBody, TopologyLimits, UnavailableCause, UnavailableOutcome, VerificationBasis,
+        MergePrepared, MergeVerificationStarted, MergeVerificationUnavailable, MountSourceIdentity,
+        MountSourceKind, PreparedDisposition, RecordedMount, RunStarted4, RungBinding,
+        RunnerContract, RunnerKind, RunnerPolicy, SequenceId, SettlementTransition,
+        TaskCandidateCreated, TaskDispatched, TaskMerged, TopologyEvent, TopologyEventBody,
+        TopologyLimits, UnavailableCause, UnavailableOutcome, VerificationBasis,
         VerificationRecord, VerificationSource, VerificationVerdict,
     };
     use crate::topology::fold::{
-        FrozenInputs, GenerationClass, PreparedCandidate, TaskState, TopologyFold, TransactionClass,
+        FoldError, FrozenInputs, GenerationClass, PreparedCandidate, TaskState, TopologyFold,
+        TransactionClass,
     };
     use crate::topology::paths::{GitPath, PathGrammar, PathPolicy, PathPolicyVersion, PathSet};
     use crate::topology::registry::{TaskKey, TaskRegistry};
@@ -556,8 +558,10 @@ pub(crate) mod tests {
                     .into_iter()
                     .collect(),
                 ),
+                mounts: Vec::new(),
             },
             probed_agents: probed_agents(),
+            shell: ShellKind::Bash,
             branch: format!("upstroke/run-{RUN_ID}"),
             integration_ref: git_ref("integration"),
             base_sha: sha("base"),
@@ -1098,6 +1102,7 @@ pub(crate) mod tests {
                 question: question.clone(),
                 answer,
                 via: "census".to_owned(),
+                text: None,
             },
         })
     }
@@ -5902,5 +5907,168 @@ pub(crate) mod tests {
             ]
         );
         assert!(interrupted > 100, "{interrupted}");
+    }
+
+    fn census_mount(target: &str, read_only: bool, object: u64) -> RecordedMount {
+        RecordedMount {
+            source: format!("/srv/census{target}"),
+            target: target.to_owned(),
+            read_only,
+            source_identity: MountSourceIdentity::Unix {
+                kind: MountSourceKind::Directory,
+                device: 64_769,
+                inode: object,
+            },
+        }
+    }
+
+    #[test]
+    fn a_run_resumed_whose_mounts_moved_is_refused_by_the_existing_runner_equality() {
+        let mut mounted = run_started();
+        mounted.runner.mounts = vec![
+            census_mount("/cache", true, 11),
+            census_mount("/tools", false, 12),
+        ];
+        let mut fold = TopologyFold::new(inputs());
+        let delta = fold
+            .plan_transition(&ev(TopologyEventBody::RunStarted {
+                data: Box::new(mounted.clone()),
+            }))
+            .expect("a run that recorded mounts starts");
+        fold.apply_delta(delta);
+        fold.plan_transition(&run_resumed(mounted.runner.clone()))
+            .expect("a resume that re-established the recorded mounts is admitted");
+
+        type Mover = fn(&mut RunnerPolicy);
+        let movers: [(&str, Mover); 5] = [
+            ("dropped", |runner| runner.mounts.clear()),
+            ("a source rebound", |runner| {
+                runner.mounts[0] = census_mount("/cache", true, 21);
+            }),
+            ("read-write now", |runner| {
+                runner.mounts[0].read_only = false
+            }),
+            ("a target moved", |runner| {
+                runner.mounts[1] = census_mount("/toolchain", false, 12);
+            }),
+            ("one more", |runner| {
+                runner.mounts.push(census_mount("/zeta", true, 13));
+            }),
+        ];
+        for (name, moved) in movers {
+            let mut runner = mounted.runner.clone();
+            moved(&mut runner);
+            match fold.plan_transition(&run_resumed(runner)) {
+                Err(FoldError::RunnerMoved { field }) => assert_eq!(
+                    field, "configured mount set",
+                    "a resume whose mounts were {name} was refused naming another field"
+                ),
+                Err(other) => panic!("a resume whose mounts were {name} was refused as {other}"),
+                Ok(_) => panic!("a resume whose mounts were {name} was admitted"),
+            }
+        }
+
+        let plain = started();
+        match plain.plan_transition(&run_resumed(mounted.runner)) {
+            Err(FoldError::RunnerMoved { field }) => assert_eq!(field, "configured mount set"),
+            Err(other) => panic!("a resume that added mounts was refused as {other}"),
+            Ok(_) => panic!("a resume that added mounts to a run without them was admitted"),
+        }
+    }
+
+    #[test]
+    fn the_report_projects_the_recorded_mounts_and_an_unmounted_record_projects_as_before() {
+        use crate::engine::topology::report::TopologyReport;
+
+        let mut mounted = run_started();
+        mounted.runner.mounts = vec![
+            census_mount("/cache", true, 11),
+            census_mount("/tools", false, 12),
+        ];
+        for started in [run_started(), mounted] {
+            let has_mounts = !started.runner.mounts.is_empty();
+            let events = vec![ev(TopologyEventBody::RunStarted {
+                data: Box::new(started.clone()),
+            })];
+            let fold = TopologyFold::replay(inputs(), &events).expect("the record replays");
+            let report =
+                TopologyReport::derive(RUN_ID, &fold, &events).expect("the report derives");
+            assert_eq!(
+                report.runner, started.runner,
+                "report.json's runner is the recorded one"
+            );
+            assert_eq!(
+                report.compute_digest().expect("digests"),
+                report.digest,
+                "the digest covers the projected runner"
+            );
+            let value = serde_json::to_value(&report).expect("serializes");
+            let runner = value["runner"].as_object().expect("an object");
+            let rendered = report.render();
+            if has_mounts {
+                assert_eq!(
+                    runner.get("mounts"),
+                    Some(&serde_json::to_value(&started.runner.mounts).expect("serializes")),
+                    "report.json does not carry the recorded mounts"
+                );
+                for line in [
+                    "runner mounts: 2",
+                    "  /cache <- /srv/census/cache (read-only, directory device 64769 inode 11)",
+                    "  /tools <- /srv/census/tools (read-write, directory device 64769 inode 12)",
+                ] {
+                    assert!(
+                        rendered.contains(line),
+                        "the rendering does not say `{line}`:\n{rendered}"
+                    );
+                }
+                let mut unmounted = value.clone();
+                unmounted["runner"]
+                    .as_object_mut()
+                    .expect("an object")
+                    .remove("mounts")
+                    .expect("present");
+                assert!(
+                    !report.is_fresh_against(&serde_json::to_vec(&unmounted).expect("serializes")),
+                    "a report.json that lost the recorded mounts reads as fresh"
+                );
+            } else {
+                assert_eq!(
+                    runner.keys().map(String::as_str).collect::<Vec<_>>(),
+                    vec!["credential_volumes", "image", "kind", "policy"],
+                    "an unmounted record projects exactly the fields it always did"
+                );
+                assert!(!rendered.contains("runner mounts"), "{rendered}");
+            }
+            assert!(
+                report.is_fresh_against(&serde_json::to_vec_pretty(&report).expect("serializes")),
+                "the stored report does not read back as fresh"
+            );
+        }
+
+        let mut windows = run_started();
+        windows.runner.mounts = vec![RecordedMount {
+            source: r"C:\srv\census".to_owned(),
+            target: "/census".to_owned(),
+            read_only: false,
+            source_identity: MountSourceIdentity::Windows {
+                kind: MountSourceKind::File,
+                volume_serial: 0x1234,
+                file_id: "00112233445566778899aabbccddeeff".to_owned(),
+            },
+        }];
+        let events = vec![ev(TopologyEventBody::RunStarted {
+            data: Box::new(windows.clone()),
+        })];
+        let fold = TopologyFold::replay(inputs(), &events).expect("the record replays");
+        let report = TopologyReport::derive(RUN_ID, &fold, &events).expect("the report derives");
+        assert_eq!(report.runner, windows.runner);
+        let rendered = report.render();
+        assert!(
+            rendered.contains(
+                "  /census <- C:\\srv\\census (read-write, file volume 0x0000000000001234 file \
+                 00112233445566778899aabbccddeeff)"
+            ),
+            "{rendered}"
+        );
     }
 }

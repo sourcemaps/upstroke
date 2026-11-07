@@ -56,6 +56,12 @@ The pre-Tokio runner steps use the same request/output contract through a
 synchronous `run`; step 5 changes that call shape to the boxed-future surface
 while parity tests hold process and parsing semantics fixed.
 
+`CommandSpec` also records `settings_file`: the permission-settings file the
+engine materialized for this one invocation, which its arguments name. The host
+runner ignores it; the container runner binds exactly that file, read-only, into
+a worker's or reviewer's container (§15, §26), and an argument naming any other
+file grants nothing.
+
 `CommandSpec.env` overlays a runner-owned base rather than replacing it. The
 host runner starts from the Upstroke environment and the container runner from the
 image environment; each supplies role-scoped `HOME`, `PATH`, and credential

@@ -520,8 +520,10 @@ fn run_started_unauthenticated() -> RunStarted4 {
             policy: RunnerContract::HostV1,
             image: None,
             credential_volumes: None,
+            mounts: Vec::new(),
         },
         probed_agents: vec!["claude-code".to_owned(), "copilot".to_owned()],
+        shell: ShellKind::Sh,
         branch: format!("upstroke/run-{RUN_ID}"),
         integration_ref: GitRef::from("refs/upstroke/integration"),
         base_sha: CommitSha::from("0f5c1c4"),
@@ -2271,6 +2273,7 @@ fn the_production_emitter_reaches_the_append_error_protocol() {
 
             clock: &fixture.clock,
             stopped: None,
+            notifiers: &[],
         };
         emitter
             .emit(budget_body(), &mut fixture.hooks)

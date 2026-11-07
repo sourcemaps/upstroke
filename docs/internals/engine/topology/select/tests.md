@@ -662,3 +662,25 @@ with `T-REPAIR-DISPATCH`.
 
 The ceiling is consulted for a repair dispatch as for any other; a repair
 spends like any attempt.
+
+## `fn an_interrupted_integration_verification_keeps_its_known_charges_and_makes_the_total_a_floor() {`
+
+K4, regular review 4, finding 4 (P2, correctness; first bad `fffa73fa`, related J3/J12). The
+reviewer's sequence, as events: a verification of aleph's candidate starts, its reviewer is
+charged (or not), the coordinator dies and recovery settles it `merge_verification_interrupted`,
+and the candidate is verified again and prepared. Two cases, the reviewer's two:
+- with a known $2.50 charge before the interruption and a $0.75 pass in the later
+  verification: aleph's row keeps $3.25, every known amount once, with its review cost marked
+  unknown; the total is $3.25, equal to `Spend::replay`'s, and a floor; `render` prints
+  `total: $3.2500?` and the ledger `total $3.2500?` with its floor legend;
+- with no charge and no priced pass after: aleph's review cost is none and unknown, the total
+  $0.0000, printed `$0.0000?`, a floor.
+
+`IntegrationReviews::spend_unknown` holds for aleph alone, and no warning is raised: the
+interruption is attributed. An interruption no start pairs with makes the run-level
+`unattributed_cost_incomplete` true, the total a floor, and raises exactly its own warning.
+
+Measured before commit: with `IntegrationReviews::replay` ignoring the interrupted terminal
+(the defect) the first assertion fails; with the report reading only unpriced passes for its
+review flag (the J3 rule), the row assertion fails for the $2.50 case.
+

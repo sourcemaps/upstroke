@@ -155,6 +155,7 @@ fn container_policy() -> RunnerPolicy {
             digest: None,
         }),
         credential_volumes: Some(Default::default()),
+        mounts: Vec::new(),
     }
 }
 
@@ -164,6 +165,7 @@ fn host_policy() -> RunnerPolicy {
         policy: RunnerContract::HostV1,
         image: None,
         credential_volumes: None,
+        mounts: Vec::new(),
     }
 }
 

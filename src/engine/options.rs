@@ -42,6 +42,8 @@ pub struct RunOptions {
     pub(super) after_candidate_capture: Option<AfterCandidateCapture>,
     #[cfg(test)]
     pub(super) log_hooks: Option<fn() -> Box<dyn crate::events::log::EventHooks>>,
+    #[cfg(test)]
+    pub(crate) legacy_writer: bool,
 }
 
 impl RunOptions {
@@ -62,7 +64,19 @@ impl RunOptions {
             after_candidate_capture: None,
             #[cfg(test)]
             log_hooks: None,
+            #[cfg(test)]
+            legacy_writer: false,
         }
+    }
+
+    pub(super) fn writes_topology(&self) -> bool {
+        #[cfg(test)]
+        if self.legacy_writer {
+            return false;
+        }
+        crate::topology::schema::fresh_writer_schema(
+            crate::topology::schema::WriterSelector::Production,
+        ) == crate::topology::schema::TOPOLOGY_SCHEMA
     }
 
     pub(super) fn paths(&self, run_id: &str) -> RunPaths {

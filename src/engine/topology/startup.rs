@@ -10,6 +10,7 @@ use crate::rundir::{
 use crate::runner::container::GitView;
 use crate::runner::container::census::{Census, CensusComplete, CensusStart, run_startup_census};
 use crate::runner::container::runtime::{ContainerRuntime, OwnerLiveness};
+use crate::workspace_manager::WorkspaceManager;
 
 use super::seams::TopologyHooks;
 
@@ -96,7 +97,14 @@ pub enum RunDirOutcome {
     RepairedStaleMarker,
     Committed,
     Skipped,
-    Unreclaimable { step: FailedStep, detail: String },
+    Unreclaimable {
+        step: FailedStep,
+        detail: String,
+    },
+    RootRetained {
+        root: Option<PathBuf>,
+        detail: String,
+    },
 }
 
 impl RunDirOutcome {
@@ -108,6 +116,7 @@ impl RunDirOutcome {
         "committed",
         "skipped",
         "unreclaimable",
+        "root-retained",
     ];
 
     #[must_use]
@@ -120,6 +129,7 @@ impl RunDirOutcome {
             Self::Committed => "committed",
             Self::Skipped => "skipped",
             Self::Unreclaimable { .. } => "unreclaimable",
+            Self::RootRetained { .. } => "root-retained",
         }
     }
 
@@ -216,6 +226,18 @@ impl RunDirEntry {
             RunDirOutcome::Unreclaimable { step, detail } => format!(
                 "retained with the error recorded, and the census carried on: {} ({detail})",
                 step.what_failed()
+            ),
+            RunDirOutcome::RootRetained { root, detail } => format!(
+                "retained, nothing deleted: {} ({detail}). A census deletes no execution root, \
+                 because a husk's proof authenticates its two halves and not who made a directory \
+                 at its root's path, so the husk stays as that root's locator",
+                root.as_ref().map_or_else(
+                    || "where this run's execution root would be cannot be told".to_owned(),
+                    |root| format!(
+                        "this run's execution-root path {} is occupied",
+                        root.display()
+                    )
+                )
             ),
         };
         match &self.locator {
@@ -390,6 +412,10 @@ enum Planned {
     ReclaimPublicOnly(UnboundShape),
     ReclaimBothHalves(PrivateHalfProof),
     Retain(RetainReason),
+    KeepForRoot {
+        root: Option<PathBuf>,
+        detail: String,
+    },
     RepairStaleMarker,
     Committed,
     Skip,
@@ -455,7 +481,9 @@ fn scan_classified(
             );
             let plan = match report.disposition {
                 HuskDisposition::Unstarted(Reclaimable::PublicOnly(shape)) => {
-                    Planned::ReclaimPublicOnly(shape)
+                    unless_its_root_is_there(&report.public, run_id, inputs, shape, || {
+                        Planned::ReclaimPublicOnly(shape)
+                    })
                 }
                 HuskDisposition::Unstarted(Reclaimable::BothHalves) => {
                     match rundir::prove_private_half_ownership(
@@ -463,9 +491,16 @@ fn scan_classified(
                         inputs.repo_key,
                         inputs.authorized_root,
                     ) {
-                        PrivateHalfOwnership::Proven(proof) => Planned::ReclaimBothHalves(proof),
+                        PrivateHalfOwnership::Proven(proof) => {
+                            match root_in_the_way(&report.public, run_id, inputs) {
+                                Some((root, detail)) => Planned::KeepForRoot { root, detail },
+                                None => Planned::ReclaimBothHalves(proof),
+                            }
+                        }
                         PrivateHalfOwnership::NothingBound(shape) => {
-                            Planned::ReclaimPublicOnly(shape)
+                            unless_its_root_is_there(&report.public, run_id, inputs, shape, || {
+                                Planned::ReclaimPublicOnly(shape)
+                            })
                         }
                         PrivateHalfOwnership::Retained(reason) => Planned::Retain(reason),
                     }
@@ -499,6 +534,7 @@ fn apply(hooks: &mut dyn RunDirHooks, public: &Path, plan: Planned) -> RunDirOut
             }
         }
         Planned::Retain(reason) => RunDirOutcome::Retained(reason),
+        Planned::KeepForRoot { root, detail } => RunDirOutcome::RootRetained { root, detail },
         Planned::RepairStaleMarker => match rundir::remove_marker(public, hooks) {
             Ok(()) => RunDirOutcome::RepairedStaleMarker,
             Err(error) => unreclaimable(FailedStep::StaleMarker, &error),
@@ -506,6 +542,229 @@ fn apply(hooks: &mut dyn RunDirHooks, public: &Path, plan: Planned) -> RunDirOut
         Planned::Committed => RunDirOutcome::Committed,
         Planned::Skip => RunDirOutcome::Skipped,
     }
+}
+
+fn unless_its_root_is_there(
+    public: &Path,
+    run_id: &str,
+    inputs: &CensusInputs<'_>,
+    shape: UnboundShape,
+    reclaim: impl FnOnce() -> Planned,
+) -> Planned {
+    if shape != UnboundShape::TargetAbsent {
+        return reclaim();
+    }
+    match root_in_the_way(public, run_id, inputs) {
+        Some((root, detail)) => Planned::KeepForRoot { root, detail },
+        None => reclaim(),
+    }
+}
+
+fn root_in_the_way(
+    public: &Path,
+    run_id: &str,
+    inputs: &CensusInputs<'_>,
+) -> Option<(Option<PathBuf>, String)> {
+    if !could_have_a_root(run_id) {
+        return None;
+    }
+    let marker = match std::fs::read_to_string(public.join(rundir::MARKER))
+        .map_err(|error| error.to_string())
+        .and_then(|text| {
+            serde_json::from_str::<rundir::CreatingMarker>(&text).map_err(|error| error.to_string())
+        }) {
+        Ok(marker) => marker,
+        Err(error) => {
+            return Some((None, format!("its marker cannot be read again: {error}")));
+        }
+    };
+    let manager = match WorkspaceManager::derive(
+        inputs.repo_root,
+        inputs.authorized_root,
+        run_id,
+        &marker.incarnation,
+    ) {
+        Ok(manager) => manager,
+        Err(error) => {
+            return Some((None, format!("the root's path cannot be derived: {error}")));
+        }
+    };
+    let root = manager.execution_root().to_path_buf();
+    match std::fs::symlink_metadata(&root) {
+        Err(absent) if absent.kind() == std::io::ErrorKind::NotFound => another_contexts_root(
+            &marker,
+            run_id,
+            inputs.authorized_root,
+            manager.private_root(),
+        ),
+        Ok(_) => Some((Some(root), "something is there".to_owned())),
+        Err(error) => Some((Some(root), format!("it cannot be read: {error}"))),
+    }
+}
+
+fn another_contexts_root(
+    marker: &rundir::CreatingMarker,
+    run_id: &str,
+    authorized_root: &Path,
+    private_root: &Path,
+) -> Option<(Option<PathBuf>, String)> {
+    let runs = private_root.join("runs");
+    let expected = runs.join(run_id);
+    let recorded = PathBuf::from(&marker.private_dir);
+    if recorded != expected
+        && recorded != authorized_root.join("runs").join(run_id)
+        && !names_the_same_entry(&recorded, &runs, run_id)
+    {
+        return Some((
+            None,
+            format!(
+                "its marker locates its private half at {}, not at {}, so a root its creator made \
+                 lies outside this command's authorized private root and cannot be ruled out",
+                recorded.display(),
+                expected.display()
+            ),
+        ));
+    }
+    let workspaces = private_root.join("workspaces");
+    match std::fs::symlink_metadata(&workspaces) {
+        Err(absent) if absent.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => {
+            return Some((
+                None,
+                format!(
+                    "the execution-root namespace {} cannot be inspected ({error}), so a root this \
+                     run made in another repository context cannot be ruled out",
+                    workspaces.display()
+                ),
+            ));
+        }
+        Ok(metadata) if is_a_link(&metadata) || !metadata.is_dir() => {
+            return Some((
+                None,
+                format!(
+                    "the execution-root namespace {} is a link, a reparse point or not a \
+                     directory, and this look follows none, so a root this run made in another \
+                     repository context cannot be ruled out",
+                    workspaces.display()
+                ),
+            ));
+        }
+        Ok(_) => {}
+    }
+    let keys = match std::fs::read_dir(&workspaces) {
+        Ok(keys) => keys,
+        Err(error) => {
+            return Some((
+                None,
+                format!(
+                    "the execution roots under {} cannot be listed ({error}), so a root this run \
+                     made in another repository context cannot be ruled out",
+                    workspaces.display()
+                ),
+            ));
+        }
+    };
+    for key in keys {
+        let key = match key {
+            Ok(key) => key.path(),
+            Err(error) => {
+                return Some((
+                    None,
+                    format!(
+                        "the execution roots under {} cannot all be listed ({error}), so a root \
+                         this run made in another repository context cannot be ruled out",
+                        workspaces.display()
+                    ),
+                ));
+            }
+        };
+        match std::fs::symlink_metadata(&key) {
+            Ok(metadata) if is_a_link(&metadata) => {
+                return Some((
+                    None,
+                    format!(
+                        "the execution-root namespace entry {} is a link or a reparse point, and \
+                         this look does not follow it, so a root this run made in another \
+                         repository context cannot be ruled out",
+                        key.display()
+                    ),
+                ));
+            }
+            Ok(metadata) if !metadata.is_dir() => continue,
+            Ok(_) => {}
+            Err(error) => {
+                return Some((
+                    None,
+                    format!(
+                        "the execution-root namespace entry {} cannot be inspected ({error}), so \
+                         a root this run made in another repository context cannot be ruled out",
+                        key.display()
+                    ),
+                ));
+            }
+        }
+        let candidate = key.join(run_id);
+        let named = key
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        match std::fs::symlink_metadata(&candidate) {
+            Err(absent) if absent.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(_) => {
+                return Some((
+                    Some(candidate),
+                    format!(
+                        "something is there, under repository key `{named}`, which this \
+                         command's effective common directory does not derive: the root of a \
+                         creating context other than this command's"
+                    ),
+                ));
+            }
+            Err(error) => {
+                return Some((
+                    Some(candidate),
+                    format!(
+                        "it cannot be read ({error}), under repository key `{named}`, which this \
+                         command's effective common directory does not derive"
+                    ),
+                ));
+            }
+        }
+    }
+    None
+}
+
+#[cfg(windows)]
+fn is_a_link(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt as _;
+    const REPARSE_POINT: u32 = 0x0000_0400;
+    metadata.file_attributes() & REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn is_a_link(metadata: &std::fs::Metadata) -> bool {
+    metadata.file_type().is_symlink()
+}
+
+fn names_the_same_entry(recorded: &Path, runs: &Path, run_id: &str) -> bool {
+    recorded.file_name() == Some(std::ffi::OsStr::new(run_id))
+        && match (
+            recorded.parent().map(std::fs::canonicalize),
+            std::fs::canonicalize(runs),
+        ) {
+            (Some(Ok(recorded_runs)), Ok(runs)) => recorded_runs == runs,
+            _ => false,
+        }
+}
+
+fn could_have_a_root(run_id: &str) -> bool {
+    const CROCKFORD: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+    run_id.len() == 26
+        && run_id.bytes().all(|byte| CROCKFORD.contains(&byte))
+        && run_id
+            .as_bytes()
+            .first()
+            .is_some_and(|first| (b'0'..=b'7').contains(first))
 }
 
 fn unreclaimable(step: FailedStep, error: &UpstrokeError) -> RunDirOutcome {
@@ -543,6 +802,11 @@ mod witness {
             #[allow(dead_code)]
             pub const fn lock(&self) -> &WorktreeLock {
                 &self.lock
+            }
+
+            #[must_use]
+            pub fn into_lock(self) -> WorktreeLock {
+                self.lock
             }
         }
     }

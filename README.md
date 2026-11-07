@@ -15,8 +15,9 @@ conductor, not an instrument.
 
 **Status.** `0.1.0` is released: the sequential conductor works end to end, passed its acceptance
 run on 2026-08-10, and has since run against a real published library. v0.2 (worktree-per-task
-parallelism, a merge queue, capacity-driven routing, more adapters) is in progress; its machinery
-is on `master`, inert by default. [See a run, start to finish →](https://upstroke.rs/)
+parallelism, a merge queue, capacity-driven routing, more adapters) is in progress and unreleased.
+On `master`, `upstroke run` now executes plans on its worktree-per-task topology (schema 4), and a
+run 0.1 created still resumes on the sequential path. [See a run, start to finish →](https://upstroke.rs/)
 
 ## Usage
 

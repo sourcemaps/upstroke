@@ -337,9 +337,13 @@ for us without changing tracked or working-tree state.
 
 The repository the v0.1 runner keeps its role processes on the recorded graph
 of, as `crate::runner::host::ManagedRepository` names it. `engine::run_harness`
-and `engine::resume_harness` call it before anything else, so every run and
-every resume writes the include again before its first role starts, whatever
-became of it in between.
+and `engine::resume_harness` call it on every run and every resume, so the
+include is written again before the command's first role starts, whatever
+became of it in between. Their schema-4 branches call it under the worktree
+lease — a fresh run after its admission, a resume after the proof of its
+records — because it is a publication a command that has not won the lease
+must not make (repair10); their legacy branches call it first, before their
+leases, as at the activation base.
 
 - **The common directory is Git's answer, made canonical.** `rev-parse
   --path-format=absolute --git-common-dir`, through `git_command` like every
@@ -348,6 +352,14 @@ became of it in between.
   spelling of the same directory would not match. A linked worktree, a
   separate Git directory and a `.git` behind a symbolic link all resolve to the
   one directory every worktree of the repository shares.
+- **It is spelled as the workspace manager spells it.** The canonical path then
+  loses Windows' verbatim prefix through the manager's own `strip_verbatim`,
+  exactly as `WorkspaceManager::common_git_dir` does, because a schema-4 run
+  compares the two (`engine::topology::entry::one_spelling`) before any role.
+  Before this repair the spelling kept the prefix, and that check refused every
+  schema-4 run and resume on Windows (CI run 41520547341). The
+  `includeIf.gitdir:` conditions do not change: `GitdirRule::Windows` drops the
+  prefix from its spelling either way.
 - **The include lives under the private root**, at
   `<private root>/git/recorded-objects.gitconfig`: engine-owned, outside every
   worktree, and, unless no home directory resolves, outside the system temporary
@@ -517,6 +529,12 @@ pattern cargo uses for `target/`) rather than an entry in
 owns, disappears with the directory, and — unlike `info/exclude` under
 `--git-dir` — behaves correctly in a linked worktree, where git reads
 excludes only from the common directory.
+
+It creates `.upstroke` and writes the file, so every caller makes it under
+the worktree lease: the legacy entries after taking theirs, the schema-4
+run in its admission after `FreshPrepared::lease`, and the schema-4 resume
+after the proof of its records (repair10; until then both schema-4 calls
+preceded every lease).
 
 ## `impl Workspace` › `pub fn capture_candidate(&self) -> Result<CapturedCandidate, UpstrokeError> {`
 
@@ -1092,10 +1110,19 @@ leave the bytes HEAD records. Until round 4 only the census held that path.
 
 ## `fn the_recorded_objects_scope_names_the_repositorys_own_common_directory() {`
 
-The scope's common directory is the canonical `.git`, the include is under the
-given private root with its exact bytes and verifies, an altered include is
-replaced by the next scope, a linked worktree of the same repository yields the
-same entries, and no staged copy is left in the include's directory.
+The scope's common directory is the canonical `.git` in the workspace manager's
+spelling (`strip_verbatim`, which is the identity off Windows), the include is
+under the given private root with its exact bytes and verifies, an altered
+include is replaced by the next scope, a linked worktree of the same repository
+yields the same entries, and no staged copy is left in the include's directory.
+
+## `fn the_recorded_objects_scope_spells_the_common_directory_as_the_workspace_manager_does() {`
+
+`engine::topology::entry::one_spelling`'s condition, held from the include's
+side: over one real repository, the scope's common directory equals
+`WorkspaceManager::common_git_dir`. CI run 41520547341 found the two apart on
+Windows by the verbatim prefix alone. Only a Windows host produces that prefix,
+so only there does the test discriminate.
 
 ## `fn a_git_older_than_the_floor_is_refused_by_name() {`
 

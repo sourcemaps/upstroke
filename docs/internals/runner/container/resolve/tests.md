@@ -292,25 +292,125 @@ And this module reaches nothing else: resolution and rebuild both.
 The volume is still there afterwards, which is the thing the row is
 actually about.
 
-## `fn a_configured_mount_does_not_reach_the_recorded_execution_identity() {`
+## `struct MountWorld {`
 
-A `[runner] mounts` entry changes the boundary and **does not** move the
-recorded execution identity.
+A real directory tree for the mount tests: a repository root with a
+`.git`, a private root under `state/`, a credential location under
+`home/`, a shared directory and a tool file, all under one canonicalized
+scratch root. Built on Unix and Windows, the two platforms that record an
+identity; the Unix tests use symlinks, sockets and non-UTF-8 names, the
+Windows test only renames. Its `context` is given the repository's `.git`
+as both Git directories (`resolve::fixtures::plain_checkout`), what Git
+reports for an ordinary checkout.
 
-Stated as an assertion rather than left implicit, because it is a real gap
-and a reviewer should find it named rather than derive it. INV-23's
-`RunnerPolicy` has four fields — kind, policy, image, credential volumes —
-and none of them is a mount list, so two runs whose `[runner]` sections
-differ only in `mounts` record the same runner and carry the same
-`runner_policy_sha256`. Filed as `PR6B-MOUNTS-ARE-NOT-EXECUTION-IDENTITY`.
+## `fn a_configured_mount_is_recorded_and_rebuilt_from_the_record() {`
 
-Second field held constant: everything but `mounts`, so the equality below
-is about that field alone.
+The gap test this replaces, `a_configured_mount_does_not_reach_the_recorded_execution_identity`,
+pinned `PR6B-MOUNTS-ARE-NOT-EXECUTION-IDENTITY`: a mount changed the
+boundary and moved neither the record nor its digest. Root's
+recorded-mounts disposition (2026-11-02) closes that gap, and the test now
+holds the closed form.
 
-## `fn a_configured_mount_does_not_reach_the_recorded_execution…` › `let mut warnings = Vec::new();`
+- The record carries each mount's canonical source (a link resolved at
+  selection), target, disposition and identity, ordered by target; it is
+  complete, it differs from the bare record in `Mounts`, and its digest
+  moves into the v2 domain while the bare record's stays v1.
+- A rebuild under the configuration it was resolved from, or under the
+  same mounts spelled canonically instead of through the link, returns the
+  record and does not warn.
+- A rebuild under a moved target, a writable disposition, another source,
+  a source that does not exist today, or no mounts returns the record,
+  digest unchanged, and warns once, naming the configured mount set as
+  ignored.
 
-And a rebuild therefore cannot warn about a mount that changed: the
-comparison has no field for it.
+## `fn a_mount_context_withholds_the_git_directories_it_is_given_and_refuses_relative_ones() {`
+
+J10 (regression review 2, finding 1), at the context: a common directory
+outside the checkout, beside a repository whose own `.git` is an ordinary
+directory. Bound to that `.git` alone, the context lets a mount of the
+outside directory's `refs` resolve (the control, and the pre-repair
+reading). Given the outside directory as the common directory, resolution
+refuses the same mount as `MountRefused`, lying inside it, authoritative
+Git. A Git directory or common directory given relative is refused when
+the context is bound, so no comparison is made against a path the
+process's directory would decide.
+
+## `fn every_configured_mount_that_could_reach_a_withheld_path_is_refused_before_the_runtime_is_asked()`
+
+The refusal table. Twenty-three source cells: relative, absent, a socket,
+the repository, inside and above it and its `.git`, the private root,
+inside and above it, a credential location, inside and above it, the
+common Git directory of a linked worktree, inside and above it, the
+linked worktree's admin directory, a comma, a quote, a newline, edge
+whitespace, a name that is not UTF-8, and an unbound context. The linked
+worktree's context is given the two directories Git reports for it, its
+admin directory and the main `.git`. The fifteen
+target cells of `REFUSED_TARGETS` and the three pairs of `NESTED_TARGETS`
+follow. Each refuses as `MountRefused`,
+for its own reason, with the runtime never asked. Every `BoundaryLayout`
+default except the scratch lies under `BOUNDARY_ROOT`. The positive control
+accepts `/upstroked`, `/tmpfile` and `/database` (a prefix of a reserved
+name is not under it) and a directory of another repository's checkout.
+
+## `const REFUSED_TARGETS: [(&str, &str); 15] = [`
+
+The targets a fresh run refuses, each with the words of its refusal:
+relative, `/`, five non-normal spellings (one of them regular review 4's
+`/cache/../upstroke/settings`), `/upstroke` at and under (one of them its
+`/upstroke/settings`), `/tmp` at and under, a comma, edge whitespace and
+empty. Thirteen until K1, which added review 4's two. Module-level so the
+fresh table above and the recorded census below read one list.
+
+## `const NESTED_TARGETS: [(&str, &str, &str); 3] = [`
+
+The pairs a fresh run refuses together: a repeated, a nested and an
+enclosing target, with their order as configured.
+
+## `fn every_target_a_fresh_run_refuses_is_refused_in_a_recorded_policy_before_the_runtime_is_asked()`
+
+K1 (regular review 4: recorded mounts bypass target validation), at the
+recheck and the rebuild. The record a fresh run makes of one mount is the
+control, rechecked clean. Every cell of `REFUSED_TARGETS`, every pair of
+`NESTED_TARGETS` (sorted, as a record holds it) and every set of
+`resolve::fixtures::REFUSED_RECORDED_TARGETS` is then planted in that
+record and read back through `serde_json`
+(`resolve::fixtures::with_recorded_targets`). For each:
+
+- a fresh run, configured with the same targets, refuses as
+  `MountRefused`; that refusal's reason is the oracle;
+- `recheck_recorded_mounts` refuses the planted record as
+  `RecordedTargetRefused`, naming the offending recorded mount, with
+  exactly that reason: the same rule, through the same functions;
+- `rebuild_by_inspection` refuses it with the runtime never asked and no
+  warning: as `RecordedTargetRefused` when completeness accepts the record,
+  which every cell but four does, and as the malformed record it is for
+  those four (the relative, empty and space-led targets and the repeated
+  pair, whose shape completeness refuses).
+
+With `refuse_recorded_targets` bypassed, the recheck answers
+`Ok(())` for the first cell and the test fails there (measured before the
+commit).
+
+## `fn a_windows_configured_mount_is_recorded_with_its_volume_and_full_file_id_and_rebuilt_from_it()`
+
+The Windows half, run only by the native Windows legs (`cfg(windows)`):
+a directory and a file resolve to `windows` identities with their kinds
+and full 32-digit file ids, under drive-letter sources with no verbatim
+prefix; the record is complete and in the v2 domain; resolving again
+records the same objects identically; and the rebuild refuses a source
+moved away (`is gone`) and another directory renamed into its path
+(`names another object`), then re-establishes the record once the source
+is back. A Linux run compiles none of it; `cargo check --target
+x86_64-pc-windows-msvc` compiles it without running it.
+
+## `fn the_rebuild_refuses_a_missing_or_rebound_source_before_any_spawn_and_resumes_once_it_is_back()`
+
+The rebuild against the recorded identity: a source moved away (`is
+gone`), another directory renamed into its path (`names another object`),
+and a link to the moved source at its path (`rebound it`) each refuse as
+`MountSourceMoved` before any spawn and before the runtime is asked. Moved
+back, the same object re-establishes the record and the run reaches its
+preflight. That is "refuses before any spawn while staying resumable".
 
 ## `fn resolution_refuses_a_selection_that_does_not_ask_for_a_container() {`
 
@@ -334,6 +434,11 @@ exactly, so anything today's config reaches is a `FoldError` later.
 
 Second field held constant: the runtime, ready in every cell, so no cell can
 succeed or fail for an inspection reason.
+
+The last cell configures a mount whose source does not exist. Today's
+config is never resolved on a resume, so an unavailable newly configured
+source cannot refuse, replace or invalidate an otherwise re-establishable
+record; it is only compared, and warned about.
 
 ## `fn a_config_that_differs_warns_naming_the_field_that_moved() {`
 
@@ -366,7 +471,10 @@ no-op beside it.
 ## `fn a_config_that_differs_warns_naming_the_field_that_moved()` › `assert_eq!(`
 
 ST-20: "a `[runner]` config that differs (kind, image reference, or
-credential volumes)". Three, and only three, are reachable.
+credential volumes)". Those three, and since root's recorded-mounts
+disposition the configured mount set, are reachable. `a mount configured
+today` is the cell for the fourth: the record has none, so any configured
+mount differs, whatever today's sources are.
 
 ## `fn an_absent_runner_section_warns_only_when_the_record_is_not_the_default() {`
 
@@ -519,6 +627,18 @@ of phase B is what proves the run command reaches pre-flight at all.
 The whole-tree half of ST-16 (i)'s second clause is
 [`no_module_outside_the_container_runner_writes_a_container_intent`].
 
+**Since PR12 the run cells name the writer.** The production writer is
+schema 4, so this test sets `RunOptions::legacy_writer` and pins the
+schema-1..3 writer's refusal, with every legacy cell always run. For one
+checkpoint (PR12's `fffa73fa` to `18166f73`) it also held schema-4 cells
+that called `engine::run_with` with a container selection; those reach the
+production `DockerCli`, so their path depended on the runtime, image and
+volumes the machine happened to have, and under a fully available runtime
+the no-lock assertion could take another path (root's checkpoint-2
+disposition, decision 4). They are now the two tests below this one: a
+deterministic host control and a Docker-gated public-path cell, with the
+deterministic resolver checks in `prelock`'s tests over its fake runtime.
+
 ## `fn legacy_container_selection_refused_before_effects()` › `let seeded: Vec<(u32, String)> = [1_u32, 2, 3]`
 
 One seeded run per legacy schema: `EngineLimits::for_resume` reads the
@@ -533,20 +653,75 @@ only one reading.
 
 -- phase B: nothing was created ------------------------------------
 
-## `fn every_engine_limits_reading_refuses_a_container_selection() {`
+## `fn schema_4_run_options(repo: &Path, private: &Path) -> RunOptions {`
 
-Every reading of `[engine]`'s limits refuses a container selection.
+A fresh run on the production (schema-4) writer, for the two tests below.
 
-`EngineLimits` is what distinguishes "a run being created now" from "a
-sequential run's resume", and `expected_failures_refusals[0]` names both. The
-grid is written out with an exhaustive `match` beside it, so an additional variant
-is a compile error here rather than a reading that quietly escapes.
+## `fn a_schema_4_host_run_under_a_held_lease_is_refused_by_the_worktree_lock() {`
 
-## `fn every_engine_limits_reading_refuses_a_container_selection()` › `EngineLimits::SequentialResumeWithRecordedGates => {}`
+The control for the gated cell below, and deterministic: a host selection
+resolves without asking a container runtime anything (`prelock::resolve_host`),
+so with nothing to refuse before the lock a schema-4 run under a held lease is
+refused by the lock, and without the lease it reaches pre-flight. Without this
+control, the gated cell's "did not reach the lock" would not show that the
+lock was on its far side.
+
+Its tree is clean, which the control's second half depends on: since L2 a
+fresh schema-4 run refuses a dirty tree (DESIGN §20, through
+`engine::coordinator::run_harness`), and since repair10 it does so under the
+worktree lease, directly after taking it. A fixture with anything untracked
+would still meet the held lease first, but without the lease it would be
+refused as dirty and never reach pre-flight. The pools file is committed with
+the config, and the private root is a separate scratch tree outside the
+checkout, so nothing a run publishes under it can make the checkout dirty.
+That this refused run publishes nothing — no exclusion, no include, under
+either root — is
+`engine::tests::a_fresh_schema_4_run_that_loses_the_worktree_lease_publishes_no_exclusion_and_no_include`'s
+to show; this control shows only the refusal's precedence.
+
+## `fn real_docker_a_schema_4_run_refuses_an_absent_image_before_the_worktree_lock() {`
+
+P12-06's ordering on the public path, against a real runtime: a schema-4 run
+whose `[runner]` names an image reference the runtime does not hold refuses
+on the image by read-only inspection before the worktree lock, resolves no
+adapter and creates no run. It is Docker-gated (`DOCKER_GATED_TESTS`),
+because `engine::run_with` composes the production `DockerCli` and so meets
+whatever runtime the machine has. The fixture is controlled rather than
+ambient: the reference and the volume name carry a per-run nonce, and the
+gate's own runtime confirms the reference is absent before the run and still
+absent after it. Under `UPSTROKE_REQUIRE_DOCKER=1` an absent runtime fails it
+rather than skipping it; that run is the coordinator's acceptance, not this
+suite's, and an ordinary suite's `ok` for it can be a gated skip.
+
+**What the after-check proves, and what it does not.** The reference still
+absent after the refusal shows that no lasting acquisition of it happened in
+this observation. It does not, by itself, show that no implicit pull, network
+request, transient acquisition or later removal was attempted. That the
+pre-lock resolution never pulls is a property of the command funnel, from the
+source: `DockerCli::image_by_reference` is the `RuntimeOp::InspectImageByReference`
+operation, an image inspection, which does not pull (root's resolve-test
+follow-through, `6f5a5f4b`). The two are separate pieces of evidence.
+
+## `fn every_engine_limits_reading_is_classified_for_a_container_selection() {`
+
+Every reading of `[engine]`'s limits is classified for a container
+selection: the three sequential readings refuse it, and the two schema-4
+readings (PR12) select it.
+
+`EngineLimits` is what distinguishes "a sequential run being created now"
+from "a sequential run's resume", and `expected_failures_refusals[0]` names
+both; since PR12 it also names a schema-4 run being created and its resume.
+The classification is written as an exhaustive `match` (`selects`), so an
+additional variant is a compile error here rather than a reading that
+quietly escapes. Until PR12 this test was
+`every_engine_limits_reading_refuses_a_container_selection`, when every
+reading refused.
+
+## `fn every_engine_limits_reading_is_classified_for_a_container_selection()` › `| EngineLimits::SequentialResumeWithRecordedGates => false,`
 
 Exhaustive on purpose: a new variant must be classified here.
 
-## `fn every_engine_limits_reading_refuses_a_container_selectio…` › `fs::write(dir.join("upstroke.toml"), "[runner]\nkind = \"host\"\n").expect("config");`
+## `fn every_engine_limits_reading_is_classified_for_a_container_sel…` › `fs::write(dir.join("upstroke.toml"), "[runner]\nkind = \"host\"\n").expect("config");`
 
 The control, byte-identical apart from the kind: the same reading
 accepts a host selection, so the refusal is about the value.
@@ -681,7 +856,24 @@ set, and this census stayed green.
 
 ## `fn the_resolution_module_names_no_lock_no_write_and_no_spawn() {`
 
-This module reaches no lock, no filesystem and no spawn.
+This module reaches no lock, no filesystem write and no spawn.
+
+Until root's recorded-mounts disposition the census forbade any `fs::`
+spelling at all. Mount resolution and its recheck must observe the
+filesystem, so `fs::` is now admitted only as the three read-only
+observations it needs, `fs::canonicalize(`, `fs::symlink_metadata(` and
+`fs::MetadataExt`: the count of `fs::` in the production region must equal
+the count of those, and must not be zero. Any other `fs::` item, a write
+above all, fails as before. The Windows identity's three calls,
+`CreateFileW(`, `GetFileInformationByHandle(` and
+`GetFileInformationByHandleEx(`, must each appear exactly once, with
+`FILE_READ_ATTRIBUTES`, `OPEN_EXISTING` and `FILE_FLAG_OPEN_REPARSE_POINT`
+named, and none of `GENERIC_WRITE`, `GENERIC_ALL`, `FILE_GENERIC_WRITE`,
+`FILE_WRITE_`, `FILE_APPEND_DATA`, `CREATE_NEW`, `CREATE_ALWAYS`,
+`OPEN_ALWAYS`, `TRUNCATE_EXISTING`, `DELETE_ON_CLOSE`, `WRITE_DAC` or
+`WRITE_OWNER` anywhere. This is a read-only API classification, recorded
+as one, and not an exemption: the clippy denylist still governs the module
+unchanged.
 
 The structural half of "before any lock or effect": the argument that
 `resolve_container` cannot take a worktree lock is an argument about what it

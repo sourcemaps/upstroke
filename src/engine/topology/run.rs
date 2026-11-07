@@ -1,21 +1,22 @@
 //! Extended notes: `docs/internals/engine/topology/run.md`
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::error::{ProcessFate, UpstrokeError};
 use crate::events::RunOutcome;
-use crate::ir::{Answer, Question, QuestionId};
+use crate::ir::{Answer, Question, QuestionId, QuestionKind, Tier};
 use crate::review;
 use crate::topology::events::Answer4;
 use crate::topology::events::TopologyEventBody;
 use crate::topology::fold::QuestionOrigin;
 
 use crate::events::AttemptRecord;
-use crate::interaction::Sleeper;
+use crate::interaction::{Notifier, Sleeper};
 use crate::topology::events::{
-    AttemptNumber, CandidateLeaseEffect, CandidateRef, CommitSha, FrozenQuestion,
-    GenerationCloseReason, GenerationId, InfrastructureKind, Materialization,
-    MergeVerificationCharged, RunStarted4, SequenceId, SessionId, TopologyEvent,
+    AttemptNumber, AttemptSettlement, CandidateLeaseEffect, CandidateRef, CommitSha,
+    FrozenQuestion, GenerationCloseReason, GenerationId, InfrastructureKind, Materialization,
+    MergeVerificationCharged, QuestionRaised4, RunStarted4, SequenceId, SessionId,
+    SettlementTransition, TopologyEvent,
 };
 use crate::topology::fold::{FrozenInputs, TopologyFold};
 use crate::topology::registry::TaskKey;
@@ -56,6 +57,7 @@ pub struct RunEmitter<'a> {
     pub state: EmitState<'a>,
     pub clock: &'a dyn TimeSource,
     pub stopped: Option<&'a str>,
+    pub notifiers: &'a [&'static dyn Notifier],
 }
 
 impl EventEmitter for RunEmitter<'_> {
@@ -72,12 +74,69 @@ impl EventEmitter for RunEmitter<'_> {
                 ),
             }));
         }
+        let open_before = self.open_question_ids();
         emit(self.identity, &mut self.state, self.clock, body, hooks)?;
+        self.announce_opened(&open_before);
         Ok(())
     }
 
     fn standing(&self, invocation: &crate::runner::InvocationId) -> Standing {
         Standing::of(self.state.fold, invocation)
+    }
+}
+
+impl RunEmitter<'_> {
+    fn open_question_ids(&self) -> BTreeSet<QuestionId> {
+        if self.notifiers.is_empty() {
+            return BTreeSet::new();
+        }
+        self.state
+            .fold
+            .open_questions()
+            .map(|open| open.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    fn announce_opened(&mut self, open_before: &BTreeSet<QuestionId>) {
+        if self.notifiers.is_empty() {
+            return;
+        }
+        let fold: &TopologyFold = self.state.fold;
+        let opened: Vec<Question> = fold
+            .open_questions()
+            .into_iter()
+            .flat_map(BTreeMap::values)
+            .filter(|open| !open_before.contains(&open.question.id))
+            .map(|open| announced_question(fold, &open.question))
+            .collect();
+        for question in &opened {
+            for notifier in self.notifiers {
+                if let Err(error) = notifier.ask(question) {
+                    self.state.warnings.push(format!(
+                        "notifier `{}` could not deliver question {}: {error}",
+                        notifier.id(),
+                        question.id
+                    ));
+                }
+            }
+        }
+    }
+}
+
+fn announced_question(fold: &TopologyFold, frozen: &FrozenQuestion) -> Question {
+    let display = fold
+        .registry()
+        .and_then(|registry| registry.get(frozen.key))
+        .map_or_else(
+            || format!("k{}", frozen.key.0),
+            |entry| entry.display_id.as_str().to_owned(),
+        );
+    Question {
+        id: frozen.id.clone(),
+        kind: frozen.kind,
+        affected_tasks: vec![crate::ir::TaskId(display)],
+        context: frozen.context.clone(),
+        options: frozen.options.clone(),
     }
 }
 
@@ -135,6 +194,7 @@ struct IntegrationCx<'a, 'h> {
     hooks: &'h mut dyn TopologyHooks,
     invocations: &'h mut InvocationLedger,
     spend: &'h mut Spend,
+    brief: &'h Brief,
     seams: &'h RunSeams<'a>,
     charged: Vec<crate::events::ReviewRecord>,
 }
@@ -506,9 +566,10 @@ pub(super) fn hard_block<O: Operator + ?Sized>(
             Answer::Unanswered => continue,
             answer => answer,
         };
+        let given = answer.clone();
         let answer4 = operator.driven().answer_for(id, &asked, answer, seams)?;
         let (run, seams, hooks) = operator.parts();
-        return run.ingest_answer(id, asked.key, answer4, seams, hooks);
+        return run.ingest_answer(id, &asked, answer4, &given, seams, hooks);
     }
     close_run(operator, seams, &closure::Cancelled::none())
 }
@@ -766,7 +827,8 @@ fn implementer_binding(
 
 impl Verification for IntegrationCx<'_, '_> {
     fn verify(&mut self, request: &VerifyRequest<'_>) -> Result<Verified, UpstrokeError> {
-        let job = VerificationJob::of(self.emitter.state.fold, request)?;
+        let decisions = self.brief.decisions(request.candidate.key);
+        let job = VerificationJob::of(self.emitter.state.fold, request, decisions)?;
         let mut charged = Vec::new();
         let outcome = {
             let ledger = std::sync::Mutex::new(&mut *self.invocations);
@@ -856,10 +918,16 @@ pub struct VerificationJob {
     entry: crate::topology::registry::TaskEntry,
     base: Option<CommitSha>,
     implementer: crate::review::PassBinding,
+    /// The task's human decisions, for the verification's review ([`Brief::decisions`]).
+    decisions: Vec<String>,
 }
 
 impl VerificationJob {
-    pub fn of(fold: &TopologyFold, request: &VerifyRequest<'_>) -> Result<Self, UpstrokeError> {
+    pub fn of(
+        fold: &TopologyFold,
+        request: &VerifyRequest<'_>,
+        decisions: Vec<String>,
+    ) -> Result<Self, UpstrokeError> {
         let key = request.candidate.key;
         let entry = fold
             .registry()
@@ -887,6 +955,7 @@ impl VerificationJob {
             entry,
             base,
             implementer: implementer_binding(fold, key)?,
+            decisions,
         })
     }
 }
@@ -956,6 +1025,7 @@ pub fn verification_body(
         .inputs(&InputsRequest {
             entry: &job.entry,
             diff,
+            decisions: &job.decisions,
         })
         .map_err(JudgeError::Other)?;
 
@@ -1208,12 +1278,65 @@ impl Brief {
             });
     }
 
+    /// The person's words on an answered question, as the sequential fold reads them
+    /// (`events::RunState`'s `question_answered`): words that name none of the question's
+    /// options are an instruction from a person for the task's next attempt and its review. A
+    /// chosen option, a spend approval, a decline, and a record written before answers kept
+    /// their words add nothing.
+    pub fn record_answer(
+        &mut self,
+        kind: QuestionKind,
+        options: &[String],
+        answered: &crate::topology::events::QuestionAnswered4,
+    ) {
+        let (Answer4::Answered { .. }, Some(text)) = (&answered.answer, &answered.text) else {
+            return;
+        };
+        if kind == QuestionKind::ApproveSpend || options.iter().any(|option| option == text) {
+            return;
+        }
+        let lines = self.per_task.entry(answered.key).or_default();
+        let attempt = lines.last().map_or(0, |line| line.attempt);
+        lines.push(crate::events::Feedback {
+            attempt,
+            tier: String::new(),
+            summary: "the operator answered the open question".to_owned(),
+            detail: Some(text.clone()),
+            human: true,
+        });
+    }
+
+    /// The person's instructions this task's brief holds, oldest first: the decisions its
+    /// review is given (the sequential engine's `decisions`).
+    #[must_use]
+    pub fn decisions(&self, key: TaskKey) -> Vec<String> {
+        self.per_task
+            .get(&key)
+            .into_iter()
+            .flatten()
+            .filter(|line| line.human)
+            .filter_map(|line| line.detail.clone())
+            .collect()
+    }
+
     #[must_use]
     pub fn replay(events: &[TopologyEvent]) -> Self {
         let mut brief = Self::new();
+        let mut asked = BTreeMap::new();
         for event in events {
-            if let TopologyEventBody::AttemptFinished { data } = &event.body {
-                brief.record(data.key, &data.record);
+            if let Some(question) = super::observe::question_opened_by(event) {
+                asked.insert(&question.id, question);
+            }
+            match &event.body {
+                TopologyEventBody::AttemptFinished { data } => {
+                    brief.record(data.key, &data.record);
+                }
+                TopologyEventBody::QuestionAnswered { data } => {
+                    if let Some(question) = asked.get(&data.question) {
+                        brief.record_answer(question.kind, &question.options, data);
+                    }
+                }
+                _ => {}
             }
         }
         brief
@@ -1267,6 +1390,10 @@ pub enum Progress {
         question: QuestionId,
         declined: bool,
     },
+    Asked {
+        key: TaskKey,
+        question: QuestionId,
+    },
     Finished {
         outcome: RunOutcome,
         closed: usize,
@@ -1292,6 +1419,10 @@ pub struct TopologyRun {
     retained: BTreeMap<TaskKey, Retained>,
     brief: Brief,
     stopped: Option<String>,
+    /// `ask_before.frontier_escalation_over_usd` for this process
+    /// ([`Self::with_spend_approval`]).
+    approve_spend_over: Option<f64>,
+    notifiers: Vec<&'static dyn Notifier>,
 }
 
 impl TopologyRun {
@@ -1317,7 +1448,24 @@ impl TopologyRun {
             retained: BTreeMap::new(),
             brief,
             stopped: None,
+            approve_spend_over: None,
+            notifiers: Vec::new(),
         }
+    }
+
+    /// The run, holding each escalation onto a frontier rung for a person's approval once its
+    /// reported spend reaches `threshold` (`ask_before.frontier_escalation_over_usd`, DESIGN
+    /// §12). `None` holds none.
+    #[must_use]
+    pub fn with_spend_approval(mut self, threshold: Option<f64>) -> Self {
+        self.approve_spend_over = threshold;
+        self
+    }
+
+    #[must_use]
+    pub fn with_notifiers(mut self, notifiers: Vec<&'static dyn Notifier>) -> Self {
+        self.notifiers = notifiers;
+        self
     }
 
     pub fn commitment_digest(&self) -> Option<&str> {
@@ -1461,6 +1609,7 @@ impl TopologyRun {
                 seams,
                 &closure::Cancelled::none(),
             ),
+            Admitted::ApproveSpend { key } => self.ask_to_approve_spend(key, seams, hooks),
         }
     }
 
@@ -1476,8 +1625,146 @@ impl TopologyRun {
         }
     }
 
+    /// What selection admits, with one hold of the run's own: a fresh dispatch onto a frontier
+    /// rung whose spend needs a person's approval first is [`Admitted::ApproveSpend`]
+    /// ([`Self::spend_unapproved`]). Both drivers act on this, so neither can start that attempt
+    /// unapproved.
     pub(super) fn admitted(&self) -> Result<Admitted, UpstrokeError> {
-        checkpoint(select(&self.handle.fold, &self.ceiling, &self.spend))
+        let admitted = checkpoint(select(&self.handle.fold, &self.ceiling, &self.spend))?;
+        if let Some(key) = fresh_dispatch(&admitted) {
+            if self.spend_unapproved(key)? {
+                return Ok(Admitted::ApproveSpend { key });
+            }
+        }
+        Ok(admitted)
+    }
+
+    /// Whether dispatching `key` now would start an attempt on a frontier rung its ladder
+    /// reached from a cheaper one, which `ask_before.frontier_escalation_over_usd` holds until a
+    /// person approves it: no attempt has run on that rung yet, the run's reported spend has
+    /// reached the threshold, and no answer since the escalation approved it. The sequential
+    /// engine's `should_approve_spend`, asked before the dispatch rather than at the
+    /// settlement, so that a log that ends between the escalation and its question still asks.
+    fn spend_unapproved(&self, key: TaskKey) -> Result<bool, UpstrokeError> {
+        let Some(threshold) = self.approve_spend_over else {
+            return Ok(false);
+        };
+        if self.handle.fold.binding_override(key).is_some() {
+            return Ok(false);
+        }
+        let task = self
+            .handle
+            .fold
+            .task(key)
+            .ok_or_else(|| UpstrokeError::Refused {
+                message: format!("task {} is not in this run's fold", key.index()),
+            })?;
+        let rungs = &self
+            .handle
+            .fold
+            .registry()
+            .and_then(|registry| registry.get(key))
+            .ok_or_else(|| UpstrokeError::Refused {
+                message: format!("task {} is not in this run's frozen registry", key.index()),
+            })?
+            .ladder
+            .rungs;
+        let rung = usize::try_from(task.rung).unwrap_or(usize::MAX);
+        let from_cheaper = rung
+            .checked_sub(1)
+            .and_then(|below| rungs.get(below))
+            .is_some_and(|below| below.tier != Tier::Frontier);
+        let onto_frontier = rungs
+            .get(rung)
+            .is_some_and(|onto| onto.tier == Tier::Frontier);
+        if !from_cheaper || !onto_frontier || task.attempts_on_rung > 0 {
+            return Ok(false);
+        }
+        let reached = self.spend.run_usd() >= threshold;
+        Ok(reached && !self.spend_approved(key, task.rung))
+    }
+
+    /// Whether an answer approved `key`'s spend since its ladder last escalated onto `rung`: an
+    /// `ApproveSpend` question raised for the task after that settlement, answered with its
+    /// approve option ([`approves`]). Each escalation needs its own approval.
+    fn spend_approved(&self, key: TaskKey, rung: u32) -> bool {
+        let mut asked = std::collections::BTreeSet::new();
+        let mut approved = false;
+        for event in &self.handle.events {
+            match &event.body {
+                TopologyEventBody::AttemptFinished { data } if data.key == key => {
+                    if escalated_onto(&data.settlement) == Some(rung) {
+                        asked.clear();
+                        approved = false;
+                    }
+                }
+                TopologyEventBody::QuestionRaised { data } => {
+                    let question = &data.question;
+                    if question.key == key && question.kind == QuestionKind::ApproveSpend {
+                        asked.insert(&question.id);
+                    }
+                }
+                TopologyEventBody::QuestionAnswered { data } if asked.contains(&data.question) => {
+                    approved = approves(&data.answer);
+                }
+                _ => {}
+            }
+        }
+        approved
+    }
+
+    /// Hold `key`'s escalation onto the frontier rung for a person's approval (DESIGN §12).
+    /// `question_raised` parks the task, so nothing runs on that rung until an answer approves
+    /// it; a decline fails the task's lineage under the halt policy, and other tasks go on.
+    pub(super) fn ask_to_approve_spend(
+        &mut self,
+        key: TaskKey,
+        seams: &RunSeams<'_>,
+        hooks: &mut dyn TopologyHooks,
+    ) -> Result<Progress, UpstrokeError> {
+        let Some(threshold) = self.approve_spend_over else {
+            return Err(UpstrokeError::Refused {
+                message: format!(
+                    "task {} was held for a spend approval this run does not ask for, so \
+                     nothing was appended",
+                    key.index()
+                ),
+            });
+        };
+        let question = self.spend_question(key, threshold, seams.ids)?;
+        let id = question.id.clone();
+        self.emit(
+            TopologyEventBody::QuestionRaised {
+                data: QuestionRaised4 { question },
+            },
+            seams,
+            hooks,
+        )?;
+        Ok(Progress::Asked { key, question: id })
+    }
+
+    fn spend_question(
+        &self,
+        key: TaskKey,
+        threshold: f64,
+        ids: &dyn IdSource,
+    ) -> Result<FrozenQuestion, UpstrokeError> {
+        let context = spend_approval_context(
+            &self.handle.fold,
+            &self.handle.events,
+            key,
+            self.spend.run_usd(),
+            threshold,
+        )?;
+        Ok(FrozenQuestion {
+            id: ids.question_id(),
+            key,
+            kind: QuestionKind::ApproveSpend,
+            context,
+            options: crate::engine::coordinator::topology_question_options(
+                QuestionKind::ApproveSpend,
+            ),
+        })
     }
 
     pub(super) fn cleanup_scope(&self) -> crate::rundir::CleanupScope {
@@ -1577,9 +1864,10 @@ impl TopologyRun {
                 Answer::Unanswered => continue,
                 answer => answer,
             };
+            let given = answer.clone();
             let answer4 = self.answer_for(id, &asked, answer, seams)?;
             return self
-                .ingest_answer(id, asked.key, answer4, seams, hooks)
+                .ingest_answer(id, &asked, answer4, &given, seams, hooks)
                 .map(Some);
         }
         Ok(None)
@@ -1653,10 +1941,12 @@ impl TopologyRun {
                     },
                     clock: seams.clock,
                     stopped: self.stopped.as_deref(),
+                    notifiers: &self.notifiers,
                 },
                 hooks,
                 invocations,
                 spend: &mut self.spend,
+                brief: &self.brief,
                 seams,
                 charged: Vec::new(),
             };
@@ -1741,7 +2031,8 @@ impl TopologyRun {
         &self,
         request: &VerifyRequest<'_>,
     ) -> Result<VerificationJob, UpstrokeError> {
-        VerificationJob::of(&self.handle.fold, request)
+        let decisions = self.brief.decisions(request.candidate.key);
+        VerificationJob::of(&self.handle.fold, request, decisions)
     }
 
     pub(super) fn charge_reviews(&mut self, key: TaskKey, reviews: &[crate::events::ReviewRecord]) {
@@ -1846,6 +2137,27 @@ impl TopologyRun {
                 });
             }
         };
+        if asked.question.kind == QuestionKind::ApproveSpend {
+            // A spend is approved only by its own option, never by words that name none.
+            return match chosen_index(&asked.question.options, &text) {
+                Some(0) => Ok(Answer4::Answered {
+                    option_index: 0,
+                    binding_override: None,
+                }),
+                Some(1) => Ok(Answer4::Declined {
+                    decline_halts_run: seams.halts_run,
+                }),
+                _ => Err(UpstrokeError::Refused {
+                    message: format!(
+                        "question {} asks to approve the spend of task {}'s escalation onto the \
+                         frontier rung, and `{text}` is neither of its options; a spend is \
+                         approved only by choosing its option, so nothing was appended",
+                        id.0,
+                        asked.key.index()
+                    ),
+                }),
+            };
+        }
         let (Some(authorized), QuestionOrigin::Admission) = (&asked.binding, asked.origin) else {
             return Ok(Answer4::Answered {
                 option_index: chosen_index(&asked.question.options, &text).unwrap_or(0),
@@ -1897,29 +2209,41 @@ impl TopologyRun {
         })
     }
 
+    /// Append `question_answered` for `asked`, as `answer_for` read `given`. An `answered`
+    /// record keeps the person's words (`text`, J2), and the brief takes them from the record
+    /// it appended ([`Brief::record_answer`]), as a replay of the log takes them.
     fn ingest_answer(
         &mut self,
         id: &QuestionId,
-        key: TaskKey,
+        asked: &OpenAsked,
         answer4: Answer4,
+        given: &Answer,
         seams: &RunSeams<'_>,
         hooks: &mut dyn TopologyHooks,
     ) -> Result<Progress, UpstrokeError> {
         let declined = matches!(answer4, Answer4::Declined { .. });
+        let text = match (&answer4, given) {
+            (Answer4::Answered { .. }, Answer::Answered { text }) => Some(text.clone()),
+            _ => None,
+        };
+        let answered = crate::topology::events::QuestionAnswered4 {
+            key: asked.key,
+            question: id.clone(),
+            answer: answer4,
+            via: seams.answers.id().to_owned(),
+            text,
+        };
         self.emit(
             TopologyEventBody::QuestionAnswered {
-                data: crate::topology::events::QuestionAnswered4 {
-                    key,
-                    question: id.clone(),
-                    answer: answer4,
-                    via: seams.answers.id().to_owned(),
-                },
+                data: answered.clone(),
             },
             seams,
             hooks,
         )?;
+        self.brief
+            .record_answer(asked.question.kind, &asked.question.options, &answered);
         Ok(Progress::Answered {
-            key,
+            key: asked.key,
             question: id.clone(),
             declined,
         })
@@ -2154,8 +2478,8 @@ impl TopologyRun {
             rung: run_as.rung,
             binding,
             workspace: site.worktree,
-            resume_session: run_as.resume_session.clone(),
-            feedback: run_as.feedback.clone(),
+            resume_session: run_as.resume_session,
+            feedback: run_as.feedback,
             materialization_observed: run_as.materialized,
         })?;
 
@@ -2172,6 +2496,7 @@ impl TopologyRun {
                 },
                 clock: seams.clock,
                 stopped: self.stopped.as_deref(),
+                notifiers: &self.notifiers,
             };
             AttemptContext {
                 manager: seams.manager,
@@ -2195,6 +2520,7 @@ impl TopologyRun {
             worktree: site.worktree.to_path_buf(),
             plan,
             entry,
+            decisions: self.brief.decisions(key),
         })
     }
 
@@ -2350,6 +2676,7 @@ impl TopologyRun {
                 },
                 clock: seams.clock,
                 stopped: self.stopped.as_deref(),
+                notifiers: &self.notifiers,
             },
             hooks,
             invocations,
@@ -2536,11 +2863,90 @@ impl TopologyRun {
             },
             clock: seams.clock,
             stopped: self.stopped.as_deref(),
+            notifiers: &self.notifiers,
         };
         emitter.emit(body, hooks)?;
         brokered(hooks, &emitter.state, invocations);
         Ok(())
     }
+}
+
+/// The task a fresh dispatch would open a generation for. A continuation's generation is open
+/// already, and it opened only once its spend was approved or needed no approval.
+fn fresh_dispatch(admitted: &Admitted) -> Option<TaskKey> {
+    match admitted {
+        Admitted::Dispatch {
+            key,
+            continuing: false,
+            ..
+        }
+        | Admitted::RepairDispatch {
+            key,
+            continuing: false,
+            ..
+        } => Some(*key),
+        _ => None,
+    }
+}
+
+/// Whether `answer` chose a spend approval's approve option: option 0, the only answer
+/// `answer_for` records as an approval. The fold gives a spend question's options no meaning
+/// of its own, so a record answering it otherwise approves nothing here.
+fn approves(answer: &Answer4) -> bool {
+    match answer {
+        Answer4::Answered { option_index, .. } => *option_index == 0,
+        Answer4::Declined { .. } => false,
+    }
+}
+
+/// The rung a settlement escalated its task onto, when it escalated.
+fn escalated_onto(settlement: &AttemptSettlement) -> Option<u32> {
+    match settlement {
+        AttemptSettlement::Closed {
+            transition: SettlementTransition::Escalated { rung },
+            ..
+        } => Some(*rung),
+        AttemptSettlement::Closed { .. } | AttemptSettlement::Retained { .. } => None,
+    }
+}
+
+fn spend_approval_context(
+    fold: &TopologyFold,
+    events: &[TopologyEvent],
+    key: TaskKey,
+    spent: f64,
+    threshold: f64,
+) -> Result<String, UpstrokeError> {
+    let entry = fold
+        .registry()
+        .and_then(|registry| registry.get(key))
+        .ok_or_else(|| UpstrokeError::Refused {
+            message: format!("task {} is not in this run's frozen registry", key.index()),
+        })?;
+    let task = fold.task(key).ok_or_else(|| UpstrokeError::Refused {
+        message: format!("task {} is not in this run's fold", key.index()),
+    })?;
+    let rung = usize::try_from(task.rung).unwrap_or(usize::MAX);
+    let onto = entry
+        .ladder
+        .rungs
+        .get(rung)
+        .map_or(Tier::Frontier, |onto| onto.tier);
+    Ok(crate::engine::coordinator::spend_question_context(
+        Some(crate::engine::coordinator::SpendSubject {
+            display_id: entry.display_id.as_str(),
+            title: &entry.spec.title,
+            acceptance: &entry.spec.acceptance,
+        }),
+        onto,
+        spent,
+        threshold,
+        spend_is_a_floor(fold, events),
+    ))
+}
+
+fn spend_is_a_floor(fold: &TopologyFold, events: &[TopologyEvent]) -> bool {
+    crate::engine::RunReport::from_topology(fold, events, Vec::new()).total_is_floor()
 }
 
 fn reclaim_snapshots_of(

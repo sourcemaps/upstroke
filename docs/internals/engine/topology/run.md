@@ -88,6 +88,16 @@ in this process but the record of the review passes a verification had
 charged". The refusal writes nothing, so the type is still a forwarder with no
 append of its own.
 
+**A question an append opens is announced here, and nowhere else** (J11,
+regression review 2, finding 2). After an append returns, the emitter tells the
+run's notifiers about each question that is open in the fold now and was not
+before the append: a worker's park, a spend approval, a verification park, a
+human-gated repair. Every append a run makes passes this one point, so each
+question is announced as soon as it is durable, under either driver, while the
+rest of the run goes on, as the sequential engine's `materialize_question`
+announces a parked question right after its settlement. The announcement
+writes nothing to the log, so the type still has no append of its own.
+
 ## `pub struct RunEmitter<'a>` › `pub identity: &'a RunIdentity,`
 
 What every refusal names, and what the checked replay is derived
@@ -102,6 +112,14 @@ five things one append touches.
 
 Where the event's timestamp comes from.
 
+## `pub struct RunEmitter<'a>` › `pub notifiers: &'a [&'static dyn Notifier],`
+
+The run's notifiers, borrowed ([`TopologyRun::with_notifiers`]). Every
+`RunEmitter` a `TopologyRun` builds is given them: `emit_undischarged`, the
+`RunJournal` of `with_journal`, the `IntegrationCx` of `integrate` and the
+announcing emitter of `prepare_attempt`. Empty unless the entry configured
+some, and then nothing is announced and no open question is looked at.
+
 ## `pub struct RunEmitter<'a>` › `pub stopped: Option<&'a str>,`
 
 Why the run is stopped, while it is: the run's own latch, borrowed
@@ -112,8 +130,10 @@ puts it back.
 
 ## `impl EventEmitter for RunEmitter<'_>` › `fn emit(`
 
-[`emit`], and nothing after it; before it only a stopped run's refusal, which
-writes nothing (`stopped`, above).
+[`emit`]; before it only a stopped run's refusal, which writes nothing
+(`stopped`, above), and after it only the announcement of the questions the
+append opened, which writes nothing either (`announce_opened`, below). A failed
+append announces nothing.
 
 The event it returns is discarded because no caller of this trait has
 ever wanted it: what a caller needs to know is whether the effect that
@@ -129,6 +149,29 @@ and they differ only in whether the log was touched, which
 `EmitError::wrote_nothing` answers for a reader that cares. A stopped run's
 refusal is `EmitFailure::Clean`, naming the stop.
 
+## `impl RunEmitter<'_>` › `fn open_question_ids(&self) -> BTreeSet<QuestionId> {`
+
+The ids of the questions open in the fold before an append, copied because
+the append changes the fold they are read from. Nothing is read when the run
+has no notifiers.
+
+## `impl RunEmitter<'_>` › `fn announce_opened(&mut self, open_before: &BTreeSet<QuestionId>) {`
+
+Each question open after the append and not before it, handed to every
+notifier in turn. A notifier that cannot deliver warns, naming itself and the
+question, as the sequential engine's `materialize_question` does, and the
+others are still asked: the run never stops over an announcement, since the
+question is durable in the log and the final report names it whatever a
+notifier did.
+
+## `fn announced_question(fold: &TopologyFold, frozen: &FrozenQuestion) -> Question {`
+
+The question a notifier is shown: the frozen question's id, kind, context and
+options, and its task by display id, as `open_question` shows it to an answer
+source. A notifier takes an `ir::Question`, so these fields are copied out of
+the fold's record. A key the registry does not hold (a valid fold has none) is
+shown as `k<key>`, as the report shows it.
+
 ## `fn brokered(hooks: &mut dyn TopologyHooks, state: &EmitState<'_>, invocations: &InvocationLedger) {`
 
 Show the hooks the broker after an append that succeeded
@@ -138,8 +181,8 @@ holders of both halves, each right after its emitter returned `Ok` —
 `TopologyRun::emit_undischarged`, [`RunJournal`]'s two `emit`s,
 [`IntegrationCx`]'s `emit`, and `prepare_attempt` after `announce`'s one
 append — which between them are every append a `TopologyRun` makes. Not in
-[`RunEmitter`], which is the protocol and nothing after it and holds only the
-reservations. Nothing touches either ledger between the append and this call,
+[`RunEmitter`], which is the protocol and the announcement of what it opened,
+and holds only the reservations. Nothing touches either ledger between the append and this call,
 so a reservation the append's caller converts after it is still held.
 
 ## `struct RunJournal<'a, 'h> {`
@@ -764,20 +807,55 @@ nothing.
 A record with no failure adds nothing: a successful attempt has no
 feedback, and `detail` is `None` on an attempt nothing judged.
 
+## `impl Brief` › `pub fn record_answer(`
+
+A person's words on an answered question, read as the sequential fold
+reads them (`events::RunState`'s `question_answered`; J2). Words that name
+none of the question's options are an instruction from a person
+(`human: true`). The next attempt's prompt quotes it with the legacy
+precedence ("an instruction from a person, and it takes precedence"), and
+its review is given it as a decision ([`Self::decisions`]). Four answers add
+nothing: a chosen option (its text is canned), a spend approval, a decline,
+and a record written before answers kept their words (`text` absent). For
+that last one the words were never recorded, and none are invented.
+
+The live loop calls it from the record it has just appended
+(`ingest_answer`), and [`Self::replay`] from the same record in the log,
+so recovery rebuilds the instruction from events alone.
+
+## `impl Brief` › `pub fn decisions(&self, key: TaskKey) -> Vec<String> {`
+
+The person's instructions in this task's brief, oldest first: the
+`decisions` its review, and its integration verification's review, are
+given (`AttemptJob::decisions`, `VerificationJob`). At the reviewed head the
+entry handed every review an empty list, in both execution modes (J2).
+
 ## `impl Brief` › `pub fn replay(events: &[TopologyEvent]) -> Self {`
 
-Every task's brief over a whole log.
+Every task's brief over a whole log, from two readings that the live
+loop makes in the same way.
 
-**`attempt_finished` only, which is exactly the live loop's coverage.**
-Two events carry an [`AttemptRecord`] — `attempt_finished` and
-`candidate_prepared` — and the driver calls [`Self::record`] beside
-`Spend::record` at both of its own appends. `candidate_prepared` is the
-*successful* settlement (INV-07), so its record carries no failure and
-contributes nothing either way; walking it here would add a duplicate
-only on the replay side. `attempt_interrupted` is deliberately absent:
-nothing judged that attempt, the live path settles it in recovery rather
-than through a settlement, and a line for it would be a line replay
-invented.
+**For the attempts' feedback, `attempt_finished` only, which is exactly the
+live loop's coverage.** Two events carry an [`AttemptRecord`] —
+`attempt_finished` and `candidate_prepared` — and the driver calls
+[`Self::record`] beside `Spend::record` at both of its own appends.
+`candidate_prepared` is the *successful* settlement (INV-07), so its record
+carries no failure and contributes nothing either way; walking it here would
+add a duplicate only on the replay side. `attempt_interrupted` is
+deliberately absent: nothing judged that attempt, the live path settles it
+in recovery rather than through a settlement, and a line for it would be a
+line replay invented.
+
+**For the human instructions, `question_answered` (J2).** Each answer is
+read through [`Self::record_answer`] against the question it answered,
+which `observe::question_opened_by` finds in the event that opened it. The
+live loop calls the same function on the record it has just appended
+(`ingest_answer`), so the two readings cannot drift apart. These lines have
+semantics of their own (`human: true`). Only words that name none of the
+question's options become one, and the next prompt quotes it as an
+instruction from a person, not as a failure. A chosen option, a spend
+approval, a decline, and a record written before answers kept their words
+add none.
 
 ## `struct Retained {`
 
@@ -910,6 +988,11 @@ question is open and the task is `AwaitingInput`).
 One verification-park question ingested: `question_answered` is
 durable, and the candidate is back in the queue (`declined` false) or
 its lineage has failed (`declined` true).
+
+## `pub enum Progress` › `Asked {`
+
+A spend approval was raised (`ask_to_approve_spend`): `question_raised` is
+durable and the task waits for its answer.
 
 ## `pub enum Progress` › `Finished {`
 
@@ -1238,6 +1321,94 @@ the one call of each in this file (`run::tests::the_loop_selects_through_one_fun
 and the only way the coordinator selects too. A selection is never cached: the
 coordinator asks again after every message it applies, because the fold's
 append checks do not re-check admission (INV-21).
+
+One hold of the run's own follows the checkpoint (J1): a fresh dispatch whose
+spend [`Self::spend_unapproved`] says needs a person's approval is
+`Admitted::ApproveSpend` instead. Because both drivers act on this one value,
+neither can dispatch that attempt unapproved.
+
+## `impl TopologyRun` › `pub fn with_spend_approval(mut self, threshold: Option<f64>) -> Self {`
+
+The run, with `ask_before.frontier_escalation_over_usd` as the threshold at
+which an escalation onto a frontier rung waits for a person (DESIGN §12). The
+entry sets it from the run's config, and a resume from today's config, as the
+sequential resume reads `ask_before` from today's analysis. At the reviewed
+head nothing supplied it, so a configured approval never asked (regression
+review #1, J1).
+
+## `impl TopologyRun` › `pub fn with_notifiers(mut self, notifiers: Vec<&'static dyn Notifier>) -> Self {`
+
+The run, with the notifiers its emitters announce each newly opened question
+to (`RunEmitter`'s `notifiers`). The entry builds them from `[interaction]
+notify`, a fresh run from its config and a resume from today's. `resumed`
+starts with none, so a run nobody configured announces nothing.
+
+## `impl TopologyRun` › `fn spend_unapproved(&self, key: TaskKey) -> Result<bool, UpstrokeError> {`
+
+The sequential engine's `should_approve_spend`: the task's rung is a frontier
+one its ladder reached from a cheaper rung, the run's reported spend has
+reached the threshold, and (added here) no attempt has run on that rung yet
+and no answer since the escalation approved it. It is asked before the
+dispatch rather than at the settlement. A process that ended between the
+escalation and the question therefore still asks on resume, and an approval
+that landed before a crash is still honoured after it. A one-off human binding
+has no ladder to escalate, so it is never held.
+
+## `impl TopologyRun` › `fn spend_approved(&self, key: TaskKey, rung: u32) -> bool {`
+
+The approval is read from the log, not from process memory. The answer must
+be `answered` with the approve option, option 0 (`approves`), to an
+`ApproveSpend` question raised for the task after its last escalation onto
+`rung`. The fold gives a spend question's options no meaning of its own, so
+any other record approves nothing, and the hold asks again (root's J1
+audit). Each escalation resets it, so each needs its own approval.
+
+## `impl TopologyRun` › `pub(super) fn ask_to_approve_spend(`
+
+Append `question_raised` for the held escalation, worded by
+`coordinator::spend_question_context` and offering
+`topology_question_options(ApproveSpend)`. The fold parks the task
+(`AwaitingInput`) and other tasks go on. An answer of its approve option
+returns the task to dispatch. Its decline option, or a decline, fails the
+task's lineage under the halt policy (`answer_for`). Under `interaction =
+never` the run ends parked on the question.
+
+## `impl TopologyRun` › `fn spend_question(`
+
+The approval question for `key`'s escalation onto its frontier rung, in the
+sequential engine's words (`spend_question_context`) and with its options: its
+frozen form, whose context `spend_approval_context` words from the handle's fold
+and log and the run's ledger total. The context is built before the question's id
+is drawn, so a refusal draws none. Until J16 it built a `ParkSubject`, computing
+an attempt count and rungs spent that the spend question never printed.
+
+## `fn spend_approval_context(`
+
+The approval's context: the subject is a `coordinator::SpendSubject` from the
+registry entry (display id, title and acceptance), `onto` is the tier of the
+rung the fold has the task on, and the reported spend is the run's ledger total,
+a floor when [`spend_is_a_floor`] says so. A free function over the fold and the
+log, so the guard words an approval from a replayed log without a run handle
+(K5). A task the registry or the fold does not hold is refused, as before.
+
+## `fn spend_is_a_floor(`
+
+Whether the run's reported spend is a floor rather than a total, answered by the
+run's own report: `RunReport::from_topology(..).total_is_floor()`. So the
+approval and the report share one treatment of unknown spend (K5, regular review
+4, finding 5; first bad `e8ab8838`, J1's repair): an attempt or a review pass
+that reported no cost, an interrupted attempt (J12), an interrupted integration
+verification (K4), and unknown spend no task carries. The report is projected
+once per approval question, which is rare: an escalation onto a frontier rung
+over the threshold.
+
+Until K5 this scanned `attempt_finished` and `candidate_prepared` records and the
+integration passes itself, and ignored `attempt_interrupted`. After a worker ran
+and its coordinator died, resume settled the attempt interrupted, and a later
+priced failure that escalated onto the frontier asked for approval with "Reported
+spend so far: $0.0100. This is what the run has already cost…" and no floor
+warning (the reviewer's focused guard), while the report of the same log said
+its total was a floor.
 
 ## `impl TopologyRun` › `pub(super) fn exceed_budget(`
 
@@ -2219,7 +2390,10 @@ appended, as an attempt's reviews are charged in `settle`:
 ## `impl TopologyRun` › `fn answer_for(`
 
 One reading of an answer, for every origin. A decline becomes
-`Declined { decline_halts_run }` from the run's seam. For a
+`Declined { decline_halts_run }` from the run's seam. An `ApproveSpend`
+answer approves only by its approve option; its decline option's text is a
+decline, and any other text is refused before anything is appended, so words
+are never read as an approval (J1). For a
 `HumanBinding` admission the answer must be one of the frozen options
 (`chosen_index`, exact text), the option indexes the authorized agents
 the fold kept beside the question, and the override is
@@ -2233,7 +2407,9 @@ override.
 ## `impl TopologyRun` › `fn ingest_answer(`
 
 Append `question_answered` for whichever origin `answer_for` read, and
-report `Answered { declined }`. The fold does the routing: `AwaitingMerge`
+report `Answered { declined }`. An `answered` record keeps the person's
+words (`text`, J2), and the brief then takes them from the appended record
+(`Brief::record_answer`). The fold does the routing: `AwaitingMerge`
 for a verification park (the candidate re-verifies under a new
 sequence), `Pending` for an admission, a failed lineage for a decline
 with its queue position consumed and its lease released, halting per

@@ -79,7 +79,9 @@ Repo-level `upstroke.toml` — overrides only; everything below has a derived de
 ```toml
 [engine]
 on_task_failure = "halt"            # halt | continue
-max_parallel    = 1                 # >1 requires v0.2
+max_parallel    = 1                 # >1 runs that many task pipelines at once (schema 4)
+max_per_agent   = 1                 # concurrent invocations of one agent; default max_parallel
+max_per_pool    = 1                 # concurrent invocations drawing on one pool; default max_parallel
 max_merge_repairs = 2               # autonomous generations per original task; then HUMAN
 shell           = "powershell"      # gate shell; default = platform native
 
@@ -139,3 +141,9 @@ timeout_secs = 1200
 ```
 
 **What the repo-level file refuses.** A mistake that would silently delete a control is an error at load, before a lock, a workspace or a run directory exists; a mistake that only degrades what the run can say about itself is a warning that names the key. So: an unknown top-level section name (anything outside `routing`, `pins`, `gates`, `engine`, `interaction`, `budgets`, `runner`) is an error naming it and the accepted seven, the same treatment as the sections below it — a misspelled section used to disappear whole, with no warning, deleting the largest unit a typo can delete. An unknown key in `[runner]`, `[engine]`, `[budgets]`, `[interaction]`, its `ask_before` table, or a `[[gates]]` entry is an error naming the accepted keys — `[engine]` included, because `on_task_failure` and `shell` sit in that table beside the ceilings, and `on_task_failur = "continue"` left to a warning is a halted run the operator asked to continue; an unrecognised `kind`, `on_task_failure`, `mode`, `second_opinion` or effort value is an error, while an unrecognised `shell` warns and takes the platform default; a zero ceiling, timeout or `attempts_per` is an error, as is a gate `timeout_secs` the run record cannot hold (more than 18,446,744,073,709,551 seconds, since `run_started` records it in milliseconds as a 64-bit count), a budget ceiling that is not a positive finite number of dollars, or an `ask_before` threshold that is negative or not finite; and two `[[gates]]` entries may not share a `name`, compared without regard to ASCII case because a case-insensitive filesystem keeps one log file for both, since the name is what a gate's log file and its failure report carry. A resume reads `[[gates]]` by what its log records (§15): a run whose log records its gates takes them from the record, so today's section is compared with them and never refused over — every shape above is a warning naming the recorded gates as what runs — while a run whose log predates the gate record settles its gates from today's file on that resume and reads the section exactly as a fresh run does. Nothing else in the file reads differently on a resume except the `[engine]` ceilings, which warn there rather than refuse.
+
+**Which CLIs a schema-4 run needs.** Before a schema-4 run commits anything, it probes the shell and every agent its chains and its review plan name. A probe that fails stops the run's creation at P4, before its commit record, naming the CLI. So every CLI the review plan names must be installed where the run executes its roles: on `PATH` for the host runner, in the image for the container runner.
+
+The review plan names its primary reviewer: the review tier's `[[pins]]` entry, or the catalog's binding for that tier. Where the primary's model family is in the catalog, it also names an alternative from another family whose adapter this build carries. With this build's adapters and no pins, that is the GitHub Copilot CLI beside Claude Code's, and both must be installed.
+
+The sequential (schema 1-3) engine dropped an alternative it could not run. A schema-4 run does not, because its recorded probe set binds its resume too. The test suites satisfy these probes with stub CLIs, so an acceptance run with stubs implies no provider call.

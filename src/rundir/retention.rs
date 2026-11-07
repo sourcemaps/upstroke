@@ -65,6 +65,13 @@ pub enum RetainReason {
     /// A component of the locator below the runs directory is a symlink or,
     /// on Windows, any reparse point — a junction included.
     LocatorThroughReparsePoint { component: PathBuf },
+    /// The recorded locator's own metadata could not be observed: the
+    /// filesystem answered something other than "not found" (`EACCES`, `EIO`,
+    /// a sharing violation), so whether the private half exists is unknown
+    /// and the marker, its only locator, is kept
+    /// (`PR12-INV9-UNREADABLE-PRIVATE-LOCATOR`). `detail` is the error as the
+    /// filesystem gave it.
+    LocatorUnreadable { locator: PathBuf, detail: String },
     /// P3a: the private directory exists, its owner record does not.
     OwnerRecordMissing,
     /// The owner record is not readable as one.
@@ -103,6 +110,7 @@ impl RetainReason {
         "marker-repo-key-mismatch",
         "locator-outside-authorized-root",
         "locator-through-reparse-point",
+        "locator-unreadable",
         "owner-record-missing",
         "owner-record-unparseable",
         "owner-record-disagrees",
@@ -128,6 +136,7 @@ impl RetainReason {
         "marker-repo-key-mismatch",
         "locator-outside-authorized-root",
         "locator-through-reparse-point",
+        "locator-unreadable",
         "owner-record-missing",
         "owner-record-unparseable",
         "owner-record-disagrees",
@@ -144,6 +153,7 @@ impl RetainReason {
             Self::MarkerRepoKeyMismatch { .. } => "marker-repo-key-mismatch",
             Self::LocatorOutsideAuthorizedRoot { .. } => "locator-outside-authorized-root",
             Self::LocatorThroughReparsePoint { .. } => "locator-through-reparse-point",
+            Self::LocatorUnreadable { .. } => "locator-unreadable",
             Self::OwnerRecordMissing => "owner-record-missing",
             Self::OwnerRecordUnparseable => "owner-record-unparseable",
             Self::OwnerRecordDisagrees { .. } => "owner-record-disagrees",
@@ -222,6 +232,12 @@ impl std::fmt::Display for RetainReason {
                 f,
                 "its private locator passes through the link {}",
                 component.display()
+            ),
+            Self::LocatorUnreadable { locator, detail } => write!(
+                f,
+                "its recorded private locator {} cannot be inspected ({detail}), so whether its \
+                 private half exists is unknown",
+                locator.display()
             ),
             Self::OwnerRecordMissing => f.write_str("its private half carries no owner record"),
             Self::OwnerRecordUnparseable => {

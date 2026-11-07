@@ -129,6 +129,13 @@ An embedded record a writer may have recorded as absent.
 
 As [`field`], when one is present.
 
+## `pub(crate) mod strict` › `pub(crate) fn present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>`
+
+The decoder of a field that later records always carry and earlier ones
+may lack. Absent, it is `None` through `#[serde(default)]`. Present, it
+must be a value, and `null` is refused. Its one use is
+`QuestionAnswered4::text` (J2).
+
 ## `pub(crate) mod strict` › `pub(crate) fn required<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>`
 
 An optional field whose *key* is still required.
@@ -255,6 +262,65 @@ The runtime's immutable image id.
 
 The manifest digest, when the runtime reported one.
 
+## `pub enum MountSourceKind {`
+
+What a recorded mount source was when it was resolved: a directory or a
+regular file. Nothing else is ever recorded; a socket, device or FIFO is
+refused at resolution (`runner/container/resolve.rs`).
+
+## `pub enum MountSourceIdentity {`
+
+The resolved source object a mount names, tagged with the platform whose
+identity it is and whose path syntax the mount's `source` is spelled in
+(`"platform"`):
+
+- `unix`: the kind, the device and the inode (`st_dev`, `st_ino`);
+- `windows`: the kind, the volume serial number and the **full 128-bit
+  file id** of `FILE_ID_INFO`, as 32 lowercase hex digits of its bytes in
+  order (root's `PR12-MOUNT-WINDOWS-IDENTITY` follow-through, 2026-11-02).
+  The id is never truncated to 64 bits, and no identity is guessed:
+  resolution reads it through a read-attributes handle on the object
+  itself, which refuses a reparse point.
+
+It identifies the *object*, not its contents. A read-write mount's
+contents change normally; what may not change is which object the
+recorded path names. A resume that finds the path gone, rebound through a
+link or a move, or naming another object refuses before any spawn.
+Builds for a platform that is neither (no supported target today) refuse
+configured mounts rather than record a guessed identity.
+
+The tag makes the comparison exact across platforms too: a record made on
+one platform never equals an identity read on the other, so a run is
+never resumed onto a different platform's object.
+
+## `pub struct RecordedMount {`
+
+One operator-configured mount as it is part of the run's execution
+identity (root's recorded-mounts disposition, 2026-11-02):
+
+- `source`: the canonical absolute host path, resolved once at selection,
+  in its identity's platform syntax: an absolute POSIX path for `unix`,
+  and for `windows` a drive-letter path (`C:\...`, backslashes only), the
+  canonical path with its verbatim `\\?\` prefix removed; a network share or
+  device path is refused. It is stored as the exact UTF-8 string the
+  runtime's `--mount` option receives (a Windows build writes its
+  separators as `/` there, which names the same path). A source whose
+  canonical spelling is not UTF-8, or carries what that option cannot
+  (`,`, `"`, control characters, edge whitespace), is refused rather than
+  converted;
+- `target`: the container path, in normal form (absolute, no empty, `.` or
+  `..` component, no trailing `/`), never `/` and never at or under
+  `/upstroke` or `/tmp`;
+- `read_only`: what the operator configured (`true` unless they wrote
+  `false`). Review and probe containers get every recorded mount
+  read-only whatever this says; implement and gate containers get it as
+  recorded;
+- `source_identity`: see `MountSourceIdentity`.
+
+These are only the configured mounts. The role's own mounts (worktree,
+Git view, objects, credential volume, settings, scratch) are composed by
+the runner and are not recorded here.
+
 ## `pub struct RunnerPolicy {`
 
 The execution identity of a schema-4 run.
@@ -279,13 +345,41 @@ two incarnations that enumerated the same volumes in different orders
 established the same runner, and refusing that would make a resume
 depend on iteration order.
 
+## `pub struct RunnerPolicy` › `pub mounts: Vec<RecordedMount>,`
+
+The configured mounts, ordered strictly by target (resolution sorts them
+and `completeness` refuses any other order), so the list has exactly one
+spelling for one set.
+
+**A deliberate exception to the strict-required convention** of the
+other fields. `#[serde(default, skip_serializing_if = "Vec::is_empty")]`:
+
+- an empty list is not written, so every `run_started`, `run_resumed`,
+  `owner.json` and `report.json` of a run without mounts keeps exactly the
+  bytes it had before the field existed, and its policy digest stays the
+  v1 one (`runner/policy.rs`);
+- an absent field reads as the empty list it always meant;
+- a reader from before the field refuses a record that has mounts,
+  through `deny_unknown_fields`. That is the right failure: it could not
+  honour them. The test
+  `a_reader_from_before_mounts_refuses_a_mount_list_and_reads_every_record_without_one`
+  holds this with a verbatim copy of the e34b6d1b `RunnerPolicy` decoder,
+  a fixture bounded to that decoder. The three documents embed the record
+  by value under `deny_unknown_fields`, so its refusal is theirs; the
+  test does not run an older binary.
+
+An explicit `"mounts": []` reads as empty too, and is written back
+without the key.
+
 ## `pub enum RunnerField {`
 
 Which part of a runner record two incarnations disagree about.
 
 Ordered as the record is read, so the first difference reported is the
 most structural one: a run that changed kind has not merely moved its
-image.
+image. `Mounts` ("configured mount set") comes last, after the
+credential volumes: any change of a source, target, disposition or
+identity, or of the list's length.
 
 ## `pub enum RunnerRecordDefect {`
 
@@ -310,7 +404,20 @@ a real answer — no agent needs credentials — and is not this.
 
 ## `pub enum RunnerRecordDefect` › `HostWithContainerFields,`
 
-A host runner carrying an image or volumes it cannot have used.
+A host runner carrying an image, volumes or mounts it cannot have used.
+
+## `pub enum RunnerRecordDefect` › `MountRecordMalformed,`
+
+A container runner whose recorded mounts cannot be rebuilt as recorded: a
+target that is not an absolute container path; a source that is not
+absolute in its identity's platform syntax (a `unix` source that does not
+start with `/`; a `windows` source that is not a drive-letter path with
+backslashes only, so a verbatim, network-share, drive-relative or
+forward-slash spelling); a `windows` file id that is not exactly 32
+lowercase hex digits; or targets that are not strictly increasing (which
+also refuses a repeated target). The full target and source rules are
+resolution's; this is the shape the fold can check from the record alone,
+at `run_started`.
 
 ## `impl RunnerPolicy` › `pub fn completeness(&self) -> Result<(), RunnerRecordDefect> {`
 
@@ -331,6 +438,13 @@ The first [`RunnerRecordDefect`] the record exhibits.
 
 The first field in which `self` and `other` are not the same runner, or
 `None` when they are identical.
+
+The mount list is compared whole, identity included, after every field
+that was there before it. The fold's `check_run_resumed` therefore
+refuses, as `RunnerMoved { field: "configured mount set" }`, a
+`run_resumed` whose mounts are not the recorded ones; no fold code
+changed for it (`topology/census.rs`,
+`a_run_resumed_whose_mounts_moved_is_refused_by_the_existing_runner_equality`).
 
 This is the whole of the resume check: a run's boundary and image are
 fixed for its life, so any difference at all refuses. It names the
@@ -389,6 +503,24 @@ What every process of this run executes through, for its whole life.
 
 The agents pre-flight actually probed. The allow-list every task's
 bindings — including one a human names for a repair — is drawn from.
+
+## `pub struct RunStarted4` › `pub shell: ShellKind,`
+
+The shell pre-flight probed: the non-slotted `RunnerPreflight` probe executes
+it at P4 and at every resume's step (c) (INV-23, "the recorded shell executing
+exit 0"), and every gate the run records runs under it. Recorded on its own,
+with gates or without: until PR12-CI-03 a resume took it from the first entry of
+`gate_cmds`, so a run with no gates recorded no shell and its resume probed
+today's `[engine] shell` instead.
+
+Required like every field here. A `run_started` written before it is refused at
+parse — at a resume's (a0), by the fold's `RewrittenLog` at line 1 naming the
+missing field — and is never read as holding a shell. Run-directory
+classification reads only `event`, `schema` and `run_id`, so such a run is still
+`Committed` and never a husk. Schema 4 is pre-release, so no log is under a
+compatibility promise a default would keep (DESIGN §26); the field is not in
+`registry_record`, `RunnerPolicy` or `run_resumed`, so the registry digest, the
+runner digest and the runner-equality refusal are unchanged.
 
 ## `pub struct RunStarted4` › `pub integration_ref: GitRef,`
 
@@ -570,6 +702,33 @@ meant.
 Which channel produced it — a terminal, an out-of-band `upstroke answer`,
 or a resume picking up an answer written while the run was dead.
 
+## `pub struct QuestionAnswered4` › `pub text: Option<String>,`
+
+The person's words (regression review #2, J2, closing the gap
+`PR249-ANSWER-TEXT-NOT-CARRIED` deferred for want of this field). Every
+`answered` answer this build appends carries `text`: the exact text the
+answer source read, which is an option's own text when an option was
+chosen. A decline carries none (`AnswerDefect::DeclineWithText`).
+
+**The serialized change.** It is one optional key, `text`, on the
+`question_answered` payload. It is written only when there are words
+(`skip_serializing_if`), so a decline, and every record without words,
+serializes exactly as before. Present, it must be a string: `null` or any
+other value is refused (`strict::present`).
+
+**Compatibility.** The schema stays 4. No released build reads schema 4,
+because the base's activation was `Inactive` and its `MAX_READABLE_SCHEMA`
+was 3, so a release refuses any schema-4 log at its ceiling. Schema-4
+records that the PR12 branch's earlier builds wrote lack the key and still
+decode: an absent `text` reads as words not recorded. Nothing is filled in
+for it, and no instruction is derived from it (`run::Brief::record_answer`).
+This is the one schema-4 field where an absent key means "written before
+the field existed" (compare `strict::required`). The canonical corpus's own
+`question_answered` is such a record, so
+`every_event_decodes_from_its_independently_written_payload` pins that it
+still decodes. An earlier PR12 build that meets a record carrying `text`
+refuses it as an unknown field, so it fails closed. Schemas 1–3 are untouched.
+
 ## `pub enum AnswerDefect {`
 
 How an answer disagrees with itself.
@@ -589,6 +748,12 @@ The override records a different option from the one chosen.
 ## `pub enum AnswerDefect` › `DeclineWithOverride,`
 
 A decline carrying a binding.
+
+## `pub enum AnswerDefect` › `DeclineWithText,`
+
+A decline carrying words. Only an `answered` answer keeps the person's
+words (J2), so a decline with `text` is a record no writer of this build
+produces, and the fold refuses it rather than guessing what it meant.
 
 ## `impl QuestionAnswered4` › `pub fn self_consistency(&self) -> Result<(), AnswerDefect> {`
 
@@ -1855,6 +2020,66 @@ INV-23 again, on the other side of the map. Every mover below keeps
 the keys, the cardinality and the pairing identical and changes one
 property of one value, so a comparison that lower-cased, trimmed, or
 compared lengths fails on exactly the mover that isolates it.
+
+## `mod tests` › `fn mounted_runner() -> RunnerPolicy {`
+
+`container_runner()` with two recorded `unix` mounts that differ in every
+field: a directory read-only and a file read-write, a non-ASCII source
+with a space, and identities at both ends of `u64` so a lossy number path
+shows. `windows_mounted_runner()` is its Windows counterpart: drive-letter
+sources, volume serials at both ends, and two full file ids.
+
+## `fn an_empty_mount_list_is_omitted_and_an_absent_one_reads_as_empty() {`
+
+The compatibility half of the field's serde exception: every fixture
+without mounts writes exactly the four historical keys, reads back equal,
+and an explicit empty list is the same record and is written back
+without its key.
+
+## `fn a_mount_list_round_trips_with_every_field_and_refuses_anything_else() {`
+
+The exact JSON a mount is written as, for both platforms, and twenty-five
+refusals: each of the four mount fields missing, each of the four fields
+of either identity missing (the `platform` tag included), an unknown key
+at either level, a kind that is not `directory` or `file`, a platform
+that is neither, a negative or quoted number, a quoted boolean, a null
+source, a map in place of the list, and either platform's field inside
+the other's identity.
+
+## `mod tests` › `struct PreMountRunnerPolicy {`
+
+A verbatim copy of `RunnerPolicy` as e34b6d1b declared it, before the
+mount field: the bounded stand-in for an older strict reader. It is
+bounded to that decoder. It does not run an older binary, and it does not
+model the other fields of the documents that embed the record.
+
+## `fn a_reader_from_before_mounts_refuses_a_mount_list_and_reads_every_record_without_one() {`
+
+Both directions over that stand-in. Records without mounts are written
+byte-identically by both writers and read by both readers. A record with
+mounts is refused by the earlier reader for exactly the unknown field
+`mounts`. The `run_started` and `run_resumed` that embed a mounted
+record are read by this reader, and the earlier one refuses the runner
+they carry.
+
+## `fn a_mount_list_differs_in_any_field_of_any_mount_and_in_its_length() {`
+
+Fifteen movers, each changing one thing: on the `unix` record a source
+byte, a target byte, either disposition, each identity field, the platform
+tag, one mount fewer or more, none; on the `windows` record the source's
+case, the kind, the volume and one byte of the file id. All are reported
+as `Mounts` in both directions; a record that also lost its volumes
+reports the volumes first.
+
+## `fn a_mount_record_is_complete_only_when_its_paths_and_identity_are_spelled_exactly() {`
+
+The completeness rules for mounts, for a container and for a host: any
+mount on a host is `HostWithContainerFields`; on a container an
+unordered or repeated target, a relative source or target, an empty
+target, a source in the other platform's syntax, a Windows source that is
+forward-slashed, mixed, verbatim, a network share, drive-relative or
+relative, and a file id that is short, long, uppercase or not hex are
+`MountRecordMalformed`; drive paths with either letter case are complete.
 
 ## `mod tests` › `const FROZEN_VOCABULARY: [(&str, bool); 24] = [`
 

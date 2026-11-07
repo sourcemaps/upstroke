@@ -6,6 +6,7 @@
     clippy::disallowed_macros
 )]
 
+use crate::runner::container::runtime::QuestionBound;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
@@ -15,9 +16,9 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use super::runtime::{
-    ContainerExecution, ContainerRuntime, ContainerTrace, CreateSpec, CreatedContainer,
-    DiscoveredContainer, ImageInspection, Liveness, Mount, OwnerLiveness, RuntimeError, RuntimeOp,
-    Settled, StopMode,
+    ContainerExecution, ContainerRuntime, ContainerTrace, ContainerUser, CreateSpec,
+    CreatedContainer, DiscoveredContainer, ImageInspection, Liveness, Mount, OwnerLiveness,
+    RuntimeError, RuntimeOp, Settled, StopMode,
 };
 use super::{ContainerHooks, CoveredCreate, CoveredStart, DockerCli};
 use crate::runner::Cancellation;
@@ -27,6 +28,7 @@ use crate::workspace_manager::fixture::{LINK_BOUND, LinkedChild, ParentLink};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FakeImage {
     pub digest: Option<String>,
+    pub environment: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,6 +104,8 @@ struct State {
     pace: Option<Pace>,
     reaper_program: Option<PathBuf>,
     covers: Option<Vec<(String, bool)>>,
+    stdin_received: BTreeMap<String, Vec<u8>>,
+    unresolved_removals: BTreeSet<String>,
 }
 
 impl Drop for State {
@@ -272,8 +276,23 @@ impl FakeRuntime {
             id.to_owned(),
             FakeImage {
                 digest: digest.map(str::to_owned),
+                environment: Vec::new(),
             },
         );
+    }
+
+    pub(crate) fn set_image_environment(&self, id: &str, environment: &[(&str, &str)]) {
+        let mut state = self.state();
+        assert!(
+            state.images.contains_key(id),
+            "`{id}` is not an image of this fake runtime"
+        );
+        if let Some(image) = state.images.get_mut(id) {
+            image.environment = environment
+                .iter()
+                .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+                .collect();
+        }
     }
 
     pub(crate) fn tag(&self, reference: &str, id: &str) {
@@ -348,6 +367,7 @@ impl FakeRuntime {
                     exit_code: Some(0),
                     stdout: Vec::new(),
                     stderr: Vec::new(),
+                    output_limited: false,
                 },
             },
         );
@@ -385,6 +405,14 @@ impl FakeRuntime {
     #[cfg(unix)]
     pub(crate) fn starts_observed(&self) -> Vec<(String, bool)> {
         self.state().covers.clone().unwrap_or_default()
+    }
+
+    pub(crate) fn stdin_received(&self, name: &str) -> Option<Vec<u8>> {
+        self.state().stdin_received.get(name).cloned()
+    }
+
+    pub(crate) fn leave_a_process_unresolved_at_removal(&self, name: &str) {
+        self.state().unresolved_removals.insert(name.to_owned());
     }
 }
 
@@ -428,6 +456,15 @@ impl ContainerRuntime for FakeRuntime {
         }))
     }
 
+    fn image_environment(&self, id: &str) -> Result<Option<Vec<(String, String)>>, RuntimeError> {
+        self.enter(RuntimeOp::InspectImageById, id)?;
+        Ok(self
+            .state()
+            .images
+            .get(id)
+            .map(|image| image.environment.clone()))
+    }
+
     fn volume_present(&self, name: &str) -> Result<bool, RuntimeError> {
         self.enter(RuntimeOp::InspectVolume, name)?;
         Ok(self.state().volumes.contains(name))
@@ -451,7 +488,7 @@ impl ContainerRuntime for FakeRuntime {
             .collect())
     }
 
-    fn observe(&self, name: &str) -> Result<Liveness, RuntimeError> {
+    fn observe(&self, name: &str, _: QuestionBound<'_>) -> Result<Liveness, RuntimeError> {
         self.enter(RuntimeOp::Observe, name)?;
         self.settle_process(name);
         Ok(self
@@ -478,6 +515,11 @@ impl ContainerRuntime for FakeRuntime {
     }
 
     fn start(&self, covered: CoveredStart<'_>) -> Result<(), RuntimeError> {
+        if !covered.stdin().is_empty() {
+            self.state()
+                .stdin_received
+                .insert(covered.name().to_owned(), covered.stdin().to_vec());
+        }
         self.daemon_start(covered.name())
     }
 
@@ -547,6 +589,7 @@ impl FakeRuntime {
                     exit_code: Some(0),
                     stdout: Vec::new(),
                     stderr: Vec::new(),
+                    output_limited: false,
                 },
             },
         );
@@ -607,7 +650,9 @@ impl FakeRuntime {
         if entered.is_ok() {
             self.kill_process(name);
         }
-        let settled = super::settle_stop(name, entered, |target| self.observe(target))?;
+        let settled = super::settle_stop(name, entered, |target| {
+            self.observe(target, QuestionBound::Runtime)
+        })?;
         if settled.process_gone() {
             if let Some(container) = self.state().containers.get_mut(name) {
                 container.state = Liveness::Exited;
@@ -623,11 +668,24 @@ impl FakeRuntime {
         if entered.is_ok() {
             self.kill_process(name);
         }
-        let settled = super::settle_remove(name, entered, |target| self.observe(target))?;
-        if settled.process_gone() {
+        let removed = super::settle_remove(name, entered, |target| {
+            self.observe(target, QuestionBound::Runtime)
+        });
+        if removed.as_ref().is_ok_and(|settled| settled.process_gone()) {
             self.state().containers.remove(name);
         }
-        Ok(settled)
+        let client = if self.state().unresolved_removals.contains(name) {
+            Err(RuntimeError::Unresolved {
+                operation: RuntimeOp::Remove,
+                detail: format!(
+                    "the fake left a process of `{name}` unresolved at its removal, as an \
+                     attached client whose supervision could not establish it gone would"
+                ),
+            })
+        } else {
+            Ok(())
+        };
+        super::combined_removal(removed, client)
     }
 
     fn observe_cover(&self, name: &str, labels: &BTreeMap<String, String>) {
@@ -680,6 +738,7 @@ impl FakeRuntime {
                 exit_code: None,
                 stdout: Vec::new(),
                 stderr: b"the fake container's process panicked".to_vec(),
+                output_limited: false,
             });
         if let Some(container) = self.state().containers.get_mut(name) {
             container.execution = execution;
@@ -948,7 +1007,7 @@ impl FakeRuntime {
                 .containers_with_label(&text("key"), &text("value"))
                 .map(|found| Value::Array(found.iter().map(discovered_json).collect())),
             RuntimeOp::Observe => self
-                .observe(&text("name"))
+                .observe(&text("name"), QuestionBound::Runtime)
                 .map(|state| Value::from(liveness_name(state))),
             RuntimeOp::Collect => self
                 .collect(&text("name"))
@@ -1065,7 +1124,7 @@ impl ContainerRuntime for LinkedRuntime {
             })
     }
 
-    fn observe(&self, name: &str) -> Result<Liveness, RuntimeError> {
+    fn observe(&self, name: &str, _: QuestionBound<'_>) -> Result<Liveness, RuntimeError> {
         let state = self.call(RuntimeOp::Observe, json!({"name": name}))?;
         state
             .as_str()
@@ -1131,6 +1190,7 @@ fn error_json(error: &RuntimeError) -> Value {
     let (kind, operation, detail) = match error {
         RuntimeError::Unreachable { operation, detail } => ("unreachable", operation, detail),
         RuntimeError::Failed { operation, detail } => ("failed", operation, detail),
+        RuntimeError::Unresolved { operation, detail } => ("unresolved", operation, detail),
     };
     json!({"kind": kind, "operation": operation.name(), "detail": detail})
 }
@@ -1146,10 +1206,10 @@ fn error_of(value: &Value, asked: RuntimeOp) -> RuntimeError {
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_owned();
-    if value.get("kind").and_then(Value::as_str) == Some("unreachable") {
-        RuntimeError::Unreachable { operation, detail }
-    } else {
-        RuntimeError::Failed { operation, detail }
+    match value.get("kind").and_then(Value::as_str) {
+        Some("unreachable") => RuntimeError::Unreachable { operation, detail },
+        Some("unresolved") => RuntimeError::Unresolved { operation, detail },
+        _ => RuntimeError::Failed { operation, detail },
     }
 }
 
@@ -1232,6 +1292,7 @@ fn execution_of(value: &Value) -> ContainerExecution {
             .and_then(|code| i32::try_from(code).ok()),
         stdout: bytes("stdout"),
         stderr: bytes("stderr"),
+        output_limited: false,
     }
 }
 
@@ -1264,6 +1325,8 @@ fn spec_json(spec: &CreateSpec) -> Value {
         "command": spec.command,
         "workdir": spec.workdir,
         "read_only_root": spec.read_only_root,
+        "user": spec.user.map(|user| [user.uid, user.gid]),
+        "open_stdin": spec.open_stdin,
     })
 }
 
@@ -1315,6 +1378,21 @@ fn spec_of(value: &Value) -> Option<CreateSpec> {
             .get("read_only_root")
             .and_then(Value::as_bool)
             .unwrap_or(true),
+        user: match value
+            .get("user")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+        {
+            Some([uid, gid]) => Some(ContainerUser {
+                uid: u32::try_from(uid.as_u64()?).ok()?,
+                gid: u32::try_from(gid.as_u64()?).ok()?,
+            }),
+            _ => None,
+        },
+        open_stdin: value
+            .get("open_stdin")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
     })
 }
 
@@ -1431,6 +1509,13 @@ pub(crate) const DOCKER_GATED_TESTS: &[&str] = &[
     "real_docker_a_container_contains_a_daemonised_descendant",
     "real_docker_fails_locally_without_ever_saying_a_container_is_gone",
     "real_docker_lists_the_state_the_settlement_observation_reads",
+    "real_docker_a_schema_4_run_refuses_an_absent_image_before_the_worktree_lock",
+    "real_docker_a_containerized_agent_reads_its_own_settings_and_cannot_write_them",
+    "real_docker_a_container_runs_as_the_coordinators_user_and_leaves_what_it_can_reclaim",
+    "real_docker_a_containerized_program_reads_its_exact_stdin_then_eof",
+    "real_docker_a_read_only_configured_mount_is_readable_and_not_writable",
+    "real_docker_a_read_write_configured_mount_is_writable_as_the_coordinators_user",
+    "real_docker_a_resume_with_changed_mount_config_keeps_the_recorded_mounts",
 ];
 
 pub(crate) fn absent_reason() -> String {

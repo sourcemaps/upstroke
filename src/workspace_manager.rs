@@ -1173,9 +1173,9 @@ fn names_a_type(found: &str) -> String {
 // ---------------------------------------------------------------------------
 
 mod containment;
+pub(crate) use self::containment::strip_verbatim;
 use self::containment::{
     Leaf, canonical_prefix, is_at_or_inside, refuse_reparse_points, refuse_unreal_directory,
-    strip_verbatim,
 };
 
 // ---------------------------------------------------------------------------
@@ -2761,6 +2761,74 @@ impl<'p> Destination<'p> {
     }
 }
 
+/// How `Worktree.CreateExecutionRoot` makes the root itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RootLeaf {
+    /// `create_dir_all`: a root already there is reused.
+    Reused,
+    /// The parent chain with `create_dir_all`, then the root with one
+    /// exclusive `create_dir`: a root already there — empty scaffolding, a
+    /// link, anything — is refused, never adopted.
+    Exclusive,
+}
+
+/// A manager's execution root, as a **fresh** run claims it.
+///
+/// `resource_accounting[R18]` lets a run account for, and remove, only a root
+/// it made. [`WorkspaceManager::create_execution_root`] reuses whatever is at
+/// the path, which is right for a resume recreating its recorded root and
+/// wrong for a run that has never had one: a directory another actor put
+/// there — empty scaffolding included — would become this run's to prune. So a
+/// fresh run creates through this, and the answer says whether it claimed.
+///
+/// Its one method is the same `Worktree.CreateExecutionRoot` funnel under the
+/// same name — the same revalidation, containment and reparse checks,
+/// scaffolding, durability barrier and hook phases — differing only in the
+/// leaf ([`RootLeaf::Exclusive`]), so the site, its inventory row and its
+/// classification are the ones already there.
+#[derive(Debug, Clone, Copy)]
+pub struct FreshExecutionRoot<'a>(pub &'a WorkspaceManager);
+
+impl FreshExecutionRoot<'_> {
+    /// `Worktree.CreateExecutionRoot` (R18), claiming the root exclusively.
+    ///
+    /// # Errors
+    ///
+    /// [`FreshRootFailure::Unclaimed`] when nothing at the root's path is this
+    /// call's: it was already there, a containment or reparse refusal or the
+    /// before-phase hook stopped it, or the parent chain or the root could not
+    /// be made. [`FreshRootFailure::Claimed`] when this call made the root and
+    /// then failed — a scaffolding directory, the durability barrier, or the
+    /// after-phase hook — so the root, whole or in part, is the caller's.
+    pub fn create_execution_root(
+        &self,
+        hooks: &mut dyn EffectHooks,
+    ) -> Result<(), FreshRootFailure> {
+        let mut claimed = false;
+        self.0
+            .create_execution_root_as(hooks, RootLeaf::Exclusive, &mut claimed)
+            .map_err(|error| {
+                if claimed {
+                    FreshRootFailure::Claimed(error)
+                } else {
+                    FreshRootFailure::Unclaimed(error)
+                }
+            })
+    }
+}
+
+/// Why [`FreshExecutionRoot::create_execution_root`] failed, and whose the
+/// root is.
+#[derive(Debug)]
+pub enum FreshRootFailure {
+    /// Nothing at the root's path was made by this call: it is not the
+    /// caller's to claim, change or delete.
+    Unclaimed(UpstrokeError),
+    /// This call made the root, then failed: the root, whole or in part, is
+    /// the caller's.
+    Claimed(UpstrokeError),
+}
+
 impl WorkspaceManager {
     /// Derive the execution root of `run_id` from the managed base and the
     /// authorized private root, and refuse every containment condition
@@ -3380,10 +3448,30 @@ impl WorkspaceManager {
 
     /// `Worktree.CreateExecutionRoot` (R18).
     ///
+    /// Idempotent: a root that is already there is reused, which is what a
+    /// resume recreating its recorded root, recovery and the fixtures rely on.
+    /// A fresh run claims its root with [`FreshExecutionRoot`] instead.
+    ///
     /// # Errors
     ///
     /// The containment refusals, or an I/O error creating the directories.
     pub fn create_execution_root(&self, hooks: &mut dyn EffectHooks) -> Result<(), UpstrokeError> {
+        self.create_execution_root_as(hooks, RootLeaf::Reused, &mut false)
+    }
+
+    /// The one primitive behind both forms of `Worktree.CreateExecutionRoot`:
+    /// the same revalidation, funnel, scaffolding and barrier, and only the
+    /// leaf's creation differs. `claimed` is set in the statement after an
+    /// [`RootLeaf::Exclusive`] create of the leaf succeeds, inside the funnel,
+    /// so a caller reads it after any error the funnel returns — a scaffolding
+    /// directory, the barrier or the after-phase hook — and knows the root is
+    /// its own.
+    fn create_execution_root_as(
+        &self,
+        hooks: &mut dyn EffectHooks,
+        leaf: RootLeaf,
+        claimed: &mut bool,
+    ) -> Result<(), UpstrokeError> {
         self.revalidate_pausing(hooks)?;
         let ledger = hooks.durability_ledger();
         funnel(
@@ -3391,13 +3479,36 @@ impl WorkspaceManager {
             EffectSiteId::Worktree(WorktreeSite::CreateExecutionRoot),
             || {
                 self.revalidate_acted_through(Primitive::CreateExecutionRoot, None, None)?;
-                fs::create_dir_all(&self.execution_root).map_err(|source| {
-                    UpstrokeError::Filesystem {
-                        operation: "create",
-                        path: self.execution_root.clone(),
-                        source,
+                match leaf {
+                    RootLeaf::Reused => {
+                        fs::create_dir_all(&self.execution_root).map_err(|source| {
+                            UpstrokeError::Filesystem {
+                                operation: "create",
+                                path: self.execution_root.clone(),
+                                source,
+                            }
+                        })?
                     }
-                })?;
+                    RootLeaf::Exclusive => {
+                        if let Some(parent) = self.execution_root.parent() {
+                            fs::create_dir_all(parent).map_err(|source| {
+                                UpstrokeError::Filesystem {
+                                    operation: "create",
+                                    path: parent.to_path_buf(),
+                                    source,
+                                }
+                            })?;
+                        }
+                        fs::create_dir(&self.execution_root).map_err(|source| {
+                            UpstrokeError::Filesystem {
+                                operation: "create",
+                                path: self.execution_root.clone(),
+                                source,
+                            }
+                        })?;
+                        *claimed = true;
+                    }
+                }
                 for directory in [
                     self.execution_root.join("intents"),
                     self.execution_root.join("tasks"),
@@ -5372,6 +5483,56 @@ impl WorkspaceManager {
             .map(std::borrow::ToOwned::to_owned))
     }
 
+    /// Git's effective `core.ignorecase` for the managed repository: `git
+    /// config --type=bool --get core.ignorecase`, run at the managed base
+    /// through this manager's builder ([`Self::git`]). So every scope Git
+    /// itself reads answers, in Git's own precedence and with Git's own
+    /// boolean spellings:
+    /// - the system and global files;
+    /// - the repository's file and the files it includes;
+    /// - the per-worktree file;
+    /// - `GIT_CONFIG_*` and `-c`.
+    ///
+    /// `Some` with the value when a scope sets it. `None` when none does,
+    /// which Git reads as false.
+    ///
+    /// Read-only: `git config --get` writes nothing, and the builder adds no
+    /// effect of its own. Its one caller is the schema-4 case-fold resolver
+    /// (`engine::topology::entry`, D7). That caller treats an error here as an
+    /// unreadable record, which folds and says so.
+    ///
+    /// # Errors
+    ///
+    /// Anything but a clean answer, with Git's own words:
+    /// - a value Git does not read as a boolean;
+    /// - a configuration file Git cannot parse;
+    /// - any message on the way, since then the read was not whole.
+    pub fn core_ignorecase(&self) -> Result<Option<bool>, UpstrokeError> {
+        let output = self.git(
+            &self.base,
+            &[
+                OsString::from("config"),
+                OsString::from("--type=bool"),
+                OsString::from("--get"),
+                OsString::from("core.ignorecase"),
+            ],
+        )?;
+        let printed = String::from_utf8_lossy(&output.stdout);
+        let said = String::from_utf8_lossy(&output.stderr);
+        match (output.status.code(), printed.trim(), said.trim()) {
+            (Some(0), "true", "") => Ok(Some(true)),
+            (Some(0), "false", "") => Ok(Some(false)),
+            (Some(1), "", "") => Ok(None),
+            (code, printed, said) => Err(UpstrokeError::Git {
+                message: format!(
+                    "`git config --type=bool --get core.ignorecase` in {} ended {code:?}, \
+                     printing `{printed}` and saying `{said}`",
+                    self.base.display()
+                ),
+            }),
+        }
+    }
+
     /// Every ref under `namespace`, as `(refname, object id)`.
     ///
     /// # Errors
@@ -5954,7 +6115,7 @@ impl WorkspaceManager {
                     .map(OsString::from)
                     .collect();
                 argv.push(OsString::from(commit));
-                self.git_ok(&path, &argv)?;
+                self.git_ok_as_engine(&path, &argv)?;
                 self.git_line(&path, &["rev-parse", "HEAD"])
             },
         )
@@ -7172,6 +7333,31 @@ impl WorkspaceManager {
             .map_err(|error| UpstrokeError::Git {
                 message: format!("failed to run git: {error}"),
             })
+    }
+
+    /// [`Self::git_ok`] through [`Self::git_with_identity`], for the one commit
+    /// the manager makes by replaying rather than by `commit-tree`: the
+    /// proposal cherry-pick ([`Self::proposal_cherry_pick`]).
+    ///
+    /// Git takes a commit's committer from the environment before any
+    /// configuration. Without it, a repository with no `user.name`/`user.email`
+    /// fails the cherry-pick ("unable to auto-detect email address", the CLI
+    /// scenario's case C at `ad513bdf`). The legacy engine never asked the
+    /// operator for an identity: every commit it put on a run's branch was
+    /// `commit-tree` with `upstroke`'s (`Workspace::commit_tree_with_upstroke_identity`
+    /// at `b9d15bdb`). This manager's own `commit-tree` already takes its
+    /// identity and dates from [`Self::git_with_identity`], so a candidate is a
+    /// function of its inputs and not of the machine. The proposal takes the
+    /// same, and its committer is `upstroke` at `@0`, like the candidate it
+    /// replays. A fast-path merge already put such commits on the integration
+    /// branch, and now a stale one does too. A replay of the same candidate
+    /// onto the same tip is then the same commit.
+    fn git_ok_as_engine(&self, cwd: &Path, args: &[OsString]) -> Result<Vec<u8>, UpstrokeError> {
+        let output = self.git_with_identity(cwd, args)?;
+        if !output.status.success() {
+            return Err(git_failure(cwd, args, &output));
+        }
+        Ok(output.stdout)
     }
 
     fn git_ok(&self, cwd: &Path, args: &[OsString]) -> Result<Vec<u8>, UpstrokeError> {

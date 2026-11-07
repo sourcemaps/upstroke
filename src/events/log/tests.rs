@@ -198,8 +198,10 @@ fn run_started_event() -> TopologyEvent {
                     policy: RunnerContract::HostV1,
                     image: None,
                     credential_volumes: None,
+                    mounts: Vec::new(),
                 },
                 probed_agents: vec!["claude-code".to_owned()],
+                shell: ShellKind::Sh,
                 branch: "upstroke/run-01J8ZQKB2M7NC5PQR0TVWXYZ12".to_owned(),
                 integration_ref: GitRef::from("refs/upstroke/integration"),
                 base_sha: CommitSha::from("0f5c1c4"),
@@ -2797,6 +2799,7 @@ fn the_stable_prefix_barrier_is_the_only_way_a_log_becomes_a_topology_fold() {
     const FOLD_ENTRIES: &[&str] = &["TopologyFold::replay(", "TopologyFold::parse_log("];
 
     const FOLD_MENTIONS: &[&str] = &[
+        "src/engine/report.rs",
         "src/engine/topology/candidate.rs",
         "src/engine/topology/closure.rs",
         "src/engine/topology/create.rs",
@@ -2804,6 +2807,7 @@ fn the_stable_prefix_barrier_is_the_only_way_a_log_becomes_a_topology_fold() {
         "src/engine/topology/finalize.rs",
         "src/engine/topology/integrate.rs",
         "src/engine/topology/ledger.rs",
+        "src/engine/topology/observe.rs",
         "src/engine/topology/reachability.rs",
         "src/engine/topology/recover.rs",
         "src/engine/topology/repair.rs",
@@ -2821,6 +2825,7 @@ fn the_stable_prefix_barrier_is_the_only_way_a_log_becomes_a_topology_fold() {
     ];
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let funnel = src.join("events").join("log.rs");
+    let observer = src.join("engine").join("topology").join("observe.rs");
 
     let mut files = Vec::new();
     let mut stack = vec![src.clone()];
@@ -2916,10 +2921,38 @@ fn the_stable_prefix_barrier_is_the_only_way_a_log_becomes_a_topology_fold() {
         callers,
         FOLD_ENTRIES
             .iter()
-            .map(|entry| (funnel.clone(), *entry, 1))
+            .map(|entry| (observer.clone(), *entry, 1))
+            .chain(FOLD_ENTRIES.iter().map(|entry| (funnel.clone(), *entry, 1)))
             .collect::<Vec<_>>(),
-        "a topology fold is built from a log in exactly one production place, once each"
+        "a topology fold is built from a log in exactly two production places, once each: the \
+         barrier, which is the only route to an effect, and the read-only observer (PR12, D1)"
     );
+
+    let observer_code =
+        crate::effects::production_code(&fs::read_to_string(&observer).expect("the observer"));
+    for effect in [
+        "EventLog::",
+        "open_funnel",
+        "establish_stable_prefix",
+        "StablePrefix",
+        "OpenOptions",
+        "set_len(",
+        "sync_data(",
+        "sync_all(",
+        "fsync",
+        "truncate(",
+        "fs::write(",
+        "remove_file(",
+        "rename(",
+        "WorktreeLock",
+        "RunLock",
+    ] {
+        assert!(
+            !observer_code.contains(effect),
+            "the observer names `{effect}`: a fold it builds is a read-only projection, never a \
+             route to an effect or a lock, and only the barrier's fold is"
+        );
+    }
 
     let funnel_code =
         crate::effects::production_code(&fs::read_to_string(&funnel).expect("the funnel"));

@@ -5,6 +5,7 @@
 #![allow(clippy::disallowed_methods)]
 #![forbid(clippy::disallowed_types, clippy::disallowed_macros)]
 
+use crate::runner::container::runtime::QuestionBound;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
@@ -13,6 +14,7 @@ use crate::gates::ShellKind;
 use crate::rundir::RunPaths;
 use crate::rundir::scratch_tree::ScratchTree;
 use crate::runner::container::intent::LABEL_PRIVATE_ROOT;
+use crate::runner::container::resolve::fixtures;
 use crate::runner::container::runtime::{
     ContainerExecution, ContainerTrace, CreatedContainer, DiscoveredContainer, ImageInspection,
     Liveness, RuntimeOp, Settled, StopMode,
@@ -119,6 +121,7 @@ fn container_policy() -> RunnerPolicy {
                 .map(|(agent, volume)| ((*agent).to_owned(), (*volume).to_owned()))
                 .collect(),
         ),
+        mounts: Vec::new(),
     }
 }
 
@@ -127,6 +130,10 @@ struct Scripted {
     fake: FakeRuntime,
     exit_on_start: bool,
     execution: Mutex<Option<ContainerExecution>>,
+    /// Set by [`Runtime::leaves_its_start_unresolved`].
+    start_unresolved: std::sync::atomic::AtomicBool,
+    observation_unresolved: std::sync::atomic::AtomicBool,
+    volume_inspection_unresolved: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Debug, Clone)]
@@ -145,7 +152,27 @@ impl Runtime {
             fake,
             exit_on_start,
             execution: Mutex::new(None),
+            start_unresolved: std::sync::atomic::AtomicBool::new(false),
+            observation_unresolved: std::sync::atomic::AtomicBool::new(false),
+            volume_inspection_unresolved: std::sync::atomic::AtomicBool::new(false),
         }))
+    }
+
+    fn leaves_its_observation_unresolved(&self) {
+        let flag = &self.0.observation_unresolved;
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn leaves_its_volume_inspections_unresolved(&self) {
+        let flag = &self.0.volume_inspection_unresolved;
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Every later start runs and then reports a process it could not establish gone, as a
+    /// bounded runtime question whose supervisor could not reap its process does.
+    fn leaves_its_start_unresolved(&self) {
+        let flag = &self.0.start_unresolved;
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     fn fake(&self) -> &FakeRuntime {
@@ -173,7 +200,18 @@ impl ContainerRuntime for Runtime {
         self.0.fake.image_by_id(id)
     }
     fn volume_present(&self, name: &str) -> Result<bool, RuntimeError> {
-        self.0.fake.volume_present(name)
+        let asked = self.0.fake.volume_present(name);
+        let flag = &self.0.volume_inspection_unresolved;
+        if flag.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(RuntimeError::Unresolved {
+                operation: RuntimeOp::InspectVolume,
+                detail: format!(
+                    "a question about the credential volume `{name}` ended its supervision \
+                     without establishing its process gone"
+                ),
+            });
+        }
+        asked
     }
     fn containers_with_label(
         &self,
@@ -182,8 +220,18 @@ impl ContainerRuntime for Runtime {
     ) -> Result<Vec<DiscoveredContainer>, RuntimeError> {
         self.0.fake.containers_with_label(key, value)
     }
-    fn observe(&self, name: &str) -> Result<Liveness, RuntimeError> {
-        self.0.fake.observe(name)
+    fn observe(&self, name: &str, bound: QuestionBound<'_>) -> Result<Liveness, RuntimeError> {
+        let flag = &self.0.observation_unresolved;
+        if flag.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(RuntimeError::Unresolved {
+                operation: RuntimeOp::Observe,
+                detail: format!(
+                    "a question about `{name}` ended its supervision without establishing its \
+                     process gone"
+                ),
+            });
+        }
+        self.0.fake.observe(name, bound)
     }
     fn collect(&self, name: &str) -> Result<ContainerExecution, RuntimeError> {
         self.0.fake.collect(name)
@@ -194,6 +242,16 @@ impl ContainerRuntime for Runtime {
     fn start(&self, covered: CoveredStart<'_>) -> Result<(), RuntimeError> {
         let name = covered.name();
         self.0.fake.start(covered)?;
+        let flag = &self.0.start_unresolved;
+        if flag.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(RuntimeError::Unresolved {
+                operation: RuntimeOp::Start,
+                detail: format!(
+                    "a question the start of `{name}` asked ended its supervision without \
+                     establishing its process gone"
+                ),
+            });
+        }
         if self.0.exit_on_start {
             self.0.fake.set_container_state(name, Liveness::Exited);
             if let Some(execution) = self
@@ -356,11 +414,74 @@ impl Fixture {
     }
 
     fn confinement(&self) -> Confinement {
-        Confinement::of_run(&self.identity, &self.repo)
+        Confinement::of_run(
+            &self.identity,
+            &self.repo,
+            fixtures::plain_checkout(&self.repo.join(".git")),
+        )
     }
 
     fn runner(&self) -> ContainerRunner {
         self.runner_with(self.identity.clone())
+    }
+
+    #[cfg(unix)]
+    fn runner_over(&self, policy: RunnerPolicy) -> ContainerRunner {
+        ContainerRunner::new(
+            policy,
+            self.identity.clone(),
+            &self.repo,
+            fixtures::plain_checkout(&self.repo.join(".git")),
+            image_environment(),
+            Box::new(self.runtime.clone()),
+        )
+        .expect("a container policy")
+        .with_hooks(Box::new(RecordingHooks::new(self.trace.clone())))
+        .with_poll(Duration::ZERO)
+    }
+
+    #[cfg(unix)]
+    fn mounted_policy(&self) -> (RunnerPolicy, PathBuf, PathBuf) {
+        let shared = self.root.join("operator-shared");
+        let tools = self.root.join("operator-tools");
+        std::fs::create_dir_all(&shared).expect("an operator directory");
+        std::fs::create_dir_all(&tools).expect("another operator directory");
+        let selection = crate::config::RunnerSelection {
+            kind: RunnerKind::Container,
+            image: Some(IMAGE_REFERENCE.to_owned()),
+            credential_volumes: recorded_volumes(&container_policy()),
+            mounts: vec![
+                crate::config::RunnerMount {
+                    source: shared.clone(),
+                    target: "/data".to_owned(),
+                    read_only: true,
+                },
+                crate::config::RunnerMount {
+                    source: tools.clone(),
+                    target: "/opt/tools".to_owned(),
+                    read_only: false,
+                },
+            ],
+            from_config: true,
+        };
+        let context = MountContext::bind_with(
+            &self.repo,
+            fixtures::plain_checkout(&self.repo.join(".git")),
+            &self.private_root,
+            &[],
+        )
+        .expect("the fixture binds a mount context");
+        let policy = crate::runner::container::resolve::resolve_container(
+            self.runtime.fake(),
+            &selection,
+            &context,
+        )
+        .expect("the configured mounts resolve");
+        (
+            policy,
+            std::fs::canonicalize(&shared).expect("canonical"),
+            std::fs::canonicalize(&tools).expect("canonical"),
+        )
     }
 
     fn runner_with(&self, identity: RunIdentity) -> ContainerRunner {
@@ -368,6 +489,7 @@ impl Fixture {
             container_policy(),
             identity,
             &self.repo,
+            fixtures::plain_checkout(&self.repo.join(".git")),
             image_environment(),
             Box::new(self.runtime.clone()),
         )
@@ -728,6 +850,47 @@ fn the_runner_reports_what_it_established_about_the_process_when_it_fails() {
 }
 
 #[test]
+fn a_start_that_left_a_process_unresolved_stays_unresolved_after_a_clean_cancel() {
+    #[cfg(unix)]
+    unresolved_process_in_an_owned_helper("start");
+    #[cfg(not(unix))]
+    assert_unresolved_start_fate(&Fixture::new("unresolved-start", false));
+}
+
+fn assert_unresolved_start_fate(fixture: &Fixture) {
+    use crate::error::ProcessFate;
+
+    fixture.runtime.leaves_its_start_unresolved();
+    let request = gate_request(
+        ShellKind::Sh.spec("exit 0"),
+        fixture.task_a.clone(),
+        Duration::from_secs(10),
+        gate_id(0),
+    );
+
+    let error = fixture
+        .runner()
+        .run_blocking(&request)
+        .expect_err("the start left a process unresolved");
+    assert_eq!(error.fate, ProcessFate::Unresolved, "{error}");
+    let message = error.to_string();
+    assert!(
+        message.contains(ProcessFate::Unresolved.describe()),
+        "{message}"
+    );
+    let ops = fixture.trace.ops();
+    assert!(
+        ops.contains(&RuntimeOp::Start) && ops.contains(&RuntimeOp::Remove),
+        "the start ran and the cancel removed the container: {ops:?}"
+    );
+    assert_eq!(
+        fixture.runtime.fake().container_names(),
+        Vec::<String>::new(),
+        "the cancel completed"
+    );
+}
+
+#[test]
 fn a_container_the_runtime_cannot_confirm_stopped_keeps_its_mounted_git_view_and_intent() {
     use crate::error::ProcessFate;
 
@@ -1046,6 +1209,488 @@ fn the_mount_set_is_the_roles_own_and_reaches_nothing_of_the_coordinators() {
     assert_eq!(Withheld::ALL.len(), 4);
 }
 
+fn review_pass_id() -> InvocationId {
+    InvocationId::attempt(
+        TaskKey(0),
+        GenerationId(0),
+        AttemptNumber(1),
+        AttemptRole::ReviewPass(0),
+        0,
+    )
+}
+
+fn naming_its_settings(own: &Path) -> crate::runner::CommandSpec {
+    crate::runner::CommandSpec::new("claude")
+        .arg("-p")
+        .arg("--settings")
+        .arg(own.to_string_lossy().into_owned())
+        .settings_file(Some(own.to_path_buf()))
+}
+
+fn materialized_settings(fixture: &Fixture) -> (PathBuf, PathBuf) {
+    let settings = fixture.paths.settings();
+    let worker = settings.join("t1-1.json");
+    let reviewer = settings.join("t1-review.json");
+    for file in [&worker, &reviewer] {
+        std::fs::write(file, "{\"permissions\":{}}\n").expect("a materialized settings file");
+    }
+    (worker, reviewer)
+}
+
+fn settings_mounts(mounts: &[Mount]) -> Vec<&Mount> {
+    mounts
+        .iter()
+        .filter(|mount| mount.target().starts_with(BoundaryLayout::DEFAULT_SETTINGS))
+        .collect()
+}
+
+#[test]
+fn an_agents_own_settings_file_is_bound_read_only_and_named_by_its_container_path() {
+    let fixture = Fixture::new("settings-bind", true);
+    let runner = fixture.runner();
+    let settings = fixture.paths.settings();
+    assert_eq!(
+        settings,
+        fixture
+            .private_root
+            .join("runs")
+            .join(&fixture.identity.run_id)
+            .join("settings"),
+        "the runner recognizes the directory `RunPaths` materializes settings into"
+    );
+    let (worker_own, reviewer_own) = materialized_settings(&fixture);
+    let claude = AgentId::new("claude-code");
+    let worker = worker_request(
+        naming_its_settings(&worker_own),
+        fixture.task_a.clone(),
+        claude.clone(),
+        Duration::from_secs(10),
+        worker_id(0),
+    );
+    let review = review_request(
+        naming_its_settings(&reviewer_own),
+        fixture.task_a.clone(),
+        claude,
+        Duration::from_secs(10),
+        review_pass_id(),
+    );
+    for (request, own, inside) in [
+        (&worker, &worker_own, "/upstroke/settings/t1-1.json"),
+        (&review, &reviewer_own, "/upstroke/settings/t1-review.json"),
+    ] {
+        let plan = runner.plan(request).expect("plans");
+        let mounts = plan.mounts();
+        let targets: Vec<&str> = mounts.iter().map(Mount::target).collect();
+        assert_eq!(
+            targets,
+            vec![
+                "/upstroke/workspace",
+                "/upstroke/gitview",
+                "/upstroke/gitobjects",
+                "/upstroke/workspace/.git",
+                "/upstroke/credentials/claude-code",
+                "/tmp",
+                inside,
+            ],
+            "{:?}: the role's own mounts, and its one settings file",
+            request.role
+        );
+        assert_eq!(
+            settings_mounts(mounts),
+            vec![&Mount::Path {
+                source: own.clone(),
+                target: inside.to_owned(),
+                read_only: true,
+            }],
+            "{:?}: exactly its own file, read-only, and no other invocation's",
+            request.role
+        );
+        assert_eq!(
+            plan.launch.spec.command,
+            vec!["claude", "-p", "--settings", inside],
+            "{:?}: the agent is given the container's path",
+            request.role
+        );
+        assert!(
+            !plan
+                .launch
+                .spec
+                .command
+                .iter()
+                .any(|arg| arg.contains(&*fixture.private_root.to_string_lossy())),
+            "{:?}: no host path reaches the container's argv: {:?}",
+            request.role,
+            plan.launch.spec.command
+        );
+        assert!(
+            fixture.confinement().violations(mounts).is_empty(),
+            "{:?}",
+            fixture.confinement().violations(mounts)
+        );
+        for (category, path) in &fixture.withheld() {
+            for source in sources(mounts) {
+                assert!(
+                    !path.starts_with(&source),
+                    "the mount `{}` hands the container `{}` ({})",
+                    source.display(),
+                    path.display(),
+                    category.passage()
+                );
+            }
+        }
+        assert!(
+            !sources(mounts)
+                .iter()
+                .any(|source| source == &settings || source == &fixture.paths.private),
+            "{:?}: the settings directory and the private half stay withheld",
+            request.role
+        );
+    }
+}
+
+#[test]
+fn only_the_invocations_own_settings_file_is_bound_and_no_argument_grants_another() {
+    let fixture = Fixture::new("settings-own-only", true);
+    let runner = fixture.runner();
+    let (worker_own, reviewer_own) = materialized_settings(&fixture);
+    let claude = AgentId::new("claude-code");
+    let ten = Duration::from_secs(10);
+    let host = |path: &Path| path.to_string_lossy().into_owned();
+
+    let with_another = worker_request(
+        naming_its_settings(&worker_own).arg(host(&reviewer_own)),
+        fixture.task_a.clone(),
+        claude.clone(),
+        ten,
+        worker_id(0),
+    );
+    let plan = runner.plan(&with_another).expect("plans");
+    assert_eq!(
+        settings_mounts(plan.mounts()),
+        vec![&Mount::Path {
+            source: worker_own.clone(),
+            target: "/upstroke/settings/t1-1.json".to_owned(),
+            read_only: true,
+        }],
+        "another invocation's settings file named in the argv is given no mount"
+    );
+    assert_eq!(
+        plan.launch.spec.command,
+        vec![
+            "claude".to_owned(),
+            "-p".to_owned(),
+            "--settings".to_owned(),
+            "/upstroke/settings/t1-1.json".to_owned(),
+            host(&reviewer_own),
+        ],
+        "only the intended argument is rewritten; the other stays the host path it was"
+    );
+
+    for (case, request) in [
+        (
+            "an argument naming a settings file, with no metadata",
+            worker_request(
+                crate::runner::CommandSpec::new("claude")
+                    .arg("--settings")
+                    .arg(host(&worker_own)),
+                fixture.task_a.clone(),
+                claude.clone(),
+                ten,
+                worker_id(1),
+            ),
+        ),
+        (
+            "metadata whose file no argument names",
+            worker_request(
+                crate::runner::CommandSpec::new("codex")
+                    .arg("exec")
+                    .settings_file(Some(worker_own.clone())),
+                fixture.task_a.clone(),
+                claude.clone(),
+                ten,
+                worker_id(2),
+            ),
+        ),
+        (
+            "a gate carrying metadata and the argument",
+            gate_request(
+                naming_its_settings(&worker_own),
+                fixture.task_a.clone(),
+                ten,
+                gate_id(0),
+            ),
+        ),
+        (
+            "an agent probe carrying metadata and the argument",
+            crate::agent::probe_request("claude-code", naming_its_settings(&worker_own), 0, ten)
+                .expect("an agent probe request"),
+        ),
+    ] {
+        let plan = runner.plan(&request).expect("plans");
+        assert!(
+            settings_mounts(plan.mounts()).is_empty(),
+            "{case}: no settings mount: {:?}",
+            plan.mounts()
+        );
+        let mut expected = vec![request.command.program.clone()];
+        expected.extend(request.command.args.iter().cloned());
+        assert_eq!(
+            plan.launch.spec.command, expected,
+            "{case}: the argv is the command's own"
+        );
+    }
+}
+
+#[test]
+fn an_own_settings_file_that_is_not_a_regular_file_of_the_runs_settings_directory_is_refused() {
+    let fixture = Fixture::new("settings-identity", true);
+    let runner = fixture.runner();
+    let (worker_own, _) = materialized_settings(&fixture);
+    let settings = fixture.paths.settings();
+    let a_directory = settings.join("t1-2.json");
+    std::fs::create_dir(&a_directory).expect("a directory where a settings file would be");
+    let elsewhere = fixture.paths.transcripts().join("k0-a1.md");
+    #[cfg(unix)]
+    let a_link = {
+        let a_link = settings.join("t1-3.json");
+        std::os::unix::fs::symlink(&elsewhere, &a_link).expect("a link to a private artifact");
+        Some((
+            "a link in the settings directory to a private artifact",
+            a_link,
+            "not a regular file",
+        ))
+    };
+    #[cfg(not(unix))]
+    let a_link = None;
+    let cases = [
+        (
+            "a directory in the settings directory",
+            a_directory,
+            "not a regular file",
+        ),
+        (
+            "a file elsewhere in the private half",
+            elsewhere.clone(),
+            "not a file of the run's settings directory",
+        ),
+    ]
+    .into_iter()
+    .chain(a_link);
+    for (case, own, why) in cases {
+        let request = worker_request(
+            naming_its_settings(&own),
+            fixture.task_a.clone(),
+            AgentId::new("claude-code"),
+            Duration::from_secs(10),
+            worker_id(0),
+        );
+        let refused = runner
+            .plan(&request)
+            .expect_err("a settings file that is not the invocation's own is refused");
+        assert!(refused.to_string().contains(why), "{case}: {refused}");
+    }
+    let control = worker_request(
+        naming_its_settings(&worker_own),
+        fixture.task_a.clone(),
+        AgentId::new("claude-code"),
+        Duration::from_secs(10),
+        worker_id(0),
+    );
+    assert!(
+        runner.plan(&control).is_ok(),
+        "the control: the regular file the invocation materialized plans"
+    );
+}
+
+#[cfg(target_os = "linux")]
+fn effective_ids() -> ContainerUser {
+    let status = std::fs::read_to_string("/proc/self/status").expect("this process's status");
+    let effective = |key: &str| -> u32 {
+        status
+            .lines()
+            .find_map(|line| line.strip_prefix(key))
+            .and_then(|ids| ids.split_whitespace().nth(1))
+            .and_then(|id| id.parse().ok())
+            .unwrap_or_else(|| panic!("no effective id after `{key}` in {status}"))
+    };
+    ContainerUser {
+        uid: effective("Uid:"),
+        gid: effective("Gid:"),
+    }
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn effective_ids() -> ContainerUser {
+    // SAFETY: `geteuid` and `getegid` take no arguments, read no memory of
+    // this process's, and always succeed (POSIX.1-2008).
+    let (uid, gid) = unsafe { (libc::geteuid(), libc::getegid()) };
+    ContainerUser { uid, gid }
+}
+
+#[cfg(unix)]
+#[test]
+fn every_container_is_created_as_the_coordinators_user() {
+    let expected = effective_ids();
+    let fixture = Fixture::new("container-user", true);
+    let runner = fixture.runner();
+    let mut roles = BTreeSet::new();
+    for request in requests(&fixture.task_a) {
+        let plan = runner.plan(&request).expect("plans");
+        assert_eq!(
+            plan.launch.spec.user,
+            Some(expected),
+            "{:?} is not created as the coordinator's effective uid and gid",
+            request.role
+        );
+        let args = crate::runner::container::docker_create_arguments(&plan.launch.spec)
+            .expect("the planned mounts are carried exactly");
+        let at = args
+            .iter()
+            .position(|arg| arg == "--user")
+            .unwrap_or_else(|| panic!("{:?}: no --user in {args:?}", request.role));
+        assert_eq!(
+            args.get(at + 1),
+            Some(&format!("{}:{}", expected.uid, expected.gid)),
+            "{:?}: {args:?}",
+            request.role
+        );
+        assert!(
+            at < args
+                .iter()
+                .position(|arg| *arg == plan.launch.spec.image_id)
+                .expect("the image id"),
+            "{:?}: --user is an option of `docker create`, before the image: {args:?}",
+            request.role
+        );
+        roles.insert(request.role.label());
+    }
+    assert_eq!(
+        roles.len(),
+        5,
+        "both probes, the worker, the gate and the reviewer: {roles:?}"
+    );
+}
+
+#[cfg(not(unix))]
+#[test]
+fn every_container_keeps_the_images_user_off_unix() {
+    let fixture = Fixture::new("container-user", true);
+    let runner = fixture.runner();
+    for request in requests(&fixture.task_a) {
+        let plan = runner.plan(&request).expect("plans");
+        assert_eq!(plan.launch.spec.user, None, "{:?}", request.role);
+        assert!(
+            !crate::runner::container::docker_create_arguments(&plan.launch.spec)
+                .expect("the planned mounts are carried exactly")
+                .contains(&"--user".to_owned()),
+            "{:?}",
+            request.role
+        );
+    }
+}
+
+const PROMPT_MARKER: &str = "PROMPT-MARKER-91f3";
+
+fn prompt(tag: &str, bytes: usize) -> Vec<u8> {
+    let mut payload = format!("{PROMPT_MARKER} {tag}\n").into_bytes();
+    let mut state: u32 = 0x9e37_79b9;
+    while payload.len() < bytes {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        payload.push(state.to_le_bytes()[0]);
+    }
+    payload
+}
+
+#[test]
+fn a_commands_stdin_reaches_its_own_container_exactly_and_through_nothing_else() {
+    let fixture = Fixture::new("stdin-delivery", true);
+    let runner = fixture.runner();
+    let claude = AgentId::new("claude-code");
+    let ten = Duration::from_secs(10);
+    let worker_prompt = prompt("worker", 200 * 1024);
+    let reviewer_prompt = prompt("reviewer", 3 * 1024);
+    assert_ne!(worker_prompt, reviewer_prompt);
+    let worker = worker_request(
+        ShellKind::Sh.spec("cat").stdin(worker_prompt.clone()),
+        fixture.task_a.clone(),
+        claude.clone(),
+        ten,
+        worker_id(0),
+    );
+    let review = review_request(
+        ShellKind::Sh.spec("cat").stdin(reviewer_prompt.clone()),
+        fixture.task_a.clone(),
+        claude,
+        ten,
+        review_pass_id(),
+    );
+    for (request, payload) in [(&worker, &worker_prompt), (&review, &reviewer_prompt)] {
+        let plan = runner.plan(request).expect("plans");
+        assert!(
+            plan.launch.spec.open_stdin,
+            "{:?}: a command with input is created with stdin open",
+            request.role
+        );
+        let spec = &plan.launch.spec;
+        let carried: Vec<String> = spec
+            .command
+            .iter()
+            .cloned()
+            .chain(spec.env.iter().map(|(key, value)| format!("{key}={value}")))
+            .chain(
+                spec.labels
+                    .iter()
+                    .map(|(key, value)| format!("{key}={value}")),
+            )
+            .chain(spec.mounts.iter().map(|mount| format!("{mount:?}")))
+            .chain(
+                crate::runner::container::docker_create_arguments(spec)
+                    .expect("the planned mounts are carried exactly"),
+            )
+            .collect();
+        assert!(
+            !carried.iter().any(|text| text.contains(PROMPT_MARKER)),
+            "{:?}: the prompt reached argv, the environment, a label or a mount",
+            request.role
+        );
+        runner.run_blocking(request).expect("runs");
+        assert_eq!(
+            fixture
+                .runtime
+                .fake()
+                .stdin_received(plan.launch.name.as_str())
+                .as_ref(),
+            Some(payload),
+            "{:?}: its own payload, byte for byte",
+            request.role
+        );
+    }
+
+    for request in requests(&fixture.task_b)
+        .into_iter()
+        .filter(|request| matches!(request.role, ExecutionRole::Gate | ExecutionRole::Probe(_)))
+    {
+        let plan = runner.plan(&request).expect("plans");
+        assert!(
+            !plan.launch.spec.open_stdin,
+            "{:?}: a command with no input keeps the closed stdin it had",
+            request.role
+        );
+        let _ = runner.run_blocking(&request);
+        assert_eq!(
+            fixture
+                .runtime
+                .fake()
+                .stdin_received(plan.launch.name.as_str()),
+            None,
+            "{:?}",
+            request.role
+        );
+    }
+}
+
 #[test]
 fn a_workspace_that_contains_a_withheld_path_is_refused_before_any_effect() {
     let fixture = Fixture::new("hostile-ws", true);
@@ -1127,6 +1772,439 @@ fn only_the_reviewer_receives_a_read_only_worktree() {
     assert_eq!(read_only.len() + writable.len() + without.len(), 5);
 }
 
+#[cfg(unix)]
+#[test]
+fn every_role_and_probe_gets_the_recorded_mounts_and_review_and_probes_get_them_read_only() {
+    let fixture = Fixture::new("configured-mounts", true);
+    let (policy, shared, tools) = fixture.mounted_policy();
+    let mounted = fixture.runner_over(policy);
+    let plain = fixture.runner();
+    let mut forced = Vec::new();
+    let mut as_recorded = Vec::new();
+    for request in requests(&fixture.task_a) {
+        let role = request.role.label();
+        let plan = mounted.plan(&request).expect("plans");
+        assert_eq!(
+            target_of(plan.mounts(), "/data"),
+            Some(&Mount::Path {
+                source: shared.clone(),
+                target: "/data".to_owned(),
+                read_only: true,
+            }),
+            "{role}: the recorded read-only mount"
+        );
+        let tools_mount = target_of(plan.mounts(), "/opt/tools").expect("the read-write mount");
+        assert_eq!(
+            tools_mount,
+            &Mount::Path {
+                source: tools.clone(),
+                target: "/opt/tools".to_owned(),
+                read_only: forces_configured_mounts_read_only(&request.role),
+            },
+            "{role}: the recorded read-write mount"
+        );
+        if tools_mount.read_only() {
+            forced.push(role.clone());
+        } else {
+            as_recorded.push(role.clone());
+        }
+        let own: Vec<&Mount> = plan
+            .mounts()
+            .iter()
+            .filter(|mount| !matches!(mount.target(), "/data" | "/opt/tools"))
+            .collect();
+        let unmounted = plain.plan(&request).expect("plans");
+        assert_eq!(
+            own,
+            unmounted.mounts().iter().collect::<Vec<_>>(),
+            "{role}: a configured mount changed the role's own mounts"
+        );
+        assert!(
+            fixture.confinement().violations(plan.mounts()).is_empty(),
+            "{role}: {:?}",
+            fixture.confinement().violations(plan.mounts())
+        );
+    }
+    assert_eq!(
+        forced,
+        vec![
+            "probe(claude-code)".to_owned(),
+            "probe(shell)".to_owned(),
+            "review".to_owned()
+        ]
+    );
+    assert_eq!(
+        as_recorded,
+        vec!["implement".to_owned(), "gate".to_owned()],
+        "a gate is given an explicitly read-write mount as the operator recorded it"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn the_docker_argument_names_exactly_the_recorded_mount() {
+    let fixture = Fixture::new("mount-argument", true);
+    let (policy, shared, tools) = fixture.mounted_policy();
+    let runner = fixture.runner_over(policy);
+    for request in requests(&fixture.task_a) {
+        let plan = runner.plan(&request).expect("plans");
+        let args = crate::runner::container::docker_create_arguments(&plan.launch.spec)
+            .expect("every planned mount is carried exactly");
+        let options: Vec<&str> = args
+            .windows(2)
+            .filter(|pair| pair[0] == "--mount")
+            .map(|pair| pair[1].as_str())
+            .collect();
+        let read_only = forces_configured_mounts_read_only(&request.role);
+        for (source, target, readonly) in
+            [(&shared, "/data", true), (&tools, "/opt/tools", read_only)]
+        {
+            let expected = format!(
+                "type=bind,source={},target={target}{}",
+                source.to_str().expect("utf-8"),
+                if readonly { ",readonly" } else { "" }
+            );
+            assert_eq!(
+                options
+                    .iter()
+                    .filter(|option| option.contains(&format!("target={target}")))
+                    .copied()
+                    .collect::<Vec<_>>(),
+                vec![expected.as_str()],
+                "{}: the argument does not denote the recorded mount",
+                request.role.label()
+            );
+        }
+        assert_eq!(
+            options.len(),
+            plan.mounts().len(),
+            "an argument for every mount and no other"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_recorded_mount_that_moved_or_reaches_a_withheld_path_refuses_the_plan_before_any_effect() {
+    let fixture = Fixture::new("mount-recheck", true);
+    let (policy, shared, _tools) = fixture.mounted_policy();
+    let runner = fixture.runner_over(policy.clone());
+    let request = gate_request(
+        ShellKind::Sh.spec("exit 0"),
+        fixture.task_a.clone(),
+        Duration::from_secs(10),
+        gate_id(0),
+    );
+    runner.plan(&request).expect("the control plans");
+
+    let away = fixture.root.join("operator-shared.away");
+    std::fs::rename(&shared, &away).expect("move the recorded source");
+    let refusal = runner
+        .plan(&request)
+        .expect_err("a recorded source that is gone refuses the plan");
+    assert!(refusal.to_string().contains("is gone"), "{refusal}");
+    let outcome = runner.run_blocking(&request);
+    assert!(
+        outcome.is_err(),
+        "the invocation ran without its recorded mount"
+    );
+    std::fs::rename(&away, &shared).expect("put it back");
+    runner
+        .plan(&request)
+        .expect("the restored source plans again");
+
+    // Recorded as selection records a source (`resolve_source`): canonically.
+    // The fixture's own spelling of the private root can run through a link,
+    // macOS's `/var` (CI run 41529099549), and the plan's recheck refuses such
+    // a record as rebound before any exclusion is consulted, which
+    // `a_record_spelled_through_a_link_is_refused_as_rebound_before_any_exclusion`
+    // holds on every Unix host.
+    let mut reaching = policy;
+    let (source, source_identity) = recorded_directory(&fixture.private_root);
+    reaching.mounts[0].source = source;
+    reaching.mounts[0].source_identity = source_identity;
+    let refusal = fixture
+        .runner_over(reaching)
+        .plan(&request)
+        .expect_err("a recorded mount of the private root refuses the plan");
+    assert!(
+        refusal.to_string().contains("the private root"),
+        "{refusal}"
+    );
+
+    assert!(
+        list_intents(&fixture.private_root)
+            .expect("scan")
+            .is_empty(),
+        "a refused plan wrote an intent"
+    );
+    assert!(fixture.runtime.fake().container_names().is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_recorded_policy_whose_targets_a_fresh_run_refuses_starts_no_container() {
+    use crate::error::ProcessFate;
+    use crate::runner::container::runtime::RuntimeOp;
+
+    let fixture = Fixture::new("recorded-target-plan", true);
+    let (policy, _shared, _tools) = fixture.mounted_policy();
+    let request = gate_request(
+        ShellKind::Sh.spec("exit 0"),
+        fixture.task_a.clone(),
+        Duration::from_secs(10),
+        gate_id(0),
+    );
+    fixture
+        .runner_over(fixtures::with_recorded_targets(&policy, &["/data"]))
+        .plan(&request)
+        .expect("the control: the same record at a target a fresh run accepts plans");
+
+    for (targets, needle) in fixtures::REFUSED_RECORDED_TARGETS {
+        let planted = fixtures::with_recorded_targets(&policy, targets);
+        assert_eq!(
+            planted.completeness(),
+            Ok(()),
+            "{targets:?}: the record is self-consistent, so only the target rule can refuse it"
+        );
+        let refused = fixture
+            .runner_over(planted)
+            .run_blocking(&request)
+            .expect_err("a recorded target a fresh run refuses refuses the invocation");
+        assert_eq!(
+            refused.fate,
+            ProcessFate::NeverStarted,
+            "{targets:?}: {refused}"
+        );
+        let message = refused.to_string();
+        assert!(
+            message.contains("is refused for this container") && message.contains(needle),
+            "{targets:?}: the refusal names the target rule: {message}"
+        );
+    }
+    assert!(
+        !fixture
+            .runtime
+            .fake()
+            .journal()
+            .iter()
+            .any(|entry| entry.op == RuntimeOp::Create),
+        "a refused record created a container: {:?}",
+        fixture.runtime.fake().journal()
+    );
+    assert!(
+        list_intents(&fixture.private_root)
+            .expect("scan")
+            .is_empty(),
+        "a refused plan wrote an intent"
+    );
+    assert!(fixture.runtime.fake().container_names().is_empty());
+}
+
+/// A directory as selection records a mount source (`resolve_source`): its
+/// canonical spelling, and the identity of the object that spelling names.
+#[cfg(unix)]
+fn recorded_directory(path: &Path) -> (String, crate::topology::events::MountSourceIdentity) {
+    use std::os::unix::fs::MetadataExt as _;
+    let canonical = std::fs::canonicalize(path).expect("the directory resolves");
+    let metadata = std::fs::metadata(&canonical).expect("the directory");
+    (
+        canonical.to_str().expect("utf-8").to_owned(),
+        crate::topology::events::MountSourceIdentity::Unix {
+            kind: crate::topology::events::MountSourceKind::Directory,
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        },
+    )
+}
+
+/// The order of the plan's two guards on a recorded mount: a record whose
+/// source is spelled through a link is refused by the recheck as rebound before
+/// any exclusion is consulted, and the canonical record of the same directory
+/// reaches the exclusion. macOS's `/var` link gave the private-root case above
+/// such a spelling; a link reproduces it on every Unix host.
+#[cfg(unix)]
+#[test]
+fn a_record_spelled_through_a_link_is_refused_as_rebound_before_any_exclusion() {
+    let fixture = Fixture::new("mount-link-order", true);
+    let (policy, _shared, _tools) = fixture.mounted_policy();
+    let request = gate_request(
+        ShellKind::Sh.spec("exit 0"),
+        fixture.task_a.clone(),
+        Duration::from_secs(10),
+        gate_id(0),
+    );
+    let (canonical, identity) = recorded_directory(&fixture.private_root);
+    let link = fixture.root.join("private-link");
+    std::os::unix::fs::symlink(&canonical, &link).expect("a link to the private root");
+    let through_link = link.to_str().expect("utf-8").to_owned();
+    for (spelling, expected) in [
+        (through_link, "so a link or a move rebound it"),
+        (canonical, "the private root"),
+    ] {
+        let mut reaching = policy.clone();
+        reaching.mounts[0].source = spelling.clone();
+        reaching.mounts[0].source_identity = identity.clone();
+        let refusal = fixture
+            .runner_over(reaching)
+            .plan(&request)
+            .expect_err("a recorded mount of the private root refuses the plan");
+        assert!(
+            refusal.to_string().contains(expected),
+            "`{spelling}` is refused for another reason than `{expected}`: {refusal}"
+        );
+    }
+    assert!(
+        list_intents(&fixture.private_root)
+            .expect("scan")
+            .is_empty(),
+        "a refused plan wrote an intent"
+    );
+    assert!(fixture.runtime.fake().container_names().is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_recorded_mount_inside_the_common_directory_the_runner_is_given_refuses_the_plan() {
+    let fixture = Fixture::new("mount-common-dir", true);
+    let common = fixture.root.join("relocated-common");
+    std::fs::create_dir_all(common.join("refs")).expect("a common directory outside the checkout");
+    let (mut policy, _shared, _tools) = fixture.mounted_policy();
+    let (source, source_identity) = recorded_directory(&common.join("refs"));
+    let Some(first) = policy.mounts.first_mut() else {
+        panic!("the mounted policy records its mounts: {policy:?}");
+    };
+    first.source = source;
+    first.source_identity = source_identity;
+    let request = gate_request(
+        ShellKind::Sh.spec("exit 0"),
+        fixture.task_a.clone(),
+        Duration::from_secs(10),
+        gate_id(0),
+    );
+    fixture
+        .runner_over(policy.clone())
+        .plan(&request)
+        .expect("the control: beside the checkout's own Git the source is an ordinary directory");
+
+    let git_dir = fixture.repo.join(".git");
+    let refusal = ContainerRunner::new(
+        policy,
+        fixture.identity.clone(),
+        &fixture.repo,
+        RepositoryGit {
+            git_dir: &git_dir,
+            common_dir: &common,
+        },
+        image_environment(),
+        Box::new(fixture.runtime.clone()),
+    )
+    .expect("a container policy")
+    .plan(&request)
+    .expect_err("a recorded source inside the run's common directory refuses the plan");
+    let said = refusal.to_string();
+    let canonical = std::fs::canonicalize(&common).expect("the common directory resolves");
+    assert!(
+        said.contains(&format!("lies inside `{}`", canonical.display()))
+            && said.contains("authoritative Git"),
+        "{said}"
+    );
+    assert!(
+        list_intents(&fixture.private_root)
+            .expect("scan")
+            .is_empty(),
+        "a refused plan wrote an intent"
+    );
+    assert!(fixture.runtime.fake().container_names().is_empty());
+}
+
+#[test]
+fn a_configured_mount_that_lies_inside_a_withheld_directory_is_refused_and_a_roles_own_is_not() {
+    let tree = repo::scratch("configured-confinement");
+    let root = tree.path();
+    let repo_dir = root.join("repo");
+    let git_dir = repo_dir.join(".git");
+    let relocated = root.join("relocated");
+    let common = relocated.join("common");
+    let identity = RunIdentity {
+        private_root: root.join("private"),
+        run_id: RUN_ID.to_owned(),
+        run_dir: root.join("public"),
+        incarnation: INCARNATION_1.to_owned(),
+        repo_key: repo_key().to_owned(),
+    };
+    let confinement = Confinement::of_run(
+        &identity,
+        &repo_dir,
+        RepositoryGit {
+            git_dir: &git_dir,
+            common_dir: &common,
+        },
+    );
+    let mount = |source: PathBuf| Mount::Path {
+        source,
+        target: "/data".to_owned(),
+        read_only: false,
+    };
+    for (relation, source, own_rule_refuses) in [
+        ("is", common.clone(), true),
+        ("contains", relocated.clone(), true),
+        ("lies inside", common.join("refs"), false),
+    ] {
+        let mounted = [mount(source)];
+        let found = confinement.configured_violations(&mounted);
+        let [only] = found.as_slice() else {
+            panic!("`{relation}`: one configured violation, of the common directory: {found:?}");
+        };
+        assert!(
+            only.contains(&format!("{relation} `{}`", common.display()))
+                && only.contains(Withheld::AuthoritativeGit.passage()),
+            "`{relation}`: {only}"
+        );
+        assert_eq!(
+            !confinement.violations(&mounted).is_empty(),
+            own_rule_refuses,
+            "`{relation}`: the rule for a role's own mounts is unchanged, one-directional"
+        );
+    }
+    let beside = [mount(root.join("shared"))];
+    assert!(
+        confinement.configured_violations(&beside).is_empty()
+            && confinement.violations(&beside).is_empty(),
+        "a directory beside every withheld path is no violation"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_mount_the_runtimes_option_cannot_carry_exactly_refuses_the_plan_before_any_effect() {
+    let fixture = Fixture::new("mount-spelling", true);
+    let runner = fixture.runner();
+    for name in ["comma,in-name", "quote\"in-name", "trailing-space "] {
+        let workspace = fixture.root.join(name);
+        std::fs::create_dir_all(&workspace).expect("an awkwardly named workspace");
+        let request = gate_request(
+            ShellKind::Sh.spec("exit 0"),
+            workspace,
+            Duration::from_secs(10),
+            gate_id(0),
+        );
+        let refusal = runner
+            .plan(&request)
+            .expect_err("a workspace the mount option cannot spell is refused");
+        assert!(
+            refusal.to_string().contains("/upstroke/workspace"),
+            "{name}: the refusal does not name the mount: {refusal}"
+        );
+    }
+    assert!(
+        list_intents(&fixture.private_root)
+            .expect("scan")
+            .is_empty()
+    );
+    assert!(fixture.runtime.fake().container_names().is_empty());
+}
+
 #[test]
 fn the_credential_volume_is_mounted_exactly_when_its_location_is_supplied() {
     let fixture = Fixture::new("creds", true);
@@ -1138,6 +2216,7 @@ fn the_credential_volume_is_mounted_exactly_when_its_location_is_supplied() {
         },
         fixture.identity.clone(),
         &fixture.repo,
+        fixtures::plain_checkout(&fixture.repo.join(".git")),
         image_environment(),
         Box::new(fixture.runtime.clone()),
     )
@@ -1538,6 +2617,7 @@ fn a_policy_that_is_not_a_container_policy_is_refused_at_construction() {
             policy,
             fixture.identity.clone(),
             &fixture.repo,
+            fixtures::plain_checkout(&fixture.repo.join(".git")),
             image_environment(),
             Box::new(fixture.runtime.clone()),
         )
@@ -1548,6 +2628,7 @@ fn a_policy_that_is_not_a_container_policy_is_refused_at_construction() {
         container_policy(),
         fixture.identity.clone(),
         &fixture.repo,
+        fixtures::plain_checkout(&fixture.repo.join(".git")),
         image_environment(),
         Box::new(fixture.runtime.clone()),
     )
@@ -1626,6 +2707,7 @@ fn failing_preflight_probe_on_resume_refuses_before_recovery_event_and_reclaims_
             exit_code: exit,
             stdout: Vec::new(),
             stderr: stderr.clone().into_bytes(),
+            output_limited: false,
         });
         let runner = fixture.runner();
         let name =
@@ -1879,7 +2961,7 @@ fn host_and_container_compose_the_same_environment_for_every_role() {
             volumes: &volumes,
             layout: &layout,
         };
-        let host_composed: BTreeMap<String, String> = host_env
+        let mut host_composed: BTreeMap<String, String> = host_env
             .compose(&role, agent.as_ref(), &overlay)
             .expect("the host composes")
             .into_iter()
@@ -1890,11 +2972,27 @@ fn host_and_container_compose_the_same_environment_for_every_role() {
                 )
             })
             .collect();
+        // The one key the two boundaries compose by different mechanisms since PR12's Q2:
+        // this host environment's default object graph (`Recorded`) disables replacements
+        // with the process-wide variable, and the container states the same policy in the
+        // role's projected view config instead, so that other repositories keep theirs.
+        // Named and checked here rather than compared.
+        assert_eq!(
+            host_composed
+                .remove(crate::workspace_manager::NO_REPLACEMENT_OBJECTS.0)
+                .as_deref(),
+            Some(crate::workspace_manager::NO_REPLACEMENT_OBJECTS.1),
+            "{role}: the host's default object graph composes the process-wide variable"
+        );
         let container_composed: BTreeMap<String, String> = container_env
             .compose(&scope, &overlay)
             .expect("the container composes")
             .into_iter()
             .collect();
+        assert!(
+            !container_composed.contains_key(crate::workspace_manager::NO_REPLACEMENT_OBJECTS.0),
+            "{role}: the container composed a process-wide replacement setting"
+        );
 
         let withheld: BTreeMap<String, String> = container_env
             .withheld_credential_locations(&scope)
@@ -1966,6 +3064,7 @@ fn a_completed_invocation_releases_in_the_contracts_order_and_reports_the_result
         exit_code: Some(3),
         stdout: b"the work is done\n".to_vec(),
         stderr: b"a warning\n".to_vec(),
+        output_limited: false,
     });
     let runner = fixture.runner();
     let request = worker_request(
@@ -2053,8 +3152,9 @@ fn a_completed_invocation_releases_in_the_contracts_order_and_reports_the_result
 fn a_container_that_outlives_its_timeout_is_stopped_and_removed() {
     let fixture = Fixture::new("timeout", false);
     let runner = fixture.runner();
+    let payload = prompt("timeout", 128 * 1024);
     let mut request = worker_request(
-        ShellKind::Sh.spec("sleep 600"),
+        ShellKind::Sh.spec("sleep 600").stdin(payload.clone()),
         fixture.task_a.clone(),
         AgentId::new("claude-code"),
         Duration::from_secs(10),
@@ -2071,6 +3171,11 @@ fn a_container_that_outlives_its_timeout_is_stopped_and_removed() {
     assert_eq!(
         output.code, None,
         "a container the supervisor stopped did not exit on its own"
+    );
+    assert_eq!(
+        fixture.runtime.fake().stdin_received(name.as_str()),
+        Some(payload),
+        "the input went to the container at its start, and the timeout path is the same"
     );
 
     let rendered = fixture.trace.rendered();
@@ -2130,6 +3235,7 @@ fn output_beyond_the_bound_is_truncated_and_reported_as_limited() {
             exit_code: Some(0),
             stdout: vec![b'x'; bytes],
             stderr: Vec::new(),
+            output_limited: false,
         });
         let runner = fixture.runner().with_output_limit(16);
         let request = gate_request(
@@ -2218,6 +3324,7 @@ fn a_credential_volume_is_never_created_or_pruned_by_any_disposition() {
                 container_policy(),
                 fixture.identity.clone(),
                 &fixture.repo,
+                fixtures::plain_checkout(&fixture.repo.join(".git")),
                 image_environment(),
                 Box::new(fixture.runtime.clone()),
             )
@@ -2334,6 +3441,7 @@ fn a_launch_that_fails_after_a_committed_effect_still_releases_everything() {
                 container_policy(),
                 fixture.identity.clone(),
                 &fixture.repo,
+                fixtures::plain_checkout(&fixture.repo.join(".git")),
                 image_environment(),
                 Box::new(fixture.runtime.clone()),
             )
@@ -2912,6 +4020,7 @@ fn the_public_constructor_withholds_every_category_from_every_role() {
         container_policy(),
         fixture.identity.clone(),
         &fixture.repo,
+        fixtures::plain_checkout(&fixture.repo.join(".git")),
         image_environment(),
         Box::new(fixture.runtime.clone()),
     )
@@ -3002,7 +4111,11 @@ fn the_execution_root_and_its_worktree_namespaces_are_withheld_and_one_worktree_
         execution_root.join("snapshots"),
     ];
 
-    let confinement = Confinement::of_run(&fixture.identity, &fixture.repo);
+    let confinement = Confinement::of_run(
+        &fixture.identity,
+        &fixture.repo,
+        fixtures::plain_checkout(&fixture.repo.join(".git")),
+    );
     for path in &namespaces {
         assert!(
             confinement
@@ -3064,6 +4177,7 @@ fn every_role_writes_and_syncs_its_own_six_field_intent_before_its_container_is_
         container_policy(),
         fixture.identity.clone(),
         &fixture.repo,
+        fixtures::plain_checkout(&fixture.repo.join(".git")),
         image_environment(),
         Box::new(fixture.runtime.clone()),
     )
@@ -3524,6 +4638,7 @@ fn a_cwd_relative_or_absent_path_refuses_every_role_before_any_effect() {
             container_policy(),
             fixture.identity.clone(),
             &fixture.repo,
+            fixtures::plain_checkout(&fixture.repo.join(".git")),
             environment,
             Box::new(fixture.runtime.clone()),
         )
@@ -3663,6 +4778,7 @@ fn real_policy(image_id: &str) -> RunnerPolicy {
             digest: None,
         }),
         credential_volumes: None,
+        mounts: Vec::new(),
     }
 }
 
@@ -3733,6 +4849,12 @@ const GATED_RUNS: &[(&str, &str)] = &[
     ("shadow", "01KZR1GATED000000000000003"),
     ("credenv", "01KZR3BGATED00000000000001"),
     ("descendant", "01KZR3BGATED00000000000002"),
+    ("settings", "01KZP12GATED00000000000001"),
+    ("user", "01KZP12GATED00000000000002"),
+    ("stdin", "01KZP12GATED00000000000003"),
+    ("mountro", "01KZP12GATED00000000000004"),
+    ("mountrw", "01KZP12GATED00000000000005"),
+    ("mountresume", "01KZP12GATED00000000000006"),
 ];
 
 fn gated_run(tag: &str) -> &'static str {
@@ -3807,6 +4929,7 @@ fn real_docker_runs_from_the_recorded_image_id_and_composes_over_the_image_envir
         real_policy(&image_id),
         identity.clone(),
         &repo_dir,
+        fixtures::plain_checkout(&repo_dir.join(".git")),
         image_environment_of(docker.as_ref(), &image_id),
         Box::new((*docker).clone()),
     )
@@ -3921,6 +5044,7 @@ fn real_docker_refuses_a_reviewer_write_to_its_read_only_mount() {
         real_policy(&image_id),
         identity.clone(),
         &repo_dir,
+        fixtures::plain_checkout(&repo_dir.join(".git")),
         image_environment_of(docker.as_ref(), &image_id),
         Box::new((*docker).clone()),
     )
@@ -3996,6 +5120,348 @@ fn real_docker_refuses_a_reviewer_write_to_its_read_only_mount() {
 }
 
 #[test]
+fn real_docker_a_containerized_agent_reads_its_own_settings_and_cannot_write_them() {
+    let trace = ContainerTrace::recording();
+    let docker = match docker_gate(
+        "real_docker_a_containerized_agent_reads_its_own_settings_and_cannot_write_them",
+        trace.clone(),
+    ) {
+        Ok(docker) => docker,
+        Err(reason) => return skipped(&reason),
+    };
+    let (_, image_id) = match discover(docker.as_ref(), PREFERRED_IMAGES) {
+        Ok(found) => found,
+        Err(reason) => return no_image(&reason),
+    };
+
+    let tree = repo::scratch("real-settings");
+    let root = tree.path();
+    let run_id = gated_run("settings");
+    let repo_dir = root.join("repo");
+    repo::repository(&repo_dir);
+    let identity = real_identity(root, &repo_dir, run_id);
+    let _residue = LeaveNoResidue {
+        docker: (*docker).clone(),
+        private_root: identity.private_root.clone(),
+    };
+    let runner = ContainerRunner::new(
+        real_policy(&image_id),
+        identity.clone(),
+        &repo_dir,
+        fixtures::plain_checkout(&repo_dir.join(".git")),
+        image_environment_of(docker.as_ref(), &image_id),
+        Box::new((*docker).clone()),
+    )
+    .expect("a container policy")
+    .with_poll(Duration::from_millis(10));
+
+    let paths = RunPaths::with_private_root(&repo_dir, run_id, &identity.private_root);
+    let settings = paths.settings();
+    std::fs::create_dir_all(&settings).expect("the settings directory");
+    let file = settings.join("k0-1.json");
+    let written = "{\"permissions\":{\"allow\":[\"Edit\"],\"deny\":[\"Read(.upstroke/**)\"]}}\n";
+    std::fs::write(&file, written).expect("an attempt's settings");
+    std::fs::write(settings.join("k0-2.json"), "SIBLING-SETTINGS-a5f2\n")
+        .expect("another attempt's settings");
+    let workspace = root.join("ws-settings");
+    std::fs::create_dir_all(&workspace).expect("a workspace");
+    let spec = crate::runner::CommandSpec::new("sh")
+        .arg("-c")
+        .arg(
+            "cat \"$0\"; ls -A /upstroke/settings | sed 's/^/LISTED=/'; \
+             test -e /upstroke/settings/k0-2.json && echo SIBLING=yes || echo SIBLING=no; \
+             test -e \"$1\" && echo PRIVATE=yes || echo PRIVATE=no; \
+             if ( echo tampered >> \"$0\" ) 2>/dev/null; then echo WROTE; \
+             else echo READ-ONLY; fi",
+        )
+        .arg(file.to_string_lossy().into_owned())
+        .arg(paths.private.to_string_lossy().into_owned())
+        .settings_file(Some(file.clone()));
+    let request = worker_request(
+        spec,
+        workspace,
+        AgentId::new("claude-code"),
+        Duration::from_secs(60),
+        worker_id(0),
+    );
+    let output = runner.run_blocking(&request).expect("runs");
+    assert_eq!(output.code, Some(0), "{}{}", output.stdout, output.stderr);
+    assert!(
+        output.stdout.contains(written.trim()),
+        "the agent read its settings: {}",
+        output.stdout
+    );
+    assert!(
+        output.stdout.contains("READ-ONLY") && !output.stdout.contains("WROTE"),
+        "the settings are read-only to the agent: {}",
+        output.stdout
+    );
+    let listed: Vec<&str> = output
+        .stdout
+        .lines()
+        .filter_map(|line| line.strip_prefix("LISTED="))
+        .collect();
+    assert_eq!(
+        listed,
+        vec!["k0-1.json"],
+        "the agent sees its own settings file and no sibling: {}",
+        output.stdout
+    );
+    assert!(
+        output.stdout.contains("SIBLING=no") && output.stdout.contains("PRIVATE=no"),
+        "another attempt's settings or the run's private directory reached the container: {}",
+        output.stdout
+    );
+    assert_eq!(
+        std::fs::read_to_string(&file).expect("the host file"),
+        written,
+        "the host file is unchanged"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn real_docker_a_container_runs_as_the_coordinators_user_and_leaves_what_it_can_reclaim() {
+    use std::os::unix::fs::MetadataExt as _;
+    let trace = ContainerTrace::recording();
+    let docker = match docker_gate(
+        "real_docker_a_container_runs_as_the_coordinators_user_and_leaves_what_it_can_reclaim",
+        trace.clone(),
+    ) {
+        Ok(docker) => docker,
+        Err(reason) => return skipped(&reason),
+    };
+    let (_, image_id) = match discover(docker.as_ref(), GIT_IMAGES) {
+        Ok(found) => found,
+        Err(reason) => return no_image(&reason),
+    };
+
+    let tree = repo::scratch("real-user");
+    let root = tree.path();
+    let run_id = gated_run("user");
+    let repo_dir = root.join("repo");
+    let (head, _) = repo::repository(&repo_dir);
+    let identity = real_identity(root, &repo_dir, run_id);
+    let execution_root =
+        crate::workspace_manager::execution_root_of(&identity.private_root, repo_key(), run_id);
+    let workspace = execution_root.join("tasks").join("kalpha-g0");
+    repo::worktree(&repo_dir, &workspace, &head);
+    let _residue = LeaveNoResidue {
+        docker: (*docker).clone(),
+        private_root: identity.private_root.clone(),
+    };
+    let runner = ContainerRunner::new(
+        real_policy(&image_id),
+        identity.clone(),
+        &repo_dir,
+        fixtures::plain_checkout(&repo_dir.join(".git")),
+        image_environment_of(docker.as_ref(), &image_id),
+        Box::new((*docker).clone()),
+    )
+    .expect("a container policy")
+    .with_poll(Duration::from_millis(10));
+    let expected = effective_ids();
+    let line = |output: &ProcessOutput, key: &str| -> String {
+        output
+            .stdout
+            .lines()
+            .find_map(|line| line.strip_prefix(key))
+            .unwrap_or_else(|| {
+                panic!(
+                    "`{key}` is not in stdout {:?} / stderr {:?}",
+                    output.stdout, output.stderr
+                )
+            })
+            .trim()
+            .to_owned()
+    };
+
+    let worker = worker_request(
+        ShellKind::Sh.spec(
+            "id -u | sed 's/^/UID=/'; id -g | sed 's/^/GID=/'; \
+             mkdir -p nested/deeper && echo written > nested/deeper/file && echo MADE=yes",
+        ),
+        workspace.clone(),
+        AgentId::new("claude-code"),
+        Duration::from_secs(60),
+        worker_id(0),
+    );
+    let output = runner.run_blocking(&worker).expect("runs");
+    assert_eq!(output.code, Some(0), "{}{}", output.stdout, output.stderr);
+    assert_eq!(
+        (line(&output, "UID="), line(&output, "GID=")),
+        (expected.uid.to_string(), expected.gid.to_string()),
+        "the container's process is not the coordinator's effective uid and gid"
+    );
+    assert_eq!(line(&output, "MADE="), "yes");
+    let made = workspace.join("nested").join("deeper").join("file");
+    for path in [
+        workspace.join("nested"),
+        workspace.join("nested").join("deeper"),
+        made,
+    ] {
+        let metadata = std::fs::metadata(&path).expect("what the container made");
+        assert_eq!(
+            (metadata.uid(), metadata.gid()),
+            (expected.uid, expected.gid),
+            "the host sees {} as the coordinator's",
+            path.display()
+        );
+    }
+    std::fs::remove_dir_all(workspace.join("nested"))
+        .expect("the coordinator reclaims what the container made");
+    assert!(!workspace.join("nested").exists());
+
+    let gate = gate_request(
+        ShellKind::Sh.spec(
+            "git -C /upstroke/workspace rev-parse HEAD | sed 's/^/HEAD=/'; \
+             git -C /upstroke/workspace status --porcelain | wc -l | tr -d ' ' \
+             | sed 's/^/DIRTY=/'",
+        ),
+        workspace.clone(),
+        Duration::from_secs(60),
+        gate_id(0),
+    );
+    let output = runner.run_blocking(&gate).expect("runs");
+    assert_eq!(
+        output.code,
+        Some(0),
+        "a Git-dependent gate needs no wildcard safe.directory: {}",
+        output.stderr
+    );
+    assert!(
+        !output.stderr.contains("dubious ownership"),
+        "{}",
+        output.stderr
+    );
+    assert_eq!(line(&output, "HEAD="), head, "the exact detached HEAD");
+    assert_eq!(line(&output, "DIRTY="), "0", "the worktree is clean again");
+}
+
+#[test]
+fn real_docker_a_containerized_program_reads_its_exact_stdin_then_eof() {
+    use sha2::{Digest as _, Sha256};
+    let trace = ContainerTrace::recording();
+    let docker = match docker_gate(
+        "real_docker_a_containerized_program_reads_its_exact_stdin_then_eof",
+        trace.clone(),
+    ) {
+        Ok(docker) => docker,
+        Err(reason) => return skipped(&reason),
+    };
+    let (_, image_id) = match discover(docker.as_ref(), PREFERRED_IMAGES) {
+        Ok(found) => found,
+        Err(reason) => return no_image(&reason),
+    };
+
+    let tree = repo::scratch("real-stdin");
+    let root = tree.path();
+    let run_id = gated_run("stdin");
+    let repo_dir = root.join("repo");
+    repo::repository(&repo_dir);
+    let identity = real_identity(root, &repo_dir, run_id);
+    let workspace = root.join("ws-stdin");
+    std::fs::create_dir_all(&workspace).expect("a workspace");
+    let _residue = LeaveNoResidue {
+        docker: (*docker).clone(),
+        private_root: identity.private_root.clone(),
+    };
+    let runner = ContainerRunner::new(
+        real_policy(&image_id),
+        identity.clone(),
+        &repo_dir,
+        fixtures::plain_checkout(&repo_dir.join(".git")),
+        image_environment_of(docker.as_ref(), &image_id),
+        Box::new((*docker).clone()),
+    )
+    .expect("a container policy")
+    .with_poll(Duration::from_millis(10));
+    let claude = AgentId::new("claude-code");
+    let line = |output: &ProcessOutput, key: &str| -> String {
+        output
+            .stdout
+            .lines()
+            .find_map(|line| line.strip_prefix(key))
+            .unwrap_or_else(|| {
+                panic!(
+                    "`{key}` is not in stdout {:?} / stderr {:?}",
+                    output.stdout, output.stderr
+                )
+            })
+            .trim()
+            .to_owned()
+    };
+
+    let payload = prompt("exact", 300 * 1024);
+    let exact = worker_request(
+        ShellKind::Sh
+            .spec(
+                "cat > /tmp/in; wc -c < /tmp/in | tr -d ' ' | sed 's/^/BYTES=/'; \
+                 sha256sum /tmp/in | cut -d ' ' -f 1 | sed 's/^/SHA=/'",
+            )
+            .stdin(payload.clone()),
+        workspace.clone(),
+        claude.clone(),
+        Duration::from_secs(120),
+        worker_id(0),
+    );
+    let output = runner.run_blocking(&exact).expect("runs");
+    assert_eq!(output.code, Some(0), "{}{}", output.stdout, output.stderr);
+    assert!(!output.timed_out, "`cat` never saw the end of its input");
+    assert_eq!(
+        line(&output, "BYTES="),
+        payload.len().to_string(),
+        "every byte, beyond a pipe buffer"
+    );
+    let digest: String = Sha256::digest(&payload)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    assert_eq!(line(&output, "SHA="), digest, "exactly the bytes sent");
+
+    let early = worker_request(
+        ShellKind::Sh
+            .spec("head -c 16 > /dev/null; exit 7")
+            .stdin(prompt("early", 1024 * 1024)),
+        workspace.clone(),
+        claude.clone(),
+        Duration::from_secs(120),
+        worker_id(1),
+    );
+    let started = Instant::now();
+    let output = runner
+        .run_blocking(&early)
+        .expect("a program that stops reading early reports its own exit");
+    assert_eq!(output.code, Some(7), "{}{}", output.stdout, output.stderr);
+    assert!(!output.timed_out);
+    assert!(
+        started.elapsed() < Duration::from_secs(60),
+        "the undelivered rest of the input held the invocation: {:?}",
+        started.elapsed()
+    );
+
+    let never = worker_request(
+        ShellKind::Sh
+            .spec("sleep 600")
+            .stdin(prompt("never-read", 1024 * 1024)),
+        workspace,
+        claude,
+        Duration::from_secs(3),
+        worker_id(2),
+    );
+    let started = Instant::now();
+    let output = runner
+        .run_blocking(&never)
+        .expect("a timeout is an output, not an error");
+    assert!(output.timed_out, "{}{}", output.stdout, output.stderr);
+    assert!(
+        started.elapsed() < Duration::from_secs(90),
+        "a pending input write held the timeout: {:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
 fn real_docker_confines_a_gate_to_its_mount() {
     let trace = ContainerTrace::recording();
     let docker = match docker_gate("real_docker_confines_a_gate_to_its_mount", trace.clone()) {
@@ -4048,6 +5514,7 @@ fn real_docker_confines_a_gate_to_its_mount() {
         real_policy(&image_id),
         identity.clone(),
         &repo_dir,
+        fixtures::plain_checkout(&repo_dir.join(".git")),
         image_environment_of(docker.as_ref(), &image_id),
         Box::new((*docker).clone()),
     )
@@ -4134,6 +5601,7 @@ fn real_docker_a_gate_write_outside_every_declared_mount_fails() {
         real_policy(&image_id),
         identity.clone(),
         &repo_dir,
+        fixtures::plain_checkout(&repo_dir.join(".git")),
         image_environment_of(docker.as_ref(), &image_id),
         Box::new((*docker).clone()),
     )
@@ -4245,6 +5713,7 @@ fn real_docker_the_daemon_holds_exactly_the_specs_mounts_and_a_read_only_root() 
         real_policy(&image_id),
         identity.clone(),
         &repo_dir,
+        fixtures::plain_checkout(&repo_dir.join(".git")),
         image_environment_of(docker.as_ref(), &image_id),
         Box::new((*docker).clone()),
     )
@@ -4428,6 +5897,7 @@ fn real_docker_a_worktree_binary_cannot_shadow_the_certified_cli() {
         real_policy(&image_id),
         identity.clone(),
         &repo_dir,
+        fixtures::plain_checkout(&repo_dir.join(".git")),
         ContainerEnvironment::from_image(vec![("PATH".to_owned(), format!(".:{IMAGE_PATH}"))]),
         Box::new((*docker).clone()),
     )
@@ -4455,6 +5925,7 @@ fn real_docker_a_worktree_binary_cannot_shadow_the_certified_cli() {
         real_policy(&image_id),
         identity.clone(),
         &repo_dir,
+        fixtures::plain_checkout(&repo_dir.join(".git")),
         image_environment_of(docker.as_ref(), &image_id),
         Box::new((*docker).clone()),
     )
@@ -4561,13 +6032,14 @@ fn real_docker_a_git_dependent_gate_sees_only_the_role_view() {
         real_policy(&image_id),
         identity.clone(),
         &repo_dir,
+        fixtures::plain_checkout(&repo_dir.join(".git")),
         image_environment_of(docker.as_ref(), &image_id),
         Box::new((*docker).clone()),
     )
     .expect("a container policy")
     .with_poll(Duration::from_millis(10));
 
-    let git = "git -c safe.directory='*' -C /upstroke/workspace";
+    let git = "git -C /upstroke/workspace";
     let leak = &planted[0];
     let script = format!(
         "{git} rev-parse HEAD | sed 's/^/HEAD=/'; \
@@ -4663,6 +6135,7 @@ fn real_docker_adapter_parsing_matches_the_host_table() {
         real_policy(&image_id),
         identity.clone(),
         &repo_dir,
+        fixtures::plain_checkout(&repo_dir.join(".git")),
         image_environment_of(docker.as_ref(), &image_id),
         Box::new((*docker).clone()),
     )
@@ -4740,6 +6213,7 @@ fn real_docker_withholds_an_image_credential_variable_from_a_role_that_takes_non
         real_policy(&image_id),
         identity,
         &repo_dir,
+        fixtures::plain_checkout(&repo_dir.join(".git")),
         image_environment_of(docker.as_ref(), &image_id),
         Box::new((*docker).clone()),
     )
@@ -4839,6 +6313,7 @@ fn real_docker_a_container_contains_a_daemonised_descendant() {
         real_policy(&image_id),
         identity.clone(),
         &repo_dir,
+        fixtures::plain_checkout(&repo_dir.join(".git")),
         image_environment_of(docker.as_ref(), &image_id),
         Box::new((*docker).clone()),
     )
@@ -4898,6 +6373,371 @@ fn real_docker_a_container_contains_a_daemonised_descendant() {
     );
 }
 
+#[cfg(unix)]
+struct MountedReal {
+    _tree: ScratchTree,
+    root: PathBuf,
+    repo: PathBuf,
+    identity: RunIdentity,
+    reference: String,
+    image_id: String,
+}
+
+#[cfg(unix)]
+impl MountedReal {
+    fn new(
+        docker: &crate::runner::container::DockerCli,
+        tag: &str,
+        run: &str,
+    ) -> Result<Self, String> {
+        let (reference, image_id) = discover(docker, PREFERRED_IMAGES)?;
+        let tree = repo::scratch(tag);
+        let root = std::fs::canonicalize(tree.path()).expect("the scratch root canonicalizes");
+        let repo_dir = root.join("repo");
+        repo::repository(&repo_dir);
+        let identity = real_identity(&root, &repo_dir, gated_run(run));
+        Ok(Self {
+            _tree: tree,
+            root,
+            repo: repo_dir,
+            identity,
+            reference,
+            image_id,
+        })
+    }
+
+    fn selection(&self, mounts: Vec<crate::config::RunnerMount>) -> crate::config::RunnerSelection {
+        crate::config::RunnerSelection {
+            kind: RunnerKind::Container,
+            image: Some(self.reference.clone()),
+            credential_volumes: BTreeMap::new(),
+            mounts,
+            from_config: true,
+        }
+    }
+
+    fn resolve(
+        &self,
+        docker: &crate::runner::container::DockerCli,
+        mounts: Vec<crate::config::RunnerMount>,
+    ) -> RunnerPolicy {
+        let context = MountContext::bind(
+            &self.repo,
+            fixtures::plain_checkout(&self.repo.join(".git")),
+            &self.identity.private_root,
+        )
+        .expect("the real fixture binds a mount context");
+        crate::runner::container::resolve::resolve_container(
+            docker,
+            &self.selection(mounts),
+            &context,
+        )
+        .expect("the configured mounts resolve against the real runtime")
+    }
+
+    fn runner(
+        &self,
+        docker: &crate::runner::container::DockerCli,
+        policy: RunnerPolicy,
+    ) -> ContainerRunner {
+        ContainerRunner::new(
+            policy,
+            self.identity.clone(),
+            &self.repo,
+            fixtures::plain_checkout(&self.repo.join(".git")),
+            image_environment_of(docker, &self.image_id),
+            Box::new(docker.clone()),
+        )
+        .expect("a container policy")
+        .with_poll(Duration::from_millis(10))
+    }
+
+    fn workspace(&self, name: &str) -> PathBuf {
+        let workspace = self.root.join(name);
+        std::fs::create_dir_all(&workspace).expect("a workspace");
+        workspace
+    }
+}
+
+#[cfg(unix)]
+fn mount(source: &Path, target: &str, read_only: bool) -> crate::config::RunnerMount {
+    crate::config::RunnerMount {
+        source: source.to_path_buf(),
+        target: target.to_owned(),
+        read_only,
+    }
+}
+
+#[cfg(unix)]
+fn stdout_value(output: &ProcessOutput, key: &str) -> String {
+    output
+        .stdout
+        .lines()
+        .find_map(|line| line.strip_prefix(key))
+        .unwrap_or_else(|| {
+            panic!(
+                "`{key}` is not in stdout {:?} / stderr {:?}",
+                output.stdout, output.stderr
+            )
+        })
+        .trim()
+        .to_owned()
+}
+
+#[cfg(unix)]
+#[test]
+fn real_docker_a_read_only_configured_mount_is_readable_and_not_writable() {
+    let trace = ContainerTrace::recording();
+    let docker = match docker_gate(
+        "real_docker_a_read_only_configured_mount_is_readable_and_not_writable",
+        trace.clone(),
+    ) {
+        Ok(docker) => docker,
+        Err(reason) => return skipped(&reason),
+    };
+    let world = match MountedReal::new(docker.as_ref(), "real-mount-ro", "mountro") {
+        Ok(world) => world,
+        Err(reason) => return no_image(&reason),
+    };
+    let _residue = LeaveNoResidue {
+        docker: (*docker).clone(),
+        private_root: world.identity.private_root.clone(),
+    };
+    let shared = world.root.join("operator-shared");
+    std::fs::create_dir_all(&shared).expect("an operator directory");
+    std::fs::write(shared.join("marker.txt"), "MOUNTED-READ-ONLY-7c1e\n").expect("a marker");
+    let policy = world.resolve(
+        docker.as_ref(),
+        vec![mount(&shared, "/operator/shared", true)],
+    );
+    let runner = world.runner(docker.as_ref(), policy);
+
+    let request = gate_request(
+        ShellKind::Sh.spec(
+            "printf 'READ=%s\\n' \"$(cat /operator/shared/marker.txt)\"; \
+             ( echo written > /operator/shared/written.txt ) 2>&1; echo WRITE=$?",
+        ),
+        world.workspace("ws-gate"),
+        Duration::from_secs(60),
+        gate_id(0),
+    );
+    let plan = runner.plan(&request).expect("plans");
+    assert_eq!(
+        target_of(plan.mounts(), "/operator/shared").map(Mount::read_only),
+        Some(true),
+        "the recorded disposition"
+    );
+    let output = runner.run_blocking(&request).expect("runs");
+    assert_eq!(output.code, Some(0), "{}{}", output.stdout, output.stderr);
+    assert_eq!(stdout_value(&output, "READ="), "MOUNTED-READ-ONLY-7c1e");
+    assert_ne!(
+        stdout_value(&output, "WRITE="),
+        "0",
+        "a write through the read-only mount succeeded"
+    );
+    assert!(
+        output.stdout.to_ascii_lowercase().contains("read-only"),
+        "the write failed for another reason: {}",
+        output.stdout
+    );
+    assert!(
+        !shared.join("written.txt").exists(),
+        "the container wrote into the host directory through a read-only mount"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn real_docker_a_read_write_configured_mount_is_writable_as_the_coordinators_user() {
+    use std::os::unix::fs::MetadataExt as _;
+    let trace = ContainerTrace::recording();
+    let docker = match docker_gate(
+        "real_docker_a_read_write_configured_mount_is_writable_as_the_coordinators_user",
+        trace.clone(),
+    ) {
+        Ok(docker) => docker,
+        Err(reason) => return skipped(&reason),
+    };
+    let world = match MountedReal::new(docker.as_ref(), "real-mount-rw", "mountrw") {
+        Ok(world) => world,
+        Err(reason) => return no_image(&reason),
+    };
+    let _residue = LeaveNoResidue {
+        docker: (*docker).clone(),
+        private_root: world.identity.private_root.clone(),
+    };
+    let cache = world.root.join("operator-cache");
+    std::fs::create_dir_all(&cache).expect("an operator directory");
+    let policy = world.resolve(
+        docker.as_ref(),
+        vec![mount(&cache, "/operator/cache", false)],
+    );
+    let runner = world.runner(docker.as_ref(), policy);
+    let expected = effective_ids();
+
+    let worker = worker_request(
+        ShellKind::Sh.spec(
+            "mkdir -p /operator/cache/made && echo MOUNTED-READ-WRITE-7c1e \
+             > /operator/cache/made/file && echo MADE=yes",
+        ),
+        world.workspace("ws-implement"),
+        AgentId::new("claude-code"),
+        Duration::from_secs(60),
+        worker_id(0),
+    );
+    let output = runner.run_blocking(&worker).expect("runs");
+    assert_eq!(output.code, Some(0), "{}{}", output.stdout, output.stderr);
+    assert_eq!(stdout_value(&output, "MADE="), "yes");
+    let made = cache.join("made").join("file");
+    assert_eq!(
+        std::fs::read_to_string(&made).expect("the host sees the write"),
+        "MOUNTED-READ-WRITE-7c1e\n"
+    );
+    for path in [cache.join("made"), made] {
+        let metadata = std::fs::metadata(&path).expect("what the container made");
+        assert_eq!(
+            (metadata.uid(), metadata.gid()),
+            (expected.uid, expected.gid),
+            "the host sees {} as the coordinator's",
+            path.display()
+        );
+    }
+
+    let review = review_request(
+        ShellKind::Sh.spec("( echo nope > /operator/cache/review.txt ) 2>&1; echo WRITE=$?"),
+        world.workspace("ws-review"),
+        AgentId::new("claude-code"),
+        Duration::from_secs(60),
+        InvocationId::attempt(
+            TaskKey(0),
+            GenerationId(0),
+            AttemptNumber(1),
+            AttemptRole::ReviewPass(0),
+            0,
+        ),
+    );
+    let output = runner.run_blocking(&review).expect("runs");
+    assert_ne!(
+        stdout_value(&output, "WRITE="),
+        "0",
+        "a reviewer wrote through a read-write configured mount"
+    );
+    assert!(!cache.join("review.txt").exists());
+    std::fs::remove_dir_all(cache.join("made"))
+        .expect("the coordinator reclaims what the container made");
+}
+
+#[cfg(unix)]
+#[test]
+fn real_docker_a_resume_with_changed_mount_config_keeps_the_recorded_mounts() {
+    let trace = ContainerTrace::recording();
+    let docker = match docker_gate(
+        "real_docker_a_resume_with_changed_mount_config_keeps_the_recorded_mounts",
+        trace.clone(),
+    ) {
+        Ok(docker) => docker,
+        Err(reason) => return skipped(&reason),
+    };
+    let world = match MountedReal::new(docker.as_ref(), "real-mount-resume", "mountresume") {
+        Ok(world) => world,
+        Err(reason) => return no_image(&reason),
+    };
+    let _residue = LeaveNoResidue {
+        docker: (*docker).clone(),
+        private_root: world.identity.private_root.clone(),
+    };
+    let recorded_source = world.root.join("recorded-source");
+    let today_source = world.root.join("today-source");
+    for (dir, marker) in [
+        (&recorded_source, "RECORDED-SOURCE-7c1e"),
+        (&today_source, "TODAY-SOURCE-7c1e"),
+    ] {
+        std::fs::create_dir_all(dir).expect("an operator directory");
+        std::fs::write(dir.join("marker.txt"), format!("{marker}\n")).expect("a marker");
+    }
+    let record = world.resolve(
+        docker.as_ref(),
+        vec![mount(&recorded_source, "/operator/data", true)],
+    );
+    let today = world.selection(vec![
+        mount(&today_source, "/operator/data", false),
+        mount(&today_source, "/operator/extra", false),
+    ]);
+
+    let mut warnings = Vec::new();
+    let rebuilt = crate::runner::container::resolve::rebuild_by_inspection(
+        docker.as_ref(),
+        &record,
+        &today,
+        &mut warnings,
+    )
+    .expect("the recorded runner is re-established");
+    assert_eq!(rebuilt, record, "today's config reached the rebuilt runner");
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.contains("configured mount set")
+                && warning.contains("is ignored")),
+        "{warnings:?}"
+    );
+
+    let runner = world.runner(docker.as_ref(), rebuilt);
+    let request = gate_request(
+        ShellKind::Sh.spec(
+            "printf 'DATA=%s\\n' \"$(cat /operator/data/marker.txt)\"; \
+             if [ -e /operator/extra ]; then echo EXTRA=present; else echo EXTRA=absent; fi; \
+             ( echo x > /operator/data/written.txt ) 2>&1; echo WRITE=$?",
+        ),
+        world.workspace("ws-resumed"),
+        Duration::from_secs(60),
+        gate_id(0),
+    );
+    let output = runner.run_blocking(&request).expect("runs");
+    assert_eq!(output.code, Some(0), "{}{}", output.stdout, output.stderr);
+    assert_eq!(
+        stdout_value(&output, "DATA="),
+        "RECORDED-SOURCE-7c1e",
+        "the resumed container did not see the recorded source"
+    );
+    assert_eq!(stdout_value(&output, "EXTRA="), "absent");
+    assert_ne!(
+        stdout_value(&output, "WRITE="),
+        "0",
+        "the recorded mount is read-only"
+    );
+    assert!(!recorded_source.join("written.txt").exists());
+    assert!(!today_source.join("written.txt").exists());
+
+    let away = world.root.join("recorded-source.away");
+    std::fs::rename(&recorded_source, &away).expect("move the recorded source");
+    let mut warnings = Vec::new();
+    let refusal = crate::runner::container::resolve::rebuild_by_inspection(
+        docker.as_ref(),
+        &record,
+        &today,
+        &mut warnings,
+    )
+    .expect_err("a resume whose recorded source is gone refuses");
+    assert!(
+        matches!(
+            refusal,
+            crate::runner::container::resolve::InspectionRefusal::MountSourceMoved { .. }
+        ),
+        "{refusal}"
+    );
+    assert!(
+        docker
+            .containers_with_label(
+                LABEL_PRIVATE_ROOT,
+                &crate::runner::container::intent::private_root_label(&world.identity.private_root),
+            )
+            .expect("reachable")
+            .is_empty(),
+        "a container exists for the refused resume"
+    );
+    std::fs::rename(&away, &recorded_source).expect("put it back");
+}
+
 #[test]
 fn every_gated_test_of_this_lane_is_counted() {
     const MINE: &[&str] = &[
@@ -4911,8 +6751,14 @@ fn every_gated_test_of_this_lane_is_counted() {
         "real_docker_a_worktree_binary_cannot_shadow_the_certified_cli",
         "real_docker_withholds_an_image_credential_variable_from_a_role_that_takes_none",
         "real_docker_a_container_contains_a_daemonised_descendant",
+        "real_docker_a_containerized_agent_reads_its_own_settings_and_cannot_write_them",
+        "real_docker_a_container_runs_as_the_coordinators_user_and_leaves_what_it_can_reclaim",
+        "real_docker_a_containerized_program_reads_its_exact_stdin_then_eof",
+        "real_docker_a_read_only_configured_mount_is_readable_and_not_writable",
+        "real_docker_a_read_write_configured_mount_is_writable_as_the_coordinators_user",
+        "real_docker_a_resume_with_changed_mount_config_keeps_the_recorded_mounts",
     ];
-    assert_eq!(MINE.len(), 10);
+    assert_eq!(MINE.len(), 16);
     assert_eq!(GATED_RUNS.len(), MINE.len(), "one run id per gated test");
     let ids: BTreeSet<&str> = GATED_RUNS.iter().map(|(_, run)| *run).collect();
     assert_eq!(
@@ -4968,8 +6814,9 @@ impl ContainerHooks for CancelAfter {
 fn a_cancelled_container_invocation_is_released_through_the_reclaim_steps_before_it_reports() {
     let fixture = Fixture::new("cancel-running", false);
     let runner = fixture.runner();
+    let payload = prompt("cancelled", 128 * 1024);
     let request = worker_request(
-        ShellKind::Sh.spec("sleep 600"),
+        ShellKind::Sh.spec("sleep 600").stdin(payload.clone()),
         fixture.task_a.clone(),
         AgentId::new("claude-code"),
         Duration::from_secs(600),
@@ -4992,6 +6839,11 @@ fn a_cancelled_container_invocation_is_released_through_the_reclaim_steps_before
         .expect_err("a cancelled invocation reports an error, not an output");
     assert!(error.is_cancelled(), "{error}");
     assert_eq!(error.fate, ProcessFate::Gone, "{error}");
+    assert_eq!(
+        fixture.runtime.fake().stdin_received(name.as_str()),
+        Some(payload),
+        "the input went to the container at its start, and the cancellation path is the same"
+    );
 
     let rendered = fixture.trace.rendered();
     let at = |needle: &str| {
@@ -5033,6 +6885,202 @@ fn a_cancelled_container_invocation_is_released_through_the_reclaim_steps_before
         !fixture.trace.ops().contains(&RuntimeOp::Collect),
         "a cancelled invocation's output is not collected: {rendered:#?}"
     );
+}
+
+#[test]
+fn a_launch_that_fails_after_a_cancellation_reports_the_cancellation() {
+    let fixture = Fixture::new("cancel-failed-start", false);
+    fixture.runtime.fake().set_failing(RuntimeOp::Start);
+    let runner = fixture.runner();
+    let request = worker_request(
+        ShellKind::Sh
+            .spec("cat")
+            .stdin(prompt("cancelled-start", 4 * 1024)),
+        fixture.task_a.clone(),
+        AgentId::new("claude-code"),
+        Duration::from_secs(600),
+        worker_id(0),
+    );
+    let cancellation = crate::runner::Cancellation::new();
+    let mut observer = CancelAfter {
+        inner: RecordingHooks::new(fixture.trace.clone()),
+        cancellation: cancellation.clone(),
+        at: crate::topology::effects::EffectSiteId::Container(ContainerSite::Create),
+    };
+
+    let error = runner
+        .run_blocking_with(
+            &request,
+            RunnerCall::new(cancellation).observed_in_container_by(&mut observer),
+        )
+        .expect_err("a start that fails reports an error");
+    assert!(
+        error.is_cancelled(),
+        "a launch that fails once a cancellation is requested reports the cancellation: {error}"
+    );
+    assert_eq!(
+        error.fate,
+        ProcessFate::Gone,
+        "with the fate the reclaim established: {error}"
+    );
+    assert!(fixture.runtime.fake().container_names().is_empty());
+    assert!(
+        list_intents(&fixture.private_root)
+            .expect("scan")
+            .is_empty()
+    );
+}
+
+#[test]
+fn an_invocation_whose_removal_leaves_a_process_unresolved_is_never_reported_gone() {
+    for cancelled in [true, false] {
+        #[cfg(unix)]
+        unresolved_removal_in_an_owned_helper(cancelled);
+        #[cfg(not(unix))]
+        assert_unresolved_removal_fate(
+            &Fixture::new(&format!("unresolved-removal-{cancelled}"), !cancelled),
+            cancelled,
+        );
+    }
+}
+
+fn assert_unresolved_removal_fate(fixture: &Fixture, cancelled: bool) {
+    let runner = fixture.runner();
+    let request = worker_request(
+        ShellKind::Sh
+            .spec("cat")
+            .stdin(prompt("unresolved", 4 * 1024)),
+        fixture.task_a.clone(),
+        AgentId::new("claude-code"),
+        Duration::from_secs(600),
+        worker_id(0),
+    );
+    let name =
+        ContainerName::new(repo_key(), RUN_ID, INCARNATION_1, &request.invocation).expect("a name");
+    fixture
+        .runtime
+        .fake()
+        .leave_a_process_unresolved_at_removal(name.as_str());
+    let cancellation = crate::runner::Cancellation::new();
+    let mut observer = CancelAfter {
+        inner: RecordingHooks::new(fixture.trace.clone()),
+        cancellation: cancellation.clone(),
+        at: crate::topology::effects::EffectSiteId::Container(if cancelled {
+            ContainerSite::Start
+        } else {
+            ContainerSite::RemoveIntent
+        }),
+    };
+    let error = runner
+        .run_blocking_with(
+            &request,
+            RunnerCall::new(cancellation).observed_in_container_by(&mut observer),
+        )
+        .expect_err("an invocation with a process left unresolved is not a success");
+    assert!(
+        !error.is_cancelled(),
+        "cancelled {cancelled}: not a plain cancellation: {error}"
+    );
+    assert_eq!(
+        error.fate,
+        ProcessFate::Unresolved,
+        "cancelled {cancelled}: never Gone while a process may still run: {error}"
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("could not establish every process"),
+        "cancelled {cancelled}: the unresolved fact is the error: {error}"
+    );
+}
+
+#[cfg(unix)]
+const UNRESOLVED_REMOVAL_PATH: &str = "UPSTROKE_TEST_UNRESOLVED_REMOVAL_PATH";
+
+#[cfg(unix)]
+const UNRESOLVED_REMOVAL_ENDING: &str = "UPSTROKE_TEST_UNRESOLVED_REMOVAL_ENDING";
+
+#[cfg(unix)]
+fn unresolved_removal_in_an_owned_helper(cancelled: bool) {
+    let path = if cancelled { "cancelled" } else { "completed" };
+    for ending in ["return", "unwind"] {
+        let ended = crate::agent::proc::test_support::run_test_isolated(
+            "runner::container::exec::tests::unresolved_removal_child",
+            &[
+                (UNRESOLVED_REMOVAL_PATH, std::ffi::OsStr::new(path)),
+                (UNRESOLVED_REMOVAL_ENDING, std::ffi::OsStr::new(ending)),
+            ],
+            FIXTURE_CHILD_BOUND,
+        );
+        assert!(
+            ended.status.is_some_and(|status| status.success())
+                && ended.stdout.contains("1 passed")
+                && ended
+                    .stderr
+                    .matches("collected retained mock reaper ")
+                    .count()
+                    == 1
+                && ended
+                    .stderr
+                    .matches("collected isolated job-control guard ")
+                    .count()
+                    == 1
+                && ended
+                    .stderr
+                    .matches("isolated helper has no direct children (ECHILD)")
+                    .count()
+                    == 1,
+            "{path}/{ending}: the owned helper must prove the unresolved fate and collect its \
+             retained reaper before succeeding: {ended}"
+        );
+        crate::workspace_manager::fixture::say(&format!("removal {path}/{ending}: {ended}"));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "owned helper for the unresolved-removal guard"]
+fn unresolved_removal_child() {
+    use crate::agent::proc::test_support::{
+        IsolatedJobControl, RetainedMockReaper, assert_no_children_in_isolated_test,
+    };
+
+    let job_control = IsolatedJobControl::new();
+    let path = std::env::var(UNRESOLVED_REMOVAL_PATH).expect("the parent names the removal path");
+    let cancelled = match path.as_str() {
+        "cancelled" => true,
+        "completed" => false,
+        _ => panic!("an unknown removal path: {path}"),
+    };
+    let ending =
+        std::env::var(UNRESOLVED_REMOVAL_ENDING).expect("the parent names the helper ending");
+    assert!(matches!(ending.as_str(), "return" | "unwind"), "{ending}");
+    let fixture = Fixture::new(&format!("unresolved-removal-{path}-{ending}"), !cancelled);
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let job_control = job_control;
+        let reaper = RetainedMockReaper::new(&fixture.private_root, INCARNATION_1);
+        assert_unresolved_removal_fate(&fixture, cancelled);
+        assert!(
+            armed_for(&fixture.private_root, INCARNATION_1),
+            "the runner's drop exercised the production retained-reaper backstop"
+        );
+        assert!(
+            ending != "unwind",
+            "deliberate unwind after retained reaper"
+        );
+        reaper.collect();
+        job_control.collect();
+    }));
+    if ending == "unwind" {
+        let payload = outcome.expect_err("the deliberate unwind exercised guard cleanup");
+        assert_eq!(
+            payload.downcast_ref::<&str>(),
+            Some(&"deliberate unwind after retained reaper")
+        );
+    } else if let Err(payload) = outcome {
+        std::panic::resume_unwind(payload);
+    }
+    assert_no_children_in_isolated_test();
 }
 
 #[test]
@@ -5845,6 +7893,11 @@ fn every_container_start_in_production_is_reached_only_through_a_covered_launch(
             ),
             (
                 "src/runner/container.rs".to_owned(),
+                "RuntimeOp::Create".to_owned(),
+                Some("create".to_owned())
+            ),
+            (
+                "src/runner/container.rs".to_owned(),
                 "RuntimeOp::Start".to_owned(),
                 Some("start".to_owned())
             ),
@@ -5944,6 +7997,8 @@ fn reaper_spec(private_root: &Path, incarnation: &str) -> CreateSpec {
         command: Vec::new(),
         workdir: None,
         read_only_root: true,
+        user: None,
+        open_stdin: false,
     }
 }
 
@@ -5963,7 +8018,16 @@ fn a_scope_that_does_not_select_its_containers_labels_is_refused_with_no_reaper_
     let foreign = reaper_spec(&fixture.private_root, INCARNATION_2);
 
     let refused = reaping
-        .cover(&fixture.runtime, &fixture.identity, &foreign)
+        .cover(
+            &fixture.runtime,
+            &fixture.identity,
+            &foreign,
+            &[],
+            Instant::now() + Duration::from_secs(60),
+            &crate::runner::Cancellation::new(),
+            &[],
+            &crate::rundir::worktree_lock_file(&fixture.repo.join(".git")),
+        )
         .err()
         .expect("a container its runner's scope does not select is refused");
     assert!(
@@ -5985,7 +8049,16 @@ fn a_scope_that_does_not_select_its_containers_labels_is_refused_with_no_reaper_
 
     let own = reaper_spec(&fixture.private_root, INCARNATION_1);
     let (covered, _, _) = reaping
-        .cover(&fixture.runtime, &fixture.identity, &own)
+        .cover(
+            &fixture.runtime,
+            &fixture.identity,
+            &own,
+            &[],
+            Instant::now() + Duration::from_secs(60),
+            &crate::runner::Cancellation::new(),
+            &[],
+            &crate::rundir::worktree_lock_file(&fixture.repo.join(".git")),
+        )
         .expect("the runner's own container is covered");
     assert!(
         armed_for(&fixture.private_root, INCARNATION_1),
@@ -6011,7 +8084,16 @@ fn a_container_whose_labels_differ_from_the_armed_scope_is_refused_before_its_in
     let armed_for_another = reaper_spec(&fixture.private_root, INCARNATION_2);
     let (covered, _, _) = runner
         .reaping
-        .cover(&fixture.runtime, &foreign, &armed_for_another)
+        .cover(
+            &fixture.runtime,
+            &foreign,
+            &armed_for_another,
+            &[],
+            Instant::now() + Duration::from_secs(60),
+            &crate::runner::Cancellation::new(),
+            &[],
+            &crate::rundir::worktree_lock_file(&fixture.repo.join(".git")),
+        )
         .expect("a reaper armed for another incarnation, as a caller-built one would have been");
     covered.settle(ProcessFate::NeverStarted);
     assert!(armed_for(&fixture.private_root, INCARNATION_2));
@@ -6316,4 +8398,2786 @@ fn no_reaper_test_reads_a_hold_as_released_once() {
         .is_empty(),
         "and accepts a read polled within a deadline"
     );
+}
+
+#[test]
+fn an_observation_that_leaves_a_process_unresolved_keeps_the_invocation_unresolved_after_a_clean_release()
+ {
+    #[cfg(unix)]
+    unresolved_process_in_an_owned_helper("observation");
+    #[cfg(not(unix))]
+    assert_unresolved_observation_fate(&Fixture::new("unresolved-observation", false));
+}
+
+fn assert_unresolved_observation_fate(fixture: &Fixture) {
+    use crate::error::ProcessFate;
+
+    fixture.runtime.leaves_its_observation_unresolved();
+    let request = gate_request(
+        ShellKind::Sh.spec("exit 0"),
+        fixture.task_a.clone(),
+        Duration::from_secs(10),
+        gate_id(0),
+    );
+
+    let error = fixture
+        .runner()
+        .run_blocking(&request)
+        .expect_err("the supervision's observation left a process unresolved");
+    assert_eq!(error.fate, ProcessFate::Unresolved, "{error}");
+    assert!(
+        error
+            .to_string()
+            .contains(ProcessFate::Unresolved.describe()),
+        "{error}"
+    );
+    let ops = fixture.trace.ops();
+    assert!(
+        ops.contains(&RuntimeOp::Start)
+            && ops.contains(&RuntimeOp::Remove)
+            && !ops.contains(&RuntimeOp::Collect),
+        "the container started, nothing was collected, and the release removed it: {ops:?}"
+    );
+    assert_eq!(
+        fixture.runtime.fake().container_names(),
+        Vec::<String>::new(),
+        "the release completed, and the invocation is still unresolved"
+    );
+}
+
+#[test]
+fn a_prestart_failure_whose_cleanup_leaves_a_process_unresolved_keeps_the_invocation_unresolved() {
+    #[cfg(unix)]
+    unresolved_process_in_an_owned_helper("prestart-cleanup");
+    #[cfg(not(unix))]
+    assert_unresolved_prestart_cleanup_fate(&Fixture::new("unresolved-prestart-cleanup", false));
+}
+
+#[test]
+fn an_unresolved_credential_volume_inspection_keeps_the_invocation_unresolved_and_held() {
+    #[cfg(unix)]
+    unresolved_process_in_an_owned_helper("volume-inspection");
+    #[cfg(not(unix))]
+    assert_unresolved_volume_inspection_fate(&Fixture::new("unresolved-volume-inspection", false));
+}
+
+struct ProbeEnd {
+    fate: crate::error::ProcessFate,
+    cancelled: bool,
+    message: String,
+    view_retained: bool,
+    intent_retained: bool,
+    registration_kept: bool,
+    slot_held: bool,
+    spawn_outage: bool,
+}
+
+fn agent_probe_named(ordinal: u32) -> (RunnerRequest, ContainerName) {
+    let request = crate::agent::probe_request(
+        "claude-code",
+        ShellKind::Sh.spec("exit 0"),
+        ordinal,
+        Duration::from_secs(10),
+    )
+    .expect("an agent probe request");
+    let name = ContainerName::new(repo_key(), RUN_ID, INCARNATION_1, &request.invocation)
+        .expect("a container name");
+    (request, name)
+}
+
+fn run_admitted(
+    fixture: &Fixture,
+    runner: &ContainerRunner,
+    request: &RunnerRequest,
+    name: &ContainerName,
+) -> ProbeEnd {
+    use crate::engine::topology::identity::{
+        InvocationEnd, InvocationLedger, SlotLimits, SlotPair,
+    };
+    use crate::engine::topology::integrate::Verified;
+    use crate::engine::topology::select::Standing;
+    use crate::topology::events::{InfrastructureKind, SequenceId};
+
+    let mut ledger =
+        InvocationLedger::with_limits(SlotLimits::new(1, 1).expect("one slot per agent"));
+    ledger
+        .register_slotted(
+            &request.invocation,
+            SlotPair {
+                agent: "claude-code".to_owned(),
+                pool: None,
+            },
+            &Standing::preflight(),
+        )
+        .expect("the probe is admitted");
+    assert!(
+        ledger.slots().holds(&request.invocation),
+        "the premise: the probe holds its slot while it runs"
+    );
+    let outcome = runner.run_blocking(request);
+    ledger
+        .end(&request.invocation, &InvocationEnd::of(&outcome))
+        .expect("the ledger takes the end");
+    let error = outcome.expect_err("the launch failed before any start");
+    let (fate, cancelled, message) = (error.fate, error.is_cancelled(), error.to_string());
+    let spawn_outage = matches!(
+        crate::engine::topology::run::verified(
+            Err(crate::engine::topology::attempt::JudgeError::Runner(error)),
+            Vec::new(),
+            SequenceId(0),
+        ),
+        Ok(Verified::Unavailable {
+            kind: InfrastructureKind::RunnerSpawnFailure,
+            ..
+        })
+    );
+    ProbeEnd {
+        fate,
+        cancelled,
+        message,
+        view_retained: view_dir(&fixture.private_root, name).exists(),
+        intent_retained: name.intent_path(&fixture.private_root).exists(),
+        registration_kept: !ledger.settled(&request.invocation),
+        slot_held: ledger.slots().holds(&request.invocation),
+        spawn_outage,
+    }
+}
+
+fn assert_settled_and_released(case: &str, end: &ProbeEnd) {
+    use crate::error::ProcessFate;
+
+    assert_eq!(
+        end.fate,
+        ProcessFate::NeverStarted,
+        "{case}: {}",
+        end.message
+    );
+    assert!(
+        !end.view_retained && !end.intent_retained,
+        "{case}: the cancel released the R19 view and the R26 intent: {}",
+        end.message
+    );
+    assert!(
+        !end.registration_kept && !end.slot_held,
+        "{case}: the ledger released the registration and its slot"
+    );
+    assert!(
+        end.spawn_outage,
+        "{case}: a settled pre-start failure is the outage verification settles"
+    );
+}
+
+fn assert_unresolved_and_held(case: &str, end: &ProbeEnd) {
+    use crate::error::ProcessFate;
+
+    assert_eq!(end.fate, ProcessFate::Unresolved, "{case}: {}", end.message);
+    assert!(
+        !end.cancelled,
+        "{case}: not a plain cancellation: {}",
+        end.message
+    );
+    assert!(
+        end.view_retained && end.intent_retained,
+        "{case}: the R19 view and the R26 intent are kept for the census: {}",
+        end.message
+    );
+    assert!(
+        end.registration_kept && end.slot_held,
+        "{case}: the ledger keeps the registration and its slot"
+    );
+    assert!(
+        !end.spawn_outage,
+        "{case}: no RunnerSpawnFailure outage is settled over an unresolved process"
+    );
+    assert!(
+        end.message.contains(ProcessFate::Unresolved.describe())
+            && end.message.contains("deliberately retained"),
+        "{case}: the error names the unresolved fate and the residue it keeps: {}",
+        end.message
+    );
+}
+
+fn assert_unresolved_prestart_cleanup_fate(fixture: &Fixture) {
+    let runner = fixture.runner();
+
+    let (control, control_name) = agent_probe_named(0);
+    fixture
+        .runtime
+        .fake()
+        .substitute_reported_image_id(control_name.as_str(), OTHER_IMAGE_ID);
+    let settled = run_admitted(fixture, &runner, &control, &control_name);
+    assert_settled_and_released("a mismatch whose cleanup is clean", &settled);
+
+    for (ordinal, case, primary) in [
+        (
+            1,
+            "a reported image id that differs from the record",
+            "reports image id",
+        ),
+        (2, "a create the runtime refuses", "armed failing"),
+    ] {
+        let (request, name) = agent_probe_named(ordinal);
+        if ordinal == 1 {
+            fixture
+                .runtime
+                .fake()
+                .substitute_reported_image_id(name.as_str(), OTHER_IMAGE_ID);
+        } else {
+            fixture.runtime.fake().set_failing(RuntimeOp::Create);
+        }
+        fixture
+            .runtime
+            .fake()
+            .leave_a_process_unresolved_at_removal(name.as_str());
+        let end = run_admitted(fixture, &runner, &request, &name);
+        assert_unresolved_and_held(case, &end);
+        assert!(
+            end.message.contains(primary) && end.message.contains("unresolved at its removal"),
+            "{case}: the primary failure and the cleanup's own fact are both reported: {}",
+            end.message
+        );
+        assert!(
+            fixture.runtime.fake().container(name.as_str()).is_none(),
+            "{case}: the cleanup removed what the runtime created; only a process is unknown"
+        );
+    }
+    assert!(
+        !fixture.trace.ops().contains(&RuntimeOp::Start),
+        "no invocation here reached `docker start`: {:?}",
+        fixture.trace.ops()
+    );
+}
+
+fn assert_unresolved_volume_inspection_fate(fixture: &Fixture) {
+    let volume = "upstroke-creds-claude";
+    let context = MountContext::bind_with(
+        &fixture.repo,
+        fixtures::plain_checkout(&fixture.repo.join(".git")),
+        &fixture.private_root,
+        &[],
+    )
+    .expect("the fixture binds a mount context");
+    let selection = crate::config::RunnerSelection {
+        kind: RunnerKind::Container,
+        image: Some(IMAGE_REFERENCE.to_owned()),
+        credential_volumes: recorded_volumes(&container_policy()),
+        mounts: Vec::new(),
+        from_config: true,
+    };
+    let resolved = crate::runner::container::resolve::resolve_container(
+        &fixture.runtime,
+        &selection,
+        &context,
+    )
+    .expect("the run's preflight finds every recorded credential volume");
+    assert_eq!(
+        resolved.credential_volumes,
+        container_policy().credential_volumes,
+        "the premise: the initial resolution recorded the volumes the runner mounts"
+    );
+    let runner = fixture.runner();
+
+    fixture.runtime.fake().remove_volume(volume);
+    let (absent, absent_name) = agent_probe_named(0);
+    let refused = run_admitted(fixture, &runner, &absent, &absent_name);
+    assert_settled_and_released("an absent volume", &refused);
+    assert!(
+        refused
+            .message
+            .contains("is not present in the container runtime"),
+        "{}",
+        refused.message
+    );
+    fixture.runtime.fake().add_volume(volume);
+
+    fixture.runtime.fake().set_failing(RuntimeOp::InspectVolume);
+    let (failed, failed_name) = agent_probe_named(1);
+    let failure = run_admitted(fixture, &runner, &failed, &failed_name);
+    assert_settled_and_released("an inspection that failed", &failure);
+
+    fixture.runtime.leaves_its_volume_inspections_unresolved();
+    let (request, name) = agent_probe_named(2);
+    let end = run_admitted(fixture, &runner, &request, &name);
+    assert_unresolved_and_held("an unresolved inspection", &end);
+    assert!(
+        end.message
+            .contains("could not be asked whether the credential volume")
+            && end.message.contains(volume),
+        "the contextual R20 refusal is kept beside the fate: {}",
+        end.message
+    );
+    let ops = fixture.trace.ops();
+    assert!(
+        !ops.contains(&RuntimeOp::Create)
+            && ops.contains(&RuntimeOp::Stop)
+            && ops.contains(&RuntimeOp::Remove),
+        "no container was ever created, and each cancel's stop and removal were asked: {ops:?}"
+    );
+    assert!(
+        fixture.runtime.fake().container_names().is_empty(),
+        "the runtime established the never-created container absent, which settles nothing \
+         about the inspection's process"
+    );
+}
+
+#[cfg(unix)]
+const UNRESOLVED_PROCESS_CASE: &str = "UPSTROKE_TEST_UNRESOLVED_PROCESS_CASE";
+
+#[cfg(unix)]
+const UNRESOLVED_PROCESS_ENDING: &str = "UPSTROKE_TEST_UNRESOLVED_PROCESS_ENDING";
+
+#[cfg(unix)]
+fn unresolved_process_in_an_owned_helper(case: &str) {
+    for ending in ["return", "unwind"] {
+        let ended = crate::agent::proc::test_support::run_test_isolated(
+            "runner::container::exec::tests::unresolved_process_child",
+            &[
+                (UNRESOLVED_PROCESS_CASE, std::ffi::OsStr::new(case)),
+                (UNRESOLVED_PROCESS_ENDING, std::ffi::OsStr::new(ending)),
+            ],
+            FIXTURE_CHILD_BOUND,
+        );
+        assert!(
+            ended.status.is_some_and(|status| status.success())
+                && ended.stdout.contains("1 passed")
+                && ended
+                    .stderr
+                    .matches("collected retained mock reaper ")
+                    .count()
+                    == 1
+                && ended
+                    .stderr
+                    .matches("collected isolated job-control guard ")
+                    .count()
+                    == 1
+                && ended
+                    .stderr
+                    .matches("isolated helper has no direct children (ECHILD)")
+                    .count()
+                    == 1,
+            "{case}/{ending}: the owned helper must prove the fate and collect its retained \
+             reaper before succeeding: {ended}"
+        );
+        crate::workspace_manager::fixture::say(&format!("{case}/{ending}: {ended}"));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "owned helper for the unresolved start, observation, pre-start cleanup and volume \
+            inspection guards"]
+fn unresolved_process_child() {
+    use crate::agent::proc::test_support::{
+        IsolatedJobControl, RetainedMockReaper, assert_no_children_in_isolated_test,
+    };
+
+    let job_control = IsolatedJobControl::new();
+    let case =
+        std::env::var(UNRESOLVED_PROCESS_CASE).expect("the parent names the unresolved case");
+    let ending =
+        std::env::var(UNRESOLVED_PROCESS_ENDING).expect("the parent names the helper ending");
+    assert!(
+        matches!(
+            case.as_str(),
+            "start" | "observation" | "prestart-cleanup" | "volume-inspection"
+        ),
+        "{case}"
+    );
+    assert!(matches!(ending.as_str(), "return" | "unwind"), "{ending}");
+    let fixture = Fixture::new(&format!("unresolved-{case}-{ending}"), false);
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let job_control = job_control;
+        let reaper = RetainedMockReaper::new(&fixture.private_root, INCARNATION_1);
+        match case.as_str() {
+            "start" => assert_unresolved_start_fate(&fixture),
+            "observation" => assert_unresolved_observation_fate(&fixture),
+            "prestart-cleanup" => assert_unresolved_prestart_cleanup_fate(&fixture),
+            "volume-inspection" => assert_unresolved_volume_inspection_fate(&fixture),
+            _ => panic!("an unknown unresolved-process case: {case}"),
+        }
+        assert!(
+            armed_for(&fixture.private_root, INCARNATION_1),
+            "the runner's drop exercised the production retained-reaper backstop"
+        );
+        assert!(
+            ending != "unwind",
+            "deliberate unwind after retained reaper"
+        );
+        reaper.collect();
+        job_control.collect();
+    }));
+    if ending == "unwind" {
+        let payload = outcome.expect_err("the deliberate unwind exercised guard cleanup");
+        assert_eq!(
+            payload.downcast_ref::<&str>(),
+            Some(&"deliberate unwind after retained reaper")
+        );
+    } else if let Err(payload) = outcome {
+        std::panic::resume_unwind(payload);
+    }
+    assert_no_children_in_isolated_test();
+}
+
+#[cfg(unix)]
+const STALLED_OBSERVATION_MODE: &str = "UPSTROKE_TEST_STALLED_OBSERVATION";
+
+#[cfg(unix)]
+const STALLED_OBSERVATION_ENDING: &str = "UPSTROKE_TEST_STALLED_OBSERVATION_ENDING";
+
+#[cfg(unix)]
+const STALLED_OBSERVATION_MARKER: &str = "UPSTROKE_TEST_OBSERVED";
+
+#[cfg(unix)]
+const STALLED_OBSERVATION_IMAGE: &str = "UPSTROKE_TEST_IMAGE";
+
+#[cfg(unix)]
+const STALLED_OBSERVATION_STUB: &str = "UPSTROKE_TEST_STALLED_OBSERVATION_STUB";
+
+#[cfg(unix)]
+const STALLED_CLEANUP: &str = "UPSTROKE_TEST_CLEANUP_STALLS";
+
+#[cfg(unix)]
+const STALLED_START_HELD: &str = "UPSTROKE_TEST_START_HELD";
+
+#[cfg(unix)]
+const STALLED_OBSERVATION_DEADLINE: Duration = Duration::from_secs(10);
+
+#[cfg(unix)]
+const STALLED_OBSERVATION_SETTLES: Duration = Duration::from_secs(20);
+
+#[cfg(unix)]
+const STALLED_OBSERVATION_DOCKER: &str = "#!/bin/sh\n\
+    case \"$1\" in\n\
+    ps)\n\
+    \x20 case \"$*\" in\n\
+    \x20 *\"filter name=\"*) : > \"$UPSTROKE_TEST_OBSERVED\"; exec sleep 60 ;;\n\
+    \x20 *) exit 0 ;;\n\
+    \x20 esac ;;\n\
+    create) exit 0 ;;\n\
+    start) if [ -n \"$UPSTROKE_TEST_START_HELD\" ]; then sleep \"$UPSTROKE_TEST_START_HELD\"; fi; exit 0 ;;\n\
+    container)\n\
+    \x20 case \"$*\" in\n\
+    \x20 *.Image*) printf '%s\\n' \"$UPSTROKE_TEST_IMAGE\" ;;\n\
+    \x20 *) printf '0\\n' ;;\n\
+    \x20 esac ;;\n\
+    logs) printf 'what the container wrote\\n' ;;\n\
+    stop|rm) if [ -n \"$UPSTROKE_TEST_CLEANUP_STALLS\" ]; then exec sleep 60; fi; exit 0 ;;\n\
+    *) exit 93 ;;\n\
+    esac\n";
+
+#[cfg(unix)]
+#[test]
+fn a_running_container_whose_observation_stalls_settles_at_its_deadline_or_cancellation_and_keeps_its_fate()
+ {
+    let tree = repo::scratch("stalled-observation");
+    let bin = tree.path().join("bin");
+    std::fs::create_dir(&bin).expect("the stub's directory");
+    let stub = bin.join("docker");
+    crate::runner::container::write_program_in_its_own_process(&stub, STALLED_OBSERVATION_DOCKER);
+    let inherited = std::env::var_os("PATH").unwrap_or_default();
+    let path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&inherited)))
+        .expect("a PATH with the stub first");
+    for mode in ["deadline", "cancel", "cleanup"] {
+        let (retained, disarmed) = if mode == "cleanup" { (1, 0) } else { (0, 1) };
+        for ending in ["return", "unwind"] {
+            let observed = tree.path().join(format!("observed-{mode}-{ending}"));
+            let mut vars = vec![
+                ("PATH", path.as_os_str()),
+                (STALLED_OBSERVATION_MODE, std::ffi::OsStr::new(mode)),
+                (STALLED_OBSERVATION_ENDING, std::ffi::OsStr::new(ending)),
+                (STALLED_OBSERVATION_MARKER, observed.as_os_str()),
+                (STALLED_OBSERVATION_IMAGE, std::ffi::OsStr::new(IMAGE_ID)),
+                (STALLED_OBSERVATION_STUB, stub.as_os_str()),
+            ];
+            if mode == "cleanup" {
+                vars.push((STALLED_CLEANUP, std::ffi::OsStr::new("1")));
+                vars.push((STALLED_START_HELD, std::ffi::OsStr::new("2")));
+            }
+            let ended = crate::agent::proc::test_support::run_test_isolated(
+                "runner::container::exec::tests::stalled_observation_child",
+                &vars,
+                Duration::from_secs(120),
+            );
+            assert!(
+                ended.status.is_some_and(|status| status.success())
+                    && ended.stdout.contains("1 passed")
+                    && ended
+                        .stderr
+                        .matches("collected retained stub reaper ")
+                        .count()
+                        == retained
+                    && ended
+                        .stderr
+                        .matches("disarmed its container reaper on drop")
+                        .count()
+                        == disarmed
+                    && ended
+                        .stderr
+                        .matches("collected isolated job-control guard ")
+                        .count()
+                        == 1
+                    && ended
+                        .stderr
+                        .matches("isolated helper has no direct children (ECHILD)")
+                        .count()
+                        == 1,
+                "{mode}/{ending}: the stalled observation held the invocation, it settled with \
+                 another fate, or the owned helper did not collect its retained reaper and its \
+                 job-control guard before succeeding: {ended}"
+            );
+            crate::workspace_manager::fixture::say(&format!("{mode}/{ending}: {ended}"));
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "owned helper of the stalled-observation witness"]
+fn stalled_observation_child() {
+    use crate::agent::proc::test_support::{
+        IsolatedJobControl, RetainedStubReaper, assert_no_children_in_isolated_test,
+    };
+
+    let job_control = IsolatedJobControl::new();
+    let mode = std::env::var(STALLED_OBSERVATION_MODE).expect("the parent names the mode");
+    let ending =
+        std::env::var(STALLED_OBSERVATION_ENDING).expect("the parent names the helper ending");
+    assert!(
+        matches!(mode.as_str(), "deadline" | "cancel" | "cleanup"),
+        "{mode}"
+    );
+    assert!(matches!(ending.as_str(), "return" | "unwind"), "{ending}");
+    let observed = PathBuf::from(
+        std::env::var_os(STALLED_OBSERVATION_MARKER).expect("the parent names the marker"),
+    );
+    let stub = PathBuf::from(
+        std::env::var_os(STALLED_OBSERVATION_STUB).expect("the parent names its stub"),
+    );
+    let held = std::env::var(STALLED_START_HELD).ok().map(|seconds| {
+        Duration::from_secs(
+            seconds
+                .parse()
+                .expect("the parent holds the start for whole seconds"),
+        )
+    });
+    let fixture = Fixture::new(&format!("stalled-observation-{mode}-{ending}"), false);
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let job_control = job_control;
+        let docker = crate::runner::container::DockerCli::new(ContainerTrace::off());
+        let reaper = RetainedStubReaper::new(
+            &fixture.private_root,
+            INCARNATION_1,
+            &docker.reaper_program(),
+            &stub,
+        );
+        assert_a_stalled_observation_settles(&fixture, &mode, &observed, held, docker);
+        let armed = armed_for(&fixture.private_root, INCARNATION_1);
+        if mode == "cleanup" {
+            assert!(
+                armed,
+                "the unresolved runner's drop exercised the production retained-reaper backstop"
+            );
+        } else {
+            assert!(
+                !armed,
+                "{mode}: the settled runner's drop disarmed its container reaper"
+            );
+            crate::workspace_manager::fixture::say(&format!(
+                "{mode}: the settled runner disarmed its container reaper on drop"
+            ));
+        }
+        assert!(
+            ending != "unwind",
+            "deliberate unwind after the runner dropped"
+        );
+        if mode == "cleanup" {
+            reaper.collect();
+        }
+        job_control.collect();
+    }));
+    if ending == "unwind" {
+        let payload = outcome.expect_err("the deliberate unwind exercised guard cleanup");
+        assert_eq!(
+            payload.downcast_ref::<&str>(),
+            Some(&"deliberate unwind after the runner dropped")
+        );
+    } else if let Err(payload) = outcome {
+        std::panic::resume_unwind(payload);
+    }
+    assert_no_children_in_isolated_test();
+}
+
+#[cfg(unix)]
+fn assert_a_stalled_observation_settles(
+    fixture: &Fixture,
+    mode: &str,
+    observed: &Path,
+    held: Option<Duration>,
+    docker: crate::runner::container::DockerCli,
+) {
+    use crate::error::ProcessFate;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let docker = if mode == "cleanup" {
+        docker.with_question_bound(Duration::from_secs(1))
+    } else {
+        docker
+    };
+    let runner = ContainerRunner::new(
+        container_policy(),
+        fixture.identity.clone(),
+        &fixture.repo,
+        fixtures::plain_checkout(&fixture.repo.join(".git")),
+        image_environment(),
+        Box::new(docker),
+    )
+    .expect("a container policy");
+    let mut request =
+        host::shell_probe_request(ShellKind::Sh, fixture.task_a.clone(), shell_probe_id());
+    let settles_within = if mode == "cancel" {
+        request.timeout = Duration::from_secs(600);
+        STALLED_OBSERVATION_SETTLES
+    } else {
+        request.timeout = STALLED_OBSERVATION_DEADLINE;
+        STALLED_OBSERVATION_DEADLINE + STALLED_OBSERVATION_SETTLES
+    };
+    let cancellation = Cancellation::new();
+    let ended = AtomicBool::new(false);
+    let began = Instant::now();
+    let (ran, asked_after) = std::thread::scope(|scope| {
+        let watcher = scope.spawn(|| {
+            let until = Instant::now() + Duration::from_secs(60);
+            let asked = loop {
+                let finished = ended.load(Ordering::SeqCst);
+                if observed.exists() {
+                    break Some(began.elapsed());
+                }
+                if finished || Instant::now() >= until {
+                    break None;
+                }
+                crate::workspace_manager::fixture::rest(Duration::from_millis(10));
+            };
+            if mode == "cancel" {
+                cancellation.cancel();
+            }
+            asked
+        });
+        let ran = runner.run_blocking_with(&request, RunnerCall::new(cancellation.clone()));
+        ended.store(true, Ordering::SeqCst);
+        (ran, watcher.join().expect("the observation watcher"))
+    });
+    let took = began.elapsed();
+    assert!(
+        observed.exists(),
+        "{mode}: the premise, the started container's observation was asked: the invocation \
+         returned {ran:?} after {took:?} under a {:?} timeout without asking it",
+        request.timeout
+    );
+    if let Some(held) = held {
+        assert!(
+            asked_after.is_some_and(|after| after >= held),
+            "{mode}: the launch was held {held:?} at `docker start`, and its observation was \
+             asked after {asked_after:?}"
+        );
+    }
+    assert!(
+        took < settles_within,
+        "{mode}: the stalled `docker` held the invocation {took:?}, past {settles_within:?}"
+    );
+    crate::workspace_manager::fixture::say(&format!(
+        "{mode}: the observation was asked after {asked_after:?} and the invocation settled \
+         after {took:?}, under a {:?} timeout",
+        request.timeout
+    ));
+    match mode {
+        "deadline" => {
+            let output = ran.expect("a timed-out invocation reports its output");
+            assert!(output.timed_out && output.code.is_none(), "{output:?}");
+        }
+        "cancel" => {
+            let error = ran.expect_err("a cancelled invocation reports an error");
+            assert!(error.is_cancelled(), "{error}");
+            assert_eq!(error.fate, ProcessFate::Gone, "{error}");
+        }
+        _ => {
+            let error = ran.expect_err("a release whose questions stalled reports an error");
+            assert_eq!(error.fate, ProcessFate::Unresolved, "{error}");
+            assert!(
+                !list_intents(&fixture.private_root)
+                    .expect("the container namespace reads")
+                    .is_empty(),
+                "the intent is kept for the census that reclaims the container"
+            );
+        }
+    }
+}
+
+#[test]
+fn review_timeouts_obey_the_platform_deadline_range() {
+    let tree = repo::scratch("review-deadline-helper");
+    let executable = std::env::current_exe().expect("the test binary");
+    let command = crate::runner::CommandSpec::new(
+        executable
+            .to_str()
+            .expect("the test binary has a UTF-8 path"),
+    )
+    .arg("runner::container::exec::tests::review_deadline_child")
+    .arg("--exact")
+    .arg("--ignored")
+    .arg("--nocapture")
+    .arg("--test-threads=1");
+    let request = gate_request(
+        command,
+        tree.path().to_path_buf(),
+        Duration::from_secs(120),
+        gate_id(0),
+    );
+    let output = host::HostRunner::new()
+        .run_blocking(&request)
+        .expect("supervise the review deadline helper");
+    assert!(
+        !output.timed_out,
+        "the review deadline helper exceeded its bound: {output:?}"
+    );
+    assert_eq!(output.code, Some(0), "{output:?}");
+    assert!(
+        output.stdout.contains("1 passed"),
+        "the helper ran its assertions: {output:?}"
+    );
+}
+
+#[test]
+#[ignore = "owned helper for the bounded review deadline guard"]
+fn review_deadline_child() {
+    use crate::error::ProcessFate;
+
+    let tree = repo::scratch("review-deadline-config");
+    let configuration = tree.path().join("upstroke.toml");
+    std::fs::write(
+        &configuration,
+        "[routing]\nreview = { tier = \"frontier\", timeout_secs = 9223372036854775807 }\n",
+    )
+    .expect("the configuration");
+    let pools = tree.path().join("pools.toml");
+    std::fs::write(&pools, "# no pools\n").expect("an empty pools file");
+    let mut warnings = Vec::new();
+    let config = crate::config::load(
+        Some(&configuration),
+        tree.path(),
+        Some(&pools),
+        &mut warnings,
+    )
+    .expect("the configuration accepts the review timeout");
+    let plan = crate::engine::topology::settle::tests::plan();
+    let chains: Vec<_> = plan
+        .tasks
+        .iter()
+        .map(|task| crate::route::resolve(task, &config))
+        .collect();
+    let timeout = crate::review::plan_for(
+        &plan,
+        &chains,
+        &config,
+        |agent| agent == "claude-code",
+        &mut warnings,
+    )
+    .expect("the review plan resolves")
+    .pass_timeout()
+    .expect("and accepts the timeout");
+    assert_eq!(
+        timeout,
+        Duration::from_secs(9_223_372_036_854_775_807),
+        "the premise: both readers accept the configured timeout"
+    );
+
+    for (case, timeout, representable) in [
+        (
+            "configured",
+            timeout,
+            Instant::now().checked_add(timeout).is_some(),
+        ),
+        ("representable", Duration::from_secs(60), true),
+        ("unrepresentable", Duration::MAX, false),
+    ] {
+        assert_eq!(
+            Instant::now().checked_add(timeout).is_some(),
+            representable,
+            "{case}: the platform holds the intended deadline premise"
+        );
+        let fixture = Fixture::new(&format!("review-deadline-{case}"), true);
+        let request = review_request(
+            ShellKind::Sh.spec("exit 0"),
+            fixture.task_a.clone(),
+            AgentId::new("claude-code"),
+            timeout,
+            InvocationId::attempt(
+                TaskKey(0),
+                GenerationId(0),
+                AttemptNumber(1),
+                AttemptRole::ReviewPass(0),
+                0,
+            ),
+        );
+        let runner = fixture.runner().with_poll(Duration::from_millis(10));
+        let Ok(ran) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            runner.run_blocking(&request)
+        })) else {
+            panic!("{case}: the runner unwound on a review timeout");
+        };
+        if representable {
+            let output = ran.expect("a representable review deadline permits the invocation");
+            assert_eq!(output.code, Some(0), "{case}: {output:?}");
+            assert!(!output.timed_out, "{case}: {output:?}");
+            let trace = fixture.trace.rendered();
+            for operation in ["rt:start:", "rt:collect:", "rt:remove:"] {
+                assert!(
+                    trace.iter().any(|entry| entry.starts_with(operation)),
+                    "{case}: {trace:?}"
+                );
+            }
+        } else {
+            let error =
+                ran.expect_err("an invocation whose deadline no instant can hold is refused");
+            assert_eq!(error.fate, ProcessFate::NeverStarted, "{case}: {error}");
+            assert!(!error.is_cancelled(), "{case}: {error}");
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("{} s", timeout.as_secs())),
+                "{case}: the refusal names the timeout: {error}"
+            );
+            assert_eq!(
+                fixture.trace.rendered(),
+                Vec::<String>::new(),
+                "{case}: nothing was asked of the funnel or the runtime"
+            );
+        }
+        assert!(
+            list_intents(&fixture.private_root)
+                .expect("the container namespace reads")
+                .is_empty(),
+            "{case}: no intent remains"
+        );
+        assert!(
+            fixture.runtime.fake().container_names().is_empty(),
+            "{case}: no container remains"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `PR12-INV9-CONTAINER-HELPER-CLEANUP-LEASE`: a killed coordinator's Docker
+// helpers keep run admission refused until they are settled
+// ---------------------------------------------------------------------------
+
+#[cfg(target_os = "linux")]
+const LEASE_KILL_CASE: &str = "UPSTROKE_TEST_LEASE_KILL_CASE";
+
+#[cfg(target_os = "linux")]
+const LEASE_KILL_ROOT: &str = "UPSTROKE_TEST_LEASE_KILL_ROOT";
+
+#[cfg(target_os = "linux")]
+const LEASE_KILL_ACK: &str = "UPSTROKE_TEST_LEASE_KILL_ACK";
+
+/// How long each Unix reaper of the killed coordinator takes over its
+/// settlement after it has ended its group (the reaper's own test-build delay,
+/// `UPSTROKE_TEST_CLEANUP_DELAY_MS`): the window in which the contender must
+/// find admission refused while the killed coordinator's reapers are still
+/// settling.
+#[cfg(target_os = "linux")]
+const LEASE_KILL_SETTLEMENT_DELAY_MS: &str = "3000";
+
+/// The `docker` on the killed coordinator's `PATH`. It pauses at an
+/// acknowledged boundary of one bounded runtime question of the worker's
+/// invocation -- the synchronous `docker create` (`worker-create`); the
+/// attached client's `docker start --attach`, on the thread the attached start
+/// spawns (`attached-start`); the credential volume's `docker volume inspect`,
+/// which `create_container` asks before any create and so before any
+/// container name exists (`credential-volume`); or the `docker stop` of the
+/// cancellation that follows a create refused before it was asked
+/// (`pre-create-cancel`, whose volume inspection the stub will not answer) --
+/// by writing its pid to the acknowledgement path (a temporary name, then
+/// `mv`) and becoming a long `sleep`. Otherwise `container inspect` answers the
+/// recorded image id, `ps` answers `created` for the observed name and nothing
+/// for a backstop's label listing, and every other verb succeeds with nothing
+/// to say.
+#[cfg(target_os = "linux")]
+fn lease_kill_stub(case: &str) -> String {
+    let pause = "printf '%s' \"$$\" > \"$UPSTROKE_TEST_LEASE_KILL_ACK.tmp\" && \
+                 mv \"$UPSTROKE_TEST_LEASE_KILL_ACK.tmp\" \"$UPSTROKE_TEST_LEASE_KILL_ACK\" && \
+                 exec sleep 600";
+    let unanswered = "printf '%s\\n' 'Error response from daemon: the lease-kill stub does not \
+                      answer this question' >&2; exit 1";
+    let (volume, create, start, stop) = match case {
+        "worker-create" => ("exit 0", pause, "exit 0", "exit 0"),
+        "attached-start" => ("exit 0", "exit 0", pause, "exit 0"),
+        "credential-volume" => (pause, "exit 0", "exit 0", "exit 0"),
+        "pre-create-cancel" => (unanswered, "exit 0", "exit 0", pause),
+        other => panic!("unknown lease-kill case `{other}`"),
+    };
+    format!(
+        "#!/bin/sh\n\
+         case \"$1\" in\n\
+         volume) {volume} ;;\n\
+         create) {create} ;;\n\
+         start) {start} ;;\n\
+         stop) {stop} ;;\n\
+         container) printf '%s\\n' '{IMAGE_ID}' ;;\n\
+         ps) for argument in \"$@\"; do case \"$argument\" in name=*) printf '%s\\037created\\n' \"${{argument#name=}}\" ;; esac; done ;;\n\
+         *) exit 0 ;;\n\
+         esac\n"
+    )
+}
+
+/// One process of the lease-kill fixture, as it was identified when this
+/// harness first found it: its pid, its start time (the clock ticks
+/// `/proc/<pid>/stat` records, which a reused pid would not share), its
+/// command name, and its process group.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Identified {
+    pid: libc::pid_t,
+    start: u64,
+    comm: String,
+    pgrp: libc::pid_t,
+}
+
+/// `/proc/<pid>/stat` of a process this harness found through its own
+/// children lists, or one the kernel named ended: its identity and its state
+/// letter. A zombie keeps its record, start time included, until collected.
+#[cfg(target_os = "linux")]
+fn stat_of(pid: libc::pid_t) -> Result<(Identified, char), String> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .map_err(|error| format!("/proc/{pid}/stat: {error}"))?;
+    let open = stat
+        .find('(')
+        .ok_or_else(|| format!("/proc/{pid}/stat: no `(`"))?;
+    let (comm, rest) = stat
+        .get(open + 1..)
+        .and_then(|after| after.rsplit_once(')'))
+        .ok_or_else(|| format!("/proc/{pid}/stat: no `)`"))?;
+    let fields: Vec<&str> = rest.split_whitespace().collect();
+    // After the command: state(0) ppid(1) pgrp(2) ... starttime(19).
+    let field = |index: usize| {
+        fields
+            .get(index)
+            .copied()
+            .ok_or_else(|| format!("/proc/{pid}/stat: field {index} is missing"))
+    };
+    let state = field(0)?.chars().next().unwrap_or('?');
+    let pgrp = field(2)?
+        .parse::<libc::pid_t>()
+        .map_err(|error| format!("/proc/{pid}/stat: pgrp: {error}"))?;
+    let start = field(19)?
+        .parse::<u64>()
+        .map_err(|error| format!("/proc/{pid}/stat: starttime: {error}"))?;
+    Ok((
+        Identified {
+            pid,
+            start,
+            comm: comm.to_owned(),
+            pgrp,
+        },
+        state,
+    ))
+}
+
+/// The children of `pid`, read from the children list of each of its tasks
+/// (`/proc/<pid>/task/<tid>/children`). An unreadable list is an error, never
+/// an answer of "no children"; and a list read empty is discovery only, never
+/// evidence that no child remains.
+#[cfg(target_os = "linux")]
+fn children_of(pid: &str) -> Result<Vec<libc::pid_t>, String> {
+    let tasks = std::fs::read_dir(format!("/proc/{pid}/task"))
+        .map_err(|error| format!("/proc/{pid}/task: {error}"))?;
+    let mut children = Vec::new();
+    for task in tasks {
+        let task = task.map_err(|error| format!("/proc/{pid}/task: {error}"))?;
+        let list = task.path().join("children");
+        let text = std::fs::read_to_string(&list)
+            .map_err(|error| format!("{}: {error}", list.display()))?;
+        for child in text.split_whitespace() {
+            children.push(
+                child
+                    .parse::<libc::pid_t>()
+                    .map_err(|error| format!("{}: {child}: {error}", list.display()))?,
+            );
+        }
+    }
+    children.sort_unstable();
+    children.dedup();
+    Ok(children)
+}
+
+/// What is established about a process this harness identified. Only
+/// [`Observed::Live`] is a positive premise of liveness, and only
+/// [`Observed::Ended`] is evidence of an ending; [`Observed::Unknown`] is
+/// neither, and as evidence that something ended it fails.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Observed {
+    /// Its pid answers the start time it was identified with, in a state that
+    /// is neither a zombie nor dead.
+    Live,
+    /// Its ending is an owned fact: this harness collected it with that
+    /// identity, or it has exited (a zombie answering that identity) and waits
+    /// for this harness to collect it.
+    Ended(String),
+    /// Nothing establishes either: an observation that could not be read, or
+    /// a pid now naming another process.
+    Unknown(String),
+}
+
+#[cfg(target_os = "linux")]
+fn observed(who: &Identified, owned: &OwnedDescendants) -> Observed {
+    if let Some((_, status)) = owned
+        .collected
+        .iter()
+        .find(|(collected, _)| collected.pid == who.pid && collected.start == who.start)
+    {
+        return Observed::Ended(format!("collected here, status {status:#x}"));
+    }
+    match stat_of(who.pid) {
+        Ok((now, state)) if now.start == who.start && matches!(state, 'Z' | 'X') => {
+            Observed::Ended(format!("exited (state {state}) and not yet collected"))
+        }
+        Ok((now, _)) if now.start == who.start => Observed::Live,
+        Ok((now, state)) => Observed::Unknown(format!(
+            "pid {} now names another process: {} started at {} (state {state})",
+            who.pid, now.comm, now.start
+        )),
+        Err(error) => Observed::Unknown(error),
+    }
+}
+
+/// What one `waitpid(pid, WNOHANG)` answered.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Waited {
+    Collected(libc::c_int),
+    StillRunning,
+    Interrupted,
+    NotAChild,
+    Failed(i32),
+}
+
+#[cfg(target_os = "linux")]
+fn wait_now(pid: libc::pid_t) -> Waited {
+    let mut status = 0;
+    // SAFETY: `status` is writable and `WNOHANG` blocks on nothing; `pid` is a
+    // child the kernel named ended, and this harness is the only waiter for its
+    // descendants.
+    let answered = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+    if answered == pid {
+        return Waited::Collected(status);
+    }
+    if answered == 0 {
+        return Waited::StillRunning;
+    }
+    match std::io::Error::last_os_error().raw_os_error() {
+        Some(libc::EINTR) => Waited::Interrupted,
+        Some(libc::ECHILD) => Waited::NotAChild,
+        Some(errno) => Waited::Failed(errno),
+        None => Waited::Failed(0),
+    }
+}
+
+/// What `waitid(P_ALL, WEXITED | WNOHANG | WNOWAIT)` answered about this
+/// harness's children, collecting none of them: the kernel's own account.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pending {
+    /// This child has ended and waits to be collected.
+    Ended(libc::pid_t),
+    /// Children remain and none of them has ended.
+    Running,
+    /// No child remains (`ECHILD`).
+    NoChildren,
+    Interrupted,
+    Failed(i32),
+}
+
+#[cfg(target_os = "linux")]
+fn pending_now() -> Pending {
+    // SAFETY: `siginfo_t` is plain data for which zeroes are a valid value, and
+    // a zero `si_pid` is how `WNOHANG` reports that no child has ended.
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    // SAFETY: `info` outlives the call; `WNOWAIT` leaves an ended child
+    // waitable and `WNOHANG` blocks on nothing.
+    let answered = unsafe {
+        libc::waitid(
+            libc::P_ALL,
+            0,
+            &raw mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    };
+    if answered == 0 {
+        // SAFETY: `waitid` returned zero, so `info` is the record it filled,
+        // or the zeroes it left when no child has ended.
+        let pid = unsafe { info.si_pid() };
+        return if pid == 0 {
+            Pending::Running
+        } else {
+            Pending::Ended(pid)
+        };
+    }
+    match std::io::Error::last_os_error().raw_os_error() {
+        Some(libc::EINTR) => Pending::Interrupted,
+        Some(libc::ECHILD) => Pending::NoChildren,
+        Some(errno) => Pending::Failed(errno),
+        None => Pending::Failed(0),
+    }
+}
+
+/// What the kernel's account established when a collection pass stopped.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Accounted {
+    /// `ECHILD`: this harness has no child left, ended or running.
+    NoneRemain,
+    /// Children remain and none of them has ended.
+    SomeRemain,
+    /// The account could not be completed; the reason is recorded.
+    Unaccountable,
+}
+
+/// Every process the killed coordinator leaves, owned by the harness.
+///
+/// The harness makes itself a child subreaper (`PR_SET_CHILD_SUBREAPER`)
+/// before it starts the coordinator, so each process the coordinator forked or
+/// spawned -- the paused stub, every command reaper and its group anchor, the
+/// container-label backstops and any `docker` child a reaper runs -- is
+/// re-parented to the harness when its own parent dies. The harness forks
+/// nothing of its own (its fixture is built by its parent; the coordinator is
+/// started with `std::process::Command`, not the process funnel), and asserts
+/// as much with the kernel before the coordinator starts, so the kernel's later
+/// answer that no child remains is about the coordinator's processes alone.
+/// It finds its children only through its own tasks' children lists -- for
+/// identification and signalling, never as evidence that none remains --
+/// records each one's identity when it first sees it, and collects only
+/// children the kernel names ended (`waitid(P_ALL, ..., WNOWAIT)`), each with
+/// its own `waitpid(pid, WNOHANG)`, reconciling the identity its zombie
+/// answers with the one it was first listed with. It signals a process only
+/// while it is listed as its own unreaped child with the start time it was
+/// identified with, never a process group. It is the only waiter for its
+/// descendants, and makes no wait before its coordinator has been collected
+/// by the coordinator's own handle.
+#[cfg(target_os = "linux")]
+struct OwnedDescendants {
+    /// Every child listed here and not yet collected, as first identified.
+    known: BTreeMap<libc::pid_t, Identified>,
+    /// Every child collected here: the identity its zombie answered, and its
+    /// wait status.
+    collected: Vec<(Identified, libc::c_int)>,
+    errors: Vec<String>,
+}
+
+/// What [`OwnedDescendants::end_and_collect_all`] established.
+#[cfg(target_os = "linux")]
+struct Collection {
+    complete: bool,
+    collected_now: usize,
+    left: Vec<String>,
+}
+
+#[cfg(target_os = "linux")]
+impl OwnedDescendants {
+    fn adopt() -> Self {
+        // SAFETY: `prctl` takes its five arguments by value and reads through
+        // no pointer for `PR_SET_CHILD_SUBREAPER`, which marks only this
+        // isolated harness process.
+        let set = unsafe {
+            libc::syscall(
+                libc::SYS_prctl,
+                libc::c_long::from(libc::PR_SET_CHILD_SUBREAPER),
+                1_i64,
+                0_i64,
+                0_i64,
+                0_i64,
+            )
+        };
+        assert_eq!(
+            set,
+            0,
+            "PR_SET_CHILD_SUBREAPER: {}",
+            std::io::Error::last_os_error()
+        );
+        Self {
+            known: BTreeMap::new(),
+            collected: Vec::new(),
+            errors: Vec::new(),
+        }
+    }
+
+    /// Record `error` once.
+    fn note(&mut self, error: String) {
+        if !self.errors.contains(&error) {
+            self.errors.push(error);
+        }
+    }
+
+    /// The premise of every collection here, asked of the kernel before the
+    /// coordinator starts: this harness has no child at all.
+    fn has_no_child(&mut self) -> bool {
+        loop {
+            match pending_now() {
+                Pending::NoChildren => return true,
+                Pending::Interrupted => {}
+                other => {
+                    self.note(format!(
+                        "before its coordinator started this harness already had a child of its \
+                         own (waitid answered {other:?}), so the kernel's account could not tell \
+                         the coordinator's processes from it"
+                    ));
+                    return false;
+                }
+            }
+        }
+    }
+
+    /// This harness's own children, each identified on first sight -- for
+    /// identification and signalling only; `None` (and an error recorded) when
+    /// a list cannot be read.
+    fn own_children(&mut self) -> Option<Vec<libc::pid_t>> {
+        match children_of("self") {
+            Ok(children) => {
+                for pid in &children {
+                    if !self.known.contains_key(pid) {
+                        match stat_of(*pid) {
+                            Ok((identified, _)) => {
+                                self.known.insert(*pid, identified);
+                            }
+                            Err(error) => self.note(error),
+                        }
+                    }
+                }
+                Some(children)
+            }
+            Err(error) => {
+                self.note(error);
+                None
+            }
+        }
+    }
+
+    /// Collect every child of this harness that the kernel names ended, and
+    /// stop at the kernel's next answer: that children remain and none has
+    /// ended, that none remains, or that the account cannot be made.
+    fn collect_ended(&mut self) -> Accounted {
+        loop {
+            match pending_now() {
+                Pending::Ended(pid) => {
+                    let identity = match stat_of(pid) {
+                        Ok((identity, _)) => identity,
+                        Err(error) => {
+                            self.note(format!("the ended child {pid}: {error}"));
+                            Identified {
+                                pid,
+                                start: 0,
+                                comm: "?".to_owned(),
+                                pgrp: 0,
+                            }
+                        }
+                    };
+                    if let Some(first) = self.known.remove(&pid) {
+                        if first.start != identity.start {
+                            self.note(format!(
+                                "child {pid} was listed with start time {} and ended with {}",
+                                first.start, identity.start
+                            ));
+                        }
+                    }
+                    loop {
+                        match wait_now(pid) {
+                            Waited::Collected(status) => {
+                                self.collected.push((identity, status));
+                                break;
+                            }
+                            Waited::Interrupted => {}
+                            other => {
+                                self.note(format!(
+                                    "the kernel named {pid} ended and waitpid({pid}, WNOHANG) \
+                                     answered {other:?}"
+                                ));
+                                return Accounted::Unaccountable;
+                            }
+                        }
+                    }
+                }
+                Pending::Running => return Accounted::SomeRemain,
+                Pending::NoChildren => return Accounted::NoneRemain,
+                Pending::Interrupted => {}
+                Pending::Failed(errno) => {
+                    self.note(format!("waitid(P_ALL) failed with errno {errno}"));
+                    return Accounted::Unaccountable;
+                }
+            }
+        }
+    }
+
+    /// `true` when every child ever listed here was collected here.
+    fn reconciled(&mut self) -> bool {
+        if self.known.is_empty() {
+            return true;
+        }
+        let never: Vec<String> = self
+            .known
+            .values()
+            .map(|who| format!("{}:{}", who.pid, who.comm))
+            .collect();
+        self.note(format!(
+            "listed here and never collected, though the kernel reports no child: {never:?}"
+        ));
+        false
+    }
+
+    /// Let every process the killed coordinator left end on its own within
+    /// `bound`, sending none a signal, and collect each; `true` only when the
+    /// kernel reports that no child remains, every listed child was collected
+    /// with its identity, and nothing failed.
+    fn settle_naturally_within(&mut self, bound: Duration) -> bool {
+        let deadline = Instant::now() + bound;
+        loop {
+            let _ = self.own_children();
+            match self.collect_ended() {
+                Accounted::NoneRemain => return self.reconciled() && self.errors.is_empty(),
+                Accounted::Unaccountable => return false,
+                Accounted::SomeRemain => {}
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            crate::workspace_manager::fixture::rest(Duration::from_millis(10));
+        }
+    }
+
+    /// End and collect every own child within `bound`: each one still listed
+    /// as this harness's unreaped child, alive and with the start time it was
+    /// identified with, is sent `SIGKILL` by its pid, and every ended one is
+    /// collected, again as grandchildren are re-parented here, until the
+    /// kernel reports that no child remains.
+    fn end_and_collect_all(&mut self, bound: Duration) -> Collection {
+        let deadline = Instant::now() + bound;
+        let before = self.collected.len();
+        loop {
+            let listed = self.own_children();
+            if self.collect_ended() == Accounted::NoneRemain {
+                let reconciled = self.reconciled();
+                return Collection {
+                    complete: reconciled && self.errors.is_empty(),
+                    collected_now: self.collected.len().saturating_sub(before),
+                    left: Vec::new(),
+                };
+            }
+            if Instant::now() >= deadline {
+                let left = self
+                    .own_children()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|pid| {
+                        stat_of(pid).map_or_else(
+                            |error| format!("{pid}: {error}"),
+                            |(who, state)| format!("{pid}:{}:{state}", who.comm),
+                        )
+                    })
+                    .collect();
+                return Collection {
+                    complete: false,
+                    collected_now: self.collected.len().saturating_sub(before),
+                    left,
+                };
+            }
+            for pid in listed.unwrap_or_default() {
+                let Some(known) = self.known.get(&pid) else {
+                    continue;
+                };
+                if stat_of(pid).is_ok_and(|(now, state)| {
+                    now.start == known.start && !matches!(state, 'Z' | 'X')
+                }) {
+                    // SAFETY: `pid` is listed as this harness's own unreaped
+                    // child and still has the start time it was identified
+                    // with, so it names that process and no other: only this
+                    // harness can collect it, so its pid cannot have been
+                    // reused.
+                    let _ = unsafe { libc::kill(pid, libc::SIGKILL) };
+                }
+            }
+            crate::workspace_manager::fixture::rest(Duration::from_millis(10));
+        }
+    }
+}
+
+/// The collector, ended at its drop: on a pass, a failing assertion, a panic,
+/// an internal deadline and the B1 reversal alike, it ends and collects every
+/// descendant within its bound and reports what it did on the harness's
+/// stderr. The fixture belongs to the parent test, which removes it only on a
+/// report of a complete collection and otherwise keeps it: an incomplete
+/// collection is never success.
+#[cfg(target_os = "linux")]
+struct OwnedCollection {
+    owned: OwnedDescendants,
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for OwnedCollection {
+    fn drop(&mut self) {
+        let collection = self.owned.end_and_collect_all(Duration::from_secs(20));
+        let statuses: Vec<String> = self
+            .owned
+            .collected
+            .iter()
+            .map(|(who, status)| format!("{}:{}:{status:#x}", who.pid, who.comm))
+            .collect();
+        crate::workspace_manager::fixture::say(&format!(
+            "lease-kill collection: complete: {}; collected at the drop: {}; collected in all: {} \
+             [{}]; errors: {:?}; left: {:?}",
+            collection.complete,
+            collection.collected_now,
+            self.owned.collected.len(),
+            statuses.join(" "),
+            self.owned.errors,
+            collection.left
+        ));
+    }
+}
+
+/// Where the coordinator writes the pids of the container-label backstops it
+/// armed (`armed_container_reaper_pids`), once its helper has paused, for its
+/// harness to identify them.
+#[cfg(target_os = "linux")]
+const LEASE_KILL_BACKSTOPS: &str = "UPSTROKE_TEST_LEASE_KILL_BACKSTOPS";
+
+/// The coordinator a lease-kill harness kills. As a fresh run's or a resume's
+/// admission does, it takes its physical worktree's lock; as
+/// `TopologyRun::run_concurrently` does, it takes its run lock and enters its
+/// cleanup scope, captures the
+/// scope's paths and hands a worker thread -- inside no scope of its own -- the
+/// `Carried` call a pipeline is given (`engine::topology::preflight::Carried`).
+/// The worker invokes a real `ContainerRunner` over `DockerCli` and the process
+/// funnel, whose stub `docker` pauses at the case's boundary, so this never
+/// returns: its harness kills it there. A second thread reports, once the
+/// helper has paused, the backstops the worker's invocation armed.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "the coordinator a lease-kill harness kills at its acknowledged boundary"]
+fn lease_kill_coordinator_child() {
+    let case = std::env::var(LEASE_KILL_CASE).expect("the harness names the case");
+    let root =
+        PathBuf::from(std::env::var_os(LEASE_KILL_ROOT).expect("the harness names the fixture"));
+    let ack = PathBuf::from(std::env::var_os(LEASE_KILL_ACK).expect("the harness names the pause"));
+    let backstops = PathBuf::from(
+        std::env::var_os(LEASE_KILL_BACKSTOPS).expect("the harness names the report"),
+    );
+    let layout = Layout::of(&root);
+    let _worktree =
+        crate::rundir::WorktreeLock::acquire_in(&layout.repo, &layout.repo.join(".git"))
+            .expect("the coordinator's worktree lock");
+    let lock =
+        crate::rundir::RunLock::acquire(&layout.paths.public).expect("the coordinator's run lock");
+    let _scope = lock.enter_cleanup_scope();
+    let carried = crate::engine::topology::preflight::Carried::new(
+        crate::runner::Cancellation::new(),
+        crate::rundir::active_cleanup_lease_paths(),
+    );
+    let report = |path: &Path, pids: &[libc::pid_t]| {
+        let text: Vec<String> = pids.iter().map(ToString::to_string).collect();
+        let staged = path.with_extension("tmp");
+        std::fs::write(&staged, format!("{}\n", text.join(" "))).expect("the backstop report");
+        std::fs::rename(&staged, path).expect("the backstop report");
+    };
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let deadline = Instant::now() + Duration::from_secs(60);
+            while Instant::now() < deadline {
+                if ack.exists() {
+                    report(
+                        &backstops,
+                        &crate::agent::proc::test_support::armed_container_reaper_pids(),
+                    );
+                    return;
+                }
+                crate::workspace_manager::fixture::rest(Duration::from_millis(5));
+            }
+        });
+        scope.spawn(|| {
+            let identity = RunIdentity {
+                private_root: layout.private_root.clone(),
+                run_id: RUN_ID.to_owned(),
+                run_dir: layout.paths.public.clone(),
+                incarnation: INCARNATION_1.to_owned(),
+                repo_key: repo_key().to_owned(),
+            };
+            let runner = ContainerRunner::new(
+                container_policy(),
+                identity,
+                &layout.repo,
+                fixtures::plain_checkout(&layout.repo.join(".git")),
+                image_environment(),
+                Box::new(crate::runner::container::DockerCli::default()),
+            )
+            .expect("a container runner over DockerCli")
+            .with_view(Box::new(crate::runner::container::DisposableDirView::new(
+                ContainerTrace::off(),
+            )))
+            .with_poll(Duration::from_millis(25));
+            let request = match case.as_str() {
+                "worker-create" | "attached-start" => {
+                    let mut request = gate_request(
+                        ShellKind::Sh.spec("exit 0"),
+                        layout.task_a.clone(),
+                        Duration::from_secs(600),
+                        gate_id(0),
+                    );
+                    if case == "attached-start" {
+                        request.command.stdin = b"the attached start's stdin\n".to_vec();
+                    }
+                    request
+                }
+                // An implementer's invocation mounts its agent's credential
+                // volume, which `create_container` asks the runtime about
+                // before anything is created.
+                "credential-volume" | "pre-create-cancel" => worker_request(
+                    ShellKind::Sh.spec("exit 0"),
+                    layout.task_a.clone(),
+                    AgentId::new("claude-code"),
+                    Duration::from_secs(600),
+                    worker_id(0),
+                ),
+                other => panic!("unknown lease-kill case `{other}`"),
+            };
+            let ended = runner.run_blocking_with(&request, carried.call());
+            panic!(
+                "the paused helper was to hold this worker until its coordinator was killed: \
+                 {ended:?}"
+            );
+        });
+    });
+}
+
+/// The pids written at `path`, once it is there: possibly none.
+#[cfg(target_os = "linux")]
+fn pids_at(path: &Path) -> Option<Vec<libc::pid_t>> {
+    let text = std::fs::read_to_string(path).ok()?;
+    Some(
+        text.split_whitespace()
+            .filter_map(|pid| pid.parse().ok())
+            .collect(),
+    )
+}
+
+/// The owned, bounded harness of the lease-kill guards.
+///
+/// It adopts every process the coordinator will leave ([`OwnedDescendants`],
+/// ended at the drop of [`OwnedCollection`]) and has the kernel confirm it has
+/// no child of its own; starts the coordinator over the fixture its parent
+/// built, with the stub `docker` first on its `PATH`; and waits for the paused
+/// helper's acknowledgement and the backstop reports. While the coordinator is
+/// alive it identifies, through the coordinator's children lists, the covered
+/// processes: the paused helper, the command reaper that registered the
+/// helper's process group (the parent of the group's anchor), and the
+/// container-label backstop, which lists its labels at its coordinator's death and,
+/// finding nothing, ends having taken nothing. Then it kills the coordinator and
+/// collects it, and asks for the run's admission -- the exclusive cleanup probe of
+/// `RunLock::acquire` -- and for a different run's admission to the worktree --
+/// `WorktreeLock`'s scan of every run's cleanup hold -- requiring both refused
+/// while the helper's reaper is live, owing its settlement, both before and
+/// after the ask; asks again until admitted, requiring every covered
+/// process's ending established by then by an owned fact; and lets every
+/// process the coordinator left end on its own and collects it, to the kernel's
+/// own account that none remains. Every wait has its own deadline inside the
+/// parent's isolation bound.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "the isolated harness of the cleanup-lease kill guards"]
+fn lease_kill_harness_child() {
+    use crate::agent::proc::test_support::RunningTestChild;
+    use std::ffi::OsStr;
+
+    let case = std::env::var(LEASE_KILL_CASE).expect("the parent names the case");
+    let root =
+        PathBuf::from(std::env::var_os(LEASE_KILL_ROOT).expect("the parent names the fixture"));
+    let Layout {
+        repo, paths: run, ..
+    } = Layout::of(&root);
+    let public = run.public;
+    let git_dir = repo.join(".git");
+    let bin = root.join("bin");
+    let ack = root.join("paused-helper.pid");
+    let backstops = root.join("backstops.pid");
+    let inherited = std::env::var_os("PATH").unwrap_or_default();
+    let path =
+        std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(&inherited)))
+            .expect("a PATH with the stub first");
+    let (out, err) = (
+        root.join("coordinator.stdout"),
+        root.join("coordinator.stderr"),
+    );
+    let mut owned = OwnedCollection {
+        owned: OwnedDescendants::adopt(),
+    };
+    assert!(
+        owned.owned.has_no_child(),
+        "{case}: before its coordinator starts this harness has no child of its own: {:?}",
+        owned.owned.errors
+    );
+    let mut coordinator = RunningTestChild::start(
+        "runner::container::exec::tests::lease_kill_coordinator_child",
+        &[
+            ("PATH", path.as_os_str()),
+            (LEASE_KILL_CASE, OsStr::new(&case)),
+            (LEASE_KILL_ROOT, root.as_os_str()),
+            (LEASE_KILL_ACK, ack.as_os_str()),
+            (LEASE_KILL_BACKSTOPS, backstops.as_os_str()),
+            (
+                "UPSTROKE_TEST_CLEANUP_DELAY_MS",
+                OsStr::new(LEASE_KILL_SETTLEMENT_DELAY_MS),
+            ),
+        ],
+        &out,
+        &err,
+    );
+    let told = || {
+        format!(
+            "stdout:\n{}\nstderr:\n{}",
+            std::fs::read_to_string(&out).unwrap_or_default(),
+            std::fs::read_to_string(&err).unwrap_or_default()
+        )
+    };
+    let paused_by = Instant::now() + Duration::from_secs(60);
+    let (helper, backstop_pids) = loop {
+        if let (Some(helper), Some(armed)) = (pids_at(&ack), pids_at(&backstops)) {
+            if let Some(helper) = helper.first() {
+                break (*helper, armed);
+            }
+        }
+        if let Some(status) = coordinator.exited() {
+            panic!(
+                "{case}: the coordinator ended ({status:?}) before its helper paused: {}",
+                told()
+            );
+        }
+        assert!(
+            Instant::now() < paused_by,
+            "{case}: the helper never acknowledged its pause, or the backstops were not reported: \
+             {}",
+            told()
+        );
+        crate::workspace_manager::fixture::rest(Duration::from_millis(10));
+    };
+
+    // The covered processes, identified while the coordinator still lives.
+    let coordinator_pid = coordinator
+        .pid()
+        .expect("the coordinator's pid")
+        .to_string();
+    let forks = children_of(&coordinator_pid).expect("the coordinator's children lists");
+    let (helper_id, _) = stat_of(helper).expect("the paused helper's identity");
+    assert!(
+        forks.contains(&helper),
+        "{case}: the paused helper is the coordinator's child"
+    );
+    let mut helper_reaper = None;
+    for fork in &forks {
+        for grandchild in children_of(&fork.to_string()).unwrap_or_default() {
+            if stat_of(grandchild).is_ok_and(|(anchor, _)| anchor.pgrp == helper) {
+                helper_reaper = Some(stat_of(*fork).expect("the helper's reaper's identity").0);
+            }
+        }
+    }
+    let helper_reaper = helper_reaper.unwrap_or_else(|| {
+        panic!("{case}: no child of the coordinator anchors the paused helper's group: {forks:?}")
+    });
+    for pid in &backstop_pids {
+        assert!(
+            forks.contains(pid),
+            "{case}: the backstop {pid} is the coordinator's child"
+        );
+    }
+    let backstop_ids: Vec<Identified> = backstop_pids
+        .iter()
+        .map(|pid| stat_of(*pid).expect("the backstop's identity").0)
+        .collect();
+    let covered: Vec<Identified> = std::iter::once(helper_id.clone())
+        .chain(std::iter::once(helper_reaper.clone()))
+        .chain(backstop_ids.iter().cloned())
+        .collect();
+
+    assert!(
+        coordinator.kill_and_collect().is_some(),
+        "{case}: the coordinator was killed and collected"
+    );
+    let before = observed(&helper_reaper, &owned.owned);
+    let refused = crate::rundir::RunLock::acquire(&public).err();
+    let refused_worktree = crate::rundir::WorktreeLock::acquire_in(&repo, &git_dir).err();
+    let after = observed(&helper_reaper, &owned.owned);
+    let owing = before == Observed::Live && after == Observed::Live;
+    crate::workspace_manager::fixture::say(&format!(
+        "{case}: admission refused while the paused helper's reaper still owed its settlement: \
+         {} (reaper {} before the ask {before:?}, after it {after:?}; the run refused {}; a \
+         different run's worktree admission refused {})",
+        owing && refused.is_some() && refused_worktree.is_some(),
+        helper_reaper.pid,
+        refused.is_some(),
+        refused_worktree.is_some()
+    ));
+    assert!(
+        owing && refused.is_some() && refused_worktree.is_some(),
+        "{case}: with the killed coordinator's helper reaper still settling, the run's admission \
+         and a different run's worktree admission refused (before {before:?}, after {after:?}, \
+         refusals {refused:?} and {refused_worktree:?})"
+    );
+
+    let admitted_by = Instant::now() + Duration::from_secs(60);
+    let admitted = loop {
+        let _ = owned.owned.collect_ended();
+        let admitted =
+            crate::rundir::WorktreeLock::acquire_in(&repo, &git_dir).and_then(|worktree| {
+                crate::rundir::RunLock::acquire(&public).map(|run| (worktree, run))
+            });
+        match admitted {
+            Ok(locks) => break locks,
+            Err(error) => {
+                assert!(
+                    Instant::now() < admitted_by,
+                    "{case}: admission never came once the settlement ended: {error}"
+                );
+                crate::workspace_manager::fixture::rest(Duration::from_millis(20));
+            }
+        }
+    };
+    let at_admission: Vec<(libc::pid_t, String, Observed)> = covered
+        .iter()
+        .map(|who| (who.pid, who.comm.clone(), observed(who, &owned.owned)))
+        .collect();
+    drop(admitted);
+    let not_ended: Vec<&(libc::pid_t, String, Observed)> = at_admission
+        .iter()
+        .filter(|(_, _, observed)| !matches!(observed, Observed::Ended(_)))
+        .collect();
+    crate::workspace_manager::fixture::say(&format!(
+        "{case}: admitted only after every covered helper, reaper and backstop had ended: {} \
+         (at admission {at_admission:?})",
+        not_ended.is_empty()
+    ));
+    assert!(
+        not_ended.is_empty(),
+        "{case}: at admission a covered process was live, or its ending was not established: \
+         {not_ended:?}"
+    );
+
+    let settled = owned.owned.settle_naturally_within(Duration::from_secs(30));
+    let remaining: Vec<String> = owned
+        .owned
+        .own_children()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|pid| {
+            stat_of(pid).map_or_else(
+                |error| format!("{pid}: {error}"),
+                |(who, state)| format!("{pid} {} {state} pgrp {}", who.comm, who.pgrp),
+            )
+        })
+        .collect();
+    crate::workspace_manager::fixture::say(&format!(
+        "{case}: every process the killed coordinator left ended on its own and was collected \
+         here: {settled} ({} collected; remaining {remaining:?}; errors {:?})",
+        owned.owned.collected.len(),
+        owned.owned.errors
+    ));
+    assert!(
+        settled,
+        "{case}: after admission every process the killed coordinator left ended on its own and \
+         this harness collected it, to the kernel's own account (remaining {remaining:?})"
+    );
+}
+
+#[cfg(target_os = "linux")]
+fn the_lease_kill_guard(case: &str) {
+    let fixture = Fixture::built_in_a_bounded_child(&format!("lease-kill-{case}"), false);
+    let bin = fixture.root.join("bin");
+    std::fs::create_dir(&bin).expect("the stub's directory");
+    let stub = bin.join("docker");
+    std::fs::write(&stub, lease_kill_stub(case)).expect("the stub");
+    crate::workspace_manager::fixture::set_mode(&stub, 0o755);
+    let ended = crate::agent::proc::test_support::run_test_isolated(
+        "runner::container::exec::tests::lease_kill_harness_child",
+        &[
+            (LEASE_KILL_CASE, std::ffi::OsStr::new(case)),
+            (LEASE_KILL_ROOT, fixture.root.as_os_str()),
+        ],
+        Duration::from_secs(300),
+    );
+    let said = format!("{}{}", ended.stdout, ended.stderr);
+    let complete = said.contains("lease-kill collection: complete: true;")
+        && !said.contains("running test child collection: not established");
+    if !complete {
+        crate::workspace_manager::fixture::say(&format!(
+            "lease-kill collection FAILED: the fixture at {} is kept for what may still need it",
+            fixture.root.display()
+        ));
+        std::mem::forget(fixture);
+    }
+    assert!(
+        complete,
+        "{case}: the harness ended and collected every process the killed coordinator left, \
+         whatever else it found: {ended}"
+    );
+    assert!(
+        ended.status.is_some_and(|status| status.success()) && ended.stdout.contains("1 passed"),
+        "{case}: the bounded harness ended: {ended}"
+    );
+    for line in [
+        format!(
+            "{case}: admission refused while the paused helper's reaper still owed its \
+             settlement: true"
+        ),
+        format!(
+            "{case}: admitted only after every covered helper, reaper and backstop had ended: \
+             true"
+        ),
+        format!(
+            "{case}: every process the killed coordinator left ended on its own and was \
+             collected here: true"
+        ),
+        "lease-kill collection: complete: true;".to_owned(),
+    ] {
+        assert!(said.contains(&line), "{case}: missing `{line}`: {ended}");
+    }
+}
+
+/// A worker's invocation carries its run's cleanup lease (R28) through the
+/// `ContainerRunner` and `DockerCli`'s bounded question to the process funnel:
+/// with the coordinator killed while the worker's synchronous `docker create`
+/// is paused, run admission refuses while that helper's reaper still owes its
+/// settlement, and is admitted only once it, the helper and the
+/// container-label backstop have ended; every process the coordinator left is
+/// then collected by the harness that owns it.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_killed_coordinators_paused_docker_create_keeps_run_admission_refused_until_it_is_settled() {
+    the_lease_kill_guard("worker-create");
+}
+
+/// The attached start's supervisor thread is inside no cleanup scope, so the
+/// invocation's leases reach its `docker start --attach` by value: with the
+/// coordinator killed while that client is paused, run admission refuses while
+/// its reaper still owes its settlement, and is admitted only once it has
+/// ended.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_killed_coordinators_paused_attached_start_keeps_run_admission_refused_until_it_is_settled() {
+    the_lease_kill_guard("attached-start");
+}
+
+/// The credential volume's inspection is asked before any container is
+/// created, through a runtime method that takes no lease, on the worker's own
+/// thread: the invocation's cleanup scope there is what its helper's reaper
+/// holds. With the coordinator killed while that `docker volume inspect` is
+/// paused, run admission refuses while its reaper still owes its settlement,
+/// and is admitted only once it has ended.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_killed_coordinators_paused_credential_volume_inspection_keeps_run_admission_refused_until_it_is_settled()
+ {
+    the_lease_kill_guard("credential-volume");
+}
+
+/// A create refused before it was asked -- here, because the runtime would not
+/// answer whether the credential volume exists -- is followed by the
+/// invocation's cancellation, whose `docker stop` asks about a container no
+/// create ever named. With the coordinator killed while that stop is paused,
+/// run admission refuses while its reaper still owes its settlement, and is
+/// admitted only once it has ended.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_killed_coordinators_paused_pre_create_cancellation_keeps_run_admission_refused_until_it_is_settled()
+ {
+    the_lease_kill_guard("pre-create-cancel");
+}
+
+// ---------------------------------------------------------------------------
+// `PR12-INV9-CONTAINER-HELPER-CLEANUP-LEASE`: the dormant label backstop's
+// handoff to an engine admitted to the same physical worktree
+// ---------------------------------------------------------------------------
+
+#[cfg(target_os = "linux")]
+const HANDOFF_CASE: &str = "UPSTROKE_TEST_HANDOFF_CASE";
+
+#[cfg(target_os = "linux")]
+const HANDOFF_STATE: &str = "UPSTROKE_TEST_HANDOFF_STATE";
+
+/// A stateful `docker` the killed coordinator's runner, its container-label
+/// backstop and the contender's real startup census all share, so that every
+/// one of them sees the same containers. Each call is appended to
+/// `$UPSTROKE_TEST_HANDOFF_STATE/calls` as its caller's pid (`$PPID`) and its
+/// arguments, so the harness can attribute each removal to its owner. `create`
+/// records the container's labels under `containers/<name>`; `ps` answers the
+/// backstop's `--quiet` listing with names, an observation by `name=` with its
+/// state, and the census's labelled listing with the six fields its format
+/// asks for, each filtered on every `label=` it is given; `rm` removes the
+/// record; every other verb succeeds with nothing to say.
+#[cfg(target_os = "linux")]
+fn handoff_stub() -> String {
+    format!(
+        "#!/bin/sh\n\
+         state=\"$UPSTROKE_TEST_HANDOFF_STATE\"\n\
+         printf '%s %s\\n' \"$PPID\" \"$*\" >> \"$state/calls\"\n\
+         case \"$1\" in\n\
+         create)\n\
+         \x20 name=''; labels=''; previous=''\n\
+         \x20 for argument in \"$@\"; do\n\
+         \x20   case \"$previous\" in\n\
+         \x20     --name) name=\"$argument\" ;;\n\
+         \x20     --label) labels=\"$labels$argument\n\"\n\
+         \x20   esac\n\
+         \x20   previous=\"$argument\"\n\
+         \x20 done\n\
+         \x20 printf '%s' \"$labels\" > \"$state/containers/$name\"\n\
+         \x20 printf '%s\\n' \"$name\" ;;\n\
+         container)\n\
+         \x20 case \"$*\" in\n\
+         \x20   *'{{{{.Image}}}}'*) printf '%s\\n' '{IMAGE_ID}' ;;\n\
+         \x20 esac ;;\n\
+         ps)\n\
+         \x20 quiet=''; named=''; labelled=''; previous=''\n\
+         \x20 for argument in \"$@\"; do\n\
+         \x20   [ \"$argument\" = --quiet ] && quiet=yes\n\
+         \x20   if [ \"$previous\" = --filter ]; then\n\
+         \x20     case \"$argument\" in\n\
+         \x20       name=*) named=\"${{argument#name=}}\" ;;\n\
+         \x20       label=*) labelled=\"$labelled ${{argument#label=}}\" ;;\n\
+         \x20     esac\n\
+         \x20   fi\n\
+         \x20   previous=\"$argument\"\n\
+         \x20 done\n\
+         \x20 for record in \"$state\"/containers/*; do\n\
+         \x20   [ -f \"$record\" ] || continue\n\
+         \x20   name=$(basename \"$record\")\n\
+         \x20   [ -n \"$named\" ] && [ \"$name\" != \"$named\" ] && continue\n\
+         \x20   selected=yes\n\
+         \x20   for label in $labelled; do grep -qxF \"$label\" \"$record\" || selected=''; done\n\
+         \x20   [ -n \"$selected\" ] || continue\n\
+         \x20   if [ -n \"$quiet\" ]; then printf '%s\\n' \"$name\"\n\
+         \x20   elif [ -n \"$named\" ]; then printf '%s\\037created\\n' \"$name\"\n\
+         \x20   else\n\
+         \x20     value() {{ sed -n \"s/^$1=//p\" \"$record\" | head -n 1; }}\n\
+         \x20     printf '%s\\037%s\\037%s\\037%s\\037%s\\037%s\\n' \"$name\" \
+         \"$(value upstroke.private_root)\" \"$(value upstroke.run)\" \
+         \"$(value upstroke.run_dir)\" \"$(value upstroke.incarnation)\" \
+         \"$(value upstroke.invocation)\"\n\
+         \x20   fi\n\
+         \x20 done ;;\n\
+         rm)\n\
+         \x20 for argument in \"$@\"; do\n\
+         \x20   case \"$argument\" in rm|-*) ;; *) rm -f \"$state/containers/$argument\" ;; esac\n\
+         \x20 done ;;\n\
+         *) ;;\n\
+         esac\n\
+         exit 0\n"
+    )
+}
+
+/// The killed coordinator's runner pauses here: at `Container.Start`'s
+/// `Before`, after the intent, the view and the container exist and every
+/// helper question before the start (the create, its image inspection) has
+/// returned -- so no helper question is in flight -- and before the start is
+/// asked. It acknowledges with its pid and waits to be killed.
+#[cfg(target_os = "linux")]
+struct PausedBeforeTheStart {
+    ack: PathBuf,
+}
+
+#[cfg(target_os = "linux")]
+impl crate::runner::container::ContainerHooks for PausedBeforeTheStart {
+    fn phase(
+        &mut self,
+        site: crate::topology::effects::EffectSiteId,
+        phase: crate::topology::effects::HookPhase,
+    ) -> crate::topology::effects::Injection {
+        use crate::topology::effects::{ContainerSite, EffectSiteId, HookPhase};
+        if site == EffectSiteId::Container(ContainerSite::Start) && phase == HookPhase::Before {
+            let staged = self.ack.with_extension("tmp");
+            std::fs::write(&staged, std::process::id().to_string()).expect("the pause's ack");
+            std::fs::rename(&staged, &self.ack).expect("the pause's ack");
+            let until = Instant::now() + Duration::from_secs(300);
+            while Instant::now() < until {
+                crate::workspace_manager::fixture::rest(Duration::from_millis(100));
+            }
+            panic!("the coordinator paused before its start was never killed");
+        }
+        crate::topology::effects::Injection::Proceed
+    }
+}
+
+/// The coordinator a handoff harness kills between two helper questions. As a
+/// fresh run's admission and its run do, it holds its physical worktree's lock
+/// and its run lock and enters its cleanup scope; a worker thread inside no
+/// scope of its own invokes a real `ContainerRunner` over `DockerCli` and the
+/// process funnel with the `Carried` call a pipeline is given, so the runner
+/// arms its dormant label backstop over the run's lease paths; the runner
+/// pauses before its start ([`PausedBeforeTheStart`]) and a second thread
+/// reports the backstop's pid. The backstop renders the test gate the harness
+/// names in this process's environment.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "the coordinator a handoff harness kills between two helper questions"]
+fn handoff_coordinator_child() {
+    let root =
+        PathBuf::from(std::env::var_os(LEASE_KILL_ROOT).expect("the harness names the fixture"));
+    let ack = PathBuf::from(std::env::var_os(LEASE_KILL_ACK).expect("the harness names the pause"));
+    let backstops = PathBuf::from(
+        std::env::var_os(LEASE_KILL_BACKSTOPS).expect("the harness names the report"),
+    );
+    let layout = Layout::of(&root);
+    let _worktree =
+        crate::rundir::WorktreeLock::acquire_in(&layout.repo, &layout.repo.join(".git"))
+            .expect("the coordinator's worktree lock");
+    let lock =
+        crate::rundir::RunLock::acquire(&layout.paths.public).expect("the coordinator's run lock");
+    let _scope = lock.enter_cleanup_scope();
+    let carried = crate::engine::topology::preflight::Carried::new(
+        crate::runner::Cancellation::new(),
+        crate::rundir::active_cleanup_lease_paths(),
+    );
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let deadline = Instant::now() + Duration::from_secs(60);
+            while Instant::now() < deadline {
+                if ack.exists() {
+                    let armed: Vec<String> =
+                        crate::agent::proc::test_support::armed_container_reaper_pids()
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect();
+                    let staged = backstops.with_extension("tmp");
+                    std::fs::write(&staged, format!("{}\n", armed.join(" ")))
+                        .expect("the backstop report");
+                    std::fs::rename(&staged, &backstops).expect("the backstop report");
+                    return;
+                }
+                crate::workspace_manager::fixture::rest(Duration::from_millis(5));
+            }
+        });
+        scope.spawn(|| {
+            let identity = RunIdentity {
+                private_root: layout.private_root.clone(),
+                run_id: RUN_ID.to_owned(),
+                run_dir: layout.paths.public.clone(),
+                incarnation: INCARNATION_1.to_owned(),
+                repo_key: repo_key().to_owned(),
+            };
+            let runner = ContainerRunner::new(
+                container_policy(),
+                identity,
+                &layout.repo,
+                fixtures::plain_checkout(&layout.repo.join(".git")),
+                image_environment(),
+                Box::new(crate::runner::container::DockerCli::default()),
+            )
+            .expect("a container runner over DockerCli")
+            .with_view(Box::new(crate::runner::container::DisposableDirView::new(
+                ContainerTrace::off(),
+            )))
+            .with_hooks(Box::new(PausedBeforeTheStart { ack: ack.clone() }))
+            .with_poll(Duration::from_millis(25));
+            let request = gate_request(
+                ShellKind::Sh.spec("exit 0"),
+                layout.task_a.clone(),
+                Duration::from_secs(600),
+                gate_id(0),
+            );
+            let ended = runner.run_blocking_with(&request, carried.call());
+            panic!(
+                "the pause before the start was to hold this worker until its coordinator was \
+                 killed: {ended:?}"
+            );
+        });
+    });
+}
+
+/// The distinct fresh run a handoff harness admits to the coordinator's
+/// physical worktree, in a process of its own so that the harness forks
+/// nothing itself and every process it collects is the coordinator's or this
+/// contender's. It takes the worktree lock -- `WorktreeLock`'s admission and
+/// its scan of every run's cleanup hold -- and says so; on the harness's word
+/// runs its real startup container census as a fresh run of another
+/// incarnation over the stub and reports what it reclaimed; on the harness's
+/// word lets the lock go and ends.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "the distinct fresh run a handoff harness admits to the worktree"]
+fn handoff_contender_child() {
+    use crate::runner::container::census::{Census, CensusStart, run_startup_census};
+
+    let root =
+        PathBuf::from(std::env::var_os(LEASE_KILL_ROOT).expect("the harness names the fixture"));
+    let words = root.join("contender");
+    let layout = Layout::of(&root);
+    let tell = |name: &str, text: &str| {
+        let staged = words.join(format!("{name}.tmp"));
+        std::fs::write(&staged, text).expect("a word to the harness");
+        std::fs::rename(&staged, words.join(name)).expect("a word to the harness");
+    };
+    let hear = |name: &str| {
+        let by = Instant::now() + Duration::from_secs(120);
+        while !words.join(name).exists() {
+            assert!(Instant::now() < by, "the harness never said `{name}`");
+            crate::workspace_manager::fixture::rest(Duration::from_millis(5));
+        }
+    };
+    let worktree = crate::rundir::WorktreeLock::acquire_in(&layout.repo, &layout.repo.join(".git"))
+        .expect("a distinct fresh run's physical worktree admission");
+    tell("admitted", &std::process::id().to_string());
+    hear("census");
+    let complete = run_startup_census(
+        &mut crate::runner::container::NoHooks,
+        &Census {
+            private_root: &layout.private_root,
+            start: &CensusStart::FreshRun {
+                incarnation: INCARNATION_2.to_owned(),
+            },
+            runtime: &crate::runner::container::DockerCli::default(),
+            liveness: &crate::runner::container::runtime::LockProbe,
+            view: &crate::runner::container::DisposableDirView::new(ContainerTrace::off()),
+        },
+    )
+    .expect("the contender's startup census");
+    let reclaimed: Vec<String> = complete
+        .report()
+        .reclaimed
+        .iter()
+        .map(|reclaimed| format!("{} {}", reclaimed.name.as_str(), reclaimed.ownership.name()))
+        .collect();
+    tell("reclaimed", &reclaimed.join("\n"));
+    hear("release");
+    drop(worktree);
+}
+
+/// Whether the backstop has reached `point` of its ending: it writes one byte to
+/// the point's arrival file, which the harness created empty to arm the point.
+#[cfg(target_os = "linux")]
+fn arrived_at(gate: &Path, point: &str) -> bool {
+    std::fs::metadata(format!("{}.{point}.arrived", gate.display()))
+        .is_ok_and(|metadata| metadata.len() > 0)
+}
+
+/// The calls the stub recorded from `pid`, each as its arguments.
+#[cfg(target_os = "linux")]
+fn calls_of(state: &Path, pid: libc::pid_t) -> Vec<String> {
+    let prefix = format!("{pid} ");
+    std::fs::read_to_string(state.join("calls"))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| line.strip_prefix(&prefix).map(str::to_owned))
+        .collect()
+}
+
+/// The containers the stub's state holds, by name.
+#[cfg(target_os = "linux")]
+fn stub_containers(state: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(state.join("containers"))
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
+/// The owned, bounded harness of the handoff guards, under the same collection
+/// as the lease-kill harness ([`OwnedDescendants`]).
+///
+/// It starts the coordinator over the fixture its parent built, with the
+/// stateful stub first on its `PATH` and the backstop gate named, and waits for
+/// the pause before the start: the intent, the view and the container exist,
+/// and -- because every helper question's reaper holds the run's cleanup lease
+/// while it lives -- no cleanup hold means no question in flight, and that the
+/// dormant backstop holds nothing. It kills the coordinator and collects it.
+/// Then, by case, it schedules a distinct fresh run's admission to the same
+/// physical worktree around the backstop's ending -- the contender is a process
+/// of its own ([`handoff_contender_child`]), so the harness forks nothing
+/// itself and asks only lock questions, which start no process:
+///
+/// * `early` -- the backstop held before its listing; the contender takes the
+///   worktree lock (admission and its scan); the backstop, released, lists,
+///   cannot take the worktree, and ends having removed nothing; the contender's
+///   real startup census then reclaims the container, its intent and its view.
+/// * `middle` -- the backstop held after its listing, exactly where a backstop
+///   that took its cleanup hold before the worktree's lock would take it; the
+///   contender takes the worktree lock; the backstop, released, cannot take the
+///   worktree and is held again before it ends; inside that interval, with the
+///   backstop alive, the run shows no cleanup hold and the contender's census
+///   classifies the dead run's container as a dead owner's and reclaims it,
+///   its intent and its view; only then does the backstop end, having removed
+///   nothing.
+/// * `late` -- the backstop held after it has taken the worktree's lock and its
+///   cleanup hold; a distinct run's worktree admission and the run's own
+///   admission are both refused; the backstop, released, kills and removes the
+///   container and ends; the contender is then admitted and its census reclaims
+///   the intent and view the backstop never touches.
+///
+/// Every removal is attributed by the caller's pid in the stub's call log, so
+/// exactly one owner removes the container. Every direct child has exactly one
+/// waiter: the coordinator and the contender are collected by their own
+/// [`RunningTestChild`] handles, which fail closed; the collector here reaps
+/// nothing while a handle owns a child -- the backstop's ending is read from
+/// its zombie, which [`observed`] counts as an ending -- so it collects only
+/// the adopted descendants, once every handle has collected its own. Every
+/// process the coordinator and the contender left ends and is collected here,
+/// to the kernel's own account.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "the isolated harness of the handoff guards"]
+fn handoff_harness_child() {
+    use crate::agent::proc::test_support::RunningTestChild;
+
+    let case = std::env::var(HANDOFF_CASE).expect("the parent names the case");
+    let root =
+        PathBuf::from(std::env::var_os(LEASE_KILL_ROOT).expect("the parent names the fixture"));
+    let state = PathBuf::from(std::env::var_os(HANDOFF_STATE).expect("the parent names the state"));
+    let layout = Layout::of(&root);
+    let public = layout.paths.public.clone();
+    let git_dir = layout.repo.join(".git");
+    let bin = root.join("bin");
+    let ack = root.join("paused-before-the-start.pid");
+    let backstops = root.join("backstops.pid");
+    let gate = root.join("gate");
+    let armed: &[&str] = match case.as_str() {
+        "early" => &["death"],
+        "middle" => &["listed", "decided"],
+        "late" => &["decided"],
+        other => panic!("unknown handoff case `{other}`"),
+    };
+    for point in armed {
+        std::fs::write(format!("{}.{point}.arrived", gate.display()), b"")
+            .expect("arm a gate point");
+    }
+    let release = |point: &str| {
+        std::fs::write(format!("{}.{point}", gate.display()), b"").expect("release a gate point");
+    };
+    let inherited = std::env::var_os("PATH").unwrap_or_default();
+    let path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&inherited)))
+        .expect("a PATH with the stub first");
+    let (out, err) = (
+        root.join("coordinator.stdout"),
+        root.join("coordinator.stderr"),
+    );
+    let mut owned = OwnedCollection {
+        owned: OwnedDescendants::adopt(),
+    };
+    assert!(
+        owned.owned.has_no_child(),
+        "{case}: before its coordinator starts this harness has no child of its own: {:?}",
+        owned.owned.errors
+    );
+    let mut coordinator = RunningTestChild::start(
+        "runner::container::exec::tests::handoff_coordinator_child",
+        &[
+            ("PATH", path.as_os_str()),
+            (LEASE_KILL_ROOT, root.as_os_str()),
+            (LEASE_KILL_ACK, ack.as_os_str()),
+            (LEASE_KILL_BACKSTOPS, backstops.as_os_str()),
+            (HANDOFF_STATE, state.as_os_str()),
+            (crate::agent::proc::BACKSTOP_GATE, gate.as_os_str()),
+        ],
+        &out,
+        &err,
+    );
+    let told = || {
+        format!(
+            "stdout:\n{}\nstderr:\n{}",
+            std::fs::read_to_string(&out).unwrap_or_default(),
+            std::fs::read_to_string(&err).unwrap_or_default()
+        )
+    };
+    let paused_by = Instant::now() + Duration::from_secs(60);
+    let reported = loop {
+        if pids_at(&ack).is_some_and(|pids| !pids.is_empty()) {
+            if let Some(pids) = pids_at(&backstops) {
+                break pids;
+            }
+        }
+        if let Some(status) = coordinator.exited() {
+            panic!(
+                "{case}: the coordinator ended ({status:?}) before its pause: {}",
+                told()
+            );
+        }
+        assert!(
+            Instant::now() < paused_by,
+            "{case}: the coordinator never paused before its start: {}",
+            told()
+        );
+        crate::workspace_manager::fixture::rest(Duration::from_millis(10));
+    };
+    let coordinator_pid = coordinator
+        .pid()
+        .expect("the coordinator's pid")
+        .to_string();
+    let forks = children_of(&coordinator_pid).expect("the coordinator's children lists");
+    let [backstop_pid] = reported.as_slice() else {
+        panic!("{case}: exactly one backstop was armed: {reported:?}");
+    };
+    assert!(
+        forks.contains(backstop_pid),
+        "{case}: the backstop {backstop_pid} is the coordinator's child"
+    );
+    let (backstop, _) = stat_of(*backstop_pid).expect("the backstop's identity");
+    let [container] = stub_containers(&state)
+        .try_into()
+        .unwrap_or_else(|left: Vec<String>| {
+            panic!("{case}: the paused invocation created exactly one container: {left:?}")
+        });
+    let intents = || {
+        crate::runner::container::list_intents(&layout.private_root)
+            .expect("the container namespace lists")
+    };
+    let [intent] = intents().try_into().unwrap_or_else(|left: Vec<_>| {
+        panic!("{case}: the paused invocation wrote exactly one intent: {left:?}")
+    });
+    assert_eq!(
+        intent.name.as_str(),
+        container,
+        "{case}: the intent names the container"
+    );
+    let view = crate::runner::container::census::view_path(&layout.private_root, &intent.name);
+    let quiet_before_the_kill =
+        !crate::rundir::observe_cleanup_hold(&public, &mut crate::rundir::NoHooks);
+    crate::workspace_manager::fixture::say(&format!(
+        "{case}: between two helper questions nothing held the run's cleanup lease, the dormant \
+         backstop included: {quiet_before_the_kill} (view present {})",
+        view.exists()
+    ));
+    assert!(
+        quiet_before_the_kill && view.exists(),
+        "{case}: the coordinator paused between helper questions with its backstop dormant and \
+         its view mounted: {}",
+        told()
+    );
+
+    assert!(
+        coordinator.kill_and_collect().is_some(),
+        "{case}: the coordinator was killed and collected"
+    );
+    let wait_for = |what: &str, done: &dyn Fn() -> bool| {
+        let by = Instant::now() + Duration::from_secs(60);
+        while !done() {
+            assert!(Instant::now() < by, "{case}: never {what}: {}", told());
+            crate::workspace_manager::fixture::rest(Duration::from_millis(5));
+        }
+    };
+    let ended = |owned: &OwnedDescendants| {
+        let by = Instant::now() + Duration::from_secs(60);
+        loop {
+            let now = observed(&backstop, owned);
+            if matches!(now, Observed::Ended(_)) || Instant::now() >= by {
+                break now;
+            }
+            crate::workspace_manager::fixture::rest(Duration::from_millis(10));
+        }
+    };
+    let listing = |call: &String| call.starts_with("ps ") && call.contains("--quiet");
+    let words = root.join("contender");
+    std::fs::create_dir(&words).expect("the contender's words");
+    let contender_vars = [
+        ("PATH", path.as_os_str()),
+        (LEASE_KILL_ROOT, root.as_os_str()),
+        (HANDOFF_STATE, state.as_os_str()),
+    ];
+    let contender_said =
+        || std::fs::read_to_string(root.join("contender.stderr")).unwrap_or_default();
+    let start_contender = || {
+        let mut contender = RunningTestChild::start(
+            "runner::container::exec::tests::handoff_contender_child",
+            &contender_vars,
+            &root.join("contender.stdout"),
+            &root.join("contender.stderr"),
+        );
+        let by = Instant::now() + Duration::from_secs(60);
+        while !words.join("admitted").exists() {
+            if let Some(status) = contender.exited() {
+                panic!(
+                    "{case}: the contender ended ({status:?}) before its admission: {}",
+                    contender_said()
+                );
+            }
+            assert!(
+                Instant::now() < by,
+                "{case}: the contender was never admitted to the worktree: {}",
+                std::fs::read_to_string(root.join("contender.stderr")).unwrap_or_default()
+            );
+            crate::workspace_manager::fixture::rest(Duration::from_millis(5));
+        }
+        contender
+    };
+    let census = |contender: &mut RunningTestChild| {
+        std::fs::write(words.join("census"), b"").expect("the contender's word");
+        let by = Instant::now() + Duration::from_secs(60);
+        loop {
+            if let Ok(text) = std::fs::read_to_string(words.join("reclaimed")) {
+                break text.lines().map(str::to_owned).collect::<Vec<String>>();
+            }
+            if let Some(status) = contender.exited() {
+                panic!(
+                    "{case}: the contender ended ({status:?}) before its census reported: {}",
+                    contender_said()
+                );
+            }
+            assert!(
+                Instant::now() < by,
+                "{case}: the contender's census never reported: {}",
+                std::fs::read_to_string(root.join("contender.stderr")).unwrap_or_default()
+            );
+            crate::workspace_manager::fixture::rest(Duration::from_millis(5));
+        }
+    };
+    let finish = |mut contender: RunningTestChild| {
+        std::fs::write(words.join("release"), b"").expect("the contender's word");
+        let by = Instant::now() + Duration::from_secs(60);
+        loop {
+            if let Some(status) = contender.exited() {
+                break status.success();
+            }
+            assert!(Instant::now() < by, "{case}: the contender never ended");
+            crate::workspace_manager::fixture::rest(Duration::from_millis(10));
+        }
+    };
+    let dead_owner = format!("{container} foreign-run-dead-owner");
+
+    match case.as_str() {
+        "early" => {
+            wait_for("held at its death", &|| arrived_at(&gate, "death"));
+            let mut contender = start_contender();
+            release("death");
+            let ending = ended(&owned.owned);
+            let calls = calls_of(&state, backstop.pid);
+            let stood_down = matches!(ending, Observed::Ended(_))
+                && calls.len() == 1
+                && calls.iter().all(listing)
+                && stub_containers(&state) == [container.clone()];
+            crate::workspace_manager::fixture::say(&format!(
+                "{case}: the backstop stood down for the admitted engine, having listed and \
+                 removed nothing: {stood_down} ({ending:?}; its calls {calls:?})"
+            ));
+            assert!(
+                stood_down,
+                "{case}: the backstop stood down: {ending:?} {calls:?}"
+            );
+            let reclaimed = census(&mut contender);
+            let converged = reclaimed == [dead_owner.clone()]
+                && stub_containers(&state).is_empty()
+                && intents().is_empty()
+                && !view.exists();
+            crate::workspace_manager::fixture::say(&format!(
+                "{case}: the admitted engine's census reclaimed the container, its intent and \
+                 its view: {converged} ({reclaimed:?})"
+            ));
+            assert!(converged, "{case}: the census converged: {reclaimed:?}");
+            assert!(finish(contender), "{case}: the contender ended");
+        }
+        "middle" => {
+            wait_for("held after its listing", &|| arrived_at(&gate, "listed"));
+            let listed = calls_of(&state, backstop.pid);
+            let unheld = !crate::rundir::observe_cleanup_hold(&public, &mut crate::rundir::NoHooks);
+            assert!(
+                listed.len() == 1 && listed.iter().all(listing) && unheld,
+                "{case}: the backstop listed its labels holding nothing: {listed:?}, unheld {unheld}"
+            );
+            let mut contender = start_contender();
+            release("listed");
+            wait_for("held after its exclusion was decided", &|| {
+                arrived_at(&gate, "decided")
+            });
+            let alive_before = observed(&backstop, &owned.owned);
+            let no_late_hold =
+                !crate::rundir::observe_cleanup_hold(&public, &mut crate::rundir::NoHooks)
+                    && !crate::rundir::is_running(&public);
+            let reclaimed = census(&mut contender);
+            let alive_after = observed(&backstop, &owned.owned);
+            let in_the_window = alive_before == Observed::Live && alive_after == Observed::Live;
+            let converged = reclaimed == [dead_owner.clone()]
+                && stub_containers(&state).is_empty()
+                && intents().is_empty()
+                && !view.exists();
+            crate::workspace_manager::fixture::say(&format!(
+                "{case}: inside the window the run showed no hold of the backstop's and the \
+                 admitted engine's census reclaimed the container, its intent and its view: {} \
+                 (backstop {alive_before:?} then {alive_after:?}; no late hold {no_late_hold}; \
+                 reclaimed {reclaimed:?})",
+                in_the_window && no_late_hold && converged
+            ));
+            assert!(
+                in_the_window && no_late_hold && converged,
+                "{case}: the census inside the window owned the cleanup (backstop \
+                 {alive_before:?}/{alive_after:?}, no late hold {no_late_hold}, reclaimed \
+                 {reclaimed:?})"
+            );
+            release("decided");
+            let ending = ended(&owned.owned);
+            let calls = calls_of(&state, backstop.pid);
+            let removed_nothing = matches!(ending, Observed::Ended(_))
+                && calls.len() == 1
+                && calls.iter().all(listing);
+            crate::workspace_manager::fixture::say(&format!(
+                "{case}: the backstop then ended having removed nothing: {removed_nothing} \
+                 ({ending:?}; its calls {calls:?})"
+            ));
+            assert!(removed_nothing, "{case}: {ending:?} {calls:?}");
+            assert!(finish(contender), "{case}: the contender ended");
+        }
+        "late" => {
+            wait_for("held with its exclusion established", &|| {
+                arrived_at(&gate, "decided")
+            });
+            let held = crate::rundir::observe_cleanup_hold(&public, &mut crate::rundir::NoHooks);
+            let distinct = crate::rundir::WorktreeLock::acquire_in(&layout.repo, &git_dir).err();
+            let same_run = crate::rundir::RunLock::acquire(&public).err();
+            let untouched = stub_containers(&state) == [container.clone()];
+            let excluded = held && distinct.is_some() && same_run.is_some() && untouched;
+            crate::workspace_manager::fixture::say(&format!(
+                "{case}: with the backstop holding the worktree and its cleanup lease, a distinct \
+                 run's admission and the run's own were refused: {excluded} (held {held}; \
+                 {distinct:?}; {same_run:?})"
+            ));
+            assert!(
+                excluded,
+                "{case}: {held} {distinct:?} {same_run:?} {untouched}"
+            );
+            release("decided");
+            let ending = ended(&owned.owned);
+            let calls = calls_of(&state, backstop.pid);
+            let removal = format!("rm --force --volumes {container}");
+            let acted = matches!(ending, Observed::Ended(_))
+                && calls.len() == 4
+                && listing(&calls[0])
+                && calls[1] == format!("kill {container}")
+                && calls[2] == removal
+                && listing(&calls[3])
+                && stub_containers(&state).is_empty();
+            crate::workspace_manager::fixture::say(&format!(
+                "{case}: the backstop removed the container and ended: {acted} ({ending:?}; its \
+                 calls {calls:?})"
+            ));
+            assert!(acted, "{case}: {ending:?} {calls:?}");
+            let mut contender = start_contender();
+            let reclaimed = census(&mut contender);
+            let converged =
+                reclaimed == [dead_owner.clone()] && intents().is_empty() && !view.exists();
+            crate::workspace_manager::fixture::say(&format!(
+                "{case}: the admitted engine's census reclaimed the intent and the view the \
+                 backstop never touches: {converged} ({reclaimed:?})"
+            ));
+            assert!(converged, "{case}: {reclaimed:?}");
+            assert!(finish(contender), "{case}: the contender ended");
+        }
+        other => panic!("unknown handoff case `{other}`"),
+    }
+
+    let settled = owned.owned.settle_naturally_within(Duration::from_secs(30));
+    crate::workspace_manager::fixture::say(&format!(
+        "{case}: every process the killed coordinator left ended on its own and was collected \
+         here: {settled} ({} collected; errors {:?})",
+        owned.owned.collected.len(),
+        owned.owned.errors
+    ));
+    assert!(
+        settled,
+        "{case}: every process the killed coordinator left ended on its own and this harness \
+         collected it, to the kernel's own account"
+    );
+}
+
+#[cfg(target_os = "linux")]
+fn the_handoff_guard(case: &str, lines: &[&str]) {
+    let fixture = Fixture::built_in_a_bounded_child(&format!("handoff-{case}"), false);
+    let bin = fixture.root.join("bin");
+    std::fs::create_dir(&bin).expect("the stub's directory");
+    let stub = bin.join("docker");
+    std::fs::write(&stub, handoff_stub()).expect("the stub");
+    crate::workspace_manager::fixture::set_mode(&stub, 0o755);
+    let state = fixture.root.join("docker-state");
+    std::fs::create_dir_all(state.join("containers")).expect("the stub's state");
+    let inherited = std::env::var_os("PATH").unwrap_or_default();
+    let path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&inherited)))
+        .expect("a PATH with the stub first");
+    let ended = crate::agent::proc::test_support::run_test_isolated(
+        "runner::container::exec::tests::handoff_harness_child",
+        &[
+            (HANDOFF_CASE, std::ffi::OsStr::new(case)),
+            (LEASE_KILL_ROOT, fixture.root.as_os_str()),
+            (HANDOFF_STATE, state.as_os_str()),
+            ("PATH", path.as_os_str()),
+        ],
+        Duration::from_secs(300),
+    );
+    let said = format!("{}{}", ended.stdout, ended.stderr);
+    let complete = said.contains("lease-kill collection: complete: true;")
+        && !said.contains("running test child collection: not established");
+    if !complete {
+        crate::workspace_manager::fixture::say(&format!(
+            "handoff collection FAILED: the fixture at {} is kept for what may still need it",
+            fixture.root.display()
+        ));
+        std::mem::forget(fixture);
+    }
+    assert!(
+        complete,
+        "{case}: the harness ended and collected every process the killed coordinator left, \
+         whatever else it found: {ended}"
+    );
+    assert!(
+        ended.status.is_some_and(|status| status.success()) && ended.stdout.contains("1 passed"),
+        "{case}: the bounded harness ended: {ended}"
+    );
+    let required = std::iter::once(format!(
+        "{case}: between two helper questions nothing held the run's cleanup lease, the dormant \
+         backstop included: true"
+    ))
+    .chain(lines.iter().map(|line| format!("{case}: {line}: true")))
+    .chain([
+        format!(
+            "{case}: every process the killed coordinator left ended on its own and was \
+             collected here: true"
+        ),
+        "lease-kill collection: complete: true;".to_owned(),
+    ]);
+    for line in required {
+        assert!(said.contains(&line), "{case}: missing `{line}`: {ended}");
+    }
+}
+
+/// A distinct fresh run admitted to the worktree before the dead coordinator's
+/// backstop lists anything: the backstop cannot take the worktree, stands down
+/// having removed nothing, and the admitted engine's census reclaims the
+/// container, its intent and its view.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_backstop_stands_down_for_an_engine_admitted_to_the_worktree_before_its_listing() {
+    the_handoff_guard(
+        "early",
+        &[
+            "the backstop stood down for the admitted engine, having listed and removed nothing",
+            "the admitted engine's census reclaimed the container, its intent and its view",
+        ],
+    );
+}
+
+/// The middle window: a distinct fresh run passes physical worktree admission
+/// after the dead coordinator's backstop has listed its container, at the point
+/// where a backstop taking its cleanup hold before the worktree's lock would
+/// take it; with the backstop alive and not yet ended, the run shows no hold of
+/// its, so the admitted engine's own census owns the cleanup and reclaims the
+/// container, its intent and its view; the backstop then ends having removed
+/// nothing.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_engine_admitted_between_a_backstops_listing_and_its_ending_owns_and_converges_the_cleanup() {
+    the_handoff_guard(
+        "middle",
+        &[
+            "inside the window the run showed no hold of the backstop's and the admitted \
+             engine's census reclaimed the container, its intent and its view",
+            "the backstop then ended having removed nothing",
+        ],
+    );
+}
+
+/// The backstop first: holding the worktree's lock and its cleanup lease, it
+/// refuses a distinct run's worktree admission and the run's own admission,
+/// removes the container and ends; the engine admitted after it reclaims the
+/// intent and the view.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_backstop_that_holds_the_worktree_refuses_every_admission_until_it_has_removed_its_containers()
+{
+    the_handoff_guard(
+        "late",
+        &[
+            "with the backstop holding the worktree and its cleanup lease, a distinct run's \
+             admission and the run's own were refused",
+            "the backstop removed the container and ended",
+            "the admitted engine's census reclaimed the intent and the view the backstop never \
+             touches",
+        ],
+    );
+}
+
+/// A child that ends at once, for the focused ownership check of
+/// [`RunningTestChild`]'s cleanup.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "a child that ends at once, for the running-test-child ownership check"]
+fn a_child_that_ends_at_once() {}
+
+/// The isolated harness of that check: it starts the child through a handle,
+/// plays the other waiter itself by collecting the child by its pid, then ends
+/// the handle and says whether the handle credited anything.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "the isolated harness of the running-test-child ownership check"]
+fn running_test_child_ownership_harness_child() {
+    use crate::agent::proc::test_support::RunningTestChild;
+
+    let dir =
+        PathBuf::from(std::env::var_os(LEASE_KILL_ROOT).expect("the parent names a directory"));
+    let child = RunningTestChild::start(
+        "runner::container::exec::tests::a_child_that_ends_at_once",
+        &[],
+        &dir.join("child.stdout"),
+        &dir.join("child.stderr"),
+    );
+    let pid = child.pid().expect("the child's pid");
+    let by = Instant::now() + Duration::from_secs(60);
+    let mut status = 0;
+    loop {
+        // SAFETY: `status` is writable and `WNOHANG` blocks on nothing; `pid`
+        // is this isolated process's own child, which this loop is the second
+        // waiter of on purpose.
+        let answered = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+        if answered == pid {
+            break;
+        }
+        assert!(
+            answered == 0 && Instant::now() < by,
+            "the other waiter collected the child ({answered})"
+        );
+        crate::workspace_manager::fixture::rest(Duration::from_millis(10));
+    }
+    let credited = child.kill_and_collect();
+    crate::workspace_manager::fixture::say(&format!(
+        "a handle whose child another waiter collected credited nothing: {}",
+        credited.is_none()
+    ));
+}
+
+/// [`RunningTestChild`] fails closed: with its child's status already taken by
+/// another waiter, ending the handle signals nothing -- its own `try_wait`
+/// answers `ECHILD`, so the group it would have signalled is not known to be
+/// its own -- records that collection is not established, and answers `None`,
+/// which every harness here reports as no collection.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_running_test_child_whose_status_another_waiter_took_is_neither_signalled_nor_credited() {
+    let tree = repo::scratch("running-test-child-ownership");
+    let ended = crate::agent::proc::test_support::run_test_isolated(
+        "runner::container::exec::tests::running_test_child_ownership_harness_child",
+        &[(LEASE_KILL_ROOT, tree.path().as_os_str())],
+        Duration::from_secs(120),
+    );
+    assert!(
+        ended.status.is_some_and(|status| status.success()) && ended.stdout.contains("1 passed"),
+        "the isolated harness ended: {ended}"
+    );
+    let said = format!("{}{}", ended.stdout, ended.stderr);
+    for line in [
+        "running test child collection: not established for ",
+        "its own wait failed before any signal",
+        "a handle whose child another waiter collected credited nothing: true",
+    ] {
+        assert!(said.contains(line), "missing `{line}`: {ended}");
+    }
 }

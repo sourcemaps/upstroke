@@ -216,6 +216,99 @@ Two distinct answers to two distinct questions about one reference: the
 intersection {image id recorded} x {reference moved} rather than either
 alone.
 
+## `fn an_attached_start_held_at_created_ends_at_its_deadline_or_its_cancellation() {`
+
+Root's START-DEADLINE finding, with no daemon. A start held at `created`, its
+client alive, ends at the invocation's deadline, within the declared bound;
+a cancellation ends it on the poll that sees it. A client that ended while
+the container is still `created`, a container that is gone, and a state that
+cannot be read each end it too. The controls: a container that left
+`created` started, whether or not its client has ended.
+
+## `fn an_attached_client_is_settled_or_reported_unresolved_within_its_bound() {`
+
+Root's DELIVERY-OWNERSHIP finding, the settlement, with local doubles. A
+client that ended with its container is settled and never asked to stop; one
+whose end comes later, within the grace, is settled without being stopped;
+one that outlives its container ends when asked and is settled; one that
+does not end even when asked is reported unresolved, after exactly two
+graces, never settled.
+
+## `fn the_delivery_verdict_tells_an_early_exit_from_a_broken_attach() {`
+
+The verdict on a settled client. Ending with the container's own code is the
+program's own result, an early exit included. Ending with another code, or
+with none, is a broken attach; a client that had to be stopped, and one whose
+wait or write failed, are errors too, each naming why.
+
+## `fn an_unresolved_attached_client_stays_unresolved_through_every_settlement() {`
+
+Root's DELIVERY-OWNERSHIP follow-through, at the settlement seam. A client
+whose supervising thread finished with `ProcessFailure { fate: Unresolved }`
+is unresolved at collection, and its removal fails as
+`RuntimeError::Unresolved`, twice: the fact survives repeated settlement, and
+what is kept is the fact, not the finished thread's handle. The funnel's
+`refused` keeps the fate. The controls: a client that exited, and one whose
+requested stop was verified, settle; and a supervision failure whose process
+was established gone is an end, for the verdict.
+
+## `fn a_removal_that_leaves_a_process_unresolved_releases_nothing_as_gone() {`
+
+The release seam. With a removal that leaves a process unresolved, a release
+of a container observed exited is a failure with `container_gone` false,
+naming the unresolved process, and the view and the intent stay for the next
+census. The control: the same release without it releases.
+
+## `fn a_removal_keeps_an_unresolved_client_over_an_ordinary_removal_failure() {`
+
+Root's combined-removal follow-through, the combination itself. A failed
+removal and an unresolved client make an `Unresolved` answer carrying both
+diagnostics; a successful removal does not settle an unresolved client. The
+controls: a settled client keeps the ordinary removal error, and success
+stays success.
+
+## `fn an_ordinary_removal_failure_never_masks_an_unresolved_client() {`
+
+The same at the release seam. With the removal failing and the client
+unresolved, after an observed exit and after a stop alike, the release does
+not count the container gone, names both failures, and keeps the view and
+the intent. The control: with the client settled, the ordinary removal error
+is the release's, and the observed exit keeps its fate.
+
+## `fn an_unresolved_credential_volume_question_is_held_under_the_volume_where_no_container_reads_it()`
+
+The premise of the volume-inspection repair (PR12-R8-VOLUME-INSPECTION-FATE,
+PR12-REG6-VOLUME-INSPECTION-FATE), on the real `DockerCli` classifier and with
+no process: synthetic supervisor results for a `volume inspect` question
+(`answer_within`). A question its supervisor never started is `Unreachable`,
+one whose process it saw gone is `Failed`, and one whose process it could not
+establish gone is `Unresolved` under `RuntimeOp::InspectVolume`. Only that one
+is held, and it is held under the volume's name: the container that would
+mount the volume settles `Absent`, and its removal reports nothing unresolved.
+So no cleanup of the container can recover the fact, and the launch keeps it
+only through the typed error `expect_mounted_volumes_present` now returns,
+with the cancel keeping the view and the intent for it (`CauseFate`).
+
+## `fn the_docker_create_arguments_carry_a_user_and_an_open_stdin_only_when_the_spec_does() {`
+
+The `docker create` argv, read with no daemon (`docker_create_arguments`). A
+spec with no user and no input asks for neither, as every create did before
+PR12's D-B and D-C. With both, `--user <uid>:<gid>` and `--interactive` are
+options of the create, before the image id, and the command after it is
+unchanged.
+
+## `fn a_mount_argument_carries_each_value_exactly_or_refuses_it() {`
+
+`mount_argument`, lossless or refusing. A source with spaces and
+non-ASCII, one with `=` and one with `;` and `:` are carried exactly; on
+Unix a backslash is carried as written; a volume and the scratch tmpfs
+render as before. Seven spellings (a `,` that would add a `readonly=false`
+field, a `"`, a newline, a tab, trailing and leading whitespace, empty) are
+refused in every position: bind source, bind target, volume name, tmpfs
+target. A non-UTF-8 source is refused on Unix, never converted lossily.
+And `docker_create_arguments` refuses a spec holding such a mount, so
+`docker` never runs with it.
+
 ## `fn the_fake_can_report_an_image_id_that_differs_from_the_one_create_asked_for() {`
 
 (3) per-container **reported image ids with substitution injection**.
@@ -1673,25 +1766,28 @@ container running.
 
 **What the budget bounds, exactly.** An observation is synchronous: the
 `docker ps --all --filter name=… --format …` listing [`DockerCli::observe`]
-makes runs to completion through `Command::output()`, with no deadline of
-its own. The budget is consulted only between observations, after one that
-found the container running, so it bounds how long the wait keeps *asking*,
-not how long the wait *takes*: an observation in flight is never
-interrupted, a [`TERMINATION_PAUSE`] begun after an under-budget observation
-is slept in full, and a scheduling delay anywhere in between is not seen
-until the next check. The wait can therefore end past the budget by one
-observation, one pause and whatever the scheduler adds, and a terminal
-observation that completes after the budget is still the answer. What the
-budget cannot do is bound a daemon that does not answer: an observation
-that blocks, blocks the wait with it. The tests below hold each of these
+makes runs under the process funnel and, asked with `QuestionBound::Runtime`
+as these tests ask it, ends at the runtime's own bound (`QUESTION_BOUND`,
+sixty seconds, K2) rather than at this budget. The budget is consulted only
+between observations, after one that found the container running, so it
+bounds how long the wait keeps *asking*, not how long the wait *takes*: an
+observation in flight is never interrupted by it, a [`TERMINATION_PAUSE`]
+begun after an under-budget observation is slept in full, and a scheduling
+delay anywhere in between is not seen until the next check. The wait can
+therefore end past the budget by one observation, one pause and whatever the
+scheduler adds, and a terminal observation that completes after the budget is
+still the answer. What the budget does not do is bound a daemon that does not
+answer: an observation that blocks holds the wait until the runtime's own
+bound ends it. Until K2 that observation had no bound at all. The tests below hold each of these
 with the fake — a running observation that takes 100 ms against a 20 ms
 budget is the wait's only observation and is reported in full, and a
 terminal one that takes as long is accepted — and against the real daemon
 on the build box (2026-09-23, `docker` 29.7.2) a container running
 `sleep 120` was reported running for 947 observations over 30.005 s before
 the wait gave up with that report as its panic message. That measures a
-daemon that answers; a daemon that stops answering has not been measured,
-and the synchronous call path says this budget would not see it.
+daemon that answers; a daemon that stops answering has not been measured
+here, and this budget would not see it: the runtime's own bound is what
+ends such an observation.
 
 **What it replaced.** Before 2026-09-23 the wait was **two hundred
 observations with a `yield_now` between them**, and its duration was
@@ -2824,3 +2920,76 @@ established against the listing rather than against its own diagnostic, and the
 comparison then discards. The colliding container is created deliberately, and
 the test fails if the filter stops matching it, so the comparison the repair
 rests on is never left untested.
+
+## `const EARLY_EXIT_DEADLINE: Duration = Duration::from_secs(3);`
+
+The deadline mode's invocation deadline, measured from the child's start (K8).
+It bounds a stalled diagnostic, and so must leave the start ample time to reach
+the diagnostic first: one attached client that ends at once and one or two
+`docker ps` questions through the process funnel.
+
+## `const EARLY_EXIT_SLACK: Duration = Duration::from_millis(1500);`
+
+How long after that deadline the deadline mode may end: the funnel's kill and
+reap of the stalled diagnostic and the start's settlement of a client that has
+already ended. The witness asserts the two together stay below `CLIENT_GRACE`,
+so a diagnostic given a fresh grace from the moment it was asked, the defect J13
+repaired, cannot end inside the bound.
+
+## `fn an_attached_start_whose_client_ended_early_asks_its_diagnostic_within_its_own_bounds() {`
+
+J13 (regular review 3, finding 2): the attached start's early-client-exit branch
+asks its diagnostic within the invocation's own deadline and cancellation. A
+child of this test binary, whose `PATH` alone carries a stub `docker` (written
+by a process of its own, `write_program_in_its_own_process`), runs the
+production `DockerCli::start_attached`. The stub's `docker start` ends at once,
+its `docker ps` keeps the container `created`, and its `docker container
+inspect` (the diagnostic) records that it was asked and then sleeps for a
+minute. Two modes: an invocation with a three-second deadline
+(`EARLY_EXIT_DEADLINE`), which must end at or after it and within
+`EARLY_EXIT_SLACK` of it; and a ten-minute one cancelled as soon as the
+diagnostic is asked, which must end within 10 s. In both the start fails on the
+early-exit branch, its reason carries nothing from the stalled diagnostic, and
+the diagnostic was asked. With the fresh `CLIENT_GRACE` deadline restored, the
+deadline mode fails: measured before K8's commit, the child reported "the
+stalled diagnostic held the start 5.164364925s, past its bound 4.5s". It is a
+stub witness, as the reviewer's was: no daemon is involved. The child runs
+through `run_test_isolated`, so a failure carries the child's own output.
+
+**K8 (CI's macOS leg, run 41724856814, job 126229500908).** The deadline mode's
+child exited 101 (`unix_wait_status(25856)`): a failed assertion in the child,
+not a kill or an overrun of the parent's bound. The log holds nothing the child
+printed: the witness then ran it through `run_kill_child_within`, which sends a
+child's stdout and stderr to `/dev/null`, so the log cannot say which assertion
+failed. The stub on `PATH` and its `ps` and `inspect` behaviour are not in
+question: J6's witness, with the same stub mechanism, passed on the same leg.
+On this box the failure was reproduced by slowing the stub's answers (`ps` a
+quarter second, `start` 0.4 s, as a slower process funnel would): the child
+failed with exit 101, the start reporting "`upstroke-early` was still created
+when the invocation's deadline passed, so it never started" instead of the
+early-exit branch. The deadline mode's deadline was then 500 ms (the 200 ms is
+the J13 reviewer's witness, not this test's), and on a runner whose funnel
+questions are slow it passed before the wait saw the client's end. That outcome is the production
+branch behaving as specified, a failed start at its deadline; what failed was the
+guard's premise, a deadline short enough to expire on a loaded runner
+(standards §12). With the three-second deadline the same slowed stub passes, in
+3.04 s. The other assertions are unchanged.
+
+## `fn attached_start_early_exit_child() {`
+
+The child of the test above: one production attached start of
+`upstroke-early`, in the mode the parent names (`UPSTROKE_TEST_EARLY_EXIT`),
+its proof minted by `CoveredStart::without_a_reaper_until` with that mode's
+deadline. In the cancel mode a scoped thread cancels the start once the stub has
+recorded the diagnostic (`UPSTROKE_TEST_INSPECTED`), so the cancellation lands
+on the diagnostic and not on the wait before it. In the deadline mode it also
+asserts the start ended no earlier than its deadline, so the stalled diagnostic
+was still in flight when the deadline ended it (K8).
+
+## `fn an_exit_status_the_runtime_reports_is_read_as_a_number_or_refused() {`
+
+K2: the collection reads the exit status `docker container inspect` reports as
+a number (surrounding whitespace aside, a negative one included), and refuses
+anything else as a `Collect` failure naming the container, where it once read
+it as a missing exit code. The cases are the reading itself
+(`exit_status_of`), with no daemon.
