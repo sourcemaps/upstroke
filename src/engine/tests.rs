@@ -18252,8 +18252,10 @@ fn a_schema_4_run_publishes_its_records_in_order_and_records_one_runner() {
 
 /// [`OwnerWitness`] behind a source that can be shared. Production's
 /// `BuiltinAdapters` can be, so `engine::run` drives the concurrent driver; the
-/// acceptance record takes that driver too and still notes, at every probe,
-/// whether the run's owner record was already published.
+/// acceptance record takes that driver too and still notes, at every adapter
+/// probe made through this source, whether the run's owner record was already
+/// published. That is all it observes: not the shell probe, and no probe made
+/// any other way.
 struct SharedOwnerWitness(std::sync::Arc<OwnerWitness>);
 
 impl AdapterSource for SharedOwnerWitness {
@@ -18440,7 +18442,9 @@ struct HostAcceptanceParked {
 }
 
 /// One released run's records, asserted and returned as its part of the record:
-/// the owner published before every probe; `run_started(4)` on the host runner;
+/// the owner published before every adapter probe the owner witness saw (each
+/// `AgentAdapter::probe` the run made through its adapter source, the first
+/// included); `run_started(4)` on the host runner;
 /// the commit record naming the committed first line's digest; one runner in
 /// `owner.json`, `run_started`, every `run_resumed` and `report.json`; the report
 /// the fresh projection of the log; both tasks merged and the recorded
@@ -18455,7 +18459,8 @@ fn host_acceptance_run(
 ) -> serde_json::Value {
     assert!(
         !probes.is_empty() && probes.iter().all(|published| *published),
-        "{case}: every probe, the first included, ran after owner.json was published: {probes:?}"
+        "{case}: owner.json was published before every adapter probe the owner witness saw, \
+         the first included: {probes:?}"
     );
     let public = rundir::public_dir(repo, run_id);
     let private = private_dir_of(repo, run_id);
@@ -18644,7 +18649,7 @@ fn host_acceptance_run(
         "integration_ref_sha": at_ref,
         "merged_shas": merged,
         "runner": runner,
-        "owner_published_at_each_probe": probes,
+        "owner_published_at_each_adapter_probe": probes,
         "first_line": {
             "text": std::str::from_utf8(first_line).expect("the first line is UTF-8"),
             "bytes": first_line.len(),
@@ -18691,7 +18696,7 @@ fn host_acceptance_fresh() -> serde_json::Value {
         &report.run_id,
         &probes,
         serde_json::json!([
-            {"entry": "engine::run_with", "outcome": "complete", "probes": probes.len()}
+            {"entry": "engine::run_with", "outcome": "complete", "adapter_probes": probes.len()}
         ]),
         None,
     )
@@ -18750,9 +18755,9 @@ fn host_acceptance_resumed() -> serde_json::Value {
         &report.run_id,
         &probes,
         serde_json::json!([
-            {"entry": "engine::run_with", "outcome": "parked", "question": question, "probes": parked_probes},
+            {"entry": "engine::run_with", "outcome": "parked", "question": question, "adapter_probes": parked_probes},
             {"entry": "answer::answer", "question": question, "reply": "the first"},
-            {"entry": "engine::resume_with", "outcome": "complete", "probes": probes.len() - parked_probes}
+            {"entry": "engine::resume_with", "outcome": "complete", "adapter_probes": probes.len() - parked_probes}
         ]),
         Some(&HostAcceptanceParked {
             log_bytes: log_at_park.len(),
@@ -18824,13 +18829,21 @@ fn host_acceptance_record() {
     }
     let record = serde_json::json!({
         "format": "upstroke-host-acceptance-record",
-        "format_version": 1,
+        "format_version": 2,
         "test": "engine::tests::host_acceptance_record",
         "harness": host_acceptance_harness(),
         "ci": host_acceptance_ci(),
         "scope": {
-            "runner": "host: the production HostRunner started every probe, worker and reviewer; \
-                       runner.image is null by design and no container was used",
+            "runner": "host: the production HostRunner started the stub adapter's probe, worker \
+                       and reviewer processes; runner.image is null by design and no container \
+                       was used",
+            "owner_witness": "OwnerWitness notes, at each AgentAdapter::probe the run made \
+                              through its adapter source, whether owner.json was already \
+                              published under the private root; \
+                              owner_published_at_each_adapter_probe is that list and nothing \
+                              more. It does not observe the shell probe or any probe made \
+                              another way, whose order relative to the owner record is the \
+                              engine's composition, not a separate observation here",
             "provider": "the deterministic stub adapter (engine::tests::TopologyStub behind \
                          OwnerWitness); no provider was called",
             "coordinator": "this test process called engine::run_with, answer::answer and \

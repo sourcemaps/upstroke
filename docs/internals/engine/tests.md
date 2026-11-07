@@ -3444,8 +3444,9 @@ The child of the test above.
 `OwnerWitness` behind an adapter source that can be shared. Production's `BuiltinAdapters` is
 shareable, so `upstroke run` reaches the concurrent driver (`run_concurrently`); the step loop is
 what an unshareable source gets. The acceptance record therefore runs on a shareable source, and
-this wrapper keeps the owner witness on it: every probe still notes whether `owner.json` was
-already published under the private root.
+this wrapper keeps the owner witness on it. Each `AgentAdapter::probe` made through the source
+still notes whether `owner.json` was already published under the private root. That is
+everything the witness observes: it does not see the shell probe or any probe made another way.
 
 ## `const HOST_ACCEPTANCE_MARKER: &str = "UPSTROKE-HOST-ACCEPTANCE-RECORD";`
 
@@ -3530,7 +3531,9 @@ assertions `a_schema_4_run_publishes_its_records_in_order_and_records_one_runner
 `a_schema_4_run_is_created_driven_and_merged_through_the_public_entry_point` make, applied here
 to both runs:
 
-- `owner.json` was published before every probe, the first included;
+- `owner.json` was published before every adapter probe the owner witness saw, the first
+  included — each `AgentAdapter::probe` the run made through its adapter source, and nothing
+  more;
 - the first event is `run_started` with schema 4, the full run id, the run's branch, runner kind
   `host` and no image;
 - `committed.json` names `sha256:` plus the digest of the committed first line's bytes, and its
@@ -3610,10 +3613,16 @@ The record is one compact JSON document:
 - `format`, `format_version` and `test`;
 - `harness` ([`host_acceptance_harness`]);
 - `ci` ([`host_acceptance_ci`]);
-- `scope`, which says plainly what the record does not show;
-- `runs`: each with its full run id, invocations, recorded runner, epochs, probe observations,
-  first line, integration ref and sha, merges, and the four raw files;
+- `scope`, which says plainly what the record does not show, including what the owner witness
+  does and does not observe;
+- `runs`: each with its full run id, invocations, recorded runner, epochs, the owner witness's
+  list (`owner_published_at_each_adapter_probe`), first line, integration ref and sha, merges, and
+  the four raw files;
 - `manifest`: one row per embedded file.
+
+`format_version` is 2. Version 1, written only by the development capture before it, named the
+owner list `owner_published_at_each_probe` and carried no `scope.owner_witness`. The rename says
+what the list is.
 
 It goes to stdout in [`host_acceptance_frame`]'s lines through one `write_all`. The engine forbids
 `println!` (`#![forbid(clippy::disallowed_macros)]` in `engine`), and `v1_role_probe_reviewer`
@@ -3629,12 +3638,17 @@ writes its marker the same way under this file's `disallowed_methods` allow.
 - the identities re-derived from the raw files agree.
 
 The CI step checks the first three of these as it runs. The decoder that binds a job's log checks
-all of them.
+all of them, and only over the capture step's executed output. It must be given either that
+bounded stream, or a job log from which it extracts the capture step's group, found by the pinned
+script the runner echoes. The echo itself is not output and its marker literals are not frame
+lines, and the suite step's many `1 passed` summaries from child harnesses are not the capture's.
 
 **Limits.**
 
 - Host only: the runner kind is `host` and `image` is null by design. No container is used, and
   container capability on the macOS and Windows runners stays unknown.
+- The owner witness observes only the adapter probes made through the adapter source. It is not
+  a direct observation of the shell probe, or of every probe the run makes.
 - No provider is called.
 - The coordinator is this test process calling `engine::run_with`, `answer::answer` and
   `engine::resume_with`, not the `upstroke` CLI process.
