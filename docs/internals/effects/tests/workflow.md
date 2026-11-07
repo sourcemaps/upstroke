@@ -200,6 +200,26 @@ The suite step's three rows anchor on its `run:` line together with the
 its job. Each row's mutation, target and code are what they were before the
 capture existed.
 
+The container capability observation after the capture
+([`CAPABILITY_OBSERVATION`]) is the third step that may carry an `env:`, and
+only the same map, under its own code `test-capability-step-env`. Its field
+set is [`CAPABILITY_STEP_FIELDS`], not [`TEST_STEP_FIELDS`]: exactly `env`,
+`name`, `run` and `timeout-minutes`. [`observation_step_complaints`] holds the
+bound to [`CAPABILITY_STEP_TIMEOUT_MINUTES`] under `test-capability-step`.
+Measured, `MUT-TEST-CAPABILITY-CASEFOLD-DROPPED`,
+`MUT-TEST-CAPABILITY-DOCKER-HOST-INJECTED`,
+`MUT-TEST-CAPABILITY-REQUIRE-DOCKER-INJECTED`,
+`MUT-TEST-CAPABILITY-TIMEOUT-DROPPED` and
+`MUT-TEST-CAPABILITY-TIMEOUT-WIDENED`.
+
+The observation's rows anchor on its `name:` line, its `timeout-minutes: 4`
+line, or its own script lines. Each of those occurs once in each job.
+
+Its script spells `set -eo pipefail` rather than the capture's bare
+`set -o pipefail` line, because that line is the anchor
+`MUT-TEST-CAPTURE-EXIT-SWALLOWED` requires exactly once in this job. Every
+earlier row's anchor, mutation and code are unchanged.
+
 ## `pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {` › `if scalar(step, "run").is_some() {`
 
 This job is a matrix, so each `run:` step resolves a shell once per
@@ -307,6 +327,15 @@ Measured, `MUT-TEST-WINDOWS-CASEFOLD-DECLARATION-DROPPED` and
 its `name:` line together with the `env:` lines, for the reason the `test`
 job's rows do.
 
+The guest's container capability observation
+([`CAPABILITY_WINDOWS_OBSERVATION`]) takes the same map whole under
+`test-windows-capability-step-env`, the field set
+[`CAPABILITY_STEP_FIELDS`] and the same bound under
+`test-windows-capability-step`. Measured,
+`MUT-TEST-WINDOWS-CAPABILITY-CASEFOLD-DROPPED`,
+`MUT-TEST-WINDOWS-CAPABILITY-DOCKER-CONTEXT-INJECTED` and
+`MUT-TEST-WINDOWS-CAPABILITY-TIMEOUT-DROPPED`.
+
 ## `pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {` › `let running = steps_of(job)`
 
 The whole step, not the command inside it. The command says which suite
@@ -374,6 +403,74 @@ load-bearing:
 | the capture's env pin | `MUT-TEST-CAPTURE-CASEFOLD-DROPPED` |
 
 Every earlier row stayed refused in all three runs.
+
+## `fn observation_complaints(`
+
+The container capability observation's step (G7, root direction `ecf15a9c`).
+Exactly one step of the job runs the pinned observation script, and it is the
+step immediately after the one step that runs the pinned host acceptance
+capture. Codes: `test-capability-command` and
+`test-windows-capability-command`.
+
+As with [`capture_complaints`], this check is what refuses an omitted
+observation, and an edited script counts as a missing one:
+
+- filtered to another test, to none, or widened by dropping `--exact`;
+- `--ignored` dropped;
+- echoed;
+- its exit propagation, its zero-test refusal or its frame check removed.
+
+"Immediately after the capture" has three reasons. A step between them could
+replace the harness or the tree. The contract places the observation
+success-only after the HOST capture. And a step above the capture would run
+before the record that step makes.
+
+Measured, in the `test` job:
+
+- `MUT-TEST-CAPABILITY-STEP-DELETED`
+- `MUT-TEST-CAPABILITY-IGNORED-NOT-RUN`
+- `MUT-TEST-CAPABILITY-FILTER-MOVED`
+- `MUT-TEST-CAPABILITY-FILTER-WIDENED`
+- `MUT-TEST-CAPABILITY-ECHOED`
+- `MUT-TEST-CAPABILITY-EXIT-SWALLOWED`
+- `MUT-TEST-CAPABILITY-ZERO-TESTS-ADMITTED`
+- `MUT-TEST-CAPABILITY-FRAMING-UNCHECKED`
+- `MUT-TEST-CAPABILITY-SEPARATED-FROM-THE-CAPTURE`
+- `MUT-TEST-CAPABILITY-ABOVE-THE-CAPTURE`
+
+`MUT-TEST-CAPABILITY-ABOVE-THE-CAPTURE` is a true move. Both scripts still
+match their pins and each runs once, in swapped order. Its anchor spans the
+capture step through the observation step.
+
+Measured, on the guest:
+
+- `MUT-TEST-WINDOWS-CAPABILITY-STEP-DELETED`
+- `MUT-TEST-WINDOWS-CAPABILITY-IGNORED-NOT-RUN`
+- `MUT-TEST-WINDOWS-CAPABILITY-FILTER-MOVED`
+- `MUT-TEST-WINDOWS-CAPABILITY-EXIT-SWALLOWED`
+- `MUT-TEST-WINDOWS-CAPABILITY-ZERO-TESTS-ADMITTED`
+- `MUT-TEST-WINDOWS-CAPABILITY-FRAMING-UNENFORCED`
+- `MUT-TEST-WINDOWS-CAPABILITY-SEPARATED-FROM-THE-CAPTURE`
+
+A conditional or failure-swallowing field on the observation, `if:` (a
+`!cancelled()` expression included) or `continue-on-error:`, is refused as
+`unexpected-step-field`. The rows are
+`MUT-TEST-CAPABILITY-STEP-DISABLED`,
+`MUT-TEST-CAPABILITY-STEP-RUN-WHEN-NOT-CANCELLED`,
+`MUT-TEST-CAPABILITY-STEP-ABSOLVED`, `MUT-TEST-WINDOWS-CAPABILITY-DISABLED`
+and `MUT-TEST-WINDOWS-CAPABILITY-ABSOLVED`.
+
+No earlier check was removed or loosened. [`TEST_STEP_FIELDS`] and
+[`STEP_FIELDS`] are unchanged; the observation step alone may carry
+`timeout-minutes`.
+
+## `fn observation_step_complaints(step: &Yaml, named: &str, code: &str) -> Vec<String> {`
+
+The observation step's own fields. They are exactly [`CAPABILITY_STEP_FIELDS`],
+every one required, so a dropped `env:` or `timeout-minutes:` is refused
+here as well as by the env pin. The bound must read as the integer
+[`CAPABILITY_STEP_TIMEOUT_MINUTES`]. A string, another number or no bound is
+refused. Codes: `test-capability-step` and `test-windows-capability-step`.
 
 ## `fn checkout_complaints(job: &Yaml, named: &str, code: &str) -> Vec<String> {`
 
