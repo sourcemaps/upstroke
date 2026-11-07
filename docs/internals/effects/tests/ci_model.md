@@ -79,16 +79,18 @@ would test `master` while the labels, the fields, the shell, the input-free
 checkout and the pinned test command that follows all still matched.
 Measured, `MUT-TEST-WINDOWS-RUN-RETARGETED` and `MUT-TEST-RUN-RETARGETED`.
 
-## `pub(super) const TEST_SCRIPTS: [&str; 3] =`
+## `pub(super) const TEST_SCRIPTS: [&str; 4] = [`
 
 Every script the hosted test job may run: the identity script, the suite,
-and [`HOST_ACCEPTANCE_CAPTURE`]. Each is one exact string; the list grows by
-one pinned script, and nothing in it is a pattern.
+[`HOST_ACCEPTANCE_CAPTURE`] and [`CAPABILITY_OBSERVATION`]. Each is one exact
+string; the list grows by one pinned script at a time, and nothing in it is a
+pattern.
 
-## `pub(super) const TEST_WINDOWS_SCRIPTS: [&str; 3] = [`
+## `pub(super) const TEST_WINDOWS_SCRIPTS: [&str; 4] = [`
 
 The scripts the Windows test leg runs: the identity script, the suite
-with the witness that it executed, and [`HOST_ACCEPTANCE_WINDOWS_CAPTURE`].
+with the witness that it executed, [`HOST_ACCEPTANCE_WINDOWS_CAPTURE`] and
+[`CAPABILITY_WINDOWS_OBSERVATION`].
 
 ## `pub(super) const WINDOWS_TEST_FLOOR: u32 = 1700;`
 
@@ -252,6 +254,104 @@ guest's evidence and not a local one. Measured in the oracle:
 `MUT-TEST-WINDOWS-CAPTURE-ZERO-TESTS-ADMITTED`,
 `MUT-TEST-WINDOWS-CAPTURE-FRAMING-UNENFORCED` and
 `MUT-TEST-WINDOWS-CAPTURE-SEPARATED-FROM-THE-WITNESS`.
+
+## `pub(super) const CAPABILITY_OBSERVATION: &str = r#"set -eo pipefail`
+
+The hosted `test` job's container capability observation (G7, root direction
+`ecf15a9c`, contract version 2 under its root audit 2), character for
+character. It runs on both legs in GitHub's default `bash -e` and must stand
+immediately after [`HOST_ACCEPTANCE_CAPTURE`]. Line by line:
+
+1. `set -eo pipefail`. Under `bash -e` a pipeline takes its status from `tee`;
+   with `pipefail` it takes Cargo's. It is spelled with `-e` because the bare
+   `set -o pipefail` line is the anchor `MUT-TEST-CAPTURE-EXIT-SWALLOWED`
+   requires once in this job.
+2. The log goes to `$RUNNER_TEMP`, outside the checkout.
+3. `cargo test --all-features --lib
+   runner::container::tests::container_capability_record -- --ignored --exact
+   --nocapture`, through `tee`. This is the brief's command exactly. `--lib`
+   selects the harness the suite step built, `--exact` the one test, and
+   `--ignored` runs it.
+4. The named test's own pass line, and `test result: ok. 1 passed; 0 failed;
+   0 ignored;`, or exit 1. A filter that matched nothing, an ignored test or a
+   run of anything else is not an observation.
+5. The PR355 `awk` frame check on this record's marker refuses a missing or
+   incomplete frame: BEGIN first and END last with the same summary, chunk `k`
+   at position `k` with the tag and its exact length, and the count equal to
+   the lines found. Decoding and the record's own checks are the reader's job,
+   and a printed frame is never acceptance.
+
+Every capability class passes the test, an absent Docker included, so this
+step fails only on what the contract calls observer integrity:
+
+- an unresolved process;
+- a binding failure;
+- a record its own decoder refuses;
+- a framing failure;
+- Cargo's own failure.
+
+Measured locally (`g7-capability-observer-author-1/controls/ci-step-1`) under
+the awks the build box has. Measured in the oracle:
+
+- `MUT-TEST-CAPABILITY-STEP-DELETED` (omitted);
+- `MUT-TEST-CAPABILITY-IGNORED-NOT-RUN` and `MUT-TEST-CAPABILITY-ECHOED`
+  (no-op);
+- `MUT-TEST-CAPABILITY-FILTER-MOVED` and `MUT-TEST-CAPABILITY-FILTER-WIDENED`
+  (filtered);
+- `MUT-TEST-CAPABILITY-EXIT-SWALLOWED`,
+  `MUT-TEST-CAPABILITY-ZERO-TESTS-ADMITTED` and
+  `MUT-TEST-CAPABILITY-FRAMING-UNCHECKED`;
+- `MUT-TEST-CAPABILITY-SEPARATED-FROM-THE-CAPTURE` and
+  `MUT-TEST-CAPABILITY-ABOVE-THE-CAPTURE` (misplaced).
+
+## `pub(super) const CAPABILITY_WINDOWS_OBSERVATION: &str = r#"cargo test --all-features --lib runner::container::tests::container_capability_record -- --ignored --exact --nocapture | Tee-Object -Variable capture`
+
+The same observation on the guest, under the job's PowerShell, character for
+character. It stands immediately after [`HOST_ACCEPTANCE_WINDOWS_CAPTURE`].
+
+- `$LASTEXITCODE` carries Cargo's exit through `Tee-Object`.
+- `-ccontains` requires the named test's pass line, and `-cmatch` requires
+  `1 passed; 0 failed; 0 ignored`.
+- The framed lines must be BEGIN first and END last with the same summary,
+  chunk `k` at position `k` with the tag, every chunk at its exact length, and
+  the count equal to the lines found.
+- The last line is the one that throws.
+
+No PowerShell runs on the build box, so this script's execution is the
+guest's evidence and not a local one. Measured in the oracle:
+`MUT-TEST-WINDOWS-CAPABILITY-STEP-DELETED`,
+`MUT-TEST-WINDOWS-CAPABILITY-IGNORED-NOT-RUN`,
+`MUT-TEST-WINDOWS-CAPABILITY-FILTER-MOVED`,
+`MUT-TEST-WINDOWS-CAPABILITY-EXIT-SWALLOWED`,
+`MUT-TEST-WINDOWS-CAPABILITY-ZERO-TESTS-ADMITTED`,
+`MUT-TEST-WINDOWS-CAPABILITY-FRAMING-UNENFORCED` and
+`MUT-TEST-WINDOWS-CAPABILITY-SEPARATED-FROM-THE-CAPTURE`.
+
+## `pub(super) const CAPABILITY_STEP_FIELDS: [&str; 4] = ["env", "name", "run", "timeout-minutes"];`
+
+The observation step's exact field set, on both jobs, every field required.
+
+- It has no `if:` and no `continue-on-error:`: the contract places it
+  success-only, so a failed suite or capture stops it before it runs.
+- It has no `shell:`, `uses:` or `with:`.
+- `timeout-minutes` is the one field it carries beyond what the suite's step
+  may, and only this step carries it; [`TEST_STEP_FIELDS`] and
+  [`STEP_FIELDS`] are unchanged.
+
+Measured, `MUT-TEST-CAPABILITY-STEP-DISABLED`,
+`MUT-TEST-CAPABILITY-STEP-RUN-WHEN-NOT-CANCELLED`,
+`MUT-TEST-CAPABILITY-STEP-ABSOLVED`, `MUT-TEST-WINDOWS-CAPABILITY-DISABLED`
+and `MUT-TEST-WINDOWS-CAPABILITY-ABSOLVED`.
+
+## `pub(super) const CAPABILITY_STEP_TIMEOUT_MINUTES: i64 = 4;`
+
+The step's bound. The questions request at most 135 s (10 + 60 + 20 +
+3 x 15), and Cargo's start comes on top. That sum is the requested bounds,
+not a proved wall-clock maximum, and the four minutes are an operational
+limit, not a guarantee that every future job fits. The tightest leg is the
+guest's 20-minute job. Measured, `MUT-TEST-CAPABILITY-TIMEOUT-DROPPED`,
+`MUT-TEST-CAPABILITY-TIMEOUT-WIDENED` and
+`MUT-TEST-WINDOWS-CAPABILITY-TIMEOUT-DROPPED`.
 
 ## `pub(super) const FMT_GATE: &str = "cargo fmt --check";`
 
@@ -492,13 +592,23 @@ record is made under the environment the suite ran under. Measured,
 `MUT-TEST-CAPTURE-CASEFOLD-DROPPED` and
 `MUT-TEST-CAPTURE-RETARGETED-THROUGH-THE-ADMITTED-ENV`.
 
+The container capability observation after it ([`CAPABILITY_OBSERVATION`])
+carries the same map whole under `test-capability-step-env`. The contract
+runs it in the leg's environment unchanged: no `DOCKER_*` selector and no
+`UPSTROKE_REQUIRE_DOCKER`. Measured, `MUT-TEST-CAPABILITY-CASEFOLD-DROPPED`,
+`MUT-TEST-CAPABILITY-DOCKER-HOST-INJECTED` and
+`MUT-TEST-CAPABILITY-REQUIRE-DOCKER-INJECTED`.
+
 ## `pub(super) const TEST_WINDOWS_STEP_ENV: [(&str, &str); 1] = [(TEMP_FOLDS_CASE_KEY, "1")];`
 
 The same declaration on the Windows step, `1` outright: one job, no
 matrix, and the guest's NTFS folds case.
 Measured, `MUT-TEST-WINDOWS-CASEFOLD-DECLARATION-DROPPED`. The guest's capture
 step carries it too (`test-windows-capture-step-env`), measured by
-`MUT-TEST-WINDOWS-CAPTURE-CASEFOLD-DROPPED`.
+`MUT-TEST-WINDOWS-CAPTURE-CASEFOLD-DROPPED`. So does the guest's container
+capability observation (`test-windows-capability-step-env`), which carries no
+other key. Measured, `MUT-TEST-WINDOWS-CAPABILITY-CASEFOLD-DROPPED` and
+`MUT-TEST-WINDOWS-CAPABILITY-DOCKER-CONTEXT-INJECTED`.
 
 ## `pub(super) const TEST_STEP_FIELDS: [&str; 6] = ["env", "name", "run", "shell", "uses", "with"];`
 
