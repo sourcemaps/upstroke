@@ -18239,6 +18239,617 @@ fn a_schema_4_run_publishes_its_records_in_order_and_records_one_runner() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// G7: the native HOST acceptance record
+// ---------------------------------------------------------------------------
+//
+// One ignored test, selected by its exact name by the capture step that follows
+// the full suite in CI's `test` and `test-windows` jobs. It drives two schema-4
+// runs on the production `HostRunner` through the public entry points, asserts
+// of each what the PR12 witnesses above assert, and only then prints the runs'
+// raw records as bounded, numbered lines that a reader of the job log can
+// reconstruct and verify. The notes give the framing and what acceptance needs.
+
+/// [`OwnerWitness`] behind a source that can be shared. Production's
+/// `BuiltinAdapters` can be, so `engine::run` drives the concurrent driver; the
+/// acceptance record takes that driver too and still notes, at every probe,
+/// whether the run's owner record was already published.
+struct SharedOwnerWitness(std::sync::Arc<OwnerWitness>);
+
+impl AdapterSource for SharedOwnerWitness {
+    fn get(&self, id: &str) -> Option<&dyn AgentAdapter> {
+        (id == TOPOLOGY_STUB).then_some(&*self.0 as &dyn AgentAdapter)
+    }
+
+    fn shared(&self) -> Option<std::sync::Arc<dyn AdapterSource + Send + Sync>> {
+        Some(std::sync::Arc::new(Self(std::sync::Arc::clone(&self.0))))
+    }
+}
+
+/// The first field of every line of the record's framing.
+const HOST_ACCEPTANCE_MARKER: &str = "UPSTROKE-HOST-ACCEPTANCE-RECORD";
+
+/// The framing's version, the second field of every line.
+const HOST_ACCEPTANCE_FRAMING: &str = "v1";
+
+/// Record bytes per chunk line: 192 hex characters, so no line passes about 250.
+const HOST_ACCEPTANCE_CHUNK: usize = 96;
+
+/// The only environment names the record reads. Provenance, never proof: the CI
+/// run, attempt, job and runner a reader of the log can check the record against.
+const HOST_ACCEPTANCE_CI_VARIABLES: [&str; 15] = [
+    "GITHUB_ACTIONS",
+    "GITHUB_REPOSITORY",
+    "GITHUB_WORKFLOW",
+    "GITHUB_EVENT_NAME",
+    "GITHUB_SHA",
+    "GITHUB_REF",
+    "GITHUB_RUN_ID",
+    "GITHUB_RUN_ATTEMPT",
+    "GITHUB_JOB",
+    "RUNNER_NAME",
+    "RUNNER_OS",
+    "RUNNER_ARCH",
+    "RUNNER_ENVIRONMENT",
+    "ImageOS",
+    "ImageVersion",
+];
+
+/// Each run's four records, by name and by the half of the run that holds them.
+const HOST_ACCEPTANCE_FILES: [(&str, &str); 4] = [
+    ("events.jsonl", "public"),
+    ("report.json", "public"),
+    ("owner.json", "private"),
+    ("committed.json", "private"),
+];
+
+/// The names that select another repository's Git context. The harness's own
+/// checkout is read without them, so the record names the repository the test
+/// binary was built from and not one an inherited variable points at.
+const HARNESS_GIT_CONTEXT: [&str; 10] = [
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CONFIG",
+    "GIT_CONFIG_COUNT",
+    "GIT_CONFIG_PARAMETERS",
+];
+
+fn host_acceptance_sha256(bytes: &[u8]) -> String {
+    format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(bytes))
+}
+
+fn host_acceptance_hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut hex = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        hex.push(char::from(DIGITS[usize::from(byte >> 4)]));
+        hex.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
+    }
+    hex
+}
+
+/// Git in the checkout this test binary was compiled from, never a scratch run
+/// repository, with [`HARNESS_GIT_CONTEXT`] removed from the child's environment.
+fn harness_git(args: &[&str]) -> String {
+    let mut git = Command::new("git");
+    git.arg("-C").arg(env!("CARGO_MANIFEST_DIR")).args(args);
+    for name in HARNESS_GIT_CONTEXT {
+        git.env_remove(name);
+    }
+    let out = git
+        .output()
+        .expect("git runs in the harness's own checkout");
+    assert!(
+        out.status.success(),
+        "git {args:?} in the harness's own checkout: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).expect("git prints UTF-8")
+}
+
+/// The test binary that is running, by its own bytes: streamed, so a large
+/// harness is never held in memory, and compared with its length on disk.
+fn host_acceptance_current_exe() -> serde_json::Value {
+    use std::io::Read as _;
+
+    let exe = std::env::current_exe().expect("the test binary's own path");
+    let mut file = fs::File::open(&exe).expect("the test binary opens for reading");
+    let mut hasher = <sha2::Sha256 as sha2::Digest>::new();
+    let mut buffer = vec![0_u8; 1 << 20];
+    let mut bytes: u64 = 0;
+    loop {
+        let read = file.read(&mut buffer).expect("the test binary reads");
+        if read == 0 {
+            break;
+        }
+        sha2::Digest::update(&mut hasher, &buffer[..read]);
+        bytes += u64::try_from(read).expect("one read fits in u64");
+    }
+    assert_eq!(
+        bytes,
+        fs::metadata(&exe)
+            .expect("the test binary's metadata")
+            .len(),
+        "the whole test binary was hashed"
+    );
+    serde_json::json!({
+        "file_name": exe.file_name().map(|name| name.to_string_lossy().into_owned()),
+        "bytes": bytes,
+        "sha256": format!("{:x}", sha2::Digest::finalize(hasher)),
+    })
+}
+
+/// What built and ran the record: the crate, the platform, the test binary's
+/// digest and the source checkout's HEAD and tree.
+fn host_acceptance_harness() -> serde_json::Value {
+    let status = harness_git(&[
+        "--no-optional-locks",
+        "status",
+        "--porcelain",
+        "--untracked-files=no",
+    ]);
+    serde_json::json!({
+        "crate": env!("CARGO_PKG_NAME"),
+        "crate_version": env!("CARGO_PKG_VERSION"),
+        "os": std::env::consts::OS,
+        "arch": std::env::consts::ARCH,
+        "family": std::env::consts::FAMILY,
+        "current_exe": host_acceptance_current_exe(),
+        "source": {
+            "manifest_dir": env!("CARGO_MANIFEST_DIR"),
+            "head": harness_git(&["rev-parse", "HEAD"]).trim(),
+            "tree": harness_git(&["rev-parse", "HEAD^{tree}"]).trim(),
+            "tracked_changes": !status.trim().is_empty(),
+        },
+    })
+}
+
+/// [`HOST_ACCEPTANCE_CI_VARIABLES`], each a string or null, and whether any is set.
+fn host_acceptance_ci() -> serde_json::Value {
+    let mut variables = serde_json::Map::new();
+    for name in HOST_ACCEPTANCE_CI_VARIABLES {
+        let value = std::env::var_os(name).map_or(serde_json::Value::Null, |value| {
+            serde_json::Value::String(value.to_string_lossy().into_owned())
+        });
+        variables.insert(name.to_owned(), value);
+    }
+    let present = variables.values().any(|value| !value.is_null());
+    serde_json::json!({
+        "state": if present { "present" } else { "absent" },
+        "statement": if present {
+            "provenance only: environment text naming the CI run; the native binding checks the \
+             checkout and source against the actual job and review head"
+        } else {
+            "none of the allowlisted CI variables is set: this record was not made by a GitHub \
+             Actions job"
+        },
+        "variables": variables,
+    })
+}
+
+/// What the parked epoch of the resumed run left, read before it was answered.
+struct HostAcceptanceParked {
+    log_bytes: usize,
+    log_sha256: String,
+    owner_sha256: String,
+}
+
+/// One released run's records, asserted and returned as its part of the record:
+/// the owner published before every probe; `run_started(4)` on the host runner;
+/// the commit record naming the committed first line's digest; one runner in
+/// `owner.json`, `run_started`, every `run_resumed` and `report.json`; the report
+/// the fresh projection of the log; both tasks merged and the recorded
+/// integration ref holding the last merge; the log ending complete.
+fn host_acceptance_run(
+    case: &str,
+    repo: &Path,
+    run_id: &str,
+    probes: &[bool],
+    invocations: serde_json::Value,
+    parked: Option<&HostAcceptanceParked>,
+) -> serde_json::Value {
+    assert!(
+        !probes.is_empty() && probes.iter().all(|published| *published),
+        "{case}: every probe, the first included, ran after owner.json was published: {probes:?}"
+    );
+    let public = rundir::public_dir(repo, run_id);
+    let private = private_dir_of(repo, run_id);
+    let files: Vec<(&str, &str, Vec<u8>)> = HOST_ACCEPTANCE_FILES
+        .iter()
+        .map(|(name, half)| {
+            let directory = if *half == "public" { &public } else { &private };
+            let path = directory.join(name);
+            let bytes = fs::read(&path)
+                .unwrap_or_else(|error| panic!("{case}: {}: {error}", path.display()));
+            (*name, *half, bytes)
+        })
+        .collect();
+    let bytes_of = |wanted: &str| {
+        files
+            .iter()
+            .find(|(name, _, _)| *name == wanted)
+            .map(|(_, _, bytes)| bytes.as_slice())
+            .unwrap_or_else(|| panic!("{case}: no {wanted}"))
+    };
+    let parse = |name: &str| -> serde_json::Value {
+        serde_json::from_slice(bytes_of(name))
+            .unwrap_or_else(|error| panic!("{case}: {name} parses: {error}"))
+    };
+
+    let log = bytes_of("events.jsonl");
+    let events: Vec<serde_json::Value> = std::str::from_utf8(log)
+        .expect("events.jsonl is UTF-8")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("an event"))
+        .collect();
+    let first_line = &log[..log
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .expect("a committed first line")];
+    let first_digest = host_acceptance_sha256(first_line);
+    let started = events.first().expect("a first event");
+    assert_eq!(started["event"], "run_started", "{case}");
+    assert_eq!(
+        started["data"]["schema"], 4,
+        "{case}: the public entry point wrote schema 4"
+    );
+    assert_eq!(started["data"]["run_id"], run_id, "{case}");
+    assert_eq!(started["data"]["branch"], format!("upstroke/run-{run_id}"));
+    let runner = &started["data"]["runner"];
+    assert_eq!(
+        runner["kind"], "host",
+        "{case}: the production HostRunner ran it"
+    );
+    assert!(
+        runner["image"].is_null(),
+        "{case}: a host runner records no image: {runner}"
+    );
+    let runner_bytes = serde_json::to_vec(runner).expect("run_started's runner");
+    let same_runner =
+        |value: &serde_json::Value| serde_json::to_vec(value).expect("a runner") == runner_bytes;
+
+    let committed = parse("committed.json");
+    assert_eq!(
+        committed["run_started_sha256"],
+        format!("sha256:{first_digest}"),
+        "{case}: committed.json names the digest of the committed first line"
+    );
+    assert_eq!(committed["run_id"], run_id, "{case}");
+    assert_eq!(
+        committed["incarnation"], started["data"]["incarnation"],
+        "{case}"
+    );
+
+    let owner = parse("owner.json");
+    assert!(
+        same_runner(&owner["runner"]),
+        "{case}: owner.json records the runner run_started(4) records"
+    );
+    assert_eq!(owner["run_id"], run_id, "{case}");
+    assert_eq!(
+        owner["incarnation"], started["data"]["incarnation"],
+        "{case}"
+    );
+
+    let resumed: Vec<&serde_json::Value> = events
+        .iter()
+        .filter(|event| event["event"] == "run_resumed")
+        .collect();
+    assert_eq!(
+        resumed.is_empty(),
+        parked.is_none(),
+        "{case}: a resumed run records its resume, a fresh one none"
+    );
+    assert!(
+        resumed
+            .iter()
+            .all(|event| same_runner(&event["data"]["runner"])),
+        "{case}: every epoch records the runner run_started(4) records"
+    );
+
+    let report_bytes = bytes_of("report.json");
+    let report = parse("report.json");
+    assert!(
+        same_runner(&report["runner"]),
+        "{case}: report.json names the runner run_started(4) records"
+    );
+    assert_eq!(report["run_id"], run_id, "{case}");
+    assert_eq!(report["outcome"], "complete", "{case}");
+    let projected = crate::engine::topology::observe::observe(repo, run_id)
+        .expect("observes")
+        .expect("a schema-4 log")
+        .report()
+        .expect("projects");
+    assert!(
+        projected.is_fresh_against(report_bytes),
+        "{case}: report.json is the projection of the committed log"
+    );
+
+    let merged: Vec<String> = events
+        .iter()
+        .filter(|event| event["event"] == "task_merged")
+        .map(|event| {
+            event["data"]["merged_sha"]
+                .as_str()
+                .expect("a merged sha")
+                .to_owned()
+        })
+        .collect();
+    assert_eq!(merged.len(), 2, "{case}: both tasks merged: {merged:?}");
+    let integration_ref = started["data"]["integration_ref"]
+        .as_str()
+        .expect("run_started names its integration ref");
+    assert_eq!(integration_ref, format!("refs/heads/upstroke/run-{run_id}"));
+    let at_ref = git_in(repo, &["rev-parse", integration_ref])
+        .trim()
+        .to_owned();
+    assert_eq!(
+        Some(&at_ref),
+        merged.last(),
+        "{case}: the recorded integration ref holds the last merge the log records"
+    );
+    let last = events.last().expect("a last event");
+    assert_eq!(last["event"], "run_finished", "{case}");
+    assert_eq!(last["data"]["outcome"], "complete", "{case}");
+
+    if let Some(parked) = parked {
+        assert!(
+            log.len() > parked.log_bytes
+                && host_acceptance_sha256(&log[..parked.log_bytes]) == parked.log_sha256,
+            "{case}: the resumed log continues the parked log byte for byte"
+        );
+        assert_eq!(
+            host_acceptance_sha256(bytes_of("owner.json")),
+            parked.owner_sha256,
+            "{case}: owner.json is the record the run was created with, unchanged by the resume"
+        );
+    }
+
+    let epochs: Vec<serde_json::Value> = std::iter::once(serde_json::json!({
+        "event": "run_started",
+        "incarnation": started["data"]["incarnation"],
+    }))
+    .chain(resumed.iter().map(|event| {
+        serde_json::json!({
+            "event": "run_resumed",
+            "incarnation": event["data"]["incarnation"],
+        })
+    }))
+    .collect();
+    let mut embedded = serde_json::Map::new();
+    for (name, half, bytes) in &files {
+        embedded.insert(
+            (*name).to_owned(),
+            serde_json::json!({
+                "half": half,
+                "bytes": bytes.len(),
+                "sha256": host_acceptance_sha256(bytes),
+                "utf8": std::str::from_utf8(bytes)
+                    .unwrap_or_else(|error| panic!("{case}: {name} is UTF-8: {error}")),
+            }),
+        );
+    }
+    serde_json::json!({
+        "case": case,
+        "run_id": run_id,
+        "invocations": invocations,
+        "outcome": "complete",
+        "branch": started["data"]["branch"],
+        "integration_ref": integration_ref,
+        "integration_ref_sha": at_ref,
+        "merged_shas": merged,
+        "runner": runner,
+        "owner_published_at_each_probe": probes,
+        "first_line": {
+            "text": std::str::from_utf8(first_line).expect("the first line is UTF-8"),
+            "bytes": first_line.len(),
+            "sha256": first_digest,
+        },
+        "committed_run_started_sha256": committed["run_started_sha256"],
+        "epochs": epochs,
+        "report_fresh": true,
+        "parked_log": parked.map(|parked| serde_json::json!({
+            "bytes": parked.log_bytes,
+            "sha256": parked.log_sha256,
+        })),
+        "owner_sha256_at_park": parked.map(|parked| parked.owner_sha256.clone()),
+        "files": embedded,
+    })
+}
+
+/// A complete fresh schema-4 run: `engine::run_with` over the two-task plan.
+fn host_acceptance_fresh() -> serde_json::Value {
+    let (_tree, repo) = temp_engine_repo("host-acceptance-fresh");
+    let witness = std::sync::Arc::new(OwnerWitness {
+        stub: TopologyStub::new(TOPOLOGY_STUB_EDIT, 0),
+        private_root: private_root_for(&repo),
+        owner_at_probe: Mutex::new(Vec::new()),
+    });
+    let source = SharedOwnerWitness(std::sync::Arc::clone(&witness));
+    let report =
+        run_with(&topology_options(&repo), &source).expect("the fresh schema-4 host run completes");
+    until_released(&repo, &report.run_id);
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:#?}");
+    assert!(
+        committed(&report, "t1") && committed(&report, "t2"),
+        "{report:#?}"
+    );
+    assert_merged_on_the_integration_branch(&repo, &report);
+    let probes = witness
+        .owner_at_probe
+        .lock()
+        .expect("owner witness")
+        .clone();
+    host_acceptance_run(
+        "fresh",
+        &repo,
+        &report.run_id,
+        &probes,
+        serde_json::json!([
+            {"entry": "engine::run_with", "outcome": "complete", "probes": probes.len()}
+        ]),
+        None,
+    )
+}
+
+/// A separate run that parks on its one question, is answered through
+/// `answer::answer` and is finished by `engine::resume_with`: two epochs of one
+/// run id, each released before the next command and before the records are read.
+fn host_acceptance_resumed() -> serde_json::Value {
+    let (_tree, repo) = temp_engine_repo("host-acceptance-resumed");
+    let witness = std::sync::Arc::new(OwnerWitness {
+        stub: TopologyStub::new(TOPOLOGY_STUB_EDIT, 1),
+        private_root: private_root_for(&repo),
+        owner_at_probe: Mutex::new(Vec::new()),
+    });
+    let source = SharedOwnerWitness(std::sync::Arc::clone(&witness));
+    let parked = run_with(&topology_options(&repo), &source).expect("the run parks");
+    until_released(&repo, &parked.run_id);
+    assert_eq!(parked.outcome(), RunOutcome::Parked, "{parked:#?}");
+    let [asked] = parked.questions.as_slice() else {
+        panic!("one question: {parked:#?}");
+    };
+    let question = asked.question.id.to_string();
+    let parked_probes = witness.owner_at_probe.lock().expect("owner witness").len();
+    let log_at_park =
+        fs::read(rundir::public_dir(&repo, &parked.run_id).join("events.jsonl")).expect("the log");
+    let owner_at_park = fs::read(private_dir_of(&repo, &parked.run_id).join("owner.json"))
+        .expect("owner.json at the park");
+
+    crate::answer::answer(
+        &repo,
+        &question,
+        crate::answer::Reply::Text("the first".to_owned()),
+    )
+    .expect("the answer is recorded");
+    until_released(&repo, &parked.run_id);
+    let mut resume = resume_options(&repo, &parked.run_id);
+    resume.private_root = None;
+    let report = resume_with(&resume, &source).expect("the resume completes the run");
+    until_released(&repo, &report.run_id);
+    assert_eq!(report.run_id, parked.run_id, "one run across both epochs");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:#?}");
+    assert!(
+        committed(&report, "t1") && committed(&report, "t2"),
+        "{report:#?}"
+    );
+    assert_merged_on_the_integration_branch(&repo, &report);
+    let probes = witness
+        .owner_at_probe
+        .lock()
+        .expect("owner witness")
+        .clone();
+    host_acceptance_run(
+        "parked-answered-resumed",
+        &repo,
+        &report.run_id,
+        &probes,
+        serde_json::json!([
+            {"entry": "engine::run_with", "outcome": "parked", "question": question, "probes": parked_probes},
+            {"entry": "answer::answer", "question": question, "reply": "the first"},
+            {"entry": "engine::resume_with", "outcome": "complete", "probes": probes.len() - parked_probes}
+        ]),
+        Some(&HostAcceptanceParked {
+            log_bytes: log_at_park.len(),
+            log_sha256: host_acceptance_sha256(&log_at_park),
+            owner_sha256: host_acceptance_sha256(&owner_at_park),
+        }),
+    )
+}
+
+/// The record's bytes as numbered lines: a `BEGIN` summary, one line of
+/// [`HOST_ACCEPTANCE_CHUNK`] bytes in lowercase hex per chunk, and an `END`
+/// summary repeating the `BEGIN` one. The summary is the tag (the digest's first
+/// sixteen characters, which every chunk line repeats), the chunk count, the byte
+/// count and the whole record's SHA-256.
+fn host_acceptance_frame(record: &[u8]) -> String {
+    let digest = host_acceptance_sha256(record);
+    let tag = &digest[..16];
+    let chunks: Vec<&[u8]> = record.chunks(HOST_ACCEPTANCE_CHUNK).collect();
+    let summary = format!("{tag} {} {} {digest}", chunks.len(), record.len());
+    let mut lines = vec![format!(
+        "{HOST_ACCEPTANCE_MARKER} {HOST_ACCEPTANCE_FRAMING} BEGIN {summary}"
+    )];
+    lines.extend(chunks.iter().enumerate().map(|(index, chunk)| {
+        format!(
+            "{HOST_ACCEPTANCE_MARKER} {HOST_ACCEPTANCE_FRAMING} {tag} {} {}",
+            index + 1,
+            host_acceptance_hex(chunk)
+        )
+    }));
+    lines.push(format!(
+        "{HOST_ACCEPTANCE_MARKER} {HOST_ACCEPTANCE_FRAMING} END {summary}"
+    ));
+    lines.join("\n") + "\n"
+}
+
+/// G7's native HOST acceptance record (root direction `087fea89`). Two schema-4
+/// runs on the production `HostRunner` through the public entry points, with the
+/// deterministic stub adapter: a complete fresh run, and a separate run parked,
+/// answered and resumed. Every assertion above holds of both before a byte is
+/// printed; then the record -- the harness's provenance, both full run ids and
+/// runner identities, and each run's raw `events.jsonl`, `owner.json`,
+/// `committed.json` and `report.json` with their lengths and digests -- goes to
+/// stdout in [`host_acceptance_frame`]'s lines, written directly because the
+/// engine forbids `println!`. Printing is not the verdict: a record is accepted
+/// only with this test's pass line, the command's zero exit, and a complete
+/// reconstruction whose digests all agree.
+#[test]
+#[ignore = "native host acceptance record: run only by CI's capture step, which selects it by \
+            its exact name after the full suite"]
+fn host_acceptance_record() {
+    use std::io::Write as _;
+
+    let fresh = host_acceptance_fresh();
+    let resumed = host_acceptance_resumed();
+    assert_ne!(fresh["run_id"], resumed["run_id"], "two runs, two run ids");
+    let mut manifest = Vec::new();
+    for run in [&fresh, &resumed] {
+        for (name, half) in HOST_ACCEPTANCE_FILES {
+            let file = &run["files"][name];
+            manifest.push(serde_json::json!({
+                "case": run["case"],
+                "run_id": run["run_id"],
+                "file": name,
+                "half": half,
+                "bytes": file["bytes"],
+                "sha256": file["sha256"],
+            }));
+        }
+    }
+    let record = serde_json::json!({
+        "format": "upstroke-host-acceptance-record",
+        "format_version": 1,
+        "test": "engine::tests::host_acceptance_record",
+        "harness": host_acceptance_harness(),
+        "ci": host_acceptance_ci(),
+        "scope": {
+            "runner": "host: the production HostRunner started every probe, worker and reviewer; \
+                       runner.image is null by design and no container was used",
+            "provider": "the deterministic stub adapter (engine::tests::TopologyStub behind \
+                         OwnerWitness); no provider was called",
+            "coordinator": "this test process called engine::run_with, answer::answer and \
+                            engine::resume_with; it is not the upstroke CLI process",
+            "acceptance": "printed only after every assertion passed; accepted only with the \
+                           named test's pass line, exit 0, complete reconstruction and matching \
+                           digests",
+        },
+        "runs": [fresh, resumed],
+        "manifest": manifest,
+    });
+    let bytes = serde_json::to_vec(&record).expect("the record serializes");
+    let mut stdout = std::io::stdout().lock();
+    stdout
+        .write_all(host_acceptance_frame(&bytes).as_bytes())
+        .expect("the record reaches stdout");
+    stdout.flush().expect("the record is flushed");
+}
+
 /// P12-W14 (D4). At width 1 the production composition through the step loop
 /// (an adapter source that cannot be shared) and through `run_concurrently` (one
 /// that can) give the same canonical projection of the same plan.

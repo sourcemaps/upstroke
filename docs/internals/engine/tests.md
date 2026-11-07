@@ -3439,6 +3439,208 @@ now.
 
 The child of the test above.
 
+## `struct SharedOwnerWitness(std::sync::Arc<OwnerWitness>);`
+
+`OwnerWitness` behind an adapter source that can be shared. Production's `BuiltinAdapters` is
+shareable, so `upstroke run` reaches the concurrent driver (`run_concurrently`); the step loop is
+what an unshareable source gets. The acceptance record therefore runs on a shareable source, and
+this wrapper keeps the owner witness on it: every probe still notes whether `owner.json` was
+already published under the private root.
+
+## `const HOST_ACCEPTANCE_MARKER: &str = "UPSTROKE-HOST-ACCEPTANCE-RECORD";`
+
+The first field of every line of the record's framing. A reader finds the record by it, after any
+timestamp a CI log puts in front of the line. It is never the verdict: see
+[`host_acceptance_record`].
+
+## `const HOST_ACCEPTANCE_FRAMING: &str = "v1";`
+
+The framing's version, the second field of every line. A reader that knows only `v1` refuses any
+other.
+
+## `const HOST_ACCEPTANCE_CHUNK: usize = 96;`
+
+Record bytes per chunk line. A chunk line is 192 lowercase hex characters after a prefix of about
+55, so no line passes about 250 characters, and one large payload never sits on one line.
+
+## `const HOST_ACCEPTANCE_CI_VARIABLES: [&str; 15] = [`
+
+The only environment names the record reads. It reads them by name and enumerates nothing else.
+They are provenance, never proof: the CI repository, workflow, event, commit, ref, run, attempt,
+job and runner (`RUNNER_*`, and `ImageOS`/`ImageVersion` where GitHub's hosted images set them).
+Whoever binds the record to a CI job checks the checkout and source against that job and the
+reviewed head. Environment text is not independent evidence of either.
+
+## `const HOST_ACCEPTANCE_FILES: [(&str, &str); 4] = [`
+
+Each run's four records, and the half of the run that holds each: `events.jsonl` and `report.json`
+in the public directory, `owner.json` and `committed.json` in the private one. The record's
+`manifest` lists them in this order, per run.
+
+## `const HARNESS_GIT_CONTEXT: [&str; 10] = [`
+
+The ten names that select another repository's Git context. [`harness_git`] removes them from its
+child, so an inherited `GIT_DIR` (or common, object or configuration selector) cannot make the
+record name a repository other than the one the test binary was built from.
+
+## `fn host_acceptance_sha256(bytes: &[u8]) -> String {`
+
+Lowercase hex SHA-256, the digest every field of the record uses.
+
+## `fn host_acceptance_hex(bytes: &[u8]) -> String {`
+
+Lowercase hex, two characters a byte, with no dependency: no base64, and nothing a log can
+reinterpret.
+
+## `fn harness_git(args: &[&str]) -> String {`
+
+Git run with `-C` set to `CARGO_MANIFEST_DIR`, the checkout this test binary was compiled from,
+and never in a scratch run repository. [`HARNESS_GIT_CONTEXT`] is removed from the child's
+environment. It refuses on a failed Git command.
+
+## `fn host_acceptance_current_exe() -> serde_json::Value {`
+
+The running test binary by its own bytes: its file name, byte length and SHA-256. The hash is
+streamed, so a large debug harness is never held in memory, and the length is checked against
+the file's metadata, so a short read cannot pass as the whole binary.
+
+## `fn host_acceptance_harness() -> serde_json::Value {`
+
+What built and ran the record: crate name and version, `std::env::consts` OS, architecture and
+family, [`host_acceptance_current_exe`], and the harness checkout's `HEAD`, `HEAD^{tree}` and
+whether `git --no-optional-locks status --porcelain --untracked-files=no` printed anything. When
+`tracked_changes` is true, the compiled source may differ from `HEAD`. A CI checkout reports
+false.
+
+## `fn host_acceptance_ci() -> serde_json::Value {`
+
+[`HOST_ACCEPTANCE_CI_VARIABLES`], each as a string or null, and a `state`. A run with none of the
+names set says `absent` and states that the record was not made by a GitHub Actions job. A local
+capture says this explicitly rather than leaving the fields blank.
+
+## `struct HostAcceptanceParked {`
+
+What the resumed run's parked epoch left before it was answered: the log's length and digest, and
+`owner.json`'s digest.
+
+## `fn host_acceptance_run(`
+
+One released run's records, asserted and then returned as its part of the record. These are the
+assertions `a_schema_4_run_publishes_its_records_in_order_and_records_one_runner` and
+`a_schema_4_run_is_created_driven_and_merged_through_the_public_entry_point` make, applied here
+to both runs:
+
+- `owner.json` was published before every probe, the first included;
+- the first event is `run_started` with schema 4, the full run id, the run's branch, runner kind
+  `host` and no image;
+- `committed.json` names `sha256:` plus the digest of the committed first line's bytes, and its
+  run id and incarnation;
+- one runner, serialized byte for byte, in `run_started`, `owner.json`, every `run_resumed` and
+  `report.json`;
+- `report.json` is the fresh projection of the committed log;
+- exactly two `task_merged` events, and the recorded integration ref
+  (`refs/heads/upstroke/run-<run_id>`) holds the last merge the log names;
+- the log ends with `run_finished`, complete.
+
+For the resumed run it also asserts that the final log begins, byte for byte, with the log the
+parked epoch left, and that `owner.json` is unchanged by the resume. A fresh run records no
+resume, and a resumed run records at least one. The run's files are embedded as their exact UTF-8
+text, with `half`, `bytes` and `sha256`; the test asserts they are UTF-8 rather than choosing
+another encoding.
+
+## `fn host_acceptance_fresh() -> serde_json::Value {`
+
+The complete fresh run: `engine::run_with` with `topology_options` over the fixture's two-task
+plan (`t2` depends on `t1`). The source is [`SharedOwnerWitness`] over `TopologyStub` asking no
+question. The run must be complete, with both tasks committed and the stub's edit on the
+integration branch. `until_released` runs before anything is read.
+
+## `fn host_acceptance_resumed() -> serde_json::Value {`
+
+A separate run that parks on its one question and is answered and resumed:
+
+1. `engine::run_with` parks, and the run is released.
+2. The parked log and `owner.json` are read.
+3. `crate::answer::answer` records `"the first"`, and the run is released again.
+4. `engine::resume_with` completes it (`private_root` left to the log, as the PR12 resume tests
+   do), and the run is released once more before its records are read.
+
+The resume must keep the run id, complete the run and commit both tasks.
+
+## `fn host_acceptance_frame(record: &[u8]) -> String {`
+
+The record's bytes R as lines a CI log keeps intact, all ASCII and single-spaced:
+
+```text
+UPSTROKE-HOST-ACCEPTANCE-RECORD v1 BEGIN <tag> <N> <B> <S>
+UPSTROKE-HOST-ACCEPTANCE-RECORD v1 <tag> <i> <hex>        (i = 1..N, in order)
+UPSTROKE-HOST-ACCEPTANCE-RECORD v1 END <tag> <N> <B> <S>
+```
+
+- `B` is R's length and `S` its SHA-256.
+- `tag` is `S`'s first sixteen characters, which can never read `BEGIN` or `END`.
+- `N` is `ceil(B / 96)`.
+- Every chunk but the last is exactly 192 hex characters.
+
+With these rules each kind of damage is detectable:
+
+- a wrapped line breaks a length;
+- a truncated one breaks a length or the count;
+- a lost or repeated line breaks the contiguity;
+- a changed byte breaks `S`.
+
+## `fn host_acceptance_record() {`
+
+G7's native HOST acceptance record (root direction `087fea89`), the host half of R21's per-platform
+run ids. CI selects it by its exact name, after the full suite, in the `test` (Linux, macOS) and
+`test-windows` (guest) jobs:
+
+```text
+cargo test --all-features --lib engine::tests::host_acceptance_record -- --ignored --exact --nocapture
+```
+
+It is ignored everywhere else and compiled on all three platforms, with no `cfg` and no early
+return. It drives a complete fresh run and a separate parked, answered and resumed run. Both are
+real schema-4 runs on the production `HostRunner`, through the public entry points, with the
+deterministic stub adapter. Every assertion of [`host_acceptance_run`] holds of both, and the two
+run ids differ, before a byte is printed.
+
+The record is one compact JSON document:
+
+- `format`, `format_version` and `test`;
+- `harness` ([`host_acceptance_harness`]);
+- `ci` ([`host_acceptance_ci`]);
+- `scope`, which says plainly what the record does not show;
+- `runs`: each with its full run id, invocations, recorded runner, epochs, probe observations,
+  first line, integration ref and sha, merges, and the four raw files;
+- `manifest`: one row per embedded file.
+
+It goes to stdout in [`host_acceptance_frame`]'s lines through one `write_all`. The engine forbids
+`println!` (`#![forbid(clippy::disallowed_macros)]` in `engine`), and `v1_role_probe_reviewer`
+writes its marker the same way under this file's `disallowed_methods` allow.
+
+**Printing is not the verdict.** A record is accepted only when all of these hold:
+
+- the capture command exited 0;
+- its output holds this test's pass line and `test result: ok. 1 passed; 0 failed; 0 ignored;`;
+- the frame is complete;
+- the reconstruction's length and SHA-256 match;
+- every embedded file's length and digest match its fields and its manifest row;
+- the identities re-derived from the raw files agree.
+
+The CI step checks the first three of these as it runs. The decoder that binds a job's log checks
+all of them.
+
+**Limits.**
+
+- Host only: the runner kind is `host` and `image` is null by design. No container is used, and
+  container capability on the macOS and Windows runners stays unknown.
+- No provider is called.
+- The coordinator is this test process calling `engine::run_with`, `answer::answer` and
+  `engine::resume_with`, not the `upstroke` CLI process.
+- The scratch repositories are deleted when the test ends. The embedded files are the retained
+  evidence, and how long they last is bounded by CI log retention.
+
 ## `enum PrivateEntry {`
 
 What one path under a private root is, for [`private_snapshot`]: a directory or a
