@@ -178,15 +178,27 @@ asserted.
 
 ## `pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {` › `let runs_the_suite = scalar(step, "run") == Some(TEST_COMMAND);`
 
-The step that runs the suite is the one step in this job that may carry an
-`env:`, and only the map [`TEST_STEP_ENV`] pins: the declaration that the
-leg's temporary directory folds case, under which
+The step that runs the suite, and the host acceptance capture step after it
+([`HOST_ACCEPTANCE_CAPTURE`]), are the two steps in this job that may carry
+an `env:`, and only the map [`TEST_STEP_ENV`] pins. That map is the
+declaration that the leg's temporary directory folds case, under which
 `the_temporary_object_scan_resolves_case_aliases_as_the_filesystem_does`
-requires its native branch. Every other step keeps [`STEP_FIELDS`], and the
-map is compared whole by [`step_env_complaints`]. Measured,
-`MUT-TEST-CASEFOLD-DECLARATION-DROPPED`,
+requires its native branch. The capture repeats it so the record is made
+under the suite's environment. Every other step keeps [`STEP_FIELDS`], and
+each map is compared whole by [`step_env_complaints`], the capture's under
+its own code, `test-capture-step-env`.
+
+Measured for the suite step: `MUT-TEST-CASEFOLD-DECLARATION-DROPPED`,
 `MUT-TEST-CASEFOLD-DECLARED-ON-THE-WRONG-LEG` and
-`MUT-TEST-STEP-RETARGETED-THROUGH-THE-ADMITTED-ENV`.
+`MUT-TEST-STEP-RETARGETED-THROUGH-THE-ADMITTED-ENV`. Measured for the
+capture: `MUT-TEST-CAPTURE-CASEFOLD-DROPPED` and
+`MUT-TEST-CAPTURE-RETARGETED-THROUGH-THE-ADMITTED-ENV`.
+
+The suite step's three rows anchor on its `run:` line together with the
+`env:` lines. The capture step repeats the same `env:` text, and
+[`mutate_workflow`] measures nothing unless an anchor occurs exactly once in
+its job. Each row's mutation, target and code are what they were before the
+capture existed.
 
 ## `pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {` › `if scalar(step, "run").is_some() {`
 
@@ -286,9 +298,14 @@ self-hosted Windows machine the account registers. Measured,
 
 ## `pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {` › `let runs_the_suite = scalar(step, "run") == Some(WINDOWS_TEST_WITNESS);`
 
-The same one-step allowance as the `test` job's, pinned to
-[`TEST_WINDOWS_STEP_ENV`]: the guest's NTFS folds case, so the declaration
-is `1` outright. Measured, `MUT-TEST-WINDOWS-CASEFOLD-DECLARATION-DROPPED`.
+The same allowance as the `test` job's, pinned to [`TEST_WINDOWS_STEP_ENV`]:
+the guest's NTFS folds case, so the declaration is `1` outright. It applies
+to the suite-and-witness step and to the capture step after it
+([`HOST_ACCEPTANCE_WINDOWS_CAPTURE`], under `test-windows-capture-step-env`).
+Measured, `MUT-TEST-WINDOWS-CASEFOLD-DECLARATION-DROPPED` and
+`MUT-TEST-WINDOWS-CAPTURE-CASEFOLD-DROPPED`. The suite step's row anchors on
+its `name:` line together with the `env:` lines, for the reason the `test`
+job's rows do.
 
 ## `pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {` › `let running = steps_of(job)`
 
@@ -297,6 +314,66 @@ Cargo was asked for; the lines after it are what say the suite ran, and
 an equality over the step is what stops those lines being dropped, or
 their floor lowered to a number an unexecuted suite clears. Measured,
 `MUT-WINDOWS-WITNESS-COUNT-DROPPED` and `MUT-WINDOWS-WITNESS-FLOOR-DROPPED`.
+
+## `fn capture_complaints(`
+
+The native HOST acceptance record's step: exactly one step of the job runs the
+pinned capture script, and it is the step immediately after the one step that
+runs the pinned suite. Codes: `test-capture-command` and
+`test-windows-capture-command`.
+
+This check is what refuses an omitted capture. Without it, nothing in this
+contract asks for the record, and deleting the step leaves every other check
+green. A capture whose script was edited in any way is no longer the pinned
+script, so it counts as missing. That covers:
+
+- filtered to another test or to none;
+- `--ignored` dropped, so libtest reports the test ignored and Cargo exits
+  zero;
+- echoed;
+- its exit propagation, its zero-test refusal or its frame check removed.
+
+[`step_pin_complaints`] also refuses such a script as unpinned.
+
+"Immediately after" because a step between the suite and the capture can
+change what the capture runs while every pin still matches. A cache restore
+can replace the harness the suite built and ran; a checkout can replace the
+tree.
+
+Measured, in the `test` job:
+
+- `MUT-TEST-CAPTURE-STEP-DELETED`
+- `MUT-TEST-CAPTURE-IGNORED-NOT-RUN`
+- `MUT-TEST-CAPTURE-FILTER-MOVED`
+- `MUT-TEST-CAPTURE-EXIT-SWALLOWED`
+- `MUT-TEST-CAPTURE-ZERO-TESTS-ADMITTED`
+- `MUT-TEST-CAPTURE-FRAMING-UNCHECKED`
+- `MUT-TEST-CAPTURE-SEPARATED-FROM-THE-SUITE`
+
+Measured, on the guest:
+
+- `MUT-TEST-WINDOWS-CAPTURE-STEP-DELETED`
+- `MUT-TEST-WINDOWS-CAPTURE-IGNORED-NOT-RUN`
+- `MUT-TEST-WINDOWS-CAPTURE-EXIT-SWALLOWED`
+- `MUT-TEST-WINDOWS-CAPTURE-ZERO-TESTS-ADMITTED`
+- `MUT-TEST-WINDOWS-CAPTURE-FRAMING-UNENFORCED`
+- `MUT-TEST-WINDOWS-CAPTURE-SEPARATED-FROM-THE-WITNESS`
+
+A field on the capture beyond the admitted set — `if:` or
+`continue-on-error:` — is refused as `unexpected-step-field`
+(`MUT-TEST-CAPTURE-STEP-DISABLED`, `MUT-TEST-CAPTURE-STEP-ABSOLVED`,
+`MUT-TEST-WINDOWS-CAPTURE-DISABLED`).
+
+Three controls each disabled one of the new checks; each check is
+load-bearing:
+
+| Check disabled | Row no longer refused |
+| --- | --- |
+| this one | `MUT-TEST-CAPTURE-STEP-DELETED` |
+| its position guard alone | `MUT-TEST-CAPTURE-SEPARATED-FROM-THE-SUITE` |
+| the capture's env pin | `MUT-TEST-CAPTURE-CASEFOLD-DROPPED` |
+
+Every earlier row stayed refused in all three runs.
 
 ## `fn checkout_complaints(job: &Yaml, named: &str, code: &str) -> Vec<String> {`
 

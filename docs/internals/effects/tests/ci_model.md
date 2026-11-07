@@ -79,14 +79,16 @@ would test `master` while the labels, the fields, the shell, the input-free
 checkout and the pinned test command that follows all still matched.
 Measured, `MUT-TEST-WINDOWS-RUN-RETARGETED` and `MUT-TEST-RUN-RETARGETED`.
 
-## `pub(super) const TEST_SCRIPTS: [&str; 2] = [GIT_IDENTITY_SCRIPT, TEST_COMMAND];`
+## `pub(super) const TEST_SCRIPTS: [&str; 3] =`
 
-Every script a test job may run: the identity script and the suite.
+Every script the hosted test job may run: the identity script, the suite,
+and [`HOST_ACCEPTANCE_CAPTURE`]. Each is one exact string; the list grows by
+one pinned script, and nothing in it is a pattern.
 
-## `pub(super) const TEST_WINDOWS_SCRIPTS: [&str; 2] = [GIT_IDENTITY_SCRIPT, WINDOWS_TEST_WITNESS];`
+## `pub(super) const TEST_WINDOWS_SCRIPTS: [&str; 3] = [`
 
-The scripts the Windows test leg runs: the identity script, and the suite
-with the witness that it executed.
+The scripts the Windows test leg runs: the identity script, the suite
+with the witness that it executed, and [`HOST_ACCEPTANCE_WINDOWS_CAPTURE`].
 
 ## `pub(super) const WINDOWS_TEST_FLOOR: u32 = 1700;`
 
@@ -183,6 +185,73 @@ its Cargo home and its environment are inputs no reviewer of a diff can
 check, and this is the leg saying that it ran what it claims to have run.
 Measured, `MUT-WINDOWS-WITNESS-FLOOR-DROPPED` and
 `MUT-WINDOWS-WITNESS-COUNT-DROPPED`.
+
+## `pub(super) const HOST_ACCEPTANCE_CAPTURE: &str = r#"set -o pipefail`
+
+The hosted `test` job's capture of the native HOST acceptance record (G7,
+root direction `087fea89`), character for character. It runs on both legs in
+GitHub's default `bash -e` and must stand immediately after the suite step.
+Line by line:
+
+1. `set -o pipefail`. Under `bash -e` a pipeline takes its status from its
+   last command, `tee`, which succeeds; with `pipefail` it takes Cargo's.
+2. The log goes to `$RUNNER_TEMP`, outside the checkout.
+3. `cargo test --all-features --lib engine::tests::host_acceptance_record --
+   --ignored --exact --nocapture`, through `tee`, so the record reaches the
+   job log and the file the next lines read.
+   - `--lib` selects the one harness the test lives in, which the suite step
+     has just built.
+   - `--exact` selects the one test.
+   - `--ignored` runs it. Without that flag libtest reports it ignored and
+     Cargo exits zero.
+4. The named test's own pass line, and `test result: ok. 1 passed; 0 failed;
+   0 ignored;`, or exit 1. A filter that matched nothing (`running 0 tests`),
+   a test reported ignored, or a run of anything else is not a record.
+5. An `awk` over the framed lines refuses a missing or incomplete frame. It
+   requires BEGIN first and END last, with the same tag, count, length and
+   digest; chunk `k` at position `k`, carrying the tag; every chunk's hex at
+   its exact length; and the declared count equal to the lines found. All
+   comparisons are strings, so no tag or digest is read as a number. It does
+   not decode the hex or check the digest: that is the reader's job when it
+   accepts the record, and a printed frame is never acceptance by itself.
+
+Measured locally (`g7-host-acceptance-author-1/controls/ci-step-2`) under
+gawk, `gawk --posix` and mawk: the unchanged capture passes; Cargo's 101
+propagates; and a missing, truncated, wrapped, reordered, doubled or
+mistagged frame, zero tests, an ignored test and two passing tests are each
+refused. macOS's awk (BWK) was not available there. The script uses only
+POSIX awk, and its run on macOS is that leg's evidence, not a local one.
+Measured in the oracle: `MUT-TEST-CAPTURE-STEP-DELETED`,
+`MUT-TEST-CAPTURE-IGNORED-NOT-RUN`, `MUT-TEST-CAPTURE-FILTER-MOVED`,
+`MUT-TEST-CAPTURE-EXIT-SWALLOWED`, `MUT-TEST-CAPTURE-ZERO-TESTS-ADMITTED`,
+`MUT-TEST-CAPTURE-FRAMING-UNCHECKED` and
+`MUT-TEST-CAPTURE-SEPARATED-FROM-THE-SUITE`.
+
+## `pub(super) const HOST_ACCEPTANCE_WINDOWS_CAPTURE: &str = r#"cargo test --all-features --lib engine::tests::host_acceptance_record -- --ignored --exact --nocapture | Tee-Object -Variable capture`
+
+The same capture on the guest, under the job's PowerShell, character for
+character. It stands immediately after the suite-and-witness step, so it
+runs the harness that step built on the compiler that step asserted.
+
+- `$LASTEXITCODE` carries Cargo's exit through `Tee-Object`, as in
+  [`WINDOWS_TEST_WITNESS`].
+- `-ccontains` requires the named test's pass line and `-cmatch` requires
+  `1 passed; 0 failed; 0 ignored`.
+- The framed lines, split on single spaces, must be BEGIN first and END last
+  with the same summary, chunk `k` at position `k` with the tag, every chunk
+  at its exact length, and the count equal to the lines found.
+
+The last line is the one that throws. A frame check that is computed and not
+acted on refuses nothing (`MUT-TEST-WINDOWS-CAPTURE-FRAMING-UNENFORCED`).
+
+No PowerShell runs on the build box, so this script's execution is the
+guest's evidence and not a local one. Measured in the oracle:
+`MUT-TEST-WINDOWS-CAPTURE-STEP-DELETED`,
+`MUT-TEST-WINDOWS-CAPTURE-IGNORED-NOT-RUN`,
+`MUT-TEST-WINDOWS-CAPTURE-EXIT-SWALLOWED`,
+`MUT-TEST-WINDOWS-CAPTURE-ZERO-TESTS-ADMITTED`,
+`MUT-TEST-WINDOWS-CAPTURE-FRAMING-UNENFORCED` and
+`MUT-TEST-WINDOWS-CAPTURE-SEPARATED-FROM-THE-WITNESS`.
 
 ## `pub(super) const FMT_GATE: &str = "cargo fmt --check";`
 
@@ -417,17 +486,28 @@ the compile. Measured, `MUT-TEST-CASEFOLD-DECLARATION-DROPPED`,
 `MUT-TEST-CASEFOLD-DECLARED-ON-THE-WRONG-LEG` and
 `MUT-TEST-STEP-RETARGETED-THROUGH-THE-ADMITTED-ENV`.
 
+The capture step after the suite ([`HOST_ACCEPTANCE_CAPTURE`]) carries the
+same map, pinned whole under its own code (`test-capture-step-env`), so the
+record is made under the environment the suite ran under. Measured,
+`MUT-TEST-CAPTURE-CASEFOLD-DROPPED` and
+`MUT-TEST-CAPTURE-RETARGETED-THROUGH-THE-ADMITTED-ENV`.
+
 ## `pub(super) const TEST_WINDOWS_STEP_ENV: [(&str, &str); 1] = [(TEMP_FOLDS_CASE_KEY, "1")];`
 
 The same declaration on the Windows step, `1` outright: one job, no
 matrix, and the guest's NTFS folds case.
-Measured, `MUT-TEST-WINDOWS-CASEFOLD-DECLARATION-DROPPED`.
+Measured, `MUT-TEST-WINDOWS-CASEFOLD-DECLARATION-DROPPED`. The guest's capture
+step carries it too (`test-windows-capture-step-env`), measured by
+`MUT-TEST-WINDOWS-CAPTURE-CASEFOLD-DROPPED`.
 
 ## `pub(super) const TEST_STEP_FIELDS: [&str; 6] = ["env", "name", "run", "shell", "uses", "with"];`
 
-The fields the step that runs the suite may declare: [`STEP_FIELDS`] plus the
-`env` whose map [`TEST_STEP_ENV`] and [`TEST_WINDOWS_STEP_ENV`] pin. Every
-other step of both test jobs keeps [`STEP_FIELDS`].
+The fields the step that runs the suite, and the capture step after it, may
+declare: [`STEP_FIELDS`] plus the `env` whose map [`TEST_STEP_ENV`] and
+[`TEST_WINDOWS_STEP_ENV`] pin. Neither may carry `if:` or `continue-on-error:`
+(`MUT-TEST-CAPTURE-STEP-DISABLED`, `MUT-TEST-CAPTURE-STEP-ABSOLVED`,
+`MUT-TEST-WINDOWS-CAPTURE-DISABLED`). Every other step of both test jobs keeps
+[`STEP_FIELDS`].
 
 ## `pub(super) const AGGREGATE_STEP_FIELDS: [&str; 4] = ["env", "name", "run", "shell"];`
 
