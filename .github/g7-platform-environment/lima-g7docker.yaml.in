@@ -1,0 +1,77 @@
+# Task-owned Lima instance for the macOS Docker capability probe
+# (G7-PLATFORM-ENVIRONMENT-SETUP-20261108-1). Ordinary environment setup only:
+# not Gate7 acceptance and not a required check.
+#
+# Rendered by macos-docker-capability.sh, which substitutes the at-sign
+# delimited placeholders below with validated values. Every download this VM makes is pinned
+# below by digest or exact package version; nothing fetched is piped to a shell.
+minimumLimaVersion: "2.2.0"
+vmType: "@VMTYPE@"
+arch: "x86_64"
+cpus: 4
+memory: "4GiB"
+disk: "16GiB"
+images:
+  # The digest-pinned image Lima v2.2.1 itself ships in
+  # templates/_images/ubuntu-24.04.yaml, checked against Ubuntu's GPG-signed
+  # SHA256SUMS for release-20260926. Deliberately no undigested fallback.
+  - location: "https://cloud-images.ubuntu.com/releases/noble/release-20260926/ubuntu-24.04-server-cloudimg-amd64.img"
+    arch: "x86_64"
+    digest: "sha256:6a81c37564db9b1ee84e141922625e1d7c5b389b99bb3c572e0243607d5bb4d2"
+mountType: "@MOUNTTYPE@"
+mounts:
+  # Same-path read/write mount: the host directory appears at the identical
+  # path inside the VM, so a client-side `-v P:P` names a path the daemon
+  # resolves to the same host directory.
+  - location: "@BIND_DIR@"
+    writable: true
+containerd:
+  system: false
+  user: false
+ssh:
+  loadDotSSHPubKeys: false
+  forwardAgent: false
+  forwardX11: false
+upgradePackages: false
+provision:
+  - mode: system
+    script: |
+      #!/bin/bash
+      # Docker Engine from Docker's apt repository at exact versions; the
+      # repository key is accepted only if its fingerprint matches.
+      set -eux -o pipefail
+      command -v dockerd >/dev/null 2>&1 && exit 0
+      export DEBIAN_FRONTEND=noninteractive
+      DOCKER_VER='5:29.9.3-1~ubuntu.24.04~noble'
+      CONTAINERD_VER='2.4.2-3~ubuntu.24.04~noble'
+      KEY_FPR='9DC858229FC7DD38854AE2D88D81803C0EBFCD88'
+      install -m 0755 -d /etc/apt/keyrings
+      curl -fsSL --retry 3 --max-time 120 -o /etc/apt/keyrings/docker.asc https://download.docker.com/linux/ubuntu/gpg
+      got=$(gpg --show-keys --with-colons /etc/apt/keyrings/docker.asc | awk -F: '/^fpr/{print $10; exit}')
+      test "$got" = "$KEY_FPR"
+      chmod a+r /etc/apt/keyrings/docker.asc
+      echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu noble stable" > /etc/apt/sources.list.d/docker.list
+      apt-get update -q
+      apt-get install -y -q --no-install-recommends docker-ce="$DOCKER_VER" docker-ce-cli="$DOCKER_VER" containerd.io="$CONTAINERD_VER"
+      apt-mark hold docker-ce docker-ce-cli containerd.io
+      # Let the Lima user own the socket so the host-side socket forward works
+      # without a group change (the pattern of Lima's own docker-rootful.yaml).
+      mkdir -p /etc/systemd/system/docker.socket.d
+      printf '[Socket]\nSocketUser=%s\n' '@SOCKET_USER@' > /etc/systemd/system/docker.socket.d/10-g7plat-user.conf
+      systemctl daemon-reload
+      systemctl restart docker.socket docker.service
+probes:
+  - mode: readiness
+    description: "pinned Docker Engine installed and running"
+    script: |
+      #!/bin/bash
+      set -eux -o pipefail
+      if ! timeout 1500s bash -c "until command -v docker >/dev/null 2>&1 && systemctl is-active --quiet docker; do sleep 5; done"; then
+        echo >&2 "docker is not running yet"
+        exit 1
+      fi
+    hint: |
+      See /var/log/cloud-init-output.log in the guest.
+portForwards:
+  - guestSocket: "/var/run/docker.sock"
+    hostSocket: "{{.Dir}}/sock/docker.sock"
