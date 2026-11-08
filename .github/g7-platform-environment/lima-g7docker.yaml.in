@@ -3,8 +3,10 @@
 # not Gate7 acceptance and not a required check.
 #
 # Rendered by macos-docker-capability.sh, which substitutes the at-sign
-# delimited placeholders below with validated values. Every download this VM makes is pinned
-# below by digest or exact package version; nothing fetched is piped to a shell.
+# delimited placeholders below with validated values. The image is pinned by
+# digest and Docker Engine by exact package versions with a fingerprint-checked
+# repository key; apt resolves their transitive Ubuntu dependencies at run time.
+# Nothing fetched is piped to a shell.
 minimumLimaVersion: "2.2.0"
 vmType: "@VMTYPE@"
 arch: "x86_64"

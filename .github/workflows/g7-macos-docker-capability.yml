@@ -7,11 +7,13 @@
 #
 # Each job uses a standard public GitHub-hosted macOS Intel runner (Apple
 # hardware; no larger or paid runner) as the native macOS host, and a
-# task-owned local Linux VM started by a pinned Lima release. The VM uses
-# Virtualization.framework when the runner exposes Hypervisor.framework, and
-# QEMU otherwise; Lima >= 2.2 falls back from HVF to TCG software emulation,
-# which is slow and is reported as such. Containers therefore run in that
-# local Linux VM, never natively on macOS.
+# task-owned local Linux VM started by a pinned Lima release. The VM tries
+# Virtualization.framework first when kern.hv_support is 1, then QEMU; the
+# pinned Lima 2.2.1 runs QEMU with TCG software emulation only when
+# kern.hv_support is not 1 (slow, and reported as such) and does not retry TCG
+# after an HVF failure. Containers therefore run in that local Linux VM, never
+# natively on macOS. Lima and the Docker CLI run only after digest checks;
+# Homebrew QEMU and the VM's transitive apt packages are recorded, not pinned.
 name: g7-macos-docker-capability
 
 on:
