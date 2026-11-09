@@ -1,0 +1,70 @@
+# Ordinary macOS Docker capability probe for G7-PLATFORM-ENVIRONMENT-SETUP-20261108-1.
+#
+# Environment evidence only: NOT Gate7 acceptance, NOT a required check, and it
+# tests nothing about the product. It runs solely for pushes to the one setup
+# branch below, never for pull requests, merge queues, master or tags, so
+# ci.yml, pr-policy.yml, release.yml and every required context are untouched.
+#
+# Each job uses a standard public GitHub-hosted macOS Intel runner (Apple
+# hardware; no larger or paid runner) as the native macOS host, and a
+# task-owned local Linux VM started by a pinned Lima release. The VM tries
+# Virtualization.framework first when kern.hv_support is 1, then QEMU; the
+# pinned Lima 2.2.1 runs QEMU with TCG software emulation only when
+# kern.hv_support is not 1 (slow, and reported as such) and does not retry TCG
+# after an HVF failure. Containers therefore run in that local Linux VM, never
+# natively on macOS. Lima and the Docker CLI run only after digest checks;
+# Homebrew QEMU and the VM's transitive apt packages are recorded, not pinned.
+name: g7-macos-docker-capability
+
+on:
+  push:
+    branches:
+      - g7/platform-environment-setup-20261108
+
+permissions:
+  contents: read
+
+concurrency:
+  group: g7-macos-docker-capability-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    name: macOS Docker capability (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15-intel, macos-26-intel]
+    steps:
+      - name: Checkout (no persisted credentials)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Probe (bounded; pinned downloads only)
+        timeout-minutes: 38
+        shell: bash
+        env:
+          G7_LOG_DIR: ${{ runner.temp }}/g7-macos-docker-logs
+          G7_RUNNER_LABEL: ${{ matrix.runner }}
+        run: bash .github/g7-platform-environment/macos-docker-capability.sh probe
+
+      - name: Cleanup (always; bounded)
+        if: always()
+        timeout-minutes: 4
+        shell: bash
+        env:
+          G7_LOG_DIR: ${{ runner.temp }}/g7-macos-docker-logs
+          G7_RUNNER_LABEL: ${{ matrix.runner }}
+        run: bash .github/g7-platform-environment/macos-docker-capability.sh cleanup
+
+      - name: Upload logs (always)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: g7-macos-docker-capability-${{ matrix.runner }}-attempt${{ github.run_attempt }}
+          path: ${{ runner.temp }}/g7-macos-docker-logs
+          if-no-files-found: warn
+          retention-days: 14

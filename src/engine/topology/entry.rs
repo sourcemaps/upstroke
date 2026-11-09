@@ -22,7 +22,6 @@ use crate::ir::{Answer, Plan, Question, QuestionId};
 use crate::review::{self, ReviewPlan};
 use crate::rundir::{self, RepoKey, RunPaths, WorktreeLock};
 use crate::runner::Runner;
-use crate::runner::container::DockerCli;
 use crate::runner::container::env::ContainerEnvironment;
 use crate::runner::container::exec::{ContainerRunner, RunIdentity};
 use crate::runner::container::resolve::{
@@ -152,13 +151,13 @@ pub fn prepare_fresh(
     let mut analysis = validate::analyze_captured(&captured, &validate_opts)?;
     let mut warnings = std::mem::take(&mut analysis.warnings);
 
-    let runtime = DockerCli::default();
+    let runtime = container_runtime::for_inspection();
     let authorization = match &opts.private_root {
         Some(root) => {
             let mounts = mount_context(&analysis.config.runner, &opts.repo_root, root)?;
             Authorization::Checked(prelock::check(&PreLock {
                 selection: &analysis.config.runner,
-                runtime: Some(&runtime),
+                runtime: Some(&*runtime),
                 private_root: root,
                 ids: &RealIds,
                 mounts: &mounts,
@@ -171,7 +170,7 @@ pub fn prepare_fresh(
             Authorization::Pending {
                 resolved: prelock::resolve_runner(
                     &analysis.config.runner,
-                    Some(&runtime),
+                    Some(&*runtime),
                     &mounts,
                 )?,
                 ids: DrawnIds::draw(&RealIds),
@@ -183,7 +182,7 @@ pub fn prepare_fresh(
     let image_environment = match kind {
         RunnerKind::Host => None,
         RunnerKind::Container => Some(recorded_image_environment(
-            &runtime,
+            &*runtime,
             authorization.runner_policy(),
         )?),
     };
@@ -308,7 +307,7 @@ impl FreshLeased {
                 root,
             } => resolved.authorize(&root, &ids)?,
         };
-        let runtime = DockerCli::default();
+        let runtime = container_runtime::for_inspection();
         let view = RoleGitView::new(ContainerTrace::off());
 
         confirm_unchanged(&validate_opts, &captured)?;
@@ -341,7 +340,7 @@ impl FreshLeased {
                 repo_key: &repo_key,
                 authorized_root: checked.private_root(),
                 incarnation: &checked.incarnation().0,
-                runtime: &runtime,
+                runtime: &*runtime,
                 liveness: &LockProbe,
                 view: &view,
             },
@@ -541,7 +540,7 @@ pub fn prepare_resume(
     let image_environment = match started.runner.kind {
         RunnerKind::Host => None,
         RunnerKind::Container => Some(recorded_image_environment(
-            &DockerCli::default(),
+            &*container_runtime::for_inspection(),
             &started.runner,
         )?),
     };
@@ -636,7 +635,7 @@ impl ResumeVerified {
             manager,
             mut hooks,
         } = self;
-        let runtime = DockerCli::default();
+        let runtime = container_runtime::for_inspection();
         let view = RoleGitView::new(ContainerTrace::off());
 
         let root = records.locks().root();
@@ -681,7 +680,7 @@ impl ResumeVerified {
                 incarnation: &incarnation,
                 inputs: inputs.clone(),
                 today: &config.runner,
-                runtime: &runtime,
+                runtime: &*runtime,
                 liveness: &LockProbe,
                 view: &view,
                 preflight: &preflight,
@@ -1228,14 +1227,32 @@ fn container_runner(
     git: RepositoryGit<'_>,
     base: Vec<(String, String)>,
 ) -> Result<ContainerRunner, UpstrokeError> {
+    let runtime = container_runtime::for_runner(&identity);
     ContainerRunner::new(
         policy.clone(),
         identity,
         repo_root,
         git,
         ContainerEnvironment::from_image(base),
-        Box::new(DockerCli::default()),
+        runtime,
     )
+}
+
+#[cfg(not(test))]
+mod container_runtime {
+    use crate::runner::container::DockerCli;
+    use crate::runner::container::exec::RunIdentity;
+    use crate::runner::container::runtime::ContainerRuntime;
+
+    #[inline]
+    pub(super) fn for_inspection() -> Box<dyn ContainerRuntime> {
+        Box::new(DockerCli::default())
+    }
+
+    #[inline]
+    pub(super) fn for_runner(_identity: &RunIdentity) -> Box<dyn ContainerRuntime> {
+        Box::new(DockerCli::default())
+    }
 }
 
 fn mount_context(
@@ -1593,6 +1610,58 @@ pub(crate) mod initial_log_read_fault {
             }
             _ => Ok(()),
         })
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod container_runtime {
+    use std::cell::RefCell;
+    use std::panic::Location;
+
+    use crate::runner::container::DockerCli;
+    use crate::runner::container::exec::RunIdentity;
+    use crate::runner::container::observed::Journal;
+    use crate::runner::container::runtime::ContainerRuntime;
+
+    thread_local! {
+        static ARMED: RefCell<Option<Journal>> = const { RefCell::new(None) };
+    }
+
+    #[must_use]
+    pub(crate) struct Armed(());
+
+    pub(crate) fn arm(journal: &Journal) -> Armed {
+        ARMED.with(|armed| *armed.borrow_mut() = Some(journal.clone()));
+        Armed(())
+    }
+
+    impl Drop for Armed {
+        fn drop(&mut self) {
+            ARMED.with(|armed| *armed.borrow_mut() = None);
+        }
+    }
+
+    #[track_caller]
+    pub(crate) fn for_inspection() -> Box<dyn ContainerRuntime> {
+        observed_or_plain(Location::caller(), None)
+    }
+
+    #[track_caller]
+    pub(crate) fn for_runner(identity: &RunIdentity) -> Box<dyn ContainerRuntime> {
+        observed_or_plain(Location::caller(), Some(identity))
+    }
+
+    fn observed_or_plain(
+        site: &Location<'_>,
+        identity: Option<&RunIdentity>,
+    ) -> Box<dyn ContainerRuntime> {
+        match ARMED.with(|armed| armed.borrow().clone()) {
+            Some(journal) => Box::new(journal.observe(
+                &format!("{}:{}", site.file().replace('\\', "/"), site.line()),
+                identity,
+            )),
+            None => Box::new(DockerCli::default()),
+        }
     }
 }
 

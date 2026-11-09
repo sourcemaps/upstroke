@@ -2416,3 +2416,595 @@ fn racing_sleep(duration: Duration) {
     tests::note_racing_performed(tests::RacingPerformed::Slept(duration));
     std::thread::sleep(duration);
 }
+
+#[cfg(test)]
+pub(crate) mod observed {
+    use std::collections::BTreeMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex, PoisonError};
+
+    use serde_json::{Value, json};
+
+    use super::exec::RunIdentity;
+    use super::intent::{ContainerIntent, ContainerName, LABEL_PRIVATE_ROOT};
+    use super::runtime::{
+        ContainerExecution, ContainerRuntime, ContainerTrace, CreateSpec, CreatedContainer,
+        DiscoveredContainer, ImageInspection, Liveness, Mount, QuestionBound, RuntimeError,
+        RuntimeOp, Settled, StopMode,
+    };
+    use super::{CoveredCreate, CoveredStart, DockerCli};
+
+    pub(crate) const CONTAINER_FIELDS: &str = concat!(
+        "{\"Id\":{{json .Id}},\"Name\":{{json .Name}},\"Created\":{{json .Created}},",
+        "\"Image\":{{json .Image}},\"ConfigImage\":{{json .Config.Image}},",
+        "\"Labels\":{{json .Config.Labels}},\"User\":{{json .Config.User}},",
+        "\"WorkingDir\":{{json .Config.WorkingDir}},\"Cmd\":{{json .Config.Cmd}},",
+        "\"Entrypoint\":{{json .Config.Entrypoint}},\"OpenStdin\":{{json .Config.OpenStdin}},",
+        "\"ReadonlyRootfs\":{{json .HostConfig.ReadonlyRootfs}},",
+        "\"HostConfigMounts\":{{json .HostConfig.Mounts}},\"Mounts\":{{json .Mounts}},",
+        "\"State\":{{json .State}},\"Platform\":{{json .Platform}},\"Driver\":{{json .Driver}}}"
+    );
+
+    pub(crate) const IMAGE_FIELDS: &str = concat!(
+        "{\"Id\":{{json .Id}},\"RepoTags\":{{json .RepoTags}},",
+        "\"RepoDigests\":{{json .RepoDigests}},\"Os\":{{json .Os}},",
+        "\"Architecture\":{{json .Architecture}},\"Created\":{{json .Created}}}"
+    );
+
+    pub(crate) const DAEMON_FIELDS: &str = concat!(
+        "{\"Name\":{{json .Name}},\"OSType\":{{json .OSType}},",
+        "\"OperatingSystem\":{{json .OperatingSystem}},\"KernelVersion\":{{json .KernelVersion}},",
+        "\"Architecture\":{{json .Architecture}},\"ServerVersion\":{{json .ServerVersion}},",
+        "\"NCPU\":{{json .NCPU}},\"MemTotal\":{{json .MemTotal}},\"Driver\":{{json .Driver}}}"
+    );
+
+    #[derive(Debug)]
+    struct RuntimeEntry {
+        site: String,
+        identity: Value,
+        trace: ContainerTrace,
+    }
+
+    #[derive(Debug, Default, Clone, Copy)]
+    struct Observations {
+        running: usize,
+        exited: usize,
+        gone: usize,
+        failed: usize,
+    }
+
+    #[derive(Debug, Default)]
+    struct Entries {
+        runtimes: Vec<RuntimeEntry>,
+        operations: Vec<Value>,
+        observations: BTreeMap<(usize, String), Observations>,
+    }
+
+    #[derive(Debug, Clone, Default)]
+    pub(crate) struct Journal(Arc<Mutex<Entries>>);
+
+    impl Journal {
+        pub(crate) fn observe(
+            &self,
+            site: &str,
+            identity: Option<&RunIdentity>,
+        ) -> ObservedRuntime {
+            let trace = ContainerTrace::recording();
+            let described = identity.map_or(Value::Null, |identity| {
+                json!({
+                    "run_id": identity.run_id,
+                    "incarnation": identity.incarnation,
+                    "repo_key": identity.repo_key,
+                    "private_root": identity.private_root.to_string_lossy(),
+                    "run_dir": identity.run_dir.to_string_lossy(),
+                })
+            });
+            let index = {
+                let mut entries = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+                entries.runtimes.push(RuntimeEntry {
+                    site: site.to_owned(),
+                    identity: described,
+                    trace: trace.clone(),
+                });
+                entries.runtimes.len() - 1
+            };
+            ObservedRuntime {
+                index,
+                journal: self.clone(),
+                inner: DockerCli::new(trace),
+                inspector: DockerCli::default(),
+                private_root: identity.map(|identity| identity.private_root.clone()),
+                private_half: identity.map(|identity| {
+                    crate::rundir::RunPaths::with_private_root(
+                        &identity.run_dir,
+                        &identity.run_id,
+                        &identity.private_root,
+                    )
+                    .private
+                }),
+            }
+        }
+
+        #[must_use]
+        pub(crate) fn runtimes(&self) -> usize {
+            self.0
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .runtimes
+                .len()
+        }
+
+        #[must_use]
+        pub(crate) fn snapshot(&self) -> Value {
+            let (described, operations, observations) = {
+                let entries = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+                let described: Vec<(String, Value, ContainerTrace)> = entries
+                    .runtimes
+                    .iter()
+                    .map(|runtime| {
+                        (
+                            runtime.site.clone(),
+                            runtime.identity.clone(),
+                            runtime.trace.clone(),
+                        )
+                    })
+                    .collect();
+                let observations: Vec<Value> = entries
+                    .observations
+                    .iter()
+                    .map(|((runtime, name), seen)| {
+                        json!({
+                            "runtime": runtime,
+                            "name": name,
+                            "running": seen.running,
+                            "exited": seen.exited,
+                            "gone": seen.gone,
+                            "failed": seen.failed,
+                        })
+                    })
+                    .collect();
+                (described, entries.operations.clone(), observations)
+            };
+            let runtimes: Vec<Value> = described
+                .into_iter()
+                .enumerate()
+                .map(|(index, (site, identity, trace))| {
+                    let rendered = trace.rendered();
+                    json!({
+                        "index": index,
+                        "site": site,
+                        "identity": identity,
+                        "trace_entries": rendered.len(),
+                        "trace_sha256": sha256(rendered.join("\n").as_bytes()),
+                        "trace": run_lengths(&rendered),
+                    })
+                })
+                .collect();
+            json!({
+                "runtimes": runtimes,
+                "operations": operations,
+                "observations": observations,
+            })
+        }
+
+        fn note(&self, runtime: usize, op: RuntimeOp, target: &str, outcome: Value) {
+            let mut entries = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+            let sequence = entries.operations.len();
+            entries.operations.push(json!({
+                "sequence": sequence,
+                "runtime": runtime,
+                "op": op.name(),
+                "target": target,
+                "outcome": outcome,
+            }));
+        }
+
+        fn observed(&self, runtime: usize, name: &str, result: &Result<Liveness, RuntimeError>) {
+            let mut entries = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+            let seen = entries
+                .observations
+                .entry((runtime, name.to_owned()))
+                .or_default();
+            match result {
+                Ok(Liveness::Running) => seen.running += 1,
+                Ok(Liveness::Exited) => seen.exited += 1,
+                Ok(Liveness::Gone) => seen.gone += 1,
+                Err(_) => seen.failed += 1,
+            }
+        }
+    }
+
+    pub(crate) struct ObservedRuntime {
+        index: usize,
+        journal: Journal,
+        inner: DockerCli,
+        inspector: DockerCli,
+        private_root: Option<PathBuf>,
+        private_half: Option<PathBuf>,
+    }
+
+    impl ObservedRuntime {
+        fn note(&self, op: RuntimeOp, target: &str, outcome: Value) {
+            self.journal.note(self.index, op, target, outcome);
+        }
+
+        fn intent_of(&self, name: &str) -> Value {
+            let Some(private_root) = self.private_root.as_deref() else {
+                return json!({"error": "this runtime was constructed for no run identity"});
+            };
+            let path = match ContainerName::rebuild(name) {
+                Ok(name) => name.intent_path(private_root),
+                Err(error) => return json!({"error": error.to_string()}),
+            };
+            match std::fs::read(&path) {
+                Ok(bytes) => {
+                    let parsed = match serde_json::from_slice::<ContainerIntent>(&bytes) {
+                        Ok(intent) => json!({
+                            "run_id": intent.run_id,
+                            "run_dir": intent.run_dir,
+                            "incarnation": intent.incarnation,
+                            "repo_key": intent.repo_key,
+                            "invocation": intent.invocation,
+                            "runner_policy_sha256": intent.runner_policy_sha256,
+                        }),
+                        Err(error) => json!({"error": error.to_string()}),
+                    };
+                    json!({
+                        "path": path.to_string_lossy(),
+                        "bytes": bytes.len(),
+                        "sha256": sha256(&bytes),
+                        "utf8": String::from_utf8(bytes)
+                            .map_or_else(|error| json!({"error": error.to_string()}), Value::String),
+                        "parsed": parsed,
+                    })
+                }
+                Err(error) => json!({"path": path.to_string_lossy(), "error": error.to_string()}),
+            }
+        }
+
+        fn owner_published(&self) -> Value {
+            self.private_half.as_deref().map_or(Value::Null, |private| {
+                Value::Bool(private.join("owner.json").is_file())
+            })
+        }
+    }
+
+    impl ContainerRuntime for ObservedRuntime {
+        fn probe(&self) -> Result<(), RuntimeError> {
+            let result = self.inner.probe();
+            self.note(
+                RuntimeOp::Probe,
+                "daemon",
+                outcome(&result, |()| Value::Null),
+            );
+            result
+        }
+
+        fn image_by_reference(
+            &self,
+            reference: &str,
+        ) -> Result<Option<ImageInspection>, RuntimeError> {
+            let result = self.inner.image_by_reference(reference);
+            self.note(
+                RuntimeOp::InspectImageByReference,
+                reference,
+                outcome(&result, image_found),
+            );
+            result
+        }
+
+        fn image_by_id(&self, id: &str) -> Result<Option<ImageInspection>, RuntimeError> {
+            let result = self.inner.image_by_id(id);
+            self.note(
+                RuntimeOp::InspectImageById,
+                id,
+                outcome(&result, image_found),
+            );
+            result
+        }
+
+        fn image_environment(
+            &self,
+            id: &str,
+        ) -> Result<Option<Vec<(String, String)>>, RuntimeError> {
+            let result = self.inner.image_environment(id);
+            self.note(
+                RuntimeOp::InspectImageById,
+                id,
+                outcome(&result, |found| {
+                    json!({
+                        "environment_names": found.as_ref().map(|environment| {
+                            environment.iter().map(|(name, _)| name.clone()).collect::<Vec<_>>()
+                        }),
+                    })
+                }),
+            );
+            result
+        }
+
+        fn volume_present(&self, name: &str) -> Result<bool, RuntimeError> {
+            let result = self.inner.volume_present(name);
+            self.note(
+                RuntimeOp::InspectVolume,
+                name,
+                outcome(&result, |present| Value::Bool(*present)),
+            );
+            result
+        }
+
+        fn containers_with_label(
+            &self,
+            key: &str,
+            value: &str,
+        ) -> Result<Vec<DiscoveredContainer>, RuntimeError> {
+            let result = self.inner.containers_with_label(key, value);
+            self.note(
+                RuntimeOp::ListByLabel,
+                value,
+                outcome(&result, |found| {
+                    json!({
+                        "key": key,
+                        "names": found.iter().map(|container| container.name.clone()).collect::<Vec<_>>(),
+                    })
+                }),
+            );
+            result
+        }
+
+        fn observe(&self, name: &str, bound: QuestionBound<'_>) -> Result<Liveness, RuntimeError> {
+            let result = self.inner.observe(name, bound);
+            self.journal.observed(self.index, name, &result);
+            result
+        }
+
+        fn collect(&self, name: &str) -> Result<ContainerExecution, RuntimeError> {
+            let result = self.inner.collect(name);
+            self.note(
+                RuntimeOp::Collect,
+                name,
+                outcome(&result, |execution| {
+                    json!({
+                        "exit_code": execution.exit_code,
+                        "stdout_bytes": execution.stdout.len(),
+                        "stderr_bytes": execution.stderr.len(),
+                        "output_limited": execution.output_limited,
+                    })
+                }),
+            );
+            result
+        }
+
+        fn create(&self, covered: CoveredCreate<'_>) -> Result<CreatedContainer, RuntimeError> {
+            let spec = covered.spec();
+            let planned = planned(spec);
+            let intent = self.intent_of(&spec.name);
+            let owner_published = self.owner_published();
+            let result = self.inner.create(covered);
+            let inspected = match &result {
+                Ok(created) => container_answer(&self.inspector, &created.name),
+                Err(_) => Value::Null,
+            };
+            self.note(
+                RuntimeOp::Create,
+                &spec.name,
+                json!({
+                    "planned": planned,
+                    "intent": intent,
+                    "owner_published": owner_published,
+                    "result": outcome(&result, |created| json!({
+                        "name": created.name,
+                        "reported_image_id": created.reported_image_id,
+                    })),
+                    "inspect_at_create": inspected,
+                }),
+            );
+            result
+        }
+
+        fn start(&self, covered: CoveredStart<'_>) -> Result<(), RuntimeError> {
+            let name = covered.name();
+            let result = self.inner.start(covered);
+            self.note(RuntimeOp::Start, name, outcome(&result, |()| Value::Null));
+            result
+        }
+
+        fn stop(&self, name: &str, mode: StopMode) -> Result<Settled, RuntimeError> {
+            let result = self.inner.stop(name, mode);
+            self.note(
+                RuntimeOp::Stop,
+                name,
+                json!({"mode": mode.name(), "result": outcome(&result, settled)}),
+            );
+            result
+        }
+
+        fn remove(&self, name: &str) -> Result<Settled, RuntimeError> {
+            let before = container_answer(&self.inspector, name);
+            let result = self.inner.remove(name);
+            self.note(
+                RuntimeOp::Remove,
+                name,
+                json!({"inspect_before_remove": before, "result": outcome(&result, settled)}),
+            );
+            result
+        }
+
+        fn reaper_program(&self) -> PathBuf {
+            self.inner.reaper_program()
+        }
+    }
+
+    fn sha256(bytes: &[u8]) -> String {
+        format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(bytes))
+    }
+
+    fn outcome<T>(result: &Result<T, RuntimeError>, ok: impl FnOnce(&T) -> Value) -> Value {
+        match result {
+            Ok(value) => json!({"ok": ok(value)}),
+            Err(error) => json!({
+                "error": error.to_string(),
+                "unreachable": error.is_unreachable(),
+            }),
+        }
+    }
+
+    fn image_found(found: &Option<ImageInspection>) -> Value {
+        found.as_ref().map_or(Value::Null, |image| {
+            json!({
+                "id": image.id,
+                "digest": image.digest,
+                "references": image.references,
+            })
+        })
+    }
+
+    fn settled(settled: &Settled) -> Value {
+        Value::String(
+            match settled {
+                Settled::ProcessGone => "process-gone",
+                Settled::RemovalInProgress => "removal-in-progress",
+            }
+            .to_owned(),
+        )
+    }
+
+    fn planned(spec: &CreateSpec) -> Value {
+        let labels: serde_json::Map<String, Value> = spec
+            .labels
+            .iter()
+            .map(|(key, value)| (key.clone(), Value::String(value.clone())))
+            .collect();
+        json!({
+            "name": spec.name,
+            "image_id": spec.image_id,
+            "labels": labels,
+            "mounts": spec.mounts.iter().map(planned_mount).collect::<Vec<_>>(),
+            "env_names": spec.env.iter().map(|(name, _)| name.clone()).collect::<Vec<_>>(),
+            "command": spec.command,
+            "workdir": spec.workdir,
+            "read_only_root": spec.read_only_root,
+            "user": spec.user.map(|user| format!("{}:{}", user.uid, user.gid)),
+            "open_stdin": spec.open_stdin,
+        })
+    }
+
+    fn planned_mount(mount: &Mount) -> Value {
+        let argument = super::mount_argument(mount)
+            .map_or_else(|error| json!({"error": error}), Value::String);
+        match mount {
+            Mount::Path {
+                source,
+                target,
+                read_only,
+            } => json!({
+                "type": "bind",
+                "source": source.to_string_lossy(),
+                "target": target,
+                "read_only": read_only,
+                "argument": argument,
+            }),
+            Mount::Volume {
+                name,
+                target,
+                read_only,
+            } => json!({
+                "type": "volume",
+                "source": name,
+                "target": target,
+                "read_only": read_only,
+                "argument": argument,
+            }),
+            Mount::Tmpfs { target } => json!({
+                "type": "tmpfs",
+                "source": Value::Null,
+                "target": target,
+                "read_only": false,
+                "argument": argument,
+            }),
+        }
+    }
+
+    fn run_lengths(entries: &[String]) -> Vec<Value> {
+        let mut runs: Vec<(String, usize)> = Vec::new();
+        for entry in entries {
+            match runs.last_mut() {
+                Some((last, count)) if last == entry => *count += 1,
+                _ => runs.push((entry.clone(), 1)),
+            }
+        }
+        runs.into_iter()
+            .map(|(entry, count)| json!([entry, count]))
+            .collect()
+    }
+
+    fn answered(docker: &DockerCli, op: RuntimeOp, target: &str, args: &[&str]) -> Value {
+        match docker.raw(op, target, args) {
+            Ok(raw) => {
+                let parsed = match serde_json::from_str::<Value>(raw.trim()) {
+                    Ok(value) => json!({"value": value}),
+                    Err(error) => json!({"error": error.to_string()}),
+                };
+                json!({
+                    "query": args,
+                    "raw": raw,
+                    "bytes": raw.len(),
+                    "sha256": sha256(raw.as_bytes()),
+                    "parsed": parsed,
+                })
+            }
+            Err(error) => json!({"query": args, "error": error.to_string()}),
+        }
+    }
+
+    fn container_answer(docker: &DockerCli, name: &str) -> Value {
+        answered(
+            docker,
+            RuntimeOp::Observe,
+            name,
+            &["container", "inspect", name, "--format", CONTAINER_FIELDS],
+        )
+    }
+
+    pub(crate) fn reachable() -> Result<(), String> {
+        ContainerRuntime::probe(&DockerCli::default()).map_err(|error| error.to_string())
+    }
+
+    #[must_use]
+    pub(crate) fn daemon() -> Value {
+        let docker = DockerCli::default();
+        let context = match docker.raw(RuntimeOp::Probe, "daemon", &["context", "show"]) {
+            Ok(raw) => json!({"query": ["context", "show"], "raw": raw}),
+            Err(error) => json!({"query": ["context", "show"], "error": error.to_string()}),
+        };
+        json!({
+            "version": answered(&docker, RuntimeOp::Probe, "daemon", &["version", "--format", "{{json .}}"]),
+            "info": answered(&docker, RuntimeOp::Probe, "daemon", &["info", "--format", DAEMON_FIELDS]),
+            "context": context,
+        })
+    }
+
+    #[must_use]
+    pub(crate) fn image(reference: &str) -> Value {
+        answered(
+            &DockerCli::default(),
+            RuntimeOp::InspectImageByReference,
+            reference,
+            &["image", "inspect", reference, "--format", IMAGE_FIELDS],
+        )
+    }
+
+    pub(crate) fn labelled(private_root_label: &str) -> Result<Vec<String>, String> {
+        ContainerRuntime::containers_with_label(
+            &DockerCli::default(),
+            LABEL_PRIVATE_ROOT,
+            private_root_label,
+        )
+        .map(|found| found.into_iter().map(|container| container.name).collect())
+        .map_err(|error| error.to_string())
+    }
+
+    #[must_use]
+    pub(crate) fn intent_directory(private_root: &Path) -> PathBuf {
+        super::intent::containers_dir(private_root)
+    }
+}

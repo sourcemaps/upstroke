@@ -18863,6 +18863,1814 @@ fn host_acceptance_record() {
     stdout.flush().expect("the record is flushed");
 }
 
+// ---------------------------------------------------------------------------
+// G7: the native CONTAINER acceptance record
+// ---------------------------------------------------------------------------
+//
+// One ignored test, selected by its exact name only by the platform capture
+// recipes under `.github/g7-platform-environment/`, never by a required job.
+// It drives two schema-4 runs whose `[runner]` selects the container boundary
+// through the public entry points, on the production `ContainerRunner` over
+// the production runtime, which `engine::topology::entry::container_runtime`
+// observes while armed. The notes give the framing, the observation and what
+// acceptance needs.
+
+/// The first field of every line of the container record's framing.
+const CONTAINER_ACCEPTANCE_MARKER: &str = "UPSTROKE-CONTAINER-ACCEPTANCE-RECORD";
+
+/// The container framing's version, the second field of every line.
+const CONTAINER_ACCEPTANCE_FRAMING: &str = "v1";
+
+/// The image reference both runs select. Required: never defaulted, pulled or skipped.
+const CONTAINER_ACCEPTANCE_IMAGE: &str = "UPSTROKE_CONTAINER_ACCEPTANCE_IMAGE";
+
+const CONTAINER_ACCEPTANCE_DIR_TARGET: &str = "/upstroke-acceptance/dir";
+const CONTAINER_ACCEPTANCE_FILE_TARGET: &str = "/upstroke-acceptance/file.txt";
+const CONTAINER_ACCEPTANCE_FILE_TEXT: &str = "upstroke-acceptance-configured-file-v1";
+const CONTAINER_ACCEPTANCE_PROBE: &str = "UPSTROKE-ACCEPTANCE-PROBE";
+const CONTAINER_ACCEPTANCE_WORKER: &str = "UPSTROKE-ACCEPTANCE-WORKER";
+const CONTAINER_ACCEPTANCE_REVIEW: &str = "UPSTROKE-ACCEPTANCE-REVIEW";
+const CONTAINER_ACCEPTANCE_REVIEW_WRITE: &str = ".upstroke-acceptance-review-write";
+
+fn container_acceptance_write_attempt(path: &str) -> String {
+    format!("$(if ( : > {path} ) 2>/dev/null; then echo allowed; else echo refused; fi)")
+}
+
+/// The agent probe, in the probe container's scratch directory.
+fn container_acceptance_probe_script() -> String {
+    format!(
+        "echo \"{CONTAINER_ACCEPTANCE_PROBE} uid=$(id -u) gid=$(id -g) system=$(uname -s) \
+         release=$(uname -r) machine=$(uname -m) root_write={root} dir_write={dir} \
+         file=$(cat {CONTAINER_ACCEPTANCE_FILE_TARGET})\"",
+        root = container_acceptance_write_attempt("/upstroke-acceptance-probe-write"),
+        dir = container_acceptance_write_attempt(&format!(
+            "{CONTAINER_ACCEPTANCE_DIR_TARGET}/probe-write"
+        )),
+    )
+}
+
+/// The worker: the topology stub's edit, then what the container sees of the
+/// checkout, the configured file and the role's Git view.
+fn container_acceptance_worker_script() -> String {
+    format!(
+        "{TOPOLOGY_STUB_EDIT} && if [ -f .git ]; then g=$(sed -n 's/^gitdir: //p' .git); \
+         else g=.git; fi && echo \"{CONTAINER_ACCEPTANCE_WORKER} uid=$(id -u) gid=$(id -g) \
+         readme=$(cat README.md) file=$(cat {CONTAINER_ACCEPTANCE_FILE_TARGET}) \
+         head=$(cat \"$g/HEAD\") alternates=$(cat \"$g/objects/info/alternates\")\" \
+         && echo worker >> {CONTAINER_ACCEPTANCE_DIR_TARGET}/workers.txt"
+    )
+}
+
+/// The reviewer: a write to its checkout and to the configured directory, each
+/// expected refused, then the stub's passing verdict.
+fn container_acceptance_review_script() -> String {
+    format!(
+        "echo \"{CONTAINER_ACCEPTANCE_REVIEW} workspace_write={workspace} dir_write={dir} \
+         file=$(cat {CONTAINER_ACCEPTANCE_FILE_TARGET}) uid=$(id -u) gid=$(id -g)\" \
+         && echo {TOPOLOGY_STUB_REVIEW}",
+        workspace = container_acceptance_write_attempt(CONTAINER_ACCEPTANCE_REVIEW_WRITE),
+        dir = container_acceptance_write_attempt(&format!(
+            "{CONTAINER_ACCEPTANCE_DIR_TARGET}/review-write"
+        )),
+    )
+}
+
+/// The one `[[gates]]` command, run by the run's recorded shell in the container.
+fn container_acceptance_gate_script() -> String {
+    format!(
+        "grep -q \"edited by the topology stub\" agent-output.txt \
+         && echo gate >> {CONTAINER_ACCEPTANCE_DIR_TARGET}/gates.txt"
+    )
+}
+
+fn container_acceptance_config(image: &str, directory: &Path, file: &Path) -> String {
+    let literal = |text: &str| {
+        assert!(
+            !text.contains(['\'', '\n', '\r']),
+            "`{text}` cannot be written as a TOML literal string"
+        );
+        format!("'{text}'")
+    };
+    let spelled = |path: &Path| {
+        path.to_str()
+            .expect("a fixture path this record can spell in TOML")
+            .to_owned()
+    };
+    format!(
+        "[engine]\nshell = \"sh\"\n\n[runner]\nkind = \"container\"\nimage = {image}\nmounts = [\n  \
+         {{ source = {directory}, target = \"{CONTAINER_ACCEPTANCE_DIR_TARGET}\", read_only = false }},\n  \
+         {{ source = {file}, target = \"{CONTAINER_ACCEPTANCE_FILE_TARGET}\", read_only = true }},\n]\n\n\
+         [[gates]]\nname = \"acceptance\"\ncmd = {gate}\n",
+        image = literal(image),
+        directory = literal(&spelled(directory)),
+        file = literal(&spelled(file)),
+        gate = literal(&container_acceptance_gate_script()),
+    )
+}
+
+/// The configured mounts' sources, beside the repository in its guarded tree,
+/// and the run's config committed with the plan.
+struct ContainerAcceptanceFixture {
+    image: String,
+    directory: PathBuf,
+    file: PathBuf,
+}
+
+fn container_acceptance_fixture(
+    tree: &Path,
+    repo: &Path,
+    image: &str,
+) -> ContainerAcceptanceFixture {
+    let mounts = tree.join("mounts");
+    fs::create_dir(&mounts).expect("the configured mounts' parent, inside the guarded tree");
+    let directory = mounts.join("configured-dir");
+    fs::create_dir(&directory).expect("the configured directory mount's source");
+    let file = mounts.join("configured-file.txt");
+    fs::write(&file, format!("{CONTAINER_ACCEPTANCE_FILE_TEXT}\n"))
+        .expect("the configured file mount's source");
+    let plan = fs::read_to_string(repo.join("plan.md")).expect("the plan temp_engine_repo seeded");
+    seed(
+        repo,
+        &plan,
+        Some(&container_acceptance_config(image, &directory, &file)),
+    );
+    ContainerAcceptanceFixture {
+        image: image.to_owned(),
+        directory,
+        file,
+    }
+}
+
+/// The topology stub's parse and question counter, with every command spelled
+/// for the Linux image's `sh` (never the native shell), noting at each adapter
+/// probe whether the owner record was published and keeping every output it saw.
+struct ContainerWitness {
+    stub: TopologyStub,
+    private_root: PathBuf,
+    owner_at_probe: Mutex<Vec<bool>>,
+    outputs: Mutex<Vec<serde_json::Value>>,
+}
+
+impl ContainerWitness {
+    fn new(questions: usize, private_root: PathBuf) -> Self {
+        Self {
+            stub: TopologyStub::new(&container_acceptance_worker_script(), questions),
+            private_root,
+            owner_at_probe: Mutex::new(Vec::new()),
+            outputs: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn witness(&self, kind: &str, out: &ProcessOutput) -> Result<(), UpstrokeError> {
+        self.outputs
+            .lock()
+            .map_err(|_| UpstrokeError::Agent {
+                message: "container witness lock poisoned".to_owned(),
+            })?
+            .push(serde_json::json!({
+                "kind": kind,
+                "code": out.code,
+                "timed_out": out.timed_out,
+                "output_limited": out.output_limited,
+                "stdout": out.stdout,
+                "stderr": out.stderr,
+            }));
+        Ok(())
+    }
+}
+
+impl AgentAdapter for ContainerWitness {
+    fn id(&self) -> &'static str {
+        TOPOLOGY_STUB
+    }
+
+    fn probe(&self, runner: &dyn crate::runner::Runner) -> Result<Caps, UpstrokeError> {
+        let published = fs::read_dir(self.private_root.join("runs")).is_ok_and(|runs| {
+            runs.flatten()
+                .any(|run| run.path().join("owner.json").is_file())
+        });
+        self.owner_at_probe
+            .lock()
+            .map_err(|_| UpstrokeError::Agent {
+                message: "container witness lock poisoned".to_owned(),
+            })?
+            .push(published);
+        let request = crate::agent::probe_request(
+            TOPOLOGY_STUB,
+            crate::gates::ShellKind::Sh.spec(&container_acceptance_probe_script()),
+            0,
+            Duration::from_secs(60),
+        )?;
+        let output = runner.run_blocking(&request)?;
+        self.witness("probe", &output)?;
+        if output.code != Some(0) {
+            return Err(UpstrokeError::Agent {
+                message: format!(
+                    "the container stub's probe exited {:?}: {}",
+                    output.code, output.stderr
+                ),
+            });
+        }
+        Ok(Caps {
+            version: "0.0.0-container-stub".to_owned(),
+            json_output: true,
+            session_resume: false,
+            cost_reporting: true,
+            read_only_mode: true,
+            acp: false,
+            model_list: false,
+        })
+    }
+
+    fn build(&self, run: &TaskRun) -> Result<CommandSpec, UpstrokeError> {
+        let script = if run.profile.permissions == PermissionMode::ReadOnly {
+            container_acceptance_review_script()
+        } else {
+            container_acceptance_worker_script()
+        };
+        Ok(crate::gates::ShellKind::Sh.spec(&script))
+    }
+
+    fn parse(&self, out: &ProcessOutput) -> Result<Outcome, UpstrokeError> {
+        let kind = if out.stdout.contains(CONTAINER_ACCEPTANCE_REVIEW) {
+            "review"
+        } else {
+            "worker"
+        };
+        self.witness(kind, out)?;
+        self.stub.parse(out)
+    }
+}
+
+/// [`ContainerWitness`] behind a source that can be shared, as production's is.
+struct SharedContainerWitness(std::sync::Arc<ContainerWitness>);
+
+impl AdapterSource for SharedContainerWitness {
+    fn get(&self, id: &str) -> Option<&dyn AgentAdapter> {
+        (id == TOPOLOGY_STUB).then_some(&*self.0 as &dyn AgentAdapter)
+    }
+
+    fn shared(&self) -> Option<std::sync::Arc<dyn AdapterSource + Send + Sync>> {
+        Some(std::sync::Arc::new(Self(std::sync::Arc::clone(&self.0))))
+    }
+}
+
+/// What the parked epoch of the resumed container run left, read before it was answered.
+struct ContainerAcceptanceParked {
+    log_bytes: usize,
+    log_sha256: String,
+    owner_sha256: String,
+}
+
+/// One container case's inputs to [`container_acceptance_run`].
+struct ContainerAcceptanceCase<'a> {
+    case: &'a str,
+    repo: &'a Path,
+    run_id: &'a str,
+    witness: &'a ContainerWitness,
+    journal: &'a crate::runner::container::observed::Journal,
+    calls: Vec<serde_json::Value>,
+    fixture: &'a ContainerAcceptanceFixture,
+    parked: Option<&'a ContainerAcceptanceParked>,
+}
+
+fn container_acceptance_creates(
+    snapshot: &serde_json::Value,
+    from: usize,
+    to: usize,
+) -> Vec<serde_json::Value> {
+    snapshot["operations"]
+        .as_array()
+        .expect("the journal's operations")
+        .iter()
+        .filter(|operation| {
+            operation["op"] == "create"
+                && operation["runtime"]
+                    .as_u64()
+                    .and_then(|runtime| usize::try_from(runtime).ok())
+                    .is_some_and(|runtime| (from..to).contains(&runtime))
+        })
+        .cloned()
+        .collect()
+}
+
+/// After one public call: the daemon lists no container labelled with the
+/// call's private root, and no container intent remains on disk.
+fn container_acceptance_end_state(
+    call: &str,
+    repo: &Path,
+    journal: &crate::runner::container::observed::Journal,
+    from: usize,
+    to: usize,
+) -> serde_json::Value {
+    let snapshot = journal.snapshot();
+    let labels: std::collections::BTreeSet<String> =
+        container_acceptance_creates(&snapshot, from, to)
+            .iter()
+            .filter_map(|create| {
+                create["outcome"]["planned"]["labels"]["upstroke.private_root"]
+                    .as_str()
+                    .map(str::to_owned)
+            })
+            .collect();
+    assert!(
+        !labels.is_empty(),
+        "{call}: the call created containers labelled with a private root"
+    );
+    for label in &labels {
+        let remaining = crate::runner::container::observed::labelled(label)
+            .unwrap_or_else(|error| panic!("{call}: the runtime lists by label: {error}"));
+        assert!(
+            remaining.is_empty(),
+            "{call}: no container labelled with this private root remains: {remaining:?}"
+        );
+    }
+    let intents = crate::runner::container::observed::intent_directory(&private_root_for(repo));
+    let entries: Vec<String> = match fs::read_dir(&intents) {
+        Ok(entries) => entries
+            .map(|entry| {
+                entry
+                    .expect("an intent directory entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => panic!("{call}: {}: {error}", intents.display()),
+    };
+    assert!(
+        entries.is_empty(),
+        "{call}: every container intent was removed: {entries:?}"
+    );
+    serde_json::json!({
+        "private_root_labels": labels,
+        "labelled_containers_remaining": [],
+        "intent_directory_entries": entries,
+    })
+}
+
+fn container_acceptance_fields(
+    stdout: &str,
+    marker: &str,
+) -> std::collections::BTreeMap<String, String> {
+    let line = stdout
+        .lines()
+        .find(|line| line.starts_with(marker))
+        .unwrap_or_else(|| panic!("no `{marker}` line in {stdout:?}"));
+    line.split_whitespace()
+        .skip(1)
+        .filter_map(|field| field.split_once('='))
+        .map(|(key, value)| (key.to_owned(), value.to_owned()))
+        .collect()
+}
+
+fn container_acceptance_role(invocation: &str) -> &'static str {
+    if invocation.starts_with("p.shell.") {
+        "probe-shell"
+    } else if invocation.starts_with("p.agent-") {
+        "probe-agent"
+    } else if invocation.contains(".worker.") {
+        "worker"
+    } else if invocation.contains(".gate") {
+        "gate"
+    } else if invocation.contains(".review_") {
+        "review"
+    } else {
+        panic!("`{invocation}` is no invocation this record knows")
+    }
+}
+
+#[cfg(unix)]
+fn container_acceptance_owner(path: &Path) -> serde_json::Value {
+    use std::os::unix::fs::MetadataExt as _;
+    let metadata = fs::metadata(path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+    serde_json::json!({
+        "uid": metadata.uid(),
+        "gid": metadata.gid(),
+        "mode": format!("{:o}", metadata.mode() & 0o7777),
+    })
+}
+
+#[cfg(not(unix))]
+fn container_acceptance_owner(path: &Path) -> serde_json::Value {
+    let metadata = fs::metadata(path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+    serde_json::json!({
+        "uid": null,
+        "gid": null,
+        "readonly": metadata.permissions().readonly(),
+    })
+}
+
+fn container_acceptance_lines(path: &Path) -> usize {
+    match fs::read_to_string(path) {
+        Ok(text) => text.lines().count(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(error) => panic!("{}: {error}", path.display()),
+    }
+}
+
+/// What every container of one run is checked against: the run's own records
+/// and the journal's operations.
+struct ContainerAcceptanceRecorded<'a> {
+    case: &'a str,
+    run_id: &'a str,
+    image_id: &'a str,
+    policy_digest: &'a str,
+    operations: &'a [serde_json::Value],
+}
+
+/// One container, validated from the journal: its planned spec, the intent on
+/// disk, the daemon's own inspection at creation and before removal, and the
+/// start, collection and removal that followed, all in one runtime.
+fn container_acceptance_container(
+    recorded: &ContainerAcceptanceRecorded<'_>,
+    create: &serde_json::Value,
+    epoch: usize,
+    incarnation: &str,
+) -> serde_json::Value {
+    let ContainerAcceptanceRecorded {
+        case,
+        run_id,
+        image_id,
+        policy_digest,
+        operations,
+    } = *recorded;
+    let name = create["target"].as_str().expect("a container name");
+    let runtime = &create["runtime"];
+    let outcome = &create["outcome"];
+    let planned = &outcome["planned"];
+    let at = |what: &str| format!("{case}: `{name}` {what}");
+    assert_eq!(planned["name"], name, "{}", at("is the planned name"));
+    assert_eq!(
+        planned["image_id"],
+        image_id,
+        "{}",
+        at("is planned from the recorded image id")
+    );
+    assert_eq!(
+        outcome["result"]["ok"]["reported_image_id"],
+        image_id,
+        "{}: {outcome}",
+        at("was created and reports the recorded image id")
+    );
+    assert_eq!(
+        outcome["owner_published"],
+        true,
+        "{}",
+        at("was created after owner.json")
+    );
+
+    let inspected = &outcome["inspect_at_create"]["parsed"]["value"];
+    assert!(
+        inspected.is_object(),
+        "{}: {}",
+        at("has the daemon's inspection at creation"),
+        outcome["inspect_at_create"]
+    );
+    assert_eq!(
+        inspected["Image"],
+        image_id,
+        "{}",
+        at("inspects as the recorded image id")
+    );
+    assert_eq!(
+        inspected["Name"],
+        format!("/{name}"),
+        "{}",
+        at("inspects by its name")
+    );
+    let labels = planned["labels"].as_object().expect("the planned labels");
+    for (key, value) in labels {
+        assert_eq!(
+            &inspected["Labels"][key],
+            value,
+            "{}",
+            at(&format!("carries {key}"))
+        );
+    }
+    assert_eq!(
+        planned["read_only_root"],
+        true,
+        "{}",
+        at("plans a read-only root")
+    );
+    assert_eq!(
+        inspected["ReadonlyRootfs"],
+        true,
+        "{}",
+        at("has a read-only root")
+    );
+    assert_eq!(
+        inspected["User"],
+        planned["user"].as_str().unwrap_or_default(),
+        "{}",
+        at("runs as its planned user")
+    );
+    assert_eq!(
+        inspected["WorkingDir"],
+        planned["workdir"],
+        "{}",
+        at("has its workdir")
+    );
+
+    let planned_mounts = planned["mounts"].as_array().expect("the planned mounts");
+    let daemon_mounts = inspected["Mounts"].as_array().cloned().unwrap_or_default();
+    let requested = inspected["HostConfigMounts"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let mut mounts = Vec::new();
+    for mount in planned_mounts {
+        let target = mount["target"].as_str().expect("a mount target");
+        let read_only = mount["read_only"].as_bool().expect("a read-only flag");
+        let kind = mount["type"].as_str().expect("a mount type");
+        let request = requested
+            .iter()
+            .find(|request| request["Target"] == target)
+            .unwrap_or_else(|| panic!("{}: {requested:?}", at(&format!("was asked for {target}"))));
+        assert_eq!(
+            request["Type"],
+            kind,
+            "{}",
+            at(&format!("asked for a {kind} at {target}"))
+        );
+        let held = daemon_mounts
+            .iter()
+            .find(|held| held["Destination"] == target);
+        if kind == "tmpfs" {
+            mounts.push(serde_json::json!({
+                "target": target,
+                "type": kind,
+                "requested": request,
+                "held": held,
+            }));
+            continue;
+        }
+        let held =
+            held.unwrap_or_else(|| panic!("{}: {daemon_mounts:?}", at(&format!("holds {target}"))));
+        assert_eq!(
+            held["Type"],
+            kind,
+            "{}",
+            at(&format!("holds a {kind} at {target}"))
+        );
+        assert_eq!(
+            held["RW"],
+            !read_only,
+            "{}",
+            at(&format!("holds {target} read-only={read_only}"))
+        );
+        if kind == "bind" && !cfg!(windows) {
+            assert_eq!(
+                held["Source"],
+                mount["source"],
+                "{}",
+                at(&format!("binds {target} from the planned source"))
+            );
+        }
+        mounts.push(serde_json::json!({
+            "target": target,
+            "type": kind,
+            "read_only": read_only,
+            "planned_source": mount["source"],
+            "argument": mount["argument"],
+            "requested_source": request["Source"],
+            "inspect_source": held["Source"],
+            "inspect_rw": held["RW"],
+        }));
+    }
+    for held in &daemon_mounts {
+        assert!(
+            planned_mounts
+                .iter()
+                .any(|mount| mount["target"] == held["Destination"]),
+            "{}: {held}",
+            at("holds no mount it was not planned")
+        );
+    }
+
+    let intent = &outcome["intent"]["parsed"];
+    assert!(
+        intent["invocation"].is_string(),
+        "{}: {}",
+        at("has its intent on disk, parsed as the runner's record"),
+        outcome["intent"]
+    );
+    assert_eq!(intent["run_id"], run_id, "{}", at("intends this run"));
+    assert_eq!(
+        intent["incarnation"],
+        incarnation,
+        "{}",
+        at("intends its epoch's incarnation")
+    );
+    assert_eq!(
+        intent["invocation"].as_str(),
+        labels
+            .get("upstroke.invocation")
+            .and_then(serde_json::Value::as_str),
+        "{}",
+        at("intends the invocation it is labelled with")
+    );
+    assert_eq!(
+        intent["runner_policy_sha256"],
+        policy_digest,
+        "{}",
+        at("intends the recorded RunnerPolicy's digest")
+    );
+    assert_eq!(
+        labels
+            .get("upstroke.incarnation")
+            .and_then(serde_json::Value::as_str),
+        Some(incarnation),
+        "{}",
+        at("is labelled with its epoch's incarnation")
+    );
+    assert_eq!(
+        labels
+            .get("upstroke.run")
+            .and_then(serde_json::Value::as_str),
+        Some(run_id),
+        "{}",
+        at("is labelled with this run")
+    );
+
+    let find = |op: &str| {
+        let found: Vec<&serde_json::Value> = operations
+            .iter()
+            .filter(|operation| {
+                operation["op"] == op
+                    && operation["target"] == name
+                    && &operation["runtime"] == runtime
+            })
+            .collect();
+        let [one] = found.as_slice() else {
+            panic!(
+                "{}: {found:?}",
+                at(&format!("has exactly one {op} in its runtime"))
+            );
+        };
+        *one
+    };
+    let started = find("start");
+    assert!(
+        started["outcome"]["ok"].is_null() && started["outcome"]["error"].is_null(),
+        "{}: {started}",
+        at("started")
+    );
+    let collected = find("collect");
+    let exit_code = collected["outcome"]["ok"]["exit_code"]
+        .as_i64()
+        .unwrap_or_else(|| panic!("{}: {collected}", at("was collected with an exit code")));
+    assert_eq!(exit_code, 0, "{}", at("exited 0"));
+    let removed = find("remove");
+    assert_eq!(
+        removed["outcome"]["result"]["ok"],
+        "process-gone",
+        "{}: {removed}",
+        at("was removed with its process gone")
+    );
+    let before = &removed["outcome"]["inspect_before_remove"]["parsed"]["value"];
+    assert!(
+        before.is_object(),
+        "{}: {removed}",
+        at("was inspected before its removal")
+    );
+    assert_eq!(
+        before["Id"],
+        inspected["Id"],
+        "{}",
+        at("is the container that was created")
+    );
+    assert_eq!(
+        before["Image"],
+        image_id,
+        "{}",
+        at("still inspects as the recorded image id")
+    );
+    assert_eq!(
+        before["State"]["Status"],
+        "exited",
+        "{}",
+        at("had exited before its removal")
+    );
+    assert_eq!(
+        before["State"]["ExitCode"],
+        exit_code,
+        "{}",
+        at("exited as collected")
+    );
+    assert_ne!(
+        before["State"]["StartedAt"],
+        "0001-01-01T00:00:00Z",
+        "{}",
+        at("had been started")
+    );
+    let sequence =
+        |operation: &serde_json::Value| operation["sequence"].as_u64().expect("a sequence");
+    assert!(
+        sequence(create) < sequence(started)
+            && sequence(started) < sequence(collected)
+            && sequence(collected) < sequence(removed),
+        "{}",
+        at("was created, started, collected and removed in that order")
+    );
+    let stops: Vec<&serde_json::Value> = operations
+        .iter()
+        .filter(|operation| {
+            operation["op"] == "stop"
+                && operation["target"] == name
+                && &operation["runtime"] == runtime
+        })
+        .collect();
+    assert!(
+        stops.len() <= 1,
+        "{}: {stops:?}",
+        at("was stopped at most once")
+    );
+    for stop in &stops {
+        assert!(
+            stop["outcome"]["result"]["ok"].is_string(),
+            "{}: {stop}",
+            at("was stopped and settled")
+        );
+        assert!(
+            sequence(collected) < sequence(stop) && sequence(stop) < sequence(removed),
+            "{}",
+            at("was stopped by its release, after its collection and before its removal")
+        );
+    }
+    let invocation = intent["invocation"]
+        .as_str()
+        .expect("the intent's invocation, asserted above")
+        .to_owned();
+    serde_json::json!({
+        "name": name,
+        "runtime": runtime,
+        "epoch": epoch,
+        "incarnation": incarnation,
+        "invocation": invocation,
+        "role": container_acceptance_role(&invocation),
+        "container_id": inspected["Id"],
+        "image": inspected["Image"],
+        "config_image": inspected["ConfigImage"],
+        "user": inspected["User"],
+        "readonly_rootfs": inspected["ReadonlyRootfs"],
+        "workdir": inspected["WorkingDir"],
+        "command": inspected["Cmd"],
+        "mounts": mounts,
+        "exit_code": exit_code,
+        "started_at": before["State"]["StartedAt"],
+        "finished_at": before["State"]["FinishedAt"],
+        "sequence": [sequence(create), sequence(started), sequence(collected), sequence(removed)],
+        "release_stops": stops
+            .iter()
+            .map(|stop| serde_json::json!({
+                "sequence": stop["sequence"],
+                "mode": stop["outcome"]["mode"],
+                "settled": stop["outcome"]["result"]["ok"],
+            }))
+            .collect::<Vec<_>>(),
+        "inspect_at_create_sha256": outcome["inspect_at_create"]["sha256"],
+        "inspect_before_remove_sha256": removed["outcome"]["inspect_before_remove"]["sha256"],
+        "intent_sha256": outcome["intent"]["sha256"],
+    })
+}
+
+/// The product runtime's own trace of one runtime, by the names each effect was asked about.
+fn container_acceptance_traced(
+    runtime: &serde_json::Value,
+    op: &str,
+) -> std::collections::BTreeSet<String> {
+    let prefix = format!("rt:{op}:");
+    runtime["trace"]
+        .as_array()
+        .expect("a runtime's trace")
+        .iter()
+        .filter_map(|run| run[0].as_str())
+        .filter_map(|entry| entry.strip_prefix(&prefix))
+        .map(str::to_owned)
+        .collect()
+}
+
+fn container_acceptance_journaled(
+    operations: &[serde_json::Value],
+    runtime: usize,
+    op: &str,
+) -> std::collections::BTreeSet<String> {
+    operations
+        .iter()
+        .filter(|operation| operation["op"] == op && operation["runtime"] == runtime)
+        .filter_map(|operation| operation["target"].as_str().map(str::to_owned))
+        .collect()
+}
+
+/// One released container run's records and observation, asserted and returned
+/// as its part of the record: everything [`host_acceptance_run`] asserts of a
+/// host run, with the container runner and its image identity in its place, and
+/// every container of every epoch validated by [`container_acceptance_container`].
+fn container_acceptance_run(input: &ContainerAcceptanceCase<'_>) -> serde_json::Value {
+    let case = input.case;
+    let repo = input.repo;
+    let run_id = input.run_id;
+    let witness = input.witness;
+    let journal = input.journal;
+    let fixture = input.fixture;
+    let parked = input.parked;
+    let probes = witness
+        .owner_at_probe
+        .lock()
+        .expect("container witness")
+        .clone();
+    assert!(
+        !probes.is_empty() && probes.iter().all(|published| *published),
+        "{case}: owner.json was published before every adapter probe: {probes:?}"
+    );
+    let public = rundir::public_dir(repo, run_id);
+    let private = private_dir_of(repo, run_id);
+    let files: Vec<(&str, &str, Vec<u8>)> = HOST_ACCEPTANCE_FILES
+        .iter()
+        .map(|(name, half)| {
+            let directory = if *half == "public" { &public } else { &private };
+            let path = directory.join(name);
+            let bytes = fs::read(&path)
+                .unwrap_or_else(|error| panic!("{case}: {}: {error}", path.display()));
+            (*name, *half, bytes)
+        })
+        .collect();
+    let bytes_of = |wanted: &str| {
+        files
+            .iter()
+            .find(|(name, _, _)| *name == wanted)
+            .map(|(_, _, bytes)| bytes.as_slice())
+            .unwrap_or_else(|| panic!("{case}: no {wanted}"))
+    };
+    let parse = |name: &str| -> serde_json::Value {
+        serde_json::from_slice(bytes_of(name))
+            .unwrap_or_else(|error| panic!("{case}: {name} parses: {error}"))
+    };
+
+    let log = bytes_of("events.jsonl");
+    let events: Vec<serde_json::Value> = std::str::from_utf8(log)
+        .expect("events.jsonl is UTF-8")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("an event"))
+        .collect();
+    let first_line = &log[..log
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .expect("a committed first line")];
+    let first_digest = host_acceptance_sha256(first_line);
+    let started = events.first().expect("a first event");
+    assert_eq!(started["event"], "run_started", "{case}");
+    assert_eq!(
+        started["data"]["schema"], 4,
+        "{case}: the public entry point wrote schema 4"
+    );
+    assert_eq!(started["data"]["run_id"], run_id, "{case}");
+    assert_eq!(started["data"]["branch"], format!("upstroke/run-{run_id}"));
+    assert_eq!(
+        started["data"]["shell"], "sh",
+        "{case}: the run recorded the image's shell"
+    );
+    let runner = &started["data"]["runner"];
+    assert_eq!(
+        runner["kind"], "container",
+        "{case}: the production ContainerRunner ran it"
+    );
+    assert_eq!(runner["policy"], "container-v1", "{case}: {runner}");
+    assert_eq!(
+        runner["image"]["reference"], fixture.image,
+        "{case}: the configured reference is recorded"
+    );
+    let image_id = runner["image"]["id"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .unwrap_or_else(|| panic!("{case}: run_started records an image id: {runner}"))
+        .to_owned();
+    assert_eq!(
+        runner["credential_volumes"],
+        serde_json::json!({}),
+        "{case}: {runner}"
+    );
+    let recorded_mounts = runner["mounts"].as_array().expect("the recorded mounts");
+    assert_eq!(
+        recorded_mounts
+            .iter()
+            .map(|mount| (mount["target"].clone(), mount["read_only"].clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                serde_json::json!(CONTAINER_ACCEPTANCE_DIR_TARGET),
+                serde_json::json!(false)
+            ),
+            (
+                serde_json::json!(CONTAINER_ACCEPTANCE_FILE_TARGET),
+                serde_json::json!(true)
+            ),
+        ],
+        "{case}: both configured mounts are recorded: {runner}"
+    );
+    let policy: crate::topology::events::RunnerPolicy = serde_json::from_value(runner.clone())
+        .unwrap_or_else(|error| panic!("{case}: run_started's runner is a RunnerPolicy: {error}"));
+    let policy_digest = crate::runner::policy::runner_policy_sha256(&policy);
+    let runner_bytes = serde_json::to_vec(runner).expect("run_started's runner");
+    let same_runner =
+        |value: &serde_json::Value| serde_json::to_vec(value).expect("a runner") == runner_bytes;
+
+    let committed = parse("committed.json");
+    assert_eq!(
+        committed["run_started_sha256"],
+        format!("sha256:{first_digest}"),
+        "{case}: committed.json names the digest of the committed first line"
+    );
+    assert_eq!(committed["run_id"], run_id, "{case}");
+    assert_eq!(
+        committed["incarnation"], started["data"]["incarnation"],
+        "{case}"
+    );
+
+    let owner = parse("owner.json");
+    assert!(
+        same_runner(&owner["runner"]),
+        "{case}: owner.json records the runner run_started(4) records"
+    );
+    assert_eq!(owner["run_id"], run_id, "{case}");
+    assert_eq!(
+        owner["incarnation"], started["data"]["incarnation"],
+        "{case}"
+    );
+
+    let resumed: Vec<&serde_json::Value> = events
+        .iter()
+        .filter(|event| event["event"] == "run_resumed")
+        .collect();
+    assert_eq!(
+        resumed.is_empty(),
+        parked.is_none(),
+        "{case}: a resumed run records its resume, a fresh one none"
+    );
+    assert!(
+        resumed
+            .iter()
+            .all(|event| same_runner(&event["data"]["runner"])),
+        "{case}: every epoch records the runner run_started(4) records"
+    );
+
+    let report_bytes = bytes_of("report.json");
+    let report = parse("report.json");
+    assert!(
+        same_runner(&report["runner"]),
+        "{case}: report.json names the runner run_started(4) records"
+    );
+    assert_eq!(report["run_id"], run_id, "{case}");
+    assert_eq!(report["outcome"], "complete", "{case}");
+    let projected = crate::engine::topology::observe::observe(repo, run_id)
+        .expect("observes")
+        .expect("a schema-4 log")
+        .report()
+        .expect("projects");
+    assert!(
+        projected.is_fresh_against(report_bytes),
+        "{case}: report.json is the projection of the committed log"
+    );
+
+    let merged: Vec<String> = events
+        .iter()
+        .filter(|event| event["event"] == "task_merged")
+        .map(|event| {
+            event["data"]["merged_sha"]
+                .as_str()
+                .expect("a merged sha")
+                .to_owned()
+        })
+        .collect();
+    assert_eq!(merged.len(), 2, "{case}: both tasks merged: {merged:?}");
+    let integration_ref = started["data"]["integration_ref"]
+        .as_str()
+        .expect("run_started names its integration ref");
+    assert_eq!(integration_ref, format!("refs/heads/upstroke/run-{run_id}"));
+    let at_ref = git_in(repo, &["rev-parse", integration_ref])
+        .trim()
+        .to_owned();
+    assert_eq!(
+        Some(&at_ref),
+        merged.last(),
+        "{case}: the recorded integration ref holds the last merge the log records"
+    );
+    let last = events.last().expect("a last event");
+    assert_eq!(last["event"], "run_finished", "{case}");
+    assert_eq!(last["data"]["outcome"], "complete", "{case}");
+
+    if let Some(parked) = parked {
+        assert!(
+            log.len() > parked.log_bytes
+                && host_acceptance_sha256(&log[..parked.log_bytes]) == parked.log_sha256,
+            "{case}: the resumed log continues the parked log byte for byte"
+        );
+        assert_eq!(
+            host_acceptance_sha256(bytes_of("owner.json")),
+            parked.owner_sha256,
+            "{case}: owner.json is the record the run was created with, unchanged by the resume"
+        );
+    }
+
+    let mut epochs: Vec<String> = vec![
+        started["data"]["incarnation"]
+            .as_str()
+            .expect("run_started's incarnation")
+            .to_owned(),
+    ];
+    epochs.extend(resumed.iter().map(|event| {
+        event["data"]["incarnation"]
+            .as_str()
+            .expect("run_resumed's incarnation")
+            .to_owned()
+    }));
+    let mut attempts: Vec<std::collections::BTreeSet<(u64, u64, u64)>> =
+        vec![std::collections::BTreeSet::new(); epochs.len()];
+    let mut epoch = 0;
+    for event in &events {
+        if event["event"] == "run_resumed" {
+            epoch += 1;
+        }
+        if event["event"] == "attempt_started" {
+            let number = |field: &str| {
+                event["data"][field]
+                    .as_u64()
+                    .unwrap_or_else(|| panic!("{case}: attempt_started's {field}: {event}"))
+            };
+            attempts[epoch].insert((number("key"), number("generation"), number("attempt")));
+        }
+    }
+
+    let snapshot = journal.snapshot();
+    let runtimes = snapshot["runtimes"]
+        .as_array()
+        .expect("the journal's runtimes");
+    let operations = snapshot["operations"]
+        .as_array()
+        .expect("the journal's operations");
+    let mut runners: Vec<usize> = Vec::new();
+    for call in &input.calls {
+        let range = call["runtimes"].as_array().expect("a call's runtime range");
+        let index = |at: usize| {
+            range[at]
+                .as_u64()
+                .and_then(|index| usize::try_from(index).ok())
+                .expect("a runtime index")
+        };
+        let (from, to) = (index(0), index(1));
+        if call["entry"] == "answer::answer" {
+            assert_eq!(
+                from, to,
+                "{case}: answer::answer constructed no container runtime"
+            );
+            continue;
+        }
+        assert_eq!(
+            to - from,
+            3,
+            "{case}: {}: the public composition constructed three runtimes: {call}",
+            call["entry"]
+        );
+        for (inspection, runtime) in runtimes.iter().enumerate().skip(from).take(2) {
+            assert!(
+                runtime["identity"].is_null(),
+                "{case}: runtime {inspection} serves inspection, not a run's containers"
+            );
+        }
+        assert_ne!(
+            runtimes[from]["site"],
+            runtimes[from + 1]["site"],
+            "{case}: the two inspection runtimes were constructed at two sites"
+        );
+        let runner_runtime = &runtimes[from + 2];
+        assert_eq!(
+            runner_runtime["identity"]["run_id"],
+            run_id,
+            "{case}: runtime {} is this run's container runner",
+            from + 2
+        );
+        for runtime in &runtimes[from..to] {
+            assert!(
+                runtime["site"]
+                    .as_str()
+                    .is_some_and(|site| site.starts_with("src/engine/topology/entry.rs:")),
+                "{case}: every runtime was constructed by the schema-4 entry: {runtime}"
+            );
+        }
+        runners.push(from + 2);
+    }
+    assert_eq!(
+        runners.len(),
+        epochs.len(),
+        "{case}: one container runner per recorded epoch"
+    );
+    assert_eq!(
+        input
+            .calls
+            .last()
+            .and_then(|call| call["runtimes"][1].as_u64())
+            .and_then(|to| usize::try_from(to).ok()),
+        Some(runtimes.len()),
+        "{case}: every runtime the journal holds was constructed by one of the case's calls"
+    );
+
+    for (index, runtime) in runtimes.iter().enumerate() {
+        let runner_epoch = runners.iter().position(|runner| *runner == index);
+        for op in ["create", "start", "stop", "remove"] {
+            let traced = container_acceptance_traced(runtime, op);
+            let journaled = container_acceptance_journaled(operations, index, op);
+            assert_eq!(
+                traced, journaled,
+                "{case}: runtime {index}'s own trace and the journal name the same {op}s"
+            );
+            if runner_epoch.is_none() {
+                assert!(
+                    journaled.is_empty(),
+                    "{case}: runtime {index} performed no {op}: {journaled:?}"
+                );
+            }
+        }
+    }
+
+    let recorded = ContainerAcceptanceRecorded {
+        case,
+        run_id,
+        image_id: &image_id,
+        policy_digest: &policy_digest,
+        operations,
+    };
+    let mut containers: Vec<serde_json::Value> = Vec::new();
+    for (epoch, runner) in runners.iter().enumerate() {
+        let incarnation = epochs[epoch].as_str();
+        assert_eq!(
+            runtimes[*runner]["identity"]["incarnation"], incarnation,
+            "{case}: the epoch-{epoch} runner serves that epoch's incarnation"
+        );
+        let creates = container_acceptance_creates(&snapshot, *runner, *runner + 1);
+        assert!(
+            !creates.is_empty(),
+            "{case}: epoch {epoch} created containers"
+        );
+        let validated: Vec<serde_json::Value> = creates
+            .iter()
+            .map(|create| container_acceptance_container(&recorded, create, epoch, incarnation))
+            .collect();
+        let roles = |role: &str| {
+            validated
+                .iter()
+                .filter(|container| container["role"] == role)
+                .count()
+        };
+        assert!(
+            roles("probe-shell") >= 1 && roles("probe-agent") >= 1,
+            "{case}: epoch {epoch} probed the shell and the agent inside the image"
+        );
+        let first_work = validated
+            .iter()
+            .filter(|container| {
+                !container["role"]
+                    .as_str()
+                    .is_some_and(|role| role.starts_with("probe-"))
+            })
+            .filter_map(|container| container["sequence"][0].as_u64())
+            .min();
+        let last_probe = validated
+            .iter()
+            .filter(|container| {
+                container["role"]
+                    .as_str()
+                    .is_some_and(|role| role.starts_with("probe-"))
+            })
+            .filter_map(|container| container["sequence"][3].as_u64())
+            .max();
+        assert!(
+            first_work.is_none() || last_probe < first_work,
+            "{case}: epoch {epoch}'s probes ran and were removed before its first work container"
+        );
+        let workers: std::collections::BTreeSet<(u64, u64, u64)> = validated
+            .iter()
+            .filter(|container| container["role"] == "worker")
+            .map(|container| {
+                let invocation = container["invocation"].as_str().expect("an invocation");
+                let number = |prefix: char, part: &str| {
+                    part.strip_prefix(prefix)
+                        .and_then(|digits| digits.parse::<u64>().ok())
+                        .unwrap_or_else(|| panic!("{case}: `{invocation}`'s {prefix} field"))
+                };
+                let parts: Vec<&str> = invocation.split('.').collect();
+                (
+                    number('k', parts[0]),
+                    number('g', parts[1]),
+                    number('a', parts[2]),
+                )
+            })
+            .collect();
+        assert_eq!(
+            workers, attempts[epoch],
+            "{case}: epoch {epoch}'s worker containers are exactly its recorded attempts"
+        );
+        containers.extend(validated);
+    }
+
+    let count = |role: &str| {
+        containers
+            .iter()
+            .filter(|container| container["role"] == role)
+            .count()
+    };
+    let outputs = witness.outputs.lock().expect("container witness").clone();
+    let witnessed = |kind: &str| -> Vec<&serde_json::Value> {
+        outputs
+            .iter()
+            .filter(|output| output["kind"] == kind)
+            .collect()
+    };
+    let planned_user = containers
+        .first()
+        .map(|container| container["user"].clone())
+        .expect("a container");
+    assert!(
+        containers
+            .iter()
+            .all(|container| container["user"] == planned_user),
+        "{case}: every container ran as one user"
+    );
+    let ids = |fields: &std::collections::BTreeMap<String, String>| {
+        format!(
+            "{}:{}",
+            fields.get("uid").map_or("?", String::as_str),
+            fields.get("gid").map_or("?", String::as_str)
+        )
+    };
+    let probe_outputs = witnessed("probe");
+    assert_eq!(
+        probe_outputs.len(),
+        count("probe-agent"),
+        "{case}: the adapter saw one output per agent probe container"
+    );
+    let mut observed_ids = std::collections::BTreeSet::new();
+    for output in &probe_outputs {
+        let fields = container_acceptance_fields(
+            output["stdout"].as_str().unwrap_or_default(),
+            CONTAINER_ACCEPTANCE_PROBE,
+        );
+        assert_eq!(
+            fields.get("system").map(String::as_str),
+            Some("Linux"),
+            "{case}: {output}"
+        );
+        assert_eq!(
+            fields.get("root_write").map(String::as_str),
+            Some("refused"),
+            "{case}: {output}"
+        );
+        assert_eq!(
+            fields.get("dir_write").map(String::as_str),
+            Some("refused"),
+            "{case}: {output}"
+        );
+        assert_eq!(
+            fields.get("file").map(String::as_str),
+            Some(CONTAINER_ACCEPTANCE_FILE_TEXT),
+            "{case}: {output}"
+        );
+        observed_ids.insert(ids(&fields));
+    }
+    let worker_outputs = witnessed("worker");
+    assert_eq!(
+        worker_outputs.len(),
+        count("worker"),
+        "{case}: the adapter saw one output per worker container"
+    );
+    let mut heads = Vec::new();
+    for output in &worker_outputs {
+        let fields = container_acceptance_fields(
+            output["stdout"].as_str().unwrap_or_default(),
+            CONTAINER_ACCEPTANCE_WORKER,
+        );
+        assert_eq!(
+            fields.get("readme").map(String::as_str),
+            Some("seed"),
+            "{case}: {output}"
+        );
+        assert_eq!(
+            fields.get("file").map(String::as_str),
+            Some(CONTAINER_ACCEPTANCE_FILE_TEXT),
+            "{case}: {output}"
+        );
+        let head = fields.get("head").cloned().unwrap_or_default();
+        assert!(
+            head.len() == 40 && head.bytes().all(|byte| byte.is_ascii_hexdigit()),
+            "{case}: the worker's Git view names a commit: {output}"
+        );
+        assert_eq!(
+            git_in(repo, &["cat-file", "-t", &head]).trim(),
+            "commit",
+            "{case}: the commit the container's view names is this repository's"
+        );
+        heads.push(serde_json::json!({
+            "head": head,
+            "alternates": fields.get("alternates"),
+        }));
+        observed_ids.insert(ids(&fields));
+    }
+    let review_outputs = witnessed("review");
+    assert_eq!(
+        review_outputs.len(),
+        count("review"),
+        "{case}: the adapter saw one output per review container"
+    );
+    for output in &review_outputs {
+        let fields = container_acceptance_fields(
+            output["stdout"].as_str().unwrap_or_default(),
+            CONTAINER_ACCEPTANCE_REVIEW,
+        );
+        assert_eq!(
+            fields.get("workspace_write").map(String::as_str),
+            Some("refused"),
+            "{case}: {output}"
+        );
+        assert_eq!(
+            fields.get("dir_write").map(String::as_str),
+            Some("refused"),
+            "{case}: {output}"
+        );
+        assert_eq!(
+            fields.get("file").map(String::as_str),
+            Some(CONTAINER_ACCEPTANCE_FILE_TEXT),
+            "{case}: {output}"
+        );
+        observed_ids.insert(ids(&fields));
+    }
+    if let Some(user) = planned_user.as_str().filter(|user| !user.is_empty()) {
+        assert_eq!(
+            observed_ids.iter().map(String::as_str).collect::<Vec<_>>(),
+            vec![user],
+            "{case}: every container's processes ran as the planned user"
+        );
+    }
+
+    let workers_file = fixture.directory.join("workers.txt");
+    let gates_file = fixture.directory.join("gates.txt");
+    assert_eq!(
+        container_acceptance_lines(&workers_file),
+        count("worker"),
+        "{case}: every worker container wrote once through the configured directory mount"
+    );
+    assert_eq!(
+        container_acceptance_lines(&gates_file),
+        count("gate"),
+        "{case}: every gate container wrote once through the configured directory mount"
+    );
+    for refused in ["review-write", "probe-write"] {
+        assert!(
+            !fixture.directory.join(refused).exists(),
+            "{case}: no read-only role wrote `{refused}`"
+        );
+    }
+    assert_eq!(
+        fs::read_to_string(&fixture.file).expect("the configured file"),
+        format!("{CONTAINER_ACCEPTANCE_FILE_TEXT}\n"),
+        "{case}: the read-only file mount is unchanged"
+    );
+    let tree_files = git_in(repo, &["ls-tree", "-r", "--name-only", integration_ref]);
+    assert!(
+        tree_files
+            .lines()
+            .all(|path| !path.ends_with(CONTAINER_ACCEPTANCE_REVIEW_WRITE)),
+        "{case}: no reviewer's write reached the integration branch"
+    );
+
+    let mut embedded = serde_json::Map::new();
+    for (name, half, bytes) in &files {
+        embedded.insert(
+            (*name).to_owned(),
+            serde_json::json!({
+                "half": half,
+                "bytes": bytes.len(),
+                "sha256": host_acceptance_sha256(bytes),
+                "utf8": std::str::from_utf8(bytes)
+                    .unwrap_or_else(|error| panic!("{case}: {name} is UTF-8: {error}")),
+            }),
+        );
+    }
+    serde_json::json!({
+        "case": case,
+        "run_id": run_id,
+        "calls": input.calls,
+        "outcome": "complete",
+        "branch": started["data"]["branch"],
+        "integration_ref": integration_ref,
+        "integration_ref_sha": at_ref,
+        "merged_shas": merged,
+        "base_sha": started["data"]["base_sha"],
+        "runner": runner,
+        "runner_policy_sha256": policy_digest,
+        "owner_published_at_each_adapter_probe": probes,
+        "first_line": {
+            "text": std::str::from_utf8(first_line).expect("the first line is UTF-8"),
+            "bytes": first_line.len(),
+            "sha256": first_digest,
+        },
+        "committed_run_started_sha256": committed["run_started_sha256"],
+        "epochs": epochs,
+        "report_fresh": true,
+        "parked_log": parked.map(|parked| serde_json::json!({
+            "bytes": parked.log_bytes,
+            "sha256": parked.log_sha256,
+        })),
+        "owner_sha256_at_park": parked.map(|parked| parked.owner_sha256.clone()),
+        "containers": containers,
+        "container_counts": {
+            "total": containers.len(),
+            "probe_shell": count("probe-shell"),
+            "probe_agent": count("probe-agent"),
+            "worker": count("worker"),
+            "gate": count("gate"),
+            "review": count("review"),
+        },
+        "witness": {
+            "outputs": outputs,
+            "worker_views": heads,
+            "process_ids": observed_ids,
+        },
+        "host_effects": {
+            "workers_txt_lines": container_acceptance_lines(&workers_file),
+            "gates_txt_lines": container_acceptance_lines(&gates_file),
+            "workers_txt_owner": container_acceptance_owner(&workers_file),
+            "configured_file_owner": container_acceptance_owner(&fixture.file),
+            "read_only_writes_absent": ["review-write", "probe-write"],
+        },
+        "journal": snapshot,
+        "files": embedded,
+    })
+}
+
+/// A complete fresh schema-4 container run: `engine::run_with` over the two-task plan.
+fn container_acceptance_fresh(image: &str) -> serde_json::Value {
+    let (tree, repo) = temp_engine_repo("container-acceptance-fresh");
+    let fixture = container_acceptance_fixture(tree.path(), &repo, image);
+    let witness = std::sync::Arc::new(ContainerWitness::new(0, private_root_for(&repo)));
+    let source = SharedContainerWitness(std::sync::Arc::clone(&witness));
+    let journal = crate::runner::container::observed::Journal::default();
+    let report = {
+        let _armed = crate::engine::topology::entry::container_runtime::arm(&journal);
+        run_with(&topology_options(&repo), &source)
+            .expect("the fresh schema-4 container run completes")
+    };
+    let constructed = journal.runtimes();
+    until_released(&repo, &report.run_id);
+    let end_state = container_acceptance_end_state("fresh", &repo, &journal, 0, constructed);
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:#?}");
+    assert!(
+        committed(&report, "t1") && committed(&report, "t2"),
+        "{report:#?}"
+    );
+    assert_merged_on_the_integration_branch(&repo, &report);
+    let probes = witness
+        .owner_at_probe
+        .lock()
+        .expect("container witness")
+        .len();
+    container_acceptance_run(&ContainerAcceptanceCase {
+        case: "fresh",
+        repo: &repo,
+        run_id: &report.run_id,
+        witness: &witness,
+        journal: &journal,
+        calls: vec![serde_json::json!({
+            "entry": "engine::run_with",
+            "outcome": "complete",
+            "adapter_probes": probes,
+            "runtimes": [0, constructed],
+            "end_state": end_state,
+        })],
+        fixture: &fixture,
+        parked: None,
+    })
+}
+
+/// A separate container run that parks on its one question, is answered through
+/// `answer::answer` and is finished by `engine::resume_with`: two epochs of one
+/// run id, each released before the next command and before the records are read.
+fn container_acceptance_resumed(image: &str) -> serde_json::Value {
+    let (tree, repo) = temp_engine_repo("container-acceptance-resumed");
+    let fixture = container_acceptance_fixture(tree.path(), &repo, image);
+    let witness = std::sync::Arc::new(ContainerWitness::new(1, private_root_for(&repo)));
+    let source = SharedContainerWitness(std::sync::Arc::clone(&witness));
+    let journal = crate::runner::container::observed::Journal::default();
+    let parked = {
+        let _armed = crate::engine::topology::entry::container_runtime::arm(&journal);
+        run_with(&topology_options(&repo), &source).expect("the container run parks")
+    };
+    let at_park = journal.runtimes();
+    until_released(&repo, &parked.run_id);
+    let parked_end = container_acceptance_end_state("parked", &repo, &journal, 0, at_park);
+    assert_eq!(parked.outcome(), RunOutcome::Parked, "{parked:#?}");
+    let [asked] = parked.questions.as_slice() else {
+        panic!("one question: {parked:#?}");
+    };
+    let question = asked.question.id.to_string();
+    let parked_probes = witness
+        .owner_at_probe
+        .lock()
+        .expect("container witness")
+        .len();
+    let log_at_park =
+        fs::read(rundir::public_dir(&repo, &parked.run_id).join("events.jsonl")).expect("the log");
+    let owner_at_park = fs::read(private_dir_of(&repo, &parked.run_id).join("owner.json"))
+        .expect("owner.json at the park");
+
+    crate::answer::answer(
+        &repo,
+        &question,
+        crate::answer::Reply::Text("the first".to_owned()),
+    )
+    .expect("the answer is recorded");
+    until_released(&repo, &parked.run_id);
+    let at_answer = journal.runtimes();
+    let mut resume = resume_options(&repo, &parked.run_id);
+    resume.private_root = None;
+    let report = {
+        let _armed = crate::engine::topology::entry::container_runtime::arm(&journal);
+        resume_with(&resume, &source).expect("the resume completes the container run")
+    };
+    let at_resume = journal.runtimes();
+    until_released(&repo, &report.run_id);
+    let resumed_end =
+        container_acceptance_end_state("resumed", &repo, &journal, at_answer, at_resume);
+    assert_eq!(report.run_id, parked.run_id, "one run across both epochs");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:#?}");
+    assert!(
+        committed(&report, "t1") && committed(&report, "t2"),
+        "{report:#?}"
+    );
+    assert_merged_on_the_integration_branch(&repo, &report);
+    let probes = witness
+        .owner_at_probe
+        .lock()
+        .expect("container witness")
+        .len();
+    container_acceptance_run(&ContainerAcceptanceCase {
+        case: "parked-answered-resumed",
+        repo: &repo,
+        run_id: &report.run_id,
+        witness: &witness,
+        journal: &journal,
+        calls: vec![
+            serde_json::json!({
+                "entry": "engine::run_with",
+                "outcome": "parked",
+                "question": question,
+                "adapter_probes": parked_probes,
+                "runtimes": [0, at_park],
+                "end_state": parked_end,
+            }),
+            serde_json::json!({
+                "entry": "answer::answer",
+                "question": question,
+                "reply": "the first",
+                "runtimes": [at_park, at_answer],
+            }),
+            serde_json::json!({
+                "entry": "engine::resume_with",
+                "outcome": "complete",
+                "adapter_probes": probes - parked_probes,
+                "runtimes": [at_answer, at_resume],
+                "end_state": resumed_end,
+            }),
+        ],
+        fixture: &fixture,
+        parked: Some(&ContainerAcceptanceParked {
+            log_bytes: log_at_park.len(),
+            log_sha256: host_acceptance_sha256(&log_at_park),
+            owner_sha256: host_acceptance_sha256(&owner_at_park),
+        }),
+    })
+}
+
+/// The container record's bytes in [`host_acceptance_frame`]'s line shape, under
+/// [`CONTAINER_ACCEPTANCE_MARKER`] so that neither record's reader takes the other's lines.
+fn container_acceptance_frame(record: &[u8]) -> String {
+    let digest = host_acceptance_sha256(record);
+    let tag = &digest[..16];
+    let chunks: Vec<&[u8]> = record.chunks(HOST_ACCEPTANCE_CHUNK).collect();
+    let summary = format!("{tag} {} {} {digest}", chunks.len(), record.len());
+    let mut lines = vec![format!(
+        "{CONTAINER_ACCEPTANCE_MARKER} {CONTAINER_ACCEPTANCE_FRAMING} BEGIN {summary}"
+    )];
+    lines.extend(chunks.iter().enumerate().map(|(index, chunk)| {
+        format!(
+            "{CONTAINER_ACCEPTANCE_MARKER} {CONTAINER_ACCEPTANCE_FRAMING} {tag} {} {}",
+            index + 1,
+            host_acceptance_hex(chunk)
+        )
+    }));
+    lines.push(format!(
+        "{CONTAINER_ACCEPTANCE_MARKER} {CONTAINER_ACCEPTANCE_FRAMING} END {summary}"
+    ));
+    lines.join("\n") + "\n"
+}
+
+/// G7's native CONTAINER acceptance record. Two schema-4 runs whose `[runner]`
+/// selects the container boundary, through the public entry points with the
+/// deterministic stub adapter under the image's `sh`: a complete fresh run, and
+/// a separate run parked, answered and resumed. A reachable runtime holding the
+/// image named by [`CONTAINER_ACCEPTANCE_IMAGE`] is required, never skipped.
+/// Every assertion holds of both runs before a byte is printed; printing is not
+/// the verdict, which needs this test's pass line, the command's zero exit and a
+/// complete reconstruction whose digests all agree.
+#[test]
+#[ignore = "native container acceptance record: run only by the platform capture recipes, which \
+            select it by its exact name with a reachable Docker daemon and the image named by \
+            UPSTROKE_CONTAINER_ACCEPTANCE_IMAGE"]
+fn container_acceptance_record() {
+    use std::io::Write as _;
+
+    let image = std::env::var(CONTAINER_ACCEPTANCE_IMAGE).unwrap_or_else(|_| {
+        panic!(
+            "{CONTAINER_ACCEPTANCE_IMAGE} must name the image reference this record runs from; \
+             it is never defaulted, pulled or skipped"
+        )
+    });
+    crate::runner::container::observed::reachable().unwrap_or_else(|reason| {
+        panic!("a reachable container runtime is required and was not available: {reason}")
+    });
+    let daemon = crate::runner::container::observed::daemon();
+    let info = &daemon["info"]["parsed"]["value"];
+    assert_eq!(
+        info["OSType"], "linux",
+        "the daemon runs Linux containers: {daemon}"
+    );
+    let image_answer = crate::runner::container::observed::image(&image);
+    let image_id = image_answer["parsed"]["value"]["Id"]
+        .as_str()
+        .unwrap_or_else(|| {
+            panic!("the runtime holds `{image}` already; nothing is pulled: {image_answer}")
+        })
+        .to_owned();
+
+    let fresh = container_acceptance_fresh(&image);
+    let resumed = container_acceptance_resumed(&image);
+    assert_ne!(fresh["run_id"], resumed["run_id"], "two runs, two run ids");
+    for run in [&fresh, &resumed] {
+        assert_eq!(
+            run["runner"]["image"]["id"], image_id,
+            "{}: the recorded image id is the one the runtime reports for `{image}`",
+            run["case"]
+        );
+    }
+    let mut manifest = Vec::new();
+    for run in [&fresh, &resumed] {
+        for (name, half) in HOST_ACCEPTANCE_FILES {
+            let file = &run["files"][name];
+            manifest.push(serde_json::json!({
+                "case": run["case"],
+                "run_id": run["run_id"],
+                "file": name,
+                "half": half,
+                "bytes": file["bytes"],
+                "sha256": file["sha256"],
+            }));
+        }
+    }
+    let os = std::env::consts::OS;
+    let statement = format!(
+        "a native {os} coordinator (this test process) drove the {} Docker daemon `{}` ({}, kernel {}, \
+         {}); every container ran in that daemon's environment, never natively on {os}",
+        info["OSType"].as_str().unwrap_or("?"),
+        info["Name"].as_str().unwrap_or("?"),
+        info["OperatingSystem"].as_str().unwrap_or("?"),
+        info["KernelVersion"].as_str().unwrap_or("?"),
+        info["Architecture"].as_str().unwrap_or("?"),
+    );
+    let record = serde_json::json!({
+        "format": "upstroke-container-acceptance-record",
+        "format_version": 1,
+        "test": "engine::tests::container_acceptance_record",
+        "harness": host_acceptance_harness(),
+        "ci": host_acceptance_ci(),
+        "platform": {
+            "coordinator": {
+                "os": os,
+                "arch": std::env::consts::ARCH,
+                "family": std::env::consts::FAMILY,
+            },
+            "daemon": daemon,
+            "statement": statement,
+        },
+        "image": {
+            "variable": CONTAINER_ACCEPTANCE_IMAGE,
+            "reference": image,
+            "id": image_id,
+            "inspect": image_answer,
+        },
+        "scope": {
+            "runner": "container: the production ContainerRunner over the production runtime \
+                       created every probe, worker, gate and reviewer container from the recorded \
+                       image id; the observer wrapped each runtime the schema-4 entry constructed \
+                       and delegated every operation to it",
+            "observer": "engine::topology::entry::container_runtime, armed by this test on its own \
+                         thread for each public call, journaled every runtime the entry \
+                         constructed, every operation, the planned spec and on-disk intent of every \
+                         container, and the daemon's inspection at its creation and before its \
+                         removal; each runtime's own trace is compared with the journal",
+            "provider": "the deterministic stub adapter (engine::tests::ContainerWitness over \
+                         TopologyStub's parse) under the image's sh; no provider was called",
+            "coordinator": "this test process called engine::run_with, answer::answer and \
+                            engine::resume_with; it is not the upstroke CLI process, and no CLI \
+                            process was restarted",
+            "acceptance": "printed only after every assertion passed; accepted only with the named \
+                           test's pass line, exit 0, complete reconstruction and matching digests",
+            "not_claimed": "kills, crashes, power loss, reaper or containment behaviour, exhaustive \
+                            filesystem or process cleanup, and real providers",
+        },
+        "runs": [fresh, resumed],
+        "manifest": manifest,
+    });
+    let bytes = serde_json::to_vec(&record).expect("the record serializes");
+    let mut stdout = std::io::stdout().lock();
+    stdout
+        .write_all(container_acceptance_frame(&bytes).as_bytes())
+        .expect("the record reaches stdout");
+    stdout.flush().expect("the record is flushed");
+}
+
+/// The container-runtime seam observes only while armed, only on the arming
+/// thread, and only by wrapping what production constructs; unarmed, and on any
+/// other thread, it constructs exactly what production does and journals nothing.
+#[test]
+fn the_container_runtime_seam_observes_only_while_armed_and_only_on_its_own_thread() {
+    use crate::engine::topology::entry::container_runtime;
+
+    let journal = crate::runner::container::observed::Journal::default();
+    drop(container_runtime::for_inspection());
+    assert_eq!(
+        journal.runtimes(),
+        0,
+        "an unarmed construction is not observed"
+    );
+    {
+        let _armed = container_runtime::arm(&journal);
+        drop(container_runtime::for_inspection());
+        assert_eq!(
+            journal.runtimes(),
+            1,
+            "an armed construction on this thread is observed"
+        );
+        std::thread::spawn(|| drop(container_runtime::for_inspection()))
+            .join()
+            .expect("the other thread constructs a runtime");
+        assert_eq!(
+            journal.runtimes(),
+            1,
+            "another thread's construction is not"
+        );
+        let identity = crate::runner::container::exec::RunIdentity {
+            private_root: PathBuf::from("private-root"),
+            run_id: "run".to_owned(),
+            run_dir: PathBuf::from("run-dir"),
+            incarnation: "incarnation".to_owned(),
+            repo_key: "repo-key".to_owned(),
+        };
+        drop(container_runtime::for_runner(&identity));
+        assert_eq!(
+            journal.runtimes(),
+            2,
+            "a runner construction is observed with its identity"
+        );
+    }
+    drop(container_runtime::for_inspection());
+    assert_eq!(
+        journal.runtimes(),
+        2,
+        "nothing is observed once the guard has dropped"
+    );
+    let snapshot = journal.snapshot();
+    let runtimes = snapshot["runtimes"]
+        .as_array()
+        .expect("the journal's runtimes");
+    assert!(
+        runtimes.iter().all(|runtime| runtime["site"]
+            .as_str()
+            .is_some_and(|site| site.starts_with("src/engine/tests.rs:"))),
+        "each construction names the call site that asked for it: {runtimes:?}"
+    );
+    assert!(
+        runtimes[0]["identity"].is_null(),
+        "an inspection runtime serves no run"
+    );
+    assert_eq!(runtimes[1]["identity"]["run_id"], "run");
+    assert_eq!(runtimes[1]["identity"]["incarnation"], "incarnation");
+    assert!(
+        snapshot["operations"].as_array().is_some_and(Vec::is_empty),
+        "constructing a runtime performs no operation"
+    );
+}
+
 /// P12-W14 (D4). At width 1 the production composition through the step loop
 /// (an adapter source that cannot be shared) and through `run_concurrently` (one
 /// that can) give the same canonical projection of the same plan.
