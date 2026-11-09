@@ -23,8 +23,12 @@ never pulled), checks, decodes and hashes the framed record, and writes
 SUMMARY.txt and MANIFEST.json. It changes no VM, network or Docker setting and
 deletes nothing. Credential-like environment variables are removed from this
 process by name before any child starts; no value is read or written. A child
-that outlives its bound is ended with its process tree, through the handle this
-script holds for it, and the step is recorded as a timeout (exit 124).
+that outlives its bound is ended through the process handle this script has held
+for it since its start (no PID lookup, no tree walk, no sweep), and its exit is
+awaited for at most -GraceSeconds; the step is recorded as a timeout (exit 124)
+with its termination outcome. A child not seen to exit within that grace leaves
+the run unresolved: every later step is refused without starting a process, and
+the script fails, within the sum of its bounds.
 #>
 param(
   [Parameter(Mandatory = $true)][string]$OutDir,
@@ -36,7 +40,8 @@ param(
   [string]$ExpectClient = 'windows/amd64 29.9.3',
   [string]$ExpectServer = 'linux/amd64 29.9.2',
   [int]$BuildSeconds = 3600,
-  [int]$RunSeconds = 1800
+  [int]$RunSeconds = 1800,
+  [int]$GraceSeconds = 30
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
@@ -55,6 +60,7 @@ New-Item -ItemType Directory -Path $Tmp | Out-Null
 
 $script:Seq = 0
 $script:Failed = 0
+$script:Unresolved = ''
 $Checks = Join-Path $OutDir 'checks.tsv'
 $Steps = Join-Path $OutDir 'steps.jsonl'
 New-Item -ItemType File -Path $Checks | Out-Null
@@ -82,31 +88,56 @@ function ConvertTo-ArgumentText([string]$Value) {
   return $text + ('\' * (2 * $slashes)) + '"'
 }
 
-# Invoke-Step NAME SECONDS PROGRAM ARGUMENTS -- bounded, stdout and stderr kept in files.
+# Invoke-Step NAME SECONDS PROGRAM ARGUMENTS -- bounded, stdout and stderr kept in files. Every
+# wait is finite: a child past its bound is ended through the handle held since its start and
+# given GraceSeconds to exit. One not seen to exit leaves the run unresolved, and from then on
+# every step is refused without starting a process.
 function Invoke-Step([string]$Name, [int]$Seconds, [string]$Program, [string[]]$Arguments) {
   $script:Seq++
   $base = Join-Path $OutDir ('{0:D2}-{1}' -f $script:Seq, $Name)
   $stdout = "$base.stdout.txt"
   $stderr = "$base.stderr.txt"
+  $script:LastStdout = $stdout
+  $entry = [ordered]@{ seq = $script:Seq; step = $Name; program = $Program; arguments = @($Arguments) }
+  if ($script:Unresolved -ne '') {
+    New-Item -ItemType File -Path $stdout | Out-Null
+    New-Item -ItemType File -Path $stderr | Out-Null
+    $entry['rc'] = -1
+    $entry['refused'] = "not started: $($script:Unresolved)"
+    Add-Content -LiteralPath $Steps -Value ($entry | ConvertTo-Json -Compress -Depth 5)
+    return -1
+  }
   $text = (@($Arguments) | ForEach-Object { ConvertTo-ArgumentText $_ }) -join ' '
   $started = Get-Date
   $process = Start-Process -FilePath $Program -ArgumentList $text -WorkingDirectory $Repo -NoNewWindow -PassThru `
     -RedirectStandardOutput $stdout -RedirectStandardError $stderr
   $null = $process.Handle
+  $entry['pid'] = $process.Id
+  try { $entry['process_start_utc'] = $process.StartTime.ToUniversalTime().ToString('o') }
+  catch { $entry['process_start_utc'] = "unavailable: $($_.Exception.Message)" }
   if ($process.WaitForExit($Seconds * 1000)) {
-    $process.WaitForExit()
     $rc = $process.ExitCode
   } else {
-    & taskkill.exe /T /F /PID $process.Id | Out-File -LiteralPath "$base.timeout.txt"
-    $process.WaitForExit()
+    $termination = [ordered]@{
+      method = 'Process.Kill through the handle held since start'; grace_seconds = $GraceSeconds
+      error = $null; settled = $false; exit_code = $null
+    }
+    try { $process.Kill() } catch { $termination['error'] = $_.Exception.Message }
+    if ($process.WaitForExit($GraceSeconds * 1000)) {
+      $termination['settled'] = $true
+      $termination['exit_code'] = $process.ExitCode
+    } else {
+      $script:Unresolved = "step $($script:Seq) ($Name) passed its $Seconds s bound and was not seen to exit within $GraceSeconds s of its termination"
+    }
+    $entry['timed_out'] = $true
+    $entry['termination'] = $termination
     $rc = 124
   }
-  $entry = [ordered]@{
-    seq = $script:Seq; step = $Name; program = $Program; arguments = @($Arguments); rc = $rc
-    seconds = [int]((Get-Date) - $started).TotalSeconds; stdout = (Split-Path -Leaf $stdout); stderr = (Split-Path -Leaf $stderr)
-  }
-  Add-Content -LiteralPath $Steps -Value ($entry | ConvertTo-Json -Compress -Depth 4)
-  $script:LastStdout = $stdout
+  $entry['rc'] = $rc
+  $entry['seconds'] = [int]((Get-Date) - $started).TotalSeconds
+  $entry['stdout'] = (Split-Path -Leaf $stdout)
+  $entry['stderr'] = (Split-Path -Leaf $stderr)
+  Add-Content -LiteralPath $Steps -Value ($entry | ConvertTo-Json -Compress -Depth 5)
   return $rc
 }
 
@@ -200,9 +231,12 @@ if ($script:Failed -eq 0) {
 }
 
 $verdict = 'CAPTURE_NOT_ESTABLISHED'
-if ($Captured -and $script:Failed -eq 0) { $verdict = 'CAPTURED' }
+if ($Captured -and $script:Failed -eq 0 -and $script:Unresolved -eq '') { $verdict = 'CAPTURED' }
+$unresolvedLine = 'unresolved_termination=none'
+if ($script:Unresolved -ne '') { $unresolvedLine = "unresolved_termination=$($script:Unresolved)" }
 @(
   "verdict=$verdict failed_checks=$($script:Failed)"
+  $unresolvedLine
   '--- checks (PASS/FAIL decide)'
   (Get-Content -LiteralPath $Checks)
   '--- not claimed here: Gate7 or M2 acceptance (root judges the decoded record), native Windows'
