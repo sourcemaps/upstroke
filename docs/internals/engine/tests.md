@@ -3655,6 +3655,294 @@ lines, and the suite step's many `1 passed` summaries from child harnesses are n
 - The scratch repositories are deleted when the test ends. The embedded files are the retained
   evidence, and how long they last is bounded by CI log retention.
 
+## `const CONTAINER_ACCEPTANCE_MARKER: &str = "UPSTROKE-CONTAINER-ACCEPTANCE-RECORD";`
+
+The first field of every line of the container record's framing. It differs from
+[`HOST_ACCEPTANCE_MARKER`] so that a reader of either record never takes the other's lines. It is
+never the verdict: see [`container_acceptance_record`].
+
+## `const CONTAINER_ACCEPTANCE_FRAMING: &str = "v1";`
+
+The container framing's version, the second field of every line. A reader that knows only `v1`
+refuses any other.
+
+## `const CONTAINER_ACCEPTANCE_IMAGE: &str = "UPSTROKE_CONTAINER_ACCEPTANCE_IMAGE";`
+
+The one environment name the container record requires: the image reference both runs configure
+as `[runner] image`. It has no default. The record refuses when it is unset, and it pulls nothing.
+Each platform recipe names an image the platform's daemon already holds: macOS the digest
+reference its setup probe pulled, Windows the setup's `alpine:3.20`.
+
+## `const CONTAINER_ACCEPTANCE_DIR_TARGET: &str = "/upstroke-acceptance/dir";`
+
+The container targets of the two configured mounts, the configured file's text, and the
+markers the stub's probe, worker and reviewer print. They are this constant and the eight after
+it: `CONTAINER_ACCEPTANCE_FILE_TARGET`, `CONTAINER_ACCEPTANCE_FILE_TEXT`,
+`CONTAINER_ACCEPTANCE_PROBE`, `CONTAINER_ACCEPTANCE_WORKER`, `CONTAINER_ACCEPTANCE_REVIEW` and
+`CONTAINER_ACCEPTANCE_REVIEW_WRITE`, the file a reviewer tries, and is expected not, to create in
+its checkout.
+
+## `fn container_acceptance_write_attempt(path: &str) -> String {`
+
+A shell fragment that tries to create `path` and prints `allowed` or `refused`. A role that should
+not write reports what the boundary did, rather than failing the stub's command.
+
+## `fn container_acceptance_probe_script() -> String {`
+
+The agent probe, run by the image's `sh` in the probe container's scratch directory. It prints the
+process's uid and gid, `uname`'s system, release and machine, and whether the root and the
+configured directory refuse a write (both must, a probe being read-only throughout). It also prints
+the configured file's text.
+
+## `fn container_acceptance_worker_script() -> String {`
+
+The worker: the topology stub's edit (`TOPOLOGY_STUB_EDIT`, which `sh` runs as it does on the host)
+in the bind-mounted checkout, then one line of what the container sees. That line has its uid and
+gid, the checkout's `README.md`, the configured file, and the role Git view's `HEAD` and
+`objects/info/alternates`, found through the checkout's `.git` pointer. The worker then appends one
+line to the configured directory, so the host can count worker containers by what reached it.
+The image needs `sh`, `cat`, `sed` and `id` and no Git: the view is read as files, the way the
+engine materialized it.
+
+## `fn container_acceptance_review_script() -> String {`
+
+The reviewer: a write to its checkout and to the configured directory, each expected `refused`
+(the checkout is read-only for a reviewer and configured mounts are forced read-only), the
+configured file, its uid and gid, then the stub's passing verdict.
+
+## `fn container_acceptance_gate_script() -> String {`
+
+The one `[[gates]]` command, run by the run's recorded shell (`sh`) in the gate's container: the
+stub's edit must be in the checkout, and the gate appends one line to the configured directory.
+
+## `fn container_acceptance_config(image: &str, directory: &Path, file: &Path) -> String {`
+
+The run's `upstroke.toml`. It sets `[engine] shell = "sh"`, so the shell probe and the gate run
+under the image's shell rather than the native one, which is `cmd` on Windows. It selects
+`[runner] kind = "container"` with the image. It configures one writable directory mount and one
+read-only file mount, and the gate. Configured mounts are read-only unless they say otherwise, so
+the directory says `read_only = false`. Every value is a TOML literal string, so a Windows path's
+backslashes need no escaping. A value that cannot be one is refused.
+
+## `struct ContainerAcceptanceFixture {`
+
+The image reference and the configured mounts' sources, created beside the repository inside its
+guarded scratch tree (never inside the checkout or the private root, which the mount rules
+exclude), with the config committed with the plan. On macOS the recipe points `TMPDIR` into the
+VM's shared directory, so every fixture the containers bind is one the VM sees at the same path.
+
+## `fn container_acceptance_fixture(`
+
+Creates the [`ContainerAcceptanceFixture`] and commits the config beside the plan
+[`temp_engine_repo`] seeded.
+
+## `struct ContainerWitness {`
+
+The adapter both container runs use. It reuses `TopologyStub`'s `parse` and question counter,
+but spells every command for the Linux image's `sh` (`ShellKind::Sh`), never the native shell.
+`TopologyStub` itself, which the HOST record uses, is unchanged. Like [`OwnerWitness`] it notes
+at each adapter probe whether the run's owner record was already published. It also keeps every
+output it saw: each probe's, worker's and reviewer's code, stdout and stderr.
+
+## `impl ContainerWitness {`
+
+`new` builds the witness over a fresh `TopologyStub` asking `questions` questions; `witness`
+records one output, refusing (never ignoring) a poisoned lock.
+
+## `impl AgentAdapter for ContainerWitness {`
+
+`probe` runs [`container_acceptance_probe_script`] through the runner it is handed, the run's
+`ContainerRunner`, so the probe is a container. `build` gives a reader the review script and a
+writer the worker script. `parse` records the output, then hands it to the stub.
+
+## `struct SharedContainerWitness(std::sync::Arc<ContainerWitness>);`
+
+[`ContainerWitness`] behind a source that can be shared, as production's `BuiltinAdapters` is, so
+both runs take the concurrent driver, as `upstroke run` does.
+
+## `struct ContainerAcceptanceParked {`
+
+What the resumed container run's parked epoch left before it was answered: the log's length and
+digest, and `owner.json`'s digest.
+
+## `struct ContainerAcceptanceCase<'a> {`
+
+One container case's inputs to [`container_acceptance_run`]. The `calls` are the public calls in
+order, each with the half-open range of journal runtime indices it constructed and, for
+`engine::run_with` and `engine::resume_with`, its [`container_acceptance_end_state`].
+
+## `fn container_acceptance_creates(`
+
+The journal's `create` operations made by runtimes in an index range.
+
+## `fn container_acceptance_end_state(`
+
+Right after one public call has returned and released, two things must hold. The daemon lists no
+container labelled with the call's private root: the label value is the one the call's own
+planned specs carry. And no container intent remains in the private root's intent directory.
+This is an end state taken from the daemon and the disk, not a sample of events.
+
+## `fn container_acceptance_fields(`
+
+The `key=value` fields of the first stdout line that begins with a marker; a missing line fails.
+
+## `fn container_acceptance_role(invocation: &str) -> &'static str {`
+
+A container's role, read from its invocation id: `p.shell.*`, `p.agent-*`, `*.worker.*`,
+`*.gate*`, `*.review_*`. Anything else fails, so a new kind of container cannot pass unclassified.
+
+## `fn container_acceptance_owner(path: &Path) -> serde_json::Value {`
+
+The host-side owner of a file the containers wrote, recorded rather than asserted. On Unix it is
+uid, gid and mode, which on macOS is also what virtiofs presented of the VM's write. On Windows
+there is no uid or gid, only the read-only flag. Two definitions, `cfg(unix)` and
+`cfg(not(unix))`, which every CI test and Clippy leg compiles on its own platform.
+
+## `fn container_acceptance_lines(path: &Path) -> usize {`
+
+A file's line count, zero when it is absent.
+
+## `struct ContainerAcceptanceRecorded<'a> {`
+
+What every container of one run is checked against: the case, the run id, the recorded image id
+and RunnerPolicy digest, and the journal's operations.
+
+## `fn container_acceptance_container(`
+
+One container, validated from the journal. Each of these must hold:
+
+- the planned spec names the recorded image id, and the daemon's create reported it;
+- `owner.json` was published before the container was created (probe containers included, which
+  the adapter-level witness cannot see);
+- the daemon's own inspection at creation reports the recorded image id, the container's name,
+  every planned label, a read-only root, the planned user (Unix: the coordinator's uid:gid;
+  Windows: the image's default, an empty `User`) and working directory;
+- the daemon asked for and holds every planned mount, with no unplanned one. Each bind and
+  volume is held with the planned read-write flag. A tmpfs is checked as asked for, since a
+  daemon may not list it among held mounts. Bind sources equal the planned spelling except on
+  Windows, where the vendor translates the native path; there the client's argument, what the
+  daemon asked for and what it holds are all recorded;
+- the intent read back from disk, as the observer parsed it into the runner's own record type,
+  names this run, the epoch's incarnation, the invocation the container is labelled with, and the
+  recorded RunnerPolicy's digest, which the labels do not carry;
+- the container started, was collected with exit 0, was removed with its process gone, and was
+  stopped at most once by its release, between collection and removal;
+- the inspection just before its removal is of the same container id and recorded image, exited
+  with the collected code, and had been started;
+- the create, start, collection and removal are in that order in the journal.
+
+It returns the container's summary, with the digests of both inspections and of its intent.
+
+## `fn container_acceptance_traced(`
+
+The container names one runtime's own trace (its `DockerCli`'s recording `ContainerTrace`) shows an
+effect asked about.
+
+## `fn container_acceptance_journaled(`
+
+The container names the journal shows one runtime asked an effect about.
+
+## `fn container_acceptance_run(input: &ContainerAcceptanceCase<'_>) -> serde_json::Value {`
+
+One released container run, asserted and returned as its part of the record. Every assertion
+[`host_acceptance_run`] makes of a host run is made here with the container runner in its place:
+`run_started(4)` with schema 4 and shell `sh`, and a `container`/`container-v1` runner recording
+the configured reference, a non-empty image id, no credential volumes and both configured mounts.
+One runner, byte for byte, in `run_started`, `owner.json`, every `run_resumed` and `report.json`.
+`committed.json`, the fresh report projection, two merges, the integration ref, a complete end,
+and for the resumed run the byte-for-byte log prefix and unchanged `owner.json`. Then, from the
+journal:
+
+- **complete enumeration.** Each `engine::run_with` and `engine::resume_with` constructed exactly
+  three runtimes in the schema-4 entry: two at two distinct inspection sites, serving no run, and
+  then the run's container runner. `answer::answer` constructed none. Every journaled runtime
+  belongs to a call. For every runtime and every effect (create, start, stop, removal), its own
+  trace and the journal name the same containers, and an inspection runtime has none at all. So
+  no container was created, started, stopped or removed that the record does not hold;
+- **epochs.** One runner per recorded epoch, serving that epoch's incarnation. Every container it
+  created is validated by [`container_acceptance_container`]. Each epoch probed the shell and the
+  agent inside the image, and removed both before its first work container. Its worker containers
+  are exactly the `attempt_started` events of that epoch;
+- **behaviour across the boundary.** The adapter saw one output per agent probe, worker and
+  reviewer container. Each probe ran on `Linux` with the root and the configured directory
+  refusing writes. Each worker read the checkout, the read-only file and a Git view whose `HEAD`
+  is a commit of this repository. Each reviewer's checkout and configured directory refused its
+  writes. Every process ran as the planned user where one is planned. The host holds one line per
+  worker container and one per gate container in the configured directory, no read-only role's
+  file, and the read-only file unchanged, and no reviewer write reached the integration branch.
+
+It returns the run's identities, the containers and their counts, the witness's outputs, the
+host-side effects with their owners, the whole journal snapshot, and the four raw files.
+
+## `fn container_acceptance_fresh(image: &str) -> serde_json::Value {`
+
+The complete fresh container run: [`container_acceptance_fixture`], then `engine::run_with` with
+`topology_options` and [`SharedContainerWitness`] asking no question, with the seam armed for that
+call only. The run must be complete, with both tasks committed and the stub's edit on the
+integration branch. `until_released` runs before the end state and the records are read.
+
+## `fn container_acceptance_resumed(image: &str) -> serde_json::Value {`
+
+A separate container run that parks on its one question: armed `engine::run_with`, the end state,
+the parked log and `owner.json` read, unarmed `answer::answer`, then armed `engine::resume_with`
+(`private_root` left to the log) and its end state. Every call is released before the next. The
+resume must keep the run id, complete the run and commit both tasks.
+
+## `fn container_acceptance_frame(record: &[u8]) -> String {`
+
+[`host_acceptance_frame`]'s line shape, with [`CONTAINER_ACCEPTANCE_MARKER`] as the first field. The
+`BEGIN`/`END` summary, chunk size (`HOST_ACCEPTANCE_CHUNK`), tag, count, length and digest rules
+are the same, and so is every damage they detect.
+
+## `fn container_acceptance_record() {`
+
+G7's native CONTAINER acceptance record: M2's per-platform Container run ids, recorded
+RunnerPolicy and image identity, report identity, and the daemon's own inspection of every actual
+container across its actual epochs. Only the platform recipes select it, by its exact name, never
+a required job:
+
+```text
+UPSTROKE_CONTAINER_ACCEPTANCE_IMAGE=<reference> cargo test --all-features --lib \
+  engine::tests::container_acceptance_record -- --ignored --exact --nocapture
+```
+
+It is ignored everywhere else and compiled on all three platforms. It refuses, and never skips,
+when the image variable is unset, the runtime does not answer, the daemon does not run Linux
+containers, or the image is not already held. It drives [`container_acceptance_fresh`] and
+[`container_acceptance_resumed`]: real schema-4 runs on the production `ContainerRunner` over the
+production runtime, through the public entry points, with deterministic stub adapters. That is
+public APIs with stub providers: no provider is called and no CLI process restarts. Every
+assertion of [`container_acceptance_run`] holds of both runs, their run ids differ, and both
+record the image id the daemon reports for the reference, before a byte is printed.
+
+The record is one compact JSON document:
+
+- `format` (`upstroke-container-acceptance-record`), `format_version` 1, and `test`;
+- `harness` ([`host_acceptance_harness`], reused unchanged) and `ci` ([`host_acceptance_ci`]);
+- `platform`: the coordinator's OS, architecture and family, the daemon's fixed-field version and
+  info answers and current context, and a statement naming the native coordinator and the Linux
+  daemon its containers ran in. A Linux daemon serving a macOS or Windows coordinator is
+  recorded as exactly that, never as native container execution;
+- `image`: the variable, the reference, the id and the daemon's image inspection;
+- `scope`: what the runner, observer, provider and coordinator were, how the record is accepted,
+  and what it does not claim;
+- `runs`: each run's [`container_acceptance_run`] value;
+- `manifest`: one row per embedded file.
+
+It goes to stdout in [`container_acceptance_frame`]'s lines through one `write_all`, as the HOST
+record does. **Printing is not the verdict**: acceptance needs the capture's zero exit, this
+test's pass line and `test result: ok. 1 passed; 0 failed; 0 ignored;`, a complete frame, a
+reconstruction whose length and SHA-256 match, every embedded file and inspection matching its
+digest, and identities re-derived from the raw files that agree. The recipes check the first four.
+The judgement of the native evidence is root's.
+
+## `fn the_container_runtime_seam_observes_only_while_armed_and_only_on_its_own_thread() {`
+
+The seam's scope, in the ordinary suite with no runtime needed, since constructing a `DockerCli`
+starts nothing. An unarmed construction is not observed. An armed one on the arming thread is,
+with its call site and, for a runner, its identity. Another thread's construction while armed is
+not. Nothing is observed once the guard drops, and a construction performs no operation.
+
 ## `enum PrivateEntry {`
 
 What one path under a private root is, for [`private_snapshot`]: a directory or a

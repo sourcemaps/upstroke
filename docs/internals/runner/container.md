@@ -2380,3 +2380,64 @@ Its one caller is `fake.rs`'s `reaper_relay_run_child`, the isolated child throu
 coordinator's reaper controls make their relay self-check (`R6-D2`); a call from a test's own
 process would make the funnel's unbounded end there (`FUA-I4-RELAY`).
 
+
+## `pub(crate) mod observed {`
+
+Test-only: the runtime observation behind G7's native container acceptance record
+(`engine::tests::container_acceptance_record`), constructed only by the armed half of
+`engine::topology::entry::container_runtime`. It sits in this file's test-only tail because it
+names `DockerCli`, which `effects::tests`' `NAMES_A_CONTAINER_RUNTIME` already records for this
+file, and its `mount_argument` and `DockerCli::raw` are this file's own. A new module file would
+have been a new member of that census's expected set.
+
+**`ObservedRuntime`** is a `ContainerRuntime` that owns a real `DockerCli`, constructed with a
+recording `ContainerTrace`, and delegates every one of the trait's operations to it, including
+`reaper_program`. It returns that runtime's own result, errors included, and changes no argument,
+order or bound. It is a recording wrapper, not a fake, proxy or second Docker client. Around the
+delegation it notes, in the shared journal:
+
+- for `create`: the planned `CreateSpec`, with environment names only and never a value, and each
+  mount's `--mount` argument as `mount_argument` spells it for the daemon. Also the container's
+  intent, read back from the private root as bytes and parsed here into the runner's own
+  `ContainerIntent` (unknown fields refused), which binds the container to its invocation and to
+  the policy digest the label set does not carry. The parse is here so that no module outside
+  the container runner names that type, which
+  `resolve::tests::no_module_outside_the_container_runner_writes_a_container_intent` enforces
+  lexically. Then whether the run's `owner.json` was published, the result, and the daemon's
+  answer to `docker container inspect` of the created container, before it is started;
+- for `remove`: the same inspection immediately before the removal, then the removal's
+  settlement;
+- for `start`, `stop` and `collect`: their outcomes, and for `collect` the exit code and the
+  output sizes;
+- for the read-only questions (`probe`, image and volume inspection, `containers_with_label`):
+  their outcomes, with an image environment reduced to its names;
+- for `observe`: per container, counts of the liveness answers, because supervision polls.
+
+The inspections use `CONTAINER_FIELDS`, a fixed `--format` of named fields: id, name, image,
+`Config.Image`, labels, user, working directory, command, entrypoint, `OpenStdin`, read-only
+root, `HostConfig.Mounts` (what the client asked for), `Mounts` (what the daemon holds), state,
+platform and driver. The environment is left out, so the record cannot carry a value from it.
+Each answer is kept exactly as the daemon printed it, with its length and SHA-256, beside its
+parse. A second `DockerCli`, with tracing off, asks these questions, so the product runtime's
+own trace holds only what the product asked.
+
+**`Journal`** is the record those runtimes share. Shared ownership is the real lifecycle here
+(§6). Each runtime lives inside the engine's `ContainerRunner`, or a census or inspection call,
+and is dropped before `engine::run_with` or `engine::resume_with` returns, while the test reads
+the journal afterwards. The runner's runtime is called from the coordinator's pipeline threads
+at once. So the journal is one `Arc<Mutex<_>>`, whose single lock serializes each append and
+the copy a snapshot takes. Each critical section is a push or a clone, with no nested lock or
+callback. A snapshot copies the trace handles out under the lock and renders the traces after
+releasing it, so no two locks are ever held together. A poisoned lock keeps its entries, as
+`ContainerTrace`'s does. `snapshot` returns, per runtime, its construction site and identity
+and its `DockerCli` trace as run-length pairs with the trace's digest, plus every operation in
+order and the observation counts. The acceptance record compares each runtime's trace with the
+journal by effect and container name, which shows that no create, start, stop or removal
+bypassed the wrapper.
+
+**The free functions** answer the record's own questions through a plain `DockerCli`:
+`reachable` (the daemon's version probe), `daemon` (fixed-field `docker version` and `docker
+info` answers and the current context), `image` (fixed-field `docker image inspect` of a
+reference, which pulls nothing), `labelled` (the containers the daemon lists under a private
+root's label), and `intent_directory`. A failed question is returned as data: the record fails
+on it rather than this module panicking inside an engine thread.

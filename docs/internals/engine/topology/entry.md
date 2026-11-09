@@ -632,8 +632,35 @@ environment. Nothing is pulled and no other id is consulted.
 
 One `ContainerRunner` over the policy, the run's identity, the repository's
 Git as the coordinator holds it and the image's environment, executing
-through the production runtime. The runner owns its copy of the recorded
-policy; the caller keeps the record (§6).
+through the runtime [`container_runtime`]'s `for_runner` gives it: the
+production `DockerCli`, which a test-only arming may wrap but never replace.
+The runtime is taken before the identity moves into the runner. The runner
+owns its copy of the recorded policy; the caller keeps the record (§6).
+
+## `mod container_runtime {`
+
+The production half of the one place this file constructs a container
+runtime. All five of the schema-4 entry's runtimes come from it, and from
+nowhere else in the production tree:
+
+- [`prepare_fresh`]'s pre-lock resolution and image-environment read;
+- [`FreshLeased::run`]'s startup census;
+- [`prepare_resume`]'s image-environment read;
+- [`ResumeVerified::run`]'s recovery and census;
+- [`container_runner`]'s runtime, for each incarnation.
+
+`for_inspection` and `for_runner` each return `Box::new(DockerCli::default())`,
+so production constructs exactly the runtime it did when each site spelled
+`DockerCli::default()` itself, at the same point and in the same order, and
+every receiver already took `&dyn ContainerRuntime`. `for_runner` ignores
+the identity it is given. Nothing in this half can be armed.
+
+The `#[cfg(test)]` half, the observation G7's container acceptance record
+needs, is the module of the same name in the file's test-only tail. The
+halves are split for the reason [`initial_log_read_fault`]'s are: a
+`#[cfg(not(test))]` module carries no `production_region` cut, so this half
+sits where it is read. It also keeps this file's production region naming
+`DockerCli`, which `effects::tests`' `NAMES_A_CONTAINER_RUNTIME` records.
 
 ## `fn mount_context(`
 
@@ -876,3 +903,37 @@ thread. Nothing of it is compiled into a production build.
 It is the file's first `#[cfg(test)]` and opens the test-only tail, so every
 production item is above it. The production half beside
 [`read_initial_log`] says why it is here.
+
+## `pub(crate) mod container_runtime {`
+
+Test-only: the observation seam of G7's native container acceptance record
+(`engine::tests::container_acceptance_record`). `arm(journal)` makes every
+`for_inspection` and `for_runner` call on the arming thread, until the
+returned `Armed` drops, construct a real `DockerCli` and hand it out wrapped
+in `runner::container::observed::ObservedRuntime`. The wrapper delegates every
+operation to that `DockerCli` and records what it asked and was answered in
+the shared `Journal`. Unarmed, or on any other thread, both functions
+construct `DockerCli::default()` and record nothing, which is what production
+does.
+
+**What it can and cannot do.** The seam cannot substitute a runtime: no fake,
+no proxy, and no second engine path. It always wraps the production type and
+returns the wrapped type's own results, errors included. Each construction is
+journaled with its call site (`#[track_caller]`: this file and line) and, for
+`for_runner`, the run's identity (run id, incarnation, repo key, private root,
+run directory). A reader of the record can therefore tell which runtime
+served which epoch, and that every runtime the public composition built was
+observed.
+
+**Lifetime and coverage.** `engine::run_with` and `engine::resume_with` reach
+every site above synchronously on the caller's thread, before the coordinator
+starts any pipeline thread, so arming the test's own thread covers the whole
+public composition of one call. That is the pre-lock and image reads, the
+census, recovery, and the runner whose runtime the shell and agent probes,
+workers, gates and reviewers of every pipeline thread use. The observed
+runtime lives inside the runner until the call returns; the journal outlives
+it (`runner::container::observed`). A construction made after `Armed` drops,
+or on a thread that never armed, is unobserved. The acceptance record
+therefore asserts the exact number of runtimes each call constructed, and
+fails rather than silently missing one. Thread-local, so parallel tests never
+see each other's arming. Nothing of it is compiled into a production build.
