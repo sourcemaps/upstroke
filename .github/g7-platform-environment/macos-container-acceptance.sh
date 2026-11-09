@@ -23,7 +23,7 @@
 # Written for macOS /bin/bash 3.2.
 set -uo pipefail
 
-LOG_DIR=${G7_LOG_DIR:?G7_LOG_DIR must name the setup probe's log directory}
+LOG_DIR=${G7_LOG_DIR:?G7_LOG_DIR must name the setup probe log directory}
 OUT="$LOG_DIR/container-acceptance"
 SELF_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$SELF_DIR/../.." && pwd)
