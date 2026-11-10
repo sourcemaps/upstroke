@@ -25,11 +25,17 @@ ceiling; `on_block` interaction in CI; the host runner where the file read as
 confined) and `validate` reported a clean file. A top-level typo deleted the
 largest unit a typo can delete, and this attribute closes that boundary and
 that boundary only (`SWEEP-CONFIG-PARSE-007`, closed by the sweep of
-`src/config/read.rs`). It is not the last silent drop in the file:
-`[routing.strategy]` is read through `RawStrategy`, which carries neither
+`src/config/read.rs`). It was not the last silent drop in the file:
+`[routing.strategy]` is read through `RawStrategy`, which carried neither
 `deny_unknown_fields` nor an unknown-key collector, so a misspelled
-`spend_down_afer` there is still discarded without a word
-(`SWEEP-CONFIG-PARSE-008`, open, guarded to this file's own sweep, row 54).
+`spend_down_afer` there was discarded without a word and
+`Strategy.spend_down_after` stayed `None`. That drop is closed too
+(`SWEEP-CONFIG-PARSE-008`), by the same attribute on `RawStrategy` -- the
+rule `[[routing.overrides]]`, `[[pins]]`, `[routing.effort]` and the per-kind
+routing tables already followed. An unknown key there now refuses the load as
+an `UpstrokeError::Config` carrying the deserializer's own text, which names
+the key as written and the accepted `mode` and `spend_down_after`. Only a key
+is refused: an unrecognised `mode` value still warns and the load succeeds.
 No forward-compatibility key is lost at the top level: nothing in the tree's
 fixtures, docs or examples writes a top-level key outside the seven.
 
@@ -46,6 +52,21 @@ temporary file, directory or cleanup is part of the oracle (§12): the suite's
 `scratch` helper writes into one tree per process that a `static` holds, so
 nothing reclaims it when the process exits, and a regression added by a sweep
 does not lean on it.
+
+## `fn a_misspelled_routing_strategy_key_is_refused_not_dropped() {`
+
+The finding's own input (`SWEEP-CONFIG-PARSE-008`): `mode = "value-max"`
+beside `spend_down_afer = 0.7` used to load, the misspelled key dropped and
+`Strategy.spend_down_after` left `None` with nothing said. The test is
+witnessed against removing `#[serde(deny_unknown_fields)]` from
+`RawStrategy`: without it the load succeeds and the key is dropped. The
+refusal's text is the deserializer's, so what is asserted is what an operator
+needs from it -- the key as written and both accepted keys -- and that no
+warning stands in for it. Each name is matched inside the backticks serde
+quotes it in, because the TOML error also echoes the offending source line,
+where `spend_down_afer` appears whatever the error says about it. The capture
+is built in memory and goes through `load_captured`, as in the test above and
+for the same reason.
 
 ## `gates: Option<toml::Value>,`
 
