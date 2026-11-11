@@ -2936,7 +2936,10 @@ Below the limit: the first repair of a run that allows one automatic
 repair is runnable, and a `HumanRequired` admission — asking a person
 for an allowance the lineage still has — is refused. A `HumanBinding`
 admission is accepted on either side of the limit: it is the empty
-intersection's shape, not the exhausted allowance's (`pr8-plan.md` R8).
+intersection's shape, not the exhausted allowance's, and the fold refuses
+every other admission on a ladder with no rungs, so refusing `HumanBinding`
+at the limit would leave an over-limit empty-intersection repair with no
+admissible shape at all.
 
 ## `fn a_lineage_past_its_repair_limit_registers_only_a_human_required_repair() {` › `let (at_limit, log) = verifying(0);`
 
@@ -2964,7 +2967,9 @@ verified and rejected in turn.
 ## `fn an_empty_intersection_ladder_records_no_tier_no_ceiling_and_the_raised_floor() {` › `let waiting = FrozenLadder {`
 
 The shape a merge repair freezes when `mid` intersects the root's
-ladder empty (`pr8-plan.md` R10): the fold's own ladder check accepts
+ladder empty — no tier, no rung, no ceiling, the floor raised to `Mid`
+or kept at the root's if that is higher, and a `HumanBinding` admission
+offering the root's allowed agents: the fold's own ladder check accepts
 it, because an absent ceiling is the maximum of no tier.
 
 ## `fn an_override_replaces_the_frozen_binding_for_every_later_attempt() {`

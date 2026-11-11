@@ -22,7 +22,7 @@ A root floored above mid keeps its own floor.
 
 ## `fn an_empty_tier_intersection_registers_a_human_binding_ladder_with_the_allowed_agents() {` › `let allowed = vec!["claude-code".to_owned(), "copilot".to_owned()];`
 
-R10: a root whose every rung is below mid has no tier the repair may
+A root whose every rung is below mid has no tier the repair may
 run at. The frozen payload records exactly that — no tier, no rung, no
 ceiling, the raised floor — and offers the run's allowed agents to the
 person who must name a binding, never the sub-floor rungs it excluded.
@@ -42,11 +42,11 @@ admissible shape for an over-limit rejection with no tier left.
 The evidence is not written into the record here. It is produced by the
 production classification of a failing gate and of a rejecting reviewer, and
 carried through `integrate::code_record` — the conversion that used to keep
-`reason` and drop `feedback`. The version before round six handed
-`code_rejection_record` its own `detail`, which sits **downstream** of that
-conversion, so it proved the spec carries what it was given and nothing about
-what gives it anything; it passed on a head where the evidence was being lost,
-which is how the defect reached a green branch (`pr8-triage.md` §9, finding 2).
+`reason` and drop `feedback`. The version before the cover review of
+`9ee9784e` handed `code_rejection_record` its own `detail`, which sits
+**downstream** of that conversion, so it proved the spec carries what it was
+given and nothing about what gives it anything; it passed on a head where the
+evidence was being lost, which is how the defect reached a green branch.
 
 The needle is one line of the evidence, because the spec is asserted against its
 JSON encoding and a newline is `\n` there; the fixture keeps a second line so
