@@ -677,8 +677,9 @@ pull request's body claimed before it had it. The three reader predicates in
 `no_production_dispatch_on_a_classification_is_an_equality_guard` refuses the
 four spellings that would undo it.
 
-`lock_held` is read inside the two arms that use it and not above the `match`.
-The `Indeterminate` arm asks nothing further about the directory, and that is
+`lock_held` is bound and read inside the one arm that uses it, `Committed`, and
+not above the `match`; the `Husk` arm calls `rundir::is_running` inline in its
+`if` without binding it. The `Indeterminate` arm asks nothing further about the directory, and that is
 the arm's whole content — see below.
 
 ## `fn scan_classified(` › `RunDirClass::Indeterminate => Scanned {`

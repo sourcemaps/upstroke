@@ -39,11 +39,12 @@ would need `is_slotted` to be wrong about `ProbeTarget::Shell`.
 ### Why the runner is wrapped rather than the probes hand-built
 
 An [`crate::agent::AgentAdapter`]'s `probe` runs **one or more** processes —
-Codex runs four — and each is already a `RunnerRequest` carrying its own
+Codex runs ten: the version, two help texts, six strict-config checks and one
+catalog read — and each is already a `RunnerRequest` carrying its own
 `InvocationId` from [`crate::agent::probe_request`]. R4 is "invocation
 registration (**all** Runner processes incl. gates, agent probes, and the
 shell probe)", so registering only the identities this module could name in
-advance would leave three of Codex's four unaccounted and the ledger would
+advance would leave nine of Codex's ten unaccounted and the ledger would
 balance while being wrong.
 
 So the ledger sits **at the boundary**: [`Registering`] is a
