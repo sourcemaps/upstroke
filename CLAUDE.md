@@ -30,8 +30,9 @@ questions.
 
 `0.1.0` is released: the sequential conductor works end to end. v0.2 is in progress. Its
 parallel-execution machinery (worktree-per-task, the compare-and-swap merge queue, the optional
-container runner, the topology layer) reached master on 2026-09-01, inert by default: the v0.1
-path is unchanged and the schema-4 machinery engages only by explicit schema choice.
+container runner, the topology layer) reached master on 2026-09-01, inert by default, and PR12
+activates it: `upstroke run` creates schema-4 runs and `upstroke resume` continues them, while a
+run of schemas 1-3 still resumes, reports and exports on the sequential path.
 `export-decisions` landed 2026-08-12. Still to come: capacity-driven routing (the capacity engine
 ships read-only), more adapters, notifiers. No `0.2.0` tag exists. The build order is `DESIGN.md`
 §21 and it is deliberate; check where the project is before adding something out of sequence.

@@ -1289,7 +1289,9 @@ child rather than a released lease.
 
 The container reaper's acknowledged CANCEL (`cancel_unleased`), PR11 follow-up A's
 `FUA-D1-CONC-1`. It acknowledged, so it is exiting, and it holds **no** cleanup lease
-(`arm_container_reaper` forks it with none), so nothing downstream depends on its exit:
+(`arm_container_reaper` forks it with none, and a `BackstopHold::BeforeActing` backstop
+takes its exclusion only at its coordinator's death, which a CANCEL from that coordinator
+precedes), so nothing downstream depends on its exit:
 the reason `AcknowledgedExit` is unbounded does not apply. Its wait is
 `wait_for_an_ended_helper` (or, with the identity path on,
 `wait_for_an_ended_helper_through_identity`) within `HELPER_END_BUDGET`; a reaper still
@@ -2442,13 +2444,22 @@ does. Then, in this order:
   fail-closed termination a missed CANCEL acknowledgement arms (`cancel_unleased`) would
   set `PENDING_TERMINATION` with nothing reading it.
 - **One reaper is forked through `fork_reaper` with no cleanup lease** and the rendered
-  scope. No lease, by construction, for the reasons the follow-up's record gives (§1.3):
-  a held R28 would refuse the in-process resume the frozen
+  scope. No lease while its coordinator lives, by construction, for the reasons the
+  follow-up's record gives (§1.3): a held R28 would refuse the in-process resume the frozen
   `a_lost_gate_container_is_reclaimed_by_the_next_resume_before_the_verification_is_settled`
   requires, the census reclaims the same containers and the two converge, and "disarming
   never leaves R28 held" becomes structural. No launch claim and no `REGISTER` either: the
   reaper's `pgid` stays 0, so it never settles a group and never forks an anchor; when its
   parent dies it runs only `reclaim_labeled_containers` over its scope.
+- **The hold it takes at that death is the caller's `BackstopHold`**
+  (`PR12-INV9-CONTAINER-HELPER-CLEANUP-LEASE`). `Unleased` -- the reaper's own mechanics
+  tests -- asks nothing and reclaims. `BeforeActing { leases, run_lock, worktree_lock }` --
+  what a container runner arms -- is rendered before the fork (`render_exclusion`) and is
+  established, in `reclaim_labeled_containers`, before anything is killed or removed: the
+  backstop takes the physical worktree's lock itself, as `WorktreeLock` admission does, and
+  only then asks the run's lock and takes its own share of the run's leases. Whoever holds
+  the worktree lock owns the dead incarnation's cleanup there, so a backstop never holds a
+  lease an admitted engine's census could see and then stands down.
 - **It rests once** (`EndingRest::SingleAttempt`, `FUA-I2-EINTR`): its exit wait after CANCEL
   and the abandonment a READY failure takes pause with one `nanosleep` between polls, so their
   deadlines hold under a stream of interruptions.
@@ -2471,7 +2482,7 @@ be established), with its own message naming the container reaper. What differs 
 exit wait after an acknowledgement: `ReaperEnding::UnleasedExit`, bounded, where `cancel`'s
 is the unbounded `AcknowledgedExit` (`FUA-D1-CONC-1`).
 
-## `mod termination` › `static ARMED_CONTAINER_REAPERS: Mutex<Vec<(libc::pid_t, Vec<String>)>> = Mutex::new(Vec::new());`
+## `mod termination` › `pub(super) static ARMED_CONTAINER_REAPERS:`
 
 Test-only: the listing argv of every container reaper this test process has armed and not
 cancelled, keyed by pid. `note_armed_container_reaper` adds one after READY,
@@ -2480,6 +2491,13 @@ cancelled, keyed by pid. `note_armed_container_reaper` adds one after READY,
 root label and incarnation; `fake.rs` asks it at each container start
 (`FakeRuntime::observing_covers`), which is how the design property's in-process witnesses
 see "covered by an armed reaper with its scope" at the instant a container starts.
+The test-support module can inspect and remove a collected entry for L5's
+`RetainedMockReaper` and R6-N1's `RetainedStubReaper`; that visibility exists
+only in test builds. The mutex
+protects this shared registry because independent runner tests register and
+query their own scopes concurrently. Collection copies only the selected pid,
+releases the lock before any process operation or wait, and locks again only to
+remove that entry after reaping it.
 ## `mod termination` › `if let Some(scope) = scope {`
 
 Rendered here so a scope that cannot be turned into argv is refused
@@ -2530,6 +2548,19 @@ What a reaper about to be forked should carry.
 ## `mod termination` › `fn reclaim_labeled_containers(containers: &ReaperContainers) {`
 
 Kill and remove every labeled container of the dead coordinator.
+
+For a `BackstopHold::BeforeActing` backstop, the exclusion comes between the first
+non-empty listing and the first kill, so the reaper's calls when it acts are unchanged (list,
+kill and rm per container, list again) and a backstop that lists nothing ends having taken
+nothing -- it never makes its run look live (`rundir::is_running`) when it has nothing to
+remove. Before the first kill it must hold, in this order: the physical worktree's lock
+(`take_the_worktree`: the existing lock file, opened for writing without creating it, locked
+whole with a non-blocking exclusive `F_SETLK`; held by another process, absent or failing,
+it stands down having taken nothing); no holder of its run's lock (`lock_has_no_holder`,
+`F_GETLK`; an absent file has none); and its own shared `flock` on every lease path
+(`hold_leases`, bounded retries over momentary exclusive probes; no lease path to take is a
+stand-down). Its exit releases all of them. The test build can park it at three points
+(`GatePoint`, `BackstopGate`); the production twin of that gate does nothing.
 
 `T-CONTAINER.resume_action`: "on Unix the cleanup reaper performs
 **kill/rm** earlier when the coordinator dies". Only kill and rm: the
@@ -3462,7 +3493,7 @@ reasoning is done on and not only on the one it runs on.
 The Linux scanner has no such ambiguity and needs no equivalent: `getdents64`
 answers a failure with a negative value, so its zero — the end of `/proc` — is
 unambiguous. That is why the two platforms' `Some(false)` are not the same
-claim, and why §7.3's row in `pr8-triage.md` now states each separately.
+claim.
 
 ## `#[cfg(target_os = "macos")]` › `fn group_has_non_zombie_members(pgid: i32) -> Option<bool> {`
 
@@ -3490,3 +3521,161 @@ the `errno` this call left alone and is an enumeration of nothing; an ordinary
 listing, where a stale `errno` cannot make a non-zero return unknown because a
 non-zero return is the syscall's own success; and a buffer filled to its last
 byte or a negative return, neither of which is an enumeration.
+
+## `pub(crate) mod test_support` › `pub(crate) struct RetainedMockReaper {`
+
+L5's Unix test guard, for an isolated helper whose runner exercises
+`Reaping::drop`'s existing `kept_until_the_process_exits` path. It owns collection
+of the retained mock reaper for one private-root label and incarnation. Construct
+it before the invocation and drop every runner of that scope before collection;
+the helper runs one test and no competing waiter. It is not a production cleanup
+path, and neither `Reaping::drop` nor `kept_until_the_process_exits` changes.
+
+`collect` requires exactly one collection. On unwind, `Drop` attempts the same
+bounded collection; an error is printed, and the calling guard requires both the
+collection marker and the helper's child census, so a failed cleanup cannot yield
+a passing outer test. No registered reaper is harmless on an early unwind before
+one was armed, but cannot satisfy the successful guard's required marker.
+
+`collect_if_armed` selects exactly one positive pid from the existing registry,
+and refuses any scope whose program is not the fake runtime's no-op program.
+It hands that pid to `collect_retained_reaper` (below), which it shares with
+`RetainedStubReaper`; the selection and its refusal are this type's alone and
+unchanged, and every message the shared routine prints for it names the `mock`
+reaper exactly as before.
+
+This mock reaper has no command process group or anchor. While its helper lives,
+the forgotten guard keeps its command descriptors open; there is no CANCEL,
+CLEANUP or parent-death request to start runtime children. SIGKILL collects it
+before the helper exits and cannot execute the reaper's cleanup/fork path. Thus
+these two fake-runtime fixtures do not leave reaper grandchildren to collect.
+This argument is specific to these fixtures, not a claim about arbitrary
+container reapers.
+
+## `pub(crate) mod test_support` › `pub(crate) struct RetainedStubReaper {`
+
+R6-N1's Unix test guard (regular review 6), for the K2 stalled-observation
+helper, whose runner is the real `DockerCli` over a stub `docker` the parent
+test wrote and put first on the helper's `PATH`. Its cleanup mode settles
+`Unresolved`, so the runner's drop takes `Reaping::drop`'s existing
+`kept_until_the_process_exits` path and the container reaper outlives the
+runner, as in L5's helpers. `RetainedMockReaper` cannot own that reaper: it
+refuses every program but the fake runtime's no-op one, and that refusal
+stays. This owner is its counterpart for a stub program, with the same
+lifecycle: construct it before the invocation and drop every runner of the
+scope before collection; `collect` requires exactly one collection; `Drop`
+attempts the same bounded collection on unwind and prints any error; no
+registered reaper is harmless on an early unwind but cannot satisfy the
+calling guard's required marker. It is not a production cleanup path, and
+nothing in production changes.
+
+The identity is exact, never a process name. `new` renders the scope's listing
+argv with production's own `ReaperContainerScope::new(program, private_root,
+incarnation).list_argv()`, the argv `arm_container_reaper` registers, and
+`collect_if_armed` selects the one registered entry whose argv equals it whole
+(program, private-root label filter, incarnation filter), with a positive pid;
+a second match or a non-positive pid is refused. The program must then be the
+stub. A bare name resolves through `crate::util::find_program`, the lookup
+production's `resolve_reaper_program` makes before the fork, on the helper's
+unchanged `PATH`, and must land on the exact file the caller names; a program
+spelled as a path must be that file. The registry does not keep the resolved
+path, so this is the same resolution made again on the same `PATH`, not a
+record of the one the reaper made. Only then is the pid handed to
+`collect_retained_reaper`.
+
+Collecting it does not defeat the backstop. The helper first requires the scope
+still registered after its runner dropped, which is `kept_until_the_process_exits`
+having kept the reaper; the owner then collects a process the helper started,
+as L5 collects the mock. No CANCEL or CLEANUP frame is sent. The program is the
+stub, whose label-filtered `ps` lists nothing, so the parent-death reclaim the
+kill forecloses would only have run that stub to list nothing.
+
+The no-grandchildren argument is the mock's, above: the retained reaper has no
+command process group or anchor; while the helper lives, the forgotten
+`ContainerReaper` keeps its command descriptors open and nothing sends it a
+command, so it starts no runtime child; SIGKILL collects it before the helper
+exits and cannot run its reclaim fork path. The argument is specific to this
+fixture.
+
+## `pub(crate) mod test_support` › `fn collect_retained_reaper(`
+
+The collection both retained-reaper owners share, moved unchanged out of
+`RetainedMockReaper::collect_if_armed` with the noun its messages carry
+(`mock`, `stub`) passed in. Given the pid its caller selected, it first asks
+`waitpid(pid, WNOHANG)` to establish that the reaper is still this process's
+own unreaped child; with no competing waiter in the isolated helper, that number
+cannot be reused between this check and `SIGKILL`. It then polls that same
+child within `ISOLATED_CHILD_COLLECTION_BOUND`, requires the SIGKILL exit, and
+only after reaping it removes its registry entry (`forget_collected_reaper`)
+and prints `collected retained <kind> reaper <pid>`. The marker carries no
+authority before that wait succeeds. A reaper found already exited is
+collected, removed from the registry and reported as an error.
+
+## `pub(crate) mod test_support` › `fn poll_retained_mock_reaper(pid: libc::pid_t) -> std::io::Result<Option<libc::c_int>> {`
+
+A nonblocking wait for the selected, positive child pid. `None` is still there,
+`Some` is the collected exit status, and an OS error stays an error. The caller
+adds the operation and pid; interruptions in the bounded collection loop are
+retried only within its deadline. The FFI safety obligations stay at the calls.
+
+## `pub(crate) mod test_support` › `pub(crate) fn assert_no_children_in_isolated_test() {`
+
+The isolated helper's direct-child census: `waitpid(-1, WNOHANG)` must report
+`ECHILD`. A live or stopped child, an uncollected exit, and any other error fail.
+This proves no direct children remain; it does not prove an arbitrary descendant
+tree is empty. The mock- and stub-reaper protocols above supply the separate
+reason these fixtures cannot have reaper grandchildren at successful collection.
+The outer `run_test_isolated` caller then collects the helper itself.
+
+## `mod termination` › `const COLLECT_ISOLATED_TEST_GUARD: u8 = 0xf1;`
+
+L5's shutdown command exists only in test builds, as does its match arm in
+`guard_loop`. Arming a real container reaper also initializes the process-global
+job-control guard, which forks a probe child. The isolated fixture therefore
+owns this guard and that grandchild in addition to its retained container reaper.
+`IsolatedJobControl` supplies their test-only ownership; production guard and
+retained-reaper protocols are unchanged.
+
+## `mod termination` › `fn collect_probe_for_isolated_test(probe_pid: libc::pid_t, probe_fd: libc::c_int) -> ! {`
+
+Runs inside the forked guard on the test-only shutdown command, using fixed
+storage and the existing syscall-only bounded wait. The guard normally ignores
+SIGCHLD, so it first restores the default disposition, making the probe's exit
+waitable. It closes the probe's sole command writer; the probe reads EOF and
+exits without forking. Only a successful wait for that exact probe with exit
+status zero earns `ISOLATED_PROBE_COLLECTED`, a distinct guard exit status. Any
+failure earns status 1. The wait uses `HELPER_END_BUDGET` and `SingleAttempt`
+rests; it cannot hold the parent indefinitely. Restoring SIGCHLD is confined to
+this ending of the forked test guard and changes no embedding host disposition.
+
+## `mod termination` › `pub(crate) struct IsolatedJobControl {`
+
+Constructed in a fresh, single-test helper before fixture setup and dropped
+after its retained-reaper owner. It owns the one process-global job-control
+guard for that helper's remaining lifetime. Its explicit `collect` and its
+unwind `Drop` both ask the guard to collect its probe, then wait for the guard
+within `ISOLATED_CHILD_COLLECTION_BOUND`. Collection requires no registered
+launches or command groups, copies the guard under its existing state lock,
+and releases that lock before the nonblocking request and waits. The monitor
+shares this state; the short critical section preserves its invariant, and
+no command may launch after this shutdown. No new shared ownership is added.
+
+Only the distinct guard status proves probe collection. After collecting the
+guard, the owner retires the signal-handler descriptor and probe pid and closes
+the guard's descriptors, including any identity descriptor. It prints the guard
+and probe pids only after that wait succeeds. An uninitialized guard is harmless
+on an early fixture failure, but does not satisfy the successful test's marker.
+Drop reports any cleanup error; the outer test requires both collection markers,
+successful child status and the helper's direct-child census. The deliberate
+unwind exercises both owners, retaining the same requirements as normal return.
+
+Collection markers and cleanup errors use the existing fixture `say` funnel,
+whose bounded writes do not panic during unwinding; the parent reads these from
+the helper's captured stderr. The required markers make a refused output channel
+a test failure rather than a silent success.
+
+The final ECHILD assertion covers the helper's direct guard and container
+reaper. The guard's distinct collected status supplies the separate evidence
+that its probe grandchild has already been reaped; the mock-reaper protocol
+above explains why it has no grandchildren. This does not use ECHILD as a claim
+about an arbitrary descendant tree.

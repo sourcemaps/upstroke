@@ -74,7 +74,6 @@ impl RunState {
         self.incarnation = resumed.incarnation.clone();
         self.budget_stop = None;
         self.finished = None;
-        self.abandoned = None;
         self.wake_backoff();
     }
 
@@ -431,20 +430,6 @@ impl RunState {
 
     fn fail_lineage(&mut self, key: TaskKey) {
         let root = self.lineage_root(key);
-        let cancels_verification = self.transaction.as_ref().is_some_and(|transaction| {
-            self.lineage_root(transaction.candidate.key) == root
-                && match &transaction.class {
-                    TransactionClass::VerificationStarted { .. } => true,
-                    TransactionClass::Prepared { .. } => false,
-                }
-        });
-        if cancels_verification {
-            self.abandoned = self
-                .transaction
-                .as_ref()
-                .map(|transaction| transaction.sequence);
-            self.release_transaction();
-        }
         let members: Vec<TaskKey> = self
             .registry
             .entries()

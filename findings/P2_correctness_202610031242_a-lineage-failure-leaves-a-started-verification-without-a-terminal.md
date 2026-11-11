@@ -170,3 +170,36 @@ decides nothing: its remedy is a separate change that needs the owner's ruling o
 modules, and it is not part of #329 or of O14's mechanism. The text above is the reviewed draft's
 (`~/orch-pr11/evidence/inv07/FINDING-DRAFT.md`, reviewed PASS with `~/orch-pr11/evidence/inv07/REPORT.md` at
 `b7b60d4f`), with its identifier and pull request set when filed.
+
+## Implementation status, 2026-10-16
+
+**Open.** This file is the finding's one record, under its identifier above. The owner package names it by the working
+name `INV07-L13`, and #332, branch
+`fix-P2/correctness_a-lineage-failure-releases-a-started-verification-with-no-terminal`, takes it up. #332's reviewed
+commit `579ca1e0` filed it a second time under that name
+(`findings/P2_correctness_202610052042_a-lineage-failure-releases-a-started-verification-with-no-terminal.md`, id
+`INV07-L13`), before this file had landed with #329. The composed branch removes that copy and keeps this file: the
+removal consolidates one finding into its landed record, and it is not a closure. `disposition: deferred` keeps the
+ledger's meaning above, open; it defers nothing past G6, past any writer of `task_spawned`, or past activation.
+
+**The owner's adoption, 2026-10-15** ("adopt all three recommended packages", the INV-07 decision report, sha256
+`76f332f26f64cac853ec2e808563a1a00c066e89f377042047051713d2a646c7`):
+- RULING L-1c, RULING L-1 composed after O14(b), which withdraws O14(b)'s bookkeeping of a released verification;
+- RULINGs L-2 and L-3 exactly as pinned;
+- T-VERIFY (a), ERRATUM E-L13-1 at its three anchors, ordered before the composed E-O14B-3 clause;
+- the composed O14(b) texts;
+- route R1: master merged into #332's branch, its reviewed commits kept.
+
+So step 3 above is met by those rulings, and T-VERIFY's retention clause is settled for a verification a lineage
+failure cancels by erratum E-L13-1: its candidate fails with its lineage and is not verified again.
+
+**The change.** #332's branch merges master `62bbbb43`, which carries O14(b) (#334), into its reviewed commits
+`d29df05e` to `579ca1e0`, and composes the two under the decision report's rules (a) to (l). A lineage failure leaves
+the verification's transaction open. The review passes it charged are recorded (`merge_verification_charged`) before
+its one terminal, `merge_verification_interrupted`, and its pin, staging worktree and snapshots are reclaimed after
+the terminal. The coordinator appends the terminal live, a halt's closure appends it with the other in-flight work,
+and the next resume's recovery appends it when no live process settled the verification.
+
+**Not claimed here.** The change's validation, its implementation reviews and this finding's merge triage are #332's
+to record. A merge of the change does not by itself close this finding. Closure is the deletion of this file under
+the standing rule, once the finding is actually resolved.

@@ -108,7 +108,7 @@
 [[module]]
 path = "src/workspace_manager.rs"
 crate_path = "upstroke::workspace_manager"
-shared = { common_git_dir = 2, object_exists = 2 }
+shared = { common_git_dir = 2, create_execution_root = 2, object_exists = 2 }
 funnel = [
     "add_site",
     "add_worktree",
@@ -147,15 +147,20 @@ effect_free = [
     "commit_tree_sha",
     "commit_tree_sha_pausing",
     "common_git_dir",
+    "composed_common_dir",
+    "core_ignorecase",
     "derive",
     "direct_ref_target",
     "execution_root",
     "execution_root_of",
+    "fmt",
     "from",
     "instance_tag",
     "intent_path",
     "intents",
     "intents_pausing",
+    "keeps_common_dir",
+    "kept_instances",
     "names",
     "names_in_another_case",
     "object_directory",
@@ -167,6 +172,7 @@ effect_free = [
     "quiescence",
     "reclaim_intents",
     "refs_under",
+    "refuse_relative_repository_wide_names",
     "refuse_unexpected_refs",
     "remove_intent",
     "remove_snapshot",
@@ -484,6 +490,11 @@ effect_free = [
     # was already performed and answers whether it *proves* the private commit
     # record absent. Only `NotFound` does.
     "commit_record_proves_absence",
+    # The target-absent step's one observation of the marker's private target,
+    # `symlink_metadata` and never followed, in the production twin of the
+    # configuration-twinned `locator_fault` module whose test twin a test fails
+    # for one path (PR12-INV9-UNREADABLE-PRIVATE-LOCATOR).
+    "locator_metadata",
     "prove_private_half_ownership",
     "public_dir",
     "run_id",
@@ -592,6 +603,12 @@ effect_free = [
     "drop",
     "durability_ledger",
     "enter",
+    # Enters, on the calling thread and for as long as the returned guards live,
+    # the cleanup scope of each lease path a `RunnerCall` carried across a thread
+    # boundary, so every reaper `spawn_reaper` forks there holds them
+    # (PR12-INV9-CONTAINER-HELPER-CLEANUP-LEASE). The thread's scope registry
+    # only; no file, lock or process.
+    "enter_carried_cleanup_scope",
     "enter_cleanup_scope",
     "events",
     "fmt",
@@ -629,6 +646,11 @@ effect_free = [
     "unrecorded_report_staging",
     "v1",
     "with_private_root",
+    # The physical worktree's lock-file path, joined from the worktree git dir:
+    # what `WorktreeLock` takes, and what a container runner's dormant backstop
+    # takes itself before it may act (PR12-INV9-CONTAINER-HELPER-CLEANUP-LEASE).
+    # A path; nothing is opened.
+    "worktree_lock_file",
 ]
 
 [[module]]
@@ -802,6 +824,7 @@ effectful = [
 ]
 effectful_unnameable = []
 effect_free = [
+    "composed_common_dir",
     "contain_write_command",
     "containment_establishments",
     "credential_location",
@@ -940,8 +963,11 @@ effect_free = [
 ]
 
 # PR6's Container funnel. The read-only inspections of `ContainerRuntime`
-# (`probe`, `image_by_reference`, `image_by_id`, `volume_present`,
-# `containers_with_label`, `observe`, `collect`) are classified EFFECT-FREE:
+# (`probe`, `image_by_reference`, `image_by_id`, `image_environment`,
+# `volume_present`, `containers_with_label`, `observe`, `collect`) are
+# classified EFFECT-FREE (`image_environment`, PR12's S7, reads the recorded
+# image id's `Config.Env` through the same `docker image inspect` path as
+# `image_by_id`):
 # `ContainerSite` has no inspection variant, `classify_object_residue` is the
 # tree's precedent for "a read-only inspection (no effect)", and lane B's policy
 # resolution is required to call them ("resolved by read-only inspection"). They
@@ -1010,6 +1036,7 @@ effect_free = [
     "harness",
     "image_by_id",
     "image_by_reference",
+    "image_environment",
     "list_intents",
     # `PR6-ACCT-007`: the staged half of the same namespace scan. A directory
     # read and a parse, like `list_intents` beside it.
@@ -1189,8 +1216,11 @@ effectful_unnameable = []
 # `emit_capacity_snapshot` estimates through `capacity::estimate` and
 # `capacity::drain_of`, effect-free rows, and calls `emit`;
 # `fail_task_with_policy` builds one event and calls `emit`. `ParkSubject::of`,
-# `prepared_pin_ref` and the three question builders make values and strings
+# `prepared_pin_ref` and the four question builders make values and strings
 # (`question_context` through `util::fence_for`, an effect-free row).
+# `spend_question_context` joined them in PR12's J1, when the schema-4 driver
+# began raising the spend approval: it writes the approval's context into a
+# `String` and calls nothing else.
 effect_free = [
     "emit",
     "emit_capacity_snapshot",
@@ -1199,6 +1229,7 @@ effect_free = [
     "prepared_pin_ref",
     "question_context",
     "question_options",
+    "spend_question_context",
     "topology_question_options",
 ]
 
@@ -1273,6 +1304,7 @@ effect_free = [
     "materialize_prompt",
     "pool_option",
     "problem",
+    "problem_in_work_tree",
     "review_failure",
     "worker_question",
 ]
@@ -1303,7 +1335,13 @@ effect_free = [
 # processes read the recorded graph through, staging it beside the file and
 # renaming it into place, outside any RunDir site. Its only callers are the two
 # conductor entry points, `run_harness` and `resume_harness`, which are denied
-# already.
+# already. `Workspace::pin_checkout` and `Workspace::discard_into_kept_pin` are
+# effectful for the same reason: each has Git write a private index file into
+# the checkout's own Git directory and removes it, and the second reads the run's
+# public directory for the kept pin's copies, has `git bundle create` write a new
+# one there, and fsyncs and renames it into place, all outside any RunDir site.
+# Their only callers are the legacy coordinator and resume, which allow the
+# denial at module level.
 [[module]]
 path = "src/workspace.rs"
 crate_path = "upstroke::workspace"
@@ -1318,6 +1356,8 @@ effectful = [
     "Workspace::prepared_pin_target",
     "Workspace::ensure_run_exclusions",
     "Workspace::recorded_objects_scope",
+    "Workspace::pin_checkout",
+    "Workspace::discard_into_kept_pin",
 ]
 effectful_unnameable = [
     "drop",
@@ -1340,6 +1380,7 @@ effect_free = [
     "head_sha_full",
     "is_clean",
     "open",
+    "open_work_tree",
     "prepare_commit_from_candidate",
     "reclaim_gate_workspaces",
     "remove_orphan_prepared_pin",
@@ -1985,6 +2026,7 @@ effect = [
     "mkdtemp",
     "mkfifo",
     "open",
+    "openat",
     "pipe",
     "pipe2",
     "pthread_sigmask",
@@ -2061,6 +2103,12 @@ not_an_effect = [
     "POLLIN",
     "POLLNVAL",
     "PROC_PIDT_SHORTBSDINFO",
+    # The prctl option the Group A owned-collection harnesses
+    # (runner::container::exec::tests) set on themselves, so that a killed
+    # coordinator's helpers, reapers and backstops are re-parented to them and
+    # collected there; the effect is `syscall` with `SYS_prctl`
+    # (PR12-INV9-CONTAINER-HELPER-CLEANUP-LEASE).
+    "PR_SET_CHILD_SUBREAPER",
     "PR_SET_NO_NEW_PRIVS",
     "PR_SET_SECCOMP",
     "P_ALL",
@@ -2154,6 +2202,11 @@ not_an_effect = [
     "c_long",
     "c_short",
     "c_void",
+    # The process's own effective uid and gid, read and nothing else: the
+    # numeric user every container is created as on a Unix host (PR12's D-B,
+    # `runner::container::exec`'s `coordinator_user`).
+    "getegid",
+    "geteuid",
     # Reads the process's own supplementary groups and writes nothing outside
     # the buffer it is handed; the report-group test picks a second group with it.
     "getgroups",

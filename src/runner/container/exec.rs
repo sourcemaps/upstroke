@@ -14,19 +14,25 @@ use crate::error::UpstrokeError;
 use crate::rundir::RunPaths;
 use crate::runner::policy::runner_policy_sha256;
 use crate::runner::{
-    AgentId, Cancellation, ExecutionRole, InvocationId, RunFuture, Runner, RunnerCall, RunnerError,
-    RunnerRequest,
+    AgentId, Cancellation, CommandSpec, ExecutionRole, InvocationId, RunFuture, Runner, RunnerCall,
+    RunnerError, RunnerRequest,
 };
-use crate::topology::events::{RunnerContract, RunnerKind, RunnerPolicy};
+use crate::topology::events::{RecordedMount, RunnerContract, RunnerKind, RunnerPolicy};
 
 use super::census::ReaperContainerScope;
 use super::env::{BoundaryLayout, ContainerEnvironment, RoleScope, supplies_credential_location};
 use super::intent::{ContainerIntent, ContainerName, LABEL_INCARNATION, LABEL_PRIVATE_ROOT};
-use super::runtime::{ContainerRuntime, ContainerTrace, CreateSpec, Mount, RuntimeError};
+use super::resolve::{
+    MountContext, MountExclusion, RepositoryGit, canonical_spelling, mount_label, nested_targets,
+    overlap, recheck_recorded_source, refuse_excluded, refuse_recorded_targets,
+};
+use super::runtime::{
+    ContainerRuntime, ContainerTrace, ContainerUser, CreateSpec, Mount, QuestionBound, RuntimeError,
+};
 use super::view::{self, RoleGitView};
 use super::{
-    CancelResidue, ContainerHooks, ContainerToRelease, GitView, GitViewRequest, LaunchPlan,
-    Launched, NoHooks, create_container, mount_git_view, start_container, write_intent,
+    CancelResidue, CauseFate, ContainerHooks, ContainerToRelease, GitView, GitViewRequest,
+    LaunchPlan, Launched, NoHooks, create_container, mount_git_view, start_container, write_intent,
 };
 use crate::topology::effects::ContainerSite;
 pub(in crate::runner::container) use cover::{CoveredCreate, CoveredStart};
@@ -49,6 +55,14 @@ pub const fn receives_a_worktree(role: &ExecutionRole) -> bool {
     match role {
         ExecutionRole::Implement | ExecutionRole::Gate | ExecutionRole::Review => true,
         ExecutionRole::Probe(_) => false,
+    }
+}
+
+#[must_use]
+pub const fn forces_configured_mounts_read_only(role: &ExecutionRole) -> bool {
+    match role {
+        ExecutionRole::Review | ExecutionRole::Probe(_) => true,
+        ExecutionRole::Implement | ExecutionRole::Gate => false,
     }
 }
 
@@ -88,7 +102,7 @@ pub struct Confinement {
 
 impl Confinement {
     #[must_use]
-    pub fn of_run(identity: &RunIdentity, repo_root: &Path) -> Self {
+    pub fn of_run(identity: &RunIdentity, repo_root: &Path, git: RepositoryGit<'_>) -> Self {
         let paths =
             RunPaths::with_private_root(repo_root, &identity.run_id, &identity.private_root);
         let execution_root = crate::workspace_manager::execution_root_of(
@@ -96,6 +110,7 @@ impl Confinement {
             &identity.repo_key,
             &identity.run_id,
         );
+        let namespaces = worktree_namespaces(&execution_root);
         let mut entries = vec![
             (Withheld::PublicLog, paths.public),
             (Withheld::PrivateArtifacts, paths.private),
@@ -104,9 +119,14 @@ impl Confinement {
                 super::intent::containers_dir(&identity.private_root),
             ),
             (Withheld::AuthoritativeGit, repo_root.join(".git")),
-            (Withheld::SiblingWorktree, execution_root.clone()),
         ];
-        for namespace in worktree_namespaces(&execution_root) {
+        for directory in [git.git_dir, git.common_dir] {
+            if !entries.iter().any(|(_, withheld)| withheld == directory) {
+                entries.push((Withheld::AuthoritativeGit, directory.to_path_buf()));
+            }
+        }
+        entries.push((Withheld::SiblingWorktree, execution_root));
+        for namespace in namespaces {
             entries.push((Withheld::SiblingWorktree, namespace));
         }
         Self { entries }
@@ -143,6 +163,43 @@ impl Confinement {
         }
         found
     }
+
+    #[must_use]
+    pub fn configured_violations(&self, configured: &[Mount]) -> Vec<String> {
+        let mut found = Vec::new();
+        for mount in configured {
+            let Mount::Path { source, target, .. } = mount else {
+                continue;
+            };
+            for (category, withheld) in &self.entries {
+                let relation = overlap(source, withheld)
+                    .or_else(|| overlap(source, &canonical_spelling(withheld)));
+                if let Some(relation) = relation {
+                    found.push(format!(
+                        "the configured mount `{}` -> `{target}` {relation} `{}` ({})",
+                        source.display(),
+                        withheld.display(),
+                        category.passage()
+                    ));
+                }
+            }
+        }
+        found
+    }
+}
+
+#[cfg(unix)]
+fn coordinator_user() -> Option<ContainerUser> {
+    // SAFETY: `geteuid` and `getegid` take no arguments, read no memory of
+    // this process's, and always succeed (POSIX.1-2008); they only report the
+    // calling process's effective credentials.
+    let (uid, gid) = unsafe { (libc::geteuid(), libc::getegid()) };
+    Some(ContainerUser { uid, gid })
+}
+
+#[cfg(not(unix))]
+const fn coordinator_user() -> Option<ContainerUser> {
+    None
 }
 
 fn worktree_namespaces(execution_root: &Path) -> Vec<PathBuf> {
@@ -256,6 +313,9 @@ pub struct ContainerRunner {
     environment: ContainerEnvironment,
     layout: BoundaryLayout,
     confinement: Confinement,
+    mount_exclusions: Vec<(MountExclusion, PathBuf)>,
+    settings_directory: PathBuf,
+    user: Option<ContainerUser>,
     runtime: Box<dyn ContainerRuntime>,
     view: Box<dyn GitView>,
     view_is_explicit: bool,
@@ -263,6 +323,7 @@ pub struct ContainerRunner {
     poll: Duration,
     output_limit: usize,
     reaping: Reaping,
+    worktree_lock: PathBuf,
 }
 
 #[derive(Default)]
@@ -279,8 +340,41 @@ struct ReapingState {
 
 struct Armed {
     #[cfg(unix)]
-    reaper: crate::agent::proc::ContainerReaper,
+    dormant: Vec<DormantBackstop>,
     scope: ReaperContainerScope,
+}
+
+#[cfg(unix)]
+struct DormantBackstop {
+    leases: Vec<PathBuf>,
+    _reaper: crate::agent::proc::ContainerReaper,
+}
+
+#[cfg(unix)]
+impl DormantBackstop {
+    fn arm(
+        scope: &ReaperContainerScope,
+        leases: &[PathBuf],
+        run_lock: &Path,
+        worktree_lock: &Path,
+    ) -> Result<Self, UpstrokeError> {
+        Ok(Self {
+            leases: leases.to_vec(),
+            _reaper: crate::agent::proc::arm_container_reaper(
+                crate::topology::effects::ProcessSite::Terminate,
+                scope,
+                crate::agent::proc::BackstopHold::BeforeActing {
+                    leases,
+                    run_lock,
+                    worktree_lock,
+                },
+            )?,
+        })
+    }
+
+    fn covers(&self, leases: &[PathBuf]) -> bool {
+        leases.iter().all(|path| self.leases.contains(path))
+    }
 }
 
 fn refuse_unless_selected(
@@ -304,9 +398,36 @@ fn refuse_unless_selected(
 }
 
 impl Armed {
+    const fn new(scope: ReaperContainerScope) -> Self {
+        Self {
+            #[cfg(unix)]
+            dormant: Vec::new(),
+            scope,
+        }
+    }
+
+    #[cfg(unix)]
+    fn cover_dormant(
+        &mut self,
+        leases: &[PathBuf],
+        run_lock: &Path,
+        worktree_lock: &Path,
+    ) -> Result<(), UpstrokeError> {
+        if self.dormant.iter().any(|backstop| backstop.covers(leases)) {
+            return Ok(());
+        }
+        self.dormant.push(DormantBackstop::arm(
+            &self.scope,
+            leases,
+            run_lock,
+            worktree_lock,
+        )?);
+        Ok(())
+    }
+
     fn kept_until_the_process_exits(self) {
         #[cfg(unix)]
-        std::mem::forget(self.reaper);
+        std::mem::forget(self.dormant);
     }
 }
 
@@ -340,6 +461,7 @@ impl ContainerRunner {
         policy: RunnerPolicy,
         identity: RunIdentity,
         repo_root: &Path,
+        git: RepositoryGit<'_>,
         environment: ContainerEnvironment,
         runtime: Box<dyn ContainerRuntime>,
     ) -> Result<Self, UpstrokeError> {
@@ -349,7 +471,17 @@ impl ContainerRunner {
         let layout = BoundaryLayout::new();
         let view = RoleGitView::new(ContainerTrace::off())
             .for_reader(layout.git_view(), layout.git_objects());
-        let confinement = Confinement::of_run(&identity, repo_root);
+        let confinement = Confinement::of_run(&identity, repo_root, git);
+        let mount_exclusions = if policy.mounts.is_empty() {
+            Vec::new()
+        } else {
+            MountContext::bind(repo_root, git, &identity.private_root)?.into_excluded()
+        };
+        let settings_directory =
+            RunPaths::with_private_root(repo_root, &identity.run_id, &identity.private_root)
+                .settings();
+        let user = coordinator_user();
+        let worktree_lock = crate::rundir::worktree_lock_file(git.git_dir);
         Ok(Self {
             policy,
             image_id,
@@ -359,6 +491,9 @@ impl ContainerRunner {
             environment,
             layout,
             confinement,
+            mount_exclusions,
+            settings_directory,
+            user,
             runtime,
             view: Box::new(view),
             view_is_explicit: false,
@@ -366,6 +501,7 @@ impl ContainerRunner {
             poll: SUPERVISION_POLL,
             output_limit: OUTPUT_LIMIT_BYTES,
             reaping: Reaping::default(),
+            worktree_lock,
         })
     }
 
@@ -471,13 +607,27 @@ impl ContainerRunner {
         } else {
             None
         };
-        let mounts = self.mounts(request, git.as_ref(), &name);
+        let (args, settings) = self.settings_for(&request.role, &request.command)?;
+        let mut mounts = self.mounts(request, git.as_ref(), &name);
+        mounts.extend(settings);
+        let configured = self.configured_mounts(&request.role, &mounts)?;
+        for mount in mounts.iter().chain(&configured) {
+            super::mount_argument(mount).map_err(|reason| UpstrokeError::Refused {
+                message: format!(
+                    "the container for `{}` cannot be given its mount at `{}`: {reason}",
+                    request.invocation.render(),
+                    mount.target()
+                ),
+            })?;
+        }
         let mut confinement = self.confinement.clone();
         if let Some(layout) = &git {
             confinement =
-                confinement.withholding(Withheld::AuthoritativeGit, layout.common_dir.clone());
+                confinement.withholding(Withheld::AuthoritativeGit, layout.common_dir.as_path());
         }
-        let violations = confinement.violations(&mounts);
+        let mut violations = confinement.violations(&mounts);
+        violations.extend(confinement.configured_violations(&configured));
+        mounts.extend(configured);
         if !violations.is_empty() {
             return Err(UpstrokeError::Refused {
                 message: format!(
@@ -497,7 +647,7 @@ impl ContainerRunner {
         let env = self.environment.compose(&scope, &request.command.env)?;
 
         let mut command = vec![request.command.program.clone()];
-        command.extend(request.command.args.iter().cloned());
+        command.extend(args);
         let view_path = view_dir(&self.identity.private_root, &name);
 
         Ok(InvocationPlan {
@@ -517,6 +667,8 @@ impl ContainerRunner {
                         self.layout.scratch().to_owned()
                     }),
                     read_only_root: true,
+                    user: self.user,
+                    open_stdin: !request.command.stdin.is_empty(),
                 },
                 view: GitViewRequest {
                     path: view_path.clone(),
@@ -532,6 +684,114 @@ impl ContainerRunner {
             },
             git,
         })
+    }
+
+    fn configured_mounts(
+        &self,
+        role: &ExecutionRole,
+        own: &[Mount],
+    ) -> Result<Vec<Mount>, UpstrokeError> {
+        let refused = |mount: &RecordedMount, reason: String| UpstrokeError::Refused {
+            message: format!(
+                "the recorded mount {} is refused for this container: {reason}",
+                mount_label(&mount.source, &mount.target)
+            ),
+        };
+        refuse_recorded_targets(&self.policy.mounts)
+            .map_err(|(mount, reason)| refused(mount, reason))?;
+        let forced = forces_configured_mounts_read_only(role);
+        let mut configured = Vec::with_capacity(self.policy.mounts.len());
+        for mount in &self.policy.mounts {
+            recheck_recorded_source(mount).map_err(|reason| refused(mount, reason))?;
+            refuse_excluded(Path::new(&mount.source), &self.mount_exclusions)
+                .map_err(|reason| refused(mount, reason))?;
+            if let Some(clash) = own
+                .iter()
+                .find(|given| nested_targets(given.target(), &mount.target))
+            {
+                return Err(refused(
+                    mount,
+                    format!(
+                        "its target and `{}`, which this role is given, are the same path or one \
+                         holds the other",
+                        clash.target()
+                    ),
+                ));
+            }
+            configured.push(Mount::Path {
+                source: PathBuf::from(&mount.source),
+                target: mount.target.clone(),
+                read_only: mount.read_only || forced,
+            });
+        }
+        Ok(configured)
+    }
+
+    fn settings_for(
+        &self,
+        role: &ExecutionRole,
+        command: &CommandSpec,
+    ) -> Result<(Vec<String>, Vec<Mount>), UpstrokeError> {
+        let unchanged = || Ok((command.args.clone(), Vec::new()));
+        if !matches!(role, ExecutionRole::Implement | ExecutionRole::Review) {
+            return unchanged();
+        }
+        let Some(own) = command.settings_file.as_deref() else {
+            return unchanged();
+        };
+        let Some(host) = own
+            .to_str()
+            .filter(|host| command.args.iter().any(|arg| arg == host))
+        else {
+            return unchanged();
+        };
+        let file_name = own
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| *own == self.settings_directory.join(name));
+        let Some(file_name) = file_name else {
+            return Err(UpstrokeError::Refused {
+                message: format!(
+                    "the settings file `{}` this invocation names is not a file of the run's \
+                     settings directory `{}`, so no container receives it",
+                    own.display(),
+                    self.settings_directory.display()
+                ),
+            });
+        };
+        let metadata = std::fs::symlink_metadata(own).map_err(|source| UpstrokeError::Io {
+            path: own.to_path_buf(),
+            source,
+        })?;
+        if !metadata.file_type().is_file() {
+            return Err(UpstrokeError::Refused {
+                message: format!(
+                    "the settings file `{}` this invocation names is not a regular file; a \
+                     directory or a link is never bound into a container",
+                    own.display()
+                ),
+            });
+        }
+        let target = self.layout.settings(file_name);
+        let args = command
+            .args
+            .iter()
+            .map(|arg| {
+                if arg == host {
+                    target.clone()
+                } else {
+                    arg.clone()
+                }
+            })
+            .collect();
+        Ok((
+            args,
+            vec![Mount::Path {
+                source: own.to_path_buf(),
+                target,
+                read_only: true,
+            }],
+        ))
     }
 
     fn mounts(
@@ -714,8 +974,28 @@ impl ContainerRunner {
         cause: UpstrokeError,
         reached: Reached,
     ) -> RunnerError {
-        let residue = self.cancel(hooks, &plan.private_root, &plan.name, &reached);
+        // A cause that left a process unresolved stays unresolved: the container's cleanup, or a
+        // settled attached client, does not establish a different process gone.
+        let unresolved = matches!(
+            cause,
+            UpstrokeError::Runner {
+                fate: ProcessFate::Unresolved,
+                ..
+            }
+        );
+        let residue = self.cancel(
+            hooks,
+            &plan.private_root,
+            &plan.name,
+            &reached,
+            if unresolved {
+                CauseFate::Unresolved
+            } else {
+                CauseFate::Settled
+            },
+        );
         let fate = match reached.container {
+            _ if unresolved || residue.process_unresolved => ProcessFate::Unresolved,
             ContainerReached::NotCreated | ContainerReached::Created => ProcessFate::NeverStarted,
             ContainerReached::Started if residue.container_gone => ProcessFate::Gone,
             ContainerReached::Started => ProcessFate::Unresolved,
@@ -743,6 +1023,7 @@ impl ContainerRunner {
         private_root: &Path,
         name: &ContainerName,
         reached: &Reached,
+        cause: CauseFate,
     ) -> CancelResidue {
         super::cancel_reached(
             hooks,
@@ -757,6 +1038,7 @@ impl ContainerRunner {
                 }
             },
             reached.view.as_deref(),
+            cause,
         )
     }
 
@@ -784,10 +1066,20 @@ impl ContainerRunner {
         cancellation: &Cancellation,
     ) -> Result<Watched, UpstrokeError> {
         loop {
-            let state = self
-                .runtime
-                .observe(name.as_str())
-                .map_err(refused_by_runtime)?;
+            let observed = self.runtime.observe(
+                name.as_str(),
+                QuestionBound::Invocation {
+                    deadline,
+                    cancellation,
+                },
+            );
+            let state = match observed {
+                Ok(state) => state,
+                Err(error @ RuntimeError::Unresolved { .. }) => return Err(super::refused(error)),
+                Err(_) if Instant::now() >= deadline => return Ok(Watched::TimedOut),
+                Err(_) if cancellation.is_cancelled() => return Ok(Watched::Cancelled),
+                Err(error) => return Err(super::refused(error)),
+            };
             if state.is_terminated() {
                 return Ok(Watched::Exited);
             }
@@ -797,8 +1089,11 @@ impl ContainerRunner {
             if cancellation.is_cancelled() {
                 return Ok(Watched::Cancelled);
             }
-            if !self.poll.is_zero() {
-                std::thread::sleep(self.poll);
+            let rest = self
+                .poll
+                .min(deadline.saturating_duration_since(Instant::now()));
+            if !rest.is_zero() {
+                std::thread::sleep(rest);
             }
         }
     }
@@ -878,13 +1173,17 @@ impl ContainerRunner {
         call: RunnerCall<'_>,
     ) -> Result<ProcessOutput, RunnerError> {
         let parts = call.into_parts();
+        let carried: &[PathBuf] = parts.leases;
+        #[cfg(unix)]
+        let _carried_scope = crate::rundir::enter_carried_cleanup_scope(carried);
+        let leases = invocation_cleanup_leases(carried);
         match (parts.container, &self.hooks) {
-            (Some(observer), _) => self.contain(request, &parts.cancellation, observer),
+            (Some(observer), _) => self.contain(request, &parts.cancellation, observer, &leases),
             (None, Some(hooks)) => {
                 let mut hooks = hooks.lock().unwrap_or_else(PoisonError::into_inner);
-                self.contain(request, &parts.cancellation, &mut **hooks)
+                self.contain(request, &parts.cancellation, &mut **hooks, &leases)
             }
-            (None, None) => self.contain(request, &parts.cancellation, &mut NoHooks),
+            (None, None) => self.contain(request, &parts.cancellation, &mut NoHooks, &leases),
         }
     }
 
@@ -893,6 +1192,7 @@ impl ContainerRunner {
         request: &RunnerRequest,
         cancellation: &Cancellation,
         hooks: &mut dyn ContainerHooks,
+        leases: &[PathBuf],
     ) -> Result<ProcessOutput, RunnerError> {
         if cancellation.is_cancelled() {
             return Err(RunnerError::cancelled(
@@ -902,17 +1202,31 @@ impl ContainerRunner {
         }
         let never_started = |error| RunnerError::never_started(&request.invocation, error);
         let plan = self.plan(request).map_err(never_started)?;
+        let started = Instant::now();
+        let deadline = started
+            .checked_add(request.timeout)
+            .ok_or_else(|| never_started(unrepresentable_deadline(request)))?;
         let (covered, to_create, to_start) = self
             .reaping
-            .cover(self.runtime.as_ref(), &self.identity, &plan.launch.spec)
+            .cover(
+                self.runtime.as_ref(),
+                &self.identity,
+                &plan.launch.spec,
+                &request.command.stdin,
+                deadline,
+                cancellation,
+                leases,
+                &self.worktree_lock,
+            )
             .map_err(never_started)?;
-        let started = Instant::now();
-        let deadline = started + request.timeout;
 
         let launched: Launched = match self.launch(hooks, &plan.launch, to_create, to_start) {
             Ok(launched) => launched,
             Err(error) => {
                 covered.settle(error.fate);
+                if cancellation.is_cancelled() {
+                    return Err(RunnerError::cancelled(&request.invocation, error.fate));
+                }
                 return Err(error);
             }
         };
@@ -936,10 +1250,17 @@ impl ContainerRunner {
                 ContainerToRelease::MayBeRunning
             },
         );
-        let fate = match &released {
-            Ok(()) => ProcessFate::Gone,
-            Err(failure) if failure.container_gone => ProcessFate::Gone,
-            Err(_) => ProcessFate::Unresolved,
+        let fate = match (&outcome, &released) {
+            (
+                Err(UpstrokeError::Runner {
+                    fate: ProcessFate::Unresolved,
+                    ..
+                }),
+                _,
+            ) => ProcessFate::Unresolved,
+            (_, Ok(())) => ProcessFate::Gone,
+            (_, Err(failure)) if failure.container_gone => ProcessFate::Gone,
+            (_, Err(_)) => ProcessFate::Unresolved,
         };
         covered.settle(fate);
         match (outcome, released) {
@@ -968,7 +1289,7 @@ impl ContainerRunner {
         let execution = self
             .runtime
             .collect(launched.name.as_str())
-            .map_err(refused_by_runtime)?;
+            .map_err(super::refused)?;
         let (stdout, stdout_limited) = bounded(&execution.stdout, self.output_limit);
         let (stderr, stderr_limited) = bounded(&execution.stderr, self.output_limit);
         Ok(ProcessOutput {
@@ -977,15 +1298,34 @@ impl ContainerRunner {
             stderr,
             duration: started.elapsed(),
             timed_out,
-            output_limited: stdout_limited || stderr_limited,
+            output_limited: execution.output_limited || stdout_limited || stderr_limited,
         })
     }
 }
 
-fn refused_by_runtime(error: RuntimeError) -> UpstrokeError {
+fn unrepresentable_deadline(request: &RunnerRequest) -> UpstrokeError {
     UpstrokeError::Refused {
-        message: error.to_string(),
+        message: format!(
+            "`{}` was given a timeout of {} s, which puts its deadline past any instant this \
+             platform's clock can hold, so it is refused before anything of it is written or \
+             launched; a timeout configured that long can never be enforced",
+            request.invocation.render(),
+            request.timeout.as_secs()
+        ),
     }
+}
+
+fn invocation_cleanup_leases(carried: &[PathBuf]) -> Vec<PathBuf> {
+    #[cfg(unix)]
+    let mut leases = crate::rundir::active_cleanup_lease_paths();
+    #[cfg(not(unix))]
+    let mut leases: Vec<PathBuf> = Vec::new();
+    for path in carried {
+        if !leases.contains(path) {
+            leases.push(path.clone());
+        }
+    }
+    leases
 }
 
 fn bounded(bytes: &[u8], limit: usize) -> (String, bool) {
@@ -1000,9 +1340,12 @@ fn bounded(bytes: &[u8], limit: usize) -> (String, bool) {
 }
 
 pub(super) mod cover {
+    use std::path::{Path, PathBuf};
     use std::sync::PoisonError;
+    use std::time::Instant;
 
     use crate::error::{ProcessFate, UpstrokeError};
+    use crate::runner::Cancellation;
     use crate::runner::container::census::ReaperContainerScope;
     use crate::runner::container::runtime::{ContainerRuntime, CreateSpec};
 
@@ -1019,34 +1362,52 @@ pub(super) mod cover {
 
     pub struct CoveredStart<'a> {
         name: &'a str,
+        stdin: &'a [u8],
+        deadline: Instant,
+        cancellation: Cancellation,
+        leases: &'a [PathBuf],
     }
 
     impl Reaping {
+        #[expect(
+            clippy::too_many_arguments,
+            reason = "the cover's inputs are each the invocation's own: the runtime and identity its backstop lists with, the spec and stdin it launches, the deadline and cancellation it is bounded by, the cleanup leases its helpers hold, and the worktree lock its backstop asks before it may act"
+        )]
         pub(in crate::runner::container::exec) fn cover<'a>(
             &'a self,
             runtime: &dyn ContainerRuntime,
             identity: &RunIdentity,
             spec: &'a CreateSpec,
+            stdin: &'a [u8],
+            deadline: Instant,
+            cancellation: &Cancellation,
+            leases: &'a [PathBuf],
+            worktree_lock: &Path,
         ) -> Result<(Covered<'a>, CoveredCreate<'a>, CoveredStart<'a>), UpstrokeError> {
             let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-            if let Some(armed) = &state.armed {
-                refuse_unless_selected(&armed.scope, &spec.labels)?;
-            } else {
-                let scope = ReaperContainerScope::new(
-                    runtime.reaper_program(),
-                    &identity.private_root,
-                    &identity.incarnation,
-                )?;
-                refuse_unless_selected(&scope, &spec.labels)?;
-                state.armed = Some(Armed {
-                    #[cfg(unix)]
-                    reaper: crate::agent::proc::arm_container_reaper(
-                        crate::topology::effects::ProcessSite::Terminate,
-                        &scope,
-                    )?,
-                    scope,
-                });
-            }
+            let armed = match &mut state.armed {
+                Some(armed) => {
+                    refuse_unless_selected(&armed.scope, &spec.labels)?;
+                    armed
+                }
+                unarmed @ None => {
+                    let scope = ReaperContainerScope::new(
+                        runtime.reaper_program(),
+                        &identity.private_root,
+                        &identity.incarnation,
+                    )?;
+                    refuse_unless_selected(&scope, &spec.labels)?;
+                    unarmed.insert(Armed::new(scope))
+                }
+            };
+            #[cfg(unix)]
+            armed.cover_dormant(
+                leases,
+                &crate::rundir::lock_file(&identity.run_dir),
+                worktree_lock,
+            )?;
+            #[cfg(not(unix))]
+            let _ = (armed, worktree_lock);
             state.in_flight = state.in_flight.saturating_add(1);
             Ok((
                 Covered {
@@ -1054,7 +1415,13 @@ pub(super) mod cover {
                     fate: None,
                 },
                 CoveredCreate { spec },
-                CoveredStart { name: &spec.name },
+                CoveredStart {
+                    name: &spec.name,
+                    stdin,
+                    deadline,
+                    cancellation: cancellation.clone(),
+                    leases,
+                },
             ))
         }
     }
@@ -1094,11 +1461,33 @@ pub(super) mod cover {
         pub fn name(&self) -> &'a str {
             self.name
         }
+
+        #[must_use]
+        pub fn stdin(&self) -> &'a [u8] {
+            self.stdin
+        }
+
+        #[must_use]
+        pub const fn deadline(&self) -> Instant {
+            self.deadline
+        }
+
+        #[must_use]
+        pub const fn cancellation(&self) -> &Cancellation {
+            &self.cancellation
+        }
+
+        #[must_use]
+        pub const fn leases(&self) -> &'a [PathBuf] {
+            self.leases
+        }
     }
 
     #[cfg(test)]
     mod without_a_reaper {
-        use super::{CoveredCreate, CoveredStart, CreateSpec};
+        use std::time::{Duration, Instant};
+
+        use super::{Cancellation, CoveredCreate, CoveredStart, CreateSpec};
 
         impl<'a> CoveredCreate<'a> {
             pub(crate) fn without_a_reaper(spec: &'a CreateSpec) -> Self {
@@ -1108,7 +1497,20 @@ pub(super) mod cover {
 
         impl<'a> CoveredStart<'a> {
             pub(crate) fn without_a_reaper(name: &'a str) -> Self {
-                Self { name }
+                Self::without_a_reaper_until(
+                    name,
+                    Instant::now() + Duration::from_secs(24 * 60 * 60),
+                )
+            }
+
+            pub(crate) fn without_a_reaper_until(name: &'a str, deadline: Instant) -> Self {
+                Self {
+                    name,
+                    stdin: &[],
+                    deadline,
+                    cancellation: Cancellation::new(),
+                    leases: &[],
+                }
             }
         }
     }

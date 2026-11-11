@@ -1,0 +1,86 @@
+# Native macOS Container acceptance capture for G7 M2
+# (commission G7-M2-CONTAINER-ACCEPTANCE-20261109-1).
+#
+# Branch-only and NOT a required check: it runs solely for pushes to the one
+# acceptance branch below, never for pull requests, merge queues, master or
+# tags, so ci.yml, pr-policy.yml, release.yml and every required context are
+# untouched. It captures evidence; root judges it, and nothing here claims
+# Gate7 or M2 acceptance.
+#
+# Each job is a standard public GitHub-hosted macOS Intel runner, the native
+# macOS coordinator: the test binary is built and run on it. The Docker daemon
+# is the task-owned local Linux VM the reviewed macos-docker-capability.sh probe
+# starts (setup) and tears down (cleanup), unchanged; containers run in that VM,
+# never natively on macOS. macos-container-acceptance.sh builds before setup and
+# captures after it, reusing the probe's recorded endpoint, client config, PATH
+# and shared bind directory.
+name: g7-platform-container-acceptance
+
+on:
+  push:
+    branches:
+      - g7/platform-container-acceptance-20261109
+
+permissions:
+  contents: read
+
+concurrency:
+  group: g7-platform-container-acceptance-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  macos:
+    name: macOS Container acceptance (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 130
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15-intel, macos-26-intel]
+    steps:
+      - name: Checkout (no persisted credentials)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Build the test binary (native; bounded)
+        timeout-minutes: 47
+        shell: bash
+        env:
+          G7_LOG_DIR: ${{ runner.temp }}/g7-macos-docker-logs
+          G7_RUNNER_LABEL: ${{ matrix.runner }}
+        run: bash .github/g7-platform-environment/macos-container-acceptance.sh build
+
+      - name: Setup (the reviewed capability probe; bounded)
+        timeout-minutes: 38
+        shell: bash
+        env:
+          G7_LOG_DIR: ${{ runner.temp }}/g7-macos-docker-logs
+          G7_RUNNER_LABEL: ${{ matrix.runner }}
+        run: bash .github/g7-platform-environment/macos-docker-capability.sh probe
+
+      - name: Capture the container acceptance record (bounded)
+        timeout-minutes: 30
+        shell: bash
+        env:
+          G7_LOG_DIR: ${{ runner.temp }}/g7-macos-docker-logs
+          G7_RUNNER_LABEL: ${{ matrix.runner }}
+        run: bash .github/g7-platform-environment/macos-container-acceptance.sh capture
+
+      - name: Cleanup (always; the reviewed teardown; bounded)
+        if: always()
+        timeout-minutes: 4
+        shell: bash
+        env:
+          G7_LOG_DIR: ${{ runner.temp }}/g7-macos-docker-logs
+          G7_RUNNER_LABEL: ${{ matrix.runner }}
+        run: bash .github/g7-platform-environment/macos-docker-capability.sh cleanup
+
+      - name: Upload logs (always)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: g7-platform-container-acceptance-${{ matrix.runner }}-attempt${{ github.run_attempt }}
+          path: ${{ runner.temp }}/g7-macos-docker-logs
+          if-no-files-found: warn
+          retention-days: 14

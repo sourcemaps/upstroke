@@ -16,13 +16,75 @@ pub(super) const WINDOWS_BUILD_WITNESS: &str = "cargo build --all-targets --all-
 
 pub(super) const GIT_IDENTITY_SCRIPT: &str = "git config --global user.email \"ci@upstroke.local\"\ngit config --global user.name \"upstroke CI\"\n";
 
-pub(super) const TEST_SCRIPTS: [&str; 2] = [GIT_IDENTITY_SCRIPT, TEST_COMMAND];
+pub(super) const TEST_SCRIPTS: [&str; 4] = [
+    GIT_IDENTITY_SCRIPT,
+    TEST_COMMAND,
+    HOST_ACCEPTANCE_CAPTURE,
+    CAPABILITY_OBSERVATION,
+];
 
-pub(super) const TEST_WINDOWS_SCRIPTS: [&str; 2] = [GIT_IDENTITY_SCRIPT, WINDOWS_TEST_WITNESS];
+pub(super) const TEST_WINDOWS_SCRIPTS: [&str; 4] = [
+    GIT_IDENTITY_SCRIPT,
+    WINDOWS_TEST_WITNESS,
+    HOST_ACCEPTANCE_WINDOWS_CAPTURE,
+    CAPABILITY_WINDOWS_OBSERVATION,
+];
 
 pub(super) const WINDOWS_TEST_FLOOR: u32 = 1700;
 
 pub(super) const WINDOWS_TEST_WITNESS: &str = "$rustc = ((cargo rustc -q --lib -- --version) | Out-String).Trim(); $path_rustc = ((rustc --version) | Out-String).Trim(); $cargo = ((cargo --version) | Out-String).Trim()\nif ($rustc -notmatch '^rustc 1\\.97\\.1 ' -or $path_rustc -notmatch '^rustc 1\\.97\\.1 ' -or $cargo -notmatch '^cargo 1\\.97\\.1 ') { throw \"the suite would run on '$rustc' (Cargo's compiler), '$path_rustc' (PATH's rustc) and '$cargo', not the image's 1.97.1: a compiler was chosen by something other than this workflow\" }\ncargo test --all-targets --all-features | Tee-Object -Variable log\nif ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n$passed = [int](($log | Select-String -Pattern '^test result: ok\\. (\\d+) passed' | ForEach-Object { [int]$_.Matches[0].Groups[1].Value } | Measure-Object -Sum).Sum)\nif ($passed -lt 1700) { throw \"the suite reported $passed passing tests, below the floor of 1700: Cargo compiled the harnesses and executed almost none of them\" }\n";
+
+pub(super) const HOST_ACCEPTANCE_CAPTURE: &str = r#"set -o pipefail
+log="$RUNNER_TEMP/host-acceptance-record.log"
+cargo test --all-features --lib engine::tests::host_acceptance_record -- --ignored --exact --nocapture | tee "$log"
+if ! grep -qx 'test engine::tests::host_acceptance_record \.\.\. ok' "$log" || ! grep -q '^test result: ok\. 1 passed; 0 failed; 0 ignored; ' "$log"; then echo "the capture did not run exactly the one host acceptance test to a pass" >&2; exit 1; fi
+awk '
+  $1 == "UPSTROKE-HOST-ACCEPTANCE-RECORD" { f[++m] = $0 }
+  END {
+    nb = split(f[1], b, " "); ne = split(f[m], e, " ")
+    ok = m >= 3 && nb == 7 && ne == 7 && b[2] == "v1" && b[3] == "BEGIN" && e[2] == "v1" && e[3] == "END"
+    ok = ok && b[4] " " b[5] " " b[6] " " b[7] == e[4] " " e[5] " " e[6] " " e[7] && b[5] "" == (m - 2) ""
+    for (k = 2; ok && k < m; k++) ok = split(f[k], c, " ") == 5 && c[2] == "v1" && c[3] "" == b[4] "" && c[4] "" == (k - 1) "" && length(c[5]) == (k < m - 1 ? 192 : 2 * (b[6] - (b[5] - 1) * 96))
+    exit !ok
+  }' "$log" || { echo "the host acceptance record is missing or its framing is incomplete" >&2; exit 1; }
+"#;
+
+pub(super) const HOST_ACCEPTANCE_WINDOWS_CAPTURE: &str = r#"cargo test --all-features --lib engine::tests::host_acceptance_record -- --ignored --exact --nocapture | Tee-Object -Variable capture
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+if (-not ($capture -ccontains 'test engine::tests::host_acceptance_record ... ok') -or -not ($capture -cmatch '^test result: ok\. 1 passed; 0 failed; 0 ignored; ')) { throw "the capture did not run exactly the one host acceptance test to a pass" }
+$f = @($capture | Where-Object { $_ -cmatch '^UPSTROKE-HOST-ACCEPTANCE-RECORD ' } | ForEach-Object { ,($_ -split ' ') })
+$ok = $f.Count -ge 3 -and $f[0].Count -eq 7 -and $f[-1].Count -eq 7 -and $f[0][1] -ceq 'v1' -and $f[0][2] -ceq 'BEGIN' -and $f[-1][1] -ceq 'v1' -and $f[-1][2] -ceq 'END' -and ($f[0][3..6] -join ' ') -ceq ($f[-1][3..6] -join ' ') -and $f[0][4] -ceq "$($f.Count - 2)"
+for ($k = 1; $ok -and $k -lt $f.Count - 1; $k++) { $ok = $f[$k].Count -eq 5 -and $f[$k][1] -ceq 'v1' -and $f[$k][2] -ceq $f[0][3] -and $f[$k][3] -ceq "$k" -and $f[$k][4].Length -eq $(if ($k -lt $f.Count - 2) { 192 } else { 2 * ([long]$f[0][5] - ([long]$f[0][4] - 1) * 96) }) }
+if (-not $ok) { throw "the host acceptance record is missing or its framing is incomplete" }
+"#;
+
+pub(super) const CAPABILITY_OBSERVATION: &str = r#"set -eo pipefail
+log="$RUNNER_TEMP/container-capability-record.log"
+cargo test --all-features --lib runner::container::tests::container_capability_record -- --ignored --exact --nocapture | tee "$log"
+if ! grep -qx 'test runner::container::tests::container_capability_record \.\.\. ok' "$log" || ! grep -q '^test result: ok\. 1 passed; 0 failed; 0 ignored; ' "$log"; then echo "the observation did not run exactly the one container capability test to a pass" >&2; exit 1; fi
+awk '
+  $1 == "UPSTROKE-CONTAINER-CAPABILITY-RECORD" { f[++m] = $0 }
+  END {
+    nb = split(f[1], b, " "); ne = split(f[m], e, " ")
+    ok = m >= 3 && nb == 7 && ne == 7 && b[2] == "v1" && b[3] == "BEGIN" && e[2] == "v1" && e[3] == "END"
+    ok = ok && b[4] " " b[5] " " b[6] " " b[7] == e[4] " " e[5] " " e[6] " " e[7] && b[5] "" == (m - 2) ""
+    for (k = 2; ok && k < m; k++) ok = split(f[k], c, " ") == 5 && c[2] == "v1" && c[3] "" == b[4] "" && c[4] "" == (k - 1) "" && length(c[5]) == (k < m - 1 ? 192 : 2 * (b[6] - (b[5] - 1) * 96))
+    exit !ok
+  }' "$log" || { echo "the container capability record is missing or its framing is incomplete" >&2; exit 1; }
+"#;
+
+pub(super) const CAPABILITY_WINDOWS_OBSERVATION: &str = r#"cargo test --all-features --lib runner::container::tests::container_capability_record -- --ignored --exact --nocapture | Tee-Object -Variable capture
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+if (-not ($capture -ccontains 'test runner::container::tests::container_capability_record ... ok') -or -not ($capture -cmatch '^test result: ok\. 1 passed; 0 failed; 0 ignored; ')) { throw "the observation did not run exactly the one container capability test to a pass" }
+$f = @($capture | Where-Object { $_ -cmatch '^UPSTROKE-CONTAINER-CAPABILITY-RECORD ' } | ForEach-Object { ,($_ -split ' ') })
+$ok = $f.Count -ge 3 -and $f[0].Count -eq 7 -and $f[-1].Count -eq 7 -and $f[0][1] -ceq 'v1' -and $f[0][2] -ceq 'BEGIN' -and $f[-1][1] -ceq 'v1' -and $f[-1][2] -ceq 'END' -and ($f[0][3..6] -join ' ') -ceq ($f[-1][3..6] -join ' ') -and $f[0][4] -ceq "$($f.Count - 2)"
+for ($k = 1; $ok -and $k -lt $f.Count - 1; $k++) { $ok = $f[$k].Count -eq 5 -and $f[$k][1] -ceq 'v1' -and $f[$k][2] -ceq $f[0][3] -and $f[$k][3] -ceq "$k" -and $f[$k][4].Length -eq $(if ($k -lt $f.Count - 2) { 192 } else { 2 * ([long]$f[0][5] - ([long]$f[0][4] - 1) * 96) }) }
+if (-not $ok) { throw "the container capability record is missing or its framing is incomplete" }
+"#;
+
+pub(super) const CAPABILITY_STEP_FIELDS: [&str; 4] = ["env", "name", "run", "timeout-minutes"];
+
+pub(super) const CAPABILITY_STEP_TIMEOUT_MINUTES: i64 = 4;
 
 pub(super) const FMT_GATE: &str = "cargo fmt --check";
 pub(super) const SHELL_GATES: [&str; 6] = [
@@ -46,26 +108,25 @@ pub(super) const GATE_SCRIPTS: [&str; 9] = [
     SHELL_GATES[5],
 ];
 
-pub(super) const PINNED_ACTIONS: [&str; 3] = [
+pub(super) const PINNED_ACTIONS: [&str; 4] = [
     "actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
     "dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c",
     "Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6",
+    "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1",
 ];
 
-pub(super) const ACTION_INPUTS: [(&str, &[&str]); 3] = [
+pub(super) const ACTION_INPUTS: [(&str, &[&str]); 4] = [
     ("actions/checkout@", &[]),
     ("dtolnay/rust-toolchain@", &["components", "toolchain"]),
     ("Swatinem/rust-cache@", &[]),
+    ("actions/setup-python@", &["python-version"]),
 ];
 
 pub(super) const TOOLCHAIN_COMPONENTS: [&str; 2] = ["clippy", "rustfmt, clippy"];
 
 pub(super) const TEST_WINDOWS_JOB: &str = "test-windows";
-pub(super) const QUEUE_LANE: &str = "github.event_name == 'merge_group'";
 pub(super) const TEST_WINDOWS_LABELS: [&str; 3] = ["self-hosted", "windows", "winguest"];
-pub(super) const TEST_WINDOWS_RUNS_ON: &str = "${{ github.event_name == 'merge_group' && 'windows-latest' || fromJSON('[\"self-hosted\", \"windows\", \"winguest\"]') }}";
 pub(super) const GOLDEN_IMAGE_TOOLCHAIN: &str = "1.97.1";
-pub(super) const TEST_WINDOWS_TOOLCHAIN_COMPONENTS: &str = "clippy";
 
 pub(super) const TEST_WINDOWS_PLATFORM: &str = "windows-latest";
 
@@ -105,8 +166,6 @@ pub(super) const TEST_STEP_ENV: [(&str, &str); 1] = [(
 pub(super) const TEST_WINDOWS_STEP_ENV: [(&str, &str); 1] = [(TEMP_FOLDS_CASE_KEY, "1")];
 
 pub(super) const TEST_STEP_FIELDS: [&str; 6] = ["env", "name", "run", "shell", "uses", "with"];
-
-pub(super) const LANE_STEP_FIELDS: [&str; 4] = ["if", "name", "uses", "with"];
 
 pub(super) const AGGREGATE_STEP_FIELDS: [&str; 4] = ["env", "name", "run", "shell"];
 

@@ -265,7 +265,7 @@ fn after_reference_present(
             if index_lock_present(worktree)? {
                 return Ok(false);
             }
-            Ok(!worktree_has_unstaged_changes(worktree)?)
+            Ok(!worktree_has_unstaged_changes(repository, worktree)?)
         }
         // `write-tree` publishes its trees through the index's cache-tree
         // extension, which is a fsck root — so the recorded tree being present
@@ -299,7 +299,7 @@ fn after_reference_present(
             if index_lock_present(worktree)? {
                 return Ok(false);
             }
-            let Some(head) = head_commit(worktree)? else {
+            let Some(head) = head_commit(repository, worktree)? else {
                 return Ok(false);
             };
             if let Some(published) = target.published {
@@ -318,7 +318,7 @@ fn after_reference_present(
             if index_lock_present(worktree)? {
                 return Ok(false);
             }
-            index_differs_from_head(worktree)
+            index_differs_from_head(repository, worktree)
         }
         other => Err(UpstrokeError::Refused {
             message: format!("`{other}` has no after-phase reference the classifier knows"),

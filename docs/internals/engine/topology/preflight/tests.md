@@ -126,6 +126,18 @@ A gate carries no agent binding; a boundary that slotted it would
 refuse here for want of one, which is what makes this assertion
 sharp rather than incidental.
 
+## `struct Composing {`
+
+A test runner that runs through the recording runner and reports a fixed composition of
+`GIT_COMMON_DIR`. It exists only to drive the boundary's forwarding. It is not evidence about any
+production runner's environment: that is `runner::host`'s test.
+
+## `fn the_boundary_forwards_its_runners_report_and_keeps_one_per_admitted_request() {`
+
+T-REG-REPORT, the integration correction's boundary (F). The boundary reports what the runner it
+wraps composes. It keeps one report per request it admitted and handed on, and none for a request it
+refused at admission, as the request also never reached the runner. The ledgers balance.
+
 ## `fn the_debug_rendering_names_the_boundary_and_not_the_ledgers() {`
 
 The `Debug` rendering names what the pre-flight is for without printing its

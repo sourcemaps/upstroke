@@ -4075,6 +4075,33 @@ with open(report_file, "w", encoding="utf-8") as report:
     report.write("refusing=%s drive=%s swept=%s forced=%d\n" % (
         listed(sites["refusing"]), drive, listed(swept), len(forced)))
 DECODEPROBE
+# THE PROBE RUNS ON CPYTHON 3.12, BECAUSE EVERY ANSWER ASSERTED OF IT BELOW IS A MEASUREMENT OF 3.12.
+# What it reads is the interpreter's own bytecode and `sys.monitoring`'s account of running it, and
+# that account moves between minor versions: 3.14 puts a `NOT_TAKEN` after each conditional jump and
+# reports the fall-through as the instruction past it, not the one `conditional()` names; it
+# compiles annotations into `__annotate__` code objects nothing calls; and 3.13 gives a namedtuple a
+# `__replace__` for the sweep to call. When `lint`'s runner image moved from ubuntu-24.04 to
+# ubuntu-26.04, whose inventories list Python 3.12.3 and 3.14.4, this file printed 45 failures --
+# all 44 stand-ins that answered otherwise moved `forced`, 11 moved a site or an outcome as well,
+# and the parser read `unproven=unresolved_material`. The job never printed which interpreter ran;
+# what is measured is that a private CPython 3.14.4 build prints those 45 lines byte for byte, and
+# that 3.12.3 and 3.12.15 pass this file. So the probe is run by `python3.12`, which the `lint` job
+# puts on PATH, and an interpreter by that name that is not CPython 3.12 is refused before anything
+# is asked of it. The rest of this file runs on the first `python3`, as the audit does. That is a
+# narrowing, and it is stated: the probe's verdict is CPython 3.12's. Moving it to another version
+# re-measures every expectation below, in the same change as the workflow's `python-version`.
+probe_python="" probe_version=""
+if probe_python="$(command -v python3.12)"; then
+  probe_version="$("$probe_python" -I -c \
+    'import sys; print(sys.implementation.name, "%d.%d.%d" % sys.version_info[:3])')" \
+    || probe_version=""
+fi
+[[ "$probe_version" == "cpython 3.12."* ]] || {
+  echo "test-pr-ready-audit: the decode probe needs CPython 3.12 as python3.12, and found" \
+    "${probe_version:-none}${probe_python:+ at $probe_python}" >&2
+  exit 1
+}
+echo "test-pr-ready-audit: the decode probe runs on $probe_version at $probe_python"
 # `PYTHONDONTWRITEBYTECODE=1` as well as the `sys.dont_write_bytecode` inside, because the probe is
 # also a script somebody runs by hand: importing the parser must not leave a `__pycache__` under
 # `scripts/`, and a required gate that writes into the tree it judges is the shape this whole
@@ -4089,7 +4116,7 @@ decode_probe() {  # decode_probe MODULE DRIVE...: the report's two lines as one,
   local module="$1" status=0
   shift
   rm -f "$tmp/decode-report"
-  TMPDIR="$tmp" PYTHONDONTWRITEBYTECODE=1 "$parser_python" "$tmp/decode-probe.py" "$module" \
+  TMPDIR="$tmp" PYTHONDONTWRITEBYTECODE=1 "$probe_python" "$tmp/decode-probe.py" "$module" \
     "$tmp/decode-report" "$@" > "$tmp/decode-probe.log" 2>&1 || status=$?
   if ((status != 0)) || [[ ! -s "$tmp/decode-report" ]]; then
     printf 'no report: the probe exited %s: %s' "$status" "$(tail -n 1 "$tmp/decode-probe.log")"

@@ -70,17 +70,18 @@ Whether these two names are the same variable under this rule.
 Which object graph the Git children of a composed environment read, and
 where, and the one thing about it a conductor gets to choose.
 
-`Recorded` is the default and the schema-4 rule: the objects the
-repository holds, never the objects `refs/replace/*` points at them
-(`design/15`, "What an exact snapshot is exact against"). It is what
-`compose` writes [`NO_REPLACEMENT_OBJECTS`](../../../../src/workspace_manager.rs)
-for, process-wide: every repository a child touches loses its
-replacements, a repository a gate creates for itself included. That is
-`PR326-SCHEMA4-ROLE-ENVIRONMENT-REFUSES-REPLACEMENTS-EVERYWHERE` (P2,
-latent: no supported configuration activates the schema-4 conductor),
-and it is why the v0.1 runner no longer reads it.
+`Recorded` is the default: the objects the repository holds, never the
+objects `refs/replace/*` points at them (`design/15`, "What an exact
+snapshot is exact against"). It is what `compose` writes
+[`NO_REPLACEMENT_OBJECTS`](../../../../src/workspace_manager.rs) for,
+process-wide: every repository a child touches loses its replacements, a
+repository a gate creates for itself included. That is
+`PR326-SCHEMA4-ROLE-ENVIRONMENT-REFUSES-REPLACEMENTS-EVERYWHERE` (P2), and it
+is why neither conductor reads it: the v0.1 runner moved off it first, and
+the schema-4 entry PR12 activates builds its host runner on `RecordedIn` too
+(`engine::topology::entry`).
 
-`RecordedIn` is the v0.1 conductor's: the recorded graph in the repository
+`RecordedIn` is both conductors': the recorded graph in the repository
 the run manages, and whatever the configuration says elsewhere, as far as a
 condition on the spelling of a Git directory can tell the two apart. Its
 section below says how, and where the spelling and the filesystem disagree.

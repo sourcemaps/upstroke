@@ -47,7 +47,35 @@ runner under a matching digest are stale, never an error: finalization then rewr
 ## `impl TopologyReport` › `pub fn render(&self) -> String {`
 
 The status text a person reads: outcome, runner identity, tasks, queue, questions, the
-retained candidates refs and the ledger.
+retained candidates refs and the ledger. A runner with recorded mounts adds `runner mounts:
+<count>` and one line per mount, `<target> <- <source> (<read-only|read-write>, <kind> device
+<device> inode <inode>)` for a Unix identity or `(..., <kind> volume <0x serial> file <file id>)`
+for a Windows one, from the record; a runner without them renders as before.
+`report.json` needs no second schema for them: its `runner` is the recorded `RunnerPolicy`,
+whose serialization carries `mounts` when there are any and omits it otherwise, so a historical
+report keeps its bytes and its digest (`topology::census::tests::the_report_projects_the_recorded_mounts_and_an_unmounted_record_projects_as_before`).
+
+An integration row's review cost renders three ways. A known amount prints as `$X`, and one
+that is a lower bound as `at least $X (?)`. A row that ran no review pass prints `none`
+(`ran_no_review` below). Any other row with no amount prints `? (unknown)`. This text is not
+the ledger of spend: `status` prints that ledger after this report
+(`observe::Observed::render`).
+
+## `fn ran_no_review(row: &LedgerRow) -> bool {`
+
+L3 (regression review 3, finding 3). A fast merge's row read `0 review(s), cost ? (unknown)`, as
+if its review spend could not be known, while the run's ledger knew it to the cent. A fast merge
+and a conflict rejection run no integration verification, so no review pass. A prepared,
+code-rejected or unavailable terminal records every pass its verification ran (J3). So a row
+whose terminal carried its passes and lists none spent nothing on review, and prints `none`.
+
+What stays unknown is a row no terminal closed: one still `open` (a verification in flight, or
+cut off before a resume settles it), and one `merge_verification_interrupted` without a charged
+record. A charged row is a lower bound (`review_cost_incomplete`) and never `none`. The test is on
+the row's own wire fields, so `report.json`, its schema and its digest are unchanged
+(`engine::topology::select::tests::the_integration_ledger_reads_a_charged_record_as_a_lower_bound`
+pins the interrupted rows; `engine::tests::a_schema_4_status_prints_the_ledger_run_reports_for_a_completed_and_an_interrupted_run`
+the fast ones).
 
 ## `pub fn outcome_label(outcome: &RunOutcome) -> String {`
 

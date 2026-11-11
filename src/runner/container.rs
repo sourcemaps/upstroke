@@ -18,19 +18,24 @@ use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
-use crate::error::UpstrokeError;
-use crate::topology::effects::{ContainerSite, EffectSiteId, HookHarness, HookPhase, Injection};
+use crate::agent::ProcessOutput;
+use crate::agent::proc::{self, ProcessFailure};
+use crate::error::{ProcessFate, UpstrokeError};
+use crate::topology::effects::{
+    ContainerSite, EffectSiteId, HookHarness, HookPhase, Injection, ProcessSite,
+};
 use crate::util;
 
-use crate::runner::InvocationId;
+use crate::runner::{Cancellation, InvocationId};
 use intent::{ContainerIntent, ContainerName, INTENT_STAGED_SUFFIX, IntentWritten, containers_dir};
 use runtime::{
     ContainerExecution, ContainerRuntime, ContainerTrace, CreateSpec, CreatedContainer,
-    DiscoveredContainer, DurableStep, Liveness, RuntimeError, RuntimeOp, Settled, StopMode,
-    TracePhase, ViewAction,
+    DiscoveredContainer, DurableStep, Liveness, QuestionBound, RuntimeError, RuntimeOp, Settled,
+    StopMode, TracePhase, ViewAction,
 };
 
 pub trait ContainerHooks {
@@ -297,9 +302,8 @@ fn expect_mounted_volumes_present(
         let runtime::Mount::Volume { name, target, .. } = mount else {
             continue;
         };
-        let present = runtime
-            .volume_present(name)
-            .map_err(|error| UpstrokeError::Refused {
+        let present = runtime.volume_present(name).map_err(|error| {
+            let refusal = UpstrokeError::Refused {
                 message: format!(
                     "the container runtime could not be asked whether the credential volume \
                      `{name}` exists before creating `{}`: {error}. A named volume that \
@@ -309,7 +313,16 @@ fn expect_mounted_volumes_present(
                      answer refuses rather than risking it",
                     spec.name
                 ),
-            })?;
+            };
+            match error {
+                RuntimeError::Unresolved { operation, .. } => UpstrokeError::Runner {
+                    invocation: format!("the container runtime's `{operation}`"),
+                    fate: ProcessFate::Unresolved,
+                    source: Box::new(refusal),
+                },
+                RuntimeError::Unreachable { .. } | RuntimeError::Failed { .. } => refusal,
+            }
+        })?;
         if !present {
             return Err(UpstrokeError::Refused {
                 message: format!(
@@ -452,10 +465,17 @@ pub enum ContainerToRelease {
     ObservedExited,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CauseFate {
+    Settled,
+    Unresolved,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CancelResidue {
     pub messages: Vec<String>,
     pub container_gone: bool,
+    pub process_unresolved: bool,
 }
 
 impl CancelResidue {
@@ -465,6 +485,11 @@ impl CancelResidue {
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a cancel takes the funnel's three handles, the container's identity, what the \
+              launch reached, and the fate of the step it follows"
+)]
 pub fn cancel_reached(
     hooks: &mut dyn ContainerHooks,
     runtime: &dyn ContainerRuntime,
@@ -473,9 +498,11 @@ pub fn cancel_reached(
     name: &ContainerName,
     container: ContainerToRelease,
     view_path: Option<&Path>,
+    cause: CauseFate,
 ) -> CancelResidue {
     let mut residue = Vec::new();
     let mut container_gone = container != ContainerToRelease::MayBeRunning;
+    let mut process_unresolved = false;
     if container != ContainerToRelease::Absent {
         match stop_container(
             hooks,
@@ -495,8 +522,44 @@ pub fn cancel_reached(
             Ok(Settled::RemovalInProgress) => {
                 residue.push(removal_in_progress_establishes_nothing("the removal", name))
             }
+            Err(
+                error @ UpstrokeError::Runner {
+                    fate: ProcessFate::Unresolved,
+                    ..
+                },
+            ) => {
+                process_unresolved = true;
+                residue.push(error.to_string());
+            }
             Err(error) => residue.push(format!("the container could not be removed: {error}")),
         }
+    }
+    if process_unresolved {
+        residue.push(format!(
+            "the R19 Git view and the R26 intent record of `{name}` are deliberately retained: a \
+             process the runtime started for it could not be established gone, so this \
+             invocation's processes are unresolved, and the intent is what the next census \
+             reclaims both through (decisions.resource_accounting.rows[R19].at_run_end.NoRunFinished)"
+        ));
+        return CancelResidue {
+            messages: residue,
+            container_gone: false,
+            process_unresolved: true,
+        };
+    }
+    if cause == CauseFate::Unresolved {
+        residue.push(format!(
+            "the R19 Git view and the R26 intent record of `{name}` are deliberately retained: \
+             the step this cancel follows left a process it started unresolved, and no cleanup \
+             of the container establishes that process gone, so this invocation's processes are \
+             unresolved, and the intent is what the next census reclaims both through \
+             (decisions.resource_accounting.rows[R19].at_run_end.NoRunFinished)"
+        ));
+        return CancelResidue {
+            messages: residue,
+            container_gone,
+            process_unresolved: true,
+        };
     }
     if !container_gone {
         residue.push(format!(
@@ -508,6 +571,7 @@ pub fn cancel_reached(
         return CancelResidue {
             messages: residue,
             container_gone,
+            process_unresolved: false,
         };
     }
     let mut view_survives = false;
@@ -526,6 +590,7 @@ pub fn cancel_reached(
         return CancelResidue {
             messages: residue,
             container_gone,
+            process_unresolved: false,
         };
     }
     if let Err(error) = remove_intent(hooks, ContainerSite::RemoveIntent, private_root, name) {
@@ -536,6 +601,7 @@ pub fn cancel_reached(
     CancelResidue {
         messages: residue,
         container_gone,
+        process_unresolved: false,
     }
 }
 
@@ -586,6 +652,7 @@ pub fn release_classified(
         &launched.name,
         container,
         Some(&launched.view_path),
+        CauseFate::Settled,
     );
     if residue.is_empty() {
         return Ok(());
@@ -627,7 +694,9 @@ pub fn observe_terminated(
     name: &ContainerName,
 ) -> Result<Liveness, UpstrokeError> {
     for _ in 0..TERMINATION_OBSERVATIONS {
-        let state = runtime.observe(name.as_str()).map_err(refused)?;
+        let state = runtime
+            .observe(name.as_str(), QuestionBound::Runtime)
+            .map_err(refused)?;
         if state.is_terminated() {
             return Ok(state);
         }
@@ -797,8 +866,17 @@ pub fn remove_staged_intent(
 }
 
 fn refused(error: RuntimeError) -> UpstrokeError {
-    UpstrokeError::Refused {
-        message: error.to_string(),
+    match error {
+        RuntimeError::Unresolved { operation, .. } => UpstrokeError::Runner {
+            invocation: format!("the container runtime's `{operation}`"),
+            fate: ProcessFate::Unresolved,
+            source: Box::new(UpstrokeError::Refused {
+                message: error.to_string(),
+            }),
+        },
+        other => UpstrokeError::Refused {
+            message: other.to_string(),
+        },
     }
 }
 
@@ -877,15 +955,27 @@ fn racing_removal(
 
 pub const DOCKER_PROGRAM: &str = "docker";
 
+const QUESTION_BOUND: Duration = Duration::from_secs(60);
+
 #[derive(Debug, Clone, Default)]
 pub struct DockerCli {
     trace: ContainerTrace,
+    deliveries: Arc<Mutex<BTreeMap<String, ClientRecord>>>,
+    /// Per container: the processes a bounded question about it started and could not establish
+    /// gone (`hold_unresolved`), read by every later settlement of that container.
+    unresolved_questions: Arc<Mutex<BTreeMap<String, String>>>,
+    question_bound: Option<Duration>,
 }
 
 impl DockerCli {
     #[must_use]
     pub fn new(trace: ContainerTrace) -> Self {
-        Self { trace }
+        Self {
+            trace,
+            deliveries: Arc::default(),
+            unresolved_questions: Arc::default(),
+            question_bound: None,
+        }
     }
 
     #[must_use]
@@ -901,8 +991,8 @@ impl DockerCli {
     }
 
     fn exec(&self, op: RuntimeOp, target: &str, args: &[&str]) -> Result<String, RuntimeError> {
-        self.exec_streams(op, target, args)
-            .map(|(stdout, _)| String::from_utf8_lossy(&stdout).into_owned())
+        let outcome = self.question(op, target, args, self.own_bound(), &|| false);
+        self.answer_within(op, target, args, outcome)
     }
 
     fn exec_streams(
@@ -910,20 +1000,47 @@ impl DockerCli {
         op: RuntimeOp,
         target: &str,
         args: &[&str],
-    ) -> Result<(Vec<u8>, Vec<u8>), RuntimeError> {
-        self.trace.runtime(op, target);
-        let output = Command::new(DOCKER_PROGRAM)
-            .args(args)
-            .output()
-            .map_err(|error| RuntimeError::Unreachable {
-                operation: op,
-                detail: format!("{DOCKER_PROGRAM} could not be started: {error}"),
-            })?;
-        if output.status.success() {
-            return Ok((output.stdout, output.stderr));
+    ) -> Result<(Vec<u8>, Vec<u8>, bool), RuntimeError> {
+        let output = self
+            .question(op, target, args, self.own_bound(), &|| false)
+            .map_err(|failure| self.unanswered(op, target, args, failure))?;
+        let limited = output.output_limited;
+        if !limited && (output.timed_out || output.code.is_none()) {
+            return Err(unfinished(op, args));
         }
-        let detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        Err(classify_docker_failure(op, detail))
+        if !limited && output.code != Some(0) {
+            return Err(classify_docker_failure(op, output.stderr.trim().to_owned()));
+        }
+        Ok((
+            output.stdout.into_bytes(),
+            output.stderr.into_bytes(),
+            limited,
+        ))
+    }
+
+    fn own_bound(&self) -> Duration {
+        self.question_bound.unwrap_or(QUESTION_BOUND)
+    }
+
+    fn question(
+        &self,
+        op: RuntimeOp,
+        target: &str,
+        args: &[&str],
+        timeout: Duration,
+        stop: &dyn Fn() -> bool,
+    ) -> Result<ProcessOutput, ProcessFailure> {
+        self.trace.runtime(op, target);
+        proc::run_with_timeout_classified(
+            ProcessSite::Spawn,
+            ProcessSite::Terminate,
+            docker_command(args),
+            &[],
+            timeout,
+            &[],
+            stop,
+            &mut proc::NoHooks,
+        )
     }
 
     fn inspect(
@@ -953,6 +1070,130 @@ impl DockerCli {
                 CONTAINER_STATE_FORMAT,
             ],
         )
+    }
+
+    fn listing_within(
+        &self,
+        name: &str,
+        deadline: Instant,
+        cancellation: &Cancellation,
+    ) -> Result<String, RuntimeError> {
+        let filter = format!("name={name}");
+        self.exec_within(
+            RuntimeOp::Observe,
+            name,
+            &[
+                "ps",
+                "--all",
+                "--filter",
+                &filter,
+                "--format",
+                CONTAINER_STATE_FORMAT,
+            ],
+            deadline,
+            cancellation,
+        )
+    }
+
+    fn exec_within(
+        &self,
+        op: RuntimeOp,
+        target: &str,
+        args: &[&str],
+        deadline: Instant,
+        cancellation: &Cancellation,
+    ) -> Result<String, RuntimeError> {
+        if cancellation.is_cancelled() || Instant::now() >= deadline {
+            return Err(RuntimeError::Failed {
+                operation: op,
+                detail: format!(
+                    "`{DOCKER_PROGRAM} {}` was not asked: the invocation's deadline had passed or \
+                     it was cancelled",
+                    args.join(" ")
+                ),
+            });
+        }
+        let outcome = self.question(
+            op,
+            target,
+            args,
+            deadline.saturating_duration_since(Instant::now()),
+            &|| cancellation.is_cancelled(),
+        );
+        self.answer_within(op, target, args, outcome)
+    }
+
+    fn answer_within(
+        &self,
+        op: RuntimeOp,
+        target: &str,
+        args: &[&str],
+        outcome: Result<ProcessOutput, ProcessFailure>,
+    ) -> Result<String, RuntimeError> {
+        let output = outcome.map_err(|failure| self.unanswered(op, target, args, failure))?;
+        if output.timed_out || output.code.is_none() {
+            return Err(unfinished(op, args));
+        }
+        if output.output_limited {
+            return Err(RuntimeError::Failed {
+                operation: op,
+                detail: format!("{} answered more than this runner reads", spelled(args)),
+            });
+        }
+        if output.code == Some(0) {
+            return Ok(output.stdout);
+        }
+        Err(classify_docker_failure(op, output.stderr.trim().to_owned()))
+    }
+
+    fn unanswered(
+        &self,
+        op: RuntimeOp,
+        target: &str,
+        args: &[&str],
+        failure: ProcessFailure,
+    ) -> RuntimeError {
+        let asked = spelled(args);
+        match failure.fate {
+            ProcessFate::NeverStarted => RuntimeError::Unreachable {
+                operation: op,
+                detail: format!("{asked} could not be started: {}", failure.error),
+            },
+            ProcessFate::Gone => RuntimeError::Failed {
+                operation: op,
+                detail: format!("{asked} failed after it ended: {}", failure.error),
+            },
+            ProcessFate::Unresolved => {
+                let fact = format!(
+                    "{asked}, asked about `{target}`, ended its supervision without \
+                     establishing its process gone, so {}: {}",
+                    ProcessFate::Unresolved.describe(),
+                    failure.error
+                );
+                self.hold_unresolved(target, &fact);
+                RuntimeError::Unresolved {
+                    operation: op,
+                    detail: fact,
+                }
+            }
+        }
+    }
+
+    /// Hold `fact`, a process a question about container `name` started and could not establish
+    /// gone, under that container. Every later settlement of the container reads it
+    /// ([`Self::settle_client_of`]), as an unresolved attached client is read, and nothing
+    /// removes it: a later successful cleanup of another process, or of the container itself,
+    /// does not establish this one gone.
+    fn hold_unresolved(&self, name: &str, fact: &str) {
+        let mut held = self
+            .unresolved_questions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let facts = held.entry(name.to_owned()).or_default();
+        if !facts.is_empty() {
+            facts.push_str("; ");
+        }
+        facts.push_str(fact);
     }
 
     fn image(
@@ -996,10 +1237,547 @@ impl DockerCli {
     }
 }
 
+impl DockerCli {
+    fn start_attached(
+        &self,
+        op: RuntimeOp,
+        covered: &exec::CoveredStart<'_>,
+        payload: &[u8],
+    ) -> Result<(), RuntimeError> {
+        let name = covered.name();
+        self.trace.runtime(op, name);
+        let client = attach_client(name, payload, covered.deadline(), covered.leases().to_vec())
+            .map_err(|detail| RuntimeError::Failed {
+                operation: op,
+                detail,
+            })?;
+        let waited =
+            self.await_attached_start(name, covered.deadline(), covered.cancellation(), || {
+                client.has_ended()
+            });
+        let reason = match waited {
+            Ok(()) => {
+                self.own_client(name, client);
+                return Ok(());
+            }
+            Err(NotStarted::Unobserved(error)) => error.to_string(),
+            Err(NotStarted::Gone) => format!("`{name}` was not found while it was being started"),
+            Err(NotStarted::ClientEnded) => format!(
+                "`{DOCKER_PROGRAM} start --attach --interactive {name}` ended while the container \
+                 was still created, so it never started{}",
+                self.exec_within(
+                    op,
+                    name,
+                    &["container", "inspect", name, "--format", "{{.State.Error}}"],
+                    covered.deadline(),
+                    covered.cancellation(),
+                )
+                .ok()
+                .map(|text| text.trim().to_owned())
+                .filter(|text| !text.is_empty())
+                .map(|text| format!(": {text}"))
+                .unwrap_or_default()
+            ),
+            Err(NotStarted::DeadlinePassed) => format!(
+                "`{name}` was still created when the invocation's deadline passed, so it never \
+                 started"
+            ),
+            Err(NotStarted::Cancelled) => {
+                format!("the invocation was cancelled while `{name}` was still created")
+            }
+        };
+        self.own_client(name, client);
+        match self.settle_client_of(name) {
+            ClientSettlement::Unresolved(fact) => Err(RuntimeError::Unresolved {
+                operation: op,
+                detail: format!("{reason}; {fact}"),
+            }),
+            ClientSettlement::Ended(end) => Err(RuntimeError::Failed {
+                operation: op,
+                detail: format!("{reason}; its attached client {}", end.describe()),
+            }),
+            ClientSettlement::Absent => Err(RuntimeError::Failed {
+                operation: op,
+                detail: reason,
+            }),
+        }
+    }
+
+    /// The attached start's wait: [`await_started`] over observations that each end at the
+    /// invocation's deadline or on its cancellation ([`Self::listing_within`]), so a stalled
+    /// `docker ps` holds the start past neither.
+    fn await_attached_start(
+        &self,
+        name: &str,
+        deadline: Instant,
+        cancellation: &Cancellation,
+        client_ended: impl Fn() -> bool,
+    ) -> Result<(), NotStarted> {
+        await_started(
+            deadline,
+            cancellation,
+            ATTACHED_START_POLL,
+            || {
+                self.listing_within(name, deadline, cancellation)
+                    .map(|listing| listed_state(&listing, name).map(str::to_owned))
+            },
+            client_ended,
+        )
+    }
+
+    fn own_client(&self, name: &str, client: AttachedClient) {
+        self.deliveries
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(name.to_owned(), ClientRecord::Owned(client));
+    }
+
+    fn client_record(&self, name: &str) -> Option<ClientRecord> {
+        self.deliveries
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(name)
+    }
+
+    fn keep_client_record(&self, name: &str, record: ClientRecord) {
+        self.deliveries
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(name.to_owned(), record);
+    }
+
+    /// How container `name`'s processes settled: its attached client's end, and every process a
+    /// question about it left unresolved, which makes the settlement unresolved whatever the
+    /// client did.
+    fn settle_client_of(&self, name: &str) -> ClientSettlement {
+        let settled = self.settle_attached_client_of(name);
+        let held = self
+            .unresolved_questions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(name)
+            .cloned();
+        let Some(questions) = held else {
+            return settled;
+        };
+        ClientSettlement::Unresolved(match settled {
+            ClientSettlement::Unresolved(fact) => format!("{fact}; {questions}"),
+            ClientSettlement::Ended(end) => {
+                format!("its attached client {}; {questions}", end.describe())
+            }
+            ClientSettlement::Absent => questions,
+        })
+    }
+
+    fn settle_attached_client_of(&self, name: &str) -> ClientSettlement {
+        let client = match self.client_record(name) {
+            None => return ClientSettlement::Absent,
+            Some(ClientRecord::Unresolved(fact)) => {
+                self.keep_client_record(name, ClientRecord::Unresolved(fact.clone()));
+                return ClientSettlement::Unresolved(fact);
+            }
+            Some(ClientRecord::Owned(client)) => client,
+        };
+        if !settle_client(
+            || client.has_ended(),
+            || client.ask_to_stop(),
+            CLIENT_GRACE,
+            ATTACHED_START_POLL,
+        ) {
+            self.keep_client_record(name, ClientRecord::Owned(client));
+            return ClientSettlement::Unresolved(format!(
+                "the attached client that fed `{name}` its stdin had not ended {}s after it was \
+                 asked to stop, so a process of this container may still be running; it stays \
+                 owned",
+                CLIENT_GRACE.as_secs()
+            ));
+        }
+        match client.into_end() {
+            ClientEnd::Failed {
+                fate: ProcessFate::Unresolved,
+                error,
+            } => {
+                let fact = format!(
+                    "the attached client that fed `{name}` its stdin ended its supervision \
+                     without establishing its process gone, so a process of this container may \
+                     still be running: {error}"
+                );
+                self.keep_client_record(name, ClientRecord::Unresolved(fact.clone()));
+                ClientSettlement::Unresolved(fact)
+            }
+            end => ClientSettlement::Ended(end),
+        }
+    }
+
+    fn settle_delivery(&self, name: &str, exit_code: Option<i32>) -> Result<(), RuntimeError> {
+        let Some(record) = self.client_record(name) else {
+            return Ok(());
+        };
+        let owned = matches!(record, ClientRecord::Owned(_));
+        self.keep_client_record(name, record);
+        if owned && self.observe(name, QuestionBound::Runtime)? == Liveness::Running {
+            return Ok(());
+        }
+        match self.settle_client_of(name) {
+            ClientSettlement::Absent => Ok(()),
+            ClientSettlement::Ended(end) => delivery_verdict(name, &end, exit_code),
+            ClientSettlement::Unresolved(fact) => Err(RuntimeError::Unresolved {
+                operation: RuntimeOp::Collect,
+                detail: fact,
+            }),
+        }
+    }
+
+    fn settle_removed_client(&self, name: &str) -> Result<(), RuntimeError> {
+        match self.settle_client_of(name) {
+            ClientSettlement::Absent | ClientSettlement::Ended(_) => Ok(()),
+            ClientSettlement::Unresolved(fact) => Err(RuntimeError::Unresolved {
+                operation: RuntimeOp::Remove,
+                detail: fact,
+            }),
+        }
+    }
+}
+
+const ATTACHED_START_POLL: Duration = Duration::from_millis(25);
+
+const CLIENT_GRACE: Duration = Duration::from_secs(5);
+
+#[derive(Debug)]
+enum ClientRecord {
+    Owned(AttachedClient),
+    Unresolved(String),
+}
+
+#[derive(Debug)]
+enum ClientSettlement {
+    Absent,
+    Ended(ClientEnd),
+    Unresolved(String),
+}
+
+#[derive(Debug)]
+struct AttachedClient {
+    stop: Arc<AtomicBool>,
+    supervisor: Option<std::thread::JoinHandle<Result<ProcessOutput, ProcessFailure>>>,
+}
+
+impl AttachedClient {
+    fn has_ended(&self) -> bool {
+        self.supervisor
+            .as_ref()
+            .is_none_or(std::thread::JoinHandle::is_finished)
+    }
+
+    fn ask_to_stop(&self) {
+        self.stop.store(true, Ordering::SeqCst);
+    }
+
+    fn into_end(mut self) -> ClientEnd {
+        let stopped = self.stop.load(Ordering::SeqCst);
+        match self.supervisor.take().map(std::thread::JoinHandle::join) {
+            Some(Ok(Ok(output))) if output.timed_out || (stopped && output.code.is_none()) => {
+                ClientEnd::Stopped
+            }
+            Some(Ok(Ok(output))) => ClientEnd::Exited(output.code),
+            Some(Ok(Err(failure))) => ClientEnd::Failed {
+                fate: failure.fate,
+                error: failure.error.to_string(),
+            },
+            Some(Err(_)) => ClientEnd::Failed {
+                fate: ProcessFate::Unresolved,
+                error: "the thread supervising it panicked".to_owned(),
+            },
+            None => ClientEnd::Failed {
+                fate: ProcessFate::Unresolved,
+                error: "its end was already taken".to_owned(),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ClientEnd {
+    Exited(Option<i32>),
+    Stopped,
+    Failed { fate: ProcessFate, error: String },
+}
+
+impl ClientEnd {
+    fn describe(&self) -> String {
+        match self {
+            Self::Exited(code) => format!("ended ({})", exit_text(*code)),
+            Self::Stopped => "was stopped and reaped".to_owned(),
+            Self::Failed { fate, error } => format!("failed ({}): {error}", fate.describe()),
+        }
+    }
+}
+
+#[derive(Debug)]
+enum NotStarted {
+    Unobserved(RuntimeError),
+    Gone,
+    ClientEnded,
+    DeadlinePassed,
+    Cancelled,
+}
+
+fn attach_client(
+    name: &str,
+    payload: &[u8],
+    deadline: Instant,
+    leases: Vec<PathBuf>,
+) -> Result<AttachedClient, String> {
+    let command = docker_command(&["start", "--attach", "--interactive", name]);
+    let stop = Arc::new(AtomicBool::new(false));
+    let stopping = Arc::clone(&stop);
+    let backstop = deadline.saturating_duration_since(Instant::now()) + CLIENT_GRACE * 2;
+    let payload = payload.to_vec();
+    let supervisor = std::thread::Builder::new()
+        .name("upstroke-attached-start".to_owned())
+        .spawn(move || {
+            proc::run_with_timeout_classified(
+                ProcessSite::Spawn,
+                ProcessSite::Terminate,
+                command,
+                &payload,
+                backstop,
+                &leases,
+                &|| stopping.load(Ordering::SeqCst),
+                &mut proc::NoHooks,
+            )
+        })
+        .map_err(|error| {
+            format!("the thread that would supervise `{name}`'s attached client could not start: {error}")
+        })?;
+    Ok(AttachedClient {
+        stop,
+        supervisor: Some(supervisor),
+    })
+}
+
+fn await_started(
+    deadline: Instant,
+    cancellation: &Cancellation,
+    poll: Duration,
+    mut state: impl FnMut() -> Result<Option<String>, RuntimeError>,
+    client_ended: impl Fn() -> bool,
+) -> Result<(), NotStarted> {
+    loop {
+        let ended = client_ended();
+        let observed = match state() {
+            Ok(observed) => observed,
+            // An observation whose process could not be established gone is reported as itself,
+            // whatever else coincided with it: that fact must reach the start's settlement.
+            Err(error @ RuntimeError::Unresolved { .. }) => {
+                return Err(NotStarted::Unobserved(error));
+            }
+            // A bounded observation ends at the deadline or on cancellation, and what ended
+            // it is reported as itself rather than as a state the runtime could not give.
+            Err(_) if cancellation.is_cancelled() => return Err(NotStarted::Cancelled),
+            Err(_) if Instant::now() >= deadline => return Err(NotStarted::DeadlinePassed),
+            Err(error) => return Err(NotStarted::Unobserved(error)),
+        };
+        match observed.as_deref() {
+            Some("created") => {}
+            Some(_) => return Ok(()),
+            None => return Err(NotStarted::Gone),
+        }
+        if ended {
+            return Err(NotStarted::ClientEnded);
+        }
+        if cancellation.is_cancelled() {
+            return Err(NotStarted::Cancelled);
+        }
+        if Instant::now() >= deadline {
+            return Err(NotStarted::DeadlinePassed);
+        }
+        std::thread::sleep(poll);
+    }
+}
+
+fn settle_client(
+    has_ended: impl Fn() -> bool,
+    ask_to_stop: impl Fn(),
+    grace: Duration,
+    poll: Duration,
+) -> bool {
+    let ended_within = |limit: Duration| {
+        let until = Instant::now() + limit;
+        while !has_ended() && Instant::now() < until {
+            std::thread::sleep(poll);
+        }
+        has_ended()
+    };
+    if ended_within(grace) {
+        return true;
+    }
+    ask_to_stop();
+    ended_within(grace)
+}
+
+fn delivery_verdict(
+    name: &str,
+    end: &ClientEnd,
+    exit_code: Option<i32>,
+) -> Result<(), RuntimeError> {
+    let failed = |detail: String| -> Result<(), RuntimeError> {
+        Err(RuntimeError::Failed {
+            operation: RuntimeOp::Collect,
+            detail,
+        })
+    };
+    match end {
+        ClientEnd::Exited(code) if *code == exit_code => Ok(()),
+        ClientEnd::Exited(code) => failed(format!(
+            "the attached client that fed `{name}` its stdin ended ({}) while the container \
+             exited ({}): the attach broke, and the input may not have been delivered",
+            exit_text(*code),
+            exit_text(exit_code)
+        )),
+        ClientEnd::Stopped => failed(format!(
+            "the attached client that fed `{name}` its stdin did not end with the container and \
+             was stopped: the input may not have been delivered"
+        )),
+        ClientEnd::Failed { fate, error } => failed(format!(
+            "the attached client that fed `{name}` its stdin failed ({}): {error}",
+            fate.describe()
+        )),
+    }
+}
+
+fn combined_removal(
+    removed: Result<Settled, RuntimeError>,
+    client: Result<(), RuntimeError>,
+) -> Result<Settled, RuntimeError> {
+    match (removed, client) {
+        (removed, Ok(())) => removed,
+        (Ok(_), Err(client)) => Err(client),
+        (Err(removal), Err(RuntimeError::Unresolved { operation, detail })) => {
+            Err(RuntimeError::Unresolved {
+                operation,
+                detail: format!("{detail}; and the container's own removal failed: {removal}"),
+            })
+        }
+        (Err(removal), Err(client)) => Err(RuntimeError::Failed {
+            operation: removal.operation(),
+            detail: format!("{removal}; and its attached client: {client}"),
+        }),
+    }
+}
+
+fn docker_command(args: &[&str]) -> Command {
+    let mut command = Command::new(DOCKER_PROGRAM);
+    command.args(args);
+    command
+}
+
+fn exit_status_of(name: &str, status: &str) -> Result<i32, RuntimeError> {
+    status
+        .trim()
+        .parse::<i32>()
+        .map_err(|error| RuntimeError::Failed {
+            operation: RuntimeOp::Collect,
+            detail: format!(
+                "`{DOCKER_PROGRAM} container inspect {name}` reported the exit status `{}`, \
+                 which is not a number: {error}",
+                status.trim()
+            ),
+        })
+}
+
+fn spelled(args: &[&str]) -> String {
+    format!("`{DOCKER_PROGRAM} {}`", args.join(" "))
+}
+
+fn unfinished(op: RuntimeOp, args: &[&str]) -> RuntimeError {
+    RuntimeError::Failed {
+        operation: op,
+        detail: format!(
+            "{} ended before it answered: the bound it was asked under passed, its invocation \
+             was cancelled, or a signal ended it",
+            spelled(args)
+        ),
+    }
+}
+
+fn exit_text(exit: Option<i32>) -> String {
+    exit.map_or_else(
+        || "no exit code".to_owned(),
+        |code| format!("exit code {code}"),
+    )
+}
+
+fn docker_create_arguments(spec: &CreateSpec) -> Result<Vec<String>, String> {
+    let mut args: Vec<String> = vec!["create".to_owned(), "--name".to_owned(), spec.name.clone()];
+    if spec.read_only_root {
+        args.push("--read-only".to_owned());
+    }
+    if let Some(user) = spec.user {
+        args.push("--user".to_owned());
+        args.push(format!("{}:{}", user.uid, user.gid));
+    }
+    if spec.open_stdin {
+        args.push("--interactive".to_owned());
+    }
+    for (key, value) in &spec.labels {
+        args.push("--label".to_owned());
+        args.push(format!("{key}={value}"));
+    }
+    for mount in &spec.mounts {
+        args.push("--mount".to_owned());
+        args.push(mount_argument(mount)?);
+    }
+    for (key, value) in &spec.env {
+        args.push("--env".to_owned());
+        args.push(format!("{key}={value}"));
+    }
+    if let Some(workdir) = &spec.workdir {
+        args.push("--workdir".to_owned());
+        args.push(workdir.clone());
+    }
+    args.push(spec.image_id.clone());
+    args.extend(spec.command.iter().cloned());
+    Ok(args)
+}
+
 struct ImageInspectionRaw {
     id: String,
     digests: Vec<String>,
     tags: Vec<String>,
+}
+
+fn image_environment_of(
+    id: &str,
+    text: &str,
+) -> Result<Option<Vec<(String, String)>>, RuntimeError> {
+    let malformed = |why: &str| RuntimeError::Failed {
+        operation: RuntimeOp::InspectImageById,
+        detail: format!(
+            "`docker image inspect {id}` reported an image environment this runner cannot read \
+             ({why})"
+        ),
+    };
+    let line = text.lines().next().unwrap_or_default();
+    let Some((reported, environment)) = line.split_once('\u{1f}') else {
+        return Err(malformed("the answer carries no environment field"));
+    };
+    if reported.trim() != id {
+        return Ok(None);
+    }
+    let entries: Option<Vec<String>> = serde_json::from_str(environment.trim())
+        .map_err(|error| malformed(&format!("the environment is not a JSON list: {error}")))?;
+    entries
+        .unwrap_or_default()
+        .into_iter()
+        .map(|entry| {
+            entry
+                .split_once('=')
+                .map(|(key, value)| (key.to_owned(), value.to_owned()))
+                .ok_or_else(|| malformed(&format!("the entry `{entry}` names no value")))
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(Some)
 }
 
 impl ImageInspectionRaw {
@@ -1223,6 +2001,24 @@ impl ContainerRuntime for DockerCli {
         Ok(Some(found.into_inspection()))
     }
 
+    fn image_environment(&self, id: &str) -> Result<Option<Vec<(String, String)>>, RuntimeError> {
+        let Some(text) = self.inspect(
+            RuntimeOp::InspectImageById,
+            id,
+            &[
+                "image",
+                "inspect",
+                id,
+                "--format",
+                "{{.Id}}\u{1f}{{json .Config.Env}}",
+            ],
+        )?
+        else {
+            return Ok(None);
+        };
+        image_environment_of(id, &text)
+    }
+
     fn volume_present(&self, name: &str) -> Result<bool, RuntimeError> {
         Ok(self
             .inspect(
@@ -1247,8 +2043,14 @@ impl ContainerRuntime for DockerCli {
         parse_ps_output(&text)
     }
 
-    fn observe(&self, name: &str) -> Result<Liveness, RuntimeError> {
-        let listing = self.listing(RuntimeOp::Observe, name)?;
+    fn observe(&self, name: &str, bound: QuestionBound<'_>) -> Result<Liveness, RuntimeError> {
+        let listing = match bound {
+            QuestionBound::Invocation {
+                deadline,
+                cancellation,
+            } => self.listing_within(name, deadline, cancellation)?,
+            QuestionBound::Runtime => self.listing(RuntimeOp::Observe, name)?,
+        };
         Ok(liveness_of(listed_state(&listing, name)))
     }
 
@@ -1269,40 +2071,24 @@ impl ContainerRuntime for DockerCli {
                 operation: RuntimeOp::Collect,
                 detail: format!("`{name}` is gone, so its exit status cannot be collected"),
             })?;
-        let exit_code = status.trim().parse::<i32>().ok();
-        let (stdout, stderr) = self.exec_streams(RuntimeOp::Collect, name, &["logs", name])?;
+        let exit_code = Some(exit_status_of(name, &status)?);
+        let (stdout, stderr, output_limited) =
+            self.exec_streams(RuntimeOp::Collect, name, &["logs", name])?;
+        self.settle_delivery(name, exit_code)?;
         Ok(ContainerExecution {
             exit_code,
             stdout,
             stderr,
+            output_limited,
         })
     }
 
     fn create(&self, covered: exec::CoveredCreate<'_>) -> Result<CreatedContainer, RuntimeError> {
         let spec = covered.spec();
-        let mut args: Vec<String> =
-            vec!["create".to_owned(), "--name".to_owned(), spec.name.clone()];
-        if spec.read_only_root {
-            args.push("--read-only".to_owned());
-        }
-        for (key, value) in &spec.labels {
-            args.push("--label".to_owned());
-            args.push(format!("{key}={value}"));
-        }
-        for mount in &spec.mounts {
-            args.push("--mount".to_owned());
-            args.push(mount_argument(mount));
-        }
-        for (key, value) in &spec.env {
-            args.push("--env".to_owned());
-            args.push(format!("{key}={value}"));
-        }
-        if let Some(workdir) = &spec.workdir {
-            args.push("--workdir".to_owned());
-            args.push(workdir.clone());
-        }
-        args.push(spec.image_id.clone());
-        args.extend(spec.command.iter().cloned());
+        let args = docker_create_arguments(spec).map_err(|detail| RuntimeError::Failed {
+            operation: RuntimeOp::Create,
+            detail,
+        })?;
         let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
         self.exec(RuntimeOp::Create, &spec.name, &borrowed)?;
         let reported = self
@@ -1322,9 +2108,20 @@ impl ContainerRuntime for DockerCli {
     }
 
     fn start(&self, covered: exec::CoveredStart<'_>) -> Result<(), RuntimeError> {
+        let op = RuntimeOp::Start;
+        let payload = covered.stdin();
+        if !payload.is_empty() {
+            return self.start_attached(op, &covered, payload);
+        }
         let name = covered.name();
-        self.exec(RuntimeOp::Start, name, &["start", name])
-            .map(|_| ())
+        self.exec_within(
+            op,
+            name,
+            &["start", name],
+            covered.deadline(),
+            covered.cancellation(),
+        )
+        .map(|_| ())
     }
 
     fn stop(&self, name: &str, mode: StopMode) -> Result<Settled, RuntimeError> {
@@ -1335,20 +2132,21 @@ impl ContainerRuntime for DockerCli {
         settle_stop(
             name,
             self.exec(RuntimeOp::Stop, name, &[verb, name]),
-            |target| self.observe(target),
+            |target| self.observe(target, QuestionBound::Runtime),
         )
     }
 
     fn remove(&self, name: &str) -> Result<Settled, RuntimeError> {
-        settle_remove(
+        let removed = settle_remove(
             name,
             self.exec(
                 RuntimeOp::Remove,
                 name,
                 &["rm", "--force", "--volumes", name],
             ),
-            |target| self.observe(target),
-        )
+            |target| self.observe(target, QuestionBound::Runtime),
+        );
+        combined_removal(removed, self.settle_removed_client(name))
     }
 }
 
@@ -1372,31 +2170,65 @@ fn settle_stop(
     settle(target, outcome, stop_answer, observe)
 }
 
-fn mount_argument(mount: &runtime::Mount) -> String {
+fn mount_option_refusal(value: &str) -> Option<&'static str> {
+    if value.is_empty() {
+        Some("is empty")
+    } else if value.trim() != value {
+        Some("begins or ends with whitespace, which the runtime's option parser may trim")
+    } else if value.contains(',') {
+        Some("contains `,`, which separates the fields of the runtime's mount option")
+    } else if value.contains('"') {
+        Some("contains `\"`, which quotes a field of the runtime's mount option")
+    } else if value.chars().any(char::is_control) {
+        Some("contains a control character, which the runtime's mount option cannot carry")
+    } else {
+        None
+    }
+}
+
+fn mount_argument(mount: &runtime::Mount) -> Result<String, String> {
+    let checked = |what: &str, value: &str| match mount_option_refusal(value) {
+        Some(reason) => Err(format!("the mount's {what} `{value}` {reason}")),
+        None => Ok(format!("{what}={value}")),
+    };
     let mut parts = Vec::new();
     match mount {
         runtime::Mount::Path { source, target, .. } => {
+            let Some(spelled) = source.to_str() else {
+                return Err(format!(
+                    "the mount's source `{}` is not valid UTF-8, so the runtime's mount option \
+                     cannot carry it exactly",
+                    source.display()
+                ));
+            };
             parts.push("type=bind".to_owned());
-            parts.push(format!(
-                "source={}",
-                source.to_string_lossy().replace('\\', "/")
-            ));
-            parts.push(format!("target={target}"));
+            parts.push(checked("source", &host_spelling(spelled))?);
+            parts.push(checked("target", target)?);
         }
         runtime::Mount::Volume { name, target, .. } => {
             parts.push("type=volume".to_owned());
-            parts.push(format!("source={name}"));
-            parts.push(format!("target={target}"));
+            parts.push(checked("source", name)?);
+            parts.push(checked("target", target)?);
         }
         runtime::Mount::Tmpfs { target } => {
             parts.push("type=tmpfs".to_owned());
-            parts.push(format!("target={target}"));
+            parts.push(checked("target", target)?);
         }
     }
     if mount.read_only() {
         parts.push("readonly".to_owned());
     }
-    parts.join(",")
+    Ok(parts.join(","))
+}
+
+#[cfg(windows)]
+fn host_spelling(path: &str) -> String {
+    path.replace('\\', "/")
+}
+
+#[cfg(not(windows))]
+fn host_spelling(path: &str) -> String {
+    path.to_owned()
 }
 
 #[cfg(test)]
@@ -1478,6 +2310,7 @@ mod uncovered {
             name,
             ContainerToRelease::MayBeRunning,
             view_path,
+            CauseFate::Settled,
         )
         .messages
     }
@@ -1520,6 +2353,12 @@ impl DockerCli {
         args: &[&str],
     ) -> Result<String, RuntimeError> {
         self.exec(op, target, args)
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn with_question_bound(mut self, bound: Duration) -> Self {
+        self.question_bound = Some(bound);
+        self
     }
 }
 
@@ -1576,4 +2415,596 @@ fn racing_yield() {
 fn racing_sleep(duration: Duration) {
     tests::note_racing_performed(tests::RacingPerformed::Slept(duration));
     std::thread::sleep(duration);
+}
+
+#[cfg(test)]
+pub(crate) mod observed {
+    use std::collections::BTreeMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex, PoisonError};
+
+    use serde_json::{Value, json};
+
+    use super::exec::RunIdentity;
+    use super::intent::{ContainerIntent, ContainerName, LABEL_PRIVATE_ROOT};
+    use super::runtime::{
+        ContainerExecution, ContainerRuntime, ContainerTrace, CreateSpec, CreatedContainer,
+        DiscoveredContainer, ImageInspection, Liveness, Mount, QuestionBound, RuntimeError,
+        RuntimeOp, Settled, StopMode,
+    };
+    use super::{CoveredCreate, CoveredStart, DockerCli};
+
+    pub(crate) const CONTAINER_FIELDS: &str = concat!(
+        "{\"Id\":{{json .Id}},\"Name\":{{json .Name}},\"Created\":{{json .Created}},",
+        "\"Image\":{{json .Image}},\"ConfigImage\":{{json .Config.Image}},",
+        "\"Labels\":{{json .Config.Labels}},\"User\":{{json .Config.User}},",
+        "\"WorkingDir\":{{json .Config.WorkingDir}},\"Cmd\":{{json .Config.Cmd}},",
+        "\"Entrypoint\":{{json .Config.Entrypoint}},\"OpenStdin\":{{json .Config.OpenStdin}},",
+        "\"ReadonlyRootfs\":{{json .HostConfig.ReadonlyRootfs}},",
+        "\"HostConfigMounts\":{{json .HostConfig.Mounts}},\"Mounts\":{{json .Mounts}},",
+        "\"State\":{{json .State}},\"Platform\":{{json .Platform}},\"Driver\":{{json .Driver}}}"
+    );
+
+    pub(crate) const IMAGE_FIELDS: &str = concat!(
+        "{\"Id\":{{json .Id}},\"RepoTags\":{{json .RepoTags}},",
+        "\"RepoDigests\":{{json .RepoDigests}},\"Os\":{{json .Os}},",
+        "\"Architecture\":{{json .Architecture}},\"Created\":{{json .Created}}}"
+    );
+
+    pub(crate) const DAEMON_FIELDS: &str = concat!(
+        "{\"Name\":{{json .Name}},\"OSType\":{{json .OSType}},",
+        "\"OperatingSystem\":{{json .OperatingSystem}},\"KernelVersion\":{{json .KernelVersion}},",
+        "\"Architecture\":{{json .Architecture}},\"ServerVersion\":{{json .ServerVersion}},",
+        "\"NCPU\":{{json .NCPU}},\"MemTotal\":{{json .MemTotal}},\"Driver\":{{json .Driver}}}"
+    );
+
+    #[derive(Debug)]
+    struct RuntimeEntry {
+        site: String,
+        identity: Value,
+        trace: ContainerTrace,
+    }
+
+    #[derive(Debug, Default, Clone, Copy)]
+    struct Observations {
+        running: usize,
+        exited: usize,
+        gone: usize,
+        failed: usize,
+    }
+
+    #[derive(Debug, Default)]
+    struct Entries {
+        runtimes: Vec<RuntimeEntry>,
+        operations: Vec<Value>,
+        observations: BTreeMap<(usize, String), Observations>,
+    }
+
+    #[derive(Debug, Clone, Default)]
+    pub(crate) struct Journal(Arc<Mutex<Entries>>);
+
+    impl Journal {
+        pub(crate) fn observe(
+            &self,
+            site: &str,
+            identity: Option<&RunIdentity>,
+        ) -> ObservedRuntime {
+            let trace = ContainerTrace::recording();
+            let described = identity.map_or(Value::Null, |identity| {
+                json!({
+                    "run_id": identity.run_id,
+                    "incarnation": identity.incarnation,
+                    "repo_key": identity.repo_key,
+                    "private_root": identity.private_root.to_string_lossy(),
+                    "run_dir": identity.run_dir.to_string_lossy(),
+                })
+            });
+            let index = {
+                let mut entries = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+                entries.runtimes.push(RuntimeEntry {
+                    site: site.to_owned(),
+                    identity: described,
+                    trace: trace.clone(),
+                });
+                entries.runtimes.len() - 1
+            };
+            ObservedRuntime {
+                index,
+                journal: self.clone(),
+                inner: DockerCli::new(trace),
+                inspector: DockerCli::default(),
+                private_root: identity.map(|identity| identity.private_root.clone()),
+                private_half: identity.map(|identity| {
+                    crate::rundir::RunPaths::with_private_root(
+                        &identity.run_dir,
+                        &identity.run_id,
+                        &identity.private_root,
+                    )
+                    .private
+                }),
+            }
+        }
+
+        #[must_use]
+        pub(crate) fn runtimes(&self) -> usize {
+            self.0
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .runtimes
+                .len()
+        }
+
+        #[must_use]
+        pub(crate) fn snapshot(&self) -> Value {
+            let (described, operations, observations) = {
+                let entries = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+                let described: Vec<(String, Value, ContainerTrace)> = entries
+                    .runtimes
+                    .iter()
+                    .map(|runtime| {
+                        (
+                            runtime.site.clone(),
+                            runtime.identity.clone(),
+                            runtime.trace.clone(),
+                        )
+                    })
+                    .collect();
+                let observations: Vec<Value> = entries
+                    .observations
+                    .iter()
+                    .map(|((runtime, name), seen)| {
+                        json!({
+                            "runtime": runtime,
+                            "name": name,
+                            "running": seen.running,
+                            "exited": seen.exited,
+                            "gone": seen.gone,
+                            "failed": seen.failed,
+                        })
+                    })
+                    .collect();
+                (described, entries.operations.clone(), observations)
+            };
+            let runtimes: Vec<Value> = described
+                .into_iter()
+                .enumerate()
+                .map(|(index, (site, identity, trace))| {
+                    let rendered = trace.rendered();
+                    json!({
+                        "index": index,
+                        "site": site,
+                        "identity": identity,
+                        "trace_entries": rendered.len(),
+                        "trace_sha256": sha256(rendered.join("\n").as_bytes()),
+                        "trace": run_lengths(&rendered),
+                    })
+                })
+                .collect();
+            json!({
+                "runtimes": runtimes,
+                "operations": operations,
+                "observations": observations,
+            })
+        }
+
+        fn note(&self, runtime: usize, op: RuntimeOp, target: &str, outcome: Value) {
+            let mut entries = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+            let sequence = entries.operations.len();
+            entries.operations.push(json!({
+                "sequence": sequence,
+                "runtime": runtime,
+                "op": op.name(),
+                "target": target,
+                "outcome": outcome,
+            }));
+        }
+
+        fn observed(&self, runtime: usize, name: &str, result: &Result<Liveness, RuntimeError>) {
+            let mut entries = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+            let seen = entries
+                .observations
+                .entry((runtime, name.to_owned()))
+                .or_default();
+            match result {
+                Ok(Liveness::Running) => seen.running += 1,
+                Ok(Liveness::Exited) => seen.exited += 1,
+                Ok(Liveness::Gone) => seen.gone += 1,
+                Err(_) => seen.failed += 1,
+            }
+        }
+    }
+
+    pub(crate) struct ObservedRuntime {
+        index: usize,
+        journal: Journal,
+        inner: DockerCli,
+        inspector: DockerCli,
+        private_root: Option<PathBuf>,
+        private_half: Option<PathBuf>,
+    }
+
+    impl ObservedRuntime {
+        fn note(&self, op: RuntimeOp, target: &str, outcome: Value) {
+            self.journal.note(self.index, op, target, outcome);
+        }
+
+        fn intent_of(&self, name: &str) -> Value {
+            let Some(private_root) = self.private_root.as_deref() else {
+                return json!({"error": "this runtime was constructed for no run identity"});
+            };
+            let path = match ContainerName::rebuild(name) {
+                Ok(name) => name.intent_path(private_root),
+                Err(error) => return json!({"error": error.to_string()}),
+            };
+            match std::fs::read(&path) {
+                Ok(bytes) => {
+                    let parsed = match serde_json::from_slice::<ContainerIntent>(&bytes) {
+                        Ok(intent) => json!({
+                            "run_id": intent.run_id,
+                            "run_dir": intent.run_dir,
+                            "incarnation": intent.incarnation,
+                            "repo_key": intent.repo_key,
+                            "invocation": intent.invocation,
+                            "runner_policy_sha256": intent.runner_policy_sha256,
+                        }),
+                        Err(error) => json!({"error": error.to_string()}),
+                    };
+                    json!({
+                        "path": path.to_string_lossy(),
+                        "bytes": bytes.len(),
+                        "sha256": sha256(&bytes),
+                        "utf8": String::from_utf8(bytes)
+                            .map_or_else(|error| json!({"error": error.to_string()}), Value::String),
+                        "parsed": parsed,
+                    })
+                }
+                Err(error) => json!({"path": path.to_string_lossy(), "error": error.to_string()}),
+            }
+        }
+
+        fn owner_published(&self) -> Value {
+            self.private_half.as_deref().map_or(Value::Null, |private| {
+                Value::Bool(private.join("owner.json").is_file())
+            })
+        }
+    }
+
+    impl ContainerRuntime for ObservedRuntime {
+        fn probe(&self) -> Result<(), RuntimeError> {
+            let result = self.inner.probe();
+            self.note(
+                RuntimeOp::Probe,
+                "daemon",
+                outcome(&result, |()| Value::Null),
+            );
+            result
+        }
+
+        fn image_by_reference(
+            &self,
+            reference: &str,
+        ) -> Result<Option<ImageInspection>, RuntimeError> {
+            let result = self.inner.image_by_reference(reference);
+            self.note(
+                RuntimeOp::InspectImageByReference,
+                reference,
+                outcome(&result, image_found),
+            );
+            result
+        }
+
+        fn image_by_id(&self, id: &str) -> Result<Option<ImageInspection>, RuntimeError> {
+            let result = self.inner.image_by_id(id);
+            self.note(
+                RuntimeOp::InspectImageById,
+                id,
+                outcome(&result, image_found),
+            );
+            result
+        }
+
+        fn image_environment(
+            &self,
+            id: &str,
+        ) -> Result<Option<Vec<(String, String)>>, RuntimeError> {
+            let result = self.inner.image_environment(id);
+            self.note(
+                RuntimeOp::InspectImageById,
+                id,
+                outcome(&result, |found| {
+                    json!({
+                        "environment_names": found.as_ref().map(|environment| {
+                            environment.iter().map(|(name, _)| name.clone()).collect::<Vec<_>>()
+                        }),
+                    })
+                }),
+            );
+            result
+        }
+
+        fn volume_present(&self, name: &str) -> Result<bool, RuntimeError> {
+            let result = self.inner.volume_present(name);
+            self.note(
+                RuntimeOp::InspectVolume,
+                name,
+                outcome(&result, |present| Value::Bool(*present)),
+            );
+            result
+        }
+
+        fn containers_with_label(
+            &self,
+            key: &str,
+            value: &str,
+        ) -> Result<Vec<DiscoveredContainer>, RuntimeError> {
+            let result = self.inner.containers_with_label(key, value);
+            self.note(
+                RuntimeOp::ListByLabel,
+                value,
+                outcome(&result, |found| {
+                    json!({
+                        "key": key,
+                        "names": found.iter().map(|container| container.name.clone()).collect::<Vec<_>>(),
+                    })
+                }),
+            );
+            result
+        }
+
+        fn observe(&self, name: &str, bound: QuestionBound<'_>) -> Result<Liveness, RuntimeError> {
+            let result = self.inner.observe(name, bound);
+            self.journal.observed(self.index, name, &result);
+            result
+        }
+
+        fn collect(&self, name: &str) -> Result<ContainerExecution, RuntimeError> {
+            let result = self.inner.collect(name);
+            self.note(
+                RuntimeOp::Collect,
+                name,
+                outcome(&result, |execution| {
+                    json!({
+                        "exit_code": execution.exit_code,
+                        "stdout_bytes": execution.stdout.len(),
+                        "stderr_bytes": execution.stderr.len(),
+                        "output_limited": execution.output_limited,
+                    })
+                }),
+            );
+            result
+        }
+
+        fn create(&self, covered: CoveredCreate<'_>) -> Result<CreatedContainer, RuntimeError> {
+            let spec = covered.spec();
+            let planned = planned(spec);
+            let intent = self.intent_of(&spec.name);
+            let owner_published = self.owner_published();
+            let result = self.inner.create(covered);
+            let inspected = match &result {
+                Ok(created) => container_answer(&self.inspector, &created.name),
+                Err(_) => Value::Null,
+            };
+            self.note(
+                RuntimeOp::Create,
+                &spec.name,
+                json!({
+                    "planned": planned,
+                    "intent": intent,
+                    "owner_published": owner_published,
+                    "result": outcome(&result, |created| json!({
+                        "name": created.name,
+                        "reported_image_id": created.reported_image_id,
+                    })),
+                    "inspect_at_create": inspected,
+                }),
+            );
+            result
+        }
+
+        fn start(&self, covered: CoveredStart<'_>) -> Result<(), RuntimeError> {
+            let name = covered.name();
+            let result = self.inner.start(covered);
+            self.note(RuntimeOp::Start, name, outcome(&result, |()| Value::Null));
+            result
+        }
+
+        fn stop(&self, name: &str, mode: StopMode) -> Result<Settled, RuntimeError> {
+            let result = self.inner.stop(name, mode);
+            self.note(
+                RuntimeOp::Stop,
+                name,
+                json!({"mode": mode.name(), "result": outcome(&result, settled)}),
+            );
+            result
+        }
+
+        fn remove(&self, name: &str) -> Result<Settled, RuntimeError> {
+            let before = container_answer(&self.inspector, name);
+            let result = self.inner.remove(name);
+            self.note(
+                RuntimeOp::Remove,
+                name,
+                json!({"inspect_before_remove": before, "result": outcome(&result, settled)}),
+            );
+            result
+        }
+
+        fn reaper_program(&self) -> PathBuf {
+            self.inner.reaper_program()
+        }
+    }
+
+    fn sha256(bytes: &[u8]) -> String {
+        format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(bytes))
+    }
+
+    fn outcome<T>(result: &Result<T, RuntimeError>, ok: impl FnOnce(&T) -> Value) -> Value {
+        match result {
+            Ok(value) => json!({"ok": ok(value)}),
+            Err(error) => json!({
+                "error": error.to_string(),
+                "unreachable": error.is_unreachable(),
+            }),
+        }
+    }
+
+    fn image_found(found: &Option<ImageInspection>) -> Value {
+        found.as_ref().map_or(Value::Null, |image| {
+            json!({
+                "id": image.id,
+                "digest": image.digest,
+                "references": image.references,
+            })
+        })
+    }
+
+    fn settled(settled: &Settled) -> Value {
+        Value::String(
+            match settled {
+                Settled::ProcessGone => "process-gone",
+                Settled::RemovalInProgress => "removal-in-progress",
+            }
+            .to_owned(),
+        )
+    }
+
+    fn planned(spec: &CreateSpec) -> Value {
+        let labels: serde_json::Map<String, Value> = spec
+            .labels
+            .iter()
+            .map(|(key, value)| (key.clone(), Value::String(value.clone())))
+            .collect();
+        json!({
+            "name": spec.name,
+            "image_id": spec.image_id,
+            "labels": labels,
+            "mounts": spec.mounts.iter().map(planned_mount).collect::<Vec<_>>(),
+            "env_names": spec.env.iter().map(|(name, _)| name.clone()).collect::<Vec<_>>(),
+            "command": spec.command,
+            "workdir": spec.workdir,
+            "read_only_root": spec.read_only_root,
+            "user": spec.user.map(|user| format!("{}:{}", user.uid, user.gid)),
+            "open_stdin": spec.open_stdin,
+        })
+    }
+
+    fn planned_mount(mount: &Mount) -> Value {
+        let argument = super::mount_argument(mount)
+            .map_or_else(|error| json!({"error": error}), Value::String);
+        match mount {
+            Mount::Path {
+                source,
+                target,
+                read_only,
+            } => json!({
+                "type": "bind",
+                "source": source.to_string_lossy(),
+                "target": target,
+                "read_only": read_only,
+                "argument": argument,
+            }),
+            Mount::Volume {
+                name,
+                target,
+                read_only,
+            } => json!({
+                "type": "volume",
+                "source": name,
+                "target": target,
+                "read_only": read_only,
+                "argument": argument,
+            }),
+            Mount::Tmpfs { target } => json!({
+                "type": "tmpfs",
+                "source": Value::Null,
+                "target": target,
+                "read_only": false,
+                "argument": argument,
+            }),
+        }
+    }
+
+    fn run_lengths(entries: &[String]) -> Vec<Value> {
+        let mut runs: Vec<(String, usize)> = Vec::new();
+        for entry in entries {
+            match runs.last_mut() {
+                Some((last, count)) if last == entry => *count += 1,
+                _ => runs.push((entry.clone(), 1)),
+            }
+        }
+        runs.into_iter()
+            .map(|(entry, count)| json!([entry, count]))
+            .collect()
+    }
+
+    fn answered(docker: &DockerCli, op: RuntimeOp, target: &str, args: &[&str]) -> Value {
+        match docker.raw(op, target, args) {
+            Ok(raw) => {
+                let parsed = match serde_json::from_str::<Value>(raw.trim()) {
+                    Ok(value) => json!({"value": value}),
+                    Err(error) => json!({"error": error.to_string()}),
+                };
+                json!({
+                    "query": args,
+                    "raw": raw,
+                    "bytes": raw.len(),
+                    "sha256": sha256(raw.as_bytes()),
+                    "parsed": parsed,
+                })
+            }
+            Err(error) => json!({"query": args, "error": error.to_string()}),
+        }
+    }
+
+    fn container_answer(docker: &DockerCli, name: &str) -> Value {
+        answered(
+            docker,
+            RuntimeOp::Observe,
+            name,
+            &["container", "inspect", name, "--format", CONTAINER_FIELDS],
+        )
+    }
+
+    pub(crate) fn reachable() -> Result<(), String> {
+        ContainerRuntime::probe(&DockerCli::default()).map_err(|error| error.to_string())
+    }
+
+    #[must_use]
+    pub(crate) fn daemon() -> Value {
+        let docker = DockerCli::default();
+        let context = match docker.raw(RuntimeOp::Probe, "daemon", &["context", "show"]) {
+            Ok(raw) => json!({"query": ["context", "show"], "raw": raw}),
+            Err(error) => json!({"query": ["context", "show"], "error": error.to_string()}),
+        };
+        json!({
+            "version": answered(&docker, RuntimeOp::Probe, "daemon", &["version", "--format", "{{json .}}"]),
+            "info": answered(&docker, RuntimeOp::Probe, "daemon", &["info", "--format", DAEMON_FIELDS]),
+            "context": context,
+        })
+    }
+
+    #[must_use]
+    pub(crate) fn image(reference: &str) -> Value {
+        answered(
+            &DockerCli::default(),
+            RuntimeOp::InspectImageByReference,
+            reference,
+            &["image", "inspect", reference, "--format", IMAGE_FIELDS],
+        )
+    }
+
+    pub(crate) fn labelled(private_root_label: &str) -> Result<Vec<String>, String> {
+        ContainerRuntime::containers_with_label(
+            &DockerCli::default(),
+            LABEL_PRIVATE_ROOT,
+            private_root_label,
+        )
+        .map(|found| found.into_iter().map(|container| container.name).collect())
+        .map_err(|error| error.to_string())
+    }
+
+    #[must_use]
+    pub(crate) fn intent_directory(private_root: &Path) -> PathBuf {
+        super::intent::containers_dir(private_root)
+    }
 }

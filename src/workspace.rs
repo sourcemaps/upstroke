@@ -5,6 +5,7 @@
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 #![forbid(clippy::disallowed_macros)]
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -14,10 +15,15 @@ use std::process::{Command, Output, Stdio};
 use crate::error::UpstrokeError;
 use crate::events::PreparedCommit;
 use crate::runner::host::{GitdirRule, ManagedRepository, RECORDED_OBJECTS_INCLUDE};
-use crate::workspace_manager::NO_REPLACEMENT_OBJECTS;
+use crate::workspace_manager::{
+    Again, COMMON_DIR, INDEX_SELECTOR, NO_REPLACEMENT_OBJECTS, RegistryHold, WORK_TREE_SELECTORS,
+    keeps_common_dir, strip_verbatim, tolerant_registry_access,
+};
 
 pub struct Workspace {
     root: PathBuf,
+    private_index: Option<PathBuf>,
+    checkout: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,22 +44,78 @@ pub(crate) const REVIEW_DIFF_FLAGS: &[&str] = &[
     "--no-color",
 ];
 
+pub(crate) const KEPT_PIN_SUFFIX: &str = "-kept";
+
+const CAPTURE_CONTROLS: [&str; 2] = ["-c", "core.sparseCheckout=false"];
+
+const PRIVATE_INDEX_CONTROLS: [&str; 4] = [
+    "-c",
+    "core.splitIndex=false",
+    "-c",
+    "splitIndex.sharedIndexExpire=never",
+];
+
 const REPLACE_REFS_REFUSED: [&str; 2] = ["-c", "core.useReplaceRefs=false"];
 
-fn git_command(directory: &Path) -> Command {
+const AUTO_MAINTENANCE_REFUSED: [&str; 8] = [
+    "-c",
+    "maintenance.auto=false",
+    "-c",
+    "gc.auto=0",
+    "-c",
+    "gc.autoDetach=false",
+    "-c",
+    "maintenance.autoDetach=false",
+];
+
+#[derive(Debug, Clone, Copy)]
+enum GitScope<'a> {
+    Checkout,
+    Registry,
+    WorkTree { checkout: &'a Path },
+}
+
+fn git_command(directory: &Path, scope: GitScope<'_>) -> Command {
     let mut command = Command::new("git");
+    match scope {
+        GitScope::Checkout => {}
+        GitScope::Registry => {
+            command.env_remove(INDEX_SELECTOR);
+        }
+        GitScope::WorkTree { checkout } => {
+            for name in WORK_TREE_SELECTORS {
+                command.env_remove(name);
+            }
+            if let Some(value) =
+                std::env::var_os(COMMON_DIR).filter(|value| !keeps_common_dir(value))
+            {
+                command.env(COMMON_DIR, checkout.join(value));
+            }
+        }
+    }
     command
         .arg("-C")
         .arg(directory)
         .args(REPLACE_REFS_REFUSED)
+        .args(AUTO_MAINTENANCE_REFUSED)
         .env(NO_REPLACEMENT_OBJECTS.0, NO_REPLACEMENT_OBJECTS.1);
     command
 }
 
 impl Workspace {
     pub fn open(root: &Path) -> Result<Self, UpstrokeError> {
+        Self::open_in(root, None)
+    }
+
+    pub fn open_work_tree(root: &Path, checkout: &Path) -> Result<Self, UpstrokeError> {
+        Self::open_in(root, Some(checkout.to_path_buf()))
+    }
+
+    fn open_in(root: &Path, checkout: Option<PathBuf>) -> Result<Self, UpstrokeError> {
         let probe = Self {
             root: root.to_path_buf(),
+            private_index: None,
+            checkout,
         };
         let inside = probe.git(&["rev-parse", "--is-inside-work-tree"])?;
         if inside.trim() != "true" {
@@ -68,7 +130,16 @@ impl Workspace {
             } else {
                 toplevel
             },
+            private_index: None,
+            checkout: probe.checkout,
         })
+    }
+
+    fn scope(&self) -> GitScope<'_> {
+        match &self.checkout {
+            None => GitScope::Checkout,
+            Some(checkout) => GitScope::WorkTree { checkout },
+        }
     }
 
     pub fn root(&self) -> &Path {
@@ -95,10 +166,18 @@ impl Workspace {
         let private_root =
             private_root.map_or_else(crate::rundir::default_private_root, Path::to_path_buf);
         let common = self.git_path(&["rev-parse", "--path-format=absolute", "--git-common-dir"])?;
-        let common = fs::canonicalize(&common).map_err(|source| UpstrokeError::Io {
-            path: common.clone(),
-            source,
-        })?;
+        // Spelled as `WorkspaceManager::common_git_dir` spells it: canonical,
+        // and without Windows' verbatim prefix. Every slot's `.git` file is
+        // written from the manager's spelling and the include's conditions
+        // from this one, so `entry::one_spelling` requires the two to be
+        // equal. The conditions themselves are unchanged by the strip:
+        // `GitdirRule::Windows` drops the prefix from its spelling either way.
+        let common = fs::canonicalize(&common)
+            .map(strip_verbatim)
+            .map_err(|source| UpstrokeError::Io {
+                path: common.clone(),
+                source,
+            })?;
         let directory =
             std::path::absolute(private_root.join("git")).map_err(|source| UpstrokeError::Io {
                 path: private_root.to_path_buf(),
@@ -159,13 +238,12 @@ impl Workspace {
     }
 
     fn git_output(&self, args: &[&str]) -> Result<Vec<u8>, UpstrokeError> {
-        let output =
-            git_command(&self.root)
-                .args(args)
-                .output()
-                .map_err(|e| UpstrokeError::Git {
-                    message: format!("failed to run git: {e}"),
-                })?;
+        let output = git_command(&self.root, self.scope())
+            .args(args)
+            .output()
+            .map_err(|e| UpstrokeError::Git {
+                message: format!("failed to run git: {e}"),
+            })?;
         if !output.status.success() {
             return Err(UpstrokeError::Git {
                 message: format!(
@@ -185,15 +263,19 @@ impl Workspace {
         let hooks = PrivateHooksDir::create()?;
         let mut hooks_config = OsString::from("core.hooksPath=");
         hooks_config.push(&hooks.path);
-        git_command(&self.root)
+        let mut command = git_command(&self.root, self.scope());
+        command
             .arg("-c")
             .arg(hooks_config)
-            .args(["-c", "core.fsmonitor=false"])
-            .args(args)
-            .output()
-            .map_err(|e| UpstrokeError::Git {
-                message: format!("failed to run git: {e}"),
-            })
+            .args(["-c", "core.fsmonitor=false"]);
+        if let Some(index) = &self.private_index {
+            command
+                .args(PRIVATE_INDEX_CONTROLS)
+                .env("GIT_INDEX_FILE", index);
+        }
+        command.args(args).output().map_err(|e| UpstrokeError::Git {
+            message: format!("failed to run git: {e}"),
+        })
     }
 
     fn git_output_with_private_hooks(&self, args: &[&str]) -> Result<Vec<u8>, UpstrokeError> {
@@ -228,18 +310,24 @@ impl Workspace {
         let hooks = PrivateHooksDir::create()?;
         let mut hooks_config = OsString::from("core.hooksPath=");
         hooks_config.push(&hooks.path);
-        let mut child = git_command(&self.root)
+        let mut command = git_command(&self.root, self.scope());
+        command
             .arg("-c")
             .arg(hooks_config)
-            .args(["-c", "core.fsmonitor=false"])
+            .args(["-c", "core.fsmonitor=false"]);
+        if let Some(index) = &self.private_index {
+            command
+                .args(PRIVATE_INDEX_CONTROLS)
+                .env("GIT_INDEX_FILE", index);
+        }
+        command
             .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| UpstrokeError::Git {
-                message: format!("failed to run git: {e}"),
-            })?;
+            .stderr(Stdio::piped());
+        let mut child = command.spawn().map_err(|e| UpstrokeError::Git {
+            message: format!("failed to run git: {e}"),
+        })?;
         let mut stdin = child.stdin.take().ok_or_else(|| UpstrokeError::Git {
             message: format!("git {} did not open stdin", args.join(" ")),
         })?;
@@ -286,7 +374,7 @@ impl Workspace {
         message: &str,
     ) -> Result<String, UpstrokeError> {
         let args = ["commit-tree", tree_oid, "-p", parent_oid, "-m", message];
-        let output = git_command(&self.root)
+        let output = git_command(&self.root, self.scope())
             .args(args)
             .env("GIT_AUTHOR_NAME", "upstroke")
             .env("GIT_AUTHOR_EMAIL", "upstroke@upstroke.local")
@@ -377,7 +465,7 @@ impl Workspace {
     }
 
     pub fn current_branch_ref(&self) -> Result<String, UpstrokeError> {
-        let output = git_command(&self.root)
+        let output = git_command(&self.root, self.scope())
             .args(["symbolic-ref", "--quiet", "--no-recurse", "HEAD"])
             .output()
             .map_err(|e| UpstrokeError::Git {
@@ -416,7 +504,7 @@ impl Workspace {
     }
 
     pub fn parent_sha(&self, sha: &str) -> Result<Option<String>, UpstrokeError> {
-        let output = git_command(&self.root)
+        let output = git_command(&self.root, self.scope())
             .args(["rev-parse", "--verify", "--quiet"])
             .arg(format!("{sha}^"))
             .output()
@@ -452,12 +540,26 @@ impl Workspace {
         let revision = format!("refs/heads/{name}^{{tree}}");
         let tree_oid = self.git(&["rev-parse", "--verify", &revision])?;
         self.refuse_unsafe_checkout_tree(tree_oid.trim())?;
-        self.git_with_private_hooks(&["switch", "-q", "--no-recurse-submodules", "--", name])
-            .map(|_| ())
+        tolerant_registry_access(
+            &canonical_common_dir(&self.root)?,
+            RegistryHold::Unheld,
+            &mut legacy_registry_pause,
+            &mut || Again::Attempt,
+            &mut || {
+                self.git_with_private_hooks(&[
+                    "switch",
+                    "-q",
+                    "--no-recurse-submodules",
+                    "--",
+                    name,
+                ])
+                .map(|_| ())
+            },
+        )
     }
 
     pub fn branch_exists(&self, name: &str) -> Result<bool, UpstrokeError> {
-        let output = git_command(&self.root)
+        let output = git_command(&self.root, self.scope())
             .args(["rev-parse", "--verify", "--quiet"])
             .arg(format!("refs/heads/{name}"))
             .output()
@@ -838,6 +940,8 @@ impl Workspace {
 
         let workspace = Workspace {
             root: pending.path.clone(),
+            private_index: None,
+            checkout: Some(self.root.clone()),
         };
         Ok(pending.finish(workspace))
     }
@@ -876,59 +980,67 @@ impl Workspace {
     ) -> Result<(), UpstrokeError> {
         let mut hooks_config = OsString::from("core.hooksPath=");
         hooks_config.push(hooks_path);
-        let mut command = git_command(&self.root);
-        command
-            .arg("-c")
-            .arg(hooks_config)
-            .args([
-                "-c",
-                "core.fsmonitor=false",
-                "worktree",
-                "add",
-                "-q",
-                "--detach",
-                "--force",
-            ])
-            .arg(path)
-            .arg(commit);
-        let output = output_past_anothers_empty_commondir(
-            path.file_name().unwrap_or_default(),
-            &mut || is_an_empty_directory(path),
-            &mut || command.output(),
+        tolerant_registry_access(
+            &canonical_common_dir(&self.root)?,
+            RegistryHold::Shared,
+            &mut legacy_registry_pause,
+            &mut || legacy_add_veto(path),
+            &mut || {
+                let output = git_command(&self.root, GitScope::Registry)
+                    .arg("-c")
+                    .arg(&hooks_config)
+                    .args([
+                        "-c",
+                        "core.fsmonitor=false",
+                        "worktree",
+                        "add",
+                        "-q",
+                        "--detach",
+                        "--force",
+                    ])
+                    .arg(path)
+                    .arg(commit)
+                    .output()
+                    .map_err(|e| UpstrokeError::Git {
+                        message: format!("failed to run git worktree add: {e}"),
+                    })?;
+                if !output.status.success() {
+                    return Err(UpstrokeError::Git {
+                        message: format!(
+                            "git worktree add failed: {}",
+                            String::from_utf8_lossy(&output.stderr).trim()
+                        ),
+                    });
+                }
+                Ok(())
+            },
         )
-        .map_err(|e| UpstrokeError::Git {
-            message: format!("failed to run git worktree add: {e}"),
-        })?;
-        if !output.status.success() {
-            return Err(UpstrokeError::Git {
-                message: format!(
-                    "git worktree add failed: {}",
-                    String::from_utf8_lossy(&output.stderr).trim()
-                ),
-            });
-        }
-        Ok(())
     }
 
     fn verify_gate_worktree(&self, path: &Path, hooks_path: &Path) -> Result<(), UpstrokeError> {
         let mut hooks_config = OsString::from("core.hooksPath=");
         hooks_config.push(hooks_path);
-        let output = git_command(path)
-            .arg("-c")
-            .arg(hooks_config)
-            .args([
-                "-c",
-                "core.fsmonitor=false",
-                "status",
-                "--porcelain=v1",
-                "-z",
-                "--untracked-files=all",
-                "--ignore-submodules=none",
-            ])
-            .output()
-            .map_err(|e| UpstrokeError::Git {
-                message: format!("failed to verify gate worktree: {e}"),
-            })?;
+        let output = git_command(
+            path,
+            GitScope::WorkTree {
+                checkout: &self.root,
+            },
+        )
+        .arg("-c")
+        .arg(hooks_config)
+        .args([
+            "-c",
+            "core.fsmonitor=false",
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+            "--ignore-submodules=none",
+        ])
+        .output()
+        .map_err(|e| UpstrokeError::Git {
+            message: format!("failed to verify gate worktree: {e}"),
+        })?;
         if !output.status.success() {
             return Err(UpstrokeError::Git {
                 message: format!(
@@ -959,14 +1071,16 @@ impl Workspace {
         self.validate_branch_ref(branch_ref)?;
         self.validate_commit_oid(parent_oid)?;
         self.validate_tree_oid(tree_oid)?;
-        let observed_branch_ref = self.current_branch_ref()?;
-        let observed_parent = self.head_sha_full()?;
-        if observed_branch_ref != branch_ref || observed_parent != parent_oid {
-            return Err(UpstrokeError::Git {
-                message: format!(
-                    "HEAD moved from captured branch {branch_ref} at {parent_oid} to {observed_branch_ref} at {observed_parent}; refusing to prepare it"
-                ),
-            });
+        if !pin_ref.ends_with(KEPT_PIN_SUFFIX) {
+            let observed_branch_ref = self.current_branch_ref()?;
+            let observed_parent = self.head_sha_full()?;
+            if observed_branch_ref != branch_ref || observed_parent != parent_oid {
+                return Err(UpstrokeError::Git {
+                    message: format!(
+                        "HEAD moved from captured branch {branch_ref} at {parent_oid} to {observed_branch_ref} at {observed_parent}; refusing to prepare it"
+                    ),
+                });
+            }
         }
         if message.trim().is_empty() || message.contains('\r') || message.contains('\n') {
             return Err(UpstrokeError::Git {
@@ -1041,7 +1155,7 @@ impl Workspace {
         if self.validate_prepared_ref(&prepared.pin_ref).is_err() {
             return Ok(false);
         }
-        let output = git_command(&self.root)
+        let output = git_command(&self.root, self.scope())
             .args(["cat-file", "commit", &prepared.commit_sha])
             .output()
             .map_err(|e| UpstrokeError::Git {
@@ -1098,7 +1212,7 @@ impl Workspace {
     }
 
     fn symbolic_ref_target(&self, refname: &str) -> Result<Option<String>, UpstrokeError> {
-        let output = git_command(&self.root)
+        let output = git_command(&self.root, self.scope())
             .args(["symbolic-ref", "--quiet", "--no-recurse", refname])
             .output()
             .map_err(|e| UpstrokeError::Git {
@@ -1133,7 +1247,7 @@ impl Workspace {
                 ),
             });
         }
-        let output = git_command(&self.root)
+        let output = git_command(&self.root, self.scope())
             .args(["rev-parse", "--verify", "--quiet", pin_ref])
             .output()
             .map_err(|e| UpstrokeError::Git {
@@ -1238,6 +1352,805 @@ impl Workspace {
         self.git_with_private_hooks(&["reset", "-q", "--hard", "HEAD"])?;
         self.git_with_private_hooks(&["clean", "-qfd"]).map(|_| ())
     }
+
+    pub(crate) fn pin_checkout(
+        &self,
+        pin: &KeptPin<'_>,
+    ) -> Result<Option<PreparedCommit>, UpstrokeError> {
+        let head = self.head_sha_full()?;
+        let head_tree = self.commit_tree_oid(&head)?;
+        let capture = self.capture_checkout(&head, &head_tree, true)?;
+        let pinned = if capture.tree == head_tree {
+            Ok(None)
+        } else {
+            self.prepare_commit_from_candidate(
+                pin.branch_ref,
+                &head,
+                &capture.tree,
+                pin.message,
+                pin.pin_ref,
+            )
+            .map(Some)
+        };
+        capture.remove();
+        pinned
+    }
+
+    pub(crate) fn discard_into_kept_pin(
+        &self,
+        pin: &KeptPin<'_>,
+        head: &str,
+        copies: &KeptCopies<'_>,
+    ) -> Result<KeptDiscard, UpstrokeError> {
+        let head_tree = self.commit_tree_oid(head)?;
+        let capture = self.capture_checkout(head, &head_tree, true)?;
+        let held = self.discard_held(&capture, pin, head, &head_tree, copies);
+        capture.remove();
+        let mut discard = held?;
+        discard.left_in_place = self.uncommitted_summary()?;
+        Ok(discard)
+    }
+
+    fn discard_held(
+        &self,
+        capture: &CheckoutCapture,
+        pin: &KeptPin<'_>,
+        head: &str,
+        head_tree: &str,
+        copies: &KeptCopies<'_>,
+    ) -> Result<KeptDiscard, UpstrokeError> {
+        let mut discard = KeptDiscard {
+            kept: None,
+            copy: None,
+            restored_from: None,
+            left_in_place: Vec::new(),
+        };
+        if capture.tree == head_tree {
+            self.git_with_private_hooks(&["read-tree", "--reset", head])?;
+            return Ok(discard);
+        }
+        let changes = capture.view.changed_paths(head_tree, &capture.tree)?;
+        let mut found = self.attempt_copies(copies, pin.pin_ref)?.into_iter();
+        let first = found.next();
+        let different = first
+            .as_ref()
+            .and_then(|(_, commit)| found.find(|(_, named)| named != commit));
+        if let (Some((copy, commit)), Some((other, named))) = (&first, different) {
+            return Err(UpstrokeError::Git {
+                message: format!(
+                    "the copies {} and {} of `{}` name different commits, {commit} and {named}",
+                    copy.display(),
+                    other.display(),
+                    pin.pin_ref
+                ),
+            });
+        }
+        let (commit, mut left) = match (self.prepared_pin_target(pin.pin_ref)?, first) {
+            (None, None) => (
+                self.prepare_commit_from_candidate(
+                    pin.branch_ref,
+                    head,
+                    &capture.tree,
+                    pin.message,
+                    pin.pin_ref,
+                )?
+                .commit_sha,
+                Vec::new(),
+            ),
+            (None, Some((copy, commit))) => {
+                self.restore_pin(&copy, &commit, pin)?;
+                discard.restored_from = Some(copy);
+                let unheld = self.held_by_pin(&changes, capture, pin, &commit)?;
+                (commit, unheld)
+            }
+            (Some(target), Some((copy, commit))) => {
+                if target != commit {
+                    return Err(UpstrokeError::Git {
+                        message: format!(
+                            "`{}` names {target}, but its copy {} names {commit}",
+                            pin.pin_ref,
+                            copy.display()
+                        ),
+                    });
+                }
+                let unheld = self.held_by_pin(&changes, capture, pin, &commit)?;
+                (commit, unheld)
+            }
+            (Some(target), None) => {
+                let unheld = self.held_by_pin(&changes, capture, pin, &target)?;
+                (target, unheld)
+            }
+        };
+        left.extend(
+            changes
+                .iter()
+                .filter(|change| change.submodule)
+                .map(|change| change.path.clone()),
+        );
+        let copy = self.copy_pin(copies, pin.pin_ref, head, &commit)?;
+        let reverted = if left.is_empty() {
+            capture.tree.clone()
+        } else {
+            self.leave_out(capture, &changes, &left)?
+        };
+        self.refuse_unsafe_checkout_tree(head_tree)?;
+        let refused = self
+            .revert(capture, head, head_tree, &reverted)
+            .map_err(|error| stopped_part_way(pin.pin_ref, &error.to_string()))?;
+        self.git_with_private_hooks(&["read-tree", "--reset", head])?;
+        self.check_reverted(pin.pin_ref, head, head_tree, &reverted, refused)?;
+        discard.kept = Some(commit);
+        discard.copy = Some(copy);
+        Ok(discard)
+    }
+
+    fn held_by_pin(
+        &self,
+        changes: &[TreeChange],
+        capture: &CheckoutCapture,
+        pin: &KeptPin<'_>,
+        commit: &str,
+    ) -> Result<Vec<Vec<u8>>, UpstrokeError> {
+        let pin_tree = self.commit_tree_oid(commit)?;
+        let upstrokes = match self.parent_sha(commit)? {
+            Some(parent_sha) => self.prepared_commit_matches(&PreparedCommit {
+                branch_ref: pin.branch_ref.to_owned(),
+                parent_sha,
+                tree_sha: pin_tree.clone(),
+                commit_sha: commit.to_owned(),
+                message: pin.message.to_owned(),
+                pin_ref: pin.pin_ref.to_owned(),
+            })?,
+            None => false,
+        };
+        if !upstrokes {
+            return Err(UpstrokeError::Git {
+                message: format!(
+                    "`{}` is not upstroke's kept commit of this attempt",
+                    pin.pin_ref
+                ),
+            });
+        }
+        let differs: BTreeMap<Vec<u8>, u8> = capture
+            .view
+            .changed_paths(&capture.tree, &pin_tree)?
+            .into_iter()
+            .map(|change| (change.path, change.status))
+            .collect();
+        let mut conflicts = Vec::new();
+        let mut in_the_way = Vec::new();
+        let mut unheld = Vec::new();
+        for change in changes.iter().filter(|change| !change.submodule) {
+            match (change.status, differs.get(&change.path).copied()) {
+                (b'D', _) | (_, None) => {}
+                (b'A', Some(b'D')) if capture.footprint_holds(&change.path) => {
+                    in_the_way.push(change.path.clone());
+                }
+                (b'A', Some(b'D')) => unheld.push(change.path.clone()),
+                _ => conflicts.push(change.path.clone()),
+            }
+        }
+        if !conflicts.is_empty() {
+            return Err(UpstrokeError::Git {
+                message: format!(
+                    "the checkout holds {} path(s) that `{}` holds otherwise: {}",
+                    conflicts.len(),
+                    pin.pin_ref,
+                    rendered_paths(&conflicts)
+                ),
+            });
+        }
+        if !in_the_way.is_empty() {
+            return Err(UpstrokeError::Git {
+                message: format!(
+                    "the discard would have to remove {} to put back what HEAD holds there, and \
+                     `{}` does not hold them; move them out of the way",
+                    rendered_paths(&in_the_way),
+                    pin.pin_ref
+                ),
+            });
+        }
+        Ok(unheld)
+    }
+
+    fn leave_out(
+        &self,
+        capture: &CheckoutCapture,
+        changes: &[TreeChange],
+        paths: &[Vec<u8>],
+    ) -> Result<String, UpstrokeError> {
+        let mut input = Vec::new();
+        for change in changes.iter().filter(|change| paths.contains(&change.path)) {
+            input.extend_from_slice(&change.old_mode);
+            input.push(b' ');
+            input.extend_from_slice(&change.old_oid);
+            input.push(b'\t');
+            input.extend_from_slice(&change.path);
+            input.push(0);
+        }
+        capture
+            .view
+            .git_output_with_input(&controlled(&["update-index", "-z", "--index-info"]), input)?;
+        capture.view.private_tree()
+    }
+
+    fn attempt_copies(
+        &self,
+        copies: &KeptCopies<'_>,
+        pin_ref: &str,
+    ) -> Result<Vec<(PathBuf, String)>, UpstrokeError> {
+        let entries = match fs::read_dir(copies.directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(source) => {
+                return Err(UpstrokeError::Io {
+                    path: copies.directory.to_path_buf(),
+                    source,
+                });
+            }
+        };
+        let mut names = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|source| UpstrokeError::Io {
+                path: copies.directory.to_path_buf(),
+                source,
+            })?;
+            if let Some(name) = entry
+                .file_name()
+                .to_str()
+                .filter(|name| is_attempt_copy(name, copies.stem))
+            {
+                names.push(name.to_owned());
+            }
+        }
+        names.sort();
+        let mut found = Vec::new();
+        for name in names {
+            let copy = copies.directory.join(name);
+            let relative = self.relative_to_root(&copy)?;
+            let Ok(heads) = self.git(&["bundle", "list-heads", &relative]) else {
+                continue;
+            };
+            let mut lines = heads.lines();
+            let only = match (lines.next(), lines.next()) {
+                (Some(line), None) => line.split_once(' '),
+                _ => None,
+            };
+            if let Some((oid, _)) =
+                only.filter(|(oid, named)| *named == pin_ref && valid_object_id(oid))
+            {
+                found.push((copy, oid.to_owned()));
+            }
+        }
+        Ok(found)
+    }
+
+    fn restore_pin(
+        &self,
+        copy: &Path,
+        commit: &str,
+        pin: &KeptPin<'_>,
+    ) -> Result<(), UpstrokeError> {
+        let relative = self.relative_to_root(copy)?;
+        self.git_output_with_private_hooks(&["bundle", "unbundle", &relative])?;
+        let tree = self.commit_tree_oid(commit)?;
+        let upstrokes = match self.parent_sha(commit)? {
+            Some(parent_sha) => self.prepared_commit_matches(&PreparedCommit {
+                branch_ref: pin.branch_ref.to_owned(),
+                parent_sha,
+                tree_sha: tree,
+                commit_sha: commit.to_owned(),
+                message: pin.message.to_owned(),
+                pin_ref: pin.pin_ref.to_owned(),
+            })?,
+            None => false,
+        };
+        if !upstrokes {
+            return Err(UpstrokeError::Git {
+                message: format!(
+                    "the copy {} names {commit}, which is not upstroke's kept commit of this attempt",
+                    copy.display()
+                ),
+            });
+        }
+        let zero = "0".repeat(commit.len());
+        self.prepared_update_ref(&[
+            "update-ref",
+            "--no-deref",
+            "-m",
+            "upstroke: restore kept pin from its copy",
+            pin.pin_ref,
+            commit,
+            &zero,
+        ])?;
+        if self.prepared_pin_target(pin.pin_ref)?.as_deref() != Some(commit) {
+            return Err(UpstrokeError::Git {
+                message: format!("`{}` did not become {commit} again", pin.pin_ref),
+            });
+        }
+        Ok(())
+    }
+
+    fn copy_pin(
+        &self,
+        copies: &KeptCopies<'_>,
+        pin_ref: &str,
+        head: &str,
+        commit: &str,
+    ) -> Result<PathBuf, UpstrokeError> {
+        let name = format!("{}-{}", copies.stem, crate::ulid::ulid());
+        let partial = copies.directory.join(format!("{name}.partial"));
+        let copy = copies.directory.join(format!("{name}.bundle"));
+        let written = self.write_copy(&partial, &copy, pin_ref, head, commit);
+        if written.is_err() {
+            let _ = fs::remove_file(&partial);
+        }
+        written.map(|()| copy)
+    }
+
+    fn write_copy(
+        &self,
+        partial: &Path,
+        copy: &Path,
+        pin_ref: &str,
+        head: &str,
+        commit: &str,
+    ) -> Result<(), UpstrokeError> {
+        let relative = self.relative_to_root(partial)?;
+        let base = format!("^{head}");
+        self.git_output_with_private_hooks(&["bundle", "create", &relative, pin_ref, &base])?;
+        let heads = self.git(&["bundle", "list-heads", &relative])?;
+        if heads.trim() != format!("{commit} {pin_ref}") {
+            return Err(UpstrokeError::Git {
+                message: format!(
+                    "the copy of `{pin_ref}` at {} names `{}`, not {commit}",
+                    partial.display(),
+                    heads.trim()
+                ),
+            });
+        }
+        let written = OpenOptions::new()
+            .write(true)
+            .open(partial)
+            .map_err(|source| UpstrokeError::Io {
+                path: partial.to_path_buf(),
+                source,
+            })?;
+        written.sync_all().map_err(|source| UpstrokeError::Io {
+            path: partial.to_path_buf(),
+            source,
+        })?;
+        fs::rename(partial, copy).map_err(|source| UpstrokeError::Io {
+            path: copy.to_path_buf(),
+            source,
+        })?;
+        sync_parent(copy)
+    }
+
+    fn relative_to_root(&self, path: &Path) -> Result<String, UpstrokeError> {
+        let outside = || UpstrokeError::Git {
+            message: format!(
+                "the kept pin's copy {} is not under a UTF-8 path inside the checkout",
+                path.display()
+            ),
+        };
+        let (Some(directory), Some(name)) = (path.parent(), path.file_name()) else {
+            return Err(outside());
+        };
+        let canonical = |at: &Path| {
+            fs::canonicalize(at).map_err(|source| UpstrokeError::Io {
+                path: at.to_path_buf(),
+                source,
+            })
+        };
+        let root = canonical(&self.root)?;
+        let directory = canonical(directory)?;
+        let inside = directory.strip_prefix(&root).map_err(|_| outside())?;
+        let mut relative = String::new();
+        for component in inside.components() {
+            relative.push_str(component.as_os_str().to_str().ok_or_else(outside)?);
+            relative.push('/');
+        }
+        relative.push_str(name.to_str().ok_or_else(outside)?);
+        Ok(relative)
+    }
+
+    fn revert(
+        &self,
+        capture: &CheckoutCapture,
+        head: &str,
+        head_tree: &str,
+        reverted: &str,
+    ) -> Result<Option<String>, UpstrokeError> {
+        let restored: Vec<TreeChange> = capture
+            .view
+            .changed_paths(head_tree, reverted)?
+            .into_iter()
+            .filter(|change| change.status == b'D')
+            .collect();
+        let target = self.tree_without(head, &restored)?;
+        capture.view.git_with_private_hooks(&controlled(&[
+            "read-tree",
+            "-m",
+            "-u",
+            reverted,
+            &target,
+        ]))?;
+        if restored.is_empty() {
+            return Ok(None);
+        }
+        let mut entries = Vec::new();
+        let mut paths = Vec::new();
+        for change in &restored {
+            entries.extend_from_slice(&change.old_mode);
+            entries.push(b' ');
+            entries.extend_from_slice(&change.old_oid);
+            entries.push(b'\t');
+            entries.extend_from_slice(&change.path);
+            entries.push(0);
+            paths.extend_from_slice(&change.path);
+            paths.push(0);
+        }
+        capture.view.git_output_with_input(
+            &controlled(&["update-index", "-z", "--index-info"]),
+            entries,
+        )?;
+        Ok(capture
+            .view
+            .git_output_with_input(&controlled(&["checkout-index", "-z", "--stdin"]), paths)
+            .err()
+            .map(|error| error.to_string()))
+    }
+
+    fn tree_without(&self, head: &str, without: &[TreeChange]) -> Result<String, UpstrokeError> {
+        let view = self.with_private_index(self.private_index_file("-tree")?);
+        let built = view.tree_of(head, without);
+        view.remove_private_index();
+        built
+    }
+
+    fn tree_of(&self, head: &str, without: &[TreeChange]) -> Result<String, UpstrokeError> {
+        self.git_output_with_private_hooks(&controlled(&["read-tree", head]))?;
+        if !without.is_empty() {
+            let mut paths = Vec::new();
+            for change in without {
+                paths.extend_from_slice(&change.path);
+                paths.push(0);
+            }
+            self.git_output_with_input(
+                &controlled(&["update-index", "--force-remove", "-z", "--stdin"]),
+                paths,
+            )?;
+        }
+        self.private_tree()
+    }
+
+    fn check_reverted(
+        &self,
+        pin_ref: &str,
+        head: &str,
+        head_tree: &str,
+        reverted: &str,
+        refused: Option<String>,
+    ) -> Result<(), UpstrokeError> {
+        let after = self.capture_checkout(head, head_tree, false)?;
+        let still = after.view.changed_paths(head_tree, &after.tree);
+        let changed = after.view.changed_paths(head_tree, reverted);
+        after.remove();
+        let still: BTreeSet<Vec<u8>> = still?.into_iter().map(|change| change.path).collect();
+        let unreverted: Vec<Vec<u8>> = changed?
+            .into_iter()
+            .filter(|change| !change.submodule && still.contains(&change.path))
+            .map(|change| change.path)
+            .collect();
+        if !unreverted.is_empty() || refused.is_some() {
+            return Err(stopped_part_way(
+                pin_ref,
+                &format!(
+                    "{} not reverted{}",
+                    rendered_paths(&unreverted),
+                    refused
+                        .map(|refusal| format!("; {refusal}"))
+                        .unwrap_or_default()
+                ),
+            ));
+        }
+        let now = self.head_sha_full()?;
+        if now != head {
+            return Err(UpstrokeError::Git {
+                message: format!(
+                    "the run branch moved from {head} to {now} during the discard; what the discard removed is kept at `{pin_ref}` and its copy"
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    fn capture_checkout(
+        &self,
+        base: &str,
+        base_tree: &str,
+        footprint: bool,
+    ) -> Result<CheckoutCapture, UpstrokeError> {
+        self.refuse_worktree_filters_before("git add")?;
+        let mut capture = CheckoutCapture {
+            view: self.with_private_index(self.private_index_file("")?),
+            tree: String::new(),
+            footprint: Vec::new(),
+        };
+        match self.fill_capture(&mut capture, base, base_tree, footprint) {
+            Ok(()) => Ok(capture),
+            Err(error) => {
+                capture.remove();
+                Err(error)
+            }
+        }
+    }
+
+    fn fill_capture(
+        &self,
+        capture: &mut CheckoutCapture,
+        base: &str,
+        base_tree: &str,
+        footprint: bool,
+    ) -> Result<(), UpstrokeError> {
+        capture
+            .view
+            .git_output_with_private_hooks(&controlled(&["read-tree", base]))?;
+        let added = capture.view.run_git_with_private_hooks(&controlled(&[
+            "add",
+            "-A",
+            "--ignore-errors",
+        ]))?;
+        if !matches!(added.status.code(), Some(0 | 1)) {
+            return Err(UpstrokeError::Git {
+                message: format!(
+                    "git add -A --ignore-errors failed: {}",
+                    String::from_utf8_lossy(&added.stderr).trim()
+                ),
+            });
+        }
+        capture.tree = capture.view.private_tree()?;
+        if !footprint {
+            return Ok(());
+        }
+        let missing: Vec<Vec<u8>> = capture
+            .view
+            .changed_paths(base_tree, &capture.tree)?
+            .into_iter()
+            .filter(|change| change.status == b'D')
+            .map(|change| change.path)
+            .collect();
+        capture.footprint = self.in_the_way(&missing);
+        if capture.footprint.is_empty() {
+            return Ok(());
+        }
+        let mut input = Vec::new();
+        for path in &capture.footprint {
+            input.extend_from_slice(path);
+            input.push(0);
+        }
+        capture.view.git_output_with_input(
+            &controlled(&[
+                "--literal-pathspecs",
+                "add",
+                "-A",
+                "-f",
+                "--ignore-errors",
+                "--pathspec-from-file=-",
+                "--pathspec-file-nul",
+            ]),
+            input,
+        )?;
+        capture.tree = capture.view.private_tree()?;
+        Ok(())
+    }
+
+    fn in_the_way(&self, missing: &[Vec<u8>]) -> Vec<Vec<u8>> {
+        let mut found: Vec<Vec<u8>> = Vec::new();
+        for path in missing {
+            let ends = path
+                .iter()
+                .enumerate()
+                .filter(|(_, byte)| **byte == b'/')
+                .map(|(at, _)| at)
+                .chain(std::iter::once(path.len()));
+            for end in ends {
+                let Some(lead) = path.get(..end) else {
+                    break;
+                };
+                let Some(on_disk) = self.checkout_path(lead) else {
+                    break;
+                };
+                let Ok(metadata) = fs::symlink_metadata(&on_disk) else {
+                    break;
+                };
+                if end == path.len() || !metadata.is_dir() {
+                    if !found.iter().any(|known| known.as_slice() == lead) {
+                        found.push(lead.to_vec());
+                    }
+                    break;
+                }
+            }
+        }
+        found
+    }
+
+    fn checkout_path(&self, path: &[u8]) -> Option<PathBuf> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            Some(self.root.join(std::ffi::OsStr::from_bytes(path)))
+        }
+        #[cfg(not(unix))]
+        {
+            std::str::from_utf8(path)
+                .ok()
+                .map(|path| self.root.join(path))
+        }
+    }
+
+    fn private_index_file(&self, role: &str) -> Result<PathBuf, UpstrokeError> {
+        Ok(self.worktree_git_dir()?.join(format!(
+            "upstroke-kept-{}-{}{role}.index",
+            std::process::id(),
+            crate::ulid::ulid()
+        )))
+    }
+
+    fn with_private_index(&self, index: PathBuf) -> Self {
+        Self {
+            root: self.root.clone(),
+            private_index: Some(index),
+            checkout: self.checkout.clone(),
+        }
+    }
+
+    fn remove_private_index(&self) {
+        if let Some(index) = &self.private_index {
+            let _ = fs::remove_file(index);
+        }
+    }
+
+    fn private_tree(&self) -> Result<String, UpstrokeError> {
+        let tree = self
+            .git_with_private_hooks(&controlled(&["write-tree"]))?
+            .trim()
+            .to_owned();
+        self.validate_tree_oid(&tree)?;
+        Ok(tree)
+    }
+
+    fn commit_tree_oid(&self, commit: &str) -> Result<String, UpstrokeError> {
+        let revision = format!("{commit}^{{tree}}");
+        let tree = self
+            .git(&["rev-parse", "--verify", &revision])?
+            .trim()
+            .to_owned();
+        self.validate_tree_oid(&tree)?;
+        Ok(tree)
+    }
+
+    fn changed_paths(&self, from: &str, to: &str) -> Result<Vec<TreeChange>, UpstrokeError> {
+        let output = self.git_output_with_private_hooks(&controlled(&[
+            "diff-tree",
+            "-r",
+            "-z",
+            "--no-renames",
+            "--raw",
+            "--ignore-submodules=none",
+            from,
+            to,
+        ]))?;
+        let mut fields = output
+            .split(|byte| *byte == 0)
+            .filter(|field| !field.is_empty());
+        let mut changed = Vec::new();
+        while let Some(record) = fields.next() {
+            let mut parts = record
+                .strip_prefix(b":")
+                .unwrap_or(record)
+                .split(|byte| *byte == b' ');
+            let (Some(old_mode), Some(new_mode), Some(old_oid), Some(status), Some(path)) = (
+                parts.next(),
+                parts.next(),
+                parts.next(),
+                record.last().copied(),
+                fields.next(),
+            ) else {
+                return Err(UpstrokeError::Git {
+                    message: "git diff-tree returned a malformed raw record".to_owned(),
+                });
+            };
+            changed.push(TreeChange {
+                path: path.to_vec(),
+                status,
+                submodule: old_mode == b"160000" || new_mode == b"160000",
+                old_mode: old_mode.to_vec(),
+                old_oid: old_oid.to_vec(),
+            });
+        }
+        Ok(changed)
+    }
+}
+
+pub(crate) struct KeptPin<'a> {
+    pub(crate) branch_ref: &'a str,
+    pub(crate) message: &'a str,
+    pub(crate) pin_ref: &'a str,
+}
+
+pub(crate) struct KeptCopies<'a> {
+    pub(crate) directory: &'a Path,
+    pub(crate) stem: &'a str,
+}
+
+pub(crate) struct KeptDiscard {
+    pub(crate) kept: Option<String>,
+    pub(crate) copy: Option<PathBuf>,
+    pub(crate) restored_from: Option<PathBuf>,
+    pub(crate) left_in_place: Vec<String>,
+}
+
+struct CheckoutCapture {
+    view: Workspace,
+    tree: String,
+    footprint: Vec<Vec<u8>>,
+}
+
+struct TreeChange {
+    path: Vec<u8>,
+    status: u8,
+    submodule: bool,
+    old_mode: Vec<u8>,
+    old_oid: Vec<u8>,
+}
+
+impl CheckoutCapture {
+    fn footprint_holds(&self, path: &[u8]) -> bool {
+        self.footprint.iter().any(|way| {
+            path.strip_prefix(way.as_slice())
+                .is_some_and(|rest| rest.is_empty() || rest.first() == Some(&b'/'))
+        })
+    }
+
+    fn remove(&self) {
+        self.view.remove_private_index();
+    }
+}
+
+fn controlled<'a>(command: &[&'a str]) -> Vec<&'a str> {
+    let mut args: Vec<&'a str> = CAPTURE_CONTROLS.to_vec();
+    args.extend_from_slice(command);
+    args
+}
+
+fn is_attempt_copy(name: &str, stem: &str) -> bool {
+    name.strip_prefix(stem)
+        .and_then(|rest| rest.strip_prefix('-'))
+        .and_then(|rest| rest.strip_suffix(".bundle"))
+        .is_some_and(|ulid| {
+            ulid.len() == 26
+                && ulid
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || byte.is_ascii_uppercase())
+        })
+}
+
+fn stopped_part_way(pin_ref: &str, detail: &str) -> UpstrokeError {
+    UpstrokeError::Git {
+        message: format!(
+            "the discard of what `{pin_ref}` and its copy hold stopped part-way: {detail}"
+        ),
+    }
+}
+
+fn rendered_paths(paths: &[Vec<u8>]) -> String {
+    paths
+        .iter()
+        .map(|path| format!("`{}`", String::from_utf8_lossy(path)))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 const GIT_FLOOR: (u32, u32) = (2, 41);
@@ -1559,35 +2472,39 @@ fn cleanup_gate_workspace(
 ) -> Result<(), UpstrokeError> {
     let mut hooks_config = OsString::from("core.hooksPath=");
     hooks_config.push(hooks_path);
-    let mut command = git_command(source_root);
-    command
-        .arg("-c")
-        .arg(&hooks_config)
-        .args([
-            "-c",
-            "core.fsmonitor=false",
-            "worktree",
-            "remove",
-            "--force",
-        ])
-        .arg(path);
-    let removal = output_past_anothers_empty_commondir(
-        path.file_name().unwrap_or_default(),
-        &mut || true,
-        &mut || command.output(),
-    )
-    .map_err(|error| UpstrokeError::Git {
-        message: format!("failed to remove gate worktree {}: {error}", path.display()),
-    })?;
-    if worktree_is_registered(source_root, path, &hooks_config)? {
-        return Err(UpstrokeError::Git {
-            message: format!(
-                "could not reclaim registered gate worktree {}: {}",
-                path.display(),
-                String::from_utf8_lossy(&removal.stderr).trim()
-            ),
-        });
-    }
+    tolerant_registry_access(
+        &canonical_common_dir(source_root)?,
+        RegistryHold::Unheld,
+        &mut legacy_registry_pause,
+        &mut || Again::Attempt,
+        &mut || {
+            let removal = git_command(source_root, GitScope::Registry)
+                .arg("-c")
+                .arg(&hooks_config)
+                .args([
+                    "-c",
+                    "core.fsmonitor=false",
+                    "worktree",
+                    "remove",
+                    "--force",
+                ])
+                .arg(path)
+                .output()
+                .map_err(|error| UpstrokeError::Git {
+                    message: format!("failed to remove gate worktree {}: {error}", path.display()),
+                })?;
+            if worktree_is_registered(source_root, path, &hooks_config)? {
+                return Err(UpstrokeError::Git {
+                    message: format!(
+                        "could not reclaim registered gate worktree {}: {}",
+                        path.display(),
+                        String::from_utf8_lossy(&removal.stderr).trim()
+                    ),
+                });
+            }
+            Ok(())
+        },
+    )?;
     let _ = fs::remove_dir_all(path);
     let _ = fs::remove_dir_all(hooks_path);
     match fs::remove_file(intent_path) {
@@ -1609,28 +2526,90 @@ fn cleanup_gate_workspace(
     Ok(())
 }
 
+fn canonical_common_dir(root: &Path) -> Result<PathBuf, UpstrokeError> {
+    let probe = Workspace {
+        root: root.to_path_buf(),
+        private_index: None,
+        checkout: None,
+    };
+    let common = probe.git_path(&["rev-parse", "--path-format=absolute", "--git-common-dir"])?;
+    fs::canonicalize(&common).map_err(|source| UpstrokeError::Io {
+        path: common.clone(),
+        source,
+    })
+}
+
+fn legacy_registry_pause(pause: std::time::Duration) -> Result<(), UpstrokeError> {
+    std::thread::sleep(pause);
+    Ok(())
+}
+
+fn legacy_add_veto(path: &Path) -> Again {
+    let undecidable = |what: String| Again::Undecidable {
+        why: format!("the snapshot destination {} {what}", path.display()),
+    };
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return undecidable(
+                "is gone after the failed add: Git took it over, or may have, and nothing \
+                 outside Git tells the add's own failure from a registration deleted under it"
+                    .to_owned(),
+            );
+        }
+        Err(error) => return undecidable(format!("could not be read: {error}")),
+    };
+    if !metadata.file_type().is_dir() {
+        return undecidable("is not a directory".to_owned());
+    }
+    match fs::read_dir(path).map(|mut entries| entries.next()) {
+        Ok(None) => {}
+        Ok(Some(Ok(_))) => return undecidable("is not empty".to_owned()),
+        Ok(Some(Err(error))) | Err(error) => {
+            return undecidable(format!("could not be listed: {error}"));
+        }
+    }
+    if let Err(error) = fs::remove_dir(path) {
+        return undecidable(format!(
+            "is an empty directory this access cannot remove ({error})"
+        ));
+    }
+    remake_destination(path)
+}
+
+fn remake_destination(path: &Path) -> Again {
+    match create_private_dir(path) {
+        Ok(()) => Again::Attempt,
+        Err(error) => Again::Undecidable {
+            why: format!(
+                "the snapshot destination {} was removed empty and could not be made again: \
+                 {error}",
+                path.display()
+            ),
+        },
+    }
+}
+
 fn worktree_is_registered(
     source_root: &Path,
     path: &Path,
     hooks_config: &std::ffi::OsStr,
 ) -> Result<bool, UpstrokeError> {
-    let mut command = git_command(source_root);
-    command.arg("-c").arg(hooks_config).args([
-        "-c",
-        "core.fsmonitor=false",
-        "worktree",
-        "list",
-        "--porcelain",
-        "-z",
-    ]);
-    let output = output_past_anothers_empty_commondir(
-        path.file_name().unwrap_or_default(),
-        &mut || true,
-        &mut || command.output(),
-    )
-    .map_err(|error| UpstrokeError::Git {
-        message: format!("failed to verify gate-worktree reclamation: {error}"),
-    })?;
+    let output = git_command(source_root, GitScope::Registry)
+        .arg("-c")
+        .arg(hooks_config)
+        .args([
+            "-c",
+            "core.fsmonitor=false",
+            "worktree",
+            "list",
+            "--porcelain",
+            "-z",
+        ])
+        .output()
+        .map_err(|error| UpstrokeError::Git {
+            message: format!("failed to verify gate-worktree reclamation: {error}"),
+        })?;
     if !output.status.success() {
         return Err(UpstrokeError::Git {
             message: format!(
@@ -1644,70 +2623,6 @@ fn worktree_is_registered(
         .split(|byte| *byte == 0)
         .filter_map(|field| field.strip_prefix(b"worktree "))
         .any(|field| git_path_field_matches(field, path)))
-}
-
-const REGISTRY_TEAR_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
-
-const REGISTRY_TEAR_BACKOFF_CEILING: std::time::Duration = std::time::Duration::from_millis(50);
-
-fn output_past_anothers_empty_commondir(
-    own: &std::ffi::OsStr,
-    may_repeat: &mut dyn FnMut() -> bool,
-    run: &mut dyn FnMut() -> std::io::Result<Output>,
-) -> std::io::Result<Output> {
-    output_past_anothers_empty_commondir_until(
-        std::time::Instant::now() + REGISTRY_TEAR_DEADLINE,
-        own,
-        may_repeat,
-        run,
-    )
-}
-
-fn output_past_anothers_empty_commondir_until(
-    deadline: std::time::Instant,
-    own: &std::ffi::OsStr,
-    may_repeat: &mut dyn FnMut() -> bool,
-    run: &mut dyn FnMut() -> std::io::Result<Output>,
-) -> std::io::Result<Output> {
-    let mut pause = std::time::Duration::from_millis(1);
-    loop {
-        let output = run()?;
-        if !read_anothers_empty_commondir(&output, own) || !may_repeat() {
-            return Ok(output);
-        }
-        let now = std::time::Instant::now();
-        if now >= deadline {
-            return Ok(output);
-        }
-        std::thread::sleep(pause.min(deadline.saturating_duration_since(now)));
-        pause = pause.saturating_mul(2).min(REGISTRY_TEAR_BACKOFF_CEILING);
-    }
-}
-
-fn read_anothers_empty_commondir(output: &Output, own: &std::ffi::OsStr) -> bool {
-    if output.status.code() != Some(128) {
-        return false;
-    }
-    let Some(line) = output.stderr.strip_suffix(b"\n") else {
-        return false;
-    };
-    let Some(registration) = line
-        .strip_prefix(b"fatal: failed to read ")
-        .and_then(|rest| rest.strip_suffix(b"/commondir: Success"))
-    else {
-        return false;
-    };
-    let mut components = registration.rsplit(|byte| *byte == b'/');
-    let id = components.next().unwrap_or_default();
-    !line.contains(&b'\n')
-        && components.next() == Some(b"worktrees".as_slice())
-        && !id.is_empty()
-        && !id.starts_with(own.as_encoded_bytes())
-}
-
-fn is_an_empty_directory(path: &Path) -> bool {
-    fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir())
-        && fs::read_dir(path).is_ok_and(|mut entries| entries.next().is_none())
 }
 
 #[cfg(unix)]
@@ -2031,7 +2946,9 @@ mod tests {
             .expect("the scope the v0.1 runner reads");
         assert_eq!(
             scope.common_dir(),
-            fs::canonicalize(repo.join(".git")).expect("the canonical common directory"),
+            strip_verbatim(
+                fs::canonicalize(repo.join(".git")).expect("the canonical common directory"),
+            ),
         );
         let include = private.join("git").join("recorded-objects.gitconfig");
         assert_eq!(scope.include(), include);
@@ -2075,6 +2992,27 @@ mod tests {
             .map(|entry| entry.file_name())
             .collect();
         assert_eq!(staged.len(), 1, "no staged copy is left behind: {staged:?}");
+    }
+
+    /// Root's D2 (b) from the include's side, over a real repository: the scope
+    /// spells the common directory exactly as `WorkspaceManager::common_git_dir`
+    /// does, which `engine::topology::entry::one_spelling` requires of every
+    /// schema-4 run and resume before any role. On Windows the scope kept the
+    /// verbatim prefix the manager strips, and that check refused them all (CI
+    /// run 41520547341). Only a Windows host produces the prefix, so elsewhere
+    /// this holds without discriminating.
+    #[test]
+    fn the_recorded_objects_scope_spells_the_common_directory_as_the_workspace_manager_does() {
+        let fixture = crate::workspace_manager::fixture::Fixture::new("scope-spelling");
+        let scope = Workspace::open(&fixture.base)
+            .expect("open the managed base")
+            .recorded_objects_scope(Some(&fixture.private))
+            .expect("the include's repository");
+        assert_eq!(
+            scope.common_dir(),
+            fixture.manager.common_git_dir(),
+            "the include and the workspace manager spell one common directory two ways"
+        );
     }
 
     #[test]
@@ -3946,11 +4884,58 @@ mod tests {
              whoever adds it names its function here"
         );
 
-        for undo in ["env_remove(", "env_clear("] {
-            assert_eq!(
-                code.matches(undo).count(),
-                0,
-                "`{undo}` can take the pair back off a child `git_command` built"
+        assert_eq!(
+            code.matches("env_clear(").count(),
+            0,
+            "`env_clear(` can take the pair back off a child `git_command` built"
+        );
+        let removals_elsewhere: Vec<usize> = code
+            .match_indices("env_remove(")
+            .map(|(at, _)| at)
+            .filter(|at| !(start..=close).contains(at))
+            .collect();
+        assert!(
+            removals_elsewhere.is_empty(),
+            "`env_remove(` outside `git_command` at byte offsets {removals_elsewhere:?} can take \
+             the pair back off a child it built"
+        );
+        assert_eq!(
+            builder.matches("env_remove(").count(),
+            2,
+            "`git_command` removes the work tree's names and nothing else: {builder}"
+        );
+        assert!(
+            builder.contains("command.env_remove(INDEX_SELECTOR);")
+                && builder.contains("fornameinWORK_TREE_SELECTORS{command.env_remove(name);}"),
+            "the two removals are the index selector, for a `git worktree` command, and each of \
+             the four work-tree selectors, for a child in a work tree the engine made: {builder}"
+        );
+        assert_eq!(
+            WORK_TREE_SELECTORS.as_slice(),
+            [
+                "GIT_DIR",
+                "GIT_WORK_TREE",
+                "GIT_IMPLICIT_WORK_TREE",
+                "GIT_INDEX_FILE"
+            ],
+            "the census blanks string literals, so the names removed are read here"
+        );
+        assert_eq!(INDEX_SELECTOR, "GIT_INDEX_FILE");
+        assert!(
+            WORK_TREE_SELECTORS
+                .iter()
+                .chain([&INDEX_SELECTOR, &COMMON_DIR])
+                .all(|name| *name != NO_REPLACEMENT_OBJECTS.0),
+            "a name `git_command` removes or replaces must never be the replacement variable"
+        );
+        let pair = builder
+            .find(".env(NO_REPLACEMENT_OBJECTS.0,NO_REPLACEMENT_OBJECTS.1)")
+            .expect("the pair, asserted above");
+        for scoped in ["env_remove(", ".env(COMMON_DIR,"] {
+            assert!(
+                builder.rfind(scoped).is_some_and(|at| at < pair),
+                "the replacement variable is set after the work tree's names, `{scoped}` \
+                 included: {builder}"
             );
         }
     }
@@ -4123,6 +5108,24 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    const WEDGED_TEAR_FIXTURE: Duration = Duration::from_secs(30);
+
+    #[cfg(target_os = "linux")]
+    const PRODUCTION_REGISTRY_DEADLINE: Duration = Duration::from_secs(10);
+
+    #[cfg(target_os = "linux")]
+    fn refusal_attempts(message: &str) -> usize {
+        let (before, _) = message
+            .split_once(" attempt(s)")
+            .expect("a registry refusal names its attempts");
+        before
+            .rsplit(' ')
+            .next()
+            .and_then(|count| count.parse().ok())
+            .expect("the attempt count before ` attempt(s)`")
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_snapshot_add_is_attempted_again_past_another_registrations_empty_commondir() {
         let fixture = SnapshotRepo::new("w924-add-past-a-tear");
@@ -4147,6 +5150,10 @@ mod tests {
     fn a_snapshots_removal_and_its_list_are_attempted_again_past_another_registrations_empty_commondir()
      {
         let fixture = SnapshotRepo::new("w924-cleanup-past-a-tear");
+        let _deadline = crate::workspace_manager::RegistryDeadline::hold(
+            &common_git_dir_of(&fixture.repo),
+            PRODUCTION_REGISTRY_DEADLINE,
+        );
         let snapshot = fixture.snapshot().expect("a snapshot");
         let (path, hooks, intent) = (
             snapshot.path.clone(),
@@ -4156,15 +5163,16 @@ mod tests {
         let entry = fixture.plant_another_registration("w924-other");
         let ((), served) = serving_commondir(
             &entry,
-            &[Served::Torn, Served::Whole, Served::Torn],
+            &[Served::Torn, Served::Whole, Served::Whole, Served::Torn],
             &|_| {},
             || drop(snapshot),
         );
         assert_eq!(
             served,
-            [Served::Torn, Served::Whole, Served::Torn],
-            "the removal read the other registration's commondir empty, then whole, and the \
-             list after it empty"
+            [Served::Torn, Served::Whole, Served::Whole, Served::Torn],
+            "the first attempt's removal read the other registration's commondir empty and its \
+             list read it whole; the next attempt's removal read it whole, and its list, after \
+             that removal had passed, read it empty"
         );
         assert!(
             !fixture.registered(&path),
@@ -4178,7 +5186,8 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn an_empty_commondir_of_the_snapshots_own_registration_is_returned_at_once() {
+    fn an_empty_commondir_of_the_snapshots_own_registration_is_attempted_again_until_the_deadline_and_refused()
+     {
         let fixture = SnapshotRepo::new("w924-own-tear");
         let snapshot = fixture.snapshot().expect("a snapshot");
         let own = fixture
@@ -4189,6 +5198,8 @@ mod tests {
         let commondir = own.join("commondir");
         let whole = fs::read(&commondir).expect("its own commondir");
         fs::write(&commondir, "").expect("its own commondir, emptied");
+        let common = common_git_dir_of(&fixture.repo);
+        let before = crate::workspace_manager::contended_attempts(&common);
         let started = std::time::Instant::now();
         let cleaned = cleanup_gate_workspace(
             &snapshot.source_root,
@@ -4198,25 +5209,34 @@ mod tests {
         );
         let elapsed = started.elapsed();
         fs::write(&commondir, whole).expect("its own commondir, restored");
-        let error = match cleaned {
-            Ok(()) => panic!("a cleanup over its own empty commondir passed"),
-            Err(error) => error.to_string(),
-        };
+        let message = registry_refusal(cleaned, "a cleanup over its own empty commondir");
         let named = format!(
-            "fatal: failed to read {}: Success",
+            "the last failed with: git error: verifying gate-worktree reclamation failed: fatal: \
+             failed to read {}: Success",
             SnapshotRepo::commondir_as_git_names_it(
                 snapshot.path.file_name().expect("a snapshot's name")
             )
             .display()
         );
         assert!(
-            error.contains("verifying gate-worktree reclamation failed: ")
-                && error.ends_with(&named),
-            "{error}"
+            message.ends_with(&named),
+            "the refusal names its own registration's empty read as the last failure: {message}"
         );
         assert!(
-            elapsed < REGISTRY_TEAR_DEADLINE / 2,
-            "its own registration is never waited on: {elapsed:?}"
+            message.contains("kept this access from completing until its deadline (500ms)"),
+            "its own registration is attempted again like any other, until the access's \
+             nominal deadline: {message}"
+        );
+        let attempts = refusal_attempts(&message);
+        assert!(attempts >= 2, "it was attempted again: {message}");
+        assert_eq!(
+            crate::workspace_manager::contended_attempts(&common) - before,
+            attempts,
+            "every failed attempt was answered `Attempt`: {message}"
+        );
+        assert!(
+            elapsed >= Duration::from_millis(500),
+            "it was waited on until the nominal deadline: {elapsed:?}"
         );
         let path = snapshot.path.clone();
         drop(snapshot);
@@ -4225,31 +5245,47 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn another_registrations_commondir_git_cannot_read_is_returned_at_once() {
+    fn another_registrations_commondir_git_cannot_read_is_attempted_again_until_the_deadline_and_refused()
+     {
         let fixture = SnapshotRepo::new("w924-unreadable");
         let entry = fixture.plant_another_registration("w924-other");
         fs::create_dir(entry.join("commondir")).expect("a commondir Git cannot read");
+        let common = common_git_dir_of(&fixture.repo);
+        let before = crate::workspace_manager::contended_attempts(&common);
         let started = std::time::Instant::now();
-        let added = fixture.snapshot();
+        let added = fixture.snapshot().map(drop);
         let elapsed = started.elapsed();
-        let error = match added {
-            Ok(_) => panic!("an add over an unreadable commondir passed"),
-            Err(error) => error.to_string(),
-        };
+        let message = registry_refusal(added, "an add over an unreadable commondir");
         let named = format!(
-            "git worktree add failed: fatal: failed to read {}: Is a directory",
+            "the last failed with: git error: git worktree add failed: fatal: failed to read {}: \
+             Is a directory",
             SnapshotRepo::commondir_as_git_names_it(std::ffi::OsStr::new("w924-other")).display()
         );
-        assert!(error.ends_with(&named), "{error}");
         assert!(
-            elapsed < REGISTRY_TEAR_DEADLINE / 2,
-            "a failure that is not an empty read is never waited on: {elapsed:?}"
+            message.ends_with(&named),
+            "the refusal names the add's own Git error as the last failure: {message}"
+        );
+        assert!(
+            message.contains("kept this access from completing until its deadline (500ms)"),
+            "a failure that is not an empty read is attempted again too, until the access's \
+             nominal deadline: {message}"
+        );
+        let attempts = refusal_attempts(&message);
+        assert!(attempts >= 2, "it was attempted again: {message}");
+        assert!(
+            crate::workspace_manager::contended_attempts(&common) - before >= attempts,
+            "every failed attempt of the add was answered `Attempt`: {message}"
+        );
+        assert!(
+            elapsed >= Duration::from_millis(500),
+            "it was waited on until the nominal deadline: {elapsed:?}"
         );
     }
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn another_registrations_empty_commondir_that_outlasts_the_deadline_returns_the_adds_error() {
+    fn another_registrations_empty_commondir_that_outlasts_the_deadline_refuses_naming_the_adds_error()
+     {
         let fixture = SnapshotRepo::new("w924-outlasting-tear");
         let entry = fixture.plant_another_registration("w924-other");
         let commondir = entry.join("commondir");
@@ -4269,6 +5305,8 @@ mod tests {
         let hooks = fixture.store.join("w924-hooks");
         fs::create_dir_all(&destination).expect("an empty destination");
         fs::create_dir_all(&hooks).expect("an empty hooks directory");
+        let common = common_git_dir_of(&fixture.repo);
+        let before = crate::workspace_manager::contended_attempts(&common);
         let (sender, receiver) = std::sync::mpsc::channel();
         let ended = std::thread::scope(|scope| {
             scope.spawn(|| {
@@ -4278,44 +5316,49 @@ mod tests {
                     .add_gate_worktree(&destination, &hooks, commit.trim());
                 let _ = sender.send((added, started.elapsed()));
             });
-            let ended = receiver.recv_timeout(REGISTRY_TEAR_DEADLINE * 3);
+            let ended = receiver.recv_timeout(WEDGED_TEAR_FIXTURE);
             if ended.is_err() {
                 fs::write(&commondir, "../..\n").expect("the tear ended, so the add can stop");
             }
             ended
         });
         let (added, elapsed) = ended.unwrap_or_else(|_| {
-            panic!(
-                "the add was still attempting {:?} after it began",
-                REGISTRY_TEAR_DEADLINE * 3
-            )
+            panic!("the add was still attempting {WEDGED_TEAR_FIXTURE:?} after it began")
         });
-        let error = match added {
-            Ok(()) => panic!("an add over a tear nobody ends passed"),
-            Err(error) => error.to_string(),
-        };
+        let message = registry_refusal(added, "an add over a tear nobody ends");
         let named = format!(
-            "git worktree add failed: fatal: failed to read {}: Success",
+            "the last failed with: git error: git worktree add failed: fatal: failed to read {}: \
+             Success",
             SnapshotRepo::commondir_as_git_names_it(std::ffi::OsStr::new("w924-other")).display()
         );
-        assert!(error.ends_with(&named), "the add's own error: {error}");
         assert!(
-            elapsed >= REGISTRY_TEAR_DEADLINE,
-            "it was attempted again until its deadline: {elapsed:?}"
+            message.ends_with(&named),
+            "the refusal names the add's own Git error as the last failure: {message}"
         );
         assert!(
-            elapsed < REGISTRY_TEAR_DEADLINE + Duration::from_secs(5),
-            "and no longer: {elapsed:?}"
+            message.contains("kept this access from completing until its deadline (500ms)"),
+            "the refusal is the access's, past its nominal deadline: {message}"
+        );
+        let attempts = refusal_attempts(&message);
+        assert!(attempts >= 2, "it was attempted again: {message}");
+        assert_eq!(
+            crate::workspace_manager::contended_attempts(&common) - before,
+            attempts,
+            "every failed attempt was answered `Attempt`, the last included: {message}"
         );
         assert!(
-            is_an_empty_directory(&destination),
-            "and the destination was never taken"
+            elapsed >= Duration::from_millis(500),
+            "it was attempted again until its nominal deadline: {elapsed:?}"
+        );
+        assert!(
+            fs::read_dir(&destination).is_ok_and(|mut entries| entries.next().is_none()),
+            "and the destination is an empty directory, never taken"
         );
     }
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn a_destination_no_longer_empty_returns_the_adds_first_error() {
+    fn a_destination_no_longer_empty_refuses_at_once_naming_the_adds_first_error() {
         let fixture = SnapshotRepo::new("w924-touched-destination");
         let entry = fixture.plant_another_registration("w924-other");
         let worktrees = fixture.store.join("worktrees");
@@ -4326,21 +5369,30 @@ mod tests {
                     .expect("a file in the add's destination");
             }
         };
+        let common = common_git_dir_of(&fixture.repo);
+        let before = crate::workspace_manager::contended_attempts(&common);
         let (added, served) = serving_commondir(&entry, &[Served::Torn], &touch, || {
             fixture.snapshot().map(drop)
         });
         assert_eq!(served, [Served::Torn], "the add read the tear once");
-        let error = match added {
-            Ok(()) => panic!("an add whose destination was touched passed"),
-            Err(error) => error.to_string(),
-        };
+        let message = registry_refusal(added, "an add whose destination was touched");
         let named = format!(
-            "git worktree add failed: fatal: failed to read {}: Success",
+            "the last attempt failed with: git error: git worktree add failed: fatal: failed to \
+             read {}: Success",
             SnapshotRepo::commondir_as_git_names_it(std::ffi::OsStr::new("w924-other")).display()
         );
         assert!(
-            error.ends_with(&named),
-            "a destination Git may have taken returns the first error, unchanged: {error}"
+            message.ends_with(&named),
+            "the add's first failure, named as it was: {message}"
+        );
+        assert!(
+            message.contains("stopped after 1 attempt(s)") && message.contains("is not empty"),
+            "a destination Git may have taken refuses at once, at the add's veto: {message}"
+        );
+        assert_eq!(
+            crate::workspace_manager::contended_attempts(&common),
+            before,
+            "with no further attempt: {message}"
         );
     }
 
@@ -4359,7 +5411,7 @@ mod tests {
         let mut added = None;
         std::thread::scope(|scope| {
             let containment = scope.spawn(move || {
-                let wedged = wait.recv_timeout(REGISTRY_TEAR_DEADLINE * 3)
+                let wedged = wait.recv_timeout(WEDGED_TEAR_FIXTURE)
                     == Err(std::sync::mpsc::RecvTimeoutError::Timeout);
                 if wedged {
                     use std::os::unix::fs::OpenOptionsExt;
@@ -4480,223 +5532,1625 @@ mod tests {
         assert_eq!(added, Some(Ok(())), "and the add went on past it");
     }
 
-    #[test]
-    fn only_another_registrations_empty_commondir_reads_as_attempted_again() {
-        let status = |args: &[&str]| {
-            Command::new("git")
-                .args(args)
-                .output()
-                .expect("run git")
-                .status
-        };
-        let died = status(&["-C", "w924-no-such-directory", "status"]);
-        assert_eq!(died.code(), Some(128), "Git's death");
-        let refused = status(&["--w924-no-such-option"]);
-        assert_eq!(refused.code(), Some(129), "Git's usage refusal");
-        let succeeded = status(&["--version"]);
-        let output = |status, stderr: &str| Output {
-            status,
-            stdout: Vec::new(),
-            stderr: stderr.as_bytes().to_vec(),
-        };
-        let own = std::ffi::OsStr::new("upstroke-gates-1-01AAAAAAAAAAAAAAAAAAAAAAAA");
-        let other = "fatal: failed to read /r/.git/worktrees/upstroke-gates-2-01BBBBBBBBBBBBBBBBBBBBBBBB\
-                     /commondir: Success\n";
-        assert!(read_anothers_empty_commondir(&output(died, other), own));
-        assert!(read_anothers_empty_commondir(
-            &output(
-                died,
-                "fatal: failed to read .git/worktrees/w/commondir: Success\n"
-            ),
-            own
-        ));
-        for (stderr, why) in [
-            (
-                "fatal: failed to read /r/.git/worktrees/upstroke-gates-1-01AAAAAAAAAAAAAAAAAAAAAAAA\
-                 /commondir: Success\n",
-                "its own registration",
-            ),
-            (
-                "fatal: failed to read /r/.git/worktrees/upstroke-gates-1-01AAAAAAAAAAAAAAAAAAAAAAAA1\
-                 /commondir: Success\n",
-                "its own, under the suffix Git gives a taken name",
-            ),
-            (
-                "fatal: failed to read /r/.git/worktrees/w/commondir: No such file or directory\n",
-                "a removal's",
-            ),
-            (
-                "fatal: failed to read /r/.git/worktrees/w/commondir: Is a directory\n",
-                "a file Git cannot read",
-            ),
-            (
-                "fatal: failed to read '/r/.git/worktrees/w/locked'\n",
-                "a lock's",
-            ),
-            (
-                "fatal: failed to read /r/.git/worktrees/w/gitdir: Success\n",
-                "a gitdir's",
-            ),
-            (
-                "fatal: failed to read /r/.git/w/commondir: Success\n",
-                "a path outside the registry",
-            ),
-            (
-                "fatal: failed to read /r/.git/worktrees//commondir: Success\n",
-                "no registration's name",
-            ),
-            (
-                "warning: w924\nfatal: failed to read /r/.git/worktrees/w/commondir: Success\n",
-                "a second line",
-            ),
-            (
-                "fatal: failed to read /r/one\nfatal: failed to read /r/.git/worktrees/w/commondir: Success\n",
-                "two lines, each Git's death",
-            ),
-            (
-                "fatal: failed to read /r/.git/worktrees/w/commondir: Success",
-                "an unfinished line",
-            ),
-            (
-                "error: failed to read /r/.git/worktrees/w/commondir: Success\n",
-                "not Git's death",
-            ),
-        ] {
-            assert!(
-                !read_anothers_empty_commondir(&output(died, stderr), own),
-                "{why}: {stderr:?}"
-            );
+    fn common_git_dir_of(repo: &Path) -> PathBuf {
+        let common = String::from_utf8(run_git(
+            repo,
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        ))
+        .expect("a common git dir this test names is UTF-8");
+        fs::canonicalize(common.trim()).expect("the canonical common git dir")
+    }
+
+    fn as_git_writes_it(path: &Path) -> Vec<u8> {
+        GitdirRule::native().spelling(path.as_os_str().as_encoded_bytes())
+    }
+
+    fn plant_a_torn_registration(repo: &Path, name: &str) -> PathBuf {
+        let admin = common_git_dir_of(repo).join("worktrees").join(name);
+        fs::create_dir_all(&admin).expect("the foreign registration's directory");
+        let checkout = repo.with_file_name(format!("{name}-checkout")).join(".git");
+        let mut gitdir = as_git_writes_it(&checkout);
+        gitdir.push(b'\n');
+        fs::write(admin.join("gitdir"), gitdir).expect("its gitdir");
+        fs::write(admin.join("commondir"), b"").expect("its commondir, opened and not yet written");
+        admin
+    }
+
+    fn finish_the_registration(admin: &Path, head: &str) {
+        fs::write(admin.join("HEAD"), format!("{head}\n")).expect("the writer writes HEAD");
+        fs::write(admin.join("commondir"), "../..\n").expect("and then commondir");
+    }
+
+    struct OnceContended<T> {
+        done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        writer: std::thread::JoinHandle<Option<(usize, T)>>,
+    }
+
+    impl<T: Send + 'static> OnceContended<T> {
+        fn spawn(common: PathBuf, finish: impl FnOnce() -> T + Send + 'static) -> Self {
+            let before = crate::workspace_manager::contended_attempts(&common);
+            let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let stop = std::sync::Arc::clone(&done);
+            let writer = std::thread::spawn(move || {
+                let watchdog = std::time::Instant::now() + Duration::from_secs(60);
+                while std::time::Instant::now() < watchdog
+                    && !stop.load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    let now = crate::workspace_manager::contended_attempts(&common);
+                    if now > before {
+                        return Some((now - before, finish()));
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                None
+            });
+            Self { done, writer }
         }
+
+        fn join(self) -> Option<(usize, T)> {
+            self.done.store(true, std::sync::atomic::Ordering::SeqCst);
+            self.writer.join().expect("the writer thread")
+        }
+    }
+
+    fn snapshot_store(tree: &crate::rundir::scratch_tree::ScratchTree) -> PathBuf {
+        let store = tree.path().join("gate-store");
+        fs::create_dir(&store).expect("a private snapshot store");
+        store
+    }
+
+    fn entries_of(directory: &Path) -> Vec<PathBuf> {
+        match fs::read_dir(directory) {
+            Ok(entries) => entries
+                .map(|entry| entry.expect("a store entry").path())
+                .collect(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => panic!("listing {}: {error}", directory.display()),
+        }
+    }
+
+    fn registry_refusal<T>(result: Result<T, UpstrokeError>, what: &str) -> String {
+        match result {
+            Err(UpstrokeError::RegistryRefused { message }) => message,
+            Err(other) => panic!("{what}: a registry refusal, never {other:?}"),
+            Ok(_) => panic!("{what}: a registry refusal, not success"),
+        }
+    }
+
+    #[test]
+    fn a_snapshot_add_beside_a_tear_its_writer_finishes_is_attempted_past() {
+        let (tree, repo) = temp_repo("legacy-add-tear");
+        let ws = Workspace::open(&repo).expect("open");
+        let parent = ws.head_sha_full().expect("parent");
+        let candidate = ws.staged_tree_oid().expect("tree");
+        let store = snapshot_store(&tree);
+        let admin = plant_a_torn_registration(&repo, "foreign-add");
+        let destinations = store.join("worktrees");
+        let writer = OnceContended::spawn(common_git_dir_of(&repo), {
+            let (admin, head) = (admin.clone(), parent.clone());
+            move || {
+                let seen: Vec<(String, bool)> = entries_of(&destinations)
+                    .into_iter()
+                    .map(|path| {
+                        let empty =
+                            fs::read_dir(&path).is_ok_and(|mut entries| entries.next().is_none());
+                        (path.to_string_lossy().into_owned(), empty)
+                    })
+                    .collect();
+                finish_the_registration(&admin, &head);
+                seen
+            }
+        });
+        let result = ws.gate_snapshot_for_candidate_in_store(&parent, &candidate, &store);
+        let finished = writer.join();
+        let snapshot = result.expect("the add is attempted past a tear its writer finished");
         assert!(
-            !read_anothers_empty_commondir(&output(refused, other), own),
-            "an exit that is not Git's death"
+            snapshot.workspace().root().join("README.md").is_file(),
+            "the snapshot holds the candidate"
         );
+        let (contended, seen) = finished.expect("the add failed on the tear at least once");
+        assert!(contended >= 1, "{contended}");
+        assert_eq!(seen.len(), 1, "one snapshot destination: {seen:?}");
         assert!(
-            !read_anothers_empty_commondir(&output(succeeded, other), own),
-            "a success"
-        );
-        assert!(
-            !read_anothers_empty_commondir(&output(died, other), std::ffi::OsStr::new("")),
-            "a command whose own registration is unknown"
+            seen.iter().all(|(_, empty)| *empty),
+            "after the failed attempt the destination is still the empty directory the \
+             snapshot made: {seen:?}"
         );
     }
 
     #[test]
-    fn a_registry_command_is_attempted_again_only_while_its_answer_allows() {
-        let status = |args: &[&str]| {
-            Command::new("git")
-                .args(args)
-                .output()
-                .expect("run git")
-                .status
-        };
-        let output = |status, stderr: &str| Output {
-            status,
-            stdout: Vec::new(),
-            stderr: stderr.as_bytes().to_vec(),
-        };
-        let torn = output(
-            status(&["-C", "w924-no-such-directory", "status"]),
-            "fatal: failed to read /r/.git/worktrees/other/commondir: Success\n",
+    fn a_snapshot_add_beside_a_tear_that_stays_refuses_as_the_registrys_and_leaves_its_intent() {
+        let (tree, repo) = temp_repo("legacy-add-static");
+        let ws = Workspace::open(&repo).expect("open");
+        let parent = ws.head_sha_full().expect("parent");
+        let candidate = ws.staged_tree_oid().expect("tree");
+        let store = snapshot_store(&tree);
+        let admin = plant_a_torn_registration(&repo, "foreign-static");
+        let common = common_git_dir_of(&repo);
+        let before = crate::workspace_manager::contended_attempts(&common);
+        let message = registry_refusal(
+            ws.gate_snapshot_for_candidate_in_store(&parent, &candidate, &store),
+            "an add beside a tear that stays",
         );
-        let unrelated = output(torn.status, "fatal: w924 something else\n");
-        let passed = output(status(&["--version"]), "");
-        let own = std::ffi::OsStr::new("mine");
-        let far = || std::time::Instant::now() + Duration::from_secs(60);
-        let attempt = |deadline: std::time::Instant,
-                       repeat: bool,
-                       script: Vec<Output>|
-         -> (std::io::Result<Output>, usize, usize) {
-            let mut script = script.into_iter();
-            let (mut runs, mut asked) = (0, 0);
-            let got = output_past_anothers_empty_commondir_until(
-                deadline,
-                own,
-                &mut || {
-                    asked += 1;
-                    repeat
-                },
-                &mut || {
-                    runs += 1;
-                    script
-                        .next()
-                        .ok_or_else(|| std::io::Error::other("ran past the script"))
-                },
+        assert!(
+            crate::workspace_manager::contended_attempts(&common) > before,
+            "the add was attempted again"
+        );
+        assert!(
+            message.contains(&common.join("worktrees").display().to_string())
+                && message.contains("deadline"),
+            "the refusal names the store and its deadline: {message}"
+        );
+        assert_eq!(
+            entries_of(&store.join("intents")).len(),
+            1,
+            "the snapshot's intent stays for the reclaim"
+        );
+        fs::remove_dir_all(&admin).expect("the operator removes the torn registration");
+        assert_eq!(
+            ws.reclaim_gate_workspaces(&store)
+                .expect("the reclaim takes the refused snapshot once the store is whole"),
+            1
+        );
+        assert!(entries_of(&store.join("intents")).is_empty());
+    }
+
+    fn run_git_with_input(repo: &Path, args: &[&str], input: &[u8]) -> String {
+        let mut child = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("run git");
+        child
+            .stdin
+            .take()
+            .expect("git's stdin")
+            .write_all(input)
+            .expect("write git's input");
+        let output = child.wait_with_output().expect("wait for git");
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout)
+            .expect("git's output is UTF-8")
+            .trim()
+            .to_owned()
+    }
+
+    fn a_tree_no_checkout_can_make(repo: &Path, shape: &str) -> String {
+        let blob = run_git_with_input(repo, &["hash-object", "-w", "--stdin"], b"x\n");
+        if shape == "name-too-long" {
+            return run_git_with_input(
+                repo,
+                &["mktree"],
+                format!("100644 blob {blob}\t{}\n", "n".repeat(300)).as_bytes(),
             );
-            (got, runs, asked)
-        };
-
-        let (got, runs, asked) = attempt(
-            far(),
-            true,
-            vec![torn.clone(), torn.clone(), passed.clone()],
+        }
+        let file = run_git_with_input(
+            repo,
+            &["mktree"],
+            format!("100644 blob {blob}\tfile.txt\n").as_bytes(),
         );
-        assert_eq!(got.expect("the third attempt"), passed, "past two tears");
+        let entry = run_git_with_input(
+            repo,
+            &["mktree"],
+            format!("040000 tree {file}\tfake-entry\n").as_bytes(),
+        );
+        let store = run_git_with_input(
+            repo,
+            &["mktree"],
+            format!("040000 tree {entry}\tworktrees\n").as_bytes(),
+        );
+        run_git_with_input(
+            repo,
+            &["mktree"],
+            format!("040000 tree {store}\t.git\n100644 blob {blob}\tREADME.md\n").as_bytes(),
+        )
+    }
+
+    #[test]
+    fn a_snapshot_whose_checkout_cannot_be_made_refuses_after_one_attempt_and_leaves_nothing() {
+        for shape in ["git-path", "name-too-long"] {
+            if shape == "name-too-long" && !cfg!(unix) {
+                continue;
+            }
+            let (tree, repo) = temp_repo("legacy-add-cannot");
+            let ws = Workspace::open(&repo).expect("open");
+            let parent = ws.head_sha_full().expect("parent");
+            let candidate = a_tree_no_checkout_can_make(&repo, shape);
+            let store = snapshot_store(&tree);
+            let common = common_git_dir_of(&repo);
+            let before = crate::workspace_manager::contended_attempts(&common);
+            let message = registry_refusal(
+                ws.gate_snapshot_for_candidate_in_store(&parent, &candidate, &store),
+                shape,
+            );
+            assert_eq!(
+                crate::workspace_manager::contended_attempts(&common),
+                before,
+                "{shape}: one attempt, never attempted again"
+            );
+            assert!(
+                message.contains("1 attempt(s)") && message.contains("is gone"),
+                "{shape}: refused at once, because Git's junk removal took the destination: \
+                 {message}"
+            );
+            assert!(
+                entries_of(&store.join("worktrees")).is_empty(),
+                "{shape}: nothing is left at the destination"
+            );
+            assert!(
+                !String::from_utf8_lossy(&run_git(&repo, &["worktree", "list", "--porcelain"]))
+                    .contains("upstroke-gates-"),
+                "{shape}: and nothing stays registered"
+            );
+        }
+    }
+
+    #[test]
+    fn a_snapshot_removal_beside_a_tear_its_writer_finishes_takes_the_registration() {
+        let (tree, repo) = temp_repo("legacy-remove-tear");
+        let ws = Workspace::open(&repo).expect("open");
+        let parent = ws.head_sha_full().expect("parent");
+        let candidate = ws.staged_tree_oid().expect("tree");
+        let store = snapshot_store(&tree);
+        let snapshot = ws
+            .gate_snapshot_for_candidate_in_store(&parent, &candidate, &store)
+            .expect("a gate snapshot");
+        let root = snapshot.workspace().root().to_path_buf();
+        let admin = plant_a_torn_registration(&repo, "foreign-remove");
+        let writer = OnceContended::spawn(common_git_dir_of(&repo), {
+            let (admin, head) = (admin.clone(), parent.clone());
+            move || finish_the_registration(&admin, &head)
+        });
+        drop(snapshot);
+        let finished = writer.join();
+        assert!(
+            finished.is_some(),
+            "the removal failed on the tear at least once"
+        );
+        assert!(!root.exists(), "the snapshot's directory is gone");
+        let listed = String::from_utf8_lossy(&run_git(&repo, &["worktree", "list", "--porcelain"]))
+            .into_owned();
+        assert!(
+            !listed.contains("upstroke-gates-"),
+            "the snapshot's registration is gone: {listed}"
+        );
+        assert!(
+            entries_of(&store.join("intents")).is_empty(),
+            "and so is its intent"
+        );
+    }
+
+    #[test]
+    fn a_branch_switch_beside_a_tear_its_writer_finishes_switches() {
+        let (_tree, repo) = temp_repo("legacy-switch-tear");
+        let head = String::from_utf8(run_git(&repo, &["rev-parse", "HEAD"]))
+            .expect("an object id is ASCII")
+            .trim()
+            .to_owned();
+        let other = String::from_utf8(run_git(
+            &repo,
+            &["commit-tree", "HEAD^{tree}", "-p", "HEAD", "-m", "other"],
+        ))
+        .expect("an object id is ASCII")
+        .trim()
+        .to_owned();
+        run_git(&repo, &["branch", "other", &other]);
+        let ws = Workspace::open(&repo).expect("open");
+        let admin = plant_a_torn_registration(&repo, "foreign-switch");
+        let common = common_git_dir_of(&repo);
+        let before = crate::workspace_manager::contended_attempts(&common);
+        let refused = registry_refusal(
+            ws.switch_branch("other"),
+            "a switch beside a tear that stays",
+        );
+        assert!(
+            crate::workspace_manager::contended_attempts(&common) > before,
+            "the switch failed on the tear and was attempted again: {refused}"
+        );
+        let branch = String::from_utf8_lossy(&run_git(&repo, &["symbolic-ref", "HEAD"]))
+            .trim()
+            .to_owned();
+        let status =
+            String::from_utf8_lossy(&run_git(&repo, &["status", "--porcelain"])).into_owned();
         assert_eq!(
-            (runs, asked),
-            (3, 2),
-            "each tear asked once, the success not at all"
+            (branch.as_str(), status.as_str()),
+            ("refs/heads/main", ""),
+            "a failed attempt changed neither HEAD nor the checkout"
         );
+        let writer = OnceContended::spawn(common, move || finish_the_registration(&admin, &head));
+        let switched = ws.switch_branch("other");
+        let finished = writer.join();
+        switched.expect("the switch is attempted past a tear its writer finished");
+        let (_, ()) = finished.expect("the switch failed on the tear at least once");
+        assert_eq!(ws.current_branch().expect("the branch"), "other");
+    }
 
-        let (got, runs, asked) = attempt(far(), true, vec![unrelated.clone(), passed.clone()]);
+    #[test]
+    fn every_git_child_of_this_module_runs_with_automatic_maintenance_off() {
+        let (_tree, repo) = temp_repo("legacy-maintenance");
+        for (key, configured) in [
+            ("maintenance.auto", "true"),
+            ("gc.auto", "6700"),
+            ("gc.autoDetach", "true"),
+            ("maintenance.autoDetach", "true"),
+        ] {
+            run_git(&repo, &["config", key, configured]);
+        }
+        let ws = Workspace::open(&repo).expect("open");
+        let seen: Vec<(&str, String)> = [
+            "maintenance.auto",
+            "gc.auto",
+            "gc.autoDetach",
+            "maintenance.autoDetach",
+        ]
+        .into_iter()
+        .map(|key| {
+            (
+                key,
+                ws.git(&["config", "--get", key])
+                    .expect("the setting reads")
+                    .trim()
+                    .to_owned(),
+            )
+        })
+        .collect();
         assert_eq!(
-            got.expect("the first attempt"),
-            unrelated,
-            "any other failure, at once"
+            seen,
+            [
+                ("maintenance.auto", "false".to_owned()),
+                ("gc.auto", "0".to_owned()),
+                ("gc.autoDetach", "false".to_owned()),
+                ("maintenance.autoDetach", "false".to_owned()),
+            ],
+            "a command-line setting outranks the repository's"
         );
-        assert_eq!((runs, asked), (1, 0));
+    }
 
-        let (got, runs, asked) = attempt(far(), false, vec![torn.clone(), passed.clone()]);
-        assert_eq!(
-            got.expect("the first attempt"),
-            torn,
-            "a caller that answers no"
-        );
-        assert_eq!((runs, asked), (1, 1));
+    #[test]
+    fn the_snapshot_add_veto_attempts_again_only_over_an_empty_destination_it_can_remove() {
+        let (tree, _repo) = temp_repo("legacy-add-veto");
+        let destination = |tag: &str| tree.path().join(format!("dest-{tag}"));
 
-        let (got, runs, asked) = attempt(
-            std::time::Instant::now(),
-            true,
-            vec![torn.clone(), passed.clone()],
+        let empty = destination("empty");
+        fs::create_dir(&empty).expect("an empty destination");
+        assert_eq!(legacy_add_veto(&empty), Again::Attempt);
+        assert!(
+            fs::read_dir(&empty).is_ok_and(|mut entries| entries.next().is_none()),
+            "the destination is an empty directory again"
         );
-        assert_eq!(
-            got.expect("the first attempt"),
-            torn,
-            "a deadline already past"
-        );
-        assert_eq!((runs, asked), (1, 1));
 
-        let deadline = std::time::Instant::now() + Duration::from_millis(30);
-        let mut ended: Vec<std::time::Instant> = Vec::new();
-        let got =
-            output_past_anothers_empty_commondir_until(deadline, own, &mut || true, &mut || {
-                if ended.last().is_some_and(|end| *end >= deadline) {
-                    return Err(std::io::Error::other(
-                        "attempted after an attempt that ended at or past the deadline",
-                    ));
+        let gone = destination("gone");
+        assert!(
+            matches!(legacy_add_veto(&gone), Again::Undecidable { why } if why.contains("is gone")),
+            "a destination Git's junk removal took"
+        );
+        assert!(!gone.exists(), "and nothing is made there");
+
+        let stray = destination("stray");
+        fs::create_dir(&stray).expect("a destination");
+        fs::write(stray.join("stray.txt"), "stray\n").expect("a file in it");
+        assert!(matches!(
+            legacy_add_veto(&stray),
+            Again::Undecidable { why } if why.contains("is not empty")
+        ));
+        assert!(
+            stray.join("stray.txt").is_file(),
+            "and nothing in it is touched"
+        );
+
+        let file = destination("file");
+        fs::write(&file, "a file where the destination was\n").expect("a file");
+        assert!(matches!(
+            legacy_add_veto(&file),
+            Again::Undecidable { why } if why.contains("is not a directory")
+        ));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let target = destination("target");
+            fs::create_dir(&target).expect("an empty directory");
+            let link = destination("link");
+            std::os::unix::fs::symlink(&target, &link).expect("a link to it");
+            assert!(matches!(
+                legacy_add_veto(&link),
+                Again::Undecidable { why } if why.contains("is not a directory")
+            ));
+            assert!(target.is_dir(), "the link's target is untouched");
+
+            let parent = destination("read-only-parent");
+            fs::create_dir(&parent).expect("a parent");
+            let pinned = parent.join("dest");
+            fs::create_dir(&pinned).expect("an empty destination");
+            fs::set_permissions(&parent, fs::Permissions::from_mode(0o555))
+                .expect("a parent nothing can write");
+            let probe = fs::create_dir(parent.join("probe"));
+            let answer = legacy_add_veto(&pinned);
+            let still_there = pinned.is_dir();
+            fs::set_permissions(&parent, fs::Permissions::from_mode(0o755))
+                .expect("writable again");
+            assert!(
+                probe.is_err(),
+                "prerequisite not met: the mode bit did not bind (root, or CAP_DAC_OVERRIDE)"
+            );
+            assert!(
+                matches!(&answer, Again::Undecidable { why } if why.contains("cannot remove")),
+                "an empty destination this access cannot remove: {answer:?}"
+            );
+            assert!(still_there, "and it stays where it is");
+        }
+    }
+
+    #[test]
+    fn a_kept_pin_is_written_whatever_head_is_and_a_publication_pin_is_not() {
+        for shape in [
+            "moved",
+            "detached",
+            "other-branch",
+            "branch-deleted",
+            "branch-symbolic",
+        ] {
+            let (_tree, repo) = temp_repo(&format!("k1-{shape}"));
+            run_git(&repo, &["switch", "-q", "-c", "upstroke/run-k1"]);
+            fs::write(repo.join("agent-output.txt"), "paid output\n").expect("an output");
+            let workspace = Workspace::open(&repo).expect("the workspace");
+            let candidate = workspace.capture_candidate().expect("a capture");
+            let parent = candidate.parent_oid.clone();
+            let branch_ref = candidate.branch_ref.clone();
+            match shape {
+                "moved" => {
+                    let moved = String::from_utf8(run_git(
+                        &repo,
+                        &["commit-tree", "HEAD^{tree}", "-p", "HEAD", "-m", "moved"],
+                    ))
+                    .expect("an object id");
+                    run_git(&repo, &["update-ref", &branch_ref, moved.trim()]);
                 }
-                ended.push(std::time::Instant::now());
-                Ok(torn.clone())
-            });
-        let returned = std::time::Instant::now();
-        assert_eq!(
-            got.expect("the last attempt"),
-            torn,
-            "the tear at the deadline, as it read"
-        );
-        assert!(
-            returned >= deadline,
-            "the last attempt is the one at the deadline"
-        );
-        let (_, before_the_last) = ended.split_last().expect("one attempt at least");
-        assert!(
-            before_the_last.iter().all(|end| *end < deadline),
-            "attempted again only after an attempt that ended before the deadline: {ended:?}, \
-             the deadline {deadline:?}"
-        );
+                "detached" => {
+                    run_git(&repo, &["checkout", "-q", "--detach"]);
+                }
+                "other-branch" => {
+                    run_git(&repo, &["switch", "-q", "-c", "other"]);
+                }
+                "branch-deleted" => {
+                    run_git(&repo, &["update-ref", "-d", &branch_ref]);
+                }
+                _ => {
+                    run_git(&repo, &["branch", "-q", "victim", &parent]);
+                    run_git(&repo, &["symbolic-ref", &branch_ref, "refs/heads/victim"]);
+                }
+            }
+            let kept = workspace
+                .prepare_commit_from_candidate(
+                    &branch_ref,
+                    &parent,
+                    &candidate.tree_oid,
+                    "[upstroke] kept: t1 attempt 1",
+                    "refs/upstroke/prepared/k1/0-1-kept",
+                )
+                .unwrap_or_else(|error| panic!("{shape}: the kept pin is written: {error:?}"));
+            assert_eq!(kept.parent_sha, parent, "{shape}: on the captured parent");
+            assert_eq!(
+                kept.tree_sha, candidate.tree_oid,
+                "{shape}: with the captured tree"
+            );
+            let published = workspace.prepare_commit_from_candidate(
+                &branch_ref,
+                &parent,
+                &candidate.tree_oid,
+                "[upstroke] t1: Implement the widget",
+                "refs/upstroke/prepared/k1/0-1",
+            );
+            assert!(published.is_err(), "{shape}: a publication pin is refused");
+        }
+    }
 
-        let (got, runs, asked) = attempt(far(), true, Vec::new());
-        assert!(got.is_err(), "a command that cannot start, at once");
-        assert_eq!((runs, asked), (1, 0));
+    #[test]
+    fn the_private_index_notes_tie_an_orphan_shared_index_to_the_checkouts_expiry() {
+        const NOTES: &str = include_str!("../docs/internals/workspace.md");
+
+        let section = NOTES
+            .split("\n## ")
+            .find(|section| section.starts_with("`const PRIVATE_INDEX_CONTROLS: [&str; 4] = [`"))
+            .expect("the notes carry the `PRIVATE_INDEX_CONTROLS` heading");
+        let section = section.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        for (proposition, pin) in [
+            (
+                "Git removes an orphan only at a later split write that creates a shared index file",
+                "Git removes an orphan only at a later split write of the checkout's own index that \
+                 creates a shared index file",
+            ),
+            (
+                "and only once the orphan is older than the configured expiry",
+                "and only once the orphan is older than the checkout's configured \
+                 `splitIndex.sharedIndexExpire`",
+            ),
+            (
+                "with the default expiry an orphan stays until it is older than two weeks",
+                "With the default, `2.weeks.ago`, an orphan stays until it is older than two weeks \
+                 and such a write follows",
+            ),
+            (
+                "with `never` automatic expiry never reclaims an orphan",
+                "with `never`, automatic expiry never reclaims it",
+            ),
+            (
+                "repeated captures can accumulate orphans",
+                "repeated captures can accumulate them",
+            ),
+            (
+                "the variable stays O3's class, with FUD-D4-ENV's",
+                "the variable is O3's class, with FUD-D4-ENV's",
+            ),
+        ] {
+            assert!(
+                section.contains(pin),
+                "the notes must state that {proposition}; looked for {pin:?} in:\n{section}"
+            );
+        }
+
+        assert!(
+            !section.contains(
+                "leaving orphan shared index files that Git's next split write of the checkout's \
+                 own index removes"
+            ),
+            "the retired claim that Git's next split write of the checkout's own index removes \
+             the orphans must not come back:\n{section}"
+        );
+    }
+
+    #[cfg(unix)]
+    const SELECTION_ROOT: &str = "UPSTROKE_LEGACY_SELECTION_ROOT";
+    #[cfg(unix)]
+    const SELECTION_TOP: &str = "UPSTROKE_LEGACY_SELECTION_TOP";
+    #[cfg(unix)]
+    const SELECTION_FILE: &str = "UPSTROKE_LEGACY_SELECTION_FILE";
+    #[cfg(unix)]
+    const SELECTION_MODE: &str = "UPSTROKE_LEGACY_SELECTION_MODE";
+    #[cfg(unix)]
+    const SELECTION_TREE: &str = "UPSTROKE_LEGACY_SELECTION_TREE";
+    #[cfg(unix)]
+    const SELECTION_IDENTITY: [(&str, &str); 4] = [
+        ("GIT_AUTHOR_NAME", "upstroke tests"),
+        ("GIT_AUTHOR_EMAIL", "tests@upstroke.local"),
+        ("GIT_COMMITTER_NAME", "upstroke tests"),
+        ("GIT_COMMITTER_EMAIL", "tests@upstroke.local"),
+    ];
+    #[cfg(unix)]
+    const SELECTION_SHAPES: [&str; 20] = [
+        "D1",
+        "V1",
+        "V2",
+        "V3",
+        "V4",
+        "V6",
+        "E1 contrived",
+        "E3",
+        "E4 linked",
+        "E4 separate",
+        "E4 submodule",
+        "E5",
+        "DOT",
+        "H2",
+        "IDX",
+        "SEL",
+        "SPELL",
+        "F4",
+        "E2 GIT_OBJECT_DIRECTORY",
+        "GIT_OBJECT_DIRECTORY pool",
+    ];
+
+    #[cfg(unix)]
+    struct InheritedSelection {
+        root: PathBuf,
+        names: Vec<(&'static str, OsString)>,
+        worker_file: &'static str,
+        untouched: Vec<PathBuf>,
+    }
+
+    #[cfg(unix)]
+    fn selection_git<S: AsRef<std::ffi::OsStr>>(
+        dir: &Path,
+        args: &[S],
+        names: &[(&str, OsString)],
+    ) -> Vec<u8> {
+        let mut command = Command::new("git");
+        command.arg("-C").arg(dir).args([
+            "-c",
+            "user.name=upstroke tests",
+            "-c",
+            "user.email=tests@upstroke.local",
+            "-c",
+            "maintenance.auto=false",
+            "-c",
+            "gc.auto=0",
+            "-c",
+            "protocol.file.allow=always",
+        ]);
+        command.args(args);
+        for (name, value) in names {
+            command.env(name, value);
+        }
+        let output = command.output().expect("run git");
+        assert!(
+            output.status.success(),
+            "git {:?} in {}: {}",
+            args.iter().map(AsRef::as_ref).collect::<Vec<_>>(),
+            dir.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output.stdout
+    }
+
+    #[cfg(unix)]
+    fn selection_line(output: Vec<u8>) -> String {
+        String::from_utf8(output)
+            .expect("Git printed UTF-8")
+            .trim_end_matches('\n')
+            .to_owned()
+    }
+
+    #[cfg(unix)]
+    fn selection_path(mut output: Vec<u8>) -> PathBuf {
+        use std::os::unix::ffi::OsStringExt;
+        if output.ends_with(b"\n") {
+            output.pop();
+        }
+        PathBuf::from(OsString::from_vec(output))
+    }
+
+    #[cfg(unix)]
+    fn selection_repository(path: &Path, files: &[(&str, &str)]) {
+        fs::create_dir_all(path).expect("a repository's directory");
+        selection_git(path, &["init", "-q", "-b", "main"], &[]);
+        for (name, content) in files {
+            let file = path.join(name);
+            fs::create_dir_all(file.parent().expect("a file's directory"))
+                .expect("a file's directory");
+            fs::write(file, content).expect("a fixture file");
+        }
+        selection_git(path, &["add", "-A"], &[]);
+        selection_git(path, &["commit", "-q", "-m", "initial"], &[]);
+    }
+
+    #[cfg(unix)]
+    fn selection_copy_tree(from: &Path, to: &Path) {
+        fs::create_dir_all(to).expect("a copy's directory");
+        for entry in fs::read_dir(from).expect("read a directory to copy") {
+            let entry = entry.expect("a directory entry");
+            let target = to.join(entry.file_name());
+            let kind = entry.file_type().expect("an entry's type");
+            if kind.is_dir() {
+                selection_copy_tree(&entry.path(), &target);
+            } else if kind.is_symlink() {
+                let link = fs::read_link(entry.path()).expect("a link's target");
+                std::os::unix::fs::symlink(link, &target).expect("copy a link");
+            } else {
+                fs::copy(entry.path(), &target).expect("copy a file");
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn selection_tree_bytes(at: &Path, into: &mut Vec<(PathBuf, Vec<u8>)>) {
+        let Ok(metadata) = fs::symlink_metadata(at) else {
+            return;
+        };
+        if metadata.is_dir() {
+            into.push((at.to_path_buf(), Vec::new()));
+            let mut entries: Vec<PathBuf> = fs::read_dir(at)
+                .expect("read a watched directory")
+                .map(|entry| entry.expect("a directory entry").path())
+                .collect();
+            entries.sort();
+            for entry in entries {
+                selection_tree_bytes(&entry, into);
+            }
+        } else {
+            into.push((at.to_path_buf(), fs::read(at).expect("read a watched file")));
+        }
+    }
+
+    #[cfg(unix)]
+    fn selection_enclosing(root: &Path) -> (PathBuf, PathBuf) {
+        let enclosing = root.join("A");
+        selection_repository(
+            &enclosing,
+            &[("README.md", "A\n"), ("work/shared.txt", "base\n")],
+        );
+        let work = enclosing.join("work");
+        fs::write(work.join("shared.txt"), "user-staged\n").expect("the user's version");
+        selection_git(&enclosing, &["add", "work/shared.txt"], &[]);
+        fs::write(work.join("shared.txt"), "base\n").expect("the file as committed");
+        (enclosing, work)
+    }
+
+    #[cfg(unix)]
+    fn selection_b(root: &Path, work: &Path) -> (PathBuf, Vec<(&'static str, OsString)>) {
+        let selected = root.join("B.git");
+        let names = vec![
+            ("GIT_DIR", selected.clone().into_os_string()),
+            ("GIT_WORK_TREE", work.as_os_str().to_owned()),
+        ];
+        selection_git(work, &["init", "-q", "-b", "main"], &names);
+        selection_git(work, &["add", "shared.txt"], &names);
+        selection_git(work, &["commit", "-q", "-m", "B: initial"], &names);
+        (selected, names)
+    }
+
+    #[cfg(unix)]
+    fn selection_shape(shape: &str, root: &Path) -> InheritedSelection {
+        let enclosing_untouched =
+            |enclosing: &Path| vec![enclosing.join(".git/index"), enclosing.join(".git/HEAD")];
+        match shape {
+            "D1" | "V1" | "V3" | "V4" | "V6" | "E3" => {
+                let (enclosing, work) = selection_enclosing(root);
+                let (selected, mut names) = selection_b(root, &work);
+                let mut untouched = enclosing_untouched(&enclosing);
+                match shape {
+                    "V1" => names = vec![("GIT_DIR", selected.into_os_string())],
+                    "V3" => fs::create_dir(work.join(".git")).expect("an empty .git directory"),
+                    "V4" => {
+                        selection_git(&work, &["init", "-q", "-b", "main"], &[]);
+                        selection_git(&work, &["add", "shared.txt"], &[]);
+                        selection_git(&work, &["commit", "-q", "-m", "C: initial"], &[]);
+                        untouched.extend(enclosing_untouched(&work));
+                    }
+                    "V6" => {
+                        let mut gitfile = b"gitdir: ".to_vec();
+                        gitfile.extend(selected.as_os_str().as_encoded_bytes());
+                        gitfile.push(b'\n');
+                        fs::write(work.join(".git"), gitfile).expect("a gitfile naming B");
+                    }
+                    "E3" => {
+                        fs::create_dir_all(work.join(".git/objects")).expect("objects");
+                        fs::create_dir_all(work.join(".git/refs")).expect("refs");
+                        fs::write(work.join(".git/HEAD"), "not a ref\n").expect("an invalid HEAD");
+                    }
+                    _ => {}
+                }
+                InheritedSelection {
+                    root: work,
+                    names,
+                    worker_file: "shared.txt",
+                    untouched,
+                }
+            }
+            "V2" => {
+                let work = root.join("plain").join("work");
+                fs::create_dir_all(&work).expect("a directory no repository holds");
+                fs::write(work.join("shared.txt"), "base\n").expect("the file");
+                let (_, names) = selection_b(root, &work);
+                InheritedSelection {
+                    root: work,
+                    names,
+                    worker_file: "shared.txt",
+                    untouched: Vec::new(),
+                }
+            }
+            "E1 contrived" => {
+                let enclosing = root.join("A");
+                selection_repository(&enclosing, &[("f", "base\n")]);
+                let sub = enclosing.join("sub");
+                fs::create_dir(&sub).expect("the started directory");
+                fs::write(sub.join("f"), "base\n").expect("a file below it");
+                fs::write(enclosing.join(".git/info/exclude"), "/sub/\n").expect("the exclude");
+                InheritedSelection {
+                    root: sub,
+                    names: vec![("GIT_DIR", enclosing.join(".git").into_os_string())],
+                    worker_file: "g",
+                    untouched: Vec::new(),
+                }
+            }
+            "E4 linked" => {
+                let main = root.join("M");
+                selection_repository(&main, &[("README.md", "M\n")]);
+                let linked = root.join("L");
+                selection_git(
+                    &main,
+                    &[
+                        std::ffi::OsStr::new("worktree"),
+                        std::ffi::OsStr::new("add"),
+                        std::ffi::OsStr::new("-q"),
+                        std::ffi::OsStr::new("-b"),
+                        std::ffi::OsStr::new("l"),
+                        linked.as_os_str(),
+                    ],
+                    &[],
+                );
+                InheritedSelection {
+                    names: vec![("GIT_DIR", linked.join(".git").into_os_string())],
+                    root: linked,
+                    worker_file: "README.md",
+                    untouched: enclosing_untouched(&main),
+                }
+            }
+            "E4 separate" => {
+                let separate = root.join("S");
+                fs::create_dir(&separate).expect("the work tree");
+                let store = root.join("store");
+                selection_git(
+                    &separate,
+                    &[
+                        std::ffi::OsStr::new("init"),
+                        std::ffi::OsStr::new("-q"),
+                        std::ffi::OsStr::new("-b"),
+                        std::ffi::OsStr::new("main"),
+                        std::ffi::OsStr::new("--separate-git-dir"),
+                        store.as_os_str(),
+                    ],
+                    &[],
+                );
+                fs::write(separate.join("README.md"), "S\n").expect("a file");
+                selection_git(&separate, &["add", "README.md"], &[]);
+                selection_git(&separate, &["commit", "-q", "-m", "S"], &[]);
+                InheritedSelection {
+                    names: vec![("GIT_DIR", separate.join(".git").into_os_string())],
+                    root: separate,
+                    worker_file: "README.md",
+                    untouched: Vec::new(),
+                }
+            }
+            "E4 submodule" => {
+                let source = root.join("source");
+                selection_repository(&source, &[("README.md", "source\n")]);
+                let superproject = root.join("super");
+                selection_repository(&superproject, &[("README.md", "super\n")]);
+                selection_git(
+                    &superproject,
+                    &[
+                        std::ffi::OsStr::new("submodule"),
+                        std::ffi::OsStr::new("add"),
+                        std::ffi::OsStr::new("-q"),
+                        source.as_os_str(),
+                        std::ffi::OsStr::new("sub"),
+                    ],
+                    &[],
+                );
+                selection_git(&superproject, &["commit", "-q", "-m", "submodule"], &[]);
+                let sub = superproject.join("sub");
+                InheritedSelection {
+                    names: vec![("GIT_DIR", sub.join(".git").into_os_string())],
+                    root: sub,
+                    worker_file: "README.md",
+                    untouched: enclosing_untouched(&superproject),
+                }
+            }
+            "E5" => {
+                let repository = root.join("repo");
+                selection_repository(&repository, &[("README.md", "readme\n")]);
+                selection_git(
+                    &repository,
+                    &["config", "core.preferSymlinkRefs", "true"],
+                    &[],
+                );
+                selection_git(
+                    &repository,
+                    &[
+                        "switch",
+                        "-q",
+                        "--no-recurse-submodules",
+                        "--create=upstroke/run-e5",
+                        "--",
+                    ],
+                    &[],
+                );
+                selection_git(&repository, &["pack-refs", "--all"], &[]);
+                InheritedSelection {
+                    names: vec![("GIT_DIR", repository.join(".git").into_os_string())],
+                    root: repository,
+                    worker_file: "README.md",
+                    untouched: Vec::new(),
+                }
+            }
+            "DOT" => {
+                let configuration = root.join("cfg.git");
+                selection_git(
+                    root,
+                    &[
+                        std::ffi::OsStr::new("init"),
+                        std::ffi::OsStr::new("-q"),
+                        std::ffi::OsStr::new("--bare"),
+                        std::ffi::OsStr::new("-b"),
+                        std::ffi::OsStr::new("main"),
+                        configuration.as_os_str(),
+                    ],
+                    &[],
+                );
+                let home = root.join("userhome");
+                fs::create_dir(&home).expect("a home directory");
+                fs::write(home.join(".profile"), "profile\n").expect("a dotfile");
+                let names = vec![
+                    ("GIT_DIR", configuration.into_os_string()),
+                    ("GIT_WORK_TREE", home.as_os_str().to_owned()),
+                ];
+                selection_git(&home, &["add", ".profile"], &names);
+                selection_git(&home, &["commit", "-q", "-m", "dotfiles"], &names);
+                InheritedSelection {
+                    root: home,
+                    names,
+                    worker_file: ".profile",
+                    untouched: Vec::new(),
+                }
+            }
+            "H2" => {
+                let main = root.join("M");
+                selection_repository(&main, &[("README.md", "M\n"), ("tracked.txt", "one\n")]);
+                let linked = root.join("L");
+                selection_git(
+                    &main,
+                    &[
+                        std::ffi::OsStr::new("worktree"),
+                        std::ffi::OsStr::new("add"),
+                        std::ffi::OsStr::new("-q"),
+                        std::ffi::OsStr::new("-b"),
+                        std::ffi::OsStr::new("user"),
+                        linked.as_os_str(),
+                    ],
+                    &[],
+                );
+                let admin = main.join(".git/worktrees/L");
+                InheritedSelection {
+                    root: linked,
+                    names: vec![
+                        ("GIT_DIR", admin.clone().into_os_string()),
+                        ("GIT_INDEX_FILE", admin.join("index").into_os_string()),
+                        ("GIT_PREFIX", OsString::new()),
+                    ],
+                    worker_file: "tracked.txt",
+                    untouched: enclosing_untouched(&main),
+                }
+            }
+            "IDX" => {
+                let managed = root.join("managed");
+                selection_repository(
+                    &managed,
+                    &[("README.md", "idx\n"), ("shared.txt", "base\n")],
+                );
+                fs::copy(managed.join(".git/index"), managed.join(".git/index.alt"))
+                    .expect("an alternate index");
+                InheritedSelection {
+                    names: vec![(
+                        "GIT_INDEX_FILE",
+                        managed.join(".git/index.alt").into_os_string(),
+                    )],
+                    untouched: vec![managed.join(".git/index")],
+                    root: managed,
+                    worker_file: "shared.txt",
+                }
+            }
+            "SEL" => {
+                let managed = root.join("managed");
+                selection_repository(&managed, &[("README.md", "readme\n")]);
+                InheritedSelection {
+                    names: vec![("GIT_WORK_TREE", managed.as_os_str().to_owned())],
+                    root: managed,
+                    worker_file: "README.md",
+                    untouched: Vec::new(),
+                }
+            }
+            "SPELL" => {
+                let real = root.join("real");
+                selection_repository(&real.join("repo"), &[("README.md", "readme\n")]);
+                let link = root.join("link");
+                std::os::unix::fs::symlink(&real, &link).expect("a second spelling");
+                let repository = link.join("repo");
+                InheritedSelection {
+                    names: vec![("GIT_DIR", repository.join(".git").into_os_string())],
+                    root: repository,
+                    worker_file: "README.md",
+                    untouched: Vec::new(),
+                }
+            }
+            "F4" | "E2 GIT_OBJECT_DIRECTORY" => {
+                let (enclosing, work) = selection_enclosing(root);
+                selection_git(&work, &["init", "-q", "-b", "main"], &[]);
+                selection_git(&work, &["add", "shared.txt"], &[]);
+                selection_git(&work, &["commit", "-q", "-m", "B: initial"], &[]);
+                let store = root.join("store");
+                fs::create_dir(&store).expect("the store");
+                let names = if shape == "F4" {
+                    for item in ["objects", "refs", "config"] {
+                        fs::rename(work.join(".git").join(item), store.join(item))
+                            .expect("move part of the repository into the store");
+                    }
+                    fs::copy(work.join(".git/HEAD"), store.join("HEAD")).expect("HEAD");
+                    selection_copy_tree(&store.join("refs"), &work.join(".git/refs"));
+                    vec![("GIT_COMMON_DIR", store.into_os_string())]
+                } else {
+                    fs::rename(work.join(".git/objects"), store.join("objects"))
+                        .expect("move the object store");
+                    vec![(
+                        "GIT_OBJECT_DIRECTORY",
+                        store.join("objects").into_os_string(),
+                    )]
+                };
+                InheritedSelection {
+                    root: work,
+                    names,
+                    worker_file: "shared.txt",
+                    untouched: enclosing_untouched(&enclosing),
+                }
+            }
+            "GIT_OBJECT_DIRECTORY pool" => {
+                let managed = root.join("managed");
+                selection_repository(&managed, &[("README.md", "readme\n")]);
+                let pool = root.join("pool");
+                selection_repository(&pool, &[("pool-only.txt", "only in the pool\n")]);
+                InheritedSelection {
+                    names: vec![
+                        (
+                            "GIT_OBJECT_DIRECTORY",
+                            pool.join(".git/objects").into_os_string(),
+                        ),
+                        (
+                            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+                            managed.join(".git/objects").into_os_string(),
+                        ),
+                    ],
+                    root: managed,
+                    worker_file: "README.md",
+                    untouched: enclosing_untouched(&pool),
+                }
+            }
+            other => panic!("no construction for {other}"),
+        }
+    }
+
+    #[cfg(unix)]
+    fn own_admin_of(work_tree: &Path) -> PathBuf {
+        use std::os::unix::ffi::OsStrExt;
+        let gitfile = fs::read(work_tree.join(".git")).expect("a linked work tree's .git file");
+        let target = gitfile
+            .strip_prefix(b"gitdir: ")
+            .expect("a gitfile")
+            .strip_suffix(b"\n")
+            .expect("one line");
+        fs::canonicalize(work_tree.join(std::ffi::OsStr::from_bytes(target)))
+            .expect("its administrative directory")
+    }
+
+    #[cfg(unix)]
+    fn assert_the_snapshot_is_its_own(snapshot: &GateWorkspace, label: &str) {
+        let at = snapshot.workspace().root();
+        let admin = own_admin_of(at);
+        assert!(
+            admin.join("index").is_file(),
+            "{label}: the snapshot has an index of its own"
+        );
+        for (query, expected) in [
+            (
+                ["rev-parse", "--absolute-git-dir"].as_slice(),
+                admin.clone(),
+            ),
+            (
+                ["rev-parse", "--path-format=absolute", "--git-path", "index"].as_slice(),
+                admin.join("index"),
+            ),
+            (
+                ["rev-parse", "--show-toplevel"].as_slice(),
+                fs::canonicalize(at).expect("the snapshot"),
+            ),
+        ] {
+            let printed = snapshot
+                .workspace()
+                .git_path(query)
+                .unwrap_or_else(|error| panic!("{label}: {query:?}: {error}"));
+            assert_eq!(
+                fs::canonicalize(&printed).ok(),
+                Some(expected),
+                "{label}: the snapshot's Git answers {query:?} with {}",
+                printed.display()
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_legacy_workspace_keeps_the_inherited_selection_at_its_checkout_and_its_snapshots_address_themselves()
+     {
+        let mut failures: Vec<String> = Vec::new();
+        for shape in SELECTION_SHAPES {
+            let tree = scratch("legacy-selection");
+            let built = selection_shape(shape, tree.path());
+            let top = selection_path(selection_git(
+                &built.root,
+                &["rev-parse", "--show-toplevel"],
+                &built.names,
+            ));
+            let before: Vec<Vec<u8>> = built
+                .untouched
+                .iter()
+                .map(|path| fs::read(path).expect("a watched file"))
+                .collect();
+            let mut vars: Vec<(&str, &std::ffi::OsStr)> = built
+                .names
+                .iter()
+                .map(|(name, value)| (*name, value.as_os_str()))
+                .collect();
+            vars.extend(
+                SELECTION_IDENTITY
+                    .iter()
+                    .map(|(name, value)| (*name, std::ffi::OsStr::new(value))),
+            );
+            vars.push((SELECTION_ROOT, built.root.as_os_str()));
+            vars.push((SELECTION_TOP, top.as_os_str()));
+            vars.push((SELECTION_FILE, std::ffi::OsStr::new(built.worker_file)));
+            let ended = crate::agent::proc::test_support::run_test_isolated(
+                "workspace::tests::legacy_selection_helper",
+                &vars,
+                Duration::from_secs(120),
+            );
+            if !(ended.status.is_some_and(|status| status.success())
+                && ended.stdout.contains("1 passed"))
+            {
+                failures.push(format!("{shape}: {ended}"));
+                continue;
+            }
+            for (path, earlier) in built.untouched.iter().zip(&before) {
+                if fs::read(path).expect("a watched file") != *earlier {
+                    failures.push(format!("{shape}: {} changed", path.display()));
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{} of the {} shapes failed:\n{}",
+            failures.len(),
+            SELECTION_SHAPES.len(),
+            failures.join("\n")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "subprocess helper"]
+    fn legacy_selection_helper() {
+        let Some(root) = env::var_os(SELECTION_ROOT).map(PathBuf::from) else {
+            return;
+        };
+        let top = PathBuf::from(env::var_os(SELECTION_TOP).expect("today's top level"));
+        let worker_file = env::var(SELECTION_FILE).expect("the worker's file");
+        let ws = Workspace::open(&root).expect("open the started checkout");
+        assert_eq!(
+            ws.root(),
+            top.as_path(),
+            "Workspace::open returns the top level Git reports under the inherited names"
+        );
+        fs::write(ws.root().join(&worker_file), "worker edit\n").expect("the worker's edit");
+        fs::write(ws.root().join("worker-new.txt"), "a file the worker made\n")
+            .expect("the worker's new file");
+        let candidate = ws.capture_candidate().expect("capture");
+        {
+            let snapshot = ws
+                .gate_snapshot_for_candidate(&candidate.parent_oid, &candidate.tree_oid)
+                .expect("the gate snapshot verifies clean");
+            assert_the_snapshot_is_its_own(&snapshot, "the gate snapshot");
+        }
+        ws.commit("the task")
+            .expect("commit into the selected repository");
+        let committed = ws
+            .git(&["ls-tree", "-r", "--name-only", "HEAD"])
+            .expect("the selected repository's HEAD");
+        assert!(
+            committed.lines().any(|line| line == "worker-new.txt"),
+            "the capture committed into the selected repository: {committed}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_snapshot_add_never_writes_an_inherited_index() {
+        let mut failures: Vec<String> = Vec::new();
+        for other_work_tree in [false, true] {
+            let tree = scratch("snapshot-index");
+            let root = tree.path();
+            let managed = root.join("managed");
+            selection_repository(
+                &managed,
+                &[("README.md", "readme\n"), ("tracked.txt", "one\n")],
+            );
+            let index = if other_work_tree {
+                let linked = root.join("other-work-tree");
+                selection_git(
+                    &managed,
+                    &[
+                        std::ffi::OsStr::new("worktree"),
+                        std::ffi::OsStr::new("add"),
+                        std::ffi::OsStr::new("-q"),
+                        std::ffi::OsStr::new("-b"),
+                        std::ffi::OsStr::new("other"),
+                        linked.as_os_str(),
+                    ],
+                    &[],
+                );
+                fs::write(linked.join("tracked.txt"), "staged in another work tree\n")
+                    .expect("another work tree's change");
+                selection_git(&linked, &["add", "tracked.txt"], &[]);
+                managed.join(".git/worktrees/other-work-tree/index")
+            } else {
+                fs::write(managed.join("tracked.txt"), "staged by the user\n")
+                    .expect("the user's change");
+                selection_git(&managed, &["add", "tracked.txt"], &[]);
+                managed.join(".git/index")
+            };
+            let before = fs::read(&index).expect("the named index");
+            let ended = crate::agent::proc::test_support::run_test_isolated(
+                "workspace::tests::snapshot_index_helper",
+                &[
+                    ("GIT_INDEX_FILE", index.as_os_str()),
+                    (SELECTION_ROOT, managed.as_os_str()),
+                ],
+                Duration::from_secs(120),
+            );
+            let label = if other_work_tree {
+                "another work tree's index"
+            } else {
+                "the checkout's own index"
+            };
+            if !(ended.status.is_some_and(|status| status.success())
+                && ended.stdout.contains("1 passed"))
+            {
+                failures.push(format!("{label}: {ended}"));
+            }
+            if fs::read(&index).expect("the named index") != before {
+                failures.push(format!(
+                    "{label}: the snapshot add wrote the inherited index {}",
+                    index.display()
+                ));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{} failure(s):\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "subprocess helper"]
+    fn snapshot_index_helper() {
+        let Some(root) = env::var_os(SELECTION_ROOT).map(PathBuf::from) else {
+            return;
+        };
+        let ws = Workspace::open(&root).expect("open the started checkout");
+        let parent = ws.head_sha_full().expect("HEAD");
+        let tree = ws
+            .git(&["rev-parse", "HEAD^{tree}"])
+            .expect("HEAD's tree")
+            .trim()
+            .to_owned();
+        let snapshot = ws
+            .gate_snapshot_for_candidate(&parent, &tree)
+            .expect("the gate snapshot");
+        assert!(
+            own_admin_of(snapshot.workspace().root())
+                .join("index")
+                .is_file(),
+            "the snapshot has an index of its own"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_private_index_binding_survives_the_scope_at_the_checkout_and_in_a_snapshot() {
+        let mut failures: Vec<String> = Vec::new();
+        for mode in ["checkout", "snapshot"] {
+            let tree = scratch("private-index-scope");
+            let root = tree.path();
+            let managed = root.join("managed");
+            selection_repository(
+                &managed,
+                &[("README.md", "readme\n"), ("tracked.txt", "one\n")],
+            );
+            fs::write(managed.join("tracked.txt"), "staged by the user\n")
+                .expect("the user's change");
+            selection_git(&managed, &["add", "tracked.txt"], &[]);
+            let index = managed.join(".git/index");
+            let before = fs::read(&index).expect("the checkout's index");
+            let ended = crate::agent::proc::test_support::run_test_isolated(
+                "workspace::tests::private_index_scope_helper",
+                &[
+                    ("GIT_INDEX_FILE", index.as_os_str()),
+                    (SELECTION_ROOT, managed.as_os_str()),
+                    (SELECTION_MODE, std::ffi::OsStr::new(mode)),
+                ],
+                Duration::from_secs(120),
+            );
+            if !(ended.status.is_some_and(|status| status.success())
+                && ended.stdout.contains("1 passed"))
+            {
+                failures.push(format!("{mode}: {ended}"));
+            }
+            if fs::read(&index).expect("the checkout's index") != before {
+                failures.push(format!(
+                    "{mode}: a private-index view wrote the inherited index {}",
+                    index.display()
+                ));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{} failure(s):\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "subprocess helper"]
+    fn private_index_scope_helper() {
+        let Some(root) = env::var_os(SELECTION_ROOT).map(PathBuf::from) else {
+            return;
+        };
+        let ws = Workspace::open(&root).expect("open the started checkout");
+        let head = ws.head_sha_full().expect("HEAD");
+        let tree = ws
+            .git(&["rev-parse", "HEAD^{tree}"])
+            .expect("HEAD's tree")
+            .trim()
+            .to_owned();
+        let snapshot;
+        let subject = if env::var_os(SELECTION_MODE).is_some_and(|mode| mode == "snapshot") {
+            snapshot = ws
+                .gate_snapshot_for_candidate(&head, &tree)
+                .expect("the gate snapshot");
+            snapshot.workspace()
+        } else {
+            &ws
+        };
+        let own = subject
+            .worktree_git_dir()
+            .expect("the subject's administrative directory")
+            .join("index");
+        let own_before = fs::read(&own).ok();
+        let private = subject
+            .private_index_file("-scope")
+            .expect("a private index name");
+        let view = subject.with_private_index(private.clone());
+        let read = view.git_output_with_private_hooks(&controlled(&["read-tree", &head]));
+        let written = read.and_then(|_| view.private_tree());
+        let created = private.is_file();
+        view.remove_private_index();
+        assert_eq!(
+            written.expect("the private index's tree"),
+            tree,
+            "the private index holds HEAD's tree"
+        );
+        assert!(
+            created,
+            "the view's Git wrote the private index it was given"
+        );
+        assert!(!private.exists(), "the view removes its private index");
+        assert_eq!(
+            fs::read(&own).ok(),
+            own_before,
+            "the subject's own index is unchanged"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn paths_with_newlines_and_undecodable_bytes_are_untouched_by_the_scope() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let rows: [(&str, &[u8], &str, bool); 8] = [
+            ("F2 CR", b"\r", "GIT_DIR", true),
+            ("F2 LF", b"\n", "GIT_DIR", true),
+            ("F5 non-UTF-8, GIT_PREFIX", b"repo-\xff", "GIT_PREFIX", true),
+            ("F5 non-UTF-8, GIT_DIR", b"repo-\xff", "GIT_DIR", true),
+            (
+                "F5 U+FFFD, GIT_PREFIX",
+                "repo-\u{fffd}".as_bytes(),
+                "GIT_PREFIX",
+                true,
+            ),
+            (
+                "F5 U+FFFD, GIT_DIR",
+                "repo-\u{fffd}".as_bytes(),
+                "GIT_DIR",
+                true,
+            ),
+            ("F5 newline, GIT_PREFIX", b"repo\nname", "GIT_PREFIX", false),
+            ("F5 newline, GIT_DIR", b"repo\nname", "GIT_DIR", false),
+        ];
+        let mut failures: Vec<String> = Vec::new();
+        let mut refused: Vec<&str> = Vec::new();
+        for (label, leaf, selector, snapshot) in rows {
+            let tree = scratch("undecodable-scope");
+            let undecodable = std::str::from_utf8(leaf).is_err();
+            let leaf = PathBuf::from(OsString::from_vec(leaf.to_vec()));
+            // A filesystem that keeps names as Unicode refuses a name that is not UTF-8 (APFS
+            // answers EILSEQ), so no path holding one exists there. The refusal is measured and
+            // reported, and the row is not counted as passed.
+            if undecodable {
+                match fs::create_dir(tree.path().join(&leaf)) {
+                    Err(error) if error.raw_os_error() == Some(libc::EILSEQ) => {
+                        refused.push(label);
+                        continue;
+                    }
+                    created => created.expect("a directory named with a byte no UTF-8 spells"),
+                }
+            }
+            let (started, repository) = if label.starts_with("F2") {
+                let enclosing = tree.path().join("A");
+                selection_repository(&enclosing, &[("f", "base\n")]);
+                let sub = enclosing.join(&leaf);
+                fs::create_dir(&sub).expect("the started directory");
+                fs::write(sub.join("f"), "base\n").expect("a file below it");
+                let mut exclude = b"/".to_vec();
+                exclude.extend(leaf.as_os_str().as_encoded_bytes());
+                exclude.extend(b"/\n");
+                fs::write(enclosing.join(".git/info/exclude"), exclude).expect("the exclude");
+                (sub, enclosing)
+            } else {
+                let repository = tree.path().join(&leaf);
+                selection_repository(&repository, &[("README.md", "readme\n")]);
+                (repository.clone(), repository)
+            };
+            let name = if selector == "GIT_DIR" {
+                repository.join(".git").into_os_string()
+            } else {
+                OsString::from("sub/")
+            };
+            let names = vec![(selector, name)];
+            let top = selection_path(selection_git(
+                &started,
+                &["rev-parse", "--show-toplevel"],
+                &names,
+            ));
+            let mut vars: Vec<(&str, &std::ffi::OsStr)> = names
+                .iter()
+                .map(|(name, value)| (*name, value.as_os_str()))
+                .collect();
+            vars.extend(
+                SELECTION_IDENTITY
+                    .iter()
+                    .map(|(name, value)| (*name, std::ffi::OsStr::new(value))),
+            );
+            vars.push((SELECTION_ROOT, started.as_os_str()));
+            vars.push((SELECTION_TOP, top.as_os_str()));
+            vars.push((
+                SELECTION_MODE,
+                std::ffi::OsStr::new(if snapshot { "snapshot" } else { "refusal" }),
+            ));
+            let ended = crate::agent::proc::test_support::run_test_isolated(
+                "workspace::tests::undecodable_scope_helper",
+                &vars,
+                Duration::from_secs(120),
+            );
+            if !(ended.status.is_some_and(|status| status.success())
+                && ended.stdout.contains("1 passed"))
+            {
+                failures.push(format!("{label}: {ended}"));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{} of the {} rows failed, and the filesystem refused {refused:?}:\n{}",
+            failures.len(),
+            rows.len(),
+            failures.join("\n")
+        );
+        assert!(
+            refused.is_empty() || refused.len() == 2,
+            "the filesystem refuses the name in both of its rows or in neither: {refused:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "subprocess helper"]
+    fn undecodable_scope_helper() {
+        let Some(root) = env::var_os(SELECTION_ROOT).map(PathBuf::from) else {
+            return;
+        };
+        let top = PathBuf::from(env::var_os(SELECTION_TOP).expect("today's top level"));
+        let ws = Workspace::open(&root).expect("open the started checkout");
+        assert_eq!(ws.root(), top.as_path(), "Workspace::open");
+        if env::var_os(SELECTION_MODE).is_some_and(|mode| mode == "refusal") {
+            let private =
+                env::temp_dir().join(format!("upstroke-newline-scope-{}", crate::ulid::ulid()));
+            let refused = ws
+                .recorded_objects_scope(Some(&private))
+                .expect_err("the constructor refuses a common directory Git cannot read in a key");
+            let _ = fs::remove_dir_all(&private);
+            assert!(
+                refused.to_string().contains(
+                    "its path contains a newline, which Git cannot read in a configuration key"
+                ),
+                "{refused}"
+            );
+            return;
+        }
+        fs::write(ws.root().join("worker-new.txt"), "a file the worker made\n")
+            .expect("the worker's new file");
+        let candidate = ws.capture_candidate().expect("capture");
+        let snapshot = ws
+            .gate_snapshot_for_candidate(&candidate.parent_oid, &candidate.tree_oid)
+            .expect("the gate snapshot verifies clean");
+        assert_the_snapshot_is_its_own(&snapshot, "the gate snapshot");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_work_tree_the_engine_made_reads_the_runs_common_dir_under_a_relative_common_dir() {
+        let tree = scratch("relative-common-slot");
+        let root = tree.path();
+        let managed = root.join("managed");
+        selection_repository(&managed, &[("README.md", "readme\n")]);
+        let common = root.join("common");
+        selection_copy_tree(&managed.join(".git"), &common);
+        let sibling = root.join("slots").join("common");
+        selection_copy_tree(&common, &sibling);
+        let slot = root.join("slots").join("one");
+        let head = selection_line(selection_git(&managed, &["rev-parse", "HEAD"], &[]));
+        selection_git(
+            &managed,
+            &[
+                std::ffi::OsStr::new("worktree"),
+                std::ffi::OsStr::new("add"),
+                std::ffi::OsStr::new("--detach"),
+                std::ffi::OsStr::new("--quiet"),
+                slot.as_os_str(),
+                std::ffi::OsStr::new(&head),
+            ],
+            &[("GIT_COMMON_DIR", OsString::from("../common"))],
+        );
+        fs::write(slot.join("slot-new.txt"), "staged in the slot\n").expect("a new file");
+        let absolute = [("GIT_COMMON_DIR", common.clone().into_os_string())];
+        selection_git(&slot, &["add", "slot-new.txt"], &absolute);
+        let staged = selection_line(selection_git(&slot, &["write-tree"], &absolute));
+        let mut before = Vec::new();
+        selection_tree_bytes(&sibling, &mut before);
+        let ended = crate::agent::proc::test_support::run_test_isolated(
+            "workspace::tests::relative_common_work_tree_helper",
+            &[
+                ("GIT_COMMON_DIR", std::ffi::OsStr::new("../common")),
+                (SELECTION_ROOT, root.as_os_str()),
+                (SELECTION_TREE, std::ffi::OsStr::new(&staged)),
+            ],
+            Duration::from_secs(120),
+        );
+        assert!(
+            ended.status.is_some_and(|status| status.success())
+                && ended.stdout.contains("1 passed"),
+            "{ended}"
+        );
+        let mut after = Vec::new();
+        selection_tree_bytes(&sibling, &mut after);
+        assert!(
+            after == before,
+            "the common directory beside the slot is byte-identical"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "subprocess helper"]
+    fn relative_common_work_tree_helper() {
+        let Some(root) = env::var_os(SELECTION_ROOT).map(PathBuf::from) else {
+            return;
+        };
+        let tree = env::var(SELECTION_TREE).expect("the staged tree");
+        let problem =
+            Workspace::open_work_tree(&root.join("slots").join("one"), &root.join("managed"))
+                .and_then(|slot| slot.review_input_problem_for_tree(&tree));
+        assert!(
+            matches!(problem, Ok(None)),
+            "the slot's review input, read against the run's common directory: {problem:?}"
+        );
     }
 }

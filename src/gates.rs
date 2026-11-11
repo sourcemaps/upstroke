@@ -86,6 +86,7 @@ impl ShellKind {
             args: args.into_iter().map(str::to_owned).collect(),
             env: Vec::new(),
             stdin: Vec::new(),
+            settings_file: None,
         }
     }
 }

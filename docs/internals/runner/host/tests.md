@@ -383,6 +383,43 @@ The worker half comes from production's builder, so the request this
 compares against the probe is the request an attempt sends: the
 bound agent and the worker identity, not a hand-written pair.
 
+## `fn dump_command(overlay: &[(&str, &str)]) -> CommandSpec {`
+
+The environment dump helper as a command, with `overlay` as its request's overlay.
+
+## `fn received_common_dir(runner: &HostRunner, request: &RunnerRequest) -> Vec<String> {`
+
+The `GIT_COMMON_DIR` entries of the environment a real child of `runner` dumped for `request`.
+
+## `fn the_host_runner_reports_the_common_dir_its_child_is_started_with() {`
+
+T-HOST-REPORT, the integration correction's report (F): `HostRunner::composed_common_dir` is the
+value the child is started with. It is checked against a real child's dumped environment, over a
+custom `HostEnvironment` with an overlay rather than `HostRunner::new` alone:
+
+- a base value;
+- an overlay's value over the base's;
+- none anywhere, `Absent`;
+- a relative value, which a gate does not receive as it is (option (C)'s work-tree context, in
+  `child_environment`). With the run's repository held, by `ObjectGraph::RecordedIn` over
+  `managed_repository`, the report and the child's value are both that repository's common
+  directory. With none held, the report is `Unknown` and the same composition refuses the run
+  `NeverStarted`. One assertion compares both reports, so a work-tree step outside
+  `child_environment`, which would make the report a second composition beside the child's, shows
+  both reports wrong at once: each would be the relative value;
+- a repeated name, where the later entry is the one the child receives and the one reported;
+- an overlay naming a reserved key, which reports `Unknown` while the same composition refuses the run.
+
+The base, overlay and repeated values are absolute on the platform that runs the test (`/…` on Unix,
+`C:\…` on Windows), because a gate's inherited value that is not absolute meets the work-tree
+context.
+
+On Unix, two more rows:
+
+- a base built with `KeyCase::Insensitive` that holds `git_common_dir`. This reports `Absent`, and
+  the child receives the lowercase name and not the variable;
+- a value that is not UTF-8, reported byte for byte.
+
 ## `fn every_credential_supplied_role_composes_one_environment_per_binding() {`
 
 The same claim, over **every** role production binds to an agent and
@@ -3351,3 +3388,200 @@ through the host funnel as its sibling's does (`FUA-I4-RELAY`, PR #328's impleme
 round 4): the funnel's end waits for its reaper's acknowledged exit without a bound, by design,
 so a stopped reaper there held this test, and the suite with it.
 
+
+## `const INHERITED_SELECTORS: [(&str, &str); 4] = [`
+
+The four work-tree selectors with values a role must not be handed in a work
+tree the engine made; and below, `KEPT_INHERITED`, the repository-wide names,
+the command scope and the pathspec and attribute globals, which every role keeps.
+
+## `fn role_request(`
+
+A request for any role, through the builder production uses for it, with the
+command and workspace a test chooses; a probe's identity is the probe target's.
+
+## `fn dumped_or_refused(`
+
+The environment a role's process actually received, read from the dump helper
+the runner starts as that role, or the `RunnerError` that refused it before it
+started.
+
+## `const fn keeps_the_inherited_context(legacy: bool, role: &ExecutionRole) -> bool {`
+
+The tests' own statement of which roles keep the inherited Git context:
+every probe, and the implement role of the runner built for the legacy
+workspace. It is the rule, written again here, so a change to the runner's
+copy of it is a difference the test sees.
+
+## `fn a_role_in_a_work_tree_the_engine_made_sheds_only_the_work_tree_context() {`
+
+The runner's half of option (C), through `supervise` and a real child per row,
+under both `KeyCase` rules, for every role and both constructors:
+
+- under `for_legacy_workspace`, which holds a managed repository, gate and
+  review shed exactly the four selectors, a `GIT_COMMON_DIR` that is relative
+  (`../common`, `common`) or empty is replaced by the repository's
+  `common_dir`, and an absolute one is kept; the implement role and every
+  probe keep them all;
+- under `new()`, which holds none, implement, gate and review shed the four and
+  keep an absolute `GIT_COMMON_DIR`, and with a relative one each is refused
+  before it starts, `NeverStarted`; every probe keeps them all and starts;
+- an overlay's own value of any of the five names is kept, a relative
+  `GIT_COMMON_DIR` included, and nothing is refused;
+- the repository-wide names, the command scope, the globals and
+  `GIT_NO_REPLACE_OBJECTS` are what composition made them;
+- `git_dir` and a relative `git_common_dir` spelled in lower case are shed and
+  replaced under `Insensitive` and kept under `Sensitive`; an absolute one is
+  kept under both.
+
+`keeps_common_dir` is asked directly too, with the platform's own absolute
+values: `/abs/common` and an absolute path holding a byte no UTF-8 spells on
+Unix; `C:\abs\common` and `\\server\share\common` on Windows, where
+`\abs\common`, `C:abs\common` and `..\common` are not absolute. Each row's
+mismatches are collected, so one run reports every row that fails.
+
+## `fn windows_a_role_in_a_work_tree_the_engine_made_sheds_the_work_tree_context_in_any_spelling() {`
+
+Windows only, natively, under a runner that holds the managed repository: its
+control first shows that Git for Windows reads `git_dir` and `Git_Index_File`
+as `GIT_DIR` and `GIT_INDEX_FILE`, and fails as unmeasured if it does not; then
+the implement, gate and review roles shed both, and a `git_common_dir` that is
+relative, drive-relative (`C:x`) or root-relative (`\x`) is replaced by the
+repository's `common_dir`, while a drive-prefixed or UNC value is kept. Its last
+rows measure `Path::join` on the two forms that are not absolute there: a
+root-relative value takes the checkout's drive, and a drive-relative value
+stays as it is, which is the builders' reasoned limit on Windows. The control
+gives Git the Git directory as the manager spells it, without the verbatim
+prefix `fs::canonicalize` returns there (the fixture's `canonical`), because Git
+for Windows refuses a verbatim Git directory as "not a git repository"; Git's
+answer is compared canonical.
+
+## `fn slot_roles_under_an_inherited_context_address_only_their_own_work_tree() {`
+
+The O3-R report's construction and its steps 01 to 25, run through
+`Runner::run_blocking` in an isolated child whose environment alone carries
+each case's names: `control`, `index`, `dir`, `dir-index` and
+`relative-index`. `managed` holds four linked work trees made in this
+process's environment, `other` a staged file its user then edited, and `alt`
+a copy of `other`'s index. Every implement, gate and review role of
+`HostRunner::new()`, and the legacy runner's gate, answers
+`--absolute-git-dir` and `--git-path index` with its own work tree's; the
+probes and the legacy worker keep the inherited context, so their answers are
+not asserted. Afterwards `other`'s index and objects and `alt`'s index are
+byte-identical, no lock is left there, and the gate killed while
+`git update-index` held the index lock left that lock in its own snapshot's
+administrative directory.
+
+Three cases run their implement role under a runner that holds the managed
+repository, as a topology runner that starts roles in slots must: a relative
+`GIT_COMMON_DIR` with a common directory beside the slot, the draft's design
+lens's construction; an absolute `GIT_COMMON_DIR` with the run's `worktrees`
+directory a link into another repository (C4); and a relative one that names
+the run's common directory from the base and from the slot behind the same
+link (C5, the regression lens's construction). Each role's
+`--git-common-dir` is the run's, its `git add` writes into the run's object
+store, and the directory beside the slot, or the other repository's objects
+and refs, are byte-identical. `control` is a control, green at both; the other
+report cases and the relative case are red at `5c222ff2`; C4 and C5 are green
+there, and red when `GIT_COMMON_DIR` is removed in a work tree, and C5 also when
+only a relative value is.
+
+## `fn slot_roles_helper() {`
+
+The child of the test above: one case's steps, under its names.
+
+## `fn a_hook_started_runs_slot_worker_leaves_the_users_commit_as_the_user_made_it() {`
+
+A real `git commit -a` in a main checkout and a plain commit in a linked
+checkout, each with a `pre-commit` hook that starts this binary's helper as
+the coordinator: it derives a manager at the hook's directory, adds a slot and
+has an implement role of `HostRunner::new()` add a file there. The user's
+commit then holds exactly the user's paths and the user's change. At
+`5c222ff2`, in both, the worker's file enters the commit and the user's change
+is lost from it, because the slot add and the worker wrote the index the
+commit is being made from.
+
+**An unexplained macOS red.** CI run `42400918861`, attempt 1, job
+`128488261776` (`test (macos-latest)`), which checked out merge `134fdd30` of
+head `bb084ac8`, failed this test with `a plain commit in a linked checkout:
+the commit failed`, at the assertion on line 8591 of that head. The commit's
+`ProcessOutput` had code `None`, `timed_out` and `output_limited` both false,
+empty stdout and a duration of about 428 ms. Its stderr held the hook's
+`hook_started_slot_worker_helper` run passing (`1 passed`). On Unix,
+`ExitStatus::code` is `None` for an end by signal, but the stored output does
+not keep a signal number. Which signal, what sent it, and the cause are
+unknown, and so is any connection to the change set under test.
+
+**The Trace2 diagnostic.** Each case gives `GIT_TRACE2_EVENT` to the outer
+commit's `Command` alone, through that `Command`'s own environment. The value
+is a fresh absolute file directly under the case's scratch root:
+`trace2-main.event` or `trace2-linked.event`. It lies outside `M`, `L`, the
+hooks directory and the private root. The process environment and Git's
+configuration are unchanged. Git normally passes the variable on to the hook
+and to the Git commands started under it, so their events can share the file.
+That widens what the trace covers, but it does not prove which process wrote
+which event.
+
+When the funnel returns, the report is printed before the exit code is
+checked, while the scratch tree still exists. The printing is done by
+[`report_hook_commit_trace`], into the test's captured output. A passing run
+discards it; a failing run or a `--nocapture` run shows it.
+
+These are unchanged:
+- the command, the funnel and its 180 s bound;
+- both cases, the hook and its helper;
+- every assertion and the control flow.
+
+**Limits.**
+- An `Err` from `run_with_timeout` still panics at once with no report,
+  because covering that path would change its control flow.
+- Git writes a `signal` event only for the signals it handles, and nothing for
+  `SIGKILL`, so a trace without one rules nothing out.
+- The report is a snapshot taken when the funnel returns.
+
+This is a diagnostic. It is not a fix, and it does not claim the red is
+explained or closed.
+
+## `const HOOK_COMMIT_TRACE_HEAD: u64 = 64 * 1024;`
+
+The read bound of [`report_hook_commit_trace`], together with
+`HOOK_COMMIT_TRACE_TAIL` (192 KiB). A trace of at most 256 KiB is read whole. A
+longer one is read only in its first 64 KiB and its last 192 KiB, and the
+bytes between them are counted and skipped by a seek. The ends are the parts
+kept because the outer commit's first events open the file, and its last
+ones, if it wrote any, normally come after the hook's.
+
+## `fn report_hook_commit_trace(label: &str, trace: &Path) {`
+
+Prints one case's trace with `eprintln!`, so that libtest captures it. The
+output, in order:
+1. A line naming the case (`label`), the path, the size when the file was
+   opened, and the number of bytes omitted.
+2. Each newline-ended piece of the bytes read, as `  | ` followed by the piece
+   escaped by `<[u8]>::escape_ascii`.
+3. For a long file only: a line giving the number of bytes omitted, followed
+   by the tail's pieces in the same form.
+4. A closing line with the number of bytes shown, or the error that stopped
+   the read.
+
+The escaping turns quotes, backslashes, control bytes and non-ASCII bytes into
+escapes, and shows a record's newline as `\n`. No trace byte then reaches a
+terminal as a control character, and the bytes read can be recovered exactly. The
+output is at most nine characters per byte read: four for an escape, plus the
+prefix and line end of a piece that can be a single byte long. Three framing
+lines come on top of that.
+
+It reports and never asserts:
+- a path that is not absolute was never given to Git, and is reported as
+  such;
+- a missing file is reported as `missing`;
+- an open or size error is reported as `unreadable`;
+- a read error is reported after whatever was read before it.
+
+It reads only that one file. It does not panic on a read problem and returns
+nothing to the test, so it can neither replace the commit's `ProcessOutput`
+and failure nor make a failing case pass.
+
+## `fn hook_started_slot_worker_helper() {`
+
+The coordinator the hook starts, under exactly the names Git handed the hook.

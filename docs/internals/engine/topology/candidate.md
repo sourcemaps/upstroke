@@ -367,7 +367,8 @@ The commit the coordinator recorded.
 `candidate`: "a Promoting generation is always promoted before any
 `run_finished`". This value is what the closure procedure at run end and the
 resume in `transaction_fault_matrix[T-CAND-REF]` both hold — which is why
-[`recovery_for`] hands one back rather than describing one.
+[`owed_for`], and [`recovery_for`] after it, hand one back rather than
+describing one.
 
 ## `pub struct PromotingCandidate` › `tree: CommitSha,`
 
@@ -668,10 +669,12 @@ Nothing owed at all.
 
 Nothing is owed.
 
-## `pub fn recovery_for(`
+## `pub fn owed_for(`
 
 Classify what one generation owes, from the derived state and the refs on
-disk.
+disk. Run-end closure (`run::complete_promotions`) reads it as it is; a
+fresh-process recovery reads it through [`recovery_for`], which adds the
+keeping P-6′ requires of recovery.
 
 The fold is the input because the fold *is* the derived state — INV-02's
 "live state and replay use one checked transition over the exact wire
@@ -718,6 +721,42 @@ while the pin it should have pruned is still there. The candidate's
 identity comes from the durable record rather than from this module's own
 derivation of the names, because the record is what the run actually
 wrote.
+
+## `pub fn recovery_for(`
+
+**Recovery's reading of [`owed_for`], with P-6′'s keeping.** The fresh regular
+lens found the gap at `f1842dcd` (P1), and #333 repairs it here. A promotion
+recovery finishes (`recover::finish_promotions`, step (f)) creates the
+candidates ref, appends `task_candidate_created` and then removes the task
+worktree with what it holds ([`reclaim_after_creation`]). That worktree can
+hold output its candidate does not pin.
+
+While an instance of it holds anything and its worktree registration is not
+whole, `dispatch::refuse_kept_promotion` refuses resumably, naming the slot and
+each kept instance. The registration is not whole when a prune no engine process
+started deleted it, wholly or in part, with the store or without it. The refusal
+comes before any of those three steps: `finish_promotions` classifies every task
+before it finishes any promotion, so nothing is appended or removed for any of
+them, and the resume ends before `run_resumed`.
+
+That is P-6′'s "recovery never removes a task worktree instance that holds
+anything while its worktree registration is not whole", and Choice A's "except
+recovery task reclaim", for the promotion's reclaim. RULING P-1's guard does not
+reach that reclaim, because it keeps only a generation recovery has closed
+(step (e)). The keeping lives here because `recover.rs` is frozen: its call of
+`recovery_for` is unchanged, and so is P-1's exception.
+
+Each resume checks again (G-2). Once the instance holds nothing (the operator
+took what it held and removed the directory), or its registration is whole again
+(`git worktree repair` writes a deleted `gitdir` again), the promotion is
+finished and the worktree removed with what it then holds. Run-end closure reads
+[`owed_for`] and still removes the worktree, as P-6′'s "run-end closure and
+terminal finalization remove it as they remove every other instance" says.
+
+### Errors
+
+[`owed_for`]'s errors; the kept-slot refusal (`UpstrokeError::RegistryRefused`);
+and the registry read's errors (`WorkspaceManager::kept_instances`).
 
 ## `pub fn prune_orphan_pin(`
 

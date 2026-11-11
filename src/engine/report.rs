@@ -6,6 +6,7 @@
     clippy::disallowed_macros
 )]
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::time::Duration;
 
@@ -14,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::capacity;
 use crate::events::{self, AttemptRecord, Progress, RunState, TaskState};
 use crate::interaction::QuestionRecord;
-use crate::ir::{Plan, Task};
+use crate::ir::{Plan, Question, Task, TaskId};
 use crate::ladder::FailureKind;
 use crate::util;
 
@@ -128,6 +129,10 @@ pub struct RunReport {
     pub running: bool,
     #[serde(default)]
     pub interrupted: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub questions_in_log: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unattributed_cost_incomplete: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -148,9 +153,11 @@ impl RunReport {
     }
 
     pub fn total_is_floor(&self) -> bool {
-        self.tasks
-            .iter()
-            .any(|task| task.cost_incomplete() || task.review_cost_incomplete)
+        self.unattributed_cost_incomplete
+            || self
+                .tasks
+                .iter()
+                .any(|task| task.cost_incomplete() || task.review_cost_incomplete)
     }
 
     fn committed_count(&self) -> usize {
@@ -198,6 +205,360 @@ impl RunReport {
     }
 }
 
+impl RunReport {
+    #[must_use]
+    pub(crate) fn from_topology(
+        fold: &crate::topology::fold::TopologyFold,
+        events: &[crate::topology::events::TopologyEvent],
+        mut warnings: Vec<String>,
+    ) -> Self {
+        use crate::events::RunOutcome as Finished;
+        use crate::topology::events::{
+            AttemptNumber, AttemptStarted4, GenerationId, TopologyEventBody,
+        };
+        use crate::topology::fold::TaskState as Topology;
+        use crate::topology::registry::TaskKey;
+
+        let mut merged: BTreeMap<TaskKey, String> = BTreeMap::new();
+        let mut records: BTreeMap<TaskKey, Vec<AttemptRecord>> = BTreeMap::new();
+        let mut starts: BTreeMap<(TaskKey, GenerationId, AttemptNumber), &AttemptStarted4> =
+            BTreeMap::new();
+        let mut exceeded = None;
+        for event in events {
+            match &event.body {
+                TopologyEventBody::TaskMerged { data } => {
+                    for key in &data.satisfies {
+                        merged.insert(*key, data.merged_sha.0.clone());
+                    }
+                }
+                TopologyEventBody::AttemptStarted { data } => {
+                    starts.insert((data.key, data.generation, data.attempt), data);
+                }
+                TopologyEventBody::AttemptFinished { data } => {
+                    records
+                        .entry(data.key)
+                        .or_default()
+                        .push(data.record.as_ref().clone());
+                }
+                TopologyEventBody::AttemptInterrupted { data } => {
+                    let started = starts
+                        .get(&(data.key, data.generation, data.attempt))
+                        .copied();
+                    if started.is_none() {
+                        warnings.push(format!(
+                            "the log settles attempt {} of task key {} (generation {}) \
+                             interrupted without recording its start, so its row names no tier \
+                             or model; its spend is unknown and this report's total is a floor",
+                            data.attempt.0, data.key.0, data.generation.0
+                        ));
+                    }
+                    records
+                        .entry(data.key)
+                        .or_default()
+                        .push(interrupted_record(data, started));
+                }
+                TopologyEventBody::CandidatePrepared { data } => {
+                    records
+                        .entry(data.key)
+                        .or_default()
+                        .push(data.attempt.as_ref().clone());
+                }
+                TopologyEventBody::BudgetExceeded { data } => exceeded = Some(data),
+                _ => {}
+            }
+        }
+
+        let integration = crate::engine::topology::select::IntegrationReviews::replay(events);
+
+        let outcome = fold.finished().cloned();
+        let blocked = derived_blocked(fold);
+        let display = |key: TaskKey| {
+            fold.registry()
+                .and_then(|registry| registry.get(key))
+                .map_or_else(
+                    || format!("k{}", key.0),
+                    |entry| entry.display_id.as_str().to_owned(),
+                )
+        };
+        let open: Vec<&crate::topology::fold::OpenQuestion> = fold
+            .open_questions()
+            .map(|questions| questions.values().collect())
+            .unwrap_or_default();
+
+        let mut tasks = Vec::new();
+        let entries = fold
+            .registry()
+            .map_or(&[][..], |registry| registry.entries());
+        for entry in entries {
+            let Some(task) = fold.task(entry.key) else {
+                continue;
+            };
+            let attempts = records.remove(&entry.key).unwrap_or_default();
+            let integrated = integration.of_task(entry.key);
+            let asked = open.iter().find(|asked| asked.question.key == entry.key);
+            let status = match (task.state, asked) {
+                (Topology::Merged, _) => TaskRunStatus::Committed {
+                    sha: merged.get(&entry.key).cloned().unwrap_or_default(),
+                },
+                (Topology::Failed, _) => {
+                    let failure = attempts
+                        .iter()
+                        .rev()
+                        .find(|record| {
+                            record
+                                .failure
+                                .as_ref()
+                                .is_none_or(|failure| failure.kind != FailureKind::Interrupted)
+                        })
+                        .and_then(|record| record.failure.as_ref());
+                    TaskRunStatus::Failed {
+                        kind: failure.map_or(FailureKind::AgentError, |failure| failure.kind),
+                        reason: failure.map_or_else(
+                            || "the run's log records no failed attempt for this task".to_owned(),
+                            |failure| failure.reason.clone(),
+                        ),
+                    }
+                }
+                (_, Some(asked)) => TaskRunStatus::Parked {
+                    question: asked.question.id.to_string(),
+                    reason: asked.question.context.clone(),
+                },
+                (Topology::AwaitingInput, None) => TaskRunStatus::Parked {
+                    question: String::new(),
+                    reason: "awaiting input".to_owned(),
+                },
+                (
+                    Topology::Pending
+                    | Topology::AwaitingMerge
+                    | Topology::AwaitingRepair
+                    | Topology::Deferred,
+                    None,
+                ) => match outcome {
+                    Some(Finished::Halted | Finished::BudgetExceeded) => TaskRunStatus::Skipped,
+                    Some(Finished::Complete | Finished::Parked) | None => {
+                        blocked.get(&entry.key).map_or(TaskRunStatus::Queued, |by| {
+                            TaskRunStatus::Blocked { by: display(*by) }
+                        })
+                    }
+                },
+            };
+            let model = attempts
+                .last()
+                .map(|record| record.model.clone())
+                .unwrap_or_default();
+            let session_id = attempts.last().and_then(|record| record.session_id.clone());
+            let mut review_models: Vec<String> = Vec::new();
+            for model in attempts
+                .iter()
+                .flat_map(AttemptRecord::review_models)
+                .chain(integrated.iter().map(|review| review.model.clone()))
+            {
+                if !review_models.contains(&model) {
+                    review_models.push(model);
+                }
+            }
+            let duration = attempts.iter().map(|record| record.duration).sum();
+            let cost_usd = sum_opt(attempts.iter().map(|record| record.cost_usd));
+            let review_cost_usd = sum_opt(
+                attempts
+                    .iter()
+                    .map(AttemptRecord::review_cost_usd)
+                    .chain(integrated.iter().map(|review| review.cost_usd)),
+            );
+            let review_cost_incomplete = attempts.iter().any(AttemptRecord::review_cost_incomplete)
+                || integration.spend_unknown(entry.key);
+            tasks.push(TaskReport {
+                id: entry.display_id.as_str().to_owned(),
+                title: entry.spec.title.clone(),
+                model,
+                status,
+                duration,
+                cost_usd,
+                review_models,
+                review_cost_usd,
+                review_cost_incomplete,
+                session_id,
+                attempts,
+            });
+        }
+
+        let questions = open
+            .iter()
+            .map(|asked| {
+                QuestionRecord::open(Question {
+                    id: asked.question.id.clone(),
+                    kind: asked.question.kind,
+                    affected_tasks: vec![TaskId(display(asked.question.key))],
+                    context: asked.question.context.clone(),
+                    options: asked.question.options.clone(),
+                })
+            })
+            .collect();
+
+        let halted_at = match outcome {
+            Some(Finished::Halted) => Some(
+                fold.halted_at()
+                    .map_or_else(|| "the run".to_owned(), display),
+            ),
+            None => fold.halted_at().map(display),
+            Some(Finished::Complete | Finished::Parked | Finished::BudgetExceeded) => None,
+        };
+        let budget_stop = match outcome {
+            Some(Finished::BudgetExceeded) | None => {
+                fold.budget_stop().map(|stop| events::BudgetExceeded {
+                    budget: stop.budget,
+                    limit_usd: exceeded.map_or(0.0, |data| data.limit_usd),
+                    spent_usd: exceeded.map_or(0.0, |data| data.spent_usd),
+                    task: exceeded
+                        .and_then(|data| data.key)
+                        .map(display)
+                        .unwrap_or_default(),
+                })
+            }
+            Some(Finished::Complete | Finished::Parked | Finished::Halted) => None,
+        };
+
+        let unattributed = integration.unattributed();
+        let total_cost_usd = total_of(&tasks)
+            + unattributed
+                .iter()
+                .filter_map(|review| review.cost_usd)
+                .sum::<f64>();
+        if unattributed.iter().any(|review| review.cost_usd.is_none()) {
+            warnings.push(
+                "an integration review pass the log attributes to no task reported no cost, so \
+                 this report's total is a floor"
+                    .to_owned(),
+            );
+        }
+        if integration.interrupted_unattributed() {
+            warnings.push(
+                "an integration verification the log attributes to no task was interrupted, so \
+                 what its review passes cost is unknown and this report's total is a floor"
+                    .to_owned(),
+            );
+        }
+        let ledger = crate::engine::topology::select::Spend::replay(events).run_total();
+        if (total_cost_usd - ledger).abs() > 1e-9 {
+            warnings.push(format!(
+                "this report's cost total ${total_cost_usd:.4} differs from the ${ledger:.4} the \
+                 run's event log records; the log is the authority"
+            ));
+        }
+        let mut drain = capacity::drain_of(tasks.iter().flat_map(|task| task.attempts.iter()));
+        for review in integration.all() {
+            if let Some(pool) = &review.pool {
+                let spend = drain.entry(pool.clone()).or_default();
+                spend.attempts = spend.attempts.saturating_add(1);
+                match review.cost_usd {
+                    Some(cost) => spend.usd = Some(spend.usd.unwrap_or(0.0) + cost),
+                    None => spend.unpriced = spend.unpriced.saturating_add(1),
+                }
+            }
+        }
+        let pool_drain = drain
+            .into_iter()
+            .map(|(pool, spend)| PoolDrainRow {
+                pool,
+                attempts: spend.attempts,
+                cost_usd: spend.usd,
+                unpriced: spend.unpriced,
+            })
+            .collect();
+        let started = fold.started();
+        Self {
+            run_id: started.map(|run| run.run_id.clone()).unwrap_or_default(),
+            branch: started.map(|run| run.branch.clone()).unwrap_or_default(),
+            gates: started.map(|run| run.gates.clone()).unwrap_or_default(),
+            gates_from_config: started.is_some_and(|run| run.gates_from_config),
+            warnings,
+            tasks,
+            halted_at,
+            questions,
+            budget_stop,
+            total_cost_usd,
+            pool_drain,
+            running: false,
+            interrupted: outcome.is_none(),
+            questions_in_log: true,
+            unattributed_cost_incomplete: integration.unattributed_spend_unknown(),
+        }
+    }
+}
+
+fn derived_blocked(
+    fold: &crate::topology::fold::TopologyFold,
+) -> BTreeMap<crate::topology::registry::TaskKey, crate::topology::registry::TaskKey> {
+    use crate::topology::fold::TaskState as Topology;
+
+    let Some(registry) = fold.registry() else {
+        return BTreeMap::new();
+    };
+    let failed = |key| fold.task_state(key) == Some(Topology::Failed);
+    let mut closure = std::collections::BTreeSet::new();
+    loop {
+        let before = closure.len();
+        for entry in registry.entries() {
+            if fold.task_state(entry.key) == Some(Topology::Pending)
+                && entry
+                    .deps
+                    .iter()
+                    .any(|dep| failed(*dep) || closure.contains(dep))
+            {
+                closure.insert(entry.key);
+            }
+        }
+        if closure.len() == before {
+            break;
+        }
+    }
+    closure
+        .iter()
+        .filter_map(|key| {
+            registry
+                .get(*key)?
+                .deps
+                .iter()
+                .find(|dep| failed(**dep) || closure.contains(*dep))
+                .map(|dep| (*key, *dep))
+        })
+        .collect()
+}
+
+fn interrupted_record(
+    interrupted: &crate::topology::events::AttemptInterrupted4,
+    started: Option<&crate::topology::events::AttemptStarted4>,
+) -> AttemptRecord {
+    let unobserved = crate::ir::Outcome {
+        status: crate::ir::OutcomeStatus::AgentError,
+        diff: String::new(),
+        detail: None,
+        session_id: None,
+        usage: None,
+        cost_usd: None,
+        transcript_path: std::path::PathBuf::new(),
+        duration: Duration::ZERO,
+    };
+    let failure = super::classify::interrupted_failure(interrupted.detail.clone());
+    let mut record = super::classify::attempt_record(
+        interrupted.attempt.0,
+        super::classify::AttemptFacts {
+            tier: started.map_or(crate::ir::Tier::Small, |started| started.binding.tier),
+            model: started.map_or("", |started| started.binding.model.as_str()),
+            pool: started.and_then(|started| started.pool.clone()),
+            resumed: started.is_some_and(|started| started.resume_session.is_some()),
+            outcome: &unobserved,
+            reviews: &[],
+            failure: Some(&failure),
+            feedback: super::classify::FeedbackCarrier::AttemptRecord,
+        },
+    );
+    if started.is_none() {
+        record.tier.clear();
+    }
+    record
+}
+
 pub(super) struct ReportHeader<'a> {
     pub(super) run_id: &'a str,
     pub(super) branch: &'a str,
@@ -208,31 +569,42 @@ pub(super) struct ReportHeader<'a> {
     pub(super) interrupted: bool,
 }
 
+#[deny(clippy::indexing_slicing)]
 pub(super) fn build_report(header: ReportHeader<'_>, plan: &Plan, state: &RunState) -> RunReport {
     let ReportHeader {
         run_id,
         branch,
         gates,
         gates_from_config,
-        warnings,
+        mut warnings,
         running,
         interrupted,
     } = header;
     let settled = settle(plan, &state.states, running);
-    let tasks: Vec<TaskReport> = state
+    let mut tasks: Vec<TaskReport> = Vec::with_capacity(plan.tasks.len());
+    for index in state
         .order
         .iter()
         .copied()
         .chain((0..plan.tasks.len()).filter(|i| !state.order.contains(i)))
-        .map(|index| {
-            task_report(
-                &plan.tasks[index],
-                &settled[index],
-                &state.progress[index],
-                running,
-            )
-        })
-        .collect();
+    {
+        match (
+            plan.tasks.get(index),
+            settled.get(index),
+            state.progress.get(index),
+        ) {
+            (Some(task), Some(settled), Some(progress)) => {
+                tasks.push(task_report(task, settled, progress, running));
+            }
+            _ => warnings.push(format!(
+                "the run's state names task position {index}, which its plan ({} task(s)) or its \
+                 state ({} row(s)) does not hold; this report has no row for it, and its spend, \
+                 if any, is not in the total",
+                plan.tasks.len(),
+                state.progress.len()
+            )),
+        }
+    }
     let total_cost_usd = total_of(&tasks);
     let pool_drain = capacity::drain_of(state.progress.iter().flat_map(|p| p.records.iter()))
         .into_iter()
@@ -257,6 +629,8 @@ pub(super) fn build_report(header: ReportHeader<'_>, plan: &Plan, state: &RunSta
         pool_drain,
         running,
         interrupted,
+        questions_in_log: false,
+        unattributed_cost_incomplete: false,
     }
 }
 
@@ -423,13 +797,21 @@ pub fn topo_order(plan: &Plan) -> Vec<usize> {
 }
 
 impl RunReport {
+    fn switched_the_checkout(&self) -> bool {
+        !self.questions_in_log
+    }
+
     pub fn render(&self) -> String {
         let mut out = util::terminal::TerminalLines::default();
         out.push(format_args!("run: {}", self.run_id));
-        out.push(format_args!(
-            "branch: {} (return with: git switch -)",
-            self.branch
-        ));
+        if self.switched_the_checkout() {
+            out.push(format_args!(
+                "branch: {} (return with: git switch -)",
+                self.branch
+            ));
+        } else {
+            out.push(format_args!("branch: {}", self.branch));
+        }
         if self.gates.is_empty() {
             out.push(format_args!("gates: none"));
         } else {
@@ -451,6 +833,7 @@ impl RunReport {
                 TaskRunStatus::Committed { sha } => {
                     let partial = if task.review_cost_incomplete { "?" } else { "" };
                     let review = match (task.review_models.as_slice(), task.review_cost_usd) {
+                        ([], _) if task.review_cost_incomplete => " + review $?".to_owned(),
                         ([], _) => String::new(),
                         (models, Some(cost)) => {
                             format!(" + review {} ${cost:.4}{partial}", models.join(", "))
@@ -535,14 +918,21 @@ impl RunReport {
                     )
                 ));
             }
-            out.push(format_args!(
-                "  payloads: {}",
-                std::path::Path::new(".upstroke")
-                    .join("runs")
-                    .join(&self.run_id)
-                    .join("questions")
-                    .display()
-            ));
+            if self.questions_in_log {
+                out.push(format_args!(
+                    "  each is in the run's log: `upstroke answer <question id>` shows and \
+                     answers it"
+                ));
+            } else {
+                out.push(format_args!(
+                    "  payloads: {}",
+                    std::path::Path::new(".upstroke")
+                        .join("runs")
+                        .join(&self.run_id)
+                        .join("questions")
+                        .display()
+                ));
+            }
         }
         out.push(format_args!(
             "total: ${:.4}{} (api-equivalent)",
@@ -677,8 +1067,8 @@ impl RunReport {
         ));
         if self.total_is_floor() {
             out.push(format_args!(
-                "  `?` marks a figure missing an attempt whose route reports no spend, or one \
-                 the engine was killed inside — a floor, not a total (§13)"
+                "  `?` marks a figure missing an attempt or a review pass whose route reports no \
+                 spend, or one the engine was killed inside — a floor, not a total (§13)"
             ));
         }
         if self.pool_drain.is_empty() {

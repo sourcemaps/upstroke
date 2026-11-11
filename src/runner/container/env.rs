@@ -11,7 +11,6 @@ use std::collections::BTreeMap;
 use crate::error::UpstrokeError;
 use crate::runner::host::{KeyCase, credential_location, reserved_keys};
 use crate::runner::{AgentId, ExecutionRole, ProbeTarget};
-use crate::workspace_manager::NO_REPLACEMENT_OBJECTS;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundaryLayout {
@@ -20,6 +19,7 @@ pub struct BoundaryLayout {
     git_view: String,
     git_objects: String,
     scratch: String,
+    settings: String,
 }
 
 impl Default for BoundaryLayout {
@@ -39,6 +39,8 @@ impl BoundaryLayout {
 
     pub const DEFAULT_SCRATCH: &'static str = "/tmp";
 
+    pub const DEFAULT_SETTINGS: &'static str = "/upstroke/settings";
+
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -47,6 +49,7 @@ impl BoundaryLayout {
             git_view: Self::DEFAULT_GIT_VIEW.to_owned(),
             git_objects: Self::DEFAULT_GIT_OBJECTS.to_owned(),
             scratch: Self::DEFAULT_SCRATCH.to_owned(),
+            settings: Self::DEFAULT_SETTINGS.to_owned(),
         }
     }
 
@@ -64,6 +67,7 @@ impl BoundaryLayout {
             git_view: git_view.into(),
             git_objects: git_objects.into(),
             scratch: scratch.into(),
+            settings: Self::DEFAULT_SETTINGS.to_owned(),
         }
     }
 
@@ -100,6 +104,11 @@ impl BoundaryLayout {
     #[must_use]
     pub fn credential_root(&self) -> &str {
         &self.credentials
+    }
+
+    #[must_use]
+    pub fn settings(&self, file_name: &str) -> String {
+        format!("{}/{file_name}", self.settings)
     }
 }
 
@@ -229,8 +238,6 @@ impl ContainerEnvironment {
         for (key, value) in overlay {
             upsert(&mut composed, self.case, key.clone(), value.clone());
         }
-        let (key, value) = NO_REPLACEMENT_OBJECTS;
-        upsert(&mut composed, self.case, key.to_owned(), value.to_owned());
         self.certify_path(&composed)?;
         Ok(composed)
     }
@@ -311,6 +318,7 @@ mod tests {
 
     use super::*;
     use crate::runner::host::{CREDENTIAL_LOCATIONS, HostEnvironment, RESERVED_ALWAYS};
+    use crate::workspace_manager::NO_REPLACEMENT_OBJECTS;
 
     const VOLUMES: &[(&str, &str)] = &[
         ("claude-code", "upstroke-creds-claude"),
@@ -434,23 +442,22 @@ mod tests {
     }
 
     #[test]
-    fn every_composed_environment_disables_replacement_objects() {
+    fn no_composed_environment_disables_replacement_objects_process_wide() {
         let volumes = volumes();
         let layout = BoundaryLayout::new();
         let mut rows = 0_usize;
         for case in KeyCase::ALL {
-            let mut base = image_base();
-            base.push((NO_REPLACEMENT_OBJECTS.0.to_ascii_lowercase(), String::new()));
-            let environment = ContainerEnvironment::with_base(base, *case);
-            for role in ExecutionRole::all() {
-                let agent = binding(&role);
-                let scope = scope(&role, agent.as_ref(), &volumes, &layout);
-                for overlay in [
-                    Vec::new(),
-                    vec![(NO_REPLACEMENT_OBJECTS.0.to_owned(), "0".to_owned())],
-                ] {
+            for declared in [None, Some("1"), Some("")] {
+                let mut base = image_base();
+                if let Some(value) = declared {
+                    base.push((NO_REPLACEMENT_OBJECTS.0.to_owned(), value.to_owned()));
+                }
+                let environment = ContainerEnvironment::with_base(base, *case);
+                for role in ExecutionRole::all() {
+                    let agent = binding(&role);
+                    let scope = scope(&role, agent.as_ref(), &volumes, &layout);
                     let composed = environment
-                        .compose(&scope, &overlay)
+                        .compose(&scope, &[])
                         .unwrap_or_else(|error| panic!("{role} ({case:?}) was refused: {error}"));
                     let named: Vec<&str> = composed
                         .iter()
@@ -461,15 +468,17 @@ mod tests {
                         .collect();
                     assert_eq!(
                         named,
-                        vec![NO_REPLACEMENT_OBJECTS.1],
-                        "{role} ({case:?}, overlay {overlay:?}): the container would read \
-                         whatever `git replace` points at the judged objects"
+                        declared.into_iter().collect::<Vec<&str>>(),
+                        "{role} ({case:?}, image declares {declared:?}): the boundary disabled \
+                         replacements in every repository the role touches, or dropped the \
+                         image's own entry; the managed repository's view refuses them in its own \
+                         config (`view::config_for`)"
                     );
                     rows += 1;
                 }
             }
         }
-        assert_eq!(rows, ExecutionRole::all().len() * 2 * KeyCase::ALL.len());
+        assert_eq!(rows, ExecutionRole::all().len() * 3 * KeyCase::ALL.len());
     }
 
     #[test]

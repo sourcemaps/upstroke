@@ -6,6 +6,7 @@
 #![forbid(clippy::disallowed_types, clippy::disallowed_macros)]
 
 use super::runtime::Settled;
+use crate::runner::container::runtime::QuestionBound;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -18,8 +19,8 @@ use super::intent::{
     invocation_hash, private_root_label,
 };
 use super::runtime::{
-    ContainerExecution, ContainerRuntime, ContainerTrace, CreateSpec, ImageInspection, Liveness,
-    Mount, OwnerLiveness, RuntimeError, RuntimeOp, StopMode, TracePhase,
+    ContainerExecution, ContainerRuntime, ContainerTrace, ContainerUser, CreateSpec,
+    ImageInspection, Liveness, Mount, OwnerLiveness, RuntimeError, RuntimeOp, StopMode, TracePhase,
 };
 use super::{
     CoveredCreate, CoveredStart, DOCKER_GATED_TESTS, DisposableDirView, DockerCli,
@@ -302,6 +303,8 @@ fn spec_for(
         command: vec!["/bin/sh".to_owned(), "-c".to_owned(), "exit 0".to_owned()],
         workdir: Some("/work".to_owned()),
         read_only_root: true,
+        user: None,
+        open_stdin: false,
     }
 }
 
@@ -538,6 +541,1104 @@ fn a_reference_can_be_moved_to_another_id_and_the_old_id_stays() {
 }
 
 #[test]
+fn an_unresolved_attached_client_stays_unresolved_through_every_settlement() {
+    use super::{AttachedClient, ClientEnd, ClientRecord, ClientSettlement, refused};
+    use crate::agent::ProcessOutput;
+    use crate::agent::proc::ProcessFailure;
+    use crate::error::ProcessFate;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+
+    fn ended(
+        stop: Arc<AtomicBool>,
+        result: Result<ProcessOutput, ProcessFailure>,
+    ) -> AttachedClient {
+        let handle = std::thread::spawn(move || result);
+        while !handle.is_finished() {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        AttachedClient {
+            stop,
+            supervisor: Some(handle),
+        }
+    }
+    let output = |code| ProcessOutput {
+        code,
+        stdout: String::new(),
+        stderr: String::new(),
+        duration: Duration::ZERO,
+        timed_out: false,
+        output_limited: false,
+    };
+    let docker = DockerCli::default();
+
+    docker.own_client(
+        "unresolved",
+        ended(
+            Arc::new(AtomicBool::new(false)),
+            Err(ProcessFailure {
+                fate: ProcessFate::Unresolved,
+                error: UpstrokeError::Agent {
+                    message: "the client's process group could not be established gone".to_owned(),
+                },
+            }),
+        ),
+    );
+    assert!(
+        matches!(
+            docker.settle_client_of("unresolved"),
+            ClientSettlement::Unresolved(fact) if fact.contains("may still be running")
+        ),
+        "a supervision that ended Unresolved is unresolved at collection, not an end"
+    );
+    for removal in 0..2 {
+        let removed = docker.settle_removed_client("unresolved");
+        assert!(
+            matches!(
+                removed,
+                Err(RuntimeError::Unresolved {
+                    operation: RuntimeOp::Remove,
+                    ..
+                })
+            ),
+            "removal {removal}: the unresolved fact survives, never an Ok: {removed:?}"
+        );
+    }
+    assert!(
+        matches!(
+            docker.client_record("unresolved"),
+            Some(ClientRecord::Unresolved(_))
+        ),
+        "what is kept is the fact, not a finished thread's handle"
+    );
+    assert!(
+        matches!(
+            refused(RuntimeError::Unresolved {
+                operation: RuntimeOp::Remove,
+                detail: "unresolved".to_owned(),
+            }),
+            UpstrokeError::Runner {
+                fate: ProcessFate::Unresolved,
+                ..
+            }
+        ),
+        "the funnel's mapping keeps the fate the release reads"
+    );
+
+    docker.own_client(
+        "exited",
+        ended(Arc::new(AtomicBool::new(false)), Ok(output(Some(0)))),
+    );
+    assert!(
+        docker.settle_removed_client("exited").is_ok(),
+        "the control: a client that exited is settled"
+    );
+    assert!(docker.client_record("exited").is_none());
+
+    docker.own_client(
+        "stopped",
+        ended(Arc::new(AtomicBool::new(true)), Ok(output(None))),
+    );
+    assert!(
+        matches!(
+            docker.settle_client_of("stopped"),
+            ClientSettlement::Ended(ClientEnd::Stopped)
+        ),
+        "the control: a verified requested stop is cleanup"
+    );
+
+    docker.own_client(
+        "gone",
+        ended(
+            Arc::new(AtomicBool::new(false)),
+            Err(ProcessFailure {
+                fate: ProcessFate::Gone,
+                error: UpstrokeError::Agent {
+                    message: "supervising agent input: broken".to_owned(),
+                },
+            }),
+        ),
+    );
+    assert!(
+        matches!(
+            docker.settle_client_of("gone"),
+            ClientSettlement::Ended(ClientEnd::Failed {
+                fate: ProcessFate::Gone,
+                ..
+            })
+        ),
+        "a supervision failure whose process is established gone is an end, judged by the \
+         verdict where a result is reported"
+    );
+}
+
+#[test]
+fn a_removal_that_leaves_a_process_unresolved_releases_nothing_as_gone() {
+    use super::{ContainerToRelease, release_classified};
+
+    for unresolved in [true, false] {
+        let fixture = Fixture::new(
+            &format!("release-unresolved-{unresolved}"),
+            RUN_A,
+            INCARNATION_1,
+            &shell_probe(),
+        );
+        let mut hooks = fixture.hooks();
+        let launched =
+            launch(&mut hooks, &fixture.runtime, &fixture.view, &fixture.plan).expect("launched");
+        if unresolved {
+            fixture
+                .runtime
+                .leave_a_process_unresolved_at_removal(launched.name.as_str());
+        }
+        let released = release_classified(
+            &mut hooks,
+            &fixture.runtime,
+            &fixture.view,
+            &fixture.root,
+            &launched,
+            ContainerToRelease::ObservedExited,
+        );
+        if !unresolved {
+            assert!(
+                released.is_ok(),
+                "the control: a removal that establishes everything gone releases"
+            );
+            continue;
+        }
+        let failure = released.expect_err("an unresolved process is not a release");
+        assert!(
+            !failure.container_gone,
+            "even with the container observed exited, an unresolved process means the \
+             invocation's processes are not established gone"
+        );
+        let message = failure.error.to_string();
+        assert!(
+            message.contains("could not establish every process"),
+            "{message}"
+        );
+        assert!(
+            launched.view_path.exists() && launched.intent_path.exists(),
+            "the view and the intent are kept for the next census"
+        );
+    }
+}
+
+#[test]
+fn a_removal_keeps_an_unresolved_client_over_an_ordinary_removal_failure() {
+    use super::combined_removal;
+
+    let removal_failed = || {
+        Err(RuntimeError::Failed {
+            operation: RuntimeOp::Remove,
+            detail: "the daemon refused the removal".to_owned(),
+        })
+    };
+    let client_unresolved = || {
+        Err(RuntimeError::Unresolved {
+            operation: RuntimeOp::Remove,
+            detail: "the attached client may still be running".to_owned(),
+        })
+    };
+
+    let both = combined_removal(removal_failed(), client_unresolved());
+    assert!(
+        matches!(
+            &both,
+            Err(RuntimeError::Unresolved { detail, .. })
+                if detail.contains("may still be running")
+                    && detail.contains("the daemon refused the removal")
+        ),
+        "the stronger unresolved fact survives, and both diagnostics stay: {both:?}"
+    );
+    assert!(
+        matches!(
+            combined_removal(Ok(Settled::ProcessGone), client_unresolved()),
+            Err(RuntimeError::Unresolved { .. })
+        ),
+        "a removal that succeeded does not settle an unresolved client"
+    );
+    assert_eq!(
+        combined_removal(removal_failed(), Ok(())),
+        removal_failed(),
+        "the control: a settled client keeps the ordinary removal error"
+    );
+    assert_eq!(
+        combined_removal(Ok(Settled::ProcessGone), Ok(())),
+        Ok(Settled::ProcessGone)
+    );
+}
+
+#[test]
+fn an_ordinary_removal_failure_never_masks_an_unresolved_client() {
+    use super::{ContainerToRelease, release_classified};
+
+    for (case, released_from, unresolved) in [
+        ("observed exited", ContainerToRelease::ObservedExited, true),
+        ("after a stop", ContainerToRelease::MayBeRunning, true),
+        ("control", ContainerToRelease::ObservedExited, false),
+    ] {
+        let fixture = Fixture::new(
+            &format!("removal-masks-{}", case.replace(' ', "-")),
+            RUN_A,
+            INCARNATION_1,
+            &shell_probe(),
+        );
+        let mut hooks = fixture.hooks();
+        let launched =
+            launch(&mut hooks, &fixture.runtime, &fixture.view, &fixture.plan).expect("launched");
+        fixture.runtime.set_failing(RuntimeOp::Remove);
+        if unresolved {
+            fixture
+                .runtime
+                .leave_a_process_unresolved_at_removal(launched.name.as_str());
+        }
+        let failure = release_classified(
+            &mut hooks,
+            &fixture.runtime,
+            &fixture.view,
+            &fixture.root,
+            &launched,
+            released_from,
+        )
+        .expect_err("a removal that failed is not a release");
+        let message = failure.error.to_string();
+        if unresolved {
+            assert!(
+                !failure.container_gone,
+                "{case}: the unresolved client is not masked by the removal's own failure"
+            );
+            assert!(
+                message.contains("could not establish every process")
+                    && message.contains("the container's own removal failed"),
+                "{case}: both diagnostics: {message}"
+            );
+            assert!(
+                launched.view_path.exists() && launched.intent_path.exists(),
+                "{case}: the view and the intent stay for the next census"
+            );
+        } else {
+            assert!(
+                failure.container_gone,
+                "{case}: with the exit observed and no client unresolved, the release keeps \
+                 its established fate"
+            );
+            assert!(
+                message.contains("the container could not be removed")
+                    && !message.contains("could not establish every process"),
+                "{case}: the ordinary removal error: {message}"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_docker_create_arguments_carry_a_user_and_an_open_stdin_only_when_the_spec_does() {
+    let mut spec = CreateSpec {
+        name: "upstroke-a-b-c-d".to_owned(),
+        image_id: IMAGE_ID.to_owned(),
+        labels: BTreeMap::new(),
+        mounts: Vec::new(),
+        env: Vec::new(),
+        command: vec!["cat".to_owned()],
+        workdir: None,
+        read_only_root: true,
+        user: None,
+        open_stdin: false,
+    };
+    assert_eq!(
+        super::docker_create_arguments(&spec).expect("nothing to refuse"),
+        [
+            "create",
+            "--name",
+            "upstroke-a-b-c-d",
+            "--read-only",
+            IMAGE_ID,
+            "cat"
+        ],
+        "a spec with no user and no input asks for neither"
+    );
+    spec.user = Some(ContainerUser {
+        uid: 1000,
+        gid: 1001,
+    });
+    spec.open_stdin = true;
+    assert_eq!(
+        super::docker_create_arguments(&spec).expect("nothing to refuse"),
+        [
+            "create",
+            "--name",
+            "upstroke-a-b-c-d",
+            "--read-only",
+            "--user",
+            "1000:1001",
+            "--interactive",
+            IMAGE_ID,
+            "cat"
+        ],
+        "the numeric user and the open stdin are options of the create, before the image"
+    );
+}
+
+#[test]
+fn a_mount_argument_carries_each_value_exactly_or_refuses_it() {
+    let bind = |source: &str, target: &str| Mount::Path {
+        source: PathBuf::from(source),
+        target: target.to_owned(),
+        read_only: true,
+    };
+    for (source, expected) in [
+        (
+            "/srv/Shared Cache/Ünicode",
+            "type=bind,source=/srv/Shared Cache/Ünicode,target=/data,readonly",
+        ),
+        (
+            "/srv/a=b",
+            "type=bind,source=/srv/a=b,target=/data,readonly",
+        ),
+        (
+            "/srv/semi;colon:x",
+            "type=bind,source=/srv/semi;colon:x,target=/data,readonly",
+        ),
+    ] {
+        assert_eq!(
+            super::mount_argument(&bind(source, "/data")),
+            Ok(expected.to_owned()),
+            "`{source}` was not carried as written"
+        );
+    }
+    #[cfg(not(windows))]
+    assert_eq!(
+        super::mount_argument(&bind("/srv/back\\slash", "/data")),
+        Ok("type=bind,source=/srv/back\\slash,target=/data,readonly".to_owned()),
+        "a backslash is a byte of a Unix name and is carried as written, not turned into `/`"
+    );
+    assert_eq!(
+        super::mount_argument(&Mount::Volume {
+            name: "upstroke-creds-codex".to_owned(),
+            target: "/upstroke/credentials/codex".to_owned(),
+            read_only: false,
+        }),
+        Ok("type=volume,source=upstroke-creds-codex,target=/upstroke/credentials/codex".to_owned())
+    );
+    assert_eq!(
+        super::mount_argument(&Mount::Tmpfs {
+            target: "/tmp".to_owned()
+        }),
+        Ok("type=tmpfs,target=/tmp".to_owned())
+    );
+
+    let refusals: [(&str, &str); 7] = [
+        ("/srv/a,readonly=false", "contains `,`"),
+        ("/srv/q\"uote", "contains `\"`"),
+        ("/srv/new\nline", "control character"),
+        ("/srv/tab\tbed", "control character"),
+        ("/srv/trailing ", "whitespace"),
+        (" /srv/leading", "whitespace"),
+        ("", "is empty"),
+    ];
+    for (value, needle) in refusals {
+        for mount in [
+            bind(value, "/data"),
+            bind("/srv/plain", value),
+            Mount::Volume {
+                name: value.to_owned(),
+                target: "/data".to_owned(),
+                read_only: false,
+            },
+            Mount::Tmpfs {
+                target: value.to_owned(),
+            },
+        ] {
+            let refused = super::mount_argument(&mount)
+                .expect_err("a value the option cannot carry is refused, never altered");
+            assert!(refused.contains(needle), "{mount:?}: {refused}");
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt as _;
+        let refused = super::mount_argument(&Mount::Path {
+            source: PathBuf::from(std::ffi::OsStr::from_bytes(b"/srv/bad\xff")),
+            target: "/data".to_owned(),
+            read_only: false,
+        })
+        .expect_err("a source that is not UTF-8 is refused, never converted lossily");
+        assert!(refused.contains("not valid UTF-8"), "{refused}");
+    }
+
+    let spec = CreateSpec {
+        name: "upstroke-a-b-c-d".to_owned(),
+        image_id: IMAGE_ID.to_owned(),
+        labels: BTreeMap::new(),
+        mounts: vec![bind("/srv/a,b", "/data")],
+        env: Vec::new(),
+        command: vec!["cat".to_owned()],
+        workdir: None,
+        read_only_root: true,
+        user: None,
+        open_stdin: false,
+    };
+    assert!(
+        super::docker_create_arguments(&spec).is_err(),
+        "a create whose mount cannot be carried exactly is refused before `docker` runs"
+    );
+}
+
+#[test]
+fn an_attached_start_held_at_created_ends_at_its_deadline_or_its_cancellation() {
+    use super::{NotStarted, await_started};
+    use crate::runner::Cancellation;
+    use std::cell::Cell;
+
+    let poll = Duration::from_millis(5);
+    let created = || Ok(Some("created".to_owned()));
+    let alive = || false;
+
+    let declared = Duration::from_millis(200);
+    let began = Instant::now();
+    let waited = await_started(began + declared, &Cancellation::new(), poll, created, alive);
+    let took = began.elapsed();
+    assert!(
+        matches!(waited, Err(NotStarted::DeadlinePassed)),
+        "held at created, the wait ends at the invocation's deadline: {waited:?}"
+    );
+    assert!(
+        took >= declared && took < declared + Duration::from_secs(2),
+        "within the declared bound: {took:?}"
+    );
+
+    let cancellation = Cancellation::new();
+    let polls = Cell::new(0_u32);
+    let cancelling = || {
+        polls.set(polls.get() + 1);
+        if polls.get() == 3 {
+            cancellation.cancel();
+        }
+        Ok(Some("created".to_owned()))
+    };
+    let began = Instant::now();
+    let waited = await_started(
+        began + Duration::from_secs(600),
+        &cancellation,
+        poll,
+        cancelling,
+        alive,
+    );
+    assert!(
+        matches!(waited, Err(NotStarted::Cancelled)),
+        "a cancellation ends the wait on the poll that sees it: {waited:?}"
+    );
+    assert_eq!(polls.get(), 3);
+    assert!(
+        began.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        began.elapsed()
+    );
+
+    let far = Instant::now() + Duration::from_secs(600);
+    let never = Cancellation::new();
+    assert!(
+        matches!(
+            await_started(far, &never, poll, created, || true),
+            Err(NotStarted::ClientEnded)
+        ),
+        "a client that ended while the container is still created is a start that failed"
+    );
+    assert!(
+        matches!(
+            await_started(far, &never, poll, || Ok(None), alive),
+            Err(NotStarted::Gone)
+        ),
+        "a container that disappeared while starting"
+    );
+    assert!(
+        matches!(
+            await_started(
+                far,
+                &never,
+                poll,
+                || Err(RuntimeError::Unreachable {
+                    operation: RuntimeOp::Observe,
+                    detail: "down".to_owned(),
+                }),
+                alive,
+            ),
+            Err(NotStarted::Unobserved(_))
+        ),
+        "a state that cannot be read is not a start"
+    );
+    for (state, client_ended) in [("running", false), ("exited", false), ("exited", true)] {
+        assert!(
+            matches!(
+                await_started(
+                    far,
+                    &never,
+                    poll,
+                    || Ok(Some(state.to_owned())),
+                    || client_ended
+                ),
+                Ok(())
+            ),
+            "the control: a container that left `created` started ({state}, client ended: \
+             {client_ended})"
+        );
+    }
+}
+
+/// J6, `PR12-ATTACHED-START-UNBOUNDED-DOCKER-OBSERVATION`. An attached start waits for its
+/// container to leave `created` by asking `docker ps`. At the reviewed head each question was
+/// an unbounded `Command::output`, so a stalled `docker` held the start past its deadline (a
+/// 50 ms deadline took 1.001 s against a one-second stub) and past its cancellation. The
+/// questions now run through the process funnel. A child of this test binary, whose `PATH`
+/// alone carries a `docker` that never answers `ps`, waits once to its deadline and once to
+/// its cancellation, and each wait ends promptly.
+#[cfg(unix)]
+#[test]
+fn the_attached_starts_observation_ends_at_its_deadline_and_on_its_cancellation() {
+    let tree = scratch("attached-start-observation");
+    let bin = tree.path().join("bin");
+    fs::create_dir(&bin).expect("the stub's directory");
+    let stub = bin.join("docker");
+    fs::write(
+        &stub,
+        "#!/bin/sh\ncase \"$1\" in\nps) exec sleep 60 ;;\n*) exit 93 ;;\nesac\n",
+    )
+    .expect("the stub");
+    crate::workspace_manager::fixture::set_mode(&stub, 0o755);
+    let inherited = std::env::var_os("PATH").unwrap_or_default();
+    let path =
+        std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(&inherited)))
+            .expect("a PATH with the stub first");
+    for mode in ["deadline", "cancel"] {
+        let began = Instant::now();
+        let status = crate::workspace_manager::fixture::run_kill_child_within(
+            "runner::container::tests::attached_start_observation_child",
+            &[
+                ("PATH", path.as_os_str()),
+                ("UPSTROKE_TEST_OBSERVATION", std::ffi::OsStr::new(mode)),
+            ],
+            Duration::from_secs(120),
+        )
+        .expect("the child ends within its bound");
+        assert!(
+            status.success(),
+            "{mode}: the child's bounded wait failed ({status:?})"
+        );
+        assert!(
+            began.elapsed() < Duration::from_secs(60),
+            "{mode}: the stalled `ps` held the child {:?}",
+            began.elapsed()
+        );
+    }
+}
+
+/// The child of `the_attached_starts_observation_ends_at_its_deadline_and_on_its_cancellation`:
+/// the production wait of an attached start, against the stalling `docker` on its `PATH`.
+#[cfg(unix)]
+#[test]
+#[ignore = "spawned by the attached start's bounded-observation witness"]
+fn attached_start_observation_child() {
+    use super::NotStarted;
+    use crate::runner::Cancellation;
+
+    let mode = std::env::var("UPSTROKE_TEST_OBSERVATION").expect("the parent names the mode");
+    let cli = DockerCli::default();
+    let cancellation = Cancellation::new();
+    let began = Instant::now();
+    let deadline = if mode == "deadline" {
+        began + Duration::from_millis(50)
+    } else {
+        began + Duration::from_secs(600)
+    };
+    let waited = std::thread::scope(|scope| {
+        if mode == "cancel" {
+            scope.spawn(|| {
+                std::thread::sleep(Duration::from_millis(50));
+                cancellation.cancel();
+            });
+        }
+        cli.await_attached_start("upstroke-observed", deadline, &cancellation, || false)
+    });
+    let took = began.elapsed();
+    if mode == "deadline" {
+        assert!(
+            matches!(waited, Err(NotStarted::DeadlinePassed)),
+            "{waited:?}"
+        );
+    } else {
+        assert!(matches!(waited, Err(NotStarted::Cancelled)), "{waited:?}");
+    }
+    assert!(
+        took < Duration::from_secs(10),
+        "{mode}: the stalled observation held the start {took:?}"
+    );
+}
+
+#[cfg(unix)]
+const EARLY_EXIT_DEADLINE: Duration = Duration::from_secs(3);
+
+#[cfg(unix)]
+const EARLY_EXIT_SLACK: Duration = Duration::from_millis(1500);
+
+#[cfg(unix)]
+#[test]
+fn an_attached_start_whose_client_ended_early_asks_its_diagnostic_within_its_own_bounds() {
+    assert!(
+        EARLY_EXIT_DEADLINE + EARLY_EXIT_SLACK < super::CLIENT_GRACE,
+        "the deadline mode's bound must stay below a fresh client grace, or the diagnostic \
+         this witness exists to hold to its invocation could take one and pass"
+    );
+    let tree = scratch("attached-start-early-exit");
+    let bin = tree.path().join("bin");
+    fs::create_dir(&bin).expect("the stub's directory");
+    let stub = bin.join("docker");
+    super::write_program_in_its_own_process(
+        &stub,
+        "#!/bin/sh\ncase \"$1\" in\nstart) exit 0 ;;\nps) printf 'upstroke-early\\037created\\n' ;;\n\
+         container) : > \"$UPSTROKE_TEST_INSPECTED\"; exec sleep 60 ;;\n*) exit 93 ;;\nesac\n",
+    );
+    let inherited = std::env::var_os("PATH").unwrap_or_default();
+    let path =
+        std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(&inherited)))
+            .expect("a PATH with the stub first");
+    for mode in ["deadline", "cancel"] {
+        let inspected = tree.path().join(format!("inspected-{mode}"));
+        let ended = crate::agent::proc::test_support::run_test_isolated(
+            "runner::container::tests::attached_start_early_exit_child",
+            &[
+                ("PATH", path.as_os_str()),
+                ("UPSTROKE_TEST_EARLY_EXIT", std::ffi::OsStr::new(mode)),
+                ("UPSTROKE_TEST_INSPECTED", inspected.as_os_str()),
+            ],
+            Duration::from_secs(120),
+        );
+        assert!(
+            ended.status.is_some_and(|status| status.success())
+                && ended.stdout.contains("1 passed"),
+            "{mode}: the early-exit start was not held to its own invocation: {ended}"
+        );
+        assert!(
+            inspected.exists(),
+            "{mode}: the premise, the start asked its diagnostic"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "spawned by the attached start's early-exit diagnostic witness"]
+fn attached_start_early_exit_child() {
+    use crate::runner::container::CoveredStart;
+
+    let mode = std::env::var("UPSTROKE_TEST_EARLY_EXIT").expect("the parent names the mode");
+    let inspected = std::env::var_os("UPSTROKE_TEST_INSPECTED")
+        .map(PathBuf::from)
+        .expect("the parent names the diagnostic's marker");
+    let cli = DockerCli::default();
+    let began = Instant::now();
+    let (deadline, bound) = if mode == "deadline" {
+        (
+            began + EARLY_EXIT_DEADLINE,
+            EARLY_EXIT_DEADLINE + EARLY_EXIT_SLACK,
+        )
+    } else {
+        (began + Duration::from_secs(600), Duration::from_secs(10))
+    };
+    let covered = CoveredStart::without_a_reaper_until("upstroke-early", deadline);
+    let started = std::thread::scope(|scope| {
+        if mode == "cancel" {
+            scope.spawn(|| {
+                let until = Instant::now() + Duration::from_secs(60);
+                while !inspected.exists() && Instant::now() < until {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                covered.cancellation().cancel();
+            });
+        }
+        cli.start_attached(RuntimeOp::Start, &covered, b"")
+    });
+    let took = began.elapsed();
+    let Err(RuntimeError::Failed { detail, .. }) = &started else {
+        panic!("{mode}: the start fails with its client settled: {started:?}");
+    };
+    assert!(
+        detail.contains("ended while the container was still created, so it never started;"),
+        "{mode}: the early-exit branch, to which the stalled diagnostic added nothing: {detail}"
+    );
+    assert!(inspected.exists(), "{mode}: the diagnostic was asked");
+    assert!(
+        took < bound,
+        "{mode}: the stalled diagnostic held the start {took:?}, past its bound {bound:?}"
+    );
+    if mode == "deadline" {
+        assert!(
+            took >= EARLY_EXIT_DEADLINE,
+            "deadline: the start ended {took:?}, before its {EARLY_EXIT_DEADLINE:?} deadline, so \
+             something other than the deadline ended the stalled diagnostic"
+        );
+    }
+}
+
+/// `PR12-J6-OBSERVATION-FATE-DROPPED` (root's source finding on J6). A bounded docker question
+/// keeps its supervisor's fate. Each result below is synthetic: a supervisor that never
+/// started the question, one that saw its process gone, one that could not establish it gone,
+/// and ordinary ends. Only the unresolved one is unresolved, and only it is held under the
+/// container it was about.
+#[test]
+fn a_bounded_docker_question_keeps_its_supervisors_fate() {
+    use super::ClientSettlement;
+    use crate::agent::proc::ProcessFailure;
+    use crate::error::ProcessFate;
+
+    let cli = DockerCli::default();
+    let ask = |name: &str, outcome| cli.answer_within(RuntimeOp::Observe, name, &["ps"], outcome);
+    let failure = |fate| {
+        Err(ProcessFailure {
+            fate,
+            error: UpstrokeError::Agent {
+                message: "the supervisor's account".to_owned(),
+            },
+        })
+    };
+    let output = |code: Option<i32>, timed_out: bool| {
+        Ok(crate::agent::ProcessOutput {
+            code,
+            stdout: "answer".to_owned(),
+            stderr: "the daemon refused".to_owned(),
+            duration: Duration::from_millis(1),
+            timed_out,
+            output_limited: false,
+        })
+    };
+
+    let never = ask("upstroke-never", failure(ProcessFate::NeverStarted));
+    assert!(
+        matches!(never, Err(RuntimeError::Unreachable { .. })),
+        "a question its supervisor never started found no runtime: {never:?}"
+    );
+    let gone = ask("upstroke-gone", failure(ProcessFate::Gone));
+    assert!(
+        matches!(gone, Err(RuntimeError::Failed { .. })),
+        "a question whose process its supervisor saw gone failed: {gone:?}"
+    );
+    let held = ask("upstroke-held", failure(ProcessFate::Unresolved));
+    assert!(
+        matches!(held, Err(RuntimeError::Unresolved { .. })),
+        "a question whose process could not be established gone is unresolved: {held:?}"
+    );
+    assert_eq!(
+        ask("upstroke-ok", output(Some(0), false)),
+        Ok("answer".to_owned())
+    );
+    let refused = ask("upstroke-ok", output(Some(1), false));
+    assert!(
+        refused.is_err() && !matches!(refused, Err(RuntimeError::Unresolved { .. })),
+        "an ordinary nonzero exit is not an unresolved process: {refused:?}"
+    );
+    let ended = ask("upstroke-ok", output(None, true));
+    assert!(
+        matches!(ended, Err(RuntimeError::Failed { .. })),
+        "a question the deadline or a cancellation killed and reaped is not unresolved: {ended:?}"
+    );
+
+    match cli.settle_client_of("upstroke-held") {
+        ClientSettlement::Unresolved(fact) => assert!(
+            fact.contains("without establishing its process gone"),
+            "{fact}"
+        ),
+        other => panic!("{other:?}"),
+    }
+    for name in ["upstroke-never", "upstroke-gone", "upstroke-ok"] {
+        assert!(
+            matches!(cli.settle_client_of(name), ClientSettlement::Absent),
+            "{name}: only an unresolved question is held"
+        );
+    }
+}
+
+/// An attached client whose supervisor ended cleanly, as a synthetic result.
+fn an_attached_client_that_ended() -> super::AttachedClient {
+    let supervisor = std::thread::spawn(|| {
+        Ok::<_, crate::agent::proc::ProcessFailure>(crate::agent::ProcessOutput {
+            code: Some(0),
+            stdout: String::new(),
+            stderr: String::new(),
+            duration: Duration::from_millis(1),
+            timed_out: false,
+            output_limited: false,
+        })
+    });
+    super::AttachedClient {
+        stop: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        supervisor: Some(supervisor),
+    }
+}
+
+/// The held fact belongs to its container and outlives every later settlement of it. The
+/// attached start's optional diagnostic (`container inspect`) fails unresolved, and the start
+/// drops that error with `.ok()` as before. Yet the container's attached client ending cleanly,
+/// a removal, and a second removal all still settle unresolved, while another container's clean
+/// end stays clean.
+#[test]
+fn an_unresolved_question_stays_with_its_container_through_every_later_settlement() {
+    use super::ClientSettlement;
+    use crate::error::ProcessFate;
+
+    let cli = DockerCli::default();
+    let name = "upstroke-held";
+    let diagnostic = cli.answer_within(
+        RuntimeOp::Start,
+        name,
+        &["container", "inspect", name, "--format", "{{.State.Error}}"],
+        Err(crate::agent::proc::ProcessFailure {
+            fate: ProcessFate::Unresolved,
+            error: UpstrokeError::Agent {
+                message: "the inspect's supervision ended".to_owned(),
+            },
+        }),
+    );
+    assert!(
+        matches!(diagnostic, Err(RuntimeError::Unresolved { .. })),
+        "the start drops this diagnostic's error and keeps its reason: {diagnostic:?}"
+    );
+
+    cli.own_client(name, an_attached_client_that_ended());
+    match cli.settle_client_of(name) {
+        ClientSettlement::Unresolved(fact) => assert!(
+            fact.contains("its attached client ended") && fact.contains("container inspect"),
+            "the clean client end does not clear the held question: {fact}"
+        ),
+        other => panic!("{other:?}"),
+    }
+    for removal in 1..=2 {
+        assert!(
+            matches!(
+                cli.settle_removed_client(name),
+                Err(RuntimeError::Unresolved { .. })
+            ),
+            "removal {removal}: the container's removal reports the held question"
+        );
+    }
+
+    cli.own_client("upstroke-other", an_attached_client_that_ended());
+    assert!(
+        matches!(
+            cli.settle_client_of("upstroke-other"),
+            ClientSettlement::Ended(_)
+        ),
+        "another container's settlement is its own"
+    );
+}
+
+#[test]
+fn an_unresolved_credential_volume_question_is_held_under_the_volume_where_no_container_reads_it() {
+    use super::ClientSettlement;
+    use crate::agent::proc::ProcessFailure;
+    use crate::error::ProcessFate;
+
+    let cli = DockerCli::default();
+    let ask = |volume: &str, fate| {
+        cli.answer_within(
+            RuntimeOp::InspectVolume,
+            volume,
+            &["volume", "inspect", volume, "--format", "{{.Name}}"],
+            Err(ProcessFailure {
+                fate,
+                error: UpstrokeError::Agent {
+                    message: "the supervisor's account".to_owned(),
+                },
+            }),
+        )
+    };
+
+    let never = ask("upstroke-creds-never", ProcessFate::NeverStarted);
+    assert!(
+        matches!(never, Err(RuntimeError::Unreachable { .. })),
+        "{never:?}"
+    );
+    let gone = ask("upstroke-creds-gone", ProcessFate::Gone);
+    assert!(matches!(gone, Err(RuntimeError::Failed { .. })), "{gone:?}");
+    let held = ask("upstroke-creds-held", ProcessFate::Unresolved);
+    assert!(
+        matches!(
+            held,
+            Err(RuntimeError::Unresolved {
+                operation: RuntimeOp::InspectVolume,
+                ..
+            })
+        ),
+        "a volume question whose process could not be established gone is unresolved: {held:?}"
+    );
+
+    let container = "upstroke-mounts-the-held-volume";
+    assert!(
+        matches!(cli.settle_client_of(container), ClientSettlement::Absent),
+        "the container that mounts the volume holds no fact of the volume's question"
+    );
+    assert!(
+        cli.settle_removed_client(container).is_ok(),
+        "so that container's clean removal reports nothing unresolved"
+    );
+    assert!(
+        matches!(
+            cli.settle_client_of("upstroke-creds-held"),
+            ClientSettlement::Unresolved(_)
+        ),
+        "the fact is held under the volume the question was about"
+    );
+    for settled in ["upstroke-creds-never", "upstroke-creds-gone"] {
+        assert!(
+            matches!(cli.settle_client_of(settled), ClientSettlement::Absent),
+            "{settled}: a question whose fate was established holds nothing"
+        );
+    }
+}
+
+/// An observation that could not establish its process gone is reported as itself even when the
+/// deadline has passed or a cancellation fired at the same moment: that fact must reach the
+/// start's settlement. An ordinary failed observation at the deadline is still the deadline.
+#[test]
+fn an_unresolved_observation_is_reported_as_itself_at_a_deadline_or_a_cancellation() {
+    use super::{NotStarted, await_started};
+    use crate::runner::Cancellation;
+
+    let poll = Duration::from_millis(1);
+    let unresolved = || {
+        Err(RuntimeError::Unresolved {
+            operation: RuntimeOp::Observe,
+            detail: "the question's process could not be established gone".to_owned(),
+        })
+    };
+    let never = Cancellation::new();
+    let cancelled = Cancellation::new();
+    cancelled.cancel();
+    let far = Instant::now() + Duration::from_secs(600);
+    let waited = await_started(far, &cancelled, poll, unresolved, || false);
+    assert!(
+        matches!(
+            waited,
+            Err(NotStarted::Unobserved(RuntimeError::Unresolved { .. }))
+        ),
+        "with a cancellation: {waited:?}"
+    );
+    let waited = await_started(Instant::now(), &never, poll, unresolved, || false);
+    assert!(
+        matches!(
+            waited,
+            Err(NotStarted::Unobserved(RuntimeError::Unresolved { .. }))
+        ),
+        "at the deadline: {waited:?}"
+    );
+    let failed = || {
+        Err(RuntimeError::Failed {
+            operation: RuntimeOp::Observe,
+            detail: "ended before it answered".to_owned(),
+        })
+    };
+    let waited = await_started(Instant::now(), &never, poll, failed, || false);
+    assert!(
+        matches!(waited, Err(NotStarted::DeadlinePassed)),
+        "an ordinary failed observation at the deadline is the deadline: {waited:?}"
+    );
+}
+
+#[test]
+fn an_attached_client_is_settled_or_reported_unresolved_within_its_bound() {
+    use super::settle_client;
+    use std::cell::Cell;
+
+    let grace = Duration::from_millis(100);
+    let poll = Duration::from_millis(5);
+
+    let asked = Cell::new(false);
+    assert!(
+        settle_client(|| true, || asked.set(true), grace, poll),
+        "a client that ended with its container is settled"
+    );
+    assert!(!asked.get(), "and is never asked to stop");
+
+    let delayed = Instant::now() + Duration::from_millis(40);
+    let asked = Cell::new(false);
+    assert!(
+        settle_client(
+            || Instant::now() >= delayed,
+            || asked.set(true),
+            grace,
+            poll
+        ),
+        "a client whose feeding and exit end a little later, within the grace, is settled"
+    );
+    assert!(!asked.get(), "without being stopped");
+
+    let asked = Cell::new(false);
+    let began = Instant::now();
+    assert!(
+        settle_client(|| asked.get(), || asked.set(true), grace, poll),
+        "a client that outlives its container ends when it is asked to stop, and is settled"
+    );
+    assert!(asked.get());
+    assert!(began.elapsed() < grace * 2 + Duration::from_secs(1));
+
+    let asked = Cell::new(false);
+    let began = Instant::now();
+    assert!(
+        !settle_client(|| false, || asked.set(true), grace, poll),
+        "a client that does not end even when asked is reported unresolved, not settled"
+    );
+    assert!(asked.get(), "it was asked to stop first");
+    let took = began.elapsed();
+    assert!(
+        took >= grace * 2 && took < grace * 2 + Duration::from_secs(1),
+        "within the declared bound of two graces: {took:?}"
+    );
+}
+
+#[test]
+fn the_delivery_verdict_tells_an_early_exit_from_a_broken_attach() {
+    use super::{ClientEnd, delivery_verdict};
+
+    assert!(
+        delivery_verdict("c", &ClientEnd::Exited(Some(0)), Some(0)).is_ok(),
+        "the attach ended with the container: the input was delivered"
+    );
+    assert!(
+        delivery_verdict("c", &ClientEnd::Exited(Some(7)), Some(7)).is_ok(),
+        "a program that stopped reading early and exited 7: its own result, as on the host"
+    );
+    for (end, exited, why) in [
+        (ClientEnd::Exited(Some(1)), Some(0), "the attach broke"),
+        (ClientEnd::Exited(None), Some(0), "the attach broke"),
+        (ClientEnd::Stopped, Some(0), "was stopped"),
+        (
+            ClientEnd::Failed {
+                fate: crate::error::ProcessFate::Gone,
+                error: "writing its input: Input/output error".to_owned(),
+            },
+            Some(0),
+            "failed (its process is gone): writing its input",
+        ),
+        (
+            ClientEnd::Failed {
+                fate: crate::error::ProcessFate::Unresolved,
+                error: "waiting on agent process: interrupted".to_owned(),
+            },
+            Some(0),
+            "failed (a process of it may still be running): waiting",
+        ),
+    ] {
+        let verdict = delivery_verdict("c", &end, exited);
+        assert!(
+            verdict
+                .as_ref()
+                .is_err_and(|error| error.to_string().contains(why)),
+            "{end:?} with the container exiting {exited:?} is an error naming `{why}`: \
+             {verdict:?}"
+        );
+    }
+}
+
+#[test]
 fn the_fake_can_report_an_image_id_that_differs_from_the_one_create_asked_for() {
     let trace = ContainerTrace::recording();
     let runtime = FakeRuntime::new(trace);
@@ -551,6 +1652,8 @@ fn the_fake_can_report_an_image_id_that_differs_from_the_one_create_asked_for() 
         command: Vec::new(),
         workdir: None,
         read_only_root: true,
+        user: None,
+        open_stdin: false,
     };
 
     let honest = runtime
@@ -611,6 +1714,8 @@ fn volume_presence_is_a_toggle_and_absence_refuses_a_create() {
         command: Vec::new(),
         workdir: None,
         read_only_root: true,
+        user: None,
+        open_stdin: false,
     };
     let refused = runtime
         .create(CoveredCreate::without_a_reaper(&spec))
@@ -652,7 +1757,7 @@ fn the_availability_toggle_is_per_operation_so_ps_can_answer_while_inspect_canno
             RuntimeOp::InspectImageById => runtime.image_by_id("x").is_err(),
             RuntimeOp::InspectVolume => runtime.volume_present("x").is_err(),
             RuntimeOp::ListByLabel => runtime.containers_with_label("k", "v").is_err(),
-            RuntimeOp::Observe => runtime.observe("x").is_err(),
+            RuntimeOp::Observe => runtime.observe("x", QuestionBound::Runtime).is_err(),
             RuntimeOp::Collect => runtime.collect("x").is_err(),
             RuntimeOp::Create => runtime
                 .create(CoveredCreate::without_a_reaper(&CreateSpec {
@@ -664,6 +1769,8 @@ fn the_availability_toggle_is_per_operation_so_ps_can_answer_while_inspect_canno
                     command: Vec::new(),
                     workdir: None,
                     read_only_root: true,
+                    user: None,
+                    open_stdin: false,
                 }))
                 .is_err(),
             RuntimeOp::Start => runtime.start(CoveredStart::without_a_reaper("x")).is_err(),
@@ -761,6 +1868,8 @@ fn the_call_log_is_ordered_and_holds_every_operation() {
         command: Vec::new(),
         workdir: None,
         read_only_root: true,
+        user: None,
+        open_stdin: false,
     };
     runtime.probe().expect("reachable");
     runtime
@@ -770,7 +1879,9 @@ fn the_call_log_is_ordered_and_holds_every_operation() {
         .start(CoveredStart::without_a_reaper(&spec.name))
         .expect("started");
     runtime.stop(&spec.name, StopMode::Kill).expect("stopped");
-    runtime.observe(&spec.name).expect("observed");
+    runtime
+        .observe(&spec.name, QuestionBound::Runtime)
+        .expect("observed");
     runtime.remove(&spec.name).expect("removed");
 
     assert_eq!(
@@ -2436,8 +3547,8 @@ impl ContainerRuntime for DockerLikeStop<'_> {
     ) -> Result<Vec<super::runtime::DiscoveredContainer>, RuntimeError> {
         self.inner.containers_with_label(key, value)
     }
-    fn observe(&self, name: &str) -> Result<Liveness, RuntimeError> {
-        self.inner.observe(name)
+    fn observe(&self, name: &str, bound: QuestionBound<'_>) -> Result<Liveness, RuntimeError> {
+        self.inner.observe(name, bound)
     }
     fn collect(&self, name: &str) -> Result<ContainerExecution, RuntimeError> {
         self.inner.collect(name)
@@ -2453,7 +3564,7 @@ impl ContainerRuntime for DockerLikeStop<'_> {
     }
 
     fn stop(&self, name: &str, mode: StopMode) -> Result<Settled, RuntimeError> {
-        let outcome = match self.inner.observe(name)? {
+        let outcome = match self.inner.observe(name, QuestionBound::Runtime)? {
             Liveness::Running => {
                 self.inner.stop(name, mode)?;
                 Ok(format!("{name}\n"))
@@ -2474,7 +3585,9 @@ impl ContainerRuntime for DockerLikeStop<'_> {
                 Ok(text) => format!("ok:{}", text.trim()),
                 Err(error) => format!("err:{error}"),
             });
-        super::settle_stop(name, outcome, |target| self.inner.observe(target))
+        super::settle_stop(name, outcome, |target| {
+            self.inner.observe(target, QuestionBound::Runtime)
+        })
     }
 
     fn remove(&self, name: &str) -> Result<Settled, RuntimeError> {
@@ -2669,6 +3782,7 @@ fn a_containers_exit_status_and_streams_come_back_through_the_seam() {
                 exit_code: code,
                 stdout: b"out".to_vec(),
                 stderr: b"err".to_vec(),
+                output_limited: false,
             },
         );
         let collected = runtime.collect("upstroke-a-b-c-d").expect("collected");
@@ -2685,7 +3799,9 @@ fn a_containers_exit_status_and_streams_come_back_through_the_seam() {
 
     runtime.set_container_state("upstroke-a-b-c-d", Liveness::Exited);
     assert_eq!(
-        runtime.observe("upstroke-a-b-c-d").expect("observed"),
+        runtime
+            .observe("upstroke-a-b-c-d", QuestionBound::Runtime)
+            .expect("observed"),
         Liveness::Exited
     );
     assert!(!Liveness::Running.is_terminated());
@@ -2696,7 +3812,9 @@ fn a_containers_exit_status_and_streams_come_back_through_the_seam() {
          concurrent reclaimers block each other"
     );
     assert_eq!(
-        runtime.observe("never-existed").expect("observed"),
+        runtime
+            .observe("never-existed", QuestionBound::Runtime)
+            .expect("observed"),
         Liveness::Gone
     );
 }
@@ -2738,8 +3856,8 @@ impl ContainerRuntime for NeverTerminates<'_> {
     ) -> Result<Vec<super::runtime::DiscoveredContainer>, RuntimeError> {
         self.0.containers_with_label(key, value)
     }
-    fn observe(&self, name: &str) -> Result<Liveness, RuntimeError> {
-        self.0.observe(name).map(|_| Liveness::Running)
+    fn observe(&self, name: &str, bound: QuestionBound<'_>) -> Result<Liveness, RuntimeError> {
+        self.0.observe(name, bound).map(|_| Liveness::Running)
     }
     fn collect(&self, name: &str) -> Result<ContainerExecution, RuntimeError> {
         self.0.collect(name)
@@ -3526,7 +4644,9 @@ fn wait_until_terminated_within(
     let mut observations = 0_u32;
     loop {
         observations += 1;
-        let state = docker.observe(name).expect("reachable");
+        let state = docker
+            .observe(name, QuestionBound::Runtime)
+            .expect("reachable");
         if state.is_terminated() {
             return Ok(state);
         }
@@ -3581,8 +4701,8 @@ impl<F: Fn(Liveness) -> Liveness + Send + Sync> ContainerRuntime for Scripted<'_
     ) -> Result<Vec<super::runtime::DiscoveredContainer>, RuntimeError> {
         self.0.containers_with_label(key, value)
     }
-    fn observe(&self, name: &str) -> Result<Liveness, RuntimeError> {
-        self.0.observe(name).map(&self.1)
+    fn observe(&self, name: &str, bound: QuestionBound<'_>) -> Result<Liveness, RuntimeError> {
+        self.0.observe(name, bound).map(&self.1)
     }
     fn collect(&self, name: &str) -> Result<ContainerExecution, RuntimeError> {
         self.0.collect(name)
@@ -3862,6 +4982,8 @@ fn real_docker_creates_from_an_id_reports_it_and_reclaims_idempotently() {
             command: vec!["/bin/sh".to_owned(), "-c".to_owned(), "exit 0".to_owned()],
             workdir: None,
             read_only_root: true,
+            user: None,
+            open_stdin: false,
         },
         view: GitViewRequest {
             path: view_path.clone(),
@@ -3946,6 +5068,8 @@ fn real_docker_kill_on_an_already_exited_container_is_tolerated() {
         command: vec!["/bin/sh".to_owned(), "-c".to_owned(), "exit 0".to_owned()],
         workdir: None,
         read_only_root: true,
+        user: None,
+        open_stdin: false,
     };
     let _ = docker.remove(name);
     docker
@@ -3981,7 +5105,12 @@ fn real_docker_kill_on_an_already_exited_container_is_tolerated() {
         .expect("a reclaimer arriving second converges on an already-stopped container");
 
     docker.remove(name).expect("removed");
-    assert_eq!(docker.observe(name).expect("reachable"), Liveness::Gone);
+    assert_eq!(
+        docker
+            .observe(name, QuestionBound::Runtime)
+            .expect("reachable"),
+        Liveness::Gone
+    );
 }
 
 #[test]
@@ -4013,6 +5142,8 @@ fn real_docker_returns_both_streams_of_a_container_separately() {
         ],
         workdir: None,
         read_only_root: true,
+        user: None,
+        open_stdin: false,
     };
     let _ = docker.remove(name);
     docker
@@ -4403,6 +5534,8 @@ fn real_docker_renders_a_comma_bearing_label_value_whole() {
         command: vec!["/bin/sh".to_owned(), "-c".to_owned(), "exit 0".to_owned()],
         workdir: None,
         read_only_root: true,
+        user: None,
+        open_stdin: false,
     };
     docker
         .create(CoveredCreate::without_a_reaper(&spec))
@@ -4665,13 +5798,17 @@ fn real_docker_lists_the_state_the_settlement_observation_reads() {
         command: vec!["/bin/sh".to_owned(), "-c".to_owned(), "sleep 30".to_owned()],
         workdir: None,
         read_only_root: true,
+        user: None,
+        open_stdin: false,
     };
     for existing in [&name, &longer] {
         let _ = docker.remove(existing);
     }
 
     assert_eq!(
-        docker.observe(&name).expect("reachable"),
+        docker
+            .observe(&name, QuestionBound::Runtime)
+            .expect("reachable"),
         Liveness::Gone,
         "a listing that succeeded and holds nothing is the daemon saying the container is gone"
     );
@@ -4708,24 +5845,38 @@ fn real_docker_lists_the_state_the_settlement_observation_reads() {
     assert_eq!(super::listed_state(&listing, &name), Some("created"));
     assert_eq!(super::listed_state(&listing, &longer), Some("running"));
     assert_eq!(
-        docker.observe(&name).expect("reachable"),
+        docker
+            .observe(&name, QuestionBound::Runtime)
+            .expect("reachable"),
         Liveness::Exited,
         "a created container holds no process"
     );
     assert_eq!(
-        docker.observe(&longer).expect("reachable"),
+        docker
+            .observe(&longer, QuestionBound::Runtime)
+            .expect("reachable"),
         Liveness::Running
     );
 
     docker
         .start(CoveredStart::without_a_reaper(&name))
         .expect("started");
-    assert_eq!(docker.observe(&name).expect("reachable"), Liveness::Running);
+    assert_eq!(
+        docker
+            .observe(&name, QuestionBound::Runtime)
+            .expect("reachable"),
+        Liveness::Running
+    );
     assert_eq!(
         docker.stop(&name, StopMode::Kill).expect("killed"),
         Settled::ProcessGone
     );
-    assert_eq!(docker.observe(&name).expect("reachable"), Liveness::Exited);
+    assert_eq!(
+        docker
+            .observe(&name, QuestionBound::Runtime)
+            .expect("reachable"),
+        Liveness::Exited
+    );
     assert_eq!(
         docker.stop(&name, StopMode::Kill).expect(
             "a second kill is the daemon's `is not running`, established against its own listing"
@@ -4738,7 +5889,12 @@ fn real_docker_lists_the_state_the_settlement_observation_reads() {
             docker.remove(existing).expect("removed"),
             Settled::ProcessGone
         );
-        assert_eq!(docker.observe(existing).expect("reachable"), Liveness::Gone);
+        assert_eq!(
+            docker
+                .observe(existing, QuestionBound::Runtime)
+                .expect("reachable"),
+            Liveness::Gone
+        );
     }
 }
 
@@ -5695,4 +6851,2828 @@ fn runtime_notes_rustdoc_shortcuts_resolve_to_links() {
         broken.is_empty(),
         "unresolved Rustdoc shortcut reference(s) with no Markdown link target: {broken:?}"
     );
+}
+
+#[test]
+fn the_image_environment_is_read_strictly_from_the_inspection_of_the_recorded_id() {
+    const ID: &str = "sha256:0123456789abcdef";
+    assert_eq!(
+        super::image_environment_of(
+            ID,
+            "sha256:0123456789abcdef\u{1f}[\"PATH=/usr/bin:/bin\",\"LANG=C.UTF-8\",\"EMPTY=\"]\n",
+        ),
+        Ok(Some(vec![
+            ("PATH".to_owned(), "/usr/bin:/bin".to_owned()),
+            ("LANG".to_owned(), "C.UTF-8".to_owned()),
+            ("EMPTY".to_owned(), String::new()),
+        ])),
+        "every entry, in the image's order, split at its first `=`"
+    );
+    assert_eq!(
+        super::image_environment_of(ID, "sha256:0123456789abcdef\u{1f}null\n"),
+        Ok(Some(Vec::new())),
+        "an image that declares no environment has an empty one, not an unreadable one"
+    );
+    assert_eq!(
+        super::image_environment_of(ID, "sha256:fedcba9876543210\u{1f}[\"PATH=/bin\"]\n"),
+        Ok(None),
+        "an answer about another image is no answer about the recorded id"
+    );
+    for (text, why) in [
+        ("sha256:0123456789abcdef\n", "no environment field"),
+        (
+            "sha256:0123456789abcdef\u{1f}{\"PATH\":\"/bin\"}\n",
+            "not a JSON list",
+        ),
+        (
+            "sha256:0123456789abcdef\u{1f}[\"PATH\"]\n",
+            "names no value",
+        ),
+    ] {
+        let error = super::image_environment_of(ID, text).expect_err(why);
+        assert!(
+            matches!(
+                &error,
+                RuntimeError::Failed {
+                    operation: RuntimeOp::InspectImageById,
+                    detail,
+                } if detail.contains(why)
+            ),
+            "{why}: {error:?}"
+        );
+    }
+}
+
+#[test]
+fn the_fake_runtime_reports_the_environment_its_image_declares() {
+    let runtime = FakeRuntime::new(ContainerTrace::off());
+    runtime.add_image("sha256:abc", None);
+    assert_eq!(
+        runtime.image_environment("sha256:abc"),
+        Ok(Some(Vec::new())),
+        "an image starts with no environment"
+    );
+    runtime.set_image_environment("sha256:abc", &[("PATH", "/usr/bin")]);
+    assert_eq!(
+        runtime.image_environment("sha256:abc"),
+        Ok(Some(vec![("PATH".to_owned(), "/usr/bin".to_owned())]))
+    );
+    assert_eq!(
+        runtime.image_environment("sha256:absent"),
+        Ok(None),
+        "an id the runtime does not hold is absent"
+    );
+}
+
+#[test]
+fn an_exit_status_the_runtime_reports_is_read_as_a_number_or_refused() {
+    for (status, code) in [("0\n", 0), ("137", 137), (" -1 ", -1)] {
+        assert_eq!(
+            super::exit_status_of("upstroke-collected", status),
+            Ok(code),
+            "{status:?}"
+        );
+    }
+    for status in ["", "\n", "running", "0x1", "137 1"] {
+        let refused = super::exit_status_of("upstroke-collected", status)
+            .expect_err("an exit status that is not a number is not a missing one");
+        let RuntimeError::Failed { operation, detail } = &refused else {
+            panic!("{status:?}: {refused:?}");
+        };
+        assert_eq!(*operation, RuntimeOp::Collect, "{status:?}");
+        assert!(
+            detail.contains("upstroke-collected") && detail.contains("not a number"),
+            "{status:?}: {detail}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// G7: the container capability observation record
+// ---------------------------------------------------------------------------
+//
+// One ignored, cfg-free test, selected by its exact name by the observation step
+// that follows the native HOST acceptance capture in CI's `test` and
+// `test-windows` jobs. It asks the container CLI the version-2 contract's bounded,
+// read-only questions (E0, P1-P5) through the product's own process path, reduces
+// every endpoint-sensitive answer in memory, and prints the reduced record as
+// numbered hex lines under the PR355 framing with a marker of its own. The notes
+// give the contract, the record and its limits.
+
+/// The first field of every line of the record's framing.
+const CAPABILITY_MARKER: &str = "UPSTROKE-CONTAINER-CAPABILITY-RECORD";
+
+/// The framing's version, the second field of every line.
+const CAPABILITY_FRAMING: &str = "v1";
+
+/// Record bytes per chunk line: 192 hex characters.
+const CAPABILITY_CHUNK: usize = 96;
+
+const CAPABILITY_RECORD_KIND: &str = "upstroke-container-capability-record";
+
+const CAPABILITY_PROTOCOL_VERSION: u64 = 1;
+
+const CAPABILITY_TEST: &str = "runner::container::tests::container_capability_record";
+
+/// The pass line libtest prints for the observation, which a reader of its stream requires
+/// exactly once.
+const CAPABILITY_PASS_LINE: &str =
+    "test runner::container::tests::container_capability_record ... ok";
+
+/// The only CI names the record reads: the run, attempt, job and runner a reader can check
+/// it against. Provenance, never proof.
+const CAPABILITY_CI_VARIABLES: [&str; 9] = [
+    "GITHUB_RUN_ID",
+    "GITHUB_RUN_ATTEMPT",
+    "GITHUB_JOB",
+    "GITHUB_SHA",
+    "RUNNER_NAME",
+    "RUNNER_OS",
+    "RUNNER_ARCH",
+    "ImageOS",
+    "ImageVersion",
+];
+
+/// The Docker selectors E0 reads: `DOCKER_HOST` by presence and, in memory only, by its
+/// reduced class; the other two by presence only.
+const CAPABILITY_SELECTORS: [&str; 3] = ["DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG"];
+
+/// The names that select another repository's Git context, removed from the binding's git
+/// children, so the record names the checkout this test binary was built from.
+const CAPABILITY_GIT_CONTEXT: [&str; 10] = [
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CONFIG",
+    "GIT_CONFIG_COUNT",
+    "GIT_CONFIG_PARAMETERS",
+];
+
+const CAPABILITY_GIT_BOUND: Duration = Duration::from_secs(60);
+
+const CAPABILITY_P2: [&str; 4] = [
+    "context",
+    "inspect",
+    "--format",
+    "{{.Endpoints.docker.Host}}",
+];
+
+const CAPABILITY_P2_BOUND: Duration = Duration::from_secs(10);
+
+const CAPABILITY_P3: [&str; 3] = ["version", "--format", "{{.Server.Version}}"];
+
+const CAPABILITY_P3_BOUND: Duration = Duration::from_secs(60);
+
+const CAPABILITY_P4: [&str; 3] = [
+    "version",
+    "--format",
+    "{{.Client.Version}}\u{1f}{{.Client.Os}}\u{1f}{{.Client.Arch}}\u{1f}{{.Server.Platform.Name}}\
+     \u{1f}{{.Server.Version}}\u{1f}{{.Server.Os}}\u{1f}{{.Server.Arch}}",
+];
+
+const CAPABILITY_P4_BOUND: Duration = Duration::from_secs(20);
+
+const CAPABILITY_P4_FIELDS: [(&str, CapabilityGrammar); 7] = [
+    ("client_version", CapabilityGrammar::Version),
+    ("client_os", CapabilityGrammar::Os),
+    ("client_arch", CapabilityGrammar::Arch),
+    ("daemon_platform_name", CapabilityGrammar::PlatformName),
+    ("daemon_version", CapabilityGrammar::Version),
+    ("daemon_os", CapabilityGrammar::Os),
+    ("daemon_arch", CapabilityGrammar::Arch),
+];
+
+const CAPABILITY_P5_REFERENCES: [&str; 3] = ["alpine:3.20", "busybox:latest", "debian:stable-slim"];
+
+const CAPABILITY_P5_FORMAT: &str = "{{.Id}}\u{1f}{{.Os}}\u{1f}{{.Architecture}}\u{1f}{{.Variant}}";
+
+const CAPABILITY_P5_BOUND: Duration = Duration::from_secs(15);
+
+const CAPABILITY_P5_FIELDS: [(&str, CapabilityGrammar); 4] = [
+    ("image_id", CapabilityGrammar::ImageId),
+    ("image_os", CapabilityGrammar::Os),
+    ("image_arch", CapabilityGrammar::Arch),
+    ("image_variant", CapabilityGrammar::Variant),
+];
+
+/// Strings only an unreduced endpoint would put in the record. The decoder refuses a record
+/// holding any of them, so the test refuses to print one.
+const CAPABILITY_UNREDUCED: [&str; 4] = ["://", "/pipe/", "\\pipe\\", ".sock"];
+
+const CAPABILITY_ENDPOINT_CLASSES: [&str; 8] = [
+    "unix-socket-path",
+    "npipe-local-name-syntax",
+    "REJECTED unix-malformed-syntax",
+    "REJECTED npipe-non-local-syntax",
+    "REJECTED tcp",
+    "REJECTED ssh",
+    "REJECTED other-scheme",
+    "ENDPOINT_UNKNOWN",
+];
+
+const CAPABILITY_OUTCOMES: [&str; 7] = [
+    "SPAWN_FAILED",
+    "COMMAND_FAILED_SETTLED",
+    "OUTPUT_LIMIT",
+    "TIMEOUT",
+    "SIGNAL",
+    "EXITED_0",
+    "EXITED_NONZERO",
+];
+
+const CAPABILITY_ROWS: [&str; 11] = [
+    "ENDPOINT_UNKNOWN",
+    "EXECUTABLE_ABSENT",
+    "ENDPOINT_REJECTED",
+    "SPAWN_FAILED",
+    "COMMAND_FAILED_SETTLED",
+    "TIMEOUT",
+    "SIGNAL",
+    "OUTPUT_LIMIT",
+    "DAEMON_UNREACHABLE",
+    "DAEMON_ERROR",
+    "DAEMON_ANSWERED",
+];
+
+/// The contract's field grammars, as character-class checks: `version`
+/// `^[0-9A-Za-z][0-9A-Za-z.+~-]{0,63}$`, `os` `^[a-z][a-z0-9]{0,15}$`, `arch`
+/// `^[a-z0-9][a-z0-9_]{0,15}$`, `platform_name` `^[A-Za-z0-9][A-Za-z0-9 ._()+-]{0,63}$`,
+/// `image_id` `^sha256:[0-9a-f]{64}$` and `variant` `^(v[0-9]{1,2})?$`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CapabilityGrammar {
+    Version,
+    Os,
+    Arch,
+    PlatformName,
+    ImageId,
+    Variant,
+}
+
+impl CapabilityGrammar {
+    fn admits(self, text: &str) -> bool {
+        let bytes = text.as_bytes();
+        let Some((&first, rest)) = bytes.split_first() else {
+            return self == Self::Variant;
+        };
+        match self {
+            Self::Version => {
+                bytes.len() <= 64
+                    && first.is_ascii_alphanumeric()
+                    && rest
+                        .iter()
+                        .all(|b| b.is_ascii_alphanumeric() || b".+~-".contains(b))
+            }
+            Self::Os => {
+                bytes.len() <= 16
+                    && first.is_ascii_lowercase()
+                    && rest
+                        .iter()
+                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+            }
+            Self::Arch => {
+                bytes.len() <= 16
+                    && (first.is_ascii_lowercase() || first.is_ascii_digit())
+                    && rest
+                        .iter()
+                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'_')
+            }
+            Self::PlatformName => {
+                bytes.len() <= 64
+                    && first.is_ascii_alphanumeric()
+                    && rest
+                        .iter()
+                        .all(|b| b.is_ascii_alphanumeric() || b" ._()+-".contains(b))
+            }
+            Self::ImageId => text
+                .strip_prefix("sha256:")
+                .is_some_and(|hex| capability_lower_hex(hex, 64)),
+            Self::Variant => {
+                first == b'v'
+                    && (1..=2).contains(&rest.len())
+                    && rest.iter().all(u8::is_ascii_digit)
+            }
+        }
+    }
+}
+
+/// One field's class: `VALID` with its value when in grammar (the variant grammar admits the
+/// empty string), `FIELD_UNKNOWN` when empty or `<no value>`, and otherwise `MALFORMED`
+/// with only the length and digest of its text.
+fn capability_field(text: &str, grammar: CapabilityGrammar) -> serde_json::Value {
+    if grammar.admits(text) {
+        serde_json::json!({"class": "VALID", "value": text})
+    } else if text.is_empty() || text == "<no value>" {
+        serde_json::json!({"class": "FIELD_UNKNOWN"})
+    } else {
+        serde_json::json!({
+            "class": "MALFORMED",
+            "text_utf8_bytes": text.len(),
+            "text_utf8_sha256": capability_sha256(text.as_bytes()),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CapabilityNotOneRecord {
+    Empty,
+    Lines,
+    ControlBytes,
+}
+
+impl CapabilityNotOneRecord {
+    fn reason(self) -> &'static str {
+        match self {
+            Self::Empty => "empty",
+            Self::Lines => "not-one-record",
+            Self::ControlBytes => "control-bytes",
+        }
+    }
+}
+
+/// The one record a command printed: one final CRLF or LF removed, then non-empty, with no
+/// further line break and no other control byte. U+001F is admitted only where `separated`
+/// says the format uses it between fields.
+fn capability_one_record(text: &str, separated: bool) -> Result<&str, CapabilityNotOneRecord> {
+    let record = text
+        .strip_suffix("\r\n")
+        .or_else(|| text.strip_suffix('\n'))
+        .unwrap_or(text);
+    if record.is_empty() {
+        return Err(CapabilityNotOneRecord::Empty);
+    }
+    if record.contains(['\n', '\r']) {
+        return Err(CapabilityNotOneRecord::Lines);
+    }
+    if record
+        .chars()
+        .any(|c| c.is_ascii_control() && !(separated && c == '\u{1f}'))
+    {
+        return Err(CapabilityNotOneRecord::ControlBytes);
+    }
+    Ok(record)
+}
+
+/// An endpoint reduced to its class. The spelling it was read from is never kept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CapabilityEndpoint {
+    UnixSocketPath,
+    NpipeLocalName,
+    Rejected(&'static str),
+    Unknown(&'static str),
+}
+
+impl CapabilityEndpoint {
+    fn class(self) -> &'static str {
+        match self {
+            Self::UnixSocketPath => "unix-socket-path",
+            Self::NpipeLocalName => "npipe-local-name-syntax",
+            Self::Rejected(class) => class,
+            Self::Unknown(_) => "ENDPOINT_UNKNOWN",
+        }
+    }
+
+    fn reason(self) -> Option<&'static str> {
+        match self {
+            Self::Unknown(reason) => Some(reason),
+            _ => None,
+        }
+    }
+}
+
+/// P2's record, or `DOCKER_HOST`'s value, reduced in memory: one exact record; then an exact
+/// absolute Unix socket spelling or a local named-pipe spelling is accepted as a transport
+/// class, every other scheme or malformed spelling is rejected, and what cannot be parsed
+/// is unknown. Syntax only: the class is not proof of where the endpoint is.
+fn capability_endpoint(text: &str) -> CapabilityEndpoint {
+    let record = match capability_one_record(text, false) {
+        Ok(record) => record,
+        Err(why) => return CapabilityEndpoint::Unknown(why.reason()),
+    };
+    if record == "<no value>" {
+        return CapabilityEndpoint::Unknown("no-value");
+    }
+    let Some((scheme, rest)) = record.split_once("://") else {
+        return CapabilityEndpoint::Unknown("unparsed");
+    };
+    let mut letters = scheme.chars();
+    let spelled = letters.next().is_some_and(|c| c.is_ascii_alphabetic())
+        && letters.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'));
+    if !spelled {
+        return CapabilityEndpoint::Unknown("unparsed");
+    }
+    match scheme {
+        "unix" if capability_absolute_path(rest) => CapabilityEndpoint::UnixSocketPath,
+        "unix" => CapabilityEndpoint::Rejected("REJECTED unix-malformed-syntax"),
+        "npipe"
+            if rest
+                .strip_prefix("//./pipe/")
+                .is_some_and(capability_pipe_name) =>
+        {
+            CapabilityEndpoint::NpipeLocalName
+        }
+        "npipe" => CapabilityEndpoint::Rejected("REJECTED npipe-non-local-syntax"),
+        "tcp" => CapabilityEndpoint::Rejected("REJECTED tcp"),
+        "ssh" => CapabilityEndpoint::Rejected("REJECTED ssh"),
+        _ => CapabilityEndpoint::Rejected("REJECTED other-scheme"),
+    }
+}
+
+/// An exact absolute path: `/`-separated segments, none empty, `.` or `..`, each of
+/// `[A-Za-z0-9._~+@%=,:-]`, and no trailing `/`.
+fn capability_absolute_path(path: &str) -> bool {
+    path.strip_prefix('/').is_some_and(|inner| {
+        !inner.is_empty()
+            && inner.split('/').all(|segment| {
+                !segment.is_empty()
+                    && segment != "."
+                    && segment != ".."
+                    && segment.chars().all(|c| {
+                        c.is_ascii_alphanumeric()
+                            || matches!(
+                                c,
+                                '.' | '_' | '~' | '+' | '@' | '%' | '=' | ',' | ':' | '-'
+                            )
+                    })
+            })
+    })
+}
+
+/// A local pipe's name after `//./pipe/`: one segment of `[A-Za-z0-9._-]`, at most 128 long.
+fn capability_pipe_name(name: &str) -> bool {
+    (1..=128).contains(&name.len())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+/// One process question of P2-P5: its id, the P5 reference it inspects, its arguments after
+/// `docker`, and its bound.
+struct CapabilityQuestion {
+    id: &'static str,
+    reference: Option<&'static str>,
+    args: Vec<&'static str>,
+    bound: Duration,
+}
+
+impl CapabilityQuestion {
+    fn argv(&self) -> Vec<String> {
+        std::iter::once(super::DOCKER_PROGRAM)
+            .chain(self.args.iter().copied())
+            .map(str::to_owned)
+            .collect()
+    }
+}
+
+/// P2, P3, P4 and the three P5 inspections, in the order the gates allow them.
+fn capability_questions() -> Vec<CapabilityQuestion> {
+    let mut questions = vec![
+        CapabilityQuestion {
+            id: "P2",
+            reference: None,
+            args: CAPABILITY_P2.to_vec(),
+            bound: CAPABILITY_P2_BOUND,
+        },
+        CapabilityQuestion {
+            id: "P3",
+            reference: None,
+            args: CAPABILITY_P3.to_vec(),
+            bound: CAPABILITY_P3_BOUND,
+        },
+        CapabilityQuestion {
+            id: "P4",
+            reference: None,
+            args: CAPABILITY_P4.to_vec(),
+            bound: CAPABILITY_P4_BOUND,
+        },
+    ];
+    for reference in CAPABILITY_P5_REFERENCES {
+        questions.push(CapabilityQuestion {
+            id: "P5",
+            reference: Some(reference),
+            args: vec![
+                "image",
+                "inspect",
+                reference,
+                "--format",
+                CAPABILITY_P5_FORMAT,
+            ],
+            bound: CAPABILITY_P5_BOUND,
+        });
+    }
+    questions
+}
+
+/// The fate of a process that returned no output. `Unresolved` never gets here: it fails the
+/// observer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CapabilityUnanswered {
+    NeverStarted,
+    Gone,
+}
+
+type CapabilityAnswer = Result<crate::agent::ProcessOutput, CapabilityUnanswered>;
+
+/// What one bounded question returned, and the wall time the observer measured around it.
+struct CapabilityAsked {
+    answer: CapabilityAnswer,
+    wall: Duration,
+}
+
+/// A settled answer: the process's output, the fate of one that returned none, or -- for a
+/// process the product's supervision could not establish gone -- the observer's integrity
+/// failure. The failure's error text is never kept: it can name what the record must not.
+fn capability_settled(
+    id: &str,
+    outcome: Result<crate::agent::ProcessOutput, crate::agent::proc::ProcessFailure>,
+) -> CapabilityAnswer {
+    match outcome {
+        Ok(output) => Ok(output),
+        Err(failure) => match failure.fate {
+            crate::error::ProcessFate::NeverStarted => Err(CapabilityUnanswered::NeverStarted),
+            crate::error::ProcessFate::Gone => Err(CapabilityUnanswered::Gone),
+            crate::error::ProcessFate::Unresolved => panic!(
+                "OBSERVER_INTEGRITY_FAILURE: `{id}` ended its supervision without establishing \
+                 its process gone (ProcessFate::Unresolved); no record is printed"
+            ),
+        },
+    }
+}
+
+/// The process outcome, kept apart from what the command's text means.
+fn capability_outcome(answer: &CapabilityAnswer) -> &'static str {
+    match answer {
+        Err(CapabilityUnanswered::NeverStarted) => "SPAWN_FAILED",
+        Err(CapabilityUnanswered::Gone) => "COMMAND_FAILED_SETTLED",
+        Ok(output) if output.output_limited => "OUTPUT_LIMIT",
+        Ok(output) if output.timed_out => "TIMEOUT",
+        Ok(output) => match output.code {
+            None => "SIGNAL",
+            Some(0) => "EXITED_0",
+            Some(_) => "EXITED_NONZERO",
+        },
+    }
+}
+
+fn capability_millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// A captured stream reduced to the length and digest of its text. The process API returns
+/// text that drain decoded lossily, so this is the captured UTF-8, not the original bytes.
+fn capability_text(text: &str) -> serde_json::Value {
+    serde_json::json!({
+        "text_utf8_bytes": text.len(),
+        "text_utf8_sha256": capability_sha256(text.as_bytes()),
+    })
+}
+
+/// A command's class, why it is that class when the reason is not the class itself, and
+/// the fields it kept.
+struct CapabilityVerdict {
+    class: &'static str,
+    reason: Option<&'static str>,
+    fields: serde_json::Value,
+}
+
+/// One question that ran: its literal argv and bound, the process facts kept apart (result,
+/// fate, exit, timeout, output limit, durations), the outcome class, the reduced streams, and
+/// the command's verdict.
+fn capability_asked_json(
+    question: &CapabilityQuestion,
+    asked: &CapabilityAsked,
+    verdict: CapabilityVerdict,
+) -> serde_json::Value {
+    let (process, streams) = match &asked.answer {
+        Ok(output) => (
+            serde_json::json!({
+                "result": "output",
+                "fate": null,
+                "exit_code": output.code,
+                "timed_out": output.timed_out,
+                "output_limited": output.output_limited,
+                "duration_ms": capability_millis(output.duration),
+                "wall_ms": capability_millis(asked.wall),
+            }),
+            serde_json::json!({
+                "capture_representation": "utf8_lossy",
+                "stdout": capability_text(&output.stdout),
+                "stderr": capability_text(&output.stderr),
+            }),
+        ),
+        Err(fate) => {
+            let fate = match fate {
+                CapabilityUnanswered::NeverStarted => "NeverStarted",
+                CapabilityUnanswered::Gone => "Gone",
+            };
+            (
+                serde_json::json!({
+                    "result": "failure",
+                    "fate": fate,
+                    "exit_code": null,
+                    "timed_out": null,
+                    "output_limited": null,
+                    "duration_ms": null,
+                    "wall_ms": capability_millis(asked.wall),
+                }),
+                serde_json::json!({
+                    "capture_representation": "utf8_lossy",
+                    "stdout": null,
+                    "stderr": null,
+                }),
+            )
+        }
+    };
+    serde_json::json!({
+        "id": question.id,
+        "reference": question.reference,
+        "argv": question.argv(),
+        "bound_s": question.bound.as_secs(),
+        "ran": true,
+        "process": process,
+        "outcome_class": capability_outcome(&asked.answer),
+        "streams": streams,
+        "class": verdict.class,
+        "reason": verdict.reason,
+        "fields": verdict.fields,
+        "reduction_applied": true,
+    })
+}
+
+/// A question its gate did not let run: listed with its literal argv, never asked.
+fn capability_not_run_json(question: &CapabilityQuestion, gated_by: &str) -> serde_json::Value {
+    serde_json::json!({
+        "id": question.id,
+        "reference": question.reference,
+        "argv": question.argv(),
+        "bound_s": question.bound.as_secs(),
+        "ran": false,
+        "class": "NOT_OBSERVED",
+        "reason": format!("gated-by-{gated_by}"),
+    })
+}
+
+fn capability_e0_json(both_selectors: bool) -> serde_json::Value {
+    let (class, reason) = if both_selectors {
+        ("ENDPOINT_UNKNOWN", Some("both-selectors-present"))
+    } else {
+        ("PROCEEDS", None)
+    };
+    serde_json::json!({
+        "id": "E0",
+        "kind": "in-process",
+        "ran": true,
+        "class": class,
+        "reason": reason,
+    })
+}
+
+fn capability_p1_json(present: Option<bool>) -> serde_json::Value {
+    let (ran, class, reason) = match present {
+        Some(true) => (true, "PRESENT", None),
+        Some(false) => (true, "EXECUTABLE_ABSENT", None),
+        None => (false, "NOT_OBSERVED", Some("gated-by-E0")),
+    };
+    serde_json::json!({
+        "id": "P1",
+        "kind": "in-process",
+        "ran": ran,
+        "present": present,
+        "class": class,
+        "reason": reason,
+    })
+}
+
+/// The observer's entries and the facts its questions established.
+#[derive(Default)]
+struct CapabilityObserver {
+    commands: Vec<serde_json::Value>,
+    asked: usize,
+    endpoint_transport: Option<&'static str>,
+    metadata: Option<serde_json::Map<String, serde_json::Value>>,
+    metadata_complete: Option<bool>,
+    images: Vec<serde_json::Value>,
+}
+
+impl CapabilityObserver {
+    /// One question through the product's bounded, contained and settled process path, the
+    /// one `DockerCli::question` takes: `docker_command`, the Spawn/Terminate sites, no
+    /// stdin, no leases, no stop predicate, no hooks.
+    fn ask(&mut self, question: &CapabilityQuestion) -> CapabilityAsked {
+        self.asked += 1;
+        let began = Instant::now();
+        let outcome = crate::agent::proc::run_with_timeout_classified(
+            crate::topology::effects::ProcessSite::Spawn,
+            crate::topology::effects::ProcessSite::Terminate,
+            super::docker_command(&question.args),
+            &[],
+            question.bound,
+            &[],
+            &|| false,
+            &mut crate::agent::proc::NoHooks,
+        );
+        let wall = began.elapsed();
+        CapabilityAsked {
+            answer: capability_settled(question.id, outcome),
+            wall,
+        }
+    }
+
+    fn gate(&mut self, questions: &[CapabilityQuestion], from: usize, gated_by: &str) {
+        for question in &questions[from..] {
+            self.commands
+                .push(capability_not_run_json(question, gated_by));
+        }
+    }
+}
+
+/// The product's own reading of a failed question's diagnostic: unreachable only for one of
+/// its seven shapes with no `error response from daemon:` line.
+fn capability_daemon_class(stderr: &str) -> &'static str {
+    if is_unreachable_diagnostic(stderr.trim()) {
+        "DAEMON_UNREACHABLE"
+    } else {
+        "DAEMON_ERROR"
+    }
+}
+
+/// Fields separated by U+001F in one record, each classified by its grammar; `None` when the
+/// output is not one record of exactly that many fields.
+fn capability_separated(
+    text: &str,
+    spec: &[(&str, CapabilityGrammar)],
+) -> Option<serde_json::Map<String, serde_json::Value>> {
+    let record = capability_one_record(text, true).ok()?;
+    let parts: Vec<&str> = record.split('\u{1f}').collect();
+    (parts.len() == spec.len()).then(|| {
+        spec.iter()
+            .zip(parts)
+            .map(|((name, grammar), part)| ((*name).to_owned(), capability_field(part, *grammar)))
+            .collect()
+    })
+}
+
+fn capability_all_valid(fields: &serde_json::Map<String, serde_json::Value>) -> bool {
+    fields.values().all(|field| field["class"] == "VALID")
+}
+
+/// P3, the product's own probe: answered only with exit 0 and a version in grammar.
+fn capability_p3(answer: &CapabilityAnswer) -> CapabilityVerdict {
+    let outcome = capability_outcome(answer);
+    let Ok(output) = answer else {
+        return CapabilityVerdict {
+            class: outcome,
+            reason: None,
+            fields: serde_json::json!({"server_version": "NOT_OBSERVED"}),
+        };
+    };
+    let version = match capability_one_record(&output.stdout, false) {
+        Ok(record) => capability_field(record, CapabilityGrammar::Version),
+        Err(CapabilityNotOneRecord::Empty) => serde_json::json!({"class": "FIELD_UNKNOWN"}),
+        Err(_) => capability_field(&output.stdout, CapabilityGrammar::Version),
+    };
+    let (class, reason) = match outcome {
+        "EXITED_0" if version["class"] == "VALID" => ("DAEMON_ANSWERED", None),
+        "EXITED_0" => ("DAEMON_ERROR", Some("exited-0-version-not-valid")),
+        "EXITED_NONZERO" => (capability_daemon_class(&output.stderr), None),
+        other => (other, None),
+    };
+    CapabilityVerdict {
+        class,
+        reason,
+        fields: serde_json::json!({"server_version": version}),
+    }
+}
+
+/// P4, asked only after P3 answered: complete when it exits 0 with seven fields all in
+/// grammar, incomplete otherwise. Either way the earlier answer stands.
+fn capability_p4(
+    answer: &CapabilityAnswer,
+) -> (
+    CapabilityVerdict,
+    Option<serde_json::Map<String, serde_json::Value>>,
+) {
+    let outcome = capability_outcome(answer);
+    let (metadata, stderr_class) = match answer {
+        Ok(output) => (
+            capability_separated(&output.stdout, &CAPABILITY_P4_FIELDS),
+            (outcome == "EXITED_NONZERO").then(|| capability_daemon_class(&output.stderr)),
+        ),
+        Err(_) => (None, None),
+    };
+    let complete = outcome == "EXITED_0" && metadata.as_ref().is_some_and(capability_all_valid);
+    let (class, reason) = if complete {
+        ("METADATA_COMPLETE", None)
+    } else if outcome != "EXITED_0" {
+        ("METADATA_INCOMPLETE", Some(outcome))
+    } else if metadata.is_none() {
+        ("METADATA_INCOMPLETE", Some("record-malformed"))
+    } else {
+        ("METADATA_INCOMPLETE", Some("fields-not-valid"))
+    };
+    let verdict = CapabilityVerdict {
+        class,
+        reason,
+        fields: serde_json::json!({"metadata": metadata, "stderr_class": stderr_class}),
+    };
+    (verdict, metadata)
+}
+
+/// One P5 inspection: present only with exit 0 and four fields in grammar; absent only by the
+/// product's own reading of the daemon's answer about this reference.
+fn capability_p5(reference: &str, answer: &CapabilityAnswer) -> CapabilityVerdict {
+    let outcome = capability_outcome(answer);
+    let Ok(output) = answer else {
+        return CapabilityVerdict {
+            class: outcome,
+            reason: None,
+            fields: serde_json::json!({"image": null}),
+        };
+    };
+    let image = capability_separated(&output.stdout, &CAPABILITY_P5_FIELDS);
+    let (class, reason) = match outcome {
+        "EXITED_0" if image.as_ref().is_some_and(capability_all_valid) => ("IMAGE_PRESENT", None),
+        "EXITED_0" => ("IMAGE_ERROR", Some("exited-0-fields-not-valid")),
+        "EXITED_NONZERO" if super::is_absent(reference, output.stderr.trim()) => {
+            ("IMAGE_ABSENT", None)
+        }
+        "EXITED_NONZERO" => ("IMAGE_ERROR", None),
+        other => (other, None),
+    };
+    CapabilityVerdict {
+        class,
+        reason,
+        fields: serde_json::json!({"image": image}),
+    }
+}
+
+/// E0, then P1-P5 under their gates. Returns the reduced selectors and the row: the first
+/// terminal class, in order E0, P1, P2, P3, with its reason.
+fn capability_observe(
+    observer: &mut CapabilityObserver,
+) -> (serde_json::Value, &'static str, Option<&'static str>) {
+    let questions = capability_questions();
+
+    // E0, by name only. DOCKER_HOST's value is classified here and dropped with this scope.
+    let [host_name, context_name, config_name] = CAPABILITY_SELECTORS;
+    let host =
+        std::env::var_os(host_name).map(|value| capability_endpoint(&value.to_string_lossy()));
+    let context = std::env::var_os(context_name).is_some();
+    let config = std::env::var_os(config_name).is_some();
+    let presence = |present: bool| if present { "present" } else { "absent" };
+    let selectors = serde_json::json!({
+        "DOCKER_HOST": presence(host.is_some()),
+        "DOCKER_HOST_reduced_class": host.map(CapabilityEndpoint::class),
+        "DOCKER_CONTEXT": presence(context),
+        "DOCKER_CONFIG": presence(config),
+    });
+    let both = host.is_some() && context;
+    observer.commands.push(capability_e0_json(both));
+    if both {
+        observer.commands.push(capability_p1_json(None));
+        observer.gate(&questions, 0, "E0");
+        return (
+            selectors,
+            "ENDPOINT_UNKNOWN",
+            Some("both-selectors-present"),
+        );
+    }
+
+    // P1, in process, as DockerCli::available asks it. The path is not kept.
+    let present = crate::util::find_program(super::DOCKER_PROGRAM).is_some();
+    observer.commands.push(capability_p1_json(Some(present)));
+    if !present {
+        observer.gate(&questions, 0, "P1");
+        return (selectors, "EXECUTABLE_ABSENT", None);
+    }
+
+    // P2: the endpoint the CLI resolved, reduced in memory and cross-checked.
+    let p2 = observer.ask(&questions[0]);
+    let endpoint = match &p2.answer {
+        Ok(output) if capability_outcome(&p2.answer) == "EXITED_0" => {
+            capability_endpoint(&output.stdout)
+        }
+        _ => CapabilityEndpoint::Unknown(capability_outcome(&p2.answer)),
+    };
+    let agreement = host.map(|host| host.class() == endpoint.class());
+    observer.endpoint_transport = Some(endpoint.class());
+    observer.commands.push(capability_asked_json(
+        &questions[0],
+        &p2,
+        CapabilityVerdict {
+            class: endpoint.class(),
+            reason: endpoint.reason(),
+            fields: serde_json::json!({
+                "endpoint_transport": endpoint.class(),
+                "selector_agreement": agreement,
+            }),
+        },
+    ));
+    if let CapabilityEndpoint::Unknown(reason) = endpoint {
+        observer.gate(&questions, 1, "P2");
+        return (selectors, "ENDPOINT_UNKNOWN", Some(reason));
+    }
+    if agreement == Some(false) {
+        observer.gate(&questions, 1, "P2");
+        return (selectors, "ENDPOINT_UNKNOWN", Some("selector-disagreement"));
+    }
+    if let CapabilityEndpoint::Rejected(class) = endpoint {
+        observer.gate(&questions, 1, "P2");
+        return (selectors, "ENDPOINT_REJECTED", Some(class));
+    }
+
+    // P3: the daemon's answer, through the product's own probe and classifier.
+    let p3 = observer.ask(&questions[1]);
+    let verdict = capability_p3(&p3.answer);
+    let (class, reason) = (verdict.class, verdict.reason);
+    observer
+        .commands
+        .push(capability_asked_json(&questions[1], &p3, verdict));
+    if class != "DAEMON_ANSWERED" {
+        observer.gate(&questions, 2, "P3");
+        return (selectors, class, reason);
+    }
+
+    // P4: selected client and daemon fields; their completeness is reported apart.
+    let p4 = observer.ask(&questions[2]);
+    let (verdict, metadata) = capability_p4(&p4.answer);
+    observer.metadata_complete = Some(verdict.class == "METADATA_COMPLETE");
+    observer.metadata = metadata;
+    observer
+        .commands
+        .push(capability_asked_json(&questions[2], &p4, verdict));
+
+    // P5: three literal references, inspected and never pulled.
+    for question in &questions[3..] {
+        let asked = observer.ask(question);
+        let reference = question.reference.unwrap_or_default();
+        let verdict = capability_p5(reference, &asked.answer);
+        observer
+            .images
+            .push(serde_json::json!({"reference": reference, "class": verdict.class}));
+        observer
+            .commands
+            .push(capability_asked_json(question, &asked, verdict));
+    }
+    (selectors, "DAEMON_ANSWERED", None)
+}
+
+/// The whole record: the binding, the reduced selectors, every command in order, the row, the
+/// image sub-rows, and the platform facts kept apart.
+fn capability_record(
+    binding: serde_json::Value,
+    selectors: serde_json::Value,
+    observer: &CapabilityObserver,
+    class: &str,
+    reason: Option<&str>,
+) -> serde_json::Value {
+    let fact = |name: &str| {
+        observer
+            .metadata
+            .as_ref()
+            .and_then(|fields| fields.get(name))
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!("NOT_OBSERVED"))
+    };
+    let images: Vec<serde_json::Value> = if observer.images.is_empty() {
+        CAPABILITY_P5_REFERENCES
+            .iter()
+            .map(|reference| serde_json::json!({"reference": reference, "class": "NOT_OBSERVED"}))
+            .collect()
+    } else {
+        observer.images.clone()
+    };
+    let role = if std::env::consts::OS == "linux" {
+        "CONTROL"
+    } else {
+        "OBSERVATION"
+    };
+    let metadata = match observer.metadata_complete {
+        Some(true) => "COMPLETE",
+        Some(false) => "INCOMPLETE",
+        None => "NOT_OBSERVED",
+    };
+    serde_json::json!({
+        "record_kind": CAPABILITY_RECORD_KIND,
+        "protocol_version": CAPABILITY_PROTOCOL_VERSION,
+        "test": CAPABILITY_TEST,
+        "binding": binding,
+        "selectors": selectors,
+        "commands": observer.commands,
+        "docker_commands_asked": observer.asked,
+        "row": {"class": class, "reason": reason, "role": role},
+        "daemon_metadata": metadata,
+        "images": images,
+        "platform": {
+            "coordinator_os": std::env::consts::OS,
+            "coordinator_arch": std::env::consts::ARCH,
+            "client_os": fact("client_os"),
+            "client_arch": fact("client_arch"),
+            "daemon_os": fact("daemon_os"),
+            "daemon_arch": fact("daemon_arch"),
+            "daemon_platform_name": fact("daemon_platform_name"),
+            "endpoint_transport": observer.endpoint_transport.unwrap_or("NOT_OBSERVED"),
+            "execution_location": "NOT_ESTABLISHED",
+        },
+        "m2_effect": "NONE",
+        "scope": {
+            "questions": "read-only questions to the container CLI and, through it, its daemon: \
+                          E0 and P1-P5 of the version-2 contract, each through the product's \
+                          bounded process path; no pull, create, start or configuration",
+            "reduction": "endpoint-sensitive output is classified in memory; the record keeps \
+                          classes, grammar-checked fields, and UTF-8 text lengths and SHA-256 \
+                          digests (capture_representation utf8_lossy), never an endpoint, a \
+                          path, a context name or diagnostic text",
+            "limits": "a capability class is an observation, not M2 acceptance, N/A or a \
+                       waiver; endpoint_transport is syntax, not proof of a physical machine; \
+                       execution_location is NOT_ESTABLISHED; a Linux row is an observer \
+                       CONTROL",
+        },
+    })
+}
+
+fn capability_sha256(bytes: &[u8]) -> String {
+    format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(bytes))
+}
+
+fn capability_hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut hex = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        hex.push(char::from(DIGITS[usize::from(byte >> 4)]));
+        hex.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
+    }
+    hex
+}
+
+fn capability_lower_hex(text: &str, length: usize) -> bool {
+    text.len() == length
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+fn capability_object_id(text: &str) -> bool {
+    capability_lower_hex(text, 40) || capability_lower_hex(text, 64)
+}
+
+/// Git in the checkout this test binary was compiled from, with [`CAPABILITY_GIT_CONTEXT`]
+/// removed, through the same bounded process path. Anything but exit 0 is a binding failure.
+fn capability_git(args: &[&str]) -> String {
+    let mut spec = CommandSpec::new("git")
+        .arg("-C")
+        .arg(env!("CARGO_MANIFEST_DIR"));
+    for arg in args {
+        spec = spec.arg(*arg);
+    }
+    let mut git = host::test_support::build_command(&spec);
+    for name in CAPABILITY_GIT_CONTEXT {
+        git.env_remove(name);
+    }
+    let outcome = crate::agent::proc::run_with_timeout_classified(
+        crate::topology::effects::ProcessSite::Spawn,
+        crate::topology::effects::ProcessSite::Terminate,
+        git,
+        &[],
+        CAPABILITY_GIT_BOUND,
+        &[],
+        &|| false,
+        &mut crate::agent::proc::NoHooks,
+    );
+    let answer = capability_settled("git", outcome);
+    match &answer {
+        Ok(output) if capability_outcome(&answer) == "EXITED_0" => output.stdout.clone(),
+        _ => panic!(
+            "OBSERVER_INTEGRITY_FAILURE: binding: `git {}` in the harness checkout ended {}",
+            args.join(" "),
+            capability_outcome(&answer)
+        ),
+    }
+}
+
+/// The running test binary's SHA-256 and length, streamed, and checked against its length on
+/// disk. Its path is not kept.
+fn capability_current_exe() -> (String, u64) {
+    use std::io::Read as _;
+
+    let exe = std::env::current_exe()
+        .expect("OBSERVER_INTEGRITY_FAILURE: binding: the test binary's own path");
+    let mut file = fs::File::open(&exe)
+        .expect("OBSERVER_INTEGRITY_FAILURE: binding: the test binary opens for reading");
+    let mut hasher = <sha2::Sha256 as sha2::Digest>::new();
+    let mut buffer = vec![0_u8; 1 << 20];
+    let mut bytes: u64 = 0;
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .expect("OBSERVER_INTEGRITY_FAILURE: binding: the test binary reads");
+        if read == 0 {
+            break;
+        }
+        sha2::Digest::update(&mut hasher, &buffer[..read]);
+        bytes += u64::try_from(read).expect("one read fits in u64");
+    }
+    let on_disk = fs::metadata(&exe)
+        .expect("OBSERVER_INTEGRITY_FAILURE: binding: the test binary's metadata")
+        .len();
+    assert_eq!(
+        bytes, on_disk,
+        "OBSERVER_INTEGRITY_FAILURE: binding: the whole test binary was hashed"
+    );
+    (format!("{:x}", sha2::Digest::finalize(hasher)), bytes)
+}
+
+/// Source head and tree, the test binary, the crate version and the allowlisted CI fields. A
+/// `RUNNER_OS` naming another OS than this binary's is a binding failure; `GITHUB_SHA` is
+/// provenance only, its equality with the head recorded and never required.
+fn capability_binding() -> serde_json::Value {
+    let head = capability_git(&["rev-parse", "HEAD"]).trim().to_owned();
+    let tree = capability_git(&["rev-parse", "HEAD^{tree}"])
+        .trim()
+        .to_owned();
+    let status = capability_git(&[
+        "--no-optional-locks",
+        "status",
+        "--porcelain",
+        "--untracked-files=no",
+    ]);
+    assert!(
+        capability_object_id(&head) && capability_object_id(&tree),
+        "OBSERVER_INTEGRITY_FAILURE: binding: the harness checkout's HEAD or tree is not an \
+         object id"
+    );
+    let (exe_sha256, exe_bytes) = capability_current_exe();
+    let mut variables = serde_json::Map::new();
+    for name in CAPABILITY_CI_VARIABLES {
+        let value = std::env::var_os(name).map_or(serde_json::Value::Null, |value| {
+            serde_json::Value::String(value.to_string_lossy().into_owned())
+        });
+        variables.insert(name.to_owned(), value);
+    }
+    let runner_os_agrees = variables
+        .get("RUNNER_OS")
+        .and_then(serde_json::Value::as_str)
+        .map(|os| os.eq_ignore_ascii_case(std::env::consts::OS));
+    assert!(
+        runner_os_agrees != Some(false),
+        "OBSERVER_INTEGRITY_FAILURE: binding: RUNNER_OS names another OS than the one this \
+         test binary was built for"
+    );
+    let github_sha_equals_source_head = variables
+        .get("GITHUB_SHA")
+        .and_then(serde_json::Value::as_str)
+        .map(|sha| sha == head);
+    let state = if variables.values().any(|value| !value.is_null()) {
+        "present"
+    } else {
+        "absent"
+    };
+    let tracked_changes = !status.trim().is_empty();
+    serde_json::json!({
+        "source_head": head,
+        "source_tree": tree,
+        "source_tracked_changes": tracked_changes,
+        "test_exe_sha256": exe_sha256,
+        "test_exe_bytes": exe_bytes,
+        "crate_version": env!("CARGO_PKG_VERSION"),
+        "ci": {"state": state, "variables": variables},
+        "runner_os_agrees": runner_os_agrees,
+        "github_sha_equals_source_head": github_sha_equals_source_head,
+    })
+}
+
+/// The record's bytes as numbered lines, PR355's framing under this record's marker: a
+/// `BEGIN` summary, one line of [`CAPABILITY_CHUNK`] bytes in lowercase hex per chunk, and an
+/// `END` summary repeating the `BEGIN` one. The summary is the tag (the digest's first
+/// sixteen characters, which every chunk line repeats), the chunk count, the byte count and
+/// the whole record's SHA-256.
+fn capability_frame(record: &[u8]) -> String {
+    let digest = capability_sha256(record);
+    let tag = &digest[..16];
+    let chunks: Vec<&[u8]> = record.chunks(CAPABILITY_CHUNK).collect();
+    let summary = format!("{tag} {} {} {digest}", chunks.len(), record.len());
+    let mut lines = vec![format!(
+        "{CAPABILITY_MARKER} {CAPABILITY_FRAMING} BEGIN {summary}"
+    )];
+    lines.extend(chunks.iter().enumerate().map(|(index, chunk)| {
+        format!(
+            "{CAPABILITY_MARKER} {CAPABILITY_FRAMING} {tag} {} {}",
+            index + 1,
+            capability_hex(chunk)
+        )
+    }));
+    lines.push(format!(
+        "{CAPABILITY_MARKER} {CAPABILITY_FRAMING} END {summary}"
+    ));
+    lines.join("\n") + "\n"
+}
+
+/// Why the decoder refused: fixed text with counts and indices, never the record's bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CapabilityRefusal(String);
+
+fn capability_refused<T>(why: impl Into<String>) -> Result<T, CapabilityRefusal> {
+    Err(CapabilityRefusal(why.into()))
+}
+
+fn capability_require(ok: bool, what: &str) -> Result<(), CapabilityRefusal> {
+    if ok {
+        Ok(())
+    } else {
+        capability_refused(format!("{what} is not what the protocol fixes"))
+    }
+}
+
+fn capability_count(text: &str) -> Option<usize> {
+    let decimal = !text.is_empty()
+        && text.len() <= 12
+        && text.bytes().all(|b| b.is_ascii_digit())
+        && (text == "0" || !text.starts_with('0'));
+    if !decimal {
+        return None;
+    }
+    text.parse().ok()
+}
+
+fn capability_unhex(hex: &str) -> Option<Vec<u8>> {
+    let digit = |b: u8| match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        _ => None,
+    };
+    if hex.len() % 2 == 1 {
+        return None;
+    }
+    hex.as_bytes()
+        .chunks(2)
+        .map(|pair| Some((digit(pair[0])? << 4) | digit(pair[1])?))
+        .collect()
+}
+
+/// The decode procedure: the stream's frame lines (a marker anywhere but at the start of a
+/// line refuses), `BEGIN` first and `END` last with one summary, chunk `k` at position `k`
+/// with the tag and its exact length, the reconstruction's length and SHA-256, strict JSON
+/// in its canonical serialization, no unreduced endpoint string, and the record's shape.
+fn capability_decode(stream: &str) -> Result<serde_json::Value, CapabilityRefusal> {
+    let mut frame: Vec<Vec<&str>> = Vec::new();
+    for line in stream.split('\n') {
+        if line.split(' ').next() == Some(CAPABILITY_MARKER) {
+            frame.push(line.split(' ').collect());
+        } else if line.contains(CAPABILITY_MARKER) {
+            return capability_refused(
+                "a frame marker stands somewhere other than the start of a line",
+            );
+        }
+    }
+    let [begin, chunk_lines @ .., end] = frame.as_slice() else {
+        return capability_refused("the stream holds fewer than two frame lines");
+    };
+    if begin.len() != 7 || begin[1] != CAPABILITY_FRAMING || begin[2] != "BEGIN" {
+        return capability_refused("the first frame line is not a v1 BEGIN summary");
+    }
+    if end.len() != 7 || end[1] != CAPABILITY_FRAMING || end[2] != "END" {
+        return capability_refused("the last frame line is not a v1 END summary");
+    }
+    if begin[3..] != end[3..] {
+        return capability_refused("the BEGIN and END summaries differ");
+    }
+    let (tag, digest) = (begin[3], begin[6]);
+    let (Some(chunks), Some(bytes)) = (capability_count(begin[4]), capability_count(begin[5]))
+    else {
+        return capability_refused("the summary's chunk or byte count is not a decimal number");
+    };
+    if !capability_lower_hex(tag, 16)
+        || !capability_lower_hex(digest, 64)
+        || !digest.starts_with(tag)
+    {
+        return capability_refused(
+            "the summary's tag or digest is not lowercase hex, or the tag does not open the \
+             digest",
+        );
+    }
+    if bytes == 0 || chunks != bytes.div_ceil(CAPABILITY_CHUNK) || chunks != chunk_lines.len() {
+        return capability_refused(format!(
+            "the summary declares {chunks} chunk(s) of {bytes} byte(s) and the stream holds {} \
+             chunk line(s)",
+            chunk_lines.len()
+        ));
+    }
+    let mut record = Vec::with_capacity(bytes);
+    for (position, line) in chunk_lines.iter().enumerate() {
+        let index = position + 1;
+        if line.len() != 5
+            || line[1] != CAPABILITY_FRAMING
+            || line[2] != tag
+            || line[3] != index.to_string()
+        {
+            return capability_refused(format!(
+                "frame line {index} is not chunk {index} of this record"
+            ));
+        }
+        let expected = if index < chunks {
+            2 * CAPABILITY_CHUNK
+        } else {
+            2 * (bytes - (chunks - 1) * CAPABILITY_CHUNK)
+        };
+        if line[4].len() != expected {
+            return capability_refused(format!(
+                "chunk {index} is not {expected} hex characters long"
+            ));
+        }
+        let Some(decoded) = capability_unhex(line[4]) else {
+            return capability_refused(format!(
+                "chunk {index} holds a character that is not lowercase hex"
+            ));
+        };
+        record.extend(decoded);
+    }
+    if record.len() != bytes || capability_sha256(&record) != digest {
+        return capability_refused("the reconstruction's length or SHA-256 is not the summary's");
+    }
+    let Ok(text) = std::str::from_utf8(&record) else {
+        return capability_refused("the record is not UTF-8");
+    };
+    if CAPABILITY_UNREDUCED
+        .iter()
+        .any(|unreduced| text.contains(unreduced))
+    {
+        return capability_refused("the record holds a string only an unreduced endpoint would");
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        return capability_refused("the record is not JSON");
+    };
+    if serde_json::to_vec(&value).ok().as_deref() != Some(record.as_slice()) {
+        return capability_refused(
+            "the record is not in its canonical serialization (key order, spacing or a \
+             duplicated key)",
+        );
+    }
+    capability_validate(&value)?;
+    Ok(value)
+}
+
+/// An object with exactly `keys`; `what` names it in a refusal, never its content.
+fn capability_object<'a>(
+    value: &'a serde_json::Value,
+    keys: &[&str],
+    what: &str,
+) -> Result<&'a serde_json::Map<String, serde_json::Value>, CapabilityRefusal> {
+    match value.as_object() {
+        Some(map) if map.len() == keys.len() && keys.iter().all(|key| map.contains_key(*key)) => {
+            Ok(map)
+        }
+        _ => capability_refused(format!("{what} is not an object with exactly its fields")),
+    }
+}
+
+/// A field object as [`capability_field`] makes it: `VALID` with a value in `grammar`,
+/// `FIELD_UNKNOWN`, or `MALFORMED` with a length and a digest.
+fn capability_field_ok(field: &serde_json::Value, grammar: CapabilityGrammar) -> bool {
+    let Some(object) = field.as_object() else {
+        return false;
+    };
+    match object.get("class").and_then(serde_json::Value::as_str) {
+        Some("VALID") => {
+            object.len() == 2
+                && object
+                    .get("value")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|value| grammar.admits(value))
+        }
+        Some("FIELD_UNKNOWN") => object.len() == 1,
+        Some("MALFORMED") => object.len() == 3 && capability_digest_ok(field),
+        _ => false,
+    }
+}
+
+fn capability_digest_ok(value: &serde_json::Value) -> bool {
+    value
+        .get("text_utf8_bytes")
+        .is_some_and(serde_json::Value::is_u64)
+        && value
+            .get("text_utf8_sha256")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|digest| capability_lower_hex(digest, 64))
+}
+
+/// Fields separated in one record, as [`capability_separated`] makes them, or null.
+fn capability_fields_ok(fields: &serde_json::Value, spec: &[(&str, CapabilityGrammar)]) -> bool {
+    fields.is_null()
+        || fields.as_object().is_some_and(|map| {
+            map.len() == spec.len()
+                && spec.iter().all(|(name, grammar)| {
+                    map.get(*name)
+                        .is_some_and(|f| capability_field_ok(f, *grammar))
+                })
+        })
+}
+
+/// One process question's entry: its literal argv and bound, and -- when it ran -- process
+/// facts consistent with its outcome class, reduced streams, and a class and fields its
+/// command can have.
+fn capability_command_ok(
+    question: &CapabilityQuestion,
+    entry: &serde_json::Value,
+) -> Result<(), CapabilityRefusal> {
+    let what = question.id;
+    let same = |map: &serde_json::Map<String, serde_json::Value>| {
+        map["id"] == question.id
+            && map["argv"] == serde_json::json!(question.argv())
+            && map["bound_s"] == question.bound.as_secs()
+            && match question.reference {
+                Some(reference) => map["reference"] == reference,
+                None => map["reference"].is_null(),
+            }
+    };
+    if entry.get("ran") == Some(&serde_json::Value::Bool(false)) {
+        let map = capability_object(
+            entry,
+            &[
+                "argv",
+                "bound_s",
+                "class",
+                "id",
+                "ran",
+                "reason",
+                "reference",
+            ],
+            what,
+        )?;
+        return capability_require(
+            same(map)
+                && map["class"] == "NOT_OBSERVED"
+                && map["reason"]
+                    .as_str()
+                    .is_some_and(|reason| reason.starts_with("gated-by-")),
+            what,
+        );
+    }
+    let map = capability_object(
+        entry,
+        &[
+            "argv",
+            "bound_s",
+            "class",
+            "fields",
+            "id",
+            "outcome_class",
+            "process",
+            "ran",
+            "reason",
+            "reduction_applied",
+            "reference",
+            "streams",
+        ],
+        what,
+    )?;
+    let process = capability_object(
+        &map["process"],
+        &[
+            "duration_ms",
+            "exit_code",
+            "fate",
+            "output_limited",
+            "result",
+            "timed_out",
+            "wall_ms",
+        ],
+        what,
+    )?;
+    let streams = capability_object(
+        &map["streams"],
+        &["capture_representation", "stderr", "stdout"],
+        what,
+    )?;
+    let digest = |value: &serde_json::Value| {
+        value.as_object().is_some_and(|map| map.len() == 2) && capability_digest_ok(value)
+    };
+    let derived = match process["result"].as_str() {
+        Some("output")
+            if process["fate"].is_null()
+                && process["duration_ms"].is_u64()
+                && digest(&streams["stdout"])
+                && digest(&streams["stderr"]) =>
+        {
+            match (
+                process["output_limited"].as_bool(),
+                process["timed_out"].as_bool(),
+                &process["exit_code"],
+            ) {
+                (Some(true), Some(_), code) if code.is_null() || code.is_i64() => {
+                    Some("OUTPUT_LIMIT")
+                }
+                (Some(false), Some(true), code) if code.is_null() || code.is_i64() => {
+                    Some("TIMEOUT")
+                }
+                (Some(false), Some(false), code) if code.is_null() => Some("SIGNAL"),
+                (Some(false), Some(false), code) if code == 0 => Some("EXITED_0"),
+                (Some(false), Some(false), code) if code.is_i64() => Some("EXITED_NONZERO"),
+                _ => None,
+            }
+        }
+        Some("failure")
+            if process["exit_code"].is_null()
+                && process["timed_out"].is_null()
+                && process["output_limited"].is_null()
+                && process["duration_ms"].is_null()
+                && streams["stdout"].is_null()
+                && streams["stderr"].is_null() =>
+        {
+            match process["fate"].as_str() {
+                Some("NeverStarted") => Some("SPAWN_FAILED"),
+                Some("Gone") => Some("COMMAND_FAILED_SETTLED"),
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+    let outcome = map["outcome_class"].as_str();
+    capability_require(
+        same(map)
+            && map["ran"] == true
+            && map["reduction_applied"] == true
+            && streams["capture_representation"] == "utf8_lossy"
+            && process["wall_ms"].is_u64()
+            && derived.is_some()
+            && derived == outcome
+            && (map["reason"].is_null() || map["reason"].is_string()),
+        what,
+    )?;
+    let class = map["class"].as_str().unwrap_or_default();
+    let fields = &map["fields"];
+    let not_exited = outcome.is_some_and(|outcome| !outcome.starts_with("EXITED"));
+    let fits = match question.id {
+        "P2" => {
+            CAPABILITY_ENDPOINT_CLASSES.contains(&class)
+                && capability_object(fields, &["endpoint_transport", "selector_agreement"], what)
+                    .is_ok_and(|fields| {
+                        fields["endpoint_transport"] == class
+                            && (fields["selector_agreement"].is_null()
+                                || fields["selector_agreement"].is_boolean())
+                    })
+        }
+        "P3" => {
+            (["DAEMON_ANSWERED", "DAEMON_UNREACHABLE", "DAEMON_ERROR"].contains(&class)
+                || (not_exited && Some(class) == outcome))
+                && capability_object(fields, &["server_version"], what).is_ok_and(|fields| {
+                    fields["server_version"] == "NOT_OBSERVED"
+                        || capability_field_ok(
+                            &fields["server_version"],
+                            CapabilityGrammar::Version,
+                        )
+                })
+        }
+        "P4" => {
+            ["METADATA_COMPLETE", "METADATA_INCOMPLETE"].contains(&class)
+                && capability_object(fields, &["metadata", "stderr_class"], what).is_ok_and(
+                    |fields| {
+                        capability_fields_ok(&fields["metadata"], &CAPABILITY_P4_FIELDS)
+                            && (fields["stderr_class"].is_null()
+                                || fields["stderr_class"] == "DAEMON_UNREACHABLE"
+                                || fields["stderr_class"] == "DAEMON_ERROR")
+                    },
+                )
+        }
+        _ => {
+            (["IMAGE_PRESENT", "IMAGE_ABSENT", "IMAGE_ERROR"].contains(&class)
+                || (not_exited && Some(class) == outcome))
+                && capability_object(fields, &["image"], what).is_ok_and(|fields| {
+                    capability_fields_ok(&fields["image"], &CAPABILITY_P5_FIELDS)
+                })
+        }
+    };
+    capability_require(fits, what)
+}
+
+/// The record's shape: its constants, binding, selectors, every command, the row, the images
+/// and the platform facts, each field a value its grammar admits.
+fn capability_validate(record: &serde_json::Value) -> Result<(), CapabilityRefusal> {
+    let top = capability_object(
+        record,
+        &[
+            "binding",
+            "commands",
+            "daemon_metadata",
+            "docker_commands_asked",
+            "images",
+            "m2_effect",
+            "platform",
+            "protocol_version",
+            "record_kind",
+            "row",
+            "scope",
+            "selectors",
+            "test",
+        ],
+        "the record",
+    )?;
+    capability_require(
+        top["record_kind"] == CAPABILITY_RECORD_KIND
+            && top["protocol_version"] == CAPABILITY_PROTOCOL_VERSION
+            && top["test"] == CAPABILITY_TEST
+            && top["m2_effect"] == "NONE",
+        "the record's kind, protocol version, test or M2 effect",
+    )?;
+
+    let binding = capability_object(
+        &top["binding"],
+        &[
+            "ci",
+            "crate_version",
+            "github_sha_equals_source_head",
+            "runner_os_agrees",
+            "source_head",
+            "source_tracked_changes",
+            "source_tree",
+            "test_exe_bytes",
+            "test_exe_sha256",
+        ],
+        "the binding",
+    )?;
+    capability_require(
+        binding["source_head"]
+            .as_str()
+            .is_some_and(capability_object_id)
+            && binding["source_tree"]
+                .as_str()
+                .is_some_and(capability_object_id)
+            && binding["source_tracked_changes"].is_boolean()
+            && binding["test_exe_sha256"]
+                .as_str()
+                .is_some_and(|digest| capability_lower_hex(digest, 64))
+            && binding["test_exe_bytes"]
+                .as_u64()
+                .is_some_and(|bytes| bytes > 0)
+            && binding["crate_version"]
+                .as_str()
+                .is_some_and(|version| CapabilityGrammar::Version.admits(version))
+            && (binding["runner_os_agrees"].is_null() || binding["runner_os_agrees"] == true)
+            && (binding["github_sha_equals_source_head"].is_null()
+                || binding["github_sha_equals_source_head"].is_boolean()),
+        "the binding's head, tree, executable, crate version or provenance flags",
+    )?;
+    let ci = capability_object(&binding["ci"], &["state", "variables"], "the CI provenance")?;
+    let variables = capability_object(&ci["variables"], &CAPABILITY_CI_VARIABLES, "the CI fields")?;
+    let set = variables.values().filter(|value| !value.is_null()).count();
+    capability_require(
+        variables
+            .values()
+            .all(|value| value.is_null() || value.is_string())
+            && ci["state"] == if set > 0 { "present" } else { "absent" },
+        "the CI provenance's state or fields",
+    )?;
+
+    let selectors = capability_object(
+        &top["selectors"],
+        &[
+            "DOCKER_CONFIG",
+            "DOCKER_CONTEXT",
+            "DOCKER_HOST",
+            "DOCKER_HOST_reduced_class",
+        ],
+        "the selectors",
+    )?;
+    let presence = |value: &serde_json::Value| value == "present" || value == "absent";
+    let reduced = &selectors["DOCKER_HOST_reduced_class"];
+    capability_require(
+        presence(&selectors["DOCKER_HOST"])
+            && presence(&selectors["DOCKER_CONTEXT"])
+            && presence(&selectors["DOCKER_CONFIG"])
+            && if selectors["DOCKER_HOST"] == "present" {
+                reduced
+                    .as_str()
+                    .is_some_and(|class| CAPABILITY_ENDPOINT_CLASSES.contains(&class))
+            } else {
+                reduced.is_null()
+            },
+        "the selectors' presence or DOCKER_HOST's reduced class",
+    )?;
+
+    let questions = capability_questions();
+    let Some(commands) = top["commands"]
+        .as_array()
+        .filter(|commands| commands.len() == 2 + questions.len())
+    else {
+        return capability_refused("the record does not list E0, P1 and six questions");
+    };
+    let e0 = capability_object(
+        &commands[0],
+        &["class", "id", "kind", "ran", "reason"],
+        "E0",
+    )?;
+    capability_require(
+        e0["id"] == "E0"
+            && e0["kind"] == "in-process"
+            && e0["ran"] == true
+            && ((e0["class"] == "PROCEEDS" && e0["reason"].is_null())
+                || (e0["class"] == "ENDPOINT_UNKNOWN" && e0["reason"] == "both-selectors-present")),
+        "E0",
+    )?;
+    let p1 = capability_object(
+        &commands[1],
+        &["class", "id", "kind", "present", "ran", "reason"],
+        "P1",
+    )?;
+    capability_require(
+        p1["id"] == "P1"
+            && p1["kind"] == "in-process"
+            && match (p1["ran"].as_bool(), p1["class"].as_str()) {
+                (Some(true), Some("PRESENT")) => p1["present"] == true && p1["reason"].is_null(),
+                (Some(true), Some("EXECUTABLE_ABSENT")) => {
+                    p1["present"] == false && p1["reason"].is_null()
+                }
+                (Some(false), Some("NOT_OBSERVED")) => {
+                    p1["present"].is_null() && p1["reason"] == "gated-by-E0"
+                }
+                _ => false,
+            },
+        "P1",
+    )?;
+    for (question, entry) in questions.iter().zip(&commands[2..]) {
+        capability_command_ok(question, entry)?;
+    }
+
+    let row = capability_object(&top["row"], &["class", "reason", "role"], "the row")?;
+    capability_require(
+        row["class"]
+            .as_str()
+            .is_some_and(|class| CAPABILITY_ROWS.contains(&class))
+            && (row["role"] == "CONTROL" || row["role"] == "OBSERVATION")
+            && (row["reason"].is_null() || row["reason"].is_string()),
+        "the row",
+    )?;
+    capability_require(
+        top["daemon_metadata"]
+            .as_str()
+            .is_some_and(|metadata| ["COMPLETE", "INCOMPLETE", "NOT_OBSERVED"].contains(&metadata))
+            && top["docker_commands_asked"]
+                .as_u64()
+                .is_some_and(|asked| asked <= 6),
+        "the daemon metadata status or the count of questions asked",
+    )?;
+    let Some(images) = top["images"].as_array().filter(|images| images.len() == 3) else {
+        return capability_refused("the record does not list the three image references");
+    };
+    for (image, reference) in images.iter().zip(CAPABILITY_P5_REFERENCES) {
+        let image = capability_object(image, &["class", "reference"], "an image sub-row")?;
+        capability_require(
+            image["reference"] == reference
+                && image["class"].as_str().is_some_and(|class| {
+                    [
+                        "IMAGE_PRESENT",
+                        "IMAGE_ABSENT",
+                        "IMAGE_ERROR",
+                        "NOT_OBSERVED",
+                    ]
+                    .contains(&class)
+                        || CAPABILITY_OUTCOMES.contains(&class)
+                }),
+            "an image sub-row",
+        )?;
+    }
+
+    let platform = capability_object(
+        &top["platform"],
+        &[
+            "client_arch",
+            "client_os",
+            "coordinator_arch",
+            "coordinator_os",
+            "daemon_arch",
+            "daemon_os",
+            "daemon_platform_name",
+            "endpoint_transport",
+            "execution_location",
+        ],
+        "the platform facts",
+    )?;
+    capability_require(
+        platform["execution_location"] == "NOT_ESTABLISHED"
+            && platform["coordinator_os"] == std::env::consts::OS
+            && platform["coordinator_arch"]
+                .as_str()
+                .is_some_and(|arch| CapabilityGrammar::Arch.admits(arch))
+            && (platform["endpoint_transport"] == "NOT_OBSERVED"
+                || platform["endpoint_transport"]
+                    .as_str()
+                    .is_some_and(|class| CAPABILITY_ENDPOINT_CLASSES.contains(&class))),
+        "the platform facts",
+    )?;
+    for (name, grammar) in [
+        ("client_os", CapabilityGrammar::Os),
+        ("client_arch", CapabilityGrammar::Arch),
+        ("daemon_os", CapabilityGrammar::Os),
+        ("daemon_arch", CapabilityGrammar::Arch),
+        ("daemon_platform_name", CapabilityGrammar::PlatformName),
+    ] {
+        capability_require(
+            platform[name] == "NOT_OBSERVED" || capability_field_ok(&platform[name], grammar),
+            "a platform fact read from P4",
+        )?;
+    }
+    capability_require(
+        top["scope"]
+            .as_object()
+            .is_some_and(|scope| scope.values().all(serde_json::Value::is_string)),
+        "the scope statements",
+    )
+}
+
+/// The observation command's stream as libtest printed it: exactly one `running 1 test`,
+/// one summary and it `ok. 1 passed; 0 failed; 0 ignored;`, and the named test's pass line
+/// once.
+fn capability_stream_verdict(stream: &str) -> Result<(), CapabilityRefusal> {
+    let lines: Vec<&str> = stream.split('\n').collect();
+    let count = |wanted: &dyn Fn(&str) -> bool| lines.iter().filter(|line| wanted(line)).count();
+    if count(&|line| line == "running 1 test") != 1 {
+        return capability_refused("the stream does not run exactly one test");
+    }
+    if count(&|line| line.starts_with("test result:")) != 1
+        || count(&|line| line.starts_with("test result: ok. 1 passed; 0 failed; 0 ignored; ")) != 1
+    {
+        return capability_refused(
+            "the stream's one summary is not `ok. 1 passed; 0 failed; 0 ignored;`",
+        );
+    }
+    if count(&|line| line == CAPABILITY_PASS_LINE) != 1 {
+        return capability_refused("the stream does not hold the observation's pass line once");
+    }
+    Ok(())
+}
+
+/// G7's container capability observation (root direction `ecf15a9c`, contract version 2 under
+/// root audit 2). E0 and P1-P5 run in order under their gates through the product's process
+/// path; every endpoint-sensitive answer is reduced in memory; the binding names the source,
+/// the test binary and the allowlisted CI fields. The record's own decoder must accept the
+/// frame before a byte is printed. Every capability class passes; an unresolved process, a
+/// binding failure or a refused record fails the test with no record printed.
+#[test]
+#[ignore = "container capability observation record: run only by CI's observation step, which \
+            selects it by its exact name after the native host acceptance record"]
+fn container_capability_record() {
+    use std::io::Write as _;
+
+    let binding = capability_binding();
+    let mut observer = CapabilityObserver::default();
+    let (selectors, class, reason) = capability_observe(&mut observer);
+    let record = capability_record(binding, selectors, &observer, class, reason);
+    let bytes =
+        serde_json::to_vec(&record).expect("OBSERVER_INTEGRITY_FAILURE: the record serializes");
+    let frame = capability_frame(&bytes);
+    match capability_decode(&frame) {
+        Ok(decoded) => assert!(
+            decoded == record,
+            "OBSERVER_INTEGRITY_FAILURE: the record's own decoder reconstructed another record"
+        ),
+        Err(refusal) => panic!(
+            "OBSERVER_INTEGRITY_FAILURE: the record's own decoder refused it ({}); no record is \
+             printed",
+            refusal.0
+        ),
+    }
+    let mut stdout = std::io::stdout().lock();
+    stdout
+        .write_all(frame.as_bytes())
+        .expect("the record reaches stdout");
+    stdout.flush().expect("the record is flushed");
+}
+
+#[test]
+fn the_capability_endpoint_classifier_accepts_only_exact_local_spellings() {
+    let cases: [(&str, &str, Option<&str>); 31] = [
+        ("unix:///var/run/docker.sock\n", "unix-socket-path", None),
+        ("unix:///var/run/docker.sock\r\n", "unix-socket-path", None),
+        ("unix:///var/run/docker.sock", "unix-socket-path", None),
+        (
+            "unix:///Users/runner/.colima/default/docker.sock\n",
+            "unix-socket-path",
+            None,
+        ),
+        (
+            "npipe:////./pipe/docker_engine\n",
+            "npipe-local-name-syntax",
+            None,
+        ),
+        (
+            "npipe:////./pipe/dockerDesktopLinuxEngine\r\n",
+            "npipe-local-name-syntax",
+            None,
+        ),
+        (
+            "npipe:////server/pipe/docker_engine\n",
+            "REJECTED npipe-non-local-syntax",
+            None,
+        ),
+        (
+            "npipe://./pipe/docker_engine\n",
+            "REJECTED npipe-non-local-syntax",
+            None,
+        ),
+        (
+            "npipe:////./pipe/\n",
+            "REJECTED npipe-non-local-syntax",
+            None,
+        ),
+        (
+            "npipe:////./pipe/a/b\n",
+            "REJECTED npipe-non-local-syntax",
+            None,
+        ),
+        (
+            "unix://var/run/docker.sock\n",
+            "REJECTED unix-malformed-syntax",
+            None,
+        ),
+        ("unix:///\n", "REJECTED unix-malformed-syntax", None),
+        ("unix:///var/run/\n", "REJECTED unix-malformed-syntax", None),
+        (
+            "unix:///var//docker.sock\n",
+            "REJECTED unix-malformed-syntax",
+            None,
+        ),
+        (
+            "unix:///var/../docker.sock\n",
+            "REJECTED unix-malformed-syntax",
+            None,
+        ),
+        (
+            "unix:///var/run/docker sock\n",
+            "REJECTED unix-malformed-syntax",
+            None,
+        ),
+        ("tcp://127.0.0.1:2375\n", "REJECTED tcp", None),
+        ("ssh://user@host:22\n", "REJECTED ssh", None),
+        ("fd://\n", "REJECTED other-scheme", None),
+        (
+            "UNIX:///var/run/docker.sock\n",
+            "REJECTED other-scheme",
+            None,
+        ),
+        ("", "ENDPOINT_UNKNOWN", Some("empty")),
+        ("\n", "ENDPOINT_UNKNOWN", Some("empty")),
+        (
+            "unix:///var/run/docker.sock\nunix:///var/run/docker.sock\n",
+            "ENDPOINT_UNKNOWN",
+            Some("not-one-record"),
+        ),
+        (
+            "unix:///var/run/docker.sock\n\n",
+            "ENDPOINT_UNKNOWN",
+            Some("not-one-record"),
+        ),
+        (
+            "unix:///var/run/docker.sock\r",
+            "ENDPOINT_UNKNOWN",
+            Some("not-one-record"),
+        ),
+        (
+            "unix:///var/run/docker\0.sock\n",
+            "ENDPOINT_UNKNOWN",
+            Some("control-bytes"),
+        ),
+        (
+            "unix:///var/run/\tdocker.sock\n",
+            "ENDPOINT_UNKNOWN",
+            Some("control-bytes"),
+        ),
+        ("<no value>\n", "ENDPOINT_UNKNOWN", Some("no-value")),
+        (
+            "/var/run/docker.sock\n",
+            "ENDPOINT_UNKNOWN",
+            Some("unparsed"),
+        ),
+        ("://x\n", "ENDPOINT_UNKNOWN", Some("unparsed")),
+        ("1tcp://x\n", "ENDPOINT_UNKNOWN", Some("unparsed")),
+    ];
+    for (text, class, reason) in cases {
+        let endpoint = capability_endpoint(text);
+        assert_eq!(
+            (endpoint.class(), endpoint.reason()),
+            (class, reason),
+            "{text:?}"
+        );
+        assert!(
+            CAPABILITY_ENDPOINT_CLASSES.contains(&endpoint.class()),
+            "{text:?}: a class outside the record's vocabulary"
+        );
+    }
+}
+
+#[test]
+fn the_capability_field_grammars_admit_what_the_contract_writes() {
+    let long_version = "9".repeat(65);
+    let long_os = "a".repeat(17);
+    let image_id = format!("sha256:{}", "0123456789abcdef".repeat(4));
+    let short_id = format!("sha256:{}", "a".repeat(63));
+    let upper_id = format!("sha256:{}", "A".repeat(64));
+    let admitted = [
+        (CapabilityGrammar::Version, "27.5.1"),
+        (CapabilityGrammar::Version, "20.10.24+dfsg1"),
+        (CapabilityGrammar::Version, "1.2.3-rc.1~ubuntu"),
+        (CapabilityGrammar::Os, "linux"),
+        (CapabilityGrammar::Os, "windows"),
+        (CapabilityGrammar::Arch, "amd64"),
+        (CapabilityGrammar::Arch, "arm64"),
+        (CapabilityGrammar::Arch, "x86_64"),
+        (CapabilityGrammar::Arch, "386"),
+        (CapabilityGrammar::PlatformName, "Docker Engine - Community"),
+        (
+            CapabilityGrammar::PlatformName,
+            "Docker Desktop 4.37.1 (178610)",
+        ),
+        (CapabilityGrammar::ImageId, image_id.as_str()),
+        (CapabilityGrammar::Variant, ""),
+        (CapabilityGrammar::Variant, "v8"),
+        (CapabilityGrammar::Variant, "v10"),
+    ];
+    let refused = [
+        (CapabilityGrammar::Version, ""),
+        (CapabilityGrammar::Version, "-1"),
+        (CapabilityGrammar::Version, "27.5.1 "),
+        (CapabilityGrammar::Version, long_version.as_str()),
+        (CapabilityGrammar::Os, "Linux"),
+        (CapabilityGrammar::Os, "1linux"),
+        (CapabilityGrammar::Os, long_os.as_str()),
+        (CapabilityGrammar::Arch, "AMD64"),
+        (CapabilityGrammar::Arch, "_x86"),
+        (CapabilityGrammar::Arch, "amd-64"),
+        (CapabilityGrammar::PlatformName, " Docker"),
+        (CapabilityGrammar::PlatformName, "Docker/Engine"),
+        (CapabilityGrammar::ImageId, short_id.as_str()),
+        (CapabilityGrammar::ImageId, upper_id.as_str()),
+        (CapabilityGrammar::Variant, "v"),
+        (CapabilityGrammar::Variant, "v123"),
+        (CapabilityGrammar::Variant, "8"),
+        (CapabilityGrammar::Variant, "<no value>"),
+    ];
+    for (grammar, text) in admitted {
+        assert!(grammar.admits(text), "{grammar:?} refuses {text:?}");
+    }
+    for (grammar, text) in refused {
+        assert!(!grammar.admits(text), "{grammar:?} admits {text:?}");
+    }
+    assert_eq!(
+        capability_field("", CapabilityGrammar::Os),
+        serde_json::json!({"class": "FIELD_UNKNOWN"})
+    );
+    assert_eq!(
+        capability_field("<no value>", CapabilityGrammar::Variant),
+        serde_json::json!({"class": "FIELD_UNKNOWN"})
+    );
+    assert_eq!(
+        capability_field("", CapabilityGrammar::Variant),
+        serde_json::json!({"class": "VALID", "value": ""}),
+        "the variant grammar admits the empty string: no variant"
+    );
+    assert_eq!(
+        capability_field("Linux OS", CapabilityGrammar::Os),
+        serde_json::json!({
+            "class": "MALFORMED",
+            "text_utf8_bytes": 8,
+            "text_utf8_sha256": capability_sha256(b"Linux OS"),
+        })
+    );
+}
+
+/// A record the decoder accepts, made without a daemon or a binding: the executable-absent
+/// row with fixed provenance.
+fn capability_sample_record() -> serde_json::Value {
+    let questions = capability_questions();
+    let mut observer = CapabilityObserver::default();
+    observer.commands.push(capability_e0_json(false));
+    observer.commands.push(capability_p1_json(Some(false)));
+    observer.gate(&questions, 0, "P1");
+    let variables: serde_json::Map<String, serde_json::Value> = CAPABILITY_CI_VARIABLES
+        .iter()
+        .map(|name| ((*name).to_owned(), serde_json::Value::Null))
+        .collect();
+    let binding = serde_json::json!({
+        "source_head": "a".repeat(40),
+        "source_tree": "b".repeat(40),
+        "source_tracked_changes": false,
+        "test_exe_sha256": "c".repeat(64),
+        "test_exe_bytes": 1024,
+        "crate_version": env!("CARGO_PKG_VERSION"),
+        "ci": {"state": "absent", "variables": variables},
+        "runner_os_agrees": null,
+        "github_sha_equals_source_head": null,
+    });
+    let selectors = serde_json::json!({
+        "DOCKER_HOST": "absent",
+        "DOCKER_HOST_reduced_class": null,
+        "DOCKER_CONTEXT": "absent",
+        "DOCKER_CONFIG": "absent",
+    });
+    capability_record(binding, selectors, &observer, "EXECUTABLE_ABSENT", None)
+}
+
+/// The decoder's refusals: a frame with a chunk missing, reordered, doubled, cut short or
+/// corrupted, a marker inside a line, a record outside its canonical serialization, a field
+/// outside its grammar, an unreduced endpoint string; and a stream that ran no test, an
+/// ignored one or two. Each refusal is fixed text: none carries the bytes it refused.
+#[test]
+fn the_capability_decoder_refuses_without_printing_what_it_refused() {
+    let sample = capability_sample_record();
+    let frame = |record: &serde_json::Value| {
+        capability_frame(&serde_json::to_vec(record).expect("the record serializes"))
+    };
+    let stream = |framed: &str| {
+        format!(
+            "\nrunning 1 test\n{framed}{CAPABILITY_PASS_LINE}\n\ntest result: ok. 1 passed; 0 \
+             failed; 0 ignored; 0 measured; 2017 filtered out; finished in 0.01s\n\n"
+        )
+    };
+    let accepted = frame(&sample);
+    assert_eq!(capability_decode(&accepted), Ok(sample.clone()));
+    assert_eq!(capability_decode(&stream(&accepted)), Ok(sample.clone()));
+    assert_eq!(capability_stream_verdict(&stream(&accepted)), Ok(()));
+
+    let lines: Vec<&str> = accepted.lines().collect();
+    assert!(lines.len() >= 5, "the sample spans at least three chunks");
+    let chunk_hex = |line: &str| line.rsplit(' ').next().unwrap_or_default().to_owned();
+    let refuse = |what: &str, stream: &str, refused: &[&str]| {
+        let refusal = capability_decode(stream).expect_err(what);
+        for bytes in refused {
+            assert!(
+                !bytes.is_empty() && !refusal.0.contains(bytes),
+                "{what}: the refusal carries what it refused"
+            );
+        }
+    };
+    let joined = |lines: &[&str]| {
+        lines
+            .iter()
+            .map(|line| format!("{line}\n"))
+            .collect::<String>()
+    };
+
+    let mut missing = lines.clone();
+    let dropped = chunk_hex(missing.remove(2));
+    refuse("a missing chunk", &joined(&missing), &[dropped.as_str()]);
+
+    let mut reordered = lines.clone();
+    reordered.swap(1, 2);
+    refuse(
+        "reordered chunks",
+        &joined(&reordered),
+        &[chunk_hex(lines[1]).as_str()],
+    );
+
+    let mut doubled = lines.clone();
+    doubled.insert(2, lines[1]);
+    refuse(
+        "a doubled chunk",
+        &joined(&doubled),
+        &[chunk_hex(lines[1]).as_str()],
+    );
+
+    let cut = lines[1][..lines[1].len() - 2].to_owned();
+    let mut short = lines.clone();
+    short[1] = cut.as_str();
+    refuse(
+        "a chunk cut short",
+        &joined(&short),
+        &[chunk_hex(&cut).as_str()],
+    );
+
+    let corrupted_hex = chunk_hex(lines[1])
+        .chars()
+        .map(|c| {
+            if c == '0' {
+                '1'
+            } else if c == '1' {
+                '0'
+            } else {
+                c
+            }
+        })
+        .collect::<String>();
+    let corrupted = lines[1].replace(&chunk_hex(lines[1]), &corrupted_hex);
+    let mut flipped = lines.clone();
+    flipped[1] = corrupted.as_str();
+    refuse(
+        "a corrupted chunk",
+        &joined(&flipped),
+        &[corrupted_hex.as_str()],
+    );
+
+    let indented = format!("  {}", lines[1]);
+    let mut shifted = lines.clone();
+    shifted[1] = indented.as_str();
+    refuse(
+        "a marker inside a line",
+        &joined(&shifted),
+        &[chunk_hex(lines[1]).as_str()],
+    );
+
+    let pretty = serde_json::to_vec_pretty(&sample).expect("the record serializes");
+    refuse(
+        "a record outside its canonical serialization",
+        &capability_frame(&pretty),
+        &[CAPABILITY_RECORD_KIND],
+    );
+
+    let mut outside = sample.clone();
+    outside["platform"]["daemon_os"] =
+        serde_json::json!({"class": "VALID", "value": "Linux-Not-In-Grammar"});
+    refuse(
+        "a field outside its grammar",
+        &frame(&outside),
+        &["Linux-Not-In-Grammar"],
+    );
+
+    let mut unreduced = sample.clone();
+    unreduced["selectors"]["DOCKER_HOST_reduced_class"] =
+        serde_json::json!("unix:///run/g7-secret/docker.sock");
+    refuse(
+        "an unreduced socket",
+        &frame(&unreduced),
+        &["g7-secret", "unix:"],
+    );
+
+    let mut piped = sample.clone();
+    piped["scope"]["limits"] = serde_json::json!("npipe:////fileserver-g7/pipe/docker_engine");
+    refuse("an unreduced pipe", &frame(&piped), &["fileserver-g7"]);
+
+    for (what, refused) in [
+        (
+            "no test ran",
+            "\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; \
+             2018 filtered out; finished in 0.00s\n"
+                .to_owned(),
+        ),
+        (
+            "the test was ignored",
+            format!(
+                "\nrunning 1 test\ntest {CAPABILITY_TEST} ... ignored, container capability \
+                 observation record\n\ntest result: ok. 0 passed; 0 failed; 1 ignored; 0 \
+                 measured; 2017 filtered out; finished in 0.00s\n"
+            ),
+        ),
+        (
+            "two tests ran",
+            format!(
+                "\nrunning 2 tests\n{accepted}{CAPABILITY_PASS_LINE}\ntest \
+                 runner::container::tests::other ... ok\n\ntest result: ok. 2 passed; 0 \
+                 failed; 0 ignored; 0 measured; 2016 filtered out; finished in 0.01s\n"
+            ),
+        ),
+        (
+            "the pass line is split by the record",
+            format!(
+                "\nrunning 1 test\ntest {CAPABILITY_TEST} ... {accepted}ok\n\ntest result: ok. 1 \
+                 passed; 0 failed; 0 ignored; 0 measured; 2017 filtered out; finished in 0.01s\n"
+            ),
+        ),
+    ] {
+        assert!(
+            capability_stream_verdict(&refused).is_err(),
+            "{what}: the stream was accepted"
+        );
+    }
+}
+
+/// What a control's child observation left: its streams, its decoded record and that
+/// record's text, and the fake docker's logged invocations (`None` when it never ran).
+#[cfg(unix)]
+struct CapabilityControl {
+    stdout: String,
+    stderr: String,
+    record: serde_json::Value,
+    text: String,
+    invocations: Option<Vec<String>>,
+}
+
+#[cfg(unix)]
+impl CapabilityControl {
+    fn row(&self) -> (&str, Option<&str>) {
+        (
+            self.record["row"]["class"].as_str().unwrap_or_default(),
+            self.record["row"]["reason"].as_str(),
+        )
+    }
+
+    fn ran(&self) -> Vec<bool> {
+        self.record["commands"]
+            .as_array()
+            .map_or_else(Vec::new, |commands| {
+                commands
+                    .iter()
+                    .map(|command| command["ran"] == true)
+                    .collect()
+            })
+    }
+
+    fn command(&self, index: usize) -> &serde_json::Value {
+        &self.record["commands"][index]
+    }
+
+    fn asked(&self) -> Vec<&str> {
+        self.invocations
+            .iter()
+            .flatten()
+            .map(String::as_str)
+            .collect()
+    }
+
+    fn assert_absent(&self, tag: &str, needles: &[&str]) {
+        for needle in needles {
+            assert!(
+                !self.text.contains(needle)
+                    && !self.stdout.contains(needle)
+                    && !self.stderr.contains(needle),
+                "[{tag}] `{needle}` reached the record or the child's streams"
+            );
+        }
+    }
+}
+
+/// A fake `docker`: it logs each invocation's arguments to the file the control names, then
+/// answers P2, P3, P4 and P5 with the given shell snippets, in which `$us` holds U+001F and
+/// `$3` is P5's reference. Anything else exits 97.
+#[cfg(unix)]
+fn capability_fake(endpoint: &str, server: &str, metadata: &str, image: &str) -> String {
+    format!(
+        "#!/bin/sh\n\
+         printf '%s\\n' \"$*\" >> \"$UPSTROKE_TEST_FAKE_DOCKER_LOG\"\n\
+         us=$(printf '\\037')\n\
+         case \"$1 $2\" in\n\
+         'context inspect') {endpoint} ;;\n\
+         'version --format')\n\
+         case \"$3\" in\n\
+         '{{{{.Server.Version}}}}') {server} ;;\n\
+         *) {metadata} ;;\n\
+         esac ;;\n\
+         'image inspect') {image} ;;\n\
+         *) exit 97 ;;\n\
+         esac\n"
+    )
+}
+
+/// A snippet printing one record of `fields` separated by U+001F.
+#[cfg(unix)]
+fn capability_fake_record(fields: &[&str]) -> String {
+    format!("printf '%s\\n' \"{}\"", fields.join("${us}"))
+}
+
+#[cfg(unix)]
+const CAPABILITY_FAKE_UNIX: &str = "printf '%s\\n' 'unix:///var/run/docker.sock'";
+
+#[cfg(unix)]
+const CAPABILITY_FAKE_ANSWERED: &str = "printf '%s\\n' '27.5.1'";
+
+#[cfg(unix)]
+const CAPABILITY_FAKE_UNASKED: &str = "exit 96";
+
+#[cfg(unix)]
+const CAPABILITY_FAKE_NO_IMAGE: &str = "printf '%s\\n' '[]'; printf '%s\\n' \"Error response from \
+                                        daemon: No such image: $3\" >&2; exit 1";
+
+#[cfg(unix)]
+fn capability_fake_metadata(daemon_os: &str) -> String {
+    capability_fake_record(&[
+        "27.5.1",
+        "linux",
+        "amd64",
+        "Docker Engine - Community",
+        "27.5.1",
+        daemon_os,
+        "amd64",
+    ])
+}
+
+/// The arguments the fake logs for question `index` of [`capability_questions`].
+#[cfg(unix)]
+fn capability_asked_line(index: usize) -> String {
+    capability_questions()[index].args.join(" ")
+}
+
+#[cfg(unix)]
+const CAPABILITY_CONTROL_BOUND: Duration = Duration::from_secs(150);
+
+/// One control. This test binary runs exactly `container_capability_record` as a child,
+/// through the product's bounded process path, with a fake `docker` first on a test-owned
+/// `PATH` -- or, with no fake, a `PATH` holding only a `git` wrapper -- and with the Docker
+/// selectors, the CI fields and `UPSTROKE_REQUIRE_DOCKER` removed and only `selectors` set.
+/// The child must pass; its stream and frame are read with the record's own decoder.
+#[cfg(unix)]
+fn capability_control(
+    tag: &str,
+    fake: Option<&str>,
+    selectors: &[(&str, &str)],
+) -> CapabilityControl {
+    let tree = scratch(tag);
+    let bin = tree.path().join("bin");
+    fs::create_dir(&bin).expect("the control's program directory");
+    let log = tree.path().join("docker-invocations");
+    let path = if let Some(script) = fake {
+        super::write_program_in_its_own_process(&bin.join(super::DOCKER_PROGRAM), script);
+        let inherited = std::env::var_os("PATH").unwrap_or_default();
+        std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(&inherited)))
+            .expect("a PATH with the fake first")
+    } else {
+        let git = crate::util::find_program("git").expect("git on this process's PATH");
+        let git = git.to_str().expect("a UTF-8 path to git");
+        assert!(
+            !git.contains('\''),
+            "a path to git a single-quoted shell word can carry: {git}"
+        );
+        super::write_program_in_its_own_process(
+            &bin.join("git"),
+            &format!("#!/bin/sh\nexec '{git}' \"$@\"\n"),
+        );
+        bin.clone().into_os_string()
+    };
+    let exe = std::env::current_exe().expect("this test binary");
+    let spec = CommandSpec::new(exe.to_string_lossy())
+        .arg(CAPABILITY_TEST)
+        .arg("--exact")
+        .arg("--ignored")
+        .arg("--nocapture")
+        .arg("--test-threads=2");
+    let mut child = host::test_support::build_command(&spec);
+    for name in CAPABILITY_SELECTORS.iter().chain(&CAPABILITY_CI_VARIABLES) {
+        child.env_remove(name);
+    }
+    child
+        .env_remove("UPSTROKE_REQUIRE_DOCKER")
+        .env("PATH", &path)
+        .env("UPSTROKE_TEST_FAKE_DOCKER_LOG", &log);
+    for (name, value) in selectors {
+        child.env(name, value);
+    }
+    let output = match crate::agent::proc::run_with_timeout_classified(
+        crate::topology::effects::ProcessSite::Spawn,
+        crate::topology::effects::ProcessSite::Terminate,
+        child,
+        &[],
+        CAPABILITY_CONTROL_BOUND,
+        &[],
+        &|| false,
+        &mut crate::agent::proc::NoHooks,
+    ) {
+        Ok(output) => output,
+        Err(failure) => panic!(
+            "[{tag}] the child observation did not run: {:?}",
+            failure.fate
+        ),
+    };
+    assert!(
+        output.code == Some(0) && !output.timed_out && !output.output_limited,
+        "[{tag}] the child observation did not pass: exit {:?}, timed out {}, limited {}\n\
+         stdout:\n{}\nstderr:\n{}",
+        output.code,
+        output.timed_out,
+        output.output_limited,
+        output.stdout,
+        output.stderr
+    );
+    if let Err(refusal) = capability_stream_verdict(&output.stdout) {
+        panic!(
+            "[{tag}] the child's stream: {}\nstdout:\n{}",
+            refusal.0, output.stdout
+        );
+    }
+    let record = capability_decode(&output.stdout)
+        .unwrap_or_else(|refusal| panic!("[{tag}] the child's record: {}", refusal.0));
+    let text = serde_json::to_string(&record).expect("the decoded record serializes");
+    let invocations = fs::read_to_string(&log)
+        .ok()
+        .map(|log| log.lines().map(str::to_owned).collect());
+    CapabilityControl {
+        stdout: output.stdout,
+        stderr: output.stderr,
+        record,
+        text,
+        invocations,
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn the_capability_observer_rejects_an_ssh_endpoint_and_keeps_its_parts_out_of_the_record() {
+    let fake = capability_fake(
+        "printf '%s\\n' 'ssh://user@host:22'",
+        CAPABILITY_FAKE_UNASKED,
+        CAPABILITY_FAKE_UNASKED,
+        CAPABILITY_FAKE_UNASKED,
+    );
+    let control = capability_control("capability-ssh", Some(&fake), &[]);
+    assert_eq!(control.row(), ("ENDPOINT_REJECTED", Some("REJECTED ssh")));
+    assert_eq!(
+        control.record["platform"]["endpoint_transport"],
+        "REJECTED ssh"
+    );
+    assert_eq!(
+        control.ran(),
+        [true, true, true, false, false, false, false, false]
+    );
+    assert_eq!(control.asked(), [capability_asked_line(0)]);
+    assert_eq!(control.record["docker_commands_asked"], 1);
+    control.assert_absent("ssh", &["user", "host:22"]);
+}
+
+#[cfg(unix)]
+#[test]
+fn the_capability_observer_rejects_a_network_named_pipe_before_any_daemon_question() {
+    let fake = capability_fake(
+        "printf '%s\\n' 'npipe:////fileserver-g7/pipe/docker_engine'",
+        CAPABILITY_FAKE_UNASKED,
+        CAPABILITY_FAKE_UNASKED,
+        CAPABILITY_FAKE_UNASKED,
+    );
+    let control = capability_control("capability-network-pipe", Some(&fake), &[]);
+    assert_eq!(
+        control.row(),
+        ("ENDPOINT_REJECTED", Some("REJECTED npipe-non-local-syntax"))
+    );
+    assert_eq!(control.asked(), [capability_asked_line(0)]);
+    assert_eq!(
+        control.ran(),
+        [true, true, true, false, false, false, false, false]
+    );
+    control.assert_absent("network-pipe", &["fileserver-g7", "/pipe/"]);
+}
+
+#[cfg(unix)]
+#[test]
+fn the_capability_observer_refuses_a_multiline_endpoint_before_any_daemon_question() {
+    let fake = capability_fake(
+        "printf '%s\\n' 'unix:///var/run/docker.sock' 'unix:///var/run/g7-second.sock'",
+        CAPABILITY_FAKE_UNASKED,
+        CAPABILITY_FAKE_UNASKED,
+        CAPABILITY_FAKE_UNASKED,
+    );
+    let control = capability_control("capability-multiline", Some(&fake), &[]);
+    assert_eq!(control.row(), ("ENDPOINT_UNKNOWN", Some("not-one-record")));
+    assert_eq!(control.asked(), [capability_asked_line(0)]);
+    assert_eq!(
+        control.record["platform"]["endpoint_transport"],
+        "ENDPOINT_UNKNOWN"
+    );
+    control.assert_absent("multiline", &["g7-second", "/var/run"]);
+}
+
+#[cfg(unix)]
+#[test]
+fn the_capability_observer_reads_an_unreachable_daemon_without_its_socket_path() {
+    let fake = capability_fake(
+        CAPABILITY_FAKE_UNIX,
+        "printf '%s\\n' 'Cannot connect to the Docker daemon at unix:///var/run/docker.sock. \
+         Is the docker daemon running?' >&2; exit 1",
+        CAPABILITY_FAKE_UNASKED,
+        CAPABILITY_FAKE_UNASKED,
+    );
+    let control = capability_control("capability-unreachable", Some(&fake), &[]);
+    assert_eq!(control.row(), ("DAEMON_UNREACHABLE", None));
+    assert_eq!(
+        control.record["platform"]["endpoint_transport"],
+        "unix-socket-path"
+    );
+    assert_eq!(control.command(3)["outcome_class"], "EXITED_NONZERO");
+    assert_eq!(
+        control.ran(),
+        [true, true, true, true, false, false, false, false]
+    );
+    assert_eq!(
+        control.asked(),
+        [capability_asked_line(0), capability_asked_line(1)]
+    );
+    control.assert_absent(
+        "unreachable",
+        &["/var/run", "docker.sock", "Cannot connect"],
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn the_capability_observer_lets_a_daemon_answer_line_override_the_unreachable_shapes() {
+    let answer = "Error response from daemon: client version 1.99 is too new";
+    let unreachable = "Cannot connect to the Docker daemon. Is the docker daemon running?";
+    assert!(
+        is_unreachable_diagnostic(unreachable)
+            && !is_unreachable_diagnostic(&format!("{answer}\n{unreachable}")),
+        "the premise: the second line alone is an unreachable shape, and the daemon's line \
+         overrides it"
+    );
+    let fake = capability_fake(
+        CAPABILITY_FAKE_UNIX,
+        &format!("printf '%s\\n' '{answer}' '{unreachable}' >&2; exit 1"),
+        CAPABILITY_FAKE_UNASKED,
+        CAPABILITY_FAKE_UNASKED,
+    );
+    let control = capability_control("capability-daemon-answer", Some(&fake), &[]);
+    assert_eq!(control.row(), ("DAEMON_ERROR", None));
+    assert_eq!(control.command(3)["class"], "DAEMON_ERROR");
+    control.assert_absent("daemon-answer", &["too new", "Cannot connect"]);
+}
+
+#[cfg(unix)]
+#[test]
+fn the_capability_observer_reads_a_question_past_its_bound_as_a_timeout_not_unreachable() {
+    let fake = capability_fake(
+        CAPABILITY_FAKE_UNIX,
+        "exec sleep 120",
+        CAPABILITY_FAKE_UNASKED,
+        CAPABILITY_FAKE_UNASKED,
+    );
+    let control = capability_control("capability-timeout", Some(&fake), &[]);
+    assert_eq!(control.row(), ("TIMEOUT", None));
+    let p3 = control.command(3);
+    assert_eq!(p3["class"], "TIMEOUT");
+    assert_eq!(p3["outcome_class"], "TIMEOUT");
+    assert_eq!(
+        p3["process"]["result"], "output",
+        "the product's supervision settled the process and returned"
+    );
+    assert_eq!(p3["process"]["timed_out"], true);
+    assert_eq!(p3["bound_s"], 60);
+    assert!(
+        p3["process"]["wall_ms"]
+            .as_u64()
+            .is_some_and(|wall| wall >= 60_000),
+        "{p3}"
+    );
+    assert_eq!(
+        control.ran(),
+        [true, true, true, true, false, false, false, false]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn the_capability_observer_keeps_a_daemon_answer_when_its_metadata_is_malformed() {
+    let malformed = "MALFORMED-DAEMON-OS-".repeat(15);
+    assert_eq!(malformed.len(), 300);
+    let fake = capability_fake(
+        CAPABILITY_FAKE_UNIX,
+        CAPABILITY_FAKE_ANSWERED,
+        &capability_fake_metadata(&malformed),
+        CAPABILITY_FAKE_NO_IMAGE,
+    );
+    let control = capability_control("capability-malformed-metadata", Some(&fake), &[]);
+    assert_eq!(control.row(), ("DAEMON_ANSWERED", None));
+    assert_eq!(control.record["daemon_metadata"], "INCOMPLETE");
+    assert_eq!(control.command(4)["class"], "METADATA_INCOMPLETE");
+    assert_eq!(control.command(4)["reason"], "fields-not-valid");
+    assert_eq!(
+        control.record["platform"]["daemon_os"],
+        serde_json::json!({
+            "class": "MALFORMED",
+            "text_utf8_bytes": 300,
+            "text_utf8_sha256": capability_sha256(malformed.as_bytes()),
+        })
+    );
+    assert_eq!(
+        control.record["platform"]["daemon_arch"],
+        serde_json::json!({"class": "VALID", "value": "amd64"})
+    );
+    assert_eq!(control.ran(), [true; 8]);
+    control.assert_absent("malformed-metadata", &["MALFORMED-DAEMON-OS"]);
+}
+
+#[cfg(unix)]
+#[test]
+fn the_capability_observer_asks_nothing_when_both_selectors_are_present() {
+    let fake = capability_fake(
+        CAPABILITY_FAKE_UNIX,
+        CAPABILITY_FAKE_ANSWERED,
+        &capability_fake_metadata("linux"),
+        CAPABILITY_FAKE_NO_IMAGE,
+    );
+    let control = capability_control(
+        "capability-both-selectors",
+        Some(&fake),
+        &[
+            ("DOCKER_HOST", "unix:///var/run/docker.sock"),
+            ("DOCKER_CONTEXT", "g7-context-name"),
+        ],
+    );
+    assert_eq!(
+        control.row(),
+        ("ENDPOINT_UNKNOWN", Some("both-selectors-present"))
+    );
+    assert!(control.invocations.is_none(), "{:?}", control.invocations);
+    assert_eq!(control.record["docker_commands_asked"], 0);
+    assert_eq!(
+        control.ran(),
+        [true, false, false, false, false, false, false, false]
+    );
+    assert_eq!(control.record["selectors"]["DOCKER_CONTEXT"], "present");
+    assert_eq!(
+        control.record["selectors"]["DOCKER_HOST_reduced_class"],
+        "unix-socket-path"
+    );
+    control.assert_absent("both-selectors", &["g7-context-name", "/var/run"]);
+}
+
+#[cfg(unix)]
+#[test]
+fn the_capability_observer_reads_disagreeing_selectors_as_unknown() {
+    let fake = capability_fake(
+        CAPABILITY_FAKE_UNIX,
+        CAPABILITY_FAKE_ANSWERED,
+        &capability_fake_metadata("linux"),
+        CAPABILITY_FAKE_NO_IMAGE,
+    );
+    let control = capability_control(
+        "capability-disagreement",
+        Some(&fake),
+        &[("DOCKER_HOST", "tcp://127.0.0.1:2375")],
+    );
+    assert_eq!(
+        control.row(),
+        ("ENDPOINT_UNKNOWN", Some("selector-disagreement"))
+    );
+    assert_eq!(
+        control.record["selectors"]["DOCKER_HOST_reduced_class"],
+        "REJECTED tcp"
+    );
+    assert_eq!(control.command(2)["fields"]["selector_agreement"], false);
+    assert_eq!(control.asked(), [capability_asked_line(0)]);
+    control.assert_absent("disagreement", &["127.0.0.1", "/var/run"]);
+}
+
+#[cfg(unix)]
+#[test]
+fn the_capability_observer_spawns_nothing_without_a_docker_executable() {
+    let control = capability_control("capability-no-executable", None, &[]);
+    assert_eq!(control.row(), ("EXECUTABLE_ABSENT", None));
+    assert!(control.invocations.is_none(), "{:?}", control.invocations);
+    assert_eq!(control.record["docker_commands_asked"], 0);
+    assert_eq!(control.command(1)["present"], false);
+    assert_eq!(
+        control.ran(),
+        [true, true, false, false, false, false, false, false]
+    );
+    assert_eq!(control.record["daemon_metadata"], "NOT_OBSERVED");
+}
+
+#[cfg(unix)]
+#[test]
+fn the_capability_observer_reads_an_absent_image_without_pulling_it() {
+    let present = capability_fake_record(&[
+        &format!("sha256:{}", "0123456789abcdef".repeat(4)),
+        "linux",
+        "amd64",
+        "",
+    ]);
+    let image = format!(
+        "case \"$3\" in\n\
+         alpine:3.20) {present} ;;\n\
+         busybox:latest) printf '%s\\n' '[]'; printf '%s\\n' 'Error response from daemon: No \
+         such image: busybox:latest' >&2; exit 1 ;;\n\
+         *) printf '%s\\n' 'Error response from daemon: the image store is unavailable' >&2; \
+         exit 1 ;;\n\
+         esac"
+    );
+    let fake = capability_fake(
+        CAPABILITY_FAKE_UNIX,
+        CAPABILITY_FAKE_ANSWERED,
+        &capability_fake_metadata("linux"),
+        &image,
+    );
+    let control = capability_control("capability-absent-image", Some(&fake), &[]);
+    assert_eq!(control.row(), ("DAEMON_ANSWERED", None));
+    assert_eq!(control.record["daemon_metadata"], "COMPLETE");
+    assert_eq!(
+        control.record["images"],
+        serde_json::json!([
+            {"reference": "alpine:3.20", "class": "IMAGE_PRESENT"},
+            {"reference": "busybox:latest", "class": "IMAGE_ABSENT"},
+            {"reference": "debian:stable-slim", "class": "IMAGE_ERROR"},
+        ])
+    );
+    assert_eq!(
+        control.command(5)["fields"]["image"]["image_variant"],
+        serde_json::json!({"class": "VALID", "value": ""})
+    );
+    assert_eq!(
+        control.record["platform"]["daemon_os"],
+        serde_json::json!({"class": "VALID", "value": "linux"})
+    );
+    let asked = control.asked();
+    assert_eq!(
+        asked,
+        (0..6).map(capability_asked_line).collect::<Vec<_>>(),
+        "every question once, in order"
+    );
+    let recorded: Vec<&str> = control.record["commands"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|command| command["argv"].as_array())
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .collect();
+    assert!(
+        !recorded.is_empty()
+            && asked.iter().all(|line| !line.contains("pull"))
+            && recorded.iter().all(|arg| !arg.contains("pull")),
+        "a pull was asked or recorded: {asked:?} {recorded:?}"
+    );
+    control.assert_absent("absent-image", &["image store", "/var/run"]);
 }

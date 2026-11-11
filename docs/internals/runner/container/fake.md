@@ -236,6 +236,27 @@ Record the call and answer whether the operation may proceed.
 Put an image in the table under its **id**, with its digest or without
 one.
 
+## `impl FakeRuntime` › `pub(crate) fn set_image_environment(&self, id: &str, environment: &[(&str, &str)]) {`
+
+Set the environment an image in the table declares; an image starts with
+none. Refuses an id the table does not hold, so a fixture cannot set the
+environment of an image it never added.
+
+## `impl ContainerRuntime for FakeRuntime` › `fn observe(&self, name: &str, _: QuestionBound<'_>) -> Result<Liveness, RuntimeError> {`
+
+The fake answers an observation from its own state and never blocks, so the
+bound a caller names (`QuestionBound`, K2) has nothing to end and is ignored;
+`LinkedRuntime` ignores it for the same reason, and the fake's own stop and
+removal settle under `QuestionBound::Runtime`, as `DockerCli`'s do. What the
+bound ends is witnessed against the real `DockerCli` and a stub `docker`
+(`exec::tests::a_running_container_whose_observation_stalls_settles_at_its_deadline_or_cancellation_and_keeps_its_fate`).
+
+## `impl ContainerRuntime for FakeRuntime` › `fn image_environment(&self, id: &str) -> Result<Option<Vec<(String, String)>>, RuntimeError> {`
+
+The environment set on the image, `Ok(None)` for an id the table does not
+hold, through the same armed-failure gate as every inspection
+(`InspectImageById`).
+
 ## `impl FakeRuntime` › `pub(crate) fn tag(&self, reference: &str, id: &str) {`
 
 -- (2) the mutable tag table -------------------------------------------
@@ -547,7 +568,8 @@ the Windows guest have no container runtime and run without it.
 Every Docker-gated test in this slice, by name.
 
 Written out rather than counted, because *which* gated test disappeared is
-the finding. `runner::container::tests::every_docker_gated_test_is_named_and_present`
+the finding. Thirty since root's recorded-mounts disposition added the
+three configured-mount witnesses in `exec::tests`. `runner::container::tests::every_docker_gated_test_is_named_and_present`
 asserts each name is a `fn` in the container sources, so a gated test that is
 deleted or renamed fails rather than silently leaving the list shorter.
 
@@ -751,6 +773,12 @@ program.
 whether an armed container reaper in this process selected its labels at the instant it
 started.
 
+## `struct State` › `stdin_received: BTreeMap<String, Vec<u8>>,`
+
+Every non-empty payload a start was given, by container name, exactly as
+the cover's start proof carried it (PR12's D-C). Kept after the container
+is removed, so a test reads what an invocation was fed after it ended.
+
 ## `impl FakeRuntime` › `pub(crate) fn observing_covers(&self) {`
 
 The design property's in-process observation (PR11 follow-up A): "while any container this
@@ -763,6 +791,21 @@ process, so the two-process witnesses do not use it; they observe the reaper's c
 ## `impl FakeRuntime` › `pub(crate) fn starts_observed(&self) -> Vec<(String, bool)> {`
 
 What `observing_covers` recorded, in start order.
+
+## `struct State` › `unresolved_removals: BTreeSet<String>,`
+
+Containers whose removal the fake answers with `RuntimeError::Unresolved`,
+combined with the removal's own outcome by the same `combined_removal` as
+`DockerCli`'s: the shape a `DockerCli` removal takes when its attached client
+could not be established gone.
+
+## `impl FakeRuntime` › `pub(crate) fn leave_a_process_unresolved_at_removal(&self, name: &str) {`
+
+Arm that answer for `name`.
+
+## `impl FakeRuntime` › `pub(crate) fn stdin_received(&self, name: &str) -> Option<Vec<u8>> {`
+
+What `name`'s start was fed, or `None` when it was given no input.
 
 ## `pub(crate) const NO_OP_REAPER_PROGRAM: &str = "/usr/bin/true";`
 

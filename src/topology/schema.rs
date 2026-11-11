@@ -24,7 +24,7 @@ impl fmt::Display for TopologyActivation {
     }
 }
 
-pub const TOPOLOGY_ACTIVATION: TopologyActivation = TopologyActivation::Inactive;
+pub const TOPOLOGY_ACTIVATION: TopologyActivation = TopologyActivation::Active;
 
 #[must_use]
 pub const fn max_readable_schema(activation: TopologyActivation) -> u32 {
@@ -36,9 +36,9 @@ pub const fn max_readable_schema(activation: TopologyActivation) -> u32 {
 
 pub const MAX_READABLE_SCHEMA: u32 = max_readable_schema(TOPOLOGY_ACTIVATION);
 
-const _: () = assert!(matches!(TOPOLOGY_ACTIVATION, TopologyActivation::Inactive));
-const _: () = assert!(MAX_READABLE_SCHEMA == LATEST_LEGACY_SCHEMA);
-const _: () = assert!(MAX_READABLE_SCHEMA == 3);
+const _: () = assert!(matches!(TOPOLOGY_ACTIVATION, TopologyActivation::Active));
+const _: () = assert!(MAX_READABLE_SCHEMA == TOPOLOGY_SCHEMA);
+const _: () = assert!(MAX_READABLE_SCHEMA == 4);
 const _: () = assert!(TOPOLOGY_SCHEMA == LATEST_LEGACY_SCHEMA + 1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -59,7 +59,7 @@ impl fmt::Display for WriterSelector {
 #[must_use]
 pub const fn fresh_writer_schema(selector: WriterSelector) -> u32 {
     match selector {
-        WriterSelector::Production => LATEST_LEGACY_SCHEMA,
+        WriterSelector::Production => max_readable_schema(TOPOLOGY_ACTIVATION),
         WriterSelector::TopologyPreview => TOPOLOGY_SCHEMA,
     }
 }
@@ -285,7 +285,7 @@ mod tests {
     }
 
     #[test]
-    fn max_readable_is_the_activation_switch_and_production_is_inactive() {
+    fn max_readable_is_the_activation_switch_and_production_is_active() {
         assert_eq!(
             max_readable_schema(TopologyActivation::Inactive),
             LATEST_LEGACY_SCHEMA
@@ -298,29 +298,36 @@ mod tests {
             max_readable_schema(TopologyActivation::Inactive),
             max_readable_schema(TopologyActivation::Active)
         );
-        assert_eq!(TOPOLOGY_ACTIVATION, TopologyActivation::Inactive);
+        assert_eq!(TOPOLOGY_ACTIVATION, TopologyActivation::Active);
         assert_eq!(
             MAX_READABLE_SCHEMA,
             max_readable_schema(TOPOLOGY_ACTIVATION)
         );
-        assert_eq!(MAX_READABLE_SCHEMA, 3);
+        assert_eq!(MAX_READABLE_SCHEMA, 4);
     }
 
     #[test]
-    fn fresh_writer_schema_maps_each_selector_to_a_different_model() {
+    fn production_writes_the_newest_schema_its_activation_reads() {
         assert_eq!(
             fresh_writer_schema(WriterSelector::Production),
-            LATEST_LEGACY_SCHEMA
+            max_readable_schema(TOPOLOGY_ACTIVATION)
+        );
+        assert_eq!(
+            fresh_writer_schema(WriterSelector::Production),
+            TOPOLOGY_SCHEMA
         );
         assert_eq!(
             fresh_writer_schema(WriterSelector::TopologyPreview),
             TOPOLOGY_SCHEMA
         );
-        assert_ne!(
-            fresh_writer_schema(WriterSelector::Production),
-            fresh_writer_schema(WriterSelector::TopologyPreview)
-        );
         assert!(fresh_writer_schema(WriterSelector::Production) <= MAX_READABLE_SCHEMA);
+        assert_eq!(
+            select_reader(&committed(
+                RUN_STARTED,
+                Some(fresh_writer_schema(WriterSelector::Production))
+            )),
+            Ok(ReaderSelection::Topology)
+        );
     }
 
     #[test]
@@ -348,13 +355,10 @@ mod tests {
     }
 
     #[test]
-    fn production_refuses_a_topology_log_and_reads_every_legacy_one() {
+    fn production_reads_a_topology_log_and_every_legacy_one() {
         assert_eq!(
             select_reader(&committed(RUN_STARTED, Some(TOPOLOGY_SCHEMA))),
-            Err(SchemaRefusal::TopologyLogUnreadable {
-                schema: TOPOLOGY_SCHEMA,
-                ceiling: LATEST_LEGACY_SCHEMA,
-            })
+            Ok(ReaderSelection::Topology)
         );
         for schema in 1..=LATEST_LEGACY_SCHEMA {
             assert_eq!(
@@ -362,6 +366,16 @@ mod tests {
                 Ok(ReaderSelection::Legacy { schema })
             );
         }
+        assert_eq!(
+            select_reader_with(
+                &committed(RUN_STARTED, Some(TOPOLOGY_SCHEMA)),
+                LATEST_LEGACY_SCHEMA
+            ),
+            Err(SchemaRefusal::TopologyLogUnreadable {
+                schema: TOPOLOGY_SCHEMA,
+                ceiling: LATEST_LEGACY_SCHEMA,
+            })
+        );
     }
 
     #[test]
@@ -669,14 +683,14 @@ mod tests {
             select_reader(&committed(RUN_STARTED, Some(5))),
             Err(SchemaRefusal::NewerThanReadable {
                 schema: 5,
-                ceiling: LATEST_LEGACY_SCHEMA
+                ceiling: TOPOLOGY_SCHEMA
             })
         );
         assert_eq!(
             select_reader(&committed(RUN_STARTED, Some(u32::MAX))),
             Err(SchemaRefusal::NewerThanReadable {
                 schema: u32::MAX,
-                ceiling: LATEST_LEGACY_SCHEMA
+                ceiling: TOPOLOGY_SCHEMA
             })
         );
     }
@@ -1132,10 +1146,13 @@ mod tests {
 
     #[test]
     fn the_activation_constant_is_asserted_outside_the_test_configuration() {
-        const { assert!(matches!(TOPOLOGY_ACTIVATION, TopologyActivation::Inactive)) };
-        const { assert!(MAX_READABLE_SCHEMA == 3) };
-        assert_eq!(TOPOLOGY_ACTIVATION, TopologyActivation::Inactive);
-        assert_eq!(MAX_READABLE_SCHEMA, LATEST_LEGACY_SCHEMA);
-        assert!(select_reader(&committed(RUN_STARTED, Some(TOPOLOGY_SCHEMA))).is_err());
+        const { assert!(matches!(TOPOLOGY_ACTIVATION, TopologyActivation::Active)) };
+        const { assert!(MAX_READABLE_SCHEMA == 4) };
+        assert_eq!(TOPOLOGY_ACTIVATION, TopologyActivation::Active);
+        assert_eq!(MAX_READABLE_SCHEMA, TOPOLOGY_SCHEMA);
+        assert_eq!(
+            select_reader(&committed(RUN_STARTED, Some(TOPOLOGY_SCHEMA))),
+            Ok(ReaderSelection::Topology)
+        );
     }
 }

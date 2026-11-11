@@ -330,7 +330,7 @@ mod tests {
                 plan_path: PathBuf::from(plan),
                 config_path: None,
                 config_root,
-                engine_limits: config::EngineLimits::Fresh,
+                engine_limits: config::EngineLimits::Topology,
                 pools_path: Some(pools),
             },
             _scratch: scratch,
@@ -819,6 +819,10 @@ mod tests {
         );
         assert!(rendered.contains("if installed"), "{rendered}");
         assert!(
+            rendered.contains("would be reviewed by codex/gpt-6-astra instead, if installed"),
+            "{rendered}"
+        );
+        assert!(
             rendered.contains("1 task(s) also require a second opinion"),
             "{rendered}"
         );
@@ -827,7 +831,7 @@ mod tests {
             .find(|l| l.starts_with("rotate"))
             .expect("row");
         assert!(
-            rotate.contains("[second opinion: copilot/gpt-5.3-codex]"),
+            rotate.contains("[second opinion: codex/gpt-6-astra]"),
             "{rotate}"
         );
         let note = rendered
@@ -835,6 +839,55 @@ mod tests {
             .find(|l| l.starts_with("note"))
             .expect("row");
         assert!(!note.contains("second opinion"), "{note}");
+    }
+
+    #[test]
+    fn the_preview_binds_an_explicit_opus_5_5_worker_to_an_astra_6_reviewer_at_max() {
+        let root = scratch_root("opus55-astra6");
+        let plan = root.path().join("plan.md");
+        fs::write(
+            &plan,
+            "## Encode the cursor\n<!-- upstroke: id=encode kind=implement depends= -->\n",
+        )
+        .expect("plan");
+        let cfg = root.path().join("upstroke.toml");
+        fs::write(
+            &cfg,
+            "[routing]\nimplement = { chain = [\"frontier\"] }\n\
+             review = { tier = \"frontier\" }\n\n\
+             [routing.effort]\nimplementation = \"max\"\nreview = \"max\"\n\n\
+             [[pins]]\ntier = \"frontier\"\nagent = \"claude-code\"\nmodel = \"claude-opus-5-5\"\n",
+        )
+        .expect("config");
+        let mut o = opts("unused");
+        o.plan_path = plan;
+        o.config_path = Some(cfg);
+        let rendered = run(&o).expect("validate").render();
+
+        let encode = rendered
+            .lines()
+            .find(|l| l.starts_with("encode"))
+            .expect("row");
+        assert!(
+            encode.contains("frontier(default)=claude-code/claude-opus-5-5(pin)"),
+            "{encode}"
+        );
+        assert!(!encode.contains("second opinion"), "{encode}");
+        let review = rendered
+            .lines()
+            .find(|l| l.starts_with("review:"))
+            .expect("review line");
+        assert_eq!(
+            review,
+            "review: claude-code/claude-opus-5-5 (5400s independent timeout per pass) (tasks it \
+             implements itself would be reviewed by codex/gpt-6-astra instead, if installed)"
+        );
+        let effort = rendered
+            .lines()
+            .find(|l| l.starts_with("effort:"))
+            .expect("effort line");
+        assert_eq!(effort, "effort: implementation=max, review=max");
+        assert!(!rendered.contains("also the reviewer"), "{rendered}");
     }
 
     #[test]

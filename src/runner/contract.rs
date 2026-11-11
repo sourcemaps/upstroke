@@ -20,6 +20,7 @@ use crate::error::UpstrokeError;
 use crate::topology::effects::{
     EffectSiteId, HookHarness, HookPhase, Injection, InjectionMode, ProcessSite, SubEffectPoint,
 };
+use crate::workspace_manager::ComposedCommonDir;
 
 use super::container::ContainerHooks;
 use super::invocation::InvocationId;
@@ -30,6 +31,7 @@ pub struct CommandSpec {
     pub args: Vec<String>,
     pub env: Vec<(String, String)>,
     pub stdin: Vec<u8>,
+    pub settings_file: Option<PathBuf>,
 }
 
 impl CommandSpec {
@@ -56,6 +58,12 @@ impl CommandSpec {
     #[must_use]
     pub fn stdin(mut self, stdin: impl Into<Vec<u8>>) -> Self {
         self.stdin = stdin.into();
+        self
+    }
+
+    #[must_use]
+    pub fn settings_file(mut self, settings_file: Option<PathBuf>) -> Self {
+        self.settings_file = settings_file;
         self
     }
 }
@@ -289,6 +297,11 @@ pub trait Runner: Send + Sync {
         call: RunnerCall<'a>,
     ) -> Result<ProcessOutput, RunnerError> {
         block_on(self.run(request, call))
+    }
+
+    fn composed_common_dir(&self, request: &RunnerRequest) -> ComposedCommonDir {
+        let _ = request;
+        ComposedCommonDir::Unknown
     }
 }
 
@@ -1673,11 +1686,24 @@ pub(crate) mod tests {
                 "src/runner/container.rs",
                 1,
                 0,
-                0,
-                "the Container funnel's `docker` CLI: one `Command::new(` in \
-                 `DockerCli::exec`, which every container operation converges \
-                 on, and no `.spawn()` because each is an `.output()` the \
-                 funnel waits on. Deliberately NOT routed through the Runner, \
+                2,
+                "the Container funnel's `docker` CLI: one `Command::new(`, in \
+                 `docker_command`, the builder every container operation \
+                 converges on, and no `.spawn()`: every operation runs under \
+                 the process funnel, through the two `run_with_timeout` \
+                 mentions. The attached `docker start --attach --interactive` \
+                 that delivers a command's stdin payload (PR12's D-C) runs \
+                 under it on a thread of its own: the funnel spawns it in its \
+                 own process group, feeds it, bounds its output, stops, \
+                 terminates and reaps it, so a start never waits on the \
+                 workload and the client is never left unowned. Every other \
+                 `docker` question runs through `DockerCli::question`, the \
+                 other mention: the start's questions and the supervision's \
+                 observations end at the invocation's deadline and on its \
+                 cancellation (PR12's J6, J13 and K2), and every other \
+                 question, of collection, cleanup or a census, at the \
+                 runtime's own bound (K2), each keeping the fate the funnel \
+                 established. Deliberately NOT routed through the Runner, \
                  and for the same reason as the two Git rows below — \
                  DESIGN.md:612's \"authoritative Git and the event log never \
                  do\" is about the things that BUILD the boundary rather than \
@@ -2044,7 +2070,7 @@ pub(crate) mod tests {
             ),
             (
                 "src/engine/classify.rs",
-                5,
+                6,
                 3,
                 "what was INLINE in `run_attempt`'s verification ladder: the \
                  diff's two observations and a failed gate, plus the three \
@@ -2054,7 +2080,11 @@ pub(crate) mod tests {
                  raises before any gate runs (`repairs.dispatch`: unresolved \
                  index entries fail capture before gates). Both engines read \
                  these, and this is the only production site that CONSTRUCTS \
-                 a `ReviewPassOutcome`",
+                 a `ReviewPassOutcome`. Plus `interrupted_failure`, the \
+                 interruption a schema-4 report's `interrupted_record` hands \
+                 `attempt_record` for an `attempt_interrupted` settlement, so \
+                 that record is built by the one record builder (J12 \
+                 follow-up)",
             ),
             (
                 "src/engine/coordinator.rs",
@@ -2485,38 +2515,73 @@ fn charge_allowance(&mut self) {}
                  carries it",
             ),
             (
+                "src/runner/container.rs",
+                1,
+                0,
+                0,
+                "the Container funnel delivering `CommandSpec::stdin` (PR12's \
+                 D-C): `DockerCli::start` reads the payload off its \
+                 `CoveredStart` once (`covered.stdin()`) and hands it to the \
+                 process funnel as the attached client's input. The payload \
+                 reaches that client's stdin and nothing else: not argv, the \
+                 environment, a mount or a log",
+            ),
+            (
+                "src/runner/container/exec.rs",
+                0,
+                0,
+                2,
+                "the payload's way from the request to the runtime: the `stdin` \
+                 field of `CoveredStart` and the `stdin` parameter of \
+                 `Reaping::cover`, which `contain` hands `request.command.stdin`. \
+                 Neither builds a CommandSpec; both carry its payload to \
+                 `ContainerRuntime::start`",
+            ),
+            (
                 "src/workspace.rs",
                 1,
-                5,
+                8,
                 0,
                 "authoritative Git, which DESIGN.md:612 keeps off the boundary \
                  entirely: `std::process::Command` methods on git invocations, \
-                 not a CommandSpec. Of the five `.env(`, four are the fixed \
-                 author and committer identity on `commit-tree` and one is \
-                 `NO_REPLACEMENT_OBJECTS` on `git_command`, the builder every \
-                 Git child of this module comes from",
+                 not a CommandSpec. Of the eight `.env(`, four are the fixed \
+                 author and committer identity on `commit-tree`, two are on \
+                 `git_command`, the builder every Git child of this module \
+                 comes from: `NO_REPLACEMENT_OBJECTS` on every child, and, on \
+                 a child in a work tree the engine made, the absolute path an \
+                 inherited `GIT_COMMON_DIR` that is not absolute names at the \
+                 started checkout; and two are `GIT_INDEX_FILE` on the two \
+                 private-hooks builders, set after `git_command`'s scope and \
+                 only on a workspace value that carries a private index file: \
+                 the legacy discard's capture and revert, whose index no other \
+                 Git client may touch. Git names an index file only through \
+                 that variable, never by an argument or a configuration key",
             ),
             (
                 "src/workspace_manager.rs",
                 2,
-                10,
+                11,
                 0,
                 "authoritative Git again, and the same answer: \
                  `std::process::Command` methods on git invocations, never a \
                  CommandSpec. The two `.stdin(` are `Stdio::null()` on the two \
                  builders — these funnels feed no payload to a child — and of \
-                 the ten `.env(`, six are the fixed author/committer identity \
+                 the eleven `.env(`, six are the fixed author/committer identity \
                  and dates that make a commit-tree a function of its inputs \
                  rather than of the machine, two are \
                  `NO_REPLACEMENT_OBJECTS` on the shared builder and on \
                  `read_only_git`'s, so that every command this manager spawns \
                  reads the objects the repository holds rather than whatever \
-                 `git replace` has been pointed at them, and the last two are \
-                 the loop over `ENGINE_GIT_ENVIRONMENT` in each builder, the \
-                 fixed `GIT_NO_LAZY_FETCH`, `GIT_ALLOW_PROTOCOL` (empty) and \
+                 `git replace` has been pointed at them, two are the loop over \
+                 `ENGINE_GIT_ENVIRONMENT` in each builder, the fixed \
+                 `GIT_NO_LAZY_FETCH`, `GIT_ALLOW_PROTOCOL` (empty) and \
                  `GIT_TERMINAL_PROMPT` bindings that keep a manager Git child \
                  from fetching, starting a transport or prompting (PR11 \
-                 follow-up C). A gate or reviewer \
+                 follow-up C), and the last, in `in_work_tree`, which both \
+                 builders call for a Git child in a work tree the manager made, \
+                 gives that child the absolute path an inherited \
+                 `GIT_COMMON_DIR` that is not absolute names at the managed \
+                 base. A gate or reviewer \
                  process gets the environment this runner composes, and \
                  `HostEnvironment::compose` and `ContainerEnvironment::compose` \
                  put the same pair there — a composed vector, not a \

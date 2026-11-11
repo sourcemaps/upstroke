@@ -367,14 +367,16 @@ pub(crate) mod tests {
         CandidateLeaseEffect, CandidatePrepared, CandidateRef, CommitSha, DeferWaitElapsed4,
         GenerationCloseReason, GenerationClosed, GenerationId, GitRef, ImageIdentity,
         IncarnationId, InfrastructureKind, LeaseDisposition, LeaseGrant, MergeLeaseRelease,
-        MergePrepared, MergeVerificationStarted, MergeVerificationUnavailable, PreparedDisposition,
-        RunStarted4, RungBinding, RunnerContract, RunnerKind, RunnerPolicy, SequenceId,
-        SettlementTransition, TaskCandidateCreated, TaskDispatched, TaskMerged, TopologyEvent,
-        TopologyEventBody, TopologyLimits, UnavailableCause, UnavailableOutcome, VerificationBasis,
+        MergePrepared, MergeVerificationStarted, MergeVerificationUnavailable, MountSourceIdentity,
+        MountSourceKind, PreparedDisposition, RecordedMount, RunStarted4, RungBinding,
+        RunnerContract, RunnerKind, RunnerPolicy, SequenceId, SettlementTransition,
+        TaskCandidateCreated, TaskDispatched, TaskMerged, TopologyEvent, TopologyEventBody,
+        TopologyLimits, UnavailableCause, UnavailableOutcome, VerificationBasis,
         VerificationRecord, VerificationSource, VerificationVerdict,
     };
     use crate::topology::fold::{
-        FrozenInputs, GenerationClass, PreparedCandidate, TaskState, TopologyFold, TransactionClass,
+        FoldError, FrozenInputs, GenerationClass, PreparedCandidate, TaskState, TopologyFold,
+        TransactionClass,
     };
     use crate::topology::paths::{GitPath, PathGrammar, PathPolicy, PathPolicyVersion, PathSet};
     use crate::topology::registry::{TaskKey, TaskRegistry};
@@ -556,8 +558,10 @@ pub(crate) mod tests {
                     .into_iter()
                     .collect(),
                 ),
+                mounts: Vec::new(),
             },
             probed_agents: probed_agents(),
+            shell: ShellKind::Bash,
             branch: format!("upstroke/run-{RUN_ID}"),
             integration_ref: git_ref("integration"),
             base_sha: sha("base"),
@@ -1098,6 +1102,7 @@ pub(crate) mod tests {
                 question: question.clone(),
                 answer,
                 via: "census".to_owned(),
+                text: None,
             },
         })
     }
@@ -5512,73 +5517,6 @@ pub(crate) mod tests {
         out
     }
 
-    fn consumes_a_sequence(candidate: &Candidate, after: SequenceId) -> bool {
-        candidate.event.body.sequence() == Some(SequenceId(after.0 + 1))
-            && matches!(
-                candidate.event.body,
-                TopologyEventBody::MergeVerificationStarted { .. }
-                    | TopologyEventBody::MergePrepared { .. }
-                    | TopologyEventBody::MergeRejected { .. }
-            )
-    }
-
-    fn later_start(fold: &TopologyFold, after: SequenceId) -> Option<(TopologyFold, String)> {
-        use crate::topology::registry::{Lineage, Origin, repair_display_id};
-        let registry = fold.registry()?;
-        let merged = registry.entries().iter().find(|entry| {
-            entry.lineage.is_none() && fold.task_state(entry.key) == Some(TaskState::Merged)
-        })?;
-        let key = TaskKey(u32::try_from(registry.len()).ok()?);
-        let mut entry = merged.clone();
-        entry.key = key;
-        entry.display_id =
-            crate::ir::TaskId::from(repair_display_id(1, &merged.display_id).as_str());
-        entry.origin = Origin::MergeRepair;
-        entry.deps = Vec::new();
-        entry.display_deps = Vec::new();
-        entry.lineage = Some(Lineage {
-            root: merged.key,
-            parent: merged.key,
-            index: 1,
-        });
-        let spawn = ev(TopologyEventBody::TaskSpawned {
-            data: Box::new(crate::topology::events::TaskSpawned {
-                spawn: crate::topology::events::FrozenSpawn {
-                    key,
-                    entry,
-                    admission: crate::topology::events::SpawnAdmission::Runnable,
-                },
-            }),
-        });
-        let mut next = applied(fold, &[spawn])?;
-        for _ in 0..16 {
-            let candidates = classes(&next);
-            if let Some(consuming) = candidates.iter().find(|candidate| {
-                consumes_a_sequence(candidate, after)
-                    && next.plan_transition(&candidate.event).is_ok()
-            }) {
-                let label = consuming.label.clone();
-                return Some((
-                    applied(&next, std::slice::from_ref(&consuming.event))?,
-                    label,
-                ));
-            }
-            let step = candidates.into_iter().find(|candidate| {
-                candidate.event.body.key() == Some(key)
-                    && [
-                        "task_dispatched",
-                        "attempt_started",
-                        "candidate_prepared",
-                        "task_candidate_created",
-                    ]
-                    .contains(&candidate.event.body.kind())
-                    && next.plan_transition(&candidate.event).is_ok()
-            })?;
-            next = applied(&next, &[step.event])?;
-        }
-        None
-    }
-
     #[test]
     fn a_charged_record_is_admitted_for_the_open_verification_and_moves_only_charged() {
         let mut admitted = 0_usize;
@@ -5613,54 +5551,161 @@ pub(crate) mod tests {
         assert!(admitted > 100, "the sweep was not vacuous: {admitted}");
     }
 
+    fn refused_for_the_failed_candidate(
+        error: &crate::topology::fold::FoldError,
+        kind: &str,
+    ) -> bool {
+        matches!(error,
+            crate::topology::fold::FoldError::InconsistentRecord { kind: refused, detail }
+                if *refused == kind
+                    && detail.contains("failed while integration sequence")
+                    && detail.contains("was verifying its candidate"))
+    }
+
+    fn opened_while(fold: &TopologyFold, start: &TopologyEvent, open: SequenceId) -> bool {
+        matches!(fold.plan_transition(start),
+            Err(crate::topology::fold::FoldError::TransactionAlreadyOpen { open: held, .. })
+                if held == open.0)
+    }
+
     #[test]
-    fn a_charged_record_is_admitted_for_the_verification_a_lineage_failure_released_until_a_sequence_is_consumed_or_the_run_resumes()
+    fn a_lineage_failure_keeps_its_verification_open_for_the_record_and_the_interrupted_terminal_and_refuses_the_carrying_ones_with_the_guard_error()
      {
-        let released = released_verifications();
-        assert!(
-            !released.is_empty(),
-            "a declined lineage sibling released an explored verification"
-        );
-        let mut consumed = 0_usize;
-        for case in &released {
-            assert_eq!(case.fold.transaction(), None);
-            assert_eq!(
-                case.fold.next_sequence(),
-                Some(SequenceId(case.sequence.0 + 1))
-            );
-            let record = verification_charged(case.sequence.0, 1);
-            case.fold
-                .plan_transition(&record)
-                .expect("admitted for the released sequence while it is the latest");
-            let resumed = applied(
-                &case.fold,
-                &[run_resumed(run_started_unauthenticated().runner)],
-            )
-            .expect("the run resumes");
-            assert!(
-                matches!(
-                    refusal_of(&resumed, &record),
-                    crate::topology::fold::FoldError::WrongSequence { .. }
-                ),
-                "refused after `run_resumed`"
-            );
-            if let Some((next, label)) = later_start(&case.fold, case.sequence) {
+        let mut covered: BTreeSet<&'static str> = BTreeSet::new();
+        let mut cancelled_cases = 0_usize;
+        for member in family() {
+            for state in member.census.states() {
+                let Some(sequence) = open_verification(&state.fold) else {
+                    continue;
+                };
+                if !unrecorded_state(&state.fold) {
+                    continue;
+                }
+                let Some(planted) = declined_sibling_of(&state.fold) else {
+                    continue;
+                };
+                let Some(cancelled) = applied(&state.fold, &planted) else {
+                    continue;
+                };
+                let open = cancelled.transaction().unwrap_or_else(|| {
+                    panic!("state {}: the decline keeps the transaction", state.id)
+                });
                 assert_eq!(
-                    next.next_sequence(),
-                    Some(SequenceId(case.sequence.0 + 2)),
-                    "`{label}` consumed the next sequence"
+                    Some(open),
+                    state.fold.transaction(),
+                    "state {}: the cancelled verification's transaction is the one it started",
+                    state.id
+                );
+                assert_eq!(
+                    cancelled.task_state(open.candidate.key),
+                    Some(TaskState::Failed),
+                    "state {}: the candidate's task failed with its lineage",
+                    state.id
+                );
+                let start = verification_started(
+                    sequence.0 + 1,
+                    open.candidate.key,
+                    open.candidate.generation.0,
+                    "pins/later",
+                    open.candidate.commit_sha.clone(),
+                    open.candidate.commit_sha.clone(),
                 );
                 assert!(
-                    matches!(
-                        refusal_of(&next, &record),
-                        crate::topology::fold::FoldError::WrongSequence { .. }
-                    ),
-                    "refused once `{label}` consumed a sequence"
+                    opened_while(&cancelled, &start, sequence),
+                    "state {}: a later start is refused while the cancelled verification is open",
+                    state.id
                 );
-                consumed += 1;
+
+                let record = verification_charged(sequence.0, 1);
+                let recorded =
+                    applied(&cancelled, std::slice::from_ref(&record)).unwrap_or_else(|| {
+                        panic!(
+                            "state {}: the record is admitted for the open transaction",
+                            state.id
+                        )
+                    });
+                let mut trace = state.trace.clone();
+                trace.extend(planted);
+                trace.push(record);
+                assert!(
+                    opened_while(&recorded, &start, sequence),
+                    "state {}",
+                    state.id
+                );
+
+                for candidate in classes(&state.fold) {
+                    let carrying = match &candidate.event.body {
+                        TopologyEventBody::MergeVerificationUnavailable { data } => {
+                            data.sequence == sequence
+                        }
+                        TopologyEventBody::MergePrepared { data } => {
+                            data.sequence == sequence
+                                && data.disposition != PreparedDisposition::Fast
+                        }
+                        TopologyEventBody::MergeRejected { data } => {
+                            data.sequence == sequence
+                                && matches!(
+                                    data.disposition,
+                                    crate::topology::events::RejectionDisposition::CodeRejected { .. }
+                                )
+                        }
+                        _ => false,
+                    };
+                    if !carrying || state.fold.plan_transition(&candidate.event).is_err() {
+                        continue;
+                    }
+                    let kind = candidate.event.body.kind();
+                    for (when, fold) in [("before the record", &cancelled), ("after it", &recorded)]
+                    {
+                        let live = refusal_of(fold, &candidate.event);
+                        assert!(
+                            refused_for_the_failed_candidate(&live, kind),
+                            "state {}: `{}` {when}: {live}",
+                            state.id,
+                            candidate.label
+                        );
+                    }
+                    assert_eq!(
+                        replayed_refusal(member.shape, &trace, &candidate.event),
+                        refusal_of(&recorded, &candidate.event)
+                    );
+                    covered.insert(kind);
+                }
+
+                let settled = ev(TopologyEventBody::MergeVerificationInterrupted {
+                    data: crate::topology::events::MergeVerificationInterrupted {
+                        sequence,
+                        detail: "the census settles the cancelled verification".to_owned(),
+                    },
+                });
+                let ended =
+                    applied(&recorded, std::slice::from_ref(&settled)).unwrap_or_else(|| {
+                        panic!(
+                            "state {}: the interrupted terminal is admitted after the record",
+                            state.id
+                        )
+                    });
+                assert_eq!(ended.transaction(), None, "state {}", state.id);
+                assert!(
+                    !opened_while(&ended, &start, sequence),
+                    "state {}: the terminal closed the transaction",
+                    state.id
+                );
+                cancelled_cases += 1;
             }
         }
-        assert!(consumed > 0, "a later start was exercised");
+        assert!(
+            cancelled_cases > 0,
+            "a declined lineage sibling cancelled an explored verification"
+        );
+        assert_eq!(
+            covered.into_iter().collect::<Vec<_>>(),
+            vec![
+                "merge_prepared",
+                "merge_rejected",
+                "merge_verification_unavailable"
+            ]
+        );
     }
 
     #[test]
@@ -5779,15 +5824,15 @@ pub(crate) mod tests {
                 let live = refusal_of(&fold, &second);
                 assert!(
                     spend_already_recorded(&live, "merge_verification_charged"),
-                    "abandoned: {live}"
+                    "cancelled: {live}"
                 );
                 assert_eq!(replayed_refusal(case.shape, &trace, &second), live);
             }
-            cases.insert("abandoned");
+            cases.insert("cancelled");
         }
         assert_eq!(
             cases.into_iter().collect::<Vec<_>>(),
-            vec!["abandoned", "open", "resumed"]
+            vec!["cancelled", "open", "resumed"]
         );
     }
 
@@ -5862,5 +5907,168 @@ pub(crate) mod tests {
             ]
         );
         assert!(interrupted > 100, "{interrupted}");
+    }
+
+    fn census_mount(target: &str, read_only: bool, object: u64) -> RecordedMount {
+        RecordedMount {
+            source: format!("/srv/census{target}"),
+            target: target.to_owned(),
+            read_only,
+            source_identity: MountSourceIdentity::Unix {
+                kind: MountSourceKind::Directory,
+                device: 64_769,
+                inode: object,
+            },
+        }
+    }
+
+    #[test]
+    fn a_run_resumed_whose_mounts_moved_is_refused_by_the_existing_runner_equality() {
+        let mut mounted = run_started();
+        mounted.runner.mounts = vec![
+            census_mount("/cache", true, 11),
+            census_mount("/tools", false, 12),
+        ];
+        let mut fold = TopologyFold::new(inputs());
+        let delta = fold
+            .plan_transition(&ev(TopologyEventBody::RunStarted {
+                data: Box::new(mounted.clone()),
+            }))
+            .expect("a run that recorded mounts starts");
+        fold.apply_delta(delta);
+        fold.plan_transition(&run_resumed(mounted.runner.clone()))
+            .expect("a resume that re-established the recorded mounts is admitted");
+
+        type Mover = fn(&mut RunnerPolicy);
+        let movers: [(&str, Mover); 5] = [
+            ("dropped", |runner| runner.mounts.clear()),
+            ("a source rebound", |runner| {
+                runner.mounts[0] = census_mount("/cache", true, 21);
+            }),
+            ("read-write now", |runner| {
+                runner.mounts[0].read_only = false
+            }),
+            ("a target moved", |runner| {
+                runner.mounts[1] = census_mount("/toolchain", false, 12);
+            }),
+            ("one more", |runner| {
+                runner.mounts.push(census_mount("/zeta", true, 13));
+            }),
+        ];
+        for (name, moved) in movers {
+            let mut runner = mounted.runner.clone();
+            moved(&mut runner);
+            match fold.plan_transition(&run_resumed(runner)) {
+                Err(FoldError::RunnerMoved { field }) => assert_eq!(
+                    field, "configured mount set",
+                    "a resume whose mounts were {name} was refused naming another field"
+                ),
+                Err(other) => panic!("a resume whose mounts were {name} was refused as {other}"),
+                Ok(_) => panic!("a resume whose mounts were {name} was admitted"),
+            }
+        }
+
+        let plain = started();
+        match plain.plan_transition(&run_resumed(mounted.runner)) {
+            Err(FoldError::RunnerMoved { field }) => assert_eq!(field, "configured mount set"),
+            Err(other) => panic!("a resume that added mounts was refused as {other}"),
+            Ok(_) => panic!("a resume that added mounts to a run without them was admitted"),
+        }
+    }
+
+    #[test]
+    fn the_report_projects_the_recorded_mounts_and_an_unmounted_record_projects_as_before() {
+        use crate::engine::topology::report::TopologyReport;
+
+        let mut mounted = run_started();
+        mounted.runner.mounts = vec![
+            census_mount("/cache", true, 11),
+            census_mount("/tools", false, 12),
+        ];
+        for started in [run_started(), mounted] {
+            let has_mounts = !started.runner.mounts.is_empty();
+            let events = vec![ev(TopologyEventBody::RunStarted {
+                data: Box::new(started.clone()),
+            })];
+            let fold = TopologyFold::replay(inputs(), &events).expect("the record replays");
+            let report =
+                TopologyReport::derive(RUN_ID, &fold, &events).expect("the report derives");
+            assert_eq!(
+                report.runner, started.runner,
+                "report.json's runner is the recorded one"
+            );
+            assert_eq!(
+                report.compute_digest().expect("digests"),
+                report.digest,
+                "the digest covers the projected runner"
+            );
+            let value = serde_json::to_value(&report).expect("serializes");
+            let runner = value["runner"].as_object().expect("an object");
+            let rendered = report.render();
+            if has_mounts {
+                assert_eq!(
+                    runner.get("mounts"),
+                    Some(&serde_json::to_value(&started.runner.mounts).expect("serializes")),
+                    "report.json does not carry the recorded mounts"
+                );
+                for line in [
+                    "runner mounts: 2",
+                    "  /cache <- /srv/census/cache (read-only, directory device 64769 inode 11)",
+                    "  /tools <- /srv/census/tools (read-write, directory device 64769 inode 12)",
+                ] {
+                    assert!(
+                        rendered.contains(line),
+                        "the rendering does not say `{line}`:\n{rendered}"
+                    );
+                }
+                let mut unmounted = value.clone();
+                unmounted["runner"]
+                    .as_object_mut()
+                    .expect("an object")
+                    .remove("mounts")
+                    .expect("present");
+                assert!(
+                    !report.is_fresh_against(&serde_json::to_vec(&unmounted).expect("serializes")),
+                    "a report.json that lost the recorded mounts reads as fresh"
+                );
+            } else {
+                assert_eq!(
+                    runner.keys().map(String::as_str).collect::<Vec<_>>(),
+                    vec!["credential_volumes", "image", "kind", "policy"],
+                    "an unmounted record projects exactly the fields it always did"
+                );
+                assert!(!rendered.contains("runner mounts"), "{rendered}");
+            }
+            assert!(
+                report.is_fresh_against(&serde_json::to_vec_pretty(&report).expect("serializes")),
+                "the stored report does not read back as fresh"
+            );
+        }
+
+        let mut windows = run_started();
+        windows.runner.mounts = vec![RecordedMount {
+            source: r"C:\srv\census".to_owned(),
+            target: "/census".to_owned(),
+            read_only: false,
+            source_identity: MountSourceIdentity::Windows {
+                kind: MountSourceKind::File,
+                volume_serial: 0x1234,
+                file_id: "00112233445566778899aabbccddeeff".to_owned(),
+            },
+        }];
+        let events = vec![ev(TopologyEventBody::RunStarted {
+            data: Box::new(windows.clone()),
+        })];
+        let fold = TopologyFold::replay(inputs(), &events).expect("the record replays");
+        let report = TopologyReport::derive(RUN_ID, &fold, &events).expect("the report derives");
+        assert_eq!(report.runner, windows.runner);
+        let rendered = report.render();
+        assert!(
+            rendered.contains(
+                "  /census <- C:\\srv\\census (read-write, file volume 0x0000000000001234 file \
+                 00112233445566778899aabbccddeeff)"
+            ),
+            "{rendered}"
+        );
     }
 }

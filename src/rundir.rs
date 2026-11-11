@@ -1854,7 +1854,10 @@ pub fn lock_file(public: &Path) -> PathBuf {
     public.join("run.lock")
 }
 
-fn worktree_lock_file(worktree_git_dir: &Path) -> PathBuf {
+/// The physical worktree's lock file: what [`WorktreeLock`] takes, and what a
+/// container runner's dormant label backstop asks `F_GETLK` of at its
+/// coordinator's death before it may act (`PR12-INV9-CONTAINER-HELPER-CLEANUP-LEASE`).
+pub(crate) fn worktree_lock_file(worktree_git_dir: &Path) -> PathBuf {
     worktree_git_dir.join("upstroke-worktree.lock")
 }
 
@@ -2440,6 +2443,34 @@ mod cleanup {
         }
     }
 
+    /// Enter, on this thread and for as long as the returned scopes live, the
+    /// cleanup scope of each lease path a call carried across a thread
+    /// boundary (`CallParts::leases`, which a worker or pipeline's `Carried`
+    /// call fills from its coordinator's own scope).
+    ///
+    /// `spawn_reaper` merges the asking thread's scope into every reaper it
+    /// forks, so a container invocation that enters its carried paths here
+    /// for its whole duration has every bounded runtime question it asks on
+    /// this thread -- whatever runtime method asks it, the ones that take no
+    /// lease argument included -- fork its helper's reaper holding them
+    /// (`PR12-INV9-CONTAINER-HELPER-CLEANUP-LEASE`). Each scope is the
+    /// existing guard and leaves its path's scope at its drop; nothing here
+    /// opens a file, takes a lock or reaches another thread.
+    pub(crate) fn enter_carried_cleanup_scope(paths: &[PathBuf]) -> Vec<CleanupScope> {
+        paths
+            .iter()
+            .map(|path| {
+                ACTIVE.with(|active| {
+                    *active.borrow_mut().entry(path.clone()).or_default() += 1;
+                });
+                CleanupScope {
+                    path: path.clone(),
+                    _thread: PhantomData,
+                }
+            })
+            .collect()
+    }
+
     pub(super) fn take(public: &Path) -> Result<CleanupLease, UpstrokeError> {
         let path = cleanup_lock_file(public);
         let file = File::options()
@@ -2535,6 +2566,8 @@ mod cleanup {
 }
 
 pub(crate) use cleanup::CleanupScope;
+#[cfg(unix)]
+pub(crate) use cleanup::enter_carried_cleanup_scope;
 
 #[cfg(unix)]
 pub(crate) fn active_cleanup_lease_paths() -> Vec<PathBuf> {
@@ -2746,6 +2779,12 @@ mod imp {
 
 #[cfg(test)]
 pub(crate) mod scratch_tree;
+
+/// The ownership proof's locator-observation fault, for the census and public
+/// composition guards outside `rundir` (`PR12-INV9-UNREADABLE-PRIVATE-LOCATOR`).
+/// Test builds only, after the census boundary above.
+#[cfg(test)]
+pub(crate) use ownership::locator_fault::LocatorMetadataFault;
 
 /// What a report writer that died between its stage and its rename leaves,
 /// planted through the writer's own record-then-create helper — never by

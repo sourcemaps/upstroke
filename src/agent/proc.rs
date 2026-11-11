@@ -831,10 +831,12 @@ pub use self::ambient::{
 pub use self::ambient::{
     ambient_job_established, child_in_ambient_job, process_alive, process_creation_time,
 };
+#[cfg(all(target_os = "linux", test))]
+pub(crate) use self::termination::BACKSTOP_GATE;
 #[cfg(all(unix, test))]
 pub(crate) use self::termination::armed_container_reaper_selects;
 #[cfg(unix)]
-pub use self::termination::{ContainerReaper, arm_container_reaper};
+pub use self::termination::{BackstopHold, ContainerReaper, arm_container_reaper};
 
 #[cfg(windows)]
 mod windows_job {
@@ -4072,6 +4074,10 @@ mod termination {
                             wake = false;
                             drain_pipe(wake_fd);
                         }
+                        #[cfg(test)]
+                        COLLECT_ISOLATED_TEST_GUARD => {
+                            collect_probe_for_isolated_test(probe_pid, probe_fd)
+                        }
                         _ => wake = true,
                     }
                 }
@@ -4816,6 +4822,120 @@ mod termination {
         program: std::ffi::CString,
         _ps: Vec<std::ffi::CString>,
         ps_argv: Vec<*const libc::c_char>,
+        /// For a backstop that holds nothing while its coordinator lives
+        /// ([`BackstopHold::BeforeActing`]): the exclusion it establishes at
+        /// that coordinator's death before it may kill or remove anything,
+        /// rendered before the fork. `None` for a backstop that checks nothing.
+        before_acting: Option<ExclusionBeforeActing>,
+    }
+
+    /// What a [`BackstopHold::BeforeActing`] backstop's reaper is handed: its
+    /// physical worktree's lock file, which it takes itself with `F_SETLK`
+    /// exactly as `WorktreeLock` admission does before it may act -- the lock
+    /// every lawful same-worktree engine (a fresh run, a different run, or the
+    /// run's own successor) holds from before its admission scan until it
+    /// ends; its run's lock file, which it asks `F_GETLK` of; and the cleanup
+    /// lease paths (R28) it then takes its own shared `flock` on.
+    struct ExclusionBeforeActing {
+        leases: Vec<std::ffi::CString>,
+        run_lock: std::ffi::CString,
+        worktree_lock: std::ffi::CString,
+        gate: BackstopGate,
+    }
+
+    /// How many times, 10 ms apart, a backstop asks for its shared hold on a
+    /// lease path before it stands down: 3 s. An exclusive hold on a cleanup
+    /// lease is only ever an admission's momentary probe.
+    const BEFORE_ACTING_LOCK_TRIES: u16 = 300;
+
+    /// The three points of a backstop's ending a test can hold it at: before
+    /// its first listing; after a non-empty listing, before it takes its
+    /// worktree's lock; and once its exclusion is established or refused,
+    /// before it acts or ends.
+    #[derive(Clone, Copy)]
+    enum GatePoint {
+        Death,
+        Listed,
+        Decided,
+    }
+
+    /// The production build's backstop gate: there is none. A backstop goes
+    /// through its ending without waiting anywhere.
+    #[cfg(not(test))]
+    struct BackstopGate;
+
+    #[cfg(not(test))]
+    impl BackstopGate {
+        #[inline]
+        const fn from_this_process() -> Self {
+            Self
+        }
+
+        #[inline]
+        const fn park_at(&self, _point: GatePoint) {}
+    }
+
+    /// The environment name a test arms the test build's gate with.
+    #[cfg(test)]
+    pub(crate) const BACKSTOP_GATE: &str = "UPSTROKE_TEST_BACKSTOP_GATE";
+
+    /// The test build's twin: a gate a test arms by naming a base path in the
+    /// coordinator's environment before the backstop is armed. At each
+    /// [`GatePoint`] whose arrival file `<base>.<point>.arrived` the test has
+    /// already created, the backstop writes one byte there and then waits, for
+    /// at most 120 s, until `<base>.<point>` exists; a point without an
+    /// arrival file is passed straight through. So a harness can schedule what
+    /// happens around each step of the backstop's ending -- nothing else of
+    /// the backstop changes. Unarmed, it is the production twin.
+    #[cfg(test)]
+    struct BackstopGate(Option<Vec<(std::ffi::CString, std::ffi::CString)>>);
+
+    #[cfg(test)]
+    impl BackstopGate {
+        fn from_this_process() -> Self {
+            let rendered = |path: String| std::ffi::CString::new(path).ok();
+            Self(std::env::var(BACKSTOP_GATE).ok().and_then(|base| {
+                ["death", "listed", "decided"]
+                    .iter()
+                    .map(|point| {
+                        Some((
+                            rendered(format!("{base}.{point}.arrived"))?,
+                            rendered(format!("{base}.{point}"))?,
+                        ))
+                    })
+                    .collect()
+            }))
+        }
+
+        fn park_at(&self, point: GatePoint) {
+            let index = match point {
+                GatePoint::Death => 0,
+                GatePoint::Listed => 1,
+                GatePoint::Decided => 2,
+            };
+            let Some((arrived, gate)) = self.0.as_ref().and_then(|points| points.get(index)) else {
+                return;
+            };
+            // SAFETY: `arrived` is a NUL-terminated string rendered before the
+            // fork; `open` allocates nothing in this process.
+            let fd = unsafe { libc::open(arrived.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC) };
+            if fd < 0 {
+                return;
+            }
+            // SAFETY: `fd` is the descriptor just opened and the one byte
+            // written is a live local.
+            let _ = unsafe { libc::write(fd, [1_u8].as_ptr().cast(), 1) };
+            close_fd(fd);
+            for _ in 0..12_000_u16 {
+                // SAFETY: as above, for `gate`.
+                let fd = unsafe { libc::open(gate.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+                if fd >= 0 {
+                    close_fd(fd);
+                    return;
+                }
+                raw_sleep_10ms();
+            }
+        }
     }
 
     static CONTAINER_SCOPE: OnceLock<
@@ -4891,6 +5011,38 @@ mod termination {
             program,
             _ps: ps,
             ps_argv,
+            before_acting: None,
+        })
+    }
+
+    /// The exclusion a [`BackstopHold::BeforeActing`] backstop establishes
+    /// before it acts, rendered here, before the fork, so its reaper only
+    /// opens what it is handed; a path that cannot be a C string refuses the
+    /// arming.
+    fn render_exclusion(
+        leases: &[PathBuf],
+        run_lock: &std::path::Path,
+        worktree_lock: &std::path::Path,
+    ) -> Result<ExclusionBeforeActing, UpstrokeError> {
+        let rendered = |path: &std::path::Path| {
+            std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).map_err(|_| {
+                UpstrokeError::Refused {
+                    message: format!(
+                        "a container backstop's cleanup exclusion names `{}`, which carries an \
+                         interior NUL and cannot be opened by its reaper",
+                        path.display()
+                    ),
+                }
+            })
+        };
+        Ok(ExclusionBeforeActing {
+            leases: leases
+                .iter()
+                .map(|path| rendered(path))
+                .collect::<Result<_, _>>()?,
+            run_lock: rendered(run_lock)?,
+            worktree_lock: rendered(worktree_lock)?,
+            gate: BackstopGate::from_this_process(),
         })
     }
 
@@ -4907,9 +5059,42 @@ mod termination {
         reaper: Option<Reaper>,
     }
 
+    /// The cleanup exclusion (R28) a container-label backstop keeps.
+    #[derive(Debug, Clone, Copy)]
+    pub enum BackstopHold<'a> {
+        /// None at any time: a backstop armed outside every run, which
+        /// reclaims at its coordinator's death without asking anything -- the
+        /// reaper's own mechanics, and nothing a container runner arms.
+        Unleased,
+        /// Nothing while its coordinator lives, so it never refuses a
+        /// same-process successor and is never a permanent hold. At that
+        /// death it lists its labels holding nothing, and ends there if
+        /// nothing is listed. Otherwise, before it may kill or remove
+        /// anything (`PR12-INV9-CONTAINER-HELPER-CLEANUP-LEASE`), it takes
+        /// `worktree_lock` itself with a non-blocking exclusive `F_SETLK`, as
+        /// `WorktreeLock` admission does -- whoever holds that lock owns the
+        /// dead incarnation's cleanup in this worktree, so held by another
+        /// process, absent or unanswered, it stands down having taken nothing
+        /// and the admitted engine's census reclaims; then asks `F_GETLK` of
+        /// `run_lock` (held or unanswered: stands down); then takes its own
+        /// shared `flock` on every one of `leases` (none to take, or one it
+        /// cannot take: stands down); and only then kills and removes, under
+        /// both, which its exit releases. What a container runner arms
+        /// (`runner::container::exec`).
+        BeforeActing {
+            leases: &'a [PathBuf],
+            run_lock: &'a std::path::Path,
+            worktree_lock: &'a std::path::Path,
+        },
+    }
+
+    /// Arm a container-label backstop for a container runner's incarnation,
+    /// keeping `hold` ([`BackstopHold`]). A hold is admission exclusion only;
+    /// it is never evidence that an invocation settled.
     pub fn arm_container_reaper(
         terminate_site: ProcessSite,
         scope: &crate::runner::container::census::ReaperContainerScope,
+        hold: BackstopHold<'_>,
     ) -> Result<ContainerReaper, UpstrokeError> {
         if terminate_site != ProcessSite::Terminate {
             return Err(UpstrokeError::Agent {
@@ -4919,7 +5104,15 @@ mod termination {
                 ),
             });
         }
-        let containers = render_container_argv(scope)?;
+        let mut containers = render_container_argv(scope)?;
+        if let BackstopHold::BeforeActing {
+            leases,
+            run_lock,
+            worktree_lock,
+        } = hold
+        {
+            containers.before_acting = Some(render_exclusion(leases, run_lock, worktree_lock)?);
+        }
         shared_state()?;
         let reaper = fork_reaper(Vec::new(), Some(containers), EndingRest::SingleAttempt)
             .map_err(|message| UpstrokeError::Agent { message })?;
@@ -4941,7 +5134,8 @@ mod termination {
     }
 
     #[cfg(test)]
-    static ARMED_CONTAINER_REAPERS: Mutex<Vec<(libc::pid_t, Vec<String>)>> = Mutex::new(Vec::new());
+    pub(super) static ARMED_CONTAINER_REAPERS: Mutex<Vec<(libc::pid_t, Vec<String>)>> =
+        Mutex::new(Vec::new());
 
     #[cfg(test)]
     fn note_armed_container_reaper(pid: libc::pid_t, list_argv: Vec<String>) {
@@ -4975,9 +5169,13 @@ mod termination {
     }
 
     fn reclaim_labeled_containers(containers: &ReaperContainers) {
+        if let Some(exclusion) = &containers.before_acting {
+            exclusion.gate.park_at(GatePoint::Death);
+        }
         let mut buffer = [0_u8; REAPER_PS_BUFFER];
         let mut previous = [0_u8; REAPER_PS_BUFFER];
         let mut previous_filled = usize::MAX;
+        let mut excluded = containers.before_acting.is_none();
         loop {
             let filled = list_labeled_containers(containers, &mut buffer);
             if filled == 0 {
@@ -4985,6 +5183,26 @@ mod termination {
             }
             if filled == previous_filled && buffer[..filled] == previous[..filled] {
                 return;
+            }
+            if !excluded {
+                // Something is listed, so something would be killed and
+                // removed: from here on only while this reaper holds its
+                // worktree's admission lock, its run's lock is free, and it
+                // holds its own share of every cleanup lease -- taken in that
+                // order, so it never holds a lease an admitted engine's census
+                // could see while it stands down.
+                let Some(exclusion) = &containers.before_acting else {
+                    return;
+                };
+                exclusion.gate.park_at(GatePoint::Listed);
+                let established = take_the_worktree(exclusion)
+                    && lock_has_no_holder(&exclusion.run_lock)
+                    && hold_leases(exclusion);
+                exclusion.gate.park_at(GatePoint::Decided);
+                if !established {
+                    return;
+                }
+                excluded = true;
             }
             previous[..filled].copy_from_slice(&buffer[..filled]);
             previous_filled = filled;
@@ -5021,6 +5239,115 @@ mod termination {
                 return;
             }
         }
+    }
+
+    /// Take this reaper's own shared `flock` on every lease path of
+    /// `exclusion`: `false` -- stand down -- when there is none to take, or
+    /// one cannot be opened, or stays exclusively held past
+    /// `BEFORE_ACTING_LOCK_TRIES` (an admission's probe is momentary). The
+    /// descriptors stay open, and the holds with them, until this reaper
+    /// exits. Async-signal-safe: `open`, `flock` and `nanosleep` over strings
+    /// rendered before the fork.
+    fn hold_leases(exclusion: &ExclusionBeforeActing) -> bool {
+        if exclusion.leases.is_empty() {
+            return false;
+        }
+        for path in &exclusion.leases {
+            // SAFETY: `path` is a NUL-terminated string rendered before the
+            // fork; `open` allocates nothing in this process.
+            let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+            if fd < 0 {
+                return false;
+            }
+            let mut tries = 0_u16;
+            loop {
+                // SAFETY: `fd` is the descriptor just opened.
+                if unsafe { libc::flock(fd, libc::LOCK_SH | libc::LOCK_NB) } == 0 {
+                    break;
+                }
+                let errno = last_errno();
+                let momentary =
+                    errno == libc::EWOULDBLOCK || errno == libc::EAGAIN || errno == libc::EINTR;
+                if !momentary || tries >= BEFORE_ACTING_LOCK_TRIES {
+                    return false;
+                }
+                tries = tries.saturating_add(1);
+                raw_sleep_10ms();
+            }
+        }
+        true
+    }
+
+    /// Take the physical worktree's admission lock, as `WorktreeLock` does:
+    /// the existing lock file, never created here, opened for writing and
+    /// locked whole with a non-blocking exclusive `F_SETLK`. `true` leaves the
+    /// descriptor open, and the lock held, until this reaper exits -- it never
+    /// opens that file again, so no close releases it early. `false` -- held
+    /// by another process, absent, or any other failure -- has taken nothing.
+    fn take_the_worktree(exclusion: &ExclusionBeforeActing) -> bool {
+        let (Ok(write), Ok(start)) = (
+            libc::c_short::try_from(libc::F_WRLCK),
+            libc::c_short::try_from(libc::SEEK_SET),
+        ) else {
+            return false;
+        };
+        // SAFETY: `worktree_lock` is a NUL-terminated string rendered before
+        // the fork; `open` without `O_CREAT` creates nothing.
+        let fd = unsafe {
+            libc::open(
+                exclusion.worktree_lock.as_ptr(),
+                libc::O_WRONLY | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return false;
+        }
+        let request = libc::flock {
+            l_type: write,
+            l_whence: start,
+            l_start: 0,
+            l_len: 0,
+            l_pid: 0,
+        };
+        // SAFETY: `request` is a valid `flock` record and `fd` the descriptor
+        // just opened; `F_SETLK` never blocks.
+        if unsafe { libc::fcntl(fd, libc::F_SETLK, &request) } == 0 {
+            return true;
+        }
+        close_fd(fd);
+        false
+    }
+
+    /// `true` when `path` does not exist -- nothing can hold a lock file no
+    /// engine has created -- or answers `F_GETLK` with no holder; `false` for
+    /// a holder and for every question the filesystem would not answer. This
+    /// reaper holds no `fcntl` lock of its own, so closing the descriptor
+    /// releases nothing.
+    fn lock_has_no_holder(path: &std::ffi::CStr) -> bool {
+        let (Ok(write), Ok(start), Ok(unlocked)) = (
+            libc::c_short::try_from(libc::F_WRLCK),
+            libc::c_short::try_from(libc::SEEK_SET),
+            libc::c_short::try_from(libc::F_UNLCK),
+        ) else {
+            return false;
+        };
+        // SAFETY: `path` is a NUL-terminated string rendered before the fork.
+        let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+        if fd < 0 {
+            return last_errno() == libc::ENOENT;
+        }
+        let mut request = libc::flock {
+            l_type: write,
+            l_whence: start,
+            l_start: 0,
+            l_len: 0,
+            l_pid: 0,
+        };
+        // SAFETY: `request` is a valid, writable `flock` record and `fd` is the
+        // descriptor just opened; `F_GETLK` only reports.
+        let asked = unsafe { libc::fcntl(fd, libc::F_GETLK, &mut request) };
+        close_fd(fd);
+        asked == 0 && request.l_type == unlocked
     }
 
     fn list_labeled_containers(containers: &ReaperContainers, buffer: &mut [u8]) -> usize {
@@ -5170,6 +5497,161 @@ mod termination {
         }
         if let Some(containers) = containers {
             reclaim_labeled_containers(containers);
+        }
+    }
+
+    #[cfg(test)]
+    const COLLECT_ISOLATED_TEST_GUARD: u8 = 0xf1;
+
+    #[cfg(test)]
+    const ISOLATED_PROBE_COLLECTED: libc::c_int = 42;
+
+    #[cfg(test)]
+    fn collect_probe_for_isolated_test(probe_pid: libc::pid_t, probe_fd: libc::c_int) -> ! {
+        let waitable = set_signal_disposition(libc::SIGCHLD, libc::SIG_DFL);
+        close_fd(probe_fd);
+        let (waited, errno, status) = wait_for_an_ended_helper(
+            probe_pid,
+            EndingWait::CollectingStatus,
+            EndingRetry::WhileInterrupted,
+            EndingRest::SingleAttempt,
+        );
+        let collected = waitable
+            && waited == probe_pid
+            && errno == 0
+            && libc::WIFEXITED(status)
+            && libc::WEXITSTATUS(status) == 0;
+        // SAFETY: the forked guard cannot return to Rust. Only the completed
+        // wait above earns this distinct status; the probe itself never forks.
+        unsafe {
+            libc::_exit(if collected {
+                ISOLATED_PROBE_COLLECTED
+            } else {
+                1
+            })
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) struct IsolatedJobControl {
+        collected: bool,
+    }
+
+    #[cfg(test)]
+    impl IsolatedJobControl {
+        pub(crate) fn new() -> Self {
+            Self { collected: false }
+        }
+
+        pub(crate) fn collect(mut self) {
+            let result = self.collect_if_installed();
+            assert_eq!(
+                result,
+                Ok(true),
+                "the isolated job-control guard and its probe were collected: {result:?}"
+            );
+        }
+
+        fn collect_if_installed(&mut self) -> Result<bool, String> {
+            let Some(state) = STATE.get() else {
+                self.collected = true;
+                return Ok(false);
+            };
+            let state = state.as_ref().map_err(|message| {
+                format!("the isolated helper's job-control setup failed: {message}")
+            })?;
+            let guard = {
+                // The monitor also owns this state. Copy only the guard after
+                // every launch settled, and release the lock before waiting.
+                let state = state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if state.spawning != 0 || !state.groups.is_empty() {
+                    return Err("the isolated helper still has registered commands".to_owned());
+                }
+                state.guard
+            };
+            let probe_pid = PROBE_PID.load(Ordering::SeqCst);
+            // SAFETY: the isolated helper owns this nonblocking command pipe.
+            // The byte lives for the call, and no command will launch after it.
+            let sent = unsafe {
+                libc::write(
+                    guard.command_fd,
+                    std::ptr::from_ref(&COLLECT_ISOLATED_TEST_GUARD).cast(),
+                    1,
+                )
+            };
+            if sent != 1 {
+                return Err(format!(
+                    "ask the isolated job-control guard to collect its probe: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            let deadline =
+                std::time::Instant::now() + super::test_support::ISOLATED_CHILD_COLLECTION_BOUND;
+            loop {
+                let mut status = 0;
+                // SAFETY: this isolated helper has no competing waiter for its
+                // guard. The status is writable, and WNOHANG never blocks.
+                let waited = unsafe { libc::waitpid(guard.pid, &mut status, libc::WNOHANG) };
+                if waited == guard.pid {
+                    self.collected = true;
+                    GUARD_COMMAND_FD.store(-1, Ordering::SeqCst);
+                    PROBE_PID.store(-1, Ordering::SeqCst);
+                    for fd in [
+                        guard.command_fd,
+                        guard.ack_fd,
+                        guard._command_keepalive_fd,
+                        guard.identity,
+                    ] {
+                        if fd >= 0 {
+                            close_fd(fd);
+                        }
+                    }
+                    if !libc::WIFEXITED(status)
+                        || libc::WEXITSTATUS(status) != ISOLATED_PROBE_COLLECTED
+                    {
+                        return Err(format!(
+                            "isolated job-control guard {} did not prove probe {probe_pid} collected: {status}",
+                            guard.pid
+                        ));
+                    }
+                    crate::workspace_manager::fixture::say(&format!(
+                        "collected isolated job-control guard {} after its probe {probe_pid}",
+                        guard.pid
+                    ));
+                    return Ok(true);
+                }
+                if waited < 0 && !last_errno_is_interrupted() {
+                    return Err(format!(
+                        "collect isolated job-control guard {}: {}",
+                        guard.pid,
+                        std::io::Error::last_os_error()
+                    ));
+                }
+                if std::time::Instant::now() >= deadline {
+                    return Err(format!(
+                        "isolated job-control guard {} did not collect probe {probe_pid} and end within {:?}",
+                        guard.pid,
+                        super::test_support::ISOLATED_CHILD_COLLECTION_BOUND
+                    ));
+                }
+                crate::workspace_manager::fixture::rest(Duration::from_millis(10));
+            }
+        }
+    }
+
+    #[cfg(test)]
+    impl Drop for IsolatedJobControl {
+        fn drop(&mut self) {
+            if self.collected {
+                return;
+            }
+            if let Err(error) = self.collect_if_installed() {
+                crate::workspace_manager::fixture::say(&format!(
+                    "isolated job-control cleanup failed: {error}"
+                ));
+            }
         }
     }
 
@@ -9359,8 +9841,12 @@ mod termination {
                 STATE.get().is_none(),
                 "no host launch has installed the signal monitor in this isolated process"
             );
-            let reaper = arm_container_reaper(ProcessSite::Terminate, &a_container_scope(program))
-                .expect("arm the container reaper");
+            let reaper = arm_container_reaper(
+                ProcessSite::Terminate,
+                &a_container_scope(program),
+                BackstopHold::Unleased,
+            )
+            .expect("arm the container reaper");
             report(&format!(
                 "signal monitor installed by arming: {}",
                 STATE.get().is_some_and(Result::is_ok)
@@ -9377,6 +9863,7 @@ mod termination {
             let refused = arm_container_reaper(
                 ProcessSite::Spawn,
                 &a_container_scope(std::path::Path::new("/usr/bin/true")),
+                BackstopHold::Unleased,
             );
             assert!(
                 refused
@@ -9394,6 +9881,7 @@ mod termination {
             let container = arm_container_reaper(
                 ProcessSite::Terminate,
                 &a_container_scope(std::path::Path::new("/usr/bin/true")),
+                BackstopHold::Unleased,
             )
             .expect("arm a container reaper");
             let container_rest = container.reaper.as_ref().map(|reaper| reaper.rest);
@@ -9597,6 +10085,7 @@ mod termination {
             let reaper = arm_container_reaper(
                 ProcessSite::Terminate,
                 &a_container_scope(std::path::Path::new("/usr/bin/true")),
+                BackstopHold::Unleased,
             )
             .expect("arm the container reaper inside the same cleanup scope");
             let not_held_while_armed = not_held_within(Duration::from_secs(20));
@@ -9907,6 +10396,9 @@ mod termination {
 pub(crate) mod test_support {
     use super::*;
 
+    #[cfg(unix)]
+    pub(crate) use super::termination::IsolatedJobControl;
+
     pub(crate) fn run_with_timeout(
         command: Command,
         stdin_data: &str,
@@ -9924,6 +10416,259 @@ pub(crate) mod test_support {
 
     #[cfg(unix)]
     pub(crate) const ISOLATED_CHILD_COLLECTION_BOUND: Duration = Duration::from_secs(10);
+
+    #[cfg(unix)]
+    pub(crate) struct RetainedMockReaper {
+        root_filter: String,
+        incarnation_filter: String,
+        collected: bool,
+    }
+
+    #[cfg(unix)]
+    impl RetainedMockReaper {
+        pub(crate) fn new(private_root: &std::path::Path, incarnation: &str) -> Self {
+            use crate::runner::container::intent::{
+                LABEL_INCARNATION, LABEL_PRIVATE_ROOT, private_root_label,
+            };
+            Self {
+                root_filter: format!(
+                    "label={LABEL_PRIVATE_ROOT}={}",
+                    private_root_label(private_root)
+                ),
+                incarnation_filter: format!("label={LABEL_INCARNATION}={incarnation}"),
+                collected: false,
+            }
+        }
+
+        pub(crate) fn collect(mut self) {
+            let result = self.collect_if_armed();
+            assert_eq!(
+                result,
+                Ok(true),
+                "one retained mock reaper was collected: {result:?}"
+            );
+        }
+
+        fn collect_if_armed(&mut self) -> Result<bool, String> {
+            let pid = {
+                let armed = super::termination::ARMED_CONTAINER_REAPERS
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let mut matching = armed.iter().filter(|(_, argv)| {
+                    argv.contains(&self.root_filter) && argv.contains(&self.incarnation_filter)
+                });
+                let Some((pid, argv)) = matching.next() else {
+                    self.collected = true;
+                    return Ok(false);
+                };
+                if matching.next().is_some()
+                    || *pid <= 0
+                    || argv.first().map(String::as_str)
+                        != Some(crate::runner::container::NO_OP_REAPER_PROGRAM)
+                {
+                    return Err(
+                        "the scope must name exactly one mock reaper with a positive pid"
+                            .to_owned(),
+                    );
+                }
+                *pid
+            };
+            collect_retained_reaper(pid, "mock", &mut self.collected)
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for RetainedMockReaper {
+        fn drop(&mut self) {
+            if self.collected {
+                return;
+            }
+            if let Err(error) = self.collect_if_armed() {
+                crate::workspace_manager::fixture::say(&format!(
+                    "retained mock reaper cleanup failed: {error}"
+                ));
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    pub(crate) struct RetainedStubReaper {
+        listing: Vec<String>,
+        program: std::path::PathBuf,
+        stub: std::path::PathBuf,
+        collected: bool,
+    }
+
+    #[cfg(unix)]
+    impl RetainedStubReaper {
+        pub(crate) fn new(
+            private_root: &std::path::Path,
+            incarnation: &str,
+            program: &std::path::Path,
+            stub: &std::path::Path,
+        ) -> Self {
+            let scope = crate::runner::container::census::ReaperContainerScope::new(
+                program,
+                private_root,
+                incarnation,
+            )
+            .expect("the stub runtime's reaper scope");
+            Self {
+                listing: scope.list_argv(),
+                program: program.to_path_buf(),
+                stub: stub.to_path_buf(),
+                collected: false,
+            }
+        }
+
+        pub(crate) fn collect(mut self) {
+            let result = self.collect_if_armed();
+            assert_eq!(
+                result,
+                Ok(true),
+                "one retained stub reaper was collected: {result:?}"
+            );
+        }
+
+        fn collect_if_armed(&mut self) -> Result<bool, String> {
+            let pid = {
+                let armed = super::termination::ARMED_CONTAINER_REAPERS
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let mut matching = armed.iter().filter(|(_, argv)| *argv == self.listing);
+                let Some((pid, _)) = matching.next() else {
+                    self.collected = true;
+                    return Ok(false);
+                };
+                if matching.next().is_some() || *pid <= 0 {
+                    return Err(
+                        "the scope must name exactly one stub reaper with a positive pid"
+                            .to_owned(),
+                    );
+                }
+                *pid
+            };
+            let resolved = match self.program.to_str() {
+                Some(name) if !name.contains('/') => crate::util::find_program(name),
+                _ => Some(self.program.clone()),
+            };
+            if resolved.as_deref() != Some(self.stub.as_path()) {
+                return Err(format!(
+                    "the scope's program `{}` resolves to {resolved:?}, not to the stub {}",
+                    self.program.display(),
+                    self.stub.display()
+                ));
+            }
+            collect_retained_reaper(pid, "stub", &mut self.collected)
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for RetainedStubReaper {
+        fn drop(&mut self) {
+            if self.collected {
+                return;
+            }
+            if let Err(error) = self.collect_if_armed() {
+                crate::workspace_manager::fixture::say(&format!(
+                    "retained stub reaper cleanup failed: {error}"
+                ));
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn collect_retained_reaper(
+        pid: libc::pid_t,
+        kind: &str,
+        collected: &mut bool,
+    ) -> Result<bool, String> {
+        if let Some(status) = poll_retained_mock_reaper(pid)
+            .map_err(|error| format!("inspect retained {kind} reaper {pid}: {error}"))?
+        {
+            forget_collected_reaper(pid, collected);
+            return Err(format!(
+                "retained {kind} reaper {pid} had already exited: {status}"
+            ));
+        }
+        // SAFETY: this helper is isolated and has no competing waiter. The caller selected
+        // this pid from the registry by its exact scope and program, after its runner
+        // dropped; waitpid just proved it is still this process's unreaped child, so its
+        // pid cannot be reused. SIGKILL cannot execute the reaper's parent-death cleanup
+        // or spawn children.
+        if unsafe { libc::kill(pid, libc::SIGKILL) } != 0 {
+            return Err(format!(
+                "kill retained {kind} reaper {pid}: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        let deadline = Instant::now() + ISOLATED_CHILD_COLLECTION_BOUND;
+        loop {
+            match poll_retained_mock_reaper(pid) {
+                Ok(Some(status)) => {
+                    forget_collected_reaper(pid, collected);
+                    if !libc::WIFSIGNALED(status) || libc::WTERMSIG(status) != libc::SIGKILL {
+                        return Err(format!(
+                            "retained {kind} reaper {pid} ended unexpectedly: {status}"
+                        ));
+                    }
+                    crate::workspace_manager::fixture::say(&format!(
+                        "collected retained {kind} reaper {pid}"
+                    ));
+                    return Ok(true);
+                }
+                Ok(None) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) => {
+                    return Err(format!("collect retained {kind} reaper {pid}: {error}"));
+                }
+            }
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "retained {kind} reaper {pid} was not collected within {ISOLATED_CHILD_COLLECTION_BOUND:?}"
+                ));
+            }
+            crate::workspace_manager::fixture::rest(Duration::from_millis(10));
+        }
+    }
+
+    #[cfg(unix)]
+    fn forget_collected_reaper(pid: libc::pid_t, collected: &mut bool) {
+        *collected = true;
+        super::termination::ARMED_CONTAINER_REAPERS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .retain(|(armed, _)| *armed != pid);
+    }
+
+    #[cfg(unix)]
+    fn poll_retained_mock_reaper(pid: libc::pid_t) -> std::io::Result<Option<libc::c_int>> {
+        let mut status = 0;
+        // SAFETY: the caller supplies the positive pid from its scoped reaper registry.
+        // The status is writable, and WNOHANG waits for neither a live nor a stopped child.
+        let waited = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+        if waited == pid {
+            Ok(Some(status))
+        } else if waited == 0 {
+            Ok(None)
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn assert_no_children_in_isolated_test() {
+        // SAFETY: this runs only in an isolated test helper with no competing waiter.
+        // It observes that helper's direct children only; no exit status is requested.
+        let waited = unsafe { libc::waitpid(-1, std::ptr::null_mut(), libc::WNOHANG) };
+        let error = (waited < 0).then(std::io::Error::last_os_error);
+        assert!(
+            waited == -1
+                && error.as_ref().and_then(std::io::Error::raw_os_error) == Some(libc::ECHILD),
+            "the isolated helper still owned a direct child: waitpid={waited}, error={error:?}"
+        );
+        crate::workspace_manager::fixture::say("isolated helper has no direct children (ECHILD)");
+    }
 
     #[cfg(unix)]
     pub(crate) struct Isolated {
@@ -10014,6 +10759,145 @@ pub(crate) mod test_support {
             status,
             stdout: std::fs::read_to_string(&stdout_path).unwrap_or_default(),
             stderr: std::fs::read_to_string(&stderr_path).unwrap_or_default(),
+        }
+    }
+
+    /// The pids of the container reapers this process has armed and not yet
+    /// disarmed (`arm_container_reaper`'s test-build record), for a harness
+    /// that must know which of a coordinator's processes is its
+    /// container-label backstop. Linux only, as its callers are.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn armed_container_reaper_pids() -> Vec<libc::pid_t> {
+        super::termination::ARMED_CONTAINER_REAPERS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .map(|(pid, _)| *pid)
+            .collect()
+    }
+
+    /// A child of this test binary running one ignored test, in a process
+    /// group of its own, started without waiting for it: for a harness that
+    /// must end it mid-run -- the coordinator it kills at an acknowledged
+    /// boundary -- and then collect it. Whatever that child supervised leads
+    /// groups of its own, so the kill reaches the child alone. A child still
+    /// running when this is dropped (a failing assertion, a panic) is killed
+    /// the same way and collected within [`ISOLATED_CHILD_COLLECTION_BOUND`].
+    ///
+    /// **This handle is its child's only waiter**, and fails closed when it
+    /// cannot establish that the child is still its own: the group is
+    /// signalled only after this handle's own `try_wait` has answered that its
+    /// child is alive and unreaped -- so neither the child's pid nor the group
+    /// id it leads can name another process -- and any wait error (`ECHILD`
+    /// when something else collected the child, or anything unknown) sends
+    /// nothing, says `running test child collection: not established` on
+    /// stderr, and answers `None`, which a harness reports as no collection.
+    /// Linux only, as its callers are.
+    #[cfg(target_os = "linux")]
+    pub(crate) struct RunningTestChild {
+        child: Option<std::process::Child>,
+    }
+
+    #[cfg(target_os = "linux")]
+    impl RunningTestChild {
+        pub(crate) fn start(
+            test: &str,
+            vars: &[(&str, &std::ffi::OsStr)],
+            stdout: &std::path::Path,
+            stderr: &std::path::Path,
+        ) -> Self {
+            use std::os::unix::process::CommandExt;
+
+            let mut command = Command::new(std::env::current_exe().expect("the test executable"));
+            command.args([
+                test,
+                "--exact",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ]);
+            for (name, value) in vars {
+                command.env(name, value);
+            }
+            let child = command
+                .process_group(0)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::fs::File::create(stdout).expect("the child's stdout file"))
+                .stderr(std::fs::File::create(stderr).expect("the child's stderr file"))
+                .spawn()
+                .unwrap_or_else(|error| panic!("start {test}: {error}"));
+            Self { child: Some(child) }
+        }
+
+        /// The child's pid, while this owns it.
+        pub(crate) fn pid(&self) -> Option<libc::pid_t> {
+            self.child
+                .as_ref()
+                .and_then(|child| libc::pid_t::try_from(child.id()).ok())
+        }
+
+        /// The child's exit status, once it has exited and been collected.
+        pub(crate) fn exited(&mut self) -> Option<std::process::ExitStatus> {
+            self.child
+                .as_mut()
+                .and_then(|child| child.try_wait().ok().flatten())
+        }
+
+        /// `SIGKILL` the child's process group and collect the child within
+        /// [`ISOLATED_CHILD_COLLECTION_BOUND`]; `None` if it was not collected.
+        pub(crate) fn kill_and_collect(mut self) -> Option<std::process::ExitStatus> {
+            self.end()
+        }
+
+        fn end(&mut self) -> Option<std::process::ExitStatus> {
+            let mut child = self.child.take()?;
+            let pid = child.id();
+            let not_established = |why: &str| {
+                crate::workspace_manager::fixture::say(&format!(
+                    "running test child collection: not established for {pid}: {why}"
+                ));
+            };
+            match child.try_wait() {
+                Ok(Some(status)) => return Some(status),
+                Ok(None) => {}
+                Err(error) => {
+                    not_established(&format!("its own wait failed before any signal: {error}"));
+                    return None;
+                }
+            }
+            let Ok(group) = libc::pid_t::try_from(pid) else {
+                not_established("its pid is not a process group id");
+                return None;
+            };
+            // SAFETY: `group` is this handle's own child, which its own
+            // `try_wait` has just answered is alive and unreaped -- so neither
+            // its pid nor the group id it leads (`process_group(0)`) can name
+            // another process -- and nothing else waits for it.
+            let _ = unsafe { libc::kill(-group, libc::SIGKILL) };
+            let deadline = Instant::now() + ISOLATED_CHILD_COLLECTION_BOUND;
+            loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => return Some(status),
+                    Ok(None) if Instant::now() < deadline => {
+                        crate::workspace_manager::fixture::rest(Duration::from_millis(10));
+                    }
+                    Ok(None) => {
+                        not_established("still running at the collection bound");
+                        return None;
+                    }
+                    Err(error) => {
+                        not_established(&format!("its own wait failed after the signal: {error}"));
+                        return None;
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    impl Drop for RunningTestChild {
+        fn drop(&mut self) {
+            let _ = self.end();
         }
     }
 

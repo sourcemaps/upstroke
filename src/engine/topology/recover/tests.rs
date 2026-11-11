@@ -133,6 +133,8 @@ struct Damage {
     /// Every task's chain is the one Small rung: a merge repair's Mid floor
     /// then intersects it empty, and the repair is admitted `HumanBinding`.
     small_only: bool,
+    /// The mounts the container runner records, in both records.
+    recorded_mounts: Vec<crate::topology::events::RecordedMount>,
 }
 
 impl Fixture {
@@ -195,11 +197,12 @@ impl Fixture {
             .locator
             .clone()
             .unwrap_or_else(|| private_dir.display().to_string());
-        let runner = if damage.host_runner {
+        let mut runner = if damage.host_runner {
             host_runner()
         } else {
             container_runner()
         };
+        runner.mounts.clone_from(&damage.recorded_mounts);
         let started = run_started(&plan, &recorded_locator, runner, &base_sha, &damage);
 
         let marker = CreatingMarker {
@@ -594,6 +597,7 @@ fn container_runner() -> RunnerPolicy {
                 .into_iter()
                 .collect(),
         ),
+        mounts: Vec::new(),
     }
 }
 
@@ -603,6 +607,7 @@ fn host_runner() -> RunnerPolicy {
         policy: RunnerContract::HostV1,
         image: None,
         credential_volumes: None,
+        mounts: Vec::new(),
     }
 }
 
@@ -694,6 +699,11 @@ fn run_started(
             ]
         } else {
             vec![AGENT.to_owned()]
+        },
+        shell: if damage.host_gate.is_some() {
+            ShellKind::Sh
+        } else {
+            ShellKind::Bash
         },
         branch: "upstroke/run".to_owned(),
         integration_ref: GitRef(format!("refs/upstroke/runs/{RUN_ID}/integration")),
@@ -3989,6 +3999,8 @@ impl crate::runner::contract::tests::InlineRunner for ProbeContainerRunner<'_> {
                     .collect(),
                 workdir: Some("/".to_owned()),
                 read_only_root: true,
+                user: None,
+                open_stdin: false,
             },
             view: GitViewRequest {
                 path: crate::runner::container::exec::view_dir(&self.private_root, &name),
@@ -4463,6 +4475,7 @@ fn kill_during_recovery_repeats_recovery() {
             .chain(observation_export_env())
             .collect(),
             stdin: Vec::new(),
+            settings_file: None,
         },
         workspace: fixture.repo_root.clone(),
         role: crate::runner::ExecutionRole::Gate,
@@ -9332,6 +9345,9 @@ fn production_container_runner(
             repo_key: fixture.repo_key.as_str().to_owned(),
         },
         &fixture.repo_root,
+        crate::runner::container::resolve::fixtures::plain_checkout(
+            &fixture.repo_root.join(".git"),
+        ),
         crate::runner::container::env::ContainerEnvironment::from_image(vec![
             ("PATH".to_owned(), "/usr/bin:/bin".to_owned()),
             ("HOME".to_owned(), "/root".to_owned()),
@@ -20824,6 +20840,7 @@ fn kill_inside_closure_recovers() {
                 .chain(observation_export_env())
                 .collect(),
                 stdin: Vec::new(),
+                settings_file: None,
             },
             workspace: fixture.repo_root.clone(),
             role: crate::runner::ExecutionRole::Gate,
@@ -25918,4 +25935,633 @@ fn a_resume_over_a_torn_open_generation_recreates_its_worktree() {
                 .len()
                 > 0
     );
+}
+
+fn f_prune_entry_of(fixture: &Fixture, checkout: &Path) {
+    use crate::workspace_manager::fixture::{git, remove_file, write_file};
+    let pointer = checkout.join(".git");
+    let bytes = std::fs::read(&pointer).expect("the checkout's .git");
+    remove_file(&pointer);
+    git(&fixture.repo_root, &["worktree", "prune", "--expire=now"]);
+    write_file(&pointer, &bytes);
+}
+
+fn f_keep_the_store(fixture: &Fixture) {
+    let keeper = fixture.root.join("store-keeper");
+    crate::workspace_manager::fixture::git(
+        &fixture.repo_root,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            keeper.to_str().expect("a fixture path is UTF-8"),
+            fixture.base_sha.as_str(),
+        ],
+    );
+}
+
+fn f_files_under(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    let mut files = BTreeMap::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory).expect("list a kept directory") {
+            let path = entry.expect("an entry").path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                let bytes = std::fs::read(&path).expect("a kept file");
+                files.insert(
+                    path.strip_prefix(root)
+                        .expect("under the root")
+                        .to_path_buf(),
+                    bytes,
+                );
+            }
+        }
+    }
+    files
+}
+
+fn f_remove_tree(root: &Path) {
+    use crate::workspace_manager::fixture::{remove_dir, remove_file};
+    let mut directories = vec![root.to_path_buf()];
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory).expect("list a directory to remove") {
+            let path = entry.expect("an entry").path();
+            if path.is_dir() {
+                directories.push(path.clone());
+                pending.push(path);
+            } else {
+                remove_file(&path);
+            }
+        }
+    }
+    for directory in directories.iter().rev() {
+        remove_dir(directory);
+    }
+}
+
+fn f_kept_refusal(
+    result: Result<(Recovered, RunHandle), UpstrokeError>,
+    checkout: &Path,
+    found: &str,
+) -> String {
+    match result {
+        Err(UpstrokeError::RegistryRefused { message }) => {
+            assert!(
+                message.contains("kept for the operator")
+                    && message.contains("recovery's reclaim")
+                    && message.contains(&checkout.display().to_string())
+                    && message.contains(found),
+                "{message}"
+            );
+            message
+        }
+        Err(other) => panic!("the guard's registry refusal, not {other:?}"),
+        Ok(_) => panic!("the resume refuses rather than reclaiming the kept slot"),
+    }
+}
+
+fn f_has_intent(fixture: &Fixture, slot: &crate::workspace_manager::Slot) -> bool {
+    fixture.manager().intents().expect("intents").contains(slot)
+}
+
+fn f_resume(fixture: &Fixture) -> Result<(Recovered, RunHandle), UpstrokeError> {
+    resume_as(
+        fixture,
+        RESUMER,
+        &runtime_holding_the_record(),
+        &mut HarnessTopologyHooks::new(harness()),
+    )
+}
+
+#[test]
+fn t_pres_1_an_in_flight_attempts_pruned_populated_slot_is_kept_and_the_resume_refuses() {
+    let fixture = Fixture::build(
+        "pres-1-in-flight",
+        Damage {
+            open_generation: true,
+            extra: vec![attempt_started(1)],
+            ..Damage::default()
+        },
+    );
+    let worktree = plant_task_worktree(&fixture, ALPHA, fixture.base_sha.as_str());
+    crate::workspace_manager::fixture::write_file(
+        &worktree.join("worker.txt"),
+        b"the attempt's unpinned output\n",
+    );
+    f_keep_the_store(&fixture);
+    f_prune_entry_of(&fixture, &worktree);
+    assert!(fixture.git_dir.join("worktrees").is_dir());
+    let slot = crate::engine::topology::dispatch::task_slot(ALPHA, GEN);
+    let before = f_files_under(&worktree);
+    let planted = durable_kinds(&fixture).len();
+    f_kept_refusal(f_resume(&fixture), &worktree, "gitdir");
+    assert_eq!(f_files_under(&worktree), before);
+    assert!(f_has_intent(&fixture, &slot));
+    assert_eq!(kinds_after(&fixture, planted), vec!["attempt_interrupted"]);
+
+    f_remove_tree(&worktree);
+    let observed = harness();
+    let mut hooks = HarnessTopologyHooks::new(Arc::clone(&observed));
+    let (_, handle) = resume_as(&fixture, RESUMER, &runtime_holding_the_record(), &mut hooks)
+        .expect("once the operator removed the directory the next resume reclaims the slot");
+    assert!(!f_has_intent(&fixture, &slot));
+    let runner = RecordingRunner::editing();
+    let driven = drive_handle(
+        &fixture,
+        handle,
+        &DriveSeams::default(),
+        1,
+        &runner,
+        &mut hooks,
+    );
+    drop(hooks);
+    assert_eq!(
+        repair_dispatches(&driven.log, ALPHA)
+            .iter()
+            .map(|dispatched| dispatched.generation)
+            .collect::<Vec<_>>(),
+        vec![GEN, GenerationId(1)]
+    );
+}
+
+#[test]
+fn t_pres_2_a_retained_generations_pruned_populated_slot_is_closed_kept_and_the_resume_refuses() {
+    let fixture = Fixture::build(
+        "pres-2-retained",
+        Damage {
+            extra: vec![
+                dispatched(),
+                attempt_started(1),
+                attempt_finished(
+                    1,
+                    AttemptSettlement::Retained {
+                        retained_session: SessionId("session-of-the-dead-incarnation".to_owned()),
+                        retained_incarnation: Epoch(0),
+                    },
+                ),
+            ],
+            ..Damage::default()
+        },
+    );
+    let worktree = plant_task_worktree(&fixture, ALPHA, fixture.base_sha.as_str());
+    crate::workspace_manager::fixture::write_file(
+        &worktree.join("worker.txt"),
+        b"the retained session's unpinned output\n",
+    );
+    f_keep_the_store(&fixture);
+    f_prune_entry_of(&fixture, &worktree);
+    let slot = crate::engine::topology::dispatch::task_slot(ALPHA, GEN);
+    let before = f_files_under(&worktree);
+    let planted = durable_kinds(&fixture).len();
+    f_kept_refusal(f_resume(&fixture), &worktree, "gitdir");
+    assert_eq!(f_files_under(&worktree), before);
+    assert!(f_has_intent(&fixture, &slot));
+    assert_eq!(kinds_after(&fixture, planted), vec!["generation_closed"]);
+    assert!(matches!(
+        replayed(&fixture)
+            .task(ALPHA)
+            .and_then(|task| task.generations.first())
+            .map(|generation| generation.class.clone()),
+        Some(crate::topology::fold::GenerationClass::Closed)
+    ));
+}
+
+#[test]
+fn t_pres_3_one_name_removed_from_a_populated_slots_entry_keeps_the_slot() {
+    for name in ["HEAD", "commondir", "gitdir"] {
+        let fixture = Fixture::build(
+            &format!("pres-3-{name}"),
+            Damage {
+                open_generation: true,
+                extra: vec![attempt_started(1)],
+                ..Damage::default()
+            },
+        );
+        let worktree = plant_task_worktree(&fixture, ALPHA, fixture.base_sha.as_str());
+        crate::workspace_manager::fixture::write_file(
+            &worktree.join("worker.txt"),
+            b"the attempt's unpinned output\n",
+        );
+        let entry =
+            crate::workspace_manager::fixture::registration_of(&fixture.manager(), &worktree);
+        crate::workspace_manager::fixture::remove_file(&entry.join(name));
+        let slot = crate::engine::topology::dispatch::task_slot(ALPHA, GEN);
+        let before = f_files_under(&worktree);
+        f_kept_refusal(f_resume(&fixture), &worktree, name);
+        assert_eq!(f_files_under(&worktree), before, "{name}");
+        assert!(f_has_intent(&fixture, &slot), "{name}");
+    }
+}
+
+#[test]
+fn t_pres_4_a_whole_populated_slot_is_reclaimed_as_before() {
+    let fixture = Fixture::build(
+        "pres-4-whole",
+        Damage {
+            open_generation: true,
+            extra: vec![attempt_started(1)],
+            ..Damage::default()
+        },
+    );
+    let worktree = plant_task_worktree(&fixture, ALPHA, fixture.base_sha.as_str());
+    crate::workspace_manager::fixture::write_file(
+        &worktree.join("worker.txt"),
+        b"the attempt's unpinned output\n",
+    );
+    let slot = crate::engine::topology::dispatch::task_slot(ALPHA, GEN);
+    let (recovered, handle) = f_resume(&fixture).expect("a whole registration is reclaimed");
+    drop(handle);
+    assert_eq!(recovered.interrupted, 1);
+    assert!(!worktree.exists() && !f_has_intent(&fixture, &slot));
+}
+
+#[test]
+fn t_pres_5_an_empty_slot_whose_registration_is_gone_is_reclaimed() {
+    let fixture = Fixture::build(
+        "pres-5-empty",
+        Damage {
+            open_generation: true,
+            extra: vec![attempt_started(1)],
+            ..Damage::default()
+        },
+    );
+    let worktree = plant_task_worktree(&fixture, ALPHA, fixture.base_sha.as_str());
+    f_prune_entry_of(&fixture, &worktree);
+    let held: Vec<PathBuf> = std::fs::read_dir(&worktree)
+        .expect("the slot")
+        .map(|entry| entry.expect("an entry").path())
+        .collect();
+    for path in held {
+        assert!(!path.is_dir(), "the base checkout holds only files");
+        crate::workspace_manager::fixture::remove_file(&path);
+    }
+    let slot = crate::engine::topology::dispatch::task_slot(ALPHA, GEN);
+    let (_, handle) = f_resume(&fixture).expect("an empty slot is reclaimed");
+    drop(handle);
+    assert!(!worktree.exists() && !f_has_intent(&fixture, &slot));
+}
+
+fn f_earlier_manager(fixture: &Fixture) -> crate::workspace_manager::WorkspaceManager {
+    crate::workspace_manager::WorkspaceManager::derive(
+        &fixture.repo_root,
+        &fixture.private_root,
+        &fixture.started.run_id,
+        "01KZT0EARLIER0INCARNATION0",
+    )
+    .expect("a manager of an earlier incarnation")
+}
+
+fn f_plant_earlier_instance(
+    fixture: &Fixture,
+) -> (crate::workspace_manager::WorkspaceManager, PathBuf) {
+    let earlier = f_earlier_manager(fixture);
+    let slot = crate::engine::topology::dispatch::task_slot(ALPHA, GEN);
+    earlier
+        .write_intent(&mut crate::workspace_manager::NoHooks, &slot)
+        .expect("the earlier incarnation's intent");
+    let worktree = earlier
+        .add_worktree(
+            &mut crate::workspace_manager::NoHooks,
+            &slot,
+            fixture.base_sha.as_str(),
+        )
+        .expect("the earlier incarnation's instance");
+    assert_ne!(worktree, fixture.manager().slot_path(&slot));
+    crate::workspace_manager::fixture::write_file(
+        &worktree.join("worker.txt"),
+        b"the earlier incarnation's unpinned output\n",
+    );
+    (earlier, worktree)
+}
+
+#[test]
+fn t_pres_6_an_earlier_incarnations_pruned_populated_instance_is_kept() {
+    let fixture = Fixture::build(
+        "pres-6-earlier-pruned",
+        Damage {
+            open_generation: true,
+            extra: vec![attempt_started(1)],
+            ..Damage::default()
+        },
+    );
+    let (_, worktree) = f_plant_earlier_instance(&fixture);
+    f_keep_the_store(&fixture);
+    f_prune_entry_of(&fixture, &worktree);
+    let before = f_files_under(&worktree);
+    f_kept_refusal(f_resume(&fixture), &worktree, "gitdir");
+    assert_eq!(f_files_under(&worktree), before);
+}
+
+#[test]
+fn t_pres_6_an_earlier_incarnations_whole_populated_instance_is_removed() {
+    let fixture = Fixture::build(
+        "pres-6-earlier-whole",
+        Damage {
+            open_generation: true,
+            extra: vec![attempt_started(1)],
+            ..Damage::default()
+        },
+    );
+    let (_, worktree) = f_plant_earlier_instance(&fixture);
+    let slot = crate::engine::topology::dispatch::task_slot(ALPHA, GEN);
+    let (_, handle) = f_resume(&fixture).expect("a whole earlier instance is reclaimed");
+    drop(handle);
+    assert!(!worktree.exists() && !f_has_intent(&fixture, &slot));
+}
+
+#[test]
+fn t_pres_7_an_earlier_instance_reached_only_through_its_directory_is_kept() {
+    let fixture = Fixture::build(
+        "pres-7-directory-only",
+        Damage {
+            open_generation: true,
+            extra: vec![attempt_started(1)],
+            ..Damage::default()
+        },
+    );
+    let (earlier, worktree) = f_plant_earlier_instance(&fixture);
+    let slot = crate::engine::topology::dispatch::task_slot(ALPHA, GEN);
+    crate::workspace_manager::fixture::remove_file(&earlier.intent_path(&slot));
+    assert!(
+        fixture
+            .manager()
+            .intents()
+            .expect("intents")
+            .contains(&slot)
+    );
+    f_keep_the_store(&fixture);
+    f_prune_entry_of(&fixture, &worktree);
+    let before = f_files_under(&worktree);
+    f_kept_refusal(f_resume(&fixture), &worktree, "gitdir");
+    assert_eq!(f_files_under(&worktree), before);
+}
+
+#[test]
+fn t_pres_8_a_promoted_candidates_pruned_populated_slot_is_kept_and_the_resume_refuses() {
+    let fixture = Fixture::build("pres-8-promoted", Damage::default());
+    plant_queued_candidate(&fixture);
+    let worktree = plant_task_worktree(&fixture, ALPHA, fixture.base_sha.as_str());
+    f_keep_the_store(&fixture);
+    f_prune_entry_of(&fixture, &worktree);
+    assert!(matches!(
+        replayed(&fixture)
+            .task(ALPHA)
+            .and_then(|task| task.generations.first())
+            .map(|generation| generation.class.clone()),
+        Some(crate::topology::fold::GenerationClass::Closed)
+    ));
+    let slot = crate::engine::topology::dispatch::task_slot(ALPHA, GEN);
+    let before = f_files_under(&worktree);
+    f_kept_refusal(f_resume(&fixture), &worktree, "gitdir");
+    assert_eq!(f_files_under(&worktree), before);
+    assert!(f_has_intent(&fixture, &slot));
+}
+
+#[test]
+fn t_pres_9_a_registration_repaired_by_the_operator_is_reclaimed_with_what_it_holds() {
+    let fixture = Fixture::build(
+        "pres-9-repaired",
+        Damage {
+            open_generation: true,
+            extra: vec![attempt_started(1)],
+            ..Damage::default()
+        },
+    );
+    let worktree = plant_task_worktree(&fixture, ALPHA, fixture.base_sha.as_str());
+    crate::workspace_manager::fixture::write_file(
+        &worktree.join("worker.txt"),
+        b"the attempt's unpinned output\n",
+    );
+    let entry = crate::workspace_manager::fixture::registration_of(&fixture.manager(), &worktree);
+    crate::workspace_manager::fixture::remove_file(&entry.join("gitdir"));
+    let slot = crate::engine::topology::dispatch::task_slot(ALPHA, GEN);
+    f_kept_refusal(f_resume(&fixture), &worktree, "gitdir");
+    assert!(worktree.join("worker.txt").exists() && f_has_intent(&fixture, &slot));
+
+    let repaired = crate::workspace_manager::fixture::git_out(
+        &fixture.repo_root,
+        &[
+            "worktree",
+            "repair",
+            worktree.to_str().expect("a fixture path is UTF-8"),
+        ],
+    );
+    assert!(repaired.status.success(), "{repaired:?}");
+    assert!(
+        entry.join("gitdir").is_file(),
+        "the repair wrote gitdir again"
+    );
+    let (_, handle) = f_resume(&fixture).expect("a whole registration is reclaimed");
+    drop(handle);
+    assert!(!worktree.exists() && !f_has_intent(&fixture, &slot));
+}
+
+/// A mount source recorded as a fresh run records one: resolved and identified by the
+/// production `resolve_mounts`, in a world of its own outside the fixture's repository and
+/// private root.
+struct MountSource {
+    _tree: crate::rundir::scratch_tree::ScratchTree,
+    root: PathBuf,
+    source: PathBuf,
+    recorded: Vec<crate::topology::events::RecordedMount>,
+}
+
+fn mount_source(tag: &str) -> MountSource {
+    use crate::runner::container::resolve::{MountContext, resolve_mounts};
+
+    let tree = fixture_tree(tag);
+    let root = std::fs::canonicalize(tree.path()).expect("the mount world canonicalizes");
+    let repo = root.join("repo");
+    mkdir(&repo);
+    mkdir(&repo.join(".git"));
+    let private = root.join("private");
+    mkdir(&private);
+    let source = root.join("shared");
+    mkdir(&source);
+    let context = MountContext::bind_with(
+        &repo,
+        crate::runner::container::resolve::fixtures::plain_checkout(&repo.join(".git")),
+        &private,
+        &[],
+    )
+    .expect("the mount world binds a mount context");
+    let recorded = resolve_mounts(
+        &[crate::config::RunnerMount {
+            source: source.clone(),
+            target: "/data".to_owned(),
+            read_only: true,
+        }],
+        &context,
+    )
+    .expect("the source is recorded as a fresh run records it");
+    MountSource {
+        _tree: tree,
+        root,
+        source,
+        recorded,
+    }
+}
+
+/// J5, `PR12-MOVED-MOUNT-REFUSED-AFTER-RECOVERY-EFFECTS`. DESIGN §26 refuses a missing or
+/// rebound recorded mount source before any recovery. At the reviewed head the refusal came
+/// from the runner's rebuild, after the stable-prefix barrier had truncated the log's torn
+/// tail and the census had reclaimed the stale marker (1924 -> 1910 bytes, `RemoveMarker`).
+/// Each case leaves a torn tail and the reclaimable marker in place, and the refusal leaves
+/// both exactly as they were.
+fn a_moved_recorded_mount_refuses_before_recovery(
+    tag: &str,
+    moved: fn(&MountSource),
+    expected: &str,
+) {
+    let mounted = mount_source(&format!("{tag}-source"));
+    let fixture = Fixture::build(
+        tag,
+        Damage {
+            recorded_mounts: mounted.recorded.clone(),
+            ..Damage::default()
+        },
+    );
+    moved(&mounted);
+    let mut torn = fixture.log_bytes();
+    torn.extend_from_slice(b"{\"event\":\"torn");
+    crate::workspace_manager::fixture::write_file(&fixture.log(), &torn);
+    let marker = fixture.public().join(rundir::MARKER);
+    let marker_before = std::fs::read(&marker).expect("the reclaimable marker is in place");
+    let harness = harness();
+    let runtime = runtime_holding_the_record();
+    let certifies = AlwaysCertifies;
+    let given = Given::healthy(&fixture, &runtime, &certifies);
+
+    let (outcome, _) = resume(&fixture, &harness, &given);
+
+    let refused = message(&outcome.expect_err("a moved recorded mount refuses the resume"));
+    assert!(
+        refused.contains("cannot be re-established") && refused.contains(expected),
+        "the refusal names the moved source: {refused}"
+    );
+    assert_eq!(
+        fixture.log_bytes(),
+        torn,
+        "the log, its torn tail included, is as it was"
+    );
+    assert_eq!(
+        std::fs::read(&marker).ok(),
+        Some(marker_before),
+        "the reclaimable marker is still there"
+    );
+    assert!(
+        first_observation(&harness, EffectSiteId::Event(EventSite::OpenLog)).is_none(),
+        "the stable-prefix barrier never opened the log"
+    );
+    assert!(
+        first_observation(&harness, EffectSiteId::RunDir(RunDirSite::RemoveMarker)).is_none(),
+        "the census never reclaimed the marker"
+    );
+}
+
+#[test]
+fn a_missing_recorded_mount_source_refuses_before_any_recovery() {
+    a_moved_recorded_mount_refuses_before_recovery(
+        "mount-gone-before-recovery",
+        |mounted| crate::workspace_manager::fixture::remove_dir(&mounted.source),
+        "its source is gone",
+    );
+}
+
+#[test]
+fn a_rebound_recorded_mount_source_refuses_before_any_recovery() {
+    a_moved_recorded_mount_refuses_before_recovery(
+        "mount-rebound-before-recovery",
+        |mounted| {
+            let elsewhere = mounted.root.join("elsewhere");
+            mkdir(&elsewhere);
+            crate::workspace_manager::fixture::remove_dir(&mounted.source);
+            crate::workspace_manager::fixture::link_directory(&elsewhere, &mounted.source);
+        },
+        "rebound it",
+    );
+}
+
+#[test]
+fn a_recorded_target_a_fresh_run_refuses_refuses_the_resume_before_any_recovery_or_runtime_question()
+ {
+    use crate::runner::container::resolve::fixtures::{
+        REFUSED_RECORDED_TARGETS, with_recorded_targets,
+    };
+
+    for (index, (targets, needle)) in REFUSED_RECORDED_TARGETS.iter().enumerate() {
+        let tag = format!("recorded-target-before-recovery-{index}");
+        let mounted = mount_source(&format!("{tag}-source"));
+        let planted = with_recorded_targets(
+            &RunnerPolicy {
+                mounts: mounted.recorded.clone(),
+                ..container_runner()
+            },
+            targets,
+        );
+        assert_eq!(
+            planted.completeness(),
+            Ok(()),
+            "{targets:?}: the record is self-consistent, so only the target rule can refuse it"
+        );
+        let fixture = Fixture::build(
+            &tag,
+            Damage {
+                recorded_mounts: planted.mounts,
+                ..Damage::default()
+            },
+        );
+        let mut torn = fixture.log_bytes();
+        torn.extend_from_slice(b"{\"event\":\"torn");
+        crate::workspace_manager::fixture::write_file(&fixture.log(), &torn);
+        let marker = fixture.public().join(rundir::MARKER);
+        let marker_before = std::fs::read(&marker).expect("the reclaimable marker is in place");
+        let harness = harness();
+        let trace = ContainerTrace::recording();
+        let runtime = FakeRuntime::new(trace.clone());
+        runtime.add_image(IMAGE_ID, Some("sha256:2222"));
+        runtime.tag(IMAGE_REF, IMAGE_ID);
+        runtime.add_volume(VOLUME);
+        let certifies = AlwaysCertifies;
+        let given = Given::healthy(&fixture, &runtime, &certifies);
+
+        let (outcome, _) = resume(&fixture, &harness, &given);
+
+        let refused = message(
+            &outcome.expect_err("a recorded target a fresh run refuses refuses the resume"),
+        );
+        assert!(
+            refused.contains("is refused")
+                && refused.contains(needle)
+                && refused.contains("A fresh run refuses that target"),
+            "{targets:?}: the refusal names the target rule: {refused}"
+        );
+        assert_eq!(
+            fixture.log_bytes(),
+            torn,
+            "{targets:?}: the log, its torn tail included, is as it was"
+        );
+        assert_eq!(
+            std::fs::read(&marker).ok(),
+            Some(marker_before),
+            "{targets:?}: the reclaimable marker is still there"
+        );
+        assert!(
+            first_observation(&harness, EffectSiteId::Event(EventSite::OpenLog)).is_none(),
+            "{targets:?}: the stable-prefix barrier never opened the log"
+        );
+        assert!(
+            first_observation(&harness, EffectSiteId::RunDir(RunDirSite::RemoveMarker)).is_none(),
+            "{targets:?}: the census never reclaimed the marker"
+        );
+        assert!(
+            trace.ops().is_empty(),
+            "{targets:?}: the runtime was asked before the record was refused: {:?}",
+            trace.rendered()
+        );
+    }
 }

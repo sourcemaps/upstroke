@@ -13,6 +13,7 @@ use crate::runner::{
     Cancellation, InvocationId, RunFuture, Runner, RunnerCall, RunnerError, RunnerRequest,
 };
 use crate::topology::events::RunnerPolicy;
+use crate::workspace_manager::ComposedCommonDir;
 
 use super::identity::{InvocationEnd, InvocationLedger, PreflightIdentities, SlotPair, is_slotted};
 use super::select::Standing;
@@ -249,6 +250,14 @@ pub(super) struct Registering<'a, R: ?Sized> {
     slots: Slots,
     carried: Option<&'a Carried>,
     completed: AtomicU32,
+    // What the inner runner composes for the `GIT_COMMON_DIR` of each request
+    // this boundary admitted, in admission order. `run` pushes one report per
+    // admitted request before it hands that request to the inner runner, and
+    // holds the lock for that push alone, never across the inner run. The
+    // owner reads the reports once, after the last run has returned, by
+    // consuming the boundary (`into_composed`). A poisoned lock keeps the
+    // reports pushed before the panic.
+    composed: Mutex<Vec<ComposedCommonDir>>,
 }
 
 impl<'a, R: ?Sized> Registering<'a, R> {
@@ -259,6 +268,7 @@ impl<'a, R: ?Sized> Registering<'a, R> {
             slots,
             carried: None,
             completed: AtomicU32::new(0),
+            composed: Mutex::new(Vec::new()),
         }
     }
 
@@ -270,12 +280,23 @@ impl<'a, R: ?Sized> Registering<'a, R> {
     pub(super) fn completed(&self) -> u32 {
         self.completed.load(Ordering::Relaxed)
     }
+
+    pub(super) fn into_composed(self) -> Vec<ComposedCommonDir> {
+        self.composed
+            .into_inner()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
 }
 
 impl<R: Registrar + ?Sized> Runner for Registering<'_, R> {
     fn run<'a>(&'a self, request: &'a RunnerRequest, call: RunnerCall<'a>) -> RunFuture<'a> {
         Box::pin(async move {
             self.admit(request)?;
+            let composed = self.inner.composed_common_dir(request);
+            self.composed
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(composed);
             let call = match self.carried {
                 Some(carried) => carried.rebuild(call),
                 None => call,
@@ -283,6 +304,10 @@ impl<R: Registrar + ?Sized> Runner for Registering<'_, R> {
             let outcome = self.inner.run(request, call).await;
             self.settle(request, outcome)
         })
+    }
+
+    fn composed_common_dir(&self, request: &RunnerRequest) -> ComposedCommonDir {
+        self.inner.composed_common_dir(request)
     }
 }
 

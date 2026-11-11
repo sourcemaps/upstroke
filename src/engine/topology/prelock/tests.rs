@@ -1,5 +1,6 @@
 //! Extended notes: `docs/internals/engine/topology/prelock/tests.md`
 
+use crate::runner::container::runtime::QuestionBound;
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
@@ -116,7 +117,7 @@ impl ContainerRuntime for Inventory {
         Ok(Vec::new())
     }
 
-    fn observe(&self, _name: &str) -> Result<Liveness, RuntimeError> {
+    fn observe(&self, _name: &str, _: QuestionBound<'_>) -> Result<Liveness, RuntimeError> {
         Ok(Liveness::Gone)
     }
 
@@ -125,6 +126,7 @@ impl ContainerRuntime for Inventory {
             exit_code: Some(0),
             stdout: Vec::new(),
             stderr: Vec::new(),
+            output_limited: false,
         })
     }
 
@@ -229,6 +231,7 @@ fn a_host_selection_resolves_host_v1_and_carries_its_digest() {
         runtime: None,
         private_root: root.path(),
         ids: &Ids,
+        mounts: &crate::runner::container::resolve::MountContext::unbound(),
     })
     .expect("the host runner resolves with nothing to inspect");
 
@@ -264,6 +267,7 @@ fn the_pre_lock_checks_leave_no_residue() {
         runtime: Some(&runtime),
         private_root: root.path(),
         ids: &Ids,
+        mounts: &crate::runner::container::resolve::MountContext::unbound(),
     })
     .expect("a reachable runtime holding the image and the volume resolves");
 
@@ -310,6 +314,7 @@ fn the_container_inspections_run_in_order_and_the_first_failure_ends_them() {
         runtime: Some(&runtime),
         private_root: root.path(),
         ids: &Ids,
+        mounts: &crate::runner::container::resolve::MountContext::unbound(),
     })
     .expect("resolves");
     assert_eq!(
@@ -328,6 +333,7 @@ fn the_container_inspections_run_in_order_and_the_first_failure_ends_them() {
         runtime: Some(&unreachable),
         private_root: root.path(),
         ids: &Ids,
+        mounts: &crate::runner::container::resolve::MountContext::unbound(),
     })
     .expect_err("an unreachable runtime refuses");
     assert!(
@@ -351,6 +357,7 @@ fn an_absent_credential_volume_refuses() {
         runtime: Some(&runtime),
         private_root: root.path(),
         ids: &Ids,
+        mounts: &crate::runner::container::resolve::MountContext::unbound(),
     })
     .expect_err("an absent volume refuses");
     assert!(
@@ -368,11 +375,70 @@ fn a_container_selection_without_a_runtime_refuses() {
         runtime: None,
         private_root: root.path(),
         ids: &Ids,
+        mounts: &crate::runner::container::resolve::MountContext::unbound(),
     })
     .expect_err("no runtime to inspect");
     assert!(
         refusal.to_string().contains(IMAGE_REFERENCE),
         "the refusal names the image it could not look for: {refusal}"
+    );
+}
+
+#[test]
+fn a_default_root_is_resolved_before_it_exists_and_authorized_only_once_it_does() {
+    let scratch = Scratch::new("default-root");
+    let root = scratch.path().join("not-yet");
+    let selection = container_selection(IMAGE_REFERENCE, &[("codex", "upstroke-codex")]);
+
+    let without_image = Inventory::reachable().with_volume("upstroke-codex");
+    let refusal = resolve_runner(&selection, Some(&without_image), &MountContext::unbound())
+        .expect_err("an image the runtime does not hold refuses");
+    assert!(
+        refusal.to_string().contains(IMAGE_REFERENCE),
+        "the refusal names the image: {refusal}"
+    );
+    let unreachable = Inventory::default();
+    resolve_runner(&selection, Some(&unreachable), &MountContext::unbound())
+        .expect_err("an unreachable runtime refuses");
+    assert_eq!(
+        unreachable.asked(),
+        vec!["probe".to_owned()],
+        "nothing past reachability was asked of an unreachable runtime"
+    );
+    resolve_runner(&selection, None, &MountContext::unbound()).expect_err("no runtime to inspect");
+    assert!(
+        !root.exists(),
+        "a refused resolution created the default root"
+    );
+
+    let ready = || {
+        Inventory::reachable()
+            .with_image(IMAGE_REFERENCE, IMAGE_ID, None)
+            .with_volume("upstroke-codex")
+    };
+    let runtime = ready();
+    let resolved = resolve_runner(&selection, Some(&runtime), &MountContext::unbound())
+        .expect("a serviceable selection resolves with no root at all");
+    assert_eq!(resolved.runner_policy().kind, RunnerKind::Container);
+    assert!(!root.exists(), "resolution created the default root");
+    resolved
+        .authorize(&root, &Ids)
+        .expect_err("a root that does not exist is not authorized");
+    assert!(!root.exists(), "authorization created the default root");
+
+    create_private_dir(&root, &mut NoHooks)
+        .expect("the root, created as production's include does");
+    let runtime = ready();
+    let checked = resolve_runner(&selection, Some(&runtime), &MountContext::unbound())
+        .expect("resolves")
+        .authorize(&root, &Ids)
+        .expect("an existing root is authorized");
+    assert_eq!(
+        checked.private_root(),
+        std::fs::canonicalize(&root)
+            .expect("the root canonicalizes")
+            .as_path(),
+        "the authorized root is the canonical one"
     );
 }
 
@@ -387,6 +453,7 @@ fn a_private_root_that_is_not_a_real_directory_refuses_before_any_inspection() {
         runtime: Some(&runtime),
         private_root: &absent,
         ids: &Ids,
+        mounts: &crate::runner::container::resolve::MountContext::unbound(),
     })
     .expect_err("an absent private root refuses");
     assert!(
@@ -415,6 +482,7 @@ fn the_authorized_private_root_is_canonical() {
         runtime: None,
         private_root: &indirect,
         ids: &Ids,
+        mounts: &crate::runner::container::resolve::MountContext::unbound(),
     })
     .expect("a root reachable through `.`/`..` is the same root");
     assert_eq!(
@@ -554,6 +622,7 @@ fn a_failed_reclamation_during_an_unwind_does_not_abort_the_process() {
             ],
             env: Vec::new(),
             stdin: Vec::new(),
+            settings_file: None,
         },
         workspace: workspace.path().to_path_buf(),
         role: ExecutionRole::Gate,
@@ -590,5 +659,94 @@ fn a_failed_reclamation_during_an_unwind_does_not_abort_the_process() {
         "the child's stderr carries no report of the root its guard could not reclaim while \
          unwinding, so a tree lost on a failing run would be lost in silence: {}",
         output.stderr
+    );
+}
+
+#[cfg(unix)]
+const RELATIVE_NAME: &str = "UPSTROKE_TEST_R5_PRE_LOCK_NAME";
+
+#[cfg(unix)]
+#[test]
+fn each_relative_repository_wide_name_refuses_the_pre_lock_checks_before_any_inspection() {
+    for name in [
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_SHALLOW_FILE",
+        "GIT_GRAFT_FILE",
+        "GIT_CONFIG",
+        "GIT_CONFIG_GLOBAL",
+        "GIT_CONFIG_SYSTEM",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    ] {
+        let ended = crate::agent::proc::test_support::run_test_isolated(
+            "engine::topology::prelock::tests::relative_name_pre_lock_child",
+            &[
+                (name, std::ffi::OsStr::new("../relative")),
+                (RELATIVE_NAME, std::ffi::OsStr::new(name)),
+            ],
+            std::time::Duration::from_secs(180),
+        );
+        assert!(
+            ended.status.is_some_and(|status| status.success())
+                && ended.stdout.contains("1 passed"),
+            "`{name}`: {ended}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "subprocess helper"]
+fn relative_name_pre_lock_child() {
+    let Some(name) = std::env::var_os(RELATIVE_NAME) else {
+        return;
+    };
+    let name = name.to_string_lossy().into_owned();
+    let root = Scratch::new("relative-name");
+    let before = names_under(root.path());
+    let selection = container_selection(IMAGE_REFERENCE, &[("codex", "upstroke-codex")]);
+    let runtime = Inventory::reachable()
+        .with_image(IMAGE_REFERENCE, IMAGE_ID, Some("sha256:manifest"))
+        .with_volume("upstroke-codex");
+    let refusal = check(&PreLock {
+        selection: &selection,
+        runtime: Some(&runtime),
+        private_root: root.path(),
+        ids: &Ids,
+        mounts: &crate::runner::container::resolve::MountContext::unbound(),
+    })
+    .expect_err("a relative repository-wide name refuses the pre-lock checks");
+    let message = refusal.to_string();
+    assert!(
+        message.contains(&format!("the inherited `{name}`"))
+            && message.contains(&format!("export `{name}` as an absolute path")),
+        "the refusal names the variable and says to export it as an absolute path: {message}"
+    );
+    assert!(
+        runtime.asked().is_empty(),
+        "nothing after the refusal ran: the runtime was asked {:?}",
+        runtime.asked()
+    );
+    assert_eq!(
+        names_under(root.path()),
+        before,
+        "the refused pre-lock checks made nothing"
+    );
+}
+
+#[test]
+fn a_runtime_that_reads_no_image_environment_refuses_rather_than_inventing_one() {
+    let runtime = Inventory::reachable().with_image(IMAGE_REFERENCE, IMAGE_ID, None);
+    let error = runtime
+        .image_environment(IMAGE_ID)
+        .expect_err("the provided method refuses");
+    assert!(
+        matches!(
+            &error,
+            RuntimeError::Failed {
+                operation: RuntimeOp::InspectImageById,
+                detail,
+            } if detail.contains(IMAGE_ID)
+        ),
+        "{error:?}"
     );
 }

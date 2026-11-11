@@ -64,6 +64,7 @@ thread_local! {
     static MARKER_READ_ATTEMPT_OBSERVER: RefCell<Option<AttemptObserver>> =
         const { RefCell::new(None) };
     static ACCESS_PLANT: RefCell<Option<AccessPlant>> = const { RefCell::new(None) };
+    static WRITE_ACT: RefCell<Option<(WriteMoment, WriteAct)>> = const { RefCell::new(None) };
 }
 
 /// A live observation of this thread's removal attempts, ended by dropping it.
@@ -474,17 +475,236 @@ pub(crate) fn refuse_git_dir_over_the_windows_budget(checkout: &Path) -> Result<
     refuse_git_dir_over_budget(checkout, crate::runner::host::GitdirRule::Windows)
 }
 
+/// One state of a checkout's worktree registration that closure 1's two
+/// readers are run over (the external-prune follow-up's T-C1-READERS): the
+/// checkout, and what the check must find there — `Ok` for a whole
+/// registration, or words the first failed condition's text holds.
+pub(crate) struct RegistrationConstruction {
+    pub(crate) label: &'static str,
+    pub(crate) checkout: PathBuf,
+    pub(crate) expected: Result<(), &'static str>,
+}
+
+/// What the manager's own reader, [`super::registration_whole`], finds of the
+/// registration of the checkout at `checkout` for a guarded child started with
+/// the `GIT_COMMON_DIR` `composed` reports: `Ok` when it is whole, or the first
+/// condition that failed. The topology twin's test compares it with its own
+/// reader on every construction.
+pub(crate) fn manager_registration_found(
+    checkout: &Path,
+    common_git_dir: &Path,
+    composed: &super::ComposedCommonDir,
+) -> Result<(), String> {
+    match super::registration_whole(checkout, common_git_dir, composed) {
+        Whole::Yes => Ok(()),
+        Whole::No(found) => Err(found),
+    }
+}
+
+/// `to`, spelt relative to the directory `from`, both canonicalized first:
+/// the form Git 2.48's `worktree.useRelativePaths` writes.
+fn relative_between(from: &Path, to: &Path) -> PathBuf {
+    let from = fs::canonicalize(from).expect("a fixture path resolves");
+    let to = fs::canonicalize(to).expect("a fixture path resolves");
+    let from: Vec<_> = from.components().collect();
+    let to: Vec<_> = to.components().collect();
+    let shared = from
+        .iter()
+        .zip(&to)
+        .take_while(|(left, right)| left == right)
+        .count();
+    let mut relative = PathBuf::new();
+    for _ in shared..from.len() {
+        relative.push("..");
+    }
+    for component in to.iter().skip(shared) {
+        relative.push(component.as_os_str());
+    }
+    relative
+}
+
+/// Every construction closure 1's readers are run over, each in a task slot of
+/// its own added to `fixture`'s repository at its head: a whole registration;
+/// each of the entry's four names removed, or the first three empty; the
+/// checkout's `.git` removed, made a directory, or not a pointer; an entry
+/// outside this repository's store; `commondir` naming another repository,
+/// one with a registration store of its own, so that a reader checking the
+/// record against the store that holds the entry compares two stores;
+/// `gitdir` naming another checkout; the relative pointers Git 2.48 writes;
+/// and, where the platform makes one without privilege, a link in place of
+/// `index`.
+pub(crate) fn registration_constructions(fixture: &Fixture) -> Vec<RegistrationConstruction> {
+    let manager = &fixture.manager;
+    // Every slot is added before any is damaged: Git's worktree list dies on
+    // some of the damaged entries, and an add lists the registry first.
+    let mut slots: Vec<(PathBuf, PathBuf)> = (1..=16)
+        .map(|generation| {
+            let slot = fixture.add_task(&mut NoHooks, "readers", generation);
+            let checkout = manager.slot_path(&slot);
+            let entry = registration_of(manager, &checkout);
+            (checkout, entry)
+        })
+        .collect();
+    let mut next = move || slots.remove(0);
+    let mut constructions = Vec::new();
+
+    let (whole, _) = next();
+    constructions.push(RegistrationConstruction {
+        label: "whole",
+        checkout: whole.clone(),
+        expected: Ok(()),
+    });
+    for name in ["HEAD", "commondir", "index", "gitdir"] {
+        let (checkout, entry) = next();
+        fs::remove_file(entry.join(name)).expect("remove one name of the entry");
+        constructions.push(RegistrationConstruction {
+            label: name,
+            checkout,
+            expected: Err("cannot be read"),
+        });
+    }
+    for name in ["HEAD", "commondir", "gitdir"] {
+        let (checkout, entry) = next();
+        fs::write(entry.join(name), []).expect("empty one name of the entry");
+        constructions.push(RegistrationConstruction {
+            label: name,
+            checkout,
+            expected: Err("is empty"),
+        });
+    }
+
+    let (checkout, _) = next();
+    fs::remove_file(checkout.join(".git")).expect("remove the checkout's .git");
+    constructions.push(RegistrationConstruction {
+        label: "the checkout's .git removed",
+        checkout,
+        expected: Err(".git cannot be read"),
+    });
+
+    let (checkout, _) = next();
+    fs::remove_file(checkout.join(".git")).expect("remove the checkout's .git");
+    fs::create_dir(checkout.join(".git")).expect("a directory in its place");
+    constructions.push(RegistrationConstruction {
+        label: "the checkout's .git a directory",
+        checkout,
+        expected: Err("is a directory, not a regular file"),
+    });
+
+    let (checkout, _) = next();
+    fs::write(checkout.join(".git"), "not a pointer\n").expect("a .git that names nothing");
+    constructions.push(RegistrationConstruction {
+        label: "the checkout's .git not a gitdir pointer",
+        checkout,
+        expected: Err("does not begin `gitdir:`"),
+    });
+
+    let (checkout, entry) = next();
+    let elsewhere = fixture.root.join("elsewhere").join("readers");
+    fs::create_dir_all(&elsewhere).expect("a directory outside the store");
+    for name in ["gitdir", "commondir", "HEAD", "index"] {
+        fs::copy(entry.join(name), elsewhere.join(name)).expect("copy the entry's names");
+    }
+    fs::write(
+        checkout.join(".git"),
+        format!("gitdir: {}\n", as_git_writes_it(&elsewhere)),
+    )
+    .expect("point the checkout outside the store");
+    constructions.push(RegistrationConstruction {
+        label: "an entry outside this repository's store",
+        checkout,
+        expected: Err("not an entry of this repository's registration store"),
+    });
+
+    let other = fixture.root.join("other-repository");
+    fs::create_dir_all(&other).expect("another repository's directory");
+    git(&other, &["init", "-q"]);
+    fs::create_dir_all(other.join(".git").join("worktrees"))
+        .expect("the other repository's registration store");
+    let (checkout, entry) = next();
+    fs::write(
+        entry.join("commondir"),
+        format!("{}\n", as_git_writes_it(&other.join(".git"))),
+    )
+    .expect("name another repository");
+    constructions.push(RegistrationConstruction {
+        label: "commondir naming another repository",
+        checkout,
+        expected: Err("not this repository's common git dir"),
+    });
+
+    let (checkout, entry) = next();
+    fs::write(
+        entry.join("gitdir"),
+        format!("{}\n", as_git_writes_it(&whole.join(".git"))),
+    )
+    .expect("name another checkout");
+    constructions.push(RegistrationConstruction {
+        label: "gitdir naming another checkout",
+        checkout,
+        expected: Err("not this checkout's"),
+    });
+
+    let (checkout, entry) = next();
+    let to_entry = relative_between(&checkout, &entry);
+    let to_checkout = relative_between(&entry, &checkout.join(".git"));
+    fs::write(
+        checkout.join(".git"),
+        format!("gitdir: {}\n", as_git_writes_it(&to_entry)),
+    )
+    .expect("a relative pointer to the entry");
+    fs::write(
+        entry.join("gitdir"),
+        format!("{}\n", as_git_writes_it(&to_checkout)),
+    )
+    .expect("a relative pointer back to the checkout");
+    constructions.push(RegistrationConstruction {
+        label: "relative pointers",
+        checkout,
+        expected: Ok(()),
+    });
+
+    #[cfg(unix)]
+    {
+        let (checkout, entry) = next();
+        let index = entry.join("index");
+        let real = entry.join("index.real");
+        fs::rename(&index, &real).expect("move the index aside");
+        std::os::unix::fs::symlink(&real, &index).expect("a link in place of index");
+        constructions.push(RegistrationConstruction {
+            label: "a link in place of index",
+            checkout,
+            expected: Err("is a symbolic link, not a regular file"),
+        });
+    }
+    constructions
+}
+
 /// A real repository, a real private root, and a manager over both.
 /// The fixture's run id: a canonical ULID, as `derive` requires
 /// (`DESIGN.md` §15, "run-id = ULID"), spelt to be recognisable in a path.
 pub(crate) const RUN_ID: &str = "01KZSWEEP00000000000000001";
 
+/// Where a fixture's managed base sits below its root unless a layout says
+/// otherwise: `<root>/repo`, beside the private root `<root>/private`.
+const BASE: &str = "repo";
+
+/// Where the managed base sits in C5's layout, the proposal's "C5 equal
+/// depth" (PROP:2129): six directories below the root, as deep as every work
+/// tree the manager makes there, at
+/// `<root>/private/workspaces/<repo-key>/<run-id>/<tasks|merge|snapshots>/<component>`.
+/// One relative `GIT_COMMON_DIR` then names the same directory from the base
+/// and from each work tree, which Git's own checkout child of `git worktree
+/// add` needs before Git 2.55, since it reads the value from the new work
+/// tree. A test that uses it derives that relationship from the actual paths
+/// and asserts it, so a change to either depth fails there first.
+pub(crate) const EQUAL_DEPTH_BASE: &str = "checkouts/user/x/y/z/repo";
+
 pub(crate) struct Fixture {
-    /// The guard over the root [`Fixture::with_object_format`] acquired,
-    /// kept for the fixture's whole life so the tree is reclaimed when it
-    /// drops -- on a panicking assertion as much as on a normal return.
-    /// `None` for [`Fixture::adopt`], whose root is a dead child's and is
-    /// bound by no token of this process's.
+    /// The guard over the root [`Fixture::with_layout`] acquired, kept for
+    /// the fixture's whole life so the tree is reclaimed when it drops -- on
+    /// a panicking assertion as much as on a normal return. `None` for
+    /// [`Fixture::adopt_based`], whose root is a dead child's and is bound by
+    /// no token of this process's.
     _tree: Option<ScratchTree>,
     pub(crate) root: PathBuf,
     pub(crate) base: PathBuf,
@@ -510,9 +730,16 @@ impl Fixture {
 
     /// A repository of the given object format, `sha1` or `sha256`.
     pub(crate) fn with_object_format(tag: &str, object_format: &str) -> Self {
+        Self::with_layout(tag, object_format, Path::new(BASE))
+    }
+
+    /// [`Self::with_object_format`] with the managed base at `below` the root
+    /// rather than at `<root>/repo`. The private root stays `<root>/private`,
+    /// and every other step, the scratch tree's guard included, is the same.
+    fn with_layout(tag: &str, object_format: &str, below: &Path) -> Self {
         let tree = scratch(tag);
         let root = tree.path().to_path_buf();
-        let base = root.join("repo");
+        let base = root.join(below);
         let private = root.join("private");
         fs::create_dir_all(&base).expect("repo directory");
         fs::create_dir_all(&private).expect("private root");
@@ -593,7 +820,13 @@ impl Fixture {
     /// [`Self::new`], because an intent records both and a reclaim that
     /// derived a different pair would be reclaiming another run's residue.
     pub(crate) fn adopt(root: PathBuf) -> Self {
-        let base = root.join("repo");
+        Self::adopt_based(root, Path::new(BASE))
+    }
+
+    /// [`Self::adopt`] over a fixture whose managed base is `below` its root,
+    /// as [`Self::with_layout`] laid it out.
+    pub(crate) fn adopt_based(root: PathBuf, below: &Path) -> Self {
+        let base = root.join(below);
         let private = root.join("private");
         let head = git(&base, &["rev-parse", "main"]);
         let seed = git(&base, &["rev-parse", "main~1"]);
@@ -617,6 +850,17 @@ impl Fixture {
 
     pub(crate) fn created(tag: &str) -> Self {
         let fixture = Self::new(tag);
+        fixture
+            .manager
+            .create_execution_root(&mut NoHooks)
+            .expect("create the execution root");
+        fixture
+    }
+
+    /// [`Self::created`] with the managed base at `below` the root: C5's
+    /// layout, [`EQUAL_DEPTH_BASE`].
+    pub(crate) fn created_based(tag: &str, below: &Path) -> Self {
+        let fixture = Self::with_layout(tag, "sha1", below);
         fixture
             .manager
             .create_execution_root(&mut NoHooks)
@@ -692,16 +936,170 @@ impl Drop for Fixture {
 /// writes what the agent would have written — and it does it here, where
 /// the write is inside the reviewed funnel module, rather than in the
 /// topology module whose whole point is that it cannot.
+///
+/// The file is created and then written, the two steps of `fs::write`, so a
+/// test can act between them ([`WriteMoment::Created`]).
 pub(crate) fn write_file(path: &Path, bytes: &[u8]) {
+    use std::io::Write as _;
+
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).expect("the parent directory of a fixture file");
     }
-    fs::write(path, bytes).expect("write a fixture file");
+    let mut file = fs::File::create(path).expect("write a fixture file");
+    act_at(WriteMoment::Created, path);
+    file.write_all(bytes).expect("write a fixture file");
+}
+
+/// Each path [`update_file`] has updated in this process, and the lock its
+/// updates take turns on. Never pruned, one entry per path; shared ownership
+/// is the lifecycle, as in `REGISTRY_LOCKS`: an update holds the `Arc` only
+/// while it holds or waits for the lock. A poisoned lock is taken anyway: it
+/// orders the updates and guards no value.
+static UPDATES: std::sync::Mutex<
+    std::collections::BTreeMap<PathBuf, std::sync::Arc<std::sync::Mutex<()>>>,
+> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// Replace the file at `path` with the bytes `update` makes of the ones it
+/// holds now, or leave it as it is when `update` answers `None`. `update` is
+/// given `None` when there is no file or it cannot be read.
+///
+/// Nothing is written into `path` itself. The replacement is written beside
+/// it, under its name with this process's id and `.tmp` appended, and renamed
+/// over it, so a reader of `path` meets the file it held or its replacement
+/// and never a part of either. An update cut short after its write began --
+/// the process killed from another thread, or a panic -- leaves `path` as it
+/// was and its part under the temporary name. Nothing is synced: the cut this
+/// guards against is the process's, not the machine's.
+///
+/// Updates of one path in this process take turns, each holding the path's
+/// lock from its read to its rename, so none reads a file another is about to
+/// replace and none replaces one published since its own read. An update that
+/// finds the turn taken acts at [`WriteMoment::Queued`] and then waits for it.
+/// The lock is the last one taken: `update` runs inside the turn and takes no
+/// lock and updates no fixture file. Another process is not kept out, so
+/// `path` must be one this process alone updates.
+pub(crate) fn update_file(path: &Path, update: impl FnOnce(Option<&[u8]>) -> Option<Vec<u8>>) {
+    use std::sync::{Arc, PoisonError, TryLockError};
+
+    let lock = {
+        let mut table = UPDATES.lock().unwrap_or_else(PoisonError::into_inner);
+        Arc::clone(table.entry(path.to_path_buf()).or_default())
+    };
+    let _turn = match lock.try_lock() {
+        Ok(turn) => turn,
+        Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(TryLockError::WouldBlock) => {
+            act_at(WriteMoment::Queued, path);
+            lock.lock().unwrap_or_else(PoisonError::into_inner)
+        }
+    };
+    let held = fs::read(path).ok();
+    let Some(bytes) = update(held.as_deref()) else {
+        return;
+    };
+    let mut name = path
+        .file_name()
+        .expect("a fixture file has a name")
+        .to_os_string();
+    name.push(format!(".{}.tmp", std::process::id()));
+    let temporary = path.with_file_name(name);
+    write_file(&temporary, &bytes);
+    fs::rename(temporary, path).expect("publish a fixture file");
 }
 
 /// Create `path` and every missing parent.
 pub(crate) fn create_dir(path: &Path) {
     fs::create_dir_all(path).expect("create a fixture directory");
+}
+
+/// `fs::canonicalize`, spelt as the manager spells the paths it derives: on
+/// Windows without the verbatim prefix (`strip_verbatim`), and elsewhere
+/// exactly as `fs::canonicalize` returns it. A test that compares a path it
+/// resolved with one the manager derived compares like spellings this way.
+pub(crate) fn canonical(path: &Path) -> PathBuf {
+    super::strip_verbatim(
+        fs::canonicalize(path)
+            .unwrap_or_else(|error| panic!("canonicalizing {}: {error}", path.display())),
+    )
+}
+
+/// Append `line` and a newline to the file at `path`, creating it: one line
+/// of the log a hosted test's Windows role stand-ins share, written as the
+/// Unix role scripts' `>>` writes it.
+#[cfg(windows)]
+pub(crate) fn append_line(path: &Path, line: &str) {
+    use std::io::Write as _;
+
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .unwrap_or_else(|error| panic!("opening {} to append: {error}", path.display()));
+    file.write_all(format!("{line}\n").as_bytes())
+        .unwrap_or_else(|error| panic!("appending to {}: {error}", path.display()));
+}
+
+/// A directory link at `link` naming `target`: the hand-made layout the
+/// linked-registry tests plant where a run's `worktrees` registry would be
+/// (R-C-REGISTRY). A topology module's test cannot make one.
+///
+/// A symbolic link on Unix. On Windows a junction, which needs no privilege
+/// where a directory symbolic link does. A junction is a name-surrogate
+/// reparse point, so std's `FileType::is_symlink` answers true for it and
+/// `fs::canonicalize` follows it, and the manager pins it as it pins any
+/// reparse point (`RegistrationStore::of`).
+#[cfg(unix)]
+pub(crate) fn link_directory(target: &Path, link: &Path) {
+    std::os::unix::fs::symlink(target, link).unwrap_or_else(|error| {
+        panic!(
+            "linking {} to {}: {error}",
+            link.display(),
+            target.display()
+        )
+    });
+}
+
+/// See the Unix half. `mklink` is `cmd`'s own command, so `cmd /D /C` makes
+/// the junction, its line passed raw: `cmd` reads its command line itself
+/// rather than as a program's runtime splits arguments.
+#[cfg(windows)]
+pub(crate) fn link_directory(target: &Path, link: &Path) {
+    use std::os::windows::process::CommandExt as _;
+
+    let output = Command::new("cmd")
+        .args(["/D", "/C"])
+        .raw_arg(format!(
+            "mklink /J \"{}\" \"{}\"",
+            link.display(),
+            target.display()
+        ))
+        .output()
+        .unwrap_or_else(|error| {
+            panic!(
+                "linking {} to {}: {error}",
+                link.display(),
+                target.display()
+            )
+        });
+    assert!(
+        output.status.success(),
+        "linking {} to {}: {}{}",
+        link.display(),
+        target.display(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Remove the directory link at `link`, of the kind [`link_directory`] makes,
+/// and nothing it names: a junction is removed as a directory, a symbolic link
+/// as a file.
+pub(crate) fn unlink_directory(link: &Path) {
+    #[cfg(windows)]
+    let removed = fs::remove_dir(link);
+    #[cfg(not(windows))]
+    let removed = fs::remove_file(link);
+    removed.unwrap_or_else(|error| panic!("unlinking {}: {error}", link.display()));
 }
 
 /// Set the Unix mode of `path`: how a test in a topology module, which cannot
@@ -883,6 +1281,75 @@ pub(crate) fn spawn_ready_helper(
     crate::agent::proc::test_support::readiness::Producer::adopt(
         command.spawn().expect("spawn the ready helper"),
     )
+}
+
+// -----------------------------------------------------------------------
+// Acting at one moment of a fixture write
+// -----------------------------------------------------------------------
+
+/// A moment of [`write_file`] or [`update_file`] at which a test can act.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WriteMoment {
+    /// `write_file` has created its file, and so emptied it, and has not
+    /// written its bytes: where a write cut short leaves its file empty.
+    Created,
+    /// `update_file` has found its path's turn taken by another update of
+    /// this process, and is about to wait for it.
+    Queued,
+}
+
+/// What a test does at that moment, given the path written or updated.
+pub(crate) type WriteAct = Box<dyn FnOnce(&Path)>;
+
+/// An act armed at the next moment of its kind on this thread, disarmed by
+/// dropping it, so a test that unwinds leaves nothing for whatever runs next
+/// on this thread.
+pub(crate) struct WritePlanting {
+    /// Not `Send`: the armed act is this thread's.
+    _not_send: PhantomData<*const ()>,
+}
+
+impl Drop for WritePlanting {
+    fn drop(&mut self) {
+        WRITE_ACT.with(|slot| {
+            if let Ok(mut slot) = slot.try_borrow_mut() {
+                *slot = None;
+            }
+        });
+    }
+}
+
+/// Run `act` once, on this thread, at the next `moment` that comes on it. An
+/// act that panics cuts the write short there.
+///
+/// Thread-local for the reason the removal observer is: the suite runs tests
+/// in parallel, so only the thread that armed it is watched.
+pub(crate) fn at_next_write(moment: WriteMoment, act: WriteAct) -> WritePlanting {
+    WRITE_ACT.with(|slot| {
+        if let Ok(mut slot) = slot.try_borrow_mut() {
+            *slot = Some((moment, act));
+        }
+    });
+    WritePlanting {
+        _not_send: PhantomData,
+    }
+}
+
+/// Take this thread's act if it is armed at `moment`, and run it on `path`.
+/// Taken before it runs, so it runs once, and a fixture write it makes itself
+/// runs unwatched.
+fn act_at(moment: WriteMoment, path: &Path) {
+    let mut armed = None;
+    WRITE_ACT.with(|slot| {
+        if let Ok(mut slot) = slot.try_borrow_mut() {
+            if slot.as_ref().is_some_and(|(at, _)| *at == moment) {
+                armed = slot.take();
+            }
+        }
+    });
+    if let Some((_, act)) = armed {
+        act(path);
+    }
 }
 
 // -----------------------------------------------------------------------
@@ -2604,8 +3071,11 @@ pub(crate) const REPLACEMENT_DISABLED_EXIT: i32 = 3;
 /// costs a loud failure rather than a false green.
 ///
 /// The child is `read_only_git`'s and `HostEnvironment::from_process`'s own
-/// child: both inherit this process's environment, which is why measuring this
-/// process is measuring theirs.
+/// child: both inherit this process's environment, less the work-tree context a
+/// Git child or a role in a work tree the engine made sheds there, the four
+/// selectors, and with a relative `GIT_COMMON_DIR` given as the absolute path it
+/// names at the started checkout, which is why measuring this process is
+/// measuring theirs.
 ///
 /// **Every `git` here runs in this process's environment, `git init`
 /// included.** That is deliberate, and it is what closes `GIT_TEMPLATE_DIR`
@@ -3424,6 +3894,19 @@ pub(crate) const COLLECT_BOUND: std::time::Duration = std::time::Duration::from_
 /// unwinding, and says so on stderr instead. A reader still reading at the
 /// bound -- the child gone, and something it started still holding its end of
 /// the pipe -- is left running, and the drop says so.
+///
+/// **Another program.** [`Self::spawn_program`] links and owns a program
+/// other than this test binary in the same way, for a helper command whose end
+/// a test bounds with [`Self::wait_within`] and which its drop kills and reaps
+/// like any other link.
+///
+/// **Shared, and locked per resource.** The link is returned in an `Arc`
+/// because a test may hand it to a thread that serves the child while the
+/// test keeps it (the topology scaffold's `Served` does): the child is killed
+/// and reaped when the last holder drops it. Every method takes `&self`, so
+/// each resource it uses is behind a lock of its own -- the `Child` for
+/// `try_wait` and `kill`, the stdin pipe for `send` and its close, the
+/// reader's handle for the drop's join -- and no method holds two at once.
 pub(crate) struct LinkedChild {
     child: std::sync::Mutex<std::process::Child>,
     stdin: std::sync::Mutex<Option<std::process::ChildStdin>>,
@@ -3455,22 +3938,55 @@ impl LinkedChild {
         stderr: &Path,
         reader: impl FnOnce(u32) -> std::thread::Builder,
     ) -> (std::sync::Arc<Self>, std::sync::mpsc::Receiver<String>) {
-        let log = fs::File::create(stderr).expect("the linked child's stderr log");
         let mut command = Command::new(std::env::current_exe().expect("this test binary"));
-        command
-            .args([
-                "--exact",
-                test,
-                "--ignored",
-                "--nocapture",
-                "--test-threads=1",
-            ])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::from(log));
+        command.args([
+            "--exact",
+            test,
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ]);
         for (key, value) in env {
             command.env(key, value);
         }
+        Self::adopt(command, stderr, reader)
+    }
+
+    /// `program` run with `args`, linked and owned as [`Self::spawn`] links and
+    /// owns a test of this binary: for a command whose end a test bounds with
+    /// [`Self::wait_within`] and which must not outlive the test however it
+    /// ends -- the `kill` that delivers the signal test's signal
+    /// (`engine::tests::signal_mid_attempt`, J15). It speaks no protocol; the
+    /// receiver hands on whatever it prints.
+    ///
+    /// Unix only, because its one caller is; on Windows it would be dead code.
+    #[cfg(unix)]
+    pub(crate) fn spawn_program(
+        program: &OsStr,
+        args: &[&OsStr],
+        stderr: &Path,
+    ) -> (std::sync::Arc<Self>, std::sync::mpsc::Receiver<String>) {
+        let mut command = Command::new(program);
+        command.args(args);
+        Self::adopt(command, stderr, |_| std::thread::Builder::new())
+    }
+
+    /// Start `command`, its stdin and stdout piped and its stderr written to
+    /// `stderr`, and own it as a link from that moment: the one constructor
+    /// [`Self::spawn_with`] and [`Self::spawn_program`] share. The reader ends
+    /// at the end of the child's stdout, and a read that fails ends it the
+    /// same way: what it forwards is best-effort, and every wait on it is its
+    /// caller's, bounded.
+    fn adopt(
+        mut command: Command,
+        stderr: &Path,
+        reader: impl FnOnce(u32) -> std::thread::Builder,
+    ) -> (std::sync::Arc<Self>, std::sync::mpsc::Receiver<String>) {
+        let log = fs::File::create(stderr).expect("the linked child's stderr log");
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::from(log));
         let mut child = command.spawn().expect("spawn the linked child");
         let pid = child.id();
         let stdin = child.stdin.take();

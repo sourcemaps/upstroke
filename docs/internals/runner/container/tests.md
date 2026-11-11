@@ -216,6 +216,99 @@ Two distinct answers to two distinct questions about one reference: the
 intersection {image id recorded} x {reference moved} rather than either
 alone.
 
+## `fn an_attached_start_held_at_created_ends_at_its_deadline_or_its_cancellation() {`
+
+Root's START-DEADLINE finding, with no daemon. A start held at `created`, its
+client alive, ends at the invocation's deadline, within the declared bound;
+a cancellation ends it on the poll that sees it. A client that ended while
+the container is still `created`, a container that is gone, and a state that
+cannot be read each end it too. The controls: a container that left
+`created` started, whether or not its client has ended.
+
+## `fn an_attached_client_is_settled_or_reported_unresolved_within_its_bound() {`
+
+Root's DELIVERY-OWNERSHIP finding, the settlement, with local doubles. A
+client that ended with its container is settled and never asked to stop; one
+whose end comes later, within the grace, is settled without being stopped;
+one that outlives its container ends when asked and is settled; one that
+does not end even when asked is reported unresolved, after exactly two
+graces, never settled.
+
+## `fn the_delivery_verdict_tells_an_early_exit_from_a_broken_attach() {`
+
+The verdict on a settled client. Ending with the container's own code is the
+program's own result, an early exit included. Ending with another code, or
+with none, is a broken attach; a client that had to be stopped, and one whose
+wait or write failed, are errors too, each naming why.
+
+## `fn an_unresolved_attached_client_stays_unresolved_through_every_settlement() {`
+
+Root's DELIVERY-OWNERSHIP follow-through, at the settlement seam. A client
+whose supervising thread finished with `ProcessFailure { fate: Unresolved }`
+is unresolved at collection, and its removal fails as
+`RuntimeError::Unresolved`, twice: the fact survives repeated settlement, and
+what is kept is the fact, not the finished thread's handle. The funnel's
+`refused` keeps the fate. The controls: a client that exited, and one whose
+requested stop was verified, settle; and a supervision failure whose process
+was established gone is an end, for the verdict.
+
+## `fn a_removal_that_leaves_a_process_unresolved_releases_nothing_as_gone() {`
+
+The release seam. With a removal that leaves a process unresolved, a release
+of a container observed exited is a failure with `container_gone` false,
+naming the unresolved process, and the view and the intent stay for the next
+census. The control: the same release without it releases.
+
+## `fn a_removal_keeps_an_unresolved_client_over_an_ordinary_removal_failure() {`
+
+Root's combined-removal follow-through, the combination itself. A failed
+removal and an unresolved client make an `Unresolved` answer carrying both
+diagnostics; a successful removal does not settle an unresolved client. The
+controls: a settled client keeps the ordinary removal error, and success
+stays success.
+
+## `fn an_ordinary_removal_failure_never_masks_an_unresolved_client() {`
+
+The same at the release seam. With the removal failing and the client
+unresolved, after an observed exit and after a stop alike, the release does
+not count the container gone, names both failures, and keeps the view and
+the intent. The control: with the client settled, the ordinary removal error
+is the release's, and the observed exit keeps its fate.
+
+## `fn an_unresolved_credential_volume_question_is_held_under_the_volume_where_no_container_reads_it()`
+
+The premise of the volume-inspection repair (PR12-R8-VOLUME-INSPECTION-FATE,
+PR12-REG6-VOLUME-INSPECTION-FATE), on the real `DockerCli` classifier and with
+no process: synthetic supervisor results for a `volume inspect` question
+(`answer_within`). A question its supervisor never started is `Unreachable`,
+one whose process it saw gone is `Failed`, and one whose process it could not
+establish gone is `Unresolved` under `RuntimeOp::InspectVolume`. Only that one
+is held, and it is held under the volume's name: the container that would
+mount the volume settles `Absent`, and its removal reports nothing unresolved.
+So no cleanup of the container can recover the fact, and the launch keeps it
+only through the typed error `expect_mounted_volumes_present` now returns,
+with the cancel keeping the view and the intent for it (`CauseFate`).
+
+## `fn the_docker_create_arguments_carry_a_user_and_an_open_stdin_only_when_the_spec_does() {`
+
+The `docker create` argv, read with no daemon (`docker_create_arguments`). A
+spec with no user and no input asks for neither, as every create did before
+PR12's D-B and D-C. With both, `--user <uid>:<gid>` and `--interactive` are
+options of the create, before the image id, and the command after it is
+unchanged.
+
+## `fn a_mount_argument_carries_each_value_exactly_or_refuses_it() {`
+
+`mount_argument`, lossless or refusing. A source with spaces and
+non-ASCII, one with `=` and one with `;` and `:` are carried exactly; on
+Unix a backslash is carried as written; a volume and the scratch tmpfs
+render as before. Seven spellings (a `,` that would add a `readonly=false`
+field, a `"`, a newline, a tab, trailing and leading whitespace, empty) are
+refused in every position: bind source, bind target, volume name, tmpfs
+target. A non-UTF-8 source is refused on Unix, never converted lossily.
+And `docker_create_arguments` refuses a spec holding such a mount, so
+`docker` never runs with it.
+
 ## `fn the_fake_can_report_an_image_id_that_differs_from_the_one_create_asked_for() {`
 
 (3) per-container **reported image ids with substitution injection**.
@@ -1673,25 +1766,28 @@ container running.
 
 **What the budget bounds, exactly.** An observation is synchronous: the
 `docker ps --all --filter name=… --format …` listing [`DockerCli::observe`]
-makes runs to completion through `Command::output()`, with no deadline of
-its own. The budget is consulted only between observations, after one that
-found the container running, so it bounds how long the wait keeps *asking*,
-not how long the wait *takes*: an observation in flight is never
-interrupted, a [`TERMINATION_PAUSE`] begun after an under-budget observation
-is slept in full, and a scheduling delay anywhere in between is not seen
-until the next check. The wait can therefore end past the budget by one
-observation, one pause and whatever the scheduler adds, and a terminal
-observation that completes after the budget is still the answer. What the
-budget cannot do is bound a daemon that does not answer: an observation
-that blocks, blocks the wait with it. The tests below hold each of these
+makes runs under the process funnel and, asked with `QuestionBound::Runtime`
+as these tests ask it, ends at the runtime's own bound (`QUESTION_BOUND`,
+sixty seconds, K2) rather than at this budget. The budget is consulted only
+between observations, after one that found the container running, so it
+bounds how long the wait keeps *asking*, not how long the wait *takes*: an
+observation in flight is never interrupted by it, a [`TERMINATION_PAUSE`]
+begun after an under-budget observation is slept in full, and a scheduling
+delay anywhere in between is not seen until the next check. The wait can
+therefore end past the budget by one observation, one pause and whatever the
+scheduler adds, and a terminal observation that completes after the budget is
+still the answer. What the budget does not do is bound a daemon that does not
+answer: an observation that blocks holds the wait until the runtime's own
+bound ends it. Until K2 that observation had no bound at all. The tests below hold each of these
 with the fake — a running observation that takes 100 ms against a 20 ms
 budget is the wait's only observation and is reported in full, and a
 terminal one that takes as long is accepted — and against the real daemon
 on the build box (2026-09-23, `docker` 29.7.2) a container running
 `sleep 120` was reported running for 947 observations over 30.005 s before
 the wait gave up with that report as its panic message. That measures a
-daemon that answers; a daemon that stops answering has not been measured,
-and the synchronous call path says this budget would not see it.
+daemon that answers; a daemon that stops answering has not been measured
+here, and this budget would not see it: the runtime's own bound is what
+ends such an observation.
 
 **What it replaced.** Before 2026-09-23 the wait was **two hundred
 observations with a `yield_now` between them**, and its duration was
@@ -2760,10 +2856,10 @@ The control: everything the release has to remove is really there.
 The daemon's three transcribed answers, each **naming the container it is
 about**, which is how a reclaimer tells an answer about its own container from
 an answer — or a path — that merely spells the phrase. They were literals until
-round six; a literal `upstroke-c` beside a fixture whose container has a
-generated name is a fixture the repaired normalizers correctly refuse, and
-making them functions of the name is what keeps the doubles honest rather than
-what works around the check.
+the cover review of `9ee9784e`; a literal `upstroke-c` beside a fixture whose
+container has a generated name is a fixture the repaired normalizers correctly
+refuse, and making them functions of the name is what keeps the doubles honest
+rather than what works around the check.
 
 ## `const SETTLED_TARGET: &str = "upstroke-c";`
 
@@ -2785,8 +2881,7 @@ daemon's own answer, and what proves a refused proposal costs no second command.
 The three shapes a diagnostic can have that must never settle anything, each
 one refused by a different half of the mechanism. Dropping the line-start
 requirement admits the first two; dropping the target requirement admits the
-first and the third. Both mutations are replayed in `pr8-triage.md` §9.3 and
-each kills this test.
+first and the third. Either mutation fails this test.
 
 ## `fn the_two_docker_diagnostic_tables_never_claim_one_message() {` › `for (what, detail) in [`
 
@@ -2824,3 +2919,487 @@ established against the listing rather than against its own diagnostic, and the
 comparison then discards. The colliding container is created deliberately, and
 the test fails if the filter stops matching it, so the comparison the repair
 rests on is never left untested.
+
+## `const EARLY_EXIT_DEADLINE: Duration = Duration::from_secs(3);`
+
+The deadline mode's invocation deadline, measured from the child's start (K8).
+It bounds a stalled diagnostic, and so must leave the start ample time to reach
+the diagnostic first: one attached client that ends at once and one or two
+`docker ps` questions through the process funnel.
+
+## `const EARLY_EXIT_SLACK: Duration = Duration::from_millis(1500);`
+
+How long after that deadline the deadline mode may end: the funnel's kill and
+reap of the stalled diagnostic and the start's settlement of a client that has
+already ended. The witness asserts the two together stay below `CLIENT_GRACE`,
+so a diagnostic given a fresh grace from the moment it was asked, the defect J13
+repaired, cannot end inside the bound.
+
+## `fn an_attached_start_whose_client_ended_early_asks_its_diagnostic_within_its_own_bounds() {`
+
+J13 (regular review 3, finding 2): the attached start's early-client-exit branch
+asks its diagnostic within the invocation's own deadline and cancellation. A
+child of this test binary, whose `PATH` alone carries a stub `docker` (written
+by a process of its own, `write_program_in_its_own_process`), runs the
+production `DockerCli::start_attached`. The stub's `docker start` ends at once,
+its `docker ps` keeps the container `created`, and its `docker container
+inspect` (the diagnostic) records that it was asked and then sleeps for a
+minute. Two modes: an invocation with a three-second deadline
+(`EARLY_EXIT_DEADLINE`), which must end at or after it and within
+`EARLY_EXIT_SLACK` of it; and a ten-minute one cancelled as soon as the
+diagnostic is asked, which must end within 10 s. In both the start fails on the
+early-exit branch, its reason carries nothing from the stalled diagnostic, and
+the diagnostic was asked. With the fresh `CLIENT_GRACE` deadline restored, the
+deadline mode fails: measured before K8's commit, the child reported "the
+stalled diagnostic held the start 5.164364925s, past its bound 4.5s". It is a
+stub witness, as the reviewer's was: no daemon is involved. The child runs
+through `run_test_isolated`, so a failure carries the child's own output.
+
+**K8 (CI's macOS leg, run 41724856814, job 126229500908).** The deadline mode's
+child exited 101 (`unix_wait_status(25856)`): a failed assertion in the child,
+not a kill or an overrun of the parent's bound. The log holds nothing the child
+printed: the witness then ran it through `run_kill_child_within`, which sends a
+child's stdout and stderr to `/dev/null`, so the log cannot say which assertion
+failed. The stub on `PATH` and its `ps` and `inspect` behaviour are not in
+question: J6's witness, with the same stub mechanism, passed on the same leg.
+On this box the failure was reproduced by slowing the stub's answers (`ps` a
+quarter second, `start` 0.4 s, as a slower process funnel would): the child
+failed with exit 101, the start reporting "`upstroke-early` was still created
+when the invocation's deadline passed, so it never started" instead of the
+early-exit branch. The deadline mode's deadline was then 500 ms (the 200 ms is
+the J13 reviewer's witness, not this test's), and on a runner whose funnel
+questions are slow it passed before the wait saw the client's end. That outcome is the production
+branch behaving as specified, a failed start at its deadline; what failed was the
+guard's premise, a deadline short enough to expire on a loaded runner
+(standards §12). With the three-second deadline the same slowed stub passes, in
+3.04 s. The other assertions are unchanged.
+
+## `fn attached_start_early_exit_child() {`
+
+The child of the test above: one production attached start of
+`upstroke-early`, in the mode the parent names (`UPSTROKE_TEST_EARLY_EXIT`),
+its proof minted by `CoveredStart::without_a_reaper_until` with that mode's
+deadline. In the cancel mode a scoped thread cancels the start once the stub has
+recorded the diagnostic (`UPSTROKE_TEST_INSPECTED`), so the cancellation lands
+on the diagnostic and not on the wait before it. In the deadline mode it also
+asserts the start ended no earlier than its deadline, so the stalled diagnostic
+was still in flight when the deadline ended it (K8).
+
+## `fn an_exit_status_the_runtime_reports_is_read_as_a_number_or_refused() {`
+
+K2: the collection reads the exit status `docker container inspect` reports as
+a number (surrounding whitespace aside, a negative one included), and refuses
+anything else as a `Collect` failure naming the container, where it once read
+it as a missing exit code. The cases are the reading itself
+(`exit_status_of`), with no daemon.
+
+## `const CAPABILITY_MARKER: &str = "UPSTROKE-CONTAINER-CAPABILITY-RECORD";`
+
+G7's container capability observation record (root direction `ecf15a9c`;
+contract `G7-PLATFORM-CONTAINER-CAPABILITY-PREPARATION-2`, bound by its root
+audit 2, which wins where the two differ). The framing is PR355's host
+acceptance framing, under this marker and the record kind
+`upstroke-container-capability-record`:
+
+- `<marker> v1 BEGIN <tag> <chunks> <bytes> <sha256>`;
+- `<marker> v1 <tag> <k> <hex>` for chunk `k` = 1..chunks, 96 record bytes in
+  lowercase hex per line (192 characters; the last chunk's length is twice
+  the remainder);
+- `<marker> v1 END <tag> <chunks> <bytes> <sha256>`.
+
+The tag is the record digest's first sixteen characters. The record is the
+compact serialization of one JSON object, written to stdout with
+`std::io::Write` (this module forbids the print macros) only after the test's
+own decoder has accepted the frame.
+
+## `const CAPABILITY_CI_VARIABLES: [&str; 9] = [`
+
+The only CI names the record reads: the run, attempt, job, commit and runner
+fields the contract's binding enumerates. Each one is recorded as its text or
+null; there is no environment listing. The 15-name list in the host
+acceptance record is not reused, because this contract enumerates nine.
+
+## `const CAPABILITY_SELECTORS: [&str; 3] = ["DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG"];`
+
+E0 reads these names and only these, by presence. A set but empty variable
+counts as present. `DOCKER_HOST`'s value is classified in memory by
+`capability_endpoint` and dropped; only the class is kept.
+`DOCKER_CONTEXT` and `DOCKER_CONFIG` are never read for their values. The
+observer never reads Docker configuration or credentials. When `DOCKER_HOST`
+and `DOCKER_CONTEXT` are both present, the row is
+`ENDPOINT_UNKNOWN (both-selectors-present)` and no docker process starts.
+That is the conservative rule root audit 2 accepted: the documentation and
+the CLI's implementation disagree on which selector wins, and the observer
+does not choose between them.
+
+## `const CAPABILITY_UNREDUCED: [&str; 4] = ["://", "/pipe/", "\\pipe\\", ".sock"];`
+
+Strings only an unreduced endpoint would put in a record. The decoder refuses
+a record holding any of them. The test decodes its own frame before printing
+it, so a record that would leak an endpoint fails the test and is never
+printed.
+
+## `enum CapabilityGrammar {`
+
+The contract's field grammars, written as character-class checks because the
+crate has no regular-expression dependency and gains none:
+
+- `version` `^[0-9A-Za-z][0-9A-Za-z.+~-]{0,63}$`;
+- `os` `^[a-z][a-z0-9]{0,15}$`;
+- `arch` `^[a-z0-9][a-z0-9_]{0,15}$`;
+- `platform_name` `^[A-Za-z0-9][A-Za-z0-9 ._()+-]{0,63}$`;
+- `image_id` `^sha256:[0-9a-f]{64}$`;
+- `variant` `^(v[0-9]{1,2})?$`.
+
+A field in its grammar is `VALID` with its value. An empty field or exactly
+`<no value>` is `FIELD_UNKNOWN`, except that the variant grammar admits the
+empty string, so an empty variant is `VALID` (the image has no variant).
+Anything else is `MALFORMED`, recorded by the length and SHA-256 of its text
+only. The owned Python decoder checks every `VALID` value against the
+contract's own regular expressions, so a drift between the two spellings
+refuses a record.
+
+## `fn capability_one_record(text: &str, separated: bool) -> Result<&str, CapabilityNotOneRecord> {`
+
+Root audit 2's one-record rule: one final CRLF or LF is removed. The remainder
+must be non-empty (`empty`), carry no LF or CR (`not-one-record`), and carry
+no other C0 control byte or DEL (`control-bytes`). U+001F is admitted only
+where the format separates fields with it (P4, P5). P2's record is never read
+by its first line.
+
+## `fn capability_endpoint(text: &str) -> CapabilityEndpoint {`
+
+P2's record, or `DOCKER_HOST`'s value, reduced to a class, in this order:
+
+- not one record: `ENDPOINT_UNKNOWN` with the rule's reason;
+- exactly `<no value>`: `ENDPOINT_UNKNOWN (no-value)`;
+- no `://`, or a scheme outside `[A-Za-z][A-Za-z0-9+.-]*`:
+  `ENDPOINT_UNKNOWN (unparsed)`;
+- `unix` followed by an exact absolute path: `unix-socket-path`; any other
+  `unix` spelling: `REJECTED unix-malformed-syntax`;
+- `npipe` followed by exactly `//./pipe/<name>`: `npipe-local-name-syntax`;
+  any other `npipe` spelling, network-named or malformed:
+  `REJECTED npipe-non-local-syntax`;
+- `tcp`: `REJECTED tcp`; `ssh`: `REJECTED ssh`; any other scheme, compared
+  case-sensitively as the CLI does: `REJECTED other-scheme`.
+
+An exact absolute path is `/`-separated segments, none empty, `.` or `..`,
+each of `[A-Za-z0-9._~+@%=,:-]`, with no trailing `/`. A local pipe name is
+one segment of `[A-Za-z0-9._-]`, at most 128 long.
+`REJECTED unix-malformed-syntax` applies the audit's "reject malformed
+URL/pipe syntax" to the unix scheme; the version-2 class table did not name it
+separately. The classes are syntax, not proof of where an endpoint is.
+
+## `fn capability_settled(`
+
+The product's process path returns output, or a `ProcessFailure` with a fate.
+
+- `NeverStarted` is `SPAWN_FAILED`.
+- `Gone` is `COMMAND_FAILED_SETTLED`.
+- `Unresolved` is the observer's integrity failure. The test panics with a
+  fixed message naming the command, and no record is printed.
+
+The failure's error text is never kept, because it can name what the record
+must not.
+
+## `impl CapabilityObserver {` › `fn ask(&mut self, question: &CapabilityQuestion) -> CapabilityAsked {`
+
+Every docker question runs through the call `DockerCli::question` makes:
+`proc::run_with_timeout_classified` at the Spawn/Terminate sites with
+`docker_command`, no stdin, no leases, no stop predicate and no hooks. Each
+question has its own bound.
+
+The record keeps these facts apart:
+
+- the process result (output or failure) and its fate;
+- the exit code, `timed_out` and `output_limited`;
+- the product's duration and the observer's wall time;
+- the outcome class (`OUTPUT_LIMIT`, then `TIMEOUT`, then `SIGNAL` for no
+  code, then `EXITED_0` or `EXITED_NONZERO`);
+- the command's class and its fields.
+
+Streams are `{text_utf8_bytes, text_utf8_sha256}` with
+`capture_representation` `utf8_lossy`, because drain decodes lossily. A
+failure that returned no output has null streams. When `output_limited` is
+true, the digests cover only the captured, bounded text, and no original total
+is inferred.
+
+## `fn capability_p3(answer: &CapabilityAnswer) -> CapabilityVerdict {`
+
+P3 is the product's own probe, `docker version --format {{.Server.Version}}`,
+bounded at 60 s like `QUESTION_BOUND`.
+
+- `DAEMON_ANSWERED`: exit 0 and a version in grammar.
+- Exit 0 with anything else: `DAEMON_ERROR (exited-0-version-not-valid)`.
+- A nonzero exit is read by `is_unreachable_diagnostic` on the trimmed
+  stderr. One of its seven shapes, with no `error response from daemon:`
+  line, is `DAEMON_UNREACHABLE`; anything else is `DAEMON_ERROR`.
+- A timeout is `TIMEOUT` and never unreachable.
+
+## `fn capability_p4(`
+
+P4 asks for the selected `docker version` fields; `docker info` is not used.
+The answer is `METADATA_COMPLETE` only with exit 0 and one record of exactly
+seven fields, all `VALID`. Otherwise it is `METADATA_INCOMPLETE`, with the
+outcome, `record-malformed` or `fields-not-valid` as the reason. On a nonzero
+exit, the product classifier's reading is kept as `stderr_class`.
+
+P3's `DAEMON_ANSWERED` and the row stand whatever P4 reports. The record
+reports `daemon_metadata` apart, as root audit 2 requires; version 2's
+example that turned a malformed P4 field into `DAEMON_ERROR` is superseded.
+
+## `fn capability_p5(reference: &str, answer: &CapabilityAnswer) -> CapabilityVerdict {`
+
+P5 inspects `alpine:3.20`, `busybox:latest` and `debian:stable-slim` for
+`Id`, `Os`, `Architecture` and `Variant` only. It never pulls, never asks for
+RepoTags or RepoDigests, and never lists images.
+
+- `IMAGE_PRESENT`: exit 0 and four fields in grammar.
+- `IMAGE_ABSENT`: a nonzero exit whose stderr the product's `is_absent` reads
+  as the daemon saying it has no such image for that reference.
+- `IMAGE_ERROR`: every other exit, including exit 0 with fields out of
+  grammar.
+
+## `fn capability_observe(`
+
+E0, then P1 to P5 under their gates. The row is the first terminal class, in
+order:
+
+1. E0 with both selectors: `ENDPOINT_UNKNOWN (both-selectors-present)`.
+2. P1 absent (`util::find_program`, as `DockerCli::available` asks):
+   `EXECUTABLE_ABSENT`.
+3. P2 unknown: `ENDPOINT_UNKNOWN`. A present `DOCKER_HOST` whose reduced class
+   differs from P2's: `ENDPOINT_UNKNOWN (selector-disagreement)`, never
+   unreachable. P2 rejected: `ENDPOINT_REJECTED`.
+4. P3's class.
+
+`DAEMON_ANSWERED` carries P4's `daemon_metadata` and P5's three image
+sub-rows. A question its gate stops is listed as `NOT_OBSERVED` with its
+literal argv, and no daemon command follows a rejected, unknown or multiline
+endpoint. The requested bounds sum to 135 s. Settlement and drain grace come
+on top, so that sum is not a proved wall-clock maximum.
+
+## `fn capability_record(`
+
+The record holds:
+
+- the binding and the reduced selectors;
+- every command in order, and `docker_commands_asked`;
+- the row with its role: `CONTROL` on a Linux coordinator, which is an
+  observer control and never M2 credit; `OBSERVATION` elsewhere;
+- `daemon_metadata`, the image sub-rows and `m2_effect` `NONE`;
+- the platform facts, kept apart: `coordinator_os` and `coordinator_arch`;
+  `client_os`, `client_arch`, `daemon_os`, `daemon_arch` and
+  `daemon_platform_name` as P4 fields or `NOT_OBSERVED`; `endpoint_transport`;
+  and `execution_location`, always `NOT_ESTABLISHED`.
+
+The scope statements say what the questions were, what the reduction keeps,
+and that a class is not acceptance.
+
+## `fn capability_binding() -> serde_json::Value {`
+
+The binding is:
+
+- `git -C <CARGO_MANIFEST_DIR>` `rev-parse HEAD` and `HEAD^{tree}`, and
+  `status --porcelain --untracked-files=no`, with the ten Git context names
+  removed. These run through the same bounded process path and must exit 0
+  with object ids.
+- The running test binary's SHA-256 and length, streamed and checked against
+  its length on disk.
+- The crate version and the nine CI fields.
+
+A `RUNNER_OS` naming another OS than this binary's is a binding failure.
+`GITHUB_SHA`'s equality with the head is recorded and never required. No
+path is recorded: neither the manifest directory nor the executable's.
+
+## `fn capability_decode(stream: &str) -> Result<serde_json::Value, CapabilityRefusal> {`
+
+The decode procedure, shared by the test's self-check and the controls:
+
+1. A frame line starts with the marker; the marker anywhere else refuses.
+2. BEGIN comes first and END last, with one summary.
+3. Chunk `k` sits at position `k` and carries the tag, in lowercase hex at its
+   exact length.
+4. The reconstruction has the summary's length and SHA-256.
+5. The record is strict UTF-8 JSON in its canonical serialization, which also
+   refuses a duplicated key.
+6. The record holds no unreduced endpoint string.
+7. `capability_validate` checks the record's shape:
+   - its closed vocabularies and the literal argv and bound table;
+   - process facts consistent with each outcome class;
+   - every field in its grammar.
+
+A refusal is fixed text with counts and indices. It never carries the bytes it
+refused.
+
+## `fn capability_stream_verdict(stream: &str) -> Result<(), CapabilityRefusal> {`
+
+On the command's own stream, it requires:
+
+- exactly one `running 1 test`;
+- one summary, and it is `ok. 1 passed; 0 failed; 0 ignored;`;
+- the named test's pass line exactly once.
+
+A printed frame alone is never acceptance.
+
+## `fn container_capability_record() {`
+
+The one ignored, cfg-free observation test. CI's observation step selects it
+by its exact name immediately after the native host acceptance capture, in
+`test` (ubuntu-latest, macos-latest) and `test-windows` (winguest). It does
+not call `docker_gate` and is not in `DOCKER_GATED_TESTS`. Its body has no
+platform cfg and no early return.
+
+Every capability class is a valid observation, and the test passes after
+printing the record: an absent executable, an unknown or rejected endpoint,
+an unreachable daemon, a timeout, an absent image. It fails, printing no
+record, on any of these:
+
+- an unresolved process;
+- a binding failure;
+- a serialization or write failure;
+- a record its own decoder refuses.
+
+What it never establishes:
+
+- where the daemon runs (`execution_location` stays `NOT_ESTABLISHED`);
+- that a transport class proves a physical machine;
+- M2 acceptance, N/A or a waiver.
+
+Native macOS and Windows observations are later CI evidence, and a Linux row
+is a control.
+
+## `fn the_capability_endpoint_classifier_accepts_only_exact_local_spellings() {`
+
+The classifier's table, with no process:
+
+- exact unix and local npipe spellings, with and without the final newline or
+  CRLF;
+- network-named, relative, empty, trailing-slash, `.`/`..`, spaced and
+  uppercase spellings;
+- `tcp`, `ssh` and other schemes;
+- empty, multiline, CR, NUL and tab records, `<no value>`, and schemeless
+  text.
+
+## `fn the_capability_field_grammars_admit_what_the_contract_writes() {`
+
+Admitted and refused values for each grammar, and the three field classes,
+the empty variant included.
+
+## `fn capability_sample_record() -> serde_json::Value {`
+
+A record the decoder accepts, made with no daemon and no binding: the
+executable-absent row with fixed provenance. The decoder's refusal controls
+mutate it.
+
+## `fn the_capability_decoder_refuses_without_printing_what_it_refused() {`
+
+The positive controls are the sample's frame, alone and inside a libtest
+stream. The decoder then refuses each of these:
+
+- a chunk that is missing, reordered, doubled, cut short or corrupted;
+- a marker inside a line;
+- a non-canonical (pretty) record;
+- a platform fact outside its grammar;
+- an unreduced socket or pipe string in a field.
+
+The stream verdict refuses no test, an ignored test, two tests, and a pass
+line split by the record. Each refusal is checked to carry none of the bytes
+it refused.
+
+## `fn capability_fake(endpoint: &str, server: &str, metadata: &str, image: &str) -> String {`
+
+The controls' fake `docker`. This is ordinary fabricated output, not a crash,
+kill or reaper fault.
+
+- A `/bin/sh` script logs each invocation's arguments to the file the control
+  names, through `UPSTROKE_TEST_FAKE_DOCKER_LOG`. The child test inherits that
+  variable; the observer never reads it.
+- It answers P2, P3, P4 and P5 with the control's snippets, and exits 97 for
+  anything else.
+- `write_program_in_its_own_process` writes it, so no thread of this
+  multi-threaded test process holds it open for writing when it is executed.
+
+## `fn capability_control(`
+
+One control runs this test binary's `container_capability_record` as a child
+(`--exact --ignored --nocapture --test-threads=2`), through the product's
+bounded process path under a 150 s bound. The child's `PATH` starts with the
+fake. With no fake, the `PATH` holds only a `git` wrapper, so the binding
+still runs while no `docker` exists anywhere on it.
+
+The Docker selectors, the nine CI names and `UPSTROKE_REQUIRE_DOCKER` are
+removed, and only the case's selectors are set. The control therefore
+exercises the observation test itself, product parity included: P1's
+`find_program` reads the child's `PATH`, and `docker_command` resolves
+through it. The child must pass. Its stream and frame are read with the
+record's own decoder, and the fake's log is the witness of what it was asked.
+
+The controls are `cfg(unix)`. The fake is a shell script, and on Windows std's
+`Command` resolves `docker` only as `docker.exe`. They run in the suite on
+Linux and macOS. The decoder controls above are cfg-free.
+
+## `fn the_capability_observer_rejects_an_ssh_endpoint_and_keeps_its_parts_out_of_the_record() {`
+
+P2 prints `ssh://user@host:22`. The result is `ENDPOINT_REJECTED`
+(`REJECTED ssh`), P2 is the only question asked, and neither `user` nor
+`host:22` reaches the record or the child's streams.
+
+## `fn the_capability_observer_rejects_a_network_named_pipe_before_any_daemon_question() {`
+
+A network-named pipe is `REJECTED npipe-non-local-syntax`. Only P2 is asked,
+and the server's name stays out.
+
+## `fn the_capability_observer_refuses_a_multiline_endpoint_before_any_daemon_question() {`
+
+Root audit 2's addition: two lines from P2 are `ENDPOINT_UNKNOWN
+(not-one-record)`, and no daemon question follows.
+
+## `fn the_capability_observer_reads_an_unreachable_daemon_without_its_socket_path() {`
+
+The CLI's own unreachable diagnostic is `DAEMON_UNREACHABLE`. The socket path
+it names, and the diagnostic text, stay out of the record.
+
+## `fn the_capability_observer_lets_a_daemon_answer_line_override_the_unreachable_shapes() {`
+
+An `Error response from daemon:` line beside an unreachable shape is
+`DAEMON_ERROR`, as the product classifier reads it. The test first asserts
+the premise that the second line alone is an unreachable shape.
+
+## `fn the_capability_observer_reads_a_question_past_its_bound_as_a_timeout_not_unreachable() {`
+
+P3 sleeps past its 60 s bound. The result is `TIMEOUT`: the product's
+supervision settled the process and returned output with `timed_out`. The
+wall time is at least the bound, the class is never unreachable, and nothing
+follows. This is the one slow control, about 66 s locally.
+
+## `fn the_capability_observer_keeps_a_daemon_answer_when_its_metadata_is_malformed() {`
+
+Root audit 2's addition: P3 answers and P4's `daemon_os` is 300 bytes. The
+row stays `DAEMON_ANSWERED`, `daemon_metadata` is `INCOMPLETE`, and
+`daemon_os` is `MALFORMED` with its length and digest. Its bytes are absent,
+the other fields stand, and P5 still runs.
+
+## `fn the_capability_observer_asks_nothing_when_both_selectors_are_present() {`
+
+`DOCKER_HOST` and `DOCKER_CONTEXT` are both present. The row is
+`ENDPOINT_UNKNOWN (both-selectors-present)`. The fake's log does not exist,
+so zero docker processes ran, and the context's name stays out.
+
+## `fn the_capability_observer_reads_disagreeing_selectors_as_unknown() {`
+
+`DOCKER_HOST=tcp://...` (reduced in memory to `REJECTED tcp`) against P2's
+unix answer is `ENDPOINT_UNKNOWN (selector-disagreement)`. Only P2 is asked,
+and the address stays out.
+
+## `fn the_capability_observer_spawns_nothing_without_a_docker_executable() {`
+
+No `docker` on the `PATH` is `EXECUTABLE_ABSENT`, with zero spawns.
+
+## `fn the_capability_observer_reads_an_absent_image_without_pulling_it() {`
+
+P5 reads one image present (empty variant `VALID`), `busybox:latest` absent by
+the daemon's no-such-image answer, and one error. The log holds the six
+questions once each, in order. No logged invocation and no recorded argv
+holds `pull`: the check reads the asked and recorded argv, not the record's
+prose, whose scope statement names what was not done.

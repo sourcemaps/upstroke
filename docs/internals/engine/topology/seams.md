@@ -92,6 +92,30 @@ Called by `emit::emit` after every applied delta, with the fold and the
 events as the emitter holds them. A no-op by default: production hooks
 project nothing, and the harness bundle records the live projection.
 
+## `pub trait TopologyHooks` › `fn brokered(`
+
+Called by `TopologyRun` after every append it makes that succeeded, right
+after `folded` saw the same append, with the fold and the events as `folded`
+saw them and the run's broker as it stands: the provisional reservations
+(R13) and the invocation ledger, whose registrations are R4 and whose slot
+table is R3. A successful append touches neither ledger, so this is their
+state at the successful-append boundary, and a reservation that the append's
+caller converts after it — a dispatch's at `task_dispatched`, a retry's at its
+`attempt_started`, an integration's at `merge_verification_started`,
+`merge_prepared(fast)` or a conflict's `merge_rejected` — is still held here.
+Read-only, and a no-op by default: production and the harness bundle record
+nothing. A refused or failed append calls neither hook.
+
+Not a parameter of `folded`, for two reasons. `emit::emit` holds only the
+reservations: the invocation ledger is the broker's other half, held beside
+the emitter, and `EmitState`, which carries the reservations, is also built by
+the frozen recovery module, so it does not grow a field. And `folded` is
+implemented by a frozen module's test child, so its signature does not change.
+The call is therefore the run's (`run.rs`'s `brokered`), made where both
+halves are in hand, and recovery's own appends, which no `TopologyRun` makes,
+do not reach it. Its reader is `coordinator::tests::interleaving`'s
+`ledger_problems`: ST-09's logical rows at every append.
+
 ## `pub struct NoTopologyHooks {`
 
 What production passes: nothing armed, nothing recorded.

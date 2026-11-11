@@ -190,6 +190,7 @@ impl RunState {
                     .to_owned(),
             });
         }
+        self.check_candidate_not_failed(MERGE_VERIFICATION_UNAVAILABLE, transaction)?;
         self.check_spend_unrecorded(MERGE_VERIFICATION_UNAVAILABLE, unavailable.sequence)?;
         unavailable
             .self_consistency()
@@ -253,11 +254,6 @@ impl RunState {
             });
         }
         self.check_spend_unrecorded(MERGE_VERIFICATION_CHARGED, charged.sequence)?;
-        if self.abandoned == Some(charged.sequence)
-            && charged.sequence.0.saturating_add(1) == self.next_sequence
-        {
-            return Ok(());
-        }
         let transaction = self.open_transaction(MERGE_VERIFICATION_CHARGED, charged.sequence)?;
         if !matches!(
             transaction.class,
@@ -287,6 +283,27 @@ impl RunState {
                      a sequence's passes are recorded once, and after its record no terminal that \
                      carries passes is admitted for it",
                     sequence.0
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    fn check_candidate_not_failed(
+        &self,
+        kind: &'static str,
+        transaction: &Transaction,
+    ) -> Result<(), FoldError> {
+        if self.task(kind, transaction.candidate.key)?.state == TaskState::Failed {
+            return Err(FoldError::InconsistentRecord {
+                kind,
+                detail: format!(
+                    "task {} failed while integration sequence {} was verifying its candidate: a \
+                     decline, or a lineage member's failed settlement, failed its lineage and \
+                     cancelled the verification, whose one terminal is \
+                     `merge_verification_interrupted`; a failed task's candidate is never \
+                     published, rejected into a repair, deferred or parked",
+                    transaction.candidate.key, transaction.sequence.0
                 ),
             });
         }
@@ -363,6 +380,7 @@ impl RunState {
                         "the transaction is already authorized to publish".to_owned(),
                     ));
                 };
+                self.check_candidate_not_failed(MERGE_PREPARED, transaction)?;
                 self.check_spend_unrecorded(MERGE_PREPARED, prepared.sequence)?;
                 if transaction.candidate != prepared.candidate() {
                     return Err(inconsistent(format!(
@@ -463,6 +481,7 @@ impl RunState {
                         "the transaction is already authorized to publish".to_owned(),
                     ));
                 };
+                self.check_candidate_not_failed(MERGE_REJECTED, transaction)?;
                 self.check_spend_unrecorded(MERGE_REJECTED, rejected.sequence)?;
                 if transaction.candidate != rejected.candidate {
                     return Err(inconsistent(format!(

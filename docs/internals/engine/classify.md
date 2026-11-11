@@ -77,8 +77,7 @@ reviewer can read. What the integration verification consults, because
 the second observation is a judgement of the candidate's content that was
 made when the candidate was produced — an integration diff is the
 candidate cherry-picked onto a moved head, and a test another candidate
-published first is absent from it without being absent from the tree
-(`pr8-triage.md` §5, adequacy 2).
+published first is absent from it without being absent from the tree.
 
 ## `pub(crate) fn diff_failure(`
 
@@ -297,6 +296,19 @@ copied here unconditionally, which handed the same text to the
 legacy wire and `report.json` as well. Neither is the rule; the
 rule is that the carrier is the caller's answer.
 `decisions/2026-08-26-durable-retry-feedback.md`.
+
+## `pub(crate) fn interrupted_failure(detail: String) -> AttemptFailure {`
+
+An attempt the log settled interrupted: `Interrupted`, worker origin, the
+settlement's own detail as its reason, and no feedback. Nothing judged the
+attempt; this classifies the interruption, which is all a log that saw the
+attempt start and never saw it end can say. Its one caller is the schema-4
+report's `interrupted_record` (`src/engine/report.rs`), which hands it to
+[`attempt_record`] so that the report's record of an interrupted attempt comes
+from the one record builder (J12 follow-up, regular review 3, finding 1). That
+record is not a third construction beside the two `attempt_record`'s qualifier
+names: the legacy `events::InterruptedAttempt::event` is still the only one
+outside this module, and it does not use this classification.
 
 ## `pub(crate) fn review_input_failure(problem: String) -> AttemptFailure {`
 

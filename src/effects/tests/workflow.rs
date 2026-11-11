@@ -13,16 +13,17 @@ use yaml_rust2::{Yaml, YamlLoader};
 
 use super::ci_model::{
     ACTION_INPUTS, AGGREGATE_JOB, AGGREGATE_JOB_FIELDS, AGGREGATE_SCRIPT, AGGREGATE_SHELL,
-    AGGREGATE_STEP_FIELDS, CI_TARGETS, CI_WORKFLOW, CLIPPY_GATE, CiTarget, DEFAULTS_FIELDS,
-    DEFAULTS_RUN_FIELDS, ENCODED_RUSTFLAGS_KEY, GATE_JOB_FIELDS, GATE_SCRIPTS,
-    GOLDEN_IMAGE_TOOLCHAIN, KNOWN_SHELLS, LANE_STEP_FIELDS, MSRV_COMMAND, MSRV_JOB,
-    MSRV_JOB_FIELDS, OPTIONAL_DEFAULTS_FIELD, PINNED_ACTIONS, QUEUE_LANE, REQUIRED_CONTEXT,
-    RUSTFLAGS_KEY, RUSTFLAGS_VALUE, STABLE_TOOLCHAIN, STEP_FIELDS, TEST_COMMAND, TEST_JOB_FIELDS,
-    TEST_SCRIPTS, TEST_STEP_ENV, TEST_STEP_FIELDS, TEST_WINDOWS_JOB, TEST_WINDOWS_JOB_FIELDS,
-    TEST_WINDOWS_PLATFORM, TEST_WINDOWS_RUNS_ON, TEST_WINDOWS_SCRIPTS, TEST_WINDOWS_STEP_ENV,
-    TEST_WINDOWS_TOOLCHAIN_COMPONENTS, TOOLCHAIN_ACTION, TOOLCHAIN_COMPONENTS,
-    WINDOWS_BUILD_WITNESS, WINDOWS_TEST_WITNESS, WORKFLOW_ENV, WORKFLOW_FIELDS,
-    WORKFLOW_PERMISSIONS,
+    AGGREGATE_STEP_FIELDS, CAPABILITY_OBSERVATION, CAPABILITY_STEP_FIELDS,
+    CAPABILITY_STEP_TIMEOUT_MINUTES, CAPABILITY_WINDOWS_OBSERVATION, CI_TARGETS, CI_WORKFLOW,
+    CLIPPY_GATE, CiTarget, DEFAULTS_FIELDS, DEFAULTS_RUN_FIELDS, ENCODED_RUSTFLAGS_KEY,
+    GATE_JOB_FIELDS, GATE_SCRIPTS, GOLDEN_IMAGE_TOOLCHAIN, HOST_ACCEPTANCE_CAPTURE,
+    HOST_ACCEPTANCE_WINDOWS_CAPTURE, KNOWN_SHELLS, MSRV_COMMAND, MSRV_JOB, MSRV_JOB_FIELDS,
+    OPTIONAL_DEFAULTS_FIELD, PINNED_ACTIONS, REQUIRED_CONTEXT, RUSTFLAGS_KEY, RUSTFLAGS_VALUE,
+    STABLE_TOOLCHAIN, STEP_FIELDS, TEST_COMMAND, TEST_JOB_FIELDS, TEST_SCRIPTS, TEST_STEP_ENV,
+    TEST_STEP_FIELDS, TEST_WINDOWS_JOB, TEST_WINDOWS_JOB_FIELDS, TEST_WINDOWS_LABELS,
+    TEST_WINDOWS_PLATFORM, TEST_WINDOWS_SCRIPTS, TEST_WINDOWS_STEP_ENV, TOOLCHAIN_ACTION,
+    TOOLCHAIN_COMPONENTS, WINDOWS_BUILD_WITNESS, WINDOWS_TEST_WITNESS, WORKFLOW_ENV,
+    WORKFLOW_FIELDS, WORKFLOW_PERMISSIONS,
 };
 use super::repo_root;
 
@@ -451,8 +452,12 @@ pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {
     }
     for (index, step) in steps_of(job).iter().enumerate() {
         let runs_the_suite = scalar(step, "run") == Some(TEST_COMMAND);
-        let allowed: &[&str] = if runs_the_suite {
+        let runs_the_capture = scalar(step, "run") == Some(HOST_ACCEPTANCE_CAPTURE);
+        let runs_the_observation = scalar(step, "run") == Some(CAPABILITY_OBSERVATION);
+        let allowed: &[&str] = if runs_the_suite || runs_the_capture {
             &TEST_STEP_FIELDS
+        } else if runs_the_observation {
+            &CAPABILITY_STEP_FIELDS
         } else {
             &STEP_FIELDS
         };
@@ -468,6 +473,27 @@ pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {
                 &format!("`test` step {index}"),
                 "test-step-env",
                 &TEST_STEP_ENV,
+            ));
+        }
+        if runs_the_capture {
+            out.extend(step_env_complaints(
+                step,
+                &format!("`test` step {index}"),
+                "test-capture-step-env",
+                &TEST_STEP_ENV,
+            ));
+        }
+        if runs_the_observation {
+            out.extend(step_env_complaints(
+                step,
+                &format!("`test` step {index}"),
+                "test-capability-step-env",
+                &TEST_STEP_ENV,
+            ));
+            out.extend(observation_step_complaints(
+                step,
+                &format!("`test` step {index}"),
+                "test-capability-step",
             ));
         }
         if scalar(step, "run").is_some() {
@@ -495,6 +521,20 @@ pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {
              job that executes them."
         ));
     }
+    out.extend(capture_complaints(
+        job,
+        "test",
+        "test-capture-command",
+        TEST_COMMAND,
+        HOST_ACCEPTANCE_CAPTURE,
+    ));
+    out.extend(observation_complaints(
+        job,
+        "test",
+        "test-capability-command",
+        HOST_ACCEPTANCE_CAPTURE,
+        CAPABILITY_OBSERVATION,
+    ));
     out.extend(checkout_complaints(job, "test", "test-job-checkout"));
     out.extend(step_pin_complaints(
         job,
@@ -633,10 +673,12 @@ pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {
     }
     for (index, step) in steps_of(job).iter().enumerate() {
         let runs_the_suite = scalar(step, "run") == Some(WINDOWS_TEST_WITNESS);
-        let allowed: &[&str] = if runs_the_suite {
+        let runs_the_capture = scalar(step, "run") == Some(HOST_ACCEPTANCE_WINDOWS_CAPTURE);
+        let runs_the_observation = scalar(step, "run") == Some(CAPABILITY_WINDOWS_OBSERVATION);
+        let allowed: &[&str] = if runs_the_suite || runs_the_capture {
             &TEST_STEP_FIELDS
-        } else if installs_a_toolchain(step) {
-            &LANE_STEP_FIELDS
+        } else if runs_the_observation {
+            &CAPABILITY_STEP_FIELDS
         } else {
             &STEP_FIELDS
         };
@@ -644,10 +686,10 @@ pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {
         if !strange.is_empty() {
             out.push(format!(
                 "[unexpected-step-field] `{TEST_WINDOWS_JOB}` step {index} declares {strange:?}. \
-                 `if:` is admitted on the toolchain install alone, where it names the lane \
-                 whose runner needs one; on the step that runs the suite it is a job that \
-                 reports success having run nothing on the other lane, and on a `run:` step \
-                 it is a script one lane executes and the other never shows a reviewer."
+                 No step of this job may carry an `if:`: on the step that runs the suite it is \
+                 a job that reports success having run nothing for the events it excludes, \
+                 and on any other step it is a script or an action one event executes and \
+                 another never shows a reviewer."
             ));
         }
         if runs_the_suite {
@@ -656,6 +698,27 @@ pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {
                 &format!("`{TEST_WINDOWS_JOB}` step {index}"),
                 "test-windows-step-env",
                 &TEST_WINDOWS_STEP_ENV,
+            ));
+        }
+        if runs_the_capture {
+            out.extend(step_env_complaints(
+                step,
+                &format!("`{TEST_WINDOWS_JOB}` step {index}"),
+                "test-windows-capture-step-env",
+                &TEST_WINDOWS_STEP_ENV,
+            ));
+        }
+        if runs_the_observation {
+            out.extend(step_env_complaints(
+                step,
+                &format!("`{TEST_WINDOWS_JOB}` step {index}"),
+                "test-windows-capability-step-env",
+                &TEST_WINDOWS_STEP_ENV,
+            ));
+            out.extend(observation_step_complaints(
+                step,
+                &format!("`{TEST_WINDOWS_JOB}` step {index}"),
+                "test-windows-capability-step",
             ));
         }
         if scalar(step, "run").is_some() {
@@ -670,70 +733,34 @@ pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {
         }
     }
 
-    out.extend(toolchain_complaints(
-        job,
-        TEST_WINDOWS_JOB,
-        "test-windows-toolchain",
-        None,
-    ));
     for (index, step) in steps_of(job).iter().enumerate() {
-        if !installs_a_toolchain(step) {
-            continue;
-        }
-        let selected = field(step, "with").and_then(|with| scalar(with, "toolchain"));
-        if selected != Some(GOLDEN_IMAGE_TOOLCHAIN) {
+        if installs_a_toolchain(step) {
             out.push(format!(
-                "[test-windows-toolchain] `{TEST_WINDOWS_JOB}` step {index} installs toolchain \
-                 {selected:?}, not `{GOLDEN_IMAGE_TOOLCHAIN}`, the golden image's. Current \
-                 stable is ahead of the image, so `stable` here runs the suite on a compiler \
-                 the pull-request lane never ran it on, and a test whose outcome depends on \
-                 the compiler passes on one lane and fails on the other; an older version \
-                 omits on the queue whatever the image's compiler enables. The pin keeps the \
-                 two test lanes one compiler. It shields the queue from nothing else: \
-                 `lint (windows)` compiles current stable on both events and is required by \
-                 the aggregate, so a stable that moves between a pull request's green and \
-                 its enqueue ejects the entry through that leg, with or without this pin."
-            ));
-        }
-        if scalar(step, "if") != Some(QUEUE_LANE) {
-            out.push(format!(
-                "[test-windows-toolchain] `{TEST_WINDOWS_JOB}` step {index} installs its \
-                 toolchain under {:?}, not exactly `{QUEUE_LANE}`. The install is written for \
-                 the hosted lane, whose runner carries no curated compiler; the guest's image \
-                 carries the compiler this job runs, and re-curation is how it moves. \
-                 Unconditional, the step selects the guest's compiler from the workflow \
-                 instead; inverted, the hosted lane runs on whatever GitHub's image \
-                 preinstalled and the guest lane installs over its own.",
-                scalar(step, "if")
-            ));
-        }
-        let components = field(step, "with").and_then(|with| scalar(with, "components"));
-        if components != Some(TEST_WINDOWS_TOOLCHAIN_COMPONENTS) {
-            out.push(format!(
-                "[test-windows-toolchain] `{TEST_WINDOWS_JOB}` step {index} installs components \
-                 {components:?}, not exactly `{TEST_WINDOWS_TOOLCHAIN_COMPONENTS}`. \
-                 `dtolnay/rust-toolchain` installs the minimal profile, and \
-                 `every_declared_effect_denial_refuses_for_the_reason_it_declares` drives \
-                 `clippy-driver` on the hosted lane as it does in `test`."
+                "[test-windows-toolchain] `{TEST_WINDOWS_JOB}` step {index} installs a \
+                 toolchain. The guest's image carries the compiler this leg runs, \
+                 `{GOLDEN_IMAGE_TOOLCHAIN}`, on every lane, and re-curation is how it moves; a \
+                 step here selects it from the workflow instead, running `rustup` over a \
+                 frozen image on every build. At the image's own version the suite step's \
+                 compiler check still passes, so this is what refuses it."
             ));
         }
     }
 
-    if scalar(job, "runs-on") != Some(TEST_WINDOWS_RUNS_ON) {
+    let expected_labels: BTreeSet<String> = TEST_WINDOWS_LABELS
+        .iter()
+        .copied()
+        .map(str::to_owned)
+        .collect();
+    let labels = field(job, "runs-on").and_then(scalar_set);
+    if labels.as_ref() != Some(&expected_labels) {
         out.push(format!(
-            "[test-windows-runner] `{TEST_WINDOWS_JOB}` runs on {:?}, not exactly \
-             `{TEST_WINDOWS_RUNS_ON}`. The expression names both machines, by lane: \
-             `{TEST_WINDOWS_PLATFORM}` for a merge-queue entry, which nothing waits on \
-             interactively, and the pinned label set for every other build, whose third \
-             label names the curated image. A bare scalar sends the pull-request lane to the \
-             hosted runner and its six minutes become twenty-five; a bare label set sends \
-             every build to the pull-request guest, where a queue entry's install, conditioned \
-             on the event and not the machine, runs over the image's compiler; a subset of the \
-             labels admits any \
-             self-hosted Windows machine the account registers; and a condition spelled \
-             other than `{QUEUE_LANE}` is one this contract cannot evaluate -- it may route \
-             both lanes as the install step expects or send one to a machine the step was \
-             not written for, and an equality over the text cannot tell which.",
+            "[test-windows-runner] `{TEST_WINDOWS_JOB}` runs on {:?}, not exactly the label \
+             set {expected_labels:?}, which names the curated guest for every lane. A scalar \
+             is a hosted runner, where no step installs the image's compiler; an expression \
+             routes some event to a machine this contract cannot name -- the merge queue's \
+             route to `{TEST_WINDOWS_PLATFORM}` from 2026-09-16 among them; and a subset of \
+             the labels admits any self-hosted Windows machine the account registers, since \
+             the third label is what names the curated image.",
             field(job, "runs-on")
         ));
     }
@@ -752,6 +779,20 @@ pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {
              something that exits zero."
         ));
     }
+    out.extend(capture_complaints(
+        job,
+        TEST_WINDOWS_JOB,
+        "test-windows-capture-command",
+        WINDOWS_TEST_WITNESS,
+        HOST_ACCEPTANCE_WINDOWS_CAPTURE,
+    ));
+    out.extend(observation_complaints(
+        job,
+        TEST_WINDOWS_JOB,
+        "test-windows-capability-command",
+        HOST_ACCEPTANCE_WINDOWS_CAPTURE,
+        CAPABILITY_WINDOWS_OBSERVATION,
+    ));
     out.extend(checkout_complaints(
         job,
         TEST_WINDOWS_JOB,
@@ -763,6 +804,95 @@ pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {
         "test-windows-run-script",
         &TEST_WINDOWS_SCRIPTS,
     ));
+    out
+}
+
+/// Exactly one step of `job` runs the pinned host acceptance `capture`, and it is
+/// the step immediately after the one step that runs the pinned `suite`.
+fn capture_complaints(
+    job: &Yaml,
+    named: &str,
+    code: &str,
+    suite: &str,
+    capture: &str,
+) -> Vec<String> {
+    let at = |script: &str| -> Vec<usize> {
+        steps_of(job)
+            .iter()
+            .enumerate()
+            .filter(|(_, step)| scalar(step, "run") == Some(script))
+            .map(|(index, _)| index)
+            .collect()
+    };
+    let suites = at(suite);
+    let captures = at(capture);
+    match (suites.as_slice(), captures.as_slice()) {
+        ([suite_at], [capture_at]) if *capture_at == suite_at + 1 => Vec::new(),
+        _ => vec![format!(
+            "[{code}] `{named}` runs the pinned host acceptance capture at steps {captures:?} \
+             and its pinned suite at steps {suites:?}, not one capture immediately after one \
+             suite. The capture is the native HOST acceptance record: deleted, filtered to \
+             another or no test, echoed, or with its exit, its zero-test refusal or its frame \
+             check edited out, it is no step this contract pins, and a job that reports success \
+             leaves no record or a record nothing refused. Immediately after the suite, because \
+             a step between them -- a cache restore, a checkout -- changes the harness or the \
+             tree the capture runs after the suite ran."
+        )],
+    }
+}
+
+/// Exactly one step of `job` runs the pinned container capability `observation`, and it is
+/// the step immediately after the one step that runs the pinned host acceptance `capture`.
+fn observation_complaints(
+    job: &Yaml,
+    named: &str,
+    code: &str,
+    capture: &str,
+    observation: &str,
+) -> Vec<String> {
+    let at = |script: &str| -> Vec<usize> {
+        steps_of(job)
+            .iter()
+            .enumerate()
+            .filter(|(_, step)| scalar(step, "run") == Some(script))
+            .map(|(index, _)| index)
+            .collect()
+    };
+    let captures = at(capture);
+    let observations = at(observation);
+    match (captures.as_slice(), observations.as_slice()) {
+        ([capture_at], [observation_at]) if *observation_at == capture_at + 1 => Vec::new(),
+        _ => vec![format!(
+            "[{code}] `{named}` runs the pinned container capability observation at steps \
+             {observations:?} and its pinned host acceptance capture at steps {captures:?}, not \
+             one observation immediately after one capture. The observation is the platform's \
+             container capability record: deleted, filtered to another or no test, echoed, or \
+             with its exit, its zero-test refusal or its frame check edited out, it is no step \
+             this contract pins, and a job that reports success leaves no record or a record \
+             nothing refused. Immediately after the capture, because a step between them -- a \
+             cache restore, a checkout -- changes the harness or the tree the observation runs \
+             after the suite and the capture ran, and above the capture it would run before \
+             the record that step makes."
+        )],
+    }
+}
+
+/// The observation step's own fields: exactly `env`, `name`, `run` and `timeout-minutes`,
+/// the bound exactly [`CAPABILITY_STEP_TIMEOUT_MINUTES`].
+fn observation_step_complaints(step: &Yaml, named: &str, code: &str) -> Vec<String> {
+    let mut out: Vec<String> = field_complaints(step, &CAPABILITY_STEP_FIELDS, &[])
+        .into_iter()
+        .map(|complaint| format!("[{code}] {named} {complaint}"))
+        .collect();
+    let minutes = field(step, "timeout-minutes").and_then(Yaml::as_i64);
+    if minutes != Some(CAPABILITY_STEP_TIMEOUT_MINUTES) {
+        out.push(format!(
+            "[{code}] {named} bounds the container capability observation at {minutes:?} \
+             minutes, not exactly {CAPABILITY_STEP_TIMEOUT_MINUTES}. The bound covers the \
+             questions' requested 135 s with Cargo's start; without it a stalled question is \
+             held by the job's own timeout, and a wider one spends the leg's headroom."
+        ));
+    }
     out
 }
 
@@ -1642,15 +1772,14 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-REHOSTED",
-        escape: "both lanes on `windows-latest`, as a scalar `runs-on:`. Every step still \
-                 matches character for character and the install step's condition still \
-                 holds on the queue; only the pull-request lane's machine changed, and with \
-                 it the six minutes every pull request waits on became twenty-five. The \
-                 pull-request lane's install is skipped there, so the suite step's compiler \
-                 check throws on every pull request: loud, but a workflow that is red by \
-                 construction is refused here before it is pushed.",
+        escape: "every lane on `windows-latest`, as a scalar `runs-on:`. Every step still \
+                 matches character for character; only the machine changed, and with it the \
+                 wait every pull request has on this leg. Nothing there installs the image's \
+                 compiler, so the suite step's compiler check throws on every build unless \
+                 GitHub's image happens to carry the same version: loud, but a workflow that \
+                 is red by construction is refused here before it is pushed.",
         job: Some("test-windows"),
-        anchor: "    runs-on: ${{ github.event_name == 'merge_group' && 'windows-latest' || fromJSON('[\"self-hosted\", \"windows\", \"winguest\"]') }}\n",
+        anchor: "    runs-on: [self-hosted, windows, winguest]\n",
         replacement: "    runs-on: windows-latest\n",
         refused_as: "test-windows-runner",
     },
@@ -1660,32 +1789,22 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  Windows runner the account ever registers satisfies; the curated image is \
                  named by the label this drops",
         job: Some("test-windows"),
-        anchor: "    runs-on: ${{ github.event_name == 'merge_group' && 'windows-latest' || fromJSON('[\"self-hosted\", \"windows\", \"winguest\"]') }}\n",
-        replacement: "    runs-on: ${{ github.event_name == 'merge_group' && 'windows-latest' || fromJSON('[\"self-hosted\", \"windows\"]') }}\n",
+        anchor: "    runs-on: [self-hosted, windows, winguest]\n",
+        replacement: "    runs-on: [self-hosted, windows]\n",
         refused_as: "test-windows-runner",
     },
     WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-QUEUE-LANE-REGUESTED",
-        escape: "the expression replaced by the plain label set. Every build lands on the \
-                 pull-request guest, a merge-queue entry queues behind whatever pull-request \
-                 build holds it, and the queue lane's install step, still conditioned on the \
-                 event rather than on the machine, now runs on the guest and installs over \
-                 the image's compiler, under the forty-five minutes meant for the slow host.",
+        name: "MUT-TEST-WINDOWS-QUEUE-REHOSTED",
+        escape: "the merge queue routed back to `windows-latest` by expression, every other \
+                 build left on the guest: the route this job ran from 2026-09-16, under which \
+                 queue entries reached their 45- and then 55-minute timeouts in October 2026 \
+                 before the suite reported a complete result. Nothing installs the image's \
+                 compiler there now, so the compiler check throws on every entry; restored \
+                 with its install step, it is a queue that lands merges on a machine no pull \
+                 request ran on.",
         job: Some("test-windows"),
-        anchor: "    runs-on: ${{ github.event_name == 'merge_group' && 'windows-latest' || fromJSON('[\"self-hosted\", \"windows\", \"winguest\"]') }}\n",
-        replacement: "    runs-on: [self-hosted, windows, winguest]\n",
-        refused_as: "test-windows-runner",
-    },
-    WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-LANES-SWAPPED",
-        escape: "the condition inverted in `runs-on:` alone: the pull-request lane goes to \
-                 `windows-latest`, where no step installs a compiler, and the queue goes to \
-                 the guest, where the install step now runs over the image's own. The \
-                 install's `if:` still matches; it is the runner that no longer agrees with \
-                 it.",
-        job: Some("test-windows"),
-        anchor: "    runs-on: ${{ github.event_name == 'merge_group' && 'windows-latest' || fromJSON('[\"self-hosted\", \"windows\", \"winguest\"]') }}\n",
-        replacement: "    runs-on: ${{ github.event_name != 'merge_group' && 'windows-latest' || fromJSON('[\"self-hosted\", \"windows\", \"winguest\"]') }}\n",
+        anchor: "    runs-on: [self-hosted, windows, winguest]\n",
+        replacement: "    runs-on: ${{ github.event_name == 'merge_group' && 'windows-latest' || fromJSON('[\"self-hosted\", \"windows\", \"winguest\"]') }}\n",
         refused_as: "test-windows-runner",
     },
     WorkflowEscape {
@@ -1724,12 +1843,11 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     WorkflowEscape {
         name: "MUT-WINDOWS-WITNESS-COMPILER-CHECK-DROPPED",
         escape: "the two lines that refuse any compiler but the image's are gone and the suite \
-                 runs on whatever Cargo resolves to. The install step still matches whole, \
-                 the toolchain action tolerates a failed `rustup default` and verifies only \
-                 `rustc +1.97.1`, and a `RUSTC` in the guest's service environment is read by \
-                 nothing here, so either lane can run the suite on a compiler the other \
-                 never saw with the install reported green -- the one-compiler claim with \
-                 nothing holding it.",
+                 runs on whatever Cargo resolves to on the guest. A `RUSTC` in the guest's \
+                 service environment, a rustup default that moved or a PATH naming another \
+                 install is read by nothing else here, so the suite can run on a compiler the \
+                 image does not carry with every other pin matching -- the image's-compiler \
+                 claim with nothing holding it.",
         job: Some("test-windows"),
         anchor: "          $rustc = ((cargo rustc -q --lib -- --version) | Out-String).Trim(); $path_rustc = ((rustc --version) | Out-String).Trim(); $cargo = ((cargo --version) | Out-String).Trim()\n\
                  \x20         if ($rustc -notmatch '^rustc 1\\.97\\.1 ' -or $path_rustc -notmatch '^rustc 1\\.97\\.1 ' -or $cargo -notmatch '^cargo 1\\.97\\.1 ') { throw \"the suite would run on '$rustc' (Cargo's compiler), '$path_rustc' (PATH's rustc) and '$cargo', not the image's 1.97.1: a compiler was chosen by something other than this workflow\" }\n",
@@ -1739,50 +1857,13 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-CACHE-BEFORE-CHECKOUT",
         escape: "a pinned cache step placed above the checkout, everything else in order: the \
-                 checkout slips to step 1 and the install to step 2, so the install's position \
-                 check refuses this shape too. The checkout pin is named because it is the one \
-                 that reads the cause -- a Rust-aware action running before the tree exists -- \
-                 and `MUT-TEST-WINDOWS-CHECKOUT-AFTER-INSTALL` is the shape only it refuses.",
+                 checkout slips to step 1 and a Rust-aware action runs before the tree exists. \
+                 The job installs no toolchain, so no install position stands between the \
+                 two, and the checkout pin -- where the checkout is, not merely what it is \
+                 given -- is the one that refuses it.",
         job: Some("test-windows"),
-        anchor: "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n\n\
-                 \x20     # The hosted lane's compiler: the image's, exactly. The workflow oracle\n",
+        anchor: "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n",
         replacement: "      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2\n\
-                      \x20     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n\n\
-                      \x20     # The hosted lane's compiler: the image's, exactly. The workflow oracle\n",
-        refused_as: "test-windows-checkout",
-    },
-    WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-CHECKOUT-AFTER-INSTALL",
-        escape: "the shape the checkout pin exists for: a pinned cache step at 0, the install \
-                 still at 1, and the checkout moved to 2. The install's position check passes, \
-                 the checkout is still input-free, and a Rust-aware action runs before the \
-                 compiler is selected and before the tree exists; only a pin on where the \
-                 checkout is, not merely what it is given, refuses it.",
-        job: Some("test-windows"),
-        anchor: "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n\n\
-                 \x20     # The hosted lane's compiler: the image's, exactly. The workflow oracle\n\
-                 \x20     # pins this step whole -- one install, right after the checkout, on\n\
-                 \x20     # exactly the lane whose runner needs one, at exactly the image's version\n\
-                 \x20     # -- and refuses an `if:` on any other step of this job. On the guest\n\
-                 \x20     # lane the step is skipped after its archive is downloaded at setup.\n\
-                 \x20     - name: Install the image's toolchain on the hosted lane\n\
-                 \x20       if: github.event_name == 'merge_group'\n\
-                 \x20       uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable\n\
-                 \x20       with:\n\
-                 \x20         toolchain: 1.97.1\n\
-                 \x20         components: clippy\n",
-        replacement: "      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2\n\n\
-                      \x20     # The hosted lane's compiler: the image's, exactly. The workflow oracle\n\
-                 \x20     # pins this step whole -- one install, right after the checkout, on\n\
-                 \x20     # exactly the lane whose runner needs one, at exactly the image's version\n\
-                 \x20     # -- and refuses an `if:` on any other step of this job. On the guest\n\
-                 \x20     # lane the step is skipped after its archive is downloaded at setup.\n\
-                 \x20     - name: Install the image's toolchain on the hosted lane\n\
-                 \x20       if: github.event_name == 'merge_group'\n\
-                 \x20       uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable\n\
-                 \x20       with:\n\
-                 \x20         toolchain: 1.97.1\n\
-                 \x20         components: clippy\n\
                       \x20     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n",
         refused_as: "test-windows-checkout",
     },
@@ -1809,129 +1890,48 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         refused_as: "test-windows-command",
     },
     WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-TOOLCHAIN-BEHIND-THE-IMAGE",
-        escape: "the hosted lane installs `1.96.0`, a compiler the image never carried. Every \
-                 step-level pin still holds -- the action is allowlisted, its input keys are \
-                 allowlisted, the components value is pinned, the condition is the lane's. \
-                 With the suite step intact its compiler check throws on every queue entry, \
-                 so this is not a silent escape but a drift between the two places the \
-                 version is pinned, and the oracle refuses the drift rather than letting the \
-                 queue discover it. Edited together with the suite step it would be silent: \
-                 the queue runs a compiler the pull-request lane never saw, and a Windows test \
-                 enabled only on 1.97 and later is omitted on the lane that lands the merge. \
-                 Before the hosted lane existed this was the ninth review pass's finding: the \
-                 hosted jobs pinned `stable` through `toolchain_complaints`, and this job, \
-                 which installed nothing, was never asked.",
-        job: Some("test-windows"),
-        anchor: "          toolchain: 1.97.1\n",
-        replacement: "          toolchain: 1.96.0\n",
-        refused_as: "test-windows-toolchain",
-    },
-    WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-TOOLCHAIN-FLOATS",
-        escape: "the hosted lane installs `stable`, which is already ahead of the image's \
-                 compiler. With the suite step intact its compiler check throws on every \
-                 queue entry; edited together with it, the queue runs the suite on a compiler \
-                 the pull-request lane never ran it on, so a test whose outcome depends on the \
-                 compiler -- a version-gated test, a std behaviour change, a new lint in test \
-                 code under `-D warnings` -- passes on the guest and fails in the queue, or \
-                 the reverse, for a reason unrelated to the diff. The pin is what keeps the \
-                 two test lanes one compiler, and the oracle refuses the drift between the \
-                 install and the suite step's check either way.",
-        job: Some("test-windows"),
-        anchor: "          toolchain: 1.97.1\n",
-        replacement: "          toolchain: stable\n",
-        refused_as: "test-windows-toolchain",
-    },
-    WorkflowEscape {
         name: "MUT-TEST-WINDOWS-INSTALL-UNCONDITIONAL",
-        escape: "the install step's `if:` dropped. The hosted lane is unchanged; the guest \
-                 lane now has its compiler selected by the workflow instead of by the image, \
-                 which is the escape the contract refused before there was a hosted lane -- \
-                 `rustup` on a frozen image, over a curated toolchain, on every pull request.",
-        job: Some("test-windows"),
-        anchor: "        if: github.event_name == 'merge_group'\n",
-        replacement: "",
-        refused_as: "test-windows-toolchain",
-    },
-    WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-INSTALL-ON-THE-WRONG-LANE",
-        escape: "the install step's condition inverted while `runs-on:` keeps its lanes: the \
-                 hosted lane is left with whatever GitHub's image preinstalled -- current \
-                 stable, or the previous one during a rollout -- where the suite step's \
-                 compiler check then throws on every queue entry, and the guest lane installs \
-                 over its own. Both pins are exact; they no longer name the same lane, and a \
-                 workflow whose queue is red by construction is refused before it is pushed.",
-        job: Some("test-windows"),
-        anchor: "        if: github.event_name == 'merge_group'\n",
-        replacement: "        if: github.event_name != 'merge_group'\n",
-        refused_as: "test-windows-toolchain",
-    },
-    WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-COMPONENTS-WITHOUT-CLIPPY",
-        escape: "the hosted lane's install drops `components: clippy`. The action installs \
-                 the minimal profile, so `clippy-driver` is absent and the effect-denial \
-                 fixtures cannot run on the lane that lands the merge -- \
-                 `MUT-CI-STOPS-INSTALLING-CLIPPY`'s shape on this job.",
-        job: Some("test-windows"),
-        anchor: "          components: clippy\n",
-        replacement: "",
-        refused_as: "test-windows-toolchain",
-    },
-    WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-SECOND-INSTALL",
-        escape: "a second, unconditional toolchain step at `stable` after the identity step. \
-                 The pinned install is untouched, so every equality over it holds; the second \
-                 install makes `stable` the default on both lanes, where the suite step's \
-                 compiler check then throws on every build. Loud today; the oracle refuses two \
-                 installs because which compiler the job runs must be decided by one step it \
-                 pins whole, not by whichever install ran last.",
+        escape: "an unconditional install of the image's own `1.97.1`, with `clippy`, before \
+                 the suite. Every other pin holds -- the action, its input keys and its \
+                 components value are allowlisted -- and the suite step's compiler check \
+                 passes, because it asks for the version it gets. What changed is who chose \
+                 it: the workflow, through `rustup` over a frozen image on every build, instead \
+                 of the image re-curation moves. The escape this contract refused before the \
+                 job had a hosted lane, refused again now that it has none.",
         job: Some("test-windows"),
         anchor: "      - name: Test, and witness that the suite ran\n",
         replacement: "      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable\n\
                       \x20       with:\n\
-                      \x20         toolchain: stable\n\
+                      \x20         toolchain: 1.97.1\n\
                       \x20         components: clippy\n\
                       \x20     - name: Test, and witness that the suite ran\n",
         refused_as: "test-windows-toolchain",
     },
     WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-INSTALL-NOT-FIRST",
-        escape: "the install step moved below the identity step. Nothing runs Cargo between \
-                 the two today, so this is the shape `MUT-TOOLCHAIN-NOT-FIRST` refuses on the \
-                 gates, held here for the same reason: a Cargo command placed above the \
-                 install would run on GitHub's preinstalled compiler with every other pin \
-                 matching.",
+        name: "MUT-TEST-WINDOWS-HOSTED-INSTALL-RESTORED",
+        escape: "the hosted lane's install step put back as it stood, under \
+                 `github.event_name == 'merge_group'`, with `runs-on:` left on the guest. Every \
+                 merge-queue entry then runs `rustup` over the image's compiler on the machine \
+                 every pull request runs on, and no pull-request build shows the step running. \
+                 Refused by the field set too, since no step here may carry an `if:`; the \
+                 toolchain refusal is named because it reads the cause.",
         job: Some("test-windows"),
-        anchor: "      - name: Install the image's toolchain on the hosted lane\n\
-                 \x20       if: github.event_name == 'merge_group'\n\
-                 \x20       uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable\n\
-                 \x20       with:\n\
-                 \x20         toolchain: 1.97.1\n\
-                 \x20         components: clippy\n\n\
-                 \x20     - name: Configure git identity\n\
-                 \x20       run: |\n\
-                 \x20         git config --global user.email \"ci@upstroke.local\"\n\
-                 \x20         git config --global user.name \"upstroke CI\"\n",
-        replacement: "      - name: Configure git identity\n\
-                 \x20       run: |\n\
-                 \x20         git config --global user.email \"ci@upstroke.local\"\n\
-                 \x20         git config --global user.name \"upstroke CI\"\n\n\
-                 \x20     - name: Install the image's toolchain on the hosted lane\n\
-                 \x20       if: github.event_name == 'merge_group'\n\
-                 \x20       uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable\n\
-                 \x20       with:\n\
-                 \x20         toolchain: 1.97.1\n\
-                 \x20         components: clippy\n",
+        anchor: "      - name: Configure git identity\n",
+        replacement: "      - name: Install the image's toolchain on the hosted lane\n\
+                      \x20       if: github.event_name == 'merge_group'\n\
+                      \x20       uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable\n\
+                      \x20       with:\n\
+                      \x20         toolchain: 1.97.1\n\
+                      \x20         components: clippy\n\n\
+                      \x20     - name: Configure git identity\n",
         refused_as: "test-windows-toolchain",
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-SUITE-ON-ONE-LANE",
-        escape: "the lane condition, exactly as the install step spells it, on the step that \
-                 runs the suite. The pull-request lane checks out, configures git, and \
-                 reports success having run nothing; the queue still runs the suite, so the \
-                 merge is still guarded, and every pull request is green on Windows for \
-                 free. The allowance is per step, not per value.",
+        escape: "the merge-queue condition on the step that runs the suite. A pull request or \
+                 a push checks out, configures git, and reports success having run nothing; \
+                 the queue still runs the suite, so the merge is still guarded, and every pull \
+                 request is green on Windows for free. No step of this job may carry an `if:`.",
         job: Some("test-windows"),
         anchor: "      - name: Test, and witness that the suite ran\n",
         replacement: "      - name: Test, and witness that the suite ran\n\
@@ -1939,12 +1939,12 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         refused_as: "unexpected-step-field",
     },
     WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-HOSTED-ONLY-RETARGET",
-        escape: "a `run:` step under the lane condition that fetches `master` and checks it \
-                 out before the suite. The pull-request lane, the one a reviewer watches, \
+        name: "MUT-TEST-WINDOWS-QUEUE-ONLY-RETARGET",
+        escape: "a `run:` step under the merge-queue condition that fetches `master` and checks \
+                 it out before the suite. The pull-request build, the one a reviewer watches, \
                  never executes it; the queue tests `master` and lands the candidate. Refused \
                  twice, by the field set and by the script pin, and the field set is the one \
-                 named here because it refuses the lane-conditional script before reading it.",
+                 named here because it refuses the event-conditional script before reading it.",
         job: Some("test-windows"),
         anchor: "      - name: Test, and witness that the suite ran\n",
         replacement: "      - if: github.event_name == 'merge_group'\n\
@@ -1997,9 +1997,10 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  one fails at the declaration (34-r6-casefold-declaration.log, ext4) -- while \
                  every pin still matches",
         job: Some("test"),
-        anchor: "        env:\n\
+        anchor: "      - run: cargo test --all-targets --all-features\n\
+                 \x20       env:\n\
                  \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}\n",
-        replacement: "",
+        replacement: "      - run: cargo test --all-targets --all-features\n",
         refused_as: "test-step-env",
     },
     WorkflowEscape {
@@ -2009,21 +2010,29 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  fails its declaration loudly -- a red that reads as a flake rather than as \
                  the guard having moved",
         job: Some("test"),
-        anchor: "          UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}\n",
-        replacement: "          UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'ubuntu-latest' && '1' || '' }}\n",
+        anchor: "      - run: cargo test --all-targets --all-features\n\
+                 \x20       env:\n\
+                 \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}\n",
+        replacement: "      - run: cargo test --all-targets --all-features\n\
+                      \x20       env:\n\
+                      \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'ubuntu-latest' && '1' || '' }}\n",
         refused_as: "test-step-env",
     },
     WorkflowEscape {
         name: "MUT-TEST-STEP-RETARGETED-THROUGH-THE-ADMITTED-ENV",
-        escape: "the hosted test step's `env:`, one of the two step-level maps this contract \
+        escape: "the hosted test step's `env:`, one of the step-level maps this contract \
                  admits, gains a second key: \
                  `CARGO_BUILD_TARGET` retargets the compile the suite performs while the \
                  `run:` scalar and the declaration both still match -- \
                  `MUT-GATE-STEP-RETARGETED`'s shape on the step that now carries an \
                  environment",
         job: Some("test"),
-        anchor: "          UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}\n",
-        replacement: "          UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}\n\
+        anchor: "      - run: cargo test --all-targets --all-features\n\
+                 \x20       env:\n\
+                 \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}\n",
+        replacement: "      - run: cargo test --all-targets --all-features\n\
+                      \x20       env:\n\
+                      \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}\n\
                       \x20         CARGO_BUILD_TARGET: x86_64-unknown-linux-gnu\n",
         refused_as: "test-step-env",
     },
@@ -2033,9 +2042,10 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  the alias test observes its native branch on Windows instead of requiring \
                  it, with the witness script and every label still matching",
         job: Some("test-windows"),
-        anchor: "        env:\n\
+        anchor: "      - name: Test, and witness that the suite ran\n\
+                 \x20       env:\n\
                  \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: \"1\"\n",
-        replacement: "",
+        replacement: "      - name: Test, and witness that the suite ran\n",
         refused_as: "test-windows-step-env",
     },
     WorkflowEscape {
@@ -2086,8 +2096,8 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  crate: the pinned test command tests an empty `ci-pass/` while the labels, \
                  shells, checkout and command all still match character for character",
         job: Some("test-windows"),
-        anchor: "    timeout-minutes: ${{ github.event_name == 'merge_group' && 45 || 20 }}\n",
-        replacement: "    timeout-minutes: ${{ github.event_name == 'merge_group' && 45 || 20 }}\n\
+        anchor: "    timeout-minutes: 20\n",
+        replacement: "    timeout-minutes: 20\n\
                       \x20   defaults:\n\
                       \x20     run:\n\
                       \x20       working-directory: ci-pass\n",
@@ -2169,7 +2179,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-CHECKOUT-REF",
         escape: "the Windows job's checkout points at `master`. Every other leg still reads \
-                 the candidate; this job, on either lane, tests a tree the candidate never \
+                 the candidate; this job, on every lane, tests a tree the candidate never \
                  touched, and a Windows-only regression goes green.",
         job: Some("test-windows"),
         anchor: "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n",
@@ -2283,8 +2293,8 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  not rewritten but ignored. Nothing in this workflow mentions `RUSTFLAGS` in \
                  that job for a reader to notice.",
         job: Some("test"),
-        anchor: "    timeout-minutes: 30\n",
-        replacement: "    timeout-minutes: 30\n\
+        anchor: "    timeout-minutes: ${{ matrix.os == 'macos-latest' && 45 || 30 }}\n",
+        replacement: "    timeout-minutes: ${{ matrix.os == 'macos-latest' && 45 || 30 }}\n\
                       \x20   env:\n\
                       \x20     CARGO_ENCODED_RUSTFLAGS: ''\n",
         refused_as: "rustflags-override",
@@ -2524,6 +2534,679 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                       \x20         toolchain: 1.85.0\n\
                       \x20     - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2\n",
         refused_as: "msrv-job-order",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-CAPTURE-STEP-DELETED",
+        escape: "the hosted capture step is gone. Both legs run the suite, report success and \
+                 leave no host acceptance record, and nothing else here asks for one.",
+        job: Some("test"),
+        anchor: r#"      - name: Capture the native host acceptance record
+        env:
+          UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}
+        run: |
+          set -o pipefail
+          log="$RUNNER_TEMP/host-acceptance-record.log"
+          cargo test --all-features --lib engine::tests::host_acceptance_record -- --ignored --exact --nocapture | tee "$log"
+          if ! grep -qx 'test engine::tests::host_acceptance_record \.\.\. ok' "$log" || ! grep -q '^test result: ok\. 1 passed; 0 failed; 0 ignored; ' "$log"; then echo "the capture did not run exactly the one host acceptance test to a pass" >&2; exit 1; fi
+          awk '
+            $1 == "UPSTROKE-HOST-ACCEPTANCE-RECORD" { f[++m] = $0 }
+            END {
+              nb = split(f[1], b, " "); ne = split(f[m], e, " ")
+              ok = m >= 3 && nb == 7 && ne == 7 && b[2] == "v1" && b[3] == "BEGIN" && e[2] == "v1" && e[3] == "END"
+              ok = ok && b[4] " " b[5] " " b[6] " " b[7] == e[4] " " e[5] " " e[6] " " e[7] && b[5] "" == (m - 2) ""
+              for (k = 2; ok && k < m; k++) ok = split(f[k], c, " ") == 5 && c[2] == "v1" && c[3] "" == b[4] "" && c[4] "" == (k - 1) "" && length(c[5]) == (k < m - 1 ? 192 : 2 * (b[6] - (b[5] - 1) * 96))
+              exit !ok
+            }' "$log" || { echo "the host acceptance record is missing or its framing is incomplete" >&2; exit 1; }
+"#,
+        replacement: "",
+        refused_as: "test-capture-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-CAPTURE-STEP-DISABLED",
+        escape: "a step-level `if: false` on the hosted capture: the job reports success with the \
+                 record never made, and the suite above it still green",
+        job: Some("test"),
+        anchor: "      - name: Capture the native host acceptance record\n",
+        replacement: "      - name: Capture the native host acceptance record\n\
+                      \x20       if: false\n",
+        refused_as: "unexpected-step-field",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-CAPTURE-STEP-ABSOLVED",
+        escape: "`continue-on-error` on the hosted capture: a failed record, a missing frame or a \
+                 test that did not pass ends the step red and the job green",
+        job: Some("test"),
+        anchor: "      - name: Capture the native host acceptance record\n",
+        replacement: "      - name: Capture the native host acceptance record\n\
+                      \x20       continue-on-error: true\n",
+        refused_as: "unexpected-step-field",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-CAPTURE-IGNORED-NOT-RUN",
+        escape: "`--ignored` dropped. The exact filter still names the test, libtest reports it \
+                 ignored, `0 passed; 0 failed; 1 ignored`, and Cargo exits zero having run \
+                 nothing: a no-op that only the pin and the step's own count refuse",
+        job: Some("test"),
+        anchor: "          cargo test --all-features --lib engine::tests::host_acceptance_record -- --ignored --exact --nocapture | tee \"$log\"\n",
+        replacement: "          cargo test --all-features --lib engine::tests::host_acceptance_record -- --exact --nocapture | tee \"$log\"\n",
+        refused_as: "test-capture-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-CAPTURE-FILTER-MOVED",
+        escape: "the filter names a test that does not exist, so it matches nothing: `running 0 \
+                 tests`, exit zero, no record. The pin refuses the moved filter before CI runs \
+                 it.",
+        job: Some("test"),
+        anchor: "          cargo test --all-features --lib engine::tests::host_acceptance_record -- --ignored --exact --nocapture | tee \"$log\"\n",
+        replacement: "          cargo test --all-features --lib engine::tests::host_acceptance_records -- --ignored --exact --nocapture | tee \"$log\"\n",
+        refused_as: "test-capture-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-CAPTURE-EXIT-SWALLOWED",
+        escape: "`set -o pipefail` dropped. The default `bash -e` takes the pipeline's status from \
+                 `tee`, which succeeds, so a failing test or a Cargo that never built the harness \
+                 ends the step on the checks after it, and a failure that still printed a pass \
+                 line and a frame goes green",
+        job: Some("test"),
+        anchor: "          set -o pipefail\n",
+        replacement: "",
+        refused_as: "test-capture-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-CAPTURE-ZERO-TESTS-ADMITTED",
+        escape: "the line that demands the named test's pass line and `1 passed; 0 failed; 0 \
+                 ignored` is gone, so a run that executed some other test, or no test at all, \
+                 is judged by its frame alone",
+        job: Some("test"),
+        anchor: "          if ! grep -qx 'test engine::tests::host_acceptance_record \\.\\.\\. ok' \"$log\" || ! grep -q '^test result: ok\\. 1 passed; 0 failed; 0 ignored; ' \"$log\"; then echo \"the capture did not run exactly the one host acceptance test to a pass\" >&2; exit 1; fi\n",
+        replacement: "",
+        refused_as: "test-capture-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-CAPTURE-FRAMING-UNCHECKED",
+        escape: "the frame check is gone: a record cut short, a chunk lost or doubled, or no \
+                 record at all passes the step, and the job is green over a record no reader \
+                 can reconstruct",
+        job: Some("test"),
+        anchor: r#"          awk '
+            $1 == "UPSTROKE-HOST-ACCEPTANCE-RECORD" { f[++m] = $0 }
+            END {
+              nb = split(f[1], b, " "); ne = split(f[m], e, " ")
+              ok = m >= 3 && nb == 7 && ne == 7 && b[2] == "v1" && b[3] == "BEGIN" && e[2] == "v1" && e[3] == "END"
+              ok = ok && b[4] " " b[5] " " b[6] " " b[7] == e[4] " " e[5] " " e[6] " " e[7] && b[5] "" == (m - 2) ""
+              for (k = 2; ok && k < m; k++) ok = split(f[k], c, " ") == 5 && c[2] == "v1" && c[3] "" == b[4] "" && c[4] "" == (k - 1) "" && length(c[5]) == (k < m - 1 ? 192 : 2 * (b[6] - (b[5] - 1) * 96))
+              exit !ok
+            }' "$log" || { echo "the host acceptance record is missing or its framing is incomplete" >&2; exit 1; }
+"#,
+        replacement: "",
+        refused_as: "test-capture-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-CAPTURE-SEPARATED-FROM-THE-SUITE",
+        escape: "a pinned cache step between the suite and the capture. Every script and action \
+                 still matches its pin; the capture now runs a harness the cache may have \
+                 replaced after the suite ran, so the record's binary need not be the suite's",
+        job: Some("test"),
+        anchor: "      - name: Capture the native host acceptance record\n",
+        replacement: "      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2\n\
+                      \x20     - name: Capture the native host acceptance record\n",
+        refused_as: "test-capture-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-CAPTURE-CASEFOLD-DROPPED",
+        escape: "the hosted capture no longer carries its leg's case-fold declaration, so it runs \
+                 under an environment the suite step did not, with its script still on its pin",
+        job: Some("test"),
+        anchor: "      - name: Capture the native host acceptance record\n\
+                 \x20       env:\n\
+                 \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}\n",
+        replacement: "      - name: Capture the native host acceptance record\n",
+        refused_as: "test-capture-step-env",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-CAPTURE-RETARGETED-THROUGH-THE-ADMITTED-ENV",
+        escape: "the capture's admitted `env:` gains `CARGO_TARGET_DIR`: Cargo builds and runs a \
+                 harness of its own, in another target directory, rather than the one the suite \
+                 step built and ran, with the script and the declaration still matching",
+        job: Some("test"),
+        anchor: "      - name: Capture the native host acceptance record\n\
+                 \x20       env:\n\
+                 \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}\n",
+        replacement: "      - name: Capture the native host acceptance record\n\
+                      \x20       env:\n\
+                      \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}\n\
+                      \x20         CARGO_TARGET_DIR: target/capture\n",
+        refused_as: "test-capture-step-env",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-CAPTURE-STEP-DELETED",
+        escape: "the guest's capture step is gone: the Windows suite is witnessed and no Windows \
+                 host acceptance record is made",
+        job: Some("test-windows"),
+        anchor: r#"      - name: Capture the native host acceptance record
+        env:
+          UPSTROKE_TEST_TEMP_FOLDS_CASE: "1"
+        run: |
+          cargo test --all-features --lib engine::tests::host_acceptance_record -- --ignored --exact --nocapture | Tee-Object -Variable capture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not ($capture -ccontains 'test engine::tests::host_acceptance_record ... ok') -or -not ($capture -cmatch '^test result: ok\. 1 passed; 0 failed; 0 ignored; ')) { throw "the capture did not run exactly the one host acceptance test to a pass" }
+          $f = @($capture | Where-Object { $_ -cmatch '^UPSTROKE-HOST-ACCEPTANCE-RECORD ' } | ForEach-Object { ,($_ -split ' ') })
+          $ok = $f.Count -ge 3 -and $f[0].Count -eq 7 -and $f[-1].Count -eq 7 -and $f[0][1] -ceq 'v1' -and $f[0][2] -ceq 'BEGIN' -and $f[-1][1] -ceq 'v1' -and $f[-1][2] -ceq 'END' -and ($f[0][3..6] -join ' ') -ceq ($f[-1][3..6] -join ' ') -and $f[0][4] -ceq "$($f.Count - 2)"
+          for ($k = 1; $ok -and $k -lt $f.Count - 1; $k++) { $ok = $f[$k].Count -eq 5 -and $f[$k][1] -ceq 'v1' -and $f[$k][2] -ceq $f[0][3] -and $f[$k][3] -ceq "$k" -and $f[$k][4].Length -eq $(if ($k -lt $f.Count - 2) { 192 } else { 2 * ([long]$f[0][5] - ([long]$f[0][4] - 1) * 96) }) }
+          if (-not $ok) { throw "the host acceptance record is missing or its framing is incomplete" }
+"#,
+        replacement: "",
+        refused_as: "test-windows-capture-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-CAPTURE-DISABLED",
+        escape: "a step-level `if: false` on the guest's capture: no step of this job may carry \
+                 one, and on this step it is a green Windows leg with no record",
+        job: Some("test-windows"),
+        anchor: "      - name: Capture the native host acceptance record\n",
+        replacement: "      - name: Capture the native host acceptance record\n\
+                      \x20       if: false\n",
+        refused_as: "unexpected-step-field",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-CAPTURE-IGNORED-NOT-RUN",
+        escape: "`--ignored` dropped on the guest: the test is reported ignored and Cargo exits \
+                 zero having run nothing",
+        job: Some("test-windows"),
+        anchor: "          cargo test --all-features --lib engine::tests::host_acceptance_record -- --ignored --exact --nocapture | Tee-Object -Variable capture\n",
+        replacement: "          cargo test --all-features --lib engine::tests::host_acceptance_record -- --exact --nocapture | Tee-Object -Variable capture\n",
+        refused_as: "test-windows-capture-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-CAPTURE-EXIT-SWALLOWED",
+        escape: "the explicit propagation of the capture's Cargo exit is gone. A failed Cargo \
+                 whose output still holds a pass line and a frame now fails the step only \
+                 because the runner appends `exit $LASTEXITCODE` and no native command happens \
+                 to follow Cargo: an accident of order the next edit of the script can undo",
+        job: Some("test-windows"),
+        anchor: "          cargo test --all-features --lib engine::tests::host_acceptance_record -- --ignored --exact --nocapture | Tee-Object -Variable capture\n\
+                 \x20         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n",
+        replacement: "          cargo test --all-features --lib engine::tests::host_acceptance_record -- --ignored --exact --nocapture | Tee-Object -Variable capture\n",
+        refused_as: "test-windows-capture-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-CAPTURE-ZERO-TESTS-ADMITTED",
+        escape: "the guest's pass-line and `1 passed; 0 failed; 0 ignored` check is gone, so a \
+                 run of no test or of another test is judged by its frame alone",
+        job: Some("test-windows"),
+        anchor: "          if (-not ($capture -ccontains 'test engine::tests::host_acceptance_record ... ok') -or -not ($capture -cmatch '^test result: ok\\. 1 passed; 0 failed; 0 ignored; ')) { throw \"the capture did not run exactly the one host acceptance test to a pass\" }\n",
+        replacement: "",
+        refused_as: "test-windows-capture-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-CAPTURE-FRAMING-UNENFORCED",
+        escape: "the guest still computes the frame check and never acts on it: the last line, \
+                 the only one that throws, is gone, so every frame passes",
+        job: Some("test-windows"),
+        anchor: "          if (-not $ok) { throw \"the host acceptance record is missing or its framing is incomplete\" }\n",
+        replacement: "",
+        refused_as: "test-windows-capture-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-CAPTURE-SEPARATED-FROM-THE-WITNESS",
+        escape: "a pinned cache step between the suite-and-witness step and the capture: the \
+                 guest's record need not come from the harness the witness counted",
+        job: Some("test-windows"),
+        anchor: "      - name: Capture the native host acceptance record\n",
+        replacement: "      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2\n\
+                      \x20     - name: Capture the native host acceptance record\n",
+        refused_as: "test-windows-capture-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-CAPTURE-CASEFOLD-DROPPED",
+        escape: "the guest's capture no longer declares that NTFS folds case, so it runs under an \
+                 environment its suite step did not",
+        job: Some("test-windows"),
+        anchor: "      - name: Capture the native host acceptance record\n\
+                 \x20       env:\n\
+                 \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: \"1\"\n",
+        replacement: "      - name: Capture the native host acceptance record\n",
+        refused_as: "test-windows-capture-step-env",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-CAPABILITY-STEP-DELETED",
+        escape: "the hosted observation step is gone (omitted). Both legs run the suite and the \
+                 host capture, report success and leave no container capability record, and \
+                 nothing else here asks for one.",
+        job: Some("test"),
+        anchor: r##"      - name: Capture the container capability observation
+        timeout-minutes: 4
+        env:
+          UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}
+        run: |
+          set -eo pipefail
+          log="$RUNNER_TEMP/container-capability-record.log"
+          cargo test --all-features --lib runner::container::tests::container_capability_record -- --ignored --exact --nocapture | tee "$log"
+          if ! grep -qx 'test runner::container::tests::container_capability_record \.\.\. ok' "$log" || ! grep -q '^test result: ok\. 1 passed; 0 failed; 0 ignored; ' "$log"; then echo "the observation did not run exactly the one container capability test to a pass" >&2; exit 1; fi
+          awk '
+            $1 == "UPSTROKE-CONTAINER-CAPABILITY-RECORD" { f[++m] = $0 }
+            END {
+              nb = split(f[1], b, " "); ne = split(f[m], e, " ")
+              ok = m >= 3 && nb == 7 && ne == 7 && b[2] == "v1" && b[3] == "BEGIN" && e[2] == "v1" && e[3] == "END"
+              ok = ok && b[4] " " b[5] " " b[6] " " b[7] == e[4] " " e[5] " " e[6] " " e[7] && b[5] "" == (m - 2) ""
+              for (k = 2; ok && k < m; k++) ok = split(f[k], c, " ") == 5 && c[2] == "v1" && c[3] "" == b[4] "" && c[4] "" == (k - 1) "" && length(c[5]) == (k < m - 1 ? 192 : 2 * (b[6] - (b[5] - 1) * 96))
+              exit !ok
+            }' "$log" || { echo "the container capability record is missing or its framing is incomplete" >&2; exit 1; }
+"##,
+        replacement: "",
+        refused_as: "test-capability-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-CAPABILITY-STEP-DISABLED",
+        escape: "a step-level `if: false` on the hosted observation (conditional): the job \
+                 reports success with the record never made",
+        job: Some("test"),
+        anchor: "      - name: Capture the container capability observation\n",
+        replacement: "      - name: Capture the container capability observation\n\
+                      \x20       if: false\n",
+        refused_as: "unexpected-step-field",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-CAPABILITY-STEP-RUN-WHEN-NOT-CANCELLED",
+        escape: "the observation runs under `if: ${{ !cancelled() }}` (conditional). It then \
+                 runs after a failed suite or capture, so its record no longer stands on a \
+                 harness the suite passed, and the contract places it success-only",
+        job: Some("test"),
+        anchor: "      - name: Capture the container capability observation\n",
+        replacement: "      - name: Capture the container capability observation\n\
+                      \x20       if: ${{ !cancelled() }}\n",
+        refused_as: "unexpected-step-field",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-CAPABILITY-STEP-ABSOLVED",
+        escape: "`continue-on-error` on the hosted observation (failure-swallowing): an unresolved \
+                 process, a refused record or a missing frame ends the step red and the job green",
+        job: Some("test"),
+        anchor: "      - name: Capture the container capability observation\n",
+        replacement: "      - name: Capture the container capability observation\n\
+                      \x20       continue-on-error: true\n",
+        refused_as: "unexpected-step-field",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-CAPABILITY-IGNORED-NOT-RUN",
+        escape: "`--ignored` dropped (no-op): libtest reports the test ignored, `0 passed; 0 \
+                 failed; 1 ignored`, and Cargo exits zero having asked nothing",
+        job: Some("test"),
+        anchor: "          cargo test --all-features --lib runner::container::tests::container_capability_record -- --ignored --exact --nocapture | tee \"$log\"\n",
+        replacement: "          cargo test --all-features --lib runner::container::tests::container_capability_record -- --exact --nocapture | tee \"$log\"\n",
+        refused_as: "test-capability-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-CAPABILITY-FILTER-MOVED",
+        escape: "the filter names a test that does not exist (filtered): `running 0 tests`, exit \
+                 zero, no record",
+        job: Some("test"),
+        anchor: "          cargo test --all-features --lib runner::container::tests::container_capability_record -- --ignored --exact --nocapture | tee \"$log\"\n",
+        replacement: "          cargo test --all-features --lib runner::container::tests::container_capability_records -- --ignored --exact --nocapture | tee \"$log\"\n",
+        refused_as: "test-capability-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-CAPABILITY-FILTER-WIDENED",
+        escape: "`--exact` dropped (filtered): the name becomes a substring filter, so any ignored \
+                 test whose path contains it runs beside the observation",
+        job: Some("test"),
+        anchor: "          cargo test --all-features --lib runner::container::tests::container_capability_record -- --ignored --exact --nocapture | tee \"$log\"\n",
+        replacement: "          cargo test --all-features --lib runner::container::tests::container_capability_record -- --ignored --nocapture | tee \"$log\"\n",
+        refused_as: "test-capability-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-CAPABILITY-ECHOED",
+        escape: "the Cargo line is echoed (no-op): the step prints the command, asks nothing, and \
+                 only its own pass-line check would notice",
+        job: Some("test"),
+        anchor: "          cargo test --all-features --lib runner::container::tests::container_capability_record -- --ignored --exact --nocapture | tee \"$log\"\n",
+        replacement: "          echo cargo test --all-features --lib runner::container::tests::container_capability_record -- --ignored --exact --nocapture | tee \"$log\"\n",
+        refused_as: "test-capability-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-CAPABILITY-EXIT-SWALLOWED",
+        escape: "`set -eo pipefail` dropped (failure-swallowing). Under the default `bash -e` the \
+                 pipeline takes its status from `tee`, so a failing observation that still \
+                 printed a pass line and a frame goes green",
+        job: Some("test"),
+        anchor: "          set -eo pipefail\n",
+        replacement: "",
+        refused_as: "test-capability-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-CAPABILITY-ZERO-TESTS-ADMITTED",
+        escape: "the pass-line and `1 passed; 0 failed; 0 ignored` check is gone, so a run of no \
+                 test or of another is judged by its frame alone",
+        job: Some("test"),
+        anchor: "          if ! grep -qx 'test runner::container::tests::container_capability_record \\.\\.\\. ok' \"$log\" || ! grep -q '^test result: ok\\. 1 passed; 0 failed; 0 ignored; ' \"$log\"; then echo \"the observation did not run exactly the one container capability test to a pass\" >&2; exit 1; fi\n",
+        replacement: "",
+        refused_as: "test-capability-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-CAPABILITY-FRAMING-UNCHECKED",
+        escape: "the frame check is gone: a record cut short, a chunk lost or doubled, or no \
+                 record at all passes the step",
+        job: Some("test"),
+        anchor: r##"          awk '
+            $1 == "UPSTROKE-CONTAINER-CAPABILITY-RECORD" { f[++m] = $0 }
+            END {
+              nb = split(f[1], b, " "); ne = split(f[m], e, " ")
+              ok = m >= 3 && nb == 7 && ne == 7 && b[2] == "v1" && b[3] == "BEGIN" && e[2] == "v1" && e[3] == "END"
+              ok = ok && b[4] " " b[5] " " b[6] " " b[7] == e[4] " " e[5] " " e[6] " " e[7] && b[5] "" == (m - 2) ""
+              for (k = 2; ok && k < m; k++) ok = split(f[k], c, " ") == 5 && c[2] == "v1" && c[3] "" == b[4] "" && c[4] "" == (k - 1) "" && length(c[5]) == (k < m - 1 ? 192 : 2 * (b[6] - (b[5] - 1) * 96))
+              exit !ok
+            }' "$log" || { echo "the container capability record is missing or its framing is incomplete" >&2; exit 1; }
+"##,
+        replacement: "",
+        refused_as: "test-capability-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-CAPABILITY-SEPARATED-FROM-THE-CAPTURE",
+        escape: "a pinned cache step between the host capture and the observation (misplaced): \
+                 every script and action still matches its pin, and the observation runs a \
+                 harness the cache may have replaced after the suite ran",
+        job: Some("test"),
+        anchor: "      - name: Capture the container capability observation\n",
+        replacement: "      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2\n\
+                      \x20     - name: Capture the container capability observation\n",
+        refused_as: "test-capability-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-CAPABILITY-ABOVE-THE-CAPTURE",
+        escape: "the observation moved above the host capture (misplaced): both scripts still \
+                 match their pins and each runs once, but the observation no longer follows \
+                 the record the capture makes",
+        job: Some("test"),
+        anchor: r##"      - name: Capture the native host acceptance record
+        env:
+          UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}
+        run: |
+          set -o pipefail
+          log="$RUNNER_TEMP/host-acceptance-record.log"
+          cargo test --all-features --lib engine::tests::host_acceptance_record -- --ignored --exact --nocapture | tee "$log"
+          if ! grep -qx 'test engine::tests::host_acceptance_record \.\.\. ok' "$log" || ! grep -q '^test result: ok\. 1 passed; 0 failed; 0 ignored; ' "$log"; then echo "the capture did not run exactly the one host acceptance test to a pass" >&2; exit 1; fi
+          awk '
+            $1 == "UPSTROKE-HOST-ACCEPTANCE-RECORD" { f[++m] = $0 }
+            END {
+              nb = split(f[1], b, " "); ne = split(f[m], e, " ")
+              ok = m >= 3 && nb == 7 && ne == 7 && b[2] == "v1" && b[3] == "BEGIN" && e[2] == "v1" && e[3] == "END"
+              ok = ok && b[4] " " b[5] " " b[6] " " b[7] == e[4] " " e[5] " " e[6] " " e[7] && b[5] "" == (m - 2) ""
+              for (k = 2; ok && k < m; k++) ok = split(f[k], c, " ") == 5 && c[2] == "v1" && c[3] "" == b[4] "" && c[4] "" == (k - 1) "" && length(c[5]) == (k < m - 1 ? 192 : 2 * (b[6] - (b[5] - 1) * 96))
+              exit !ok
+            }' "$log" || { echo "the host acceptance record is missing or its framing is incomplete" >&2; exit 1; }
+
+      # The container capability observation for this platform (Gate7 M2's
+      # runtime question, contract version 2 under its root audit).
+      # `runner::container::tests::container_capability_record` is ignored by
+      # the suite and selected here by its exact name. It asks the CLI the
+      # contract's bounded read-only questions -- the endpoint the CLI
+      # resolved, the daemon's version, selected version fields and three
+      # local image inspections, never a pull -- through the product's
+      # process path, reduces every endpoint-sensitive answer in memory, and
+      # prints the reduced record as numbered hex lines between BEGIN and END
+      # (`docs/internals/runner/container/tests.md`). Every capability class
+      # passes, an absent Docker included; an unresolved process, a binding
+      # failure or a record its own decoder refuses fails the test.
+      # `pipefail` carries Cargo's exit through `tee`; the step then refuses
+      # unless exactly that test ran and passed, and refuses a missing or
+      # incomplete frame. A class is an observation, not M2 acceptance, and
+      # the Linux row is a control. Four minutes bound the 135 s the
+      # questions may request, with Cargo's start. The step adds no
+      # environment of its own; the workflow oracle pins it whole,
+      # immediately after the host acceptance capture.
+      - name: Capture the container capability observation
+        timeout-minutes: 4
+        env:
+          UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}
+        run: |
+          set -eo pipefail
+          log="$RUNNER_TEMP/container-capability-record.log"
+          cargo test --all-features --lib runner::container::tests::container_capability_record -- --ignored --exact --nocapture | tee "$log"
+          if ! grep -qx 'test runner::container::tests::container_capability_record \.\.\. ok' "$log" || ! grep -q '^test result: ok\. 1 passed; 0 failed; 0 ignored; ' "$log"; then echo "the observation did not run exactly the one container capability test to a pass" >&2; exit 1; fi
+          awk '
+            $1 == "UPSTROKE-CONTAINER-CAPABILITY-RECORD" { f[++m] = $0 }
+            END {
+              nb = split(f[1], b, " "); ne = split(f[m], e, " ")
+              ok = m >= 3 && nb == 7 && ne == 7 && b[2] == "v1" && b[3] == "BEGIN" && e[2] == "v1" && e[3] == "END"
+              ok = ok && b[4] " " b[5] " " b[6] " " b[7] == e[4] " " e[5] " " e[6] " " e[7] && b[5] "" == (m - 2) ""
+              for (k = 2; ok && k < m; k++) ok = split(f[k], c, " ") == 5 && c[2] == "v1" && c[3] "" == b[4] "" && c[4] "" == (k - 1) "" && length(c[5]) == (k < m - 1 ? 192 : 2 * (b[6] - (b[5] - 1) * 96))
+              exit !ok
+            }' "$log" || { echo "the container capability record is missing or its framing is incomplete" >&2; exit 1; }
+"##,
+        replacement: r##"      - name: Capture the container capability observation
+        timeout-minutes: 4
+        env:
+          UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}
+        run: |
+          set -eo pipefail
+          log="$RUNNER_TEMP/container-capability-record.log"
+          cargo test --all-features --lib runner::container::tests::container_capability_record -- --ignored --exact --nocapture | tee "$log"
+          if ! grep -qx 'test runner::container::tests::container_capability_record \.\.\. ok' "$log" || ! grep -q '^test result: ok\. 1 passed; 0 failed; 0 ignored; ' "$log"; then echo "the observation did not run exactly the one container capability test to a pass" >&2; exit 1; fi
+          awk '
+            $1 == "UPSTROKE-CONTAINER-CAPABILITY-RECORD" { f[++m] = $0 }
+            END {
+              nb = split(f[1], b, " "); ne = split(f[m], e, " ")
+              ok = m >= 3 && nb == 7 && ne == 7 && b[2] == "v1" && b[3] == "BEGIN" && e[2] == "v1" && e[3] == "END"
+              ok = ok && b[4] " " b[5] " " b[6] " " b[7] == e[4] " " e[5] " " e[6] " " e[7] && b[5] "" == (m - 2) ""
+              for (k = 2; ok && k < m; k++) ok = split(f[k], c, " ") == 5 && c[2] == "v1" && c[3] "" == b[4] "" && c[4] "" == (k - 1) "" && length(c[5]) == (k < m - 1 ? 192 : 2 * (b[6] - (b[5] - 1) * 96))
+              exit !ok
+            }' "$log" || { echo "the container capability record is missing or its framing is incomplete" >&2; exit 1; }
+      - name: Capture the native host acceptance record
+        env:
+          UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}
+        run: |
+          set -o pipefail
+          log="$RUNNER_TEMP/host-acceptance-record.log"
+          cargo test --all-features --lib engine::tests::host_acceptance_record -- --ignored --exact --nocapture | tee "$log"
+          if ! grep -qx 'test engine::tests::host_acceptance_record \.\.\. ok' "$log" || ! grep -q '^test result: ok\. 1 passed; 0 failed; 0 ignored; ' "$log"; then echo "the capture did not run exactly the one host acceptance test to a pass" >&2; exit 1; fi
+          awk '
+            $1 == "UPSTROKE-HOST-ACCEPTANCE-RECORD" { f[++m] = $0 }
+            END {
+              nb = split(f[1], b, " "); ne = split(f[m], e, " ")
+              ok = m >= 3 && nb == 7 && ne == 7 && b[2] == "v1" && b[3] == "BEGIN" && e[2] == "v1" && e[3] == "END"
+              ok = ok && b[4] " " b[5] " " b[6] " " b[7] == e[4] " " e[5] " " e[6] " " e[7] && b[5] "" == (m - 2) ""
+              for (k = 2; ok && k < m; k++) ok = split(f[k], c, " ") == 5 && c[2] == "v1" && c[3] "" == b[4] "" && c[4] "" == (k - 1) "" && length(c[5]) == (k < m - 1 ? 192 : 2 * (b[6] - (b[5] - 1) * 96))
+              exit !ok
+            }' "$log" || { echo "the host acceptance record is missing or its framing is incomplete" >&2; exit 1; }
+"##,
+        refused_as: "test-capability-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-CAPABILITY-TIMEOUT-DROPPED",
+        escape: "the observation's 4-minute bound is gone: a stalled question is held by the \
+                 job's own timeout, past the step's budget",
+        job: Some("test"),
+        anchor: "        timeout-minutes: 4\n",
+        replacement: "",
+        refused_as: "test-capability-step",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-CAPABILITY-TIMEOUT-WIDENED",
+        escape: "the observation's bound widened to 30 minutes: every field still present, and a \
+                 stalled question spends the leg's headroom",
+        job: Some("test"),
+        anchor: "        timeout-minutes: 4\n",
+        replacement: "        timeout-minutes: 30\n",
+        refused_as: "test-capability-step",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-CAPABILITY-DOCKER-HOST-INJECTED",
+        escape: "the observation's admitted `env:` gains `DOCKER_HOST`: the step no longer \
+                 observes the leg's own environment but one this file chose, with its script \
+                 still on its pin",
+        job: Some("test"),
+        anchor: "      - name: Capture the container capability observation\n\
+                 \x20       timeout-minutes: 4\n\
+                 \x20       env:\n\
+                 \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}\n",
+        replacement: "      - name: Capture the container capability observation\n\
+                      \x20       timeout-minutes: 4\n\
+                      \x20       env:\n\
+                      \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}\n\
+                      \x20         DOCKER_HOST: tcp://127.0.0.1:2375\n",
+        refused_as: "test-capability-step-env",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-CAPABILITY-REQUIRE-DOCKER-INJECTED",
+        escape: "the observation's admitted `env:` gains `UPSTROKE_REQUIRE_DOCKER`: the contract \
+                 runs it in the leg's environment unchanged, and the variable is the suite's \
+                 Docker requirement, not this record's",
+        job: Some("test"),
+        anchor: "      - name: Capture the container capability observation\n\
+                 \x20       timeout-minutes: 4\n\
+                 \x20       env:\n\
+                 \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}\n",
+        replacement: "      - name: Capture the container capability observation\n\
+                      \x20       timeout-minutes: 4\n\
+                      \x20       env:\n\
+                      \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}\n\
+                      \x20         UPSTROKE_REQUIRE_DOCKER: \"1\"\n",
+        refused_as: "test-capability-step-env",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-CAPABILITY-CASEFOLD-DROPPED",
+        escape: "the hosted observation no longer carries its leg's case-fold declaration, so it \
+                 runs under an environment the suite step did not",
+        job: Some("test"),
+        anchor: "        timeout-minutes: 4\n\
+                 \x20       env:\n\
+                 \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}\n",
+        replacement: "        timeout-minutes: 4\n",
+        refused_as: "test-capability-step-env",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-CAPABILITY-STEP-DELETED",
+        escape: "the guest's observation step is gone (omitted): the Windows suite is witnessed \
+                 and captured, and no Windows container capability record is made",
+        job: Some("test-windows"),
+        anchor: r##"      - name: Capture the container capability observation
+        timeout-minutes: 4
+        env:
+          UPSTROKE_TEST_TEMP_FOLDS_CASE: "1"
+        run: |
+          cargo test --all-features --lib runner::container::tests::container_capability_record -- --ignored --exact --nocapture | Tee-Object -Variable capture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not ($capture -ccontains 'test runner::container::tests::container_capability_record ... ok') -or -not ($capture -cmatch '^test result: ok\. 1 passed; 0 failed; 0 ignored; ')) { throw "the observation did not run exactly the one container capability test to a pass" }
+          $f = @($capture | Where-Object { $_ -cmatch '^UPSTROKE-CONTAINER-CAPABILITY-RECORD ' } | ForEach-Object { ,($_ -split ' ') })
+          $ok = $f.Count -ge 3 -and $f[0].Count -eq 7 -and $f[-1].Count -eq 7 -and $f[0][1] -ceq 'v1' -and $f[0][2] -ceq 'BEGIN' -and $f[-1][1] -ceq 'v1' -and $f[-1][2] -ceq 'END' -and ($f[0][3..6] -join ' ') -ceq ($f[-1][3..6] -join ' ') -and $f[0][4] -ceq "$($f.Count - 2)"
+          for ($k = 1; $ok -and $k -lt $f.Count - 1; $k++) { $ok = $f[$k].Count -eq 5 -and $f[$k][1] -ceq 'v1' -and $f[$k][2] -ceq $f[0][3] -and $f[$k][3] -ceq "$k" -and $f[$k][4].Length -eq $(if ($k -lt $f.Count - 2) { 192 } else { 2 * ([long]$f[0][5] - ([long]$f[0][4] - 1) * 96) }) }
+          if (-not $ok) { throw "the container capability record is missing or its framing is incomplete" }
+"##,
+        replacement: "",
+        refused_as: "test-windows-capability-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-CAPABILITY-DISABLED",
+        escape: "a step-level `if: false` on the guest's observation (conditional): no step of \
+                 this job may carry one",
+        job: Some("test-windows"),
+        anchor: "      - name: Capture the container capability observation\n",
+        replacement: "      - name: Capture the container capability observation\n\
+                      \x20       if: false\n",
+        refused_as: "unexpected-step-field",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-CAPABILITY-ABSOLVED",
+        escape: "`continue-on-error` on the guest's observation (failure-swallowing): a failed \
+                 observation ends the step red and the Windows leg green",
+        job: Some("test-windows"),
+        anchor: "      - name: Capture the container capability observation\n",
+        replacement: "      - name: Capture the container capability observation\n\
+                      \x20       continue-on-error: true\n",
+        refused_as: "unexpected-step-field",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-CAPABILITY-IGNORED-NOT-RUN",
+        escape: "`--ignored` dropped on the guest (no-op): the test is reported ignored and Cargo \
+                 exits zero having asked nothing",
+        job: Some("test-windows"),
+        anchor: "          cargo test --all-features --lib runner::container::tests::container_capability_record -- --ignored --exact --nocapture | Tee-Object -Variable capture\n",
+        replacement: "          cargo test --all-features --lib runner::container::tests::container_capability_record -- --exact --nocapture | Tee-Object -Variable capture\n",
+        refused_as: "test-windows-capability-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-CAPABILITY-FILTER-MOVED",
+        escape: "the guest's filter names a test that does not exist (filtered): `running 0 \
+                 tests`, exit zero, no record",
+        job: Some("test-windows"),
+        anchor: "          cargo test --all-features --lib runner::container::tests::container_capability_record -- --ignored --exact --nocapture | Tee-Object -Variable capture\n",
+        replacement: "          cargo test --all-features --lib runner::container::tests::container_capability_records -- --ignored --exact --nocapture | Tee-Object -Variable capture\n",
+        refused_as: "test-windows-capability-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-CAPABILITY-EXIT-SWALLOWED",
+        escape: "the explicit propagation of the observation's Cargo exit is gone \
+                 (failure-swallowing): a failed Cargo whose output still holds a pass line and a \
+                 frame fails the step only by an accident of order",
+        job: Some("test-windows"),
+        anchor: "          cargo test --all-features --lib runner::container::tests::container_capability_record -- --ignored --exact --nocapture | Tee-Object -Variable capture\n\
+                 \x20         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n",
+        replacement: "          cargo test --all-features --lib runner::container::tests::container_capability_record -- --ignored --exact --nocapture | Tee-Object -Variable capture\n",
+        refused_as: "test-windows-capability-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-CAPABILITY-ZERO-TESTS-ADMITTED",
+        escape: "the guest's pass-line and `1 passed; 0 failed; 0 ignored` check is gone, so a \
+                 run of no test or of another is judged by its frame alone",
+        job: Some("test-windows"),
+        anchor: "          if (-not ($capture -ccontains 'test runner::container::tests::container_capability_record ... ok') -or -not ($capture -cmatch '^test result: ok\\. 1 passed; 0 failed; 0 ignored; ')) { throw \"the observation did not run exactly the one container capability test to a pass\" }\n",
+        replacement: "",
+        refused_as: "test-windows-capability-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-CAPABILITY-FRAMING-UNENFORCED",
+        escape: "the guest computes the frame check and never acts on it: the line that throws is \
+                 gone, so every frame passes",
+        job: Some("test-windows"),
+        anchor: "          if (-not $ok) { throw \"the container capability record is missing or its framing is incomplete\" }\n",
+        replacement: "",
+        refused_as: "test-windows-capability-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-CAPABILITY-SEPARATED-FROM-THE-CAPTURE",
+        escape: "a pinned cache step between the guest's host capture and its observation \
+                 (misplaced): the record need not come from the harness the witness counted",
+        job: Some("test-windows"),
+        anchor: "      - name: Capture the container capability observation\n",
+        replacement: "      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2\n\
+                      \x20     - name: Capture the container capability observation\n",
+        refused_as: "test-windows-capability-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-CAPABILITY-TIMEOUT-DROPPED",
+        escape: "the guest's 4-minute bound is gone: a stalled question is held by the guest's \
+                 20-minute job, the tightest leg",
+        job: Some("test-windows"),
+        anchor: "        timeout-minutes: 4\n",
+        replacement: "",
+        refused_as: "test-windows-capability-step",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-CAPABILITY-DOCKER-CONTEXT-INJECTED",
+        escape: "the guest's observation gains `DOCKER_CONTEXT` in its admitted `env:`: a \
+                 selector this file chose, not the leg's",
+        job: Some("test-windows"),
+        anchor: "      - name: Capture the container capability observation\n\
+                 \x20       timeout-minutes: 4\n\
+                 \x20       env:\n\
+                 \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: \"1\"\n",
+        replacement: "      - name: Capture the container capability observation\n\
+                      \x20       timeout-minutes: 4\n\
+                      \x20       env:\n\
+                      \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: \"1\"\n\
+                      \x20         DOCKER_CONTEXT: desktop-linux\n",
+        refused_as: "test-windows-capability-step-env",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-CAPABILITY-CASEFOLD-DROPPED",
+        escape: "the guest's observation no longer declares that NTFS folds case, so it runs \
+                 under an environment its suite step did not",
+        job: Some("test-windows"),
+        anchor: "        timeout-minutes: 4\n\
+                 \x20       env:\n\
+                 \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: \"1\"\n",
+        replacement: "        timeout-minutes: 4\n",
+        refused_as: "test-windows-capability-step-env",
     },
 ];
 

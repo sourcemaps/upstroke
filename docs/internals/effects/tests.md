@@ -2112,35 +2112,32 @@ the job's own comment spelled the needle.
 ## `fn the_windows_leg_runs_these_fixtures_on_the_runner_each_lane_pins() {`
 
 The Windows suite's job runs these fixtures on the curated guest for a pull
-request or push and on `windows-latest` for a merge-queue entry, and on
-nothing else the contract can read.
+request, a push and a merge-queue entry alike, and on nothing else the
+contract can read.
 
 The claim the `test` job discharges with an install step -- that
-`clippy-driver` is present for the fixtures -- is discharged on the
-pull-request lane by the golden image the runner boots, which this contract
-cannot read and re-curation is bound to instead, and on the queue lane by
-an install step pinned whole: one, first after the checkout, under the lane
-condition, at the image's version, with `clippy`. What the contract *can*
-read is pinned: the `runs-on:` expression exactly, the suite step exactly --
-the command and the count that says it executed, see
+`clippy-driver` is present for the fixtures -- is discharged by the golden
+image the runner boots, which this contract cannot read and re-curation is
+bound to instead; a toolchain install in this job is refused. What the
+contract *can* read is pinned: the `runs-on:` label set exactly, the suite
+step exactly -- the command and the count that says it executed, see
 [`the_windows_leg_counts_the_tests_it_ran`] -- the platform-default shell on
 every `run:` step, and a field set with no `if:` or `continue-on-error:`
-anywhere but on that one install. The refusals are executed in
-[`WORKFLOW_ESCAPES`], every row named `MUT-TEST-WINDOWS-*` and the three
-`MUT-WINDOWS-WITNESS-*`.
+anywhere. The refusals are executed in [`WORKFLOW_ESCAPES`], every row named
+`MUT-TEST-WINDOWS-*` and the three `MUT-WINDOWS-WITNESS-*`.
 
-## `fn the_windows_leg_routes_each_lane_to_the_runner_its_install_step_is_written_for() {`
+## `fn the_windows_leg_runs_every_lane_on_the_self_hosted_guest_its_labels_name() {`
 
-The pinned `runs-on:` literal is the lane test, the hosted platform and the
-self-hosted labels this contract names, composed -- not a fourth string that
-happens to read back.
+The pinned label set is a self-hosted one -- not a GitHub-hosted runner
+the oracle's equality would then hold every lane to.
 
-The oracle compares `runs-on:` as one string because it cannot evaluate the
-expression. That leaves the literal free to name a different condition
-from the install step's `if:`, or a different runner from the one the cfg
-census models, while both equalities hold; this test closes that by
-building the literal from the same three constants and requiring the
-hosted runner to be a [`CI_TARGETS`] entry.
+The oracle compares `runs-on:` with [`TEST_WINDOWS_LABELS`] as a set, so a
+literal sequence routes every event to the same machine; what that equality
+cannot see is the constant itself moving with the workflow, both sides
+edited to a hosted runner together. This test refuses that: the set must
+name `self-hosted` and no [`CI_TARGETS`] runner. It also requires the
+platform whose shell and cfg valuations the guest's steps are read under to
+be a [`CI_TARGETS`] entry.
 
 ## `fn the_hosted_windows_leg_still_links_every_test_binary() {`
 
@@ -2190,8 +2187,8 @@ this check read and how each was shown a spelling it missed.
 
 ## `fn the_windows_leg_counts_the_tests_it_ran() {`
 
-The leg whose tests leave GitHub's runners on the pull-request lane reports
-that they ran, on either lane, and refuses to run them on any compiler but
+The leg whose tests leave GitHub's runners reports that they ran, and
+refuses to run them on any compiler but
 the one [`GOLDEN_IMAGE_TOOLCHAIN`] names -- asking Cargo which compiler it
 will run, the step's PATH which `rustc` it names, and the step's PATH
 which `cargo` it has. The fixtures' own PATH is Cargo's to build, and a

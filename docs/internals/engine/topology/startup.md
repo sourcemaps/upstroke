@@ -134,7 +134,11 @@ Inputs
 Everything both halves need, as one value.
 
 **There is one `authorized_root` and both halves census it.** `R` is computed
-read-only by recovery step (a0) before any lock is taken, and half (a)'s
+read-only before any lock is taken — by recovery step (a0) on a resume, by
+`prelock::check` for a fresh run's explicit root — except for a fresh run's
+default root, which may not exist until the include's publication under the
+worktree lease creates it and is canonicalized only then, still before this
+census (`engine/topology/entry.md`). Half (a)'s
 `private_root` and half (b)'s ownership root are the same field here rather
 than two parameters that a caller could disagree with itself about. A
 container census under one root followed by an ownership proof under another
@@ -152,7 +156,10 @@ it, or the husk is a directory copied from another repository.
 
 ## `pub struct CensusInputs<'a>` › `pub authorized_root: &'a Path,`
 
-The authorized private root `R`, computed read-only before any lock.
+The authorized private root `R`: computed read-only before any lock for a
+resume and for an explicit root, and for a fresh run's default root
+canonicalized under the worktree lease once the include's publication has
+created it, before this census.
 
 ## `pub struct CensusInputs<'a>` › `pub incarnation: &'a str,`
 
@@ -298,6 +305,29 @@ attempt, because of a different run's residue.
 [`super::create::Disposition::PrivateHalfRemovalFailed`] is the creator's
 side of the same answer, and states the same policy: "it is not a second
 error to report over the one that stopped the run".
+
+## `pub enum RunDirOutcome` › `RootRetained {`
+
+A husk this census would otherwise reclaim, **kept** because the
+execution-root path of its run is occupied, cannot be read, or cannot be
+derived ([`root_in_the_way`]); nothing is deleted and the census carries on.
+`root` is the path when it could be derived, and `detail` says which of the
+three it was.
+
+A census deletes no execution root. R18 is created only at `create_run`'s P3c,
+by an exclusive claim, and removed before publication only by the creator that
+claimed it (`engine::topology::create`). A husk's proof authenticates its
+public and private halves — marker and owner record agreeing, the current
+repository's key, the locator under the authorized root, no commit record — and
+it does not say who made a directory found at its run's root path: the
+creator after P3c, or another actor while the creator was stopped before it.
+So the husk is kept, as the record whose marker locates that root through the
+run it names, and the outcome reports the uncertainty; it claims neither that
+this run made the root, nor that anything will reclaim it automatically.
+Nothing in this release removes that root; removing it is left to a later
+recovery an operator authorizes. Once the path is empty, the next census
+reclaims the husk as before
+(PR12-INV7-PREPUBLICATION-EXECUTION-ROOT-ORPHAN, repair14).
 
 ## `pub enum RunDirOutcome` › `step: FailedStep,`
 
@@ -614,6 +644,9 @@ and is spent by [`rundir::remove_private_husk`]. Holding it here rather than
 re-proving in phase 2 is what makes "the proof that authorized this deletion"
 and "the proof this census computed" the same object.
 
+`Planned::KeepForRoot` is the reclaim [`root_in_the_way`] stopped: no effect,
+as for `Retain`, and reported as [`RunDirOutcome::RootRetained`].
+
 ## `fn scan(run_id: &str, inputs: &CensusInputs<'_>, own_run: Option<&str>) -> Scanned {`
 
 Classify one directory, read-only, and hand the classification to the decision.
@@ -644,8 +677,9 @@ pull request's body claimed before it had it. The three reader predicates in
 `no_production_dispatch_on_a_classification_is_an_equality_guard` refuses the
 four spellings that would undo it.
 
-`lock_held` is read inside the two arms that use it and not above the `match`.
-The `Indeterminate` arm asks nothing further about the directory, and that is
+`lock_held` is bound and read inside the one arm that uses it, `Committed`, and
+not above the `match`; the `Husk` arm calls `rundir::is_running` inline in its
+`if` without binding it. The `Indeterminate` arm asks nothing further about the directory, and that is
 the arm's whole content — see below.
 
 ## `fn scan_classified(` › `RunDirClass::Indeterminate => Scanned {`
@@ -705,6 +739,11 @@ is recomputed here to mint one. A second answer that is not `Proven`
 differ — a commit record that has since appeared, an owner record that
 has since been rewritten — is a reason not to delete.
 
+A proven husk is reclaimed only when [`root_in_the_way`] finds its run's
+execution-root path empty; otherwise it is `Planned::KeepForRoot`. The
+husks with a marker whose private half is gone (`TargetAbsent`) go through
+the same question ([`unless_its_root_is_there`]).
+
 ## `fn apply(hooks: &mut dyn RunDirHooks, public: &Path, plan: Planned) -> RunDirOutcome {`
 
 Perform one plan. The only place in this module that has an effect.
@@ -734,6 +773,120 @@ locator. The creator states the identical rule at its own
 
 Arm (iii). No effect, by construction rather than by discipline:
 there is no funnel call on this path at all.
+
+## `fn unless_its_root_is_there(`
+
+The public-only reclaim of a husk, unless its run's execution-root path is
+occupied. Only `TargetAbsent` asks — a valid marker naming a private half that
+is gone: with its owner record gone nothing authenticates the run any more,
+and the marker is all that locates a root of it, so the husk is kept while
+the path is occupied. A husk with no marker (`Bare`, `StagedMarkerOnly`) never
+reached P1, and so never P3c: no root of its run exists, and its reclaim is
+unchanged.
+
+## `fn root_in_the_way(`
+
+Whether reclaiming a husk could delete the only record that locates an
+execution root: `Some` when the root path of the husk's run is occupied,
+unreadable or underivable, `None` only when it is empty.
+
+The path is the one a creator of the run would have claimed at P3c in this
+command's context: `WorkspaceManager::derive` over the current repository (the
+key of its effective common directory), the authorized root, the husk's run id
+and the incarnation its marker records. The marker is read again for its
+incarnation; an unreadable marker is an undecidable answer, and kept.
+
+That path is not the only place the run's root can be. A creating context with
+another legal `GIT_COMMON_DIR` derived another key, and its root is at
+`workspaces/<that key>/<run id>`; reclaiming the husk because *this* context's
+path is empty would delete the marker, the only linkage to that root
+(`PR12-REGRESSION11-PRECOMMIT-R18-RECOVERY`). So where the derived path is
+absent the answer is [`another_contexts_root`]'s, which can only keep the husk.
+
+Nothing here deletes, and no scan is ever deletion authority: a namespace look
+cannot say whose a root is -- linked worktrees share one repository key and
+hold separate worktree leases, so under this census's lease another worktree's
+live run can have a root in the same namespace -- so what it finds, or cannot
+read, only keeps the husk, and only a complete link-free view with no entry for
+this run leaves the answer `None` that reclaims as before. The census observes
+(`symlink_metadata` and `read_dir`, never following a link) and keeps the husk
+when anything is, or may be, there.
+
+## `fn another_contexts_root(`
+
+Whether this run may have a root this command's context did not derive, asked
+only once this context's own derived root path is absent; `Some` keeps the
+husk (`Planned::KeepForRoot`, reported `root-retained`), and nothing here
+deletes or follows a link.
+
+First the marker: its recorded locator must be `<authorized root>/runs/<run
+id>` -- spelt as the census's authorized root spells it, as the manager spells
+it, or naming the same entry once its parent is canonicalized ([`names_the_same_entry`];
+creation records the root as `fs::canonicalize` spells it, verbatim on Windows,
+and the manager strips the verbatim prefix). A marker that locates its private
+half anywhere else names a creator whose root would hang from another private
+root, outside this command's authorized namespace, which this census does not
+read: kept.
+
+Then the namespace, `<private root>/workspaces`, read without following: absent
+(`NotFound`) is no root anywhere; a link, a reparse point, a non-directory or
+an unreadable entry there keeps the husk; each key entry is read with
+`symlink_metadata` -- a link or reparse point keeps the husk, a regular file is
+no key and is passed, an unreadable one keeps the husk -- and `<key>/<run id>`
+is asked the same way: anything there, a link included, or an error other than
+`NotFound`, keeps the husk and names the path. Only a complete, link-free view
+with no entry for this run answers `None`. A run id is a ULID, so an entry under
+another key with this run's id is this run's root, made in another repository
+context; it is kept, never claimed or removed.
+
+**What this leaves, and where (the accepted PR-fit deferral).** A husk kept for
+a root stays as it is until an operator, or a later convergence this pull
+request does not add, removes the root: the public husk
+`<repo>/.upstroke/runs/<run id>` with its `.creating` marker, whose
+`private_dir` names the private half `<private root>/runs/<run id>` (and its
+`owner.json`, when the run got that far), and the root
+`<private root>/workspaces/<key>/<run id>`. The private root is the one the run
+was created under: `~/.upstroke` unless configured otherwise. The census reports
+the entry as `root-retained` with the root's path in its `describe()`, but that
+report is not delivered by every public command (the census-report delivery is
+a separate accepted deferral). `upstroke status <run id>` is unchanged and does
+not ask this question: for a husk it reports the husk's disposition and the
+marker's recorded private locator -- for a husk whose private half is gone,
+"an unstarted husk (its recorded private half is gone) that the next write
+command reclaims"; for a proven one, "an unstarted husk, bound to a private half
+that never committed, that the next write command reclaims" -- even where the
+next census keeps it for its root. To find retained state, read it directly and
+read-only: `cat <repo>/.upstroke/runs/<run id>/.creating` for the locator, `cat
+<private root>/runs/<run id>/owner.json` for the run's record, and `ls -la
+<private root>/workspaces/*/<run id>` for its roots under every key.
+
+## `fn is_a_link(metadata: &std::fs::Metadata) -> bool {`
+
+Whether a namespace component is something the look must not follow. On
+Windows any reparse point (`FILE_ATTRIBUTE_REPARSE_POINT`, `0x400`), a junction
+included, as the ownership proof's `is_reparse_point` answers; elsewhere a
+symbolic link.
+
+## `fn names_the_same_entry(recorded: &Path, runs: &Path, run_id: &str) -> bool {`
+
+Whether a marker's recorded locator names `<runs>/<run id>` in another spelling:
+its last component is the run id and its parent canonicalizes to what `runs`
+canonicalizes to. Either canonicalization failing is not the same entry, and
+the husk is kept.
+
+## `fn could_have_a_root(run_id: &str) -> bool {`
+
+Whether `run_id` has the one shape `WorkspaceManager::derive` accepts (its
+private `is_canonical_ulid`): twenty-six uppercase Crockford base32
+characters, the first `0` to `7`. P3c creates a root only through a manager
+derived for its run's id, so no creator ever made a root for an id of any
+other shape, and [`root_in_the_way`] answers `None` for one without deriving.
+Every other `derive` refusal — a repository Git cannot read, a registry that
+does not answer — stays undecidable and keeps the husk.
+
+The copy is held to `derive`'s own answer by
+`startup::tests::the_censuss_run_id_shape_is_the_one_the_workspace_manager_derives_roots_for`,
+over a canonical id and each way of not being one.
 
 ## `fn unreclaimable(step: FailedStep, error: &UpstrokeError) -> RunDirOutcome {`
 
@@ -811,6 +964,15 @@ The lock this witness is holding.
 ## `impl WorktreeLocked` › `#[allow(dead_code)]` (trailing)
 
 never called at 610106b; see `PR7-NARROWED-SURFACE-19-UNCALLED` (§2)
+
+## `impl WorktreeLocked` › `pub fn into_lock(self) -> WorktreeLock {`
+
+Hands the lock back, consuming the witness. The production creation chain
+(`engine::topology::entry`, PR12) takes the lock "across the startup census
+and the whole run": the census consumes the witness, `FreshCensused::into_parts`
+returns it, and this gives the lock itself to `Started::into_handle`, which
+holds it in the `RunHandle` until the run ends. There is no point between
+the acquisition and the handle at which the lock is released.
 
 ## `mod witness` › `mod fresh {`
 

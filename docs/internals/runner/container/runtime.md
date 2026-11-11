@@ -170,6 +170,21 @@ which is not the same as an operation that reached the runtime and failed.
 
 The runtime could not be reached for this operation.
 
+## `pub enum RuntimeError` › `Unresolved {`
+
+A process the runtime started could not be established gone. The error does
+not establish that the operation's own effect completed. `DockerCli` answers
+it from every bounded `docker` question, an image or volume inspection (since
+K2) as much as a removal, whose supervisor could not establish the question's
+own process gone (`unanswered`, which first holds the fact under the name the
+question asked about). It answers it too from an attached start that fails,
+and from a collection or a removal, while the container's attached client, or
+a fact held under the container, is unresolved (PR12's attached client, root's
+DELIVERY-OWNERSHIP follow-through). The funnel's `refused` keeps it typed, as
+`ProcessFate::Unresolved`, for the release. A pre-flight inspection reads it
+as a runtime failure: `InspectionRefusal::from_runtime` and
+`recorded_image_environment` fold it into `RuntimeFailed`.
+
 ## `pub enum RuntimeError` › `Failed {`
 
 The runtime answered, and the answer was a failure.
@@ -263,6 +278,13 @@ Whether the mount is read-only.
 A tmpfs that could not be written would be a mount with no purpose, so
 this variant has no flag rather than a flag that is always `false`.
 
+## `pub struct ContainerUser {`
+
+A numeric uid and gid a container runs as: `docker create --user <uid>:<gid>`
+(PR12's D-B). Numbers and not names, because the image's `/etc/passwd`
+need not know the coordinator's user, and a name would resolve inside the
+image to whoever it means there.
+
 ## `pub struct CreateSpec {`
 
 Everything `docker create` is given.
@@ -322,6 +344,22 @@ needs to write.
 A field rather than an unconditional argv flag so the obligation is
 assertable from a [`CreateSpec`] on a machine with no container runtime
 — including the Windows guest, which has none.
+
+## `pub struct CreateSpec` › `pub user: Option<ContainerUser>,`
+
+Who the container's process runs as. `Some` is the coordinator's effective
+numeric identity, which `exec::ContainerRunner::plan` gives every container
+on Linux (`coordinator_user`); `None` keeps the image's user, as every
+container did before PR12's D-B.
+
+## `pub struct CreateSpec` › `pub open_stdin: bool,`
+
+Whether the container is created with stdin open (`docker create
+--interactive`), true exactly when its command carries a non-empty
+`CommandSpec::stdin` (PR12's D-C). The payload itself is not here: it
+travels in the cover's start proof, so a spec that is logged, hashed or
+compared never holds a prompt. A closed stdin is the EOF a command with no
+input reads at once, as before.
 
 ## `pub struct CreatedContainer {`
 
@@ -404,6 +442,27 @@ What a finished container did.
 
 `None` when the process was signalled rather than exiting.
 
+## `pub struct ContainerExecution` › `pub output_limited: bool,`
+
+Whether the runtime read only part of what the container wrote (K2):
+`DockerCli` sets it when the process funnel ended `docker logs` at its output
+limit, which keeps at most that limit of each stream. The runner then reports
+the output limited whatever the lengths it was handed
+(`exec::ContainerRunner::collect`), so a gate whose output overran the limit
+fails as it did when the runner's own truncation saw the whole output.
+
+## `pub enum QuestionBound<'a> {`
+
+How long one question about a container may take (K2, regular review 4,
+finding 2). `Invocation` is the running invocation's deadline and its
+cancellation: the question ends at whichever comes first, and is not asked
+once either has passed. `Runtime` is the runtime's own bound for one question
+(`DockerCli`'s `QUESTION_BOUND`), for a question no invocation bounds: a
+cleanup, a collection, a reclaim or a census, which may run after an
+invocation's deadline has passed or once it was cancelled and must still be
+asked. `Copy`, and it borrows the cancellation, which outlives every question
+asked under it.
+
 ## `pub trait ContainerRuntime: Send + Sync {`
 
 ---------------------------------------------------------------------------
@@ -453,6 +512,33 @@ absent from the runtime", which refuses a rebuild before any spawn.
 [`RuntimeError`] when the runtime cannot be reached or the inspection
 fails.
 
+## `pub trait ContainerRuntime: Send + Sync` › `fn image_environment(&self, id: &str) -> Result<Option<Vec<(String, String)>>, RuntimeError> {`
+
+The environment the image recorded as `id` declares (`Config.Env`), as
+`KEY=VALUE` pairs in the image's order — read-only, by the immutable id the
+run recorded and never by a reference, so it cannot be retargeted. PR12's
+S7: the container runner's base environment is the image's own
+(`ContainerEnvironment::from_image`), and this is where it comes from;
+there is no fallback to the host's environment.
+
+`Ok(None)` means the runtime holds no image with that id. `Ok(Some(vec![]))`
+means the image declares no environment, which is a value and not an
+absence; the runner's `certify_path` then refuses it, because no `PATH` is
+not a usable environment.
+
+**A provided method that refuses.** A runtime that does not implement it
+answers [`RuntimeError::Failed`] (operation `InspectImageById`) rather than an
+empty environment, so a test double, or a future runtime, that never learned
+to read one cannot be mistaken for an image without an environment. The
+production runtime implements it through the same read-only
+`docker image inspect` path as `image_by_id`; the effects classification
+lists it among the effect-free inspections.
+
+### Errors
+
+[`RuntimeError`] when the runtime cannot be reached, the inspection fails or
+its answer cannot be read, and the provided refusal above.
+
 ## `pub trait ContainerRuntime: Send + Sync` › `fn volume_present(&self, name: &str) -> Result<bool, RuntimeError>;`
 
 Whether a named volume exists. R20 volumes are operator-owned and are
@@ -472,9 +558,14 @@ Every container carrying `key=value`, with its labels.
 [`RuntimeError`] when the runtime cannot be reached or the listing
 fails.
 
-## `pub trait ContainerRuntime: Send + Sync` › `fn observe(&self, name: &str) -> Result<Liveness, RuntimeError>;`
+## `pub trait ContainerRuntime: Send + Sync` › `fn observe(&self, name: &str, bound: QuestionBound<'_>) -> Result<Liveness, RuntimeError>;`
 
-Whether a container is running, exited, or gone.
+Whether a container is running, exited, or gone, asked under `bound`
+(`QuestionBound`, K2): the supervision of a running invocation passes its
+deadline and its cancellation, so an observation that does not answer ends
+where the invocation does; everything else, a settlement, a reclaim or a test,
+passes the runtime's own bound. A runtime whose observations cannot block,
+as the fakes', may ignore it.
 
 ### Errors
 
@@ -510,7 +601,11 @@ the spec from it; there is no other spec to create from.
 
 ## `pub trait ContainerRuntime: Send + Sync` › `fn start(&self, covered: CoveredStart<'_>) -> Result<(), RuntimeError>;`
 
-Start `covered.name()`.
+Start `covered.name()`, and deliver `covered.stdin()` to it exactly once, then
+EOF, when that payload is not empty (PR12's D-C). The start returns once the
+container has started: it waits neither for the workload nor for the whole
+payload to be written, and any wait it does make ends at `covered.deadline()`
+or at `covered.cancellation()`.
 
 ### Errors
 

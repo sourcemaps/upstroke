@@ -416,6 +416,22 @@ impl TopologyReport {
                 runner_policy(&self.runner)
             )),
         }
+        if !self.runner.mounts.is_empty() {
+            out.push(format_args!("runner mounts: {}", self.runner.mounts.len()));
+            for mount in &self.runner.mounts {
+                out.push(format_args!(
+                    "  {} <- {} ({}, {})",
+                    mount.target,
+                    mount.source,
+                    if mount.read_only {
+                        "read-only"
+                    } else {
+                        "read-write"
+                    },
+                    identity_text(&mount.source_identity)
+                ));
+            }
+        }
         if let Some(key) = self.halted_at {
             out.push(format_args!("halted at task {key}"));
         }
@@ -505,12 +521,26 @@ impl TopologyReport {
                 match row.review_cost_usd {
                     Some(cost) if !row.review_cost_incomplete => format!("${cost:.4}"),
                     Some(cost) => format!("at least ${cost:.4} (?)"),
+                    None if ran_no_review(row) => "none".to_owned(),
                     None => "? (unknown)".to_owned(),
                 }
             ));
         }
         out.into_string()
     }
+}
+
+/// A row whose terminal carried its review passes and lists none spent nothing on
+/// review: a fast merge and a conflict run no verification, and a prepared, rejected
+/// or unavailable terminal records every pass its verification ran. Only a row still
+/// open, or interrupted without a charged record, has spend no terminal carried.
+fn ran_no_review(row: &LedgerRow) -> bool {
+    row.reviews == 0
+        && !row.review_cost_incomplete
+        && !matches!(
+            row.terminal.as_str(),
+            "open" | "merge_verification_interrupted"
+        )
 }
 
 #[must_use]
@@ -522,6 +552,29 @@ pub fn outcome_label(outcome: &RunOutcome) -> String {
         RunOutcome::BudgetExceeded => "budget exceeded",
     }
     .to_owned()
+}
+
+fn identity_text(identity: &crate::topology::events::MountSourceIdentity) -> String {
+    use crate::topology::events::{MountSourceIdentity, MountSourceKind};
+    let kind = |kind: &MountSourceKind| match kind {
+        MountSourceKind::Directory => "directory",
+        MountSourceKind::File => "file",
+    };
+    match identity {
+        MountSourceIdentity::Unix {
+            kind: object,
+            device,
+            inode,
+        } => format!("{} device {device} inode {inode}", kind(object)),
+        MountSourceIdentity::Windows {
+            kind: object,
+            volume_serial,
+            file_id,
+        } => format!(
+            "{} volume {volume_serial:#018x} file {file_id}",
+            kind(object)
+        ),
+    }
 }
 
 fn runner_kind(runner: &RunnerPolicy) -> &'static str {

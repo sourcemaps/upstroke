@@ -3231,8 +3231,8 @@ P7/P8 startup repair reads the same refs the transaction recovery moves.
 
 The `RecordingRefs` double every other resume here supplies answers
 "absent" to the startup repair whatever the repository holds, which is
-exactly how a resume that refused its own published head stayed green
-(`pr8-triage.md` C1). A publication test resumes through this.
+exactly how a resume that refused its own published head stayed green. A
+publication test resumes through this.
 
 ## `fn resume_as_certified_by(`
 
@@ -3829,7 +3829,7 @@ made without crossing a resume passes with the terminal empty.
 
 ## `fn an_unjudgeable_proposal_parks_the_candidate_for_a_person() {` › `let fixture = Fixture::two_tasks("input-rejected");`
 
-R4: a review input that cannot be judged is HumanRequired, not a code
+A review input that cannot be judged is HumanRequired, not a code
 rejection and not a publication. The review-input policy refuses the
 proposed tree before any reviewer runs.
 
@@ -3840,7 +3840,7 @@ must be charged there, live and on replay of the terminal's record.
 
 ## `fn a_verification_park_answer_is_ingested_and_the_candidate_re_verifies() {`
 
-R13: the loop ingests an answer to a verification-park question —
+The loop ingests an answer to a verification-park question —
 Answered returns the candidate to the queue, and the next step integrates
 it. The repair-admission half of PR8's version of this test, a refusal,
 became
@@ -6647,3 +6647,101 @@ else to reclaim, so no intent removal runs before step (g). Step (g) verifies th
 worktree, the verification's revalidation repairs the torn registration — the slot's forced
 removal, its intent kept — and the worktree reads as not registered, so (g) recreates it at its
 base. At `dfab458b` that verification refused on every resume.
+
+## `fn f_prune_entry_of(fixture: &Fixture, checkout: &Path) {`
+
+A prune no engine process started, deleting the whole entry of a checkout: `.git` set aside, `git worktree prune --expire=now`, `.git` put back.
+
+## `fn f_keep_the_store(fixture: &Fixture) {`
+
+A linked checkout outside the execution root that keeps the registration store when a slot's entry is pruned.
+
+## `fn f_files_under(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {`
+
+Every file under a directory with its bytes.
+
+## `fn f_remove_tree(root: &Path) {`
+
+The operator removing a kept directory.
+
+## `fn f_kept_refusal(`
+
+The guard's refusal: `RegistryRefused` naming recovery's reclaim, the kept checkout and what the check found.
+
+## `fn f_has_intent(fixture: &Fixture, slot: &crate::workspace_manager::Slot) -> bool {`
+
+Whether a slot's intent stands.
+
+## `fn f_resume(fixture: &Fixture) -> Result<(Recovered, RunHandle), UpstrokeError> {`
+
+A resume as `RESUMER`.
+
+## `fn t_pres_1_an_in_flight_attempts_pruned_populated_slot_is_kept_and_the_resume_refuses() {`
+
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-PRES-1 (appendix §3.4): an in-flight attempt's populated slot pruned whole, another registration keeping the store: the resume refuses `RegistryRefused`; slot, contents (byte-compared) and intent stay; after the operator removes the directory the next resume reclaims the intent and dispatches a fresh generation.
+
+## `fn t_pres_2_a_retained_generations_pruned_populated_slot_is_closed_kept_and_the_resume_refuses() {`
+
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-PRES-2: the same for a retained generation; its close is appended and the slot is kept.
+
+## `fn t_pres_3_one_name_removed_from_a_populated_slots_entry_keeps_the_slot() {`
+
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-PRES-3: `HEAD`, `commondir`, `gitdir`, one at a time, each kept.
+
+## `fn t_pres_4_a_whole_populated_slot_is_reclaimed_as_before() {`
+
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-PRES-4 (control): a whole registration is reclaimed as before.
+
+## `fn t_pres_5_an_empty_slot_whose_registration_is_gone_is_reclaimed() {`
+
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-PRES-5 (control): an empty slot whose registration is gone is reclaimed.
+
+## `fn f_earlier_manager(fixture: &Fixture) -> crate::workspace_manager::WorkspaceManager {`
+
+A manager of an earlier incarnation of the same run.
+
+## `fn f_plant_earlier_instance(`
+
+An earlier incarnation's populated instance of the in-flight generation's slot.
+
+## `fn t_pres_6_an_earlier_incarnations_pruned_populated_instance_is_kept() {`
+
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-PRES-6 (under U): an earlier incarnation's populated instance with a deleted registration is kept.
+
+## `fn t_pres_6_an_earlier_incarnations_whole_populated_instance_is_removed() {`
+
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-PRES-6's control: a whole earlier instance is removed.
+
+## `fn t_pres_7_an_earlier_instance_reached_only_through_its_directory_is_kept() {`
+
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-PRES-7 (under U): reachable only through its directory under the slot's namespace (no intent); kept: the guard's reach is the removal's.
+
+## `fn t_pres_8_a_promoted_candidates_pruned_populated_slot_is_kept_and_the_resume_refuses() {`
+
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-PRES-8: a promoted candidate's closed generation whose scrub did not finish; kept, the resume refusing (K-6's liveness cost).
+
+## `fn t_pres_9_a_registration_repaired_by_the_operator_is_reclaimed_with_what_it_holds() {`
+
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-PRES-9 (G-1, G-2, rule (d)): `gitdir` removed, kept at the first resume; `git worktree repair` writes it again; the next resume's guard answers `Ok` and the reclaim removes the slot with its contents.
+
+## `fn a_recorded_target_a_fresh_run_refuses_refuses_the_resume_before_any_recovery_or_runtime_question()`
+
+K1 (regular review 4: recorded mounts bypass target validation), through
+`run_recovery_order`. For each set of
+`resolve::fixtures::REFUSED_RECORDED_TARGETS` (the container's root,
+`/upstroke/settings`, `/cache/../upstroke/settings`, and `/cache` with
+`/cache/inner`), a source is recorded as a fresh run records one
+(`mount_source`), its record is planted at those targets and read back
+through `serde_json` (`resolve::fixtures::with_recorded_targets`), and the
+fixture's run records it in `run_started` and the owner record, the
+container runner's digest moving with it. Each record is complete, so only
+the target rule can refuse it. As J5's cases do, each leaves a torn tail
+and the reclaimable marker in place. The resume refuses with the target
+rule's words; the log, torn tail included, and the marker are as they
+were; the stable-prefix barrier never opened the log and the census never
+removed the marker; and the runtime, a fake over a recording trace, was
+asked nothing.
+
+With the shared target validator `resolve::refuse_recorded_targets` bypassed, the
+resume of the root cell recovers through every step, A to H, and the test
+fails (measured before the commit).

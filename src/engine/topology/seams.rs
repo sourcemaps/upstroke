@@ -13,6 +13,8 @@ use crate::topology::events::TopologyEvent;
 use crate::topology::fold::TopologyFold;
 use crate::workspace_manager::EffectHooks;
 
+use super::identity::{InvocationLedger, Reservations};
+
 pub trait TopologyHooks {
     fn effects(&mut self) -> &mut dyn EffectHooks;
 
@@ -25,6 +27,15 @@ pub trait TopologyHooks {
     fn spawn(&mut self) -> &mut dyn SpawnHooks;
 
     fn folded(&mut self, _fold: &TopologyFold, _events: &[TopologyEvent]) {}
+
+    fn brokered(
+        &mut self,
+        _fold: &TopologyFold,
+        _events: &[TopologyEvent],
+        _reservations: &Reservations,
+        _invocations: &InvocationLedger,
+    ) {
+    }
 }
 
 #[derive(Debug, Default)]

@@ -915,14 +915,43 @@ pub fn run_recovery_order(
     hooks: &mut dyn TopologyHooks,
     warnings: &mut Vec<String>,
 ) -> Result<(Recovered, RunHandle), UpstrokeError> {
-    let locks = LocksHeld::take(
+    let records = verify_for_recovery(
         root,
         seams.repo_root,
         seams.worktree_git_dir,
-        hooks.rundir(),
+        seams.repo_key,
+        hooks,
     )?;
+    recover_verified(records, seams, hooks, warnings)
+}
+
+pub fn verify_for_recovery(
+    root: RootDerived,
+    repo_root: &Path,
+    worktree_git_dir: &Path,
+    repo_key: &RepoKey,
+    hooks: &mut dyn TopologyHooks,
+) -> Result<RecordsVerified, UpstrokeError> {
+    let locks = LocksHeld::take(root, repo_root, worktree_git_dir, hooks.rundir())?;
     let _cleanup_scope = locks.cleanup_scope();
-    let records = RecordsVerified::verify(locks, seams.repo_key)?;
+    let records = RecordsVerified::verify(locks, repo_key)?;
+    // DESIGN §26: a missing or rebound recorded mount source refuses before any recovery. The
+    // check reads the records just verified and stats each source, changing nothing, so it
+    // precedes the stable-prefix barrier and the census, which would otherwise truncate a torn
+    // tail and reclaim a stale marker of a run that cannot continue. The rebuild checks again.
+    crate::runner::container::resolve::recheck_recorded_mounts(
+        &records.locks().root().started().runner,
+    )?;
+    Ok(records)
+}
+
+pub fn recover_verified(
+    records: RecordsVerified,
+    seams: &ResumeSeams<'_>,
+    hooks: &mut dyn TopologyHooks,
+    warnings: &mut Vec<String>,
+) -> Result<(Recovered, RunHandle), UpstrokeError> {
+    let _cleanup_scope = records.locks().cleanup_scope();
     let mut steps = vec![RecoveryStep::A];
 
     let log_path = records.locks().root().log_path();
@@ -1126,16 +1155,26 @@ pub fn finish_integration(
                 }
                 crate::topology::events::VerificationBasis::AlreadyPresent => None,
             };
+            let cancelled = fold_of(certified).task_state(transaction.candidate.key)
+                == Some(crate::topology::fold::TaskState::Failed);
             emit(
                 certified,
                 context,
                 TopologyEventBody::MergeVerificationInterrupted {
                     data: crate::topology::events::MergeVerificationInterrupted {
                         sequence,
-                        detail: "the coordinator that started this verification did not survive \
-                                 it; recovery step (f) settles it interrupted and the candidate \
-                                 re-verifies under a new sequence"
-                            .to_owned(),
+                        detail: if cancelled {
+                            "a decline, or a lineage member's failed settlement, failed this \
+                             verification's lineage and cancelled it, and the coordinator that \
+                             started it did not survive it; recovery step (f) settles it \
+                             interrupted, and its candidate, whose task failed, is not verified \
+                             again"
+                        } else {
+                            "the coordinator that started this verification did not survive \
+                             it; recovery step (f) settles it interrupted and the candidate \
+                             re-verifies under a new sequence"
+                        }
+                        .to_owned(),
                     },
                 },
             )?;
@@ -1458,6 +1497,11 @@ fn reclaim_closed_generations(
             }
             let slot = task_slot(key, generation.id);
             if intents.contains(&slot) {
+                crate::engine::topology::dispatch::refuse_kept_slot(
+                    manager,
+                    &slot,
+                    &generation.base_sha,
+                )?;
                 crate::engine::topology::dispatch::scrub(manager, hooks, &slot)?;
                 reclaimed += 1;
             }

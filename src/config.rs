@@ -125,6 +125,7 @@ struct RawRoleEffort {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawStrategy {
     mode: Option<String>,
     spend_down_after: Option<f64>,
@@ -289,6 +290,10 @@ pub const LAST_SEQUENTIAL_SCHEMA: u32 = 3;
 pub enum EngineLimits {
     Fresh,
 
+    Topology,
+
+    TopologyResume,
+
     SequentialResume,
 
     SequentialResumeWithRecordedGates,
@@ -298,7 +303,7 @@ impl EngineLimits {
     #[must_use]
     pub fn for_resume(effective_schema: u32, gates_recorded: bool) -> Self {
         if effective_schema > LAST_SEQUENTIAL_SCHEMA {
-            Self::Fresh
+            Self::TopologyResume
         } else if gates_recorded {
             Self::SequentialResumeWithRecordedGates
         } else {
@@ -376,6 +381,10 @@ pub struct Config {
 
     pub max_per_pool: u32,
 
+    pub explicit_max_per_agent: Option<u32>,
+
+    pub explicit_max_per_pool: Option<u32>,
+
     pub interaction_mode: InteractionMode,
 
     pub notify: Vec<String>,
@@ -392,6 +401,8 @@ struct EngineSettings {
     max_merge_repairs: u32,
     max_per_agent: u32,
     max_per_pool: u32,
+    explicit_max_per_agent: Option<u32>,
+    explicit_max_per_pool: Option<u32>,
 }
 
 struct InteractionSettings {
@@ -466,7 +477,7 @@ pub fn load(
         repo_config,
         discover_in,
         pools_file,
-        EngineLimits::Fresh,
+        EngineLimits::Topology,
         warnings,
     )
 }
@@ -794,6 +805,8 @@ pub fn load_captured_with(
         max_merge_repairs: engine.max_merge_repairs,
         max_per_agent: engine.max_per_agent,
         max_per_pool: engine.max_per_pool,
+        explicit_max_per_agent: engine.explicit_max_per_agent,
+        explicit_max_per_pool: engine.explicit_max_per_pool,
         interaction_mode: interaction.mode,
         notify: interaction.notify,
         wait_on_block: interaction.wait_on_block,
@@ -1056,6 +1069,36 @@ mod tests {
     }
 
     #[test]
+    fn a_misspelled_routing_strategy_key_is_refused_not_dropped() {
+        let body = "[routing.strategy]\nmode = \"value-max\"\nspend_down_afer = 0.7\n";
+        let captured = CapturedConfig {
+            repo: FileSnapshot {
+                path: PathBuf::from("upstroke.toml"),
+                required: true,
+                content: Ok(Some(body.as_bytes().to_vec())),
+            },
+            pools: None,
+        };
+        let mut warnings = Vec::new();
+        let err = load_captured(&captured, EngineLimits::Fresh, &mut warnings)
+            .expect_err("an unknown [routing.strategy] key is a typo, not silence");
+        assert!(matches!(err, UpstrokeError::Config { .. }), "{err}");
+        let message = err.to_string();
+        assert!(
+            message.contains("`spend_down_afer`"),
+            "the refusal names the misspelled key: {message}"
+        );
+        assert!(
+            message.contains("`mode`") && message.contains("`spend_down_after`"),
+            "the refusal lists the accepted keys: {message}"
+        );
+        assert!(
+            warnings.is_empty(),
+            "this is a refusal, not a degraded warning: {warnings:?}"
+        );
+    }
+
+    #[test]
     fn parses_chains_overrides_pins_and_strategy() {
         let path = scratch(
             "full.toml",
@@ -1285,6 +1328,101 @@ model = "claude-opus-4-8"
             msg.contains("claude-opus-4-8"),
             "should list known models: {msg}"
         );
+    }
+
+    #[test]
+    fn the_requested_frontier_pins_load_exactly_with_their_catalogued_family() {
+        for (agent, model, family) in [
+            ("claude-code", "claude-opus-5-5", catalog::Family::Anthropic),
+            ("codex", "gpt-6-astra", catalog::Family::OpenAI),
+        ] {
+            let path = scratch(
+                &format!("requestedpin-{agent}.toml"),
+                &format!(
+                    "[[pins]]\ntier = \"frontier\"\nagent = \"{agent}\"\nmodel = \"{model}\"\n\
+                     effort = \"max\"\n"
+                ),
+            );
+            let mut warnings = Vec::new();
+            let cfg = load(Some(&path), &hermetic(), Some(&missing()), &mut warnings)
+                .unwrap_or_else(|error| panic!("{agent}/{model} must load: {error}"));
+            assert_eq!(cfg.pins.len(), 1, "{agent}/{model}");
+            let pin = &cfg.pins[0];
+            assert_eq!(
+                (pin.tier, pin.agent.as_str(), pin.model.as_str(), pin.effort),
+                (Tier::Frontier, agent, model, Some(Effort::Max)),
+                "the pin keeps the exact pair it was given"
+            );
+            assert_eq!(
+                catalog::lookup(&pin.agent, &pin.model).map(|entry| (entry.tier, entry.family)),
+                Some((Tier::Frontier, family))
+            );
+            assert_eq!(cfg.implementation_effort(Tier::Frontier), Effort::Max);
+            assert_eq!(cfg.review_effort(), Effort::Max);
+            assert!(warnings.is_empty(), "{agent}/{model}: {warnings:?}");
+        }
+    }
+
+    #[test]
+    fn every_catalogued_model_still_loads_as_an_explicit_pin() {
+        for (index, entry) in catalog::CATALOG.iter().enumerate() {
+            let path = scratch(
+                &format!("catalogpin-{index}.toml"),
+                &format!(
+                    "[[pins]]\ntier = \"{}\"\nagent = \"{}\"\nmodel = \"{}\"\n",
+                    entry.tier, entry.agent, entry.model
+                ),
+            );
+            let mut warnings = Vec::new();
+            let cfg = load(Some(&path), &hermetic(), Some(&missing()), &mut warnings)
+                .unwrap_or_else(|error| {
+                    panic!("{}/{} must load: {error}", entry.agent, entry.model)
+                });
+            assert_eq!(cfg.pins.len(), 1);
+            let pin = &cfg.pins[0];
+            assert_eq!(
+                (pin.tier, pin.agent.as_str(), pin.model.as_str()),
+                (entry.tier, entry.agent, entry.model)
+            );
+            assert!(warnings.is_empty(), "{}: {warnings:?}", entry.model);
+        }
+    }
+
+    #[test]
+    fn a_near_miss_of_the_requested_pair_is_still_an_unknown_pin() {
+        for (agent, model, spelling) in [
+            ("claude-code", "claude-opus-5.5", "claude-opus-5-5"),
+            ("claude-code", "gpt-6-astra", "claude-opus-5-5"),
+            ("codex", "gpt-6", "gpt-6-astra"),
+            ("codex", "claude-opus-5-5", "gpt-6-astra"),
+        ] {
+            let path = scratch(
+                &format!("nearmiss-{agent}-{model}.toml"),
+                &format!(
+                    "[[pins]]\ntier = \"frontier\"\nagent = \"{agent}\"\nmodel = \"{model}\"\n"
+                ),
+            );
+            let mut warnings = Vec::new();
+            let error = load(Some(&path), &hermetic(), Some(&missing()), &mut warnings)
+                .expect_err("a near miss must not load");
+            match error {
+                UpstrokeError::UnknownPinnedModel {
+                    agent: refused_agent,
+                    model: refused_model,
+                    known,
+                } => {
+                    assert_eq!(
+                        (refused_agent.as_str(), refused_model.as_str()),
+                        (agent, model)
+                    );
+                    assert!(
+                        known.split(", ").any(|offered| offered == spelling),
+                        "the refusal offers the exact `{spelling}`: {known}"
+                    );
+                }
+                other => panic!("{agent}/{model} refused for the wrong reason: {other}"),
+            }
+        }
     }
 
     #[test]
@@ -1939,8 +2077,14 @@ pool_fraction = 0.5
                 "manyparallel.toml",
                 &format!("[engine]\nmax_parallel = {parallel}\n"),
             );
-            let error = load(Some(&path), &hermetic(), Some(&missing()), &mut warnings)
-                .expect_err("a ceiling this engine cannot honour must not load");
+            let error = load_limits(
+                Some(&path),
+                &hermetic(),
+                Some(&missing()),
+                EngineLimits::Fresh,
+                &mut warnings,
+            )
+            .expect_err("a ceiling the sequential engine cannot honour must not load");
             let message = error.to_string();
             assert!(
                 message.contains(&format!("max_parallel = {parallel}")),
@@ -1950,6 +2094,28 @@ pool_fraction = 0.5
                 message.contains("max_parallel = 1"),
                 "names the one accepted value: {message}"
             );
+
+            for limits in [EngineLimits::Topology, EngineLimits::TopologyResume] {
+                let mut accepted = Vec::new();
+                let cfg = load_limits(
+                    Some(&path),
+                    &hermetic(),
+                    Some(&missing()),
+                    limits,
+                    &mut accepted,
+                )
+                .expect("a schema-4 run honours the ceiling");
+                assert_eq!(cfg.max_parallel, parallel, "{limits:?}");
+                assert_eq!(
+                    cfg.max_per_agent, parallel,
+                    "{limits:?}: defaults to the width"
+                );
+                assert_eq!(
+                    cfg.max_per_pool, parallel,
+                    "{limits:?}: defaults to the width"
+                );
+                assert!(accepted.is_empty(), "{limits:?}: {accepted:?}");
+            }
         }
 
         warnings.clear();
@@ -2093,7 +2259,8 @@ pool_fraction = 0.5
         for gates_recorded in [true, false] {
             assert_eq!(
                 EngineLimits::for_resume(LAST_SEQUENTIAL_SCHEMA + 1, gates_recorded),
-                EngineLimits::Fresh
+                EngineLimits::TopologyResume,
+                "a schema-4 run's resume reads today's file against its own record"
             );
         }
     }
@@ -2142,6 +2309,8 @@ pool_fraction = 0.5
         );
         for limits in [
             EngineLimits::Fresh,
+            EngineLimits::Topology,
+            EngineLimits::TopologyResume,
             EngineLimits::SequentialResume,
             EngineLimits::SequentialResumeWithRecordedGates,
         ] {
@@ -2179,7 +2348,14 @@ pool_fraction = 0.5
             "[engine]\nmax_merge_repairs = 5\nmax_per_agent = 3\nmax_per_pool = 2\n",
         );
         let mut warnings = Vec::new();
-        let cfg = load(Some(&path), &hermetic(), Some(&missing()), &mut warnings).expect("load");
+        let cfg = load_limits(
+            Some(&path),
+            &hermetic(),
+            Some(&missing()),
+            EngineLimits::Fresh,
+            &mut warnings,
+        )
+        .expect("load");
         assert_eq!(cfg.max_merge_repairs, 5);
         assert_eq!(cfg.max_per_agent, 3);
         assert_eq!(cfg.max_per_pool, 2);
@@ -2189,6 +2365,25 @@ pool_fraction = 0.5
                     .iter()
                     .any(|w| w.contains(key) && w.contains("not acted on")),
                 "`{key}` must say it is not acted on: {warnings:?}"
+            );
+        }
+
+        for limits in [EngineLimits::Topology, EngineLimits::TopologyResume] {
+            let mut acted_on = Vec::new();
+            let cfg = load_limits(
+                Some(&path),
+                &hermetic(),
+                Some(&missing()),
+                limits,
+                &mut acted_on,
+            )
+            .expect("load");
+            assert_eq!(cfg.max_merge_repairs, 5, "{limits:?}");
+            assert_eq!(cfg.max_per_agent, 3, "{limits:?}");
+            assert_eq!(cfg.max_per_pool, 2, "{limits:?}");
+            assert!(
+                acted_on.is_empty(),
+                "{limits:?}: a schema-4 run acts on all three: {acted_on:?}"
             );
         }
 
@@ -2211,7 +2406,14 @@ pool_fraction = 0.5
              max_parallel = 1\nmax_merge_repairs = 3\n",
         );
         let mut warnings = Vec::new();
-        let cfg = load(Some(&path), &hermetic(), Some(&missing()), &mut warnings).expect("load");
+        let cfg = load_limits(
+            Some(&path),
+            &hermetic(),
+            Some(&missing()),
+            EngineLimits::Fresh,
+            &mut warnings,
+        )
+        .expect("load");
         assert_eq!(cfg.shell, ShellKind::PowerShell);
         assert_eq!(cfg.on_task_failure, OnTaskFailure::Continue);
         assert_eq!(cfg.max_merge_repairs, 3);
@@ -2221,6 +2423,14 @@ pool_fraction = 0.5
             "only the inert repair ceiling is announced: {warnings:?}"
         );
         assert!(warnings[0].contains("max_merge_repairs"), "{warnings:?}");
+
+        warnings.clear();
+        let cfg = load(Some(&path), &hermetic(), Some(&missing()), &mut warnings).expect("load");
+        assert_eq!(cfg.max_merge_repairs, 3);
+        assert!(
+            warnings.is_empty(),
+            "the default reading is a schema-4 run's, which acts on the ceiling: {warnings:?}"
+        );
     }
 
     #[test]
@@ -2459,7 +2669,7 @@ mounts = [
     #[test]
     fn a_container_section_parses_into_the_selection_resolution_consumes() {
         use crate::runner::container::FakeRuntime;
-        use crate::runner::container::resolve::resolve_container;
+        use crate::runner::container::resolve::{MountContext, resolve_container};
         use crate::runner::container::runtime::ContainerTrace;
 
         let raw: toml::Value = toml::from_str(
@@ -2477,7 +2687,8 @@ credential_volumes = { claude-code = "creds-cc" }
         runtime.tag("upstroke/ci:3.2", "sha256:abc");
         runtime.add_volume("creds-cc");
 
-        let policy = resolve_container(&runtime, &selection).expect("resolves");
+        let policy =
+            resolve_container(&runtime, &selection, &MountContext::unbound()).expect("resolves");
         let image = policy.image.as_ref().expect("image");
         assert_eq!(image.reference, "upstroke/ci:3.2", "from the TOML");
         assert_eq!(image.id, "sha256:abc", "from the runtime");
@@ -2490,16 +2701,25 @@ credential_volumes = { claude-code = "creds-cc" }
         policy.completeness().expect("a complete record");
 
         let empty = FakeRuntime::new(ContainerTrace::off());
-        resolve_container(&empty, &selection)
+        resolve_container(&empty, &selection, &MountContext::unbound())
             .expect_err("a runtime holding nothing cannot resolve it");
     }
 
     #[test]
     fn the_legacy_refusal_is_about_the_kind_and_about_nothing_else() {
-        for limits in [
-            EngineLimits::Fresh,
-            EngineLimits::SequentialResume,
-            EngineLimits::SequentialResumeWithRecordedGates,
+        for (limits, expected) in [
+            (
+                EngineLimits::Fresh,
+                "is being created by the schema-1..3 engine",
+            ),
+            (
+                EngineLimits::SequentialResume,
+                "keeps the boundary it started with",
+            ),
+            (
+                EngineLimits::SequentialResumeWithRecordedGates,
+                "keeps the boundary it started with",
+            ),
         ] {
             let container = RunnerSelection {
                 kind: RunnerKind::Container,
@@ -2532,16 +2752,55 @@ credential_volumes = { claude-code = "creds-cc" }
                 "{limits:?}: {message}"
             );
 
-            let expected = match limits {
-                EngineLimits::Fresh => "is being created by the schema-1..3 engine",
-                EngineLimits::SequentialResume
-                | EngineLimits::SequentialResumeWithRecordedGates => {
-                    "keeps the boundary it started with"
-                }
-            };
             assert!(message.contains(expected), "{limits:?}: {message}");
             refuse_legacy_container_selection(&host, Path::new("upstroke.toml"), limits)
                 .expect("a host selection is not refused");
         }
+    }
+
+    #[test]
+    fn a_schema_4_reading_accepts_a_container_selection() {
+        for limits in [EngineLimits::Topology, EngineLimits::TopologyResume] {
+            let container = RunnerSelection {
+                kind: RunnerKind::Container,
+                image: Some("upstroke/ci:3.2".to_owned()),
+                credential_volumes: BTreeMap::new(),
+                mounts: Vec::new(),
+                from_config: true,
+            };
+            refuse_legacy_container_selection(&container, Path::new("upstroke.toml"), limits)
+                .expect("a schema-4 run selects the container boundary");
+        }
+    }
+
+    #[test]
+    fn a_schema_4_resume_compares_todays_gates_and_a_new_run_governs_by_them() {
+        let path = scratch(
+            "topologygates.toml",
+            "[[gates]]\nname = \"check\"\ncmd = \"cargo check\"\ntimeout_sec = 900\n",
+        );
+        let mut warnings = Vec::new();
+        load_limits(
+            Some(&path),
+            &hermetic(),
+            Some(&missing()),
+            EngineLimits::Topology,
+            &mut warnings,
+        )
+        .expect_err("a run being created governs by today's gates and refuses the typo");
+
+        let mut warnings = Vec::new();
+        load_limits(
+            Some(&path),
+            &hermetic(),
+            Some(&missing()),
+            EngineLimits::TopologyResume,
+            &mut warnings,
+        )
+        .expect("a schema-4 run records its gates, so today's file is compared, not obeyed");
+        assert!(
+            warnings.iter().any(|w| w.contains("`timeout_sec`")),
+            "the unknown key is announced: {warnings:?}"
+        );
     }
 }

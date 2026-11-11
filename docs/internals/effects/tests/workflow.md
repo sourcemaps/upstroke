@@ -178,15 +178,47 @@ asserted.
 
 ## `pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {` › `let runs_the_suite = scalar(step, "run") == Some(TEST_COMMAND);`
 
-The step that runs the suite is the one step in this job that may carry an
-`env:`, and only the map [`TEST_STEP_ENV`] pins: the declaration that the
-leg's temporary directory folds case, under which
+The step that runs the suite, and the host acceptance capture step after it
+([`HOST_ACCEPTANCE_CAPTURE`]), are the two steps in this job that may carry
+an `env:`, and only the map [`TEST_STEP_ENV`] pins. That map is the
+declaration that the leg's temporary directory folds case, under which
 `the_temporary_object_scan_resolves_case_aliases_as_the_filesystem_does`
-requires its native branch. Every other step keeps [`STEP_FIELDS`], and the
-map is compared whole by [`step_env_complaints`]. Measured,
-`MUT-TEST-CASEFOLD-DECLARATION-DROPPED`,
+requires its native branch. The capture repeats it so the record is made
+under the suite's environment. Every other step keeps [`STEP_FIELDS`], and
+each map is compared whole by [`step_env_complaints`], the capture's under
+its own code, `test-capture-step-env`.
+
+Measured for the suite step: `MUT-TEST-CASEFOLD-DECLARATION-DROPPED`,
 `MUT-TEST-CASEFOLD-DECLARED-ON-THE-WRONG-LEG` and
-`MUT-TEST-STEP-RETARGETED-THROUGH-THE-ADMITTED-ENV`.
+`MUT-TEST-STEP-RETARGETED-THROUGH-THE-ADMITTED-ENV`. Measured for the
+capture: `MUT-TEST-CAPTURE-CASEFOLD-DROPPED` and
+`MUT-TEST-CAPTURE-RETARGETED-THROUGH-THE-ADMITTED-ENV`.
+
+The suite step's three rows anchor on its `run:` line together with the
+`env:` lines. The capture step repeats the same `env:` text, and
+[`mutate_workflow`] measures nothing unless an anchor occurs exactly once in
+its job. Each row's mutation, target and code are what they were before the
+capture existed.
+
+The container capability observation after the capture
+([`CAPABILITY_OBSERVATION`]) is the third step that may carry an `env:`, and
+only the same map, under its own code `test-capability-step-env`. Its field
+set is [`CAPABILITY_STEP_FIELDS`], not [`TEST_STEP_FIELDS`]: exactly `env`,
+`name`, `run` and `timeout-minutes`. [`observation_step_complaints`] holds the
+bound to [`CAPABILITY_STEP_TIMEOUT_MINUTES`] under `test-capability-step`.
+Measured, `MUT-TEST-CAPABILITY-CASEFOLD-DROPPED`,
+`MUT-TEST-CAPABILITY-DOCKER-HOST-INJECTED`,
+`MUT-TEST-CAPABILITY-REQUIRE-DOCKER-INJECTED`,
+`MUT-TEST-CAPABILITY-TIMEOUT-DROPPED` and
+`MUT-TEST-CAPABILITY-TIMEOUT-WIDENED`.
+
+The observation's rows anchor on its `name:` line, its `timeout-minutes: 4`
+line, or its own script lines. Each of those occurs once in each job.
+
+Its script spells `set -eo pipefail` rather than the capture's bare
+`set -o pipefail` line, because that line is the anchor
+`MUT-TEST-CAPTURE-EXIT-SWALLOWED` requires exactly once in this job. Every
+earlier row's anchor, mutation and code are unchanged.
 
 ## `pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {` › `if scalar(step, "run").is_some() {`
 
@@ -227,88 +259,82 @@ matrix -- every platform but the one whose suite runs in its own job.
 
 ## `fn installs_a_toolchain(step: &Yaml) -> bool {`
 
-Whether a step is the pinned toolchain action, by its `uses:` prefix. The
-one kind of step the Windows job may put a lane condition on.
+Whether a step is the toolchain action, by its `uses:` prefix: the one
+kind of step the Windows job may not carry at all.
 
 ## `pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {`
 
 Every way the Windows test job fails its contract.
 
 The same shape as [`ci_test_job_complaints`] without the matrix, and with
-the one thing that job cannot say: which machine, and on which lane. The
-job runs on two: the curated guest for a pull request or push, where a
-reviewer waits on it, and `windows-latest` for a merge-queue entry, where
-nobody does. The `runs-on:` is one expression over the lane test, compared
-whole -- a scalar sends every pull request to the slow machine, a bare label
-set sends every build to the pull-request guest where a queue entry's
-event-conditioned install runs over the image's compiler, a subset of the
-labels admits every Windows machine the account registers, and an inverted
-condition routes each lane to the machine the other's setup was written for.
+the one thing that job cannot say: which machine. The job runs on the
+curated guest on every lane -- a pull request, a push and a merge-queue
+entry alike -- and `runs-on:` is compared as a label set: a scalar is a
+hosted runner, an expression routes some event to a machine this contract
+cannot name, and a subset of the labels admits every Windows machine the
+account registers.
 
-The guest's image carries `clippy-driver` for the fixtures, and re-curation
-is bound to that claim, which a document parser cannot check. The hosted
-runner carries nothing curated, so the job installs the image's compiler
-there -- and the contract pins that install as tightly as it pins the
-labels: one step, right after the checkout, under the lane condition
-exactly, at the image's version exactly, with `clippy` exactly.
+The guest's image carries the compiler and `clippy-driver` for the
+fixtures, and re-curation is bound to that claim, which a document parser
+cannot check. The job installs nothing, and an install is refused; the
+suite step asks which compiler it is about to run.
 
-## `pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {` › `&LANE_STEP_FIELDS`
+## `pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {` › `&STEP_FIELDS`
 
-The toolchain install is the one step that may carry an `if:`, and it may
-carry nothing this contract does not model. Every other step keeps its
-usual set, so the lane condition on the suite step -- a pull-request lane
-that reports success having run nothing -- and a lane-conditional `run:`
-step -- a script the reviewed lane never executes -- are refused by the
-field set before their values are read. Measured,
-`MUT-TEST-WINDOWS-SUITE-ON-ONE-LANE` and
-`MUT-TEST-WINDOWS-HOSTED-ONLY-RETARGET`.
+No step of this job may carry an `if:`. The suite step keeps
+[`TEST_STEP_FIELDS`] and every other step [`STEP_FIELDS`], and neither
+admits one: on the step that runs the suite a condition is a job that
+reports success having run nothing for the events it excludes, and on any
+other step it is a script or an action one event executes and the
+pull-request build -- the one a reviewer watches -- never shows. Both are
+refused by the field set before their values are read. Measured,
+`MUT-TEST-WINDOWS-DISABLED`, `MUT-TEST-WINDOWS-SUITE-ON-ONE-LANE` and
+`MUT-TEST-WINDOWS-QUEUE-ONLY-RETARGET`.
 
-## `pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {` › `out.extend(toolchain_complaints(`
+## `pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {` › `if installs_a_toolchain(step) {`
 
-The same helper the gates use, asked for the count and the position only:
-exactly one install, at step 1. The version is checked beside it rather
-than through the helper's `expected`, because the helper's complaint says a
-mismatch leaves current stable compiled by no leg, and that is the gates'
-reason, not this job's. This job wants [`GOLDEN_IMAGE_TOOLCHAIN`], the
-image's version: not `stable`, which is already ahead of the image and
-would run the suite in the queue on a compiler the pull-request lane never
-ran it on; not an older version, which would omit on the queue whatever
-the image's compiler enables. The install alone does not settle which
-compiler bare `cargo` runs -- the action tolerates a failed `rustup
-default` -- so the pinned suite script refuses any other version before it
-runs, and the constant is held to that script by
-`the_windows_leg_counts_the_tests_it_ran`. Before the hosted lane existed this job
-installed nothing and the helper was never asked, which the ninth review
-pass found. Measured,
-`MUT-TEST-WINDOWS-TOOLCHAIN-FLOATS`,
-`MUT-TEST-WINDOWS-TOOLCHAIN-BEHIND-THE-IMAGE`,
-`MUT-TEST-WINDOWS-SECOND-INSTALL` and `MUT-TEST-WINDOWS-INSTALL-NOT-FIRST`.
+No toolchain install, at any step. The guest's image carries
+[`GOLDEN_IMAGE_TOOLCHAIN`] and re-curation moves it; an install here selects
+the compiler from the workflow instead, `rustup` over a frozen image on
+every build. At the image's own version the suite script's compiler
+questions still pass, so this refusal, not the witness, is what holds the
+claim that the image chose. While the merge queue ran on `windows-latest`
+the job carried one install, under the queue condition and pinned whole --
+one step, right after the checkout, at the image's version, with `clippy`;
+it went with that lane, and the pins on it with it. Measured,
+`MUT-TEST-WINDOWS-INSTALL-UNCONDITIONAL` and
+`MUT-TEST-WINDOWS-HOSTED-INSTALL-RESTORED`.
 
-## `pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {` › `if scalar(step, "if") != Some(QUEUE_LANE) {`
+## `pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {` › `let labels = field(job, "runs-on").and_then(scalar_set);`
 
-The install's condition, exactly [`QUEUE_LANE`]. Dropped, the guest lane
-has its compiler selected by the workflow instead of by the image, which is
-the escape this job refused before it had a hosted lane; inverted, the
-hosted lane compiles on whatever GitHub's image preinstalled while the
-guest installs over its own. The condition is the same string `runs-on:`
-routes by, so the step runs on exactly the lane whose machine needs it.
-Measured, `MUT-TEST-WINDOWS-INSTALL-UNCONDITIONAL` and
-`MUT-TEST-WINDOWS-INSTALL-ON-THE-WRONG-LANE`.
-
-## `pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {` › `if scalar(job, "runs-on") != Some(TEST_WINDOWS_RUNS_ON) {`
-
-The whole expression, as a string equality. The contract cannot evaluate
-it, so it pins the one spelling whose two arms are known: the hosted
-runner's name and the pinned labels, selected by the same condition the
-install step carries. Measured, `MUT-TEST-WINDOWS-REHOSTED`,
-`MUT-TEST-WINDOWS-LABEL-DROPPED`, `MUT-TEST-WINDOWS-QUEUE-LANE-REGUESTED`
-and `MUT-TEST-WINDOWS-LANES-SWAPPED`.
+The whole `runs-on:`, as a set equality with [`TEST_WINDOWS_LABELS`]. A
+literal sequence cannot vary by event, so while this holds no lane can be
+routed elsewhere: a scalar is a hosted runner, an expression -- the merge
+queue's route to `windows-latest` from 2026-09-16 among them -- is something
+this contract cannot evaluate and refuses, and a subset admits any
+self-hosted Windows machine the account registers. Measured,
+`MUT-TEST-WINDOWS-REHOSTED`, `MUT-TEST-WINDOWS-LABEL-DROPPED` and
+`MUT-TEST-WINDOWS-QUEUE-REHOSTED`.
 
 ## `pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {` › `let runs_the_suite = scalar(step, "run") == Some(WINDOWS_TEST_WITNESS);`
 
-The same one-step allowance as the `test` job's, pinned to
-[`TEST_WINDOWS_STEP_ENV`]: NTFS folds case on the guest and on
-`windows-latest` alike, so the declaration is `1` outright. Measured, `MUT-TEST-WINDOWS-CASEFOLD-DECLARATION-DROPPED`.
+The same allowance as the `test` job's, pinned to [`TEST_WINDOWS_STEP_ENV`]:
+the guest's NTFS folds case, so the declaration is `1` outright. It applies
+to the suite-and-witness step and to the capture step after it
+([`HOST_ACCEPTANCE_WINDOWS_CAPTURE`], under `test-windows-capture-step-env`).
+Measured, `MUT-TEST-WINDOWS-CASEFOLD-DECLARATION-DROPPED` and
+`MUT-TEST-WINDOWS-CAPTURE-CASEFOLD-DROPPED`. The suite step's row anchors on
+its `name:` line together with the `env:` lines, for the reason the `test`
+job's rows do.
+
+The guest's container capability observation
+([`CAPABILITY_WINDOWS_OBSERVATION`]) takes the same map whole under
+`test-windows-capability-step-env`, the field set
+[`CAPABILITY_STEP_FIELDS`] and the same bound under
+`test-windows-capability-step`. Measured,
+`MUT-TEST-WINDOWS-CAPABILITY-CASEFOLD-DROPPED`,
+`MUT-TEST-WINDOWS-CAPABILITY-DOCKER-CONTEXT-INJECTED` and
+`MUT-TEST-WINDOWS-CAPABILITY-TIMEOUT-DROPPED`.
 
 ## `pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {` › `let running = steps_of(job)`
 
@@ -317,6 +343,134 @@ Cargo was asked for; the lines after it are what say the suite ran, and
 an equality over the step is what stops those lines being dropped, or
 their floor lowered to a number an unexecuted suite clears. Measured,
 `MUT-WINDOWS-WITNESS-COUNT-DROPPED` and `MUT-WINDOWS-WITNESS-FLOOR-DROPPED`.
+
+## `fn capture_complaints(`
+
+The native HOST acceptance record's step: exactly one step of the job runs the
+pinned capture script, and it is the step immediately after the one step that
+runs the pinned suite. Codes: `test-capture-command` and
+`test-windows-capture-command`.
+
+This check is what refuses an omitted capture. Without it, nothing in this
+contract asks for the record, and deleting the step leaves every other check
+green. A capture whose script was edited in any way is no longer the pinned
+script, so it counts as missing. That covers:
+
+- filtered to another test or to none;
+- `--ignored` dropped, so libtest reports the test ignored and Cargo exits
+  zero;
+- echoed;
+- its exit propagation, its zero-test refusal or its frame check removed.
+
+[`step_pin_complaints`] also refuses such a script as unpinned.
+
+"Immediately after" because a step between the suite and the capture can
+change what the capture runs while every pin still matches. A cache restore
+can replace the harness the suite built and ran; a checkout can replace the
+tree.
+
+Measured, in the `test` job:
+
+- `MUT-TEST-CAPTURE-STEP-DELETED`
+- `MUT-TEST-CAPTURE-IGNORED-NOT-RUN`
+- `MUT-TEST-CAPTURE-FILTER-MOVED`
+- `MUT-TEST-CAPTURE-EXIT-SWALLOWED`
+- `MUT-TEST-CAPTURE-ZERO-TESTS-ADMITTED`
+- `MUT-TEST-CAPTURE-FRAMING-UNCHECKED`
+- `MUT-TEST-CAPTURE-SEPARATED-FROM-THE-SUITE`
+
+Measured, on the guest:
+
+- `MUT-TEST-WINDOWS-CAPTURE-STEP-DELETED`
+- `MUT-TEST-WINDOWS-CAPTURE-IGNORED-NOT-RUN`
+- `MUT-TEST-WINDOWS-CAPTURE-EXIT-SWALLOWED`
+- `MUT-TEST-WINDOWS-CAPTURE-ZERO-TESTS-ADMITTED`
+- `MUT-TEST-WINDOWS-CAPTURE-FRAMING-UNENFORCED`
+- `MUT-TEST-WINDOWS-CAPTURE-SEPARATED-FROM-THE-WITNESS`
+
+A field on the capture beyond the admitted set — `if:` or
+`continue-on-error:` — is refused as `unexpected-step-field`
+(`MUT-TEST-CAPTURE-STEP-DISABLED`, `MUT-TEST-CAPTURE-STEP-ABSOLVED`,
+`MUT-TEST-WINDOWS-CAPTURE-DISABLED`).
+
+Three controls each disabled one of the new checks; each check is
+load-bearing:
+
+| Check disabled | Row no longer refused |
+| --- | --- |
+| this one | `MUT-TEST-CAPTURE-STEP-DELETED` |
+| its position guard alone | `MUT-TEST-CAPTURE-SEPARATED-FROM-THE-SUITE` |
+| the capture's env pin | `MUT-TEST-CAPTURE-CASEFOLD-DROPPED` |
+
+Every earlier row stayed refused in all three runs.
+
+## `fn observation_complaints(`
+
+The container capability observation's step (G7, root direction `ecf15a9c`).
+Exactly one step of the job runs the pinned observation script, and it is the
+step immediately after the one step that runs the pinned host acceptance
+capture. Codes: `test-capability-command` and
+`test-windows-capability-command`.
+
+As with [`capture_complaints`], this check is what refuses an omitted
+observation, and an edited script counts as a missing one:
+
+- filtered to another test, to none, or widened by dropping `--exact`;
+- `--ignored` dropped;
+- echoed;
+- its exit propagation, its zero-test refusal or its frame check removed.
+
+"Immediately after the capture" has three reasons. A step between them could
+replace the harness or the tree. The contract places the observation
+success-only after the HOST capture. And a step above the capture would run
+before the record that step makes.
+
+Measured, in the `test` job:
+
+- `MUT-TEST-CAPABILITY-STEP-DELETED`
+- `MUT-TEST-CAPABILITY-IGNORED-NOT-RUN`
+- `MUT-TEST-CAPABILITY-FILTER-MOVED`
+- `MUT-TEST-CAPABILITY-FILTER-WIDENED`
+- `MUT-TEST-CAPABILITY-ECHOED`
+- `MUT-TEST-CAPABILITY-EXIT-SWALLOWED`
+- `MUT-TEST-CAPABILITY-ZERO-TESTS-ADMITTED`
+- `MUT-TEST-CAPABILITY-FRAMING-UNCHECKED`
+- `MUT-TEST-CAPABILITY-SEPARATED-FROM-THE-CAPTURE`
+- `MUT-TEST-CAPABILITY-ABOVE-THE-CAPTURE`
+
+`MUT-TEST-CAPABILITY-ABOVE-THE-CAPTURE` is a true move. Both scripts still
+match their pins and each runs once, in swapped order. Its anchor spans the
+capture step through the observation step.
+
+Measured, on the guest:
+
+- `MUT-TEST-WINDOWS-CAPABILITY-STEP-DELETED`
+- `MUT-TEST-WINDOWS-CAPABILITY-IGNORED-NOT-RUN`
+- `MUT-TEST-WINDOWS-CAPABILITY-FILTER-MOVED`
+- `MUT-TEST-WINDOWS-CAPABILITY-EXIT-SWALLOWED`
+- `MUT-TEST-WINDOWS-CAPABILITY-ZERO-TESTS-ADMITTED`
+- `MUT-TEST-WINDOWS-CAPABILITY-FRAMING-UNENFORCED`
+- `MUT-TEST-WINDOWS-CAPABILITY-SEPARATED-FROM-THE-CAPTURE`
+
+A conditional or failure-swallowing field on the observation, `if:` (a
+`!cancelled()` expression included) or `continue-on-error:`, is refused as
+`unexpected-step-field`. The rows are
+`MUT-TEST-CAPABILITY-STEP-DISABLED`,
+`MUT-TEST-CAPABILITY-STEP-RUN-WHEN-NOT-CANCELLED`,
+`MUT-TEST-CAPABILITY-STEP-ABSOLVED`, `MUT-TEST-WINDOWS-CAPABILITY-DISABLED`
+and `MUT-TEST-WINDOWS-CAPABILITY-ABSOLVED`.
+
+No earlier check was removed or loosened. [`TEST_STEP_FIELDS`] and
+[`STEP_FIELDS`] are unchanged; the observation step alone may carry
+`timeout-minutes`.
+
+## `fn observation_step_complaints(step: &Yaml, named: &str, code: &str) -> Vec<String> {`
+
+The observation step's own fields. They are exactly [`CAPABILITY_STEP_FIELDS`],
+every one required, so a dropped `env:` or `timeout-minutes:` is refused
+here as well as by the env pin. The bound must read as the integer
+[`CAPABILITY_STEP_TIMEOUT_MINUTES`]. A string, another number or no bound is
+refused. Codes: `test-capability-step` and `test-windows-capability-step`.
 
 ## `fn checkout_complaints(job: &Yaml, named: &str, code: &str) -> Vec<String> {`
 
@@ -328,12 +482,10 @@ Count and position first. A pinned action placed above the checkout runs
 against an empty workspace, or one it prepared itself, and a second
 checkout later can replace the candidate while the first, input-free one
 still matches; both pass a reading that checks only the inputs of whatever
-checkouts it finds, and the position the toolchain check asserts for the
+checkouts it finds, and the position the toolchain check asserts for an
 install is only meaningful if the checkout is the step before it. Measured,
-`MUT-TEST-WINDOWS-CHECKOUT-AFTER-INSTALL` -- the shape only this pin
-refuses, the install kept at step 1 and the checkout moved below it --
-`MUT-TEST-WINDOWS-CACHE-BEFORE-CHECKOUT` and
-`MUT-TEST-WINDOWS-SECOND-CHECKOUT`.
+`MUT-TEST-WINDOWS-CACHE-BEFORE-CHECKOUT` -- on a job that installs nothing,
+the shape only this pin refuses -- and `MUT-TEST-WINDOWS-SECOND-CHECKOUT`.
 
 `actions/checkout` with no inputs checks out the event's own ref: for a
 pull request, the candidate merged onto its base. Any input -- `ref:`,
@@ -388,18 +540,15 @@ decides which compiler it installs. A gate downgraded from `stable` to the
 version the golden image already carries leaves no leg compiling on current
 stable, and every other pin in this contract still matches. The MSRV leg is
 not checked here: it pins its own floor against the manifest, in
-[`ci_msrv_job_complaints`]. The Windows test job is, asked for the image's
-version rather than `stable`, and its install's lane condition is read
-beside this helper rather than in it. Measured,
-`MUT-GATE-TOOLCHAIN-DOWNGRADED`.
+[`ci_msrv_job_complaints`]. Nor is the Windows test job: it installs
+nothing, and [`ci_test_windows_job_complaints`] refuses an install there
+outright. Measured, `MUT-GATE-TOOLCHAIN-DOWNGRADED`.
 
 ## `out.push(format!(`
 
 Zero installs is a job whose compiler something other than this workflow
-chose. Every job this helper is asked about installs one, the Windows test
-job included: its install is conditional on the queue lane, and the guest
-lane -- where the image carries the compiler -- is the skipped arm of that
-one step, not a second shape of the job.
+chose. Every job this helper is asked about installs one; the Windows test
+job, whose compiler the guest's image chooses, is not asked.
 
 ## `if *install != 1 {`
 
@@ -435,8 +584,8 @@ Measured, `MUT-WORKFLOW-PERMISSIONS-WIDENED`.
 
 Every way the hosted Windows codegen witness fails its contract.
 
-The Windows test leg executes the suite with the golden image's toolchain
-on both lanes, which moves only by re-curation. `cargo check` and Clippy on
+The Windows test leg executes the suite with the golden image's toolchain,
+which moves only by re-curation. `cargo check` and Clippy on
 `windows-latest` type-check current stable and stop before codegen, so
 without this witness nothing on GitHub's current stable ever code-generates
 or links the Windows tree: a Windows-only codegen or link failure there

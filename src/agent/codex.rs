@@ -840,17 +840,27 @@ mod tests {
         }
     }
 
-    fn debug_models_json(levels: &[&str]) -> String {
+    fn model_json(slug: &str, levels: &[&str]) -> Value {
         json!({
-            "models": [{
-                "slug": "gpt-5.6-sol",
-                "supported_reasoning_levels": levels
-                    .iter()
-                    .map(|effort| json!({ "effort": effort }))
-                    .collect::<Vec<_>>(),
-            }]
+            "slug": slug,
+            "supported_reasoning_levels": levels
+                .iter()
+                .map(|effort| json!({ "effort": effort }))
+                .collect::<Vec<_>>(),
         })
-        .to_string()
+    }
+
+    fn catalog_json(models: Vec<Value>) -> String {
+        json!({ "models": models }).to_string()
+    }
+
+    fn debug_models_json(levels: &[&str]) -> String {
+        catalog_json(
+            catalog::known_models(ADAPTER_ID)
+                .into_iter()
+                .map(|slug| model_json(slug, levels))
+                .collect(),
+        )
     }
 
     #[test]
@@ -1042,20 +1052,61 @@ mod tests {
 
     #[test]
     fn model_catalog_requires_every_effort_for_each_known_codex_model() {
+        let known = catalog::known_models(ADAPTER_ID);
+        for slug in ["gpt-6-astra", "gpt-5.6-sol"] {
+            assert!(known.contains(&slug), "`{slug}` is checked: {known:?}");
+        }
+        let required: Vec<String> = Effort::ALL.into_iter().map(|e| e.to_string()).collect();
+        let every: Vec<&str> = required.iter().map(String::as_str).collect();
+
         let complete = debug_models_json(&["low", "medium", "high", "xhigh", "max", "ultra"]);
         let parsed = parse_debug_models(&complete).expect("realistic catalog");
         validate_model_efforts("0.147.0", &parsed).expect("all Upstroke levels are present");
 
-        for (missing, levels) in [
-            ("xhigh", ["low", "medium", "high", "max"]),
-            ("max", ["low", "medium", "high", "xhigh"]),
-        ] {
-            let parsed = parse_debug_models(&debug_models_json(&levels)).expect("catalog");
-            let error = validate_model_efforts("0.147.0", &parsed)
-                .expect_err("a missing shared level must refuse")
-                .to_string();
-            assert!(error.contains("gpt-5.6-sol"), "{error}");
-            assert!(error.contains(missing), "{error}");
+        for slug in &known {
+            for missing in &every {
+                let models: Vec<Value> = known
+                    .iter()
+                    .map(|listed| {
+                        let levels: Vec<&str> = every
+                            .iter()
+                            .copied()
+                            .filter(|level| listed != slug || level != missing)
+                            .collect();
+                        model_json(listed, &levels)
+                    })
+                    .collect();
+                let parsed = parse_debug_models(&catalog_json(models)).expect("catalog");
+                let error = validate_model_efforts("0.147.0", &parsed)
+                    .expect_err("a missing shared level must refuse")
+                    .to_string();
+                assert!(
+                    error.contains(&format!("model `{slug}` does not advertise")),
+                    "{error}"
+                );
+                assert!(error.contains(&format!("level(s): {missing}.")), "{error}");
+            }
+
+            for stand_in in [None, Some(format!("{slug}-preview"))] {
+                let models: Vec<Value> = known
+                    .iter()
+                    .filter_map(|listed| {
+                        if listed == slug {
+                            stand_in.as_deref().map(|wrong| model_json(wrong, &every))
+                        } else {
+                            Some(model_json(listed, &every))
+                        }
+                    })
+                    .collect();
+                let parsed = parse_debug_models(&catalog_json(models)).expect("catalog");
+                let error = validate_model_efforts("0.147.0", &parsed)
+                    .expect_err("each catalogued model must be listed under its exact slug")
+                    .to_string();
+                assert!(
+                    error.contains(&format!("known model `{slug}`")),
+                    "{stand_in:?}: {error}"
+                );
+            }
         }
 
         let unrelated = serde_json::to_string(&json!({
@@ -1075,7 +1126,8 @@ mod tests {
         let error = validate_model_efforts("0.147.0", &parsed)
             .expect_err("another slug cannot satisfy the configured model")
             .to_string();
-        assert!(error.contains("gpt-5.6-sol"), "{error}");
+        let first = known.first().expect("codex has catalogued models");
+        assert!(error.contains(&format!("known model `{first}`")), "{error}");
     }
 
     #[test]

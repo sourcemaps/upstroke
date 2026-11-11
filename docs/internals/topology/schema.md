@@ -39,11 +39,14 @@ Two boundaries are enforced here and stated plainly to whoever hits them:
 ### Activation
 
 [`MAX_READABLE_SCHEMA`] is *derived* from [`TOPOLOGY_ACTIVATION`], not
-written down. Production is [`TopologyActivation::Inactive`], so the ceiling
-is 3 and a schema-4 log is refused by a released binary rather than folded
-by a reader that does not exist yet. Activation is a one-token change in a
-later slice; every decision that depends on the ceiling already reads it
-through [`select_reader_with`], so nothing has to be rewritten when it moves.
+written down. Production is [`TopologyActivation::Active`] since PR12, so the
+ceiling is 4: a schema-4 log is read by the topology reader, and every
+schema-1..3 log by the legacy one. Every decision that depends on the
+ceiling reads it through [`select_reader_with`], so the switch moved without
+any reader being rewritten. A binary built before PR12 has a ceiling of 3
+and still refuses a schema-4 log explicitly
+([`SchemaRefusal::TopologyLogUnreadable`]); that refusal stays reachable here
+through [`select_reader_with`] at a lower ceiling, and the tests hold it.
 
 ## `pub const LATEST_LEGACY_SCHEMA: u32 = 3;`
 
@@ -70,9 +73,11 @@ No topology reader is wired up; schema-4 logs are refused explicitly.
 
 The topology reader is wired up and schema-4 logs are read.
 
-## `pub const TOPOLOGY_ACTIVATION: TopologyActivation = TopologyActivation::Inactive;`
+## `pub const TOPOLOGY_ACTIVATION: TopologyActivation = TopologyActivation::Active;`
 
-This binary's activation state. **Production is [`TopologyActivation::Inactive`].**
+This binary's activation state. **Production is [`TopologyActivation::Active`]**
+(PR12): `upstroke run` creates a schema-4 run, and `upstroke resume` reads
+both models by the header.
 
 ## `pub const fn max_readable_schema(activation: TopologyActivation) -> u32 {`
 
@@ -86,28 +91,30 @@ in between is meaningful, which is why this is a match and not arithmetic.
 
 This binary's ceiling, derived from [`TOPOLOGY_ACTIVATION`].
 
-## `const _: () = assert!(matches!(TOPOLOGY_ACTIVATION, TopologyActivation::Inactive));`
+## `const _: () = assert!(matches!(TOPOLOGY_ACTIVATION, TopologyActivation::Active));`
 
-The slice's invariant — production reads to schema 3 and no further — held
-where a test cannot hold it. Every assertion in the `tests` module below
-compiles only under `cfg(test)`, so an activation that is `Inactive` for the
-test build and `Active` for the released one satisfies the entire suite while
-shipping a binary that folds schema-4 logs through a reader this slice does
-not have. These are evaluated in the ordinary build too — the one `src/main.rs`
-links — so that shape fails to compile rather than shipping.
+The activated invariant — production reads to schema 4 and no further —
+held where a test cannot hold it. Every assertion in the `tests` module
+below compiles only under `cfg(test)`, so an activation that differed
+between the test build and the released one would satisfy the entire suite
+while shipping a binary whose reader the suite never exercised. These are
+evaluated in the ordinary build too — the one `src/main.rs` links — so that
+shape fails to compile rather than shipping. Until PR12 they held the
+opposite state (`Inactive`, a ceiling of 3).
 
 ## `pub enum WriterSelector {`
 
 Which schema a *fresh* run is written in.
 
 Separate from the read ceiling on purpose. Reading is about what a binary
-can be handed; writing is about what it chooses to create, and a binary that
-could read schema 4 still writes schema 3 for every ordinary run until the
-topology is what `upstroke run` means.
+can be handed; writing is about what it chooses to create. Production writes
+the newest schema its activation reads — `max_readable_schema(TOPOLOGY_ACTIVATION)`,
+so 4 since PR12, and 3 before it — which ties the writer to the one switch
+rather than to a second constant that could disagree with it.
 
 ## `pub enum WriterSelector` › `Production,`
 
-What `upstroke run` creates.
+What `upstroke run` creates: a schema-4 topology run since PR12.
 
 ## `pub enum WriterSelector` › `TopologyPreview,`
 
@@ -195,9 +202,11 @@ the post-activation ceiling be exercised without moving production's.
 
 ### Errors
 
-[`SchemaRefusal::TopologyLogUnreadable`] for a topology log this binary is
-not activated for, and [`SchemaRefusal::NewerThanReadable`] for anything
-above the topology schema.
+Whenever `schema` is above the supplied `ceiling`:
+[`SchemaRefusal::TopologyLogUnreadable`] when `schema` is the topology
+schema, and [`SchemaRefusal::NewerThanReadable`] for any other schema,
+including a legacy one below the topology schema (schema 3 with ceiling 2,
+for example).
 
 ## `pub fn select_for_schema(schema: u32, ceiling: u32) -> Result<ReaderSelection, SchemaRefusal> {` › `if schema == TOPOLOGY_SCHEMA {`
 
@@ -306,19 +315,21 @@ looked past line 1 would find this and be believed.
 
 -- constants ---------------------------------------------------------
 
-## `fn max_readable_is_the_activation_switch_and_production_is_inactive() {` › `assert_eq!(`
+## `fn max_readable_is_the_activation_switch_and_production_is_active() {` › `assert_eq!(`
 
 The ceiling is not a number this crate writes down twice: it is the
 activation, evaluated. A mutation that hard-codes either side of the
 switch is what these four assertions exist to catch.
 
-## `fn max_readable_is_the_activation_switch_and_production_is_inactive() {` › `assert_eq!(MAX_READABLE_SCHEMA, 3);`
+## `fn max_readable_is_the_activation_switch_and_production_is_active() {` › `assert_eq!(MAX_READABLE_SCHEMA, 4);`
 
-The slice's stated invariant, said in the plainest possible way.
+The activated invariant, said in the plainest possible way.
 
-## `fn fresh_writer_schema_maps_each_selector_to_a_different_model() {` › `assert!(fresh_writer_schema(WriterSelector::Production) <= MAX_READABLE_SCHEMA);`
+## `fn production_writes_the_newest_schema_its_activation_reads() {` › `assert!(fresh_writer_schema(WriterSelector::Production) <= MAX_READABLE_SCHEMA);`
 
-Production never writes something production cannot read back.
+Production never writes something production cannot read back, and the
+last assertion reads the header it would write through the production
+wrapper and gets the topology reader.
 
 ## `mod tests` › `fn reader_selection_is_a_relation_over_every_ceiling_and_schema() {`
 
@@ -567,11 +578,11 @@ produces is a schema-3 log reinterpreted as a topology one.
 Activation
 ==================================================================
 
-## `fn the_activation_constant_is_asserted_outside_the_test_configuration() {` › `const { assert!(matches!(TOPOLOGY_ACTIVATION, TopologyActivation::Inactive)) };`
+## `fn the_activation_constant_is_asserted_outside_the_test_configuration() {` › `const { assert!(matches!(TOPOLOGY_ACTIVATION, TopologyActivation::Active)) };`
 
 The four `const _` assertions beside `MAX_READABLE_SCHEMA` are the
 load-bearing ones: they are evaluated in the ordinary build, so an
-activation that is `Inactive` under `cfg(test)` and `Active`
-otherwise fails to compile rather than shipping a binary that folds
-schema-4 logs. This test records that they exist and agrees with
-them, and is deliberately not the proof.
+activation that differs between `cfg(test)` and the released build
+fails to compile rather than shipping a reader the suite never ran.
+This test records that they exist and agrees with them, and is
+deliberately not the proof.

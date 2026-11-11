@@ -249,6 +249,28 @@ nothing to do with running a plan: `capacity` documents itself as a pure
 estimator over plain values, and `connect` executes nothing at all, yet both
 had to import the execution engine for this two-line trait.
 
+## `pub trait AdapterSource` › `fn shared(&self) -> Option<Arc<dyn AdapterSource + Send + Sync>> {`
+
+An owned, thread-shareable handle on the same registry, or `None`.
+
+The schema-4 coordinator (`engine::topology::coordinator`) runs each
+pipeline on a thread of its own and hands every one an
+`Arc<dyn AdapterSource + Send + Sync>`, while the public entry points
+(`run_with`, `run_harness`, `resume_with`, `resume_harness`) take a borrowed
+`&dyn AdapterSource`. A borrow cannot become an owned, `'static` handle, so
+a source says whether it can give one. The default is `None`: a test
+double that holds borrowed state, or one that is not `Sync`, keeps
+compiling unchanged and simply cannot be shared. The production entry
+(`engine::topology::entry`) refuses a run wider than one before any lock
+when its source answers `None`, and drives a width-1 run on the
+single-threaded step loop instead (PR12's D4).
+
+## `impl AdapterSource for BuiltinAdapters` › `fn shared(&self) -> Option<Arc<dyn AdapterSource + Send + Sync>> {`
+
+The built-in registry is a unit struct over a `static` table, so sharing it
+is a fresh `Arc` of the same zero-sized value: every handle resolves every
+id to the same `&'static dyn AgentAdapter`.
+
 ## `pub static ADAPTERS: &[&dyn AgentAdapter] = &[`
 
 Registry in routing order; ids match `WorkerProfile.agent`.
@@ -555,9 +577,9 @@ is what says so, and it is what fails if one comes back.
 
 Two independently varying fields, and their intersection is the test:
 **which boundary** (two, reporting different versions) x **in which
-order** (both). Three distinct versions are asserted as distinct-value
-counts rather than described, so a fixture that lost a version reports
-it instead of agreeing with itself.
+order** (both). Two distinct versions (1.1.1 and 2.2.2), probed in both
+orders, are asserted as a distinct-value count rather than described, so
+a fixture that lost a version reports it instead of agreeing with itself.
 
 ## `mod built_program_tests` › `fn the_adapters_hold_no_process_wide_resolution_state() {`
 

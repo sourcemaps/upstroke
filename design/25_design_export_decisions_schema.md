@@ -52,6 +52,18 @@ JSON types are normative. A "measured" field is a stored fact copied from the ev
 | `failure_reason` | string | yes | measured settlement prose; null on pass and on a dangling start |
 | `reviews` | array of review objects, below | never | measured review passes that actually ran, in recorded pass order; empty when none ran or the start dangles |
 
+**What an attempt's interval is not (schema 4).** A schema-4 run appends
+`attempt_started` when it admits the attempt, before the attempt acquires its
+per-agent and per-pool slot permit. So `attempt_started_at` to
+`attempt_finished_at` can include time spent waiting for a slot. Two rows whose
+intervals overlap did not necessarily run their workers at the same time. In
+the command-line scenario's case B (`max_per_agent = 1`), the attempt intervals
+overlap while the workers ran one after the other. Worker concurrency is
+measured from the role processes' own lifetimes, never from these timestamps.
+A successful schema-4 attempt's `attempt_finished_at` is its
+`candidate_prepared`. The order is the protected admission code's, and this
+paragraph describes it rather than changing it.
+
 `task_features` has exactly: measured `kind` (string), `suggested_tier` (string or null), `minimum_tier` (string or null), and `path_hints` (array of strings, exact and ordered as frozen); plus derived `dependency_count`, `acceptance_count`, `artifact_input_count`, and `artifact_output_count` (each a non-negative integer equal to the length of its frozen-plan array). No diff size or other post-execution feature belongs here.
 
 `chain` has `tiers` (non-empty ordered array of tier strings) and `attempts_per` (positive integer), copied from the run-start chain for that task. `selected_tier` is separate because it is the choice actually made for this attempt.

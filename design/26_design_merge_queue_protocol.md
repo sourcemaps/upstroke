@@ -89,7 +89,13 @@ Task and merge worktrees are detached checkouts under a stable execution root
 recorded by `run_started` (default `~/.upstroke/workspaces/<repo-key>/<run-id>`).
 They are separate from private transcripts and from the user's checkout. A
 container sees only the one workspace mounted for its role; sibling worktrees,
-the event log, and private artifacts are not mounted.
+the event log, and private artifacts are not mounted. The single exception is a
+worker's or reviewer's own permission-settings file: the one the engine
+materialized for that invocation, which its command records and its arguments
+name. That one file is bound read-only; the directory holding it, and every other
+attempt's settings, are not. Beyond these, a container receives the operator's
+configured `[runner]` mounts as the run recorded them (§6), none of which may reach
+the repository, its Git, the private root or a host credential location.
 
 A task branches from the integration SHA observed at **dispatch**, after all of
 its declared dependencies are `Merged`. Independent tasks may therefore begin
@@ -292,13 +298,25 @@ verification backoff remains a separate fact.
 A decline fails every unmerged lineage member, including the root. It closes
 their generations, removes candidates and questions, clears execution backoff,
 and releases their generation, candidate and lineage holdings. A matching
-`VerificationStarted` transaction is cancelled; late results for closed
-generations or sequences are refused. A `Prepared` transaction has already
-authorized publication, so a decline affecting it is refused before append
-until that publication completes. Already merged ancestors remain merged.
-Unrelated transactions and holdings survive. `decline_halts_run` additionally
-records a run halt; it does not decide whether the lineage fails. New repairs
-must name a coherent root and parent and cannot revive a failed ancestor.
+`VerificationStarted` transaction is cancelled, not released, as is one a
+lineage member's failed settlement meets: it stays unresolved and keeps its
+pipeline and merge entitlements, so no other transaction starts and the run
+does not end before its one terminal record, `merge_verification_interrupted`;
+the fold refuses `merge_prepared`, `merge_rejected` and
+`merge_verification_unavailable` for a verification whose candidate's task has
+failed. The coordinator that stopped the verification appends that terminal
+once the Runner has established the end of each of its processes, a halt's
+closure appends it with the other in-flight work, and a resume's recovery
+appends it for a verification no live process settled; the pin is then deleted
+expected-old and the staging worktree and snapshots are reclaimed, as for any
+interrupted verification, and nothing is verified again, since its candidate
+was removed with its lineage. Late results for closed generations or sequences
+are refused. A `Prepared` transaction has already authorized publication, so a
+decline affecting it is refused before append until that publication completes.
+Already merged ancestors remain merged. Unrelated transactions and holdings
+survive. `decline_halts_run` additionally records a run halt; it does not
+decide whether the lineage fails. New repairs must name a coherent root and
+parent and cannot revive a failed ancestor.
 
 These are durable fold and replay rules. The topology driver ingests human
 answers: before each step it polls every open question without blocking, and
@@ -308,9 +326,13 @@ applied before any further work is selected. The driver runs one attempt at
 a time, so no agent process is running when an answer is ingested and none
 has to be cancelled on a decline. A concurrent driver that ingests answers
 must stop the affected work and discard late results before appending their
-completion. Event shapes are unchanged; schema-4 replay refuses the unsafe
-event orders excluded above, including bare questions during active lineage
-work and questions on terminal tasks.
+completion; a verification it stops because a lineage failed still receives
+its one terminal, `merge_verification_interrupted`, before the driver starts
+another integration or ends the run, as the paragraph above describes. Event
+shapes are unchanged; schema-4 replay refuses the unsafe event orders
+excluded above, including bare questions during active lineage work,
+questions on terminal tasks, and an integration start or `run_finished`
+while a cancelled verification still awaits its terminal.
 
 The live writer checks one event, appends that exact event successfully once,
 and applies its delta once to the same fold with no intervening transition.
@@ -417,12 +439,26 @@ agent output.
 
 `CommandSpec.env` overlays a runner-defined base; it is never a replacement for
 the process environment. The host base starts from the Upstroke process
-environment, while the container base starts from the image environment. The
-runner then supplies role-scoped `HOME`, `PATH`, and credential locations before
-applying non-reserved adapter overrides. An adapter that conflicts with a
-runner-reserved environment key is a pre-flight error rather than an
-order-dependent override. Probes and real processes use the same composed
-environment and mounts.
+environment, while the container base starts from the image environment. **On
+the host, a process started in a work tree the engine made — a slot, or a gate
+or review snapshot — goes without the values the Upstroke process inherited for
+`GIT_DIR`, `GIT_WORK_TREE`, `GIT_IMPLICIT_WORK_TREE` and `GIT_INDEX_FILE`, and
+an inherited `GIT_COMMON_DIR` whose value is not an absolute path reaches it as
+the absolute path that value names at the checkout the coordinator was started
+in. The four select that checkout, so its Git takes that work tree's own
+administrative directory and index. Its common directory is the one that
+checkout resolved wherever a `GIT_COMMON_DIR` is inherited, and otherwise the
+one the work tree records; Git takes shared refs from that record in either
+case. A value the request's own overlay sets for one of them is kept, and every
+other inherited variable stays. A `git worktree` command the engine runs from
+that checkout goes without the inherited `GIT_INDEX_FILE`. The container base is
+not changed: a value its image provides stays.** The runner then supplies
+role-scoped `HOME`, `PATH`, and credential locations before applying
+non-reserved adapter overrides. An adapter that conflicts with a runner-reserved
+environment key is a pre-flight error rather than an order-dependent override.
+Probes and real processes use the same composed environment and mounts; on the
+host, a process in a work tree the engine made then goes without the inherited
+values above, which select nothing pre-flight certifies.
 
 Pre-flight probes also execute through the selected runner. The capability and
 version snapshot must describe the CLI that will run, not a similarly named host
@@ -433,11 +469,51 @@ before spend.
 Every process capable of executing repository-controlled code goes through the
 runner. In particular, gates do not remain a host-side escape hatch while agents
 move into containers. Reviewer workspaces mount read-only; implementation/gate
-workspaces mount read-write; private run artifacts and the event log are absent.
+workspaces mount read-write; private run artifacts and the event log are absent,
+apart from that one read-only settings file for a worker or reviewer.
 Persistent per-agent credential volumes survive token rotation. Codex retains
 the already-decided `external-sandbox` exception only inside a standard-hardened
 container. Host runner behavior remains available and honestly provides no OS
 boundary around gate code.
+
+On a Unix host every container, for work, review, gates and probes alike, runs
+as the coordinator's effective numeric uid and gid, so what a role writes into
+its worktree the coordinator can manage and reclaim, and Git inside the
+container needs no wildcard `safe.directory`. The image and the credential
+volumes must therefore be usable by that uid and gid: nothing changes their
+ownership, and no global Git setting or privileged cleanup stands in for it.
+Rootless and user-namespace-remapped daemons and Docker Desktop's file sharing
+are not covered by that mapping, and on Windows a container keeps its image's
+user. A command's stdin reaches its container exactly as the host runner delivers
+it: the container is created with stdin open, and an attached start, run and
+owned by the process funnel, writes the payload once, then EOF. The start waits
+for the container to start no longer than the invocation's deadline and stops at
+its cancellation; the attached client is kept until its end is established, and
+one that cannot be settled is reported unresolved. The prompt never enters
+argv, the environment, a mount or a log.
+
+Operator-configured `[runner]` mounts are execution identity, like the image. A
+fresh run resolves them before any lock or probe: each source must be an absolute
+path to an existing directory or regular file (on Windows, on a drive letter), and is
+recorded canonicalized (links resolved), with its identity (the device and inode on
+Unix; on Windows the volume serial number and the full 128-bit file id, read from the
+object itself, a reparse point refused), as the `mounts` of the run's `RunnerPolicy`; each target is a container path in normal form, never `/`, never at
+or under `/upstroke` or `/tmp`, and no two targets are the same or nested. A source
+that is, contains or lies inside the repository root, its Git or common directory,
+the private root (and so every run's worktrees and private artifacts) or a host
+credential location (`CLAUDE_CONFIG_DIR`, `COPILOT_HOME`, `CODEX_HOME`, and
+`~/.claude`, `~/.claude.json`, `~/.codex`, `~/.copilot`, compared as paths, never
+opened) is refused, as is a path the runtime's `--mount` option cannot carry exactly.
+A build for a platform that is neither Unix nor Windows refuses configured mounts.
+The record is digested (a separate v2
+domain, so a record without mounts keeps its v1 digest and its exact bytes), written
+to the owner record and `run_started`, and every role and probe gets the recorded
+list: read-only for review and probes, as recorded for implement and gate, so a gate
+can write through a mount the operator made read-write. Each use, and every resume,
+re-checks that the recorded path still names the recorded object; a missing or
+rebound source refuses before any recovery or work spawn and the run stays
+resumable. Today's differing `mounts` only warn and are ignored, and `report.json`'s
+`runner`, read from the record, names them.
 
 A linked worktree's `.git` file points back into the authoritative repository,
 which must not simply be mounted into an agent container: that would expose all
@@ -626,7 +702,8 @@ cancelled. A cancellation settles nothing unavailable, and what follows it is it
 concurrent driver cancels a verification. A halt then closes the run `Halted`, its closure settling
 the verification interrupted, and no resume continues the run; if the Runner did not establish that
 every process of the run ended, the closure appends nothing and the command ends resumably instead,
-the halt still recorded. A lineage failure cancels the verification's transaction, and the same
+the halt still recorded. A lineage failure cancels the verification's transaction, which the
+coordinator settles `merge_verification_interrupted` once its pipeline has ended, and the same
 command goes on. A shutdown, another pipeline's error or an invocation left unresolved ends the
 command resumably, as any other error that takes the judgement does, and the next resume settles the
 verification interrupted and verifies the candidate again under a new sequence, unless a cause that
@@ -665,8 +742,7 @@ command or the integration ends, and replay charges its passes by the same addit
 terminal and not a finish event: it records no outcome and settles, releases and authorizes nothing,
 so the transaction stays open, cleanup and readmission keep their conditions — a process the Runner
 did not establish as ended still blocks them — and which terminal settles the verification is not
-changed by it. The fold admits the record only for the open verification of its sequence, or for the
-one a lineage failure cancelled while it is still the latest sequence of the incarnation; never with
+changed by it. The fold admits the record only for the open verification of its sequence; never with
 no pass; and at most once for a sequence. Once a sequence has its record, no terminal that carries a
 verification's passes is admitted for it — `merge_verification_interrupted`, which carries none,
 still is — so its spend is counted once, whatever is appended after it. If the record's own append
@@ -684,3 +760,25 @@ refuses a log holding one for the same reason. Each is a Class C wire change und
 `src/topology/**` freeze and the whole subject of the pull request that makes it, which is what the
 classification asks for; the record's also moves files G6 compares with its G5 range, which the
 owner's rulings on G6's diff proof name by path and merge.
+
+#### A verification in a checkout a prune emptied
+
+Added under §13's same-change rule; not part of the verbatim record above. It records which outcome an
+integration reaches when a prune that no engine process starts deletes the registration of a checkout
+it uses (`design/15`, the external-prune paragraph).
+
+The classification of a stale candidate's failed proposal pick is read from its staging checkout; a
+verification's staging diff and review-input read, and its gates and reviews, from its checkouts.
+Each, failure or answer, is read against the worktree registration of the checkout it was read in;
+a gate's run that fails without a verdict, its launch included, is such a failure, and one that was
+cancelled, or whose process may still be running, is handled as before.
+When that registration is not whole, nothing read there is used: a deleted index reads as an empty
+one, so a conflict would read as an empty pick and a review-input problem as none. The read is a
+registry refusal (`UpstrokeError::RegistryRefused`), which ends the command resumably. No terminal
+is appended for it, no deferral is spent and no repair is registered; a refused classification
+opens no verification, and the next resume reclaims its staging checkout and integrates the
+candidate again; a refused verification is settled interrupted by the next resume and verified
+again under a new sequence. A removed `index` or `HEAD` that Git wrote again before the read, or a
+file the read does not check, is not seen, and the read's answer is then used as before.
+
+The review passes it had charged are recorded as "The unavailable terminal's spend" says.

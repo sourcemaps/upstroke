@@ -6,14 +6,18 @@
 )]
 #![forbid(clippy::disallowed_macros)]
 use std::collections::BTreeMap;
+use std::io;
+use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
+use super::env::BoundaryLayout;
 use super::runtime::{ContainerRuntime, ImageInspection, RuntimeError, RuntimeOp};
-use crate::config::RunnerSelection;
+use crate::config::{RunnerMount, RunnerSelection};
 use crate::error::UpstrokeError;
 use crate::topology::events::{
-    ImageIdentity, RunnerContract, RunnerField, RunnerKind, RunnerPolicy, RunnerRecordDefect,
+    ImageIdentity, MountSourceIdentity, RecordedMount, RunnerContract, RunnerField, RunnerKind,
+    RunnerPolicy, RunnerRecordDefect,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -55,6 +59,18 @@ pub enum InspectionRefusal {
     SelectionWithoutImage,
     #[error("the resolved container runner is not a usable RunnerPolicy: {0}")]
     RecordIncomplete(RunnerRecordDefect),
+    #[error("[runner] the mount {mount} is refused: {reason}")]
+    MountRefused { mount: String, reason: String },
+    #[error(
+        "the recorded mount {mount} cannot be re-established: {reason}. A run keeps the mounts it \
+         started with, so it cannot continue until that source is back as recorded"
+    )]
+    MountSourceMoved { mount: String, reason: String },
+    #[error(
+        "the recorded mount {mount} is refused: {reason}. A fresh run refuses that target, and so \
+         does every use of a run's record, so the run cannot continue with it"
+    )]
+    RecordedTargetRefused { mount: String, reason: String },
 }
 
 impl InspectionRefusal {
@@ -71,7 +87,10 @@ impl InspectionRefusal {
             RuntimeError::Unreachable { operation, detail } => {
                 Self::RuntimeUnavailable { operation, detail }
             }
-            RuntimeError::Failed { operation, detail } => Self::RuntimeFailed { operation, detail },
+            RuntimeError::Failed { operation, detail }
+            | RuntimeError::Unresolved { operation, detail } => {
+                Self::RuntimeFailed { operation, detail }
+            }
         }
     }
 }
@@ -111,9 +130,579 @@ pub trait RunnerPreflight {
     fn certify(&self, policy: &RunnerPolicy) -> Result<(), UpstrokeError>;
 }
 
+pub const BOUNDARY_ROOT: &str = "/upstroke";
+
+pub const DEFAULT_CREDENTIAL_HOMES: [&str; 4] = [".claude", ".claude.json", ".codex", ".copilot"];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum MountExclusion {
+    RepositoryRoot,
+    AuthoritativeGit,
+    PrivateRoot,
+    CredentialLocation,
+}
+
+impl MountExclusion {
+    #[must_use]
+    pub const fn describe(self) -> &'static str {
+        match self {
+            Self::RepositoryRoot => "the repository this run integrates into",
+            Self::AuthoritativeGit => {
+                "authoritative Git, which never crosses the boundary (DESIGN.md:612)"
+            }
+            Self::PrivateRoot => {
+                "the private root, which holds every run's private artifacts, worktrees and \
+                 container intents (DESIGN.md:400)"
+            }
+            Self::CredentialLocation => {
+                "a host credential location; a per-agent credential volume is the only \
+                 credential channel into a container"
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RepositoryGit<'a> {
+    pub git_dir: &'a Path,
+    pub common_dir: &'a Path,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MountContext {
+    excluded: Option<Vec<(MountExclusion, PathBuf)>>,
+}
+
+impl MountContext {
+    #[must_use]
+    pub const fn unbound() -> Self {
+        Self { excluded: None }
+    }
+
+    pub fn bind(
+        repo_root: &Path,
+        git: RepositoryGit<'_>,
+        private_root: &Path,
+    ) -> Result<Self, UpstrokeError> {
+        Self::bind_with(repo_root, git, private_root, &host_credential_locations())
+    }
+
+    pub fn bind_with(
+        repo_root: &Path,
+        git: RepositoryGit<'_>,
+        private_root: &Path,
+        credential_locations: &[PathBuf],
+    ) -> Result<Self, UpstrokeError> {
+        let root = canonical(repo_root).map_err(|source| UpstrokeError::Io {
+            path: repo_root.to_path_buf(),
+            source,
+        })?;
+        if let Some(relative) = [git.git_dir, git.common_dir]
+            .into_iter()
+            .find(|directory| !directory.is_absolute())
+        {
+            return Err(UpstrokeError::Refused {
+                message: format!(
+                    "[runner] mounts are configured and `{}`, a Git directory of the repository \
+                     this run integrates into, is not an absolute path, so whether a mount \
+                     reaches it cannot be decided",
+                    relative.display()
+                ),
+            });
+        }
+        let mut excluded = vec![
+            (MountExclusion::RepositoryRoot, root),
+            (
+                MountExclusion::AuthoritativeGit,
+                canonical_spelling(git.git_dir),
+            ),
+            (
+                MountExclusion::AuthoritativeGit,
+                canonical_spelling(git.common_dir),
+            ),
+            (
+                MountExclusion::PrivateRoot,
+                canonical_spelling(private_root),
+            ),
+        ];
+        for location in credential_locations {
+            excluded.push((
+                MountExclusion::CredentialLocation,
+                canonical_spelling(location),
+            ));
+        }
+        Ok(Self {
+            excluded: Some(excluded),
+        })
+    }
+
+    #[must_use]
+    pub fn excluded(&self) -> &[(MountExclusion, PathBuf)] {
+        self.excluded.as_deref().unwrap_or_default()
+    }
+
+    #[must_use]
+    pub fn into_excluded(self) -> Vec<(MountExclusion, PathBuf)> {
+        self.excluded.unwrap_or_default()
+    }
+
+    #[must_use]
+    pub const fn is_bound(&self) -> bool {
+        self.excluded.is_some()
+    }
+}
+
+#[must_use]
+pub fn host_credential_locations() -> Vec<PathBuf> {
+    let mut locations: Vec<PathBuf> = crate::runner::host::CREDENTIAL_LOCATIONS
+        .iter()
+        .filter_map(|(_, key)| std::env::var_os(key))
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .collect();
+    if let Some(home) = crate::util::user_upstroke_dir()
+        .as_deref()
+        .and_then(Path::parent)
+    {
+        locations.extend(DEFAULT_CREDENTIAL_HOMES.iter().map(|name| home.join(name)));
+    }
+    locations
+}
+
+#[must_use]
+pub fn canonical_spelling(path: &Path) -> PathBuf {
+    let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut existing = absolute.as_path();
+    let mut below = Vec::new();
+    loop {
+        if let Ok(mut resolved) = canonical(existing) {
+            resolved.extend(below.iter().rev());
+            return resolved;
+        }
+        match (existing.parent(), existing.file_name()) {
+            (Some(parent), Some(name)) => {
+                below.push(name.to_os_string());
+                existing = parent;
+            }
+            _ => return absolute,
+        }
+    }
+}
+
+pub fn canonical(path: &Path) -> io::Result<PathBuf> {
+    std::fs::canonicalize(path).map(without_verbatim_disk_prefix)
+}
+
+#[cfg(windows)]
+fn without_verbatim_disk_prefix(path: PathBuf) -> PathBuf {
+    let plain = path
+        .to_str()
+        .and_then(|spelled| spelled.strip_prefix(r"\\?\"))
+        .filter(|rest| is_drive_absolute(rest))
+        .map(PathBuf::from);
+    plain.unwrap_or(path)
+}
+
+#[cfg(not(windows))]
+const fn without_verbatim_disk_prefix(path: PathBuf) -> PathBuf {
+    path
+}
+
+fn is_drive_absolute(spelled: &str) -> bool {
+    matches!(
+        spelled.as_bytes(),
+        [letter, b':', b'\\', ..] if letter.is_ascii_alphabetic()
+    )
+}
+
+#[must_use]
+pub fn mount_label(source: &str, target: &str) -> String {
+    format!("`{source}` -> `{target}`")
+}
+
+#[must_use]
+pub fn overlap(source: &Path, excluded: &Path) -> Option<&'static str> {
+    if source == excluded {
+        Some("is")
+    } else if excluded.starts_with(source) {
+        Some("contains")
+    } else if source.starts_with(excluded) {
+        Some("lies inside")
+    } else {
+        None
+    }
+}
+
+pub fn refuse_excluded(
+    source: &Path,
+    excluded: &[(MountExclusion, PathBuf)],
+) -> Result<(), String> {
+    for (category, path) in excluded {
+        if let Some(relation) = overlap(source, path) {
+            return Err(format!(
+                "its source {relation} `{}`, {}",
+                path.display(),
+                category.describe()
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub fn refuse_target(target: &str) -> Result<(), String> {
+    if let Some(reason) = super::mount_option_refusal(target) {
+        return Err(format!("its target {reason}"));
+    }
+    let Some(below_root) = target.strip_prefix('/') else {
+        return Err(
+            "its target is not an absolute path; a target names a path inside the container"
+                .to_owned(),
+        );
+    };
+    if below_root.is_empty() {
+        return Err("its target is the container's root, which no mount may replace".to_owned());
+    }
+    if below_root
+        .split('/')
+        .any(|name| name.is_empty() || name == "." || name == "..")
+    {
+        return Err(
+            "its target is not in normal form; spell it without an empty, `.` or `..` \
+             component and without a trailing `/`"
+                .to_owned(),
+        );
+    }
+    for reserved in [BOUNDARY_ROOT, BoundaryLayout::DEFAULT_SCRATCH] {
+        if target == reserved
+            || target
+                .strip_prefix(reserved)
+                .is_some_and(|rest| rest.starts_with('/'))
+        {
+            return Err(format!(
+                "its target is at or under `{reserved}`, which the runner reserves for the \
+                 workspace, Git view, objects, credentials, settings and scratch it composes"
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[must_use]
+pub fn nested_targets(first: &str, second: &str) -> bool {
+    first == second
+        || second
+            .strip_prefix(first)
+            .is_some_and(|rest| rest.starts_with('/'))
+        || first
+            .strip_prefix(second)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
+pub fn refuse_recorded_targets(mounts: &[RecordedMount]) -> Result<(), (&RecordedMount, String)> {
+    for mount in mounts {
+        refuse_target(&mount.target).map_err(|reason| (mount, reason))?;
+    }
+    refuse_nested_targets(mounts)
+}
+
+fn refuse_nested_targets(mounts: &[RecordedMount]) -> Result<(), (&RecordedMount, String)> {
+    for (index, first) in mounts.iter().enumerate() {
+        for second in mounts.iter().skip(index + 1) {
+            if nested_targets(&first.target, &second.target) {
+                return Err((
+                    second,
+                    format!(
+                        "its target and that of {} are the same path or one holds the other, so \
+                         which source the container sees there would depend on mount order",
+                        mount_label(&first.source, &first.target)
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn resolve_source(source: &Path) -> Result<(String, MountSourceIdentity), String> {
+    if !source.is_absolute() {
+        return Err(format!(
+            "its source `{}` is not an absolute host path, and a relative one would depend on \
+             the directory `upstroke` was started from",
+            source.display()
+        ));
+    }
+    let resolved = canonical(source).map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            "its source does not exist".to_owned()
+        } else {
+            format!("its source cannot be resolved: {error}")
+        }
+    })?;
+    let Some(spelled) = resolved.to_str() else {
+        return Err(format!(
+            "its source resolves to `{}`, which is not valid UTF-8, so the runtime's mount \
+             option cannot carry it exactly",
+            resolved.display()
+        ));
+    };
+    if cfg!(windows) && !is_drive_absolute(spelled) {
+        return Err(format!(
+            "its source resolves to `{spelled}`, which is not a path on a drive letter; a \
+             network share or a device path is not mounted"
+        ));
+    }
+    if let Some(reason) = super::mount_option_refusal(spelled) {
+        return Err(format!(
+            "its source resolves to `{spelled}`, and that spelling {reason}"
+        ));
+    }
+    let identity = source_identity(&resolved)?;
+    Ok((spelled.to_owned(), identity))
+}
+
+#[cfg(unix)]
+fn source_identity(canonical: &Path) -> Result<MountSourceIdentity, String> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    use crate::topology::events::MountSourceKind;
+    let metadata = std::fs::symlink_metadata(canonical)
+        .map_err(|error| format!("its source cannot be inspected: {error}"))?;
+    let kind = if metadata.file_type().is_dir() {
+        MountSourceKind::Directory
+    } else if metadata.file_type().is_file() {
+        MountSourceKind::File
+    } else if metadata.file_type().is_symlink() {
+        return Err("its source changed into a link while it was being resolved".to_owned());
+    } else {
+        return Err(
+            "its source is neither a directory nor a regular file; a socket, device or FIFO is \
+             never mounted"
+                .to_owned(),
+        );
+    };
+    Ok(MountSourceIdentity::Unix {
+        kind,
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    })
+}
+
+#[cfg(windows)]
+fn source_identity(canonical: &Path) -> Result<MountSourceIdentity, String> {
+    use std::os::windows::ffi::OsStrExt as _;
+    use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
+
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_ATTRIBUTE_DEVICE, FILE_ATTRIBUTE_DIRECTORY,
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        FILE_ID_INFO, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        FileIdInfo, GetFileInformationByHandle, GetFileInformationByHandleEx, OPEN_EXISTING,
+    };
+
+    use crate::topology::events::MountSourceKind;
+
+    let mut wide: Vec<u16> = canonical.as_os_str().encode_wide().collect();
+    if wide.contains(&0) {
+        return Err("its source path holds a NUL, so it cannot be opened".to_owned());
+    }
+    wide.push(0);
+    // SAFETY: `wide` is a live NUL-terminated UTF-16 path that outlives the call, and the two
+    // pointer arguments are the documented "no security attributes" and "no template" nulls.
+    // The access is FILE_READ_ATTRIBUTES and the disposition OPEN_EXISTING, so nothing is
+    // created, written or truncated; FILE_FLAG_OPEN_REPARSE_POINT opens a reparse point itself
+    // rather than what it names, and FILE_FLAG_BACKUP_SEMANTICS lets a directory be opened.
+    let raw = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            std::ptr::null_mut(),
+        )
+    };
+    if raw == INVALID_HANDLE_VALUE {
+        return Err(format!(
+            "its source cannot be opened to read its identity: {}",
+            io::Error::last_os_error()
+        ));
+    }
+    // SAFETY: `raw` is the valid handle CreateFileW just returned and nothing else owns it; the
+    // OwnedHandle closes it exactly once, when it drops at the end of this function.
+    let handle = unsafe { OwnedHandle::from_raw_handle(raw) };
+
+    let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: the handle is live for the whole call, and `information` is an initialized,
+    // writable BY_HANDLE_FILE_INFORMATION that only this call writes.
+    if unsafe { GetFileInformationByHandle(handle.as_raw_handle(), &mut information) } == 0 {
+        return Err(format!(
+            "its source's attributes cannot be read: {}",
+            io::Error::last_os_error()
+        ));
+    }
+    let attributes = information.dwFileAttributes;
+    if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(
+            "its source is a link, junction or other reparse point, or became one while it was \
+             being resolved"
+                .to_owned(),
+        );
+    }
+    if attributes & FILE_ATTRIBUTE_DEVICE != 0 {
+        return Err("its source is a device, neither a directory nor a regular file".to_owned());
+    }
+    let kind = if attributes & FILE_ATTRIBUTE_DIRECTORY == 0 {
+        MountSourceKind::File
+    } else {
+        MountSourceKind::Directory
+    };
+
+    let mut id = FILE_ID_INFO::default();
+    let length = u32::try_from(std::mem::size_of::<FILE_ID_INFO>())
+        .map_err(|_| "FILE_ID_INFO exceeds the Windows buffer-size field".to_owned())?;
+    // SAFETY: the handle is live for the whole call. The writable, initialized buffer is exactly
+    // one FILE_ID_INFO, with the FileIdInfo class and that struct's byte length; no pointer
+    // escapes and no ownership is transferred.
+    let read = unsafe {
+        GetFileInformationByHandleEx(
+            handle.as_raw_handle(),
+            FileIdInfo,
+            std::ptr::from_mut(&mut id).cast(),
+            length,
+        )
+    };
+    if read == 0 {
+        return Err(format!(
+            "its source's file id cannot be read: {}",
+            io::Error::last_os_error()
+        ));
+    }
+    Ok(MountSourceIdentity::Windows {
+        kind,
+        volume_serial: id.VolumeSerialNumber,
+        file_id: id
+            .FileId
+            .Identifier
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect(),
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
+fn source_identity(_canonical: &Path) -> Result<MountSourceIdentity, String> {
+    Err(
+        "this platform's build records no file identity for a mount source (Unix records the \
+         device and inode, Windows the volume and the 128-bit file id), and a mount is recorded \
+         with one, so `[runner] mounts` is refused here"
+            .to_owned(),
+    )
+}
+
+#[must_use]
+pub fn described(identity: &MountSourceIdentity) -> String {
+    match identity {
+        MountSourceIdentity::Unix {
+            kind,
+            device,
+            inode,
+        } => format!("{kind:?}, device {device}, inode {inode}"),
+        MountSourceIdentity::Windows {
+            kind,
+            volume_serial,
+            file_id,
+        } => format!("{kind:?}, volume {volume_serial:#018x}, file id {file_id}"),
+    }
+}
+
+pub fn resolve_mounts(
+    configured: &[RunnerMount],
+    context: &MountContext,
+) -> Result<Vec<RecordedMount>, InspectionRefusal> {
+    if configured.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut recorded = Vec::with_capacity(configured.len());
+    for mount in configured {
+        let refused = |reason: String| InspectionRefusal::MountRefused {
+            mount: mount_label(&mount.source.display().to_string(), &mount.target),
+            reason,
+        };
+        if !context.is_bound() {
+            return Err(refused(
+                "no repository context was bound to check it against, so no configured mount \
+                 is accepted"
+                    .to_owned(),
+            ));
+        }
+        refuse_target(&mount.target).map_err(refused)?;
+        let (source, source_identity) = resolve_source(&mount.source).map_err(refused)?;
+        refuse_excluded(Path::new(&source), context.excluded()).map_err(refused)?;
+        recorded.push(RecordedMount {
+            source,
+            target: mount.target.clone(),
+            read_only: mount.read_only,
+            source_identity,
+        });
+    }
+    recorded.sort_by(|left, right| left.target.cmp(&right.target));
+    refuse_nested_targets(&recorded).map_err(|(mount, reason)| {
+        InspectionRefusal::MountRefused {
+            mount: mount_label(&mount.source, &mount.target),
+            reason,
+        }
+    })?;
+    Ok(recorded)
+}
+
+pub fn recheck_recorded_source(mount: &RecordedMount) -> Result<(), String> {
+    let recorded = Path::new(&mount.source);
+    let resolved = canonical(recorded).map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            "its source is gone".to_owned()
+        } else {
+            format!("its source cannot be resolved: {error}")
+        }
+    })?;
+    if resolved != recorded {
+        return Err(format!(
+            "its source path now resolves to `{}`, so a link or a move rebound it",
+            resolved.display()
+        ));
+    }
+    let now = source_identity(&resolved)?;
+    if now != mount.source_identity {
+        return Err(format!(
+            "its source path now names another object ({}; the run recorded {})",
+            described(&now),
+            described(&mount.source_identity)
+        ));
+    }
+    Ok(())
+}
+
+pub fn recheck_recorded_mounts(record: &RunnerPolicy) -> Result<(), InspectionRefusal> {
+    refuse_recorded_targets(&record.mounts).map_err(|(mount, reason)| {
+        InspectionRefusal::RecordedTargetRefused {
+            mount: mount_label(&mount.source, &mount.target),
+            reason,
+        }
+    })?;
+    for mount in &record.mounts {
+        recheck_recorded_source(mount).map_err(|reason| InspectionRefusal::MountSourceMoved {
+            mount: mount_label(&mount.source, &mount.target),
+            reason,
+        })?;
+    }
+    Ok(())
+}
+
 pub fn resolve_container(
     runtime: &dyn ContainerRuntime,
     selection: &RunnerSelection,
+    context: &MountContext,
 ) -> Result<RunnerPolicy, InspectionRefusal> {
     if selection.kind != RunnerKind::Container {
         return Err(InspectionRefusal::NotAContainerSelection {
@@ -123,6 +712,7 @@ pub fn resolve_container(
     let Some(reference) = selection.image.as_deref() else {
         return Err(InspectionRefusal::SelectionWithoutImage);
     };
+    let mounts = resolve_mounts(&selection.mounts, context)?;
     runtime.probe().map_err(InspectionRefusal::from_runtime)?;
     let inspection = runtime
         .image_by_reference(reference)
@@ -145,6 +735,7 @@ pub fn resolve_container(
             digest: reported_digest(&inspection),
         }),
         credential_volumes: Some(selection.credential_volumes.clone()),
+        mounts,
     };
     policy
         .completeness()
@@ -196,6 +787,7 @@ pub fn rebuild_by_inspection(
         .ok_or(InspectionRefusal::RecordIncomplete(
             RunnerRecordDefect::ContainerWithoutImage,
         ))?;
+    recheck_recorded_mounts(record)?;
 
     runtime.probe().map_err(InspectionRefusal::from_runtime)?;
     if runtime
@@ -257,7 +849,35 @@ pub fn rebuild_from_record(
 static EMPTY: BTreeMap<String, String> = BTreeMap::new();
 
 fn configured_difference(record: &RunnerPolicy, today: &RunnerSelection) -> Option<RunnerField> {
-    record.difference(&today_in_record_shape(record, today))
+    record
+        .difference(&today_in_record_shape(record, today))
+        .or_else(|| {
+            (!same_configured_mounts(&record.mounts, &today.mounts)).then_some(RunnerField::Mounts)
+        })
+}
+
+fn same_configured_mounts(recorded: &[RecordedMount], configured: &[RunnerMount]) -> bool {
+    if recorded.len() != configured.len() {
+        return false;
+    }
+    let mut today: Vec<(String, &str, bool)> = Vec::with_capacity(configured.len());
+    for mount in configured {
+        let spelled = canonical(&mount.source)
+            .ok()
+            .and_then(|canonical| canonical.to_str().map(str::to_owned))
+            .or_else(|| mount.source.to_str().map(str::to_owned));
+        let Some(spelled) = spelled else {
+            return false;
+        };
+        today.push((spelled, mount.target.as_str(), mount.read_only));
+    }
+    today.sort_by(|left, right| left.1.cmp(right.1));
+    recorded
+        .iter()
+        .zip(&today)
+        .all(|(mount, (source, target, read_only))| {
+            mount.source == *source && mount.target == *target && mount.read_only == *read_only
+        })
 }
 
 fn today_in_record_shape(record: &RunnerPolicy, today: &RunnerSelection) -> RunnerPolicy {
@@ -267,6 +887,7 @@ fn today_in_record_shape(record: &RunnerPolicy, today: &RunnerSelection) -> Runn
             policy: RunnerContract::HostV1,
             image: None,
             credential_volumes: None,
+            mounts: Vec::new(),
         },
         RunnerKind::Container => RunnerPolicy {
             kind: RunnerKind::Container,
@@ -281,7 +902,54 @@ fn today_in_record_shape(record: &RunnerPolicy, today: &RunnerSelection) -> Runn
                 digest: record.image.as_ref().and_then(|image| image.digest.clone()),
             }),
             credential_volumes: Some(today.credential_volumes.clone()),
+            mounts: record.mounts.clone(),
         },
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod fixtures {
+    use std::path::Path;
+
+    use super::RepositoryGit;
+    use crate::topology::events::{RecordedMount, RunnerPolicy};
+
+    pub(crate) const fn plain_checkout(git_dir: &Path) -> RepositoryGit<'_> {
+        RepositoryGit {
+            git_dir,
+            common_dir: git_dir,
+        }
+    }
+
+    pub(crate) const REFUSED_RECORDED_TARGETS: [(&[&str], &str); 4] = [
+        (&["/"], "the container's root"),
+        (&["/upstroke/settings"], "which the runner reserves"),
+        (&["/cache/../upstroke/settings"], "not in normal form"),
+        (&["/cache", "/cache/inner"], "one holds the other"),
+    ];
+
+    pub(crate) fn with_recorded_targets(record: &RunnerPolicy, targets: &[&str]) -> RunnerPolicy {
+        let Some(template) = record.mounts.first() else {
+            panic!("the record carries a mount to plant the targets on: {record:?}");
+        };
+        let planted = RunnerPolicy {
+            mounts: targets
+                .iter()
+                .map(|target| RecordedMount {
+                    target: (*target).to_owned(),
+                    ..template.clone()
+                })
+                .collect(),
+            ..record.clone()
+        };
+        let wire = serde_json::to_string(&planted).expect("a recorded policy serializes");
+        let read: RunnerPolicy = serde_json::from_str(&wire)
+            .expect("a recorded policy deserializes whatever targets it carries");
+        assert_eq!(
+            read, planted,
+            "the policy reads back exactly as it was written"
+        );
+        read
     }
 }
 

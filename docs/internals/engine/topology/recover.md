@@ -98,14 +98,13 @@ too) and requires the ref there. A ref elsewhere, or none, is DESIGN §26's
 "`task_merged` exists but the ref disagrees — refuse; the log and integration
 branch no longer describe the same run": nothing is moved and nothing is
 created. The three reviews of `3414dc58` found the base compared after a
-publication, which refused every resume of a run that had merged anything
-(`pr8-triage.md` C1).
+publication, which refused every resume of a run that had merged anything.
 
 It is skipped only when the proven prefix carries a `Prepared` transaction
 — [`finish_integration`] at step (f) owns the ref then, moving it by the
 authorized CAS — and runs under a `VerificationStarted` one, whose interrupted
-settlement moves no ref (`pr8-plan.md` R23). Otherwise its position is before
-step (d)'s first append, and every bound on it is a separate clause:
+settlement moves no ref. Otherwise its position is before step (d)'s first
+append, and every bound on it is a separate clause:
 
 * **After (a1).** It is a durable effect on a repository ref. O18 puts the
   stable-prefix barrier before the census's fold-derived reclaim, before any
@@ -129,8 +128,7 @@ step (d)'s first append, and every bound on it is a separate clause:
   settlement moves no ref, so a ref that is neither at the base nor at the
   last publication is foreign state (`[T-RESUME].refusal_condition`) whatever
   the verification recorded, and refusing it here is refusing before any
-  append. The reviews of `3414dc58` had it skipped under any transaction
-  (`pr8-triage.md` R23).
+  append. The reviews of `3414dc58` had it skipped under any transaction.
 * **Before (d).** The step can refuse: a ref at another SHA, a symbolic ref,
   a ref checked out in a worktree. A refusal after `attempt_interrupted`,
   `generation_closed` and `run_resumed` is a resume half-performed — the
@@ -147,12 +145,18 @@ It is **not** a recovery event. It appends nothing and needs no terminal of
 its own — the effect either happened or did not, and the next resume decides
 which by looking at the ref.
 
-### Nothing here is a production path
+### The production path
 
-`MAX_READABLE_SCHEMA` is 3 and `TOPOLOGY_ACTIVATION` is `Inactive`, so
-[`RootDerived::derive`] refuses every schema-4 log in a released binary.
-The reader ceiling is the seam a test raises — see [`RootDerived::derive`]
-and [`RootDerived::derive_with`] beside it.
+Since PR12 `MAX_READABLE_SCHEMA` is 4 and `TOPOLOGY_ACTIVATION` is `Active`,
+so [`RootDerived::derive`] admits a schema-4 log, and `upstroke resume`
+reaches this order through `engine::topology::entry::prepare_resume`,
+`ResumePrepared::verify` (step (a), through [`verify_for_recovery`]) and
+`ResumeVerified::run` (steps (a1)–(h), through [`recover_verified`]). The
+public entry publishes the run's recorded-objects include between the two —
+the resume's first private write, so after step (a) and never before it
+(PR12-CI-01) — which is why the order is split at that one point. Until PR12
+the ceiling was 3 and this order was reached by tests alone, through
+[`RootDerived::derive_with`] at a raised ceiling.
 
 (That sentence deliberately does not spell the test-configuration attribute
 out. Two source censuses in this tree cut a file at its first occurrence of
@@ -225,11 +229,12 @@ never called at 610106b; see `PR7-NARROWED-SURFACE-19-UNCALLED` (§2)
 
 Step (a0) against this binary's reader ceiling.
 
-Production's ceiling is 3 (`TOPOLOGY_ACTIVATION` is `Inactive`),
-so a released binary refuses every schema-4 log here and no
-production path reaches the rest of this file. That is
-`pr_sequence[8].production_effect: none` expressed as a
-refusal rather than as a promise.
+Production's ceiling is 4 since PR12 (`TOPOLOGY_ACTIVATION` is
+`Active`), so a released binary admits a schema-4 log here and refuses a
+legacy one, which `engine::resume` drives instead. Until PR12 the
+ceiling was 3, and this refusal of every schema-4 log was
+`pr_sequence[8].production_effect: none` expressed as a refusal rather
+than as a promise.
 
 ### Errors
 
@@ -428,8 +433,9 @@ after acquiring the lock; the topology path acquired it here and entered
 nothing, so every reaper of the probes at (c) and of the loop's gates and
 reviewers held no lease — the cover review of `8a5f59e8` measured a real
 reaper at `ReaperStarted` with the run's hold absent
-(`PR8-R4-CLEANUP-LEASE`). [`run_recovery_order`] enters it for its own
-duration, and `TopologyRun::step` enters one per step.
+(`PR8-R4-CLEANUP-LEASE`). [`verify_for_recovery`] and [`recover_verified`]
+each enter it for their own duration, so [`run_recovery_order`] holds it from
+the locks to its end as before, and `TopologyRun::step` enters one per step.
 
 ## `impl LocksHeld` › `pub fn into_guards(self) -> (RunLock, WorktreeLock, RootDerived) {`
 
@@ -1236,10 +1242,12 @@ disappears from the trace. That is what makes
 ## `pub fn run_recovery_order(`
 
 Steps (a) through (h), in the packet's order, each step consuming the last
-step's witness.
+step's witness: [`verify_for_recovery`], then [`recover_verified`] on the
+records it proved.
 
 The ordering claim of this function is not in its statements — it is in the
 types. `RecordsVerified::verify` cannot be called without a `LocksHeld`;
+[`recover_verified`] cannot be called without a `RecordsVerified`;
 `ResumeCensused::census` cannot be called without a `BarrierHeld`; and
 [`run_resumed`] eats the `PreflightCertified` that every recovery emitter
 needs. Reordering the body does not compile.
@@ -1247,11 +1255,34 @@ needs. Reordering the body does not compile.
 Step (i), admission, is the loop's and is not here: `checkpoint_refusals`
 gives the loop's refusals to `select.rs`, and this file owns step (b)'s.
 
-The lock's cleanup scope is entered as soon as the locks are held and
-lives to the end of the function ([`LocksHeld::cleanup_scope`]), so the
-reapers of (c)'s host probes hold the run's R28 lease; the loop enters its
-own per step, because the scope is thread-local and the handle may be
-driven elsewhere.
+The lock's cleanup scope is entered as soon as the locks are held, by each
+half for its own duration ([`LocksHeld::cleanup_scope`]), so the reapers of
+(c)'s host probes hold the run's R28 lease; the loop enters its own per step,
+because the scope is thread-local and the handle may be driven elsewhere.
+
+## `pub fn verify_for_recovery(`
+
+Recovery step (a), alone: the worktree lease then the run lock, the owner and
+commit records verified against the committed first line, and the recorded
+mounts rechecked. Nothing here writes anything private, and the
+`RecordsVerified` it returns holds both locks.
+
+It is a function of its own because the public resume needs a point between
+(a) and (a1): the recorded-objects include is that resume's first private
+write, and `Workspace::recorded_objects_scope`, which writes it, is denied to
+every topology module, so `engine::resume::resume_harness` publishes it there,
+under the root these records proved and with both locks held (PR12-CI-01,
+INV-15, O18). Recovery-only tests call [`run_recovery_order`] and never saw
+that composition; the public guard is `engine::tests`'
+`a_schema_4_resume_proves_its_owner_and_commit_records_before_it_writes_its_include`.
+
+## `pub fn recover_verified(`
+
+Steps (a1) through (h) on records step (a) proved: the stable-prefix barrier,
+the census, step (b), the rebuild and pre-flight, and every recovery event.
+Taking the `RecordsVerified` by value is what makes it the continuation of
+[`verify_for_recovery`] and of nothing else: it neither takes the locks again
+nor reads a record the proof did not.
 
 ### Errors
 
@@ -1284,7 +1315,7 @@ the fold is poisoned and the next resume repeats from (a0).
 
 (c) the recorded Runner by inspection, then its probes.
 
-## `pub fn run_recovery_order(` › `let publication_pending = matches!(`
+## `pub fn recover_verified(` › `let publication_pending = matches!(`
 
 A `Prepared` transaction owns the ref: `finish_integration` compares it
 against the authorization and swaps it, so the startup check would only
@@ -1316,9 +1347,9 @@ keeps it — returning it for the namespace check's expected set. Anything
 else under `prepared/` is not accounted for by the log and is what the check
 refuses, untouched. The reviews of `3414dc58` found this step deleting every
 pin it did not recognise, the still-Prepared transaction's and a
-substituted one included (`pr8-triage.md` C2).
+substituted one included.
 
-## `pub fn run_recovery_order(` › `let live_pin = reclaim_stale_residue(&certified, seams.manager, &mut context)?;`
+## `pub fn recover_verified(` › `let live_pin = reclaim_stale_residue(&certified, seams.manager, &mut context)?;`
 
 T-PROPOSAL residue and the pins the log accounts for: staging worktrees
 no live transaction owns are reclaimed with force, a resolved sequence's
@@ -1327,18 +1358,18 @@ checked against its record and kept, and exactly the provisional orphan
 `prepared/<next_seq>` is reclaimed. Before the namespace check, so that
 check refuses whatever the log does not account for — untouched.
 
-## `pub fn run_recovery_order(` › `expected.push(fold.started().map_or_else(String::new, |started| {`
+## `pub fn recover_verified(` › `expected.push(fold.started().map_or_else(String::new, |started| {`
 
 The run's own integration ref sits under this namespace and is never
 unexpected; `expected_refs` leaves it out because it enumerates
 candidate refs, so the recovery names it here.
 
-## `pub fn run_recovery_order(` › `if let Some(pin) = &live_pin {`
+## `pub fn recover_verified(` › `if let Some(pin) = &live_pin {`
 
 The open transaction's pin is expected: it keeps the proposal
 reachable while the transaction resolves, verifying or prepared.
 
-## `pub fn run_recovery_order(` › `if !publication_pending {`
+## `pub fn recover_verified(` › `if !publication_pending {`
 
 The P7/P8 integration-ref repair is for a run killed at run-start, and
 the published-run check for every later one. A run with a prepared
@@ -1471,7 +1502,11 @@ closure), never abandoned".
 * A **`VerificationStarted`** transaction is settled
   `merge_verification_interrupted`, its `prepared/<seq>` pin deleted
   expected-old at the proposal the record names and its staging worktree
-  reclaimed, and the candidate re-verifies under a new sequence.
+  reclaimed, and the candidate re-verifies under a new sequence. A
+  verification a lineage failure cancelled — its candidate's task is
+  `Failed`, and the fold keeps its transaction open until this terminal —
+  is settled the same way, with a detail that says so: its candidate,
+  whose task failed, is not verified again.
   `Authorized::from_fold` returns `None` for it — this build no longer
   refuses that `None`, it interrupts. The pin was checked against its record
   by [`reclaim_stale_residue`] before any append; a substituted pin refused
@@ -1557,7 +1592,7 @@ Returns the open transaction's pin for the namespace check's expected set.
 Expected-old deletion at whatever a ref names proves only that nothing
 moved it since the read; it does not establish that the value read was
 authorized, which is why the old form of this step — delete everything but
-the verifying pin — was wrong (`pr8-triage.md` C2).
+the verifying pin — was wrong.
 
 ## `pub fn finish_promotions(`
 
@@ -1624,6 +1659,17 @@ another SHA — or whatever the append returns.
 
 Classified before anything is appended, from the fold as it stands. The
 borrow ends here because the sequence below needs the chain mutably.
+
+**Recovery's keeping is here too.** `candidate::recovery_for` refuses
+resumably for a promotion it reports when an instance of the generation's task
+worktree holds anything and its worktree registration is not whole
+(`dispatch::refuse_kept_promotion`; P-6′, and Choice A's "except recovery task
+reclaim"). This was #333's repair of the fresh regular lens's P1 at `f1842dcd`.
+
+Because every task is classified first, the refusal comes before any candidates
+ref, `task_candidate_created` or removal, for every task. RULING P-1's guard
+(step (e)) keeps only generations recovery has closed. This file is unchanged
+by the repair: its call of `recovery_for` now reaches the keeping.
 **Both products of the classification, not one.**
 
 `CandidateRecovery` carries a `promotion`, an `orphan_pin` and
@@ -1878,6 +1924,21 @@ is not touched, so a resume with nothing to reclaim executes no
 `Worktree.Remove`; a generation closed by a recovery that died before its
 scrub, by the live loop, or by this pass's own (d) and (e) is reclaimed here
 alike. Task slots only: staging and snapshot residue have their own steps.
+
+## `fn reclaim_closed_generations(` › `crate::engine::topology::dispatch::refuse_kept_slot(`
+
+**RULING P-1's one statement** (the decision appendix §3.2, adopted by the
+owner with O2(a) on 2026-10-15; erratum E-G6-1's third bullet, under O12(a),
+admits this hunk and its appended tests into G6's module diff proof, bound to
+the merge SHA of the change that makes them).
+Immediately before the scrub of a closed generation's slot, the non-frozen
+guard `dispatch::refuse_kept_slot` refuses, removing nothing, while an
+instance of the slot holds anything and its worktree registration is not
+whole; its refusal leaves recovery through `?`, before step (f), the
+promotions, step (g) and `run_resumed`, and recovery's earlier appends — steps
+(d) and (e) and every reclaim before it in the loop — stand. `generation` is
+the loop's closed generation, whose recorded base the guard's message names.
+Nothing else in this module changes.
 
 ## `pub fn run_resumed(`
 

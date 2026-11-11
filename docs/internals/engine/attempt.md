@@ -12,6 +12,15 @@ LEGACY-EFFECT: this module is in the **frozen legacy section** of
 `effects/allowlist.toml`, which carries its justification and the condition
 under which the section shrinks. `decisions.effect_site_inventory.mechanism` (2).
 
+**Adopted on 2026-10-11 with decision O8 (decision B), as an agent decision by `pr11_decide_d` under the owner's delegation of 2026-10-11 (babysit's `0194a1e4…`).** Follow-up D (#331, a draft) amends this module's freeze; the amendment is its row's text in `effects/allowlist.toml`, marked there as adopted, and the record `reviews/2026-10-02-pr11-follow-up-d-record.md` (§1 to §4, and its Implementation section) is why. Nothing it adds is in force until the pull request merges. In this module it is one more argument of `run_attempt`, the type
+that argument holds and the function that fills it, below.
+
+**Adopted by the owner on 2026-10-15, with option (C) and O8's extension for it (the owner's
+adoption record `818e7675…`).** It amends this module's freeze a second time; the amendment
+is its row's text in `effects/allowlist.toml`, marked there as adopted. In this module it is
+`LegacyReviewInputPolicy`'s implementation of the review-input seam's provided method
+`problem_in_work_tree`, below.
+
 ## `const MAX_FEEDBACK_ENTRIES: usize = 6;`
 
 Most recent feedback entries carried into an escalated prompt. Older
@@ -121,10 +130,36 @@ failed first and no review happened. Derived from the reviews having
 happened rather than from passes being configured, so the ledger never
 credits a model with work it did not do (§13).
 
+## `pub(super) struct RefusedCandidate {`
+
+The candidate a gate or review snapshot's worktree-registry refusal stopped, as
+`capture_candidate` captured it: the branch ref, the parent and the tree. It is what
+the coordinator keeps (follow-up D's B-PRESERVE). The captured identity, never the
+index as it stands at the refusal: another Git client can unstage or change the
+index between the capture and the refusal (FUB-D5-INDEX), and
+`gates_review_and_commit_use_one_frozen_candidate_tree` already holds the captured
+candidate authoritative over a mutated index.
+
+## `fn note_refused(`
+
+Records the captured candidate into the caller's slot when, and only when, the
+snapshot's error is `UpstrokeError::RegistryRefused`: it compares the variant and
+copies three strings, and nothing else. A snapshot error of any other kind — the
+store cannot be made, the verification's Git error — records nothing, so the
+coordinator discards the checkout as before
+(`a_snapshot_failure_that_is_not_the_registrys_still_discards`).
+
 ## `pub(super) fn run_attempt(`
 
 Run one attempt and verify it, without deciding what happens next: the
 caller owns commit, rollback, retry, and escalation (§11/§14).
+
+`refused` is follow-up D's slot (adopted with O8 on 2026-10-11 as an agent decision by
+`pr11_decide_d` under the owner's delegation of 2026-10-11 (babysit's `0194a1e4…`), and in
+force only from #331's merge): it is filled only
+at the two snapshot calls, through `note_refused`, when the snapshot's
+registry access refused. The error `run_attempt` returns, its return type, and
+every other `?` are as before; the coordinator reads the slot after an error.
 
 ## `let worker_workspace = workspace.root().to_path_buf();`
 
@@ -155,6 +190,13 @@ result and the allowance decision is derived from it.
 Through the seam and the classifier, so the schema-4 driver runs the
 same rung rather than a copy of it.
 
+## `let gate_workspace = workspace`
+
+The gate snapshot. Its `inspect_err` calls `note_refused` with the candidate
+captured above, so a registry refusal of this snapshot's add or removal leaves the
+captured branch, parent and tree in `refused` before the error returns through `?`
+unchanged (`a_registry_refusal_after_capture_keeps_and_pins_the_captured_candidate_across_both_resumes`).
+
 ## `let mut reviews = Vec::new();`
 
 §11.2: gates are objective but shallow — a strong reviewer judges the
@@ -166,11 +208,15 @@ Passes short-circuit, like gates do (§11.1): once one has said no, a
 second opinion on the same diff changes nothing about what happens next
 and costs another frontier invocation to learn it.
 
-## `let review_workspace = workspace.gate_snapshot_for_candidate_in_store(`
+## `let review_workspace = workspace`
 
 Like gates, reviewers may inspect repository context beyond the
 supplied diff. Give them the exact staged candidate, never ignored
 worker inputs or residue from the authoritative workspace.
+
+Its `inspect_err` records the captured candidate when this snapshot's registry
+access refused, as the gate snapshot's does; the error then returns through `?`
+unchanged (`a_review_snapshot_refused_after_capture_keeps_and_pins_the_candidate`).
 
 ## `&review::ReviewInvocations {`
 
@@ -206,9 +252,25 @@ legacy path below, and the schema-4 driver through
 [`crate::workspace::Workspace`]'s review-input policy, for a caller that
 holds a worktree path instead of a `Workspace`.
 
-The legacy verification ladder is its first caller — through
-`run_attempt`'s own `workspace`, not through this — and the schema-4 driver
-is its second. One policy, two callers.
+The legacy verification ladder is its first caller — through the seam's
+`problem`, which opens the started checkout with `Workspace::open` — and the
+schema-4 driver is its second, through the seam's `problem_in_work_tree`. One
+policy, two callers.
+
+## `impl super::topology::attempt::ReviewInputPolicy for LegacyReviewInputPolicy {` › `fn problem_in_work_tree(`
+
+The slot's review input, read as a work tree the engine made from the
+started checkout the seam carries: the slot is opened with
+`Workspace::open_work_tree(worktree, checkout)`, so every Git child of the
+check goes without the four inherited selectors, and an inherited relative
+`GIT_COMMON_DIR` reaches it as `checkout` joined with the value, the
+absolute path the checkout's own children resolved it to. Opened with
+`Workspace::open`, as `problem` opens the started checkout, an inherited
+`GIT_DIR` or `GIT_WORK_TREE` would select another repository or exclude the
+slot altogether ("not a git worktree"), and a relative `GIT_COMMON_DIR`
+would name a directory beside the slot. `problem` itself is unchanged: the
+ladder asks it about the checkout the run was started in, where the
+inherited context is the run's.
 
 ## `pub(super) fn review_failure(`
 

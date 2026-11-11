@@ -75,6 +75,26 @@ overlays a runner-owned base rather than replacing it."
 Bytes for the child's stdin. `Vec<u8>` rather than `String` because a
 prompt is text but a spec is a command, and the funnel writes bytes.
 
+## `pub struct CommandSpec` › `pub settings_file: Option<PathBuf>,`
+
+The permission-settings file the engine materialized for this one invocation
+(`AgentAdapter::materialize_permissions`), when it made one: the trusted record
+of which file is the invocation's own (PR12's D-A, root's container repair
+disposition). `engine::assembly` sets it on a worker's spec and `review` on a
+reviewer's, from the path `materialize_permissions` returned; an adapter never
+sets it, and a gate's, a probe's and every other spec carry `None`.
+
+The host runner ignores it: the host process reads the path its argument
+names, as before. The container runner binds exactly this file, read-only,
+when the invocation is an implement or review request and an argument is
+this path exactly, and rewrites only that argument to the container's path
+(`exec::ContainerRunner`'s `settings_for`). An argument naming any other
+file, another attempt's settings included, grants nothing.
+
+DESIGN.md:222's struct lists the four fields that existed when it was
+written; this one is the metadata for the one private file a container may
+receive, recorded beside the arguments that name it (`design/08`).
+
 ## `impl CommandSpec` › `pub fn new(program: impl Into<String>) -> Self {`
 
 A spec for `program` with no arguments, no overlay and no stdin.
@@ -90,6 +110,10 @@ Add one overlay entry.
 ## `impl CommandSpec` › `pub fn stdin(mut self, stdin: impl Into<Vec<u8>>) -> Self {`
 
 Set the stdin payload.
+
+## `impl CommandSpec` › `pub fn settings_file(mut self, settings_file: Option<PathBuf>) -> Self {`
+
+Record the invocation's own settings file, or that it has none.
 
 ## `pub struct AgentId(String);`
 
@@ -226,6 +250,33 @@ await points PR11's coordinator introduces. Since PR11, `run` is the boxed
 (then a boxed Send future)"), behind the same `&dyn Runner` its callers
 already held; the two blocking methods below are how a synchronous caller
 meets it.
+
+## `pub trait Runner` › `fn composed_common_dir(&self, request: &RunnerRequest) -> ComposedCommonDir {`
+
+The `GIT_COMMON_DIR` this runner composes for the process it starts for
+`request` (DESIGN §8; the external-prune follow-up's integration correction,
+F): `Present` with the value exactly as composed, `Absent` when the
+composition carries none, and this provided default, `Unknown`, when the
+runner reports nothing. Closure 1's check reads it as the Git context of a
+gate, a reviewer and a worker (`workspace_manager::registration_whole`,
+condition 3).
+
+- **The default is not a claim.** `Unknown` says the runner gives no usable
+  report. It does not say the process has no `GIT_COMMON_DIR`. The check
+  reads it by its original rule, so a runner that keeps the default, as the
+  container runner and every test runner do, is checked exactly as before.
+- **What it describes.** The composition the process is started with, not
+  every Git command the process later runs, since a role's own code can change
+  its environment or its directory.
+- **Who answers.** `HostRunner`, from the one composition that gives its
+  child its environment (`src/runner/host.rs`, `fn child_environment(`).
+  `Registering` forwards it and keeps the reports of the requests it admitted
+  (`src/engine/topology/preflight.rs`).
+- **An instrument-path change.** This file also holds the source censuses
+  below. The method was added beside them under root's disposition
+  `F-RETURN7-RUNNER-EXTENSION-DISPOSITION-20261027`. No census, assertion or
+  enforcement condition changed, and the method adds none of the shapes they
+  count.
 
 ## `pub struct RunnerError {`
 
@@ -1254,7 +1305,9 @@ disagreed about what its diff was.
 
 Columns count the constructors of the two verdict types: `AttemptFailure`
 and `ReviewRecord`. `src/engine/classify.rs` holds what was inline in
-the legacy verification ladder. `src/engine/attempt.rs` keeps its count
+the legacy verification ladder, and `interrupted_failure`, the
+classification the schema-4 report's record of an interrupted attempt is
+built with (J12 follow-up). `src/engine/attempt.rs` keeps its count
 for `review_failure`, which was **already a function** — a pure move of
 something already callable is churn, not extraction — and `src/ladder.rs`
 keeps its own for the escalation vocabulary it owns.

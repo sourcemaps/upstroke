@@ -230,6 +230,12 @@ does too.
 
 Everything a run needs, assembled around whichever doubles a test wants.
 
+## `struct Driver<'a>` › `root: Option<&'a dyn RootCreation>,`
+
+The execution root P3c creates through: `None` for every test whose subject is
+not R18, which then runs against [`NoRoot`] at a path nothing ever makes;
+`Some` for the P3c guards, which hand it a [`RealRoot`].
+
 ## `struct Driver<'a>` › `execution: RecordingRunner,`
 
 The run's Runner, which the caller owns because the capabilities it
@@ -268,13 +274,6 @@ The happy path, and the order it runs in
 
 ## `fn a_created_run_hands_itself_to_the_loop() {`
 
-P0-P8, in `run_creation`'s order, each step through its own site.
-
-The ordering claims that are not visible from the returned value are
-asserted from the harness and from the tree: every site of the sequence
-was reached, the private skeleton exists *and* the owner record does
-(O08 is asserted separately by the P3a tests, which is where the
-ordering is observable), and the marker is gone while the log is
 **A freshly created run is drivable, not just creatable.**
 
 `decisions.sequential_substrate.engine` is one sentence about both paths —
@@ -301,6 +300,13 @@ defect on the resumed path, arriving on the created one.
 
 ## `fn the_publication_prefixes_run_in_the_packets_order() {`
 
+P0-P8, in `run_creation`'s order, each step through its own site.
+
+The ordering claims that are not visible from the returned value are
+asserted from the harness and from the tree: every site of the sequence
+was reached, the private skeleton exists *and* the owner record does
+(O08 is asserted separately by the P3a tests, which is where the
+ordering is observable), and the marker is gone while the log is
 committed.
 
 ## `fn the_publication_prefixes_run_in_the_packets_order()` › `let calls = probes.calls();`
@@ -353,6 +359,18 @@ What the caller claims, and what pre-flight actually resolved, differ.
 ## `fn run_started_records_runner_policy_resolved_before_worktree_lock() {` › `hooks.faults().arm_phase(`
 
 The marker is read before P7 removes it, so the run is stopped at P6.
+
+## `fn a_run_with_configured_mounts_records_one_runner_in_its_marker_owner_record_and_run_started() {`
+
+The same agreement for a container record with a configured mount (root's
+recorded-mounts disposition): the pre-lock check resolves the mount
+against a bound `MountContext` into the policy (canonical source, target,
+read-only), its digest is the v2 one, and the marker's digest,
+`owner.json.runner` and `run_started(4).runner` are that one record. The
+container intents carry the same digest because the runner computes it
+from the same record (`ContainerRunner::new`), which
+`probe_intent_carries_runner_policy_digest_matching_owner_record` already
+holds for the unmounted record.
 
 ## `fn creator_error_at_p3a_retains_both_halves_and_reports_them() {`
 
@@ -951,11 +969,13 @@ so the public husk alone is reclaimed".
 "P3a: the private directory exists without an owner record —
 unprovable — so both halves are retained and reported".
 
-## `fn expected_disposition(prefix: Prefix) -> &'static str` › `Prefix::P3b | Prefix::P4 | Prefix::P5 => "both-halves",`
+## `fn expected_disposition(prefix: Prefix) -> &'static str` › `Prefix::P3b | Prefix::P3c | Prefix::P4 | Prefix::P5 => "both-halves",`
 
 "P3b-P5: the ownership proof passes ... and the census reclaims
 the private half through the proof-token funnel, then the public
-directory with the marker last".
+directory with the marker last". P3c's halves are P3b's: the execution
+root it claims is not in either half, and a census reclaims those halves
+only while the root's path is empty (`startup`'s `root_in_the_way`).
 
 ## `fn expected_disposition(prefix: Prefix) -> &'static str` › `Prefix::P5b => "retained:possibly-committed",`
 
@@ -1071,7 +1091,9 @@ Containerized probes
 ## `fn container_execution(`
 
 The probes of a containerized run: the real [`ContainerRunner`], over a
-runtime with no daemon behind it.
+runtime with no daemon behind it, given the fixture repository's `.git` as
+both its Git directories (`resolve::fixtures::plain_checkout`), what Git reports
+for that ordinary checkout.
 
 [`ContainerRunner`]: crate::runner::container::exec::ContainerRunner
 The container runner a containerized creation executes through.
@@ -1408,7 +1430,9 @@ pair.
 
 ## `fn the_deletion_boundary_falls_between_p5_and_p5b() {`
 
-The vocabulary the report and the fault registry share.
+The vocabulary the report and the fault registry share. Fifteen prefixes since
+repair14 added P3c, the execution root's claim, between P3b and P4; P3c is
+before the boundary.
 
 `Prefix::ALL` is the closed set a suite is measured against, and
 `is_past_the_deletion_boundary` is the **ordering** claim beside the stat —
@@ -1499,7 +1523,11 @@ reclaimed when the witness returns and when it unwinds (#292's review round 6).
 ## `fn census_of(`
 
 The next command's run-directory census over the fixture's repository, with a runtime, a
-liveness probe and a view that no run here uses.
+liveness probe and a view that no run here uses. The repository is made a Git repository first:
+before the census reclaims a husk with a marker it derives where that run's execution root would
+be, which asks Git for the common directory, and a census of a directory Git cannot read keeps
+the husk as undecidable rather than reclaiming it. A census runs inside a repository in
+production; this fixture is a plain directory until then.
 
 ## `fn a_kill_while_the_first_line_is_written_leaves_a_retained_husk_whose_next_open_truncates_it() {`
 
@@ -1551,6 +1579,17 @@ keeping the trait's `docker` default, which would arm a reaper over the real CLI
 A fresh run's creation with production `RunnerProbes` (the shell and one agent) over a
 `ContainerRunner`.
 
+## `fn fresh_p4_probe_child() {` › `let _worktree =`
+
+The creator holds the physical worktree's lock, as production's creator does: a fresh run takes
+`WorktreeLock` before its census and `create_run`, and never creates a container without it. The
+child drives `create_run` directly, so it takes that lock itself (the fixture's `.git` directory
+first, through the `RunDir` funnel, since the lock file lives there). The runner's container-label
+backstop needs it at its coordinator's death: it owns the dead incarnation's cleanup only by
+taking that same lock, and stands down when it cannot (`PR12-INV9-CONTAINER-HELPER-CLEANUP-LEASE`).
+Before this change the child held no worktree lock; the parent's oracle -- list, kill, remove,
+list -- is unchanged.
+
 ## `fn a_fresh_runs_p4_probe_container_is_killed_by_its_reaper_before_run_started() {`
 
 `R7-D1`: the creator, in a child over the parent's fake, is killed inside its first P4 probe
@@ -1570,3 +1609,119 @@ test, and the suite with it.
 The design property for creation: the shell and agent probes each start under an armed reaper
 whose scope selects their labels.
 
+## `impl Fixture` › `fn no_root(&self) -> NoRoot {`
+
+The [`NoRoot`] of this fixture, under its tree and never made.
+
+## `struct NoRoot(PathBuf);`
+
+An execution root for the tests whose subject is not R18: its `create` makes nothing and claims,
+its case policy is `false`, its `remove` removes nothing, and its path never exists — so the
+admission before P0 passes, and a cleanup that settles it finds nothing there. Those tests drive
+P0–P8 exactly as before P3c existed.
+
+## `impl Fixture` › `fn manager(&self) -> WorkspaceManager {`
+
+The fixture's repository made a Git repository, and the `WorkspaceManager` of the fixture's run
+under its private root: the production root capability, for the P3c guards.
+
+## `struct ErrorAt(EffectSiteId, HookPhase);`
+
+Effect hooks that fail one phase of one site and let everything else proceed. The shared
+`HookHarness` injects only at sub-effect points, so a phase fault at the R18 sites is this.
+
+## `enum Twist {`
+
+At most one departure from the production capability per guard: a capability answering `true`
+for the case policy (`Folding`), another actor making a root at the path just before the claim
+(`AnotherActorFirst`), the create site failing after its claim (`FailAfterClaim`), content
+appearing in the claimed root (`ContentAfterClaim`), and the R18 remover refusing
+(`RemovalFails`).
+
+## `struct RealRoot {`
+
+The production root capability on a real manager — `FreshExecutionRoot`'s exclusive claim, the
+case policy observed at the created root (the same function `entry` uses), and the R18 remover —
+with its [`Twist`]. Every twist goes through the real funnels: another actor's root is the
+idempotent `create_execution_root`, a failure after the claim is the claim's own after-phase
+refusing, content is made through `RunDir.CreatePrivateDir`, and a failing removal is the remover
+refusing at its before phase.
+
+## `fn names_of(dir: &Path) -> Vec<String> {`
+
+A directory's entries, sorted.
+
+## `fn scaffolding_only(root: &Path) -> bool {`
+
+Whether `root` holds exactly the five empty scaffolding directories and nothing else: what a root
+made by the create site looks like, and what "untouched" means for one.
+
+## `fn run_over(`
+
+One creation over a [`RealRoot`], with the shell probe refusing or not.
+
+## `fn p3c_claims_the_execution_root_after_the_owner_record_and_the_record_carries_its_case_policy() {`
+
+PR12-INV7-PREPUBLICATION-EXECUTION-ROOT-ORPHAN, the order. A run creates its execution root at
+P3c: after the marker that locates the run and the owner record that authenticates it, before the
+plan and the commit record — first executions on the harness, in that order. The committed record
+carries the case policy the created root shows (its `TASKS` resolves on a case-insensitive
+filesystem and not on a sensitive one). A second run whose capability answers `true` commits
+`true`: P5b stamps P3c's observation over whatever the caller's record held.
+
+## `fn a_refusal_after_p3c_settles_the_claimed_root_before_either_half() {`
+
+A P4 refusal after the claim: the run stops at P3c, both halves are reclaimed, and the claimed
+root is gone — `Worktree.RemoveExecutionRoot` before `RunDir.RemovePrivateHusk` and
+`RunDir.RemovePublicHusk`, so the root is settled while the marker that locates it and the owner
+record that authenticates the run are still there.
+
+## `fn a_failure_after_the_claim_leaves_a_root_that_is_this_creators_to_settle() {`
+
+The create site fails after it made the root (its after phase): the claim answers `Claimed`, the
+run stops at P3b, and cleanup settles the whole root before it reclaims both halves.
+
+## `fn a_root_another_actor_puts_at_the_claim_boundary_is_refused_and_untouched() {`
+
+Another actor makes a root — exactly the scaffolding a run's own has — at the path after the
+admission before P0 and immediately before the claim. The exclusive create refuses it
+(`Unclaimed`): the run stops at P3b naming the root, the halves this run made are reclaimed, the
+other actor's root is exactly as it made it, and the remover's site is never even reached.
+
+## `fn a_claimed_root_the_creator_cannot_settle_keeps_the_husk_that_locates_it() {`
+
+A claimed root the creator cannot settle — one holding content it did not make, and one whose
+removal the R18 remover refuses — keeps everything: `Disposition::ExecutionRootRetained` names the
+root, the public directory and the private half, the root and the marker that locates it stay, and
+the husk's proof still authenticates the run's halves. That proof does not show who made the root;
+the creator's claim did, and a later census keeps the husk rather than reclaiming it.
+
+## `fn a_claimed_root_whose_private_half_is_gone_is_settled_before_the_public_husk_goes() {`
+
+The arm of `stat_after_error` where the proof finds no private half bound (`NothingBound`) to a
+creator that owns its root: a marker naming an absent private half, a root claimed through
+[`RealRoot`], and an `Aborted` at P3c built by hand, because the protocol itself makes the private
+half before it claims a root, so only an outside actor removing it reaches this arm. The creator's
+authority over the root is its own claim, not the husk's proof, so the root is settled first here
+too. Scaffolding alone is pruned and then the public husk goes, in that order
+(`PublicHalfRemoved(TargetAbsent)`); a root holding content the run did not make is kept, with the
+public directory and its marker, `ExecutionRootRetained` naming no private half, neither remover
+called, and a sentence that does not claim an owner record was kept.
+
+## `fn a_root_already_there_before_the_run_is_refused_before_anything_is_published() {`
+
+A root already at the path when the run begins is refused by the admission before P0:
+`NothingCreated`, no public directory — so no husk can lead a census to that root — no
+`RunDir.CreatePublicDir` reached, and the root exactly as it was.
+
+## `fn create_root_kill_child() {`
+
+The subprocess half of the guard below: a creation over a [`RealRoot`] killed in P4's shell
+probe, after P3c claimed the root.
+
+## `fn a_kill_after_p3c_leaves_a_husk_the_census_keeps_with_its_root() {`
+
+A creator killed after its claim leaves a husk and the root it claimed. The next census keeps
+both — `RootRetained` naming that root — and changes nothing in the root: from the husk it cannot
+tell who made the directory at the root's path, because the husk's proof authenticates the run's
+halves, and only the creator's claim, which ended with it, made the root its own.

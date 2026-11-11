@@ -30,7 +30,7 @@ use crate::topology::effects::EventSite;
 use crate::ulid;
 use crate::util;
 use crate::validate::Analysis;
-use crate::workspace::Workspace;
+use crate::workspace::{KEPT_PIN_SUFFIX, KeptPin, Workspace};
 
 use super::attempt::{AttemptCx, RetryBrief, Reviewer, pool_option, run_attempt};
 #[cfg(test)]
@@ -55,9 +55,35 @@ pub fn run_with(
 }
 
 pub fn run_harness(opts: &RunOptions, harness: &Harness<'_>) -> Result<RunReport, UpstrokeError> {
+    if opts.writes_topology() {
+        let _contained = contain_write_command(&mut NoHooks)?;
+        let prepared = super::topology::entry::prepare_fresh(opts, harness)?;
+        let leased = prepared.lease(opts)?;
+        let workspace = Workspace::open(&opts.repo_root)?;
+        refuse_dirty_tree(&workspace)?;
+        let repository = workspace.recorded_objects_scope(Some(leased.private_root()))?;
+        return leased.run(opts, harness, repository);
+    }
     let repository =
         Workspace::open(&opts.repo_root)?.recorded_objects_scope(opts.private_root.as_deref())?;
     run_harness_on(opts, harness, &HostRunner::for_legacy_workspace(repository))
+}
+
+fn refuse_dirty_tree(workspace: &Workspace) -> Result<(), UpstrokeError> {
+    workspace.ensure_run_exclusions()?;
+    if !workspace.is_clean()? {
+        return Err(UpstrokeError::Git {
+            message: "working tree is not clean; commit or stash first (the engine refuses \
+                      dirty trees). upstroke compares the checkout with the objects the \
+                      repository records, never with what `git replace` substitutes for \
+                      them, so `git --no-replace-objects -c core.useReplaceRefs=false \
+                      status` lists what it found; plain `git status` can report the \
+                      checkout clean when a replacement changes what HEAD holds \
+                      (`git replace -l` lists them)"
+                .to_owned(),
+        });
+    }
+    Ok(())
 }
 
 pub(super) fn run_harness_on(
@@ -145,19 +171,7 @@ pub(super) fn run_harness_inner_with_id(
     } = preflight(opts, harness, runner, analysis)?;
 
     workspace.ensure_execution_prerequisites()?;
-    workspace.ensure_run_exclusions()?;
-    if !workspace.is_clean()? {
-        return Err(UpstrokeError::Git {
-            message: "working tree is not clean; commit or stash first (the engine refuses \
-                      dirty trees). upstroke compares the checkout with the objects the \
-                      repository records, never with what `git replace` substitutes for \
-                      them, so `git --no-replace-objects -c core.useReplaceRefs=false \
-                      status` lists what it found; plain `git status` can report the \
-                      checkout clean when a replacement changes what HEAD holds \
-                      (`git replace -l` lists them)"
-                .to_owned(),
-        });
-    }
+    refuse_dirty_tree(&workspace)?;
     let base_sha = workspace.head_sha_full()?;
     let wait_on_block = opts.wait_on_block;
 
@@ -280,6 +294,39 @@ pub(super) fn run_harness_inner_with_id(
 
 pub(super) fn prepared_pin_ref(run_id: &str, task_index: usize, attempt: u32) -> String {
     format!("refs/upstroke/prepared/{run_id}/{task_index}-{attempt}")
+}
+
+fn kept_on_error(
+    workspace: &Workspace,
+    pin: &KeptPin<'_>,
+    candidate: Option<(&str, &str, &str)>,
+    what: &str,
+    error: UpstrokeError,
+) -> UpstrokeError {
+    let advice = if candidate.is_some() {
+        ""
+    } else {
+        ". Nothing outside this checkout keeps it, so `git clean` or `git reset --hard` there \
+         would lose it. Fix what stopped the pin first (for a clean or smudge filter, remove the \
+         attribute that sets it, after copying out anything to keep), and then resume"
+    };
+    let pinned = match candidate {
+        Some((branch_ref, parent, tree)) => workspace
+            .prepare_commit_from_candidate(branch_ref, parent, tree, pin.message, pin.pin_ref)
+            .map(Some),
+        None => workspace.pin_checkout(pin),
+    };
+    match pinned {
+        Ok(Some(_)) => error.with_warnings(vec![format!(
+            "{what} is kept in this checkout and pinned at `{}`",
+            pin.pin_ref
+        )]),
+        Ok(None) => error,
+        Err(pin_error) => error.with_warnings(vec![format!(
+            "{what} is kept in this checkout, and pinning it at `{}` failed: {pin_error}{advice}",
+            pin.pin_ref
+        )]),
+    }
 }
 
 pub(super) struct Run<'a> {
@@ -541,11 +588,55 @@ impl Run<'_> {
                     after_candidate_capture: self.after_candidate_capture,
                 };
 
-                match run_attempt(&attempt_cx, workspace, resume.clone()) {
+                let mut refused = None;
+                match run_attempt(&attempt_cx, workspace, resume.clone(), &mut refused) {
                     Ok(result) => result,
                     Err(error) => {
-                        let _ = workspace.discard_uncommitted();
-                        return Err(error);
+                        if let Some(candidate) = refused {
+                            let kept = format!(
+                                "{}{KEPT_PIN_SUFFIX}",
+                                prepared_pin_ref(&self.run_id, index, attempt)
+                            );
+                            let pinned = workspace.prepare_commit_from_candidate(
+                                &candidate.branch_ref,
+                                &candidate.parent,
+                                &candidate.tree,
+                                &format!("[upstroke] kept: {task_id} attempt {attempt}"),
+                                &kept,
+                            );
+                            return Err(UpstrokeError::RegistryRefused {
+                                message: match pinned {
+                                    Ok(_) => format!(
+                                        "{error}; the worker's output for attempt {attempt} of \
+                                         `{task_id}` is kept in this checkout and pinned at \
+                                         `{kept}`"
+                                    ),
+                                    Err(pin_error) => format!(
+                                        "{error}; the worker's output for attempt {attempt} of \
+                                         `{task_id}` is kept in this checkout, and pinning it at \
+                                         `{kept}` failed: {pin_error}"
+                                    ),
+                                },
+                            });
+                        }
+                        let kept = format!(
+                            "{}{KEPT_PIN_SUFFIX}",
+                            prepared_pin_ref(&self.run_id, index, attempt)
+                        );
+                        let message = format!("[upstroke] kept: {task_id} attempt {attempt}");
+                        let branch_ref = format!("refs/heads/{}", self.branch);
+                        let pin = KeptPin {
+                            branch_ref: &branch_ref,
+                            message: &message,
+                            pin_ref: &kept,
+                        };
+                        return Err(kept_on_error(
+                            workspace,
+                            &pin,
+                            None,
+                            &format!("the worker's output for attempt {attempt} of `{task_id}`"),
+                            error,
+                        ));
                     }
                 }
             };
@@ -652,18 +743,40 @@ impl Run<'_> {
                 }
             }
 
+            let kept = format!(
+                "{}{KEPT_PIN_SUFFIX}",
+                prepared_pin_ref(&self.run_id, index, attempt)
+            );
+            let kept_message = format!("[upstroke] kept: {task_id} attempt {attempt}");
+            let recorded_branch_ref = format!("refs/heads/{}", self.branch);
+            let kept_pin = KeptPin {
+                branch_ref: &recorded_branch_ref,
+                message: &kept_message,
+                pin_ref: &kept,
+            };
+            let candidate = Some((
+                result.candidate_branch_ref.as_str(),
+                result.candidate_parent.as_str(),
+                result.candidate_tree.as_str(),
+            ));
+            let reviewed = format!("the reviewed candidate of attempt {attempt} of `{task_id}`");
             let prepared_commit = if result.failure.is_none() {
                 let message = format!("[upstroke] {}: {}", task.id, task.title);
                 let pin_ref = prepared_pin_ref(&self.run_id, index, attempt);
-                let recorded_branch_ref = format!("refs/heads/{}", self.branch);
                 if result.candidate_branch_ref != recorded_branch_ref {
-                    let _ = self.workspace.discard_uncommitted();
-                    return Err(UpstrokeError::Git {
+                    let error = UpstrokeError::Git {
                         message: format!(
                             "candidate was captured from `{}`, not recorded run branch `{recorded_branch_ref}`; refusing publication",
                             result.candidate_branch_ref
                         ),
-                    });
+                    };
+                    return Err(kept_on_error(
+                        self.workspace,
+                        &kept_pin,
+                        candidate,
+                        &reviewed,
+                        error,
+                    ));
                 }
                 match self.workspace.prepare_commit_from_candidate(
                     &result.candidate_branch_ref,
@@ -674,8 +787,13 @@ impl Run<'_> {
                 ) {
                     Ok(prepared) => Some(prepared),
                     Err(error) => {
-                        let _ = self.workspace.discard_uncommitted();
-                        return Err(error);
+                        return Err(kept_on_error(
+                            self.workspace,
+                            &kept_pin,
+                            candidate,
+                            &reviewed,
+                            error,
+                        ));
                     }
                 }
             } else {
@@ -705,6 +823,15 @@ impl Run<'_> {
                 )),
             });
             if let Err(error) = settlement {
+                if prepared_commit.is_some() {
+                    return Err(kept_on_error(
+                        self.workspace,
+                        &kept_pin,
+                        candidate,
+                        &reviewed,
+                        error,
+                    ));
+                }
                 if let Err(cleanup) = self.workspace.discard_uncommitted() {
                     return Err(UpstrokeError::Git {
                         message: format!(
@@ -970,6 +1097,7 @@ impl Run<'_> {
         })
     }
 
+    #[deny(clippy::indexing_slicing)]
     fn build_spend_approval(
         &self,
         index: usize,
@@ -977,14 +1105,24 @@ impl Run<'_> {
         pending_spend: f64,
         pending_unpriced: bool,
     ) -> Question {
+        let question = self.build_question(index, QuestionKind::ApproveSpend, String::new());
+        let named = self
+            .analysis
+            .plan
+            .tasks
+            .iter()
+            .find(|task| question.affected_tasks.contains(&task.id));
         let context = spend_question_context(
-            &self.analysis.plan.tasks[index],
+            named.map(SpendSubject::from_task),
             onto,
             self.reported_spend(None) + pending_spend,
             self.ask_before.frontier_escalation_over_usd.unwrap_or(0.0),
             self.unpriced_attempts() > 0 || pending_unpriced,
         );
-        self.build_question(index, QuestionKind::ApproveSpend, context)
+        Question {
+            context,
+            ..question
+        }
     }
 
     fn unpriced_attempts(&self) -> u32 {
@@ -1239,35 +1377,58 @@ pub(super) fn question_context(
     context
 }
 
-fn spend_question_context(
-    task: &Task,
+pub(super) struct SpendSubject<'a> {
+    pub(super) display_id: &'a str,
+    pub(super) title: &'a str,
+    pub(super) acceptance: &'a [String],
+}
+
+impl<'a> SpendSubject<'a> {
+    fn from_task(task: &'a Task) -> Self {
+        Self {
+            display_id: task.id.as_str(),
+            title: &task.title,
+            acceptance: &task.acceptance,
+        }
+    }
+}
+
+pub(super) fn spend_question_context(
+    task: Option<SpendSubject<'_>>,
     onto: crate::ir::Tier,
     spent: f64,
     threshold: f64,
-    unpriced: bool,
+    floor: bool,
 ) -> String {
     let mut context = String::new();
-    let _ = writeln!(context, "Task `{}` — {}", task.id, task.title);
+    if let Some(task) = &task {
+        let _ = writeln!(context, "Task `{}` — {}", task.display_id, task.title);
+    }
     let _ = writeln!(
         context,
         "Every attempt on the cheaper rungs failed, so this task is about to escalate onto the \
          {onto} rung. You asked to approve that once the run had reported \
          ${threshold:.4} of spend (`ask_before.frontier_escalation_over_usd`)."
     );
-    let qualifier = if unpriced {
-        " — a floor, not a total: some attempts ran on routes that report no spend at all (§13)"
+    let (qualifier, already) = if floor {
+        (
+            " — a floor, not a total: some of the run's spend was never reported, by an attempt \
+             or a review pass on a route that reports none, or by one the engine was killed \
+             inside (§13)",
+            "at least what the run has already cost",
+        )
     } else {
-        ""
+        ("", "what the run has already cost")
     };
     let _ = writeln!(
         context,
-        "Reported spend so far: ${spent:.4}{qualifier}. This is what the run has already cost, \
-         not an estimate of what the {onto} attempt will cost — upstroke measures spend rather than \
-         predicting it (§10)."
+        "Reported spend so far: ${spent:.4}{qualifier}. This is {already}, not an estimate of \
+         what the {onto} attempt will cost — upstroke measures spend rather than predicting it \
+         (§10)."
     );
-    if !task.acceptance.is_empty() {
+    if let Some(task) = task.filter(|task| !task.acceptance.is_empty()) {
         context.push_str("Acceptance criteria this task must meet:\n");
-        for item in &task.acceptance {
+        for item in task.acceptance {
             let _ = writeln!(context, "- {item}");
         }
     }
@@ -1294,7 +1455,8 @@ pub(super) fn topology_question_options(kind: QuestionKind) -> Vec<String> {
     match kind {
         QuestionKind::ApproveSpend => question_options(kind),
         QuestionKind::Clarify | QuestionKind::Unblock | QuestionKind::Continue => vec![
-            "retry this task (typed text un-parks it and is not passed to the agent)".to_owned(),
+            "retry this task (typed text un-parks it and reaches the agent and its reviewer)"
+                .to_owned(),
             interaction::GIVE_UP_OPTION.to_owned(),
         ],
     }

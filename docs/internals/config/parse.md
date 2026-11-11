@@ -172,17 +172,21 @@ line after it "the first effect of the command".
 `runner::container::resolve::tests::legacy_container_selection_refused_before_effects`
 drives both commands and asserts the tree afterwards.
 
-#### Every reading refuses, and that is the whole of today's answer
+#### The sequential readings refuse, and the schema-4 readings select
 
-[`EngineLimits`] distinguishes a run being created from a sequential run's
-resume — in two flavours since 2026-09-05, by whether the log records its
-gates, which changes how `[[gates]]` is read and nothing here — and
-`expected_failures_refusals[0]` names a fresh run **and** a resume. No
-reading accepts a container selection in this build: `EngineLimits::Fresh`
-means "a run being created now", and every run this binary creates is
-schema-3. `PR12 config acceptance for fresh schema-4 runs only` (INV-23's
-`enforced_by`) is where a fresh schema-4 run learns to accept it, and that
-is a new reading rather than a relaxation of this one.
+[`EngineLimits`] distinguishes a sequential run being created from a
+sequential run's resume — in two flavours since 2026-09-05, by whether the
+log records its gates, which changes how `[[gates]]` is read and nothing
+here — and `expected_failures_refusals[0]` names a fresh run **and** a
+resume. Every sequential reading refuses a container selection: the
+schema-1..3 engine has nothing to give a container an owner with. Since
+PR12 the two schema-4 readings ([`EngineLimits::Topology`] for a run being
+created and [`EngineLimits::TopologyResume`] for its resume) return `Ok`
+here instead: `PR12 config acceptance for fresh schema-4 runs only`
+(INV-23's `enforced_by`) is that new reading, not a relaxation of this one.
+A schema-4 run resolves the selection by read-only inspection before any
+lock (`engine::topology::prelock`), and its resume rebuilds the runner from
+the record and only compares today's selection with it.
 
 ### Errors
 
@@ -252,8 +256,10 @@ collisions that mapping itself creates (`lint fast` and `lint-fast`) are the
 log writer's, `SWEEP-CONFIG-PARSE-011`.
 
 **Which reading, and why the parser cannot choose it alone.** Under
-[`EngineLimits::Fresh`] today's section governs the run, and every shape
-above refuses. Under [`EngineLimits::SequentialResumeWithRecordedGates`] the run's log
+[`EngineLimits::Fresh`] and [`EngineLimits::Topology`] today's section
+governs the run, and every shape above refuses. Under
+[`EngineLimits::TopologyResume`] the reading is the compare-only one below,
+because a schema-4 log always records its gates. Under [`EngineLimits::SequentialResumeWithRecordedGates`] the run's log
 records its gates and `design/15` is explicit that they are taken from the
 record, not re-derived, and **not refused over**: today's section is read
 only to be compared with them, so nothing here refuses — every shape,
@@ -371,12 +377,23 @@ harm `second_opinion` and `[budgets] pool_fraction` each earned a refusal
 for, and it is this section's own long-standing defect.
 
 The three ceilings split from `max_parallel` on which reading is wrong.
-`max_parallel` above 1 describes a run **this engine cannot perform**, so on
-a fresh run it is a hard error — raised here, which is before a lock, a
+Under the sequential creation reading ([`EngineLimits::Fresh`]),
+`max_parallel` above 1 describes a run **the sequential engine cannot
+perform**, so it is a hard error — raised here, which is before a lock, a
 workspace, or a run directory exists. `max_merge_repairs`, `max_per_agent`,
-and `max_per_pool` bound a topology that arrives with the parallel engine; a
-nondefault value is a true statement about a later run and a silent no-op in
-this one, so it parses, is kept, and warns.
+and `max_per_pool` bound the parallel topology; under a sequential reading a
+nondefault value is a true statement about a schema-4 run and a silent
+no-op in this one, so it parses, is kept, and warns. Under the two schema-4
+readings ([`EngineLimits::Topology`], [`EngineLimits::TopologyResume`])
+all four are what the engine performs: `max_parallel` is accepted at any
+width of at least 1, and the other three are kept without a warning
+(`max_merge_repairs` and `max_parallel` are recorded in `run_started`, and a
+resume runs on the recorded pair. The slot limits are not recorded:
+`permits.agent_pool_slots` makes them the command's configuration, "default
+max_parallel", so a configured value governs a fresh run and a resume alike,
+and an absent one defaults to the width the run runs at — today's on a fresh
+run, the recorded one on a resume. The written values are kept as
+`explicit_max_per_agent`/`explicit_max_per_pool` for that).
 
 `limits` is what keeps that refusal from reaching a run it cannot help. See
 [`EngineLimits`]: on a sequential run's resume every one of these keys is

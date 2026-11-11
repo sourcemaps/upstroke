@@ -49,32 +49,41 @@ rather than as optimism — but the converse is a defect too, and this
 paragraph was one for as long as it said "none of them exists here today"
 about a typestate the module below had already implemented.
 
-### Nothing here is a production path yet
+### The production path (PR12)
 
-`decisions.pr_sequence[8].production_effect` is "none (TopologyPreview
-selector only)". `upstroke run` still writes schema 3 and still drives
-[`super::coordinator`]; a schema-4 run is reachable only from a
-`#[cfg(test)]` writer selector. PR12 activates it.
+`decisions.pr_sequence[8].production_effect` was "none (TopologyPreview
+selector only)". PR12 activates the subsystem: `upstroke run` writes
+schema 4 and `upstroke resume` resumes a schema-4 log, both through
+[`entry`] (see `docs/internals/engine/topology/entry.md`). The
+`#[cfg(test)]` `legacy_writer` keeps the legacy suite on the schema-1..3
+writer, and a legacy log still resumes on [`super::coordinator`]'s lines.
 
 ## `#![cfg_attr(not(test), allow(dead_code))]`
 
-**`dead_code` is allowed here for a lib build only, and the shape is the
-point.** With `engine::topology` narrowed to `pub(crate)`, this subsystem has
-no non-`#[cfg(test)]` caller — which is exactly what
-`production_effect = "none"` asserts, and `pub` was what kept the compiler
-from saying so. Narrowing it made rustc report **328 items** across this
-module tree as never used.
+**Kept at PR12, by root's measured S11 disposition.** The allow was written
+for a subsystem with no non-`#[cfg(test)]` caller: narrowing
+`engine::topology` to `pub(crate)` made rustc report 328 items across the
+module tree as never used, and the `cfg_attr` form keeps the test build
+without an allow, so anything not reached even by a test is still an error
+at `-D warnings`.
 
-`cfg_attr(not(test), …)` rather than a bare allow, deliberately. A blanket
-`#![allow(dead_code)]` would hide a genuinely dead item added later, which is
-the class this slice's own review rounds kept finding. Under this form the
-**test** build carries no allow, so anything not reached even by a test is
-still an error at `-D warnings`. What is silenced is precisely the one true
-fact — the production binary does not drive schema 4 yet.
-
-**Remove this when PR12 activates the driver.** At that point the items have
-production callers and the allow stops being true rather than stops being
-convenient.
+Root's checkpoint-2 disposition asked for it to be removed. With it removed,
+`cargo check --all-targets --all-features` (validation run V045 at
+`d1c0a7de`, exit 0) reported 171 dead-code diagnostics in the lib build; a
+diagnostic can name several items or fields. By file: `ledger` 46,
+`coverage` 31, `reachability` 22, `dispatch` 7, `candidate` 6, `startup` 6,
+`coordinator` 5, `create` 5, `identity` 5, `recover` 5, `settle` 5,
+`attempt` 4, `emit` 4, `report` 4, `run` 4, `seams` 4, `permits` 2,
+`preflight` 2, `select` 2, `closure` 1, `integrate` 1. That run was a check,
+not clippy. Root's S11 diagnostic disposition (`6a92b57a`) then kept this
+conditional allow as a limited hygiene deferral: it is not a finding repair,
+not evidence of activation, and no permission to suppress a new lint or
+error failure. The diagnostics are neither evidence that all of them are
+harmless nor, by themselves, evidence that required behaviour is absent
+(root's reading: `ledger` is a fixture-driven accounting observation
+module, and the run path dispatches through `dispatch_through`, not the
+unused helper a diagnostic names). Public-path acceptance and the formal
+reviews decide whether the required activation behaviour is wired.
 
 ## `#![forbid(`
 
@@ -133,7 +142,15 @@ holds that of every module this subtree descends from.
 PR11 phase 3's Tokio coordinator: [`TopologyRun::run_concurrently`], additive
 beside [`TopologyRun::step`], which stays the width-1 path. Both run every transition through the same functions in `run`;
 the coordinator runs an attempt's and a verification's bodies on pipeline
-threads. Neither is a production path yet (PR12).
+threads. Both are production paths since PR12, through `entry`: a shareable
+adapter source runs concurrently at any width, and an unshareable one at
+width 1 steps.
+
+## `pub mod entry;`
+
+PR12's production entry: the fresh and resume compositions `upstroke run` and
+`upstroke resume` reach through `engine::coordinator::run_harness` and
+`engine::resume::resume_harness`.
 
 ## `pub mod preflight;`
 

@@ -13,6 +13,9 @@ LEGACY-EFFECT: this module is in the **frozen legacy section** of
 `effects/allowlist.toml`, which carries its justification and the condition
 under which the section shrinks. `decisions.effect_site_inventory.mechanism` (2).
 
+**Adopted on 2026-10-11 with decision O8 (decision B), as an agent decision by `pr11_decide_d` under the owner's delegation of 2026-10-11 (babysit's `0194a1e4…`).** Follow-up D (#331, a draft) amends this module's freeze; the amendment is its row's text in `effects/allowlist.toml`, marked there as adopted, and the record `reviews/2026-10-02-pr11-follow-up-d-record.md` (§1 to §4, and its Implementation section) is why. Nothing it adds is in force until the pull request merges. In this module it is one constant, `KEPT_PIN_SUFFIX`, and one arm
+of the attempt's error path, below.
+
 ## `pub fn run(opts: &RunOptions) -> Result<RunReport, UpstrokeError> {`
 
 The v0.1 conductor's public entry points -- `run`, `run_with` and
@@ -32,6 +35,39 @@ recorded allow and is a classified module, so the five are rows of
 leaving this file) and denied by path in `clippy.toml` like the conductors
 below. The bodies are what they were; the call in `run_contained` lost its
 `coordinator::` prefix and the two seams became `pub(super)`.
+
+## `if opts.writes_topology() {`
+
+PR12's dispatch: since the topology is active, `upstroke run` creates a
+schema-4 run, and this branch is it. The order is the read-only half
+([`crate::engine::topology::entry::prepare_fresh`], after containment), then
+the physical worktree lease (`FreshPrepared::lease`), the command's first
+effect, then — under that lease — the legacy admission of the checkout
+(`refuse_dirty_tree`: the run exclusion, then the refusal of a dirty tree; L2),
+then the include publication, written here because `recorded_objects_scope` is
+denied to every topology module, then the effectful half (`FreshLeased::run`),
+which keeps the same lease through the startup census and the run. The
+admission is here for the same reason: `Workspace::ensure_run_exclusions` is an
+effectful wrapper no topology module may call, so the schema-4 entry cannot
+make it, and this is the first point on the path where the legacy entry's rule
+can run as written once the lease is held, before anything of the run exists.
+The include goes under the root the read-only half authorized, or under the
+default root, which it creates when missing (root's Q4: only after the runtime,
+image and credential-volume refusals, and only after the read-only half has
+refused a default root that would resolve to a path no string spells, J14, so
+that refusal leaves nothing behind). The legacy body below runs only for the
+test configuration's legacy writer ([`RunOptions::writes_topology`](options.md)).
+
+Until repair10 the exclusion and the include came before the lease, so a fresh
+run that lost it — to a conductor holding it, or to a surviving reaper's
+cleanup hold on a run of the checkout — had already written both: one defect,
+reported three times (PR12-R9-PUBLIC-PUBLICATION-BEFORE-WORKTREE-LOCK,
+PR12-REG7-PRELOCK-WRITES, PR12-N4-PRELOCK-PUBLICATION) against the canonical
+rule that a write command's first effect is the worktree lock. The ordering is
+in `engine/topology/entry.md`; the guards are
+`engine::tests::a_fresh_schema_4_run_that_loses_the_worktree_lease_publishes_no_exclusion_and_no_include`
+and, for the default private root (Unix),
+`engine::tests::a_fresh_schema_4_run_over_the_default_root_that_loses_the_worktree_lease_creates_nothing_under_home`.
 
 ## `run_harness_on(opts, harness, &HostRunner::for_legacy_workspace(repository))`
 
@@ -64,7 +100,40 @@ the private root. That write happens even for a run refused later, and is
 harmless: the file's bytes never vary, it lives in the private root, and no Git
 configuration names it; only the environment of a role this runner starts does.
 
-## `if !workspace.is_clean()? {`
+## `fn refuse_dirty_tree(workspace: &Workspace) -> Result<(), UpstrokeError> {`
+
+The checkout's admission, one definition for both entries (L2, regression
+review 3, finding 2; DESIGN §20, "the engine refuses dirty trees"): first
+`Workspace::ensure_run_exclusions`, so the engine's own `.upstroke/` (its public
+run directories) is ignored by Git, then `Workspace::is_clean`, refusing any
+staged, unstaged or untracked change with the message below. The order is the
+legacy entry's and it is load-bearing: without the exclusion, a repository that
+already holds a run's public directory reads as dirty, and its next run is
+refused for the engine's own files (measured with the exclusion removed: the
+second fresh schema-4 run in one repository was refused).
+
+Both entries call it under the worktree lease. The legacy entry
+(`run_harness_inner_with_id`) calls it after `ensure_execution_prerequisites`,
+where these two steps were written inline, and the schema-4 dispatch in
+`run_harness` calls it after `FreshPrepared::lease` and before the include
+publication. Until L2 the schema-4 path made no such check: a fresh `upstroke
+run` over a modified tracked file ran its worker and reviewer against the
+committed tree, recorded a completed run and exited 0 (the reviewer's executed
+comparison; the base refused with this message and created no run log). From
+L2 until repair10 the schema-4 dispatch called it before any lease, so a run
+that went on to lose the lease had written the exclusion first. A refused run
+leaves the exclusion (`.upstroke/.gitignore`) and, as every command that took
+the lease does, the worktree lock file (R25, which spans runs), and nothing
+else, as the legacy entry always has.
+
+The exclusion is also what keeps an admitted fresh run's generated public files
+out of Git (L4, regression review 3, finding 4). Before L2 a schema-4 run made no
+exclusion, so a completed run left `?? .upstroke/` in `git status`, and an
+ordinary `git add -A` took its log, frozen plan, report and locks.
+`engine::tests::a_completed_schema_4_run_leaves_no_generated_file_for_an_ordinary_git_add_to_take`
+pins that. The schema-4 resume makes the exclusion itself (`resume.md`).
+
+## `refuse_dirty_tree` › `if !workspace.is_clean()? {`
 
 The dirty-tree refusal names the command that shows what upstroke found,
 `git --no-replace-objects -c core.useReplaceRefs=false status`, and `git replace
@@ -208,6 +277,44 @@ record does not describe.
 A fresh run has no signals of its own yet, and §13's other sources are
 not read in v0.1 — so this snapshot is honestly a record of how little
 was known when the run started.
+
+## `fn kept_on_error(`
+
+R-D1's part N (adopted with O8 on 2026-10-11 as an agent decision by `pr11_decide_d` under the owner's delegation
+of 2026-10-11 (babysit's `0194a1e4…`), and in force only from #331's merge;
+`PR331-AN-ATTEMPT-ERROR-AFTER-THE-WORKER-RAN-DISCARDS-ITS-OUTPUT`
+and `PR331-A-REVIEWED-CANDIDATE-IS-DISCARDED-WHEN-ITS-PUBLICATION-FAILS`): every arm that
+discarded the checkout after the worker ran now keeps it and pins what it holds at the
+attempt's kept pin — the prepared pin followed by `KEPT_PIN_SUFFIX`, which this module
+imports from `crate::workspace` since part K moved it there — and returns the error
+unchanged, with a warning naming the pin or the pin's failure (`UpstrokeError::with_warnings`).
+With a captured candidate (N2's three publication arms) it pins that candidate — its branch,
+parent and tree, never the live index — through `prepare_commit_from_candidate`; without one
+(N1's attempt error) it pins the checkout through `Workspace::pin_checkout`, which captures it
+into a private index. Both are written whatever `HEAD` is (part K). `Ok(None)` from
+`pin_checkout` (nothing to keep) returns the error with no warning. Nothing publishes a kept
+pin and no engine path removes one; the resume's guarded discard (part G4,
+`src/engine/resume.rs`) removes the checkout's copy only once the pin and a durable copy of it
+hold it. A new run refuses over the kept checkout as over any uncommitted work, until a resume
+or the operator acts — a disclosed cost (the proposal's §9.1).
+
+When N1's arm cannot pin the checkout, its warning also says what that leaves (F1 of the
+owner's full review of #331, `FUD-FULL-FILTERPIN`, repaired under the owner's instruction "we
+fix F1 and record the rest"): nothing outside the checkout keeps the output, so `git clean` or
+`git reset --hard` there would lose it, and what stopped the pin is to be fixed before a resume —
+for a clean or smudge filter, the attribute that sets it removed, after copying out anything to
+keep. One such cause is a path a clean or smudge filter attribute covers that Git lists for the
+checkout (`git ls-files --cached --others --exclude-standard`: every path the index holds and
+every untracked path not ignored): `pin_checkout`'s capture refuses it before `git add` could run
+the filter's configured code, as every capture of the module refuses such a path, so that output
+stays unpinned. The refusal covers only that listing: an ignored path in the way of what `HEAD`
+holds, which the capture's footprint adds with `git add -f`, is not checked
+(`FUD-F1R-IGNOREDFOOTPRINT`, open). Moving that path out of the checkout is not offered as the
+fix: a tracked path moved out stays in the index, and the resume's listing checks every path the
+index holds, so the next resume refuses the same way (DF1R-1 of the regression review of
+`cc8ea2ed`, corrected under the same instruction). The reviewed-candidate arms (N2) keep the
+warning they had: they pin a candidate captured before its review, which a filtered path never
+reaches.
 
 ## `pub(super) struct Run<'a>` › `pub(super) log: EventLog,`
 
@@ -502,11 +609,37 @@ identity: this task's position in the plan. See
 The same entries the worker prompt quotes as operator
 instruction, routed to the judge as well (§12).
 
-## `fn step_task(&mut self, index: usize) -> Result<bool, UpstrokeError> {` › `match run_attempt(&attempt_cx, workspace, resume.clone()) {`
+## `fn step_task(&mut self, index: usize) -> Result<bool, UpstrokeError> {` › `match run_attempt(&attempt_cx, workspace, resume.clone(), &mut refused) {`
 
 Any error between the agent editing files and the verdict
 leaves the tree dirty; the run cannot continue but must not
 hand the user a half-staged workspace either (§14).
+
+## `fn step_task(&mut self, index: usize) -> Result<bool, UpstrokeError> {` › `if let Some(candidate) = refused {`
+
+The one exception, follow-up D's B-PRESERVE (adopted with O8 on 2026-10-11 as an agent decision
+by `pr11_decide_d` under the owner's delegation of 2026-10-11 (babysit's `0194a1e4…`), and in
+force only from #331's merge): when the
+attempt's gate or review snapshot was refused by the worktree registry after the
+worker's output was captured, `run_attempt` recorded the captured candidate, and
+this arm does not discard the checkout. It pins that candidate — the branch ref,
+parent and tree captured before the refusal, never the index as it stands now —
+through `prepare_commit_from_candidate` at the attempt's prepared pin followed by
+`KEPT_PIN_SUFFIX`, and returns a registry refusal that names the pin, or says that
+pinning it failed (`HEAD` moved after the capture, or the ref store could not be
+written; R-D1). `prepare_commit_from_candidate` writes a hook-free commit with
+upstroke's identity and pins it with a create-only `update-ref`; since R-D1's part K it
+does so for a kept pin whatever `HEAD` is, so a branch moved after the capture no longer
+refuses the pin, and only a store, name or lock that refuses the write does (C1 to C4, B1
+to B5). Every other attempt error keeps the checkout too (part N, `kept_on_error` below).
+The arm calls `prepared_pin_ref` and `prepare_commit_from_candidate`, both of which this
+module already called.
+
+The pin keeps the output on every later invocation: the resume removes the checkout's
+copy only through its guarded discard, which checks that pin, writes a durable copy of it
+and reverts exactly the captured changes, and names the pin with the commands that take
+its output back (`src/engine/resume.rs`). A new run instead of a resume refuses over the
+kept output as it refuses over any uncommitted work.
 
 ## `fn step_task(&mut self, index: usize) -> Result<bool, UpstrokeError> {` › `let next = result.failure.as_ref().map(|failure| {`
 
@@ -709,6 +842,18 @@ and write the payload where a UI or `upstroke answer` can read it.
 frontier rung, and the run has already reported enough spend that the
 operator asked to be consulted first.
 
+The question names its task through `build_question`, as every question this
+engine raises does, and its context describes the plan task that question
+names (`SpendSubject`). So the function reads no row of the plan or of the
+run's state by position; a function-local `#[deny(clippy::indexing_slicing)]`
+holds that (J16, regular review 3, finding 4; regression review 2, finding 6).
+A question that names no task of the plan, which `build_question` cannot
+produce, would carry the spend facts without the task line and the acceptance
+list rather than invented ones. Until J16 the function built a `ParkSubject`
+from `plan.tasks[index]` and `state.progress[index]`; J1 had added the second
+read for an attempt count and rungs spent that the spend question never
+prints.
+
 ## `impl Run<'_>` › `fn unpriced_attempts(&self) -> u32 {`
 
 Attempts whose route reported no spend at all (§13), so the figures this
@@ -863,13 +1008,16 @@ attempt.
 
 The schema-4 driver's options for the same kinds, worded for what that
 engine does with an answer. `question_answered(schema 4)` records an option
-index and, for a binding, an override; it has no field for typed text, so a
-typed answer un-parks the task and reaches no agent
-(`PR249-ANSWER-TEXT-NOT-CARRIED`). PR8's fourteenth review found the
-`Clarify` list promising delivery the driver does not make; this list
-promises nothing it cannot keep, and its give-up option is the shared
-constant, so `answer_for_option` reads it as a decline. `ApproveSpend` is
-not a kind this driver raises and keeps the legacy pair for totality.
+index, for a binding an override, and since J2 the person's words (`text`).
+Typed text un-parks the task and reaches its next attempt as an instruction
+and its review as a decision (`run::Brief::record_answer`). The retry
+option says so. It promised the opposite while the vocabulary had no field
+for the words (`PR249-ANSWER-TEXT-NOT-CARRIED`). PR8's fourteenth review
+had found the `Clarify` list promising a delivery the driver did not make.
+The give-up option is the shared constant, so `answer_for_option` reads it
+as a decline. `ApproveSpend` keeps
+the legacy pair, approve or the shared decline constant. The schema-4 driver
+raises it since J1 (`TopologyRun::ask_to_approve_spend`).
 
 ## `pub(super) fn question_context(`
 
@@ -881,10 +1029,26 @@ plan. Naming them lets the schema-4 driver, which holds a `FrozenTaskSpec`
 and no `Task`, raise the same question the legacy engine does rather than
 wording its own.
 
-## `fn spend_question_context(`
+## `pub(super) struct SpendSubject<'a> {`
+
+The task a spend approval describes: its display id, its title and its
+acceptance list, the three things the question prints. A [`ParkSubject`]
+also carries the attempts and rungs a park question quotes, which a spend
+question does not, so neither engine needs a task's progress to word one.
+
+## `impl<'a> SpendSubject<'a>` › `fn from_task(task: &'a Task) -> Self {`
+
+The subject of a schema-3 plan task.
+
+## `pub(super) fn spend_question_context(`
 
 §12's spend approval, in the operator's terms: what is about to happen, what
-it has cost so far, and how confident that figure is.
+it has cost so far, and how confident that figure is. The task comes as a
+[`SpendSubject`], so the schema-4 driver words its approval question the same
+way, including for a repair task the plan never named (J1). Without a subject
+the task line and the acceptance list are left out and the rest is unchanged.
+Each `let _ = writeln!` writes into a `String`, whose `fmt::Write` cannot
+fail, so nothing but `Ok` is discarded.
 
 The threshold is a **spend-to-date** reading rather than a forward
 projection, and the text says so — see [`crate::config::AskBefore`] for why.
@@ -892,6 +1056,16 @@ The figure itself is quoted with the ledger's own `?` honesty: a run whose
 Copilot attempts report nothing has a reported total that is a floor, and
 presenting a floor as a total is how someone approves a number they did not
 actually see.
+
+`floor` is the caller's: the sequential engine's `unpriced_attempts` (a record
+with no cost or an incomplete review cost, an interrupted attempt among them),
+and the schema-4 driver's `spend_is_a_floor`, which is the schema-4 report's own
+`total_is_floor` (K5). A floor is worded for every cause either can find, not
+only a route that reports no spend: "some of the run's spend was never reported,
+by an attempt or a review pass on a route that reports none, or by one the engine
+was killed inside", and the figure is "at least what the run has already cost".
+Until K5 the qualifier named routes that report no spend alone, and the sentence
+after it said the figure was what the run had cost even when it was a floor.
 
 ## `run_harness_inner_with_id` › `path: plan_path.clone(),`
 

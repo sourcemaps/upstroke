@@ -109,6 +109,24 @@ An absent credential volume refuses, and the digest is never computed.
 A `Container` selection with no runtime seam refuses rather than
 silently proceeding as though the inspection had passed.
 
+## `fn a_default_root_is_resolved_before_it_exists_and_authorized_only_once_it_does() {`
+
+Component-level evidence for root's Q4, over the fake runtime. `resolve_runner`
+reads the selection and the runtime and nothing else, so a container
+selection the runtime cannot serve (an image it does not hold, an
+unreachable runtime, no runtime at all) refuses before the default root
+exists, and nothing on the way creates it. `RunnerResolved::authorize` is
+what requires the root: it refuses one that does not exist, creates nothing,
+and succeeds, with the canonical spelling, once something else has created
+it, which in production is the include's publication between the entry's two
+halves. It is component-level: `resolve_runner` takes no root, and the
+gated public-path cell
+(`runner::container::resolve::tests::real_docker_a_schema_4_run_refuses_an_absent_image_before_the_worktree_lock`)
+creates and supplies an explicit private root. Neither shows that the public
+default-root entry composes these steps in this order; that negative cell and
+the fresh-success cell on the default root remain owed in the command-line and
+acceptance work (root's resolve-test follow-through, `6f5a5f4b`).
+
 ## `fn a_private_root_that_is_not_a_real_directory_refuses_before_any_inspection() {`
 
 A private root that is not there refuses read-only, before anything
@@ -267,3 +285,33 @@ processes cannot collide and there is no state to hand over.
 carries its backtrace, and a failure report that buries the one line
 that names the cause — `panic in a destructor during cleanup` — under
 fifty frames of it is a report nobody reads.
+
+## `const RELATIVE_NAME: &str = "UPSTROKE_TEST_R5_PRE_LOCK_NAME";`
+
+The variable that tells [`relative_name_pre_lock_child`] which of the seven
+repository-wide names its environment carries relative, so it can check that the
+refusal names that one. A child started without it returns at once.
+
+## `fn each_relative_repository_wide_name_refuses_the_pre_lock_checks_before_any_inspection() {`
+
+R-C-RELSTORE's fresh face, B-2's fresh half, and RS-1's fresh row: red at the
+bound master, where nothing refuses, and green here. For each of the seven
+names R-C-RELSTORE reads, an isolated child inherits it as `../relative` and
+runs the pre-lock checks with a container selection whose runtime would answer
+every inspection. The refusal is the first statement of `check`, so the child
+finds it before the private root is canonicalized, before the runtime is asked
+anything and before any id is drawn.
+
+The name reaches the child through its environment and nowhere else: this
+process's own environment is never set, because every test in it reads the same
+one, and a child is the only process whose inherited environment a test may
+choose. `run_test_isolated` is Unix only, so the Windows forms of the rule are
+executed by `src/workspace_manager/tests.rs`'s unit tests on the Windows legs.
+
+## `fn relative_name_pre_lock_child() {`
+
+The child of [`each_relative_repository_wide_name_refuses_the_pre_lock_checks_before_any_inspection`].
+It passes only when the pre-lock checks refuse, naming the variable and saying
+to export it as an absolute path, the runtime was asked nothing, and nothing
+was made under the private root, which is B-2's evidence that no runner
+inspection or probe ran after the refusal point.
