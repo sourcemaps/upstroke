@@ -127,8 +127,9 @@ does not consume one. Fold-derived like the rest of the table: it is a
 function of the order in which lineages were created, which is the order
 of the `merge_rejected` events that created them, so a replay of the log
 rebuilds it exactly and the live table and the replayed one compare equal.
-Nothing serialises it. It saturates at `u32::MAX` like the fold's other
-counters, the residual `SWEEP-FOLD-APPLY-SATURATING-COUNTERS` records.
+Nothing serialises it. `grant` advances it with `saturating_add`, so it
+stops rising at `u32::MAX`: every lineage created once it is there takes
+`u32::MAX`, and `<` sees none of those lineages as older than another.
 
 ## `impl LeaseTable` › `pub fn grant(&mut self, owner: LeaseOwner, paths: PathSet) {`
 
