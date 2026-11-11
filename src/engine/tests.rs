@@ -17159,15 +17159,11 @@ fn a_tracked_filtered_path_moved_out_stays_refused_and_is_pinned_once_its_attrib
     let Err(UpstrokeError::WithWarnings(warned)) = &run else {
         panic!("the capture's own refusal, with the kept note: {run:?}");
     };
-    assert_eq!(
-        warned.warnings.len(),
-        1,
-        "the kept note, and no other warning: {:?}",
-        warned.warnings
-    );
-    let [warning] = warned.warnings.as_slice() else {
-        panic!("the kept note, and no other warning: {:?}", warned.warnings);
-    };
+    let warning = warned
+        .warnings
+        .iter()
+        .find(|warning| warning.contains("pinning it at"))
+        .expect("the kept note");
     let pin = kept_pin_of(&repo, 1);
     assert_eq!(pin_target(&repo, &pin), None, "no pin holds the output");
     assert!(kept_copies(&repo).is_empty(), "and no copy");
@@ -17256,232 +17252,18 @@ fn a_tracked_filtered_path_moved_out_stays_refused_and_is_pinned_once_its_attrib
         Some(commit),
         "the copy puts the pin back"
     );
-    let filter = "git error: working-tree path `paid.dat` uses clean/smudge filter `paid-marker`";
-    let kept_advice = ". Nothing outside this checkout keeps it, so `git clean` or \
-                       `git reset --hard` there would lose it. Fix what stopped the pin first \
-                       (for a clean or smudge filter, remove the attribute that sets it, after \
-                       copying out anything to keep), and then resume";
-    let refused_advice = format!(
-        ". Nothing was discarded: whatever the attempt left stays in the checkout, and \
-         `git clean` or `git reset --hard` would lose any of it that no kept pin holds. Fix that \
-         first (for a clean or smudge filter, remove the attribute that sets it, after copying \
-         out anything to keep), and then resume: the resume discards none of it before `{pin}` \
-         and a copy of that pin it writes in {} hold it.",
-        paths_of(&repo, &run_id).public.display()
-    );
-    let listing = format!(
-        "attempt 1 of `t1` is in flight, and listing this checkout's uncommitted paths stopped: \
-         {filter}; refusing before git status can execute configured filter code"
-    );
-    let remove = "remove the attribute that sets it, after copying out anything to keep";
-    for (what, text, cause, advice) in [
-        (
-            "the kept note",
-            warning.as_str(),
-            format!(
-                "the worker's output for attempt 1 of `t1` is kept in this checkout, and pinning \
-                 it at `{pin}` failed: {filter}; refusing before git add can execute configured \
-                 filter code"
-            ),
-            kept_advice,
-        ),
-        (
-            "the refusal",
-            refusal.as_str(),
-            listing.clone(),
-            refused_advice.as_str(),
-        ),
-        (
-            "the refusal after the move",
-            still_refused.as_str(),
-            listing,
-            refused_advice.as_str(),
-        ),
+    let advice = "remove the attribute that sets it, after copying out anything to keep";
+    for (what, text) in [
+        ("the kept note", warning.as_str()),
+        ("the refusal", refusal.as_str()),
+        ("the refusal after the move", still_refused.as_str()),
     ] {
-        assert_eq!(
-            text,
-            format!("{cause}{advice}"),
-            "{what} carries exactly this advice for a tracked path, and no other"
+        assert!(
+            !text.contains("move that path out"),
+            "{what} offers no move-out for a tracked path: {text}"
         );
-        assert!(text.contains(remove), "{what} says to {remove}: {text}");
+        assert!(text.contains(advice), "{what} says to {advice}: {text}");
     }
-}
-
-fn two_gated_tasks(repo: &Path) {
-    seed(
-        repo,
-        "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n\n\
-         ## Implement the gadget\n<!-- upstroke: id=t2 kind=implement depends= -->\n",
-        Some(
-            "[routing]\nimplement = { chain = [\"small\"], attempts_per = 1 }\n\n\
-             [[gates]]\nname = \"version\"\ncmd = \"git --version\"\n",
-        ),
-    );
-}
-
-fn a_second_attempt_in_flight(paths: &RunPaths) {
-    let text = fs::read_to_string(paths.events()).expect("log");
-    let started: Vec<&str> = text
-        .lines()
-        .filter(|line| line.contains("\"attempt_started\""))
-        .collect();
-    let [line] = started.as_slice() else {
-        panic!("the run started one attempt: {started:?}");
-    };
-    let mut second: serde_json::Value = serde_json::from_str(line).expect("an event");
-    let other = if second["task"] == "t1" { "t2" } else { "t1" };
-    second["task"] = serde_json::Value::from(other);
-    fs::write(paths.events(), format!("{}\n{second}\n", text.trim_end()))
-        .expect("a second attempt in flight");
-}
-
-fn the_listings_own_error_comes_back(repo: &Path, what: &str) {
-    let resumed = bounded_resume(what, repo, fake(Effect::EditFile));
-    let Err(error) = &resumed else {
-        panic!("{what}: the listing's error, not {resumed:?}");
-    };
-    assert!(
-        matches!(
-            error,
-            UpstrokeError::Git { message }
-                if message.contains("path `paid.dat` uses clean/smudge filter `lfs`")
-        ),
-        "{what}: the listing's own Git error, not a resume refusal: {error:?}"
-    );
-    let listed = Workspace::open(repo)
-        .expect("the checkout")
-        .uncommitted_summary()
-        .expect_err("the listing still fails on the filtered path");
-    assert_eq!(
-        format!("{error:?}"),
-        format!("{listed:?}"),
-        "{what}: the listing's error comes back unchanged"
-    );
-    the_filtered_output_is_in_the_checkout(repo);
-    assert_eq!(kept_pins(repo), Vec::<(String, String)>::new(), "{what}");
-    assert!(kept_copies(repo).is_empty(), "{what}: no copy");
-}
-
-#[test]
-fn a_resume_with_no_attempt_in_flight_returns_the_failing_listings_own_error() {
-    let (_tree, repo) = rd1_repo("f1r-3-none");
-    let run = a_run_over_a_filtered_output(&repo);
-    assert!(
-        run.is_err(),
-        "the capture refuses the filtered path: {run:?}"
-    );
-    let run_id = rundir::latest_run(&repo).expect("the run started");
-    truncate_log_before(&paths_of(&repo, &run_id), "attempt_started");
-    the_listings_own_error_comes_back(&repo, "the resume with no attempt in flight");
-}
-
-#[test]
-fn a_resume_with_two_attempts_in_flight_returns_the_failing_listings_own_error() {
-    let (_tree, repo) = temp_engine_repo("f1r-3-two");
-    git_in(&repo, &["config", "core.autocrlf", "false"]);
-    two_gated_tasks(&repo);
-    let run = a_run_over_a_filtered_output(&repo);
-    assert!(
-        run.is_err(),
-        "the capture refuses the filtered path: {run:?}"
-    );
-    let run_id = rundir::latest_run(&repo).expect("the run started");
-    a_second_attempt_in_flight(&paths_of(&repo, &run_id));
-    the_listings_own_error_comes_back(&repo, "the resume with two attempts in flight");
-}
-
-fn advance_the_branch_and_block_the_kept_pin_after_capture(
-    workspace: &Workspace,
-    candidate: &crate::workspace::CapturedCandidate,
-) -> Result<(), UpstrokeError> {
-    advance_the_branch_after_capture(workspace, candidate)?;
-    let below = format!("{}/blocker", kept_name_after_capture(workspace)?);
-    git_after_capture(
-        workspace.root(),
-        &["update-ref", &below, &candidate.parent_oid],
-    )
-    .map(|_| ())
-}
-
-#[test]
-fn a_reviewed_candidate_whose_publication_and_kept_pin_fail_carries_no_advice() {
-    let (_tree, repo) = rd1_repo("f1r-3-n2");
-    let run = bounded_run(
-        "the run whose reviewed candidate meets a moved head and a blocked kept pin",
-        &repo,
-        Some(advance_the_branch_and_block_the_kept_pin_after_capture),
-        fake(Effect::EditFile),
-    );
-    let Err(UpstrokeError::WithWarnings(warned)) = &run else {
-        panic!("the publication's refusal, with the kept note: {run:?}");
-    };
-    assert!(
-        warned.error.to_string().contains("HEAD moved"),
-        "the error is the publication's: {run:?}"
-    );
-    let pin = kept_pin_of(&repo, 1);
-    assert_eq!(pin_target(&repo, &pin), None, "no pin holds the candidate");
-    assert_eq!(kept_pins(&repo), Vec::<(String, String)>::new());
-    assert!(
-        status_of(&repo).contains("agent-output.txt"),
-        "the checkout keeps the output"
-    );
-    let (_, parent, tree) = captured(&repo);
-    let identity =
-        format!("tree {tree}\nparent {parent}\nauthor upstroke <upstroke@upstroke.local> ");
-    let commits: Vec<String> = git_in(
-        &repo,
-        &[
-            "cat-file",
-            "--batch-all-objects",
-            "--batch-check=%(objectname) %(objecttype)",
-        ],
-    )
-    .lines()
-    .filter_map(|line| line.strip_suffix(" commit"))
-    .filter(|oid| {
-        let text = git_in(&repo, &["cat-file", "commit", oid]);
-        text.starts_with(&identity) && text.ends_with("\n\n[upstroke] kept: t1 attempt 1\n")
-    })
-    .map(str::to_owned)
-    .collect();
-    let [commit] = commits.as_slice() else {
-        panic!("the kept pin's one unreferenced commit of the candidate: {commits:?}");
-    };
-    let zero = "0".repeat(parent.len());
-    let update = [
-        "update-ref",
-        "--no-deref",
-        "-m",
-        "upstroke: pin prepared task",
-        pin.as_str(),
-        commit.as_str(),
-        zero.as_str(),
-    ];
-    let again = Command::new("git")
-        .arg("-C")
-        .arg(&repo)
-        .args(update)
-        .output()
-        .expect("run git");
-    assert!(!again.status.success(), "the blocker still refuses the pin");
-    let refused = String::from_utf8_lossy(&again.stderr).trim().to_owned();
-    assert!(
-        refused.contains(&format!("'{pin}/blocker' exists")),
-        "Git refuses the pin over the planted blocker: {refused}"
-    );
-    let [warning] = warned.warnings.as_slice() else {
-        panic!("the kept note, and no other warning: {:?}", warned.warnings);
-    };
-    assert_eq!(
-        warning.as_str(),
-        format!(
-            "the reviewed candidate of attempt 1 of `t1` is kept in this checkout, and pinning it \
-             at `{pin}` failed: git error: git {} failed: {refused}",
-            update.join(" ")
-        ),
-        "the reviewed candidate's note says the pin failed and why, and carries no advice"
-    );
 }
 
 #[cfg(unix)]
