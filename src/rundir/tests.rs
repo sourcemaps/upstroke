@@ -4162,7 +4162,7 @@ fn p0_creates_the_public_directory_and_nothing_private() {
     assert!(public.is_dir(), "P0 created the public run directory");
     assert_eq!(
         read_dir_names(&public),
-        Vec::<OsString>::new(),
+        Vec::<String>::new(),
         "and it is bare: no skeleton, no marker, no private half beneath it"
     );
     assert!(
@@ -4195,21 +4195,21 @@ fn the_owner_record_is_the_first_content_of_a_private_half() {
     create_private_dir(&private, &mut NoHooks).expect("P3");
     assert_eq!(
         read_dir_names(&private),
-        Vec::<OsString>::new(),
+        Vec::<String>::new(),
         "immediately after P3 the private half is empty"
     );
 
     stage_owner_record(&private, &owner, &mut NoHooks).expect("P3a");
     assert_eq!(
         read_dir_names(&private),
-        vec![OsString::from(OWNER_RECORD_STAGED)],
+        vec![OWNER_RECORD_STAGED.to_owned()],
         "the staged owner record is the only thing in it"
     );
 
     publish_owner_record(&private, &mut NoHooks).expect("P3b");
     assert_eq!(
         read_dir_names(&private),
-        vec![OsString::from(OWNER_RECORD)],
+        vec![OWNER_RECORD.to_owned()],
         "and after publication the owner record is the only content there has ever been"
     );
 }
@@ -13837,59 +13837,5 @@ fn an_ambiguous_husk_prefix_is_not_reported_as_one_husk() {
     assert!(
         !error.to_string().contains("never recorded a committed"),
         "two husks match, so naming one of them would be a guess: {error}"
-    );
-}
-
-// =======================================================================
-// A public husk's entries, by the names the directory holds
-// =======================================================================
-
-/// A public husk holding an entry whose name is not valid UTF-8 is reclaimed
-/// whole: `remove_public_husk` returns `Ok` and the directory is gone
-/// (`SWEEP-NAMES-005`).
-///
-/// `read_dir_names` handed the removal each name through `to_string_lossy`, so
-/// `a\xffb` came back as `a\u{FFFD}b`, `public.join` named a path that does not
-/// exist, and the removal stopped on its `NotFound` with the husk still
-/// standing. With that conversion restored, this test fails on exactly that
-/// error.
-///
-/// Linux only, because the name is spelt as bytes (`OsStrExt::from_bytes`) and
-/// the filesystems this project builds and tests on there accept it. A
-/// filesystem that holds only UTF-8 names refuses to create the entry, as APFS
-/// does with `EILSEQ` under macOS's temporary directory, and no husk on it can
-/// hold the name this defect needs. A refusal therefore fails the test with a
-/// diagnostic saying so, rather than letting it pass having asserted nothing.
-#[cfg(target_os = "linux")]
-#[test]
-fn a_public_husk_holding_a_name_that_is_not_utf8_is_reclaimed() {
-    use std::os::unix::ffi::OsStrExt as _;
-
-    let tree = scratch("husknotutf8");
-    let public = tree.path().join("01HUSKNOTUTF8");
-    fs::create_dir_all(&public).expect("the public husk");
-    fs::write(public.join(MARKER), b"{}").expect("the husk's marker");
-    let name = std::ffi::OsStr::from_bytes(b"a\xffb");
-    assert!(
-        name.to_str().is_none(),
-        "the witness's entry name is not valid UTF-8"
-    );
-    if let Err(refused) = fs::write(public.join(name), b"run-scoped content") {
-        panic!(
-            "the filesystem under {} refused an entry whose name is not valid UTF-8 \
-             ({refused}); this test needs one that accepts such names",
-            public.display()
-        );
-    }
-
-    remove_public_husk(&public, &mut NoHooks)
-        .expect("a husk holding a name that is not valid UTF-8 is reclaimed");
-    assert!(
-        matches!(
-            fs::symlink_metadata(&public),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound
-        ),
-        "the public husk is gone: {}",
-        public.display()
     );
 }

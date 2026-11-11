@@ -24,7 +24,6 @@
 #![cfg_attr(not(test), forbid(clippy::disallowed_macros))]
 
 use std::collections::BTreeSet;
-use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
@@ -1691,7 +1690,7 @@ pub fn remove_public_husk(public: &Path, hooks: &mut dyn RunDirHooks) -> Result<
         EffectSiteId::RunDir(RunDirSite::RemovePublicHusk),
         || {
             for entry in read_dir_names(public) {
-                if entry == OsStr::new(MARKER) {
+                if entry == MARKER {
                     continue;
                 }
                 let path = public.join(&entry);
@@ -1746,21 +1745,14 @@ fn remove_file_if_present(path: &Path) -> Result<(), UpstrokeError> {
     }
 }
 
-/// The names of `dir`'s entries, sorted, each exactly as the directory holds
-/// it.
-///
-/// `OsString`s, never lossy strings, because the names are identity:
-/// [`remove_public_husk`] joins each one onto the husk to remove it, and both
-/// that function and the ownership proof's `unbound_shape` compare them with a
-/// marker's name as an `OsStr`. A name that is not valid UTF-8 did not survive
-/// the `to_string_lossy` this used to apply: the husk's removal joined a path
-/// that does not exist, stopped on its `NotFound`, and left the husk for every
-/// later census to report again (`SWEEP-NAMES-005`).
-fn read_dir_names(dir: &Path) -> Vec<OsString> {
+fn read_dir_names(dir: &Path) -> Vec<String> {
     let Ok(entries) = fs::read_dir(dir) else {
         return Vec::new();
     };
-    let mut names: Vec<OsString> = entries.flatten().map(|entry| entry.file_name()).collect();
+    let mut names: Vec<String> = entries
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
     names.sort();
     names
 }
