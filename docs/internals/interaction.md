@@ -404,14 +404,7 @@ a run with many open questions cannot multiply its own deadline.
 
 ## `fn a_detached_run_waits_for_an_answer_file_then_gives_up()` › `let arriving = ArrivingSleeper {`
 
-An answer that lands during the wait is picked up, and the answer
-file is still published, byte for byte, afterwards: the bytes are
-compared with those of the same record freshly published into a
-second scratch directory, so the waiting read is never a take. This
-is the `resolve` half of the rule that a reader of a published
-answer never removes or rewrites it
-(`G4B-O9-EVENT-LOG-ANSWER-READER-NEVER-PRUNES-UNWITNESSED`); the
-engine's ingestion test witnesses the `poll` half.
+An answer that lands during the wait is picked up.
 
 ## `mod tests` › `struct ArrivingSleeper {`
 
