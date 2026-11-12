@@ -15,13 +15,30 @@ source, documentation, workflows, release machinery and this file.
 3. **Run the ten-command baseline** (`CODING_STANDARDS.md` §2) before every push, then wait for
    the two required contexts: `upstroke-ci` (formatting, Clippy on three platforms, the Linux and macOS
    test matrix, the Windows suite in `test-windows` -- on its self-hosted ephemeral runner for a
-   pull request, a push and a merge-queue entry alike -- the MSRV matrix, the six
+   pull request, a push and a merge-queue entry alike, unless the run is sent to the hosted
+   runner (below) -- the MSRV matrix, the six
    Bash gates) and `upstroke-pr-policy` (title, body sections, ledger). A
    branch behind `master` is not updated by hand to merge once the ruleset carries the merge
    queue (Repository rules): the queue builds the entry on `master`'s head and runs both
    contexts there (step 7), so update it only when the change needs what `master` gained.
    Until the ruleset carries the queue, the up-to-date requirement stands: a branch behind
    `master` is updated first and waits again, and the audit reports it as `behind-master`.
+
+   **The Windows suite has two homes.** It runs on the guest unless the run's
+   `pick-windows-home` job answers `hosted`; then `test-windows` is skipped,
+   `test-windows-hosted` runs the same suite and the same passing-test count on `windows-latest`,
+   and `upstroke-ci` requires exactly one of the two to pass. The answer is `hosted` when the
+   repository variable `WINGUEST_BUSY` is `1`, or when the guest's jobs queued or running in
+   other runs reach `WINGUEST_QUEUE_LIMIT` (2 when it is unset or not a positive whole number); a
+   GitHub API the job cannot read answers `guest`. The build machine's operator sets
+   `WINGUEST_BUSY` to `1` while baselines or Upstroke runs hold the machine, and clears it
+   afterwards. A hosted run is not free: by the workflow's September 2026 measurements it takes
+   three to four times the guest's time, 21 to 28 minutes a job against about 7, and in October
+   2026 hosted merge-queue entries reached the 45- and then the 55-minute timeout, the cause
+   unknown; the twin runs under that 55 minutes. A test whose outcome depends on the machine can
+   now pass or fail according to the home a run was given, so re-run a Windows-only failure on
+   the other home before believing it -- re-run all of the run's jobs, since re-running only the
+   failed one keeps the home already picked.
 4. **One frontier review pass on the green head.** Give the exact diff and head SHA to an
    independent frontier-class reviewer at `max` effort — today `gpt-5.6-sol` through `codex exec`,
    run by the owner's review driver against the pull request's own base. Allow at least 90 minutes per

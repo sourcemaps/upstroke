@@ -191,7 +191,7 @@ What it does not do is bound a hostile candidate, and no step in this file
 does. An edit to `ci.yml` deletes this one as easily as the guards it
 replaces, and the decision record says so where it says where the boundary
 actually is. What it bounds is the guest: the machine that executes this platform's
-suite, on every lane, is provisioned outside the repository, so
+suite, on every lane the picker leaves with it, is provisioned outside the repository, so
 its Cargo home and its environment are inputs no reviewer of a diff can
 check, and this is the leg saying that it ran what it claims to have run.
 Measured, `MUT-WINDOWS-WITNESS-FLOOR-DROPPED` and
@@ -458,15 +458,19 @@ tested, as a pull request, inside its own 20-minute timeout. The queue lane
 then returned to the guest -- the same labels and the same guest as every
 other build, not the retired second one -- as a scheduling repair that
 names no cause for the hosted runs and repairs no test. One guest serves
-every lane, so a queue entry waits for it behind whatever build holds it;
-and the queue now runs the composed commit on the machine every pull
-request runs on, so a test whose outcome depends on the machine is no
-longer seen first by the push to master.
+every lane, so a queue entry waits for it behind whatever build holds it --
+up to the picker's queue limit, past which, or while the operator has set
+`WINGUEST_BUSY`, the run goes to [`TEST_WINDOWS_HOSTED_JOB`] instead. A run
+the guest takes runs the composed commit on the machine every pull request
+runs on, so a test whose outcome depends on the machine is not seen first
+by the push to master; a run sent to the twin reopens that gap for itself,
+which is why `MAINTAINING.md` step 3 asks for a Windows-only failure to be
+re-run on the other home before it is believed.
 
 ## `pub(super) const TEST_WINDOWS_LABELS: [&str; 3] = ["self-hosted", "windows", "winguest"];`
 
-The labels every lane runs on: the job's whole `runs-on:`, compared as a
-set. An equality because a looser set is a different machine: `[self-hosted,
+The labels the guest's job runs on, on every lane: the job's whole
+`runs-on:`, compared as a set. An equality because a looser set is a different machine: `[self-hosted,
 windows]` admits any Windows runner the account ever registers, and the
 third label is what names the curated image. A scalar there is a hosted
 runner, and an expression routes some event elsewhere -- the merge queue's
@@ -484,7 +488,8 @@ The compiler the golden image carries, and so the one
 ahead of the image (`lint (windows)` installed 1.98.1 on 2026-09-16 against
 the image's 1.97.1). The job installs nothing: the image selects the
 compiler on every lane, and re-curation moves it, editing this constant in
-the same change. While the merge queue ran on `windows-latest` its lane
+the same change. The hosted twin has no image to ask and installs stable
+instead ([`WINDOWS_HOSTED_TEST_WITNESS`]). While the merge queue ran on `windows-latest` its lane
 installed this version, so that the queue and the pull-request lane ran one
 compiler; that install went with the lane, and a toolchain install in this
 job is now refused outright, since at this very version it would pass the
@@ -498,8 +503,9 @@ queue from that. Measured, `MUT-TEST-WINDOWS-INSTALL-UNCONDITIONAL`,
 
 ## `pub(super) const TEST_WINDOWS_PLATFORM: &str = "windows-latest";`
 
-The [`CI_TARGETS`] runner whose tests run in [`TEST_WINDOWS_JOB`] rather than
-in the `test` matrix.
+The [`CI_TARGETS`] runner whose tests run in [`TEST_WINDOWS_JOB`], or in its
+hosted twin [`TEST_WINDOWS_HOSTED_JOB`] on this very runner, rather than in
+the `test` matrix.
 Its shell and cfg valuations carry over to the guest: the image carries
 PowerShell 7, so a `run:` step resolves to `pwsh` there exactly as on
 `windows-latest`, and it builds the same MSVC tuple.
