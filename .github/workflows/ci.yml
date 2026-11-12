@@ -86,8 +86,9 @@ jobs:
       # else -- the ubuntu leg, a developer's TMPDIR on case-sensitive APFS --
       # it observes the branch instead of failing it. The macOS runner's
       # temporary directory folds case and the ubuntu runner's does not, so
-      # the declaration is per leg, and `test-windows` makes the same
-      # declaration for the guest's NTFS. The workflow oracle pins this one
+      # the declaration is per leg, and `test-windows` and its hosted twin
+      # make the same declaration for the guest's and the hosted runner's
+      # NTFS. The workflow oracle pins this one
       # step-level `env:` as a whole map (`TEST_STEP_ENV`), the way it pins
       # the aggregate's: any other key here is refused.
       - run: cargo test --all-targets --all-features
@@ -525,9 +526,10 @@ jobs:
   # note by MSVC clippy. So without this job `expected_failures_refusals[5]` and
   # `[6]` are undischarged for the Windows half of the tree.
   #
-  # A separate job rather than a step in a test job, deliberately:
-  # `test-windows` is the attestation of record for the Windows suite and a
-  # lint failure must not be able to masquerade as a test failure in it. This
+  # A separate job rather than a step in a test job, deliberately: the
+  # Windows suite job that ran, `test-windows` or its hosted twin, is the
+  # attestation of record for the Windows suite and a lint failure must not
+  # be able to masquerade as a test failure in it. This
   # leg stays on windows-latest on every lane, on purpose: GitHub's runner
   # remains the neutral witness that the Windows tree compiles clean, and its
   # second step, `cargo build --all-targets`, makes it the witness that the
