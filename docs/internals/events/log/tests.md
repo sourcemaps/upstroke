@@ -1332,19 +1332,21 @@ History: the fixtures used to live in `src/events/log.rs`'s doc comments, and
 this function lifted them out and stripped the doc-comment prefixes. That
 module now has no `compile_fail` fence; an edit there reaches no fixture.
 
-## `fn crate_under_test() -> (PathBuf, PathBuf) {`
-
-The `--extern` this crate's own rlib is reachable by, and the directory its
-dependencies are in.
-
-The test binary lives in `<target>/debug/deps` beside the rlib cargo built
-from the same sources, so both are found from `current_exe` rather than from
-a guessed target directory — `CARGO_TARGET_DIR` is set by the build wrapper
-this project uses and is not `target/`.
-
 ## `fn typecheck(dir: &Path, name: &str, body: &str) -> (bool, String) {`
 
 Type-check `body` against this crate and return rustc's diagnostics.
+
+## `fn typecheck(dir: &Path, name: &str, body: &str) -> (bool, String) {` › `let built = crate::effects::tests::crate_under_test();`
+
+The crate's rlib, and the directories its dependencies are in, come from the
+lookup the effects suite's fixture compilers use, as `rustc` arguments
+(`built.rustc_args()`). That lookup is one `--extern upstroke=<rlib>` and one
+`-L dependency=<dir>` per directory. This file used to carry its own
+`crate_under_test`, which found the rlib beside the test binary and handed
+`rustc` that one directory. Cargo 1.100.0 gives every unit a directory of its
+own, so that copy found nothing there, and this test failed on every pull
+request (`CI-RUST-1-100-BUILD-LAYOUT-RLIB-LOOKUP`). Both layouts are
+described at `crate_under_test` in `docs/internals/effects/tests.md`.
 
 ## `fn typecheck(dir: &Path, name: &str, body: &str) -> (bool, String) {` › `fs::write(&source, format!("fn main() {{\n{body}\n}}\n")).expect("the fixture");`
 

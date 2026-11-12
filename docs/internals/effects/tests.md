@@ -1434,11 +1434,20 @@ nothing would report an empty set and pass.
 Run clippy over an empty probe with `dir`'s `clippy.toml` and collect the
 paths it reports as unreachable.
 
-## `fn extern_dependencies(deps: &Path) -> Vec<(String, PathBuf)> {`
+## `fn extern_dependencies(dirs: &[PathBuf]) -> Vec<(String, PathBuf)> {`
 
-Every dependency rlib beside the test executable, so the probe links the
-crates whose paths the denylist names — `libc` above all, whose entries would
-otherwise be silently unchecked.
+Every dependency rlib in the crate's dependency directories, the newest of
+each crate name, so the probe links the crates whose paths the denylist names —
+`libc` above all, whose entries would otherwise be silently unchecked.
+
+`dirs` is [`crate_under_test`]'s `dependency_dirs`: one `<profile>/deps`
+directory under the layout Cargo used before 1.100.0, and every unit's `out`
+directory under 1.100.0's, where no two dependencies share one. Under 1.100.0
+the directory beside the executable, the only one this used to read, holds no
+dependency at all, so it would have linked no `libc`. That is the half of
+`CI-RUST-1-100-BUILD-LAYOUT-RLIB-LOOKUP` the rlib lookup's panic hid. A
+directory that cannot be read contributes nothing, as the one directory
+always did.
 
 ## `fn every_platform_conditional_denial_names_something_real() {`
 
@@ -2403,14 +2412,101 @@ Each leg is load-bearing, with a witness. A runner no body needs is a job
 this contract would keep demanding for no reason; a body only one runner
 compiles is why that runner's leg cannot be dropped.
 
-## `fn crate_under_test() -> (PathBuf, PathBuf) {`
+## `pub(crate) struct CrateUnderTest {`
 
-The crate's own rlib and the directory its dependencies are in.
+The crate's own rlib and every directory its dependencies' artifacts are in,
+as the build that produced the running test executable laid them out.
 
-The test binary lives beside them, so both are found from `current_exe`
-rather than from a guessed target directory — `CARGO_TARGET_DIR` here is the
-build wrapper's slot, not `target/`. The idiom is lane C's, from
-`src/events/log/tests.rs`.
+`pub(crate)` because three suites compile fixtures against the crate: this
+file's lint fixtures, `events::log::tests::typecheck` and
+`rundir::tests::compile_against_this_crate`. Each carried its own copy of the
+lookup, and all three broke together under Cargo 1.100.0
+(`CI-RUST-1-100-BUILD-LAYOUT-RLIB-LOOKUP`). This file is the home because it
+already drives the compilers. It is a whole-file test module, so the
+`fs::read_dir` and the paths it hands a subprocess are in no production
+census's domain.
+
+## `impl CrateUnderTest` › `pub(crate) fn rustc_args(&self) -> Vec<OsString> {`
+
+One `-L dependency=<dir>` per dependency directory, then
+`--extern upstroke=<rlib>`, ready for `Command::args`. Each argument is built
+by pushing the path onto an `OsString`, not by formatting `Path::display`, so a
+directory whose name is not UTF-8 reaches the compiler as it is on disk.
+
+Under the per-unit layout the `-L` list is every unit's `out` directory in the
+build directory. That is a superset of the 41 Cargo hands `rustc` when it
+builds the library on this tree. The superset is safe because `rustc` finds
+each dependency of the crate by its file prefix, `lib<name>-<hash>`, and by
+the hash recorded in the crate's metadata, so a directory holding another
+build's units supplies nothing the crate did not ask for. Its cost is length.
+A build directory that has gathered several hundred units would bring the
+command line near Windows' 32,767-character limit, which the old single
+directory never approached.
+
+## `pub(crate) fn crate_under_test() -> CrateUnderTest {`
+
+The crate's own rlib and the directories a compiler needs to link a fixture
+against it.
+
+Both are found from `current_exe` rather than from a guessed target
+directory: `CARGO_TARGET_DIR` here is the build wrapper's slot, not `target/`.
+The idiom is lane C's, from `src/events/log/tests.rs`.
+
+There are two layouts, told apart by what is on disk and never by the
+toolchain's version:
+
+* **One `deps` directory.** This is Cargo's layout before 1.100.0: 1.97.1 on
+  the build box, and 1.99.1 on CI's runners until 2026-11-09. The test
+  executable, the library's `libupstroke-<hash>.rlib` and every dependency's
+  artifacts share `<profile>/deps`. An rlib beside the executable selects
+  this layout, and that directory is the only dependency directory.
+* **One directory per unit.** This is Cargo 1.100.0's layout, although its
+  `-Z help` still lists `build-dir-new-layout` as unstable. Every unit
+  (library, test harness, binary, dependency, build script) has
+  `<profile>/build/<package>/<unit hash>/`, with its outputs in `out/` and its
+  `fingerprint/` beside them. The test executable is alone in its unit's
+  `out/` with its `.d`. The library is
+  `<profile>/build/upstroke/<hash>/out/libupstroke-<hash>.rlib`, and each
+  dependency is in its own unit's `out/`. An executable whose directory is
+  `out`, with `fingerprint` beside it, selects this layout. The rlib is then
+  the newest in the package's own unit directories, and every unit's `out`
+  directory is a dependency directory.
+
+Where several rlibs are candidates, the newest by modification time wins, as
+before the per-unit layout. A slot shared by several checkouts can hold the
+library of each, and the newest is not always this checkout's: a library a
+build finds fresh is not rewritten. That limit predates the per-unit layout,
+and this change keeps it.
+
+### Panics
+
+When neither layout yields a `libupstroke-*.rlib`. The message names the
+directory beside the executable. Under the per-unit layout it also names the
+package's `*/out` pattern and how many unit directories it searched; under the
+other it says no other layout was searched. `cargo test --lib` alone builds
+only the test harness and never compiles the library as an rlib, so the
+message says which build does: `cargo build`, or `cargo test --all-targets`,
+which builds the library for the binaries and is CI's command.
+
+## `fn per_unit_package(beside: &Path) -> Option<&Path> {`
+
+The package directory, `<profile>/build/<package>`, when `beside` is a unit's
+`out` directory. That means it is named `out` and has the unit's
+`fingerprint` directory beside it. The fingerprint is the evidence: a
+directory merely named `out` is not taken for a unit, and an old-layout build
+script's `OUT_DIR` is one such.
+
+## `fn unit_out_dirs(build: &Path) -> Vec<PathBuf> {`
+
+Every `<package>/<unit>/out` directory under `<profile>/build`. They are
+sorted, so the `-L` order does not depend on the order the directory is
+listed in. An entry that cannot be listed as a directory is skipped.
+
+## `fn newest_upstroke_rlib(dirs: &[PathBuf]) -> Option<PathBuf> {`
+
+The most recently modified `libupstroke-*.rlib` in any of `dirs`, or `None`.
+A file whose modification time cannot be read sorts as the epoch, as it did
+in the lookup this replaces.
 
 ## `fn every_externally_reachable_fn_of_a_legacy_or_shared_module_is_classified() {`
 
