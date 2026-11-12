@@ -25,12 +25,11 @@ use super::ci_model::{
     PICK_WINDOWS_HOME_TIMEOUT_MINUTES, PINNED_ACTIONS, REQUIRED_CONTEXT, RUSTFLAGS_KEY,
     RUSTFLAGS_VALUE, STABLE_TOOLCHAIN, STEP_FIELDS, TEST_COMMAND, TEST_JOB_FIELDS, TEST_SCRIPTS,
     TEST_STEP_ENV, TEST_STEP_FIELDS, TEST_WINDOWS_CONDITION, TEST_WINDOWS_HOSTED_CONDITION,
-    TEST_WINDOWS_HOSTED_JOB, TEST_WINDOWS_HOSTED_NAME, TEST_WINDOWS_HOSTED_SCRIPTS,
-    TEST_WINDOWS_HOSTED_TIMEOUT_MINUTES, TEST_WINDOWS_JOB, TEST_WINDOWS_JOB_FIELDS,
-    TEST_WINDOWS_LABELS, TEST_WINDOWS_NAME, TEST_WINDOWS_PLATFORM, TEST_WINDOWS_SCRIPTS,
-    TEST_WINDOWS_STEP_ENV, TEST_WINDOWS_TIMEOUT_MINUTES, TOOLCHAIN_ACTION, TOOLCHAIN_COMPONENTS,
-    WINDOWS_BUILD_WITNESS, WINDOWS_HOSTED_TEST_WITNESS, WINDOWS_TEST_WITNESS, WORKFLOW_ENV,
-    WORKFLOW_FIELDS, WORKFLOW_PERMISSIONS,
+    TEST_WINDOWS_HOSTED_JOB, TEST_WINDOWS_HOSTED_NAME, TEST_WINDOWS_HOSTED_TIMEOUT_MINUTES,
+    TEST_WINDOWS_JOB, TEST_WINDOWS_JOB_FIELDS, TEST_WINDOWS_LABELS, TEST_WINDOWS_NAME,
+    TEST_WINDOWS_PLATFORM, TEST_WINDOWS_SCRIPTS, TEST_WINDOWS_STEP_ENV,
+    TEST_WINDOWS_TIMEOUT_MINUTES, TOOLCHAIN_ACTION, TOOLCHAIN_COMPONENTS, WINDOWS_BUILD_WITNESS,
+    WINDOWS_TEST_WITNESS, WORKFLOW_ENV, WORKFLOW_FIELDS, WORKFLOW_PERMISSIONS,
 };
 use super::repo_root;
 
@@ -908,7 +907,7 @@ pub(super) fn ci_test_windows_hosted_job_complaints(doc: &Yaml) -> Vec<String> {
 
     for (index, step) in steps_of(job).iter().enumerate() {
         let named = format!("`{TEST_WINDOWS_HOSTED_JOB}` step {index}");
-        let runs_the_suite = scalar(step, "run") == Some(WINDOWS_HOSTED_TEST_WITNESS);
+        let runs_the_suite = scalar(step, "run") == Some(WINDOWS_TEST_WITNESS);
         let runs_the_capture = scalar(step, "run") == Some(HOST_ACCEPTANCE_WINDOWS_CAPTURE);
         let runs_the_observation = scalar(step, "run") == Some(CAPABILITY_WINDOWS_OBSERVATION);
         let allowed: &[&str] = if runs_the_suite || runs_the_capture {
@@ -968,22 +967,24 @@ pub(super) fn ci_test_windows_hosted_job_complaints(doc: &Yaml) -> Vec<String> {
 
     let running = steps_of(job)
         .iter()
-        .filter(|step| scalar(step, "run") == Some(WINDOWS_HOSTED_TEST_WITNESS))
+        .filter(|step| scalar(step, "run") == Some(WINDOWS_TEST_WITNESS))
         .count();
     if running != 1 {
         out.push(format!(
             "[test-windows-hosted-command] `{TEST_WINDOWS_HOSTED_JOB}` has {running} steps whose \
-             `run:` is exactly the pinned suite-and-witness script, not one. It is the guest's \
-             script without the two lines that assert the image's compiler: `{TEST_COMMAND}`, \
-             its exit, and the count of passing tests against the guest's floor, without which \
-             a suite that compiled and executed nothing is green here as on the guest."
+             `run:` is exactly the guest's pinned suite-and-witness script, not one. The lines \
+             before `{TEST_COMMAND}` refuse any compiler but the image's \
+             `{GOLDEN_IMAGE_TOOLCHAIN}`, which on this runner is the one the install selected \
+             only if its `rustup default` took; the lines after it are the count of passing \
+             tests against the guest's floor, without which a suite that compiled and executed \
+             nothing is green here as on the guest."
         ));
     }
     out.extend(capture_complaints(
         job,
         TEST_WINDOWS_HOSTED_JOB,
         "test-windows-hosted-capture-command",
-        WINDOWS_HOSTED_TEST_WITNESS,
+        WINDOWS_TEST_WITNESS,
         HOST_ACCEPTANCE_WINDOWS_CAPTURE,
     ));
     out.extend(observation_complaints(
@@ -1002,14 +1003,35 @@ pub(super) fn ci_test_windows_hosted_job_complaints(doc: &Yaml) -> Vec<String> {
         job,
         TEST_WINDOWS_HOSTED_JOB,
         "test-windows-hosted-run-script",
-        &TEST_WINDOWS_HOSTED_SCRIPTS,
+        &TEST_WINDOWS_SCRIPTS,
     ));
     out.extend(toolchain_complaints(
         job,
         TEST_WINDOWS_HOSTED_JOB,
         "test-windows-hosted-toolchain",
-        Some(STABLE_TOOLCHAIN),
+        None,
     ));
+    for (index, step) in steps_of(job).iter().enumerate() {
+        if !installs_a_toolchain(step) {
+            continue;
+        }
+        let selected = field(step, "with").and_then(|with| scalar(with, "toolchain"));
+        if selected != Some(GOLDEN_IMAGE_TOOLCHAIN) {
+            out.push(format!(
+                "[test-windows-hosted-toolchain] `{TEST_WINDOWS_HOSTED_JOB}` step {index} \
+                 installs toolchain {selected:?}, not `{GOLDEN_IMAGE_TOOLCHAIN}`, the guest's \
+                 image's. The twin runs the suite only when the guest is busy, so any other \
+                 compiler here makes a test whose outcome depends on the compiler -- a \
+                 version-gated test, a std behaviour change, a new lint in test code under \
+                 `-D warnings` -- pass or fail according to how busy the guest was. `stable` \
+                 floats ahead of the image and an older version omits what the image's \
+                 compiler enables; the pin keeps the two homes one compiler. With the suite \
+                 step intact its compiler questions throw on every run sent here, so this is \
+                 the drift between the two places the version is written, refused before it \
+                 is pushed."
+            ));
+        }
+    }
 
     let components: BTreeSet<&str> = steps_of(job)
         .iter()
@@ -3757,15 +3779,17 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         refused_as: "test-windows-hosted-command",
     },
     WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-HOSTED-ASSERTS-THE-IMAGE-COMPILER",
-        escape: "the guest's suite step copied into the twin whole, its check that the compiler \
-                 is the image's 1.97.1 included. The twin installs stable, so the step throws on \
-                 every run sent there: a fallback that is red by construction",
+        name: "MUT-TEST-WINDOWS-HOSTED-COMPILER-CHECK-DROPPED",
+        escape: "the twin's two compiler lines dropped, the install left at the image's \
+                 version. The toolchain action tolerates a failed `rustup default` and verifies \
+                 only `rustc +1.97.1`, so the install can report success while bare `cargo` is \
+                 the runner's preinstalled stable, and a `RUSTC` or a PATH naming another \
+                 install is read by nothing else here: the suite runs on a compiler the guest \
+                 never ran it on with every other pin matching",
         job: Some("test-windows-hosted"),
-        anchor: "          cargo test --all-targets --all-features | Tee-Object -Variable log\n",
-        replacement: "          $rustc = ((cargo rustc -q --lib -- --version) | Out-String).Trim(); $path_rustc = ((rustc --version) | Out-String).Trim(); $cargo = ((cargo --version) | Out-String).Trim()\n\
-                      \x20         if ($rustc -notmatch '^rustc 1\\.97\\.1 ' -or $path_rustc -notmatch '^rustc 1\\.97\\.1 ' -or $cargo -notmatch '^cargo 1\\.97\\.1 ') { throw \"the suite would run on '$rustc' (Cargo's compiler), '$path_rustc' (PATH's rustc) and '$cargo', not the image's 1.97.1: a compiler was chosen by something other than this workflow\" }\n\
-                      \x20         cargo test --all-targets --all-features | Tee-Object -Variable log\n",
+        anchor: "          $rustc = ((cargo rustc -q --lib -- --version) | Out-String).Trim(); $path_rustc = ((rustc --version) | Out-String).Trim(); $cargo = ((cargo --version) | Out-String).Trim()\n\
+                 \x20         if ($rustc -notmatch '^rustc 1\\.97\\.1 ' -or $path_rustc -notmatch '^rustc 1\\.97\\.1 ' -or $cargo -notmatch '^cargo 1\\.97\\.1 ') { throw \"the suite would run on '$rustc' (Cargo's compiler), '$path_rustc' (PATH's rustc) and '$cargo', not the image's 1.97.1: a compiler was chosen by something other than this workflow\" }\n",
+        replacement: "",
         refused_as: "test-windows-hosted-command",
     },
     WorkflowEscape {
@@ -3836,17 +3860,36 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-TOOLCHAIN-DOWNGRADED",
-        escape: "the twin installs the guest's 1.97.1 instead of stable: the action and its \
-                 input keys are allowlisted, and the suite runs on a compiler the hosted jobs \
-                 do not",
+        escape: "the twin installs `1.96.0`, a compiler the guest's image never carried. The \
+                 action, its input keys and its components value are allowlisted, so every \
+                 step-level pin holds. With the suite step intact its compiler questions throw \
+                 on every run sent to the twin; edited together with it, the twin omits a \
+                 Windows test enabled only on 1.97 and later, so a run's result depends on how \
+                 busy the guest was",
         job: Some("test-windows-hosted"),
-        anchor: "          toolchain: stable\n",
-        replacement: "          toolchain: 1.97.1\n",
+        anchor: "          toolchain: 1.97.1\n",
+        replacement: "          toolchain: 1.96.0\n",
+        refused_as: "test-windows-hosted-toolchain",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-HOSTED-TOOLCHAIN-FLOATS",
+        escape: "the twin installs `stable`, the shape this job first had, which is already \
+                 ahead of the image's compiler. With the suite step intact its compiler \
+                 questions throw on every run sent to the twin; edited together with it, the \
+                 twin runs the suite on a compiler the guest never ran it on, and a test whose \
+                 outcome depends on the compiler -- a std change to Windows process spawning, a \
+                 new lint in test code under `-D warnings` -- passes on one home and fails on \
+                 the other. The compiler split the hosted merge-queue lane's pin removed, and \
+                 that the first review of #375 found this job had brought back",
+        job: Some("test-windows-hosted"),
+        anchor: "          toolchain: 1.97.1\n",
+        replacement: "          toolchain: stable\n",
         refused_as: "test-windows-hosted-toolchain",
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-WITHOUT-CLIPPY",
-        escape: "the twin installs stable without `clippy`, so the effect-denial fixtures in the \
+        escape: "the twin installs the image's compiler without `clippy`, so the effect-denial \
+                 fixtures in the \
                  suite it runs have no `clippy-driver`",
         job: Some("test-windows-hosted"),
         anchor: "          components: clippy\n",

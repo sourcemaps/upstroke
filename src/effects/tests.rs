@@ -5385,8 +5385,8 @@ mod workflow;
 use ci_model::{
     CI_TARGETS, CI_WORKFLOW, GOLDEN_IMAGE_TOOLCHAIN, MSRV_COMMAND, MSRV_JOB, OVERRIDING_REPO_FILES,
     PICK_WINDOWS_HOME_SCRIPT, RUSTFLAGS_KEY, TEST_COMMAND, TEST_WINDOWS_CONDITION,
-    TEST_WINDOWS_HOSTED_CONDITION, TEST_WINDOWS_LABELS, TEST_WINDOWS_NAME, TEST_WINDOWS_PLATFORM,
-    WINDOWS_HOSTED_TEST_WITNESS, WINDOWS_TEST_FLOOR, WINDOWS_TEST_WITNESS,
+    TEST_WINDOWS_HOSTED_CONDITION, TEST_WINDOWS_HOSTED_JOB, TEST_WINDOWS_LABELS, TEST_WINDOWS_NAME,
+    TEST_WINDOWS_PLATFORM, WINDOWS_TEST_FLOOR, WINDOWS_TEST_WITNESS,
 };
 use workflow::{
     WORKFLOW_ESCAPES, ci_msrv_job_complaints, ci_pick_windows_home_complaints,
@@ -6093,7 +6093,7 @@ if (( page == 1 )); then echo "fake gh: no canned answer for $path" >&2; exit 1;
 }
 
 #[test]
-fn the_hosted_windows_twin_runs_the_guests_suite_and_count_when_the_picker_sends_it_there() {
+fn the_hosted_windows_twin_runs_the_guests_suite_on_the_guests_compiler() {
     let doc = parse_workflow(&ci_workflow_text()).expect(CI_WORKFLOW);
     let complaints = ci_test_windows_hosted_job_complaints(&doc);
     assert!(
@@ -6101,12 +6101,20 @@ fn the_hosted_windows_twin_runs_the_guests_suite_and_count_when_the_picker_sends
         "the Windows suite's hosted twin does not match the contract:\n{}",
         complaints.join("\n")
     );
+    let installed: Vec<&str> = field(&doc, "jobs")
+        .and_then(|jobs| field(jobs, TEST_WINDOWS_HOSTED_JOB))
+        .map(steps_of)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|step| field(step, "with").and_then(|with| scalar(with, "toolchain")))
+        .collect();
+    let version = GOLDEN_IMAGE_TOOLCHAIN.replace('.', "\\.");
     assert!(
-        WINDOWS_HOSTED_TEST_WITNESS.starts_with(&format!("{TEST_COMMAND} | "))
-            && WINDOWS_TEST_WITNESS.ends_with(WINDOWS_HOSTED_TEST_WITNESS),
-        "the twin's suite step is not the guest's suite command and count with only the \
-         guest's compiler check in front of them removed, so the two homes do not run one \
-         suite against one floor"
+        installed == [GOLDEN_IMAGE_TOOLCHAIN]
+            && WINDOWS_TEST_WITNESS.contains(&format!("$rustc -notmatch '^rustc {version} '")),
+        "the twin installs {installed:?} where the guest's suite step, which the twin runs too, \
+         asserts `{GOLDEN_IMAGE_TOOLCHAIN}`, so the two homes do not run the suite on one \
+         compiler"
     );
     assert_eq!(
         TEST_WINDOWS_CONDITION.replace("'guest'", "'hosted'"),

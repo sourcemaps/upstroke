@@ -92,14 +92,13 @@ The scripts the Windows test leg runs: the identity script, the suite
 with the witness that it executed, [`HOST_ACCEPTANCE_WINDOWS_CAPTURE`] and
 [`CAPABILITY_WINDOWS_OBSERVATION`].
 
-## `pub(super) const TEST_WINDOWS_HOSTED_SCRIPTS: [&str; 4] = [`
-
-The scripts the hosted twin runs: the guest's list with
-[`WINDOWS_HOSTED_TEST_WITNESS`] in place of the guest's suite step. The two
-acceptance-record steps are carried over unchanged, because neither depends
-on the guest's image: each runs the test it names and checks the frame it
-prints, and every container capability class passes, an absent Docker
-included.
+Both Windows suite jobs run this one list, the guest's and its hosted twin
+[`TEST_WINDOWS_HOSTED_JOB`]'s. The twin's suite step is the guest's, compiler
+questions included, because the twin installs the guest's compiler
+([`GOLDEN_IMAGE_TOOLCHAIN`]). The two acceptance-record steps carry over
+because neither depends on the guest's image: each runs the test it names
+and checks the frame it prints, and every container capability class
+passes, an absent Docker included.
 
 ## `pub(super) const WINDOWS_TEST_FLOOR: u32 = 1700;`
 
@@ -197,22 +196,17 @@ check, and this is the leg saying that it ran what it claims to have run.
 Measured, `MUT-WINDOWS-WITNESS-FLOOR-DROPPED` and
 `MUT-WINDOWS-WITNESS-COUNT-DROPPED`.
 
-## `pub(super) const WINDOWS_HOSTED_TEST_WITNESS: &str`
-
-The hosted twin's suite step, character for character: the guest's
-[`WINDOWS_TEST_WITNESS`] without its first two lines, the questions that
-refuse any compiler but the image's. The twin has no image to ask about; it
-installs stable at step 1, as the `test` job does, and the oracle pins that
-install and its `clippy` component instead. Kept, character for character:
-[`TEST_COMMAND`], its exit, and the count against [`WINDOWS_TEST_FLOOR`] --
-the twin's machine is GitHub's and not the build box, but a Cargo target
-runner or a `[workspace]` selection reaches it the same way, and a count is
-what refuses a suite that did not execute.
-`the_hosted_windows_twin_runs_the_guests_suite_and_count_when_the_picker_sends_it_there`
-holds this to the guest's script's tail, so the two homes run one suite
-against one floor. Measured, `MUT-TEST-WINDOWS-HOSTED-WITNESS-DROPPED`,
-`MUT-TEST-WINDOWS-HOSTED-FLOOR-DROPPED` and
-`MUT-TEST-WINDOWS-HOSTED-ASSERTS-THE-IMAGE-COMPILER`.
+The same step runs on the hosted twin, character for character. There a
+step does install the compiler -- the image's version, at step 1 -- and the
+three questions are what make that install the claim rather than a hope:
+the toolchain action tolerates a failed `rustup default` and verifies only
+`rustc +1.97.1`, so it can report success while bare `cargo` is still the
+runner's preinstalled stable. The count carries over for the reason it
+exists on the guest: the twin's machine is GitHub's, not the build box, but
+a Cargo target runner or a `[workspace]` selection reaches it the same way.
+Measured on the twin, `MUT-TEST-WINDOWS-HOSTED-COMPILER-CHECK-DROPPED`,
+`MUT-TEST-WINDOWS-HOSTED-WITNESS-DROPPED` and
+`MUT-TEST-WINDOWS-HOSTED-FLOOR-DROPPED`.
 
 ## `pub(super) const HOST_ACCEPTANCE_CAPTURE: &str = r#"set -o pipefail`
 
@@ -489,12 +483,25 @@ The compiler the golden image carries, and so the one
 ahead of the image (`lint (windows)` installed 1.98.1 on 2026-09-16 against
 the image's 1.97.1). The job installs nothing: the image selects the
 compiler on every lane, and re-curation moves it, editing this constant in
-the same change. The hosted twin has no image to ask and installs stable
-instead ([`WINDOWS_HOSTED_TEST_WITNESS`]). While the merge queue ran on `windows-latest` its lane
+the same change. While the merge queue ran on `windows-latest` its lane
 installed this version, so that the queue and the pull-request lane ran one
 compiler; that install went with the lane, and a toolchain install in this
 job is now refused outright, since at this very version it would pass the
 witness while the workflow, not the image, chose the compiler.
+
+The hosted twin, [`TEST_WINDOWS_HOSTED_JOB`], has no image to carry a
+compiler, so it installs this version, exactly, and runs the guest's
+[`WINDOWS_TEST_WITNESS`], whose questions assert it. It first installed
+`stable`; the first review of #375 found that the split the hosted queue
+lane's pin had removed, and the operator pinned the twin to the guest's
+compiler on 2026-11-12. A twin on `stable` runs the suite on a compiler the
+guest never ran it on, so a test whose outcome depends on the compiler -- a
+version-gated test, a std change to Windows process spawning, a new lint in
+test code under `-D warnings` -- passes or fails according to how busy the
+guest was. With the pin, what differs between the two homes is the machine,
+not the compiler. Re-curation moves the twin's install with this constant.
+Measured, `MUT-TEST-WINDOWS-HOSTED-TOOLCHAIN-FLOATS` and
+`MUT-TEST-WINDOWS-HOSTED-TOOLCHAIN-DOWNGRADED`.
 `lint (windows)` compiles current stable on every event and is required by
 the aggregate, so a stable that adds a lint between a pull request's green
 and its enqueue ejects the entry through that leg; nothing here shields the
@@ -531,10 +538,14 @@ answer is `guest`. Measured, `MUT-TEST-WINDOWS-TIMEOUT-RAISED`,
 
 The Windows suite's hosted twin: `test (windows-latest)` on GitHub's
 `windows-latest`, needing `pick-windows-home` and running only when its
-answer is `hosted`. The two conditions compare the one answer with its two
-values, so exactly one of the two jobs runs on any run whose picker
-succeeded; `the_hosted_windows_twin_runs_the_guests_suite_and_count_when_the_picker_sends_it_there`
-holds them to that shape.
+answer is `hosted`. It installs [`GOLDEN_IMAGE_TOOLCHAIN`] with `clippy` at
+step 1 and then runs the guest's [`TEST_WINDOWS_SCRIPTS`], so the two homes
+run one suite, on one compiler, against one floor. The two conditions
+compare the one answer with its two values, so exactly one of the two jobs
+runs on any run whose picker succeeded;
+`the_hosted_windows_twin_runs_the_guests_suite_on_the_guests_compiler`
+holds the install to the version the suite step asserts, and the conditions
+to that shape.
 
 55 minutes: the ceiling the hosted Windows suite last ran under. The job
 inherits that suite's record -- 21 to 28 minutes a job in September 2026,

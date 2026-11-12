@@ -370,17 +370,32 @@ Every way the Windows suite's hosted twin fails its contract, pinned as
 strictly as the guest's job: field set, name, runner, timeout, `needs:` and
 condition; every step's fields, the case-fold map on the suite, capture and
 observation steps, and the observation's bound; the platform-default shell on
-every `run:` step; exactly one suite step running
-[`WINDOWS_HOSTED_TEST_WITNESS`], the capture immediately after it and the
-observation immediately after that; one input-free checkout at step 0; and
-every script and action on its pin.
+every `run:` step; exactly one suite step running the guest's
+[`WINDOWS_TEST_WITNESS`], compiler questions included, the capture
+immediately after it and the observation immediately after that; one
+input-free checkout at step 0; and every script and action on the guest's
+pins, [`TEST_WINDOWS_SCRIPTS`].
 
 Where the guest's job refuses a toolchain install, this one requires one:
-the toolchain action at step 1 selecting `stable`, as the `test` job's is,
-with `clippy` among its components, since the suite's effect-denial
-fixtures run `clippy-driver`. The guest's rule against an install stays,
-and applies to the guest's job only. Measured, every row named
-`MUT-TEST-WINDOWS-HOSTED-*`.
+the toolchain action at step 1, with `clippy` among its components, since
+the suite's effect-denial fixtures run `clippy-driver`. The guest's rule
+against an install stays, and applies to the guest's job only. Measured,
+every row named `MUT-TEST-WINDOWS-HOSTED-*`.
+
+## `pub(super) fn ci_test_windows_hosted_job_complaints(doc: &Yaml) -> Vec<String> {` › `let selected = field(step, "with").and_then(|with| scalar(with, "toolchain"));`
+
+The install selects [`GOLDEN_IMAGE_TOOLCHAIN`], the guest's image's
+compiler, exactly: not `stable`, which floats ahead of the image, and not an
+older version, which omits what the image's compiler enables. The twin runs
+only when the guest is busy, so a second compiler would make a
+compiler-dependent test's result depend on the guest's load. With the suite
+step intact either drift throws at the compiler questions on every run sent
+to the twin; this refuses it before it is pushed, and edited together with
+the suite step the drift is refused there, as an unpinned script. The
+check is the twin's own rather than [`toolchain_complaints`]'s `expected`,
+whose complaint is written for the hosted jobs that pin `stable`. Measured,
+`MUT-TEST-WINDOWS-HOSTED-TOOLCHAIN-FLOATS` and
+`MUT-TEST-WINDOWS-HOSTED-TOOLCHAIN-DOWNGRADED`.
 
 ## `pub(super) fn ci_test_windows_hosted_job_complaints(doc: &Yaml) -> Vec<String> {` › `let components: BTreeSet<&str> = steps_of(job)`
 

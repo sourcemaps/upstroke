@@ -2189,7 +2189,9 @@ this check read and how each was shown a spelling it missed.
 
 The leg whose tests leave GitHub's runners reports that they ran, and
 refuses to run them on any compiler but
-the one [`GOLDEN_IMAGE_TOOLCHAIN`] names -- asking Cargo which compiler it
+the one [`GOLDEN_IMAGE_TOOLCHAIN`] names. The script is both Windows suite
+jobs' suite step, the guest's and its hosted twin's, so this holds both --
+asking Cargo which compiler it
 will run, the step's PATH which `rustc` it names, and the step's PATH
 which `cargo` it has. The fixtures' own PATH is Cargo's to build, and a
 split there fails the rlib-linked fixtures rather than passing them
@@ -2315,16 +2317,19 @@ pin and the clean-workflow checks; and restoring a default limit of 2
 2026-11-12) failed the case with neither variable set -- it asked the API
 and answered `hosted` -- and the picker's pin.
 
-## `fn the_hosted_windows_twin_runs_the_guests_suite_and_count_when_the_picker_sends_it_there() {`
+## `fn the_hosted_windows_twin_runs_the_guests_suite_on_the_guests_compiler() {`
 
 The hosted twin matches the contract, and two relations hold between it and
 the guest's job that the oracle's pins, each against its own constant, do
-not state. The twin's suite step is the tail of the guest's -- the same
-`cargo test` line, its exit and the same count against the same floor --
-with only the guest's two compiler lines in front of it removed. And the two
-conditions are one comparison of the picker's answer, with `guest` and
-`hosted` its two values, so the two jobs cannot both run, or both be
-skipped, on a run whose picker succeeded.
+not state. The toolchain the twin's one install selects, read from the
+workflow, is the version the guest's suite step -- which the twin runs too
+-- asserts for Cargo's compiler, so the two homes run the suite on one
+compiler. And the two conditions are one comparison of the picker's
+answer, with `guest` and `hosted` its two values, so the two jobs cannot
+both run, or both be skipped, on a run whose picker succeeded. Measured by
+setting the twin's install back to `stable` in the workflow and restoring
+it: this test and the oracle's clean-workflow check both failed, each with
+the twin's toolchain complaint.
 
 ## `mod merge_gate_answers {`
 

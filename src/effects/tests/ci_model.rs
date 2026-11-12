@@ -30,18 +30,9 @@ pub(super) const TEST_WINDOWS_SCRIPTS: [&str; 4] = [
     CAPABILITY_WINDOWS_OBSERVATION,
 ];
 
-pub(super) const TEST_WINDOWS_HOSTED_SCRIPTS: [&str; 4] = [
-    GIT_IDENTITY_SCRIPT,
-    WINDOWS_HOSTED_TEST_WITNESS,
-    HOST_ACCEPTANCE_WINDOWS_CAPTURE,
-    CAPABILITY_WINDOWS_OBSERVATION,
-];
-
 pub(super) const WINDOWS_TEST_FLOOR: u32 = 1700;
 
 pub(super) const WINDOWS_TEST_WITNESS: &str = "$rustc = ((cargo rustc -q --lib -- --version) | Out-String).Trim(); $path_rustc = ((rustc --version) | Out-String).Trim(); $cargo = ((cargo --version) | Out-String).Trim()\nif ($rustc -notmatch '^rustc 1\\.97\\.1 ' -or $path_rustc -notmatch '^rustc 1\\.97\\.1 ' -or $cargo -notmatch '^cargo 1\\.97\\.1 ') { throw \"the suite would run on '$rustc' (Cargo's compiler), '$path_rustc' (PATH's rustc) and '$cargo', not the image's 1.97.1: a compiler was chosen by something other than this workflow\" }\ncargo test --all-targets --all-features | Tee-Object -Variable log\nif ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n$passed = [int](($log | Select-String -Pattern '^test result: ok\\. (\\d+) passed' | ForEach-Object { [int]$_.Matches[0].Groups[1].Value } | Measure-Object -Sum).Sum)\nif ($passed -lt 1700) { throw \"the suite reported $passed passing tests, below the floor of 1700: Cargo compiled the harnesses and executed almost none of them\" }\n";
-
-pub(super) const WINDOWS_HOSTED_TEST_WITNESS: &str = "cargo test --all-targets --all-features | Tee-Object -Variable log\nif ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n$passed = [int](($log | Select-String -Pattern '^test result: ok\\. (\\d+) passed' | ForEach-Object { [int]$_.Matches[0].Groups[1].Value } | Measure-Object -Sum).Sum)\nif ($passed -lt 1700) { throw \"the suite reported $passed passing tests, below the floor of 1700: Cargo compiled the harnesses and executed almost none of them\" }\n";
 
 pub(super) const HOST_ACCEPTANCE_CAPTURE: &str = r#"set -o pipefail
 log="$RUNNER_TEMP/host-acceptance-record.log"

@@ -402,17 +402,35 @@ jobs:
           if (-not $ok) { throw "the container capability record is missing or its framing is incomplete" }
 
   # The Windows suite's hosted twin, for a run `pick-windows-home` sends off
-  # the guest. It runs the guest's suite command and the same witness, the
-  # count of passing tests against the same floor, and differs only where
-  # GitHub's image differs from the guest's. No image carries the compiler
-  # here, so it installs stable the way the hosted `test` job does, with
-  # `clippy` for the effect-denial fixtures, and the workflow oracle pins
-  # that install where the guest's suite step asserts the image's 1.97.1;
-  # the suite step is the guest's without those two compiler lines. It caches
-  # like the other hosted jobs. The host acceptance capture and the container
-  # capability observation follow the suite as they do on the guest: neither
-  # depends on the guest's image -- each runs the test it names and checks
-  # its frame, and every capability class passes, an absent Docker included.
+  # the guest. Its suite step is the guest's, character for character: the
+  # three compiler questions, the suite, its exit and the count of passing
+  # tests against the same floor. It differs only where GitHub's image
+  # differs from the guest's. No image carries the compiler here, so step 1
+  # installs the image's, `1.97.1`, not `stable`. Current stable is ahead of
+  # the image (`lint (windows)` installed 1.98.1 on 2026-09-16), so `stable`
+  # here would run the suite on a compiler the guest never ran it on: a test
+  # whose outcome depends on the compiler -- a version-gated test, a std
+  # change to Windows process spawning, which this suite's `cmd /C` quoting
+  # and PATHEXT tests exercise, a new lint in test code under the
+  # workflow-wide `-D warnings` -- would pass on one home and fail on the
+  # other according to how busy the guest was. The pin keeps the two homes
+  # one compiler, as it kept the hosted merge-queue lane and the guest one
+  # compiler until that lane went (d3434ace). The toolchain action tolerates
+  # a failed `rustup default` and then verifies only `rustc +1.97.1`, so the
+  # install can report success while bare `cargo` is still the runner's
+  # preinstalled stable; the suite step's three questions refuse that here
+  # as they do on the guest, and the workflow oracle holds the install and
+  # the questions to the one version it pins as the image's. Re-curation
+  # edits both. The first question compiles the dependencies, which the
+  # suite would compile next anyway. `clippy` is a test dependency here, as
+  # in `test` above. It caches like the other hosted jobs. The host
+  # acceptance capture and the container capability observation follow the
+  # suite as they do on the guest: neither depends on the guest's image --
+  # each runs the test it names and checks its frame, and every capability
+  # class passes, an absent Docker included. What the pin does not remove is
+  # the machine: GitHub's image, filesystem, temporary directory and services
+  # are not the guest's, so a test whose outcome depends on the machine can
+  # still pass here and fail there.
   #
   # 55 minutes, the ceiling the hosted Windows suite last ran under. This job
   # inherits that suite's risk: it took 21 to 28 minutes a job in September
@@ -429,10 +447,10 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - name: Install Rust
+      - name: Install the image's toolchain
         uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
-          toolchain: stable
+          toolchain: 1.97.1
           components: clippy
 
       - name: Cache cargo
@@ -447,6 +465,8 @@ jobs:
         env:
           UPSTROKE_TEST_TEMP_FOLDS_CASE: "1"
         run: |
+          $rustc = ((cargo rustc -q --lib -- --version) | Out-String).Trim(); $path_rustc = ((rustc --version) | Out-String).Trim(); $cargo = ((cargo --version) | Out-String).Trim()
+          if ($rustc -notmatch '^rustc 1\.97\.1 ' -or $path_rustc -notmatch '^rustc 1\.97\.1 ' -or $cargo -notmatch '^cargo 1\.97\.1 ') { throw "the suite would run on '$rustc' (Cargo's compiler), '$path_rustc' (PATH's rustc) and '$cargo', not the image's 1.97.1: a compiler was chosen by something other than this workflow" }
           cargo test --all-targets --all-features | Tee-Object -Variable log
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $passed = [int](($log | Select-String -Pattern '^test result: ok\. (\d+) passed' | ForEach-Object { [int]$_.Matches[0].Groups[1].Value } | Measure-Object -Sum).Sum)
@@ -510,8 +530,8 @@ jobs:
   # second step, `cargo build --all-targets`, makes it the witness that the
   # tree code-generates and links on current stable too, library, binaries and
   # test harnesses alike -- `cargo check` and Clippy stop before codegen, and
-  # the test leg links with the image's toolchain, which moves only by
-  # re-curation. In the dev
+  # both Windows suite jobs, the guest and its hosted twin, link with the
+  # image's toolchain, which moves only by re-curation. In the dev
   # profile, which is the profile every CI leg here builds; `release.yml` builds
   # the shipped artifact with `--release`. The two steps fail separately and the
   # log names which.
