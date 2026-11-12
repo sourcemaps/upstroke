@@ -2245,6 +2245,20 @@ Linux only. The script runs on `ubuntu-latest` and nowhere else, and it
 needs `bash` 4 (`mapfile`) and `jq`. The Windows legs, the guest's image
 included, promise neither; the macOS runner's `/bin/bash` is 3.2.
 
+## ``const JQ_ABSENT: &str = "no `jq` on PATH, and the picker's script reads the API's answers \``
+
+Why the fixtures skipped, as a value the skip prints rather than a comment,
+on the pattern of the Docker gate's `absent_reason`.
+
+## `const ON_A_GITHUB_RUNNER: &str = "GITHUB_ACTIONS";`
+
+The variable GitHub sets on every runner. Where it is set the skip is a
+failure: the picker's job runs on `ubuntu-latest` because that image carries
+`jq`, so a runner without it means these fixtures did not run where they
+are due to, and a skip counts as a pass in the suite's totals. Unlike
+`UPSTROKE_REQUIRE_DOCKER` it needs no workflow change, which matters
+because the `test` step's environment is pinned whole.
+
 ## `const FAKE_GH: &str = r#"#!/usr/bin/env bash`
 
 `gh api [--paginate] <path>` over canned pages. A path's pages are files
@@ -2303,8 +2317,17 @@ aggregate requires the picker to succeed.
 ## `fn the_windows_home_picker_answers_from_canned_api_pages() {`
 
 Every case, reported together, so a broken script names every answer it
-gets wrong. It requires `jq` on PATH first and fails if there is none,
-rather than reading the script's own `guest` fallback as a pass. Measured
+gets wrong. It asks for `jq` on PATH first, so that a machine without it is
+never read as the script's own `guest` fallback passing. Without it the test
+skips, printing [`JQ_ABSENT`], the repository's convention for a missing
+prerequisite -- the Docker gate's loud skip with its reason a value, and
+`connect`'s `skipped: no claude on PATH` -- so `cargo test` on a Linux
+machine without `jq` does not fail where it passed before the picker
+existed. On a GitHub runner it fails instead ([`ON_A_GITHUB_RUNNER`]), as a
+Docker-gated test does under `UPSTROKE_REQUIRE_DOCKER`. Measured on
+2026-11-12 by pointing the probe at a program that does not exist: the test
+printed the skip and passed; with the runner check pointed at a variable
+that is always set, it failed naming the skip. Both restored. Measured
 by mutating the workflow's script, each mutation then restored: removing the
 run-id dedupe failed the counted-once case; dropping `--paginate` from the
 jobs read failed the later-pages case and the later-page-failure case of a

@@ -5660,6 +5660,10 @@ done
 if (( page == 1 )); then echo "fake gh: no canned answer for $path" >&2; exit 1; fi
 "#;
 
+    const JQ_ABSENT: &str = "no `jq` on PATH, and the picker's script reads the API's answers \
+                             with it; install `jq` to run these fixtures";
+    const ON_A_GITHUB_RUNNER: &str = "GITHUB_ACTIONS";
+
     const BUSY: &str = "WINGUEST_BUSY is 1, so the queue for the guest was not counted.";
     const ROUTING_OFF: &str = "WINGUEST_BUSY is not 1, and WINGUEST_QUEUE_LIMIT is unset or not a \
                                positive whole number, so routing on the queue is off and the \
@@ -6066,11 +6070,16 @@ if (( page == 1 )); then echo "fake gh: no canned answer for $path" >&2; exit 1;
     #[test]
     fn the_windows_home_picker_answers_from_canned_api_pages() {
         let jq = Command::new("jq").arg("--version").output();
-        assert!(
-            jq.is_ok_and(|output| output.status.success()),
-            "these fixtures run the picker's script, which reads the API's answers with `jq`; \
-             the ubuntu runner carries it, and this machine has none on PATH"
-        );
+        if !jq.is_ok_and(|output| output.status.success()) {
+            assert!(
+                std::env::var_os(ON_A_GITHUB_RUNNER).is_none(),
+                "{ON_A_GITHUB_RUNNER} is set and these fixtures would have skipped: {JQ_ABSENT}. \
+                 The picker runs on `ubuntu-latest` because its image carries `jq`, so a runner \
+                 without it is a skip where a pass was due"
+            );
+            eprintln!("skipped: {JQ_ABSENT}");
+            return;
+        }
         let doc = parse_workflow(&ci_workflow_text()).expect(CI_WORKFLOW);
         let script = field(&doc, "jobs")
             .and_then(|jobs| field(jobs, PICK_WINDOWS_HOME_JOB))
