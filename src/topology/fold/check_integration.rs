@@ -33,6 +33,16 @@ impl RunState {
                 next: self.next_sequence,
             });
         }
+        if self.next_sequence.checked_add(1).is_none() {
+            return Err(FoldError::InconsistentRecord {
+                kind,
+                detail: format!(
+                    "this run has exhausted its integration sequence numbers: no sequence \
+                     follows {}, so the transaction after this one could not be told from it",
+                    sequence.0
+                ),
+            });
+        }
         let first = self
             .queue
             .first_eligible(
