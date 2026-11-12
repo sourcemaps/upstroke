@@ -1930,8 +1930,7 @@ shapes, in the direction that matters: an answered failure read as unreachable
 makes `census::proceeds_without` true, and a write command then proceeds with
 no container evidence over a runtime that answered and would not list a dead
 owner's containers. The daemon's phrases are its own; the label values and
-mount paths it quotes back are engine-supplied. Round six, the sweep of
-finding 1's class.
+mount paths it quotes back are engine-supplied.
 
 ## `pub fn classify_docker_failure(operation: RuntimeOp, detail: String) -> RuntimeError {`
 
@@ -1952,7 +1951,7 @@ stderr: [`daemon_answer_about`] is what decides which text they may be looked
 for in. `DockerCli::inspect` is the only caller that still turns this into an
 answer on its own, and on every path it reaches — an image, a volume, and the
 container reads inside `collect` and `create`'s read-back — an absent object
-is a refusal or an error and never a settled process (round six, §7.3).
+is a refusal or an error and never a settled process.
 
 ## `pub const REMOVAL_IN_PROGRESS: &str = "is already in progress";`
 
@@ -2146,9 +2145,9 @@ A free function taking the raw outcome rather than a `match` inside
 [`DockerCli::stop`], so the tolerance is reachable **without a daemon**: the
 branch that matters is one a real runtime only produces in a race, and a
 gated test is the wrong and only place it could otherwise be observed. Since
-round six it is a thin naming of [`settle`] over [`stop_answer`]: what it
-means to settle, and what a settlement has to be established against, is one
-function shared with `settle_remove`.
+the cover review of `9ee9784e` it is a thin naming of [`settle`] over
+[`stop_answer`]: what it means to settle, and what a settlement has to be
+established against, is one function shared with `settle_remove`.
 
 ## `const DAEMON_ANSWER: &str = "error response from daemon:";`
 
@@ -2174,8 +2173,13 @@ is text the environment shapes. With TLS material missing under a directory
 named `no such container`, the CLI fails **before contacting the daemon** and
 quotes that path back; every phrase table in this file matched the quoted path,
 so a local failure settled `Gone` and `ProcessGone` beside a container that was
-still running — the sequence and its reproduction are `pr8-triage.md` §9,
-finding 1.
+still running. The sequence: a gate starts under valid TLS material, the
+material disappears, every later Docker command fails locally, and the false
+settlement prunes the mounted R19 view, removes the R26 intent, makes the Runner
+answer `Gone`, and lets the verification settle and reclaim its snapshot while
+the gate's container survives.
+`tests::real_docker_fails_locally_without_ever_saying_a_container_is_gone`
+reproduces the local failure against the live CLI.
 
 Two things have to hold before a phrase means anything at all. The message has
 to be one the daemon spoke, which the CLI marks by opening the line with
@@ -2247,10 +2251,17 @@ holding the container at all.
 
 The vocabulary and the fallthrough are PR6's, unchanged: a container being
 removed counts as running until its record is gone, and a status this does not
-enumerate lands on the terminated side. `pr8-triage.md` §7.3 records why that
-arm is the class's remaining weak one and why refusing an unenumerated state,
-though the conforming shape, is a behaviour change to PR6 code with no
-reproduction behind it.
+enumerate lands on the terminated side. That fallthrough is the one weak arm
+left among the sites that conclude a process gone, and it is not a defect
+today: Docker's status vocabulary is closed and every member of it is
+classified — `created`, `exited` and `dead` hold no live process — and every
+way the query can fail is an `Err` before this match is reached. It would
+become a defect if the runtime gained a state that means a process is still
+running and is not one of the four this maps to `Running`: the census would
+observe a live container terminated and `reclaim` would remove it. Refusing an
+unenumerated state is the
+conforming shape, but it would change PR6's behaviour with no reproduction
+behind it, so the fallthrough stays.
 
 ## `const CONTAINER_STATE_FORMAT: &str = "{{.Names}}\u{1f}{{.State}}";`
 
@@ -2272,7 +2283,7 @@ exit of **0** with no output, which no local failure can produce.
 Absence is read out of a listing that had to succeed, never out of a failed
 `container inspect`'s stderr: the phrase a diagnostic carries is text the
 environment shapes, and this is the observation every other settlement in the
-runtime is established against (round six, finding 1).
+runtime is established against.
 
 The listing is asked under the bound the caller names (K2): the invocation's
 deadline and cancellation for the supervision (`listing_within`), the

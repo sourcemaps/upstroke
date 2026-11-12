@@ -29,6 +29,26 @@ refusals[7]: one integration transaction at a time.
 
 refusals[6] / refusals[10]: sequences are dense from 0 across the run.
 
+## `impl RunState` › `if self.next_sequence.checked_add(1).is_none() {`
+
+Dense, and therefore distinct: a transaction is refused when the sequence after it cannot be
+represented. `apply` advances `next_sequence` with `saturating_add(1)`, which cannot panic a
+replay and, at `u32::MAX`, cannot move either. Without this refusal the transaction at
+`u32::MAX` would leave the counter where it was, a second transaction recording the same
+sequence would pass the density check above, and every later event that cites a sequence would
+name two transactions with one number. So the last sequence a `u32` holds opens nothing. The
+refusal is `InconsistentRecord`, the error `check_attempt_started` gives its exhausted attempt
+counter, and no variant was added for it.
+
+All three openers come through here: `merge_verification_started`, a fast `merge_prepared` and
+a conflict `merge_rejected`. With the refusal in place the `saturating_add` in each of their
+appliers never saturates for a checked event; the applying module is unchanged. The check sits
+after the density check, so a mis-numbered event at the ceiling is still refused as
+`NonDenseSequence`. No physical run reaches the ceiling, since the counter counts integration
+transactions. The boundary is pinned by `an_exhausted_integration_sequence_opens_no_transaction`
+in `src/topology/fold/tests/predicates.rs`, which accepts a fast publication at `u32::MAX - 1`
+and refuses it at `u32::MAX`; deleting this refusal fails that test.
+
 ## `impl RunState` › `let first = self`
 
 refusals[8]: the first eligible entry is integrated, and the fold
