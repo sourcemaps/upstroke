@@ -269,7 +269,8 @@ Every way the Windows test job fails its contract.
 The same shape as [`ci_test_job_complaints`] without the matrix, and with
 the one thing that job cannot say: which machine. The job runs on the
 curated guest on every lane -- a pull request, a push and a merge-queue
-entry alike -- and `runs-on:` is compared as a label set: a scalar is a
+entry alike -- whenever the picker answers `guest`, and `runs-on:` is
+compared as a label set: a scalar is a
 hosted runner, an expression routes some event to a machine this contract
 cannot name, and a subset of the labels admits every Windows machine the
 account registers.
@@ -343,6 +344,48 @@ Cargo was asked for; the lines after it are what say the suite ran, and
 an equality over the step is what stops those lines being dropped, or
 their floor lowered to a number an unexecuted suite clears. Measured,
 `MUT-WINDOWS-WITNESS-COUNT-DROPPED` and `MUT-WINDOWS-WITNESS-FLOOR-DROPPED`.
+
+## `pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {` › `out.extend(windows_home_complaints(`
+
+The guest's job needs the picker, runs only when it answers `guest`, and
+keeps its 20 minutes. Every step, script, label and the timeout are what
+they were before the twin; these are the two fields the twin added.
+
+## `fn windows_home_complaints(`
+
+The three fields that tie a Windows suite job to the picker: `needs:` is
+exactly `pick-windows-home`, `if:` is exactly the job's own condition, and
+the timeout is exactly its own. A condition that admits both answers runs
+both jobs and one that admits neither skips both; the aggregate fails either
+run, but only after it has spent its time, and this refuses the workflow
+before it is pushed. Codes `<job>-needs`, `<job>-condition` and
+`<job>-timeout`. Measured, `MUT-TEST-WINDOWS-RUNS-BESIDE-THE-TWIN`,
+`MUT-TEST-WINDOWS-HOSTED-RUNS-BESIDE-THE-GUEST`,
+`MUT-TEST-WINDOWS-NEEDS-DROPPED`, `MUT-TEST-WINDOWS-HOSTED-NEEDS-DROPPED`,
+`MUT-TEST-WINDOWS-TIMEOUT-RAISED` and `MUT-TEST-WINDOWS-HOSTED-TIMEOUT-RAISED`.
+
+## `pub(super) fn ci_test_windows_hosted_job_complaints(doc: &Yaml) -> Vec<String> {`
+
+Every way the Windows suite's hosted twin fails its contract, pinned as
+strictly as the guest's job: field set, name, runner, timeout, `needs:` and
+condition; every step's fields, the case-fold map on the suite, capture and
+observation steps, and the observation's bound; the platform-default shell on
+every `run:` step; exactly one suite step running
+[`WINDOWS_HOSTED_TEST_WITNESS`], the capture immediately after it and the
+observation immediately after that; one input-free checkout at step 0; and
+every script and action on its pin.
+
+Where the guest's job refuses a toolchain install, this one requires one:
+the toolchain action at step 1 selecting `stable`, as the `test` job's is,
+with `clippy` among its components, since the suite's effect-denial
+fixtures run `clippy-driver`. The guest's rule against an install stays,
+and applies to the guest's job only. Measured, every row named
+`MUT-TEST-WINDOWS-HOSTED-*`.
+
+## `pub(super) fn ci_test_windows_hosted_job_complaints(doc: &Yaml) -> Vec<String> {` › `let components: BTreeSet<&str> = steps_of(job)`
+
+The `clippy` component, read from the install step the way the `test` job's
+check reads it. Measured, `MUT-TEST-WINDOWS-HOSTED-WITHOUT-CLIPPY`.
 
 ## `fn capture_complaints(`
 

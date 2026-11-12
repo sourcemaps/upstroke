@@ -2298,6 +2298,36 @@ unreadable case; dropping the this-run exclusion failed the this-run case;
 and answering `hosted` on an unreadable API failed this test, the picker's
 pin and the clean-workflow checks.
 
+## `fn the_hosted_windows_twin_runs_the_guests_suite_and_count_when_the_picker_sends_it_there() {`
+
+The hosted twin matches the contract, and two relations hold between it and
+the guest's job that the oracle's pins, each against its own constant, do
+not state. The twin's suite step is the tail of the guest's -- the same
+`cargo test` line, its exit and the same count against the same floor --
+with only the guest's two compiler lines in front of it removed. And the two
+conditions are one comparison of the picker's answer, with `guest` and
+`hosted` its two values, so the two jobs cannot both run, or both be
+skipped, on a run whose picker succeeded.
+
+## `mod merge_gate_answers {`
+
+The aggregate's script, executed. Linux only, for the reason
+`pick_windows_home_answers` is: the script runs on `ubuntu-latest`.
+
+## `fn the_aggregate_requires_exactly_one_windows_suite_job_and_every_other_gate() {`
+
+The workflow's own aggregate script, run under `bash --noprofile --norc -eo
+pipefail` with the results it would read. The gates are the `_RESULT` names
+of the step's own `env:`, so a gate added to the workflow is exercised
+without an edit here. Every pair of Windows results among `success`,
+`failure`, `cancelled` and `skipped`, every other gate succeeding: exactly
+`success` beside `skipped`, either way round, passes. Then each other gate
+failed, cancelled or skipped, beside either passing Windows pair: the
+aggregate fails. Measured by mutating the workflow's script, each mutation
+then restored: accepting both Windows jobs skipped failed this test on that
+pair, and requiring both to succeed, as the script did before the twin,
+failed it on both passing pairs.
+
 ## `fn the_msrv_leg_checks_the_floor_the_manifest_publishes_on_every_platform() {`
 
 The MSRV leg checks the floor the manifest publishes, on every platform.

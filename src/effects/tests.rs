@@ -5384,15 +5384,17 @@ mod workflow;
 
 use ci_model::{
     CI_TARGETS, CI_WORKFLOW, GOLDEN_IMAGE_TOOLCHAIN, MSRV_COMMAND, MSRV_JOB, OVERRIDING_REPO_FILES,
-    PICK_WINDOWS_HOME_SCRIPT, RUSTFLAGS_KEY, TEST_COMMAND, TEST_WINDOWS_LABELS, TEST_WINDOWS_NAME,
-    TEST_WINDOWS_PLATFORM, WINDOWS_TEST_FLOOR, WINDOWS_TEST_WITNESS, WINGUEST_QUEUE_LIMIT_DEFAULT,
+    PICK_WINDOWS_HOME_SCRIPT, RUSTFLAGS_KEY, TEST_COMMAND, TEST_WINDOWS_CONDITION,
+    TEST_WINDOWS_HOSTED_CONDITION, TEST_WINDOWS_LABELS, TEST_WINDOWS_NAME, TEST_WINDOWS_PLATFORM,
+    WINDOWS_HOSTED_TEST_WITNESS, WINDOWS_TEST_FLOOR, WINDOWS_TEST_WITNESS,
+    WINGUEST_QUEUE_LIMIT_DEFAULT,
 };
 use workflow::{
     WORKFLOW_ESCAPES, ci_msrv_job_complaints, ci_pick_windows_home_complaints,
-    ci_test_job_complaints, ci_test_windows_job_complaints, ci_windows_build_witness_complaints,
-    ci_workflow_text, complaint_codes, declared_msrv_toolchain, declared_rust_version, field,
-    field_names, mutate_workflow, parse_workflow, rustflags_complaints, scalar, steps_of,
-    three_component, workflow_complaints,
+    ci_test_job_complaints, ci_test_windows_hosted_job_complaints, ci_test_windows_job_complaints,
+    ci_windows_build_witness_complaints, ci_workflow_text, complaint_codes,
+    declared_msrv_toolchain, declared_rust_version, field, field_names, mutate_workflow,
+    parse_workflow, rustflags_complaints, scalar, steps_of, three_component, workflow_complaints,
 };
 
 #[test]
@@ -6067,6 +6069,128 @@ if (( page == 1 )); then echo "fake gh: no canned answer for $path" >&2; exit 1;
             failures.is_empty(),
             "the picker's script answered wrongly from canned API pages:\n\n{}",
             failures.join("\n\n")
+        );
+    }
+}
+
+#[test]
+fn the_hosted_windows_twin_runs_the_guests_suite_and_count_when_the_picker_sends_it_there() {
+    let doc = parse_workflow(&ci_workflow_text()).expect(CI_WORKFLOW);
+    let complaints = ci_test_windows_hosted_job_complaints(&doc);
+    assert!(
+        complaints.is_empty(),
+        "the Windows suite's hosted twin does not match the contract:\n{}",
+        complaints.join("\n")
+    );
+    assert!(
+        WINDOWS_HOSTED_TEST_WITNESS.starts_with(&format!("{TEST_COMMAND} | "))
+            && WINDOWS_TEST_WITNESS.ends_with(WINDOWS_HOSTED_TEST_WITNESS),
+        "the twin's suite step is not the guest's suite command and count with only the \
+         guest's compiler check in front of them removed, so the two homes do not run one \
+         suite against one floor"
+    );
+    assert_eq!(
+        TEST_WINDOWS_CONDITION.replace("'guest'", "'hosted'"),
+        TEST_WINDOWS_HOSTED_CONDITION,
+        "the two Windows suite jobs' conditions are not one comparison of the picker's answer \
+         with its two values"
+    );
+}
+
+#[cfg(target_os = "linux")]
+mod merge_gate_answers {
+    use std::fs;
+    use std::process::Command;
+
+    use super::ci_model::{AGGREGATE_JOB, CI_WORKFLOW};
+    use super::scratch_dir;
+    use super::workflow::{ci_workflow_text, field, field_names, parse_workflow, scalar, steps_of};
+
+    const GUEST: &str = "TEST_WINDOWS_RESULT";
+    const HOSTED: &str = "TEST_WINDOWS_HOSTED_RESULT";
+    const RESULTS: [&str; 4] = ["success", "failure", "cancelled", "skipped"];
+
+    #[test]
+    fn the_aggregate_requires_exactly_one_windows_suite_job_and_every_other_gate() {
+        let doc = parse_workflow(&ci_workflow_text()).expect(CI_WORKFLOW);
+        let step = field(&doc, "jobs")
+            .and_then(|jobs| field(jobs, AGGREGATE_JOB))
+            .map(steps_of)
+            .and_then(|steps| steps.first())
+            .expect("the aggregate has a step");
+        let script = scalar(step, "run").expect("the aggregate's step has a script");
+        let variables = field(step, "env").map(field_names).unwrap_or_default();
+        assert!(
+            variables.contains(GUEST) && variables.contains(HOSTED),
+            "the aggregate does not read both Windows suite jobs' results: {variables:?}"
+        );
+        let others: Vec<&str> = variables
+            .iter()
+            .map(String::as_str)
+            .filter(|name| *name != GUEST && *name != HOSTED)
+            .collect();
+        assert!(
+            others.len() > 1,
+            "the aggregate reads no gate beside the Windows pair: {variables:?}"
+        );
+
+        let tree = scratch_dir("merge-gate");
+        let script_file = tree.path().join("merge-gate.sh");
+        fs::write(&script_file, script).expect("the aggregate's script");
+        let passes = |results: &[(&str, &str)]| -> bool {
+            Command::new("bash")
+                .args(["--noprofile", "--norc", "-eo", "pipefail"])
+                .arg(&script_file)
+                .env_clear()
+                .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+                .envs(results.iter().copied())
+                .output()
+                .expect("bash runs the aggregate's script")
+                .status
+                .success()
+        };
+
+        let mut wrong = Vec::new();
+        for guest in RESULTS {
+            for hosted in RESULTS {
+                let mut results: Vec<(&str, &str)> =
+                    others.iter().map(|name| (*name, "success")).collect();
+                results.extend([(GUEST, guest), (HOSTED, hosted)]);
+                let expected = matches!(
+                    (guest, hosted),
+                    ("success", "skipped") | ("skipped", "success")
+                );
+                if passes(&results) != expected {
+                    wrong.push(format!(
+                        "every other gate succeeded, the guest's job was `{guest}` and the \
+                         twin `{hosted}`: the aggregate {}",
+                        if expected { "failed" } else { "passed" }
+                    ));
+                }
+            }
+        }
+        for gate in &others {
+            for result in ["failure", "cancelled", "skipped"] {
+                for (guest, hosted) in [("success", "skipped"), ("skipped", "success")] {
+                    let mut results: Vec<(&str, &str)> = others
+                        .iter()
+                        .map(|name| (*name, if name == gate { result } else { "success" }))
+                        .collect();
+                    results.extend([(GUEST, guest), (HOSTED, hosted)]);
+                    if passes(&results) {
+                        wrong.push(format!(
+                            "`{gate}` was `{result}` beside a guest's job `{guest}` and a \
+                             twin `{hosted}`: the aggregate passed"
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "the aggregate does not require exactly one Windows suite job and every other \
+             gate:\n{}",
+            wrong.join("\n")
         );
     }
 }

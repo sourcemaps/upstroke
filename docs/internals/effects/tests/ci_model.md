@@ -92,6 +92,15 @@ The scripts the Windows test leg runs: the identity script, the suite
 with the witness that it executed, [`HOST_ACCEPTANCE_WINDOWS_CAPTURE`] and
 [`CAPABILITY_WINDOWS_OBSERVATION`].
 
+## `pub(super) const TEST_WINDOWS_HOSTED_SCRIPTS: [&str; 4] = [`
+
+The scripts the hosted twin runs: the guest's list with
+[`WINDOWS_HOSTED_TEST_WITNESS`] in place of the guest's suite step. The two
+acceptance-record steps are carried over unchanged, because neither depends
+on the guest's image: each runs the test it names and checks the frame it
+prints, and every container capability class passes, an absent Docker
+included.
+
 ## `pub(super) const WINDOWS_TEST_FLOOR: u32 = 1700;`
 
 The count the Windows leg's suite must report before the job is allowed to
@@ -187,6 +196,23 @@ its Cargo home and its environment are inputs no reviewer of a diff can
 check, and this is the leg saying that it ran what it claims to have run.
 Measured, `MUT-WINDOWS-WITNESS-FLOOR-DROPPED` and
 `MUT-WINDOWS-WITNESS-COUNT-DROPPED`.
+
+## `pub(super) const WINDOWS_HOSTED_TEST_WITNESS: &str`
+
+The hosted twin's suite step, character for character: the guest's
+[`WINDOWS_TEST_WITNESS`] without its first two lines, the questions that
+refuse any compiler but the image's. The twin has no image to ask about; it
+installs stable at step 1, as the `test` job does, and the oracle pins that
+install and its `clippy` component instead. Kept, character for character:
+[`TEST_COMMAND`], its exit, and the count against [`WINDOWS_TEST_FLOOR`] --
+the twin's machine is GitHub's and not the build box, but a Cargo target
+runner or a `[workspace]` selection reaches it the same way, and a count is
+what refuses a suite that did not execute.
+`the_hosted_windows_twin_runs_the_guests_suite_and_count_when_the_picker_sends_it_there`
+holds this to the guest's script's tail, so the two homes run one suite
+against one floor. Measured, `MUT-TEST-WINDOWS-HOSTED-WITNESS-DROPPED`,
+`MUT-TEST-WINDOWS-HOSTED-FLOOR-DROPPED` and
+`MUT-TEST-WINDOWS-HOSTED-ASSERTS-THE-IMAGE-COMPILER`.
 
 ## `pub(super) const HOST_ACCEPTANCE_CAPTURE: &str = r#"set -o pipefail`
 
@@ -407,7 +433,9 @@ action at a pinned commit with an allowlisted input name. Measured,
 ## `pub(super) const TEST_WINDOWS_JOB: &str = "test-windows";`
 
 The job that runs those fixtures for the one platform whose test execution
-is not in the `test` matrix, on the curated guest, on every lane.
+is not in the `test` matrix, on the curated guest, on every lane -- unless
+the run's `pick-windows-home` answers `hosted`, when this job is skipped and
+[`TEST_WINDOWS_HOSTED_JOB`] runs the same suite on `windows-latest`.
 
 The Windows suite is spawn- and worktree-heavy, and on `windows-latest` it
 was the whole CI wall clock: a median of 12.5 minutes and a tail of 21 on
@@ -483,6 +511,33 @@ not its id, and that is the name [`PICK_WINDOWS_HOME_SCRIPT`] counts, so the
 oracle holds [`TEST_WINDOWS_JOB`]'s `name:` to it: under any other name the
 guest's queue reads as empty whatever is waiting. Nothing else pins that
 `name:`. Measured, `MUT-PICK-WINDOWS-HOME-COUNTS-A-RENAMED-JOB`.
+
+## `pub(super) const TEST_WINDOWS_TIMEOUT_MINUTES: i64 = 20;`
+
+The guest's timeout and condition. 20 minutes, unchanged by the twin and
+pinned now so that it stays the guest's own: a stalled guest holds the
+build machine. The job needs `pick-windows-home` and runs only when its
+answer is `guest`. Measured, `MUT-TEST-WINDOWS-TIMEOUT-RAISED`,
+`MUT-TEST-WINDOWS-RUNS-BESIDE-THE-TWIN` and `MUT-TEST-WINDOWS-NEEDS-DROPPED`.
+
+## `pub(super) const TEST_WINDOWS_HOSTED_JOB: &str = "test-windows-hosted";`
+
+The Windows suite's hosted twin: `test (windows-latest)` on GitHub's
+`windows-latest`, needing `pick-windows-home` and running only when its
+answer is `hosted`. The two conditions compare the one answer with its two
+values, so exactly one of the two jobs runs on any run whose picker
+succeeded; `the_hosted_windows_twin_runs_the_guests_suite_and_count_when_the_picker_sends_it_there`
+holds them to that shape.
+
+55 minutes: the ceiling the hosted Windows suite last ran under. The job
+inherits that suite's record -- 21 to 28 minutes a job in September 2026,
+and merge-queue entries cancelled at 45 and then 55 minutes in October with
+the cause unknown ([`TEST_WINDOWS_JOB`]). Sharding the suite, as draft pull
+request #339 proposed, is not done. Measured,
+`MUT-TEST-WINDOWS-HOSTED-RUNS-BESIDE-THE-GUEST`,
+`MUT-TEST-WINDOWS-HOSTED-NEEDS-DROPPED`,
+`MUT-TEST-WINDOWS-HOSTED-TIMEOUT-RAISED` and
+`MUT-TEST-WINDOWS-HOSTED-ON-THE-GUEST`.
 
 ## `pub(super) const PICK_WINDOWS_HOME_JOB: &str = "pick-windows-home";`
 
@@ -637,6 +692,18 @@ and a pin refuses it outright. The pin is not its own oracle: the loop's gate
 list is re-derived from `needs:` below and compared, so this literal being a
 faithful copy is itself checked against the job graph.
 
+Every gate must succeed except the two Windows suite jobs, of which the
+picker sends a run to one: the loop collects their two results, and the
+script then requires exactly one `success` and one `skipped`. Both skipped,
+both run, or either failed or cancelled is red, and so is a failed picker,
+which is a gate like the others and skips both. One loop still names every
+gate, so the derived-loop check reaches the pair too.
+`the_aggregate_requires_exactly_one_windows_suite_job_and_every_other_gate`
+runs the workflow's script over every pair of results and every other gate
+failing. Measured there, and as pins,
+`MUT-AGGREGATE-ACCEPTS-BOTH-WINDOWS-JOBS-SKIPPED` and
+`MUT-AGGREGATE-ACCEPTS-BOTH-WINDOWS-JOBS-RUN`.
+
 ## `pub(super) const GATE_JOB_FIELDS: [&str; 4] = ["name", "runs-on", "steps", "timeout-minutes"];`
 
 The fields a platform Clippy job may declare -- an equality, not a denylist.
@@ -740,11 +807,16 @@ leaves the required context missing rather than red.
 
 The fields the job that runs these fixtures declares.
 
-## `pub(super) const TEST_WINDOWS_JOB_FIELDS: [&str; 4] =`
+## `pub(super) const TEST_WINDOWS_JOB_FIELDS: [&str; 6] =`
 
-The fields the Windows test job declares: the `test` job's set without a
-`strategy:`, since one job on one machine needs no matrix. `if:` and `continue-on-error:`
-are absent by construction, as everywhere in this contract.
+The fields both Windows suite jobs declare, the guest's and its hosted twin:
+the `test` job's set without a `strategy:`, since one job on one machine
+needs no matrix, plus `needs:` and `if:`, which tie each to the picker's
+answer. Both are required, and their values are pinned exactly
+([`TEST_WINDOWS_CONDITION`], [`TEST_WINDOWS_HOSTED_CONDITION`]), so an `if:`
+is admitted only as the one condition each job runs under; before the twin
+existed the guest's job had no `if:` at all. `continue-on-error:` is absent
+by construction, as everywhere in this contract.
 
 ## `pub(super) const MSRV_JOB_FIELDS: [&str; 5] =`
 

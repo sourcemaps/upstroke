@@ -30,9 +30,18 @@ pub(super) const TEST_WINDOWS_SCRIPTS: [&str; 4] = [
     CAPABILITY_WINDOWS_OBSERVATION,
 ];
 
+pub(super) const TEST_WINDOWS_HOSTED_SCRIPTS: [&str; 4] = [
+    GIT_IDENTITY_SCRIPT,
+    WINDOWS_HOSTED_TEST_WITNESS,
+    HOST_ACCEPTANCE_WINDOWS_CAPTURE,
+    CAPABILITY_WINDOWS_OBSERVATION,
+];
+
 pub(super) const WINDOWS_TEST_FLOOR: u32 = 1700;
 
 pub(super) const WINDOWS_TEST_WITNESS: &str = "$rustc = ((cargo rustc -q --lib -- --version) | Out-String).Trim(); $path_rustc = ((rustc --version) | Out-String).Trim(); $cargo = ((cargo --version) | Out-String).Trim()\nif ($rustc -notmatch '^rustc 1\\.97\\.1 ' -or $path_rustc -notmatch '^rustc 1\\.97\\.1 ' -or $cargo -notmatch '^cargo 1\\.97\\.1 ') { throw \"the suite would run on '$rustc' (Cargo's compiler), '$path_rustc' (PATH's rustc) and '$cargo', not the image's 1.97.1: a compiler was chosen by something other than this workflow\" }\ncargo test --all-targets --all-features | Tee-Object -Variable log\nif ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n$passed = [int](($log | Select-String -Pattern '^test result: ok\\. (\\d+) passed' | ForEach-Object { [int]$_.Matches[0].Groups[1].Value } | Measure-Object -Sum).Sum)\nif ($passed -lt 1700) { throw \"the suite reported $passed passing tests, below the floor of 1700: Cargo compiled the harnesses and executed almost none of them\" }\n";
+
+pub(super) const WINDOWS_HOSTED_TEST_WITNESS: &str = "cargo test --all-targets --all-features | Tee-Object -Variable log\nif ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n$passed = [int](($log | Select-String -Pattern '^test result: ok\\. (\\d+) passed' | ForEach-Object { [int]$_.Matches[0].Groups[1].Value } | Measure-Object -Sum).Sum)\nif ($passed -lt 1700) { throw \"the suite reported $passed passing tests, below the floor of 1700: Cargo compiled the harnesses and executed almost none of them\" }\n";
 
 pub(super) const HOST_ACCEPTANCE_CAPTURE: &str = r#"set -o pipefail
 log="$RUNNER_TEMP/host-acceptance-record.log"
@@ -131,6 +140,14 @@ pub(super) const GOLDEN_IMAGE_TOOLCHAIN: &str = "1.97.1";
 pub(super) const TEST_WINDOWS_PLATFORM: &str = "windows-latest";
 
 pub(super) const TEST_WINDOWS_NAME: &str = "test (winguest)";
+pub(super) const TEST_WINDOWS_TIMEOUT_MINUTES: i64 = 20;
+pub(super) const TEST_WINDOWS_CONDITION: &str = "needs.pick-windows-home.outputs.home == 'guest'";
+
+pub(super) const TEST_WINDOWS_HOSTED_JOB: &str = "test-windows-hosted";
+pub(super) const TEST_WINDOWS_HOSTED_NAME: &str = "test (windows-latest)";
+pub(super) const TEST_WINDOWS_HOSTED_TIMEOUT_MINUTES: i64 = 55;
+pub(super) const TEST_WINDOWS_HOSTED_CONDITION: &str =
+    "needs.pick-windows-home.outputs.home == 'hosted'";
 
 pub(super) const PICK_WINDOWS_HOME_JOB: &str = "pick-windows-home";
 pub(super) const PICK_WINDOWS_HOME_NAME: &str = "pick windows home";
@@ -218,14 +235,24 @@ pub(super) const AGGREGATE_JOB: &str = "merge-gate";
 pub(super) const REQUIRED_CONTEXT: &str = "upstroke-ci";
 
 pub(super) const AGGREGATE_SCRIPT: &str = r#"failed=0
-for gate in LINT LINT_WINDOWS LINT_MACOS MSRV PICK_WINDOWS_HOME TEST TEST_WINDOWS; do
+windows=""
+for gate in LINT LINT_WINDOWS LINT_MACOS MSRV PICK_WINDOWS_HOME TEST TEST_WINDOWS TEST_WINDOWS_HOSTED; do
   result_var="${gate}_RESULT"
   result="${!result_var}"
-  if [[ "$result" != "success" ]]; then
+  if [[ "$gate" == "TEST_WINDOWS" || "$gate" == "TEST_WINDOWS_HOSTED" ]]; then
+    windows+="$gate=$result "
+  elif [[ "$result" != "success" ]]; then
     echo "$gate did not succeed: $result" >&2
     failed=1
   fi
 done
+case "$windows" in
+  "TEST_WINDOWS=success TEST_WINDOWS_HOSTED=skipped " | "TEST_WINDOWS=skipped TEST_WINDOWS_HOSTED=success ") ;;
+  *)
+    echo "exactly one Windows suite job must succeed and the other be skipped: $windows" >&2
+    failed=1
+    ;;
+esac
 exit "$failed"
 "#;
 
@@ -252,8 +279,8 @@ pub(super) const AGGREGATE_JOB_FIELDS: [&str; 6] =
 pub(super) const TEST_JOB_FIELDS: [&str; 5] =
     ["name", "runs-on", "steps", "strategy", "timeout-minutes"];
 
-pub(super) const TEST_WINDOWS_JOB_FIELDS: [&str; 4] =
-    ["name", "runs-on", "steps", "timeout-minutes"];
+pub(super) const TEST_WINDOWS_JOB_FIELDS: [&str; 6] =
+    ["if", "name", "needs", "runs-on", "steps", "timeout-minutes"];
 
 pub(super) const MSRV_JOB_FIELDS: [&str; 5] =
     ["name", "runs-on", "steps", "strategy", "timeout-minutes"];

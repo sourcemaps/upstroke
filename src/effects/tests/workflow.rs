@@ -24,10 +24,13 @@ use super::ci_model::{
     PICK_WINDOWS_HOME_STEP_ENV, PICK_WINDOWS_HOME_STEP_FIELDS, PICK_WINDOWS_HOME_STEP_ID,
     PICK_WINDOWS_HOME_TIMEOUT_MINUTES, PINNED_ACTIONS, REQUIRED_CONTEXT, RUSTFLAGS_KEY,
     RUSTFLAGS_VALUE, STABLE_TOOLCHAIN, STEP_FIELDS, TEST_COMMAND, TEST_JOB_FIELDS, TEST_SCRIPTS,
-    TEST_STEP_ENV, TEST_STEP_FIELDS, TEST_WINDOWS_JOB, TEST_WINDOWS_JOB_FIELDS,
+    TEST_STEP_ENV, TEST_STEP_FIELDS, TEST_WINDOWS_CONDITION, TEST_WINDOWS_HOSTED_CONDITION,
+    TEST_WINDOWS_HOSTED_JOB, TEST_WINDOWS_HOSTED_NAME, TEST_WINDOWS_HOSTED_SCRIPTS,
+    TEST_WINDOWS_HOSTED_TIMEOUT_MINUTES, TEST_WINDOWS_JOB, TEST_WINDOWS_JOB_FIELDS,
     TEST_WINDOWS_LABELS, TEST_WINDOWS_NAME, TEST_WINDOWS_PLATFORM, TEST_WINDOWS_SCRIPTS,
-    TEST_WINDOWS_STEP_ENV, TOOLCHAIN_ACTION, TOOLCHAIN_COMPONENTS, WINDOWS_BUILD_WITNESS,
-    WINDOWS_TEST_WITNESS, WORKFLOW_ENV, WORKFLOW_FIELDS, WORKFLOW_PERMISSIONS,
+    TEST_WINDOWS_STEP_ENV, TEST_WINDOWS_TIMEOUT_MINUTES, TOOLCHAIN_ACTION, TOOLCHAIN_COMPONENTS,
+    WINDOWS_BUILD_WITNESS, WINDOWS_HOSTED_TEST_WITNESS, WINDOWS_TEST_WITNESS, WORKFLOW_ENV,
+    WORKFLOW_FIELDS, WORKFLOW_PERMISSIONS,
 };
 use super::repo_root;
 
@@ -768,6 +771,13 @@ pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {
             field(job, "runs-on")
         ));
     }
+    out.extend(windows_home_complaints(
+        job,
+        TEST_WINDOWS_JOB,
+        "test-windows",
+        TEST_WINDOWS_CONDITION,
+        TEST_WINDOWS_TIMEOUT_MINUTES,
+    ));
 
     let running = steps_of(job)
         .iter()
@@ -808,6 +818,212 @@ pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {
         "test-windows-run-script",
         &TEST_WINDOWS_SCRIPTS,
     ));
+    out
+}
+
+/// A Windows suite job needs the picker, runs under exactly its own condition on the
+/// picker's answer, and is bounded by exactly its own timeout.
+fn windows_home_complaints(
+    job: &Yaml,
+    named: &str,
+    code: &str,
+    condition: &str,
+    minutes: i64,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    if scalar(job, "needs") != Some(PICK_WINDOWS_HOME_JOB) {
+        out.push(format!(
+            "[{code}-needs] `{named}` needs {:?}, not exactly `{PICK_WINDOWS_HOME_JOB}`. Its \
+             condition reads that job's answer, which is there to read only for a job that \
+             needs it.",
+            field(job, "needs")
+        ));
+    }
+    if scalar(job, "if") != Some(condition) {
+        out.push(format!(
+            "[{code}-condition] `{named}` runs under {:?}, not exactly `{condition}`. Each \
+             Windows suite job runs for one of the picker's two answers, so exactly one of \
+             them runs; a condition that admits both answers runs both, one that admits \
+             neither skips both, and either spends a run the aggregate then fails.",
+            field(job, "if")
+        ));
+    }
+    let found = field(job, "timeout-minutes").and_then(Yaml::as_i64);
+    if found != Some(minutes) {
+        out.push(format!(
+            "[{code}-timeout] `{named}` is bounded at {found:?} minutes, not exactly {minutes}"
+        ));
+    }
+    out
+}
+
+pub(super) fn ci_test_windows_hosted_job_complaints(doc: &Yaml) -> Vec<String> {
+    let mut out = Vec::new();
+    let Some(jobs) = field(doc, "jobs") else {
+        return vec!["[jobs] the workflow declares no `jobs:` mapping".to_owned()];
+    };
+    let Some(job) = field(jobs, TEST_WINDOWS_HOSTED_JOB) else {
+        return vec![format!(
+            "[test-windows-hosted-missing] no `{TEST_WINDOWS_HOSTED_JOB}` job, so a run the \
+             picker sends off the guest runs no Windows suite"
+        )];
+    };
+    let Some(platform) = CI_TARGETS
+        .iter()
+        .find(|target| target.runner == TEST_WINDOWS_PLATFORM)
+    else {
+        return vec![format!(
+            "[test-windows-hosted-platform] `{TEST_WINDOWS_PLATFORM}` is not a runner this \
+             contract models, so the shell its steps resolve to is undecidable here"
+        )];
+    };
+
+    for complaint in field_complaints(job, &TEST_WINDOWS_JOB_FIELDS, &OPTIONAL_DEFAULTS_FIELD) {
+        out.push(format!(
+            "[unexpected-job-field] `{TEST_WINDOWS_HOSTED_JOB}` {complaint}"
+        ));
+    }
+    if scalar(job, "name") != Some(TEST_WINDOWS_HOSTED_NAME) {
+        out.push(format!(
+            "[test-windows-hosted-name] `{TEST_WINDOWS_HOSTED_JOB}` is named {:?}, not \
+             `{TEST_WINDOWS_HOSTED_NAME}`",
+            scalar(job, "name")
+        ));
+    }
+    if scalar(job, "runs-on") != Some(TEST_WINDOWS_PLATFORM) {
+        out.push(format!(
+            "[test-windows-hosted-runner] `{TEST_WINDOWS_HOSTED_JOB}` runs on {:?}, not \
+             `{TEST_WINDOWS_PLATFORM}`. It exists for the runs the guest cannot take; on any \
+             other runner it is not the twin the picker sends them to.",
+            field(job, "runs-on")
+        ));
+    }
+    out.extend(windows_home_complaints(
+        job,
+        TEST_WINDOWS_HOSTED_JOB,
+        "test-windows-hosted",
+        TEST_WINDOWS_HOSTED_CONDITION,
+        TEST_WINDOWS_HOSTED_TIMEOUT_MINUTES,
+    ));
+
+    for (index, step) in steps_of(job).iter().enumerate() {
+        let named = format!("`{TEST_WINDOWS_HOSTED_JOB}` step {index}");
+        let runs_the_suite = scalar(step, "run") == Some(WINDOWS_HOSTED_TEST_WITNESS);
+        let runs_the_capture = scalar(step, "run") == Some(HOST_ACCEPTANCE_WINDOWS_CAPTURE);
+        let runs_the_observation = scalar(step, "run") == Some(CAPABILITY_WINDOWS_OBSERVATION);
+        let allowed: &[&str] = if runs_the_suite || runs_the_capture {
+            &TEST_STEP_FIELDS
+        } else if runs_the_observation {
+            &CAPABILITY_STEP_FIELDS
+        } else {
+            &STEP_FIELDS
+        };
+        let strange = unexpected(&field_names(step), allowed);
+        if !strange.is_empty() {
+            out.push(format!(
+                "[unexpected-step-field] {named} declares {strange:?}. No step of this job may \
+                 carry an `if:`, for the reason no step of the guest's job may."
+            ));
+        }
+        if runs_the_suite {
+            out.extend(step_env_complaints(
+                step,
+                &named,
+                "test-windows-hosted-step-env",
+                &TEST_WINDOWS_STEP_ENV,
+            ));
+        }
+        if runs_the_capture {
+            out.extend(step_env_complaints(
+                step,
+                &named,
+                "test-windows-hosted-capture-step-env",
+                &TEST_WINDOWS_STEP_ENV,
+            ));
+        }
+        if runs_the_observation {
+            out.extend(step_env_complaints(
+                step,
+                &named,
+                "test-windows-hosted-capability-step-env",
+                &TEST_WINDOWS_STEP_ENV,
+            ));
+            out.extend(observation_step_complaints(
+                step,
+                &named,
+                "test-windows-hosted-capability-step",
+            ));
+        }
+        if scalar(step, "run").is_some() {
+            out.extend(shell_complaints(
+                doc,
+                job,
+                step,
+                platform,
+                &named,
+                platform.default_shell,
+            ));
+        }
+    }
+
+    let running = steps_of(job)
+        .iter()
+        .filter(|step| scalar(step, "run") == Some(WINDOWS_HOSTED_TEST_WITNESS))
+        .count();
+    if running != 1 {
+        out.push(format!(
+            "[test-windows-hosted-command] `{TEST_WINDOWS_HOSTED_JOB}` has {running} steps whose \
+             `run:` is exactly the pinned suite-and-witness script, not one. It is the guest's \
+             script without the two lines that assert the image's compiler: `{TEST_COMMAND}`, \
+             its exit, and the count of passing tests against the guest's floor, without which \
+             a suite that compiled and executed nothing is green here as on the guest."
+        ));
+    }
+    out.extend(capture_complaints(
+        job,
+        TEST_WINDOWS_HOSTED_JOB,
+        "test-windows-hosted-capture-command",
+        WINDOWS_HOSTED_TEST_WITNESS,
+        HOST_ACCEPTANCE_WINDOWS_CAPTURE,
+    ));
+    out.extend(observation_complaints(
+        job,
+        TEST_WINDOWS_HOSTED_JOB,
+        "test-windows-hosted-capability-command",
+        HOST_ACCEPTANCE_WINDOWS_CAPTURE,
+        CAPABILITY_WINDOWS_OBSERVATION,
+    ));
+    out.extend(checkout_complaints(
+        job,
+        TEST_WINDOWS_HOSTED_JOB,
+        "test-windows-hosted-checkout",
+    ));
+    out.extend(step_pin_complaints(
+        job,
+        TEST_WINDOWS_HOSTED_JOB,
+        "test-windows-hosted-run-script",
+        &TEST_WINDOWS_HOSTED_SCRIPTS,
+    ));
+    out.extend(toolchain_complaints(
+        job,
+        TEST_WINDOWS_HOSTED_JOB,
+        "test-windows-hosted-toolchain",
+        Some(STABLE_TOOLCHAIN),
+    ));
+
+    let components: BTreeSet<&str> = steps_of(job)
+        .iter()
+        .filter(|step| installs_a_toolchain(step))
+        .filter_map(|step| field(step, "with").and_then(|with| scalar(with, "components")))
+        .flat_map(|list| list.split(',').map(str::trim))
+        .collect();
+    if !components.contains("clippy") {
+        out.push(format!(
+            "[test-windows-hosted-toolchain] `{TEST_WINDOWS_HOSTED_JOB}` installs components \
+             {components:?}, which do not include `clippy`. The suite's effect-denial fixtures \
+             run `clippy-driver`, and `dtolnay/rust-toolchain` installs the minimal profile."
+        ));
+    }
     out
 }
 
@@ -1684,6 +1900,7 @@ pub(super) fn workflow_complaints(doc: &Yaml) -> Vec<String> {
     let mut out = ci_gate_complaints(doc);
     out.extend(ci_test_job_complaints(doc));
     out.extend(ci_test_windows_job_complaints(doc));
+    out.extend(ci_test_windows_hosted_job_complaints(doc));
     out.extend(ci_pick_windows_home_complaints(doc));
     out.extend(ci_windows_build_witness_complaints(doc));
     out.extend(workflow_env_complaints(doc));
@@ -1839,8 +2056,8 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         escape: "a gate the aggregate does not depend on: branch protection settles green \
                  while the Windows denial gate is red. `PR5D-MSVC-CLIPPY-NEVER-RUN`.",
         job: Some("merge-gate"),
-        anchor: "    needs: [lint, lint-windows, lint-macos, msrv, pick-windows-home, test, test-windows]\n",
-        replacement: "    needs: [lint, lint-macos, msrv, pick-windows-home, test, test-windows]\n",
+        anchor: "    needs: [lint, lint-windows, lint-macos, msrv, pick-windows-home, test, test-windows, test-windows-hosted]\n",
+        replacement: "    needs: [lint, lint-macos, msrv, pick-windows-home, test, test-windows, test-windows-hosted]\n",
         refused_as: "aggregate-needs",
     },
     WorkflowEscape {
@@ -1861,8 +2078,8 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  `requires.split_whitespace().any(|word| word == looped)` passes on the \
                  trailing mention.",
         job: Some("merge-gate"),
-        anchor: "          for gate in LINT LINT_WINDOWS LINT_MACOS MSRV PICK_WINDOWS_HOME TEST TEST_WINDOWS; do\n",
-        replacement: "          for gate in LINT LINT_WINDOWS MSRV PICK_WINDOWS_HOME TEST TEST_WINDOWS; do : LINT_MACOS\n",
+        anchor: "          for gate in LINT LINT_WINDOWS LINT_MACOS MSRV PICK_WINDOWS_HOME TEST TEST_WINDOWS TEST_WINDOWS_HOSTED; do\n",
+        replacement: "          for gate in LINT LINT_WINDOWS MSRV PICK_WINDOWS_HOME TEST TEST_WINDOWS TEST_WINDOWS_HOSTED; do : LINT_MACOS\n",
         refused_as: "aggregate-loop",
     },
     WorkflowEscape {
@@ -1993,8 +2210,9 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-DISABLED",
         escape: "a step-level `if: false` on the self-hosted job's test step: the job reports \
-                 success having run nothing. A job-level `if:` is not this escape -- the job \
-                 reports `skipped` and the aggregate, which accepts only `success`, fails.",
+                 success having run nothing. A job-level `if:` is not this escape: the job's \
+                 condition is pinned to the picker's `guest` answer, and a skipped job is \
+                 accepted only beside a hosted twin that succeeded.",
         job: Some("test-windows"),
         anchor: "      - name: Test, and witness that the suite ran\n",
         replacement: "      - name: Test, and witness that the suite ran\n\
@@ -2133,7 +2351,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  name going before it notices nothing else",
         job: None,
         anchor: "\n  test-windows:\n",
-        replacement: "\n  test-windows-hosted:\n",
+        replacement: "\n  test-windows-renamed:\n",
         refused_as: "test-windows-missing",
     },
     WorkflowEscape {
@@ -3504,6 +3722,175 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         anchor: "    name: test (winguest)\n",
         replacement: "    name: test (guest)\n",
         refused_as: "pick-windows-home-counts",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-HOSTED-WITNESS-DROPPED",
+        escape: "the hosted twin keeps the suite command and loses the count. A Cargo target \
+                 runner in the image's environment or Cargo home then hands every harness to a \
+                 wrapper that exits zero, and the run the picker sent off the guest is green \
+                 having executed nothing",
+        job: Some("test-windows-hosted"),
+        anchor: "          $passed = [int](($log | Select-String -Pattern '^test result: ok\\. (\\d+) passed' | ForEach-Object { [int]$_.Matches[0].Groups[1].Value } | Measure-Object -Sum).Sum)\n          if ($passed -lt 1700) { throw \"the suite reported $passed passing tests, below the floor of 1700: Cargo compiled the harnesses and executed almost none of them\" }\n",
+        replacement: "",
+        refused_as: "test-windows-hosted-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-HOSTED-FLOOR-DROPPED",
+        escape: "the hosted twin's count stays and its floor drops to zero, so a suite that \
+                 executed no test clears it: a floor the guest holds and its twin does not",
+        job: Some("test-windows-hosted"),
+        anchor: "          if ($passed -lt 1700) { throw \"the suite reported $passed passing tests, below the floor of 1700: Cargo compiled the harnesses and executed almost none of them\" }\n",
+        replacement: "          if ($passed -lt 0) { throw \"the suite reported $passed passing tests, below the floor of 1700: Cargo compiled the harnesses and executed almost none of them\" }\n",
+        refused_as: "test-windows-hosted-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-HOSTED-ASSERTS-THE-IMAGE-COMPILER",
+        escape: "the guest's suite step copied into the twin whole, its check that the compiler \
+                 is the image's 1.97.1 included. The twin installs stable, so the step throws on \
+                 every run sent there: a fallback that is red by construction",
+        job: Some("test-windows-hosted"),
+        anchor: "          cargo test --all-targets --all-features | Tee-Object -Variable log\n",
+        replacement: "          $rustc = ((cargo rustc -q --lib -- --version) | Out-String).Trim(); $path_rustc = ((rustc --version) | Out-String).Trim(); $cargo = ((cargo --version) | Out-String).Trim()\n\
+                      \x20         if ($rustc -notmatch '^rustc 1\\.97\\.1 ' -or $path_rustc -notmatch '^rustc 1\\.97\\.1 ' -or $cargo -notmatch '^cargo 1\\.97\\.1 ') { throw \"the suite would run on '$rustc' (Cargo's compiler), '$path_rustc' (PATH's rustc) and '$cargo', not the image's 1.97.1: a compiler was chosen by something other than this workflow\" }\n\
+                      \x20         cargo test --all-targets --all-features | Tee-Object -Variable log\n",
+        refused_as: "test-windows-hosted-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-HOSTED-RUNS-BESIDE-THE-GUEST",
+        escape: "a twin condition that holds whatever the picker answered, so both Windows jobs \
+                 run on every run the guest takes: a hosted suite spent for nothing, and the \
+                 aggregate red over two green legs",
+        job: Some("test-windows-hosted"),
+        anchor: "    if: needs.pick-windows-home.outputs.home == 'hosted'\n",
+        replacement: "    if: needs.pick-windows-home.result == 'success'\n",
+        refused_as: "test-windows-hosted-condition",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-RUNS-BESIDE-THE-TWIN",
+        escape: "the guest's condition widened to `always()`: the guest's job runs on a run the \
+                 picker sent away, waiting in the queue it was sent away from, and on a run whose \
+                 picker failed",
+        job: Some("test-windows"),
+        anchor: "    if: needs.pick-windows-home.outputs.home == 'guest'\n",
+        replacement: "    if: always()\n",
+        refused_as: "test-windows-condition",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-NEEDS-DROPPED",
+        escape: "the guest's job no longer needs the picker, so its condition reads an answer \
+                 that is not there and the job is skipped on every run",
+        job: Some("test-windows"),
+        anchor: "    needs: pick-windows-home\n",
+        replacement: "",
+        refused_as: "test-windows-needs",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-HOSTED-NEEDS-DROPPED",
+        escape: "the twin no longer needs the picker, so its condition reads an answer that is \
+                 not there and no run is ever sent to it",
+        job: Some("test-windows-hosted"),
+        anchor: "    needs: pick-windows-home\n",
+        replacement: "",
+        refused_as: "test-windows-hosted-needs",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-TIMEOUT-RAISED",
+        escape: "the guest's 20 minutes raised to the twin's 55: a stalled guest holds the build \
+                 machine, and every run queued behind it, nearly three times as long",
+        job: Some("test-windows"),
+        anchor: "    timeout-minutes: 20\n",
+        replacement: "    timeout-minutes: 55\n",
+        refused_as: "test-windows-timeout",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-HOSTED-TIMEOUT-RAISED",
+        escape: "the twin's ceiling raised past the 55 minutes the hosted suite last ran under, \
+                 so a hung hosted suite holds the required check longer than any hosted run \
+                 ever needed",
+        job: Some("test-windows-hosted"),
+        anchor: "    timeout-minutes: 55\n",
+        replacement: "    timeout-minutes: 120\n",
+        refused_as: "test-windows-hosted-timeout",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-HOSTED-ON-THE-GUEST",
+        escape: "the twin moved onto the guest's labels: a run the picker sent away for a busy \
+                 guest waits for that guest anyway",
+        job: Some("test-windows-hosted"),
+        anchor: "    runs-on: windows-latest\n",
+        replacement: "    runs-on: [self-hosted, windows, winguest]\n",
+        refused_as: "test-windows-hosted-runner",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-HOSTED-TOOLCHAIN-DOWNGRADED",
+        escape: "the twin installs the guest's 1.97.1 instead of stable: the action and its \
+                 input keys are allowlisted, and the suite runs on a compiler the hosted jobs \
+                 do not",
+        job: Some("test-windows-hosted"),
+        anchor: "          toolchain: stable\n",
+        replacement: "          toolchain: 1.97.1\n",
+        refused_as: "test-windows-hosted-toolchain",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-HOSTED-WITHOUT-CLIPPY",
+        escape: "the twin installs stable without `clippy`, so the effect-denial fixtures in the \
+                 suite it runs have no `clippy-driver`",
+        job: Some("test-windows-hosted"),
+        anchor: "          components: clippy\n",
+        replacement: "",
+        refused_as: "test-windows-hosted-toolchain",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-HOSTED-CASEFOLD-DECLARATION-DROPPED",
+        escape: "the twin's suite step no longer declares that the runner's NTFS folds case, so \
+                 the alias test observes its native branch there instead of requiring it",
+        job: Some("test-windows-hosted"),
+        anchor: "      - name: Test, and witness that the suite ran\n\
+                 \x20       env:\n\
+                 \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: \"1\"\n",
+        replacement: "      - name: Test, and witness that the suite ran\n",
+        refused_as: "test-windows-hosted-step-env",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-HOSTED-CAPTURE-SEPARATED-FROM-THE-WITNESS",
+        escape: "a pinned cache step between the twin's suite step and its capture: the record \
+                 need not come from the harness the witness counted",
+        job: Some("test-windows-hosted"),
+        anchor: "      - name: Capture the native host acceptance record\n",
+        replacement: "      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2\n\
+                      \x20     - name: Capture the native host acceptance record\n",
+        refused_as: "test-windows-hosted-capture-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-HOSTED-CHECKOUT-REF",
+        escape: "the twin checks out `master`: every run the picker sends to it tests a tree the \
+                 candidate never touched",
+        job: Some("test-windows-hosted"),
+        anchor: "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n",
+        replacement: "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n\
+                      \x20       with:\n\
+                      \x20         ref: master\n",
+        refused_as: "test-windows-hosted-checkout",
+    },
+    WorkflowEscape {
+        name: "MUT-AGGREGATE-ACCEPTS-BOTH-WINDOWS-JOBS-SKIPPED",
+        escape: "the aggregate accepts both Windows suite jobs skipped. A picker output that \
+                 names neither home, or two conditions that both fail, then runs no Windows \
+                 suite at all and the required check is green",
+        job: Some("merge-gate"),
+        anchor: "            \"TEST_WINDOWS=success TEST_WINDOWS_HOSTED=skipped \" | \"TEST_WINDOWS=skipped TEST_WINDOWS_HOSTED=success \") ;;\n",
+        replacement: "            \"TEST_WINDOWS=success TEST_WINDOWS_HOSTED=skipped \" | \"TEST_WINDOWS=skipped TEST_WINDOWS_HOSTED=success \" | \"TEST_WINDOWS=skipped TEST_WINDOWS_HOSTED=skipped \") ;;\n",
+        refused_as: "aggregate-script",
+    },
+    WorkflowEscape {
+        name: "MUT-AGGREGATE-ACCEPTS-BOTH-WINDOWS-JOBS-RUN",
+        escape: "the aggregate accepts both Windows suite jobs run. The conditions are pinned to \
+                 exclude it, so it can only happen through a condition the pin has missed, and \
+                 the aggregate is the second line that refuses it",
+        job: Some("merge-gate"),
+        anchor: "            \"TEST_WINDOWS=success TEST_WINDOWS_HOSTED=skipped \" | \"TEST_WINDOWS=skipped TEST_WINDOWS_HOSTED=success \") ;;\n",
+        replacement: "            \"TEST_WINDOWS=success TEST_WINDOWS_HOSTED=skipped \" | \"TEST_WINDOWS=skipped TEST_WINDOWS_HOSTED=success \" | \"TEST_WINDOWS=success TEST_WINDOWS_HOSTED=success \") ;;\n",
+        refused_as: "aggregate-script",
     },
 ];
 
