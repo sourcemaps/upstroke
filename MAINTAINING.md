@@ -26,20 +26,36 @@ source, documentation, workflows, release machinery and this file.
 
    **The Windows suite has two homes.** It runs on the guest unless the run's
    `pick-windows-home` job answers `hosted`; then `test-windows` is skipped,
-   `test-windows-hosted` runs the same suite and the same passing-test count on `windows-latest`,
-   and `upstroke-ci` requires exactly one of the two to pass. The answer is `hosted` when the
-   repository variable `WINGUEST_BUSY` is `1`, or when the repository variable
-   `WINGUEST_QUEUE_LIMIT` is a positive whole number and the guest's jobs queued or running in
-   other runs reach it. Both are opt-in: with neither set every run goes to the guest, and an
-   unset or malformed limit counts nothing. A GitHub API the job cannot read answers `guest`. The build machine's operator sets
+   `test-windows-hosted` runs on `windows-latest` with the guest image's compiler, installed and
+   asserted, and the guest's suite step and passing-test floor, and `upstroke-ci` requires
+   exactly one of the two to pass. The answer is `hosted` when the repository variable
+   `WINGUEST_BUSY` is `1`, or when the repository variable `WINGUEST_QUEUE_LIMIT` is a positive
+   whole number and the guest's jobs queued or running in other runs reach it. Both are opt-in:
+   with neither set every run goes to the guest, and an unset or malformed limit counts nothing.
+   A GitHub API the job cannot read answers `guest`. The build machine's operator sets
    `WINGUEST_BUSY` to `1` while baselines or Upstroke runs hold the machine, and clears it
    afterwards. A hosted run is not free: by the workflow's September 2026 measurements it takes
    three to four times the guest's time, 21 to 28 minutes a job against about 7, and in October
    2026 hosted merge-queue entries reached the 45- and then the 55-minute timeout, the cause
-   unknown; the twin runs under that 55 minutes. A test whose outcome depends on the machine can
-   now pass or fail according to the home a run was given, so re-run a Windows-only failure on
-   the other home before believing it -- re-run all of the run's jobs, since re-running only the
-   failed one keeps the home already picked.
+   unknown; the twin runs under that 55 minutes.
+
+   The two homes share the compiler, the suite and the floor. What still differs is the runner:
+   GitHub's image against the curated guest's, their filesystems and temporary directories,
+   their services, and what the runner environment reports. A test that depends on those can
+   pass on one home and fail on the other, and a run sent to the twin can pass where the guest
+   would have failed (`PR299-HOSTED-QUEUE-DOES-NOT-PROVE-GUEST-BEHAVIOUR`). So run a Windows-only
+   failure on the other home too: one that follows the change to both homes is the change's;
+   one that appears on only one home is a test whose outcome depends on the runner, which is
+   repaired in the test, not dismissed as the machine's. The picker answers from the variables
+   and the live queue as the run starts, not from the home the run had before: re-running the
+   failed job keeps the home already picked, and re-running all of the run's jobs asks again
+   under the same rule, which usually gives the same answer. To move a run, re-run all of its
+   jobs after setting `WINGUEST_BUSY` to `1` (to the twin), or after clearing it and, where a
+   `WINGUEST_QUEUE_LIMIT` is set, unsetting it or waiting for the queue to fall below it (to the
+   guest). These are repository variables, so the change reaches every run that starts while it
+   stands -- other pull requests, pushes to `master` and merge-queue entries go to the same home
+   -- and it is the operator's to make while the operator holds the machine; set it for the
+   re-run and put it back once that run's picker has answered.
 4. **One frontier review pass on the green head.** Give the exact diff and head SHA to an
    independent frontier-class reviewer at `max` effort — today `gpt-5.6-sol` through `codex exec`,
    run by the owner's review driver against the pull request's own base. Allow at least 90 minutes per

@@ -17,9 +17,14 @@ bash .github/scripts/test-pr-ready-audit.sh
 
 CI splits the ten across jobs: `lint` runs rustfmt, Clippy and the six Bash gates; `test` runs
 the suite on Linux and macOS, and `test-windows` runs it on Windows, on a self-hosted ephemeral
-runner for a pull request, a push and a merge-queue entry alike; `msrv` runs the locked check on all three; `lint (windows)` runs Clippy natively and builds
+runner for a pull request, a push and a merge-queue entry alike -- unless `pick-windows-home`
+sends the run to the hosted twin `test-windows-hosted`, which runs the same suite step on
+`windows-latest` on the guest image's compiler, and only when the operator has set
+`WINGUEST_BUSY` or a `WINGUEST_QUEUE_LIMIT` the guest's queue has reached (`MAINTAINING.md`
+step 3); `msrv` runs the locked check on all three; `lint (windows)` runs Clippy natively and builds
 every target as the hosted Windows compile witness; `lint (macos)` runs Clippy natively;
-`upstroke-ci` aggregates every leg and is the required context. The `--locked` MSRV check is what
+`upstroke-ci` aggregates every leg, requires exactly one of the two Windows suite jobs, and is
+the required context. The `--locked` MSRV check is what
 proves the floor against the dependency set a release ships. `test-release-record.sh` needs `jq`, and `test-pr-policy.sh` only works from the root.
 
 Edition 2024, MSRV 1.85.0; code and dependencies stay compatible with both the MSRV and current
