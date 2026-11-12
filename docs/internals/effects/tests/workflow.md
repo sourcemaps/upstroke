@@ -373,8 +373,8 @@ observation steps, and the observation's bound; the platform-default shell on
 every `run:` step; exactly one suite step running the guest's
 [`WINDOWS_TEST_WITNESS`], compiler questions included, the capture
 immediately after it and the observation immediately after that; one
-input-free checkout at step 0; and every script and action on the guest's
-pins, [`TEST_WINDOWS_SCRIPTS`].
+input-free checkout at step 0; every script and action on the guest's
+pins, [`TEST_WINDOWS_SCRIPTS`]; and no cache step.
 
 Where the guest's job refuses a toolchain install, this one requires one:
 the toolchain action at step 1, with `clippy` among its components, since
@@ -396,6 +396,13 @@ check is the twin's own rather than [`toolchain_complaints`]'s `expected`,
 whose complaint is written for the hosted jobs that pin `stable`. Measured,
 `MUT-TEST-WINDOWS-HOSTED-TOOLCHAIN-FLOATS` and
 `MUT-TEST-WINDOWS-HOSTED-TOOLCHAIN-DOWNGRADED`.
+
+## `pub(super) fn ci_test_windows_hosted_job_complaints(doc: &Yaml) -> Vec<String> {` › `if scalar(step, "uses").is_some_and(|uses| uses.starts_with(CACHE_ACTION)) {`
+
+No cache step, at any position: a twin run's cache is one nothing later
+reads ([`CACHE_ACTION`]). The capture's placement rule already refuses a
+cache step between the suite and the capture; this refuses one anywhere,
+and names the cause. Measured, `MUT-TEST-WINDOWS-HOSTED-CACHE-RESTORED`.
 
 ## `pub(super) fn ci_test_windows_hosted_job_complaints(doc: &Yaml) -> Vec<String> {` › `let components: BTreeSet<&str> = steps_of(job)`
 

@@ -423,14 +423,20 @@ jobs:
   # the questions to the one version it pins as the image's. Re-curation
   # edits both. The first question compiles the dependencies, which the
   # suite would compile next anyway. `clippy` is a test dependency here, as
-  # in `test` above. It caches like the other hosted jobs. The host
-  # acceptance capture and the container capability observation follow the
-  # suite as they do on the guest: neither depends on the guest's image --
-  # each runs the test it names and checks its frame, and every capability
-  # class passes, an absent Docker included. What the pin does not remove is
-  # the machine: GitHub's image, filesystem, temporary directory and services
-  # are not the guest's, so a test whose outcome depends on the machine can
-  # still pass here and fail there.
+  # in `test` above. No cache step, for the reason the hosted merge-queue
+  # lane carried none: a run restores caches from its own ref or the default
+  # branch, a queue entry's ref is a fresh `gh-readonly-queue/` branch, and
+  # `master` saves a twin cache only on a push the picker itself sent here,
+  # so nearly every run would start cold and then upload, inside its 55
+  # minutes, a cache nothing later reads; the workflow oracle refuses one
+  # here. A pull request sent here twice is the one run that would gain.
+  # The host acceptance capture and the container capability observation
+  # follow the suite as they do on the guest: neither depends on the guest's
+  # image -- each runs the test it names and checks its frame, and every
+  # capability class passes, an absent Docker included. What the pin does
+  # not remove is the machine: GitHub's image, filesystem, temporary
+  # directory and services are not the guest's, so a test whose outcome
+  # depends on the machine can still pass here and fail there.
   #
   # 55 minutes, the ceiling the hosted Windows suite last ran under. This job
   # inherits that suite's risk: it took 21 to 28 minutes a job in September
@@ -452,9 +458,6 @@ jobs:
         with:
           toolchain: 1.97.1
           components: clippy
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: Configure git identity
         run: |

@@ -13,7 +13,7 @@ use yaml_rust2::{Yaml, YamlLoader};
 
 use super::ci_model::{
     ACTION_INPUTS, AGGREGATE_JOB, AGGREGATE_JOB_FIELDS, AGGREGATE_SCRIPT, AGGREGATE_SHELL,
-    AGGREGATE_STEP_FIELDS, CAPABILITY_OBSERVATION, CAPABILITY_STEP_FIELDS,
+    AGGREGATE_STEP_FIELDS, CACHE_ACTION, CAPABILITY_OBSERVATION, CAPABILITY_STEP_FIELDS,
     CAPABILITY_STEP_TIMEOUT_MINUTES, CAPABILITY_WINDOWS_OBSERVATION, CI_TARGETS, CI_WORKFLOW,
     CLIPPY_GATE, CiTarget, DEFAULTS_FIELDS, DEFAULTS_RUN_FIELDS, ENCODED_RUSTFLAGS_KEY,
     GATE_JOB_FIELDS, GATE_SCRIPTS, GOLDEN_IMAGE_TOOLCHAIN, HOST_ACCEPTANCE_CAPTURE,
@@ -1029,6 +1029,18 @@ pub(super) fn ci_test_windows_hosted_job_complaints(doc: &Yaml) -> Vec<String> {
                  step intact its compiler questions throw on every run sent here, so this is \
                  the drift between the two places the version is written, refused before it \
                  is pushed."
+            ));
+        }
+    }
+    for (index, step) in steps_of(job).iter().enumerate() {
+        if scalar(step, "uses").is_some_and(|uses| uses.starts_with(CACHE_ACTION)) {
+            out.push(format!(
+                "[test-windows-hosted-cache] `{TEST_WINDOWS_HOSTED_JOB}` step {index} restores and \
+                 saves a cargo cache. A run reads caches from its own ref or the default branch: \
+                 a merge-queue entry's ref is a fresh `gh-readonly-queue/` branch, and `master` \
+                 saves a twin cache only on a push the picker itself sent here, so nearly every \
+                 run starts cold and then uploads, inside its 55 minutes, a cache nothing later \
+                 reads -- the reason the hosted merge-queue lane carried none."
             ));
         }
     }
@@ -3870,6 +3882,20 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         anchor: "          toolchain: 1.97.1\n",
         replacement: "          toolchain: 1.96.0\n",
         refused_as: "test-windows-hosted-toolchain",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-HOSTED-CACHE-RESTORED",
+        escape: "the cache step this job first had, put back between the install and the \
+                 identity step. The action is pinned and given no input, so every other pin \
+                 holds; the step uploads a cache per run that no later run reads, from a queue \
+                 entry's fresh ref and with `master` almost never saving one, and spends the \
+                 upload inside the twin's 55 minutes",
+        job: Some("test-windows-hosted"),
+        anchor: "      - name: Configure git identity\n",
+        replacement: "      - name: Cache cargo\n\
+                      \x20       uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2\n\n\
+                      \x20     - name: Configure git identity\n",
+        refused_as: "test-windows-hosted-cache",
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-TOOLCHAIN-FLOATS",

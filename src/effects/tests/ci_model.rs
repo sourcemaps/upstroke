@@ -137,6 +137,7 @@ pub(super) const TEST_WINDOWS_CONDITION: &str = "needs.pick-windows-home.outputs
 pub(super) const TEST_WINDOWS_HOSTED_JOB: &str = "test-windows-hosted";
 pub(super) const TEST_WINDOWS_HOSTED_NAME: &str = "test (windows-latest)";
 pub(super) const TEST_WINDOWS_HOSTED_TIMEOUT_MINUTES: i64 = 55;
+pub(super) const CACHE_ACTION: &str = "Swatinem/rust-cache@";
 pub(super) const TEST_WINDOWS_HOSTED_CONDITION: &str =
     "needs.pick-windows-home.outputs.home == 'hosted'";
 

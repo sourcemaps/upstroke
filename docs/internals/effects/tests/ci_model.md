@@ -557,6 +557,21 @@ request #339 proposed, is not done. Measured,
 `MUT-TEST-WINDOWS-HOSTED-TIMEOUT-RAISED` and
 `MUT-TEST-WINDOWS-HOSTED-ON-THE-GUEST`.
 
+## `pub(super) const CACHE_ACTION: &str = "Swatinem/rust-cache@";`
+
+The cache action, by prefix, which the hosted twin may not use. A run
+restores caches from its own ref or the default branch. A merge-queue
+entry's ref is a fresh `gh-readonly-queue/` branch, and `master` saves a
+twin cache only on a push the picker itself sent to the twin, which with
+routing opt-in is rare; so nearly every twin run would start cold and then
+upload, inside its 55 minutes, a cache nothing later reads, spending the
+repository's cache space. That was the hosted merge-queue lane's reason for
+carrying none before `d3434ace`. The twin first carried one, "like the other
+hosted jobs", which the first review of #375 found did not answer that
+reason; the operator removed it on 2026-11-12. A pull request sent to the
+twin twice is the one run that would have gained. Measured,
+`MUT-TEST-WINDOWS-HOSTED-CACHE-RESTORED`.
+
 ## `pub(super) const PICK_WINDOWS_HOME_JOB: &str = "pick-windows-home";`
 
 The job that decides where this run's Windows suite goes, `guest` or
