@@ -8472,6 +8472,10 @@ fn single_quoted_for_sh(text: &OsStr) -> Vec<u8> {
 }
 
 #[cfg(unix)]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "quarantined on macOS: G7-CI-MACOS-HOOK-COMMIT-FLAKE"
+)]
 #[test]
 fn a_hook_started_runs_slot_worker_leaves_the_users_commit_as_the_user_made_it() {
     use std::os::unix::fs::PermissionsExt;

@@ -2856,10 +2856,10 @@ The control: everything the release has to remove is really there.
 The daemon's three transcribed answers, each **naming the container it is
 about**, which is how a reclaimer tells an answer about its own container from
 an answer — or a path — that merely spells the phrase. They were literals until
-round six; a literal `upstroke-c` beside a fixture whose container has a
-generated name is a fixture the repaired normalizers correctly refuse, and
-making them functions of the name is what keeps the doubles honest rather than
-what works around the check.
+the cover review of `9ee9784e`; a literal `upstroke-c` beside a fixture whose
+container has a generated name is a fixture the repaired normalizers correctly
+refuse, and making them functions of the name is what keeps the doubles honest
+rather than what works around the check.
 
 ## `const SETTLED_TARGET: &str = "upstroke-c";`
 
@@ -2881,8 +2881,7 @@ daemon's own answer, and what proves a refused proposal costs no second command.
 The three shapes a diagnostic can have that must never settle anything, each
 one refused by a different half of the mechanism. Dropping the line-start
 requirement admits the first two; dropping the target requirement admits the
-first and the third. Both mutations are replayed in `pr8-triage.md` §9.3 and
-each kills this test.
+first and the third. Either mutation fails this test.
 
 ## `fn the_two_docker_diagnostic_tables_never_claim_one_message() {` › `for (what, detail) in [`
 

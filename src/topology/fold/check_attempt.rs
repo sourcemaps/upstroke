@@ -13,6 +13,17 @@ impl RunState {
                 field: field.to_string(),
             });
         }
+        if self.epoch.0.checked_add(1).is_none() {
+            return Err(FoldError::InconsistentRecord {
+                kind: "run_resumed",
+                detail: format!(
+                    "this run has resumed {} time(s) and has exhausted its epoch numbers: no \
+                     epoch follows, so this incarnation could not be told from the last and \
+                     could resume the sessions that one retained",
+                    self.epoch.0
+                ),
+            });
+        }
         Ok(())
     }
 

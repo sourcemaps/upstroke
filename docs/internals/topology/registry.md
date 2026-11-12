@@ -393,7 +393,9 @@ Refuse a registry that does not match a recorded digest.
 
 ## `impl TaskRegistry` › `pub fn canonical_bytes(&self) -> Vec<u8> {`
 
-The exact bytes [`Self::digest`] hashes.
+The canonical encoding of the whole registry: every entry, dynamic ones
+included. These are the bytes [`Self::digest`] hashes only when nothing
+dynamic has been registered; the digest encodes the originals alone.
 
 **Frozen.** The field order below, and the set of fields in it, are part
 of what a recorded digest means; changing either re-dates every digest

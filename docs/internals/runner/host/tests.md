@@ -3542,6 +3542,13 @@ These are unchanged:
 This is a diagnostic. It is not a fix, and it does not claim the red is
 explained or closed.
 
+**Quarantined on macOS.** From 2026-11-11, on the owner's decision, the test
+is ignored on macOS by a `cfg_attr` attribute whose reason names the finding
+`G7-CI-MACOS-HOOK-COMMIT-FLAKE`. It still runs on Linux and other Unix
+systems, and on macOS when asked for with `--ignored`. While the quarantine
+stands, the macOS job does not witness the failure. Lifting the quarantine is
+part of the finding's repair.
+
 ## `const HOOK_COMMIT_TRACE_HEAD: u64 = 64 * 1024;`
 
 The read bound of [`report_hook_commit_trace`], together with

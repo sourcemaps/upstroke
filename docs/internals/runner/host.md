@@ -6,8 +6,11 @@ Extended notes for [`src/runner/host.rs`](../../../src/runner/host.rs).
 
 The host runner implements `host-v1`. The code is the authority for what it does.
 The source retains its pointer and the lock protocol beside `HostRunner`, as
-required by standards §§6, 10 and 13. Item contracts below are the API
-documentation; the following sections record rationale, history and examples.
+required by standards §§6, 10 and 13. It also keeps, above its `#![allow]`, the
+two-line allowlist-placement marker naming the funnel section of
+`effects/allowlist.toml` (see "Allowlist placement" below). Item contracts below
+are the API documentation; the following sections record rationale, history and
+examples.
 
 Section headings are the item names as they are spelled in the source, so a heading is the grep
 string that finds the code.
