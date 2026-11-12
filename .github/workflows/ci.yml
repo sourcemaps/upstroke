@@ -163,6 +163,93 @@ jobs:
               exit !ok
             }' "$log" || { echo "the container capability record is missing or its framing is incomplete" >&2; exit 1; }
 
+  # Where this run's Windows suite should go: `guest`, the self-hosted guest
+  # on the build machine, or `hosted`, GitHub's windows-latest. The guest is
+  # one machine, shared with the operator's baselines and Upstroke runs, and
+  # on a busy day each makes the other fail (owner request, 2026-11-11). The
+  # answer is the job output `home`. Nothing reads it yet: `test-windows`
+  # still runs on the guest on every lane, and the job that consumes the
+  # answer arrives in the next change.
+  #
+  # The answer is `hosted` when the repository variable WINGUEST_BUSY is `1`
+  # (the build machine's operator sets it while the machine is held), or when
+  # the `test (winguest)` jobs queued or in progress in other runs of this
+  # workflow number WINGUEST_QUEUE_LIMIT or more (2 when that variable is
+  # unset or not a positive whole number). Otherwise it is `guest`, and it is
+  # `guest` whenever the API cannot be read: a failed question must not move
+  # a run off the machine every lane has run on so far. The count takes the
+  # queued and the in-progress runs in two queries, so a run that moves
+  # between them can be listed by both: run ids are collected from both and
+  # each distinct run's jobs are counted once, this run left out. Every page
+  # of every listing is read, and a failure on any page is the API not being
+  # readable. The script prints what it found.
+  #
+  # Reading other runs' jobs needs `actions: read`, which the workflow's
+  # token does not carry. This job alone widens it, by that one read scope;
+  # it checks out nothing and runs no step but the script below. The
+  # workflow oracle pins the job whole -- fields, permissions, output,
+  # environment and the script as text -- and refuses a `permissions:` block
+  # on any other job; `the_windows_home_picker_answers_from_canned_api_pages`
+  # runs this script against canned API answers, a fake `gh` on its PATH
+  # (`docs/internals/effects/tests.md`).
+  pick-windows-home:
+    name: pick windows home
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      home: ${{ steps.pick.outputs.home }}
+    steps:
+      - name: Pick where the Windows suite runs
+        id: pick
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WINGUEST_BUSY: ${{ vars.WINGUEST_BUSY }}
+          WINGUEST_QUEUE_LIMIT: ${{ vars.WINGUEST_QUEUE_LIMIT }}
+        run: |
+          limit=2
+          limit_from="the default: WINGUEST_QUEUE_LIMIT is unset or not a positive whole number"
+          if [[ "${WINGUEST_QUEUE_LIMIT:-}" =~ ^0*[1-9][0-9]{0,5}$ ]]; then
+            limit=$((10#$WINGUEST_QUEUE_LIMIT))
+            limit_from="WINGUEST_QUEUE_LIMIT"
+          fi
+          winguest_jobs() {
+            local runs="repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs"
+            local status listed seen="" id jobs matched count=0
+            local -a run_ids
+            for status in queued in_progress; do
+              listed="$(gh api --paginate "$runs?status=$status&per_page=100")" || return 1
+              listed="$(jq -r '.workflow_runs[].id' <<<"$listed")" || return 1
+              seen+="$listed"$'\n'
+            done
+            mapfile -t run_ids < <(sort -u <<<"$seen")
+            for id in "${run_ids[@]}"; do
+              if [[ -z "$id" || "$id" == "$GITHUB_RUN_ID" ]]; then continue; fi
+              [[ "$id" =~ ^[0-9]+$ ]] || return 1
+              jobs="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$id/jobs?filter=latest&per_page=100")" || return 1
+              matched="$(jq -s '[.[].jobs[] | select(.name == "test (winguest)" and (.status == "queued" or .status == "in_progress"))] | length' <<<"$jobs")" || return 1
+              [[ "$matched" =~ ^[0-9]+$ ]] || return 1
+              count=$((count + matched))
+            done
+            echo "$count"
+          }
+          home=guest
+          echo "limit: $limit ($limit_from)"
+          if [[ "${WINGUEST_BUSY:-}" == "1" ]]; then
+            home=hosted
+            echo "WINGUEST_BUSY is 1, so the queue for the guest was not counted."
+          elif count="$(winguest_jobs)"; then
+            echo "WINGUEST_BUSY is not 1. Other runs of this workflow have $count 'test (winguest)' jobs queued or in progress."
+            if (( count >= limit )); then home=hosted; fi
+          else
+            echo "WINGUEST_BUSY is not 1, and the GitHub API could not be read, so the queue for the guest is unknown. A failed question does not move a run off the guest."
+          fi
+          echo "home: $home"
+          echo "home=$home" >> "$GITHUB_OUTPUT"
+
   # The Windows suite runs on an ephemeral self-hosted runner, on every lane:
   # a throwaway overlay of a frozen Server 2025 image on the build box, one
   # job per boot, registered for that job with a single-use just-in-time
@@ -414,7 +501,7 @@ jobs:
   merge-gate:
     name: upstroke-ci
     if: always()
-    needs: [lint, lint-windows, lint-macos, msrv, test, test-windows]
+    needs: [lint, lint-windows, lint-macos, msrv, pick-windows-home, test, test-windows]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -425,11 +512,12 @@ jobs:
           LINT_WINDOWS_RESULT: ${{ needs.lint-windows.result }}
           LINT_MACOS_RESULT: ${{ needs.lint-macos.result }}
           MSRV_RESULT: ${{ needs.msrv.result }}
+          PICK_WINDOWS_HOME_RESULT: ${{ needs.pick-windows-home.result }}
           TEST_RESULT: ${{ needs.test.result }}
           TEST_WINDOWS_RESULT: ${{ needs.test-windows.result }}
         run: |
           failed=0
-          for gate in LINT LINT_WINDOWS LINT_MACOS MSRV TEST TEST_WINDOWS; do
+          for gate in LINT LINT_WINDOWS LINT_MACOS MSRV PICK_WINDOWS_HOME TEST TEST_WINDOWS; do
             result_var="${gate}_RESULT"
             result="${!result_var}"
             if [[ "$result" != "success" ]]; then

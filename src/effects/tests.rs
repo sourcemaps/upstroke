@@ -5384,15 +5384,15 @@ mod workflow;
 
 use ci_model::{
     CI_TARGETS, CI_WORKFLOW, GOLDEN_IMAGE_TOOLCHAIN, MSRV_COMMAND, MSRV_JOB, OVERRIDING_REPO_FILES,
-    RUSTFLAGS_KEY, TEST_COMMAND, TEST_WINDOWS_LABELS, TEST_WINDOWS_PLATFORM, WINDOWS_TEST_FLOOR,
-    WINDOWS_TEST_WITNESS,
+    PICK_WINDOWS_HOME_SCRIPT, RUSTFLAGS_KEY, TEST_COMMAND, TEST_WINDOWS_LABELS, TEST_WINDOWS_NAME,
+    TEST_WINDOWS_PLATFORM, WINDOWS_TEST_FLOOR, WINDOWS_TEST_WITNESS, WINGUEST_QUEUE_LIMIT_DEFAULT,
 };
 use workflow::{
-    WORKFLOW_ESCAPES, ci_msrv_job_complaints, ci_test_job_complaints,
-    ci_test_windows_job_complaints, ci_windows_build_witness_complaints, ci_workflow_text,
-    complaint_codes, declared_msrv_toolchain, declared_rust_version, field, field_names,
-    mutate_workflow, parse_workflow, rustflags_complaints, scalar, steps_of, three_component,
-    workflow_complaints,
+    WORKFLOW_ESCAPES, ci_msrv_job_complaints, ci_pick_windows_home_complaints,
+    ci_test_job_complaints, ci_test_windows_job_complaints, ci_windows_build_witness_complaints,
+    ci_workflow_text, complaint_codes, declared_msrv_toolchain, declared_rust_version, field,
+    field_names, mutate_workflow, parse_workflow, rustflags_complaints, scalar, steps_of,
+    three_component, workflow_complaints,
 };
 
 #[test]
@@ -5591,6 +5591,484 @@ fn the_windows_leg_counts_the_tests_it_ran() {
         "the Windows leg's step does not test the count against \
          {WINDOWS_TEST_FLOOR}, so the floor this contract documents is not the floor it runs"
     );
+}
+
+#[test]
+fn the_windows_home_is_picked_by_the_one_job_the_contract_pins() {
+    let doc = parse_workflow(&ci_workflow_text()).expect(CI_WORKFLOW);
+    let complaints = ci_pick_windows_home_complaints(&doc);
+    assert!(
+        complaints.is_empty(),
+        "the job that picks where the Windows suite runs does not match the contract:\n{}",
+        complaints.join("\n")
+    );
+    assert_eq!(
+        PICK_WINDOWS_HOME_SCRIPT.lines().next(),
+        Some(format!("limit={WINGUEST_QUEUE_LIMIT_DEFAULT}").as_str()),
+        "the picker's script does not start from the default limit the model names"
+    );
+    assert!(
+        PICK_WINDOWS_HOME_SCRIPT.contains(&format!("select(.name == \"{TEST_WINDOWS_NAME}\" and")),
+        "the picker's script does not count jobs named `{TEST_WINDOWS_NAME}`, the guest's job"
+    );
+}
+
+#[cfg(target_os = "linux")]
+mod pick_windows_home_answers {
+    use std::collections::BTreeMap;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
+    use std::process::Command;
+
+    use super::ci_model::{
+        CI_WORKFLOW, PICK_WINDOWS_HOME_JOB, TEST_WINDOWS_NAME, WINGUEST_QUEUE_LIMIT_DEFAULT,
+    };
+    use super::scratch_dir;
+    use super::workflow::{ci_workflow_text, field, parse_workflow, scalar, steps_of};
+
+    const REPOSITORY: &str = "upstroke/fixture";
+    const THIS_RUN: u64 = 900;
+
+    const FAKE_GH: &str = r#"#!/usr/bin/env bash
+set -u
+if [[ "${1:-}" != api ]]; then echo "fake gh: not an api call: $*" >&2; exit 2; fi
+shift
+paginate=0
+path=
+for arg in "$@"; do
+  case "$arg" in
+    --paginate) paginate=1 ;;
+    -*) echo "fake gh: unmodelled flag $arg" >&2; exit 2 ;;
+    *) path="$arg" ;;
+  esac
+done
+printf '%s\n' "$path" >> "$FAKE_GH_LOG"
+key="$(printf '%s' "$path" | tr -c 'A-Za-z0-9' '_')"
+page=1
+while :; do
+  if [[ -e "$FAKE_GH_PAGES/$key.$page.fails" ]]; then echo "fake gh: HTTP 502 on page $page of $path" >&2; exit 1; fi
+  if [[ ! -e "$FAKE_GH_PAGES/$key.$page.json" ]]; then break; fi
+  cat "$FAKE_GH_PAGES/$key.$page.json"
+  if (( ! paginate )); then exit 0; fi
+  page=$((page + 1))
+done
+if (( page == 1 )); then echo "fake gh: no canned answer for $path" >&2; exit 1; fi
+"#;
+
+    const BUSY: &str = "WINGUEST_BUSY is 1, so the queue for the guest was not counted.";
+    const UNREADABLE: &str = "WINGUEST_BUSY is not 1, and the GitHub API could not be read, so \
+                              the queue for the guest is unknown. A failed question does not \
+                              move a run off the guest.";
+
+    enum Page {
+        Body(String),
+        Fails,
+    }
+
+    struct Case {
+        name: String,
+        busy: &'static str,
+        limit: &'static str,
+        pages: Vec<(String, Vec<Page>)>,
+        home: &'static str,
+        says: Vec<String>,
+        asked: Vec<String>,
+    }
+
+    fn runs(status: &str) -> String {
+        format!("repos/{REPOSITORY}/actions/workflows/ci.yml/runs?status={status}&per_page=100")
+    }
+
+    fn jobs(run: u64) -> String {
+        format!("repos/{REPOSITORY}/actions/runs/{run}/jobs?filter=latest&per_page=100")
+    }
+
+    fn run_page(ids: &[u64]) -> Page {
+        let listed: Vec<String> = ids.iter().map(|id| format!("{{\"id\":{id}}}")).collect();
+        Page::Body(format!(
+            "{{\"total_count\":{},\"workflow_runs\":[{}]}}\n",
+            ids.len(),
+            listed.join(",")
+        ))
+    }
+
+    fn job_page(listed: &[(u64, &str, &str)]) -> Page {
+        let listed: Vec<String> = listed
+            .iter()
+            .map(|(id, name, status)| {
+                format!("{{\"id\":{id},\"name\":\"{name}\",\"status\":\"{status}\"}}")
+            })
+            .collect();
+        Page::Body(format!(
+            "{{\"total_count\":{},\"jobs\":[{}]}}\n",
+            listed.len(),
+            listed.join(",")
+        ))
+    }
+
+    fn counted(count: usize) -> String {
+        format!(
+            "WINGUEST_BUSY is not 1. Other runs of this workflow have {count} \
+             '{TEST_WINDOWS_NAME}' jobs queued or in progress."
+        )
+    }
+
+    fn default_limit() -> String {
+        format!(
+            "limit: {WINGUEST_QUEUE_LIMIT_DEFAULT} (the default: WINGUEST_QUEUE_LIMIT is unset \
+             or not a positive whole number)"
+        )
+    }
+
+    fn page_key(path: &str) -> String {
+        path.chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect()
+    }
+
+    fn cases() -> Vec<Case> {
+        let guest = TEST_WINDOWS_NAME;
+        let empty = || vec![run_page(&[])];
+        let mut out = vec![
+            Case {
+                name: "busy".to_owned(),
+                busy: "1",
+                limit: "",
+                pages: Vec::new(),
+                home: "hosted",
+                says: vec![BUSY.to_owned()],
+                asked: Vec::new(),
+            },
+            Case {
+                name: "busy-is-only-the-value-1".to_owned(),
+                busy: "true",
+                limit: "",
+                pages: vec![(runs("queued"), empty()), (runs("in_progress"), empty())],
+                home: "guest",
+                says: vec![counted(0)],
+                asked: vec![runs("queued"), runs("in_progress")],
+            },
+            Case {
+                name: "the-api-cannot-be-read".to_owned(),
+                busy: "",
+                limit: "",
+                pages: Vec::new(),
+                home: "guest",
+                says: vec![UNREADABLE.to_owned()],
+                asked: vec![runs("queued")],
+            },
+            Case {
+                name: "one-waiting-job-is-below-the-default-limit".to_owned(),
+                busy: "",
+                limit: "",
+                pages: vec![
+                    (runs("queued"), vec![run_page(&[101])]),
+                    (runs("in_progress"), empty()),
+                    (
+                        jobs(101),
+                        vec![job_page(&[(1, "lint", "completed"), (2, guest, "queued")])],
+                    ),
+                ],
+                home: "guest",
+                says: vec![default_limit(), counted(1)],
+                asked: vec![runs("queued"), runs("in_progress"), jobs(101)],
+            },
+            Case {
+                name: "two-waiting-jobs-reach-the-default-limit".to_owned(),
+                busy: "",
+                limit: "",
+                pages: vec![
+                    (runs("queued"), vec![run_page(&[101])]),
+                    (runs("in_progress"), vec![run_page(&[102])]),
+                    (jobs(101), vec![job_page(&[(11, guest, "queued")])]),
+                    (jobs(102), vec![job_page(&[(21, guest, "in_progress")])]),
+                ],
+                home: "hosted",
+                says: vec![default_limit(), counted(2)],
+                asked: vec![runs("queued"), runs("in_progress"), jobs(101), jobs(102)],
+            },
+            Case {
+                name: "a-run-both-status-queries-list-is-counted-once".to_owned(),
+                busy: "",
+                limit: "",
+                pages: vec![
+                    (runs("queued"), vec![run_page(&[101])]),
+                    (runs("in_progress"), vec![run_page(&[101])]),
+                    (
+                        jobs(101),
+                        vec![job_page(&[
+                            (11, "lint", "in_progress"),
+                            (12, guest, "queued"),
+                        ])],
+                    ),
+                ],
+                home: "guest",
+                says: vec![default_limit(), counted(1)],
+                asked: vec![runs("queued"), runs("in_progress"), jobs(101)],
+            },
+            Case {
+                name: "jobs-and-runs-after-the-first-page-are-counted".to_owned(),
+                busy: "",
+                limit: "",
+                pages: vec![
+                    (runs("queued"), empty()),
+                    (
+                        runs("in_progress"),
+                        vec![run_page(&[101]), run_page(&[102])],
+                    ),
+                    (
+                        jobs(101),
+                        vec![
+                            job_page(&[
+                                (11, "lint", "in_progress"),
+                                (12, "test (ubuntu-latest)", "in_progress"),
+                            ]),
+                            job_page(&[(13, guest, "in_progress")]),
+                        ],
+                    ),
+                    (jobs(102), vec![job_page(&[(21, guest, "queued")])]),
+                ],
+                home: "hosted",
+                says: vec![counted(2)],
+                asked: vec![runs("queued"), runs("in_progress"), jobs(101), jobs(102)],
+            },
+            Case {
+                name: "a-failure-on-a-later-page-of-the-run-listing-answers-guest".to_owned(),
+                busy: "",
+                limit: "",
+                pages: vec![
+                    (runs("queued"), vec![run_page(&[101, 102]), Page::Fails]),
+                    (runs("in_progress"), empty()),
+                    (jobs(101), vec![job_page(&[(11, guest, "queued")])]),
+                    (jobs(102), vec![job_page(&[(21, guest, "queued")])]),
+                ],
+                home: "guest",
+                says: vec![UNREADABLE.to_owned()],
+                asked: vec![runs("queued")],
+            },
+            Case {
+                name: "a-failure-on-a-later-page-of-a-runs-jobs-answers-guest".to_owned(),
+                busy: "",
+                limit: "",
+                pages: vec![
+                    (runs("queued"), vec![run_page(&[101, 102])]),
+                    (runs("in_progress"), empty()),
+                    (
+                        jobs(101),
+                        vec![job_page(&[(11, guest, "queued")]), Page::Fails],
+                    ),
+                    (jobs(102), vec![job_page(&[(21, guest, "in_progress")])]),
+                ],
+                home: "guest",
+                says: vec![UNREADABLE.to_owned()],
+                asked: vec![runs("queued"), runs("in_progress"), jobs(101)],
+            },
+            Case {
+                name: "this-run-is-left-out".to_owned(),
+                busy: "",
+                limit: "",
+                pages: vec![
+                    (runs("queued"), empty()),
+                    (runs("in_progress"), vec![run_page(&[THIS_RUN, 101])]),
+                    (jobs(THIS_RUN), vec![job_page(&[(91, guest, "queued")])]),
+                    (jobs(101), vec![job_page(&[(11, guest, "queued")])]),
+                ],
+                home: "guest",
+                says: vec![counted(1)],
+                asked: vec![runs("queued"), runs("in_progress"), jobs(101)],
+            },
+            Case {
+                name: "only-waiting-guest-jobs-are-counted".to_owned(),
+                busy: "",
+                limit: "",
+                pages: vec![
+                    (runs("queued"), vec![run_page(&[101])]),
+                    (runs("in_progress"), vec![run_page(&[102])]),
+                    (
+                        jobs(101),
+                        vec![job_page(&[
+                            (11, guest, "completed"),
+                            (12, "test (windows-latest)", "queued"),
+                            (13, "lint (windows)", "queued"),
+                        ])],
+                    ),
+                    (jobs(102), vec![job_page(&[(21, guest, "queued")])]),
+                ],
+                home: "guest",
+                says: vec![counted(1)],
+                asked: vec![runs("queued"), runs("in_progress"), jobs(101), jobs(102)],
+            },
+            Case {
+                name: "a-limit-of-3-admits-two-waiting-jobs".to_owned(),
+                busy: "",
+                limit: "3",
+                pages: vec![
+                    (runs("queued"), vec![run_page(&[101])]),
+                    (runs("in_progress"), vec![run_page(&[102])]),
+                    (jobs(101), vec![job_page(&[(11, guest, "queued")])]),
+                    (jobs(102), vec![job_page(&[(21, guest, "in_progress")])]),
+                ],
+                home: "guest",
+                says: vec!["limit: 3 (WINGUEST_QUEUE_LIMIT)".to_owned(), counted(2)],
+                asked: vec![runs("queued"), runs("in_progress"), jobs(101), jobs(102)],
+            },
+            Case {
+                name: "a-limit-of-1-sends-one-waiting-job-to-the-hosted-runner".to_owned(),
+                busy: "",
+                limit: "1",
+                pages: vec![
+                    (runs("queued"), vec![run_page(&[101])]),
+                    (runs("in_progress"), empty()),
+                    (jobs(101), vec![job_page(&[(11, guest, "queued")])]),
+                ],
+                home: "hosted",
+                says: vec!["limit: 1 (WINGUEST_QUEUE_LIMIT)".to_owned(), counted(1)],
+                asked: vec![runs("queued"), runs("in_progress"), jobs(101)],
+            },
+        ];
+        for (tag, limit) in [
+            ("zero", "0"),
+            ("negative", "-1"),
+            ("fraction", "2.5"),
+            ("word", "two"),
+            ("padded", " 3"),
+        ] {
+            out.push(Case {
+                name: format!("a-{tag}-limit-falls-back-to-the-default"),
+                busy: "",
+                limit,
+                pages: vec![
+                    (runs("queued"), vec![run_page(&[101])]),
+                    (runs("in_progress"), empty()),
+                    (jobs(101), vec![job_page(&[(11, guest, "queued")])]),
+                ],
+                home: "guest",
+                says: vec![default_limit(), counted(1)],
+                asked: vec![runs("queued"), runs("in_progress"), jobs(101)],
+            });
+        }
+        out
+    }
+
+    fn answer(case: &Case, script: &str, root: &Path) -> Result<(), String> {
+        let dir = root.join(&case.name);
+        let bin = dir.join("bin");
+        let pages = dir.join("pages");
+        for made in [&dir, &bin, &pages] {
+            fs::create_dir(made).expect("a fixture directory");
+        }
+        let gh = bin.join("gh");
+        fs::write(&gh, FAKE_GH).expect("the fake gh");
+        fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).expect("an executable gh");
+        for (path, listed) in &case.pages {
+            for (index, page) in listed.iter().enumerate() {
+                let stem = format!("{}.{}", page_key(path), index + 1);
+                let canned = match page {
+                    Page::Body(body) => fs::write(pages.join(format!("{stem}.json")), body),
+                    Page::Fails => fs::write(pages.join(format!("{stem}.fails")), ""),
+                };
+                canned.expect("a canned page");
+            }
+        }
+        let script_file = dir.join("pick.sh");
+        fs::write(&script_file, script).expect("the picker's script");
+        let written = dir.join("github-output");
+        let log = dir.join("gh.log");
+        let inherited = std::env::var_os("PATH").unwrap_or_default();
+        let path =
+            std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&inherited)))
+                .expect("a PATH with the fake gh first");
+
+        let output = Command::new("bash")
+            .args(["--noprofile", "--norc", "-eo", "pipefail"])
+            .arg(&script_file)
+            .env_clear()
+            .env("PATH", path)
+            .env("GITHUB_REPOSITORY", REPOSITORY)
+            .env("GITHUB_RUN_ID", THIS_RUN.to_string())
+            .env("GITHUB_OUTPUT", &written)
+            .env("GH_TOKEN", "canned")
+            .env("WINGUEST_BUSY", case.busy)
+            .env("WINGUEST_QUEUE_LIMIT", case.limit)
+            .env("FAKE_GH_PAGES", &pages)
+            .env("FAKE_GH_LOG", &log)
+            .output()
+            .expect("bash runs the picker's script");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let written = fs::read_to_string(&written).unwrap_or_default();
+        let calls = fs::read_to_string(&log).unwrap_or_default();
+
+        let mut asked: BTreeMap<String, usize> = BTreeMap::new();
+        for call in calls.lines() {
+            *asked.entry(call.to_owned()).or_default() += 1;
+        }
+        let mut expected_asked: BTreeMap<String, usize> = BTreeMap::new();
+        for path in &case.asked {
+            *expected_asked.entry(path.clone()).or_default() += 1;
+        }
+        let mut wrong = Vec::new();
+        if !output.status.success() {
+            wrong.push(format!(
+                "the script exited {:?}; it must succeed on every answer",
+                output.status
+            ));
+        }
+        if written != format!("home={}\n", case.home) {
+            wrong.push(format!(
+                "it wrote {written:?} to GITHUB_OUTPUT, not `home={}`",
+                case.home
+            ));
+        }
+        let home_line = format!("home: {}", case.home);
+        for line in case.says.iter().chain(std::iter::once(&home_line)) {
+            if !stdout.lines().any(|printed| printed == line) {
+                wrong.push(format!("it did not print {line:?}"));
+            }
+        }
+        if asked != expected_asked {
+            wrong.push(format!(
+                "it asked the API {asked:#?}, not exactly {expected_asked:#?}"
+            ));
+        }
+        if wrong.is_empty() {
+            return Ok(());
+        }
+        Err(format!(
+            "{}:\n  {}\n  stdout:\n{stdout}\n  stderr:\n{stderr}",
+            case.name,
+            wrong.join("\n  ")
+        ))
+    }
+
+    #[test]
+    fn the_windows_home_picker_answers_from_canned_api_pages() {
+        let jq = Command::new("jq").arg("--version").output();
+        assert!(
+            jq.is_ok_and(|output| output.status.success()),
+            "these fixtures run the picker's script, which reads the API's answers with `jq`; \
+             the ubuntu runner carries it, and this machine has none on PATH"
+        );
+        let doc = parse_workflow(&ci_workflow_text()).expect(CI_WORKFLOW);
+        let script = field(&doc, "jobs")
+            .and_then(|jobs| field(jobs, PICK_WINDOWS_HOME_JOB))
+            .map(steps_of)
+            .and_then(|steps| steps.first())
+            .and_then(|step| scalar(step, "run"))
+            .expect("the workflow's picker has a script to run");
+
+        let tree = scratch_dir("pick-windows-home");
+        let failures: Vec<String> = cases()
+            .iter()
+            .filter_map(|case| answer(case, script, tree.path()).err())
+            .collect();
+        assert!(
+            failures.is_empty(),
+            "the picker's script answered wrongly from canned API pages:\n\n{}",
+            failures.join("\n\n")
+        );
+    }
 }
 
 #[test]

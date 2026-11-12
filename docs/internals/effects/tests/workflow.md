@@ -580,6 +580,56 @@ ships, with the checkout's credential still configured, and no guest
 teardown recalls what it pushed.
 Measured, `MUT-WORKFLOW-PERMISSIONS-WIDENED`.
 
+## `fn pinned_map(pinned: &[(&str, &str)]) -> BTreeMap<String, String> {`
+
+A model's `(key, value)` pairs as the map a parsed mapping is compared with.
+
+## `pub(super) fn ci_pick_windows_home_complaints(doc: &Yaml) -> Vec<String> {`
+
+Every way the job that picks the Windows suite's home fails its contract.
+
+The job is pinned whole: its field set, name, runner, timeout, permissions,
+output, its one step's fields, id, environment, resolved shell and script.
+The script is pinned as text, and what that text answers is executed
+elsewhere, by `the_windows_home_picker_answers_from_canned_api_pages` in
+`super`, against canned API pages; the pin is what makes those answers the
+workflow's.
+
+## `pub(super) fn ci_pick_windows_home_complaints(doc: &Yaml) -> Vec<String> {` › `for name in field_names(jobs) {`
+
+No other job declares `permissions:`. The picker is the one job that widens
+the workflow's token, by one read scope, and it checks out nothing; a block
+on any other job hands whatever it names to a job that runs the candidate's
+build scripts and tests. Every modelled job's field set already refuses the
+key; this scan reaches a job added tomorrow that has no field set yet, and
+names the cause. Measured, `MUT-JOB-PERMISSIONS-ON-THE-GUEST-JOB`.
+
+## `pub(super) fn ci_pick_windows_home_complaints(doc: &Yaml) -> Vec<String> {` › `let counted = field(jobs, TEST_WINDOWS_JOB).and_then(|job| scalar(job, "name"));`
+
+The guest's job keeps the `name:` the picker counts. The API lists jobs by
+name, and nothing else pins that one, so a rename would leave the picker
+counting an empty queue. Measured, `MUT-PICK-WINDOWS-HOME-COUNTS-A-RENAMED-JOB`.
+
+## `pub(super) fn ci_pick_windows_home_complaints(doc: &Yaml) -> Vec<String> {` › `let permissions = field(job, "permissions").and_then(scalar_map);`
+
+The token's scopes and the answer's name, each as a whole map. A wider
+`actions:` can cancel or re-run any run; another scope is a token the job
+never needed; an output under another name, or bound to another step, is an
+empty string to the jobs that read it. Measured,
+`MUT-PICK-WINDOWS-HOME-PERMISSION-WIDENED`,
+`MUT-PICK-WINDOWS-HOME-PERMISSION-ADDED` and
+`MUT-PICK-WINDOWS-HOME-OUTPUT-RENAMED`.
+
+## `pub(super) fn ci_pick_windows_home_complaints(doc: &Yaml) -> Vec<String> {` › `let steps = steps_of(job);`
+
+Exactly one step, a script: no checkout, no action. Then its id, its
+environment, its script and its resolved shell. Measured,
+`MUT-PICK-WINDOWS-HOME-SECOND-STEP`, `MUT-PICK-WINDOWS-HOME-ENV-CROSSED`,
+`MUT-PICK-WINDOWS-HOME-UNREADABLE-ANSWERS-HOSTED`,
+`MUT-PICK-WINDOWS-HOME-COUNTS-A-RUN-TWICE`,
+`MUT-PICK-WINDOWS-HOME-FIRST-PAGE-ONLY` and
+`MUT-PICK-WINDOWS-HOME-LATER-PAGE-FAILURE-IGNORED`.
+
 ## `pub(super) fn ci_windows_build_witness_complaints(doc: &Yaml) -> Vec<String> {`
 
 Every way the hosted Windows codegen witness fails its contract.

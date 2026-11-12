@@ -2220,6 +2220,84 @@ machine, which is the input this change added. The guest is provisioned
 outside the repository, so its Cargo home and its environment are not in any
 diff, and this is the leg saying it ran what it says it ran.
 
+## `fn the_windows_home_is_picked_by_the_one_job_the_contract_pins() {`
+
+The job that decides where the Windows suite runs matches the contract, and
+two facts inside its pinned script agree with the model: it starts from
+`WINGUEST_QUEUE_LIMIT_DEFAULT`, and it counts jobs named
+`TEST_WINDOWS_NAME`. The refusals are executed in [`WORKFLOW_ESCAPES`], every
+row named `MUT-PICK-WINDOWS-HOME-*` and `MUT-JOB-PERMISSIONS-ON-THE-GUEST-JOB`.
+
+## `mod pick_windows_home_answers {`
+
+What the picker's script answers, executed rather than read. The oracle pins
+the script as text; this runs the workflow's own text under `bash
+--noprofile --norc -eo pipefail`, the invocation GitHub uses for
+`shell: bash`, with a fake `gh` first on its PATH and the real `jq`, `sort`
+and `tr` behind it.
+
+Linux only. The script runs on `ubuntu-latest` and nowhere else, and it
+needs `bash` 4 (`mapfile`) and `jq`. The Windows legs, the guest's image
+included, promise neither; the macOS runner's `/bin/bash` is 3.2.
+
+## `const FAKE_GH: &str = r#"#!/usr/bin/env bash`
+
+`gh api [--paginate] <path>` over canned pages. A path's pages are files
+named by the path with every character outside `[A-Za-z0-9]` turned into
+`_`, then `.<n>.json`, or `.<n>.fails` for a page that fails. With
+`--paginate` it prints every page in order and, at a failing page, exits 1
+having already printed the ones before it, which is what `gh` does; without
+the flag it prints the first page only. It logs each requested path, so the
+fixtures can say which runs were asked for their jobs and how often. A path
+with no pages fails, so an unexpected request reads as an unreadable API
+rather than as an empty one.
+
+## `fn cases() -> Vec<Case> {`
+
+Every answer the plan names, and the three the earlier attempt's reviews
+found missing. Each case states the answer, the lines the script must print,
+and exactly which paths it must ask for and how often.
+
+- `a-run-both-status-queries-list-is-counted-once`: run 101 is in both the
+  queued and the in-progress listing with one queued guest job; the count is
+  1, the answer `guest`, and run 101's jobs are asked for once.
+- `jobs-and-runs-after-the-first-page-are-counted`: a second page of the run
+  listing and of one run's jobs each carry a guest job, and the answer is
+  `hosted` only if both pages are read.
+- `a-failure-on-a-later-page-of-the-run-listing-answers-guest` and
+  `a-failure-on-a-later-page-of-a-runs-jobs-answers-guest`: the pages before
+  the failure hold enough guest jobs to reach the limit, so counting them
+  would answer `hosted`.
+
+The rest: `WINGUEST_BUSY` is `1` exactly and then nothing is asked; an
+unreadable API; one job below the default limit and two at it; this run
+left out; completed guest jobs and other jobs not counted; limits of 3 and 1
+read from the variable; and five values that are not positive whole numbers
+-- `0`, `-1`, `2.5`, `two`, ` 3` -- each falling back to the default, at a
+count where reading the value literally would answer differently.
+
+## `fn answer(case: &Case, script: &str, root: &Path) -> Result<(), String> {`
+
+One case in a directory of its own: the fake `gh`, its pages, a cleared
+environment holding only what the job's step would hold, the script run,
+and every way its answer, its output, its printed lines or its requests
+differ from the case. The script must exit 0 on every answer, since the
+aggregate requires the picker to succeed.
+
+## `fn the_windows_home_picker_answers_from_canned_api_pages() {`
+
+Every case, reported together, so a broken script names every answer it
+gets wrong. It requires `jq` on PATH first and fails if there is none,
+rather than reading the script's own `guest` fallback as a pass. Measured
+by mutating the workflow's script, each mutation then restored: removing the
+run-id dedupe failed the counted-once case; dropping `--paginate` from the
+jobs read failed the later-pages case and the later-page-failure case of a
+run's jobs; ignoring a failed jobs page (`|| true`) failed that case;
+ignoring a failed run-listing page failed the run-listing case and the
+unreadable case; dropping the this-run exclusion failed the this-run case;
+and answering `hosted` on an unreadable API failed this test, the picker's
+pin and the clean-workflow checks.
+
 ## `fn the_msrv_leg_checks_the_floor_the_manifest_publishes_on_every_platform() {`
 
 The MSRV leg checks the floor the manifest publishes, on every platform.

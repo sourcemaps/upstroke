@@ -130,6 +130,83 @@ pub(super) const GOLDEN_IMAGE_TOOLCHAIN: &str = "1.97.1";
 
 pub(super) const TEST_WINDOWS_PLATFORM: &str = "windows-latest";
 
+pub(super) const TEST_WINDOWS_NAME: &str = "test (winguest)";
+
+pub(super) const PICK_WINDOWS_HOME_JOB: &str = "pick-windows-home";
+pub(super) const PICK_WINDOWS_HOME_NAME: &str = "pick windows home";
+pub(super) const PICK_WINDOWS_HOME_RUNNER: &str = "ubuntu-latest";
+pub(super) const PICK_WINDOWS_HOME_TIMEOUT_MINUTES: i64 = 5;
+
+pub(super) const PICK_WINDOWS_HOME_JOB_FIELDS: [&str; 6] = [
+    "name",
+    "outputs",
+    "permissions",
+    "runs-on",
+    "steps",
+    "timeout-minutes",
+];
+
+pub(super) const PICK_WINDOWS_HOME_PERMISSIONS: [(&str, &str); 2] =
+    [("actions", "read"), ("contents", "read")];
+
+pub(super) const PICK_WINDOWS_HOME_STEP_ID: &str = "pick";
+
+pub(super) const PICK_WINDOWS_HOME_OUTPUTS: [(&str, &str); 1] =
+    [("home", "${{ steps.pick.outputs.home }}")];
+
+pub(super) const PICK_WINDOWS_HOME_STEP_FIELDS: [&str; 5] = ["env", "id", "name", "run", "shell"];
+
+pub(super) const PICK_WINDOWS_HOME_SHELL: &str = "bash";
+
+pub(super) const PICK_WINDOWS_HOME_STEP_ENV: [(&str, &str); 3] = [
+    ("GH_TOKEN", "${{ github.token }}"),
+    ("WINGUEST_BUSY", "${{ vars.WINGUEST_BUSY }}"),
+    ("WINGUEST_QUEUE_LIMIT", "${{ vars.WINGUEST_QUEUE_LIMIT }}"),
+];
+
+pub(super) const WINGUEST_QUEUE_LIMIT_DEFAULT: u32 = 2;
+
+pub(super) const PICK_WINDOWS_HOME_SCRIPT: &str = r#"limit=2
+limit_from="the default: WINGUEST_QUEUE_LIMIT is unset or not a positive whole number"
+if [[ "${WINGUEST_QUEUE_LIMIT:-}" =~ ^0*[1-9][0-9]{0,5}$ ]]; then
+  limit=$((10#$WINGUEST_QUEUE_LIMIT))
+  limit_from="WINGUEST_QUEUE_LIMIT"
+fi
+winguest_jobs() {
+  local runs="repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs"
+  local status listed seen="" id jobs matched count=0
+  local -a run_ids
+  for status in queued in_progress; do
+    listed="$(gh api --paginate "$runs?status=$status&per_page=100")" || return 1
+    listed="$(jq -r '.workflow_runs[].id' <<<"$listed")" || return 1
+    seen+="$listed"$'\n'
+  done
+  mapfile -t run_ids < <(sort -u <<<"$seen")
+  for id in "${run_ids[@]}"; do
+    if [[ -z "$id" || "$id" == "$GITHUB_RUN_ID" ]]; then continue; fi
+    [[ "$id" =~ ^[0-9]+$ ]] || return 1
+    jobs="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$id/jobs?filter=latest&per_page=100")" || return 1
+    matched="$(jq -s '[.[].jobs[] | select(.name == "test (winguest)" and (.status == "queued" or .status == "in_progress"))] | length' <<<"$jobs")" || return 1
+    [[ "$matched" =~ ^[0-9]+$ ]] || return 1
+    count=$((count + matched))
+  done
+  echo "$count"
+}
+home=guest
+echo "limit: $limit ($limit_from)"
+if [[ "${WINGUEST_BUSY:-}" == "1" ]]; then
+  home=hosted
+  echo "WINGUEST_BUSY is 1, so the queue for the guest was not counted."
+elif count="$(winguest_jobs)"; then
+  echo "WINGUEST_BUSY is not 1. Other runs of this workflow have $count 'test (winguest)' jobs queued or in progress."
+  if (( count >= limit )); then home=hosted; fi
+else
+  echo "WINGUEST_BUSY is not 1, and the GitHub API could not be read, so the queue for the guest is unknown. A failed question does not move a run off the guest."
+fi
+echo "home: $home"
+echo "home=$home" >> "$GITHUB_OUTPUT"
+"#;
+
 pub(super) const MSRV_JOB: &str = "msrv";
 pub(super) const MSRV_COMMAND: &str = "cargo check --locked --all-targets --all-features";
 
@@ -141,7 +218,7 @@ pub(super) const AGGREGATE_JOB: &str = "merge-gate";
 pub(super) const REQUIRED_CONTEXT: &str = "upstroke-ci";
 
 pub(super) const AGGREGATE_SCRIPT: &str = r#"failed=0
-for gate in LINT LINT_WINDOWS LINT_MACOS MSRV TEST TEST_WINDOWS; do
+for gate in LINT LINT_WINDOWS LINT_MACOS MSRV PICK_WINDOWS_HOME TEST TEST_WINDOWS; do
   result_var="${gate}_RESULT"
   result="${!result_var}"
   if [[ "$result" != "success" ]]; then

@@ -18,12 +18,16 @@ use super::ci_model::{
     CLIPPY_GATE, CiTarget, DEFAULTS_FIELDS, DEFAULTS_RUN_FIELDS, ENCODED_RUSTFLAGS_KEY,
     GATE_JOB_FIELDS, GATE_SCRIPTS, GOLDEN_IMAGE_TOOLCHAIN, HOST_ACCEPTANCE_CAPTURE,
     HOST_ACCEPTANCE_WINDOWS_CAPTURE, KNOWN_SHELLS, MSRV_COMMAND, MSRV_JOB, MSRV_JOB_FIELDS,
-    OPTIONAL_DEFAULTS_FIELD, PINNED_ACTIONS, REQUIRED_CONTEXT, RUSTFLAGS_KEY, RUSTFLAGS_VALUE,
-    STABLE_TOOLCHAIN, STEP_FIELDS, TEST_COMMAND, TEST_JOB_FIELDS, TEST_SCRIPTS, TEST_STEP_ENV,
-    TEST_STEP_FIELDS, TEST_WINDOWS_JOB, TEST_WINDOWS_JOB_FIELDS, TEST_WINDOWS_LABELS,
-    TEST_WINDOWS_PLATFORM, TEST_WINDOWS_SCRIPTS, TEST_WINDOWS_STEP_ENV, TOOLCHAIN_ACTION,
-    TOOLCHAIN_COMPONENTS, WINDOWS_BUILD_WITNESS, WINDOWS_TEST_WITNESS, WORKFLOW_ENV,
-    WORKFLOW_FIELDS, WORKFLOW_PERMISSIONS,
+    OPTIONAL_DEFAULTS_FIELD, PICK_WINDOWS_HOME_JOB, PICK_WINDOWS_HOME_JOB_FIELDS,
+    PICK_WINDOWS_HOME_NAME, PICK_WINDOWS_HOME_OUTPUTS, PICK_WINDOWS_HOME_PERMISSIONS,
+    PICK_WINDOWS_HOME_RUNNER, PICK_WINDOWS_HOME_SCRIPT, PICK_WINDOWS_HOME_SHELL,
+    PICK_WINDOWS_HOME_STEP_ENV, PICK_WINDOWS_HOME_STEP_FIELDS, PICK_WINDOWS_HOME_STEP_ID,
+    PICK_WINDOWS_HOME_TIMEOUT_MINUTES, PINNED_ACTIONS, REQUIRED_CONTEXT, RUSTFLAGS_KEY,
+    RUSTFLAGS_VALUE, STABLE_TOOLCHAIN, STEP_FIELDS, TEST_COMMAND, TEST_JOB_FIELDS, TEST_SCRIPTS,
+    TEST_STEP_ENV, TEST_STEP_FIELDS, TEST_WINDOWS_JOB, TEST_WINDOWS_JOB_FIELDS,
+    TEST_WINDOWS_LABELS, TEST_WINDOWS_NAME, TEST_WINDOWS_PLATFORM, TEST_WINDOWS_SCRIPTS,
+    TEST_WINDOWS_STEP_ENV, TOOLCHAIN_ACTION, TOOLCHAIN_COMPONENTS, WINDOWS_BUILD_WITNESS,
+    WINDOWS_TEST_WITNESS, WORKFLOW_ENV, WORKFLOW_FIELDS, WORKFLOW_PERMISSIONS,
 };
 use super::repo_root;
 
@@ -1099,6 +1103,174 @@ fn workflow_permissions_complaints(doc: &Yaml) -> Vec<String> {
     )]
 }
 
+fn pinned_map(pinned: &[(&str, &str)]) -> BTreeMap<String, String> {
+    pinned
+        .iter()
+        .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+        .collect()
+}
+
+pub(super) fn ci_pick_windows_home_complaints(doc: &Yaml) -> Vec<String> {
+    let mut out = Vec::new();
+    let Some(jobs) = field(doc, "jobs") else {
+        return vec!["[jobs] the workflow declares no `jobs:` mapping".to_owned()];
+    };
+
+    for name in field_names(jobs) {
+        if name == PICK_WINDOWS_HOME_JOB {
+            continue;
+        }
+        if field(jobs, &name).is_some_and(|job| field(job, "permissions").is_some()) {
+            out.push(format!(
+                "[job-permissions] `{name}` declares its own `permissions:`. One job widens the \
+                 workflow's token, `{PICK_WINDOWS_HOME_JOB}`, by one read scope and with no \
+                 checkout; a block on any other job hands a job that runs the candidate's build \
+                 scripts and tests whatever the block names."
+            ));
+        }
+    }
+
+    let counted = field(jobs, TEST_WINDOWS_JOB).and_then(|job| scalar(job, "name"));
+    if counted != Some(TEST_WINDOWS_NAME) {
+        out.push(format!(
+            "[pick-windows-home-counts] `{TEST_WINDOWS_JOB}` is named {counted:?}, not \
+             `{TEST_WINDOWS_NAME}`. The API lists a job by its `name:`, and that is the name \
+             `{PICK_WINDOWS_HOME_JOB}` counts: under any other the queue for the guest reads as \
+             empty whatever is waiting, and no run ever leaves a busy guest."
+        ));
+    }
+
+    let Some(job) = field(jobs, PICK_WINDOWS_HOME_JOB) else {
+        out.push(format!(
+            "[pick-windows-home-missing] no `{PICK_WINDOWS_HOME_JOB}` job, so nothing decides \
+             where the Windows suite runs"
+        ));
+        return out;
+    };
+
+    for complaint in field_complaints(job, &PICK_WINDOWS_HOME_JOB_FIELDS, &OPTIONAL_DEFAULTS_FIELD)
+    {
+        out.push(format!(
+            "[unexpected-job-field] `{PICK_WINDOWS_HOME_JOB}` {complaint}. An `if:` skips the \
+             job and `continue-on-error:` reports success over a script that wrote no answer; \
+             either leaves the output empty, which names neither home."
+        ));
+    }
+    if scalar(job, "name") != Some(PICK_WINDOWS_HOME_NAME) {
+        out.push(format!(
+            "[pick-windows-home-name] `{PICK_WINDOWS_HOME_JOB}` is named {:?}, not \
+             `{PICK_WINDOWS_HOME_NAME}`",
+            scalar(job, "name")
+        ));
+    }
+    if scalar(job, "runs-on") != Some(PICK_WINDOWS_HOME_RUNNER) {
+        out.push(format!(
+            "[pick-windows-home-runner] `{PICK_WINDOWS_HOME_JOB}` runs on {:?}, not \
+             `{PICK_WINDOWS_HOME_RUNNER}`. The question is asked from a hosted runner, whose \
+             image carries `gh` and `jq`: asked from the guest it would wait in the queue it \
+             is there to measure, holding a token that reads other runs.",
+            field(job, "runs-on")
+        ));
+    }
+    let minutes = field(job, "timeout-minutes").and_then(Yaml::as_i64);
+    if minutes != Some(PICK_WINDOWS_HOME_TIMEOUT_MINUTES) {
+        out.push(format!(
+            "[pick-windows-home-timeout] `{PICK_WINDOWS_HOME_JOB}` is bounded at {minutes:?} \
+             minutes, not exactly {PICK_WINDOWS_HOME_TIMEOUT_MINUTES}. The question is a few \
+             API reads; a stalled one holds every job that needs the answer, the required \
+             aggregate among them, for as long as this allows."
+        ));
+    }
+
+    let permissions = field(job, "permissions").and_then(scalar_map);
+    let expected_permissions = pinned_map(&PICK_WINDOWS_HOME_PERMISSIONS);
+    if permissions.as_ref() != Some(&expected_permissions) {
+        out.push(format!(
+            "[pick-windows-home-permissions] `{PICK_WINDOWS_HOME_JOB}`'s `permissions:` is \
+             {permissions:#?}, not exactly {expected_permissions:#?}. Listing other runs' jobs \
+             needs `actions: read` and nothing more; a job-level block replaces the workflow's \
+             for this job, so `actions: write` here can cancel or re-run any run, and a \
+             `contents: write` can push."
+        ));
+    }
+
+    let outputs = field(job, "outputs").and_then(scalar_map);
+    let expected_outputs = pinned_map(&PICK_WINDOWS_HOME_OUTPUTS);
+    if outputs.as_ref() != Some(&expected_outputs) {
+        out.push(format!(
+            "[pick-windows-home-output] `{PICK_WINDOWS_HOME_JOB}`'s `outputs:` is {outputs:#?}, \
+             not exactly {expected_outputs:#?}. The job's consumers read the one name: under \
+             another name, or bound to another step, they read an empty string, which is \
+             neither home."
+        ));
+    }
+
+    let steps = steps_of(job);
+    let [step] = steps else {
+        out.push(format!(
+            "[pick-windows-home-steps] `{PICK_WINDOWS_HOME_JOB}` has {} steps, not exactly one. \
+             The job holds a token that reads other runs and needs no checkout to ask its \
+             question; a second step is a checkout, an action or a script beside that token.",
+            steps.len()
+        ));
+        return out;
+    };
+    for complaint in field_complaints(step, &PICK_WINDOWS_HOME_STEP_FIELDS, &[]) {
+        out.push(format!(
+            "[unexpected-step-field] `{PICK_WINDOWS_HOME_JOB}`'s step {complaint}"
+        ));
+    }
+    if scalar(step, "id") != Some(PICK_WINDOWS_HOME_STEP_ID) {
+        out.push(format!(
+            "[pick-windows-home-output] `{PICK_WINDOWS_HOME_JOB}`'s step has id {:?}, not \
+             `{PICK_WINDOWS_HOME_STEP_ID}`, the step the job's output reads its answer from",
+            scalar(step, "id")
+        ));
+    }
+
+    let env = field(step, "env").and_then(scalar_map);
+    let expected_env = pinned_map(&PICK_WINDOWS_HOME_STEP_ENV);
+    if env.as_ref() != Some(&expected_env) {
+        out.push(format!(
+            "[pick-windows-home-env] `{PICK_WINDOWS_HOME_JOB}`'s step binds {env:#?}, not \
+             exactly {expected_env:#?}. The two repository variables reach the script as \
+             environment, never as text spliced into it, and each name reads its own variable; \
+             any other key is something the script was never written to be handed."
+        ));
+    }
+
+    let script = scalar(step, "run");
+    if script != Some(PICK_WINDOWS_HOME_SCRIPT) {
+        out.push(format!(
+            "[pick-windows-home-script] `{PICK_WINDOWS_HOME_JOB}`'s script is not the pinned \
+             one. `the_windows_home_picker_answers_from_canned_api_pages` executes the \
+             workflow's script against canned API pages, and the pin is what makes those \
+             answers this text's: an unreadable API answers `guest`, a run both status \
+             queries list is counted once, and every page is read. Found:\n{script:?}\n\
+             Pinned:\n{PICK_WINDOWS_HOME_SCRIPT:?}"
+        ));
+    }
+
+    match CI_TARGETS
+        .iter()
+        .find(|target| target.runner == PICK_WINDOWS_HOME_RUNNER)
+    {
+        Some(target) => out.extend(shell_complaints(
+            doc,
+            job,
+            step,
+            target,
+            &format!("`{PICK_WINDOWS_HOME_JOB}`'s step"),
+            PICK_WINDOWS_HOME_SHELL,
+        )),
+        None => out.push(format!(
+            "[step-shell] `{PICK_WINDOWS_HOME_RUNNER}` is not a runner this contract models, so \
+             the shell `{PICK_WINDOWS_HOME_JOB}`'s script resolves to is undecidable here"
+        )),
+    }
+    out
+}
+
 pub(super) fn ci_windows_build_witness_complaints(doc: &Yaml) -> Vec<String> {
     let mut out = Vec::new();
     let Some(jobs) = field(doc, "jobs") else {
@@ -1512,6 +1684,7 @@ pub(super) fn workflow_complaints(doc: &Yaml) -> Vec<String> {
     let mut out = ci_gate_complaints(doc);
     out.extend(ci_test_job_complaints(doc));
     out.extend(ci_test_windows_job_complaints(doc));
+    out.extend(ci_pick_windows_home_complaints(doc));
     out.extend(ci_windows_build_witness_complaints(doc));
     out.extend(workflow_env_complaints(doc));
     out.extend(workflow_permissions_complaints(doc));
@@ -1666,8 +1839,8 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         escape: "a gate the aggregate does not depend on: branch protection settles green \
                  while the Windows denial gate is red. `PR5D-MSVC-CLIPPY-NEVER-RUN`.",
         job: Some("merge-gate"),
-        anchor: "    needs: [lint, lint-windows, lint-macos, msrv, test, test-windows]\n",
-        replacement: "    needs: [lint, lint-macos, msrv, test, test-windows]\n",
+        anchor: "    needs: [lint, lint-windows, lint-macos, msrv, pick-windows-home, test, test-windows]\n",
+        replacement: "    needs: [lint, lint-macos, msrv, pick-windows-home, test, test-windows]\n",
         refused_as: "aggregate-needs",
     },
     WorkflowEscape {
@@ -1688,8 +1861,8 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  `requires.split_whitespace().any(|word| word == looped)` passes on the \
                  trailing mention.",
         job: Some("merge-gate"),
-        anchor: "          for gate in LINT LINT_WINDOWS LINT_MACOS MSRV TEST TEST_WINDOWS; do\n",
-        replacement: "          for gate in LINT LINT_WINDOWS MSRV TEST TEST_WINDOWS; do : LINT_MACOS\n",
+        anchor: "          for gate in LINT LINT_WINDOWS LINT_MACOS MSRV PICK_WINDOWS_HOME TEST TEST_WINDOWS; do\n",
+        replacement: "          for gate in LINT LINT_WINDOWS MSRV PICK_WINDOWS_HOME TEST TEST_WINDOWS; do : LINT_MACOS\n",
         refused_as: "aggregate-loop",
     },
     WorkflowEscape {
@@ -3207,6 +3380,130 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: \"1\"\n",
         replacement: "        timeout-minutes: 4\n",
         refused_as: "test-windows-capability-step-env",
+    },
+    WorkflowEscape {
+        name: "MUT-PICK-WINDOWS-HOME-OUTPUT-RENAMED",
+        escape: "the answer published under another name. The step still writes `home` and \
+                 the job is green; whatever reads `needs.pick-windows-home.outputs.home` reads \
+                 an empty string, which names neither home.",
+        job: Some("pick-windows-home"),
+        anchor: "      home: ${{ steps.pick.outputs.home }}\n",
+        replacement: "      where: ${{ steps.pick.outputs.home }}\n",
+        refused_as: "pick-windows-home-output",
+    },
+    WorkflowEscape {
+        name: "MUT-PICK-WINDOWS-HOME-UNREADABLE-ANSWERS-HOSTED",
+        escape: "the fallback inverted: an API that cannot be read answers `hosted`. Fields, \
+                 permissions and output all still match, and an API outage or a token that \
+                 lost its scope moves every run off the guest every lane has run on.",
+        job: Some("pick-windows-home"),
+        anchor: "            echo \"WINGUEST_BUSY is not 1, and the GitHub API could not be read, so the queue for the guest is unknown. A failed question does not move a run off the guest.\"\n",
+        replacement: "            home=hosted\n",
+        refused_as: "pick-windows-home-script",
+    },
+    WorkflowEscape {
+        name: "MUT-PICK-WINDOWS-HOME-PERMISSION-WIDENED",
+        escape: "`actions: write` where `actions: read` is enough. A job-level block replaces \
+                 the workflow's for that job, so the script's token can cancel or re-run any \
+                 run in the repository.",
+        job: Some("pick-windows-home"),
+        anchor: "      actions: read\n",
+        replacement: "      actions: write\n",
+        refused_as: "pick-windows-home-permissions",
+    },
+    WorkflowEscape {
+        name: "MUT-PICK-WINDOWS-HOME-PERMISSION-ADDED",
+        escape: "a third scope beside the two the question needs: `pull-requests: write` is a \
+                 token that can edit a pull request, handed to a job that only reads",
+        job: Some("pick-windows-home"),
+        anchor: "      actions: read\n",
+        replacement: "      actions: read\n      pull-requests: write\n",
+        refused_as: "pick-windows-home-permissions",
+    },
+    WorkflowEscape {
+        name: "MUT-JOB-PERMISSIONS-ON-THE-GUEST-JOB",
+        escape: "the picker's read scope given to the guest's job too. That job runs the \
+                 candidate's build scripts and tests, so whatever the block names is theirs; \
+                 the field set refuses the key as well, and the permission scan is what names \
+                 the cause.",
+        job: Some("test-windows"),
+        anchor: "    timeout-minutes: 20\n",
+        replacement: "    timeout-minutes: 20\n\
+                      \x20   permissions:\n\
+                      \x20     actions: read\n\
+                      \x20     contents: read\n",
+        refused_as: "job-permissions",
+    },
+    WorkflowEscape {
+        name: "MUT-PICK-WINDOWS-HOME-CONDITIONED",
+        escape: "an `if:` on the picker: on the lanes it excludes the job is skipped and its \
+                 output is empty, which names neither home",
+        job: Some("pick-windows-home"),
+        anchor: "    runs-on: ubuntu-latest\n",
+        replacement: "    runs-on: ubuntu-latest\n    if: github.event_name != 'merge_group'\n",
+        refused_as: "unexpected-job-field",
+    },
+    WorkflowEscape {
+        name: "MUT-PICK-WINDOWS-HOME-SECOND-STEP",
+        escape: "a checkout ahead of the question. The script is unchanged and still matches \
+                 its pin, but the job now holds a token that reads other runs beside the \
+                 candidate's tree, which it never needed",
+        job: Some("pick-windows-home"),
+        anchor: "      - name: Pick where the Windows suite runs\n",
+        replacement: "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n\
+                      \x20     - name: Pick where the Windows suite runs\n",
+        refused_as: "pick-windows-home-steps",
+    },
+    WorkflowEscape {
+        name: "MUT-PICK-WINDOWS-HOME-ENV-CROSSED",
+        escape: "`WINGUEST_BUSY` bound to the other variable. With the limit set to `1` every \
+                 run reads as busy, and with it unset none does, whatever the operator set",
+        job: Some("pick-windows-home"),
+        anchor: "          WINGUEST_BUSY: ${{ vars.WINGUEST_BUSY }}\n",
+        replacement: "          WINGUEST_BUSY: ${{ vars.WINGUEST_QUEUE_LIMIT }}\n",
+        refused_as: "pick-windows-home-env",
+    },
+    WorkflowEscape {
+        name: "MUT-PICK-WINDOWS-HOME-COUNTS-A-RUN-TWICE",
+        escape: "the repeats are no longer removed from the two status listings. A run that \
+                 moves from queued to in progress between the two queries is listed by both, \
+                 its jobs are counted twice, and at the default limit one waiting guest job \
+                 sends this run to the hosted runner. The first gap two reviews found in an \
+                 earlier attempt.",
+        job: Some("pick-windows-home"),
+        anchor: "            mapfile -t run_ids < <(sort -u <<<\"$seen\")\n",
+        replacement: "            mapfile -t run_ids <<<\"$seen\"\n",
+        refused_as: "pick-windows-home-script",
+    },
+    WorkflowEscape {
+        name: "MUT-PICK-WINDOWS-HOME-FIRST-PAGE-ONLY",
+        escape: "a run's jobs read from the first page only. A guest job listed after it is \
+                 never counted, so a busy guest reads as free. The second gap two reviews found \
+                 in an earlier attempt.",
+        job: Some("pick-windows-home"),
+        anchor: "              jobs=\"$(gh api --paginate \"repos/$GITHUB_REPOSITORY/actions/runs/$id/jobs?filter=latest&per_page=100\")\" || return 1\n",
+        replacement: "              jobs=\"$(gh api \"repos/$GITHUB_REPOSITORY/actions/runs/$id/jobs?filter=latest&per_page=100\")\" || return 1\n",
+        refused_as: "pick-windows-home-script",
+    },
+    WorkflowEscape {
+        name: "MUT-PICK-WINDOWS-HOME-LATER-PAGE-FAILURE-IGNORED",
+        escape: "a failed page read as a short one. `gh api --paginate` has already printed \
+                 the pages before the failure, so the jobs on them are counted and the run is \
+                 judged on part of the queue rather than answering `guest`",
+        job: Some("pick-windows-home"),
+        anchor: "              jobs=\"$(gh api --paginate \"repos/$GITHUB_REPOSITORY/actions/runs/$id/jobs?filter=latest&per_page=100\")\" || return 1\n",
+        replacement: "              jobs=\"$(gh api --paginate \"repos/$GITHUB_REPOSITORY/actions/runs/$id/jobs?filter=latest&per_page=100\")\" || true\n",
+        refused_as: "pick-windows-home-script",
+    },
+    WorkflowEscape {
+        name: "MUT-PICK-WINDOWS-HOME-COUNTS-A-RENAMED-JOB",
+        escape: "the guest's job renamed. Nothing else pins its `name:`, and the picker counts \
+                 jobs by that name, so under any other the guest's queue reads as empty and no \
+                 run ever leaves a busy guest",
+        job: Some("test-windows"),
+        anchor: "    name: test (winguest)\n",
+        replacement: "    name: test (guest)\n",
+        refused_as: "pick-windows-home-counts",
     },
 ];
 

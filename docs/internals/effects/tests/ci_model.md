@@ -476,6 +476,111 @@ Its shell and cfg valuations carry over to the guest: the image carries
 PowerShell 7, so a `run:` step resolves to `pwsh` there exactly as on
 `windows-latest`, and it builds the same MSVC tuple.
 
+## `pub(super) const TEST_WINDOWS_NAME: &str = "test (winguest)";`
+
+The guest's job as the API lists it. The API names a job by its `name:`,
+not its id, and that is the name [`PICK_WINDOWS_HOME_SCRIPT`] counts, so the
+oracle holds [`TEST_WINDOWS_JOB`]'s `name:` to it: under any other name the
+guest's queue reads as empty whatever is waiting. Nothing else pins that
+`name:`. Measured, `MUT-PICK-WINDOWS-HOME-COUNTS-A-RENAMED-JOB`.
+
+## `pub(super) const PICK_WINDOWS_HOME_JOB: &str = "pick-windows-home";`
+
+The job that decides where this run's Windows suite goes, `guest` or
+`hosted`, and its name, runner and timeout. The guest is one machine on the
+build box, shared with the operator's baselines and Upstroke runs; on a busy
+day each makes the other fail, and the owner asked on 2026-11-11 for a second
+home used only then.
+
+`ubuntu-latest`, because the image carries `gh` and `jq` and the question
+needs nothing else; asked from the guest, it would wait in the queue it
+measures. Five minutes, because the question is a few API reads and every job
+that needs the answer -- the required aggregate among them -- waits on it.
+
+## `pub(super) const PICK_WINDOWS_HOME_JOB_FIELDS: [&str; 6] = [`
+
+The picker's fields, an equality like every other job's. `if:` would skip
+the job and `continue-on-error:` would report success over a script that
+wrote no answer; either leaves the output empty, which names neither home.
+`permissions` is here and on no other job's list.
+
+## `pub(super) const PICK_WINDOWS_HOME_PERMISSIONS: [(&str, &str); 2] =`
+
+Exactly `contents: read` and `actions: read`. Listing other runs' jobs needs
+`actions: read`, which the workflow's token ([`WORKFLOW_PERMISSIONS`]) does
+not carry, and a job-level block *replaces* the workflow's for that job
+rather than adding to it, so the block restates `contents: read`. The
+workflow-level map is unchanged, and the oracle refuses a `permissions:`
+block on any other job: those jobs run the candidate's build scripts and
+tests. Measured, `MUT-PICK-WINDOWS-HOME-PERMISSION-WIDENED`,
+`MUT-PICK-WINDOWS-HOME-PERMISSION-ADDED` and
+`MUT-JOB-PERMISSIONS-ON-THE-GUEST-JOB`.
+
+## `pub(super) const PICK_WINDOWS_HOME_STEP_ID: &str = "pick";`
+
+The step the job's output reads its answer from.
+
+## `pub(super) const PICK_WINDOWS_HOME_OUTPUTS: [(&str, &str); 1] =`
+
+The job's one output, `home`, bound to the step's. Pinned as a whole map: a
+consumer reading `needs.pick-windows-home.outputs.home` reads an empty string
+when the output is renamed or bound to another step. Measured,
+`MUT-PICK-WINDOWS-HOME-OUTPUT-RENAMED`.
+
+## `pub(super) const PICK_WINDOWS_HOME_STEP_FIELDS: [&str; 5] = ["env", "id", "name", "run", "shell"];`
+
+The picker's one step, all five required: no `uses:`, so no action and no
+checkout beside a token that reads other runs. Measured,
+`MUT-PICK-WINDOWS-HOME-SECOND-STEP` (the step count refuses a second step).
+
+## `pub(super) const PICK_WINDOWS_HOME_SHELL: &str = "bash";`
+
+The shell the script is written for, declared on the step and checked as
+resolved, the way the aggregate's is.
+
+## `pub(super) const PICK_WINDOWS_HOME_STEP_ENV: [(&str, &str); 3] = [`
+
+The step's environment, whole: the job's token for `gh`, and the two
+repository variables. They reach the script as environment, never spliced
+into its text, and each name reads its own variable. Measured,
+`MUT-PICK-WINDOWS-HOME-ENV-CROSSED`.
+
+## `pub(super) const WINGUEST_QUEUE_LIMIT_DEFAULT: u32 = 2;`
+
+The queue length at which a run goes to the hosted runner when
+`WINGUEST_QUEUE_LIMIT` is unset or not a positive whole number.
+`the_windows_home_is_picked_by_the_one_job_the_contract_pins` holds the
+script's first line to it, and the canned fixtures expect it.
+
+## `pub(super) const PICK_WINDOWS_HOME_SCRIPT: &str = r#"limit=2`
+
+The picker's script, character for character. It answers `hosted` when
+`WINGUEST_BUSY` is exactly `1`; otherwise when the `test (winguest)` jobs
+queued or in progress in other runs of this workflow number the limit or
+more; otherwise `guest`. It answers `guest` whenever the API cannot be read,
+because a failed question must not move a run off the machine every lane has
+run on, and it prints what it found: the limit and where it came from, the
+variable, the count, the answer.
+
+Two gaps, each found by a review of an earlier attempt, shape the count:
+
+- **A run listed twice.** Queued and in-progress runs are two queries, and a
+  run that starts between them is in both. The run ids from both are
+  collected and their repeats removed (`sort -u`) before any run's jobs are
+  read, so each distinct run is counted once; this run is left out.
+- **The first page only.** Every listing is read with `gh api --paginate`,
+  and its exit is checked: `gh` has already printed the pages before a failed
+  one, so a failure on any page answers `guest` rather than counting part of
+  the queue.
+
+The pin is what makes the executed answers this text's:
+`the_windows_home_picker_answers_from_canned_api_pages` runs the workflow's
+script against canned pages. Measured there, and as pins,
+`MUT-PICK-WINDOWS-HOME-COUNTS-A-RUN-TWICE`,
+`MUT-PICK-WINDOWS-HOME-FIRST-PAGE-ONLY`,
+`MUT-PICK-WINDOWS-HOME-LATER-PAGE-FAILURE-IGNORED` and
+`MUT-PICK-WINDOWS-HOME-UNREADABLE-ANSWERS-HOSTED`.
+
 ## `pub(super) const MSRV_JOB: &str = "msrv";`
 
 The job that holds this crate to the floor it publishes, and the command it
