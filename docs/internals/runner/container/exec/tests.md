@@ -2199,11 +2199,11 @@ it requires, registered here, in `GATED_RUNS` (`mountro`, `mountrw`,
 
 ## `fn removal_in_progress_diagnostic(name: &str) -> String {`
 
-The daemon's answer names the container it is about, and since round six nothing
-reads an answer about another container as this one's settlement, so the fixture
-is armed after the container's name is known rather than from a literal. A
-constant naming `upstroke-c` beside a generated container name is a diagnostic
-the repaired normalizer correctly refuses.
+The daemon's answer names the container it is about, and since the cover review
+of `9ee9784e` nothing reads an answer about another container as this one's
+settlement, so the fixture is armed after the container's name is known rather
+than from a literal. A constant naming `upstroke-c` beside a generated container
+name is a diagnostic the repaired normalizer correctly refuses.
 
 ## `struct CancelAfter {`
 

@@ -1304,7 +1304,8 @@ The build refusal
 
 ## `struct BuildRefusal {`
 
-One `compile_fail` fixture lifted out of this module's own doc comments.
+One `compile_fail` fixture read out of the funnel's Markdown notes,
+`docs/internals/events/log.md`.
 
 ## `struct BuildRefusal` › `code: String,`
 
@@ -1312,18 +1313,24 @@ The `EXXXX` the fence declares.
 
 ## `struct BuildRefusal` › `line: usize,`
 
-Where in `src/events/log.rs` the fence opens, for a failure message.
+The 1-based line of `docs/internals/events/log.md` on which the fence opens,
+for a failure message.
 
 ## `struct BuildRefusal` › `body: String,`
 
-The block's Rust, doc-comment prefixes removed.
+The block's Rust, the fence's lines exactly as the Markdown file has them:
+there is no comment prefix to remove, and none is stripped.
 
 ## `fn declared_build_refusals() -> Vec<BuildRefusal> {`
 
-Every ```` ```compile_fail,EXXXX ```` block in `src/events/log.rs`.
+Every ```` ```compile_fail,EXXXX ```` block in `docs/internals/events/log.md`.
 
-The fixtures are read out of the doc comments rather than copied, so the
-executed test and the documented one cannot drift: there is one text.
+The fixtures are read out of those notes rather than copied, so the executed
+test and the documented one cannot drift: there is one text.
+
+History: the fixtures used to live in `src/events/log.rs`'s doc comments, and
+this function lifted them out and stripped the doc-comment prefixes. That
+module now has no `compile_fail` fence; an edit there reaches no fixture.
 
 ## `fn crate_under_test() -> (PathBuf, PathBuf) {`
 
@@ -1353,16 +1360,18 @@ The distinct `error[EXXXX]` codes in a rustc diagnostic stream.
 `expected_failures_refusals`: "a schema-4 append outside the Event funnel
 does not compile", proven by a test the project's own gate runs.
 
-The three fixtures that carry this claim are `compile_fail` doctests, and
-**`cargo test --all-targets` does not run doctests** — `--all-targets` is
-`--lib --bins --tests --benches --examples`, and the doc target is not in it.
-CI runs exactly that command, so as documentation-only fixtures they were
-green because they never executed at all: the strongest form of the failure
-this slice's contract warns about ("a fixture asserting *this does not build*
-is green whether it failed for the intended reason or a typo").
+History: the three fixtures that carry this claim began as `compile_fail`
+doctests in `src/events/log.rs`, and **`cargo test --all-targets` does not run
+doctests** — `--all-targets` is `--lib --bins --tests --benches --examples`,
+and the doc target is not in it. CI runs exactly that command, so as
+documentation-only fixtures they were green because they never executed at
+all: the strongest form of the failure this slice's contract warns about ("a
+fixture asserting *this does not build* is green whether it failed for the
+intended reason or a typo").
 
-So the blocks are read out of the doc comments and compiled here. Three
-things are asserted that a bare "it did not build" cannot:
+So the blocks are compiled here. They now live as fenced blocks in
+`docs/internals/events/log.md`, which `declared_build_refusals` reads
+directly. Three things are asserted that a bare "it did not build" cannot:
 
 * the **positive control** compiles, so a mis-wired `--extern` cannot make
   every fixture "refuse" for want of a crate to refuse against;

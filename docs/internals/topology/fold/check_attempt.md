@@ -19,6 +19,26 @@ from its first attempt to its close.
 
 refusals[5], second half: exact equality, field for field (INV-23).
 
+## `pub(super) fn check_run_resumed(&self, resumed: &RunResumed…` › `if self.epoch.0.checked_add(1).is_none() {`
+
+A resume begins a new incarnation, and the fold tells an incarnation from the one before it by
+its epoch, so a resume is refused when the epoch after it cannot be represented.
+`apply_resumed` advances the epoch with `saturating_add(1)`, which cannot panic a replay and, at
+`u32::MAX`, cannot move either. Without this refusal the resumed incarnation would carry the
+epoch of the one it replaces, and a session that one retained would still pass
+`check_attempt_started`'s `*incarnation != self.epoch` test and be resumed across the boundary,
+though the process that retained it is gone (refusals[12]). The refusal is
+`InconsistentRecord`, the error `check_attempt_started` gives its exhausted attempt counter, and
+no variant was added for it.
+
+With the refusal in place `apply_resumed`'s `saturating_add` never saturates for a checked
+event; the applying module is unchanged. The check sits after the runner check, so a resume
+that also moved the runner is still refused as `RunnerMoved`. No physical run reaches the
+ceiling, since the epoch counts resumes. The boundary is pinned by
+`an_exhausted_epoch_admits_no_resume` in `src/topology/fold/tests/predicates.rs`, which accepts
+a resume at epoch `u32::MAX - 1` and refuses it at `u32::MAX`; deleting this refusal fails that
+test.
+
 ## `impl RunState` › `pub(super) fn check_spawn(`
 
 --- task_spawned ------------------------------------------------------
