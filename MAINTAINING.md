@@ -28,9 +28,10 @@ source, documentation, workflows, release machinery and this file.
    `pick-windows-home` job answers `hosted`; then `test-windows` is skipped,
    `test-windows-hosted` runs the same suite and the same passing-test count on `windows-latest`,
    and `upstroke-ci` requires exactly one of the two to pass. The answer is `hosted` when the
-   repository variable `WINGUEST_BUSY` is `1`, or when the guest's jobs queued or running in
-   other runs reach `WINGUEST_QUEUE_LIMIT` (2 when it is unset or not a positive whole number); a
-   GitHub API the job cannot read answers `guest`. The build machine's operator sets
+   repository variable `WINGUEST_BUSY` is `1`, or when the repository variable
+   `WINGUEST_QUEUE_LIMIT` is a positive whole number and the guest's jobs queued or running in
+   other runs reach it. Both are opt-in: with neither set every run goes to the guest, and an
+   unset or malformed limit counts nothing. A GitHub API the job cannot read answers `guest`. The build machine's operator sets
    `WINGUEST_BUSY` to `1` while baselines or Upstroke runs hold the machine, and clears it
    afterwards. A hosted run is not free: by the workflow's September 2026 measurements it takes
    three to four times the guest's time, 21 to 28 minutes a job against about 7, and in October

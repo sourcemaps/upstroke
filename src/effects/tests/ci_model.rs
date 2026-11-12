@@ -181,15 +181,7 @@ pub(super) const PICK_WINDOWS_HOME_STEP_ENV: [(&str, &str); 3] = [
     ("WINGUEST_QUEUE_LIMIT", "${{ vars.WINGUEST_QUEUE_LIMIT }}"),
 ];
 
-pub(super) const WINGUEST_QUEUE_LIMIT_DEFAULT: u32 = 2;
-
-pub(super) const PICK_WINDOWS_HOME_SCRIPT: &str = r#"limit=2
-limit_from="the default: WINGUEST_QUEUE_LIMIT is unset or not a positive whole number"
-if [[ "${WINGUEST_QUEUE_LIMIT:-}" =~ ^0*[1-9][0-9]{0,5}$ ]]; then
-  limit=$((10#$WINGUEST_QUEUE_LIMIT))
-  limit_from="WINGUEST_QUEUE_LIMIT"
-fi
-winguest_jobs() {
+pub(super) const PICK_WINDOWS_HOME_SCRIPT: &str = r#"winguest_jobs() {
   local runs="repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs"
   local status listed seen="" id jobs matched count=0
   local -a run_ids
@@ -210,15 +202,20 @@ winguest_jobs() {
   echo "$count"
 }
 home=guest
-echo "limit: $limit ($limit_from)"
 if [[ "${WINGUEST_BUSY:-}" == "1" ]]; then
   home=hosted
   echo "WINGUEST_BUSY is 1, so the queue for the guest was not counted."
-elif count="$(winguest_jobs)"; then
-  echo "WINGUEST_BUSY is not 1. Other runs of this workflow have $count 'test (winguest)' jobs queued or in progress."
-  if (( count >= limit )); then home=hosted; fi
+elif [[ ! "${WINGUEST_QUEUE_LIMIT:-}" =~ ^0*[1-9][0-9]{0,5}$ ]]; then
+  echo "WINGUEST_BUSY is not 1, and WINGUEST_QUEUE_LIMIT is unset or not a positive whole number, so routing on the queue is off and the queue for the guest was not counted."
 else
-  echo "WINGUEST_BUSY is not 1, and the GitHub API could not be read, so the queue for the guest is unknown. A failed question does not move a run off the guest."
+  limit=$((10#$WINGUEST_QUEUE_LIMIT))
+  echo "WINGUEST_BUSY is not 1. WINGUEST_QUEUE_LIMIT is $limit."
+  if count="$(winguest_jobs)"; then
+    echo "Other runs of this workflow have $count 'test (winguest)' jobs queued or in progress."
+    if (( count >= limit )); then home=hosted; fi
+  else
+    echo "The GitHub API could not be read, so the queue for the guest is unknown. A failed question does not move a run off the guest."
+  fi
 fi
 echo "home: $home"
 echo "home=$home" >> "$GITHUB_OUTPUT"

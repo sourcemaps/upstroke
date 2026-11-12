@@ -172,16 +172,24 @@ jobs:
   #
   # The answer is `hosted` when the repository variable WINGUEST_BUSY is `1`
   # (the build machine's operator sets it while the machine is held), or when
-  # the `test (winguest)` jobs queued or in progress in other runs of this
-  # workflow number WINGUEST_QUEUE_LIMIT or more (2 when that variable is
-  # unset or not a positive whole number). Otherwise it is `guest`, and it is
-  # `guest` whenever the API cannot be read: a failed question must not move
-  # a run off the machine every lane has run on so far. The count takes the
-  # queued and the in-progress runs in two queries, so a run that moves
-  # between them can be listed by both: run ids are collected from both and
-  # each distinct run's jobs are counted once, this run left out. Every page
-  # of every listing is read, and a failure on any page is the API not being
-  # readable. The script prints what it found.
+  # the repository variable WINGUEST_QUEUE_LIMIT is a positive whole number
+  # and the `test (winguest)` jobs queued or in progress in other runs of
+  # this workflow number that limit or more. Routing on the queue is opt-in:
+  # with WINGUEST_QUEUE_LIMIT unset, empty or anything else the queue is not
+  # counted, no API call is made, and the answer is `guest`, so with neither
+  # variable set every run goes to the guest as it did before the twin
+  # existed. A limit that applied by default would be reached by ordinary
+  # concurrency -- one build and one queue entry -- and send runs, merge-queue
+  # entries among them, to a hosted suite whose October 2026 queue runs were
+  # cancelled at their timeouts (operator decision, 2026-11-12, on the first
+  # review of this job). The answer is also `guest` whenever the API cannot
+  # be read: a failed question must not move a run off the machine every
+  # lane has run on so far. The count takes the queued and the in-progress
+  # runs in two queries, so a run that moves between them can be listed by
+  # both: run ids are collected from both and each distinct run's jobs are
+  # counted once, this run left out. Every page of every listing is read,
+  # and a failure on any page is the API not being readable. The script
+  # prints what it found.
   #
   # Reading other runs' jobs needs `actions: read`, which the workflow's
   # token does not carry. This job alone widens it, by that one read scope;
@@ -209,12 +217,6 @@ jobs:
           WINGUEST_BUSY: ${{ vars.WINGUEST_BUSY }}
           WINGUEST_QUEUE_LIMIT: ${{ vars.WINGUEST_QUEUE_LIMIT }}
         run: |
-          limit=2
-          limit_from="the default: WINGUEST_QUEUE_LIMIT is unset or not a positive whole number"
-          if [[ "${WINGUEST_QUEUE_LIMIT:-}" =~ ^0*[1-9][0-9]{0,5}$ ]]; then
-            limit=$((10#$WINGUEST_QUEUE_LIMIT))
-            limit_from="WINGUEST_QUEUE_LIMIT"
-          fi
           winguest_jobs() {
             local runs="repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs"
             local status listed seen="" id jobs matched count=0
@@ -236,15 +238,20 @@ jobs:
             echo "$count"
           }
           home=guest
-          echo "limit: $limit ($limit_from)"
           if [[ "${WINGUEST_BUSY:-}" == "1" ]]; then
             home=hosted
             echo "WINGUEST_BUSY is 1, so the queue for the guest was not counted."
-          elif count="$(winguest_jobs)"; then
-            echo "WINGUEST_BUSY is not 1. Other runs of this workflow have $count 'test (winguest)' jobs queued or in progress."
-            if (( count >= limit )); then home=hosted; fi
+          elif [[ ! "${WINGUEST_QUEUE_LIMIT:-}" =~ ^0*[1-9][0-9]{0,5}$ ]]; then
+            echo "WINGUEST_BUSY is not 1, and WINGUEST_QUEUE_LIMIT is unset or not a positive whole number, so routing on the queue is off and the queue for the guest was not counted."
           else
-            echo "WINGUEST_BUSY is not 1, and the GitHub API could not be read, so the queue for the guest is unknown. A failed question does not move a run off the guest."
+            limit=$((10#$WINGUEST_QUEUE_LIMIT))
+            echo "WINGUEST_BUSY is not 1. WINGUEST_QUEUE_LIMIT is $limit."
+            if count="$(winguest_jobs)"; then
+              echo "Other runs of this workflow have $count 'test (winguest)' jobs queued or in progress."
+              if (( count >= limit )); then home=hosted; fi
+            else
+              echo "The GitHub API could not be read, so the queue for the guest is unknown. A failed question does not move a run off the guest."
+            fi
           fi
           echo "home: $home"
           echo "home=$home" >> "$GITHUB_OUTPUT"
@@ -254,8 +261,9 @@ jobs:
   # registered for that job with a single-use just-in-time config
   # (MAINTAINING.md step 3). A pull request, a push to master and a
   # merge-queue entry all run it there, on the same three labels, unless the
-  # run's `pick-windows-home` answers `hosted` -- WINGUEST_BUSY is `1`, or the
-  # guest's queue has reached WINGUEST_QUEUE_LIMIT. Then this job is skipped
+  # run's `pick-windows-home` answers `hosted` -- WINGUEST_BUSY is `1`, or
+  # WINGUEST_QUEUE_LIMIT is set and the guest's queue has reached it, both
+  # opt-in and neither set by default. Then this job is skipped
   # and `test-windows-hosted` below runs the same suite on windows-latest;
   # the aggregate requires exactly one of the two to succeed. Measured
   # 2026-09-15/16: five hosted samples of the suite on windows-latest (run
@@ -271,7 +279,8 @@ jobs:
   # inside its own 20-minute timeout. So the queue runs on the guest again.
   # That is a scheduling repair: it names no cause for the hosted runs, and
   # it repairs no test. One guest serves every lane, so a queue entry's leg
-  # waits for it behind any build that holds it, up to the queue limit; and
+  # waits for it behind any build that holds it, up to the queue limit where
+  # the operator has set one; and
   # a run the guest takes runs the composed commit on the machine every pull
   # request runs on, where the hosted queue left a test whose outcome depends
   # on the machine to be seen first by the push to master. A run sent to the

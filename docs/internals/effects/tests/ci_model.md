@@ -459,8 +459,9 @@ then returned to the guest -- the same labels and the same guest as every
 other build, not the retired second one -- as a scheduling repair that
 names no cause for the hosted runs and repairs no test. One guest serves
 every lane, so a queue entry waits for it behind whatever build holds it --
-up to the picker's queue limit, past which, or while the operator has set
-`WINGUEST_BUSY`, the run goes to [`TEST_WINDOWS_HOSTED_JOB`] instead. A run
+unless the operator has set `WINGUEST_BUSY`, or has set a
+`WINGUEST_QUEUE_LIMIT` the guest's queue has reached, when the run goes to
+[`TEST_WINDOWS_HOSTED_JOB`] instead. Neither is set by default. A run
 the guest takes runs the composed commit on the machine every pull request
 runs on, so a test whose outcome depends on the machine is not seen first
 by the push to master; a run sent to the twin reopens that gap for itself,
@@ -606,22 +607,26 @@ repository variables. They reach the script as environment, never spliced
 into its text, and each name reads its own variable. Measured,
 `MUT-PICK-WINDOWS-HOME-ENV-CROSSED`.
 
-## `pub(super) const WINGUEST_QUEUE_LIMIT_DEFAULT: u32 = 2;`
-
-The queue length at which a run goes to the hosted runner when
-`WINGUEST_QUEUE_LIMIT` is unset or not a positive whole number.
-`the_windows_home_is_picked_by_the_one_job_the_contract_pins` holds the
-script's first line to it, and the canned fixtures expect it.
-
-## `pub(super) const PICK_WINDOWS_HOME_SCRIPT: &str = r#"limit=2`
+## `pub(super) const PICK_WINDOWS_HOME_SCRIPT: &str = r#"winguest_jobs() {`
 
 The picker's script, character for character. It answers `hosted` when
-`WINGUEST_BUSY` is exactly `1`; otherwise when the `test (winguest)` jobs
-queued or in progress in other runs of this workflow number the limit or
-more; otherwise `guest`. It answers `guest` whenever the API cannot be read,
-because a failed question must not move a run off the machine every lane has
-run on, and it prints what it found: the limit and where it came from, the
-variable, the count, the answer.
+`WINGUEST_BUSY` is exactly `1`; otherwise, when `WINGUEST_QUEUE_LIMIT` is a
+positive whole number, when the `test (winguest)` jobs queued or in progress
+in other runs of this workflow number that limit or more; otherwise `guest`.
+It answers `guest` whenever the API cannot be read, because a failed question
+must not move a run off the machine every lane has run on, and it prints what
+it found: the variables, the limit, the count, the answer.
+
+Routing on the queue is opt-in. With `WINGUEST_QUEUE_LIMIT` unset, empty or
+anything but a positive whole number the script counts nothing, calls no API
+and answers `guest`, so with neither variable set every run goes to the guest
+as it did before the twin. The first review of this job (#375, head
+`873ff8c7`) found the default limit of 2 it then had would be reached by one
+build and one queue entry, sending runs -- merge-queue entries among them --
+to a hosted suite whose October 2026 queue runs were cancelled at their
+timeouts, and the operator made the route opt-in on 2026-11-12.
+`the_windows_home_is_picked_by_the_one_job_the_contract_pins` holds the one
+count behind the limit check. Measured, `MUT-PICK-WINDOWS-HOME-COUNTS-BY-DEFAULT`.
 
 Two gaps, each found by a review of an earlier attempt, shape the count:
 
@@ -637,6 +642,7 @@ Two gaps, each found by a review of an earlier attempt, shape the count:
 The pin is what makes the executed answers this text's:
 `the_windows_home_picker_answers_from_canned_api_pages` runs the workflow's
 script against canned pages. Measured there, and as pins,
+`MUT-PICK-WINDOWS-HOME-COUNTS-BY-DEFAULT`,
 `MUT-PICK-WINDOWS-HOME-COUNTS-A-RUN-TWICE`,
 `MUT-PICK-WINDOWS-HOME-FIRST-PAGE-ONLY`,
 `MUT-PICK-WINDOWS-HOME-LATER-PAGE-FAILURE-IGNORED` and

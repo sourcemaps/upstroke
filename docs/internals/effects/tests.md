@@ -2223,10 +2223,13 @@ diff, and this is the leg saying it ran what it says it ran.
 ## `fn the_windows_home_is_picked_by_the_one_job_the_contract_pins() {`
 
 The job that decides where the Windows suite runs matches the contract, and
-two facts inside its pinned script agree with the model: it starts from
-`WINGUEST_QUEUE_LIMIT_DEFAULT`, and it counts jobs named
-`TEST_WINDOWS_NAME`. The refusals are executed in [`WORKFLOW_ESCAPES`], every
-row named `MUT-PICK-WINDOWS-HOME-*` and `MUT-JOB-PERMISSIONS-ON-THE-GUEST-JOB`.
+two facts inside its pinned script agree with the model: it counts the
+guest's queue in exactly one place, after the check that
+`WINGUEST_QUEUE_LIMIT` is a positive whole number, so routing on the queue is
+opt-in on every platform this test runs on, not only where the script is
+executed; and it counts jobs named `TEST_WINDOWS_NAME`. The refusals are
+executed in [`WORKFLOW_ESCAPES`], every row named `MUT-PICK-WINDOWS-HOME-*`
+and `MUT-JOB-PERMISSIONS-ON-THE-GUEST-JOB`.
 
 ## `mod pick_windows_home_answers {`
 
@@ -2254,10 +2257,15 @@ rather than as an empty one.
 
 ## `fn cases() -> Vec<Case> {`
 
-Every answer the plan names, and the three the earlier attempt's reviews
-found missing. Each case states the answer, the lines the script must print,
-and exactly which paths it must ask for and how often.
+Every answer the plan names, the three the earlier attempt's reviews found
+missing, and the opt-in the first review of #375 asked for. Each case states
+the answer, the lines the script must print, and exactly which paths it must
+ask for and how often. Every case that counts sets the limit itself, `2`
+unless it says otherwise.
 
+- `neither-variable-set-asks-nothing-and-answers-guest`: a queue deep enough
+  for any limit, and no variable set; the answer is `guest`, the script says
+  routing on the queue is off, and it asks the API nothing.
 - `a-run-both-status-queries-list-is-counted-once`: run 101 is in both the
   queued and the in-progress listing with one queued guest job; the count is
   1, the answer `guest`, and run 101's jobs are asked for once.
@@ -2269,12 +2277,18 @@ and exactly which paths it must ask for and how often.
   the failure hold enough guest jobs to reach the limit, so counting them
   would answer `hosted`.
 
-The rest: `WINGUEST_BUSY` is `1` exactly and then nothing is asked; an
-unreadable API; one job below the default limit and two at it; this run
-left out; completed guest jobs and other jobs not counted; limits of 3 and 1
-read from the variable; and five values that are not positive whole numbers
--- `0`, `-1`, `2.5`, `two`, ` 3` -- each falling back to the default, at a
-count where reading the value literally would answer differently.
+The rest: `WINGUEST_BUSY` is `1` exactly and then nothing is asked, and
+`true` is not `1`; an unreadable API; one job below a limit of 2 and two at
+it; this run left out; completed guest jobs and other jobs not counted;
+limits of 3 and 1; and five values that are not positive whole numbers --
+`0`, `-1`, `2.5`, `two`, ` 3` -- each leaving routing on the queue off, so
+nothing is asked and the answer is `guest`, over the deep queue below.
+
+## `fn deep_queue() -> Vec<(String, Vec<Page>)> {`
+
+Three waiting guest jobs in two other runs. Every limit a literal reading of
+the invalid values could give is at most 3, so a script that counted this
+queue under one of them, or under a default, would answer `hosted`.
 
 ## `fn answer(case: &Case, script: &str, root: &Path) -> Result<(), String> {`
 
@@ -2295,8 +2309,11 @@ jobs read failed the later-pages case and the later-page-failure case of a
 run's jobs; ignoring a failed jobs page (`|| true`) failed that case;
 ignoring a failed run-listing page failed the run-listing case and the
 unreadable case; dropping the this-run exclusion failed the this-run case;
-and answering `hosted` on an unreadable API failed this test, the picker's
-pin and the clean-workflow checks.
+answering `hosted` on an unreadable API failed this test, the picker's
+pin and the clean-workflow checks; and restoring a default limit of 2
+(`${WINGUEST_QUEUE_LIMIT:=2}` in the limit check, re-measured on
+2026-11-12) failed the case with neither variable set -- it asked the API
+and answered `hosted` -- and the picker's pin.
 
 ## `fn the_hosted_windows_twin_runs_the_guests_suite_and_count_when_the_picker_sends_it_there() {`
 

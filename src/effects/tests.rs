@@ -5387,7 +5387,6 @@ use ci_model::{
     PICK_WINDOWS_HOME_SCRIPT, RUSTFLAGS_KEY, TEST_COMMAND, TEST_WINDOWS_CONDITION,
     TEST_WINDOWS_HOSTED_CONDITION, TEST_WINDOWS_LABELS, TEST_WINDOWS_NAME, TEST_WINDOWS_PLATFORM,
     WINDOWS_HOSTED_TEST_WITNESS, WINDOWS_TEST_FLOOR, WINDOWS_TEST_WITNESS,
-    WINGUEST_QUEUE_LIMIT_DEFAULT,
 };
 use workflow::{
     WORKFLOW_ESCAPES, ci_msrv_job_complaints, ci_pick_windows_home_complaints,
@@ -5604,10 +5603,15 @@ fn the_windows_home_is_picked_by_the_one_job_the_contract_pins() {
         "the job that picks where the Windows suite runs does not match the contract:\n{}",
         complaints.join("\n")
     );
-    assert_eq!(
-        PICK_WINDOWS_HOME_SCRIPT.lines().next(),
-        Some(format!("limit={WINGUEST_QUEUE_LIMIT_DEFAULT}").as_str()),
-        "the picker's script does not start from the default limit the model names"
+    let limit_check = "elif [[ ! \"${WINGUEST_QUEUE_LIMIT:-}\" =~ ";
+    let first_count = "if count=\"$(winguest_jobs)\"; then";
+    assert!(
+        PICK_WINDOWS_HOME_SCRIPT.matches(first_count).count() == 1
+            && PICK_WINDOWS_HOME_SCRIPT
+                .find(limit_check)
+                .is_some_and(|checked| PICK_WINDOWS_HOME_SCRIPT.find(first_count) > Some(checked)),
+        "the picker's script does not count the guest's queue exactly once, behind the check \
+         that `WINGUEST_QUEUE_LIMIT` is set, so routing on the queue is not opt-in"
     );
     assert!(
         PICK_WINDOWS_HOME_SCRIPT.contains(&format!("select(.name == \"{TEST_WINDOWS_NAME}\" and")),
@@ -5623,9 +5627,7 @@ mod pick_windows_home_answers {
     use std::path::Path;
     use std::process::Command;
 
-    use super::ci_model::{
-        CI_WORKFLOW, PICK_WINDOWS_HOME_JOB, TEST_WINDOWS_NAME, WINGUEST_QUEUE_LIMIT_DEFAULT,
-    };
+    use super::ci_model::{CI_WORKFLOW, PICK_WINDOWS_HOME_JOB, TEST_WINDOWS_NAME};
     use super::scratch_dir;
     use super::workflow::{ci_workflow_text, field, parse_workflow, scalar, steps_of};
 
@@ -5659,9 +5661,11 @@ if (( page == 1 )); then echo "fake gh: no canned answer for $path" >&2; exit 1;
 "#;
 
     const BUSY: &str = "WINGUEST_BUSY is 1, so the queue for the guest was not counted.";
-    const UNREADABLE: &str = "WINGUEST_BUSY is not 1, and the GitHub API could not be read, so \
-                              the queue for the guest is unknown. A failed question does not \
-                              move a run off the guest.";
+    const ROUTING_OFF: &str = "WINGUEST_BUSY is not 1, and WINGUEST_QUEUE_LIMIT is unset or not a \
+                               positive whole number, so routing on the queue is off and the \
+                               queue for the guest was not counted.";
+    const UNREADABLE: &str = "The GitHub API could not be read, so the queue for the guest is \
+                              unknown. A failed question does not move a run off the guest.";
 
     enum Page {
         Body(String),
@@ -5711,16 +5715,13 @@ if (( page == 1 )); then echo "fake gh: no canned answer for $path" >&2; exit 1;
 
     fn counted(count: usize) -> String {
         format!(
-            "WINGUEST_BUSY is not 1. Other runs of this workflow have {count} \
-             '{TEST_WINDOWS_NAME}' jobs queued or in progress."
+            "Other runs of this workflow have {count} '{TEST_WINDOWS_NAME}' jobs queued or in \
+             progress."
         )
     }
 
-    fn default_limit() -> String {
-        format!(
-            "limit: {WINGUEST_QUEUE_LIMIT_DEFAULT} (the default: WINGUEST_QUEUE_LIMIT is unset \
-             or not a positive whole number)"
-        )
+    fn limited(limit: usize) -> String {
+        format!("WINGUEST_BUSY is not 1. WINGUEST_QUEUE_LIMIT is {limit}.")
     }
 
     fn page_key(path: &str) -> String {
@@ -5745,25 +5746,34 @@ if (( page == 1 )); then echo "fake gh: no canned answer for $path" >&2; exit 1;
             Case {
                 name: "busy-is-only-the-value-1".to_owned(),
                 busy: "true",
-                limit: "",
+                limit: "2",
                 pages: vec![(runs("queued"), empty()), (runs("in_progress"), empty())],
                 home: "guest",
-                says: vec![counted(0)],
+                says: vec![limited(2), counted(0)],
                 asked: vec![runs("queued"), runs("in_progress")],
+            },
+            Case {
+                name: "neither-variable-set-asks-nothing-and-answers-guest".to_owned(),
+                busy: "",
+                limit: "",
+                pages: deep_queue(),
+                home: "guest",
+                says: vec![ROUTING_OFF.to_owned()],
+                asked: Vec::new(),
             },
             Case {
                 name: "the-api-cannot-be-read".to_owned(),
                 busy: "",
-                limit: "",
+                limit: "2",
                 pages: Vec::new(),
                 home: "guest",
-                says: vec![UNREADABLE.to_owned()],
+                says: vec![limited(2), UNREADABLE.to_owned()],
                 asked: vec![runs("queued")],
             },
             Case {
-                name: "one-waiting-job-is-below-the-default-limit".to_owned(),
+                name: "one-waiting-job-is-below-a-limit-of-2".to_owned(),
                 busy: "",
-                limit: "",
+                limit: "2",
                 pages: vec![
                     (runs("queued"), vec![run_page(&[101])]),
                     (runs("in_progress"), empty()),
@@ -5773,13 +5783,13 @@ if (( page == 1 )); then echo "fake gh: no canned answer for $path" >&2; exit 1;
                     ),
                 ],
                 home: "guest",
-                says: vec![default_limit(), counted(1)],
+                says: vec![limited(2), counted(1)],
                 asked: vec![runs("queued"), runs("in_progress"), jobs(101)],
             },
             Case {
-                name: "two-waiting-jobs-reach-the-default-limit".to_owned(),
+                name: "two-waiting-jobs-reach-a-limit-of-2".to_owned(),
                 busy: "",
-                limit: "",
+                limit: "2",
                 pages: vec![
                     (runs("queued"), vec![run_page(&[101])]),
                     (runs("in_progress"), vec![run_page(&[102])]),
@@ -5787,13 +5797,13 @@ if (( page == 1 )); then echo "fake gh: no canned answer for $path" >&2; exit 1;
                     (jobs(102), vec![job_page(&[(21, guest, "in_progress")])]),
                 ],
                 home: "hosted",
-                says: vec![default_limit(), counted(2)],
+                says: vec![limited(2), counted(2)],
                 asked: vec![runs("queued"), runs("in_progress"), jobs(101), jobs(102)],
             },
             Case {
                 name: "a-run-both-status-queries-list-is-counted-once".to_owned(),
                 busy: "",
-                limit: "",
+                limit: "2",
                 pages: vec![
                     (runs("queued"), vec![run_page(&[101])]),
                     (runs("in_progress"), vec![run_page(&[101])]),
@@ -5806,13 +5816,13 @@ if (( page == 1 )); then echo "fake gh: no canned answer for $path" >&2; exit 1;
                     ),
                 ],
                 home: "guest",
-                says: vec![default_limit(), counted(1)],
+                says: vec![limited(2), counted(1)],
                 asked: vec![runs("queued"), runs("in_progress"), jobs(101)],
             },
             Case {
                 name: "jobs-and-runs-after-the-first-page-are-counted".to_owned(),
                 busy: "",
-                limit: "",
+                limit: "2",
                 pages: vec![
                     (runs("queued"), empty()),
                     (
@@ -5832,13 +5842,13 @@ if (( page == 1 )); then echo "fake gh: no canned answer for $path" >&2; exit 1;
                     (jobs(102), vec![job_page(&[(21, guest, "queued")])]),
                 ],
                 home: "hosted",
-                says: vec![counted(2)],
+                says: vec![limited(2), counted(2)],
                 asked: vec![runs("queued"), runs("in_progress"), jobs(101), jobs(102)],
             },
             Case {
                 name: "a-failure-on-a-later-page-of-the-run-listing-answers-guest".to_owned(),
                 busy: "",
-                limit: "",
+                limit: "2",
                 pages: vec![
                     (runs("queued"), vec![run_page(&[101, 102]), Page::Fails]),
                     (runs("in_progress"), empty()),
@@ -5846,13 +5856,13 @@ if (( page == 1 )); then echo "fake gh: no canned answer for $path" >&2; exit 1;
                     (jobs(102), vec![job_page(&[(21, guest, "queued")])]),
                 ],
                 home: "guest",
-                says: vec![UNREADABLE.to_owned()],
+                says: vec![limited(2), UNREADABLE.to_owned()],
                 asked: vec![runs("queued")],
             },
             Case {
                 name: "a-failure-on-a-later-page-of-a-runs-jobs-answers-guest".to_owned(),
                 busy: "",
-                limit: "",
+                limit: "2",
                 pages: vec![
                     (runs("queued"), vec![run_page(&[101, 102])]),
                     (runs("in_progress"), empty()),
@@ -5863,13 +5873,13 @@ if (( page == 1 )); then echo "fake gh: no canned answer for $path" >&2; exit 1;
                     (jobs(102), vec![job_page(&[(21, guest, "in_progress")])]),
                 ],
                 home: "guest",
-                says: vec![UNREADABLE.to_owned()],
+                says: vec![limited(2), UNREADABLE.to_owned()],
                 asked: vec![runs("queued"), runs("in_progress"), jobs(101)],
             },
             Case {
                 name: "this-run-is-left-out".to_owned(),
                 busy: "",
-                limit: "",
+                limit: "2",
                 pages: vec![
                     (runs("queued"), empty()),
                     (runs("in_progress"), vec![run_page(&[THIS_RUN, 101])]),
@@ -5877,13 +5887,13 @@ if (( page == 1 )); then echo "fake gh: no canned answer for $path" >&2; exit 1;
                     (jobs(101), vec![job_page(&[(11, guest, "queued")])]),
                 ],
                 home: "guest",
-                says: vec![counted(1)],
+                says: vec![limited(2), counted(1)],
                 asked: vec![runs("queued"), runs("in_progress"), jobs(101)],
             },
             Case {
                 name: "only-waiting-guest-jobs-are-counted".to_owned(),
                 busy: "",
-                limit: "",
+                limit: "2",
                 pages: vec![
                     (runs("queued"), vec![run_page(&[101])]),
                     (runs("in_progress"), vec![run_page(&[102])]),
@@ -5898,7 +5908,7 @@ if (( page == 1 )); then echo "fake gh: no canned answer for $path" >&2; exit 1;
                     (jobs(102), vec![job_page(&[(21, guest, "queued")])]),
                 ],
                 home: "guest",
-                says: vec![counted(1)],
+                says: vec![limited(2), counted(1)],
                 asked: vec![runs("queued"), runs("in_progress"), jobs(101), jobs(102)],
             },
             Case {
@@ -5912,7 +5922,7 @@ if (( page == 1 )); then echo "fake gh: no canned answer for $path" >&2; exit 1;
                     (jobs(102), vec![job_page(&[(21, guest, "in_progress")])]),
                 ],
                 home: "guest",
-                says: vec!["limit: 3 (WINGUEST_QUEUE_LIMIT)".to_owned(), counted(2)],
+                says: vec![limited(3), counted(2)],
                 asked: vec![runs("queued"), runs("in_progress"), jobs(101), jobs(102)],
             },
             Case {
@@ -5925,7 +5935,7 @@ if (( page == 1 )); then echo "fake gh: no canned answer for $path" >&2; exit 1;
                     (jobs(101), vec![job_page(&[(11, guest, "queued")])]),
                 ],
                 home: "hosted",
-                says: vec!["limit: 1 (WINGUEST_QUEUE_LIMIT)".to_owned(), counted(1)],
+                says: vec![limited(1), counted(1)],
                 asked: vec![runs("queued"), runs("in_progress"), jobs(101)],
             },
         ];
@@ -5937,20 +5947,29 @@ if (( page == 1 )); then echo "fake gh: no canned answer for $path" >&2; exit 1;
             ("padded", " 3"),
         ] {
             out.push(Case {
-                name: format!("a-{tag}-limit-falls-back-to-the-default"),
+                name: format!("a-{tag}-limit-leaves-routing-on-the-queue-off"),
                 busy: "",
                 limit,
-                pages: vec![
-                    (runs("queued"), vec![run_page(&[101])]),
-                    (runs("in_progress"), empty()),
-                    (jobs(101), vec![job_page(&[(11, guest, "queued")])]),
-                ],
+                pages: deep_queue(),
                 home: "guest",
-                says: vec![default_limit(), counted(1)],
-                asked: vec![runs("queued"), runs("in_progress"), jobs(101)],
+                says: vec![ROUTING_OFF.to_owned()],
+                asked: Vec::new(),
             });
         }
         out
+    }
+
+    fn deep_queue() -> Vec<(String, Vec<Page>)> {
+        let guest = TEST_WINDOWS_NAME;
+        vec![
+            (runs("queued"), vec![run_page(&[101])]),
+            (runs("in_progress"), vec![run_page(&[102])]),
+            (
+                jobs(101),
+                vec![job_page(&[(11, guest, "queued"), (12, guest, "queued")])],
+            ),
+            (jobs(102), vec![job_page(&[(21, guest, "in_progress")])]),
+        ]
     }
 
     fn answer(case: &Case, script: &str, root: &Path) -> Result<(), String> {

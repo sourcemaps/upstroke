@@ -668,6 +668,7 @@ empty string to the jobs that read it. Measured,
 Exactly one step, a script: no checkout, no action. Then its id, its
 environment, its script and its resolved shell. Measured,
 `MUT-PICK-WINDOWS-HOME-SECOND-STEP`, `MUT-PICK-WINDOWS-HOME-ENV-CROSSED`,
+`MUT-PICK-WINDOWS-HOME-COUNTS-BY-DEFAULT`,
 `MUT-PICK-WINDOWS-HOME-UNREADABLE-ANSWERS-HOSTED`,
 `MUT-PICK-WINDOWS-HOME-COUNTS-A-RUN-TWICE`,
 `MUT-PICK-WINDOWS-HOME-FIRST-PAGE-ONLY` and

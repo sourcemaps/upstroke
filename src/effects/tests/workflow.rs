@@ -1461,8 +1461,9 @@ pub(super) fn ci_pick_windows_home_complaints(doc: &Yaml) -> Vec<String> {
             "[pick-windows-home-script] `{PICK_WINDOWS_HOME_JOB}`'s script is not the pinned \
              one. `the_windows_home_picker_answers_from_canned_api_pages` executes the \
              workflow's script against canned API pages, and the pin is what makes those \
-             answers this text's: an unreadable API answers `guest`, a run both status \
-             queries list is counted once, and every page is read. Found:\n{script:?}\n\
+             answers this text's: the queue is counted only under a limit the operator set, \
+             an unreadable API answers `guest`, a run both status queries list is counted \
+             once, and every page is read. Found:\n{script:?}\n\
              Pinned:\n{PICK_WINDOWS_HOME_SCRIPT:?}"
         ));
     }
@@ -3615,8 +3616,20 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  permissions and output all still match, and an API outage or a token that \
                  lost its scope moves every run off the guest every lane has run on.",
         job: Some("pick-windows-home"),
-        anchor: "            echo \"WINGUEST_BUSY is not 1, and the GitHub API could not be read, so the queue for the guest is unknown. A failed question does not move a run off the guest.\"\n",
-        replacement: "            home=hosted\n",
+        anchor: "              echo \"The GitHub API could not be read, so the queue for the guest is unknown. A failed question does not move a run off the guest.\"\n",
+        replacement: "              home=hosted\n",
+        refused_as: "pick-windows-home-script",
+    },
+    WorkflowEscape {
+        name: "MUT-PICK-WINDOWS-HOME-COUNTS-BY-DEFAULT",
+        escape: "a default limit of 2 put back by one parameter expansion: `:=` assigns 2 to an \
+                 unset or empty `WINGUEST_QUEUE_LIMIT`, the limit check then passes, and every \
+                 run counts the guest's queue unasked. One build and one queue entry reach it, \
+                 so ordinary concurrency sends runs, merge-queue entries among them, to the \
+                 hosted twin with neither variable set -- the routing the operator made opt-in",
+        job: Some("pick-windows-home"),
+        anchor: "          elif [[ ! \"${WINGUEST_QUEUE_LIMIT:-}\" =~ ^0*[1-9][0-9]{0,5}$ ]]; then\n",
+        replacement: "          elif [[ ! \"${WINGUEST_QUEUE_LIMIT:=2}\" =~ ^0*[1-9][0-9]{0,5}$ ]]; then\n",
         refused_as: "pick-windows-home-script",
     },
     WorkflowEscape {
@@ -3685,8 +3698,8 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         name: "MUT-PICK-WINDOWS-HOME-COUNTS-A-RUN-TWICE",
         escape: "the repeats are no longer removed from the two status listings. A run that \
                  moves from queued to in progress between the two queries is listed by both, \
-                 its jobs are counted twice, and at the default limit one waiting guest job \
-                 sends this run to the hosted runner. The first gap two reviews found in an \
+                 its jobs are counted twice, and at a limit of 2 one waiting guest job sends \
+                 this run to the hosted runner. The first gap two reviews found in an \
                  earlier attempt.",
         job: Some("pick-windows-home"),
         anchor: "            mapfile -t run_ids < <(sort -u <<<\"$seen\")\n",
