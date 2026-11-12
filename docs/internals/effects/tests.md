@@ -2257,8 +2257,9 @@ included, promise neither; the macOS runner's `/bin/bash` is 3.2.
 
 ## ``const JQ_ABSENT: &str = "no `jq` on PATH, and the picker's script reads the API's answers \``
 
-Why the fixtures skipped, as a value the skip prints rather than a comment,
-on the pattern of the Docker gate's `absent_reason`.
+Why the fixtures skip, as a value the test body reads rather than a comment,
+on the pattern of the Docker gate's `absent_reason`; the runner check's
+failure message carries it.
 
 ## `const ON_A_GITHUB_RUNNER: &str = "GITHUB_ACTIONS";`
 
@@ -2329,15 +2330,17 @@ aggregate requires the picker to succeed.
 Every case, reported together, so a broken script names every answer it
 gets wrong. It asks for `jq` on PATH first, so that a machine without it is
 never read as the script's own `guest` fallback passing. Without it the test
-skips, printing [`JQ_ABSENT`], the repository's convention for a missing
-prerequisite -- the Docker gate's loud skip with its reason a value, and
-`connect`'s `skipped: no claude on PATH` -- so `cargo test` on a Linux
-machine without `jq` does not fail where it passed before the picker
-existed. On a GitHub runner it fails instead ([`ON_A_GITHUB_RUNNER`]), as a
-Docker-gated test does under `UPSTROKE_REQUIRE_DOCKER`. Measured on
-2026-11-12 by pointing the probe at a program that does not exist: the test
-printed the skip and passed; with the runner check pointed at a variable
-that is always set, it failed naming the skip. Both restored. Measured
+returns early, the repository's convention for a missing prerequisite: the
+Docker gate's skip, whose reason is a value the test body reads rather than
+an unremarked `return` ([`JQ_ABSENT`]), so `cargo test` on a Linux machine
+without `jq` does not fail where it passed before the picker existed. It
+prints nothing: this file forbids the governed `eprintln!`, and the Docker
+gate's skips print nothing either. On a GitHub runner it fails instead
+([`ON_A_GITHUB_RUNNER`]), naming the skip, as a Docker-gated test does
+under `UPSTROKE_REQUIRE_DOCKER`. Measured on 2026-11-12 by pointing the
+probe at a program that does not exist: the test returned early and passed;
+with the runner check pointed at a variable that is always set, it failed
+naming the skip. Both restored. Measured
 by mutating the workflow's script, each mutation then restored: removing the
 run-id dedupe failed the counted-once case; dropping `--paginate` from the
 jobs read failed the later-pages case and the later-page-failure case of a

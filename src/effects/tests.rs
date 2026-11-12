@@ -6077,7 +6077,6 @@ if (( page == 1 )); then echo "fake gh: no canned answer for $path" >&2; exit 1;
                  The picker runs on `ubuntu-latest` because its image carries `jq`, so a runner \
                  without it is a skip where a pass was due"
             );
-            eprintln!("skipped: {JQ_ABSENT}");
             return;
         }
         let doc = parse_workflow(&ci_workflow_text()).expect(CI_WORKFLOW);
