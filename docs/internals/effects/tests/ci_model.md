@@ -252,8 +252,9 @@ Measured in the oracle: `MUT-TEST-CAPTURE-STEP-DELETED`,
 ## `pub(super) const HOST_ACCEPTANCE_WINDOWS_CAPTURE: &str = r#"cargo test --all-features --lib engine::tests::host_acceptance_record -- --ignored --exact --nocapture | Tee-Object -Variable capture`
 
 The same capture on the guest, under the job's PowerShell, character for
-character. It stands immediately after the suite-and-witness step, so it
-runs the harness that step built on the compiler that step asserted.
+character, and on the hosted twin when the picker sends the run there. It
+stands immediately after the suite-and-witness step, so it runs the harness
+that step built on the compiler that step asserted.
 
 - `$LASTEXITCODE` carries Cargo's exit through `Tee-Object`, as in
   [`WINDOWS_TEST_WITNESS`].
@@ -267,7 +268,8 @@ The last line is the one that throws. A frame check that is computed and not
 acted on refuses nothing (`MUT-TEST-WINDOWS-CAPTURE-FRAMING-UNENFORCED`).
 
 No PowerShell runs on the build box, so this script's execution is the
-guest's evidence and not a local one. Measured in the oracle:
+Windows job's evidence -- the guest's, or the twin's on a run sent there --
+and not a local one. Measured in the oracle:
 `MUT-TEST-WINDOWS-CAPTURE-STEP-DELETED`,
 `MUT-TEST-WINDOWS-CAPTURE-IGNORED-NOT-RUN`,
 `MUT-TEST-WINDOWS-CAPTURE-EXIT-SWALLOWED`,
@@ -327,7 +329,8 @@ the awks the build box has. Measured in the oracle:
 ## `pub(super) const CAPABILITY_WINDOWS_OBSERVATION: &str = r#"cargo test --all-features --lib runner::container::tests::container_capability_record -- --ignored --exact --nocapture | Tee-Object -Variable capture`
 
 The same observation on the guest, under the job's PowerShell, character for
-character. It stands immediately after [`HOST_ACCEPTANCE_WINDOWS_CAPTURE`].
+character, and on the hosted twin when the picker sends the run there. It
+stands immediately after [`HOST_ACCEPTANCE_WINDOWS_CAPTURE`].
 
 - `$LASTEXITCODE` carries Cargo's exit through `Tee-Object`.
 - `-ccontains` requires the named test's pass line, and `-cmatch` requires
@@ -338,7 +341,8 @@ character. It stands immediately after [`HOST_ACCEPTANCE_WINDOWS_CAPTURE`].
 - The last line is the one that throws.
 
 No PowerShell runs on the build box, so this script's execution is the
-guest's evidence and not a local one. Measured in the oracle:
+Windows job's evidence -- the guest's, or the twin's on a run sent there --
+and not a local one. Measured in the oracle:
 `MUT-TEST-WINDOWS-CAPABILITY-STEP-DELETED`,
 `MUT-TEST-WINDOWS-CAPABILITY-IGNORED-NOT-RUN`,
 `MUT-TEST-WINDOWS-CAPABILITY-FILTER-MOVED`,
@@ -349,7 +353,8 @@ guest's evidence and not a local one. Measured in the oracle:
 
 ## `pub(super) const CAPABILITY_STEP_FIELDS: [&str; 4] = ["env", "name", "run", "timeout-minutes"];`
 
-The observation step's exact field set, on both jobs, every field required.
+The observation step's exact field set, on every job that runs it -- `test`,
+the guest's Windows job and its hosted twin -- every field required.
 
 - It has no `if:` and no `continue-on-error:`: the contract places it
   success-only, so a failed suite or capture stops it before it runs.
@@ -471,7 +476,7 @@ third label is what names the curated image. A scalar there is a hosted
 runner, and an expression routes some event elsewhere -- the merge queue's
 route to `windows-latest` from 2026-09-16 is one. The set itself is held to
 `self-hosted` and to no runner [`CI_TARGETS`] names by
-`the_windows_leg_runs_every_lane_on_the_self_hosted_guest_its_labels_name`,
+`the_guests_windows_job_runs_on_the_self_hosted_guest_its_labels_name`,
 so the equality cannot be moved to a hosted machine with both sides edited
 together. Measured, `MUT-TEST-WINDOWS-REHOSTED`,
 `MUT-TEST-WINDOWS-LABEL-DROPPED` and `MUT-TEST-WINDOWS-QUEUE-REHOSTED`.
@@ -761,9 +766,12 @@ retarget the compile the gate performs -- `CARGO_BUILD_TARGET` on the macOS
 leg lints a target no `#[cfg(target_os = "macos")]` body belongs to, while
 the `run:` scalar still matches character for character. Measured,
 `MUT-GATE-STEP-RETARGETED`. The steps that carry an `env:` outside the
-aggregate are the two that run the suite, the hosted test step and the
-Windows step, and their maps are pinned whole by [`TEST_STEP_ENV`] and
-[`TEST_WINDOWS_STEP_ENV`] rather than admitted by field name.
+aggregate and the picker ([`PICK_WINDOWS_HOME_STEP_ENV`]) are the steps of
+the three suite-running jobs -- the hosted test step and the suite steps of
+the guest's Windows job and its hosted twin, with the capture and
+observation steps after each -- and their maps are pinned whole by
+[`TEST_STEP_ENV`] and [`TEST_WINDOWS_STEP_ENV`] rather than admitted by field
+name.
 
 ## `pub(super) const TEMP_FOLDS_CASE_KEY: &str = "UPSTROKE_TEST_TEMP_FOLDS_CASE";`
 
@@ -778,7 +786,8 @@ failing (`PR258-CASEFOLD-EXPECTATION-KEYED-ON-TARGET-OS`: keyed on the target
 OS, the requirement failed on a supported case-sensitive volume before the
 scan was checked). The declaration is per leg because the filesystems are:
 the macOS runner's temporary directory folds case, the ubuntu runner's does
-not, and the guest's NTFS does.
+not, and the guest's NTFS does, as does the hosted Windows runner's the twin
+runs on.
 
 ## `pub(super) const TEST_STEP_ENV: [(&str, &str); 1] = [(`
 
@@ -811,9 +820,14 @@ runs it in the leg's environment unchanged: no `DOCKER_*` selector and no
 
 ## `pub(super) const TEST_WINDOWS_STEP_ENV: [(&str, &str); 1] = [(TEMP_FOLDS_CASE_KEY, "1")];`
 
-The same declaration on the Windows step, `1` outright: one job, no
-matrix, and the guest's NTFS folds case.
-Measured, `MUT-TEST-WINDOWS-CASEFOLD-DECLARATION-DROPPED`. The guest's capture
+The same declaration on the Windows suite steps, `1` outright: each Windows
+suite job is one job with no matrix, and both the guest's NTFS and the
+hosted runner's fold case. The twin's three steps carry the same map under
+codes of their own (`test-windows-hosted-step-env`,
+`test-windows-hosted-capture-step-env`,
+`test-windows-hosted-capability-step-env`); measured there,
+`MUT-TEST-WINDOWS-HOSTED-CASEFOLD-DECLARATION-DROPPED`. On the guest,
+measured, `MUT-TEST-WINDOWS-CASEFOLD-DECLARATION-DROPPED`. The guest's capture
 step carries it too (`test-windows-capture-step-env`), measured by
 `MUT-TEST-WINDOWS-CAPTURE-CASEFOLD-DROPPED`. So does the guest's container
 capability observation (`test-windows-capability-step-env`), which carries no
@@ -826,8 +840,8 @@ The fields the step that runs the suite, and the capture step after it, may
 declare: [`STEP_FIELDS`] plus the `env` whose map [`TEST_STEP_ENV`] and
 [`TEST_WINDOWS_STEP_ENV`] pin. Neither may carry `if:` or `continue-on-error:`
 (`MUT-TEST-CAPTURE-STEP-DISABLED`, `MUT-TEST-CAPTURE-STEP-ABSOLVED`,
-`MUT-TEST-WINDOWS-CAPTURE-DISABLED`). Every other step of both test jobs keeps
-[`STEP_FIELDS`].
+`MUT-TEST-WINDOWS-CAPTURE-DISABLED`). Every other step of the three test
+jobs keeps [`STEP_FIELDS`].
 
 ## `pub(super) const AGGREGATE_STEP_FIELDS: [&str; 4] = ["env", "name", "run", "shell"];`
 

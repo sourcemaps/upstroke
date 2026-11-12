@@ -5499,7 +5499,7 @@ fn the_windows_leg_runs_these_fixtures_on_the_runner_each_lane_pins() {
 }
 
 #[test]
-fn the_windows_leg_runs_every_lane_on_the_self_hosted_guest_its_labels_name() {
+fn the_guests_windows_job_runs_on_the_self_hosted_guest_its_labels_name() {
     let hosted: Vec<&str> = CI_TARGETS
         .iter()
         .map(|target| target.runner)

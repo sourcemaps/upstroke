@@ -309,11 +309,15 @@ it went with that lane, and the pins on it with it. Measured,
 ## `pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {` › `let labels = field(job, "runs-on").and_then(scalar_set);`
 
 The whole `runs-on:`, as a set equality with [`TEST_WINDOWS_LABELS`]. A
-literal sequence cannot vary by event, so while this holds no lane can be
-routed elsewhere: a scalar is a hosted runner, an expression -- the merge
-queue's route to `windows-latest` from 2026-09-16 among them -- is something
-this contract cannot evaluate and refuses, and a subset admits any
-self-hosted Windows machine the account registers. Measured,
+literal sequence cannot vary by event, so while this holds no lane of this
+job can be routed elsewhere: a scalar is a hosted runner, an expression --
+the merge queue's route to `windows-latest` from 2026-09-16 among them -- is
+something this contract cannot evaluate and refuses, and a subset admits any
+self-hosted Windows machine the account registers. A run does now leave the
+guest, but by another route this check does not govern: the picker answers
+`hosted`, this job is skipped by its pinned condition, and the hosted twin,
+pinned by [`ci_test_windows_hosted_job_complaints`], runs the suite on the
+guest image's compiler. Measured,
 `MUT-TEST-WINDOWS-REHOSTED`, `MUT-TEST-WINDOWS-LABEL-DROPPED` and
 `MUT-TEST-WINDOWS-QUEUE-REHOSTED`.
 

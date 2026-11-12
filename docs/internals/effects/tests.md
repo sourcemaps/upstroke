@@ -2111,9 +2111,11 @@ the job's own comment spelled the needle.
 
 ## `fn the_windows_leg_runs_these_fixtures_on_the_runner_each_lane_pins() {`
 
-The Windows suite's job runs these fixtures on the curated guest for a pull
-request, a push and a merge-queue entry alike, and on nothing else the
-contract can read.
+The guest's Windows suite job runs these fixtures on the curated guest for a
+pull request, a push and a merge-queue entry alike whenever the run's picker
+answers `guest`, and on nothing else the contract can read; a run the picker
+sends away runs them in the hosted twin instead
+([`the_hosted_windows_twin_runs_the_guests_suite_on_the_guests_compiler`]).
 
 The claim the `test` job discharges with an install step -- that
 `clippy-driver` is present for the fixtures -- is discharged by the golden
@@ -2122,14 +2124,22 @@ bound to instead; a toolchain install in this job is refused. What the
 contract *can* read is pinned: the `runs-on:` label set exactly, the suite
 step exactly -- the command and the count that says it executed, see
 [`the_windows_leg_counts_the_tests_it_ran`] -- the platform-default shell on
-every `run:` step, and a field set with no `if:` or `continue-on-error:`
-anywhere. The refusals are executed in [`WORKFLOW_ESCAPES`], every row named
-`MUT-TEST-WINDOWS-*` and the three `MUT-WINDOWS-WITNESS-*`.
+every `run:` step, and a field set with no `continue-on-error:` anywhere and
+no `if:` on any step. The job's own `if:` is required, and admitted only as
+the exact condition on the picker's `guest` answer, beside `needs:` on the
+picker; before the twin the job had no `if:` at all. The refusals are
+executed in [`WORKFLOW_ESCAPES`], every row named `MUT-TEST-WINDOWS-*` that
+mutates `test-windows` (the twin's rows mutate `test-windows-hosted`), and
+the three `MUT-WINDOWS-WITNESS-*`.
 
-## `fn the_windows_leg_runs_every_lane_on_the_self_hosted_guest_its_labels_name() {`
+## `fn the_guests_windows_job_runs_on_the_self_hosted_guest_its_labels_name() {`
 
 The pinned label set is a self-hosted one -- not a GitHub-hosted runner
-the oracle's equality would then hold every lane to.
+the oracle's equality would then hold the guest's job to, on every lane the
+picker leaves with the guest. Until the hosted twin existed this test was
+`the_windows_leg_runs_every_lane_on_the_self_hosted_guest_its_labels_name`;
+the twin's runner is pinned by its own contract, so the guarantee here is
+the guest's job's, not every lane's.
 
 The oracle compares `runs-on:` with [`TEST_WINDOWS_LABELS`] as a set, so a
 literal sequence routes every event to the same machine; what that equality

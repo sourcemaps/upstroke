@@ -761,7 +761,8 @@ pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {
     if labels.as_ref() != Some(&expected_labels) {
         out.push(format!(
             "[test-windows-runner] `{TEST_WINDOWS_JOB}` runs on {:?}, not exactly the label \
-             set {expected_labels:?}, which names the curated guest for every lane. A scalar \
+             set {expected_labels:?}, which names the curated guest for every lane the picker \
+             leaves with it; a run it sends away runs in `{TEST_WINDOWS_HOSTED_JOB}`. A scalar \
              is a hosted runner, where no step installs the image's compiler; an expression \
              routes some event to a machine this contract cannot name -- the merge queue's \
              route to `{TEST_WINDOWS_PLATFORM}` from 2026-09-16 among them; and a subset of \
@@ -2223,10 +2224,13 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         escape: "the merge queue routed back to `windows-latest` by expression, every other \
                  build left on the guest: the route this job ran from 2026-09-16, under which \
                  queue entries reached their 45- and then 55-minute timeouts in October 2026 \
-                 before the suite reported a complete result. Nothing installs the image's \
-                 compiler there now, so the compiler check throws on every entry; restored \
-                 with its install step, it is a queue that lands merges on a machine no pull \
-                 request ran on.",
+                 before the suite reported a complete result. Nothing in this job installs the \
+                 image's compiler, so the compiler check throws on every entry; restored with \
+                 its install step, it sends every queue entry off the guest by event, whatever \
+                 the guest's load and with no operator having asked. A run does now leave the \
+                 guest, but only by the picker's opt-in answer and into the hosted twin, which \
+                 is pinned whole by its own contract and runs on the guest image's compiler; \
+                 this job's labels stay a literal set, so it cannot be routed by event.",
         job: Some("test-windows"),
         anchor: "    runs-on: [self-hosted, windows, winguest]\n",
         replacement: "    runs-on: ${{ github.event_name == 'merge_group' && 'windows-latest' || fromJSON('[\"self-hosted\", \"windows\", \"winguest\"]') }}\n",
