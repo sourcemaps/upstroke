@@ -30,7 +30,9 @@ bash .github/scripts/test-pr-ready-audit.sh
 ```
 
 `CODING_STANDARDS.md` §2 is the normative statement of this baseline and says how CI splits it
-across jobs. `test-release-record.sh` needs `jq`; `test-pr-policy.sh` only works from the root.
+across jobs. `test-release-record.sh` needs `jq`, and so does `cargo test` on Linux, which runs the
+workflow's own scripts and fails, saying so, where `jq` is missing; `test-pr-policy.sh` only works
+from the root.
 
 Use the pull-request template to record the exact commands, implementation provenance, reviewed
 SHA, review model and effort, evidence link, risk and rollback. Resolve every review conversation;

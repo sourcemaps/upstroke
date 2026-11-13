@@ -2273,20 +2273,31 @@ Linux only. The script runs on `ubuntu-latest` and nowhere else, and it
 needs `bash` 4 (`mapfile`) and `jq`. The Windows legs, the guest's image
 included, promise neither; the macOS runner's `/bin/bash` is 3.2.
 
-## ``const JQ_ABSENT: &str = "no `jq` on PATH, and the picker's script reads the API's answers \``
+## `const JQ: &str = "jq";`
 
-Why the fixtures skip, as a value the test body reads rather than a comment,
-on the pattern of the Docker gate's `absent_reason`; the runner check's
-failure message carries it.
+The fixtures' one prerequisite beyond `bash`, as the name the guard asks
+PATH for. `jq` is a prerequisite of the suite on Linux, listed with the
+baseline's others (`CODING_STANDARDS.md` §2, `CONTRIBUTING.md`,
+`CLAUDE.md`); `test-release-record.sh` already needed it.
 
-## `const ON_A_GITHUB_RUNNER: &str = "GITHUB_ACTIONS";`
+## `const NO_SUCH_PROGRAM: &str = "upstroke-fixture-no-such-jq";`
 
-The variable GitHub sets on every runner. Where it is set the skip is a
-failure: the picker's job runs on `ubuntu-latest` because that image carries
-`jq`, so a runner without it means these fixtures did not run where they
-are due to, and a skip counts as a pass in the suite's totals. Unlike
-`UPSTROKE_REQUIRE_DOCKER` it needs no workflow change, which matters
-because the `test` step's environment is pinned whole.
+A program no PATH carries, asked for in place of `jq` by
+[`the_picker_fixtures_fail_with_a_diagnostic_where_jq_is_absent`], so that a
+machine without `jq` is modelled without touching the suite's PATH.
+
+## ``const JQ_ABSENT: &str = "The picker's script reads the API's answers with `jq`, and these \``
+
+What the fixtures say when they cannot run, after the name of the program
+that did not answer. The fixtures fail with it; they do not skip. The first
+repair of the undocumented prerequisite returned early without `jq` unless
+`GITHUB_ACTIONS` was set, and the second review of #375 measured that as a
+test counted as passed with no case run and no diagnostic, against §12's
+"no silent success when a prerequisite is absent". Of §12's three remedies
+this is the third. Providing `jq` is not the suite's to do, and an
+`#[ignore]` would take the executed proof of the picker's script out of the
+default suite on the one platform that runs it: the workflow's suite step is
+pinned as text and selects nothing ignored.
 
 ## `const FAKE_GH: &str = r#"#!/usr/bin/env bash`
 
@@ -2438,22 +2449,32 @@ more runs on the guest than the limit leaves, and they leave no place on it
 empty that one of them could have taken. The first refuses the reviewer's
 "both answer `guest`", the second "both answer `hosted`".
 
-## `fn the_windows_home_picker_answers_from_canned_api_pages() {`
+## `fn answers_on_path(program: &str) -> Result<(), String> {`
+
+The guard: `program --version` runs and succeeds, or the reason it is needed
+([`JQ_ABSENT`]) behind the name that did not answer. It reads nothing else.
+The first form of this guard also read `GITHUB_ACTIONS`, to fail on a
+runner and skip elsewhere; nothing here reads the environment now, so the
+answer is the same on a runner and off one.
+
+## `fn picker_fixtures(jq: &str) {`
 
 Every case and every burst, reported together, so a broken script names
-every answer it gets wrong. It asks for `jq` on PATH first, so that a machine without it is
-never read as the script's own `guest` fallback passing. Without it the test
-returns early, the repository's convention for a missing prerequisite: the
-Docker gate's skip, whose reason is a value the test body reads rather than
-an unremarked `return` ([`JQ_ABSENT`]), so `cargo test` on a Linux machine
-without `jq` does not fail where it passed before the picker existed. It
-prints nothing: this file forbids the governed `eprintln!`, and the Docker
-gate's skips print nothing either. On a GitHub runner it fails instead
-([`ON_A_GITHUB_RUNNER`]), naming the skip, as a Docker-gated test does
-under `UPSTROKE_REQUIRE_DOCKER`. Measured on 2026-11-12 by pointing the
-probe at a program that does not exist: the test returned early and passed;
-with the runner check pointed at a variable that is always set, it failed
-naming the skip. Both restored. Measured
+every answer it gets wrong. It asks PATH for `jq` first, under the name it
+is handed, and fails with the guard's reason when that does not answer: a
+machine without `jq` is then never read as the script's own `guest` fallback
+passing, and never as a pass at all. The parameter is the name the guard
+asks for and nothing else; the script always runs the `jq` its PATH has.
+
+Measured on 2026-11-13: with [`JQ`] set to a program that does not exist,
+[`the_windows_home_picker_answers_from_canned_api_pages`] failed with `no
+... on PATH` and the reason, where the guard it replaces had returned early
+and been counted as passed (measured on 2026-11-12, and again by the second
+review with an empty PATH). Restored. Run with a PATH that has no `jq` it
+was not: the session that made the change could not start the test binary
+outside Cargo.
+
+Measured
 by mutating the workflow's script, each mutation then restored: removing the
 run-id dedupe failed the counted-once case; dropping `--paginate` from the
 jobs read failed the later-pages case and the later-page-failure case of a
@@ -2480,6 +2501,20 @@ guest jobs are reported `queued`, both pickers answering `hosted`, and the
 two rows for that reading. The two bursts that fail under neither of the
 first two are the one with room for both runs and the one with room for
 none, where every rule agrees.
+
+## `fn the_windows_home_picker_answers_from_canned_api_pages() {`
+
+[`picker_fixtures`], asking PATH for [`JQ`].
+
+## `fn the_picker_fixtures_fail_with_a_diagnostic_where_jq_is_absent() {`
+
+The same entry point, asking PATH for [`NO_SUCH_PROGRAM`] instead: it must
+panic, and with the message that names the program and carries
+[`JQ_ABSENT`]. This is what a machine without `jq` sees, executed in the
+default suite on every run rather than once by hand, and it is the
+regression test for the silent pass. Measured on 2026-11-13 by putting the
+early return back in [`picker_fixtures`]: the call returned, and this test
+failed saying the fixtures had passed and run none. Restored.
 
 ## `fn the_hosted_windows_twin_runs_the_guests_suite_on_the_guests_compiler() {`
 

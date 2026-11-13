@@ -5668,9 +5668,12 @@ done
 if (( page == 1 )); then echo "fake gh: no canned answer for $path" >&2; exit 1; fi
 "#;
 
-    const JQ_ABSENT: &str = "no `jq` on PATH, and the picker's script reads the API's answers \
-                             with it; install `jq` to run these fixtures";
-    const ON_A_GITHUB_RUNNER: &str = "GITHUB_ACTIONS";
+    const JQ: &str = "jq";
+    const NO_SUCH_PROGRAM: &str = "upstroke-fixture-no-such-jq";
+    const JQ_ABSENT: &str = "The picker's script reads the API's answers with `jq`, and these \
+                             fixtures run that script, so they cannot run without it: install \
+                             `jq`, which the ten-command baseline needs already. They fail here \
+                             rather than pass without having run";
 
     const BUSY: &str = "WINGUEST_BUSY is 1, so the queue for the guest was not counted.";
     const ROUTING_OFF: &str = "WINGUEST_BUSY is not 1, and WINGUEST_QUEUE_LIMIT is unset or not a \
@@ -6544,18 +6547,16 @@ if (( page == 1 )); then echo "fake gh: no canned answer for $path" >&2; exit 1;
         ))
     }
 
-    #[test]
-    fn the_windows_home_picker_answers_from_canned_api_pages() {
-        let jq = Command::new("jq").arg("--version").output();
-        if !jq.is_ok_and(|output| output.status.success()) {
-            assert!(
-                std::env::var_os(ON_A_GITHUB_RUNNER).is_none(),
-                "{ON_A_GITHUB_RUNNER} is set and these fixtures would have skipped: {JQ_ABSENT}. \
-                 The picker runs on `ubuntu-latest` because its image carries `jq`, so a runner \
-                 without it is a skip where a pass was due"
-            );
-            return;
+    fn answers_on_path(program: &str) -> Result<(), String> {
+        let version = Command::new(program).arg("--version").output();
+        if version.is_ok_and(|output| output.status.success()) {
+            return Ok(());
         }
+        Err(format!("no `{program}` on PATH. {JQ_ABSENT}"))
+    }
+
+    fn picker_fixtures(jq: &str) {
+        answers_on_path(jq).unwrap_or_else(|absent| panic!("{absent}"));
         let doc = parse_workflow(&ci_workflow_text()).expect(CI_WORKFLOW);
         let script = field(&doc, "jobs")
             .and_then(|jobs| field(jobs, PICK_WINDOWS_HOME_JOB))
@@ -6581,6 +6582,29 @@ if (( page == 1 )); then echo "fake gh: no canned answer for $path" >&2; exit 1;
             failures.is_empty(),
             "the picker's script answered wrongly from canned API pages:\n\n{}",
             failures.join("\n\n")
+        );
+    }
+
+    #[test]
+    fn the_windows_home_picker_answers_from_canned_api_pages() {
+        picker_fixtures(JQ);
+    }
+
+    #[test]
+    fn the_picker_fixtures_fail_with_a_diagnostic_where_jq_is_absent() {
+        let refused = std::panic::catch_unwind(|| picker_fixtures(NO_SUCH_PROGRAM));
+        let said = match refused {
+            Ok(()) => panic!(
+                "the fixtures passed with `{NO_SUCH_PROGRAM}` asked for in place of `{JQ}`, so \
+                 a machine without `{JQ}` counts them as passed and has run none"
+            ),
+            Err(payload) => payload.downcast_ref::<String>().cloned(),
+        };
+        assert!(
+            said.as_deref()
+                .is_some_and(|said| said.contains(NO_SUCH_PROGRAM) && said.contains(JQ_ABSENT)),
+            "the fixtures failed without `{JQ}`, but not with the diagnostic that names it: \
+             {said:?}"
         );
     }
 }

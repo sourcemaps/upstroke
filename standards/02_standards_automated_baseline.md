@@ -25,7 +25,9 @@ step 3); `msrv` runs the locked check on all three; `lint (windows)` runs Clippy
 every target as the hosted Windows compile witness; `lint (macos)` runs Clippy natively;
 `upstroke-ci` aggregates every leg, requires exactly one of the two Windows suite jobs, and is
 the required context. The `--locked` MSRV check is what
-proves the floor against the dependency set a release ships. `test-release-record.sh` needs `jq`, and `test-pr-policy.sh` only works from the root.
+proves the floor against the dependency set a release ships. `test-release-record.sh` needs `jq`,
+and so does `cargo test` on Linux: the fixtures that run the workflow's `pick-windows-home` script
+fail, naming it, where it is absent. `test-pr-policy.sh` only works from the root.
 
 Edition 2024, MSRV 1.85.0; code and dependencies stay compatible with both the MSRV and current
 stable. A green baseline is necessary, not sufficient: nothing past this section is checked by a
