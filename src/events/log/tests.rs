@@ -3116,41 +3116,8 @@ fn declared_build_refusals() -> Vec<BuildRefusal> {
     refusals
 }
 
-fn crate_under_test() -> (PathBuf, PathBuf) {
-    let exe = std::env::current_exe().expect("the test executable");
-    let deps = exe
-        .parent()
-        .expect("the test executable is in a directory")
-        .to_path_buf();
-    let mut rlibs: Vec<(std::time::SystemTime, PathBuf)> = fs::read_dir(&deps)
-        .expect("the deps directory")
-        .filter_map(|entry| {
-            let path = entry.ok()?.path();
-            let name = path.file_name()?.to_str()?;
-            (name.starts_with("libupstroke-") && name.ends_with(".rlib")).then(|| {
-                let stamp = path
-                    .metadata()
-                    .and_then(|meta| meta.modified())
-                    .unwrap_or(std::time::UNIX_EPOCH);
-                (stamp, path)
-            })
-        })
-        .collect();
-    rlibs.sort();
-    let rlib = rlibs
-        .pop()
-        .unwrap_or_else(|| {
-            panic!(
-                "no libupstroke-*.rlib beside the test executable in {}",
-                deps.display()
-            )
-        })
-        .1;
-    (deps, rlib)
-}
-
 fn typecheck(dir: &Path, name: &str, body: &str) -> (bool, String) {
-    let (deps, rlib) = crate_under_test();
+    let built = crate::effects::tests::crate_under_test();
     let source = dir.join(format!("{name}.rs"));
     fs::write(&source, format!("fn main() {{\n{body}\n}}\n")).expect("the fixture");
     let out = dir.join(format!("{name}-out"));
@@ -3165,10 +3132,7 @@ fn typecheck(dir: &Path, name: &str, body: &str) -> (bool, String) {
         ])
         .arg("--out-dir")
         .arg(&out)
-        .arg("-L")
-        .arg(format!("dependency={}", deps.display()))
-        .arg("--extern")
-        .arg(format!("upstroke={}", rlib.display()))
+        .args(built.rustc_args())
         .arg(&source)
         .output()
         .expect("rustc runs; it is the compiler that built this test");
