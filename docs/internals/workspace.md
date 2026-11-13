@@ -762,6 +762,9 @@ durability idiom: `File::sync_all` with write access (`fsync`, `F_FULLFSYNC` on 
 `fsync` on Unix, nothing on Windows). Each failure refuses before anything is removed.
 Whether the calls are those system calls, and what a successful fsync means on a disk, is
 reasoned; the order was traced on Linux (record §5.17).
+`write_copy_syncs_the_written_file_then_renames_it_then_syncs_its_parent` holds that order in the
+source, and that each step hands its error back, so a failed one stops the steps after it; see its
+section.
 
 ## `impl Workspace` › `fn relative_to_root(`
 
@@ -1573,6 +1576,121 @@ that Git's next split write of the checkout's own index removes the orphans, is 
 not the record: the package excludes `reviews/` and `findings/`. Git's behaviour is unchanged,
 so no behaviour test can guard the sentence; the reviewer's sequence, executed again on Git
 2.43.0 and 2.55.0, is the evidence. Red on round 4's notes.
+
+## `fn write_copy_syncs_the_written_file_then_renames_it_then_syncs_its_parent() {`
+
+The guard `FUD-FULL-COPYBARRIER` asked for (F4 of the owner's full review of #331): nothing held
+the order of `write_copy`'s durability barrier, and with the file's `sync_all` removed and
+`sync_parent` made a no-op every engine and workspace test stayed green. A source pin whose check
+is `check_copy_barrier` (its section below), run first over fixtures and then over the live body.
+
+Its positive controls come first: bodies built from the four steps as `write_copy` writes them,
+each with one step broken, and the four intact. The check must accept the intact body and reject
+each other one for the breach it injects, a `CopyBarrierBreach` compared whole: the file's sync
+missing, and the parent's (`NotOnce`); the rename before the file's sync (`OutOfOrder`); the
+file's sync under a condition (`Nested`); and, as `ErrorNotPropagated`, the file's sync and the
+parent's each bound to `_` and each with its result unused, the file's sync with its error mapped
+and then discarded (`.map_err(drop).ok();`), the rename bound to `_`, and the open left unchecked
+with the file synced only if it opened. Two more hold the edge of the return rule from both sides,
+the four steps intact behind each: a body that first publishes the copy another way and returns
+success, `if publish_without_syncing(partial, copy)? { return Ok(()); }`, must be rejected as
+`ReturnNotAnError`, the shape a review found the four-step check passed; and a body that first
+returns an error under a condition, `return Err(UpstrokeError::Git { … });` as `write_copy` does
+when the bundle names the wrong commit, must be accepted. A control that fails names its fixture.
+
+Then the live body, read as the census reads this file: comments and string literals blanked by
+`crate::effects::blank_comments_and_strings`, which must keep the file's length, the test module
+taken out by `test_module_span`, `fn write_copy(` found exactly once in what is left, and its body
+taken through the brace that balances it. The check must accept it: each of the four steps once,
+in order, a statement of the body's own, its error handed back the way `write_copy` hands it back
+today, and no `return` in it but the one that returns an error when the bundle names the wrong
+commit.
+
+Red with `let _ = written.sync_all();` in `write_copy`, as `ErrorNotPropagated` for
+`written.sync_all()`: the review found that an earlier, order-only version of this pin on this
+branch passed it, the text
+it required still there once and in order. Red with the parent's sync deleted (`sync_parent(copy)`
+replaced by `Ok(())`), as `NotOnce` for `sync_parent(copy)`, found 0 times. Green with each
+restored. With the return rule taken out of `check_copy_barrier`, the early-success fixture is
+accepted and the pin fails on it, `Ok(())` where `ReturnNotAnError` is expected; green with the
+rule restored.
+
+What it refuses, then: a step missing, repeated, out of order, inside a block, or with its error
+not handed back; and any way out of the body before the parent's sync that is a `return` of
+anything but an error written as `Err(…)`, which is the way the pin refuses for the body to report
+a copy it has not synced by leaving early. An early `?` or `return Err(…)` leaves without
+reporting a copy, which leaves the barrier whole. A body that keeps every step's text but syncs a
+different file than it renames is not refused; the list below says how.
+
+What it cannot see. It reads source: it does not run the calls, replay a crash, or know what a
+successful fsync means on a disk. It finds a `return` by its keyword in the blanked text, so a
+macro whose expansion returns, or a call that publishes the copy unsynced and lets the body run on,
+is invisible to it. A parent sync that does nothing inside its own function is
+invisible to it: `sync_parent` made a no-op on Unix passes, and on Windows it is one by design,
+where the directory entry's durability is reasoned. Nor does it see the whole `copy_pin` call
+moving after the revert in `discard_held`, where a crash after the revert could find the only copy
+of what the discard removed not yet durable. A step moved into a helper, or handing its error back
+in another shape than today's (a bare `?;` with no `map_err`, or `sync_parent(copy)?;` before an
+`Ok(())`), fails it, and whoever moves one changes the pin with it. It matches whitespace-free
+text, so a plain assignment, with no `let`, to a variable named `letwritten`
+(`letwritten = OpenOptions::new()…;`) reads as `let written = …` once whitespace is removed and
+stands in for the first step, while a `let` binding of another name is refused:
+`let rewritten = …` as `NotOnce`, `let letwritten = …` as `ErrorNotPropagated`. A body that opens
+the partial into `letwritten` and then syncs a `written` bound to another file passes, renaming
+the unsynced partial into place; so does a body that binds `written` again to another file between
+the open and the sync. It counts braces, not other delimiters, and does not expand macros, so a
+macro whose input is the barrier's statements passes: `stringify!` around the first three steps
+is accepted. The pin catches an accidental removal or reordering of the barrier's steps, not a
+body written to mislead it.
+
+## `const COPY_BARRIER: [&str; 4] = [`
+
+The four steps of `write_copy`'s barrier, in order, as `check_copy_barrier` finds them in a body
+with its whitespace removed: the written file opened with write access, the opening call standing
+in that whitespace-free text as the binding of `written`; `written` synced; the `.partial` renamed
+to the copy's name; and the copy's directory synced. The first step matches text, not a binding:
+once whitespace is gone, `let written =` and an assignment to `letwritten`, an identifier ending in
+`written`, read the same, so the check does not establish that the `written` it finds synced names
+the file the first step opens. The pin's controls name the steps from it, so their expected
+breaches move with it.
+
+## `enum CopyBarrierBreach {`
+
+Why `check_copy_barrier` finds a body's barrier broken, at the first step that breaks it, named by
+its call as `COPY_BARRIER` spells it: `NotOnce`, the call is not in the body exactly once, and
+`times` is how often it is; `OutOfOrder`, it begins before the end of the call ahead of it,
+`after`; `Nested`, it is inside a block of the body, so it runs only when that block does; and
+`ErrorNotPropagated`, it is not a statement of the body that hands its error back the way
+`write_copy` does today, so its failure need not stop what follows it. One breach names no step:
+`ReturnNotAnError`, the body holds a `return` whose value is not an error written as `Err(…)`, so
+it can leave reporting success before the parent's sync, the barrier's last step.
+
+## `fn check_copy_barrier(body: &str) -> Result<(), CopyBarrierBreach> {`
+
+The pin's check, apart from the file it reads, so the same code runs over the live body and over
+the fixtures. `body` is a block, its braces included, whose comments and strings are already
+blanked, as the live body's are; the fixtures carry none. With its whitespace removed, each step of
+`COPY_BARRIER` in turn must be in it exactly once; begin no earlier than the end of the call before
+it; have only the body's own brace open ahead of it, the `{` ahead of it outnumbering the `}` by
+one; and begin a statement, the code ahead of it ending in `;`, `{` or `}`, so that no `let _ =`
+or `drop(` takes its result. Then it must hand its error back in the shape `write_copy` uses
+today. The first three end their statement with `.map_err(…)?;`: the call, `.map_err(`, the
+parentheses balanced to its close, then `?;`. The last, the parent's sync, is the body's tail:
+nothing follows it but the closing brace, so its `Result` is `write_copy`'s own. That rule bounds
+the domain too: a body taken past its closing brace fails there, and one cut short fails on the
+step it lacks.
+
+With every step holding, the body must also hold no `return` but one of an error. Before its
+whitespace is removed, each `return` standing as a word of its own, at any depth, counts, and its
+value must be `Err(`, after any whitespace, with the parentheses balanced to its close and only
+`;`, `}` or `,` after it: `return Ok(())`, a bare `return;`, and a return of any other expression,
+`Err(…)` with a method chained on it among them, are `ReturnNotAnError`. So is an error returned
+under another name, `return failure;` with `failure` an `Err`: the check cannot tell its value,
+and refuses it on purpose rather than guess. A `return` inside a closure in the body is refused
+too, though it leaves only the closure. The last step being the body's tail is what bounds this
+rule: no return can follow it, so any that the check lets through leaves before the barrier
+completes, and leaves with an error. `Ok(())` when every step and the return rule hold; otherwise
+the first breach, the steps' before the return rule's.
 
 ## `struct InheritedSelection {`
 
