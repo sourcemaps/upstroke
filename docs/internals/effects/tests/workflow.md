@@ -679,6 +679,14 @@ The guest's job keeps the `name:` the picker counts. The API lists jobs by
 name, and nothing else pins that one, so a rename would leave the picker
 counting an empty queue. Measured, `MUT-PICK-WINDOWS-HOME-COUNTS-A-RENAMED-JOB`.
 
+## `pub(super) fn ci_pick_windows_home_complaints(doc: &Yaml) -> Vec<String> {` › `if scalar(job, "name") != Some(PICK_WINDOWS_HOME_NAME) {`
+
+The picker keeps the `name:` its own script reads in other runs. A run whose
+picker is listed and unfinished is one still choosing its home; under another
+name every run reads as having none, and runs that start together answer
+alike again (`PR375-QUEUE-PICKERS-RACE`). Measured,
+`MUT-PICK-WINDOWS-HOME-RENAMED`.
+
 ## `pub(super) fn ci_pick_windows_home_complaints(doc: &Yaml) -> Vec<String> {` › `let permissions = field(job, "permissions").and_then(scalar_map);`
 
 The token's scopes and the answer's name, each as a whole map. A wider
@@ -697,8 +705,13 @@ environment, its script and its resolved shell. Measured,
 `MUT-PICK-WINDOWS-HOME-COUNTS-BY-DEFAULT`,
 `MUT-PICK-WINDOWS-HOME-UNREADABLE-ANSWERS-HOSTED`,
 `MUT-PICK-WINDOWS-HOME-COUNTS-A-RUN-TWICE`,
-`MUT-PICK-WINDOWS-HOME-FIRST-PAGE-ONLY` and
-`MUT-PICK-WINDOWS-HOME-LATER-PAGE-FAILURE-IGNORED`.
+`MUT-PICK-WINDOWS-HOME-FIRST-PAGE-ONLY`,
+`MUT-PICK-WINDOWS-HOME-LATER-PAGE-FAILURE-IGNORED`,
+`MUT-PICK-WINDOWS-HOME-IGNORES-EARLIER-RUNS-STILL-CHOOSING`,
+`MUT-PICK-WINDOWS-HOME-COUNTS-LATER-RUNS-STILL-CHOOSING` and
+`MUT-PICK-WINDOWS-HOME-HOLDS-A-JOB-ITS-PICKER-HAS-NOT-RELEASED`. The pin
+refuses any other text; what each of the last three does to runs that start
+together is executed, in `super`'s two-picker fixtures.
 
 ## `pub(super) fn ci_windows_build_witness_complaints(doc: &Yaml) -> Vec<String> {`
 

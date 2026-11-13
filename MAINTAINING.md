@@ -30,7 +30,11 @@ source, documentation, workflows, release machinery and this file.
    asserted, and the guest's suite step and passing-test floor, and `upstroke-ci` requires
    exactly one of the two to pass. The answer is `hosted` when the repository variable
    `WINGUEST_BUSY` is `1`, or when the repository variable `WINGUEST_QUEUE_LIMIT` is a positive
-   whole number and the guest's jobs queued or running in other runs reach it. Both are opt-in:
+   whole number and the guest's queue reaches it: the guest's jobs queued or running in other
+   runs, together with the runs of a lower run id that have not yet shown where their own suite
+   goes. So of runs that start together, a merge queue's entries among them, the earliest take
+   the guest up to the limit and the rest go to the hosted runner; a limit of `1` keeps the
+   guest to one suite at a time. Both are opt-in:
    with neither set every run goes to the guest, and an unset or malformed limit counts nothing.
    A GitHub API the job cannot read answers `guest`. The build machine's operator sets
    `WINGUEST_BUSY` to `1` while baselines or Upstroke runs hold the machine, and clears it

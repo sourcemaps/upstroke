@@ -5380,9 +5380,10 @@ mod workflow;
 
 use ci_model::{
     CI_TARGETS, CI_WORKFLOW, GOLDEN_IMAGE_TOOLCHAIN, MSRV_COMMAND, MSRV_JOB, OVERRIDING_REPO_FILES,
-    PICK_WINDOWS_HOME_SCRIPT, RUSTFLAGS_KEY, TEST_COMMAND, TEST_WINDOWS_CONDITION,
-    TEST_WINDOWS_HOSTED_CONDITION, TEST_WINDOWS_HOSTED_JOB, TEST_WINDOWS_LABELS, TEST_WINDOWS_NAME,
-    TEST_WINDOWS_PLATFORM, WINDOWS_TEST_FLOOR, WINDOWS_TEST_WITNESS,
+    PICK_WINDOWS_HOME_NAME, PICK_WINDOWS_HOME_SCRIPT, RUSTFLAGS_KEY, TEST_COMMAND,
+    TEST_WINDOWS_CONDITION, TEST_WINDOWS_HOSTED_CONDITION, TEST_WINDOWS_HOSTED_JOB,
+    TEST_WINDOWS_LABELS, TEST_WINDOWS_NAME, TEST_WINDOWS_PLATFORM, WINDOWS_TEST_FLOOR,
+    WINDOWS_TEST_WITNESS,
 };
 use workflow::{
     WORKFLOW_ESCAPES, ci_msrv_job_complaints, ci_pick_windows_home_complaints,
@@ -5600,30 +5601,41 @@ fn the_windows_home_is_picked_by_the_one_job_the_contract_pins() {
         complaints.join("\n")
     );
     let limit_check = "elif [[ ! \"${WINGUEST_QUEUE_LIMIT:-}\" =~ ";
-    let first_count = "if count=\"$(winguest_jobs)\"; then";
+    let first_count = "if queue=\"$(winguest_queue)\"; then";
     assert!(
         PICK_WINDOWS_HOME_SCRIPT.matches(first_count).count() == 1
+            && PICK_WINDOWS_HOME_SCRIPT.matches("winguest_queue").count() == 2
             && PICK_WINDOWS_HOME_SCRIPT
                 .find(limit_check)
                 .is_some_and(|checked| PICK_WINDOWS_HOME_SCRIPT.find(first_count) > Some(checked)),
         "the picker's script does not count the guest's queue exactly once, behind the check \
          that `WINGUEST_QUEUE_LIMIT` is set, so routing on the queue is not opt-in"
     );
-    assert!(
-        PICK_WINDOWS_HOME_SCRIPT.contains(&format!("select(.name == \"{TEST_WINDOWS_NAME}\" and")),
-        "the picker's script does not count jobs named `{TEST_WINDOWS_NAME}`, the guest's job"
-    );
+    for (read_as, name) in [
+        ("the guest's job", TEST_WINDOWS_NAME),
+        ("another run's picker", PICK_WINDOWS_HOME_NAME),
+    ] {
+        assert!(
+            PICK_WINDOWS_HOME_SCRIPT.contains(&format!("select(.name == \"{name}\")")),
+            "the picker's script does not read jobs named `{name}` as {read_as}, the name the \
+             oracle holds that job's `name:` to"
+        );
+    }
 }
 
 #[cfg(target_os = "linux")]
 mod pick_windows_home_answers {
     use std::collections::BTreeMap;
+    use std::ffi::OsString;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
-    use std::path::Path;
-    use std::process::Command;
+    use std::path::{Path, PathBuf};
+    use std::process::{Command, ExitStatus};
 
-    use super::ci_model::{CI_WORKFLOW, PICK_WINDOWS_HOME_JOB, TEST_WINDOWS_NAME};
+    use super::ci_model::{
+        CI_WORKFLOW, PICK_WINDOWS_HOME_JOB, PICK_WINDOWS_HOME_NAME, TEST_WINDOWS_HOSTED_NAME,
+        TEST_WINDOWS_NAME,
+    };
     use super::scratch_dir;
     use super::workflow::{ci_workflow_text, field, parse_workflow, scalar, steps_of};
 
@@ -5682,6 +5694,29 @@ if (( page == 1 )); then echo "fake gh: no canned answer for $path" >&2; exit 1;
         asked: Vec<String>,
     }
 
+    struct Burst {
+        name: &'static str,
+        limit: usize,
+        taken: usize,
+        listed: Vec<(u64, Vec<(&'static str, &'static str)>)>,
+        pickers: Vec<(u64, &'static str)>,
+    }
+
+    struct Snapshot {
+        dir: PathBuf,
+        pages: PathBuf,
+        script: PathBuf,
+        path: OsString,
+    }
+
+    struct Picked {
+        exit: ExitStatus,
+        stdout: String,
+        stderr: String,
+        written: String,
+        asked: BTreeMap<String, usize>,
+    }
+
     fn runs(status: &str) -> String {
         format!("repos/{REPOSITORY}/actions/workflows/ci.yml/runs?status={status}&per_page=100")
     }
@@ -5713,10 +5748,26 @@ if (( page == 1 )); then echo "fake gh: no canned answer for $path" >&2; exit 1;
         ))
     }
 
+    fn listed_jobs(run: u64, listed: &[(&str, &str)]) -> Page {
+        let numbered: Vec<(u64, &str, &str)> = listed
+            .iter()
+            .zip(1_u64..)
+            .map(|((name, status), nth)| (run * 100 + nth, *name, *status))
+            .collect();
+        job_page(&numbered)
+    }
+
     fn counted(count: usize) -> String {
         format!(
             "Other runs of this workflow have {count} '{TEST_WINDOWS_NAME}' jobs queued or in \
              progress."
+        )
+    }
+
+    fn ahead(count: usize) -> String {
+        format!(
+            "Earlier runs of this workflow that have not yet shown where their Windows suite \
+             goes: {count}."
         )
     }
 
@@ -5749,7 +5800,7 @@ if (( page == 1 )); then echo "fake gh: no canned answer for $path" >&2; exit 1;
                 limit: "2",
                 pages: vec![(runs("queued"), empty()), (runs("in_progress"), empty())],
                 home: "guest",
-                says: vec![limited(2), counted(0)],
+                says: vec![limited(2), counted(0), ahead(0)],
                 asked: vec![runs("queued"), runs("in_progress")],
             },
             Case {
@@ -5783,7 +5834,7 @@ if (( page == 1 )); then echo "fake gh: no canned answer for $path" >&2; exit 1;
                     ),
                 ],
                 home: "guest",
-                says: vec![limited(2), counted(1)],
+                says: vec![limited(2), counted(1), ahead(0)],
                 asked: vec![runs("queued"), runs("in_progress"), jobs(101)],
             },
             Case {
@@ -5797,7 +5848,7 @@ if (( page == 1 )); then echo "fake gh: no canned answer for $path" >&2; exit 1;
                     (jobs(102), vec![job_page(&[(21, guest, "in_progress")])]),
                 ],
                 home: "hosted",
-                says: vec![limited(2), counted(2)],
+                says: vec![limited(2), counted(2), ahead(0)],
                 asked: vec![runs("queued"), runs("in_progress"), jobs(101), jobs(102)],
             },
             Case {
@@ -5816,7 +5867,7 @@ if (( page == 1 )); then echo "fake gh: no canned answer for $path" >&2; exit 1;
                     ),
                 ],
                 home: "guest",
-                says: vec![limited(2), counted(1)],
+                says: vec![limited(2), counted(1), ahead(0)],
                 asked: vec![runs("queued"), runs("in_progress"), jobs(101)],
             },
             Case {
@@ -5842,7 +5893,7 @@ if (( page == 1 )); then echo "fake gh: no canned answer for $path" >&2; exit 1;
                     (jobs(102), vec![job_page(&[(21, guest, "queued")])]),
                 ],
                 home: "hosted",
-                says: vec![limited(2), counted(2)],
+                says: vec![limited(2), counted(2), ahead(0)],
                 asked: vec![runs("queued"), runs("in_progress"), jobs(101), jobs(102)],
             },
             Case {
@@ -5887,7 +5938,7 @@ if (( page == 1 )); then echo "fake gh: no canned answer for $path" >&2; exit 1;
                     (jobs(101), vec![job_page(&[(11, guest, "queued")])]),
                 ],
                 home: "guest",
-                says: vec![limited(2), counted(1)],
+                says: vec![limited(2), counted(1), ahead(0)],
                 asked: vec![runs("queued"), runs("in_progress"), jobs(101)],
             },
             Case {
@@ -5908,7 +5959,7 @@ if (( page == 1 )); then echo "fake gh: no canned answer for $path" >&2; exit 1;
                     (jobs(102), vec![job_page(&[(21, guest, "queued")])]),
                 ],
                 home: "guest",
-                says: vec![limited(2), counted(1)],
+                says: vec![limited(2), counted(1), ahead(0)],
                 asked: vec![runs("queued"), runs("in_progress"), jobs(101), jobs(102)],
             },
             Case {
@@ -5922,7 +5973,7 @@ if (( page == 1 )); then echo "fake gh: no canned answer for $path" >&2; exit 1;
                     (jobs(102), vec![job_page(&[(21, guest, "in_progress")])]),
                 ],
                 home: "guest",
-                says: vec![limited(3), counted(2)],
+                says: vec![limited(3), counted(2), ahead(0)],
                 asked: vec![runs("queued"), runs("in_progress"), jobs(101), jobs(102)],
             },
             Case {
@@ -5935,7 +5986,7 @@ if (( page == 1 )); then echo "fake gh: no canned answer for $path" >&2; exit 1;
                     (jobs(101), vec![job_page(&[(11, guest, "queued")])]),
                 ],
                 home: "hosted",
-                says: vec![limited(1), counted(1)],
+                says: vec![limited(1), counted(1), ahead(0)],
                 asked: vec![runs("queued"), runs("in_progress"), jobs(101)],
             },
         ];
@@ -5956,7 +6007,348 @@ if (( page == 1 )); then echo "fake gh: no canned answer for $path" >&2; exit 1;
                 asked: Vec::new(),
             });
         }
+        out.extend(other_runs_still_choosing());
         out
+    }
+
+    fn beside_one_run(
+        name: &str,
+        run: u64,
+        listed: &[(&str, &str)],
+        (held, earlier): (usize, usize),
+        home: &'static str,
+    ) -> Case {
+        Case {
+            name: name.to_owned(),
+            busy: "",
+            limit: "1",
+            pages: vec![
+                (runs("queued"), vec![run_page(&[])]),
+                (runs("in_progress"), vec![run_page(&[run])]),
+                (jobs(run), vec![listed_jobs(run, listed)]),
+            ],
+            home,
+            says: vec![limited(1), counted(held), ahead(earlier)],
+            asked: vec![runs("queued"), runs("in_progress"), jobs(run)],
+        }
+    }
+
+    fn other_runs_still_choosing() -> Vec<Case> {
+        let guest = TEST_WINDOWS_NAME;
+        let twin = TEST_WINDOWS_HOSTED_NAME;
+        let picker = PICK_WINDOWS_HOME_NAME;
+        let earlier = 101;
+        let later = 950;
+        vec![
+            beside_one_run(
+                "an-earlier-run-still-picking-is-counted",
+                earlier,
+                &[(picker, "in_progress"), ("lint", "queued")],
+                (0, 1),
+                "hosted",
+            ),
+            beside_one_run(
+                "a-later-run-still-picking-is-not-counted",
+                later,
+                &[(picker, "in_progress"), ("lint", "queued")],
+                (0, 0),
+                "guest",
+            ),
+            beside_one_run(
+                "an-earlier-run-whose-picker-waits-for-a-runner-is-counted",
+                earlier,
+                &[(picker, "queued"), ("lint", "queued")],
+                (0, 1),
+                "hosted",
+            ),
+            beside_one_run(
+                "an-earlier-run-whose-picker-finished-and-lists-no-guest-job-is-counted",
+                earlier,
+                &[(picker, "completed"), ("lint", "in_progress")],
+                (0, 1),
+                "hosted",
+            ),
+            beside_one_run(
+                "a-later-run-whose-picker-finished-and-lists-no-guest-job-is-not-counted",
+                later,
+                &[(picker, "completed"), ("lint", "in_progress")],
+                (0, 0),
+                "guest",
+            ),
+            beside_one_run(
+                "an-earlier-run-whose-guest-job-is-listed-but-not-queued-is-counted",
+                earlier,
+                &[(picker, "completed"), (guest, "waiting")],
+                (0, 1),
+                "hosted",
+            ),
+            beside_one_run(
+                "a-later-run-queued-for-the-guest-is-counted",
+                later,
+                &[(picker, "completed"), (guest, "queued")],
+                (1, 0),
+                "hosted",
+            ),
+            beside_one_run(
+                "a-later-run-on-the-guest-is-counted",
+                later,
+                &[(picker, "completed"), (guest, "in_progress")],
+                (1, 0),
+                "hosted",
+            ),
+            beside_one_run(
+                "a-later-run-with-no-picker-queued-for-the-guest-is-counted",
+                later,
+                &[("lint", "in_progress"), (guest, "queued")],
+                (1, 0),
+                "hosted",
+            ),
+            beside_one_run(
+                "an-earlier-runs-queued-guest-job-is-a-choice-not-a-hold-while-its-picker-runs",
+                earlier,
+                &[(picker, "in_progress"), (guest, "queued")],
+                (0, 1),
+                "hosted",
+            ),
+            beside_one_run(
+                "a-later-runs-queued-guest-job-is-not-a-hold-while-its-picker-runs",
+                later,
+                &[(picker, "in_progress"), (guest, "queued")],
+                (0, 0),
+                "guest",
+            ),
+            beside_one_run(
+                "an-earlier-run-picking-again-beside-a-finished-guest-job-is-counted",
+                earlier,
+                &[(picker, "in_progress"), (guest, "completed")],
+                (0, 1),
+                "hosted",
+            ),
+            beside_one_run(
+                "an-earlier-run-sent-to-the-hosted-runner-is-not-counted",
+                earlier,
+                &[
+                    (picker, "completed"),
+                    (guest, "completed"),
+                    (twin, "in_progress"),
+                ],
+                (0, 0),
+                "guest",
+            ),
+            beside_one_run(
+                "an-earlier-run-with-no-job-listed-yet-is-counted",
+                earlier,
+                &[],
+                (0, 1),
+                "hosted",
+            ),
+            beside_one_run(
+                "an-earlier-run-with-neither-a-picker-nor-a-guest-job-is-not-counted",
+                earlier,
+                &[("lint", "in_progress"), (twin, "in_progress")],
+                (0, 0),
+                "guest",
+            ),
+            beside_one_run(
+                "run-99-is-earlier-than-run-900-as-a-number",
+                99,
+                &[(picker, "in_progress")],
+                (0, 1),
+                "hosted",
+            ),
+            beside_one_run(
+                "run-1000-is-later-than-run-900-as-a-number",
+                1000,
+                &[(picker, "in_progress")],
+                (0, 0),
+                "guest",
+            ),
+            Case {
+                name: "an-earlier-run-both-status-queries-list-is-counted-once-while-it-picks"
+                    .to_owned(),
+                busy: "",
+                limit: "2",
+                pages: vec![
+                    (runs("queued"), vec![run_page(&[earlier])]),
+                    (runs("in_progress"), vec![run_page(&[earlier])]),
+                    (
+                        jobs(earlier),
+                        vec![listed_jobs(earlier, &[(picker, "in_progress")])],
+                    ),
+                ],
+                home: "guest",
+                says: vec![limited(2), counted(0), ahead(1)],
+                asked: vec![runs("queued"), runs("in_progress"), jobs(earlier)],
+            },
+            Case {
+                name: "a-held-guest-and-an-earlier-run-still-picking-reach-a-limit-of-2".to_owned(),
+                busy: "",
+                limit: "2",
+                pages: vec![
+                    (runs("queued"), vec![run_page(&[])]),
+                    (runs("in_progress"), vec![run_page(&[earlier, later])]),
+                    (
+                        jobs(earlier),
+                        vec![listed_jobs(earlier, &[(picker, "in_progress")])],
+                    ),
+                    (
+                        jobs(later),
+                        vec![listed_jobs(
+                            later,
+                            &[(picker, "completed"), (guest, "in_progress")],
+                        )],
+                    ),
+                ],
+                home: "hosted",
+                says: vec![limited(2), counted(1), ahead(1)],
+                asked: vec![
+                    runs("queued"),
+                    runs("in_progress"),
+                    jobs(earlier),
+                    jobs(later),
+                ],
+            },
+            Case {
+                name: "a-limit-of-3-admits-a-held-guest-and-an-earlier-run-still-picking"
+                    .to_owned(),
+                busy: "",
+                limit: "3",
+                pages: vec![
+                    (runs("queued"), vec![run_page(&[])]),
+                    (runs("in_progress"), vec![run_page(&[earlier, later])]),
+                    (
+                        jobs(earlier),
+                        vec![listed_jobs(earlier, &[(picker, "in_progress")])],
+                    ),
+                    (
+                        jobs(later),
+                        vec![listed_jobs(
+                            later,
+                            &[(picker, "completed"), (guest, "in_progress")],
+                        )],
+                    ),
+                ],
+                home: "guest",
+                says: vec![limited(3), counted(1), ahead(1)],
+                asked: vec![
+                    runs("queued"),
+                    runs("in_progress"),
+                    jobs(earlier),
+                    jobs(later),
+                ],
+            },
+        ]
+    }
+
+    fn bursts() -> Vec<Burst> {
+        let guest = TEST_WINDOWS_NAME;
+        let picker = PICK_WINDOWS_HOME_NAME;
+        let picking = |guest_job: Option<&'static str>| {
+            let mut listed = vec![(picker, "in_progress"), ("lint", "queued")];
+            listed.extend(guest_job.map(|status| (guest, status)));
+            listed
+        };
+        vec![
+            Burst {
+                name: "two-runs-whose-guest-jobs-are-not-listed-yet",
+                limit: 1,
+                taken: 0,
+                listed: vec![(999, picking(None)), (1000, picking(None))],
+                pickers: vec![(999, "guest"), (1000, "hosted")],
+            },
+            Burst {
+                name: "two-runs-whose-guest-jobs-are-waiting",
+                limit: 1,
+                taken: 0,
+                listed: vec![
+                    (999, picking(Some("waiting"))),
+                    (1000, picking(Some("waiting"))),
+                ],
+                pickers: vec![(999, "guest"), (1000, "hosted")],
+            },
+            Burst {
+                name: "two-runs-whose-guest-jobs-are-reported-queued",
+                limit: 1,
+                taken: 0,
+                listed: vec![
+                    (999, picking(Some("queued"))),
+                    (1000, picking(Some("queued"))),
+                ],
+                pickers: vec![(999, "guest"), (1000, "hosted")],
+            },
+            Burst {
+                name: "two-runs-listed-with-a-waiting-guest-job-and-no-picker",
+                limit: 1,
+                taken: 0,
+                listed: vec![
+                    (999, vec![(guest, "waiting")]),
+                    (1000, vec![(guest, "waiting")]),
+                ],
+                pickers: vec![(999, "guest"), (1000, "hosted")],
+            },
+            Burst {
+                name: "two-runs-under-a-limit-of-2-both-take-the-guest",
+                limit: 2,
+                taken: 0,
+                listed: vec![(999, picking(None)), (1000, picking(None))],
+                pickers: vec![(999, "guest"), (1000, "guest")],
+            },
+            Burst {
+                name: "two-runs-beside-a-running-guest-job-under-a-limit-of-2",
+                limit: 2,
+                taken: 1,
+                listed: vec![
+                    (101, vec![(picker, "completed"), (guest, "in_progress")]),
+                    (999, picking(None)),
+                    (1000, picking(None)),
+                ],
+                pickers: vec![(999, "guest"), (1000, "hosted")],
+            },
+            Burst {
+                name: "two-runs-beside-a-running-guest-job-under-a-limit-of-1",
+                limit: 1,
+                taken: 1,
+                listed: vec![
+                    (101, vec![(picker, "completed"), (guest, "in_progress")]),
+                    (999, picking(None)),
+                    (1000, picking(None)),
+                ],
+                pickers: vec![(999, "hosted"), (1000, "hosted")],
+            },
+            Burst {
+                name: "two-runs-beside-a-later-run-queued-for-the-guest",
+                limit: 2,
+                taken: 1,
+                listed: vec![
+                    (999, picking(None)),
+                    (1000, picking(None)),
+                    (1001, vec![(picker, "completed"), (guest, "queued")]),
+                ],
+                pickers: vec![(999, "guest"), (1000, "hosted")],
+            },
+            Burst {
+                name: "two-runs-behind-an-earlier-run-still-picking",
+                limit: 2,
+                taken: 1,
+                listed: vec![
+                    (500, picking(None)),
+                    (999, picking(None)),
+                    (1000, picking(None)),
+                ],
+                pickers: vec![(999, "guest"), (1000, "hosted")],
+            },
+            Burst {
+                name: "three-runs-under-a-limit-of-2",
+                limit: 2,
+                taken: 0,
+                listed: vec![
+                    (998, picking(None)),
+                    (999, picking(None)),
+                    (1000, picking(None)),
+                ],
+                pickers: vec![(998, "guest"), (999, "guest"), (1000, "hosted")],
+            },
+        ]
     }
 
     fn deep_queue() -> Vec<(String, Vec<Page>)> {
@@ -5972,8 +6364,8 @@ if (( page == 1 )); then echo "fake gh: no canned answer for $path" >&2; exit 1;
         ]
     }
 
-    fn answer(case: &Case, script: &str, root: &Path) -> Result<(), String> {
-        let dir = root.join(&case.name);
+    fn stage(root: &Path, name: &str, script: &str, canned: &[(String, Vec<Page>)]) -> Snapshot {
+        let dir = root.join(name);
         let bin = dir.join("bin");
         let pages = dir.join("pages");
         for made in [&dir, &bin, &pages] {
@@ -5982,84 +6374,173 @@ if (( page == 1 )); then echo "fake gh: no canned answer for $path" >&2; exit 1;
         let gh = bin.join("gh");
         fs::write(&gh, FAKE_GH).expect("the fake gh");
         fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).expect("an executable gh");
-        for (path, listed) in &case.pages {
+        for (path, listed) in canned {
             for (index, page) in listed.iter().enumerate() {
                 let stem = format!("{}.{}", page_key(path), index + 1);
-                let canned = match page {
+                let written = match page {
                     Page::Body(body) => fs::write(pages.join(format!("{stem}.json")), body),
                     Page::Fails => fs::write(pages.join(format!("{stem}.fails")), ""),
                 };
-                canned.expect("a canned page");
+                written.expect("a canned page");
             }
         }
         let script_file = dir.join("pick.sh");
         fs::write(&script_file, script).expect("the picker's script");
-        let written = dir.join("github-output");
-        let log = dir.join("gh.log");
         let inherited = std::env::var_os("PATH").unwrap_or_default();
         let path =
             std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&inherited)))
                 .expect("a PATH with the fake gh first");
+        Snapshot {
+            dir,
+            pages,
+            script: script_file,
+            path,
+        }
+    }
 
+    fn pick(snapshot: &Snapshot, run: u64, busy: &str, limit: &str) -> Picked {
+        let written = snapshot.dir.join(format!("github-output-{run}"));
+        let log = snapshot.dir.join(format!("gh-{run}.log"));
         let output = Command::new("bash")
             .args(["--noprofile", "--norc", "-eo", "pipefail"])
-            .arg(&script_file)
+            .arg(&snapshot.script)
             .env_clear()
-            .env("PATH", path)
+            .env("PATH", &snapshot.path)
             .env("GITHUB_REPOSITORY", REPOSITORY)
-            .env("GITHUB_RUN_ID", THIS_RUN.to_string())
+            .env("GITHUB_RUN_ID", run.to_string())
             .env("GITHUB_OUTPUT", &written)
             .env("GH_TOKEN", "canned")
-            .env("WINGUEST_BUSY", case.busy)
-            .env("WINGUEST_QUEUE_LIMIT", case.limit)
-            .env("FAKE_GH_PAGES", &pages)
+            .env("WINGUEST_BUSY", busy)
+            .env("WINGUEST_QUEUE_LIMIT", limit)
+            .env("FAKE_GH_PAGES", &snapshot.pages)
             .env("FAKE_GH_LOG", &log)
             .output()
             .expect("bash runs the picker's script");
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let written = fs::read_to_string(&written).unwrap_or_default();
         let calls = fs::read_to_string(&log).unwrap_or_default();
-
         let mut asked: BTreeMap<String, usize> = BTreeMap::new();
         for call in calls.lines() {
             *asked.entry(call.to_owned()).or_default() += 1;
         }
-        let mut expected_asked: BTreeMap<String, usize> = BTreeMap::new();
-        for path in &case.asked {
-            *expected_asked.entry(path.clone()).or_default() += 1;
+        Picked {
+            exit: output.status,
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            written: fs::read_to_string(&written).unwrap_or_default(),
+            asked,
         }
-        let mut wrong = Vec::new();
-        if !output.status.success() {
-            wrong.push(format!(
-                "the script exited {:?}; it must succeed on every answer",
-                output.status
-            ));
+    }
+
+    impl Picked {
+        fn wrong(&self, home: &str, asked: &[String]) -> Vec<String> {
+            let mut expected: BTreeMap<String, usize> = BTreeMap::new();
+            for path in asked {
+                *expected.entry(path.clone()).or_default() += 1;
+            }
+            let mut wrong = Vec::new();
+            if !self.exit.success() {
+                wrong.push(format!(
+                    "the script exited {:?}; it must succeed on every answer",
+                    self.exit
+                ));
+            }
+            if self.written != format!("home={home}\n") {
+                wrong.push(format!(
+                    "it wrote {:?} to GITHUB_OUTPUT, not `home={home}`",
+                    self.written
+                ));
+            }
+            if self.asked != expected {
+                wrong.push(format!(
+                    "it asked the API {:#?}, not exactly {expected:#?}",
+                    self.asked
+                ));
+            }
+            wrong
         }
-        if written != format!("home={}\n", case.home) {
-            wrong.push(format!(
-                "it wrote {written:?} to GITHUB_OUTPUT, not `home={}`",
-                case.home
-            ));
-        }
+    }
+
+    fn answer(case: &Case, script: &str, root: &Path) -> Result<(), String> {
+        let snapshot = stage(root, &case.name, script, &case.pages);
+        let picked = pick(&snapshot, THIS_RUN, case.busy, case.limit);
+        let mut wrong = picked.wrong(case.home, &case.asked);
         let home_line = format!("home: {}", case.home);
         for line in case.says.iter().chain(std::iter::once(&home_line)) {
-            if !stdout.lines().any(|printed| printed == line) {
+            if !picked.stdout.lines().any(|printed| printed == line) {
                 wrong.push(format!("it did not print {line:?}"));
             }
         }
-        if asked != expected_asked {
+        if wrong.is_empty() {
+            return Ok(());
+        }
+        Err(format!(
+            "{}:\n  {}\n  stdout:\n{}\n  stderr:\n{}",
+            case.name,
+            wrong.join("\n  "),
+            picked.stdout,
+            picked.stderr
+        ))
+    }
+
+    fn together(burst: &Burst, script: &str, root: &Path) -> Result<(), String> {
+        let ids: Vec<u64> = burst.listed.iter().map(|(run, _)| *run).collect();
+        let mut pages = vec![
+            (runs("queued"), vec![run_page(&[])]),
+            (runs("in_progress"), vec![run_page(&ids)]),
+        ];
+        for (run, listed) in &burst.listed {
+            pages.push((jobs(*run), vec![listed_jobs(*run, listed)]));
+        }
+        let snapshot = stage(root, burst.name, script, &pages);
+        let limit = burst.limit.to_string();
+
+        let mut wrong = Vec::new();
+        let mut printed = Vec::new();
+        let mut on_guest = 0_usize;
+        for (run, home) in &burst.pickers {
+            if !ids.contains(run) {
+                wrong.push(format!(
+                    "run {run} picks and is not in the listing it reads"
+                ));
+            }
+            let mut asked = vec![runs("queued"), runs("in_progress")];
+            asked.extend(ids.iter().filter(|id| *id != run).map(|id| jobs(*id)));
+            let picked = pick(&snapshot, *run, "", &limit);
+            wrong.extend(
+                picked
+                    .wrong(home, &asked)
+                    .into_iter()
+                    .map(|fault| format!("run {run}: {fault}")),
+            );
+            if picked.written == "home=guest\n" {
+                on_guest += 1;
+            }
+            printed.push(format!(
+                "  run {run} stdout:\n{}\n  run {run} stderr:\n{}",
+                picked.stdout, picked.stderr
+            ));
+        }
+        let room = burst.limit.saturating_sub(burst.taken);
+        if on_guest + burst.taken > burst.limit {
             wrong.push(format!(
-                "it asked the API {asked:#?}, not exactly {expected_asked:#?}"
+                "together they sent {on_guest} runs to a guest that {} other runs hold or will \
+                 take first, past the limit of {}",
+                burst.taken, burst.limit
+            ));
+        }
+        if on_guest < room.min(burst.pickers.len()) {
+            wrong.push(format!(
+                "the guest had room for {room} of these {} runs and {on_guest} took it",
+                burst.pickers.len()
             ));
         }
         if wrong.is_empty() {
             return Ok(());
         }
         Err(format!(
-            "{}:\n  {}\n  stdout:\n{stdout}\n  stderr:\n{stderr}",
-            case.name,
-            wrong.join("\n  ")
+            "{}:\n  {}\n{}",
+            burst.name,
+            wrong.join("\n  "),
+            printed.join("\n")
         ))
     }
 
@@ -6084,9 +6565,17 @@ if (( page == 1 )); then echo "fake gh: no canned answer for $path" >&2; exit 1;
             .expect("the workflow's picker has a script to run");
 
         let tree = scratch_dir("pick-windows-home");
-        let failures: Vec<String> = cases()
+        let alone = cases();
+        let started_together = bursts();
+        let failures: Vec<String> = alone
             .iter()
-            .filter_map(|case| answer(case, script, tree.path()).err())
+            .map(|case| answer(case, script, tree.path()))
+            .chain(
+                started_together
+                    .iter()
+                    .map(|burst| together(burst, script, tree.path())),
+            )
+            .filter_map(Result::err)
             .collect();
         assert!(
             failures.is_empty(),

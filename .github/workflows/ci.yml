@@ -174,8 +174,8 @@ jobs:
   # The answer is `hosted` when the repository variable WINGUEST_BUSY is `1`
   # (the build machine's operator sets it while the machine is held), or when
   # the repository variable WINGUEST_QUEUE_LIMIT is a positive whole number
-  # and the `test (winguest)` jobs queued or in progress in other runs of
-  # this workflow number that limit or more. Routing on the queue is opt-in:
+  # and the guest's queue, as this run reads it in the other runs of this
+  # workflow, has reached that limit. Routing on the queue is opt-in:
   # with WINGUEST_QUEUE_LIMIT unset, empty or anything else the queue is not
   # counted, no API call is made, and the answer is `guest`, so with neither
   # variable set every run goes to the guest as it did before the twin
@@ -187,10 +187,27 @@ jobs:
   # be read: a failed question must not move a run off the machine every
   # lane has run on so far. The count takes the queued and the in-progress
   # runs in two queries, so a run that moves between them can be listed by
-  # both: run ids are collected from both and each distinct run's jobs are
-  # counted once, this run left out. Every page of every listing is read,
+  # both: run ids are collected from both and each distinct run is read
+  # once, this run left out. Every page of every listing is read,
   # and a failure on any page is the API not being readable. The script
   # prints what it found.
+  #
+  # The queue is two counts, because runs that start together read one
+  # listing and none can reserve the guest (PR375-QUEUE-PICKERS-RACE): a
+  # count of the jobs already waiting gives a burst of runs one answer, all
+  # `guest` or all `hosted`. The first count is the `test (winguest)` jobs
+  # that hold the guest, in a run of any id: in progress, or queued with
+  # their own run's picker finished or not listed. The second is the runs
+  # with a lower run id that have not yet shown where their Windows suite
+  # goes: the picker not finished, a guest job listed but not yet queued, or
+  # no guest job listed beside a finished picker or an empty job list. A
+  # queued guest job whose own picker has not finished is the second kind:
+  # whatever status the API gives a job still waiting on its `needs`, the
+  # job has not been released to the guest. A later run still choosing is
+  # not counted, because it counts this one. The run id orders every picker's
+  # reading the same way, so of a burst the earliest runs take the guest up
+  # to the limit and the rest go to the twin. No reading is atomic, and what
+  # that leaves open is in `docs/internals/effects/tests/ci_model.md`.
   #
   # Reading other runs' jobs needs `actions: read`, which the workflow's
   # token does not carry. This job alone widens it, by that one read scope;
@@ -218,9 +235,9 @@ jobs:
           WINGUEST_BUSY: ${{ vars.WINGUEST_BUSY }}
           WINGUEST_QUEUE_LIMIT: ${{ vars.WINGUEST_QUEUE_LIMIT }}
         run: |
-          winguest_jobs() {
+          winguest_queue() {
             local runs="repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs"
-            local status listed seen="" id jobs matched count=0
+            local status listed seen="" id jobs found held=0 ahead=0
             local -a run_ids
             for status in queued in_progress; do
               listed="$(gh api --paginate "$runs?status=$status&per_page=100")" || return 1
@@ -232,11 +249,19 @@ jobs:
               if [[ -z "$id" || "$id" == "$GITHUB_RUN_ID" ]]; then continue; fi
               [[ "$id" =~ ^[0-9]+$ ]] || return 1
               jobs="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$id/jobs?filter=latest&per_page=100")" || return 1
-              matched="$(jq -s '[.[].jobs[] | select(.name == "test (winguest)" and (.status == "queued" or .status == "in_progress"))] | length' <<<"$jobs")" || return 1
-              [[ "$matched" =~ ^[0-9]+$ ]] || return 1
-              count=$((count + matched))
+              found="$(jq -rs '
+                [.[].jobs[]] as $jobs
+                | [$jobs[] | select(.name == "test (winguest)") | .status] as $guest
+                | [$jobs[] | select(.name == "pick windows home") | .status] as $picker
+                | ($picker | any(. != "completed")) as $picking
+                | ([$guest[] | select(. == "in_progress" or (. == "queued" and ($picking | not)))] | length) as $held
+                | ($picking or ($guest | any(. != "completed")) or (($guest | length) == 0 and (($picker | length) > 0 or ($jobs | length) == 0))) as $unsettled
+                | "\($held) \(if $held == 0 and $unsettled then 1 else 0 end)"' <<<"$jobs")" || return 1
+              [[ "$found" =~ ^([0-9]+)\ ([01])$ ]] || return 1
+              held=$((held + BASH_REMATCH[1]))
+              if (( BASH_REMATCH[2] == 1 && 10#$id < 10#$GITHUB_RUN_ID )); then ahead=$((ahead + 1)); fi
             done
-            echo "$count"
+            echo "$held $ahead"
           }
           home=guest
           if [[ "${WINGUEST_BUSY:-}" == "1" ]]; then
@@ -247,9 +272,11 @@ jobs:
           else
             limit=$((10#$WINGUEST_QUEUE_LIMIT))
             echo "WINGUEST_BUSY is not 1. WINGUEST_QUEUE_LIMIT is $limit."
-            if count="$(winguest_jobs)"; then
-              echo "Other runs of this workflow have $count 'test (winguest)' jobs queued or in progress."
-              if (( count >= limit )); then home=hosted; fi
+            if queue="$(winguest_queue)"; then
+              read -r held ahead <<<"$queue"
+              echo "Other runs of this workflow have $held 'test (winguest)' jobs queued or in progress."
+              echo "Earlier runs of this workflow that have not yet shown where their Windows suite goes: $ahead."
+              if (( held + ahead >= limit )); then home=hosted; fi
             else
               echo "The GitHub API could not be read, so the queue for the guest is unknown. A failed question does not move a run off the guest."
             fi

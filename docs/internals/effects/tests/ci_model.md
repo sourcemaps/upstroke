@@ -590,6 +590,12 @@ needs nothing else; asked from the guest, it would wait in the queue it
 measures. Five minutes, because the question is a few API reads and every job
 that needs the answer -- the required aggregate among them -- waits on it.
 
+The `name:` is read as well as shown. The API lists a job by its name, and
+[`PICK_WINDOWS_HOME_SCRIPT`] reads every other run's job of this name to tell
+a run still choosing its home from one that has chosen. Renamed, with the
+script left as pinned, every run reads as having no picker and runs that
+start together answer alike again. Measured, `MUT-PICK-WINDOWS-HOME-RENAMED`.
+
 ## `pub(super) const PICK_WINDOWS_HOME_JOB_FIELDS: [&str; 6] = [`
 
 The picker's fields, an equality like every other job's. `if:` would skip
@@ -638,15 +644,15 @@ repository variables. They reach the script as environment, never spliced
 into its text, and each name reads its own variable. Measured,
 `MUT-PICK-WINDOWS-HOME-ENV-CROSSED`.
 
-## `pub(super) const PICK_WINDOWS_HOME_SCRIPT: &str = r#"winguest_jobs() {`
+## `pub(super) const PICK_WINDOWS_HOME_SCRIPT: &str = r#"winguest_queue() {`
 
 The picker's script, character for character. It answers `hosted` when
 `WINGUEST_BUSY` is exactly `1`; otherwise, when `WINGUEST_QUEUE_LIMIT` is a
-positive whole number, when the `test (winguest)` jobs queued or in progress
-in other runs of this workflow number that limit or more; otherwise `guest`.
+positive whole number, when the guest's queue, as the script reads it in the
+other runs of this workflow, has reached that limit; otherwise `guest`.
 It answers `guest` whenever the API cannot be read, because a failed question
 must not move a run off the machine every lane has run on, and it prints what
-it found: the variables, the limit, the count, the answer.
+it found: the variables, the limit, the two counts, the answer.
 
 Routing on the queue is opt-in. With `WINGUEST_QUEUE_LIMIT` unset, empty or
 anything but a positive whole number the script counts nothing, calls no API
@@ -659,25 +665,96 @@ timeouts, and the operator made the route opt-in on 2026-11-12.
 `the_windows_home_is_picked_by_the_one_job_the_contract_pins` holds the one
 count behind the limit check. Measured, `MUT-PICK-WINDOWS-HOME-COUNTS-BY-DEFAULT`.
 
-Two gaps, each found by a review of an earlier attempt, shape the count:
+Two gaps, each found by a review of an earlier attempt, shape the reading:
 
 - **A run listed twice.** Queued and in-progress runs are two queries, and a
   run that starts between them is in both. The run ids from both are
   collected and their repeats removed (`sort -u`) before any run's jobs are
-  read, so each distinct run is counted once; this run is left out.
+  read, so each distinct run is read once; this run is left out.
 - **The first page only.** Every listing is read with `gh api --paginate`,
   and its exit is checked: `gh` has already printed the pages before a failed
   one, so a failure on any page answers `guest` rather than counting part of
   the queue.
 
+**The queue is two counts**, since the second review of #375 (head
+`e4e931a9`, `PR375-QUEUE-PICKERS-RACE`). The script first counted the
+`test (winguest)` jobs queued or in progress in other runs, and nothing else.
+Runs that start together read one listing and none of them can reserve the
+guest: a guest job needs its run's picker, so while the pickers run no guest
+job is in the queue to be counted. Every picker of a burst read the same
+number and gave the same answer: all `guest`, which queues the burst on the
+one machine the limit was set to protect, or, where the API lists a job still
+waiting on its `needs` as `queued`, all `hosted`, which leaves the guest idle.
+The reviewer reproduced both with the script and symmetric canned pages at a
+limit of 1. A merge queue that builds several entries at once is such a
+burst.
+
+The script now reads each other run's jobs once and adds two counts:
+
+- **Held.** The run's `test (winguest)` jobs that are `in_progress`, or
+  `queued` while the run lists no unfinished picker. These are in the
+  guest's queue and count whatever the run's id. A run that lists no picker
+  at all has nothing to wait for, so its queued guest job is in the queue:
+  a run of the workflow as it was before this job, or a guest job listed
+  without the picker that released it.
+- **Ahead.** The run has a lower run id than this one, holds nothing, and has
+  not yet shown where its Windows suite goes. That is any of: its picker is
+  listed and not `completed`, whatever its guest job shows; a guest job is
+  listed in a status other than `queued`, `in_progress` and `completed`; or
+  no guest job is listed and either its picker is, finished, or none of its
+  jobs is yet. A `queued` guest job beside an unfinished picker is this kind
+  and not the first: whatever status the API gives a job still waiting on
+  its `needs`, it has not been released to the guest. A run with jobs listed
+  and neither a picker nor a guest job among them is not a contender.
+
+The answer is `hosted` when the two together reach the limit. A later run
+that has not yet shown its home is deliberately not counted: it counts this
+one. The run id is the same number to every reader, so of two runs that read
+each other as undecided exactly one, the later, counts the other; with `h`
+jobs held, the `i`-th run of a burst by id counts `h + i - 1`, and the
+earliest `limit - h` take the guest while the rest go to the twin. The id,
+not a start time: `GITHUB_RUN_ID` is in the job's environment and every
+listing carries the others', so the order costs no read and cannot tie. A
+re-run keeps its id and so its place.
+
+The rule does not depend on how the API lists a job that waits on its
+`needs`, which was not observed: absent, in a status before `queued`, or
+`queued`, the run's own picker is listed unfinished beside it, and that is
+what the script reads. It does depend on the picker's `name:`, which the
+oracle pins and `the_windows_home_is_picked_by_the_one_job_the_contract_pins`
+holds this text to.
+
+No reading here is a reservation, and three things stay open:
+
+- **A contender this run could not see.** Only runs listed `queued` or
+  `in_progress` are read. A run that had finished and is re-run a moment
+  later, or one still `pending` behind its concurrency group, is not listed;
+  if its id is lower and it reads before this run's guest job is listed as
+  queued, it does not count this run, and both take the guest. The window is
+  the seconds between this script's reads and that listing.
+- **An earlier run counted ahead that does not take the guest.** It found the
+  guest full a moment before, its picker failed or ran to its five-minute
+  timeout, or it was cancelled. A later run that deferred to it went to the
+  twin with the guest free: one slower suite, not a wrong result.
+- **A run that changes listing between the two queries the other way.** A run
+  listed by neither query is not read at all. Asking for `queued` before
+  `in_progress` covers a run that starts between the two; it does not cover a
+  run whose last running job ends between them while its guest job waits, if
+  GitHub then lists that run as `queued` again, which was not observed. This
+  is older than the two counts and unchanged by them.
+
 The pin is what makes the executed answers this text's:
 `the_windows_home_picker_answers_from_canned_api_pages` runs the workflow's
-script against canned pages. Measured there, and as pins,
+script against canned pages, one picker at a time and several against one
+snapshot. Measured there, and as pins,
 `MUT-PICK-WINDOWS-HOME-COUNTS-BY-DEFAULT`,
 `MUT-PICK-WINDOWS-HOME-COUNTS-A-RUN-TWICE`,
 `MUT-PICK-WINDOWS-HOME-FIRST-PAGE-ONLY`,
-`MUT-PICK-WINDOWS-HOME-LATER-PAGE-FAILURE-IGNORED` and
-`MUT-PICK-WINDOWS-HOME-UNREADABLE-ANSWERS-HOSTED`.
+`MUT-PICK-WINDOWS-HOME-LATER-PAGE-FAILURE-IGNORED`,
+`MUT-PICK-WINDOWS-HOME-UNREADABLE-ANSWERS-HOSTED`,
+`MUT-PICK-WINDOWS-HOME-IGNORES-EARLIER-RUNS-STILL-CHOOSING`,
+`MUT-PICK-WINDOWS-HOME-COUNTS-LATER-RUNS-STILL-CHOOSING` and
+`MUT-PICK-WINDOWS-HOME-HOLDS-A-JOB-ITS-PICKER-HAS-NOT-RELEASED`.
 
 ## `pub(super) const MSRV_JOB: &str = "msrv";`
 

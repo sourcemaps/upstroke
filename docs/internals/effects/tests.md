@@ -2250,13 +2250,16 @@ diff, and this is the leg saying it ran what it says it ran.
 ## `fn the_windows_home_is_picked_by_the_one_job_the_contract_pins() {`
 
 The job that decides where the Windows suite runs matches the contract, and
-two facts inside its pinned script agree with the model: it counts the
-guest's queue in exactly one place, after the check that
-`WINGUEST_QUEUE_LIMIT` is a positive whole number, so routing on the queue is
-opt-in on every platform this test runs on, not only where the script is
-executed; and it counts jobs named `TEST_WINDOWS_NAME`. The refusals are
-executed in [`WORKFLOW_ESCAPES`], every row named `MUT-PICK-WINDOWS-HOME-*`
-and `MUT-JOB-PERMISSIONS-ON-THE-GUEST-JOB`.
+three facts inside its pinned script agree with the model. It reads the
+guest's queue in exactly one place -- the function is defined once and called
+once -- after the check that `WINGUEST_QUEUE_LIMIT` is a positive whole
+number, so routing on the queue is opt-in on every platform this test runs
+on, not only where the script is executed. And it reads other runs' jobs by
+the two names the oracle holds their `name:` to: `TEST_WINDOWS_NAME`, the
+guest's job, and `PICK_WINDOWS_HOME_NAME`, another run's picker, whose state
+is what tells a run still choosing its home from one that has chosen. The
+refusals are executed in [`WORKFLOW_ESCAPES`], every row named
+`MUT-PICK-WINDOWS-HOME-*` and `MUT-JOB-PERMISSIONS-ON-THE-GUEST-JOB`.
 
 ## `mod pick_windows_home_answers {`
 
@@ -2297,13 +2300,27 @@ fixtures can say which runs were asked for their jobs and how often. A path
 with no pages fails, so an unexpected request reads as an unreadable API
 rather than as an empty one.
 
+## `struct Burst {`
+
+Runs that start together, as one snapshot several pickers read. `listed` is
+every run the in-progress listing names, with its jobs as `(name, status)`;
+`pickers` is the runs among them whose picker is run against that snapshot,
+each with the home it must answer; `limit` is `WINGUEST_QUEUE_LIMIT`; and
+`taken` is how many places on the guest the snapshot gives to runs that are
+not picking here -- a guest job held, or an earlier run still choosing. It is
+stated by the fixture, not derived from the script's output, so the two
+checks in [`together`] do not copy the rule they test.
+
 ## `fn cases() -> Vec<Case> {`
 
 Every answer the plan names, the three the earlier attempt's reviews found
 missing, and the opt-in the first review of #375 asked for. Each case states
 the answer, the lines the script must print, and exactly which paths it must
 ask for and how often. Every case that counts sets the limit itself, `2`
-unless it says otherwise.
+unless it says otherwise. None of these lists a picker in another run, so
+each reads the queue as the first script did, by its held jobs alone, and
+each requires the second count to be printed as `0`; the cases that list
+one are [`other_runs_still_choosing`].
 
 - `neither-variable-set-asks-nothing-and-answers-guest`: a queue deep enough
   for any limit, and no variable set; the answer is `guest`, the script says
@@ -2326,24 +2343,105 @@ limits of 3 and 1; and five values that are not positive whole numbers --
 `0`, `-1`, `2.5`, `two`, ` 3` -- each leaving routing on the queue off, so
 nothing is asked and the answer is `guest`, over the deep queue below.
 
+## `fn beside_one_run(`
+
+One other run in the in-progress listing, read by run 900 at a limit of 1:
+its jobs, the two counts the script must print for it, and the answer. At
+that limit a run counted at all sends this one to the twin, so each row
+states one reading.
+
+## `fn other_runs_still_choosing() -> Vec<Case> {`
+
+How one picker reads another run, state by state
+(`PR375-QUEUE-PICKERS-RACE`). Run 101 is earlier than this run and run 950
+later.
+
+- Counted as ahead when earlier, and not at all when later: a picker
+  `in_progress`, or `queued` for a runner; a finished picker with no guest
+  job listed yet; a guest job listed as `waiting`; no job listed at all; and
+  a picker running again beside a guest job already `completed`, which is
+  how a re-run could be listed while its last attempt's job still shows.
+- Counted as held whatever the id: a guest job `queued` or `in_progress`
+  beside a finished picker, and a guest job `queued` in a run that lists no
+  picker. That last is a run of the workflow from before the picker, or a
+  guest job listed without it, and it is in the guest's queue.
+- A `queued` guest job beside a picker still running is not held: it is
+  ahead for an earlier run and nothing for a later one. This is the reading
+  under which the API lists a job waiting on its `needs` as `queued`.
+- Not counted: an earlier run whose guest job is `completed` beside a
+  finished picker, sent to the twin or done; and an earlier run with jobs
+  listed and neither a picker nor a guest job among them.
+- Runs 99 and 1000 against this run's 900: ids are compared as numbers. As
+  strings `99` sorts after `900` and `1000` before it, and each row would
+  answer the other way.
+- An earlier run named by both status listings while it picks is counted
+  once; and a held job with an earlier run still picking reach a limit of 2
+  together, and are admitted by a limit of 3.
+
+## `fn bursts() -> Vec<Burst> {`
+
+Several pickers against one snapshot. Runs 999 and 1000 start together and
+each lists its own picker `in_progress`; run 998 joins them for the last
+burst. The ids straddle a digit, so a comparison as strings sends the wrong
+run to the guest.
+
+The first three are one burst under the three ways the API might list a
+guest job that waits on its picker: not listed, `waiting`, and `queued`. The
+second and third are the second review's two symmetric snapshots, in which
+the first script answered `guest` twice and `hosted` twice; here run 999
+takes the guest and run 1000 the twin in all three. The fourth is the
+reviewer's first snapshot with nothing listed but the waiting guest jobs: a
+guest job listed and not yet queued is enough to read a run as still
+choosing. The same is not asked of a `queued` guest job with no picker
+listed. That is a job in the guest's queue ([`other_runs_still_choosing`]),
+and a snapshot two running pickers read lists both pickers, since each is a
+job of its run and is listed while it runs.
+
+The rest vary the room: a limit of 2 admits both; a guest job in progress in
+a third run leaves room for one at a limit of 2 and for none at 1; a later
+run already queued for the guest counts for both; an earlier third run still
+picking takes a place before either; and of three runs at a limit of 2 the
+first two take the guest.
+
 ## `fn deep_queue() -> Vec<(String, Vec<Page>)> {`
 
 Three waiting guest jobs in two other runs. Every limit a literal reading of
 the invalid values could give is at most 3, so a script that counted this
 queue under one of them, or under a default, would answer `hosted`.
 
+## `fn stage(root: &Path, name: &str, script: &str, canned: &[(String, Vec<Page>)]) -> Snapshot {`
+
+One snapshot in a directory of its own: the fake `gh`, its canned pages, the
+script, and a PATH with the fake first. Every picker run against it reads
+the same files, which is what makes several pickers' snapshot one.
+
+## `fn pick(snapshot: &Snapshot, run: u64, busy: &str, limit: &str) -> Picked {`
+
+The script run once, as `run`: a cleared environment holding only what the
+job's step would hold, a `GITHUB_OUTPUT` and a request log of its own, and
+what it exited with, printed, wrote and asked for.
+
 ## `fn answer(case: &Case, script: &str, root: &Path) -> Result<(), String> {`
 
-One case in a directory of its own: the fake `gh`, its pages, a cleared
-environment holding only what the job's step would hold, the script run,
-and every way its answer, its output, its printed lines or its requests
-differ from the case. The script must exit 0 on every answer, since the
-aggregate requires the picker to succeed.
+One case: staged, picked as run 900, and every way its answer, its output,
+its printed lines or its requests differ from the case. The script must exit
+0 on every answer, since the aggregate requires the picker to succeed.
+
+## `fn together(burst: &Burst, script: &str, root: &Path) -> Result<(), String> {`
+
+One burst: the snapshot staged once and each picker run against it in turn,
+which against pages that do not change is the same as at once. Each picker
+must answer its stated home, and ask for both listings and every other
+listed run's jobs once, never its own. Then two checks that read only the
+answers and the fixture's `limit` and `taken`: together the pickers put no
+more runs on the guest than the limit leaves, and they leave no place on it
+empty that one of them could have taken. The first refuses the reviewer's
+"both answer `guest`", the second "both answer `hosted`".
 
 ## `fn the_windows_home_picker_answers_from_canned_api_pages() {`
 
-Every case, reported together, so a broken script names every answer it
-gets wrong. It asks for `jq` on PATH first, so that a machine without it is
+Every case and every burst, reported together, so a broken script names
+every answer it gets wrong. It asks for `jq` on PATH first, so that a machine without it is
 never read as the script's own `guest` fallback passing. Without it the test
 returns early, the repository's convention for a missing prerequisite: the
 Docker gate's skip, whose reason is a value the test body reads rather than
@@ -2367,6 +2465,21 @@ pin and the clean-workflow checks; and restoring a default limit of 2
 (`${WINGUEST_QUEUE_LIMIT:=2}` in the limit check, re-measured on
 2026-11-12) failed the case with neither variable set -- it asked the API
 and answered `hosted` -- and the picker's pin.
+
+Measured on 2026-11-13 for the two counts (`PR375-QUEUE-PICKERS-RACE`), each
+a mutation of the workflow's script, then restored. With the count of
+earlier runs removed, which is the first script's rule, eight of the ten
+bursts failed, the pickers together sending two runs to a guest with room
+for one and three at a limit of 2, beside every row of
+[`other_runs_still_choosing`] that counts an earlier run. With the run-id
+order removed, so that later runs still choosing are counted too, the same
+eight failed the other way, no picker taking a guest that had room, beside
+the rows that leave a later run uncounted. With a `queued` guest job held
+whatever its run's picker is doing, exactly three failed: the burst whose
+guest jobs are reported `queued`, both pickers answering `hosted`, and the
+two rows for that reading. The two bursts that fail under neither of the
+first two are the one with room for both runs and the one with room for
+none, where every rule agrees.
 
 ## `fn the_hosted_windows_twin_runs_the_guests_suite_on_the_guests_compiler() {`
 

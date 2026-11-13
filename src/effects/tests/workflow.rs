@@ -1410,7 +1410,10 @@ pub(super) fn ci_pick_windows_home_complaints(doc: &Yaml) -> Vec<String> {
     if scalar(job, "name") != Some(PICK_WINDOWS_HOME_NAME) {
         out.push(format!(
             "[pick-windows-home-name] `{PICK_WINDOWS_HOME_JOB}` is named {:?}, not \
-             `{PICK_WINDOWS_HOME_NAME}`",
+             `{PICK_WINDOWS_HOME_NAME}`. The API lists a job by its `name:`, and that is the \
+             name every other run's picker reads to tell a run still choosing its home from \
+             one that has chosen: under any other, runs that start together read one another \
+             as having no picker and answer alike again.",
             scalar(job, "name")
         ));
     }
@@ -1498,7 +1501,9 @@ pub(super) fn ci_pick_windows_home_complaints(doc: &Yaml) -> Vec<String> {
              workflow's script against canned API pages, and the pin is what makes those \
              answers this text's: the queue is counted only under a limit the operator set, \
              an unreadable API answers `guest`, a run both status queries list is counted \
-             once, and every page is read. Found:\n{script:?}\n\
+             once, every page is read, and runs that start together are told apart by run \
+             id, so a burst neither overfills the guest nor leaves it empty. \
+             Found:\n{script:?}\n\
              Pinned:\n{PICK_WINDOWS_HOME_SCRIPT:?}"
         ));
     }
@@ -3773,6 +3778,48 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         anchor: "    name: test (winguest)\n",
         replacement: "    name: test (guest)\n",
         refused_as: "pick-windows-home-counts",
+    },
+    WorkflowEscape {
+        name: "MUT-PICK-WINDOWS-HOME-IGNORES-EARLIER-RUNS-STILL-CHOOSING",
+        escape: "the earlier runs that have not yet shown where their suite goes are no longer \
+                 counted, which is the count this job first had. Runs that start together each \
+                 read a guest nobody holds yet, so at a limit of 1 a whole burst answers \
+                 `guest` and queues on the one machine: `PR375-QUEUE-PICKERS-RACE`",
+        job: Some("pick-windows-home"),
+        anchor: "              if (( BASH_REMATCH[2] == 1 && 10#$id < 10#$GITHUB_RUN_ID )); then ahead=$((ahead + 1)); fi\n",
+        replacement: "",
+        refused_as: "pick-windows-home-script",
+    },
+    WorkflowEscape {
+        name: "MUT-PICK-WINDOWS-HOME-COUNTS-LATER-RUNS-STILL-CHOOSING",
+        escape: "the run-id order dropped, so every run still choosing is counted, the later \
+                 ones too. Two runs that start together then each count the other, and at a \
+                 limit of 1 both answer `hosted` and leave the guest idle",
+        job: Some("pick-windows-home"),
+        anchor: "              if (( BASH_REMATCH[2] == 1 && 10#$id < 10#$GITHUB_RUN_ID )); then ahead=$((ahead + 1)); fi\n",
+        replacement: "              if (( BASH_REMATCH[2] == 1 )); then ahead=$((ahead + 1)); fi\n",
+        refused_as: "pick-windows-home-script",
+    },
+    WorkflowEscape {
+        name: "MUT-PICK-WINDOWS-HOME-HOLDS-A-JOB-ITS-PICKER-HAS-NOT-RELEASED",
+        escape: "a queued guest job counted as holding the guest whatever its own run's picker \
+                 is doing. Where the API lists a job still waiting on its `needs` as `queued`, \
+                 two runs that start together each read the other's job as a held guest, and \
+                 both answer `hosted`",
+        job: Some("pick-windows-home"),
+        anchor: "                | ([$guest[] | select(. == \"in_progress\" or (. == \"queued\" and ($picking | not)))] | length) as $held\n",
+        replacement: "                | ([$guest[] | select(. == \"in_progress\" or . == \"queued\")] | length) as $held\n",
+        refused_as: "pick-windows-home-script",
+    },
+    WorkflowEscape {
+        name: "MUT-PICK-WINDOWS-HOME-RENAMED",
+        escape: "the picker's own job renamed. Its script still matches its pin and reads other \
+                 runs' pickers by the old name, so every run reads as having none: a run still \
+                 choosing is not counted, and runs that start together answer alike again",
+        job: Some("pick-windows-home"),
+        anchor: "    name: pick windows home\n",
+        replacement: "    name: pick the windows home\n",
+        refused_as: "pick-windows-home-name",
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-WITNESS-DROPPED",

@@ -173,9 +173,9 @@ pub(super) const PICK_WINDOWS_HOME_STEP_ENV: [(&str, &str); 3] = [
     ("WINGUEST_QUEUE_LIMIT", "${{ vars.WINGUEST_QUEUE_LIMIT }}"),
 ];
 
-pub(super) const PICK_WINDOWS_HOME_SCRIPT: &str = r#"winguest_jobs() {
+pub(super) const PICK_WINDOWS_HOME_SCRIPT: &str = r#"winguest_queue() {
   local runs="repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs"
-  local status listed seen="" id jobs matched count=0
+  local status listed seen="" id jobs found held=0 ahead=0
   local -a run_ids
   for status in queued in_progress; do
     listed="$(gh api --paginate "$runs?status=$status&per_page=100")" || return 1
@@ -187,11 +187,19 @@ pub(super) const PICK_WINDOWS_HOME_SCRIPT: &str = r#"winguest_jobs() {
     if [[ -z "$id" || "$id" == "$GITHUB_RUN_ID" ]]; then continue; fi
     [[ "$id" =~ ^[0-9]+$ ]] || return 1
     jobs="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$id/jobs?filter=latest&per_page=100")" || return 1
-    matched="$(jq -s '[.[].jobs[] | select(.name == "test (winguest)" and (.status == "queued" or .status == "in_progress"))] | length' <<<"$jobs")" || return 1
-    [[ "$matched" =~ ^[0-9]+$ ]] || return 1
-    count=$((count + matched))
+    found="$(jq -rs '
+      [.[].jobs[]] as $jobs
+      | [$jobs[] | select(.name == "test (winguest)") | .status] as $guest
+      | [$jobs[] | select(.name == "pick windows home") | .status] as $picker
+      | ($picker | any(. != "completed")) as $picking
+      | ([$guest[] | select(. == "in_progress" or (. == "queued" and ($picking | not)))] | length) as $held
+      | ($picking or ($guest | any(. != "completed")) or (($guest | length) == 0 and (($picker | length) > 0 or ($jobs | length) == 0))) as $unsettled
+      | "\($held) \(if $held == 0 and $unsettled then 1 else 0 end)"' <<<"$jobs")" || return 1
+    [[ "$found" =~ ^([0-9]+)\ ([01])$ ]] || return 1
+    held=$((held + BASH_REMATCH[1]))
+    if (( BASH_REMATCH[2] == 1 && 10#$id < 10#$GITHUB_RUN_ID )); then ahead=$((ahead + 1)); fi
   done
-  echo "$count"
+  echo "$held $ahead"
 }
 home=guest
 if [[ "${WINGUEST_BUSY:-}" == "1" ]]; then
@@ -202,9 +210,11 @@ elif [[ ! "${WINGUEST_QUEUE_LIMIT:-}" =~ ^0*[1-9][0-9]{0,5}$ ]]; then
 else
   limit=$((10#$WINGUEST_QUEUE_LIMIT))
   echo "WINGUEST_BUSY is not 1. WINGUEST_QUEUE_LIMIT is $limit."
-  if count="$(winguest_jobs)"; then
-    echo "Other runs of this workflow have $count 'test (winguest)' jobs queued or in progress."
-    if (( count >= limit )); then home=hosted; fi
+  if queue="$(winguest_queue)"; then
+    read -r held ahead <<<"$queue"
+    echo "Other runs of this workflow have $held 'test (winguest)' jobs queued or in progress."
+    echo "Earlier runs of this workflow that have not yet shown where their Windows suite goes: $ahead."
+    if (( held + ahead >= limit )); then home=hosted; fi
   else
     echo "The GitHub API could not be read, so the queue for the guest is unknown. A failed question does not move a run off the guest."
   fi
