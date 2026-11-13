@@ -12188,36 +12188,14 @@ fn build_refusals() -> Vec<BuildRefusal> {
     ]
 }
 
-/// This crate's rlib, beside the test binary that is running.
-fn this_crates_rlib(deps: &Path) -> PathBuf {
-    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
-    for entry in fs::read_dir(deps).expect("the deps directory").flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if !name.starts_with("libupstroke-") || !name.ends_with(".rlib") {
-            continue;
-        }
-        let when = entry
-            .metadata()
-            .and_then(|meta| meta.modified())
-            .expect("mtime");
-        if best.as_ref().is_none_or(|(seen, _)| when > *seen) {
-            best = Some((when, entry.path()));
-        }
-    }
-    best.expect("this crate's rlib is beside its test binary").1
-}
-
+/// Compiles `source` against this crate's rlib, found under whichever build layout produced
+/// this test binary by [`crate::effects::tests::crate_under_test`].
 fn compile_against_this_crate(tag: &str, source: &str) -> (bool, Vec<String>, String) {
     let tree = scratch(&format!("compile-{tag}"));
     let dir = tree.path();
     let file = dir.join("fixture.rs");
     fs::write(&file, source).expect("fixture source");
-    let deps = std::env::current_exe()
-        .expect("test binary")
-        .parent()
-        .expect("deps directory")
-        .to_path_buf();
-    let rlib = this_crates_rlib(&deps);
+    let built = crate::effects::tests::crate_under_test();
     let out = std::process::Command::new("rustc")
         .args([
             "--edition",
@@ -12227,10 +12205,7 @@ fn compile_against_this_crate(tag: &str, source: &str) -> (bool, Vec<String>, St
             "--emit",
             "metadata",
         ])
-        .arg("--extern")
-        .arg(format!("upstroke={}", rlib.display()))
-        .arg("-L")
-        .arg(format!("dependency={}", deps.display()))
+        .args(built.rustc_args())
         .args(["--error-format", "json"])
         .arg("--out-dir")
         .arg(dir)
