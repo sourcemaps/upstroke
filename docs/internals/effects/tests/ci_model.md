@@ -461,11 +461,19 @@ every lane, so a queue entry waits for it behind whatever build holds it --
 unless the operator has set `WINGUEST_BUSY`, or has set a
 `WINGUEST_QUEUE_LIMIT` the guest's queue has reached, when the run goes to
 [`TEST_WINDOWS_HOSTED_JOB`] instead. Neither is set by default. A run
-the guest takes runs the composed commit on the machine every pull request
-runs on, so a test whose outcome depends on the machine is not seen first
-by the push to master; a run sent to the twin reopens that gap for itself,
-which is why `MAINTAINING.md` step 3 asks for a Windows-only failure to be
-re-run on the other home before it is believed.
+the guest takes runs its commit on the guest, and says no more than that:
+the picker answers for each run on its own, so taking the guest for one run
+says nothing about where the earlier runs of the same change ran. With
+neither variable set every run of a change is on the guest, and a test whose
+outcome depends on the machine is not seen first by the push to master. With
+either set, a pull request and its queue entry can both pass on the twin and
+the push to master be the change's first run on the guest, where such a test
+is then first seen; `WINGUEST_BUSY` cleared between the queue entry and the
+push is enough. That is why `MAINTAINING.md` step 3 asks for a Windows-only
+failure to be run on the other home before it is believed. The second review
+of #375 found this paragraph, and the workflow's comment above
+`test-windows`, still naming the guest as the machine "every pull request
+runs on".
 
 ## `pub(super) const TEST_WINDOWS_LABELS: [&str; 3] = ["self-hosted", "windows", "winguest"];`
 

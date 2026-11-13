@@ -308,11 +308,14 @@ jobs:
   # That is a scheduling repair: it names no cause for the hosted runs, and
   # it repairs no test. One guest serves every lane, so a queue entry's leg
   # waits for it behind any build that holds it, up to the queue limit where
-  # the operator has set one; and
-  # a run the guest takes runs the composed commit on the machine every pull
-  # request runs on, where the hosted queue left a test whose outcome depends
-  # on the machine to be seen first by the push to master. A run sent to the
-  # hosted twin reopens that gap for itself. `lint (windows)` and the Windows
+  # the operator has set one. With neither variable set every run of a
+  # change is on the guest, where the hosted queue left a test whose outcome
+  # depends on the machine to be seen first by the push to master. That is
+  # as far as it goes: the picker answers for each run on its own, so taking
+  # the guest for one run says nothing about where the earlier runs of the
+  # same change ran. A pull request and its queue entry sent to the hosted
+  # twin can both pass there, and the push to master is then the change's
+  # first run on the guest. `lint (windows)` and the Windows
   # MSRV leg stay on windows-latest, and `lint (windows)` also links every
   # binary and test harness with `cargo build --all-targets`, so GitHub's
   # runner still compiles, code-generates and links every `#[cfg(windows)]`

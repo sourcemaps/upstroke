@@ -2346,8 +2346,9 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         name: "MUT-TEST-WINDOWS-HOSTED-INSTALL-RESTORED",
         escape: "the hosted lane's install step put back as it stood, under \
                  `github.event_name == 'merge_group'`, with `runs-on:` left on the guest. Every \
-                 merge-queue entry then runs `rustup` over the image's compiler on the machine \
-                 every pull request runs on, and no pull-request build shows the step running. \
+                 merge-queue entry the guest takes then runs `rustup` over the image's compiler \
+                 on the machine pull requests share, and no pull-request build shows the step \
+                 running. \
                  Refused by the field set too, since no step here may carry an `if:`; the \
                  toolchain refusal is named because it reads the cause.",
         job: Some("test-windows"),
