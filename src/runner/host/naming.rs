@@ -330,6 +330,70 @@ mod tests {
         (dir, name)
     }
 
+    fn absent_child_of(directory: &std::path::Path) -> (PathBuf, std::io::Error) {
+        let mut passed_over = Vec::new();
+        for attempt in 0..10 {
+            let child = directory.join(match attempt {
+                0 => "upstroke-naming-walked-past".to_owned(),
+                n => format!("upstroke-naming-walked-past-{n}"),
+            });
+            match std::fs::symlink_metadata(&child) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return (child, error);
+                }
+                Ok(_) => passed_over.push(format!("{}: present", child.display())),
+                Err(error) => passed_over.push(format!("{}: {error}", child.display())),
+            }
+        }
+        panic!(
+            "none of the names the walked-past witness tries is absent from {}: {passed_over:?}",
+            directory.display()
+        )
+    }
+
+    #[cfg(all(unix, not(target_os = "linux")))]
+    fn descriptor_directory(file: &std::path::Path) -> PathBuf {
+        use std::io::{Seek as _, SeekFrom};
+        use std::os::fd::AsRawFd as _;
+        use std::os::unix::fs::MetadataExt as _;
+        let directory = PathBuf::from("/dev/fd");
+        let mut held = std::fs::File::open(file).unwrap_or_else(|error| {
+            panic!("{} does not open for reading: {error}", file.display())
+        });
+        held.seek(SeekFrom::Start(1))
+            .expect("a file open for reading takes a position");
+        let number = held.as_raw_fd();
+        let entry = directory.join(number.to_string());
+        let mut duplicate = std::fs::File::open(&entry).unwrap_or_else(|error| {
+            panic!(
+                "{} is not shown to be this process's descriptor directory: {} answered {error}",
+                directory.display(),
+                entry.display()
+            )
+        });
+        let (held_file, entry_file) = (
+            held.metadata().expect("an open file answers fstat"),
+            duplicate.metadata().expect("an open file answers fstat"),
+        );
+        assert_eq!(
+            (entry_file.dev(), entry_file.ino()),
+            (held_file.dev(), held_file.ino()),
+            "{} must open the file descriptor {number} holds, {}",
+            entry.display(),
+            file.display()
+        );
+        assert_eq!(
+            duplicate
+                .stream_position()
+                .expect("an open file answers its position"),
+            1,
+            "{} must be descriptor {number} duplicated, at its position, not {} opened anew",
+            entry.display(),
+            file.display()
+        );
+        directory
+    }
+
     #[test]
     fn a_candidate_this_platform_cannot_stat_is_never_reported_as_absence() {
         let path = undeterminable_directory().into_os_string();
@@ -406,13 +470,31 @@ mod tests {
 
     #[test]
     fn a_directory_that_is_merely_absent_is_walked_past_to_a_later_match() {
-        let (dir, name) = this_test_binary();
-        let absent = never_created_directory("walked-past");
-        let path = std::env::join_paths([absent.as_path(), dir.as_path()])
+        #[cfg(target_os = "linux")]
+        let (later, program) = (PathBuf::from("/proc/self"), "exe".to_owned());
+        #[cfg(all(unix, not(target_os = "linux")))]
+        let (later, program) = (PathBuf::from("/bin"), "sh".to_owned());
+        #[cfg(windows)]
+        let (later, program) = (
+            PathBuf::from(r"\\?\GLOBALROOT\SystemRoot\System32"),
+            "ntdll.dll".to_owned(),
+        );
+        #[cfg(target_os = "linux")]
+        let (absent, probe) = absent_child_of(&later);
+        #[cfg(all(unix, not(target_os = "linux")))]
+        let (absent, probe) = absent_child_of(&descriptor_directory(&later.join(&program)));
+        #[cfg(windows)]
+        let (absent, probe) = absent_child_of(&later.join(&program));
+        assert_eq!(
+            probe.kind(),
+            std::io::ErrorKind::NotFound,
+            "the fixture must be absent, not merely unreadable, to be a control"
+        );
+        let path = std::env::join_paths([absent.as_path(), later.as_path()])
             .expect("neither entry carries the PATH separator");
 
         let resolved = resolve_program(
-            &name,
+            &program,
             &composed(&[("PATH", path.as_os_str())]),
             KeyCase::Sensitive,
             ProgramNaming::current(),
@@ -420,7 +502,7 @@ mod tests {
         .expect("a not-found miss continues the search to the installed program");
         assert_eq!(
             resolved,
-            dir.join(&name),
+            later.join(&program),
             "the search must reach the program past an absent directory"
         );
     }
