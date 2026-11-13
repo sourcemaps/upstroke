@@ -6,6 +6,7 @@
 #![forbid(clippy::disallowed_macros)]
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -3383,7 +3384,7 @@ fn every_denied_path_this_host_can_resolve_does_resolve() {
 }
 
 fn unresolved_paths(dir: &Path, tag: &str) -> BTreeSet<String> {
-    let (deps, rlib) = crate_under_test();
+    let built = crate_under_test();
     let source = dir.join(format!("{tag}.rs"));
     fs::write(&source, "pub fn nothing() {}\n").expect("the probe source");
     let out = dir.join(format!("{tag}-out"));
@@ -3400,14 +3401,12 @@ fn unresolved_paths(dir: &Path, tag: &str) -> BTreeSet<String> {
         ])
         .arg("--out-dir")
         .arg(&out)
-        .arg("-L")
-        .arg(format!("dependency={}", deps.display()))
-        .arg("--extern")
-        .arg(format!("upstroke={}", rlib.display()));
-    for (name, path) in extern_dependencies(&deps) {
-        command
-            .arg("--extern")
-            .arg(format!("{name}={}", path.display()));
+        .args(built.rustc_args());
+    for (name, path) in extern_dependencies(&built.dependency_dirs) {
+        let mut pair = OsString::from(name);
+        pair.push("=");
+        pair.push(path);
+        command.arg("--extern").arg(pair);
     }
     let output = command
         .arg(&source)
@@ -3425,11 +3424,12 @@ fn unresolved_paths(dir: &Path, tag: &str) -> BTreeSet<String> {
         .collect()
 }
 
-fn extern_dependencies(deps: &Path) -> Vec<(String, PathBuf)> {
+fn extern_dependencies(dirs: &[PathBuf]) -> Vec<(String, PathBuf)> {
     let mut best: BTreeMap<String, (std::time::SystemTime, PathBuf)> = BTreeMap::new();
-    let Ok(entries) = fs::read_dir(deps) else {
-        return Vec::new();
-    };
+    let entries = dirs
+        .iter()
+        .filter_map(|dir| fs::read_dir(dir).ok())
+        .flatten();
     for entry in entries.flatten() {
         let path = entry.path();
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
@@ -3451,11 +3451,9 @@ fn extern_dependencies(deps: &Path) -> Vec<(String, PathBuf)> {
             .metadata()
             .and_then(|meta| meta.modified())
             .unwrap_or(std::time::UNIX_EPOCH);
-        let slot = best
-            .entry(crate_name.replace('-', "_"))
-            .or_insert((stamp, path.clone()));
-        if stamp >= slot.0 {
-            *slot = (stamp, path);
+        let key = crate_name.replace('-', "_");
+        if best.get(&key).is_none_or(|(seen, _)| stamp >= *seen) {
+            best.insert(key, (stamp, path));
         }
     }
     best.into_iter()
@@ -5155,7 +5153,7 @@ fn the_prologue_readers_read_an_inner_attribute_whatever_rustc_reads_between_its
 }
 
 fn lint_fixture(dir: &Path, tag: &str, body: &str) -> (bool, Vec<(String, String)>) {
-    let (deps, rlib) = crate_under_test();
+    let built = crate_under_test();
     let source = dir.join(format!("{tag}.rs"));
     fs::write(&source, body).expect("the fixture");
     let out = dir.join(format!("{tag}-out"));
@@ -5173,14 +5171,12 @@ fn lint_fixture(dir: &Path, tag: &str, body: &str) -> (bool, Vec<(String, String
         ])
         .arg("--out-dir")
         .arg(&out)
-        .arg("-L")
-        .arg(format!("dependency={}", deps.display()))
-        .arg("--extern")
-        .arg(format!("upstroke={}", rlib.display()));
-    for (name, path) in extern_dependencies(&deps) {
-        command
-            .arg("--extern")
-            .arg(format!("{name}={}", path.display()));
+        .args(built.rustc_args());
+    for (name, path) in extern_dependencies(&built.dependency_dirs) {
+        let mut pair = OsString::from(name);
+        pair.push("=");
+        pair.push(path);
+        command.arg("--extern").arg(pair);
     }
     let output = command
         .arg(&source)
@@ -6724,15 +6720,110 @@ fn every_platform_this_crate_configures_for_has_a_clippy_gate_the_aggregate_requ
     );
 }
 
-fn crate_under_test() -> (PathBuf, PathBuf) {
+pub(crate) struct CrateUnderTest {
+    pub(crate) rlib: PathBuf,
+    pub(crate) dependency_dirs: Vec<PathBuf>,
+}
+
+impl CrateUnderTest {
+    pub(crate) fn rustc_args(&self) -> Vec<OsString> {
+        let mut args = Vec::with_capacity(2 * self.dependency_dirs.len() + 2);
+        for dir in &self.dependency_dirs {
+            let mut search = OsString::from("dependency=");
+            search.push(dir);
+            args.push(OsString::from("-L"));
+            args.push(search);
+        }
+        let mut upstroke = OsString::from("upstroke=");
+        upstroke.push(&self.rlib);
+        args.push(OsString::from("--extern"));
+        args.push(upstroke);
+        args
+    }
+}
+
+pub(crate) fn crate_under_test() -> CrateUnderTest {
     let exe = std::env::current_exe().expect("the test executable");
-    let deps = exe
+    let beside = exe
         .parent()
         .expect("the test executable is in a directory")
         .to_path_buf();
-    let mut rlibs: Vec<(std::time::SystemTime, PathBuf)> = fs::read_dir(&deps)
-        .expect("the deps directory")
-        .filter_map(|entry| {
+    if let Some(rlib) = newest_upstroke_rlib(&[beside.as_path()]) {
+        return CrateUnderTest {
+            rlib,
+            dependency_dirs: vec![beside],
+        };
+    }
+    let Some(package) = per_unit_package(&beside) else {
+        panic!(
+            "no libupstroke-*.rlib beside the test executable in {}, and that directory is not a \
+             per-unit `<package>/<unit>/out` directory with `<unit>/fingerprint` beside it, so no \
+             other layout was searched. A `cargo test --lib` build compiles no rlib of the \
+             library; `cargo build` or `cargo test --all-targets` does",
+            beside.display()
+        );
+    };
+    let build = package
+        .parent()
+        .expect("a per-unit package directory is in the build directory");
+    let dependency_dirs = unit_out_dirs(build);
+    let own: Vec<&Path> = dependency_dirs
+        .iter()
+        .filter(|out| out.parent().and_then(Path::parent) == Some(package))
+        .map(PathBuf::as_path)
+        .collect();
+    let Some(rlib) = newest_upstroke_rlib(&own) else {
+        panic!(
+            "no libupstroke-*.rlib beside the test executable in {}, nor in any of the {} unit \
+             output directories {} of its package. A `cargo test --lib` build compiles no rlib of \
+             the library; `cargo build` or `cargo test --all-targets` does",
+            beside.display(),
+            own.len(),
+            package.join("*").join("out").display()
+        );
+    };
+    CrateUnderTest {
+        rlib,
+        dependency_dirs,
+    }
+}
+
+fn per_unit_package(beside: &Path) -> Option<&Path> {
+    if beside.file_name()? != "out" {
+        return None;
+    }
+    let unit = beside.parent()?;
+    if !unit.join("fingerprint").is_dir() {
+        return None;
+    }
+    unit.parent()
+}
+
+fn unit_out_dirs(build: &Path) -> Vec<PathBuf> {
+    let packages = fs::read_dir(build)
+        .unwrap_or_else(|error| panic!("the build directory {}: {error}", build.display()));
+    let mut dirs = Vec::new();
+    for package in packages.flatten() {
+        let Ok(units) = fs::read_dir(package.path()) else {
+            continue;
+        };
+        for unit in units.flatten() {
+            let out = unit.path().join("out");
+            if out.is_dir() {
+                dirs.push(out);
+            }
+        }
+    }
+    dirs.sort();
+    dirs
+}
+
+fn newest_upstroke_rlib(dirs: &[&Path]) -> Option<PathBuf> {
+    let mut rlibs: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
+    for dir in dirs {
+        let entries = fs::read_dir(dir)
+            .unwrap_or_else(|error| panic!("the artifact directory {}: {error}", dir.display()));
+        rlibs.extend(entries.filter_map(|entry| {
             let path = entry.ok()?.path();
             let name = path.file_name()?.to_str()?;
             (name.starts_with("libupstroke-") && name.ends_with(".rlib")).then(|| {
@@ -6742,19 +6833,10 @@ fn crate_under_test() -> (PathBuf, PathBuf) {
                     .unwrap_or(std::time::UNIX_EPOCH);
                 (stamp, path)
             })
-        })
-        .collect();
+        }));
+    }
     rlibs.sort();
-    let rlib = rlibs
-        .pop()
-        .unwrap_or_else(|| {
-            panic!(
-                "no libupstroke-*.rlib beside the test executable in {}",
-                deps.display()
-            )
-        })
-        .1;
-    (deps, rlib)
+    rlibs.pop().map(|(_, rlib)| rlib)
 }
 
 /// A scratch tree for one test, guarded by the token that authorises its
