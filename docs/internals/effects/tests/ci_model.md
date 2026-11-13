@@ -730,7 +730,13 @@ The rule does not depend on how the API lists a job that waits on its
 `queued`, the run's own picker is listed unfinished beside it, and that is
 what the script reads. It does depend on the picker's `name:`, which the
 oracle pins and `the_windows_home_is_picked_by_the_one_job_the_contract_pins`
-holds this text to.
+holds this text to. And it depends on a guest job skipped by its condition
+being listed as `completed`, which is how the API lists a skipped job: a run
+sent to the twin that listed no guest job at all would read as still
+choosing for as long as it ran, and every later run would defer to it. That
+too was not observed against the live API; the picker's log prints the
+second count, so a guest left idle behind a count that never falls shows
+there.
 
 No reading here is a reservation, and three things stay open:
 
@@ -750,6 +756,12 @@ No reading here is a reservation, and three things stay open:
   run whose last running job ends between them while its guest job waits, if
   GitHub then lists that run as `queued` again, which was not observed. This
   is older than the two counts and unchanged by them.
+
+The reading costs two requests and one more for every other run listed, so a
+burst of `n` runs spends about `n` squared against the job token's hourly
+request limit. Past that limit the API cannot be read and every picker
+answers `guest`, the fallback, at the very load the limit was set for. Also
+older than the two counts, which add no request.
 
 The pin is what makes the executed answers this text's:
 `the_windows_home_picker_answers_from_canned_api_pages` runs the workflow's
