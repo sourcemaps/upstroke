@@ -1364,6 +1364,78 @@ model = "claude-opus-4-8"
     }
 
     #[test]
+    fn a_fable_5_2_frontier_pin_loads_and_binds_the_frontier_tier_alone() {
+        let path = scratch(
+            "fable52pin.toml",
+            "[[pins]]\ntier = \"frontier\"\nagent = \"claude-code\"\nmodel = \"claude-fable-5-2\"\n",
+        );
+        let mut warnings = Vec::new();
+        let cfg = load(Some(&path), &hermetic(), Some(&missing()), &mut warnings)
+            .unwrap_or_else(|error| panic!("claude-code/claude-fable-5-2 must load: {error}"));
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(cfg.pins.len(), 1);
+        let pin = &cfg.pins[0];
+        assert_eq!(
+            (pin.tier, pin.agent.as_str(), pin.model.as_str(), pin.effort),
+            (Tier::Frontier, "claude-code", "claude-fable-5-2", None),
+            "the pin keeps the exact pair it was given"
+        );
+        assert_eq!(
+            catalog::lookup(&pin.agent, &pin.model).map(|entry| (entry.tier, entry.family)),
+            Some((Tier::Frontier, catalog::Family::Anthropic))
+        );
+
+        let task = crate::ir::Task {
+            id: crate::ir::TaskId::from("t"),
+            kind: TaskKind::Fix,
+            title: String::new(),
+            body: String::new(),
+            depends_on: Vec::new(),
+            acceptance: Vec::new(),
+            path_hints: Vec::new(),
+            suggested_tier: None,
+            min_tier: None,
+            artifacts_in: Vec::new(),
+            artifacts_out: Vec::new(),
+        };
+        let bound: Vec<(Tier, String, String, bool)> = crate::route::resolve(&task, &cfg)
+            .rungs
+            .into_iter()
+            .map(|rung| {
+                (
+                    rung.tier,
+                    rung.binding.agent,
+                    rung.binding.model,
+                    rung.binding.pinned,
+                )
+            })
+            .collect();
+        let unpinned = |tier| {
+            let example = catalog::example_binding(tier);
+            (
+                tier,
+                example.agent.to_owned(),
+                example.model.to_owned(),
+                false,
+            )
+        };
+        assert_eq!(
+            bound,
+            [
+                unpinned(Tier::Small),
+                unpinned(Tier::Mid),
+                (
+                    Tier::Frontier,
+                    "claude-code".to_owned(),
+                    "claude-fable-5-2".to_owned(),
+                    true
+                ),
+            ],
+            "the frontier rung binds to the pin and the tiers below keep their defaults"
+        );
+    }
+
+    #[test]
     fn every_catalogued_model_still_loads_as_an_explicit_pin() {
         for (index, entry) in catalog::CATALOG.iter().enumerate() {
             let path = scratch(
