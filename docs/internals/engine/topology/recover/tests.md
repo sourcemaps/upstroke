@@ -3396,6 +3396,15 @@ on resume rather than re-deciding it — so a test that asserts on the durable
 question needs the id to be the same bytes every run. `RealIds` gives a
 ULID, which is right in production and unpinnable here.
 
+## `struct CountingIds {`
+
+An [`IdSource`] that mints `q-counted-1`, `q-counted-2`, … — one fresh
+question id per call, still the same bytes every run — and is otherwise
+[`FixedIds`]. It is what a driven test selects with
+`DriveSeams::counting_question_ids` when the run must raise more than one
+question: under `FixedIds` the second park would reuse the first's id,
+and the fold refuses a reused question identity.
+
 ## `fn durable_kinds(fixture: &Fixture) -> Vec<String> {`
 
 The kinds in a fixture's durable log, in order.
@@ -3670,6 +3679,14 @@ nothing.
 Which read of the answer source delivers `answer`; the other refuses or
 reports nobody there, so a test says which ingestion path it exercises and
 the other cannot stand in for it.
+
+## `struct DriveSeams {` › `counting_question_ids: bool,`
+
+Questions are minted by [`CountingIds`], a fresh id each, rather than by
+[`FixedIds`]' one constant. A run whose repair was admitted on the fixed
+id cannot raise a second question under it: the fold refuses the second
+`Parked` settlement as a reused question identity. Off by default, so every
+test that asserts on the fixed id's bytes keeps them.
 
 ## `enum AnswerDelivery {`
 
@@ -4519,6 +4536,29 @@ exactly that binding, pinned, at rung 0. The `Blocking` arm is the one
 PR8's hard-block refusal fails: PR #249's refusals review restored that
 refusal (M11) and every test passed, because the polled path had ingested
 the answer before the block was reached.
+
+## `fn an_overridden_repair_that_exhausts_its_one_rung_parks_on_a_fresh_unblock_question() {`
+
+`G4-O2-OVERRIDE-SINGLE-RUNG-EXHAUSTION-UNWITNESSED`: the G4 measurement's
+`G4C3` shape, committed. Under a one-off binding `ladder_policy` gives the
+repair a ladder of exactly one rung with the kind's `attempts_per` (2 here);
+without the override its frozen ladder intersects the Mid floor empty and
+has no rung at all. So the repair, admitted `HumanBinding` and answered with
+an agent, runs with its gate failing (`gate_exit_code: Some(1)`): the first
+failure settles `Closed { Retry }`, and the second exhausts the one rung and
+settles `Parked` on a fresh `Unblock` question — the human rung — counted as
+"2 attempt(s) across 1 rung(s)", with the repair `AwaitingInput`, that
+question its one open question, and the lineage not failed.
+
+`counting_question_ids` is what lets the run raise that question: the
+admission question was minted as `q-park-fixed`, and under `FixedIds` the
+park would reuse it. The test stops at step 3, the first `Parked`, because
+the driven answer source re-delivers the same answer to any later question
+and would answer the fresh one too.
+
+The witness: with `ladder_policy` counting the ladder's own rungs under a
+binding override (G4 run 3's M34), the first gate failure fails the lineage
+and the run finishes at step 3, where the rest of this module still passes.
 
 ## `fn picking_the_last_of_two_offered_agents_binds_the_repair_to_it_rather_than_declining() {`
 
