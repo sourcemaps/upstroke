@@ -85,3 +85,53 @@ at `4bb04a65` on ubuntu, macOS and the build box's gates; and the re-run at the 
 jobs, `~/orch-pr11/logs/pr11_impl_g/findings/run-36769385877-jobs.tsv`. Nothing here changes the
 change that takes this up (above).
 
+## A third fingerprint, 2026-11-12
+
+The same test, `workspace_manager::tests::sampled_git_child_kills_every_residue_classified_and_recovered`,
+in the `test (winguest)` job (the self-hosted Windows guest), panicked at
+`src\workspace_manager\tests.rs:13274:9` with the message `every sample recovered by its classified
+action` — the sampler's assertion that each sample's classified recovery succeeded
+(`record.recovered`), reached after the assertions that every sample was accounted for and that none
+was unclassified had passed. It did so three times on 2026-11-12, each time the only failing test of
+its job, on pull requests none of which changes the sampler (#375 changes comments elsewhere in the
+same test file, below):
+
+- CI run 43221659775, job 131194404548, pull request #366 at `583e7e6b`: 3369 passed, 1 failed.
+- CI run 43234617706, job 131238552041, pull request #373 at `72ebee2f`: 3388 passed, 1 failed.
+- CI run 43289831147, job 131432857144, pull request #375 at `274431d0`, the run checking out
+  `35d068bc`, GitHub's merge of that head into `master`: the same panic.
+
+In the first, the log's per-site summary showed:
+
+    Object.CandidateStage       n=8 none=0 internal=1 after=7 unclassified=0
+    Object.CandidateWriteTree   n=8 none=7 internal=1 after=0 unclassified=0
+    Object.ProposalCherryPick   n=8 none=0 internal=3 after=5 unclassified=0
+    Worktree.Add                n=8 none=1 internal=0 after=7 unclassified=0
+
+The failing site was `Worktree.Add`, the site of this row's second fingerprint. The test loops over
+`SAMPLED_SITES` in the order `CandidateStage`, `CandidateWriteTree`, `ProposalCherryPick`,
+`Worktree.Add` (`src/workspace_manager/tests.rs`, near line 14125); each iteration runs
+`sample_site`, prints that site's `n=… none=…` line (near line 13201), and then asserts on that
+site, ending with `record.recovered` (near line 13274), so a failing `record.recovered` ends the
+loop. The log holds all four summary lines, so the first three sites passed their assertions and
+the fourth, `Worktree.Add`, failed. Lines 13100-14200 of `src/workspace_manager/tests.rs`, which
+hold the test (near line 13196), `sample_site` (near line 13933) and `SAMPLED_SITES` (near line
+14125), are byte-identical at `583e7e6b`, `72ebee2f`, `274431d0` and `9992447b`. The file as a
+whole differs at `274431d0`, where #375 changes only comments, in another test
+(`the_temporary_object_scan_resolves_case_aliases_as_the_filesystem_does` and the constants and
+helpers above it, from near line 15199 down). The third run checked out
+`35d068bc086afc6fd93de07b441991f4e4c845c0`, GitHub's merge of `274431d0` into `master` at
+`2b16cec2` (its two parents); in that merge `src/workspace_manager/tests.rs` is blob `7a732f18`,
+the same blob as at `274431d0`, so the sampler's lines 13100-14200 are byte-identical in the tree
+the run tested too. No rate is given: the number of guest jobs that ran this test that day
+was not counted for this record.
+
+This is a third fingerprint of this row, not a new row: a recovery that fails is consistent with
+this file's failure sequence — a real `git` still running after the kill ended its launcher — and
+that reading is not established by the logs. The guest was heavily loaded that day. Reasoned from
+the code and not run: on Windows the kill reaches only the direct child
+(`kill_process_group` is `child.kill()`, `src/workspace_manager/fixture.rs`, near lines 3596-3599)
+and `await_group_end` returns at once (near lines 3636-3639), so the children `git worktree add`
+itself starts are neither killed nor waited for, and routing the spawn through
+`fixture::sampled_git`, the change prescribed above, is not shown to cure this fingerprint.
+
