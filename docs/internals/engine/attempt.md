@@ -358,6 +358,19 @@ teach it never to ask, so this precedes the evidence rules.
 §19: the feedback is the transcript tail. Without it the retry
 starts blind on a task already known to run long.
 
+## `Some(if crate::agent::looks_rate_limited(&output.stderr) {`
+
+The reason is the outcome's detail, as it always was, but that may not be
+the text that showed the limit. Claude Code can put an unrelated JSON result
+(`request failed`) in the detail and the limit on stderr, and
+`claude::parse_output` classifies from either. When stderr signals the
+limit, it rides on the failure as `limit_message`, so the coordinator's
+`record_pool_exhausted` can read the reset from it
+(`PR380-RESET-SIGNAL-CHANNEL-DROPPED`). Stderr that does not signal the
+limit is not carried: some other text classified the attempt, and that text
+is already in the reason. Nothing else reads the field, so the kind, reason,
+feedback and every stored record are what they were.
+
 ## `pub(super) fn worker_question(detail: Option<&str>) -> Option<String> {`
 
 §12: a worker may flag a decision it should not make alone. Everything from

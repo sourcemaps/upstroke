@@ -222,6 +222,27 @@ pub fn observe(events: &[Event]) -> Observations {
 }
 
 fn retire_signals(exhausted: &mut BTreeMap<String, Option<String>>, record: &AttemptRecord) {
+    retire_served_pools(exhausted, record);
+    if let Some(failure) = &record.failure {
+        if failure.kind == FailureKind::RateLimited {
+            let pool = match failure.origin {
+                crate::ladder::FailureOrigin::Worker => record.pool.as_ref(),
+                crate::ladder::FailureOrigin::Reviewer => record
+                    .reviews
+                    .last()
+                    .and_then(|review| review.pool.as_ref()),
+            };
+            if let Some(pool) = pool {
+                exhausted.entry(pool.clone()).or_insert(None);
+            }
+        }
+    }
+}
+
+pub(crate) fn retire_served_pools(
+    exhausted: &mut BTreeMap<String, Option<String>>,
+    record: &AttemptRecord,
+) {
     let worker_served = record.failure.as_ref().is_none_or(|failure| {
         failure.kind != FailureKind::Interrupted
             && !(failure.kind == FailureKind::RateLimited
@@ -236,20 +257,6 @@ fn retire_signals(exhausted: &mut BTreeMap<String, Option<String>>, record: &Att
         if review.outcome != ReviewPassOutcome::Unavailable {
             if let Some(pool) = &review.pool {
                 exhausted.remove(pool);
-            }
-        }
-    }
-    if let Some(failure) = &record.failure {
-        if failure.kind == FailureKind::RateLimited {
-            let pool = match failure.origin {
-                crate::ladder::FailureOrigin::Worker => record.pool.as_ref(),
-                crate::ladder::FailureOrigin::Reviewer => record
-                    .reviews
-                    .last()
-                    .and_then(|review| review.pool.as_ref()),
-            };
-            if let Some(pool) = pool {
-                exhausted.insert(pool.clone(), None);
             }
         }
     }
@@ -906,6 +913,153 @@ mod tests {
         assert!(!obs.exhausted.contains_key("worker-pool"), "{obs:?}");
         assert!(!obs.exhausted.contains_key("recovered-reviewer"), "{obs:?}");
         assert!(obs.exhausted.contains_key("limited-reviewer"), "{obs:?}");
+    }
+
+    #[test]
+    fn a_later_rate_limit_keeps_the_reset_its_pool_exhausted_recorded() {
+        use crate::events::{AttemptRecord, Event, EventBody, PoolExhausted};
+        use crate::ladder::{FailureKind, FailureOrigin};
+
+        let record = |attempt: u32, failure: Option<FailureKind>| {
+            Event::now(EventBody::AttemptFinished {
+                task: "t1".to_owned(),
+                attempt,
+                rung: 0,
+                profile: "p".to_owned(),
+                parking: None,
+                transition: None,
+                prepared_commit: None,
+                data: Box::new(AttemptRecord {
+                    attempt,
+                    tier: "small".to_owned(),
+                    model: "m".to_owned(),
+                    pool: Some("claude-max".to_owned()),
+                    resumed: false,
+                    duration: Duration::ZERO,
+                    cost_usd: None,
+                    reviews: Vec::new(),
+                    session_id: None,
+                    usage: None,
+                    failure: failure.map(|kind| crate::events::FailureRecord {
+                        kind,
+                        origin: FailureOrigin::Worker,
+                        reason: "You've hit your 5-hour limit · resets 5:30am (UTC)".to_owned(),
+                        detail: None,
+                    }),
+                }),
+            })
+        };
+        let signal = Event::now(EventBody::PoolExhausted {
+            task: "t1".to_owned(),
+            data: PoolExhausted {
+                pool: "claude-max".to_owned(),
+                agent: "claude-code".to_owned(),
+                reset_at: Some("2026-08-09T05:30:00Z".to_owned()),
+                detail: "You've hit your 5-hour limit · resets 5:30am (UTC)".to_owned(),
+            },
+        });
+        let obs = observe(&[record(1, Some(FailureKind::RateLimited))]);
+        assert_eq!(obs.exhausted.get("claude-max"), Some(&None), "{obs:?}");
+
+        let mut events = vec![
+            record(1, Some(FailureKind::RateLimited)),
+            signal,
+            record(2, Some(FailureKind::RateLimited)),
+        ];
+
+        let obs = observe(&events);
+        assert_eq!(
+            obs.exhausted.get("claude-max"),
+            Some(&Some("2026-08-09T05:30:00Z".to_owned())),
+            "a deferral's rate limit must not erase the reset the outage recorded: {:?}",
+            obs.exhausted
+        );
+
+        events.push(record(3, None));
+        let obs = observe(&events);
+        assert!(obs.exhausted.is_empty(), "{:?}", obs.exhausted);
+    }
+
+    #[test]
+    fn a_later_pool_exhausted_with_a_different_reset_replaces_the_earlier_one() {
+        use crate::events::{AttemptRecord, Event, EventBody, PoolExhausted};
+        use crate::ladder::{FailureKind, FailureOrigin};
+
+        let signal = |reset_at: &str, detail: &str| {
+            Event::now(EventBody::PoolExhausted {
+                task: "t1".to_owned(),
+                data: PoolExhausted {
+                    pool: "claude-max".to_owned(),
+                    agent: "claude-code".to_owned(),
+                    reset_at: Some(reset_at.to_owned()),
+                    detail: detail.to_owned(),
+                },
+            })
+        };
+        let rate_limited = Event::now(EventBody::AttemptFinished {
+            task: "t1".to_owned(),
+            attempt: 2,
+            rung: 0,
+            profile: "p".to_owned(),
+            parking: None,
+            transition: None,
+            prepared_commit: None,
+            data: Box::new(AttemptRecord {
+                attempt: 2,
+                tier: "small".to_owned(),
+                model: "m".to_owned(),
+                pool: Some("claude-max".to_owned()),
+                resumed: false,
+                duration: Duration::ZERO,
+                cost_usd: None,
+                reviews: Vec::new(),
+                session_id: None,
+                usage: None,
+                failure: Some(crate::events::FailureRecord {
+                    kind: FailureKind::RateLimited,
+                    origin: FailureOrigin::Worker,
+                    reason: "You've hit your weekly limit · resets Nov 14, 5pm (UTC)".to_owned(),
+                    detail: None,
+                }),
+            }),
+        });
+        let five_hour = signal(
+            "2026-11-14T05:30:00Z",
+            "You've hit your 5-hour limit · resets 5:30am (UTC)",
+        );
+        let weekly = signal(
+            "2026-11-14T17:00:00Z",
+            "You've hit your weekly limit · resets Nov 14, 5pm (UTC)",
+        );
+
+        let obs = observe(&[five_hour.clone(), rate_limited.clone(), weekly.clone()]);
+        assert_eq!(
+            obs.exhausted.get("claude-max"),
+            Some(&Some("2026-11-14T17:00:00Z".to_owned())),
+            "the latest signal's reset wins over the one it replaced: {:?}",
+            obs.exhausted
+        );
+
+        let obs = observe(&[
+            five_hour.clone(),
+            rate_limited.clone(),
+            weekly,
+            rate_limited.clone(),
+        ]);
+        assert_eq!(
+            obs.exhausted.get("claude-max"),
+            Some(&Some("2026-11-14T17:00:00Z".to_owned())),
+            "a rate limit after the second signal keeps that signal's reset: {:?}",
+            obs.exhausted
+        );
+
+        let obs = observe(&[five_hour, rate_limited]);
+        assert_eq!(
+            obs.exhausted.get("claude-max"),
+            Some(&Some("2026-11-14T05:30:00Z".to_owned())),
+            "before the second signal, the first one's reset stands: {:?}",
+            obs.exhausted
+        );
     }
 
     #[test]

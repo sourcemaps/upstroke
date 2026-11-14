@@ -395,10 +395,15 @@ Re-derived from today's config and flags, deliberately (see
 `ResumeOptions::budget_usd`): raising the ceiling and resuming is the
 one-command recovery a budget stop is supposed to have.
 
-## `exhausted_pools: prior_signals.keys().cloned().collect(),`
+## `exhausted_pools: prior_signals.clone(),`
 
 Seeded from the log so a resume neither re-announces an outage the
-previous process recorded nor swallows a fresh one.
+previous process recorded nor swallows a fresh one. The resets come
+with the pools, from the same fold: the latest `pool_exhausted`'s reset
+for each, or none where only a rate-limited settlement marked it. A
+deferral after the resume that names the same reset stays silent, and
+one naming a different reset writes the signal it would have written
+had the previous process lived.
 
 ## `if let Some((task, message)) = adopted {`
 

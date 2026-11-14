@@ -121,6 +121,42 @@ cross-family one only warns.
 
 Whether this route reports spend. Copilot's does not.
 
+## `worker_rate_limit: &'static str,`
+
+The detail a worker's `Effect::RateLimited` reports, which the engine
+carries into the failure's reason (`pool rate-limited: …`) and so into the
+text `pool_exhausted` reads its reset from. Both constructors set it to
+[`FIVE_HOUR_LIMIT_REACHED`], the text every test saw before the field
+existed, so only a test that assigns it sees anything else. The reviewer's
+rate limit keeps its own literal.
+
+## `worker_rate_limits: Vec<&'static str>,`
+
+The same detail scripted per worker call, indexed like `effects`: a run
+whose refusals say different things — the five-hour limit, then the
+weekly one — sets this. Past the script's end the last entry repeats,
+and an empty script (both constructors' default) leaves every refusal
+saying `worker_rate_limit`.
+
+## `worker_limit_on_stderr: Option<&'static str>,`
+
+A limit Claude Code printed on stderr beside an unrelated JSON result. When
+set, a worker's `Effect::RateLimited` runs a real process that prints
+[`CLAUDE_REQUEST_FAILED`] on stdout and this text on stderr and exits 1, and
+`parse` hands that output to the real `ClaudeCodeAdapter::parse`, so
+`claude::parse_output` decides the outcome and its detail. Both constructors
+leave it `None`, and then the scripted detail above is used, as before.
+
+## `const FIVE_HOUR_LIMIT_REACHED: &str = "5-hour limit reached";`
+
+The older Claude Code wording, which names no reset.
+
+## `const CLAUDE_REQUEST_FAILED: &str =`
+
+A Claude Code JSON result that failed for a reason the result does not
+name: `request failed`, with `is_error` set. Nothing in it signals a rate
+limit, so any limit has to come from stderr.
+
 ## `const REVIEW_MARKER: &str = "UPSTROKE-FAKE-REVIEW";`
 
 Marker the fake's review command prints so `parse` can tell a review
@@ -5216,3 +5252,93 @@ present, creates the run, records both agents as probed, and completes it.
 
 This prose sat above the test in the source until the execution root moved into the create protocol
 at P3c; the refusal used to be reported after P3b, and the root was made before creation began.
+
+## `fn a_rate_limit_marks_its_pool_exhausted_and_a_recovery_retires_the_signal() {` › `assert_eq!(signals[0].reset_at, None, "{signals:?}");`
+
+The worker's rate-limit text here is the default "5-hour limit reached", which names no reset, so
+the recorded `pool_exhausted` carries none. Reading a reset out of text that has none would put an
+invented time into the log as the subscription's own.
+
+## `fn a_rate_limit_that_names_its_reset_records_it_on_pool_exhausted() {`
+
+The same run as the test above, with one difference: the worker's rate-limit text is the message
+Claude Code printed on 2026-11-11, `You've hit your 5-hour limit · resets 5:30am (UTC)`, set through
+`worker_rate_limit`. The one `pool_exhausted` event carries that text in its detail and a `reset_at`
+in the fixed-width RFC 3339 form ending `T05:30:00Z`. The test reads the clock before and after the
+run, and the reset falls in that window extended by twelve hours either side: the 05:30 UTC nearest
+the moment the signal was recorded, which may be the one just past, by string comparison, which the
+fixed width makes legitimate. The
+estimate folded from the log up to the signal reports the pool exhausted with that same reset time:
+`attempt_finished` comes first and marks the pool with no reset, and `pool_exhausted` after it
+supplies the time. The run still completes, as the test above does, so the reset changes what is
+recorded and nothing about how the attempt is deferred or retried.
+
+## `fn a_limit_on_stderr_beside_an_unrelated_result_records_its_reset_on_pool_exhausted() {`
+
+`PR380-RESET-SIGNAL-CHANNEL-DROPPED`, end to end. With `worker_limit_on_stderr` set, the fake's
+rate-limited worker runs as Claude Code did: it prints `CLAUDE_REQUEST_FAILED`, a JSON result
+reading `request failed`, on stdout, prints `You've hit your 5-hour limit · resets 5:30am (UTC)` on
+stderr, and exits 1. The fake hands that output to the real `ClaudeCodeAdapter::parse` rather than
+building the outcome itself, so the classification is `claude::parse_output`'s own. The
+rate-limited `attempt_finished` still reads `pool rate-limited: request failed`, and the one
+`pool_exhausted` carries that same reason as its detail, as before. Its `reset_at` ends
+`T05:30:00Z`. Before the failure carried the stderr, the reset was read from the reason alone and
+was `None`.
+
+## `fn a_rate_limited_failure_carries_a_limit_from_stderr_without_changing_its_reason() {`
+
+The same defect one level down, at `evaluate_outcome`. The output `ClaudeCodeAdapter::parse` reads
+as `RateLimited` from its stderr becomes a failure whose kind, reason (`pool rate-limited: request
+failed`) and feedback are what they were, and whose `limit_message` is that stderr. Then a
+rate-limited outcome whose stderr signals nothing: the reason is the outcome's detail, as before,
+and no `limit_message` is carried, because the stderr did not classify the attempt.
+
+## `fn the_deferral_rate_limit_text_names_one_reset_at_any_time_of_day() {`
+
+The test below reads its text against the real clock once per refusal, so the text must name one
+reset whenever it is read. This reads `DEFERRAL_RATE_LIMIT` at every second of 2026-11-11 and
+requires `2026-11-14T17:00:00Z` each time. The time-only `resets 5:30am (UTC)` it replaced fails
+here at 17:30:00, where the next morning's 05:30 takes over.
+
+## `fn a_deferral_rate_limit_keeps_the_reset_pool_exhausted_recorded() {`
+
+The same run as `a_rate_limit_that_names_its_reset_records_it_on_pool_exhausted`, rate limited
+twice before it succeeds: `[RateLimited, RateLimited, EditFile]`, with a text that names the reset. The engine writes one `pool_exhausted` for the
+outage, after the first rate-limited `attempt_finished` and before the second; the second is the
+first deferral, and it writes no signal of its own. The text is the dated `You've hit your weekly
+limit · resets Nov 14, 5pm (UTC)`, not the time-only `resets 5:30am (UTC)`, because the engine reads
+the reset again on each refusal against the real clock. A time-only reset resolves to the nearest
+05:30, and the later one wins a tie, so a run whose first refusal was read at 17:29:59 and whose
+retry was read at 17:30:00 named two different resets and rightly wrote a second signal. The
+dated text gives both reads the same Nov 14 17:00 at any time of day. The year it picks changes
+only once a year, halfway between two Nov 14s in mid-May, and the two reads would have to fall
+either side of that one instant. The estimate folded from the log through that second
+`attempt_finished` still reports the pool exhausted with the reset the signal recorded.
+Before `retire_signals` kept a known reset, that settlement marked the pool again with none, so
+`upstroke validate` said the signal carried no reset time and a resume's `capacity_snapshot` wrote
+`reset_at: null` beside an open signal that named one. The estimate over the whole log no longer
+reads the pool as exhausted: the attempt that succeeds still retires it.
+
+## `fn a_different_later_reset_writes_one_more_pool_exhausted() {`
+
+The same run as the test above, but the two refusals say different things, through
+`worker_rate_limits`: first `You've hit your 5-hour limit · resets 5:30am (UTC)`, then `You've hit
+your weekly limit · resets Nov 14, 5pm (UTC)` — a pool refused for its weekly cap on the deferral
+after its five-hour cap cleared. Two `pool_exhausted` events, one after each rate-limited
+`attempt_finished`: the first carries the `T05:30:00Z` reset, the second the `-11-14T17:00:00Z` one
+and the weekly text in its detail. The estimate folded through the second signal reports the pool
+exhausted until the weekly reset. Before the engine remembered each pool's recorded reset, the
+second refusal wrote nothing, and the estimate kept a 05:30 that had already passed. The test above,
+where the same reset is named twice, and `one_outage_records_one_signal_however_many_deferrals_it_causes`,
+where no reset is named, still write one signal each.
+
+## `fn another_agents_rate_limit_naming_a_reset_records_none_on_pool_exhausted() {`
+
+The reset is read only from Claude Code's text. The small tier is pinned to `copilot`, the pools
+file names only `copilot-window`, and the Copilot fake refuses once with `premium request allowance
+exhausted; resets Dec 1, 12am (UTC)` before it edits; Claude Code reviews. The test first checks
+that `agent::reset_at_from_limit_message` does parse that text on its own, so the only thing that
+can keep the reset out is the engine's check of the agent. The one `pool_exhausted` names
+`copilot-window` and `copilot` and carries the text in its detail, and its `reset_at` is `None`.
+Before the engine compared the agent with `claude::ADAPTER_ID`, it recorded the nearest 1 December
+at 00:00 UTC there: a reset read from another vendor's words on the strength of Claude Code's.

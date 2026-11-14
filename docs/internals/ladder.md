@@ -139,8 +139,9 @@ How many rungs the resolved chain has.
 ## `pub struct LadderPolicy` › `pub max_defers: u32,`
 
 How many deferrals a task may take before the pool counts as down and
-the human is asked instead. Without the capacity engine there is no
-reset time to wait for, so this bound is what stops an exhausted pool
+the human is asked instead. The sequential engine now records a reset
+time on `pool_exhausted` where Claude Code's message names one, but
+nothing waits on it yet, so this bound is what stops an exhausted pool
 spinning forever.
 
 ## `pub struct LadderState {`
@@ -477,3 +478,19 @@ than a constructor argument, so the one production site that classifies a
 review result keeps its single `AttemptFailure::new` call and the census over
 those calls (`runner::contract::tests::an_observation_about_an_attempt_is_classified_in_one_production_place`)
 still counts one rule per observation.
+
+## `pub struct AttemptFailure {` › `pub limit_message: Option<String>,`
+
+The text that signalled a rate limit, when it is not the text in `reason`.
+`engine::attempt::evaluate_outcome` sets it to a worker's stderr when that
+stderr signals the limit, and the coordinator's `record_pool_exhausted`
+reads a Claude Code reset from it when the reason names none
+(`PR380-RESET-SIGNAL-CHANNEL-DROPPED`). Like `never_started` it is in memory
+only: `FailureRecord` does not carry it, so no event changes shape, and the
+ladder does not read it.
+
+## `impl AttemptFailure {` › `pub fn with_limit_message(mut self, text: String) -> Self {`
+
+Attach the limit text. A builder for the same reason as
+`from_a_process_that_never_started`: the rate-limit arm keeps its one
+`AttemptFailure::new` call.

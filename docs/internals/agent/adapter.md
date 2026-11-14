@@ -311,9 +311,12 @@ Twelve tasks parked without a commit.
 So one rule sits beside the phrases, in `hits_a_quota_window`: the text, in
 lower case, contains "hit your " followed immediately by a quota window and
 then " limit" as a whole word (the boundary is set out in the next section).
-There are exactly three windows: a number of hours, written as
-one or more ASCII digits and then "-hour" ("5-hour"); "session"; and
-"weekly". Every occurrence of "hit your " is checked, not only the first, so
+There are three windows that signal on their own: a number of hours, written
+as one or more ASCII digits and then "-hour" ("5-hour"); "session"; and
+"weekly". A fourth form signals only with a reset: any other name of one
+word of ASCII letters, such as a model's ("Fable", "Opus"), when the next
+word after "limit" is "resets" ("hit your Fable limit · resets Nov 14, 9am
+(UTC)"). Every occurrence of "hit your " is checked, not only the first, so
 an ordinary "the patch hit your branch" earlier in the text does not hide a
 limit message after it. "hit your usage limit" needs no window: "usage limit"
 is one of the twelve phrases.
@@ -321,23 +324,27 @@ is one of the twelve phrases.
 The rule is narrow on purpose. A rate-limit signal is ground truth about
 capacity (§13): the ladder does not count the attempt, defers it, and after
 three deferrals asks a human. So "You've hit your context-window limit",
-"hit your rate of change limit" and a bare "hit your limit" do not signal.
-They are task failures, to be retried or escalated like any other.
+"hit your rate of change limit", "hit your token limit" with no reset after
+it and a bare "hit your limit" do not signal. They are task failures, to be
+retried or escalated like any other.
 
 The rule splits the already lower-cased text on "hit your " and reads each
-piece with `trim_start_matches`, `strip_prefix` and `starts_with`. Those
-return slices of the same string, so it allocates nothing more, and nothing
-in it indexes or unwraps, so it cannot panic.
+piece with `trim_start_matches`, `strip_prefix`, `strip_suffix` and
+`starts_with`. Those return slices of the same string or `None`, so it
+allocates nothing more, and nothing in it indexes or unwraps, so it cannot
+panic.
 
-Two forms have been observed. The five-hour form is the one from run
+Three forms have been observed. The five-hour form is the one from run
 `01M740JX5N8HB94RNC7W2MM777` above (2026-11-11, exit code 1). The session
 form, `You've hit your session limit`, is in `reviews/FINDINGS.md`, in the
 record of a worker that returned rc=1 with that message while its wrapper
-reported success. The weekly form is covered on the expectation that it is
-worded alike. It has not been observed. A limit message in any other wording
-is not recognised and is read as `AgentError`. That spends an attempt, which
-is the safer mistake: a false rate-limit signal would tell the capacity
-engine an untouched pool is exhausted.
+reported success. The model form, `You've hit your Fable limit · resets Nov
+14, 9am (UTC)`, was printed on the build machine on 2026-11-12, when one
+model's weekly allowance was spent. The weekly form is covered on the
+expectation that it is worded alike. It has not been observed. A limit
+message in any other wording is not recognised and is read as `AgentError`.
+That spends an attempt, which is the safer mistake: a false rate-limit
+signal would tell the capacity engine an untouched pool is exhausted.
 
 Only ever consulted for a FAILED attempt: a successful task *about* rate
 limiting ("added backoff for 429 responses") must never be read as the pool
@@ -345,12 +352,57 @@ being exhausted, or verified work gets rolled back.
 
 ## `fn hits_a_quota_window(lower: &str) -> bool {`
 
-The quota-window rule described in the section above. After the window, the
-text must continue with " limit", and "limit" must then end: at the end of
-the text, or at a character that is not an ASCII letter, ASCII digit or
-underscore. A full stop, a space, a semicolon or the " · resets" of the
-observed five-hour message all end it; "limiter", "limitation" and "limited"
-do not.
+The quota-window rule described in the section above: some piece after
+"hit your " starts with a quota window and its limit, as
+`after_a_quota_window` reads it.
+
+## `fn after_a_quota_window(after: &str) -> Option<&str> {`
+
+What follows " limit", when `after`, the lower-cased text after a
+"hit your ", starts with a quota window and its limit; otherwise `None`. It
+is read one of two ways:
+
+- If it starts with ASCII digits, the window is those digits and "-hour".
+- Otherwise the window is the run of ASCII letters it starts with, which
+  must not be empty. "session" and "weekly" signal on their own. Any other
+  word, a model name such as "fable" or "opus", signals only if
+  `when_it_resets` finds a reset in what follows the limit.
+
+Either way the window must be followed by " limit" as a whole word, which
+`after_a_whole_limit` checks. The window is one word: "context window" and
+"context-window" stop at the space or the hyphen, which is not " limit", and
+"fable4" stops at the digit. So none of them signals, with a reset or
+without.
+
+It is one function, rather than the body of `hits_a_quota_window`, so that
+`the_limits_reset` recognises exactly the limits that signal, and nothing
+else, when it looks for the reset that follows one. What it returns is a
+suffix of `after`, so a caller that knows where `after` ends knows where the
+limit ends.
+
+The model form was added after the pull request that reads resets from limit
+messages. Its parser test read the observed Fable message with
+`reset_at_from_limit_message` directly, and nothing checked that the message
+was a rate limit at all. It was not: none of the twelve phrases matches it,
+and this rule then accepted only the three windows. So an attempt that
+printed it was read as `AgentError`, the coordinator never recorded
+`pool_exhausted`, and the ladder kept spending attempts against an exhausted
+pool.
+
+A name signals only with a reset because, unlike "session" and "weekly", it
+is not a known window. "token" and "context" are names too, and "You've hit
+your token limit" with nothing after it is about the prompt, not the pool.
+The reset is what makes it a quota: the message says when the allowance comes
+back. "session", "weekly" and the hours window are unchanged, and still
+signal with or without a reset.
+
+## `fn after_a_whole_limit(window_end: &str) -> Option<&str> {`
+
+What follows " limit" right after a window, if "limit" is a whole word
+there. "limit" must end at the end of the text, or at a character that is
+not an ASCII letter, ASCII digit or underscore. A full stop, a space, a
+semicolon or the " · resets" of the observed five-hour message all end it;
+"limiter", "limitation" and "limited" do not, and give `None`.
 
 The boundary was added after a round-two review of the first form, which
 checked only that the rest began with " limit". That accepted "limiter",
@@ -363,6 +415,206 @@ The check strips " limit" with `strip_prefix` and asks `starts_with` whether
 the next character is a word character. Both work on slices of the same
 string, so the rule still allocates nothing more and cannot panic. The
 character test is ASCII only, like the lower-casing before it.
+
+## `fn when_it_resets(after_limit: &str) -> Option<&str> {`
+
+What follows "resets " when the next word after the limit is "resets",
+followed by a space, as in " · resets Nov 14, 9am (UTC)"; otherwise `None`.
+Only characters that are neither letters, digits (in any script) nor
+underscores may come between: spaces, `·`, `∙`, punctuation. So "hit your
+token limit; the cache resets 9am (UTC)" does not count: the next word is
+"the".
+
+`after_a_quota_window` asks only whether there is one. The test there is for
+the word only, not for a reset that parses. A reset in another zone, which
+`reset_at_from_limit_message` refuses, still says the allowance comes back,
+so the message is still a rate limit; its `reset_at` is just unknown.
+"resets " with a space is the same word `reset_at_from_limit_message` looks
+for, and `the_limits_reset` uses what this returns as the reset to read. It
+was `says_when_it_resets`, which returned only whether; it returns the rest
+so that both read one rule for which reset belongs to the limit.
+
+The gap test uses Unicode letters and digits, not ASCII ones, so that a word
+in another script between "limit" and "resets" is a word and stops the
+match, rather than being skipped as punctuation.
+
+## `pub fn reset_at_from_limit_message(text: &str, now_unix: u64) -> Option<String> {`
+
+When a usage limit says it lifts, read from the limit message itself, as an
+RFC 3339 UTC timestamp (`YYYY-MM-DDTHH:MM:SSZ`). The coordinator records it as
+`reset_at` on the `pool_exhausted` event, and calls this only when the agent
+that failed is Claude Code: the shape below is Claude Code's, and another
+vendor's text that happens to fit it is not a reset this knows how to read.
+
+Two messages carry one. Both were printed by Claude Code on the build machine:
+
+- `You've hit your 5-hour limit · resets 5:30am (UTC)` (2026-11-11);
+- `You've hit your Fable limit · resets Nov 14, 9am (UTC)` (2026-11-12).
+
+So a reset is the word `resets` and a space, then an optional date, then a
+time of day, then a space and `(UTC)`. The date is a three-letter month
+(`Jan` to `Dec`), a space, a day of the month in one or two digits, a comma
+and a space. The time of day is an hour from 1 to 12 in one or two digits,
+optionally `:` and exactly two minute digits, then `am` or `pm`. `12am` is
+midnight and `12pm` noon. The spelling is matched exactly, case included, as
+it was printed.
+
+Neither message gives a year, and the time-only one gives no date. Both are
+completed against `now_unix`, the moment the message is read, by one rule:
+the reset is the occurrence nearest to `now_unix`. There are three
+candidates, in order:
+
+- for a time only, that time yesterday, today and tomorrow;
+- for a month and day, that date at that time in the year before
+  `now_unix`'s, in its year and in the year after. A candidate that is not a
+  real date, such as 29 February in a common year, is not a candidate, and
+  if none is, the answer is `None`.
+
+The candidate with the smallest absolute distance from `now_unix` is the
+reset, and on a tie the later one. So a message read well before its reset
+gets the coming one: `5:30am` read the evening before is the next morning's,
+and `Jan 2` read on 30 December is the coming 2 January. A message read just
+after its reset keeps its own reset, a moment in the past, rather than one a
+day or a year away: `5:30am` read at 05:30:01 is that morning's, and
+`Dec 31, 11pm` read at 00:30 on 1 January is the day before's, in the year
+before. Either way the reset is never more than half a day from `now_unix`
+for a time only, nor more than half a year for a date every year has.
+`Feb 29` is the exception, since at most one of the three years has it: read
+in 2027 it is 29 February 2028, more than a year ahead; read in 2029 it is
+29 February 2028, in the past; read in 2026, with no leap year among 2025,
+2026 and 2027, it is `None`.
+
+This rule replaced two, after the frontier review found a defect in each. A
+time only was the first such time at or after `now_unix`, so a message read
+a second after its reset was recorded a day ahead. A month and day was in
+`now_unix`'s year unless that was more than a day past, so the previous year
+was never a candidate and a `Dec 31` reset read on 1 January was recorded a
+year ahead.
+
+`None` means the text gave no reset this can stand behind: no `resets` at
+all, a zone other than `(UTC)`, or any part that does not parse (an hour
+outside 1 to 12, minutes outside 0 to 59 or not two digits, a month not in
+the list, a day the month does not have, a missing comma or space). A
+reset in another zone is refused rather than converted: converting
+`(Europe/London)` needs a time-zone database, which is a dependency, and a
+guess at the offset would be a wrong timestamp recorded as fact. `None` is
+what `reset_at` held before this existed, and the estimate already says
+what it means: the reset is unknown.
+
+Which reset is read is decided before any of it is parsed, by two rules in
+order:
+
+- the reset that belongs to a limit: `resets` as the next word after a
+  limit `hits_a_quota_window` would accept, on the same line
+  (`the_limits_reset`). If several lines carry one, the first such line's
+  is read;
+- failing that, the text's reset if it has exactly one (`the_only_reset`).
+  A text with two or more resets and none of them a limit's gives `None`.
+
+So `MCP cache resets 9am (UTC)` on one line and `You've hit your 5-hour
+limit · resets 5:30am (UTC)` on the next give 05:30, in either order. The
+two observed messages, each alone, read as they always have: their reset is
+both the limit's and the only one. A text with a single reset reads as it
+did before as well, wherever the reset is, so `You've hit your session
+limit` with `resets 5:30am (UTC)` on the next line still gives 05:30.
+
+The chosen reset is the only one parsed. When the limit's reset is
+malformed or in another zone the answer is `None`, even if another reset in
+the text parses: the limit's is the one the message gave, and the other is
+about something else.
+
+The rule was the first `resets` in the text until finding
+`PR380-RESET-PARSER-TAKES-UNRELATED-FIRST-RESET` showed it taking an
+unrelated one. Claude Code's stderr can
+carry other lines before the limit message, and with `MCP cache resets 9am
+(UTC)` above the five-hour message the recorded `reset_at` was 09:00, three
+and a half hours after the pool came back. A lone reset is still read
+without a limit before it because that is what the rule did, and the only
+reset in a failure that is already a rate limit has nothing to be confused
+with. With two and no limit to choose between them, `None`, an unknown
+reset, is the honest answer.
+
+It never panics, on any text and any `now_unix`. The text is read with
+`lines`, `match_indices`, `strip_prefix`, `starts_with`, `get` and
+`split_at_checked`, each of which returns a slice of the same string or
+`None`; the only indices come from `find` and `match_indices`, or are a
+line's length less that of a suffix of its lower-cased copy (with
+`checked_sub`), so they fall on character boundaries. The clock arithmetic is checked: a
+`now_unix` past `i64::MAX`, or a candidate whose seconds would overflow,
+gives `None`. So does a nearest candidate before 1970, which has no unix
+time to format; only a clock read near the epoch can meet one.
+
+## `fn the_limits_reset(text: &str) -> Option<&str> {`
+
+What follows `resets ` where that is the next word after a recognised
+limit, on the first line that has one. The text is lower-cased once, for
+`after_a_quota_window`, and its lines are walked beside the original's.
+`to_ascii_lowercase` changes only ASCII letters, byte for byte, so the two
+have the same lines, of the same lengths, with characters at the same
+offsets. The limit's end is found in the lower-cased line, where "Fable"
+reads as a window, and carried to the original line by its distance from
+the line's end. `when_it_resets` then reads the original, so "resets " must
+be printed in lower case, as the rest of the grammar is matched exactly.
+
+Every "hit your " in a line is tried, as in `hits_a_quota_window`, but the
+piece after it runs to the end of the line rather than to the next
+"hit your ". The two differ only for a limit with "hit your " directly
+against it ("limithit your"), which one reads as a limit with nothing after
+it and the other not as a limit; neither has a reset to take.
+
+Lines are those of `str::lines`, so a `\r\n` ending is a line ending too.
+A reset on the line after the limit, with nothing but the limit on its own
+line, is not the limit's: the observed messages carry theirs on the same
+line, and a line break is where stderr starts something else.
+
+## `fn the_only_reset(text: &str) -> Option<&str> {`
+
+What follows the text's reset when `resets_in` finds exactly one; `None`
+when it finds none or several.
+
+## `fn resets_in(text: &str) -> impl Iterator<Item = &str> {`
+
+What follows each `resets ` that begins a word, in order: at the start of
+the text, or after a character that is not an ASCII letter, ASCII digit or
+underscore, the boundary `after_a_whole_limit` uses. Without it,
+`loaded presets 5:30am (UTC)` would read as a reset, and would count against
+a real one. This was `first_reset`, which took the first; it yields them
+all so that `the_only_reset` can count them.
+
+## `const MONTHS: [&str; 12] = [`
+
+The twelve abbreviations, in order, so the position gives the month's
+number. `Sept` and `November` are not in it, and are refused rather than
+guessed at: neither has been printed.
+
+## `fn leading_month(text: &str) -> Option<(i64, &str)> {`
+
+A month abbreviation and the space after it. `None` here is not yet a
+refusal: the reset may be a time only. A text that starts with neither a
+month nor an hour is refused by `time_of_day`.
+
+## `fn leading_digits(text: &str) -> Option<(i64, &str)> {`
+
+One or two ASCII digits at the start of the text, as a number. Three digits
+or none are refused, and so is a sign, which `str::parse` would otherwise
+accept.
+
+## `fn time_of_day(text: &str) -> Option<(i64, &str)> {`
+
+The time of day as seconds after midnight, and what follows it. `hour % 12`
+is what makes `12am` midnight and `12pm` noon: the twelve wraps to zero and
+`pm` adds twelve hours.
+
+## `fn epoch_day(year: i64, month: i64, day: i64) -> Option<i64> {`
+
+The day number of a date, counted from 1970-01-01, or `None` when the month
+does not have that day. `util::days_from_civil` counts a missing day on into
+the next month, so the date is converted back with `util::civil_from_days`
+and must come back unchanged. That is how `Feb 29` is a candidate in 2028
+and not in 2027, and how `Nov 31` is a candidate in no year, so it gives
+`None`. It returns days rather than seconds so that a date the month lacks
+and a time that overflows stay apart: the first only drops a candidate, the
+second refuses the whole reset.
 
 ## `mod tests` › `fn a_successful_answer_from(id: &str) -> String {`
 
@@ -478,14 +730,15 @@ phrases matches it. Remove "session" from the windows and this test fails.
 
 A context-window limit is a fault in the task, not a quota window: a shorter
 prompt fixes it and waiting does not. "hit your " is followed by
-"context-window", which is none of the three windows, so the text does not
-signal. Under the earlier rule, which took any "limit" after "hit your", it
+"context-window", which is none of the three windows and not a name of one
+word, so the text does not signal. Under the earlier rule, which took any
+"limit" after "hit your", it
 did, and the ladder would have deferred a real failure three times and asked
 a human.
 
 ## `mod tests` › `fn hit_your_limit_with_no_window_does_not_signal() {`
 
-"you hit your limit" names no window. The rule needs one of the three
+"you hit your limit" names no window. The rule needs a window or a name
 between "hit your " and " limit", so this does not signal. A rule that made
 the window optional would fail this test.
 
@@ -557,6 +810,219 @@ text is the one `a_hit_your_weekly_limit_message_signals` uses; it is here
 again to pin the end-of-text half of the boundary beside the full stop
 above. A boundary that demanded a following character, as a check reading
 the next character without allowing for none would, fails this test.
+
+## `mod tests` › `fn the_observed_hit_your_fable_limit_message_signals() {`
+
+The message Claude Code printed on the build machine on 2026-11-12, when the
+Fable model's own weekly allowance was spent: `FABLE`, the same text the
+reset tests below read. None of the twelve phrases matches it, so only the
+name form of the quota-window rule can make it signal. Before that form
+existed this test failed, and an attempt that printed the message was an
+`AgentError` that spent an attempt against an exhausted pool.
+
+## `mod tests` › `fn a_hit_your_opus_limit_message_with_a_reset_signals() {`
+
+The same form with another model's name and a time-only reset. It has not
+been observed. It witnesses that the rule accepts any one-word name and not
+"fable" alone: a rule that listed the observed name would fail this test.
+
+## `mod tests` › `fn a_hit_your_token_limit_message_without_a_reset_does_not_signal() {`
+
+"hit your token limit" and "hit your context limit", the first with nothing
+after it and the second with a semicolon and advice. Both are about the
+prompt, not the pool. "token" and "context" are one-word names, but neither
+text says when anything resets, so neither signals. A rule that took a name
+without a reset would fail this test.
+
+## `mod tests` › `fn a_model_named_limit_without_a_reset_does_not_signal() {`
+
+The observed Fable message with its reset cut off. A model's name is not
+enough on its own: the rule cannot tell "Fable" from "token", so it is the
+reset that makes the message a quota. It witnesses that the reset is required
+for every name, model names included.
+
+## `mod tests` › `fn a_named_limit_whose_next_word_is_not_resets_does_not_signal() {`
+
+"resets" appears after the limit, but the next word after "limit" is "the".
+The reset has to follow the limit, as in the observed message, not merely
+appear later in the text. A rule that looked for "resets" anywhere after the
+limit would fail this test.
+
+## `mod tests` › `fn a_named_limiter_with_a_reset_does_not_signal() {`
+
+The observed Fable message with "limiter" for "limit". The name form keeps
+the same whole-word boundary as the three windows, so the reset after it does
+not help. A name form that skipped `after_a_whole_limit` would fail this
+test.
+
+## `mod tests` › `fn a_name_of_more_than_one_word_with_a_reset_does_not_signal() {`
+
+Three names that are not one word of ASCII letters, each followed by a
+limit and a reset: "context window", "context-window" and "Fable4". The name
+stops at the space, the hyphen and the digit, and what follows is not
+" limit", so none signals. A rule that took everything up to " limit" as the
+name would fail this test.
+
+## `mod tests` › `const NOV_11_2026: u64 = 1_794_355_200;`
+
+The reset tests read their messages at fixed instants, never at the
+clock's. Each constant is a UTC midnight written as a literal, and
+`the_reset_fixtures_are_the_midnights_they_are_named_for` checks each
+against the date it is named for, so a miscounted constant fails there,
+by name, rather than as a wrong reset further down.
+
+## `mod tests` › `fn the_observed_five_hour_message_resets_later_the_same_day() {`
+
+The five-hour message as Claude Code printed it, read at 03:00 on the day
+it was seen: the reset is 05:30 that day.
+
+## `mod tests` › `fn the_observed_fable_message_resets_on_its_date() {`
+
+The dated message as Claude Code printed it, read on 12 November 2026: the
+reset is 14 November 2026 at 09:00.
+
+## `mod tests` › `fn a_time_only_reset_read_just_after_itself_is_its_own() {`
+
+The first defect the frontier review found. The five-hour message read at
+05:30 exactly, at 05:30:01 and at 06:00 gives 05:30 that morning each time.
+Under the rule this replaced, "the first such time at or after", the last
+two gave the next morning's, a day ahead of the reset the message named.
+This test replaced `a_time_only_reset_already_passed_today_is_tomorrows`,
+which pinned that rule.
+
+## `mod tests` › `fn a_time_only_reset_read_the_evening_before_is_the_next_mornings() {`
+
+Read at 20:00, `5:30am` is the next morning's, 9.5 hours ahead rather than
+14.5 hours past. 17:30 is halfway between the two mornings: one second
+before it the morning just gone is the nearer, and at it the two are as
+near as each other and the later is taken, so both sides of the tie are
+pinned.
+
+## `mod tests` › `fn twelve_am_is_midnight_and_twelve_pm_is_noon() {`
+
+Read at 01:00: `12am` and `12:45am` are an hour and a quarter of an hour
+past, and are today's 00:00 and 00:45; `12pm` and `12:45pm` are today's
+12:00 and 12:45. `1am`, `1pm` and `11:59pm` pin the hours either side of the
+wrap: `1am` is now, `1pm` is twelve hours either way and so the later,
+today's, and `11:59pm` is yesterday's, an hour past. Reading `12am` as
+12:00, as a parser that only adds twelve for `pm` would, fails here.
+
+The read time is the one this test had under the rule this replaced, when
+`12am`, `12:45am` and `11:59pm` gave tomorrow's 00:00, tomorrow's 00:45 and
+today's 23:59. The nearest-occurrence rule moved those three expectations,
+and the wrap is pinned just as well by the new ones.
+
+## `mod tests` › `fn a_dated_reset_is_its_own_until_the_next_years_is_nearer() {`
+
+The `Nov 14, 9am` message read on 14 November at 20:00, at 09:00 on 15
+November, and a second after that gives 14 November 2026. Under the rule
+this replaced, that last read was past its day of tolerance and gave 14
+November 2027; this test replaced
+`a_dated_reset_read_just_after_itself_stays_in_its_year`, which pinned it.
+The two resets are 365 days apart, so halfway between them is 21:00 on 15
+May 2027, which the test checks first. One second before it the reset is
+still 2026's, and at it the two are as near as each other and the later,
+2027's, is taken.
+
+## `mod tests` › `fn a_dated_reset_across_a_year_end_is_next_years() {`
+
+Read at 20:00 on 31 December 2026, `Jan 2` is 2 January 2027 and a time-only
+`5am` is 1 January 2027, nine hours ahead. `Dec 31, 11pm` is later that same
+day. Read at noon on 30 December, `Jan 2` is still the coming 2 January, not
+the one just under a year past.
+
+The read time was noon until the nearest-occurrence rule: at noon, `5am` is
+seven hours past and the rule gives that morning's, which is no longer a
+year-end case, so the read moved to 20:00 rather than the expectation.
+
+## `mod tests` › `fn a_reset_read_just_after_a_year_end_is_last_years() {`
+
+The second defect the frontier review found. At 00:30 on 1 January 2027,
+`Dec 31, 11pm` is 31 December 2026, an hour and a half past, and not 31
+December 2027, the date in the year read from the clock, which the rule
+this replaced gave. A time-only `11pm` read then is the same instant,
+yesterday's.
+
+## `mod tests` › `fn feb_29_is_a_neighbouring_years_leap_day_or_none() {`
+
+`Feb 29, 3pm` read on 27 February of four years in a row. In 2028 it is
+29 February 2028. In 2027 and in 2029, years without that day, it is 29
+February 2028, the leap day in the next year and in the year before: the
+nearest leap year is a candidate when it is a neighbouring year, whether that
+puts the reset a year ahead or in the past. In 2026 it is `None`, since none
+of 2025, 2026 and 2027 has the day; it is never moved to 1 March. The test
+was `feb_29_resets_in_a_leap_year_and_is_refused_in_another`, which gave
+`None` in 2027 because only the current year and, after it, the next were
+read; with the next year a candidate whatever the date, 2027's expectation
+changed.
+
+## `mod tests` › `fn a_zone_other_than_utc_gives_none() {`
+
+The five-hour message with `(Europe/London)` in place of `(UTC)` gives
+`None`, and so do `(GMT)`, a lower-case `(utc)`, `UTC` without parentheses
+or without the space before them, and no zone at all.
+
+## `mod tests` › `fn text_without_a_reset_gives_none() {`
+
+Texts with no reset in them: the empty text, the session-limit message, the
+older "5-hour limit reached", a time and zone with no `resets` before them,
+`reset` without the `s`, `resets` with nothing after it, and `presets`,
+which contains `resets ` but not as a word.
+
+## `mod tests` › `fn malformed_hours_minutes_months_and_days_give_none() {`
+
+One malformation per text, each otherwise in the observed shape: hours 0,
+13 and 123, a signed hour, a space before `am`, upper-case `AM`, no `am` or
+`pm`, minutes 60 and 99, one or three minute digits, a `.` for the `:`, a
+misspelt, lower-case, unabbreviated or four-letter month, 31 November,
+31 April, 30 February, day 0, a three-digit day, no day, no comma, no space
+after the comma, and a dated reset with an hour of 13 or no time.
+
+## `mod tests` › `fn the_reset_after_the_limit_is_read_not_an_earlier_unrelated_one() {`
+
+The defect `PR380-RESET-PARSER-TAKES-UNRELATED-FIRST-RESET`: `MCP cache
+resets 9am (UTC)` on the line before the observed five-hour message gives
+05:30, not 09:00. So does the same with `\r\n` line endings, with the
+lines the other way round, with a session limit, and with the unrelated
+reset on a line that has a "hit your" which is not a limit: a context-window
+limit or "the patch hit your branch". The Fable message under the same
+line gives its own 14 November.
+
+## `mod tests` › `fn several_resets_and_none_after_a_limit_give_none() {`
+
+Two resets and no limit's to choose: `None`. That covers two resets with no
+limit at all, which gave the first under the rule this replaced (the test
+was `the_first_of_several_resets_is_read`), and a limit whose reset is on
+the next line, after another word ("the queue resets"), or after a
+context-window limit, which is not a quota window.
+
+## `mod tests` › `fn a_lone_reset_is_read_as_before() {`
+
+The fallback. A single reset is read wherever it is, as under the first-reset
+rule: on the line after the limit, after another word on the limit's line,
+and with no limit in the text at all.
+
+## `mod tests` › `fn a_malformed_reset_after_the_limit_is_not_passed_over() {`
+
+A limit's reset with an hour of 13, or in `(Europe/London)`, gives `None`
+though the text's other reset parses. Two resets with no limit, the first
+malformed, give `None` as well, now because there are two.
+
+## `mod tests` › `fn arbitrary_non_ascii_text_never_panics() {`
+
+Texts with non-ASCII characters where the reset's parts would be (a
+full-width digit, an accented month or `am`, full-width `UTC`, a
+no-break space, a middle dot in place of each space, Japanese before the
+message, an emoji or a NUL against `resets`; and, for the limit's reset,
+limits with a no-break space before `resets`, a non-ASCII model name, an
+accented `résets`, a limit in capitals, a limit whose `resets` has nothing
+after it and a bare "hit your "), each read at five instants
+from 0 to `u64::MAX`. With them, every prefix and every suffix of both
+observed messages, cut at each character boundary, so a cut lands inside
+every part of the grammar, including just after the multibyte middle dot.
+Each prefix stops before the closing `)` and must give `None`. None of
+these may panic, and at `u64::MAX`, past what an `i64` second count holds,
+both messages give `None`.
 
 ## `mod built_program_tests` › `struct Boundary {`
 

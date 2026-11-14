@@ -714,6 +714,9 @@ effect_free = [
     # thread can satisfy (`PR6-LANEF-001`).
     "barriers_on_this_thread",
     "barriers_performed",
+    # Calendar arithmetic on integers: a day count to a civil date and back,
+    # for the event timestamps and for reading a rate limit's reset time.
+    "civil_from_days",
     "clear",
     # Arms and disarms a process-wide, path-keyed barrier fault (a test's, the
     # guard's `drop` disarms it); reaches no filesystem effect of its own.
@@ -722,6 +725,7 @@ effect_free = [
     # The same fault, scoped to the file barriers directly under a directory,
     # for a staged file whose name the write chooses (PR10's round 8).
     "fail_file_barriers_within",
+    "days_from_civil",
     "deserialize",
     "executable_extensions",
     "fence_for",
@@ -742,10 +746,15 @@ effect_free = [
     "recording",
     "records",
     "records_for",
+    # Formats a unix time; reads no clock.
+    "rfc3339_utc",
     "rfc3339_utc_now",
     "serialize",
     "steps",
     "tail",
+    # Reads the system clock; `rfc3339_utc_now` reads it through this. A clock
+    # read is no effect in this classification, as that row already records.
+    "unix_seconds_now",
     "user_upstroke_dir",
 ]
 
@@ -1791,6 +1800,7 @@ effect_free = [
     "render",
     "render_duration",
     "report",
+    "retire_served_pools",
     "strategy_preview",
 ]
 

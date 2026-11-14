@@ -10,7 +10,7 @@ use std::fs;
 use std::time::Duration;
 
 use crate::agent::proc::NoHooks;
-use crate::agent::{AdapterSource, BuiltinAdapters, Caps};
+use crate::agent::{AdapterSource, BuiltinAdapters, Caps, claude, reset_at_from_limit_message};
 use crate::capacity;
 use crate::config::{self, OnTaskFailure};
 use crate::error::UpstrokeError;
@@ -280,7 +280,7 @@ pub(super) fn run_harness_inner_with_id(
         branch,
         warnings,
         unanswerable: Vec::new(),
-        exhausted_pools: std::collections::BTreeSet::new(),
+        exhausted_pools: BTreeMap::new(),
         #[cfg(test)]
         after_candidate_capture: opts.after_candidate_capture,
     };
@@ -356,7 +356,7 @@ pub(super) struct Run<'a> {
     pub(super) branch: String,
     pub(super) warnings: Vec<String>,
     pub(super) unanswerable: Vec<QuestionId>,
-    pub(super) exhausted_pools: std::collections::BTreeSet<String>,
+    pub(super) exhausted_pools: BTreeMap<String, Option<String>>,
     #[cfg(test)]
     pub(super) after_candidate_capture: Option<AfterCandidateCapture>,
 }
@@ -800,6 +800,19 @@ impl Run<'_> {
                 None
             };
 
+            let record = super::classify::attempt_record(
+                attempt,
+                super::classify::AttemptFacts {
+                    tier: rung.tier,
+                    model: &profile.model,
+                    pool: pool_option(&profile.pool),
+                    resumed: resume.is_some(),
+                    outcome: &result.outcome,
+                    reviews: &result.reviews,
+                    failure: result.failure.as_ref(),
+                    feedback: super::classify::FeedbackCarrier::LadderEvent,
+                },
+            );
             let settlement = self.emit(EventBody::AttemptFinished {
                 task: task_id.clone(),
                 attempt,
@@ -808,19 +821,7 @@ impl Run<'_> {
                 parking,
                 transition,
                 prepared_commit: prepared_commit.clone().map(Box::new),
-                data: Box::new(super::classify::attempt_record(
-                    attempt,
-                    super::classify::AttemptFacts {
-                        tier: rung.tier,
-                        model: &profile.model,
-                        pool: pool_option(&profile.pool),
-                        resumed: resume.is_some(),
-                        outcome: &result.outcome,
-                        reviews: &result.reviews,
-                        failure: result.failure.as_ref(),
-                        feedback: super::classify::FeedbackCarrier::LadderEvent,
-                    },
-                )),
+                data: Box::new(record.clone()),
             });
             if let Err(error) = settlement {
                 if prepared_commit.is_some() {
@@ -841,6 +842,7 @@ impl Run<'_> {
                 }
                 return Err(error);
             }
+            capacity::retire_served_pools(&mut self.exhausted_pools, &record);
             if let Some(question) = parking_question.as_ref() {
                 if let Err(error) = self.materialize_question(question) {
                     if let Err(cleanup) = self.workspace.discard_uncommitted() {
@@ -874,19 +876,6 @@ impl Run<'_> {
                 return Ok(false);
             };
 
-            if failure.kind != FailureKind::Interrupted
-                && !(failure.kind == FailureKind::RateLimited
-                    && failure.origin == FailureOrigin::Worker)
-            {
-                self.exhausted_pools.remove(&profile.pool);
-            }
-            for review in &result.reviews {
-                if review.outcome != events::ReviewPassOutcome::Unavailable {
-                    if let Some(pool) = &review.pool {
-                        self.exhausted_pools.remove(pool);
-                    }
-                }
-            }
             if failure.kind == FailureKind::RateLimited {
                 self.record_pool_exhausted(&task_id, &profile, &result.reviews, &failure)?;
             }
@@ -1055,15 +1044,28 @@ impl Run<'_> {
             FailureOrigin::Worker => (pool_option(&implementer.pool), implementer.agent.clone()),
         };
         let Some(pool) = pool else { return Ok(()) };
-        if !self.exhausted_pools.insert(pool.clone()) {
+        let reset_at = if agent == claude::ADAPTER_ID {
+            let now = util::unix_seconds_now();
+            std::iter::once(failure.reason.as_str())
+                .chain(failure.limit_message.as_deref())
+                .find_map(|text| reset_at_from_limit_message(text, now))
+        } else {
+            None
+        };
+        let already_recorded = self
+            .exhausted_pools
+            .get(&pool)
+            .is_some_and(|recorded| reset_at.is_none() || *recorded == reset_at);
+        if already_recorded {
             return Ok(());
         }
+        self.exhausted_pools.insert(pool.clone(), reset_at.clone());
         self.emit(EventBody::PoolExhausted {
             task: task.to_owned(),
             data: events::PoolExhausted {
                 pool,
                 agent,
-                reset_at: None,
+                reset_at,
                 detail: util::head(&failure.reason, 400),
             },
         })

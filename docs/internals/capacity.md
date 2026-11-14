@@ -225,6 +225,16 @@ the source of truth). Attempts that name no pool contribute nothing — an
 unattributed cost belongs to no subscription, and guessing which would be
 worse than leaving the pool unmeasured.
 
+## `pub fn observe(events: &[Event]) -> Observations {` › `EventBody::PoolExhausted { data, .. } => {`
+
+A signal sets its pool's reset to its own: the latest signal wins. The
+engine writes a second `pool_exhausted` for a pool already exhausted only
+when a later refusal names a different reset — the five-hour limit
+clearing into the weekly one — and that later time is the one the
+estimate must report, not the five-hour reset already past. A rate-limited
+settlement, unlike a signal, never replaces a known reset (see
+`retire_signals`).
+
 ## `fn retire_signals`
 
 Withdraw the exhausted mark from any pool this attempt proves is serving
@@ -239,7 +249,32 @@ read `exhausted [signal]` at midnight, on the same line that reported the
 successful attempts it had served since.
 
 Events arrive in order, so a later signal re-marks a pool this retired —
-which is right: the pool went down again.
+which is right: the pool went down again. The retiring half is
+`retire_served_pools`, which the live engine calls too.
+
+## `fn retire_signals` › `if let Some(failure) = &record.failure {`
+
+The attempt settlement itself is the durable source of a rate-limit
+signal. `pool_exhausted` remains useful detail, but a crash between the
+two appends must not make replay forget which subscription refused work.
+
+## `fn retire_signals` › `exhausted.entry(pool.clone()).or_insert(None);`
+
+Mark the pool, but keep a reset already known for it. The sequential
+engine writes one `pool_exhausted` per outage, carrying the reset it read
+from the first refusal (and one more only when a later refusal names a
+different reset), and every other deferral after it settles as one more
+rate-limited attempt with no signal of its own. Overwriting with `None`
+here let the first deferral — about a minute later on the default
+back-off — erase that reset, so `validate` said the signal carried none
+and a resume's `capacity_snapshot` wrote `reset_at: null` beside an open
+signal that named one. A rate limit with no earlier signal still marks
+the pool, with no reset; a success or an available review still retires
+it first, in `retire_served_pools`.
+
+## `pub(crate) fn retire_served_pools(`
+
+Remove every pool this attempt proves is serving again, reset and all.
 
 What counts as proof is deliberately narrow. A *completed* attempt reached
 the model and got an answer, whatever the verdict on its code — a gate
@@ -247,16 +282,26 @@ failure says nothing about the subscription. A rate-limited one proves the
 opposite. An interrupted one proves nothing at all: the engine died without
 ever learning whether a reply was coming.
 
-## `fn retire_signals` › `for review in &record.reviews {`
+The engine's coordinator calls this on the record it has just settled, so
+its own `exhausted_pools` and this fold retire a pool on the same attempt.
+It used to carry a copy of the rule instead, and the copy sat on the failure
+branch only. A success forgot nothing, so the coordinator went on
+remembering the pool and its reset while this fold had retired it. A later
+task refused on the same pool, naming the same reset, then looked
+already recorded and wrote no `pool_exhausted`. The fold, which had
+retired the pool, re-marked it from that refusal with no reset, and the
+estimate said "unknown" where the log had once named the time.
+`a_rate_limit_after_a_success_retired_its_pool_writes_pool_exhausted_again`
+in `engine::tests` holds the two together.
+
+It is effect-free in `effects/wrappers.toml`, like the rest of this module:
+it reads the record it is given and removes entries from the map it is
+given, and reaches no primitive and no path.
+
+## `fn retire_served_pools` › `for review in &record.reviews {`
 
 A review pass that reached a verdict proves its own pool served, which on
 a cross-vendor second opinion is a different subscription entirely.
-
-## `fn retire_signals` › `if let Some(failure) = &record.failure {`
-
-The attempt settlement itself is the durable source of a rate-limit
-signal. `pool_exhausted` remains useful detail, but a crash between the
-two appends must not make replay forget which subscription refused work.
 
 ## `pub fn drain_of<'a>(`
 
@@ -555,6 +600,33 @@ And order is respected: recovery then a fresh outage stays down.
 
 A reviewer-side limit is attached to the failed review pool, while
 the same settlement proves the worker and earlier reviewers served.
+
+## `fn a_later_rate_limit_keeps_the_reset_its_pool_exhausted_recorded()` › `let obs = observe(&[record(1, Some(FailureKind::RateLimited))]);`
+
+A rate limit with no signal before it marks the pool exhausted with no
+reset — the settlement alone is enough to remember the outage.
+
+## `fn a_later_rate_limit_keeps_the_reset_its_pool_exhausted_recorded()` › `let obs = observe(&events);`
+
+The sequential engine's shape: the refusal, the one `pool_exhausted`
+carrying the reset read from it, then a deferral that is rate limited
+again and writes no signal of its own. That second attempt must not
+erase the reset, or `validate` and a resume's `capacity_snapshot` report
+none for a pool whose open signal names one.
+
+## `fn a_later_rate_limit_keeps_the_reset_its_pool_exhausted_recorded()` › `events.push(record(3, None));`
+
+Keeping the reset does not make the outage sticky: the attempt that
+finally succeeds still retires the pool.
+
+## `fn a_later_pool_exhausted_with_a_different_reset_replaces_the_earlier_one() {`
+
+Signal A (the five-hour limit, resetting 05:30), a rate-limited
+settlement, then signal B (the weekly limit, resetting 17:00 on Nov 14):
+the fold reports B. A settlement keeps a known reset, but a signal is a
+newer statement of when the pool comes back, so it replaces one. A
+further rate limit after B keeps B, and the log cut before B still
+reports A — the replacement is the signal's doing, not the settlement's.
 
 ## `fn self_metering_cannot_talk_an_exhausted_pool_back_up()` › `let mut p = pool("claude-max");`
 

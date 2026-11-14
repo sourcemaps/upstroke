@@ -345,8 +345,10 @@ Waiting, injectable so tests never actually sleep.
 ## `pub const DEFAULT_DEFER_BACKOFF: Duration = Duration::from_secs(60);`
 
 First wait after a rate-limited attempt. Windows reset on the order of
-hours (§13), but without the capacity engine there is no reset time to read
-— so this backs off rather than pretending to know one.
+hours (§13). The sequential engine now records a reset time on
+`pool_exhausted` where Claude Code's message names one, but nothing waits
+on it yet — the capacity engine ships read-only — so this backs off rather
+than waiting for a time it often does not have.
 
 ## `pub const MAX_DEFER_BACKOFF: Duration = Duration::from_secs(600);`
 
