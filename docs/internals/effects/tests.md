@@ -2126,9 +2126,11 @@ the job's own comment spelled the needle.
 
 ## `fn the_windows_leg_runs_these_fixtures_on_the_runner_each_lane_pins() {`
 
-The Windows suite's job runs these fixtures on the curated guest for a pull
-request, a push and a merge-queue entry alike, and on nothing else the
-contract can read.
+The guest's Windows suite job runs these fixtures on the curated guest for a
+pull request, a push and a merge-queue entry alike whenever the run's picker
+answers `guest`, and on nothing else the contract can read; a run the picker
+sends away runs them in the hosted twin instead
+([`the_hosted_windows_twin_runs_the_guests_suite_on_the_guests_compiler`]).
 
 The claim the `test` job discharges with an install step -- that
 `clippy-driver` is present for the fixtures -- is discharged by the golden
@@ -2137,14 +2139,22 @@ bound to instead; a toolchain install in this job is refused. What the
 contract *can* read is pinned: the `runs-on:` label set exactly, the suite
 step exactly -- the command and the count that says it executed, see
 [`the_windows_leg_counts_the_tests_it_ran`] -- the platform-default shell on
-every `run:` step, and a field set with no `if:` or `continue-on-error:`
-anywhere. The refusals are executed in [`WORKFLOW_ESCAPES`], every row named
-`MUT-TEST-WINDOWS-*` and the three `MUT-WINDOWS-WITNESS-*`.
+every `run:` step, and a field set with no `continue-on-error:` anywhere and
+no `if:` on any step. The job's own `if:` is required, and admitted only as
+the exact condition on the picker's `guest` answer, beside `needs:` on the
+picker; before the twin the job had no `if:` at all. The refusals are
+executed in [`WORKFLOW_ESCAPES`], every row named `MUT-TEST-WINDOWS-*` that
+mutates `test-windows` (the twin's rows mutate `test-windows-hosted`), and
+the three `MUT-WINDOWS-WITNESS-*`.
 
-## `fn the_windows_leg_runs_every_lane_on_the_self_hosted_guest_its_labels_name() {`
+## `fn the_guests_windows_job_runs_on_the_self_hosted_guest_its_labels_name() {`
 
 The pinned label set is a self-hosted one -- not a GitHub-hosted runner
-the oracle's equality would then hold every lane to.
+the oracle's equality would then hold the guest's job to, on every lane the
+picker leaves with the guest. Until the hosted twin existed this test was
+`the_windows_leg_runs_every_lane_on_the_self_hosted_guest_its_labels_name`;
+the twin's runner is pinned by its own contract, so the guarantee here is
+the guest's job's, not every lane's.
 
 The oracle compares `runs-on:` with [`TEST_WINDOWS_LABELS`] as a set, so a
 literal sequence routes every event to the same machine; what that equality
@@ -2204,7 +2214,9 @@ this check read and how each was shown a spelling it missed.
 
 The leg whose tests leave GitHub's runners reports that they ran, and
 refuses to run them on any compiler but
-the one [`GOLDEN_IMAGE_TOOLCHAIN`] names -- asking Cargo which compiler it
+the one [`GOLDEN_IMAGE_TOOLCHAIN`] names. The script is both Windows suite
+jobs' suite step, the guest's and its hosted twin's, so this holds both --
+asking Cargo which compiler it
 will run, the step's PATH which `rustc` it names, and the step's PATH
 which `cargo` it has. The fixtures' own PATH is Cargo's to build, and a
 split there fails the rlib-linked fixtures rather than passing them
@@ -2234,6 +2246,308 @@ record says where the boundary actually is. It is a defence against the
 machine, which is the input this change added. The guest is provisioned
 outside the repository, so its Cargo home and its environment are not in any
 diff, and this is the leg saying it ran what it says it ran.
+
+## `fn the_windows_home_is_picked_by_the_one_job_the_contract_pins() {`
+
+The job that decides where the Windows suite runs matches the contract, and
+three facts inside its pinned script agree with the model. It reads the
+guest's queue in exactly one place -- the function is defined once and called
+once -- after the check that `WINGUEST_QUEUE_LIMIT` is a positive whole
+number, so routing on the queue is opt-in on every platform this test runs
+on, not only where the script is executed. And it reads other runs' jobs by
+the two names the oracle holds their `name:` to: `TEST_WINDOWS_NAME`, the
+guest's job, and `PICK_WINDOWS_HOME_NAME`, another run's picker, whose state
+is what tells a run still choosing its home from one that has chosen. The
+refusals are executed in [`WORKFLOW_ESCAPES`], every row named
+`MUT-PICK-WINDOWS-HOME-*` and `MUT-JOB-PERMISSIONS-ON-THE-GUEST-JOB`.
+
+## `mod pick_windows_home_answers {`
+
+What the picker's script answers, executed rather than read. The oracle pins
+the script as text; this runs the workflow's own text under `bash
+--noprofile --norc -eo pipefail`, the invocation GitHub uses for
+`shell: bash`, with a fake `gh` first on its PATH and the real `jq`, `sort`
+and `tr` behind it.
+
+Linux only. The script runs on `ubuntu-latest` and nowhere else, and it
+needs `bash` 4 (`mapfile`) and `jq`. The Windows legs, the guest's image
+included, promise neither; the macOS runner's `/bin/bash` is 3.2.
+
+## `const JQ: &str = "jq";`
+
+The fixtures' one prerequisite beyond `bash`, as the name the guard asks
+PATH for. `jq` is a prerequisite of the suite on Linux, listed with the
+baseline's others (`CODING_STANDARDS.md` §2, `CONTRIBUTING.md`,
+`CLAUDE.md`); `test-release-record.sh` already needed it.
+
+## `const NO_SUCH_PROGRAM: &str = "upstroke-fixture-no-such-jq";`
+
+A program no PATH carries, asked for in place of `jq` by
+[`the_picker_fixtures_fail_with_a_diagnostic_where_jq_is_absent`], so that a
+machine without `jq` is modelled without touching the suite's PATH.
+
+## ``const JQ_ABSENT: &str = "The picker's script reads the API's answers with `jq`, and these \``
+
+What the fixtures say when they cannot run, after the name of the program
+that did not answer. The fixtures fail with it; they do not skip. The first
+repair of the undocumented prerequisite returned early without `jq` unless
+`GITHUB_ACTIONS` was set, and the second review of #375 measured that as a
+test counted as passed with no case run and no diagnostic, against §12's
+"no silent success when a prerequisite is absent". Of §12's three remedies
+this is the third. Providing `jq` is not the suite's to do, and an
+`#[ignore]` would take the executed proof of the picker's script out of the
+default suite on the one platform that runs it: the workflow's suite step is
+pinned as text and selects nothing ignored.
+
+## `const FAKE_GH: &str = r#"#!/usr/bin/env bash`
+
+`gh api [--paginate] <path>` over canned pages. A path's pages are files
+named by the path with every character outside `[A-Za-z0-9]` turned into
+`_`, then `.<n>.json`, or `.<n>.fails` for a page that fails. With
+`--paginate` it prints every page in order and, at a failing page, exits 1
+having already printed the ones before it, which is what `gh` does; without
+the flag it prints the first page only. It logs each requested path, so the
+fixtures can say which runs were asked for their jobs and how often. A path
+with no pages fails, so an unexpected request reads as an unreadable API
+rather than as an empty one.
+
+## `struct Burst {`
+
+Runs that start together, as one snapshot several pickers read. `listed` is
+every run the in-progress listing names, with its jobs as `(name, status)`;
+`pickers` is the runs among them whose picker is run against that snapshot,
+each with the home it must answer; `limit` is `WINGUEST_QUEUE_LIMIT`; and
+`taken` is how many places on the guest the snapshot gives to runs that are
+not picking here -- a guest job held, or an earlier run still choosing. It is
+stated by the fixture, not derived from the script's output, so the two
+checks in [`together`] do not copy the rule they test.
+
+## `fn cases() -> Vec<Case> {`
+
+Every answer the plan names, the three the earlier attempt's reviews found
+missing, and the opt-in the first review of #375 asked for. Each case states
+the answer, the lines the script must print, and exactly which paths it must
+ask for and how often. Every case that counts sets the limit itself, `2`
+unless it says otherwise. None of these lists a picker in another run, so
+each reads the queue as the first script did, by its held jobs alone, and
+each requires the second count to be printed as `0`; the cases that list
+one are [`other_runs_still_choosing`].
+
+- `neither-variable-set-asks-nothing-and-answers-guest`: a queue deep enough
+  for any limit, and no variable set; the answer is `guest`, the script says
+  routing on the queue is off, and it asks the API nothing.
+- `a-run-both-status-queries-list-is-counted-once`: run 101 is in both the
+  queued and the in-progress listing with one queued guest job; the count is
+  1, the answer `guest`, and run 101's jobs are asked for once.
+- `jobs-and-runs-after-the-first-page-are-counted`: a second page of the run
+  listing and of one run's jobs each carry a guest job, and the answer is
+  `hosted` only if both pages are read.
+- `a-failure-on-a-later-page-of-the-run-listing-answers-guest` and
+  `a-failure-on-a-later-page-of-a-runs-jobs-answers-guest`: the pages before
+  the failure hold enough guest jobs to reach the limit, so counting them
+  would answer `hosted`.
+
+The rest: `WINGUEST_BUSY` is `1` exactly and then nothing is asked, and
+`true` is not `1`; an unreadable API; one job below a limit of 2 and two at
+it; this run left out; completed guest jobs and other jobs not counted;
+limits of 3 and 1; and five values that are not positive whole numbers --
+`0`, `-1`, `2.5`, `two`, ` 3` -- each leaving routing on the queue off, so
+nothing is asked and the answer is `guest`, over the deep queue below.
+
+## `fn beside_one_run(`
+
+One other run in the in-progress listing, read by run 900 at a limit of 1:
+its jobs, the two counts the script must print for it, and the answer. At
+that limit a run counted at all sends this one to the twin, so each row
+states one reading.
+
+## `fn other_runs_still_choosing() -> Vec<Case> {`
+
+How one picker reads another run, state by state
+(`PR375-QUEUE-PICKERS-RACE`). Run 101 is earlier than this run and run 950
+later.
+
+- Counted as ahead when earlier, and not at all when later: a picker
+  `in_progress`, or `queued` for a runner; a finished picker with no guest
+  job listed yet; a guest job listed as `waiting`; no job listed at all; and
+  a picker running again beside a guest job already `completed`, which is
+  how a re-run could be listed while its last attempt's job still shows.
+- Counted as held whatever the id: a guest job `queued` or `in_progress`
+  beside a finished picker, and a guest job `queued` in a run that lists no
+  picker. That last is a run of the workflow from before the picker, or a
+  guest job listed without it, and it is in the guest's queue.
+- A `queued` guest job beside a picker still running is not held: it is
+  ahead for an earlier run and nothing for a later one. This is the reading
+  under which the API lists a job waiting on its `needs` as `queued`.
+- Not counted: an earlier run whose guest job is `completed` beside a
+  finished picker, sent to the twin or done; and an earlier run with jobs
+  listed and neither a picker nor a guest job among them.
+- Runs 99 and 1000 against this run's 900: ids are compared as numbers. As
+  strings `99` sorts after `900` and `1000` before it, and each row would
+  answer the other way.
+- An earlier run named by both status listings while it picks is counted
+  once; and a held job with an earlier run still picking reach a limit of 2
+  together, and are admitted by a limit of 3.
+
+## `fn bursts() -> Vec<Burst> {`
+
+Several pickers against one snapshot. Runs 999 and 1000 start together and
+each lists its own picker `in_progress`; run 998 joins them for the last
+burst. The ids straddle a digit, so a comparison as strings sends the wrong
+run to the guest.
+
+The first three are one burst under the three ways the API might list a
+guest job that waits on its picker: not listed, `waiting`, and `queued`. The
+second and third are the second review's two symmetric snapshots, in which
+the first script answered `guest` twice and `hosted` twice; here run 999
+takes the guest and run 1000 the twin in all three. The fourth is the
+reviewer's first snapshot with nothing listed but the waiting guest jobs: a
+guest job listed and not yet queued is enough to read a run as still
+choosing. The same is not asked of a `queued` guest job with no picker
+listed. That is a job in the guest's queue ([`other_runs_still_choosing`]),
+and a snapshot two running pickers read lists both pickers, since each is a
+job of its run and is listed while it runs.
+
+The rest vary the room: a limit of 2 admits both; a guest job in progress in
+a third run leaves room for one at a limit of 2 and for none at 1; a later
+run already queued for the guest counts for both; an earlier third run still
+picking takes a place before either; and of three runs at a limit of 2 the
+first two take the guest.
+
+## `fn deep_queue() -> Vec<(String, Vec<Page>)> {`
+
+Three waiting guest jobs in two other runs. Every limit a literal reading of
+the invalid values could give is at most 3, so a script that counted this
+queue under one of them, or under a default, would answer `hosted`.
+
+## `fn stage(root: &Path, name: &str, script: &str, canned: &[(String, Vec<Page>)]) -> Snapshot {`
+
+One snapshot in a directory of its own: the fake `gh`, its canned pages, the
+script, and a PATH with the fake first. Every picker run against it reads
+the same files, which is what makes several pickers' snapshot one.
+
+## `fn pick(snapshot: &Snapshot, run: u64, busy: &str, limit: &str) -> Picked {`
+
+The script run once, as `run`: a cleared environment holding only what the
+job's step would hold, a `GITHUB_OUTPUT` and a request log of its own, and
+what it exited with, printed, wrote and asked for.
+
+## `fn answer(case: &Case, script: &str, root: &Path) -> Result<(), String> {`
+
+One case: staged, picked as run 900, and every way its answer, its output,
+its printed lines or its requests differ from the case. The script must exit
+0 on every answer, since the aggregate requires the picker to succeed.
+
+## `fn together(burst: &Burst, script: &str, root: &Path) -> Result<(), String> {`
+
+One burst: the snapshot staged once and each picker run against it in turn,
+which against pages that do not change is the same as at once. Each picker
+must answer its stated home, and ask for both listings and every other
+listed run's jobs once, never its own. Then two checks that read only the
+answers and the fixture's `limit` and `taken`: together the pickers put no
+more runs on the guest than the limit leaves, and they leave no place on it
+empty that one of them could have taken. The first refuses the reviewer's
+"both answer `guest`", the second "both answer `hosted`".
+
+## `fn answers_on_path(program: &str) -> Result<(), String> {`
+
+The guard: `program --version` runs and succeeds, or the reason it is needed
+([`JQ_ABSENT`]) behind the name that did not answer. It reads nothing else.
+The first form of this guard also read `GITHUB_ACTIONS`, to fail on a
+runner and skip elsewhere; nothing here reads the environment now, so the
+answer is the same on a runner and off one.
+
+## `fn picker_fixtures(jq: &str) {`
+
+Every case and every burst, reported together, so a broken script names
+every answer it gets wrong. It asks PATH for `jq` first, under the name it
+is handed, and fails with the guard's reason when that does not answer: a
+machine without `jq` is then never read as the script's own `guest` fallback
+passing, and never as a pass at all. The parameter is the name the guard
+asks for and nothing else; the script always runs the `jq` its PATH has.
+
+Measured on 2026-11-13: with [`JQ`] set to a program that does not exist,
+[`the_windows_home_picker_answers_from_canned_api_pages`] failed with `no
+... on PATH` and the reason, where the guard it replaces had returned early
+and been counted as passed (measured on 2026-11-12, and again by the second
+review with an empty PATH). Restored. Run with a PATH that has no `jq` it
+was not: the session that made the change could not start the test binary
+outside Cargo.
+
+Measured
+by mutating the workflow's script, each mutation then restored: removing the
+run-id dedupe failed the counted-once case; dropping `--paginate` from the
+jobs read failed the later-pages case and the later-page-failure case of a
+run's jobs; ignoring a failed jobs page (`|| true`) failed that case;
+ignoring a failed run-listing page failed the run-listing case and the
+unreadable case; dropping the this-run exclusion failed the this-run case;
+answering `hosted` on an unreadable API failed this test, the picker's
+pin and the clean-workflow checks; and restoring a default limit of 2
+(`${WINGUEST_QUEUE_LIMIT:=2}` in the limit check, re-measured on
+2026-11-12) failed the case with neither variable set -- it asked the API
+and answered `hosted` -- and the picker's pin.
+
+Measured on 2026-11-13 for the two counts (`PR375-QUEUE-PICKERS-RACE`), each
+a mutation of the workflow's script, then restored. With the count of
+earlier runs removed, which is the first script's rule, eight of the ten
+bursts failed, the pickers together sending two runs to a guest with room
+for one and three at a limit of 2, beside every row of
+[`other_runs_still_choosing`] that counts an earlier run. With the run-id
+order removed, so that later runs still choosing are counted too, the same
+eight failed the other way, no picker taking a guest that had room, beside
+the rows that leave a later run uncounted. With a `queued` guest job held
+whatever its run's picker is doing, exactly three failed: the burst whose
+guest jobs are reported `queued`, both pickers answering `hosted`, and the
+two rows for that reading. The two bursts that fail under neither of the
+first two are the one with room for both runs and the one with room for
+none, where every rule agrees.
+
+## `fn the_windows_home_picker_answers_from_canned_api_pages() {`
+
+[`picker_fixtures`], asking PATH for [`JQ`].
+
+## `fn the_picker_fixtures_fail_with_a_diagnostic_where_jq_is_absent() {`
+
+The same entry point, asking PATH for [`NO_SUCH_PROGRAM`] instead: it must
+panic, and with the message that names the program and carries
+[`JQ_ABSENT`]. This is what a machine without `jq` sees, executed in the
+default suite on every run rather than once by hand, and it is the
+regression test for the silent pass. Measured on 2026-11-13 by putting the
+early return back in [`picker_fixtures`]: the call returned, and this test
+failed saying the fixtures had passed and run none. Restored.
+
+## `fn the_hosted_windows_twin_runs_the_guests_suite_on_the_guests_compiler() {`
+
+The hosted twin matches the contract, and two relations hold between it and
+the guest's job that the oracle's pins, each against its own constant, do
+not state. The toolchain the twin's one install selects, read from the
+workflow, is the version the guest's suite step -- which the twin runs too
+-- asserts for Cargo's compiler, so the two homes run the suite on one
+compiler. And the two conditions are one comparison of the picker's
+answer, with `guest` and `hosted` its two values, so the two jobs cannot
+both run, or both be skipped, on a run whose picker succeeded. Measured by
+setting the twin's install back to `stable` in the workflow and restoring
+it: this test and the oracle's clean-workflow check both failed, each with
+the twin's toolchain complaint.
+
+## `mod merge_gate_answers {`
+
+The aggregate's script, executed. Linux only, for the reason
+`pick_windows_home_answers` is: the script runs on `ubuntu-latest`.
+
+## `fn the_aggregate_requires_exactly_one_windows_suite_job_and_every_other_gate() {`
+
+The workflow's own aggregate script, run under `bash --noprofile --norc -eo
+pipefail` with the results it would read. The gates are the `_RESULT` names
+of the step's own `env:`, so a gate added to the workflow is exercised
+without an edit here. Every pair of Windows results among `success`,
+`failure`, `cancelled` and `skipped`, every other gate succeeding: exactly
+`success` beside `skipped`, either way round, passes. Then each other gate
+failed, cancelled or skipped, beside either passing Windows pair: the
+aggregate fails. Measured by mutating the workflow's script, each mutation
+then restored: accepting both Windows jobs skipped failed this test on that
+pair, and requiring both to succeed, as the script did before the twin,
+failed it on both passing pairs.
 
 ## `fn the_msrv_leg_checks_the_floor_the_manifest_publishes_on_every_platform() {`
 

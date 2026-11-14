@@ -269,7 +269,8 @@ Every way the Windows test job fails its contract.
 The same shape as [`ci_test_job_complaints`] without the matrix, and with
 the one thing that job cannot say: which machine. The job runs on the
 curated guest on every lane -- a pull request, a push and a merge-queue
-entry alike -- and `runs-on:` is compared as a label set: a scalar is a
+entry alike -- whenever the picker answers `guest`, and `runs-on:` is
+compared as a label set: a scalar is a
 hosted runner, an expression routes some event to a machine this contract
 cannot name, and a subset of the labels admits every Windows machine the
 account registers.
@@ -308,11 +309,15 @@ it went with that lane, and the pins on it with it. Measured,
 ## `pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {` › `let labels = field(job, "runs-on").and_then(scalar_set);`
 
 The whole `runs-on:`, as a set equality with [`TEST_WINDOWS_LABELS`]. A
-literal sequence cannot vary by event, so while this holds no lane can be
-routed elsewhere: a scalar is a hosted runner, an expression -- the merge
-queue's route to `windows-latest` from 2026-09-16 among them -- is something
-this contract cannot evaluate and refuses, and a subset admits any
-self-hosted Windows machine the account registers. Measured,
+literal sequence cannot vary by event, so while this holds no lane of this
+job can be routed elsewhere: a scalar is a hosted runner, an expression --
+the merge queue's route to `windows-latest` from 2026-09-16 among them -- is
+something this contract cannot evaluate and refuses, and a subset admits any
+self-hosted Windows machine the account registers. A run does now leave the
+guest, but by another route this check does not govern: the picker answers
+`hosted`, this job is skipped by its pinned condition, and the hosted twin,
+pinned by [`ci_test_windows_hosted_job_complaints`], runs the suite on the
+guest image's compiler. Measured,
 `MUT-TEST-WINDOWS-REHOSTED`, `MUT-TEST-WINDOWS-LABEL-DROPPED` and
 `MUT-TEST-WINDOWS-QUEUE-REHOSTED`.
 
@@ -343,6 +348,70 @@ Cargo was asked for; the lines after it are what say the suite ran, and
 an equality over the step is what stops those lines being dropped, or
 their floor lowered to a number an unexecuted suite clears. Measured,
 `MUT-WINDOWS-WITNESS-COUNT-DROPPED` and `MUT-WINDOWS-WITNESS-FLOOR-DROPPED`.
+
+## `pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {` › `out.extend(windows_home_complaints(`
+
+The guest's job needs the picker, runs only when it answers `guest`, and
+keeps its 20 minutes. Every step, script, label and the timeout are what
+they were before the twin; these are the two fields the twin added.
+
+## `fn windows_home_complaints(`
+
+The three fields that tie a Windows suite job to the picker: `needs:` is
+exactly `pick-windows-home`, `if:` is exactly the job's own condition, and
+the timeout is exactly its own. A condition that admits both answers runs
+both jobs and one that admits neither skips both; the aggregate fails either
+run, but only after it has spent its time, and this refuses the workflow
+before it is pushed. Codes `<job>-needs`, `<job>-condition` and
+`<job>-timeout`. Measured, `MUT-TEST-WINDOWS-RUNS-BESIDE-THE-TWIN`,
+`MUT-TEST-WINDOWS-HOSTED-RUNS-BESIDE-THE-GUEST`,
+`MUT-TEST-WINDOWS-NEEDS-DROPPED`, `MUT-TEST-WINDOWS-HOSTED-NEEDS-DROPPED`,
+`MUT-TEST-WINDOWS-TIMEOUT-RAISED` and `MUT-TEST-WINDOWS-HOSTED-TIMEOUT-RAISED`.
+
+## `pub(super) fn ci_test_windows_hosted_job_complaints(doc: &Yaml) -> Vec<String> {`
+
+Every way the Windows suite's hosted twin fails its contract, pinned as
+strictly as the guest's job: field set, name, runner, timeout, `needs:` and
+condition; every step's fields, the case-fold map on the suite, capture and
+observation steps, and the observation's bound; the platform-default shell on
+every `run:` step; exactly one suite step running the guest's
+[`WINDOWS_TEST_WITNESS`], compiler questions included, the capture
+immediately after it and the observation immediately after that; one
+input-free checkout at step 0; every script and action on the guest's
+pins, [`TEST_WINDOWS_SCRIPTS`]; and no cache step.
+
+Where the guest's job refuses a toolchain install, this one requires one:
+the toolchain action at step 1, with `clippy` among its components, since
+the suite's effect-denial fixtures run `clippy-driver`. The guest's rule
+against an install stays, and applies to the guest's job only. Measured,
+every row named `MUT-TEST-WINDOWS-HOSTED-*`.
+
+## `pub(super) fn ci_test_windows_hosted_job_complaints(doc: &Yaml) -> Vec<String> {` › `let selected = field(step, "with").and_then(|with| scalar(with, "toolchain"));`
+
+The install selects [`GOLDEN_IMAGE_TOOLCHAIN`], the guest's image's
+compiler, exactly: not `stable`, which floats ahead of the image, and not an
+older version, which omits what the image's compiler enables. The twin runs
+only when the guest is busy, so a second compiler would make a
+compiler-dependent test's result depend on the guest's load. With the suite
+step intact either drift throws at the compiler questions on every run sent
+to the twin; this refuses it before it is pushed, and edited together with
+the suite step the drift is refused there, as an unpinned script. The
+check is the twin's own rather than [`toolchain_complaints`]'s `expected`,
+whose complaint is written for the hosted jobs that pin `stable`. Measured,
+`MUT-TEST-WINDOWS-HOSTED-TOOLCHAIN-FLOATS` and
+`MUT-TEST-WINDOWS-HOSTED-TOOLCHAIN-DOWNGRADED`.
+
+## `pub(super) fn ci_test_windows_hosted_job_complaints(doc: &Yaml) -> Vec<String> {` › `if scalar(step, "uses").is_some_and(|uses| uses.starts_with(CACHE_ACTION)) {`
+
+No cache step, at any position: a twin run's cache is one nothing later
+reads ([`CACHE_ACTION`]). The capture's placement rule already refuses a
+cache step between the suite and the capture; this refuses one anywhere,
+and names the cause. Measured, `MUT-TEST-WINDOWS-HOSTED-CACHE-RESTORED`.
+
+## `pub(super) fn ci_test_windows_hosted_job_complaints(doc: &Yaml) -> Vec<String> {` › `let components: BTreeSet<&str> = steps_of(job)`
+
+The `clippy` component, read from the install step the way the `test` job's
+check reads it. Measured, `MUT-TEST-WINDOWS-HOSTED-WITHOUT-CLIPPY`.
 
 ## `fn capture_complaints(`
 
@@ -579,6 +648,70 @@ A widened token is available to every build script and test the candidate
 ships, with the checkout's credential still configured, and no guest
 teardown recalls what it pushed.
 Measured, `MUT-WORKFLOW-PERMISSIONS-WIDENED`.
+
+## `fn pinned_map(pinned: &[(&str, &str)]) -> BTreeMap<String, String> {`
+
+A model's `(key, value)` pairs as the map a parsed mapping is compared with.
+
+## `pub(super) fn ci_pick_windows_home_complaints(doc: &Yaml) -> Vec<String> {`
+
+Every way the job that picks the Windows suite's home fails its contract.
+
+The job is pinned whole: its field set, name, runner, timeout, permissions,
+output, its one step's fields, id, environment, resolved shell and script.
+The script is pinned as text, and what that text answers is executed
+elsewhere, by `the_windows_home_picker_answers_from_canned_api_pages` in
+`super`, against canned API pages; the pin is what makes those answers the
+workflow's.
+
+## `pub(super) fn ci_pick_windows_home_complaints(doc: &Yaml) -> Vec<String> {` › `for name in field_names(jobs) {`
+
+No other job declares `permissions:`. The picker is the one job that widens
+the workflow's token, by one read scope, and it checks out nothing; a block
+on any other job hands whatever it names to a job that runs the candidate's
+build scripts and tests. Every modelled job's field set already refuses the
+key; this scan reaches a job added tomorrow that has no field set yet, and
+names the cause. Measured, `MUT-JOB-PERMISSIONS-ON-THE-GUEST-JOB`.
+
+## `pub(super) fn ci_pick_windows_home_complaints(doc: &Yaml) -> Vec<String> {` › `let counted = field(jobs, TEST_WINDOWS_JOB).and_then(|job| scalar(job, "name"));`
+
+The guest's job keeps the `name:` the picker counts. The API lists jobs by
+name, and nothing else pins that one, so a rename would leave the picker
+counting an empty queue. Measured, `MUT-PICK-WINDOWS-HOME-COUNTS-A-RENAMED-JOB`.
+
+## `pub(super) fn ci_pick_windows_home_complaints(doc: &Yaml) -> Vec<String> {` › `if scalar(job, "name") != Some(PICK_WINDOWS_HOME_NAME) {`
+
+The picker keeps the `name:` its own script reads in other runs. A run whose
+picker is listed and unfinished is one still choosing its home; under another
+name every run reads as having none, and runs that start together answer
+alike again (`PR375-QUEUE-PICKERS-RACE`). Measured,
+`MUT-PICK-WINDOWS-HOME-RENAMED`.
+
+## `pub(super) fn ci_pick_windows_home_complaints(doc: &Yaml) -> Vec<String> {` › `let permissions = field(job, "permissions").and_then(scalar_map);`
+
+The token's scopes and the answer's name, each as a whole map. A wider
+`actions:` can cancel or re-run any run; another scope is a token the job
+never needed; an output under another name, or bound to another step, is an
+empty string to the jobs that read it. Measured,
+`MUT-PICK-WINDOWS-HOME-PERMISSION-WIDENED`,
+`MUT-PICK-WINDOWS-HOME-PERMISSION-ADDED` and
+`MUT-PICK-WINDOWS-HOME-OUTPUT-RENAMED`.
+
+## `pub(super) fn ci_pick_windows_home_complaints(doc: &Yaml) -> Vec<String> {` › `let steps = steps_of(job);`
+
+Exactly one step, a script: no checkout, no action. Then its id, its
+environment, its script and its resolved shell. Measured,
+`MUT-PICK-WINDOWS-HOME-SECOND-STEP`, `MUT-PICK-WINDOWS-HOME-ENV-CROSSED`,
+`MUT-PICK-WINDOWS-HOME-COUNTS-BY-DEFAULT`,
+`MUT-PICK-WINDOWS-HOME-UNREADABLE-ANSWERS-HOSTED`,
+`MUT-PICK-WINDOWS-HOME-COUNTS-A-RUN-TWICE`,
+`MUT-PICK-WINDOWS-HOME-FIRST-PAGE-ONLY`,
+`MUT-PICK-WINDOWS-HOME-LATER-PAGE-FAILURE-IGNORED`,
+`MUT-PICK-WINDOWS-HOME-IGNORES-EARLIER-RUNS-STILL-CHOOSING`,
+`MUT-PICK-WINDOWS-HOME-COUNTS-LATER-RUNS-STILL-CHOOSING` and
+`MUT-PICK-WINDOWS-HOME-HOLDS-A-JOB-ITS-PICKER-HAS-NOT-RELEASED`. The pin
+refuses any other text; what each of the last three does to runs that start
+together is executed, in `super`'s two-picker fixtures.
 
 ## `pub(super) fn ci_windows_build_witness_complaints(doc: &Yaml) -> Vec<String> {`
 

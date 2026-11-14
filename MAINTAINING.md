@@ -15,13 +15,57 @@ source, documentation, workflows, release machinery and this file.
 3. **Run the ten-command baseline** (`CODING_STANDARDS.md` §2) before every push, then wait for
    the two required contexts: `upstroke-ci` (formatting, Clippy on three platforms, the Linux and macOS
    test matrix, the Windows suite in `test-windows` -- on its self-hosted ephemeral runner for a
-   pull request, a push and a merge-queue entry alike -- the MSRV matrix, the six
+   pull request, a push and a merge-queue entry alike, unless the run is sent to the hosted
+   runner (below) -- the MSRV matrix, the six
    Bash gates) and `upstroke-pr-policy` (title, body sections, ledger). A
    branch behind `master` is not updated by hand to merge once the ruleset carries the merge
    queue (Repository rules): the queue builds the entry on `master`'s head and runs both
    contexts there (step 7), so update it only when the change needs what `master` gained.
    Until the ruleset carries the queue, the up-to-date requirement stands: a branch behind
    `master` is updated first and waits again, and the audit reports it as `behind-master`.
+
+   **The Windows suite has two homes.** It runs on the guest unless the run's
+   `pick-windows-home` job answers `hosted`; then `test-windows` is skipped,
+   `test-windows-hosted` runs on `windows-latest` with the guest image's compiler, installed and
+   asserted, and the guest's suite step and passing-test floor, and `upstroke-ci` requires
+   exactly one of the two to pass. The answer is `hosted` when the repository variable
+   `WINGUEST_BUSY` is `1`, or when the repository variable `WINGUEST_QUEUE_LIMIT` is a positive
+   whole number and the guest's queue reaches it: the guest's jobs queued or running in other
+   runs, together with the runs of a lower run id that have not yet shown where their own suite
+   goes. The limit is best effort. While every run's picker can read the API and list the other
+   runs, of runs that start together, a merge queue's entries among them, the earliest take the
+   guest up to the limit and no further, and the rest go to the hosted runner. Both are opt-in:
+   with neither set every run goes to the guest, and an unset or malformed limit counts nothing.
+   A GitHub API the job cannot read answers `guest`: a failed question never moves a run off
+   the guest. So the limit can be passed in two ways. A burst of n runs costs about n² requests,
+   each picker asking about each other active run, against the workflow token's rate limits
+   (GitHub documents 1,000 requests an hour for a repository's `GITHUB_TOKEN`), and pickers
+   refused together each answer `guest`; and an earlier run a picker could not list, one still
+   `pending` or a finished run re-run, is not counted. Either can put more suites than the limit
+   on the guest. The build machine's operator sets
+   `WINGUEST_BUSY` to `1` while baselines or Upstroke runs hold the machine, and clears it
+   afterwards. A hosted run is not free: by the workflow's September 2026 measurements it takes
+   three to four times the guest's time, 21 to 28 minutes a job against about 7, and in October
+   2026 hosted merge-queue entries reached the 45- and then the 55-minute timeout, the cause
+   unknown; the twin runs under that 55 minutes.
+
+   The two homes share the compiler, the suite and the floor. What still differs is the runner:
+   GitHub's image against the curated guest's, their filesystems and temporary directories,
+   their services, and what the runner environment reports. A test that depends on those can
+   pass on one home and fail on the other, and a run sent to the twin can pass where the guest
+   would have failed (`PR299-HOSTED-QUEUE-DOES-NOT-PROVE-GUEST-BEHAVIOUR`). So run a Windows-only
+   failure on the other home too: one that follows the change to both homes is the change's;
+   one that appears on only one home is a test whose outcome depends on the runner, which is
+   repaired in the test, not dismissed as the machine's. The picker answers from the variables
+   and the live queue as the run starts, not from the home the run had before: re-running the
+   failed job keeps the home already picked, and re-running all of the run's jobs asks again
+   under the same rule, which usually gives the same answer. To move a run, re-run all of its
+   jobs after setting `WINGUEST_BUSY` to `1` (to the twin), or after clearing it and, where a
+   `WINGUEST_QUEUE_LIMIT` is set, unsetting it or waiting for the queue to fall below it (to the
+   guest). These are repository variables, so the change reaches every run that starts while it
+   stands -- other pull requests, pushes to `master` and merge-queue entries go to the same home
+   -- and it is the operator's to make while the operator holds the machine; set it for the
+   re-run and put it back once that run's picker has answered.
 4. **One frontier review pass on the green head.** Give the exact diff and head SHA to an
    independent frontier-class reviewer at `max` effort — today `gpt-5.6-sol` through `codex exec`,
    run by the owner's review driver against the pull request's own base. Allow at least 90 minutes per

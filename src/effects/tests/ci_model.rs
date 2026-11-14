@@ -130,6 +130,99 @@ pub(super) const GOLDEN_IMAGE_TOOLCHAIN: &str = "1.97.1";
 
 pub(super) const TEST_WINDOWS_PLATFORM: &str = "windows-latest";
 
+pub(super) const TEST_WINDOWS_NAME: &str = "test (winguest)";
+pub(super) const TEST_WINDOWS_TIMEOUT_MINUTES: i64 = 20;
+pub(super) const TEST_WINDOWS_CONDITION: &str = "needs.pick-windows-home.outputs.home == 'guest'";
+
+pub(super) const TEST_WINDOWS_HOSTED_JOB: &str = "test-windows-hosted";
+pub(super) const TEST_WINDOWS_HOSTED_NAME: &str = "test (windows-latest)";
+pub(super) const TEST_WINDOWS_HOSTED_TIMEOUT_MINUTES: i64 = 55;
+pub(super) const CACHE_ACTION: &str = "Swatinem/rust-cache@";
+pub(super) const TEST_WINDOWS_HOSTED_CONDITION: &str =
+    "needs.pick-windows-home.outputs.home == 'hosted'";
+
+pub(super) const PICK_WINDOWS_HOME_JOB: &str = "pick-windows-home";
+pub(super) const PICK_WINDOWS_HOME_NAME: &str = "pick windows home";
+pub(super) const PICK_WINDOWS_HOME_RUNNER: &str = "ubuntu-latest";
+pub(super) const PICK_WINDOWS_HOME_TIMEOUT_MINUTES: i64 = 5;
+
+pub(super) const PICK_WINDOWS_HOME_JOB_FIELDS: [&str; 6] = [
+    "name",
+    "outputs",
+    "permissions",
+    "runs-on",
+    "steps",
+    "timeout-minutes",
+];
+
+pub(super) const PICK_WINDOWS_HOME_PERMISSIONS: [(&str, &str); 2] =
+    [("actions", "read"), ("contents", "read")];
+
+pub(super) const PICK_WINDOWS_HOME_STEP_ID: &str = "pick";
+
+pub(super) const PICK_WINDOWS_HOME_OUTPUTS: [(&str, &str); 1] =
+    [("home", "${{ steps.pick.outputs.home }}")];
+
+pub(super) const PICK_WINDOWS_HOME_STEP_FIELDS: [&str; 5] = ["env", "id", "name", "run", "shell"];
+
+pub(super) const PICK_WINDOWS_HOME_SHELL: &str = "bash";
+
+pub(super) const PICK_WINDOWS_HOME_STEP_ENV: [(&str, &str); 3] = [
+    ("GH_TOKEN", "${{ github.token }}"),
+    ("WINGUEST_BUSY", "${{ vars.WINGUEST_BUSY }}"),
+    ("WINGUEST_QUEUE_LIMIT", "${{ vars.WINGUEST_QUEUE_LIMIT }}"),
+];
+
+pub(super) const PICK_WINDOWS_HOME_SCRIPT: &str = r#"winguest_queue() {
+  local runs="repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs"
+  local status listed seen="" id jobs found held=0 ahead=0
+  local -a run_ids
+  for status in queued in_progress; do
+    listed="$(gh api --paginate "$runs?status=$status&per_page=100")" || return 1
+    listed="$(jq -r '.workflow_runs[].id' <<<"$listed")" || return 1
+    seen+="$listed"$'\n'
+  done
+  mapfile -t run_ids < <(sort -u <<<"$seen")
+  for id in "${run_ids[@]}"; do
+    if [[ -z "$id" || "$id" == "$GITHUB_RUN_ID" ]]; then continue; fi
+    [[ "$id" =~ ^[0-9]+$ ]] || return 1
+    jobs="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$id/jobs?filter=latest&per_page=100")" || return 1
+    found="$(jq -rs '
+      [.[].jobs[]] as $jobs
+      | [$jobs[] | select(.name == "test (winguest)") | .status] as $guest
+      | [$jobs[] | select(.name == "pick windows home") | .status] as $picker
+      | ($picker | any(. != "completed")) as $picking
+      | ([$guest[] | select(. == "in_progress" or (. == "queued" and ($picking | not)))] | length) as $held
+      | ($picking or ($guest | any(. != "completed")) or (($guest | length) == 0 and (($picker | length) > 0 or ($jobs | length) == 0))) as $unsettled
+      | "\($held) \(if $held == 0 and $unsettled then 1 else 0 end)"' <<<"$jobs")" || return 1
+    [[ "$found" =~ ^([0-9]+)\ ([01])$ ]] || return 1
+    held=$((held + BASH_REMATCH[1]))
+    if (( BASH_REMATCH[2] == 1 && 10#$id < 10#$GITHUB_RUN_ID )); then ahead=$((ahead + 1)); fi
+  done
+  echo "$held $ahead"
+}
+home=guest
+if [[ "${WINGUEST_BUSY:-}" == "1" ]]; then
+  home=hosted
+  echo "WINGUEST_BUSY is 1, so the queue for the guest was not counted."
+elif [[ ! "${WINGUEST_QUEUE_LIMIT:-}" =~ ^0*[1-9][0-9]{0,5}$ ]]; then
+  echo "WINGUEST_BUSY is not 1, and WINGUEST_QUEUE_LIMIT is unset or not a positive whole number, so routing on the queue is off and the queue for the guest was not counted."
+else
+  limit=$((10#$WINGUEST_QUEUE_LIMIT))
+  echo "WINGUEST_BUSY is not 1. WINGUEST_QUEUE_LIMIT is $limit."
+  if queue="$(winguest_queue)"; then
+    read -r held ahead <<<"$queue"
+    echo "Other runs of this workflow have $held 'test (winguest)' jobs queued or in progress."
+    echo "Earlier runs of this workflow that have not yet shown where their Windows suite goes: $ahead."
+    if (( held + ahead >= limit )); then home=hosted; fi
+  else
+    echo "The GitHub API could not be read, so the queue for the guest is unknown. A failed question does not move a run off the guest."
+  fi
+fi
+echo "home: $home"
+echo "home=$home" >> "$GITHUB_OUTPUT"
+"#;
+
 pub(super) const MSRV_JOB: &str = "msrv";
 pub(super) const MSRV_COMMAND: &str = "cargo check --locked --all-targets --all-features";
 
@@ -141,14 +234,24 @@ pub(super) const AGGREGATE_JOB: &str = "merge-gate";
 pub(super) const REQUIRED_CONTEXT: &str = "upstroke-ci";
 
 pub(super) const AGGREGATE_SCRIPT: &str = r#"failed=0
-for gate in LINT LINT_WINDOWS LINT_MACOS MSRV TEST TEST_WINDOWS; do
+windows=""
+for gate in LINT LINT_WINDOWS LINT_MACOS MSRV PICK_WINDOWS_HOME TEST TEST_WINDOWS TEST_WINDOWS_HOSTED; do
   result_var="${gate}_RESULT"
   result="${!result_var}"
-  if [[ "$result" != "success" ]]; then
+  if [[ "$gate" == "TEST_WINDOWS" || "$gate" == "TEST_WINDOWS_HOSTED" ]]; then
+    windows+="$gate=$result "
+  elif [[ "$result" != "success" ]]; then
     echo "$gate did not succeed: $result" >&2
     failed=1
   fi
 done
+case "$windows" in
+  "TEST_WINDOWS=success TEST_WINDOWS_HOSTED=skipped " | "TEST_WINDOWS=skipped TEST_WINDOWS_HOSTED=success ") ;;
+  *)
+    echo "exactly one Windows suite job must succeed and the other be skipped: $windows" >&2
+    failed=1
+    ;;
+esac
 exit "$failed"
 "#;
 
@@ -175,8 +278,8 @@ pub(super) const AGGREGATE_JOB_FIELDS: [&str; 6] =
 pub(super) const TEST_JOB_FIELDS: [&str; 5] =
     ["name", "runs-on", "steps", "strategy", "timeout-minutes"];
 
-pub(super) const TEST_WINDOWS_JOB_FIELDS: [&str; 4] =
-    ["name", "runs-on", "steps", "timeout-minutes"];
+pub(super) const TEST_WINDOWS_JOB_FIELDS: [&str; 6] =
+    ["if", "name", "needs", "runs-on", "steps", "timeout-minutes"];
 
 pub(super) const MSRV_JOB_FIELDS: [&str; 5] =
     ["name", "runs-on", "steps", "strategy", "timeout-minutes"];

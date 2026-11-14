@@ -6952,8 +6952,9 @@ fn an_exit_status_the_runtime_reports_is_read_as_a_number_or_refused() {
 // ---------------------------------------------------------------------------
 //
 // One ignored, cfg-free test, selected by its exact name by the observation step
-// that follows the native HOST acceptance capture in CI's `test` and
-// `test-windows` jobs. It asks the container CLI the version-2 contract's bounded,
+// that follows the native HOST acceptance capture in CI's `test` job and in
+// whichever of the Windows suite's two jobs ran, `test-windows` or its hosted
+// twin. It asks the container CLI the version-2 contract's bounded,
 // read-only questions (E0, P1-P5) through the product's own process path, reduces
 // every endpoint-sensitive answer in memory, and prints the reduced record as
 // numbered hex lines under the PR355 framing with a marker of its own. The notes

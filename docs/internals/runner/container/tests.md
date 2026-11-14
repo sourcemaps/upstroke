@@ -3246,7 +3246,9 @@ A printed frame alone is never acceptance.
 
 The one ignored, cfg-free observation test. CI's observation step selects it
 by its exact name immediately after the native host acceptance capture, in
-`test` (ubuntu-latest, macos-latest) and `test-windows` (winguest). It does
+`test` (ubuntu-latest, macos-latest) and in whichever Windows suite job the
+run's `pick-windows-home` chose, `test-windows` (winguest) or
+`test-windows-hosted` (windows-latest). It does
 not call `docker_gate` and is not in `DOCKER_GATED_TESTS`. Its body has no
 platform cfg and no early return.
 
