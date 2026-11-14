@@ -768,7 +768,7 @@ mod tests {
         let arriving = ArrivingSleeper {
             dir: dir.clone(),
             id: question().id,
-            after: Mutex::new(2),
+            after: std::cell::Cell::new(2),
         };
         let answers = EventLogAnswers::with_poll(
             dir,
@@ -804,28 +804,132 @@ mod tests {
     struct ArrivingSleeper {
         dir: std::path::PathBuf,
         id: QuestionId,
-        after: Mutex<usize>,
+        after: std::cell::Cell<usize>,
+    }
+
+    impl ArrivingSleeper {
+        fn record() -> AnswerRecord {
+            AnswerRecord::unattributed(Answer::Answered {
+                text: "opaque cursors".to_owned(),
+            })
+        }
     }
 
     impl Sleeper for ArrivingSleeper {
         fn sleep(&self, _duration: Duration) {
-            let Ok(mut remaining) = self.after.lock() else {
-                return;
-            };
-            if *remaining == 0 {
+            let remaining = self.after.get();
+            if remaining == 0 {
                 return;
             }
-            *remaining -= 1;
-            if *remaining == 0 {
-                let _ = write_answer(
-                    &self.dir,
-                    &self.id,
-                    &AnswerRecord::unattributed(Answer::Answered {
-                        text: "opaque cursors".to_owned(),
-                    }),
-                );
+            self.after.set(remaining - 1);
+            if remaining == 1 {
+                write_answer(&self.dir, &self.id, &Self::record())
+                    .expect("publish the arriving answer");
             }
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "publish the arriving answer")]
+    fn the_arriving_sleeper_fails_on_a_publication_error_rather_than_erasing_it() {
+        let tree = scratch("arriving-unpublishable");
+        let blocker = tree.path().join("not-a-directory");
+        std::fs::write(&blocker, b"").expect("the file the answer directory would sit under");
+        let arriving = ArrivingSleeper {
+            dir: blocker.join("answers"),
+            id: question().id,
+            after: std::cell::Cell::new(1),
+        };
+        arriving.sleep(Duration::from_secs(1));
+    }
+
+    fn assert_read_never_took(path: &Path, published: &[u8], read: &str) {
+        assert!(
+            path.is_file(),
+            "R21's read-never-take rule for {read}: the published answer {} must still be \
+             present after the read",
+            path.display()
+        );
+        assert_eq!(
+            std::fs::read(path).expect("the answer file after the read"),
+            published,
+            "R21's read-never-take rule for {read}: the published answer must be byte-identical \
+             to what was published"
+        );
+    }
+
+    #[test]
+    fn polling_a_published_answer_reads_it_and_leaves_the_file_byte_identical() {
+        let tree = scratch("poll-read");
+        let dir = tree.path().to_path_buf();
+        let record = AnswerRecord::unattributed(Answer::Answered {
+            text: "retry on frontier".to_owned(),
+        });
+        write_answer(&dir, &question().id, &record).expect("publish");
+        let path = answer_path(&dir, &question().id);
+        let published = std::fs::read(&path).expect("the published answer");
+
+        let idle = CountingSleeper::default();
+        let answers = EventLogAnswers::new(dir, Duration::from_secs(60), &idle);
+        assert_eq!(answers.poll(&question()).expect("poll"), record.answer);
+        assert_read_never_took(&path, &published, "`poll`");
+    }
+
+    #[test]
+    fn resolving_a_published_answer_reads_it_at_once_and_leaves_the_file_byte_identical() {
+        let tree = scratch("resolve-read");
+        let dir = tree.path().to_path_buf();
+        let record = AnswerRecord::unattributed(Answer::Declined);
+        write_answer(&dir, &question().id, &record).expect("publish");
+        let path = answer_path(&dir, &question().id);
+        let published = std::fs::read(&path).expect("the published answer");
+
+        let counting = CountingSleeper::default();
+        let answers = EventLogAnswers::new(dir, Duration::from_secs(60), &counting);
+        assert_eq!(
+            answers.resolve(&question()).expect("resolve"),
+            record.answer
+        );
+        assert_eq!(
+            counting.count(),
+            0,
+            "the immediate read returned the answer: `resolve` never waited"
+        );
+        assert_read_never_took(&path, &published, "`resolve`'s immediate read");
+    }
+
+    #[test]
+    fn an_answer_published_during_the_wait_is_read_by_the_loop_and_left_byte_identical() {
+        let tree = scratch("wait-read");
+        let dir = tree.path().to_path_buf();
+        let path = answer_path(&dir, &question().id);
+
+        let reference = scratch("wait-read-bytes");
+        write_answer(reference.path(), &question().id, &ArrivingSleeper::record())
+            .expect("publish the reference");
+        let published = std::fs::read(answer_path(reference.path(), &question().id))
+            .expect("the bytes `write_answer` publishes for the arriving record");
+
+        let arriving = ArrivingSleeper {
+            dir: dir.clone(),
+            id: question().id,
+            after: std::cell::Cell::new(1),
+        };
+        let answers = EventLogAnswers::with_poll(
+            dir,
+            Duration::from_secs(60),
+            Duration::from_secs(1),
+            &arriving,
+        );
+        assert!(
+            !path.exists(),
+            "nothing is published before `resolve`, so its immediate read finds nothing"
+        );
+        assert_eq!(
+            answers.resolve(&question()).expect("resolve"),
+            ArrivingSleeper::record().answer
+        );
+        assert_read_never_took(&path, &published, "`resolve`'s waiting read");
     }
 
     #[test]
